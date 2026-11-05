@@ -1,4 +1,3 @@
-import { qkTemplates } from "./templates";
 /**
  * TanStack Query hooks for the settings shell's data surface (split-settings
  * design, Task 5). Mirrors the factory idiom in `src/api/queries.ts`:
@@ -11,6 +10,7 @@ import {
   useMutation,
   useQuery,
   useQueryClient,
+  type QueryClient,
   type UseQueryOptions,
 } from "@tanstack/react-query";
 import type {
@@ -28,7 +28,6 @@ import type {
   GetOrgReasoningResponse,
   GetSlackAppResponse,
   JoinSuggestedTeamResponse,
-  ListAssistantsResponse,
   ListLlmProvidersResponse,
   ListModelsResponse,
   ListSuggestedTeamsResponse,
@@ -36,9 +35,11 @@ import type {
   ListTeamsResponse,
   MeResponse,
   OpenrouterRegistryResponse,
+  ProviderModelCatalogResponse,
   OrgDirectoryResponse,
   OrgMembersResponse,
   OrgPluginsResponse,
+  OrgMcpServersResponse,
   OrgResponse,
   OrgSettingsResponse,
   PatchLlmProviderRequest,
@@ -68,7 +69,6 @@ import type {
   TestLlmProviderRequest,
   TestLlmProviderResponse,
 } from "@valet/api/wire";
-import { qkAssistants } from "./assistants";
 import { api } from "./client";
 import { qkIntegrations } from "./integrations";
 import { qkRepos } from "./repos";
@@ -96,9 +96,11 @@ export const qkSettings = {
   orgMembers: () => ["settings", "org", "members"] as const,
   orgDirectory: () => ["settings", "org", "directory"] as const,
   orgPlugins: () => ["settings", "org", "plugins"] as const,
+  orgMcpServers: () => ["settings", "org", "mcp-servers"] as const,
   models: () => ["settings", "models"] as const,
   llmProviders: () => ["settings", "llmProviders"] as const,
   openrouterRegistry: () => ["settings", "openrouterRegistry"] as const,
+  providerModelCatalog: (kind: string) => ["settings", "providerModelCatalog", kind] as const,
   modelTiers: () => ["settings", "modelTiers"] as const,
   approvedModels: () => ["settings", "approvedModels"] as const,
   orgReasoning: () => ["settings", "orgReasoning"] as const,
@@ -176,6 +178,15 @@ export function useOrgPlugins(opts?: Partial<UseQueryOptions<OrgPluginsResponse>
   });
 }
 
+export function useOrgMcpServers(opts?: Partial<UseQueryOptions<OrgMcpServersResponse>>) {
+  return useQuery<OrgMcpServersResponse>({
+    queryKey: qkSettings.orgMcpServers(),
+    queryFn: () => api.getOrgMcpServers(),
+    staleTime: 60_000,
+    ...opts,
+  });
+}
+
 export function useModels(opts?: UseQueryOptions<ListModelsResponse>) {
   return useQuery<ListModelsResponse>({
     queryKey: qkSettings.models(),
@@ -203,6 +214,19 @@ export function useOpenrouterRegistry(opts?: { enabled?: boolean }) {
   return useQuery<OpenrouterRegistryResponse>({
     queryKey: qkSettings.openrouterRegistry(),
     queryFn: () => api.openrouterRegistry(),
+    staleTime: Infinity,
+    enabled: opts?.enabled ?? true,
+  });
+}
+
+/** Pickable models for a curated known kind — powers the model-selection
+ * picker on the OpenRouter and Amazon Bedrock cards. The server caches the
+ * Bedrock account lookup for an hour; the client keeps it for the page
+ * session and fetches only while the picker is open (`enabled`). */
+export function useProviderModelCatalog(kind: "openrouter" | "amazon-bedrock", opts?: { enabled?: boolean }) {
+  return useQuery<ProviderModelCatalogResponse>({
+    queryKey: qkSettings.providerModelCatalog(kind),
+    queryFn: () => api.providerModelCatalog(kind),
     staleTime: Infinity,
     enabled: opts?.enabled ?? true,
   });
@@ -285,7 +309,16 @@ export function usePatchMe() {
     onMutate: async (body) => {
       await qc.cancelQueries({ queryKey: qkSettings.me() });
       const previous = qc.getQueryData<MeResponse>(qkSettings.me());
-      if (previous) qc.setQueryData<MeResponse>(qkSettings.me(), { ...previous, ...body });
+      if (previous) {
+        const { reportedTimezone: _reported, ...visible } = body;
+        // A timezone set or clear is a user choice. Mark it now so the
+        // auto-report cannot fire from the optimistic value (TKAI-584).
+        qc.setQueryData<MeResponse>(qkSettings.me(), {
+          ...previous,
+          ...visible,
+          ...("timezone" in body ? { timezoneReportDone: true } : {}),
+        });
+      }
       return { previous };
     },
     onError: (_error, _body, context) => {
@@ -375,14 +408,20 @@ export function useSetOrgMemberRole() {
 
 // ── LLM providers ────────────────────────────────────────────────────────
 
+/** A provider or key change moves what the catalog lists and whether the
+ * org default tier can run (`defaultTierResolvable`), so every provider
+ * mutation refreshes all three reads. */
+function invalidateProviderQueries(qc: QueryClient): void {
+  qc.invalidateQueries({ queryKey: qkSettings.llmProviders() });
+  qc.invalidateQueries({ queryKey: qkSettings.models() });
+  qc.invalidateQueries({ queryKey: qkSettings.modelTiers() });
+}
+
 export function useCreateLlmProvider() {
   const qc = useQueryClient();
   return useMutation<CreateLlmProviderResponse, Error, CreateLlmProviderRequest>({
     mutationFn: (body) => api.createLlmProvider(body),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkSettings.llmProviders() });
-      qc.invalidateQueries({ queryKey: qkSettings.models() });
-    },
+    onSuccess: () => invalidateProviderQueries(qc),
   });
 }
 
@@ -390,10 +429,7 @@ export function usePatchLlmProvider() {
   const qc = useQueryClient();
   return useMutation<PatchLlmProviderResponse, Error, { id: string; body: PatchLlmProviderRequest }>({
     mutationFn: ({ id, body }) => api.patchLlmProvider(id, body),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkSettings.llmProviders() });
-      qc.invalidateQueries({ queryKey: qkSettings.models() });
-    },
+    onSuccess: () => invalidateProviderQueries(qc),
   });
 }
 
@@ -401,10 +437,7 @@ export function useDeleteLlmProvider() {
   const qc = useQueryClient();
   return useMutation<undefined, Error, string>({
     mutationFn: (id) => api.deleteLlmProvider(id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkSettings.llmProviders() });
-      qc.invalidateQueries({ queryKey: qkSettings.models() });
-    },
+    onSuccess: () => invalidateProviderQueries(qc),
   });
 }
 
@@ -412,10 +445,7 @@ export function usePutLlmProviderKey() {
   const qc = useQueryClient();
   return useMutation<PutLlmProviderKeyResponse, Error, { id: string; body: PutLlmProviderKeyRequest }>({
     mutationFn: ({ id, body }) => api.putLlmProviderKey(id, body),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkSettings.llmProviders() });
-      qc.invalidateQueries({ queryKey: qkSettings.models() });
-    },
+    onSuccess: () => invalidateProviderQueries(qc),
   });
 }
 
@@ -423,10 +453,7 @@ export function useDeleteLlmProviderKey() {
   const qc = useQueryClient();
   return useMutation<undefined, Error, string>({
     mutationFn: (id) => api.deleteLlmProviderKey(id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkSettings.llmProviders() });
-      qc.invalidateQueries({ queryKey: qkSettings.models() });
-    },
+    onSuccess: () => invalidateProviderQueries(qc),
   });
 }
 
@@ -482,7 +509,7 @@ export function usePatchOrgReasoning() {
  * or `/chat` treats the new team as empty until the next list fetch.
  */
 export function teamCreateQueryKeys() {
-  return [qkSettings.teams(), qkAssistants.list()] as const;
+  return [qkSettings.teams()] as const;
 }
 
 export function useJoinSuggestedTeam() {
@@ -492,7 +519,6 @@ export function useJoinSuggestedTeam() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkSettings.suggestedTeams() });
       qc.invalidateQueries({ queryKey: qkSettings.teams() });
-      qc.invalidateQueries({ queryKey: qkAssistants.list() });
     },
   });
 }
@@ -502,17 +528,6 @@ export function useCreateTeam() {
   return useMutation<CreateTeamResponse, Error, CreateTeamRequest>({
     mutationFn: (body) => api.createTeam(body),
     onSuccess: (created) => {
-      // Write the seeded row into a WARM cache only, same as
-      // `usePatchAssistant`. A cold cache stays cold and the invalidation
-      // below fetches the real list: a one-row list seeded here would
-      // satisfy every "list resolved" gate with the caller's own
-      // assistants missing until the refetch landed.
-      qc.setQueryData<ListAssistantsResponse>(qkAssistants.list(), (prev) => {
-        if (prev === undefined) return prev;
-        const row = created.defaultAssistant;
-        if (prev.assistants.some((a) => a.id === row.id)) return prev;
-        return { assistants: [...prev.assistants, row] };
-      });
       for (const queryKey of teamCreateQueryKeys()) {
         qc.invalidateQueries({ queryKey });
       }
@@ -638,7 +653,6 @@ export function useSaveGithubAppCredential() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkSettings.githubApp() });
       qc.invalidateQueries({ queryKey: qkRepos.githubOrgStatus() });
-      qc.invalidateQueries({ queryKey: qkTemplates.all() });
     },
   });
 }
@@ -650,7 +664,6 @@ export function useRefreshGithubApp() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkSettings.githubApp() });
       qc.invalidateQueries({ queryKey: qkRepos.githubOrgStatus() });
-      qc.invalidateQueries({ queryKey: qkTemplates.all() });
     },
   });
 }
@@ -662,7 +675,6 @@ export function useDeleteGithubApp() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkSettings.githubApp() });
       qc.invalidateQueries({ queryKey: qkRepos.githubOrgStatus() });
-      qc.invalidateQueries({ queryKey: qkTemplates.all() });
     },
   });
 }
@@ -699,7 +711,7 @@ export function useSaveSlackCredential() {
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkSettings.slackAppAll() });
-      qc.invalidateQueries({ queryKey: qkIntegrations.plugins() });
+      qc.invalidateQueries({ queryKey: qkIntegrations.pluginsAll() });
     },
   });
 }
@@ -710,7 +722,7 @@ export function useDeleteSlackApp() {
     mutationFn: () => api.deleteCredential("slack", { scope: "org" }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkSettings.slackAppAll() });
-      qc.invalidateQueries({ queryKey: qkIntegrations.plugins() });
+      qc.invalidateQueries({ queryKey: qkIntegrations.pluginsAll() });
     },
   });
 }

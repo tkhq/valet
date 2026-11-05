@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { BusEvent, MessageEntry, MessagePart as EngineMessagePart } from "@valet/engine";
-import { busEventToWire, engineSignalToWire, engineToWireParts } from "./bridge.js";
+import { MID_TURN_DELIVERY_KEY, type BusEvent, type DecisionGate, type MessageEntry, type MessagePart as EngineMessagePart, type QueueItem } from "@valet/engine";
+import { busEventToWire, engineGateToWire, engineSignalToWire, engineToWireParts, queuedItemToWire } from "./bridge.js";
+import { QUEUED_TEXT_MAX } from "../wire/types.js";
 
 function ev(event: BusEvent["event"], threadId = "t1"): BusEvent {
   return { sessionId: "s1", threadId, userId: "u1", event, timestamp: 100 };
@@ -34,9 +35,29 @@ describe("engineSignalToWire", () => {
   it("returns undefined for undefined input", () => {
     expect(engineSignalToWire(undefined)).toBeUndefined();
   });
+
+  it("ships only the origin channel type, never the thread key", () => {
+    const signal: NonNullable<MessageEntry["signal"]> = {
+      signalType: "wakeup.process.exited",
+      tagName: "signal",
+      origin: { channelType: "slack", threadKey: "slack:C1:171.1", reply: "auto" },
+    };
+    expect(engineSignalToWire(signal)).toEqual({
+      signalType: "wakeup.process.exited",
+      origin: { channelType: "slack" },
+    });
+  });
 });
 
 describe("engineToWireParts", () => {
+  it("keeps per-block timing in history and live updates", () => {
+    const part = { type: "thinking" as const, text: "", startedAt: 1000, durationMs: 2400 };
+    const wirePart = { kind: "thinking", text: "", startedAt: 1000, durationMs: 2400 };
+    expect(engineToWireParts([part])).toEqual([wirePart]);
+    expect(busEventToWire(ev({ type: "thinking_update", threadId: "t1", messageId: "m1", index: 2, part })))
+      .toEqual([{ type: "thinking_update", threadId: "t1", messageId: "m1", index: 2, part: wirePart }]);
+  });
+
   it("translates engine tool_call → wire tool_call (snake_case kind)", () => {
     const parts: EngineMessagePart[] = [
       { type: "tool_call", callId: "c1", toolName: "bash", status: "running" },
@@ -77,9 +98,35 @@ describe("engineToWireParts", () => {
 });
 
 describe("busEventToWire", () => {
+  it("preserves image evidence beside the text fallback", () => {
+    const resultData = { content: [
+      { type: "text", text: "Screenshot" },
+      { type: "image", data: "cGl4ZWxz", mimeType: "image/png" },
+    ] };
+    expect(busEventToWire(ev({
+      type: "tool_end", threadId: "t1", tool: "browser_execute",
+      result: "Screenshot", resultData, isError: false,
+    }))).toEqual([expect.objectContaining({ result: "Screenshot", resultData })]);
+  });
+
   it("forwards message_start", () => {
     const out = busEventToWire(ev({ type: "message_start", threadId: "t1", messageId: "m1", role: "assistant" }));
     expect(out).toEqual([{ type: "message_start", threadId: "t1", messageId: "m1", role: "assistant" }]);
+  });
+
+  it("forwards the tool-use message_end reason", () => {
+    const out = busEventToWire(
+      ev({ type: "message_end", threadId: "t1", messageId: "m1", reason: "tool_use" }),
+    );
+    expect(out).toEqual([{ type: "message_end", threadId: "t1", messageId: "m1", reason: "tool_use" }]);
+  });
+
+  it("forwards the item a merged submission joined", () => {
+    const out = busEventToWire(ev({
+      type: "submission_settled", sessionId: "s1", threadId: "t1", queueItemId: "q2",
+      outcome: { outcome: "merged" }, mergedIntoItemId: "q1",
+    }));
+    expect(out).toEqual([{ type: "submission.settled", sessionId: "s1", threadId: "t1", queueItemId: "q2", outcome: "merged", error: undefined, mergedIntoItemId: "q1" }]);
   });
 
   it("forwards text_delta with empty messageId placeholder", () => {
@@ -124,6 +171,8 @@ describe("busEventToWire", () => {
   it("forwards status events directly (engine status ⊆ wire status)", () => {
     const out = busEventToWire(ev({ type: "status", threadId: "t1", status: "thinking" }));
     expect(out).toEqual([{ type: "status", threadId: "t1", status: "thinking" }]);
+    expect(busEventToWire(ev({ type: "status", threadId: "t1", status: "tool_calling", turnStartedAt: 4000 })))
+      .toEqual([{ type: "status", threadId: "t1", status: "tool_calling", turnStartedAt: 4000 }]);
   });
 
   it("forwards turn_end", () => {
@@ -148,6 +197,19 @@ describe("busEventToWire", () => {
         threadId: "t1",
         sessionTitle: "Fix Authentication",
         threadTitle: "Fix Authentication",
+      },
+    ]);
+  });
+
+  it("forwards persisted thread user activity", () => {
+    expect(
+      busEventToWire(ev({ type: "thread_user_activity", threadId: "t1", activityAt: 250 })),
+    ).toEqual([
+      {
+        type: "thread.activity",
+        sessionId: "s1",
+        threadId: "t1",
+        lastUserActivityAt: 250,
       },
     ]);
   });
@@ -374,5 +436,136 @@ describe("busEventToWire", () => {
       }),
     );
     expect(out).toEqual([{ type: "sandbox.status", state: "ready", epoch: 1, estimateMs: undefined }]);
+  });
+});
+
+describe("engineGateToWire oneShot", () => {
+  const gate = (context?: Record<string, unknown>): DecisionGate => ({
+    id: "g1", sessionId: "s1", threadId: "t1", queueItemId: "q1", resumeKey: "k", ordinal: 0, type: "approval",
+    title: "Approve?", actions: [{ id: "approve", label: "Approve" }, { id: "deny", label: "Deny" }],
+    status: "pending", createdAt: 1, updatedAt: 1, ...(context ? { context } : {}),
+  });
+
+  it("marks a tool approval gate whose approve allows only this call", () => {
+    expect(engineGateToWire(gate({ tool_id: "github.get_issue", oneShot: true })).oneShot).toBe(true);
+  });
+
+  it("preserves one-shot eligibility when the gate names its requester", () => {
+    const wire = engineGateToWire(gate({
+      tool_id: "github.get_issue", oneShot: true, approver: { userId: "bea" },
+      provenance: { baseMode: "require_approval", source: "team_policy" },
+    }));
+    expect(wire.oneShot).toBe(true);
+    expect(wire.approver).toEqual({ userId: "bea" });
+  });
+
+  it.each([undefined, { userId: "lender" }])("excludes shared-account consent even with a stale one-shot marker (approver: %j)", (approver) => {
+    expect(engineGateToWire(gate({
+      tool_id: "github.get_issue", oneShot: true, approver,
+      provenance: { baseMode: "allow", source: "shared_account" },
+    })).oneShot).toBeUndefined();
+  });
+
+  it("excludes legacy shared-account consent without complete policy provenance", () => {
+    expect(engineGateToWire(gate({
+      tool_id: "github.get_issue", oneShot: true, approver: { userId: "lender" },
+      provenance: { source: "shared_account" },
+    })).oneShot).toBeUndefined();
+  });
+
+  it("leaves it off a gate that covers later work or lends an account", () => {
+    // sec_start and ask_approval open plain approval gates with approve/deny and no tool context.
+    expect(engineGateToWire(gate()).oneShot).toBeUndefined();
+    expect(engineGateToWire(gate({ tool_id: "github.get_issue" })).oneShot).toBeUndefined();
+    expect(engineGateToWire(gate({ tool_id: "github.get_issue", approver: { userId: "bea" } })).oneShot).toBeUndefined();
+    expect(engineGateToWire(gate({ oneShot: true })).oneShot).toBeUndefined();
+  });
+});
+
+describe("engineGateToWire riskLevel", () => {
+  const gate = (context?: Record<string, unknown>): DecisionGate => ({
+    id: "g1", sessionId: "s1", threadId: "t1", queueItemId: "q1", resumeKey: "k", ordinal: 0, type: "approval",
+    title: "Approve?", actions: [{ id: "approve", label: "Approve" }, { id: "deny", label: "Deny" }],
+    status: "pending", createdAt: 1, updatedAt: 1, ...(context ? { context } : {}),
+  });
+
+  it("carries the tool action's risk level", () => {
+    expect(engineGateToWire(gate({ tool_id: "github.delete_repo", riskLevel: "critical" })).riskLevel).toBe("critical");
+    expect(engineGateToWire(gate({ tool_id: "github.get_issue", riskLevel: "low" })).riskLevel).toBe("low");
+  });
+
+  it("omits an unknown level and gates without tool context", () => {
+    expect(engineGateToWire(gate({ tool_id: "github.get_issue", riskLevel: "extreme" })).riskLevel).toBeUndefined();
+    expect(engineGateToWire(gate({ riskLevel: "high" })).riskLevel).toBeUndefined();
+  });
+});
+
+describe("engineGateToWire tool", () => {
+  // The body the engine writes for a tool approval (`approvalGateRequest`).
+  const toolBody = (toolId: string, args: Record<string, unknown>) =>
+    `Post the release notes\n\ntool_id=${toolId}\nargs=${JSON.stringify(args, null, 2)}`;
+  const gate = (overrides: Partial<DecisionGate>): DecisionGate => ({
+    id: "g1", sessionId: "s1", threadId: "t1", queueItemId: "q1", resumeKey: "k", ordinal: 0, type: "approval",
+    title: "Approve Send Message?", actions: [{ id: "approve", label: "Approve" }, { id: "deny", label: "Deny" }],
+    status: "pending", createdAt: 1, updatedAt: 1, ...overrides,
+  });
+
+  it("carries the gated call's id and args", () => {
+    const args = { channel: "#eng", text: "Release 1.2 is out.", thread_ts: "1780887543.189519" };
+    const wire = engineGateToWire(gate({
+      body: toolBody("slack.send_message", args),
+      context: { tool_id: "slack.send_message", service: "slack", args, summary: "Post the release notes", oneShot: true },
+    }));
+    expect(wire.tool).toEqual({ id: "slack.send_message", args });
+  });
+
+  it("carries the id alone when the context has no args", () => {
+    const wire = engineGateToWire(gate({ body: toolBody("gmail.send_draft", {}), context: { tool_id: "gmail.send_draft" } }));
+    expect(wire.tool).toEqual({ id: "gmail.send_draft" });
+  });
+
+  it("cuts string args longer than 4000 characters at any depth", () => {
+    const long = `${"a".repeat(3999)}😀tail`;
+    const args = { text: long, short: "ok", count: 3, nested: { body: long }, list: [long, 1] };
+    const wire = engineGateToWire(gate({ body: toolBody("slack.send_message", args), context: { tool_id: "slack.send_message", args } }));
+    const cut = `${"a".repeat(3999)}😀…`;
+    expect(wire.tool?.args).toEqual({ text: cut, short: "ok", count: 3, nested: { body: cut }, list: [cut, 1] });
+    // A string at the limit passes through unchanged.
+    const atLimit = "b".repeat(4000);
+    const exact = engineGateToWire(gate({ body: toolBody("slack.send_message", { text: atLimit }), context: { tool_id: "slack.send_message", args: { text: atLimit } } }));
+    expect(exact.tool?.args).toEqual({ text: atLimit });
+  });
+
+  it("omits it on gates without tool context", () => {
+    expect(engineGateToWire(gate({ body: "Deploy to production?" })).tool).toBeUndefined();
+    expect(engineGateToWire(gate({ type: "question", body: toolBody("slack.send_message", {}), context: { tool_id: "slack.send_message", args: {} } })).tool).toBeUndefined();
+  });
+
+  it("omits it when the body does not show the call", () => {
+    // A shared-account gate replaces the tool_id/args body with prose.
+    const context = { tool_id: "slack.send_message", args: { channel: "#eng", text: "hi" }, approver: { userId: "u2" } };
+    expect(engineGateToWire(gate({ body: "Valet would use your Slack account.", context })).tool).toBeUndefined();
+    expect(engineGateToWire(gate({ context })).tool).toBeUndefined();
+  });
+});
+
+describe("queuedItemToWire", () => {
+  const item = (over: Partial<QueueItem>): QueueItem => ({
+    id: "q-1", threadId: "t1", content: "hello", status: "queued", attemptCount: 0, maxAttempts: 10,
+    timeoutAt: 0, createdAt: 1, updatedAt: 1, ...over,
+  });
+
+  it("carries the text the queued stack shows, never the files", () => {
+    expect(queuedItemToWire(item({ metadata: { [MID_TURN_DELIVERY_KEY]: true } }))).toEqual({ id: "q-1", text: "hello", midTurn: true });
+    expect(queuedItemToWire(item({
+      content: { text: "see the image", attachments: [{ type: "image", url: "data:image/png;base64,AAAA", mimeType: "image/png" }] },
+    }))).toEqual({ id: "q-1", text: "see the image", midTurn: false, attachments: 1 });
+    expect(queuedItemToWire(item({ content: { kind: "signal", signalType: "wakeup.timer", tagName: "wakeup", body: "Check it." } })))
+      .toEqual({ id: "q-1", text: "Check it.", signal: { type: "wakeup" }, midTurn: false });
+    // The engine's default tag names no kind, so a child's result reads as its type.
+    expect(queuedItemToWire(item({ content: { kind: "signal", signalType: "child.settled", tagName: "signal", body: "Done." } })))
+      .toEqual({ id: "q-1", text: "Done.", signal: { type: "child.settled" }, midTurn: false });
+    const long = queuedItemToWire(item({ content: "x".repeat(QUEUED_TEXT_MAX + 50) }));
+    expect(long.text).toHaveLength(QUEUED_TEXT_MAX + 1);
   });
 });

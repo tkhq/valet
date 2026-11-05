@@ -9,6 +9,7 @@
 import { metrics } from "@opentelemetry/api";
 
 type Counter = ReturnType<ReturnType<typeof metrics.getMeter>["createCounter"]>;
+type Histogram = ReturnType<ReturnType<typeof metrics.getMeter>["createHistogram"]>;
 
 let createdCounter: Counter | null = null;
 let settledCounter: Counter | null = null;
@@ -16,6 +17,8 @@ let compactionStaleCounter: Counter | null = null;
 let runnerStalledCounter: Counter | null = null;
 let cellExhaustedCounter: Counter | null = null;
 let bootRestoreTimeoutCounter: Counter | null = null;
+let credentialCountHistogram: Histogram | null = null;
+let credentialFragmentAlertCounter: Counter | null = null;
 
 /** Cells materialized by startEngagement. */
 export function recordSecurityCellsCreated(count: number): void {
@@ -103,4 +106,53 @@ export function recordBootRestoreTimeout(): void {
       });
   }
   bootRestoreTimeoutCounter.add(1);
+}
+
+/**
+ * Declared 1Password credential count at engagement start (Part 12, the
+ * sec_start observability seam). The broker allowlist reads
+ * `credentials_json` directly on every resolve, so this histogram is not a
+ * runtime registry; it is the boot-time signal that an engagement's declared
+ * credential count landed. No per-id attributes: the engagement id and the
+ * declared labels go in the caller's log line, never on the metric.
+ */
+export function recordSecurityEngagementCredentialCount(count: number): void {
+  if (!credentialCountHistogram) {
+    credentialCountHistogram = metrics
+      .getMeter("@valet/api")
+      .createHistogram("valet.security.engagement.credentials_declared", {
+        description: "Declared credential count per engagement at start",
+        advice: { explicitBucketBoundaries: [0, 1, 2, 5, 10, 20] },
+      });
+  }
+  credentialCountHistogram.record(count);
+}
+
+/**
+ * Output from one session covered more than half of a registered
+ * credential value, and nothing was blocked yet. Partial reconstruction is
+ * the early signal that a persona is dripping a value out in fragments.
+ * The tripwire fires this once per value, then keeps matching. Nothing
+ * auto-repairs the session: a human reads the transcript and decides.
+ *
+ * The counter carries no attributes. The session and engagement ids are
+ * unbounded, so they go in the log line and never on the metric.
+ */
+export function recordSecurityCredentialFragmentAlert(args: {
+  sessionId: string;
+  engagementId: string;
+}): void {
+  if (!credentialFragmentAlertCounter) {
+    credentialFragmentAlertCounter = metrics
+      .getMeter("@valet/api")
+      .createCounter("valet.security.credential_fragment_alerts", {
+        description: "Registered credential values half reconstructed in session output",
+      });
+  }
+  credentialFragmentAlertCounter.add(1);
+  console.warn(
+    `security tripwire: output covered more than half of a registered credential value ` +
+      `for session ${args.sessionId} in engagement ${args.engagementId}. ` +
+      `Read the session transcript and stop the session if the persona is leaking the value.`,
+  );
 }

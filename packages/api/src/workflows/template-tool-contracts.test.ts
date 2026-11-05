@@ -625,6 +625,11 @@ class SeededCredentialStore implements CredentialStore {
     this.rows.set(this.key(owner, service), credential);
   }
 
+  async compareAndSwap(owner: CredentialOwner, service: string, expected: StoredCredential, next: StoredCredential): Promise<boolean> {
+    if (this.rows.get(this.key(owner, service)) !== expected) return false;
+    this.rows.set(this.key(owner, service), next);
+    return true;
+  }
   async delete(owner: CredentialOwner, service: string): Promise<void> {
     this.rows.delete(this.key(owner, service));
   }

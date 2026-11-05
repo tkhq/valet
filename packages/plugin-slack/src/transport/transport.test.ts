@@ -1,5 +1,6 @@
+import { SlackApi } from "./api.js";
 import { createHmac } from "node:crypto";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChannelStreamError, type StoredCredential } from "@valet/engine";
 import { startFakeSlackApi, type FakeSlackApi } from "../../test/fake-slack-api.js";
 import {
@@ -134,6 +135,14 @@ describe("send threads on the conversation key's thread root", () => {
     expect(lastCall("chat.postMessage").thread_ts).toBe("1700000000.000100");
   });
 
+  it("keeps a delayed reply on its original root after another inbound turn", async () => {
+    const transport = makeTransport();
+    const original = primeTurn(transport, "1700000000.000100");
+    primeTurn(transport, "1700000000.000200");
+    await transport.send(original, { markdown: "Recovered answer" });
+    expect(lastCall("chat.postMessage").thread_ts).toBe("1700000000.000100");
+  });
+
   it("threads a primed (inbound) conversation, unchanged", async () => {
     const transport = makeTransport();
     const key = primeTurn(transport, "1700000000.000200");
@@ -145,6 +154,15 @@ describe("send threads on the conversation key's thread root", () => {
     const transport = makeTransport();
     const key = await transport.openDirectConversation("U9");
     await transport.send(key, { markdown: "nudge" });
+    expect(lastCall("chat.postMessage").thread_ts).toBeUndefined();
+  });
+});
+
+describe("home channel", () => {
+  it("starts a new top-level message", async () => {
+    const transport = makeTransport();
+    await transport.sendToChannel("C0123456789", { markdown: "Team update" });
+    expect(lastCall("chat.postMessage").channel).toBe("C0123456789");
     expect(lastCall("chat.postMessage").thread_ts).toBeUndefined();
   });
 });
@@ -329,6 +347,24 @@ describe("parseUpdate — the agent surface events", () => {
     }
   });
 
+  it("reads a person's DM edit as an edit with the text before and after", () => {
+    const transport = makeTransport();
+    const edit = transport.parseUpdate(envelope({
+      type: "message",
+      subtype: "message_changed",
+      channel_type: "im",
+      channel: CHANNEL,
+      message: { user: "U1", text: "deploy to staging", ts: "1700000000.000100" },
+      previous_message: { user: "U1", text: "deploy to prod", ts: "1700000000.000100" },
+    }, "EvEdit"));
+    expect(edit).toMatchObject({ kind: "edit", text: "deploy to staging", previousText: "deploy to prod", dispatchId: "slack:EvEdit", sender: { externalId: "U1" } });
+    // A link preview loading changes no text.
+    expect(transport.parseUpdate(envelope({
+      type: "message", subtype: "message_changed", channel_type: "im", channel: CHANNEL,
+      message: { user: "U1", text: "same", ts: "1.1" }, previous_message: { text: "same" },
+    }))).toBeNull();
+  });
+
   it("keeps a file_share, which carries a real user turn", () => {
     const transport = makeTransport();
     const event = transport.parseUpdate(
@@ -349,6 +385,66 @@ describe("parseUpdate — the agent surface events", () => {
     const transport = makeTransport();
     expect(transport.parseUpdate(envelope(imMessage({ channel_type: "channel", channel: "C1" })))).toBeNull();
     expect(transport.parseUpdate(envelope({ type: "app_mention", channel: "C1", user: "U1", text: "hi" }))).toBeNull();
+  });
+
+  it("routes a group DM message that mentions the app, marked as a group conversation", () => {
+    const transport = makeTransport();
+    const event = transport.parseUpdate(envelope(imMessage({
+      channel_type: "mpim", channel: "C0GROUP", text: "<@UBOT> can you look at this?",
+      ts: "1700000000.000300", thread_ts: "1700000000.000100",
+    })));
+    expect(event).toMatchObject({
+      kind: "message",
+      conversationKey: conversationKeyFor(TEAM, "C0GROUP", "1700000000.000100"),
+      text: "can you look at this?",
+      threadTs: "1700000000.000100",
+      group: { channelId: "C0GROUP", messageTs: "1700000000.000300" },
+    });
+  });
+
+  it("passes a group DM thread reply without a mention to the host as a follow-up", () => {
+    const transport = makeTransport();
+    const event = transport.parseUpdate(envelope(imMessage({
+      channel_type: "mpim", channel: "C0GROUP", text: "link me to the thread for this",
+      ts: "1700000000.000700", thread_ts: "1700000000.000100",
+    })));
+    expect(event).toMatchObject({
+      kind: "message",
+      conversationKey: conversationKeyFor(TEAM, "C0GROUP", "1700000000.000100"),
+      text: "link me to the thread for this",
+      threadTs: "1700000000.000100",
+      group: { channelId: "C0GROUP", messageTs: "1700000000.000700", followUp: true },
+    });
+    // A reply without a mention is not addressed to the app, so it is never a link command.
+    expect(transport.parseUpdate(envelope(imMessage({
+      channel_type: "mpim", channel: "C0GROUP", text: "link ABC123", ts: "1700000000.000800", thread_ts: "1700000000.000100",
+    })))?.kind).toBe("message");
+  });
+
+  it("leaves a top-level group DM message without a mention to the event pipeline", () => {
+    const transport = makeTransport();
+    expect(transport.parseUpdate(envelope(imMessage({ channel_type: "mpim", channel: "C0GROUP", text: "lunch?" })))).toBeNull();
+    expect(transport.parseUpdate(envelope(imMessage({ channel_type: "mpim", channel: "C0GROUP", text: "<@UOTHER> lunch?" })))).toBeNull();
+    // A thread root names its own ts as thread_ts; it is not a reply.
+    expect(transport.parseUpdate(envelope(imMessage({
+      channel_type: "mpim", channel: "C0GROUP", text: "lunch?", ts: "1700000000.000100", thread_ts: "1700000000.000100",
+    })))).toBeNull();
+    // Without its own user id the app cannot tell that it was mentioned.
+    expect(makeTransport({ botUserId: undefined }).parseUpdate(
+      envelope(imMessage({ channel_type: "mpim", channel: "C0GROUP", text: "<@UBOT> hi" })),
+    )).toBeNull();
+  });
+
+  it("marks a group DM shared with another organization as external", () => {
+    const event = makeTransport().parseUpdate({
+      ...envelope(imMessage({ channel_type: "mpim", channel: "C0EXT", text: "<@UBOT> hi", ts: "1700000000.000500" })),
+      is_ext_shared_channel: true,
+    });
+    expect(event?.group).toEqual({ channelId: "C0EXT", messageTs: "1700000000.000500", external: true });
+  });
+
+  it("does not mark a direct message as a group conversation", () => {
+    expect(makeTransport().parseUpdate(envelope(imMessage()))).not.toHaveProperty("group");
   });
 
   it("parses a link command DM into a command event", () => {
@@ -647,6 +743,112 @@ describe("parseUpdate — gate callbacks", () => {
   });
 });
 
+describe("sendPrivateNotice", () => {
+  it("sends only an ephemeral message and propagates provider failures", async () => {
+    const transport = makeTransport();
+    await transport.sendPrivateNotice(CHANNEL, "U1", "Link your account.");
+    expect(fake.calls.find(c => c.method === "chat.postEphemeral")?.body).toMatchObject({ channel: CHANNEL, user: "U1", text: "Link your account." });
+    expect(fake.calls.some(c => c.method === "chat.postMessage")).toBe(false);
+    fake.failNext("chat.postEphemeral", "channel_not_found");
+    await expect(transport.sendPrivateNotice(CHANNEL, "U1", "Link your account.")).rejects.toThrow("channel_not_found");
+  });
+});
+
+describe("answerCallback", () => {
+  const EXPIRED = "This approval has expired — resolve it on the web.";
+
+  function click(over: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      type: "block_actions",
+      trigger_id: "TRIG-ANSWER",
+      user: { id: "U1", username: "someone" },
+      team: { id: TEAM },
+      channel: { id: CHANNEL },
+      container: { message_ts: "1700000000.000900", thread_ts: THREAD_TS },
+      actions: [{ value: "g|gate-77|deny" }],
+      response_url: `${fake.baseUrl}/response-url`,
+      ...over,
+    };
+  }
+
+  it("answers the click on its own response_url", async () => {
+    const transport = makeTransport();
+    transport.parseUpdate(click());
+
+    await transport.answerCallback("TRIG-ANSWER", EXPIRED);
+
+    const answer = fake.calls.find((c) => c.method === "response-url");
+    expect(answer?.body).toEqual({ response_type: "ephemeral", replace_original: false, text: EXPIRED });
+    // The response_url is a capability URL. It carries no bot token.
+    expect(answer?.auth).toBeUndefined();
+    expect(fake.calls.some((c) => c.method === "chat.postEphemeral")).toBe(false);
+  });
+
+  it("answers with an ephemeral message when the click carried no response_url", async () => {
+    const transport = makeTransport();
+    const payload = click();
+    delete payload.response_url;
+    transport.parseUpdate(payload);
+
+    await transport.answerCallback("TRIG-ANSWER", EXPIRED);
+
+    const ephemeral = fake.calls.find((c) => c.method === "chat.postEphemeral");
+    expect(ephemeral?.body).toMatchObject({ channel: CHANNEL, user: "U1", text: EXPIRED });
+  });
+
+  it("answers with an ephemeral message when the response_url no longer accepts the post", async () => {
+    const transport = makeTransport();
+    transport.parseUpdate(click());
+    fake.failNext("response-url", "expired_url", 500);
+
+    await transport.answerCallback("TRIG-ANSWER", EXPIRED);
+
+    const ephemeral = fake.calls.find((c) => c.method === "chat.postEphemeral");
+    expect(ephemeral?.body).toMatchObject({ channel: CHANNEL, user: "U1", text: EXPIRED });
+  });
+
+  it("refuses a response_url that does not belong to Slack", async () => {
+    const transport = makeTransport();
+    // A reachable host is still the wrong host. A payload that reached the
+    // parser without Slack's signature must not aim the answer elsewhere.
+    const foreign = `${fake.baseUrl.replace("127.0.0.1", "localhost")}/response-url`;
+    transport.parseUpdate(click({ response_url: foreign }));
+
+    await transport.answerCallback("TRIG-ANSWER", EXPIRED);
+
+    expect(fake.calls.some((c) => c.method === "response-url")).toBe(false);
+    const ephemeral = fake.calls.find((c) => c.method === "chat.postEphemeral");
+    expect(ephemeral?.body).toMatchObject({ channel: CHANNEL, user: "U1", text: EXPIRED });
+  });
+
+  it("says nothing when the callback carries no text", async () => {
+    const transport = makeTransport();
+    transport.parseUpdate(click());
+
+    await transport.answerCallback("TRIG-ANSWER");
+
+    expect(fake.calls.some((c) => c.method === "response-url")).toBe(false);
+    expect(fake.calls.some((c) => c.method === "chat.postEphemeral")).toBe(false);
+  });
+
+  it("stays quiet for a callback it never parsed", async () => {
+    const transport = makeTransport();
+
+    await expect(transport.answerCallback("TRIG-UNKNOWN", EXPIRED)).resolves.toBeUndefined();
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it("keeps the ephemeral answer working when the message send fails", async () => {
+    const transport = makeTransport();
+    const payload = click();
+    delete payload.response_url;
+    transport.parseUpdate(payload);
+    fake.failNext("chat.postEphemeral", "channel_not_found");
+
+    await expect(transport.answerCallback("TRIG-ANSWER", EXPIRED)).resolves.toBeUndefined();
+  });
+});
+
 describe("verifyWebhook", () => {
   function signed(body: string, secret = SIGNING_SECRET, timestamp = Math.floor(Date.now() / 1000)) {
     const digest = createHmac("sha256", secret).update(`v0:${timestamp}:${body}`).digest("hex");
@@ -718,6 +920,16 @@ describe("streaming", () => {
     const transport = makeTransport();
     await transport.startStream(KEY, { threadTs: "1700000000.000100" });
     expect(lastCall("chat.startStream")).not.toHaveProperty("recipient_user_id");
+  });
+
+  it("names the turn's recipient when it streams into a group DM", async () => {
+    const transport = makeTransport();
+    await transport.startStream(conversationKeyFor(TEAM, "C0GROUP", "1700000000.000400"), {
+      threadTs: "1700000000.000400", recipient: { userId: "U7", teamId: TEAM },
+    });
+    expect(lastCall("chat.startStream")).toMatchObject({
+      channel: "C0GROUP", thread_ts: "1700000000.000400", recipient_user_id: "U7", recipient_team_id: TEAM,
+    });
   });
 
   it("splits an append over the 12,000-character limit without losing a character", async () => {
@@ -875,6 +1087,24 @@ describe("gate prompts", () => {
     });
   });
 
+  it("shortens a button label to Slack's 75-character limit, keeping the action id", async () => {
+    const transport = makeTransport();
+    await transport.sendGatePrompt(KEY, { gateId: "gate-long", title: "Pick one", actions: [{ id: "long", label: "x".repeat(80) }] });
+    const blocks = lastCall("chat.postMessage").blocks;
+    if (!Array.isArray(blocks)) throw new Error("expected blocks");
+    const button = blocks.find((b: { type: string }) => b.type === "actions").elements[0];
+    expect(button.text.text.length).toBeLessThanOrEqual(75);
+    expect(button.action_id).toBe("long");
+  });
+
+  it("sends an open question with no actions block, which Slack would reject empty", async () => {
+    const transport = makeTransport();
+    await transport.sendGatePrompt(KEY, { gateId: "gate-open", title: "Which repo?", actions: [] });
+    const blocks = lastCall("chat.postMessage").blocks;
+    if (!Array.isArray(blocks)) throw new Error("expected blocks");
+    expect(blocks.map((b: { type: string }) => b.type)).toEqual(["header"]);
+  });
+
   it("posts the gate under the turn that raised it, with the gate id in the button", async () => {
     const transport = makeTransport();
     const turnKey = primeTurn(transport, "1700000000.000700");
@@ -1010,7 +1240,8 @@ describe("gate prompts", () => {
       user: { id: "U1" },
       team: { id: TEAM },
     });
-    expect(inbound?.gateCallback?.ref).toEqual(ref);
+    expect(ref.channelId).toBe("D-U1");
+    expect(inbound?.gateCallback?.ref).toEqual({ conversationKey: ref.conversationKey, messageId: ref.messageId });
     expect(inbound?.gateCallback?.gateId).toBe("gate-88");
   });
 
@@ -1039,6 +1270,16 @@ describe("gate prompts", () => {
     expect(text).not.toContain("deploy.ship");
     const blocks = body.blocks;
     expect(Array.isArray(blocks) ? blocks.length : 0).toBe(1);
+  });
+
+  it("passes the attention deadline flag through gate settlement edits", async () => {
+    const transport = makeTransport();
+    const ref = await transport.sendGatePrompt(KEY, { gateId: "attention-settlement", title: "Approve", actions: [], attentionDeliveryId: "token" });
+    const update = vi.spyOn(SlackApi.prototype, "updateMessage");
+    try {
+      await transport.updateGatePrompt(ref, { label: "Expired", attention: true });
+      expect(update).toHaveBeenCalledWith(expect.objectContaining({ attention: true }));
+    } finally { update.mockRestore(); }
   });
 
   it("keeps the human-written body through the edit for a gate without fields", async () => {
@@ -1085,6 +1326,70 @@ describe("gate prompt identity (TKAI-387)", () => {
 });
 
 describe("discrete sends", () => {
+  it("renders short tables as blocks and keeps raw mentions inert", async () => {
+    const transport = makeTransport();
+    const markdown = '| PR | Status |\n| --- | --- |\n| [PR](https://github.com/tkhq/mono/pull/8240) | <!channel> |';
+    await transport.send(KEY, { markdown });
+    const body = lastCall("chat.postMessage");
+    expect(body.blocks).toEqual([{ type: 'section', text: { type: 'mrkdwn', text: '*PR*: <https://github.com/tkhq/mono/pull/8240|PR>\n*Status*: &lt;!channel>\n' } }]);
+    expect(fake.calls.filter((call) => call.method === "chat.postMessage")).toHaveLength(1);
+  });
+
+  it("renders a table without native spans as a native table block", async () => {
+    const transport = makeTransport();
+    const markdown = '| PR | Related |\n| --- | --- |\n| [PR](https://github.com/tkhq/mono/pull/8240) | [#1](https://x/1)<br>[#2](https://x/2) |';
+    await transport.send(KEY, { markdown });
+    const body = lastCall("chat.postMessage");
+    expect(body.blocks).toMatchObject([{
+      type: 'table',
+      rows: [[{ text: 'PR' }, { text: 'Related' }], [
+        { elements: [{ elements: [{ type: 'link', url: 'https://github.com/tkhq/mono/pull/8240', text: 'PR' }] }] },
+        { elements: [{ elements: [{ type: 'link', text: '#1' }, { type: 'text', text: '\n' }, { type: 'link', text: '#2' }] }] },
+      ]],
+    }]);
+    expect(fake.calls.filter((call) => call.method === "chat.postMessage")).toHaveLength(1);
+  });
+
+  it("retries with the Markdown block when Slack rejects the table block", async () => {
+    const transport = makeTransport();
+    const markdown = '| PR | Related |\n| --- | --- |\n| a | b<br>c |';
+    fake.failNext("chat.postMessage", "invalid_blocks");
+    await transport.send(KEY, { markdown });
+    const posts = fake.calls.filter((call) => call.method === "chat.postMessage");
+    expect(posts.map((post) => (post.body.blocks as { type: string }[]).map((block) => block.type))).toEqual([['table'], ['markdown']]);
+    expect(posts[1].body.blocks).toEqual([{ type: 'markdown', text: markdown }]);
+  });
+
+  it("sends the Markdown fallback before retrying without the sender identity", async () => {
+    const transport = makeTransport();
+    const markdown = '| PR | Related |\n| --- | --- |\n| a | b<br>c |';
+    fake.failNext("chat.postMessage", "invalid_blocks");
+    await transport.send(KEY, { markdown, sender: { displayName: "Ledger" } });
+    const posts = fake.calls.filter((call) => call.method === "chat.postMessage");
+    expect(posts.map((post) => [post.body.username, ...(post.body.blocks as { type: string }[]).map((block) => block.type)]))
+      .toEqual([["Ledger", "table"], ["Ledger", "markdown"]]);
+  });
+
+  it("sends the Markdown fallback after the retry without the sender identity", async () => {
+    // A token without chat:write.customize fails on the identity first, so
+    // the table first reaches block validation on the retry without it.
+    fake.rejectWhen("chat.postMessage", (body) => {
+      if (body.username !== undefined) return "missing_scope";
+      if ((body.blocks as { type: string }[] | undefined)?.some((block) => block.type === "table")) return "invalid_blocks";
+      return undefined;
+    });
+    try {
+      const transport = makeTransport();
+      const markdown = '| PR | Related |\n| --- | --- |\n| a | b<br>c |';
+      await transport.send(KEY, { markdown, sender: { displayName: "Ledger" } });
+      const posts = fake.calls.filter((call) => call.method === "chat.postMessage");
+      expect(posts.map((post) => [post.body.username, ...(post.body.blocks as { type: string }[]).map((block) => block.type)]))
+        .toEqual([["Ledger", "table"], [undefined, "table"], [undefined, "markdown"]]);
+    } finally {
+      fake.rejectWhen("chat.postMessage");
+    }
+  });
+
   it("replies in the turn's thread", async () => {
     const transport = makeTransport();
     const turnKey = primeTurn(transport, "1700000000.000300");
@@ -1264,5 +1569,43 @@ describe("lookupUserByEmail", () => {
       name: "ChannelLookupError",
       kind: "transport",
     });
+  });
+});
+
+
+describe("attention delivery metadata", () => {
+  it("tags plain DMs and approval cards with opaque tokens and no gate ids", async () => {
+    const transport = makeTransport();
+    const key = await transport.openDirectConversation("U1");
+    const plain = await transport.send(key, { markdown: "Needs you", attentionDeliveryId: "plain-job" });
+    expect(lastCall("chat.postMessage").metadata).toEqual({ event_type: "valet_attention", event_payload: { delivery_id: "plain-job" } });
+    expect(plain.channelId).toBe("D-U1");
+    const gate = await transport.sendGatePrompt(key, { gateId: "g", title: "Approve", actions: [], attentionDeliveryId: "gate-job" });
+    expect(lastCall("chat.postMessage").metadata).toEqual({ event_type: "valet_attention_gate", event_payload: { delivery_id: "gate-job" } });
+    expect(gate.channelId).toBe("D-U1");
+  });
+});
+
+describe("fetchMedia image type (TKAI-661)", () => {
+  const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+  const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0x10]);
+  const register = (bytes: Uint8Array) => {
+    fake.addFile("thumb_1024.png", bytes);
+    fake.setFileInfo("F1", {
+      id: "F1",
+      url_private: `${fake.baseUrl}/files/shot.png`,
+      thumb_1024: `${fake.baseUrl}/files/thumb_1024.png`,
+      mimetype: "image/png",
+      name: "Screenshot.png",
+    });
+    return makeTransport().fetchMedia({ kind: "photo", fileId: "F1" });
+  };
+
+  it("reports image/png for a PNG thumbnail instead of a hardcoded image/jpeg", async () => {
+    expect((await register(PNG))?.mimeType).toBe("image/png");
+  });
+
+  it("reports image/jpeg for JPEG bytes declared as PNG", async () => {
+    expect((await register(JPEG))?.mimeType).toBe("image/jpeg");
   });
 });

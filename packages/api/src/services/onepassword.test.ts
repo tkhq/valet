@@ -19,6 +19,11 @@ function memStore(): CredentialStore {
     save: async (o, s, c) => {
       m.set(k(o, s), c);
     },
+    compareAndSwap: async (o, s, expected, next) => {
+      if (m.get(k(o, s)) !== expected) return false;
+      m.set(k(o, s), next);
+      return true;
+    },
     delete: async (o, s) => {
       m.delete(k(o, s));
     },
@@ -49,7 +54,6 @@ describe("createOnePasswordService", () => {
     });
     const svc = createOnePasswordService({
       credentials,
-      getAllowPersonal: async () => true,
       createClient: async () => fakeClient(),
     });
     const secret = await svc.resolveReference("org", ctx, "op://Vault/Item/field");
@@ -60,7 +64,6 @@ describe("createOnePasswordService", () => {
     const credentials = memStore();
     const svc = createOnePasswordService({
       credentials,
-      getAllowPersonal: async () => true,
       createClient: async () => fakeClient(),
     });
     await expect(svc.resolveReference("org", ctx, "op://Vault/Item/field")).rejects.toThrow(
@@ -79,7 +82,6 @@ describe("createOnePasswordService", () => {
     });
     const svc = createOnePasswordService({
       credentials,
-      getAllowPersonal: async () => true,
       createClient: async () => fakeClient(),
     });
     const secret = await svc.resolveReference("personal", ctx, "op://Vault/Item/field");
@@ -90,7 +92,6 @@ describe("createOnePasswordService", () => {
     const credentials = memStore();
     const svc = createOnePasswordService({
       credentials,
-      getAllowPersonal: async () => true,
       createClient: async () => fakeClient(),
     });
     await expect(svc.resolveReference("personal", ctx, "op://Vault/Item/field")).rejects.toThrow(
@@ -99,22 +100,6 @@ describe("createOnePasswordService", () => {
     await expect(svc.resolveReference("personal", ctx, "op://Vault/Item/field")).rejects.toThrow(
       /no personal 1Password service account token/,
     );
-  });
-
-  it("resolveReference personal scope disabled by org toggle throws before token lookup", async () => {
-    const credentials = memStore();
-    // No token row saved at all — if the toggle check ran after token lookup,
-    // this would throw the "no personal token" error instead.
-    const getAllowPersonal = vi.fn(async () => false);
-    const svc = createOnePasswordService({
-      credentials,
-      getAllowPersonal,
-      createClient: async () => fakeClient(),
-    });
-    await expect(svc.resolveReference("personal", ctx, "op://Vault/Item/field")).rejects.toThrow(
-      /disabled by your organization/,
-    );
-    expect(getAllowPersonal).toHaveBeenCalledWith(ctx.orgId);
   });
 
   it("caches resolved references within the TTL and re-resolves after it expires", async () => {
@@ -127,7 +112,6 @@ describe("createOnePasswordService", () => {
     const resolve = vi.fn(async (ref: string) => `secret-for-${ref}`);
     const svc = createOnePasswordService({
       credentials,
-      getAllowPersonal: async () => true,
       createClient: async () => fakeClient({ secrets: { resolve } }),
       now: () => t,
     });
@@ -150,7 +134,6 @@ describe("createOnePasswordService", () => {
     const createClient = vi.fn(async () => fakeClient());
     const svc = createOnePasswordService({
       credentials,
-      getAllowPersonal: async () => true,
       createClient,
     });
 
@@ -180,7 +163,6 @@ describe("createOnePasswordService", () => {
     const resolve = vi.fn(async () => current);
     const svc = createOnePasswordService({
       credentials,
-      getAllowPersonal: async () => true,
       createClient: async () => fakeClient({ secrets: { resolve } }),
       // Time never advances: any re-resolve is the rotation, not the TTL.
       now: () => 0,
@@ -209,7 +191,6 @@ describe("createOnePasswordService", () => {
     const list = vi.fn(async () => [{ id: "v1", title: "Vault" }]);
     const svc = createOnePasswordService({
       credentials,
-      getAllowPersonal: async () => true,
       createClient: async () =>
         fakeClient({
           vaults: { list },
@@ -244,7 +225,6 @@ describe("createOnePasswordService", () => {
     });
     const svc = createOnePasswordService({
       credentials,
-      getAllowPersonal: async () => true,
       createClient: async () => fakeClient(),
     });
     const row: StoredCredential = {
@@ -267,7 +247,6 @@ describe("createOnePasswordService", () => {
     });
     const svc = createOnePasswordService({
       credentials,
-      getAllowPersonal: async () => true,
       createClient: async () => fakeClient(),
     });
     const row: StoredCredential = {
@@ -286,7 +265,6 @@ describe("createOnePasswordService", () => {
     const credentials = memStore();
     const svc = createOnePasswordService({
       credentials,
-      getAllowPersonal: async () => true,
       createClient: async () => fakeClient(),
     });
     const row: StoredCredential = { type: "api_key", apiKey: "raw-key" };
@@ -327,7 +305,6 @@ describe("createOnePasswordService", () => {
     const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const svc = createOnePasswordService({
       credentials,
-      getAllowPersonal: async () => true,
       createClient: async () =>
         fakeClient({
           secrets: {
@@ -365,7 +342,6 @@ describe("createOnePasswordService", () => {
     const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const svc = createOnePasswordService({
       credentials,
-      getAllowPersonal: async () => true,
       createClient: async () => {
         throw new Error("token expired");
       },
@@ -386,7 +362,6 @@ describe("createOnePasswordService", () => {
     });
     const svc = createOnePasswordService({
       credentials,
-      getAllowPersonal: async () => true,
       createClient: async () =>
         fakeClient({
           vaults: {
@@ -424,7 +399,6 @@ describe("createOnePasswordService", () => {
     const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const svc = createOnePasswordService({
       credentials,
-      getAllowPersonal: async () => true,
       createClient,
     });
 
@@ -476,7 +450,7 @@ describe("findCandidates", () => {
   async function svcFor(vaultTitle: string, itemTitle: string) {
     const credentials = memStore();
     await credentials.save({ type: "org", id: ctx.orgId }, ONEPASSWORD_SERVICE, { type: "service_account", apiKey: "org-token" });
-    return createOnePasswordService({ credentials, getAllowPersonal: async () => true, createClient: async () => client(vaultTitle, itemTitle) });
+    return createOnePasswordService({ credentials, createClient: async () => client(vaultTitle, itemTitle) });
   }
 
   it("keeps titles the SDK can resolve, spaces included", async () => {
@@ -526,7 +500,6 @@ describe("findCredentialForService", () => {
     const calls: string[] = [];
     const svc = createOnePasswordService({
       credentials: await withOrgToken(),
-      getAllowPersonal: async () => true,
       createClient: async () => inventoryClient(calls),
     });
     expect(await svc.findCredentialForService("org", ctx, "google_calendar")).toBe("k-123");
@@ -536,7 +509,6 @@ describe("findCredentialForService", () => {
     const calls: string[] = [];
     const svc = createOnePasswordService({
       credentials: await withOrgToken(),
-      getAllowPersonal: async () => true,
       createClient: async () => inventoryClient(calls),
     });
     await svc.findCredentialForService("org", ctx, "google_calendar");
@@ -544,21 +516,6 @@ describe("findCredentialForService", () => {
     await svc.findCredentialForService("org", ctx, "slack");
     expect(calls.filter((c) => c === "vaults.list")).toHaveLength(1);
     expect(calls.filter((c) => c === "items.list")).toHaveLength(1);
-  });
-
-  // The gate runs before the cache: a hit must not outlive the toggle.
-  it("re-checks the personal toggle on every call, cache or not", async () => {
-    let allowed = true;
-    const credentials = memStore();
-    await credentials.save({ type: "user", id: ctx.userId }, ONEPASSWORD_SERVICE, { type: "service_account", apiKey: "me" });
-    const svc = createOnePasswordService({
-      credentials,
-      getAllowPersonal: async () => allowed,
-      createClient: async () => inventoryClient([]),
-    });
-    expect(await svc.findCredentialForService("personal", ctx, "google_calendar")).toBe("k-123");
-    allowed = false;
-    await expect(svc.findCredentialForService("personal", ctx, "google_calendar")).rejects.toMatchObject({ kind: "disabled" });
   });
 
   // A one-time code is good for about thirty seconds; caching it for five
@@ -578,7 +535,6 @@ describe("findCredentialForService", () => {
     });
     const svc = createOnePasswordService({
       credentials: await withOrgToken(),
-      getAllowPersonal: async () => true,
       createClient: async () => client,
     });
     expect(await svc.findCredentialForService("org", ctx, "acme")).toBe("000001");
@@ -591,7 +547,6 @@ describe("findCredentialForService", () => {
     const calls: string[] = [];
     const svc = createOnePasswordService({
       credentials: memStore(),
-      getAllowPersonal: async () => true,
       createClient: async () => inventoryClient(calls),
     });
     await expect(svc.findCredentialForService("org", ctx, "linear")).rejects.toMatchObject({ kind: "no_token" });

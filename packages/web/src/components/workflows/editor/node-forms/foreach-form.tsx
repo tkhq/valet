@@ -1,7 +1,8 @@
-import type { ForeachBodyNode, ForeachNode } from "@valet/workflow";
+import { sharedWorkingDirectoryWarning, type ForeachBodyNode, type ForeachNode } from "@valet/workflow";
+import { Callout } from "~/components/primitives";
 import { LabeledInput, NumberField, SelectField } from "../fields";
 import { LlmForm } from "./llm-form";
-import { OrchestratorForm } from "./orchestrator-form";
+import { ThreadForm } from "./thread-form";
 import { SessionForm } from "./session-form";
 import { SetForm } from "./set-form";
 import { ToolForm } from "./tool-form";
@@ -23,6 +24,7 @@ export function ForeachForm({
   node: ForeachNode;
   onChange: (patch: Record<string, unknown>) => void;
 }) {
+  const sharedWorkingDirectory = sharedWorkingDirectoryWarning(node);
   return (
     <div className="flex flex-col gap-3">
       <LabeledInput
@@ -48,6 +50,11 @@ export function ForeachForm({
         min={1}
         max={10}
       />
+      {sharedWorkingDirectory && (
+        <Callout role="status" tone="warning" className="text-xs">
+          {sharedWorkingDirectory}
+        </Callout>
+      )}
       <SelectField
         label="On item error"
         value={node.onItemError ?? "fail"}
@@ -76,7 +83,9 @@ function defaultForeachBody(type: ForeachBodyNode["type"], id: string): ForeachB
     case "set":
       return { id, type: "set", values: {} };
     case "orchestrator":
-      return { id, type: "orchestrator", prompt: "" };
+      // Each entry gets its own conversation. Entries run in parallel only
+      // when the foreach's concurrency is above 1 (the default is 1).
+      return { id, type: "orchestrator", prompt: "", thread: "step" };
     case "session":
       return { id, type: "session", mode: "start", prompt: "" };
     case "workflow":
@@ -137,7 +146,7 @@ function BodyNodeForm({
     case "set":
       return <SetForm node={node} onChange={onChange} />;
     case "orchestrator":
-      return <OrchestratorForm node={node} onChange={onChange} />;
+      return <ThreadForm node={node} onChange={onChange} />;
     case "session":
       return <SessionForm node={node} onChange={onChange} />;
     case "workflow":

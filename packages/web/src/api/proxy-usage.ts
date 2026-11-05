@@ -6,24 +6,20 @@
  * Routed through the central `api` client so 401→login handling and the
  * 30-second request timeout apply the same way as every other page.
  */
-import { useQuery, useMutation, useQueryClient, type UseQueryOptions } from "@tanstack/react-query";
+import { useMutation, useQueryClient, type UseQueryOptions } from "@tanstack/react-query";
 import type {
-  ProxyUsageSummary,
   ProxyRequestListItem,
-  ProxyRequestDetail,
   ProxySettingsResponse,
 } from "@valet/api/wire";
 import { api } from "~/api/client";
+import { useCancellableQuery } from "./use-cancellable-query";
 
 export const qkProxy = {
-  summary: (window: string) => ["proxy", "usage", "summary", window] as const,
   requests: (filters: ProxyRequestFilters) => ["proxy", "requests", filters] as const,
-  detail: (id: string) => ["proxy", "requests", id] as const,
   settings: () => ["proxy", "settings"] as const,
 };
 
 export interface ProxyRequestFilters {
-  user?: string;
   model?: string;
   harness?: string;
   from?: number;
@@ -32,49 +28,26 @@ export interface ProxyRequestFilters {
   limit?: number;
 }
 
-export interface ProxyRequestListResponse {
+export interface ProxyRequestPage {
   items: ProxyRequestListItem[];
   nextCursor?: string;
-}
-
-export function useProxyUsageSummary(
-  window: string = "7d",
-  opts?: Partial<UseQueryOptions<ProxyUsageSummary>>,
-) {
-  return useQuery<ProxyUsageSummary>({
-    queryKey: qkProxy.summary(window),
-    queryFn: () => api.proxyUsageSummary(window),
-    staleTime: 60_000,
-    ...opts,
-  });
+  pageSize: number;
+  hasMore: boolean;
 }
 
 export function useProxyRequests(
   filters: ProxyRequestFilters = {},
-  opts?: Partial<UseQueryOptions<ProxyRequestListResponse>>,
+  opts?: Partial<UseQueryOptions<ProxyRequestPage>>,
 ) {
-  return useQuery<ProxyRequestListResponse>({
+  return useCancellableQuery<ProxyRequestPage>({
     queryKey: qkProxy.requests(filters),
-    queryFn: async () => {
-      const raw = await api.proxyRequests(filters);
+    queryFn: async ({ signal }) => {
+      const raw = await api.proxyRequests(filters, signal);
       // The backend returns `{ requests, nextCursor }` but the hook exposes
       // `{ items, nextCursor }` so callers don't need to know the key name.
-      return { items: raw.requests, nextCursor: raw.nextCursor };
+      return { items: raw.requests, nextCursor: raw.nextCursor, pageSize: raw.pageSize, hasMore: raw.hasMore };
     },
     staleTime: 30_000,
-    ...opts,
-  });
-}
-
-export function useProxyRequestDetail(
-  id: string,
-  opts?: Partial<UseQueryOptions<ProxyRequestDetail>>,
-) {
-  return useQuery<ProxyRequestDetail>({
-    queryKey: qkProxy.detail(id),
-    queryFn: () => api.proxyRequestDetail(id),
-    enabled: !!id,
-    staleTime: 5 * 60_000,
     ...opts,
   });
 }
@@ -82,9 +55,9 @@ export function useProxyRequestDetail(
 export function useProxySettings(
   opts?: Partial<UseQueryOptions<ProxySettingsResponse>>,
 ) {
-  return useQuery<ProxySettingsResponse>({
+  return useCancellableQuery<ProxySettingsResponse>({
     queryKey: qkProxy.settings(),
-    queryFn: () => api.proxySettings(),
+    queryFn: ({ signal }) => api.proxySettings(signal),
     staleTime: 60_000,
     ...opts,
   });

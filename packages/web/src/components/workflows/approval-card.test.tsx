@@ -4,17 +4,19 @@
  * `useResolveApproval`'s mutation with the right `nodeId` and `approved`
  * value, carrying an optional note.
  */
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { ApprovalCard } from "./approval-card";
 
 const mutate = vi.fn();
+let isPending = false;
 
 vi.mock("~/api/workflows", () => ({
-  useResolveApproval: () => ({ mutate, isPending: false, isError: false }),
+  useResolveApproval: () => ({ mutate, isPending, isError: false }),
 }));
 
 describe("ApprovalCard", () => {
+  beforeEach(() => { isPending = false; mutate.mockClear(); });
   it("renders the prompt when provided, else a fallback with the node id", () => {
     render(<ApprovalCard runId="wfrun_1" nodeId="deploy" prompt="Ship it?" />);
     expect(screen.getByText("Ship it?")).toBeTruthy();
@@ -25,13 +27,31 @@ describe("ApprovalCard", () => {
     expect(screen.getByText("Approval required: deploy")).toBeTruthy();
   });
 
+  // The prompt sat unreadable in dark mode: the card's fill was a solid step
+  // off the `accent` ramp with a `dark:` partner naming `accent-950`, a step
+  // that ramp does not define. Tailwind emitted nothing for the partner, the
+  // light fill survived, and `--ink` went near-white on top of it. An alpha
+  // wash over `--paper` needs no partner, so it cannot fall out of step.
+  it("tints with an alpha wash, not a solid ramp step that needs a dark partner", () => {
+    const { container } = render(<ApprovalCard runId="wfrun_1" nodeId="deploy" prompt="Ship it?" />);
+    const card = container.firstElementChild as HTMLElement;
+    const classes = card.className.split(/\s+/);
+    expect(classes).toContain("bg-moss-wash");
+    // Every `accent` step this card still names must exist in the ramp,
+    // which stops at 900.
+    for (const cls of classes) {
+      const shade = /^(?:dark:)?(?:bg|text|border)-accent-(\d+)$/.exec(cls)?.[1];
+      if (shade) expect(Number(shade)).toBeLessThanOrEqual(900);
+    }
+  });
+
   it("calls the mutation with approved: true on Approve", () => {
     mutate.mockClear();
     render(<ApprovalCard runId="wfrun_1" nodeId="deploy" prompt="Ship it?" />);
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
     expect(mutate).toHaveBeenCalledWith({
       nodeId: "deploy",
-      body: { approved: true, note: undefined },
+      body: { approved: true, note: undefined, iteration: undefined },
     });
   });
 
@@ -41,7 +61,7 @@ describe("ApprovalCard", () => {
     fireEvent.click(screen.getByRole("button", { name: "Deny" }));
     expect(mutate).toHaveBeenCalledWith({
       nodeId: "deploy",
-      body: { approved: false, note: undefined },
+      body: { approved: false, note: undefined, iteration: undefined },
     });
   });
 
@@ -54,7 +74,33 @@ describe("ApprovalCard", () => {
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
     expect(mutate).toHaveBeenCalledWith({
       nodeId: "deploy",
-      body: { approved: true, note: "looks good" },
+      body: { approved: true, note: "looks good", iteration: undefined },
     });
   });
+
+  it("submits denial directly with the note and iteration", () => {
+    mutate.mockClear();
+    render(<ApprovalCard runId="wfrun_1" nodeId="deploy" iteration={2} />);
+    fireEvent.change(screen.getByRole("textbox", { name: "Optional note" }), {
+      target: { value: "  needs changes  " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Deny" }));
+    expect(mutate).toHaveBeenCalledExactlyOnceWith({
+      nodeId: "deploy",
+      body: { approved: false, note: "needs changes", iteration: 2 },
+    });
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("disables both decisions while the response is being submitted", () => {
+    isPending = true;
+    render(<ApprovalCard runId="wfrun_1" nodeId="deploy" />);
+    for (const name of ["Approve", "Deny"]) {
+      const button = screen.getByRole("button", { name });
+      expect(button.hasAttribute("disabled")).toBe(true);
+      fireEvent.click(button);
+    }
+    expect(mutate).not.toHaveBeenCalled();
+  });
+
 });

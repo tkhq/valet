@@ -11,7 +11,10 @@ import type { ChannelOrigin } from "@valet/engine";
 interface TransportRegistry {
   transportFor(channelType: string): {
     fetchThreadContext?(channelId: string, threadTs: string): Promise<string | null>;
-    fetchThreadWindow?(channelId: string, threadTs: string, afterTs: string, beforeTs: string): Promise<string | null>;
+    fetchThreadWindow?(
+      channelId: string, threadTs: string, afterTs: string, beforeTs: string,
+      opts?: { keepAppPostsExcept?: readonly string[] },
+    ): Promise<string | null>;
   } | null;
 }
 

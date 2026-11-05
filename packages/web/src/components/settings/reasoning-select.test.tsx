@@ -71,3 +71,17 @@ describe("ReasoningSelect", () => {
     expect(onChange).toHaveBeenCalledWith(null);
   });
 });
+
+
+it("intersects supported levels with the organization limit and preserves an unavailable saved value", async () => {
+  orgReasoningData = { max: "high" };
+  const onChange = vi.fn();
+  render(<ReasoningSelect value="max" onChange={onChange} allowedLevels={["low", "medium", "xhigh"]} />);
+  const select = screen.getByLabelText("Reasoning");
+  expect(select).toHaveProperty("value", "max");
+  expect(screen.getByRole("option", { name: "Max (unavailable)" })).toHaveProperty("disabled", true);
+  const available = Array.from(select.querySelectorAll("option")).filter(o => !o.disabled).map(o => o.value);
+  expect(available).toEqual(["", "low", "medium"]);
+  await userEvent.selectOptions(select, "");
+  expect(onChange).toHaveBeenCalledWith(null);
+});

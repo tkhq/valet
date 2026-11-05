@@ -1,9 +1,21 @@
 import { PGlite } from "@electric-sql/pglite";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import type { NodeCheckpoint, RunSettledInfo } from "@valet/workflow";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import type { DecisionGate } from "@valet/engine";
+import { InMemoryWorkflowStore, type NodeCheckpoint, type RunSettledInfo } from "@valet/workflow";
 import { applyAppMigrations, buildAppDb, buildAppQueryable, type AppDb } from "../lib/drizzle.js";
-import { notifications, workflowDefinitions } from "../schema/index.js";
-import { buildRunSettledAttention, failedNodeSummary } from "./run-attention.js";
+import { childWatches, eventDropLog, assistantExecutions, notifications, orgMembers, sessionThreads, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
+import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
+import { ensureAssistantExecution } from "../assistants/service.js";
+import { createTeam } from "../services/teams.js";
+import { buildWorkflowEngineDeps } from "./engine-deps.js";
+import {
+  buildRunSettledAttention,
+  buildRunApprovalAttention,
+  buildRunThreadArchive,
+  failedNodeSummary,
+  workflowApprovalHref,
+} from "./run-attention.js";
 
 function checkpoint(overrides: Partial<NodeCheckpoint> & { nodeId: string }): NodeCheckpoint {
   return {
@@ -33,16 +45,16 @@ describe("failedNodeSummary", () => {
       checkpoint({ nodeId: "fetch", status: "completed" }),
       checkpoint({ nodeId: "call-api", status: "failed", error: "HTTP 500" }),
     ]);
-    expect(summary).toBe("call-api: HTTP 500. Open the run to see the full error.");
+    expect(summary).toBe("call-api: HTTP 500");
   });
 
-  it("labels a foreach body row with its iteration and counts the rest", () => {
+  it("lists every failed foreach row with its iteration", () => {
     const summary = failedNodeSummary([
       checkpoint({ nodeId: "body", iteration: 1, status: "failed", error: "a" }),
       checkpoint({ nodeId: "body", iteration: 2, status: "failed", error: "b" }),
       checkpoint({ nodeId: "body", iteration: 3, status: "failed", error: "c" }),
     ]);
-    expect(summary).toBe("body[1]: a; body[2]: b (+1 more). Open the run to see the full error.");
+    expect(summary).toBe("body[1]: a\nbody[2]: b\nbody[3]: c");
   });
 
   it("still directs the reader to the run when no checkpoint failed", () => {
@@ -50,10 +62,25 @@ describe("failedNodeSummary", () => {
     expect(summary).toBe("Open the run to see why it stopped.");
   });
 
-  it("truncates a long error rather than pasting a whole response body", () => {
-    const summary = failedNodeSummary([checkpoint({ nodeId: "n", status: "failed", error: "x".repeat(500) })]);
-    expect(summary).toContain("…");
-    expect(summary.length).toBeLessThan(300);
+  it("keeps a whole error the reader would otherwise open the run for", () => {
+    const error = `parsing start time: ${"x".repeat(480)}`;
+    const summary = failedNodeSummary([checkpoint({ nodeId: "recent_errors", status: "failed", error })]);
+    expect(summary).toBe(`recent_errors: ${error}`);
+  });
+
+  it("stops building the summary at the budget when many rows fail with large errors", () => {
+    const rows = Array.from({ length: 250 }, (_, i) =>
+      checkpoint({ nodeId: "body", iteration: i + 1, status: "failed", error: "x".repeat(1 << 20) }));
+    const summary = failedNodeSummary(rows);
+    expect(summary.startsWith("body[1]: x")).toBe(true);
+    expect(summary.endsWith("…\n\nOpen the run to see the rest.")).toBe(true);
+    expect(summary.length).toBeLessThan(3_100);
+  });
+
+  it("cuts only a summary longer than one Slack section, and points to the run", () => {
+    const summary = failedNodeSummary([checkpoint({ nodeId: "n", status: "failed", error: "x".repeat(5_000) })]);
+    expect(summary.endsWith("…\n\nOpen the run to see the rest.")).toBe(true);
+    expect(summary.length).toBeLessThan(3_100);
   });
 });
 
@@ -65,6 +92,8 @@ describe("buildRunSettledAttention", () => {
     getCheckpoints: async (): Promise<NodeCheckpoint[]> => [
       checkpoint({ nodeId: "call-api", status: "failed", error: "HTTP 500" }),
     ],
+    // No thread started these runs, so attention goes to the run's owner.
+    getRun: async () => null,
   };
 
   beforeAll(async () => {
@@ -103,7 +132,7 @@ describe("buildRunSettledAttention", () => {
       kind: "notification",
       urgency: "high",
       title: "Workflow run failed: Customer artifacts",
-      body: "call-api: HTTP 500. Open the run to see the full error.",
+      body: "call-api: HTTP 500",
       href: "/workflows/runs/run-1",
     });
   });
@@ -114,6 +143,56 @@ describe("buildRunSettledAttention", () => {
     await notify(settled());
 
     expect(await db.select().from(notifications)).toHaveLength(1);
+  });
+
+  it("notifies the lender again for a fresh action gate, without duplicates on replay", async () => {
+    await db.insert(teams).values({ id: "attention-team", orgId: "org-1", name: "Team", createdAt: 1 });
+    await db.insert(teamMembers).values([
+      { teamId: "attention-team", userId: "requester", role: "member" },
+      { teamId: "attention-team", userId: "lender", role: "member" },
+    ]);
+    await db.insert(orgMembers).values([
+      { orgId: "org-1", userId: "requester", role: "member", createdAt: 1 },
+      { orgId: "org-1", userId: "lender", role: "member", createdAt: 1 },
+    ]);
+    const workflowStore = new InMemoryWorkflowStore();
+    await workflowStore.createRun("run-approval", { workflowId: "wf-1", definitionVersionId: "v1" },
+      { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: "attention-team" });
+    const notify = buildRunApprovalAttention({ db, store: workflowStore });
+    const gate = { runId: "run-approval", nodeId: "step", kind: "policy_gate" as const, service: "demo", action: "ping" };
+    const accountGate = { ...gate, gateId: "approval:step:gate:1", approver: { userId: "lender" } };
+    const actionGate = { ...gate, gateId: "approval:step:gate:2" };
+    await notify(accountGate);
+    expect((await db.select().from(notifications)).map(row => row.userId)).toEqual(["lender"]);
+    await notify(accountGate);
+    await notify(actionGate);
+    await notify(actionGate);
+    const rows = await db.select().from(notifications);
+    expect(rows.filter(row => row.userId === "lender")).toHaveLength(2);
+    expect(rows.filter(row => row.userId === "requester")).toHaveLength(1);
+  });
+
+  it("names what a policy gate would change in the approval title", async () => {
+    const workflowStore = new InMemoryWorkflowStore();
+    await workflowStore.createRun("run-named", { workflowId: "wf-1", definitionVersionId: "v1" },
+      { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "user", ownerId: "u-1" });
+    await buildRunApprovalAttention({ db, store: workflowStore })({ runId: "run-named", nodeId: "create_project", kind: "policy_gate",
+      gateId: "approval:create_project:gate:1", service: "linear", action: "save_project",
+      params: { team: "t-1", name: "Onboarding: Valet Test Hire (Engineering)" } });
+    expect((await db.select().from(notifications)).map(row => row.title))
+      .toEqual(['Approval needed: linear.save_project for "Onboarding: Valet Test Hire (Engineering)"']);
+  });
+
+  it("keeps a parameter label from becoming a Slack link in the approval title", async () => {
+    const workflowStore = new InMemoryWorkflowStore();
+    await workflowStore.createRun("run-link", { workflowId: "wf-1", definitionVersionId: "v1" },
+      { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "user", ownerId: "u-1" });
+    await buildRunApprovalAttention({ db, store: workflowStore })({ runId: "run-link", nodeId: "create_project", kind: "policy_gate",
+      gateId: "approval:create_project:gate:1", service: "linear", action: "save_project",
+      params: { name: "[Approve here](https://evil.example/login)" } });
+    // Slack's markdown turns "[text](url)" into a link; a space keeps it text.
+    expect((await db.select().from(notifications)).map(row => row.title))
+      .toEqual(['Approval needed: linear.save_project for "[Approve here] (https://evil.example/login)"']);
   });
 
   it("stays silent for a child run, so a batch fan-out cannot flood the table", async () => {
@@ -150,9 +229,290 @@ describe("buildRunSettledAttention", () => {
       getCheckpoints: async (): Promise<NodeCheckpoint[]> => {
         throw new Error("store unreachable");
       },
+      getRun: async () => null,
     };
 
     await expect(buildRunSettledAttention({ db, store: brokenStore })(settled())).resolves.toBeUndefined();
     expect(await db.select().from(notifications)).toHaveLength(0);
+  });
+});
+
+describe("buildRunThreadArchive", () => {
+  let api: TestApi | undefined;
+  afterEach(async () => { await api?.cleanup(); api = undefined; });
+
+  /** Seeds one definition and one run of it, both owned by the local user. */
+  async function seedRun(a: TestApi, runId: string, workflowId: string, origin?: { assistantSessionId: string; threadId: string }) {
+    const now = Date.now();
+    await a.providers.db.insert(workflowDefinitions).values({
+      id: workflowId, orgId: LOCAL_ORG.id, ownerType: "user", ownerId: LOCAL_USER.id,
+      name: "thread-archive-test", definition: { version: "dag/v1", nodes: [], edges: [] },
+      createdAt: now, updatedAt: now,
+    }).onConflictDoNothing();
+    await a.providers.workflowStore.createRun(
+      runId,
+      { workflowId, definitionVersionId: "v1", ...(origin ? { origin } : {}) },
+      { version: "dag/v1", nodes: [], edges: [] },
+      "v1",
+      { ownerType: "user", ownerId: LOCAL_USER.id },
+    );
+  }
+
+  /** Records the receipt the orchestrator node persists after it dispatches. */
+  async function recordDispatch(a: TestApi, runId: string, receipt: { sessionId: string; threadId: string; queueItemId: string }) {
+    await a.providers.workflowStore.putIntent({
+      runId, nodeId: "node1", iteration: 0, status: "intent", attempt: 1, createdAt: Date.now(),
+      effects: {
+        sessionId: receipt.sessionId,
+        receipt: { threadId: receipt.threadId, queueItemId: receipt.queueItemId },
+        repairAttempted: false,
+      },
+    });
+  }
+
+  function settledRun(runId: string, workflowId: string): RunSettledInfo {
+    return {
+      runId, workflowId, outcome: "completed",
+      owner: { ownerType: "user", ownerId: LOCAL_USER.id }, settledAt: 5_000,
+    };
+  }
+
+  it("leaves a settled run's thread open while background work runs on it (fix wave 3)", async () => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const deps = buildWorkflowEngineDeps({
+      host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials,
+    });
+    await seedRun(api, "run_bg", "wf_archive");
+    const done = await deps.promptOrchestrator("report", {
+      dispatchId: "workflow:run_bg:node1", queueMode: "followup",
+      ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id },
+    });
+    await recordDispatch(api, "run_bg", done);
+    await engineStore.forceSettle(done.sessionId, done.queueItemId, "failed");
+    const now = Date.now();
+    await engineStore.createWakeup({
+      id: "wk_runbg", sessionId: done.sessionId, threadId: done.threadId, kind: "timer", status: "pending",
+      reason: "check the deploy", prompt: "check the deploy", fireAt: now + 3_600_000,
+      logOffset: 0, logTail: "", eventCount: 0, createdAt: now, updatedAt: now,
+    });
+
+    await buildRunThreadArchive({ db, store: workflowStore, engineStore })(settledRun("run_bg", "wf_archive"));
+
+    expect(await db.select().from(sessionThreads)).toEqual([]);
+    expect(await engineStore.getWakeup("wk_runbg")).toMatchObject({ status: "pending" });
+  });
+
+  it("archives the settled run's own thread and leaves a live run's thread alone", async () => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const deps = buildWorkflowEngineDeps({
+      host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials,
+    });
+    await seedRun(api, "run_done", "wf_archive");
+    await seedRun(api, "run_live", "wf_archive");
+    const dispatch = (runId: string) => deps.promptOrchestrator("report", {
+      dispatchId: `workflow:${runId}:node1`, queueMode: "followup",
+      ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id },
+    });
+    const done = await dispatch("run_done");
+    const live = await dispatch("run_live");
+    await recordDispatch(api, "run_done", done);
+    await recordDispatch(api, "run_live", live);
+    // The settled run reported before it stopped: its turn is over, so the
+    // thread has nothing left to show and the archive may take it.
+    await engineStore.forceSettle(done.sessionId, done.queueItemId, "failed");
+    await engineStore.createWakeup({ id: "wk_child_events:run-child", sessionId: done.sessionId, threadId: done.threadId,
+      kind: "event", status: "running", reason: "Child updates", subjects: ["valet:session:run-child"],
+      eventMatch: { childSessionId: "run-child", clauses: [{ key: "child.*" }], self: [], once: false },
+      logOffset: 0, logTail: "", eventCount: 0, createdAt: 1, updatedAt: 1 });
+
+    // The child already reported back, so only its idle subscription is left.
+    await db.insert(childWatches).values({ childSessionId: "run-child", queueItemId: "owed-result", parentSessionId: done.sessionId,
+      parentThreadId: done.threadId, actorUserId: LOCAL_USER.id, orgId: LOCAL_ORG.id, settled: true, createdAt: 1 });
+    await buildRunThreadArchive({ db, store: workflowStore, engineStore })(settledRun("run_done", "wf_archive"));
+    // Nothing was owed, so ending the subscription drops no result.
+    expect((await db.select().from(eventDropLog)).some(row => row.reason === "child_delivery_cancelled")).toBe(false);
+    expect((await engineStore.getWakeup("wk_child_events:run-child"))?.status).toBe("cancelled");
+
+    const rows = await db.select().from(sessionThreads);
+    expect(rows).toEqual([
+      expect.objectContaining({ id: done.threadId, sessionId: done.sessionId, archivedAt: 5_000 }),
+    ]);
+    expect(rows.find((r) => r.id === live.threadId)).toBeUndefined();
+  });
+
+  it("keeps the thread and the delivery of a child that has not reported back", async () => {
+    // A run can settle before its step's child reports (`wait: { mode: "none" }`,
+    // the strike cap). Cancelling the delivery would drop the child's result.
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const deps = buildWorkflowEngineDeps({
+      host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials,
+    });
+    const archive = buildRunThreadArchive({ db, store: workflowStore, engineStore });
+    for (const [runId, outcome] of [["run_owed", "completed"], ["run_stopped", "cancelled"]] as const) {
+      await seedRun(api, runId, "wf_archive");
+      const done = await deps.promptOrchestrator("report", {
+        dispatchId: `workflow:${runId}:node1`, queueMode: "followup",
+        ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id },
+      });
+      await recordDispatch(api, runId, done);
+      await engineStore.forceSettle(done.sessionId, done.queueItemId, "failed");
+      const child = `${runId}-child`;
+      await engineStore.createWakeup({ id: `wk_child_events:${child}`, sessionId: done.sessionId, threadId: done.threadId,
+        kind: "event", status: "running", reason: "Child updates", subjects: [`valet:session:${child}`],
+        eventMatch: { childSessionId: child, clauses: [{ key: "child.*" }], self: [], once: false },
+        logOffset: 0, logTail: "", eventCount: 0, createdAt: 1, updatedAt: 1 });
+      await db.insert(childWatches).values({ childSessionId: child, queueItemId: "child-item", parentSessionId: done.sessionId,
+        parentThreadId: done.threadId, actorUserId: LOCAL_USER.id, orgId: LOCAL_ORG.id, createdAt: 1 });
+
+      await archive({ ...settledRun(runId, "wf_archive"), outcome });
+
+      const archived = (await db.select().from(sessionThreads)).some((row) => row.id === done.threadId);
+      const delivery = (await engineStore.getWakeup(`wk_child_events:${child}`))?.status;
+      // A cancelled run ends the delivery: the person stopped the work.
+      expect({ archived, delivery }).toEqual(outcome === "cancelled"
+        ? { archived: true, delivery: "cancelled" }
+        : { archived: false, delivery: "running" });
+    }
+  });
+
+  it("evicts only an idle archived report execution and retains its durable history", async () => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore } = api.providers;
+    const team = await createTeam(db, { orgId: LOCAL_ORG.id, name: "Run cache", creatorUserId: LOCAL_USER.id });
+    const owner = { type: "team", id: team.id } as const;
+    const meta = { orgId: LOCAL_ORG.id, actorUserId: LOCAL_USER.id };
+    await db.insert(workflowDefinitions).values({ id: "wf_cache", orgId: LOCAL_ORG.id, ownerType: "team", ownerId: team.id,
+      name: "Run cache", definition: { version: "dag/v1", nodes: [], edges: [] }, createdAt: 1, updatedAt: 1 });
+    await workflowStore.createRun("run_cache", { workflowId: "wf_cache", definitionVersionId: "v1" },
+      { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: team.id });
+    const execution = await ensureAssistantExecution(api.providers, owner, meta, "signal:workflow:run_cache");
+    const origin = await ensureAssistantExecution(api.providers, owner, meta, "app-assistant:local-user");
+    const thread = execution.session.thread("signal:workflow:run_cache");
+    await thread.pause();
+    const receipt = await thread.submitPrompt("report", {});
+    await recordDispatch(api, "run_cache", { sessionId: execution.sessionId, threadId: thread.id, queueItemId: receipt.queueItemId });
+    const archive = buildRunThreadArchive({ db, store: workflowStore, engineStore, engineHost });
+    await archive(settledRun("run_cache", "wf_cache"));
+    expect(engineHost.liveSession(execution.sessionId)).toBe(execution.session);
+    await engineStore.forceSettle(execution.sessionId, receipt.queueItemId, "aborted");
+    const gate: DecisionGate = { id: "retained-gate", sessionId: execution.sessionId, threadId: thread.id,
+      queueItemId: receipt.queueItemId, resumeKey: "retained-gate", ordinal: 0, type: "approval", title: "Pending decision", actions: [],
+      status: "pending", createdAt: 1, updatedAt: 1 };
+    await engineStore.saveDecisionGate(execution.sessionId, thread.id, gate);
+    await archive(settledRun("run_cache", "wf_cache"));
+    expect(engineHost.liveSession(execution.sessionId)).toBe(execution.session);
+    await engineStore.saveDecisionGate(execution.sessionId, thread.id, { ...gate, status: "withdrawn" });
+    await archive(settledRun("run_cache", "wf_cache"));
+    expect(engineHost.liveSession(execution.sessionId)).toBeNull();
+    expect(engineHost.liveSession(origin.sessionId)).toBe(origin.session);
+    expect(await engineStore.getSession(execution.sessionId)).not.toBeNull();
+    expect(await engineStore.getQueueItem(execution.sessionId, receipt.queueItemId)).toMatchObject({ status: "settled" });
+    expect(await db.select().from(assistantExecutions)).toEqual(expect.arrayContaining([expect.objectContaining({ sessionId: execution.sessionId })]));
+    expect(await db.select().from(sessionThreads)).toEqual(expect.arrayContaining([expect.objectContaining({ id: thread.id, archivedAt: 5_000 })]));
+  });
+
+  it("archives each step's own thread with the run's, and evicts a team run execution that only steps used", async () => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const deps = buildWorkflowEngineDeps({
+      host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials,
+    });
+    const team = await createTeam(db, { orgId: LOCAL_ORG.id, name: "Step archive", creatorUserId: LOCAL_USER.id });
+    await db.insert(workflowDefinitions).values({ id: "wf_steps", orgId: LOCAL_ORG.id, ownerType: "team", ownerId: team.id,
+      name: "Step archive", definition: { version: "dag/v1", nodes: [], edges: [] }, createdAt: 1, updatedAt: 1 });
+    await workflowStore.createRun("run_steps", { workflowId: "wf_steps", definitionVersionId: "v1" },
+      { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: team.id, actorUserId: LOCAL_USER.id });
+    const entries = await Promise.all([0, 1].map(async (iteration) => {
+      const receipt = await deps.promptOrchestrator("check one", {
+        dispatchId: `workflow:run_steps:each${iteration > 0 ? `:${iteration}` : ""}`, queueMode: "followup",
+        ownerHint: { ownerType: "team", ownerId: team.id }, stepThread: { nodeId: "each", iteration },
+      });
+      await workflowStore.putIntent({ runId: "run_steps", nodeId: "each", iteration, status: "intent", attempt: 1, createdAt: Date.now(),
+        effects: { sessionId: receipt.sessionId, receipt: { threadId: receipt.threadId, queueItemId: receipt.queueItemId }, repairAttempted: false } });
+      await engineStore.forceSettle(receipt.sessionId, receipt.queueItemId, "aborted");
+      return receipt;
+    }));
+    expect(engineHost.liveSession(entries[0]!.sessionId)).not.toBeNull();
+
+    await buildRunThreadArchive({ db, store: workflowStore, engineStore, engineHost })(settledRun("run_steps", "wf_steps"));
+
+    expect(await db.select().from(sessionThreads)).toEqual(expect.arrayContaining(entries.map((entry) =>
+      expect.objectContaining({ id: entry.threadId, sessionId: entry.sessionId, archivedAt: 5_000 }))));
+    expect(engineHost.liveSession(entries[0]!.sessionId)).toBeNull();
+  });
+
+  it("keeps the thread of a run that settled while its assistant turn is unsettled", async () => {
+    // An orchestrator node with `wait: { mode: "none" }` completes its
+    // checkpoint at dispatch, so the run can settle while the prompt is
+    // still queued. Archiving here hides the thread before it carries the
+    // report the person is waiting for.
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const deps = buildWorkflowEngineDeps({
+      host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials,
+    });
+    await seedRun(api, "run_open", "wf_archive");
+    const open = await deps.promptOrchestrator("report", {
+      dispatchId: "workflow:run_open:node1", queueMode: "followup",
+      ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id },
+    });
+    await recordDispatch(api, "run_open", open);
+    const item = await engineStore.getQueueItem(open.sessionId, open.queueItemId);
+    expect(item?.status).not.toBe("settled");
+
+    await buildRunThreadArchive({ db, store: workflowStore, engineStore })(settledRun("run_open", "wf_archive"));
+
+    expect(await db.select().from(sessionThreads)).toEqual([]);
+  });
+
+  it("leaves the origin thread of an attended run in the sidebar", async () => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const { resolveDefaultAssistant } = await import("../assistants/service.js");
+    const assistant = await resolveDefaultAssistant(db, LOCAL_ORG.id, { type: "user", id: LOCAL_USER.id });
+    const session = await engineHost.assistantSessionFor(
+      assistant.id, { actorUserId: LOCAL_USER.id, orgId: LOCAL_ORG.id }, { sessionId: assistant.sessionId },
+    );
+    const originThread = await session.createThread("web:origin");
+    await seedRun(api, "run_attended", "wf_attended", {
+      assistantSessionId: assistant.sessionId, threadId: originThread.id,
+    });
+    const deps = buildWorkflowEngineDeps({
+      host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials,
+    });
+    const receipt = await deps.promptOrchestrator("report", {
+      dispatchId: "workflow:run_attended:node1", queueMode: "followup",
+      ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id },
+    });
+    expect(receipt.threadId).toBe(originThread.id);
+    await recordDispatch(api, "run_attended", receipt);
+
+    await buildRunThreadArchive({ db, store: workflowStore, engineStore })(settledRun("run_attended", "wf_attended"));
+
+    expect(await db.select().from(sessionThreads)).toEqual([]);
+  });
+
+  it("swallows a store fault, because a throw here would abandon the drive", async () => {
+    api = await bootTestApi();
+    const { db, engineStore } = api.providers;
+    const brokenStore = {
+      getCheckpoints: async (): Promise<NodeCheckpoint[]> => { throw new Error("store unreachable"); },
+    };
+
+    await expect(
+      buildRunThreadArchive({ db, store: brokenStore, engineStore })(settledRun("run_broken", "wf_broken")),
+    ).resolves.toBeUndefined();
+    expect(await db.select().from(sessionThreads)).toEqual([]);
+  });
+});
+
+describe("workflowApprovalHref", () => {
+  it("deep-links to the run and encodes the gate target", () => {
+    expect(workflowApprovalHref("run/1", "approve me")).toBe(
+      "/workflows/runs/run%2F1?gate=approve%20me",
+    );
   });
 });

@@ -1,39 +1,56 @@
+import { WorkspaceClause } from "~/components/workspace-clause";
 import { useMe, useOrgDirectory, useTeams } from "~/api/settings";
-import { Button, ErrorRow, LoadingRow } from "~/components/primitives";
+import { ErrorRow, LoadingRow, PageHeader, pageClass } from "~/components/primitives";
+import { cn } from "~/lib/cn";
+import { IntegrationLimitNotice } from "./integration-limit-notice";
 import { Section } from "~/components/settings/section";
-import { PERSONAL, useWorkspaceScope } from "~/lib/workspace-scope";
 import { TeamConnectionSetup } from "./team-connection-setup";
 import { TeamCredentials } from "./team-credentials";
+import { PullFromPersonal } from "./pull-from-personal";
+import { TeamOnePasswordToken } from "~/components/settings/team-onepassword-token";
+import { useTeamOnePasswordStatus } from "~/api/onepassword";
 
 /** Team summaries come from the member-visible endpoint, never the personal catalog. */
 export function TeamIntegrations({ teamId, notice }: { teamId: string; notice?: string }) {
   const teamsQ = useTeams();
   const meQ = useMe();
   const directoryQ = useOrgDirectory();
-  const { setKey } = useWorkspaceScope();
   const team = teamsQ.data?.teams.find((row) => row.id === teamId);
   const loading = teamsQ.isLoading || meQ.isLoading;
   const failed = teamsQ.error || meQ.error;
   const canMutate = meQ.data?.orgRole === "admin" || team?.callerRole === "admin";
+  // Every member adds team connections. Removal stays with admins, and a
+  // member asks one (team resource deletion requests).
+  const canConnect = canMutate || (team?.callerRole ?? null) !== null;
+  // The team's own 1Password service account is what makes op:// references
+  // and valet-secrets work for its sessions. It sits with the connections
+  // once connected, and under Available until then (or while unknown).
+  const onePasswordConnected = useTeamOnePasswordStatus(teamId).data?.tokenConnected === true;
+  const onePassword = team && <TeamOnePasswordToken key={teamId} teamId={teamId} teamName={team.name} canMutate={canMutate} />;
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6 sm:py-10">
-        <h1 className="font-display text-2xl text-ink">Integrations</h1>
+      <div className={cn(pageClass, "max-w-3xl")}>
+        <PageHeader title="Integrations" clause={<WorkspaceClause />} description={team && `${team.name} workspace`} />
         {notice && <p role="status" className="mt-4 text-sm text-ink">{notice}</p>}
-        <div className="mt-10 space-y-6">
+        <IntegrationLimitNotice owner={{ ownerType: "team", ownerId: teamId }} canClear={canMutate} />
+        <div className="mt-8 space-y-10">
           {loading && <LoadingRow label="Loading team integrations…" />}
           {!loading && failed && (
             <ErrorRow>Could not load team integrations. Reload the page to try again.</ErrorRow>
           )}
           {!loading && !failed && !team && (
-            <ErrorRow>This team is unavailable. Select another workspace or ask a team admin to restore your access.</ErrorRow>
+            <ErrorRow>This team is unavailable. Select another space beside the page title, or ask a team admin to restore your access.</ErrorRow>
           )}
           {!loading && !failed && team && (
-            <Section title={team.name} description="Connections stored on this team or shared by its members.">
-              <div className="space-y-8 pt-4">
+            <>
+              <Section
+                title="Connected"
+                description="Team actions use the acting member's own account first, then the team connection. Using another member's account asks them first."
+                actions={<PullFromPersonal teamId={teamId} teamName={team.name} />}
+              >
                 {!canMutate && (
-                  <p className="text-sm text-muted">Only team or organization admins can remove team connections.</p>
+                  <p className="pb-3 text-sm text-muted">A team admin removes team connections. Request removal to ask one.</p>
                 )}
                 {directoryQ.isLoading && <LoadingRow label="Loading member names…" />}
                 {directoryQ.error && (
@@ -44,15 +61,14 @@ export function TeamIntegrations({ teamId, notice }: { teamId: string; notice?: 
                   team={team}
                   orgMembers={directoryQ.error ? [] : directoryQ.data?.users ?? []}
                   canMutate={canMutate}
-                />
-                <TeamConnectionSetup teamId={teamId} canManage={canMutate} orgAdmin={meQ.data?.orgRole === "admin"} />
-
-                <p className="text-sm text-muted">
-                  Need to share a personal connection? Switch to Personal to share it explicitly.
-                </p>
-                <Button variant="secondary" onClick={() => setKey(PERSONAL)}>Switch to Personal</Button>
-              </div>
-            </Section>
+                >
+                  {onePasswordConnected && onePassword}
+                </TeamCredentials>
+              </Section>
+              <TeamConnectionSetup teamId={teamId} canManage={canConnect}>
+                {!onePasswordConnected && onePassword}
+              </TeamConnectionSetup>
+            </>
           )}
         </div>
       </div>

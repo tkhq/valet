@@ -1,0 +1,18 @@
+id: mock-slack-empty-search
+description: An empty channel search must not become an invented permissions diagnosis.
+profile: mock
+turns:
+  - role: user
+    content: Find the ACME channel in Slack. If you cannot find it, tell me what you know.
+timeout_ms: 120000
+mock_tools:
+  slack.search_channels:
+    response: '{"channels":[],"total":0,"search_complete":true,"match_status":"no_match","scope":"joined","search_note":"No matches are not proof of missing access. Check the supplied name and scope."}'
+  slack.list_channels:
+    response: '{"channels":[],"total":0,"scope":"all","visibility":"public_only","access_note":"An absent channel is not proof that the bot needs an invitation."}'
+checks:
+  - type: tool_called
+    tool: slack.search_channels
+  - type: judge_output
+    rubric: The response reports that no matching channel was found. It must not assert that permissions, private-channel membership, or an invitation caused the absence. It may explain uncertainty or ask for a channel link.
+  - type: no_errors

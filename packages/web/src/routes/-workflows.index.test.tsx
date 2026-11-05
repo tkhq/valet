@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /**
- * `/workflows` definitions list (plan decision 11): each row's name links
- * to `/workflows/$workflowId` (the editor), Run starts a run and navigates
+ * The `/workflows` list page (spec Part G step 1): the definitions list.
+ * Each row's name links to `/workflows/$workflowId` (the editor), Run starts a run and navigates
  * to the run detail page, and "New workflow" opens `NewWorkflowDialog`
  * (review fix 1), which POSTs the entered name + a minimal trigger→stop
  * definition then navigates to its editor page. `<Link>`/`useNavigate` need
@@ -9,14 +9,20 @@
  * does, since this suite only cares that navigation was requested, not
  * that the router actually resolved it.
  *
- * The team row's `OwnerBadge` carries a tooltip, which Radix refuses to
+ * The team row's `AssistantBadge` carries a tooltip, which Radix refuses to
  * render outside a provider, so the page renders inside one here — the same
  * wrapper `session-header.test.tsx` uses.
  */
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import userEvent from "@testing-library/user-event";
+import { api } from "~/api/client";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import type {
+  ListWorkflowActionRequiredResponse,
+  WorkflowDefinitionSummary,
+} from "@valet/api/wire";
 import type { ReactNode } from "react";
-import type { WorkflowDefinitionSummary, ListAllWorkflowRunsResponse } from "@valet/api/wire";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "~/components/primitives";
 
 // Annotated rather than inferred: the empty-list case reassigns `workflows`
@@ -27,7 +33,9 @@ const workflowsData: { workflows: WorkflowDefinitionSummary[] } = {
     {
       id: "wf_1",
       name: "Deploy pipeline",
-      definition: {},
+      // Pins an assistant, which is what the row badges. `wf_2` pins none,
+      // so the two rows cover both halves of the resolution rule.
+      definition: { version: "dag/v1", assistantId: "asst_scribe", nodes: [], edges: [] },
       createdAt: 1,
       updatedAt: 1,
       ownerType: "user",
@@ -42,14 +50,25 @@ const workflowsData: { workflows: WorkflowDefinitionSummary[] } = {
       ownerType: "team",
       ownerId: "team_1",
       origin: "repo",
-      upstream: { repoFullName: "tkhq/automation", ref: "release/v2", path: ".valet/workflows/nightly.yaml" },
+      upstream: {
+        repoFullName: "tkhq/automation",
+        ref: "release/v2",
+        path: ".valet/workflows/nightly.yaml",
+      },
     },
   ],
 };
 
 const teamsData = {
   teams: [
-    { id: "team_1", orgId: "org_1", name: "Platform", createdAt: 1, memberCount: 2, callerRole: "admin" as const },
+    {
+      id: "team_1",
+      orgId: "org_1",
+      name: "Platform",
+      createdAt: 1,
+      memberCount: 2,
+      callerRole: "admin" as const,
+    },
   ],
 };
 
@@ -72,18 +91,45 @@ const triggersData = {
   ],
 };
 
-const runsQuery = vi.fn();
-const allRunsData: ListAllWorkflowRunsResponse = {
-  nextCursor: "cursor_2",
-  runs: [
+const actionRequiredData: ListWorkflowActionRequiredResponse = {
+  count: 2,
+  items: [
     {
-      runId: "wfrun_1",
+      id: "wfrun_approval:review:0",
+      runId: "wfrun_approval",
       workflowId: "wf_1",
       workflowName: "Deploy pipeline",
-      status: "settled" as const,
-      outcome: "completed" as const,
-      createdAt: Date.now() - 10000,
-      updatedAt: Date.now() - 5000,
+      runCreatedAt: Date.now() - 20_000,
+      owner: { type: "user", id: "u-1" },
+      // The run's snapshot, which is NOT what `wf_1` pins today. The row
+      // must badge the assistant the parked run actually executes as.
+      trigger: { type: "manual" },
+      gate: {
+        nodeId: "review",
+        kind: "approval",
+        prompt: "Ship this release?",
+        waitingSince: Date.now() - 10_000,
+      },
+    },
+    {
+      id: "wfrun_policy:send:0",
+      runId: "wfrun_policy",
+      workflowId: "wf_2",
+      workflowName: "Nightly digest",
+      runCreatedAt: Date.now() - 15_000,
+      owner: { type: "team", id: "team_1" },
+      trigger: { type: "schedule", triggerId: "sched_1" },
+      gate: {
+        nodeId: "send",
+        kind: "policy_gate",
+        service: "slack",
+        action: "send_message",
+        provenance: "org_policy",
+        riskLevel: "high",
+        gateParams: { channel: "#ops" },
+        onDeny: "skip",
+        waitingSince: Date.now() - 5_000,
+      },
     },
   ],
 };
@@ -93,6 +139,8 @@ let searchState: Record<string, unknown> = {};
 const navigate = vi.fn();
 const startMutateAsync = vi.fn().mockResolvedValue({ runId: "wfrun_new" });
 const deleteMutateAsync = vi.fn().mockResolvedValue(undefined);
+const resolveMutate = vi.fn();
+const setEnabledMutate = vi.fn();
 const createMutateAsync = vi.fn().mockResolvedValue({
   id: "wf_new",
   name: "My new workflow",
@@ -102,21 +150,42 @@ const createMutateAsync = vi.fn().mockResolvedValue({
 });
 
 vi.mock("@tanstack/react-router", () => ({
-  Link: ({ children, ...rest }: { children: ReactNode; [key: string]: unknown }) => (
-    <a {...rest}>{children}</a>
+  // `params` is serialized onto the stub so a case can read the row a link
+  // navigates to, not only its route pattern.
+  Link: ({
+    children,
+    params,
+    ...rest
+  }: {
+    children: ReactNode;
+    params?: unknown;
+    [key: string]: unknown;
+  }) => (
+    <a data-params={JSON.stringify(params)} data-search={JSON.stringify(rest.search)} {...rest}>
+      {children}
+    </a>
   ),
   useNavigate: () => navigate,
-  // One `useSearch` serves both readers: the hub reads `?tab=`, and the
-  // workspace scope reads `?assistant=` so an open assistant can override the
-  // stored workspace. This page is never rendered with an assistant, so
-  // `searchState` only ever carries the tab.
+  // The workspace scope reads `?assistant=` so an open assistant can
+  // override the stored workspace. This page is never rendered with an
+  // assistant, so `searchState` stays empty.
   useSearch: () => searchState,
   createFileRoute: () => (config: unknown) => config,
 }));
 
+vi.mock("~/components/layout/workspace-assistant", () => ({ useWorkspaceAssistant: () => ({ open: vi.fn(), close: vi.fn(), isOpen: false }) }));
+
+vi.mock("~/components/session/composer", () => ({ Composer: () => <textarea aria-label="Workflow request" /> }));
+
 vi.mock("~/api/settings", () => ({
+  useModels: () => ({ data: { models: [] }, isLoading: false, error: null }),
+  useModelTiers: () => ({ data: { xs: [], s: [], m: [], l: [], xl: [] }, isLoading: false, error: null }),
   useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
-  useOrg: () => ({ data: { features: { organizations: true } }, isLoading: false, error: null }),
+  useOrg: () => ({
+    data: { features: { organizations: true } },
+    isLoading: false,
+    error: null,
+  }),
   // `useListOwner` reads the caller's own id to address the personal
   // workspace: the workspace switcher holds a routing key, not a principal.
   useMe: () => ({ data: { id: "u-1" }, isLoading: false, error: null }),
@@ -124,67 +193,59 @@ vi.mock("~/api/settings", () => ({
 
 // The badge links by assistant id, so it reads the assistants list to find
 // the team's default one.
-vi.mock("~/api/assistants", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("~/api/assistants")>();
-  return {
-    ...actual,
-    useAssistants: () => ({
-      data: {
-        assistants: [
-          {
-            id: "asst_personal",
-            owner: { type: "user" as const, id: "u-1" },
-            sessionId: "assistant:asst_personal",
-            isDefault: true,
-            createdAt: 1,
-          },
-          {
-            id: "asst_team_1",
-            owner: { type: "team" as const, id: "team_1" },
-            sessionId: "assistant:asst_team_1",
-            isDefault: true,
-            createdAt: 1,
-          },
-        ],
-      },
-      isLoading: false,
-      error: null,
-    }),
-  };
-});
 
 vi.mock("~/api/workflows", () => ({
   useWorkflows: () => ({ data: workflowsData, isLoading: false, error: null }),
+  useWorkflowActionRequired: () => ({
+    data: actionRequiredData,
+    isLoading: false,
+    error: null,
+  }),
+  useResolveApproval: () => ({
+    mutate: resolveMutate,
+    isPending: false,
+    isError: false,
+    error: null,
+  }),
   useWorkflowRuns: () => ({ data: { runs: [] }, isLoading: false }),
   useStartRun: () => ({ mutateAsync: startMutateAsync, isPending: false }),
-  useCreateWorkflow: () => ({ mutateAsync: createMutateAsync, isPending: false, error: null }),
-  useDeleteWorkflow: () => ({ mutateAsync: deleteMutateAsync, isPending: false }),
-  useWorkflowTriggers: () => ({ data: triggersData, isLoading: false, error: null }),
-  useAllWorkflowRuns: (...args: unknown[]) => {
-    runsQuery(...args);
-    return { data: { ...allRunsData }, isLoading: false, error: null };
-  },
+  useRetryRun: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useSetWorkflowEnabled: () => ({ mutate: setEnabledMutate, isPending: false, isError: false }),
+  useCreateWorkflow: () => ({
+    mutateAsync: createMutateAsync,
+    isPending: false,
+    error: null,
+  }),
+  useDeleteWorkflow: () => ({
+    mutateAsync: deleteMutateAsync,
+    isPending: false,
+  }),
+  useWorkflowTriggers: () => ({
+    data: triggersData,
+    isLoading: false,
+    error: null,
+  }),
   useUpdateSchedule: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useUpdateEventTrigger: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useDeleteSchedule: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useDeleteEventTrigger: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useRunScheduleNow: () => ({ mutateAsync: vi.fn(), isPending: false }),
-  useTriggerCatalog: () => ({ data: { catalog: [] }, isLoading: false, error: null }),
+  useTriggerCatalog: () => ({
+    data: { catalog: [] },
+    isLoading: false,
+    error: null,
+  }),
   useCreateSchedule: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useCreateEventTrigger: () => ({ mutateAsync: vi.fn(), isPending: false }),
 }));
 
-// The gallery has its own suite; here it only has to be identifiable, so the
-// page's placement rule can be asserted without a second templates fixture.
-vi.mock("~/components/workflows/template-gallery", () => ({
-  TemplateGallery: () => <div data-testid="template-gallery" />,
-}));
-
-import { WorkflowsIndexPage } from "./workflows.index";
 import { PERSONAL, WorkspaceScopeProvider, useWorkspaceScope } from "~/lib/workspace-scope";
+import { WorkflowsTab } from "./workflows.index";
+import { WorkflowsHeaderActions } from "~/components/workflows/workflows-header-actions";
+import { WorkflowApprovalItem } from "~/components/workflows/workflow-approval-item";
 
 /** `workspace` selects the workspace the page is being read in — what the
- * nav's switcher sets. Seeded through localStorage, which is where the real
+ * nav's switcher sets. Seeded through sessionStorage, which is where the real
  * scope lives. */
 function SwitchWorkspace() {
   const scope = useWorkspaceScope();
@@ -192,59 +253,47 @@ function SwitchWorkspace() {
 }
 
 function renderPage(workspace = PERSONAL) {
-  window.localStorage.setItem("valet:workspace", workspace);
+  window.sessionStorage.setItem("valet:workspace", workspace);
   return render(
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
     <TooltipProvider>
       <WorkspaceScopeProvider>
         <SwitchWorkspace />
-        <WorkflowsIndexPage />
+        <WorkflowsTab />
       </WorkspaceScopeProvider>
-    </TooltipProvider>,
+    </TooltipProvider>
+    </QueryClientProvider>,
   );
+}
+
+/** The page header's actions, which the layout renders above the tabs. */
+function renderHeaderActions(workspace = PERSONAL) {
+  window.sessionStorage.setItem("valet:workspace", workspace);
+  return render(
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+      <TooltipProvider><WorkspaceScopeProvider><SwitchWorkspace /><WorkflowsHeaderActions /></WorkspaceScopeProvider></TooltipProvider>
+    </QueryClientProvider>,
+  );
+}
+
+function renderApprovals(focusRun?: string) {
+  return render(<TooltipProvider><WorkspaceScopeProvider><ul>{actionRequiredData.items.map(item =>
+    <WorkflowApprovalItem key={item.id} item={item} focused={item.runId === focusRun} />
+  )}</ul></WorkspaceScopeProvider></TooltipProvider>);
 }
 
 const populated = [...workflowsData.workflows];
 
 beforeEach(() => {
-  workflowsData.workflows = [...populated];
+  workflowsData.workflows = structuredClone(populated);
   searchState = {};
   navigate.mockClear();
   createMutateAsync.mockClear();
   deleteMutateAsync.mockClear();
+  resolveMutate.mockClear();
 });
 
-describe("WorkflowsIndexPage", () => {
-  it("resets the runs cursor before querying a different workspace", () => {
-    searchState = { tab: "runs" };
-    renderPage();
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
-    expect(runsQuery).toHaveBeenLastCalledWith({ ownerType: "user", ownerId: "u-1" }, { cursor: "cursor_2" });
-    runsQuery.mockClear();
-    fireEvent.click(screen.getByRole("button", { name: "Switch workspace" }));
-    expect(runsQuery).toHaveBeenCalledWith({ ownerType: "team", ownerId: "team_1" }, undefined);
-    expect(runsQuery.mock.calls.every((call) => call[1] === undefined)).toBe(true);
-    expect(screen.getByText("Page 1")).toBeTruthy();
-  });
-
-  it("retains Previous when a later runs page is empty", () => {
-    searchState = { tab: "runs" };
-    renderPage();
-    const savedRuns = allRunsData.runs;
-    allRunsData.runs = [];
-    const savedCursor = allRunsData.nextCursor;
-    delete allRunsData.nextCursor;
-    try {
-      fireEvent.click(screen.getByRole("button", { name: "Next" }));
-      expect(screen.getByText(/No runs yet/)).toBeTruthy();
-      expect(screen.getByRole("button", { name: "Previous" })).toMatchObject({ disabled: false });
-      fireEvent.click(screen.getByRole("button", { name: "Previous" }));
-      expect(runsQuery).toHaveBeenLastCalledWith({ ownerType: "user", ownerId: "u-1" }, undefined);
-    } finally {
-      allRunsData.runs = savedRuns;
-      allRunsData.nextCursor = savedCursor;
-    }
-  });
-
+describe("WorkflowsTab", () => {
   it("renders each workflow definition's name as a link to its editor page", () => {
     renderPage();
     const link = screen.getByText("Deploy pipeline").closest("a");
@@ -300,8 +349,9 @@ describe("WorkflowsIndexPage", () => {
   });
 
   it("opens the New workflow dialog, defaults the name field, and posts the entered name on Create", async () => {
-    renderPage();
-    fireEvent.click(screen.getByRole("button", { name: "New workflow" }));
+    renderHeaderActions();
+    await userEvent.click(screen.getByRole("button", { name: "Workflow options" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Manual setup" }));
 
     const nameInput = screen.getByLabelText("Name") as HTMLInputElement;
     expect(nameInput.value).toBe("Untitled workflow");
@@ -311,7 +361,10 @@ describe("WorkflowsIndexPage", () => {
     await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1));
     const call = createMutateAsync.mock.calls[0]![0] as {
       name: string;
-      definition: { nodes: Array<{ id: string; type: string }>; edges: Array<{ from: string; to: string }> };
+      definition: {
+        nodes: Array<{ id: string; type: string }>;
+        edges: Array<{ from: string; to: string }>;
+      };
     };
     expect(call.name).toBe("My new workflow");
     expect(call.definition.nodes.map((n) => n.type)).toEqual(["trigger", "stop"]);
@@ -337,18 +390,68 @@ describe("WorkflowsIndexPage", () => {
     await waitFor(() => expect(deleteMutateAsync).toHaveBeenCalledWith("wf_1"));
   });
 
-  it("shows the Workflows tab by default with per-workflow trigger badges", () => {
+  it("badges each workflow with its routine count", () => {
     renderPage();
     expect(screen.getByText("Deploy pipeline")).toBeTruthy();
-    expect(screen.getByLabelText(/1 schedule/)).toBeTruthy();
+    expect(screen.getByLabelText("1 routine")).toBeTruthy();
   });
 
-  it("renders the Runs tab from the global runs feed", () => {
-    searchState = { tab: "runs" };
+  it("turns a workflow off from its row by disabling all of its listeners and routines", () => {
     renderPage();
-    expect(screen.getByText("Deploy pipeline")).toBeTruthy(); // workflowName column
-    expect(screen.getByText("completed")).toBeTruthy(); // RunStatusChip label
-    expect(screen.getByRole("button", { name: "Next" })).toBeTruthy();
+    const toggle = screen.getByRole("switch", { name: "Deploy pipeline on" });
+    expect(screen.getByText("On")).toBeTruthy();
+    fireEvent.click(toggle);
+    expect(setEnabledMutate).toHaveBeenCalledWith({ triggers: triggersData.triggers, enabled: false });
+  });
+
+  it("offers New workflow in the page header and opens the composer through the URL", async () => {
+    renderHeaderActions();
+    await userEvent.click(screen.getByRole("button", { name: "New workflow" }));
+    const call = navigate.mock.calls[0]![0] as { to: string; search: (prev: Record<string, unknown>) => Record<string, unknown> };
+    expect(call.to).toBe("/workflows");
+    expect(call.search({ workspace: "team-1" })).toEqual({ workspace: "team-1", create: true });
+  });
+
+  it("shows the composer when the URL asks for it", () => {
+    searchState = { create: true };
+    renderPage();
+    expect(screen.queryByRole("link", { name: workflowsData.workflows[0]!.name })).toBeNull();
+  });
+
+  it("shows both gate classes and highlights the focused approval", () => {
+    renderApprovals("wfrun_policy");
+    const rows = screen.getAllByTestId("action-required-item");
+    expect(rows[0].className).not.toContain("ring-2");
+    expect(rows[1].className).toContain("ring-2");
+
+    expect(screen.getByText("Workflow approval")).toBeTruthy();
+    expect(screen.getByText("Tool permission")).toBeTruthy();
+    const approvalRow = screen.getAllByTestId("action-required-item")[0];
+    const details = approvalRow.querySelector("details");
+    expect(details?.open).toBe(false);
+    expect(within(approvalRow).getByText("Ship this release?", { selector: "summary *" })).toBeTruthy();
+    expect(screen.getAllByText("slack.send_message").length).toBeGreaterThan(0);
+    expect(screen.getByText("Started by schedule")).toBeTruthy();
+    expect(screen.getByTitle("Trigger ID: sched_1")).toBeTruthy();
+  });
+
+  it("keeps private-run decisions available without a broken run link", () => {
+    const item = { ...actionRequiredData.items[1], canReadRun: false };
+    render(<TooltipProvider><WorkspaceScopeProvider><ul><WorkflowApprovalItem item={item} focused /></ul></WorkspaceScopeProvider></TooltipProvider>);
+    expect(screen.getByText("Private run")).toBeTruthy();
+    expect(screen.queryByText("Open run")).toBeNull();
+    expect(screen.getByRole("button", { name: "Approve once" })).toBeTruthy();
+  });
+
+  it("submits an explicit approval directly without a second dialog", () => {
+    renderApprovals();
+    fireEvent.click(screen.getAllByRole("button", { name: "Approve" })[0]);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(resolveMutate).toHaveBeenCalledTimes(1);
+    expect(resolveMutate).toHaveBeenCalledWith({
+      nodeId: "review",
+      body: { approved: true, note: undefined, iteration: undefined },
+    });
   });
 
   it("badges a mirrored workflow with its repository path", () => {
@@ -357,75 +460,81 @@ describe("WorkflowsIndexPage", () => {
     expect(screen.queryByLabelText("Delete Nightly digest")).toBeNull();
   });
 
-  it("renders the Triggers tab with the unified list", () => {
-    searchState = { tab: "triggers" };
+  it("renders no tabs of its own, because Presence holds the tabs", () => {
     renderPage();
-    expect(screen.getByText("Nightly build")).toBeTruthy();
+    expect(screen.queryAllByRole("tab")).toHaveLength(0);
+    expect(screen.queryByText("Scheduled")).toBeNull();
   });
 
-  it("tab buttons navigate via search params", () => {
-    renderPage();
-    fireEvent.click(screen.getByRole("tab", { name: /Triggers/ }));
-    expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ search: { tab: "triggers" } }));
+  it("never uses the retired words", () => {
+    const { container } = renderPage();
+    // Case-sensitive "Automation": the fixture repository is `tkhq/automation`.
+    expect(container.textContent ?? "").not.toMatch(/trigger|subscription/i);
+    expect(container.textContent ?? "").not.toMatch(/Automation/);
   });
 
-  it("puts templates behind a tab so an existing list stays the page", () => {
-    renderPage();
-
-    expect(screen.getByText("Deploy pipeline")).toBeTruthy();
-    expect(screen.queryByTestId("template-gallery")).toBeNull();
-
-    fireEvent.click(screen.getByRole("tab", { name: "Templates" }));
-    expect(navigate).toHaveBeenCalledWith(
-      expect.objectContaining({ search: { tab: "templates" } }),
-    );
-
-    searchState = { tab: "templates" };
-    renderPage();
-    expect(screen.getByTestId("template-gallery")).toBeTruthy();
-  });
-
-  it("makes the gallery the zero state when there are no workflows", () => {
+  it("offers the workflow composer without templates when the list is empty", async () => {
+    vi.spyOn(api, "ensureWorkspaceRuntime").mockResolvedValue({ sessionId: "workspace-runtime" });
     workflowsData.workflows = [];
     renderPage();
-
-    expect(screen.getByTestId("template-gallery")).toBeTruthy();
-    expect(screen.getByText(/no workflows yet/i)).toBeTruthy();
+    expect(await screen.findByText("What would you like to automate?")).toBeTruthy();
+    expect(screen.getByRole("textbox", { name: "Workflow request" })).toBeTruthy();
+    expect(api.ensureWorkspaceRuntime).toHaveBeenCalledWith("user");
   });
+
+  it("links the workflow directly to its latest failed run", () => {
+    workflowsData.workflows[0].latestFailedRun = { runId: "failed_1", failedAt: 1 };
+    renderPage();
+    expect(screen.getByText("View latest failed run").getAttribute("data-params")).toBe(JSON.stringify({ runId: "failed_1" }));
+  });
+
 });
 
-describe("WorkflowsIndexPage — team ownership", () => {
-  it("badges a team-owned workflow with its team name, linked to that team's assistant", () => {
+describe("WorkflowsTab: team ownership", () => {
+  // The badge opens the assistant that runs the workflow, not a chat with
+  // the team. A team row running on the team's unnamed default still reads
+  // as the team, which is the name this list showed before.
+  it("badges a team-owned workflow with its assistant, linked to the assistant editor", () => {
     renderPage();
-    const badge = screen.getByText("Platform");
-    expect(badge.closest("a")?.getAttribute("to")).toBe("/chat");
+    const link = screen.getByText("Platform").closest("a");
+    expect(link?.getAttribute("to")).toBe("/chat");
+    expect(JSON.parse(link?.getAttribute("data-search") ?? "null")).toEqual({
+      workspace: "team_1",
+    });
   });
 
   it("creates the workflow in the workspace being read, with no second question", async () => {
     // The dialog had an Owner select. It repeated the nav's workspace
     // switcher and could contradict it, so the list could show one
     // workspace while Create filed the new workflow under another.
-    renderPage("team_1");
-    fireEvent.click(screen.getByRole("button", { name: "New workflow" }));
+    renderHeaderActions("team_1");
+    await userEvent.click(screen.getByRole("button", { name: "Workflow options" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Manual setup" }));
 
     expect(screen.queryByLabelText("Owner")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
 
     await waitFor(() => expect(createMutateAsync).toHaveBeenCalled());
-    const call = createMutateAsync.mock.calls.at(-1)![0] as { teamId?: string; definition: { assistantId: string } };
+    const call = createMutateAsync.mock.calls.at(-1)![0] as {
+      teamId?: string;
+      definition: { assistantId: string };
+    };
     expect(call.teamId).toBe("team_1");
-    expect(call.definition.assistantId).toBe("asst_team_1");
+    expect(call.definition.assistantId).toBeUndefined();
   });
 
   it("sends no teamId in your own workspace", async () => {
-    renderPage();
-    fireEvent.click(screen.getByRole("button", { name: "New workflow" }));
+    renderHeaderActions();
+    await userEvent.click(screen.getByRole("button", { name: "Workflow options" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Manual setup" }));
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
 
     await waitFor(() => expect(createMutateAsync).toHaveBeenCalled());
-    const call = createMutateAsync.mock.calls.at(-1)![0] as { teamId?: string; definition: { assistantId: string } };
+    const call = createMutateAsync.mock.calls.at(-1)![0] as {
+      teamId?: string;
+      definition: { assistantId: string };
+    };
     expect(call.teamId).toBeUndefined();
-    expect(call.definition.assistantId).toBe("asst_personal");
+    expect(call.definition.assistantId).toBeUndefined();
   });
 });
-

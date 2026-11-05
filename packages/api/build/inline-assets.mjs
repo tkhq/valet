@@ -22,7 +22,7 @@ import { dirname, resolve, extname } from "node:path";
 // Whitespace-tolerant (`\s*`) so multi-line source (e.g. the google-calendar
 // and sandbox-tunnels plugins) still matches.
 const READ_CALL =
-  /readFileSync\(\s*(?:fileURLToPath\(\s*)?new URL\(\s*(['"])((?:[^'"\\]|\\.)*)\1\s*,\s*import\.meta\.url\s*\)\s*(?:\)\s*)?,\s*(['"])utf-?8\3\s*\)/g;
+  /readFileSync\(\s*(?:fileURLToPath\(\s*)?new URL\(\s*(['"])((?:[^'"\\]|\\.)*)\1\s*,\s*import\.meta\.url\s*\)\s*(?:\)\s*)?,\s*(['"])utf-?8\3\s*,?\s*\)/g;
 
 // Fail-loud detector: any `readFileSync( ... new URL( <template-literal> ,
 // import.meta.url ... )` whose path is a backtick template (dynamic) can't be

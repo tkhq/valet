@@ -1,9 +1,7 @@
 /**
- * Sandbox tokens — long-lived (default 24h) bearer tokens minted for a
- * session's sandbox to call back into the API. A token is `"st_" +
- * randomBytes(24).toString("hex")` (48 hex chars); only its sha256 hex
- * digest is ever persisted (`sandbox_tokens.token_hash`). The plaintext
- * token is returned to the caller exactly once, at mint time.
+ * Sandbox bearer credentials are stored as SHA-256 hashes. Production uses
+ * getOrCreateSandboxToken for recoverable, lifetime credentials. The legacy
+ * random mint helper remains for bounded credentials and compatibility tests.
  *
  * Also hosts the per-session service-JWT primitives used for short-lived
  * (default 10 min) sandbox-internal auth: a per-session HMAC secret derived
@@ -11,9 +9,14 @@
  * sign/verify pair ported from v1's `packages/worker/src/lib/jwt.ts`.
  */
 import { randomBytes, randomUUID, createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, asc, eq, gt, isNull, lt, sql } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
+import { recordSandboxTokenRejected } from "../observability/sandbox-token-metrics.js";
 import { sandboxTokens } from "../schema/index.js";
+
+// A finite sentinel keeps older API verifiers and the existing NOT NULL column
+// compatible during rolling upgrades. Only explicit teardown ends this lifetime.
+const DURABLE_EXPIRES_AT = new Date("9999-12-31T23:59:59.000Z");
 
 const TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
 const JWT_TTL_MS = 10 * 60 * 1000;
@@ -28,18 +31,10 @@ function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
-/** Mints a new sandbox token for a session. Returns the plaintext token —
- * the only place it's ever available; only its hash is stored.
- *
- * Does NOT revoke prior live tokens. A session BUILD (create/restore) can run
- * on any cache miss — an api restart or an orchestrator PATCH — while the
- * previous build's sandbox is still running and holding its token in the git
- * credential helper. Revoking on mint would 401 that live sandbox until its
- * pod is recreated, so each build mints an ADDITIONAL token instead; the
- * natural 24h TTL bounds how long a stale one lingers. Explicit revocation is
- * reserved for `EngineHost.destroy()` (a stopped session's sandbox MUST lose
- * its token) via `revokeSandboxTokens`, which cancels ALL of a session's live
- * tokens at once. */
+/** Mint a legacy random credential. Never revoke another credential here.
+ * Production provisioning uses getOrCreateSandboxToken instead. Successful
+ * verification adopts still-valid legacy credentials into the durable lifetime.
+ */
 export async function mintSandboxToken(
   db: AppDb,
   opts: { sessionId: string; userId: string; orgId: string; ttlMs?: number },
@@ -63,6 +58,55 @@ export async function mintSandboxToken(
   return { token, expiresAt };
 }
 
+/** Adopt a recoverable credential, or mint one without revoking earlier tokens.
+ * The stable instance key and random row ID recover the bearer after restart.
+ * Domain separation and the full principal bind it to this use and owner.
+ * Only its hash is stored; possession of a database row cannot recover it.
+ */
+export async function getOrCreateSandboxToken(
+  db: AppDb,
+  principal: SandboxPrincipal,
+  master: string,
+): Promise<{ token: string; expiresAt: number }> {
+  const derive = (id: string) => `st_${createHmac("sha256", master)
+    .update(JSON.stringify(["valet:sandbox-token:v1", id, principal.sessionId, principal.userId, principal.orgId]))
+    .digest("hex").slice(0, 48)}`;
+  const rows = await db.select().from(sandboxTokens).where(and(
+    eq(sandboxTokens.sessionId, principal.sessionId),
+    eq(sandboxTokens.userId, principal.userId),
+    eq(sandboxTokens.orgId, principal.orgId),
+    isNull(sandboxTokens.revokedAt),
+    gt(sandboxTokens.expiresAt, new Date()),
+  )).orderBy(asc(sandboxTokens.createdAt), asc(sandboxTokens.id));
+  for (const row of rows) {
+    const token = derive(row.id);
+    if (hashToken(token) === row.tokenHash) {
+      return { token, expiresAt: row.expiresAt.getTime() };
+    }
+  }
+
+  const id = `sbtok_${randomUUID()}`;
+  const token = derive(id);
+  await db.insert(sandboxTokens).values({
+    id, tokenHash: hashToken(token), ...principal,
+    createdAt: new Date(), expiresAt: DURABLE_EXPIRES_AT, revokedAt: null,
+  });
+  return { token, expiresAt: DURABLE_EXPIRES_AT.getTime() };
+}
+
+/** One-time upgrade of still-valid legacy credentials before serving requests.
+ * Crash/rolling-update compatibility: keep the bearer already inside a sandbox
+ * usable without requiring a credential mount or a live refresh.
+ * Expired and revoked rows remain invalid.
+ */
+export async function preserveLegacySandboxTokens(db: AppDb): Promise<void> {
+  await db.update(sandboxTokens).set({ expiresAt: DURABLE_EXPIRES_AT }).where(and(
+    isNull(sandboxTokens.revokedAt),
+    gt(sandboxTokens.expiresAt, new Date()),
+    lt(sandboxTokens.expiresAt, DURABLE_EXPIRES_AT),
+  ));
+}
+
 /** Looks up an unexpired, unrevoked sandbox token by its plaintext value
  * (hashed before the lookup — the plaintext is never stored or compared
  * directly). Returns the principal it was minted for, or null. */
@@ -71,10 +115,26 @@ export async function verifySandboxToken(db: AppDb, token: string): Promise<Sand
   const rows = await db
     .select()
     .from(sandboxTokens)
-    .where(and(eq(sandboxTokens.tokenHash, hashToken(token)), isNull(sandboxTokens.revokedAt)))
+    .where(eq(sandboxTokens.tokenHash, hashToken(token)))
     .limit(1);
   const row = rows[0];
-  if (!row || row.expiresAt <= now) return null;
+  if (!row) return null;
+  if (row.revokedAt !== null || row.expiresAt <= now) {
+    // The persisted attachment covers cold sessions too. Expected rejection
+    // after teardown has no attachment and must not page an operator.
+    const attached = await db.select({ id: sql<string>`id` }).from(sql`engine_sessions`)
+      .where(sql`id = ${row.sessionId} AND sandbox_id IS NOT NULL`).limit(1);
+    if (attached.length) recordSandboxTokenRejected(row.revokedAt ? "revoked" : "expired");
+    return null;
+  }
+  if (row.expiresAt < DURABLE_EXPIRES_AT) {
+    // An older replica can issue a legacy credential after this process boots.
+    // Adopt it on first use, but never clear a concurrent revocation.
+    const promoted = await db.update(sandboxTokens).set({ expiresAt: DURABLE_EXPIRES_AT })
+      .where(and(eq(sandboxTokens.id, row.id), isNull(sandboxTokens.revokedAt), gt(sandboxTokens.expiresAt, new Date())))
+      .returning({ id: sandboxTokens.id });
+    if (!promoted.length) return null;
+  }
   return { sessionId: row.sessionId, userId: row.userId, orgId: row.orgId };
 }
 

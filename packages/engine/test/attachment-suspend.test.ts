@@ -3,6 +3,7 @@ import {
   SandboxAttachment,
   SandboxStartupError,
   SandboxPreparationError,
+  WorkspaceProvisioningError,
   type PrepStep,
   type AttachmentStatus,
   type Sandbox,
@@ -262,6 +263,23 @@ describe("SandboxAttachment hibernation", () => {
     // Must fail on the resume rejection, not the (huge) ensureReady timeout.
     expect(Date.now() - start).toBeLessThan(1000);
     expect(att.state).toBe("error");
+  });
+
+  it("a plain resume failure is logged and named by the waiter's timeout", async () => {
+    const provider = new HibernatingProvider();
+    provider.resumeImpl = async () => {
+      throw new Error("container not found");
+    };
+    const att = await reachSuspended(provider, "sb-1");
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const err = await att.ensureReady({ timeoutMs: 100 }).then(() => undefined, (e: unknown) => e);
+      expect(err).toBeInstanceOf(WorkspaceProvisioningError);
+      expect((err as WorkspaceProvisioningError).message).toContain("The last start attempt failed: container not found. Retry the operation");
+      expect(logged).toHaveBeenCalledWith("SandboxAttachment: sandbox start failed", expect.objectContaining({ phase: "resume" }));
+    } finally {
+      logged.mockRestore();
+    }
   });
 
   it("suspend() rejection keeps the attachment ready and rethrows", async () => {

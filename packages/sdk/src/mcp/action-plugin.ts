@@ -1,9 +1,10 @@
 import { decode as decodeToon } from '@toon-format/toon';
 import { Type } from 'typebox';
 import type { TSchema } from 'typebox';
-import type { ActionPlugin, CredentialProvider, PluginAction, RiskLevel } from '@valet/engine';
+import type { ActionPlugin, CredentialProvider, CredentialSource, PluginAction, RiskLevel } from '@valet/engine';
 import { hasToonCollectionMarker } from '@valet/shared';
-import { McpClient } from './client.js';
+import { McpClient, McpHttpError } from './client.js';
+import { refusedListing, scopeGaps, type McpProbeResult } from './probe.js';
 import type { McpTool, McpToolResult } from './types.js';
 
 export interface McpActionPluginOptions {
@@ -21,7 +22,73 @@ export interface McpActionPluginOptions {
   staticToken?: string;
   /** Send the credential as this URL query param instead of an Authorization header. */
   authQueryParam?: string;
+  /**
+   * Credential service to fall back to when the caller has no personal
+   * `serviceName` credential connected — the native integration's app
+   * identity (docs/specs/2026-10-15-native-integration-credential-policy-design.md
+   * Part C). The personal credential always wins when present. Applies to
+   * both tool discovery and execute.
+   */
+  appCredentialService?: string;
+  /**
+   * Human-readable name for user-facing error text (e.g. "Linear"). Falls
+   * back to `serviceName` when absent.
+   */
+  displayName?: string;
+  /**
+   * Where an admin reconnects the app identity, as a settings path in words
+   * (for example "Settings, Organization, Linear"). The app-token rejection
+   * message names it. When absent, the message names no page.
+   */
+  appConnectHint?: string;
+  /**
+   * The scopes an `auth: oauth` mcpServers entry declares for this service.
+   * A scope the server demands that is not listed here is fixed by an admin
+   * editing the entry. Absent for services that keep their scopes in code
+   * or have none to edit.
+   */
+  configScopes?: string[];
+  /**
+   * The server accepts only tokens from its own OAuth sign-in. A rejected
+   * personal account then tells the user to disconnect it and sign in,
+   * because a pasted token saved before the connect UI stopped offering
+   * token entry never works (CredentialDeclaration.oauthOnly).
+   */
+  oauthOnly?: boolean;
   description?: string;
+}
+
+/** An `ActionPlugin` built by `mcpActionPlugin`, with its health probe. */
+export interface McpActionPlugin extends ActionPlugin {
+  /**
+   * Lists the server's tools with the same credential `resolveActions`
+   * sends, and says what the answer means for the connection: the tools
+   * themselves as actions, a refusal, or the scopes the grant lacks for
+   * tools that declare them. Throws for a failure that says nothing about
+   * the credential (no credential, a transport error, a 5xx).
+   */
+  probe(ctx: { credentials: CredentialProvider }): Promise<McpProbeResult>;
+}
+
+/** True for a plugin `mcpActionPlugin` built, also after a spread. */
+export function isMcpActionPlugin(plugin: ActionPlugin): plugin is McpActionPlugin {
+  return 'probe' in plugin && typeof plugin.probe === 'function';
+}
+
+/** The names an auth-rejection message uses. */
+interface RejectionText {
+  /** `displayName`, or `serviceName` when absent. */
+  label: string;
+  appConnectHint?: string;
+  oauthOnly?: boolean;
+}
+
+interface ResolvedToken {
+  token: string | undefined;
+  /** Absent for `noAuth`/`staticToken`: no personal or app connection to name. */
+  source?: CredentialSource;
+  /** The scopes the credential's grant holds, when the host stored them. */
+  scopes?: string[];
 }
 
 /**
@@ -39,7 +106,7 @@ export interface McpActionPluginOptions {
  * rather than capturing the token resolved at discovery time — the token
  * may have been refreshed or connected in between.
  */
-export function mcpActionPlugin(opts: McpActionPluginOptions): ActionPlugin {
+export function mcpActionPlugin(opts: McpActionPluginOptions): McpActionPlugin {
   const client = new McpClient({
     url: opts.mcpUrl,
     serviceName: opts.serviceName,
@@ -49,18 +116,47 @@ export function mcpActionPlugin(opts: McpActionPluginOptions): ActionPlugin {
   const defaultRiskLevel = opts.defaultRiskLevel;
   const noAuth = opts.noAuth ?? false;
   const staticToken = opts.staticToken;
+  const appCredentialService = opts.appCredentialService;
+  const messages: RejectionText = {
+    label: opts.displayName ?? serviceName,
+    appConnectHint: opts.appConnectHint,
+    oauthOnly: opts.oauthOnly,
+  };
+  const configScopes = opts.configScopes;
 
   return {
     service: serviceName,
     description: opts.description,
     actions: [],
     requiresCredential: !noAuth && staticToken === undefined,
+    appCredentialService,
     resolveActions: async ({ credentials }: { credentials: CredentialProvider }) => {
-      const token = await resolveToken(credentials, serviceName, noAuth, staticToken);
-      const tools = await client.listTools(token);
+      const { token, source } = await resolveToken(credentials, serviceName, noAuth, staticToken, appCredentialService);
+      let tools: McpTool[];
+      try {
+        tools = await client.listTools(token);
+      } catch (err) {
+        const rejection = authRejectionMessage(err, source, messages);
+        throw rejection ? new Error(rejection) : err;
+      }
       return tools.map((tool) =>
-        mapToolToAction(tool, client, serviceName, defaultRiskLevel, noAuth, staticToken),
+        mapToolToAction(tool, client, serviceName, defaultRiskLevel, noAuth, staticToken, appCredentialService, messages, configScopes),
       );
+    },
+    probe: async ({ credentials }) => {
+      const { token, scopes } = await resolveToken(credentials, serviceName, noAuth, staticToken, appCredentialService);
+      let tools: McpTool[];
+      try {
+        tools = await client.listTools(token);
+      } catch (err) {
+        const refused = refusedListing(err, scopes);
+        if (refused) return refused;
+        throw err;
+      }
+      const actions = tools.map((tool) =>
+        mapToolToAction(tool, client, serviceName, defaultRiskLevel, noAuth, staticToken, appCredentialService, messages, configScopes),
+      );
+      return { kind: 'listed', actions, ...scopeGaps(tools, scopes) };
     },
   };
 }
@@ -72,18 +168,147 @@ export function mcpActionPlugin(opts: McpActionPluginOptions): ActionPlugin {
  * seam is documented to throw here — the catalog turns it into a
  * `list_tools` warning (or a `call_tool` error string) rather than silently
  * hiding the service.
+ *
+ * When `appCredentialService` is set and the caller has no personal
+ * `serviceName` credential, fall back to the named app-identity service
+ * before refusing (Part C, native-integration-credential-policy). The
+ * personal credential always wins when present.
  */
 async function resolveToken(
   credentials: CredentialProvider,
   serviceName: string,
   noAuth: boolean,
   staticToken?: string,
-): Promise<string | undefined> {
-  if (noAuth) return undefined;
-  if (staticToken !== undefined) return staticToken;
+  appCredentialService?: string,
+): Promise<ResolvedToken> {
+  if (noAuth) return { token: undefined };
+  if (staticToken !== undefined) return { token: staticToken };
   const cred = await credentials.get();
-  if (!cred) throw new Error(`${serviceName}: no credential connected`);
-  return cred.accessToken;
+  // A host that does not say whose account it is gives the caller's own.
+  if (cred) return { token: cred.accessToken, source: cred.source ?? { kind: 'personal' }, scopes: cred.scopes };
+  if (appCredentialService) {
+    const appCred = await credentials.get(appCredentialService);
+    if (appCred) return { token: appCred.accessToken, source: { kind: 'app' }, scopes: appCred.scopes };
+  }
+  throw new Error(`${serviceName}: no credential connected`);
+}
+
+/**
+ * The MCP server rejected the bearer token (401/403): the connection it
+ * answered with is bad, not the request. Name which credential it was and
+ * the fix, per CLAUDE.md's "every user-facing error names the corrective
+ * action" rule. The fix goes to whoever holds the account: the caller for
+ * their own, a team admin for the team's, the sharing member for a share,
+ * an admin for the org's or the app's. Returns undefined for any other failure (bad request,
+ * transport error, 5xx) — those keep today's verbatim error text, and for
+ * `noAuth`/`staticToken` calls there is no personal/app connection to name.
+ *
+ * Detects the rejection via `McpHttpError.status`, not a text match on the
+ * message: the message's tail is the server's own response body (up to 200
+ * chars, verbatim), so a 500 whose body happens to say "upstream returned
+ * HTTP 401" must not be misclassified as an auth rejection.
+ */
+function authRejectionMessage(
+  err: unknown,
+  source: CredentialSource | undefined,
+  { label, appConnectHint, oauthOnly }: RejectionText,
+): string | undefined {
+  if (!source) return undefined;
+  if (!(err instanceof McpHttpError) || (err.status !== 401 && err.status !== 403)) return undefined;
+  const own = `connect your own ${label} account on the Integrations page`;
+  switch (source.kind) {
+    case 'app': {
+      const where = appConnectHint ? ` in ${appConnectHint}` : '';
+      return `${label} rejected the Valet app's access. Ask an admin to reconnect the ${label} app${where}, or ${own}.`;
+    }
+    case 'team':
+      return `${label} rejected the team's ${label} connection. Ask a team admin to reconnect ${label} for the team, or ${own}.`;
+    case 'shared': {
+      if (source.memberName === undefined) {
+        return `${label} rejected a ${label} account a team member shared. Ask that member to reconnect ${label}, or ${own}.`;
+      }
+      return `${label} rejected the ${label} account that ${source.memberName} shared with the team. Ask ${source.memberName} to reconnect ${label}, or ${own}.`;
+    }
+    case 'org':
+      return `${label} rejected the organization's ${label} credential. Ask an organization admin to reconnect ${label} in Settings, Organization, or ${own}.`;
+    case 'vault':
+      return `${label} rejected the token from its 1Password item. Ask the owner of the ${label} item in 1Password to update it, or ${own}.`;
+    case 'personal':
+      if (oauthOnly) {
+        return `${label} rejected your connected account. Disconnect ${label} on the Integrations page, then select Connect to sign in with ${label}.`;
+      }
+      return `${label} rejected your connected account. Reconnect ${label} on the Integrations page.`;
+  }
+}
+
+/** A challenge's RFC 7235 auth-params, names lowercased; the first value
+ * wins. A value is a quoted string or a bare token. */
+function challengeParams(header: string): Map<string, string> {
+  const params = new Map<string, string>();
+  for (const m of header.matchAll(/([A-Za-z0-9_-]+)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^\s,"]+))/g)) {
+    const name = (m[1] ?? '').toLowerCase();
+    if (!params.has(name)) params.set(name, m[2] !== undefined ? m[2].replace(/\\(.)/g, '$1') : (m[3] ?? ''));
+  }
+  return params;
+}
+
+/**
+ * The scopes a 403 `error=insufficient_scope` challenge (RFC 6750 §3.1)
+ * names that the credential lacks. The challenge `scope` may also list
+ * scopes the token holds (Metabase does), so those are removed. A
+ * credential with no recorded grant (a pasted or 1Password token) gives
+ * undefined: its held scopes are unknown, so no subset is claimed.
+ */
+function missingScopes(err: unknown, grantedScopes: string[] | undefined): string[] | undefined {
+  if (!(err instanceof McpHttpError) || err.status !== 403 || !err.wwwAuthenticate) return undefined;
+  if (grantedScopes === undefined) return undefined;
+  const params = challengeParams(err.wwwAuthenticate);
+  if (params.get('error') !== 'insufficient_scope') return undefined;
+  const held = new Set(grantedScopes);
+  const missing = (params.get('scope') ?? '').split(' ').filter((s) => s && !held.has(s));
+  return missing.length > 0 ? missing : undefined;
+}
+
+/**
+ * The error for a refused call. Reconnecting requests the same scopes, so
+ * a missing scope that a config entry does not declare is fixed by an admin
+ * editing the entry. A declared scope the server did not grant, or a
+ * service with no config scopes, keeps the fix for whoever holds the account.
+ *
+ * Step-up (MCP authorization, "Scope Challenge Handling"): for an undeclared
+ * scope on the caller's own connection, the message links to the connect
+ * route with the held and missing scopes, so the person can approve the added
+ * scope on the provider's screen and then ask for a retry. `configScopes` is
+ * set only for an `auth: oauth` config entry, so the link always has a
+ * sign-in to go to. Every other connection keeps the admin fix: a team
+ * connection is shared, and a member's sign-in would make the team act as
+ * that member.
+ */
+function rejectionMessage(
+  err: unknown,
+  { source, scopes }: ResolvedToken,
+  text: RejectionText,
+  configScopes: string[] | undefined,
+  service: string,
+): string | undefined {
+  const missing = missingScopes(err, scopes);
+  const accountFix = authRejectionMessage(err, source, text);
+  if (!missing) return accountFix;
+  const { label } = text;
+  const noun = (list: string[]) => (list.length === 1 ? 'scope' : 'scopes');
+  const undeclared = configScopes ? missing.filter((s) => !configScopes.includes(s)) : [];
+  if (undeclared.length > 0) {
+    const list = undeclared.join(', ');
+    const refused = `${label} refused this call: the connection does not hold the ${list} ${noun(undeclared)}.`;
+    if (source?.kind === 'personal') {
+      const addScopes = [...new Set([...(scopes ?? []), ...missing])].sort().join(' ');
+      const link = `/api/credentials/${encodeURIComponent(service)}/connect?${new URLSearchParams({ addScopes }).toString()}`;
+      return `${refused} To grant it, open ${link} and approve the request on ${label}'s screen. Then ask me to retry.`;
+    }
+    return `${refused} Ask an admin to add ${list} to the ${label} integration's scopes. Then reconnect ${label}.`;
+  }
+  if (!accountFix) return undefined;
+  return `${label} has not granted the ${missing.join(', ')} ${noun(missing)} to this connection. ${accountFix}`;
 }
 
 function mapToolToAction(
@@ -92,7 +317,10 @@ function mapToolToAction(
   serviceName: string,
   defaultRiskLevel: RiskLevel,
   noAuth: boolean,
-  staticToken?: string,
+  staticToken: string | undefined,
+  appCredentialService: string | undefined,
+  messages: RejectionText,
+  configScopes: string[] | undefined,
 ): PluginAction {
   // `tool.inputSchema` is a JSON-Schema-shaped object from the MCP server.
   // TypeBox's `TSchema` is declared as an empty interface
@@ -108,11 +336,13 @@ function mapToolToAction(
     riskLevel: deriveRiskLevel(tool, defaultRiskLevel),
     parameters,
     execute: async (args, ctx) => {
-      const token = await resolveToken(ctx.credentials, serviceName, noAuth, staticToken);
+      const resolved = await resolveToken(ctx.credentials, serviceName, noAuth, staticToken, appCredentialService);
       try {
-        const result = await client.callTool(token, tool.name, args);
+        const result = await client.callTool(resolved.token, tool.name, args);
         return mapToolResult(result);
       } catch (err) {
+        const rejection = rejectionMessage(err, resolved, messages, configScopes, serviceName);
+        if (rejection) return { success: false, error: rejection };
         return { success: false, error: err instanceof Error ? err.message : String(err) };
       }
     },

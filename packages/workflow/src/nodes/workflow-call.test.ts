@@ -123,11 +123,31 @@ describe('workflow node (sub-workflow call)', () => {
     expect(child?.params.parentRunId).toBe('wfrun_p1');
     expect(child?.params.parentNodeId).toBe('call');
     expect(child?.params.workflowId).toBe('wf-child');
+    expect(child?.params.origin).toBeUndefined();
     expect(child?.owner).toEqual({ ownerType: 'user', ownerId: 'u1' });
     expect(child?.wakeRequested).toBe(true);
     const input = child?.params.input as { type: string; data: Record<string, unknown> };
     expect(input.type).toBe('workflow');
     expect(input.data).toEqual({ name: 'acme' });
+  });
+
+  it('preserves the assistant conversation origin on a child run', async () => {
+    const store = new InMemoryWorkflowStore();
+    const engine = resolvingEngine();
+    const params = parentParams();
+    params.origin = { assistantSessionId: 'assistant:origin', threadId: 'th-origin' };
+    params.toolScope = { actions: ['github.get_issue'] };
+    await store.createRun('wfrun_origin', params, parentDefinition(), 'v1', {
+      ownerType: 'team', ownerId: 'team-a', actorUserId: 'u1',
+    });
+
+    const park = await drive(store, engine, 'wfrun_origin');
+    const wait = park.waitingOn[0];
+    if (wait.kind !== 'run') throw new Error('expected a run wait');
+    const child = await store.getRun(wait.runId);
+    expect(child?.params.origin).toEqual(params.origin);
+    expect(child?.params.toolScope).toEqual({ actions: ['github.get_issue'] });
+    expect(child?.actorUserId).toBe('u1');
   });
 
   it('resumes with the child stop output and wakes the parent on child settle', async () => {
@@ -275,6 +295,25 @@ describe('workflow node (sub-workflow call)', () => {
     const childSignals = await store.listSignals(wait.runId, { unconsumed: true });
     expect(childSignals.some((s) => s.signalType === 'cancel')).toBe(true);
     expect((await store.getRun(wait.runId))?.wakeRequested).toBe(true);
+  });
+
+  it('settles a cancel when the call node recorded a child id but never created the child', async () => {
+    let now = 1_000;
+    const store = new InMemoryWorkflowStore(() => now);
+    const engine = resolvingEngine();
+    // The intent records the derived child id, then the input fails to
+    // render, so the drive throws before the child run exists.
+    await store.createRun('wfrun_p7', parentParams(), parentDefinition({ input: { name: '{{ trigger.data.customer > 1 }}' } }), 'v1');
+    await expect(drive(store, engine, 'wfrun_p7')).rejects.toThrow(/compare values of mixed types/);
+    const childRunId = await deriveChildRunId('wfrun_p7', 'call', 0);
+    expect(await store.getRun(childRunId)).toBeNull();
+
+    await store.insertSignal({ runId: 'wfrun_p7', signalId: 'cancel', signalType: 'cancel', createdAt: now });
+    now += 60_000; // the failed drive's lease expires
+    const cancelled = await drive(store, engine, 'wfrun_p7');
+
+    expect(cancelled.outcome).toBe('cancelled');
+    expect(await store.getRun(childRunId)).toBeNull();
   });
 });
 

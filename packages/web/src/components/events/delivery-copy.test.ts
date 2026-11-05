@@ -38,7 +38,7 @@ function subscription(over: Partial<EventSubscriptionWire>): EventSubscriptionWi
     ownerId: "u1",
     eventKeys: ["github.pull_request.opened"],
     filters: [],
-    target: { kind: "orchestrator" },
+    target: { kind: "assistant" },
     enabled: true,
     createdBy: "u1",
     createdAt: 1,
@@ -69,6 +69,14 @@ describe("deliveryStatusLine", () => {
 
     const dead = deliveryStatusLine(delivery({ status: "dead", attempts: 4 }), NOW);
     expect(dead).toBe("Gave up after 4 attempts. To send it again, press Redeliver.");
+  });
+
+  // The turn started before it failed, so a plain "press Redeliver" could
+  // repeat a reply or an action it already made.
+  it("warns before a redelivery of a delivery whose assistant turn failed", () => {
+    const line = deliveryStatusLine(delivery({ status: "dead", attempts: 1, turnFailed: true }), NOW);
+    expect(line).toBe("The assistant's turn failed after it started, so it may have replied or acted already. Check its thread before you press Redeliver.");
+    expect(line).not.toContain("To send it again");
   });
 
   it("describes a queued first attempt without a countdown", () => {
@@ -121,7 +129,7 @@ describe("scheduledRetryCount", () => {
 describe("redeliverConfirmDescription", () => {
   it("names how many subscriptions and runs the press starts", () => {
     expect(redeliverConfirmDescription(2, 0)).toBe(
-      "This event matches up to 2 enabled subscriptions. Each match creates one delivery, so this can start up to 2 runs.",
+      "This event matches up to 2 lines in Presence that are on. Each match can start one run, so this can start up to 2 runs.",
     );
   });
 
@@ -131,15 +139,15 @@ describe("redeliverConfirmDescription", () => {
   });
 
   it("names the corrective action when nothing matches", () => {
-    expect(redeliverConfirmDescription(0, 0)).toContain("Subscriptions tab");
+    expect(redeliverConfirmDescription(0, 0)).toContain("turn on or edit what should match in Presence");
   });
 });
 
 describe("redeliverResultText", () => {
   it("reports a zero-created redelivery as a real outcome", () => {
     expect(redeliverResultText(0)).toContain("Nothing was queued");
-    expect(redeliverResultText(0)).toContain("Enable or edit one on the Subscriptions tab");
-    expect(redeliverResultText(2)).toBe("Queued 2 deliveries. The result appears in this list.");
-    expect(redeliverResultText(1)).toBe("Queued 1 delivery. The result appears in this list.");
+    expect(redeliverResultText(0)).toContain("Turn on or edit what should match in Presence");
+    expect(redeliverResultText(2)).toBe("Queued the event for 2 lines. The result appears in this list.");
+    expect(redeliverResultText(1)).toBe("Queued the event for 1 line. The result appears in this list.");
   });
 });

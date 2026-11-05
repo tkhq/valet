@@ -99,7 +99,7 @@ describe("OrganizationLibraryPage — org skills panel", () => {
     const { container } = render(<OrganizationLibraryPage />);
     expect(screen.getByText("Org playbook")).toBeTruthy();
     // One card in the org grid.
-    const grid = container.querySelector(".grid");
+    const grid = container.querySelector(`ul[aria-label="Skills"]`);
     expect(grid?.querySelectorAll("a").length).toBe(1);
   });
 

@@ -10,13 +10,18 @@ import { SettingsLayout } from "./settings";
 vi.mock("~/lib/workspace-scope", () => ({
   useWorkspaceScope: () => ({ teamId: "team_1", key: "team_1" }),
 }));
+vi.mock("~/api/integrations", async (importOriginal) => ({
+  ...await importOriginal<typeof import("~/api/integrations")>(),
+  usePlugins: () => ({ data: { plugins: [] }, isLoading: false, error: null }),
+}));
 vi.mock("~/api/settings", async (importOriginal) => ({
   ...await importOriginal<typeof import("~/api/settings")>(),
-  useOrg: () => ({ data: { callerRole: "admin", features: { organizations: true } } }),
+  useOrg: () => ({ data: { callerRole: "admin", features: { organizations: true }, plugins: [] } }),
+  useTeams: () => ({ data: { teams: [] } }),
 }));
 
 describe("leaving team settings", () => {
-  it.each(["/integrations", "/workflows", "/artifacts", "/chat"])("allows primary navigation to %s", async (destination) => {
+  it.each(["/integrations", "/workflows", "/chat"])("allows primary navigation to %s", async (destination) => {
     const root = createRootRoute({ component: () => <><Link to={destination}>Leave settings</Link><Outlet /></> });
     const settings = createRoute({ getParentRoute: () => root, path: "/settings", component: SettingsLayout });
     const team = createRoute({ getParentRoute: () => settings, path: "/team", component: () => <p>Team settings content</p> });

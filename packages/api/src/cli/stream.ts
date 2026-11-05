@@ -26,7 +26,10 @@
  */
 import { WebSocket, type RawData } from "ws";
 import { UnreachableError } from "./exit.js";
+import { printErr } from "./output.js";
+import { latestCredential } from "./token-refresh.js";
 import type { WireEvent, WireEventType } from "../wire/types.js";
+
 
 export interface StreamSessionOpts {
   url: string;
@@ -57,6 +60,7 @@ const WIRE_EVENT_TYPES: Record<WireEventType, true> = {
   init: true,
   message_start: true,
   text_delta: true,
+  thinking_update: true,
   tool_call_update: true,
   message_update: true,
   message_end: true,
@@ -65,10 +69,12 @@ const WIRE_EVENT_TYPES: Record<WireEventType, true> = {
   status: true,
   turn_end: true,
   error: true,
+  turn_retry: true,
   model_switched: true,
   "model.state": true,
   compaction_start: true,
   compaction_end: true,
+  branch_switched: true,
   decision_gate: true,
   decision_gate_resolved: true,
   decision_gate_expired: true,
@@ -76,6 +82,8 @@ const WIRE_EVENT_TYPES: Record<WireEventType, true> = {
   "queue.state": true,
   "submission.settled": true,
   "title.updated": true,
+  "thread.activity": true,
+  "thread.viewers": true,
   "sandbox.status": true,
   command_result: true,
   ping: true,
@@ -97,6 +105,63 @@ function rawToString(data: RawData): string {
   if (Buffer.isBuffer(data)) return data.toString("utf8");
   if (Array.isArray(data)) return Buffer.concat(data).toString("utf8");
   return Buffer.from(data).toString("utf8");
+}
+
+/**
+ * The socket surface the stream needs. Node uses the `ws` package. A
+ * Bun-compiled `valet` binary uses Bun's native `WebSocket` instead: the
+ * bundled `ws` client upgrades through `node:http`, which Bun does not
+ * support for this path (the handshake closes 1006, or Bun crashes). Bun's
+ * native `WebSocket` accepts a `headers` option, which carries the API key.
+ */
+interface StreamSocket {
+  onMessage(cb: (text: string) => void): void;
+  onClose(cb: (code: number) => void): void;
+  onError(cb: () => void): void;
+  close(code: number): void;
+}
+
+/** Bun's native WebSocket: the WHATWG API plus Bun's `headers` option. */
+interface BunWebSocketCtor {
+  new (url: string, options?: { headers?: Record<string, string> }): {
+    addEventListener(type: "message", cb: (ev: { data: unknown }) => void): void;
+    addEventListener(type: "close", cb: (ev: { code: number }) => void): void;
+    addEventListener(type: "error", cb: () => void): void;
+    close(code?: number): void;
+  };
+}
+
+function bunWebSocket(): BunWebSocketCtor | undefined {
+  if (!process.versions.bun) return undefined;
+  const ctor: unknown = Reflect.get(globalThis, "WebSocket");
+  return typeof ctor === "function" ? (ctor as BunWebSocketCtor) : undefined; // Bun's global is the native client.
+}
+
+function frameText(data: unknown): string {
+  if (typeof data === "string") return data;
+  if (data instanceof ArrayBuffer) return Buffer.from(data).toString("utf8");
+  if (ArrayBuffer.isView(data)) return Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString("utf8");
+  return String(data);
+}
+
+function openStreamSocket(url: string, headers: Record<string, string> | undefined): StreamSocket {
+  const Native = bunWebSocket();
+  if (Native) {
+    const ws = new Native(url, headers ? { headers } : undefined);
+    return {
+      onMessage: (cb) => ws.addEventListener("message", (ev) => cb(frameText(ev.data))),
+      onClose: (cb) => ws.addEventListener("close", (ev) => cb(ev.code)),
+      onError: (cb) => ws.addEventListener("error", cb),
+      close: (code) => ws.close(code),
+    };
+  }
+  const ws = headers ? new WebSocket(url, { headers }) : new WebSocket(url);
+  return {
+    onMessage: (cb) => ws.on("message", (data: RawData) => cb(rawToString(data))),
+    onClose: (cb) => ws.on("close", (code: number) => cb(code)),
+    onError: (cb) => ws.on("error", cb),
+    close: (code) => ws.close(code),
+  };
 }
 
 /** A minimal single-producer/single-consumer async queue bridging the `ws`
@@ -163,14 +228,17 @@ const MAX_BACKOFF_MS = 2_000;
 type ConnectionOutcome = "clean" | "reconnect" | "terminal";
 
 export async function* streamSession(opts: StreamSessionOpts): AsyncGenerator<WireEvent> {
-  const { url, apiKey, sessionId, signal } = opts;
-  const headers = apiKey ? { "x-api-key": apiKey } : undefined;
+  const { url, sessionId, signal } = opts;
+  // A reconnect can come after another command refreshed a CLI token, which
+  // retires this one after a short grace. Each connection picks up the
+  // newest credential (`latestCredential`).
+  let apiKey = opts.apiKey;
 
   const queue = new AsyncQueue<WireEvent>();
   let lastOffset = opts.fromOffset;
   let attempt = 0;
   let stopping = false;
-  let currentWs: WebSocket | null = null;
+  let currentWs: StreamSocket | null = null;
 
   const stop = (): void => {
     stopping = true;
@@ -190,22 +258,27 @@ export async function* streamSession(opts: StreamSessionOpts): AsyncGenerator<Wi
   }
   signal?.addEventListener("abort", stop, { once: true });
 
-  const runConnection = (): Promise<ConnectionOutcome> =>
+  const runConnection = async (): Promise<ConnectionOutcome> => {
+    apiKey = await latestCredential(apiKey);
+    return connectOnce(apiKey ? { "x-api-key": apiKey } : undefined);
+  };
+
+  const connectOnce = (headers: Record<string, string> | undefined): Promise<ConnectionOutcome> =>
     new Promise((resolve) => {
       const wsUrl = httpToWsUrl(url, sessionId, lastOffset);
-      const ws = headers ? new WebSocket(wsUrl, { headers }) : new WebSocket(wsUrl);
+      const ws = openStreamSocket(wsUrl, headers);
       currentWs = ws;
 
-      ws.on("message", (data: RawData) => {
+      ws.onMessage((text) => {
         let parsed: unknown;
         try {
-          parsed = JSON.parse(rawToString(data));
+          parsed = JSON.parse(text);
         } catch {
-          process.stderr.write("streamSession: dropping malformed (non-JSON) frame\n");
+          printErr("streamSession: dropping malformed (non-JSON) frame");
           return;
         }
         if (!isWireEvent(parsed)) {
-          process.stderr.write("streamSession: dropping frame with unknown type\n");
+          printErr("streamSession: dropping frame with unknown type");
           return;
         }
         // Progress → reset backoff and advance the resume offset.
@@ -217,7 +290,7 @@ export async function* streamSession(opts: StreamSessionOpts): AsyncGenerator<Wi
         queue.push(parsed);
       });
 
-      ws.on("close", (code: number) => {
+      ws.onClose((code) => {
         currentWs = null;
         if (stopping) {
           resolve("terminal");
@@ -228,7 +301,7 @@ export async function* streamSession(opts: StreamSessionOpts): AsyncGenerator<Wi
         else resolve("reconnect");
       });
 
-      ws.on("error", () => {
+      ws.onError(() => {
         // A `close` always follows an `error`; the close handler decides
         // whether to reconnect. Swallow here to avoid an unhandled 'error'.
       });

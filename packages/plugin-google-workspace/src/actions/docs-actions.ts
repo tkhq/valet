@@ -112,11 +112,12 @@ type DocJson = Record<string, any>;
 async function fetchDocument(
   token: string,
   documentId: string,
-  options?: { includeTabsContent?: boolean; fields?: string },
+  options?: { includeTabsContent?: boolean; fields?: string; suggestionsViewMode?: SuggestionsViewMode },
 ): Promise<{ ok: true; doc: DocJson } | { ok: false; result: PluginActionResult }> {
   const qs = new URLSearchParams();
   if (options?.fields) qs.set('fields', options.fields);
   if (options?.includeTabsContent) qs.set('includeTabsContent', 'true');
+  if (options?.suggestionsViewMode) qs.set('suggestionsViewMode', options.suggestionsViewMode);
 
   const qsStr = qs.toString();
   const path = `/documents/${encodeURIComponent(documentId)}${qsStr ? `?${qsStr}` : ''}`;
@@ -188,6 +189,11 @@ function extractPlainText(bodyContent: unknown[]): string {
 
 // ─── docs.read_document ────────────────────────────────────────────────────
 
+type SuggestionsViewMode =
+  | 'PREVIEW_WITHOUT_SUGGESTIONS'
+  | 'PREVIEW_SUGGESTIONS_ACCEPTED'
+  | 'SUGGESTIONS_INLINE';
+
 const readDocument = action(
   Type.Object({
     documentId: Type.String({ description: 'Document ID or full Google Docs URL' }),
@@ -198,6 +204,16 @@ const readDocument = action(
     ),
     maxLength: Type.Optional(Type.Number({ description: 'Maximum character limit for output' })),
     tabId: Type.Optional(Type.String()),
+    suggestionsViewMode: Type.Optional(
+      Type.Union([
+        Type.Literal('PREVIEW_WITHOUT_SUGGESTIONS'),
+        Type.Literal('PREVIEW_SUGGESTIONS_ACCEPTED'),
+        Type.Literal('SUGGESTIONS_INLINE'),
+      ], {
+        description:
+          'Google Docs suggestions view mode: PREVIEW_WITHOUT_SUGGESTIONS, PREVIEW_SUGGESTIONS_ACCEPTED, or SUGGESTIONS_INLINE. Omit this parameter to preserve the Google Docs API default.',
+      }),
+    ),
   }),
 )({
   id: 'docs.read_document',
@@ -223,6 +239,7 @@ const readDocument = action(
       const fetchResult = await fetchDocument(token, docId, {
         includeTabsContent: needsTabsContent,
         fields: needsTabsContent ? '*' : fields,
+        suggestionsViewMode: p.suggestionsViewMode,
       });
       if (!fetchResult.ok) return fetchResult.result;
       const doc = fetchResult.doc;

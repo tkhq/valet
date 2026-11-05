@@ -27,6 +27,35 @@ Two related gaps in the v2 model/compaction stack:
 
 ## Decisions
 
+### October 5: protect live model changes before requests
+
+The provider request hook checks context before every conversational provider request.
+This includes thread pins, submission models, role models, and in-turn switches.
+It also checks unchanged models after tool results grow the context within one agent loop.
+The check includes pending prompts, tool results, current instructions, and tool definitions.
+It uses the larger of prior usage and a fresh payload estimate.
+Prior usage alone cannot measure instructions added by a new role.
+
+A bounded compaction sequence preserves unsummarized history across checkpoints.
+If context still exceeds the budget, the submission fails before the conversational provider request.
+The error names manual compaction, shorter input, and a larger context as recovery options.
+Provider tokenization can differ from the estimate, so reactive recovery remains available.
+Reactive recovery continues the rebuilt transcript without adding the user prompt again.
+
+Cancellation aborts preparation and does not count as a compaction failure.
+A cancelled submission cannot start post-turn compaction or an overflow retry.
+These changes do not remove stored workflows, sessions, or conversation history.
+
+The shared tool guidance directs presentation edits to installed skills and dedicated actions first.
+Browser editing requires a missing operation or an explicit user request.
+The agent must explain the missing operation before using browser editing.
+It must not create a tunnel just to edit a hosted deck.
+
+Regression coverage uses mock providers for all four model-selection paths,
+oversized role instructions with prior usage, prompt deduplication, failed-switch recovery, and repeated cancellation.
+Same-model tool-loop coverage verifies compaction before the next request, retained tool evidence, and one tool execution.
+If compaction is disabled, an oversized request fails before the provider call.
+
 ### 1. `Session.thread()` stamps the pin at creation
 
 `Session.thread()` is the single creation seam — default (`web:default`),
@@ -78,9 +107,54 @@ Compaction always runs inside a claimed turn (proactive after `runAgent`,
 reactive inside it, manual via the in-turn command path), so
 `agent.state.model` holds the resolved effective model — including
 resolver-only specs the internal registry cannot resolve. All five budget
-sites switch to it: the proactive trigger (`shouldCompactProactive`), the
+sites switch to it: the proactive trigger (`proactiveCompactionTrigger`), the
 reactive overflow check (`isContextOverflow`), the summarizer fallback model,
 cut-point selection, and the post-compaction transcript rebuild.
+
+Added 2026-10-28: the compaction budget. `compactionBudget` is the usable
+context capped at `compaction.contextBudgetTokens` (default 200k; `0`
+removes the cap). An org admin sets the cap in Settings, Models, Context
+(`orgs.compaction_window_tokens`, `PATCH /api/org/settings`
+`compactionWindowTokens`). The host hands each session a config whose
+`contextBudgetTokens` reads the org value live, so a change reaches loaded
+sessions in that process without a rebuild.
+
+The proactive trigger has two levels. "overflow" means the next request does
+not fit the usable context, and the pass behaves as before. "budget" means
+the request fits but exceeds the budget. A budget pass never continues the
+turn. A budget pass that finds nothing to reclaim or fails does not count
+toward the circuit breaker; a failure still emits `compaction_failed`. When it runs depends on who watches the thread:
+
+- An unattended turn (workflow work, a delivery nobody watches) or a channel
+  turn (Slack, Telegram) runs it at turn end. It skips the pass when another
+  message waits; that message's turn end checks again. A submission stopped
+  at its model call limit still runs it.
+- An interactive turn arms an idle timer instead
+  (`compaction.idleCompactionMs`). The default ends shortly before the
+  thread's prompt cache expires: 55 minutes with the long cache, 4 minutes
+  with the short one, 0 with no cache. The pass holds the drive lock, so no
+  turn claims while it runs, and kicks the queue after. A new turn cancels
+  the timer. `0` compacts every thread at turn end. The turn's resolver key
+  is gone by then, so the pass resolves the model and key through
+  `resolveModel` again. Like a turn, it fails closed: an unknown spec or a
+  missing credential stops the pass, and no ambient key is used.
+- The first turn after a reload stands in for a timer the restart lost: it
+  runs a budget pass first only when the newest message is older than the
+  idle delay.
+
+The tail budget (25%) scales from the compaction budget, so a 1M-token model
+keeps about 50k tokens verbatim, not about 245k. The reactive and
+pre-request overflow paths still use the usable context, so a long turn is
+never compacted in the middle at the budget. The context meter reports the
+budget as its limit.
+
+Reason: a 1M-token model compacted only near 980k. In production, one Slack
+thread on such a model grew to 833k tokens. Each reply after the 1h prompt
+cache expired re-wrote the whole context, at $4 to $7 per reply. Claude Code
+compacts an idle conversation over 200k before its cache expires, and Codex
+can compact after a turn when no input waits; this design follows both. The
+compaction recall evals in `evals/cases/compaction/` guard recall after a
+compaction.
 
 ### 5. The proactive trigger rehydrates from the DAG
 
@@ -130,11 +204,37 @@ summarizer prompt.
 
 - The session-header model picker becomes thread-scoped: it shows the active
   thread's effective model and PATCHes the thread. The session default stays
-  API-patchable and governs new threads.
+  API-patchable and governs new threads. Changed 2026-11-02: the picker
+  renders in the composer beside Send on every screen size, as a quiet
+  "Model · effort" control that opens upward. The header no longer shows it.
 - Thread rows show a pin chip when the thread's pin differs from the session
   default (full model id in the tooltip).
 - The message list renders a compaction divider for messages with
   `compaction`: a rule with token counts and a collapsible summary.
+- Added 2026-10-20: the composer shows a context meter beside the send
+  button. `Thread.contextUsage` measures like the proactive trigger: the
+  usage-anchored estimate (`estimateLiveContextTokens`) against
+  `compactionBudget` of the thread's model, so a full meter means the
+  thread compacts when it goes idle or after its next unattended or channel
+  turn. A thread that has not loaded its transcript is read from
+  the store with `entriesToAgentMessages` and stays unloaded, so the read
+  never wakes a sandbox. Outside a turn, the budget model comes from the
+  host resolver for the thread's spec on every read, also when the spec is
+  the session default, so a re-pointed size tier shows the model the next
+  turn uses; a failed resolution falls back to
+  `effectiveModelLenient`, because the turn path fails loud for the same
+  spec. `GET /api/threads/:threadId/context` (also under
+  `/api/sessions/:id/threads/:threadId/context`) returns `{ context: null }`
+  for a model with no context window. Thread guests cannot read it. The web
+  client refetches the reading on `turn_end`, `submission.settled`,
+  `compaction_end`, and `model_switched`. A `turn_end` refetch can land
+  before the turn clears its one-off model. A read uses the live turn model
+  only while the running turn still owns its published model state, which
+  settlement clears before it announces `submission_settled`; so the
+  `submission.settled` refetch reads the thread's own model, pinned or not. The meter turns amber at 80%. Its popover names the
+  token counts and the model, says whether automatic compaction is on, and
+  has a Compact now button that sends `/compact`. The button waits while a
+  turn runs.
 
 ### 9. Oversized inbound input spills to a file; an un-compactable tail fails loud
 
@@ -352,7 +452,14 @@ It replaces the overlapping suffix with the REST tail. If no row overlaps,
 the tail replaces the thread. The store keeps only rows marked `optimistic`
 or `streaming` after that tail. REST confirmation
 removes a client row with the same message id or queue item id. A complete
-response replaces canonical rows for the thread.
+response replaces canonical rows for the thread. The merge records the prior and
+next canonical row on each client-only row. Each anchor includes the store sequence.
+These anchors survive REST snapshots that omit a canonical row. If both anchor IDs
+are absent, the merge uses canonical `(createdAt, sequence)` order. If sequence
+metadata is absent, equal timestamps do not establish order. The merge keeps the
+client row before that equal-time window. The bounded prefix drops client rows that
+REST confirms later in the tail. The merge indexes IDs, queue items, and user
+content, then uses forward scans. Reconciliation is linear in stored and fresh rows.
 
 ## Out of scope
 
@@ -367,3 +474,200 @@ response replaces canonical rows for the thread.
 This change edits the same `makeResolveModel` seam as the spend-limits spec —
 whichever lands second rebases. The small-fixes spec (2026-08-24) defers its
 split-brain candidates 2 and 5 and its silent-downgrade fix to this document.
+
+Transient provider failures show the provider, retry delay, and attempt count. The notice suggests a model change if retries fail. A parsed request ID supports troubleshooting without showing the raw provider error.
+
+## Amendment (2026-09-13, TKAI-211): child compaction keeps the active task
+
+The transcript store is a DAG. Each new entry now points to the thread's active
+leaf. The thread serializes entry appends, so a command cannot race an agent
+message and create two accidental leaves. Only entry append operations can
+advance the durable leaf. A general thread settings save cannot rewind it.
+
+The store returns the thread row and entries as one coherent snapshot. The
+Postgres store locks the thread row before it reads entries. An append updates
+that row after it inserts entries, so the snapshot is wholly before or wholly
+after the append. The reader follows parent links from the snapshot's active
+leaf and excludes inactive branches.
+
+For old transcripts, the reader keeps the latest legacy compaction entry and
+the chronological null-parent suffix that follows it. Legacy compaction entries
+pointed to their covered head while later entries still had null parents. This
+rule preserves the checkpoint and post-compaction work without admitting linked
+inactive branches.
+
+Compaction now selects, prunes, and summarizes entries from the active path.
+The compaction entry points to the prior active leaf. Its `coveredEntryIds`
+contains the part of the path prefix this summary describes. The summarizer
+input has a 64,000-token limit, and it is allocated in one order: the head
+first, the recent tail second. The head takes its window from the entries the
+active checkpoint has not covered yet, so neither the newest turn nor history a
+previous summary already carries can pull the window off the entries this
+checkpoint will replace. The recent tail
+then takes what the head leaves, up to 8,000 estimated tokens, and it is
+trimmed to what fits. A newest entry that alone exceeds that budget leaves no
+tail evidence. The tail stays verbatim in live context either way. Existing
+per-block limits still apply.
+
+The window is budgeted with the same caps the payload uses. The conversion to
+summarizer messages caps prose at 20,000 chars, and it caps each tool result at
+the configured tool-output limit, 2,000 chars by default. A 300,000-char
+assistant run therefore costs about 5,000 tokens of input, not 75,000. A budget
+walk over raw sizes rejected entries whose real payload fits many times over.
+
+A budget cap can cut into a turn. The window keeps that shape: it is the
+newest entries that fit, with no alignment to a user entry. The summarizer
+prepends a synthetic user message when its input starts with an assistant
+message. Several providers reject that shape with a plain 400 error, and that
+error is not an overflow, so it would abort the overflow retry. An earlier
+version aligned the window forward to the next user entry, which dropped the
+entries in front of it, and returned an empty window when no later user entry
+existed. The summarizer then wrote a summary from nothing.
+
+Some entries render into no summarizer message: a command result, a decision
+gate, a prior checkpoint, an assistant step that held only thinking. They cost
+no budget, so a window can stop on them alone. The selection steps back to the
+newest entry the summarizer can read, and `summarize` refuses an input that
+converts to an empty transcript.
+
+`coveredEntryIds` records what the summary describes, and the rebuild drops
+every covered entry from model context. One pass therefore claims two sets: the
+window it sent the summarizer, and whatever the checkpoint it supersedes already
+covered. The carried half reaches the new summary through `previousSummary`, and
+the rebuild reads only the newest checkpoint, so a pass that dropped the carried
+half would put earlier covered entries back into the context.
+
+Head entries outside the window are not claimed. They keep their place in live
+context, and the next pass sees a shorter pending head. A head larger than the
+summarizer input budget is compacted over several passes. On a 400-entry head
+worth about 404,000 summarizer tokens, 62 entries fit one window;
+`compaction-pure.test.ts` pins that measurement.
+
+The chain converges. Each written checkpoint covers at least one head entry that
+was not covered before, because the window is selected from the pending head
+alone and the guard below rejects a window with no readable entry in it. The
+count of uncovered head entries therefore falls with every pass, and a pass that
+finds every head entry already covered reclaims nothing and reports `noop`,
+which the caller counts toward the breaker. A repeated pass on one shape cannot
+spin without progress.
+
+Two blocked cases report separately, and compaction repairs neither.
+
+- The pending head carries no text the summarizer reads. The pass emits
+  `compaction_coverage_gap`, records the `valet.compaction.coverage_gap`
+  counter, and reports the `coverage_gap` outcome. It writes no checkpoint, so
+  the head stays in live context. `/compact` prints this cause and tells the
+  user to start a fresh thread. Shortening the newest turn cannot help here,
+  which is why this outcome is separate from `insufficient` and carries its own
+  message.
+- The turn that hit the limit cannot be helped by summarizing the head at all.
+  The pass reports `insufficient` with `context_overflow_unrecoverable`.
+
+Both outcomes are final for the turn that produced them. A reactive pass that
+reports one of them counts one failure toward the breaker, and the post-turn
+proactive check stands down for the rest of that turn. The error reaches the
+user once, the counter records one violation, and the breaker advances by one.
+The next turn starts clear, because its transcript may be one compaction can
+help.
+
+The compaction span carries the deferred remainder on
+`valet.compaction.head_entries_deferred` and
+`valet.compaction.head_tokens_deferred`. Deferred entries are live context, not
+lost history, so this is a size signal and not a violation.
+
+The overflow retry shrinks the input in the same order it was allocated: tail
+evidence first, then the oldest half of the head, and it stops before a slice
+that carries no head content.
+
+The summary has a `Continuation Checkpoint` section. It records the branch,
+commit, changed files, worktree status, last command, failure output, next
+action, and acceptance checklist. A field uses `(unknown)` or `(none)` when the
+transcript does not contain that fact. The portable engine does not run Git
+commands or enforce repository policy.
+
+A proactive compaction continues inside the same queue item. The engine appends
+the hidden continuation prompt to the active path, then runs the agent again.
+It does not admit a second queue item. The original submission settles only
+after this continuation ends. A stale fenced prompt append stops the
+continuation before another model call. A child watcher therefore cannot report
+`child.settled` at the compaction boundary.
+
+For workflow-purpose sessions, the continuation requests unattended completion of remaining authorized work and the required output.
+A progress recap is not completion. Genuine blocking failures must remain truthful.
+The instruction preserves the original scope, tools, constraints, safety boundaries, and approvals.
+Other session purposes retain the existing interactive continuation wording, including the option to pause for clarification.
+Queue identity, synthetic metadata, cancellation, and disabled-continuation behavior do not change.
+
+
+### October 5: model selection feedback
+
+The header shows a pending model selection from the mutation variables. It labels the save as pending and disables duplicate submissions.
+A failed save shows the error and restores the saved selection. Pending selections and errors belong to their selected thread.
+An active submission keeps its actual model after the save; the configured pin controls later submissions.
+
+The thread PATCH response updates only the model field in cached thread lists. It preserves newer titles and activity fields.
+The model-switch event refreshes only the exact session and thread-list queries. It does not refetch transcripts or decisions.
+No permissions, provider validation, or running-submission model behavior changes.
+
+## Catalog and cost policy
+
+The bundled catalog fills missing GPT-6.1 Sol and Claude Sonnet 5.5 metadata; SDK entries and runtime overlays take precedence.
+Provider availability and organization approval still apply. Serialization tests use fake HTTP transports, without paid requests.
+Source metadata: https://developers.openai.com/api/docs/models/gpt-6.1-sol and https://platform.claude.com/docs/en/models/sonnet-5-5/overview.
+Astra is available from the SDK catalog and follows normal provider credentials and organization approval rules.
+This change does not add Astra to default tiers or rewrite saved approval lists.
+Restricted organizations must approve Astra before members can select it or use it as a tier fallback.
+Unrestricted organizations can select any active model, including Astra.
+Historical usage pricing remains available. Session restoration preserves resolvable saved model IDs, including Astra.
+The recording proxy retains its existing gateway rules; it does not enforce the organization model approval list.
+Proxy inference requires a model; batches remain unavailable because uploaded request files cannot be checked before submission.
+
+
+## Amendment (2026-10-16): summary acceptance and task retention
+
+A new compaction checkpoint requires a terminal `stop` response without tool calls.
+After scratchpad removal, the summary must contain every required template section once, in order, with content in each leaf section.
+Heading checks ignore case, repeated spaces, and a trailing colon. Additional subsections can organize a required section's content.
+An optional heading alone does not supply content, and a separate optional section cannot fill an empty required section.
+Headings inside code fences do not count. Unclosed fences, missing sections, duplicate sections, and empty sections fail acceptance.
+Failure keeps the accepted checkpoint and unsummarized messages. It does not add a retry loop or bypass the existing compaction failure limits.
+Existing checkpoints remain readable. These checks apply when accepting a new summary, not when loading history.
+A valid structure does not prove that every fact in the summary is correct.
+
+Workflow admissions mark their user entry with `metadata.preserveTask`.
+Compaction retains that original rendered task once, independently of the summary, using the existing sender, signal, attachment, and input-spill rendering.
+Only the active submission selects a retained task. Historical task markers cannot restore a completed request.
+A schema repair carries `taskSourceQueueItemId` from the first submission receipt.
+The engine resolves that source only on the active transcript branch and keeps the original task rather than the repair instructions.
+It rebuilds repair context before appending the repair message, so the repair itself appears once.
+A new repair can recover an original entry admitted before task markers existed, in both running and restarted sessions.
+Already-queued repairs without a source reference are not rewritten.
+Restart, interrupted continuation, and gate replay restore the active submission's task reference.
+Before an unrelated submission runs, the engine removes any contract injected into the running context.
+Cut-point selection reserves the rendered task, accepted summary, system prompt, and current tool definitions before choosing the recent tail.
+After generation, the engine selects the tail again with the new summary's measured size, including its wrapper and transcript link.
+Displaced tail entries stay live and uncovered until an existing bounded compaction pass summarizes them.
+Checkpoint size includes a covered task that remains in context.
+The engine rejects a new checkpoint if the required task, summary, recent tail, and fixed context cannot fit.
+Deferred older history can still use the existing bounded compaction passes.
+The existing per-request context check budgets the retained task before calling the provider.
+
+
+### Tool evidence during reconstruction
+
+Live tool-result persistence and transcript reconstruction use one text reader.
+Failed calls retain their stored result text, including operation receipts and recovery instructions.
+If a call also has an explicit interruption error, both texts remain available without duplicating identical text.
+The summarizer receives the same failure evidence, including errors without a stored result.
+Successful elided results keep their existing live-context elision policy. Stored results remain available to the summarizer.
+A schema repair rebuilds its prefix only when the active checkpoint covers its original source entry.
+An uncompacted running session keeps its live prefix. A restarted session reconstructs failed-tool evidence from storage.
+
+This design keeps essential instructions outside summary prose while preserving the context needed to continue.
+Anthropic documents retaining selected instruction messages after compaction: https://platform.claude.com/docs/en/build-with-claude/compaction-threshold.
+OpenAI documents treating the returned compacted window as the canonical next context: https://developers.openai.com/api/docs/guides/compaction.
+These references support the retention principle; the engine keeps its provider-independent compaction implementation.
+
+Regression coverage combines the workflow interpreter, PostgreSQL-compatible storage, original task retention, compaction, restart, and one bounded repair.
+Session nodes and team orchestrator nodes retain operation receipts. They reuse completed operations and deliver only validated output.
+A blocked repair fails the workflow without posting a fabricated report.

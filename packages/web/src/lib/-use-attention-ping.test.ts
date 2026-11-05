@@ -4,10 +4,9 @@
  * only blocked-on-a-person kinds ping, an already-read item never does, and
  * a gate on the page you are looking at stays silent.
  */
-import { describe, expect, it } from "vitest";
 import type { NotificationKind, NotificationSummary } from "@valet/api/wire";
+import { describe, expect, it } from "vitest";
 import {
-  attentionSessionIds,
   hrefMatchesLocation,
   isActionable,
   shouldPing,
@@ -45,46 +44,6 @@ describe("isActionable", () => {
   });
 });
 
-describe("attentionSessionIds", () => {
-  it("collects sessions with an unread actionable notification", () => {
-    const out = attentionSessionIds([
-      notif("approval", { sessionId: "s1" }),
-      notif("notification", { id: "n2", sessionId: "s2" }),
-      notif("question", { id: "n3", readAt: 5, sessionId: "s3" }),
-    ]);
-    expect(out).toEqual(new Set(["s1"]));
-  });
-
-  it("lights a live session from its pending gate before any poll arrives", () => {
-    // The gate frame reaches the stream store the moment the gate opens;
-    // the notification row shows up on the next 30s poll. The dot must not
-    // wait for the poll (TKAI-257).
-    expect(attentionSessionIds([], { s1: true })).toEqual(new Set(["s1"]));
-  });
-
-  it("clears a live session the moment its gates resolve, unread notification or not", () => {
-    // Resolving a gate does not mark its notification read, so the poll
-    // keeps listing the session until the user opens the bell. The live
-    // store says the gate is gone — believe it.
-    const out = attentionSessionIds([notif("approval", { sessionId: "s1" })], { s1: false });
-    expect(out).toEqual(new Set());
-  });
-
-  it("keeps an escalation lit even when the live session has no gates", () => {
-    // A stuck submission has no decision gate behind it, so the stream
-    // store never sees it. Only the poll can clear it.
-    const out = attentionSessionIds([notif("escalation", { sessionId: "s1" })], { s1: false });
-    expect(out).toEqual(new Set(["s1"]));
-  });
-
-  it("falls back to the poll for a session with no open socket", () => {
-    // No key in the live map = no WS. Its slice may be missing or stale;
-    // the poll is the only truth available.
-    const out = attentionSessionIds([notif("approval", { sessionId: "s1" })], {});
-    expect(out).toEqual(new Set(["s1"]));
-  });
-});
-
 describe("shouldPing", () => {
   it("stays silent for a general update", () => {
     expect(shouldPing(notif("notification"), HIDDEN)).toBe(false);
@@ -109,8 +68,8 @@ describe("shouldPing", () => {
 });
 
 describe("hrefMatchesLocation", () => {
-  it("ignores a thread parameter, which names a place inside a conversation you can see", () => {
-    expect(hrefMatchesLocation("/chat?thread=t1", "/chat", "")).toBe(true);
+  it("requires the notification thread to be on screen", () => {
+    expect(hrefMatchesLocation("/chat?thread=t1", "/chat", "")).toBe(false);
     expect(hrefMatchesLocation("/chat", "/chat", "")).toBe(true);
   });
 
@@ -124,34 +83,40 @@ describe("hrefMatchesLocation", () => {
    * OTHER assistant silent while the reader sat on `/chat` — the case this
    * whole feature exists to catch.
    */
-  it("does not match another assistant's conversation at the same path", () => {
-    expect(hrefMatchesLocation("/chat?assistant=b", "/chat", "?assistant=a")).toBe(false);
+  it("does not match another workspace at the same path", () => {
+    expect(hrefMatchesLocation("/chat?workspace=b", "/chat", "?workspace=a")).toBe(false);
   });
 
-  it("matches the assistant actually open", () => {
-    expect(hrefMatchesLocation("/chat?assistant=a", "/chat", "?assistant=a")).toBe(true);
+  it("matches the workspace actually open", () => {
+    expect(hrefMatchesLocation("/chat?workspace=a", "/chat", "?workspace=a")).toBe(true);
     // The leading `?` is optional — routers report it both ways.
-    expect(hrefMatchesLocation("/chat?assistant=a", "/chat", "assistant=a")).toBe(true);
+    expect(hrefMatchesLocation("/chat?workspace=a", "/chat", "workspace=a")).toBe(true);
   });
 
-  it("does not match when no assistant is open at all", () => {
-    expect(hrefMatchesLocation("/chat?assistant=b", "/chat", "")).toBe(false);
+  it("does not match an unresolved workspace", () => {
+    expect(hrefMatchesLocation("/chat?workspace=b", "/chat", "")).toBe(false);
   });
 
-  it("ignores a thread difference once the assistant agrees", () => {
-    expect(hrefMatchesLocation("/chat?assistant=a&thread=t9", "/chat", "?assistant=a")).toBe(true);
+  it("does not suppress an approval in another thread of the same workspace", () => {
+    expect(hrefMatchesLocation("/chat?workspace=a&thread=t9", "/chat", "?workspace=a")).toBe(false);
   });
+  it("uses the active scope when the URL omits workspace", () => {
+    expect(hrefMatchesLocation("/chat?workspace=team-a&thread=t1", "/chat", "?thread=t1", "team-a")).toBe(true);
+    expect(hrefMatchesLocation("/chat?workspace=team-b&thread=t1", "/chat", "?thread=t1", "team-a")).toBe(false);
+    expect(hrefMatchesLocation("/chat?workspace=team-a&thread=t1", "/chat", "?workspace=team-b&thread=t1", "team-a")).toBe(false);
+  });
+
 });
 
-describe("shouldPing — several assistants share /chat", () => {
-  const onA: PingContext = { pathname: "/chat", search: "?assistant=a", tabVisible: true };
+describe("shouldPing — workspace conversations share /chat", () => {
+  const onA: PingContext = { pathname: "/chat", search: "?workspace=a", tabVisible: true };
 
   it("pings for a gate raised by an assistant you are NOT looking at", () => {
-    expect(shouldPing(notif("approval", { href: "/chat?assistant=b" }), onA)).toBe(true);
+    expect(shouldPing(notif("approval", { href: "/chat?workspace=b" }), onA)).toBe(true);
   });
 
   it("stays quiet for the conversation already on screen", () => {
-    expect(shouldPing(notif("approval", { href: "/chat?assistant=a" }), onA)).toBe(false);
+    expect(shouldPing(notif("approval", { href: "/chat?workspace=a" }), onA)).toBe(false);
   });
 });
 

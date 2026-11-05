@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { SandboxListing } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
-import { agentSessions } from "../schema/index.js";
+import { agentSessions, assistants } from "../schema/index.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { SandboxReconcileSweep, type SandboxReconcileSweepDeps } from "./sandbox-reconcile-sweep.js";
 
@@ -72,13 +72,22 @@ describe("SandboxReconcileSweep", () => {
     return { deps, destroyedSandboxes };
   }
 
+  it("retains a cutover assistant's working directory until operator recovery", async () => {
+    await db.insert(assistants).values({ id: "old", orgId: "org", ownerType: "team", ownerId: "team:retired:old",
+      sessionId: "retained", createdAt: 1, archivedAt: 2 });
+    const { deps, destroyedSandboxes } = fakeDeps({ listed: [listing("retained-sandbox", "retained", OVER_AGE)] });
+    const report = await new SandboxReconcileSweep(deps).sweep(NOW);
+    expect(destroyedSandboxes).toEqual([]);
+    expect(report.overAge).toBe(1);
+  });
+
   it("no-ops on providers without a list() seam", async () => {
     const { deps, destroyedSandboxes } = fakeDeps({ noList: true });
 
     const report = await new SandboxReconcileSweep(deps).sweep(NOW);
 
     expect(destroyedSandboxes).toEqual([]);
-    expect(report).toEqual({ orphansDestroyed: 0, overAge: 0, unowned: 0 });
+    expect(report).toEqual({ orphansDestroyed: 0, overAge: 0, unowned: 0, liveScratchBytes: 0 });
   });
 
   it("destroys an orphaned sandbox whose session is gone from the store and the cache", async () => {
@@ -254,7 +263,7 @@ describe("SandboxReconcileSweep", () => {
     const report = await new SandboxReconcileSweep(deps).sweep(NOW);
 
     expect(destroyedSandboxes).toEqual(["sbx-1"]);
-    expect(report).toEqual({ orphansDestroyed: 1, overAge: 1, unowned: 0 });
+    expect(report).toEqual({ orphansDestroyed: 1, overAge: 1, unowned: 0, liveScratchBytes: 0 });
   });
 
   it("ageReportMs <= 0 disables the over-age report but keeps the orphan rule", async () => {
@@ -295,5 +304,40 @@ describe("SandboxReconcileSweep", () => {
 
     expect(destroyedSandboxes).toEqual(["sbx-2"]);
     expect(report.orphansDestroyed).toBe(1);
+  });
+
+  it("sums the scratch of live sandboxes into the fleet gauge each pass (fix wave 3, M1)", async () => {
+    function withScratch(row: SandboxListing, scratchBytes: number): SandboxListing {
+      const listed = { ...row, scratchBytes };
+      return listed;
+    }
+    const { deps } = fakeDeps({
+      listed: [
+        withScratch(listing("a", "s-a", FRESH), 100 * 2 ** 30),
+        withScratch(listing("b", "s-b", FRESH), 2 ** 40),
+        listing("c", "s-c", FRESH),
+      ],
+      knownSessions: ["s-a", "s-b", "s-c"],
+    });
+    const recorded: number[] = [];
+
+    const report = await new SandboxReconcileSweep({
+      ...deps, recordLiveScratchBytes: (bytes) => recorded.push(bytes),
+    }).sweep(NOW);
+
+    expect(report.liveScratchBytes).toBe(100 * 2 ** 30 + 2 ** 40);
+    expect(recorded).toEqual([100 * 2 ** 30 + 2 ** 40]);
+  });
+
+  it("records zero when no sandbox has scratch", async () => {
+    const { deps } = fakeDeps({ listed: [listing("c", "s-c", FRESH)], knownSessions: ["s-c"] });
+    const recorded: number[] = [];
+
+    const report = await new SandboxReconcileSweep({
+      ...deps, recordLiveScratchBytes: (bytes) => recorded.push(bytes),
+    }).sweep(NOW);
+
+    expect(report.liveScratchBytes).toBe(0);
+    expect(recorded).toEqual([0]);
   });
 });

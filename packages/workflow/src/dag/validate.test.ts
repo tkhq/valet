@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 
 import { validateWorkflowDefinition } from './validate.js';
 import type { WorkflowDefinition } from './shape.js';
-import type { ToolNode } from './nodes.js';
+import type { ThreadNode, ToolNode } from './nodes.js';
 
 /** Deliberately-malformed node for linter-behavior tests. The validator's
  * real-world input is LLM-authored JSON, so tests must hand it shapes the
@@ -29,6 +29,12 @@ function definition(overrides: Partial<WorkflowDefinition>): WorkflowDefinition 
 }
 
 describe('validateWorkflowDefinition', () => {
+  it('validates optional channel presence', () => {
+    expect(validateWorkflowDefinition(definition({ presence: { displayName: 'Helper', avatarUrl: 'https://example.com/a.webp' } }))).toEqual({ ok: true });
+    const invalid = validateWorkflowDefinition(definition({ presence: { avatarUrl: 'http://example.com/a.webp' } }));
+    expect(invalid).toMatchObject({ ok: false, errors: [expect.stringContaining('HTTPS')] });
+  });
+
   it('accepts a valid fixture', () => {
     const result = validateWorkflowDefinition(definition({}));
     expect(result).toEqual({ ok: true });
@@ -352,7 +358,7 @@ describe('validateWorkflowDefinition', () => {
   });
 
   describe('llm node', () => {
-    function llmDefinition(overrides: Partial<{ model: string; prompt: string }>): WorkflowDefinition {
+    function llmDefinition(overrides: Partial<{ model: string; prompt: string; reasoning: string }>): WorkflowDefinition {
       return definition({
         nodes: [
           { id: 'trigger', type: 'trigger' },
@@ -368,6 +374,13 @@ describe('validateWorkflowDefinition', () => {
 
     it('accepts a valid llm node', () => {
       expect(validateWorkflowDefinition(llmDefinition({}))).toEqual({ ok: true });
+    });
+
+    it('accepts a known reasoning level and rejects an unknown one', () => {
+      expect(validateWorkflowDefinition(llmDefinition({ reasoning: 'high' }))).toEqual({ ok: true });
+      const result = validateWorkflowDefinition(llmDefinition({ reasoning: 'extreme' }));
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.errors.some((e) => e.includes('llm.reasoning must be one of'))).toBe(true);
     });
 
     it('rejects an empty model', () => {
@@ -442,8 +455,8 @@ describe('validateWorkflowDefinition', () => {
     });
   });
 
-  describe('orchestrator node', () => {
-    it('accepts a valid orchestrator node', () => {
+  describe('orchestrator (Thread) node', () => {
+    it('accepts a valid thread node', () => {
       const result = validateWorkflowDefinition(
         definition({
           nodes: [
@@ -477,6 +490,30 @@ describe('validateWorkflowDefinition', () => {
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(result.errors.some((e) => e.includes('orchestrator.prompt must be a non-empty string'))).toBe(true);
+      }
+    });
+
+    it('accepts "run" and "step" for thread and rejects any other value', () => {
+      const withThread = (thread: unknown) => validateWorkflowDefinition(
+        definition({
+          nodes: [
+            { id: 'trigger', type: 'trigger' },
+            // Deliberately unchecked: the validator must reject what the type cannot hold.
+            { id: 'ask', type: 'orchestrator', prompt: 'do the thing', thread } as unknown as ThreadNode,
+            { id: 'stop', type: 'stop' },
+          ],
+          edges: [
+            { from: 'trigger', to: 'ask' },
+            { from: 'ask', to: 'stop' },
+          ],
+        }),
+      );
+      expect(withThread('run')).toEqual({ ok: true });
+      expect(withThread('step')).toEqual({ ok: true });
+      const result = withThread('iteration');
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors).toContain('node "ask": orchestrator.thread must be "run" or "step", got "iteration"');
       }
     });
   });
@@ -542,7 +579,7 @@ describe('validateWorkflowDefinition', () => {
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(
-          result.errors.some((e) => e.includes('tool.credential must be "auto", "app" or "user"')),
+          result.errors.some((e) => e.includes('tool.credential must be "auto", "app", or "user"')),
         ).toBe(true);
       }
     });

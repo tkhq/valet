@@ -32,6 +32,7 @@ export interface ValetPlugin {
   actions?: ActionPlugin[];              // plugin-catalog shape, unchanged
   transports?: ChannelTransportFactory[]; // v2 channel contract (engine spec)
   triggers?: TriggerDef[];               // this spec, below
+  httpRoutes?: PluginHttpRoute[];        // host-mounted portable route declarations
   skills?: SkillSource[];
   roles?: RoleSpec[];
   credentials?: CredentialDeclaration[]; // declaration only, below
@@ -242,8 +243,10 @@ model then answers "I can't do that" without ever calling `list_tools`. Three
 prompt changes close this gap:
 
 - **`list_tools` names every service in its description**
-  (`Available services: github, gmail, ...`), computed per session from the
+  (`Installed services: github, gmail, ...`), computed per session from the
   catalog's static entries plus its dynamic (`resolveActions`-backed) plugins.
+  The line does not probe the person's own connection, so it says so and tells
+  the model to call `list_tools` before it reports a service as connected.
   The tool catalog is re-sent on every turn, so the service index is a
   zero-cost, always-fresh signal. The description also carries the rule: check
   here before you say a request is not possible.
@@ -255,8 +258,28 @@ prompt changes close this gap:
   carries the same rule as a `## Capabilities` section for every owner kind.
 
 All three distinguish "not connected" from "not possible": an unconnected
-integration is reported with its corrective action (`list_tools` already emits
-that warning), never presented as a capability the agent lacks.
+integration is reported with its corrective action, never presented as a
+capability the agent lacks.
+
+## Capability discovery inventory (2026-09-17)
+
+Every API session now includes `list_tools` and `call_tool`, even when no
+action plugin survives filtering. The catalog description states that it lists
+integration actions only. A search that matches a native tool, or no action,
+directs the model to its visible native tool list and names native matches.
+
+The host records service availability before each filter removes actions. The
+catalog reports `deployment_unconfigured`, `disabled_by_org`,
+`excluded_by_assistant`, and `load_failed` at service level. It never
+reports schemas or action ids for a removed service. Personal credential probes
+report `not_connected` and direct the user to the Integrations page (`/integrations`).
+
+The deployment and org-credential inventory resolves on every `list_tools`
+call. A cached session therefore sees an org credential immediately after an
+admin stores it. The build-time snapshot supplies only the compact description:
+available service names, configurable service names, and gated service markers.
+Native tool names and availability data are plain host inputs, so the engine
+keeps no API dependency.
 
 ## Structured tool output encoding (2026-09-11)
 
@@ -279,3 +302,7 @@ when present, then parses JSON text, then tries TOON, and finally preserves raw
 text. The TOON step requires a standalone first-line array or table marker such
 as `[2]:`, `items[2]:`, or `items[2]{id,name}:`. This gate keeps ordinary text
 such as `Error: Invalid input` as text.
+
+## Plugin HTTP routes
+
+The [HTTP interfaces design](2026-10-07-plugin-http-interfaces-design.md) defines `ValetPlugin.httpRoutes`. The host owns authentication, namespace assignment, and streaming body limits. Linear webhook ingress uses this interface. GitHub's App setup, user connection, and App webhook routes use it with capabilities from the host binding table. Other connection handlers and providers remain unchanged.

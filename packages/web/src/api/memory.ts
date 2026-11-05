@@ -1,12 +1,13 @@
 /**
  * Memory queries (assistant-centered web UI, decision 7). House pattern: a
  * query-key factory per resource file, mirroring `~/api/queries` and
- * `~/api/orchestrator`. The dashboard memory card uses `tree` + `doc`; the
+ * `~/api/workspace-runtime`. The dashboard memory card uses `tree` + `doc`; the
  * Task 6 explorer adds `search` on top of the same factory.
  */
 import { useQuery, type UseQueryOptions } from "@tanstack/react-query";
-import type { GetMemoryTreeResponse } from "@valet/api/wire";
-import { api, ApiError, type OwnerFilter } from "./client";
+import type { GetMemoryPrinciplesResponse, GetMemoryTreeResponse } from "@valet/api/wire";
+import { api, type OwnerFilter } from "./client";
+import { retryUnlessNotFound } from "~/lib/not-found";
 import type { GetMemoryDocResponse, SearchMemoryResponse } from "./memory-types";
 
 /** Every key carries the workspace, so switching refetches instead of
@@ -18,6 +19,7 @@ function ownerKey(owner?: OwnerFilter): readonly string[] {
 
 export const qkMemory = {
   tree: (owner?: OwnerFilter) => ["memory", "tree", ...ownerKey(owner)] as const,
+  principles: (owner?: OwnerFilter) => ["memory", "principles", ...ownerKey(owner)] as const,
   doc: (path: string, owner?: OwnerFilter) =>
     ["memory", "doc", path, ...ownerKey(owner)] as const,
   search: (q: string, owner?: OwnerFilter) =>
@@ -33,6 +35,14 @@ export function useMemoryTree(
     queryKey: qkMemory.tree(owner),
     queryFn: () => api.getMemoryTree(owner),
     ...opts,
+  });
+}
+
+/** Every principle the scope reads: own, team, and org-synced. */
+export function useMemoryPrinciples(owner?: OwnerFilter) {
+  return useQuery<GetMemoryPrinciplesResponse>({
+    queryKey: qkMemory.principles(owner),
+    queryFn: () => api.getMemoryPrinciples(owner),
   });
 }
 
@@ -52,10 +62,7 @@ export function useMemoryDoc(
   return useQuery<GetMemoryDocResponse>({
     queryKey: qkMemory.doc(path, owner),
     queryFn: () => api.getMemoryDoc(path, owner),
-    retry: (failureCount, error) => {
-      if (error instanceof ApiError && error.status === 404) return false;
-      return failureCount < 2;
-    },
+    retry: retryUnlessNotFound,
     ...opts,
   });
 }

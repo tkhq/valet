@@ -20,6 +20,7 @@ CREATE TABLE "engine_decision_gates" (
 	"status" text NOT NULL,
 	"title" text NOT NULL,
 	"body" text,
+	"agent_reason" text,
 	"actions" text NOT NULL,
 	"origin" text,
 	"context" text,
@@ -30,6 +31,8 @@ CREATE TABLE "engine_decision_gates" (
 );
 --> statement-breakpoint
 CREATE INDEX "engine_decision_gates_thread" ON "engine_decision_gates" ("session_id","thread_id","status");
+--> statement-breakpoint
+CREATE INDEX "engine_decision_gates_pending" ON "engine_decision_gates" ("created_at", "id" COLLATE "C") WHERE "status" = 'pending';
 --> statement-breakpoint
 CREATE INDEX "engine_decision_gates_resume" ON "engine_decision_gates" ("session_id","thread_id","queue_item_id","resume_key");
 --> statement-breakpoint
@@ -91,6 +94,7 @@ CREATE TABLE "engine_queue_items" (
 	"thread_id" text NOT NULL,
 	"dispatch_id" text,
 	"status" text NOT NULL,
+	"child_result_delivery" text,
 	"outcome" text,
 	"error" text,
 	"superseded_by_item_id" text,
@@ -123,6 +127,8 @@ CREATE TABLE "engine_queue_items" (
 CREATE INDEX "engine_queue_items_thread" ON "engine_queue_items" ("session_id","thread_id","status");
 --> statement-breakpoint
 CREATE UNIQUE INDEX "engine_queue_items_dispatch" ON "engine_queue_items" ("session_id","dispatch_id") WHERE "dispatch_id" IS NOT NULL;
+--> statement-breakpoint
+CREATE INDEX "engine_queue_items_child_delivery" ON "engine_queue_items" ("session_id") WHERE "child_result_delivery" = 'pending';
 --> statement-breakpoint
 CREATE TABLE "engine_attempt_markers" (
 	"item_id" text NOT NULL,
@@ -220,3 +226,69 @@ CREATE TABLE "engine_threads" (
 CREATE INDEX "engine_threads_session" ON "engine_threads" ("session_id");
 --> statement-breakpoint
 CREATE UNIQUE INDEX "engine_threads_session_key" ON "engine_threads" ("session_id","key");
+--> statement-breakpoint
+CREATE TABLE "engine_wakeups" (
+	"id" text PRIMARY KEY NOT NULL,
+	"session_id" text NOT NULL,
+	"thread_id" text NOT NULL,
+	"kind" text NOT NULL,
+	"status" text NOT NULL,
+	"reason" text NOT NULL,
+	"command" text,
+	"prompt" text,
+	"exec_id" text,
+	"lease_id" text,
+	"fire_at" bigint,
+	"deadline_at" bigint,
+	"exit_code" integer,
+	"cause" text,
+	"log_offset" bigint NOT NULL DEFAULT 0,
+	"log_tail" text NOT NULL DEFAULT '',
+	"event_count" integer NOT NULL DEFAULT 0,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL,
+	"ended_at" bigint,
+	"origin_json" text,
+	"window_start_at" bigint,
+	"window_count" integer,
+	"watch_buffer" text,
+	"last_emit_at" bigint,
+	"match_json" text,
+	"subjects" text[],
+	"event_buffer" text,
+	"event_seen" text,
+	"event_source_seen" text,
+	"source_queue_item_id" text,
+	"terminal_signal_started_at" bigint,
+	"terminal_signal_loss_reported_at" bigint,
+	"terminal_signal_expected" boolean NOT NULL DEFAULT false
+);
+--> statement-breakpoint
+CREATE INDEX "engine_wakeups_session" ON "engine_wakeups" ("session_id","status");
+--> statement-breakpoint
+CREATE INDEX "engine_wakeups_due" ON "engine_wakeups" ("status","kind","fire_at");
+--> statement-breakpoint
+CREATE INDEX "engine_wakeups_event_buffer_due" ON "engine_wakeups" ("created_at", "id") WHERE "kind" = 'event' AND "status" = 'running' AND COALESCE("event_buffer", '[]') <> '[]';
+--> statement-breakpoint
+CREATE INDEX "engine_wakeups_event_subjects" ON "engine_wakeups" USING gin ("subjects") WHERE "kind" = 'event' AND "status" = 'running';
+--> statement-breakpoint
+CREATE TABLE "engine_leases" (
+	"id" text PRIMARY KEY NOT NULL,
+	"session_id" text NOT NULL,
+	"sandbox_id" text,
+	"owner_kind" text NOT NULL,
+	"owner_id" text,
+	"reason" text NOT NULL,
+	"created_at" bigint NOT NULL,
+	"deadline_at" bigint NOT NULL,
+	"released_at" bigint,
+	"release_cause" text,
+	"source_queue_item_id" text,
+	"terminal_signal_started_at" bigint,
+	"terminal_signal_loss_reported_at" bigint,
+	"terminal_signal_expected" boolean NOT NULL DEFAULT false,
+	"thread_id" text,
+	"origin_json" text
+);
+--> statement-breakpoint
+CREATE INDEX "engine_leases_active" ON "engine_leases" ("session_id") WHERE "released_at" IS NULL;

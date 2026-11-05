@@ -31,7 +31,7 @@ import {
   asRecord,
   createSkill,
   deleteSkill,
-  listSkills,
+  listSkillRowsFor,
   SkillNameConflictError,
   SkillNotLocalError,
   SkillValidationError,
@@ -121,14 +121,15 @@ export function skillsActionPlugin(db: AppDb): ActionPlugin {
     id: "skills.list_skills",
     name: "List skills",
     description:
-      "List the stored skills you can reach: your own, plus every team you belong to. " +
-      "Returns names and descriptions, not bodies — call the `skill` tool with a name to " +
-      "read one. Skills a plugin ships are not listed here.",
+      "List the stored skills available to this session. Returns names and descriptions, " +
+      "not bodies — call the `skill` tool with a name to read one. Skills a plugin ships " +
+      "are not listed here.",
     riskLevel: "low",
     execute: async (_args, ctx) => {
       const owner = skillOwnerFromContext(ctx);
       if (!owner) return NO_OWNER;
-      const rows = await listSkills(db, owner);
+      const principal = ctx.owner ?? { type: "user", id: owner.userId };
+      const rows = await listSkillRowsFor(db, principal, owner.orgId);
       return { success: true, data: { skills: rows.map(toSummary) } };
     },
   });

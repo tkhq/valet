@@ -16,9 +16,47 @@
  * `valet_tokens_total`). The bundled Grafana dashboard queries those
  * rendered names.
  */
-import { metrics, type Counter, type Histogram } from "@opentelemetry/api";
+import { metrics, type Counter, type Histogram, type ObservableGauge } from "@opentelemetry/api";
+import { SANDBOX_STARTUP_KINDS, type SandboxStartupKind } from "./errors.js";
+import type { LeaseOwnerKind, WakeupCause, WakeupKind } from "./wakeups/types.js";
 
 const METER_NAME = "@valet/engine";
+
+/**
+ * Last-set value for one observable gauge's one label set. The engine has no
+ * push-gauge instrument (OTel only offers synchronous Counter/UpDownCounter/
+ * Histogram plus async Observable*), so each gauge keeps its latest value
+ * here, keyed by its serialized attributes, and an `addCallback` on the
+ * matching `createObservableGauge` reports every entry at each collection.
+ */
+interface GaugeEntry {
+  value: number;
+  attributes: Record<string, string>;
+}
+
+function attributeKey(attributes: Record<string, string>): string {
+  return Object.keys(attributes)
+    .sort()
+    .map((key) => `${key}=${attributes[key]}`)
+    .join(",");
+}
+
+function setGauge(state: Map<string, GaugeEntry>, attributes: Record<string, string>, value: number): void {
+  state.set(attributeKey(attributes), { value, attributes });
+}
+
+function observeGauge(gauge: ObservableGauge, state: Map<string, GaugeEntry>): void {
+  gauge.addCallback((result) => {
+    for (const entry of state.values()) result.observe(entry.value, entry.attributes);
+  });
+}
+
+const wakeupsActiveState = new Map<string, GaugeEntry>();
+const leasesActiveState = new Map<string, GaugeEntry>();
+const leasesOverDeadlineState = new Map<string, GaugeEntry>();
+const leasesUnannotatedState = new Map<string, GaugeEntry>();
+const scratchRequestedState = new Map<string, GaugeEntry>();
+const wakeupSweepOkState = new Map<string, GaugeEntry>();
 
 interface Instruments {
   turns: Counter;
@@ -26,6 +64,7 @@ interface Instruments {
   tokens: Counter;
   costUsd: Counter;
   settlements: Counter;
+  childResultsRecovered: Counter;
   queueWait: Histogram;
   toolDuration: Histogram;
   sandboxExecDuration: Histogram;
@@ -35,9 +74,34 @@ interface Instruments {
   sandboxCreated: Counter;
   sandboxDestroyed: Counter;
   sandboxFlagged: Counter;
+  sandboxStartupFailed: Counter;
   sandboxCapacityWait: Histogram;
   sandboxWorkspaceGrow: Counter;
   cacheBreaks: Counter;
+  compactionCoverageGaps: Counter;
+  toolStopTimeouts: Counter;
+  wakeupsTotal: Counter;
+  wakeupSignalsLost: Counter;
+  wakeupKillsFailed: Counter;
+  wakeupsActive: ObservableGauge;
+  leasesActive: ObservableGauge;
+  leaseNodeSeconds: Counter;
+  leasesOverDeadline: ObservableGauge;
+  leasesUnannotated: ObservableGauge;
+  scratchRequestedBytes: ObservableGauge;
+  scratchRefused: Counter;
+  leasesOrphanReleased: Counter;
+  wakeupBadRows: Counter;
+  eventWaiterBufferFull: Counter;
+  eventWaiterMatches: Counter;
+  eventDerive: Counter;
+  eventMatchFailed: Counter;
+  wakeupSweepOkAt: ObservableGauge;
+  wakeupSweepFailed: Counter;
+  jobLogsPruned: Counter;
+  dockerJobOutputDropped: Counter;
+  leasesSettleOverDeadline: Counter;
+  errors: Counter;
 }
 
 let instruments: Instruments | null = null;
@@ -58,6 +122,9 @@ function inst(): Instruments {
     }),
     costUsd: meter.createCounter("valet.cost.usd", {
       description: "LLM spend in USD (priced models only — unpriced turns record nothing)",
+    }),
+    childResultsRecovered: meter.createCounter("valet.child.results_recovered", {
+      description: "Pending child settlements recovered at runtime after a missed observer event",
     }),
     settlements: meter.createCounter("valet.submissions.settled", {
       description: "Settled submissions, by outcome",
@@ -95,6 +162,10 @@ function inst(): Instruments {
       description:
         "Sandboxes flagged by the reconcile sweep without a destroy, by kind (over_age, unowned). A sustained non-zero rate means a lifecycle owner failed to clean up — the alert signal for the alert-don't-auto-repair rule.",
     }),
+    sandboxStartupFailed: meter.createCounter("valet.sandbox.startup_failed", {
+      description:
+        "Terminal sandbox startup failures by bounded kind (crash_loop/image_pull/unschedulable/pod_failed/ownership/other). A failure here reached the attachment as a SandboxStartupError; retries are counted again.",
+    }),
     sandboxCapacityWait: meter.createHistogram("valet.sandbox.capacity_wait", {
       unit: "ms",
       description:
@@ -108,8 +179,117 @@ function inst(): Instruments {
       description:
         "Prompt-cache breaks between consecutive turns, by cause (model_changed, system_prompt_changed, tools_changed, ttl_or_content). A sustained rate on one cause means something rewrites the request prefix every turn — investigate that source, do not ignore (TKAI-320).",
     }),
+    compactionCoverageGaps: meter.createCounter("valet.compaction.coverage_gap", {
+      description:
+        "Compaction passes that refused to write a checkpoint because the summarizer input carried none of the history the checkpoint would replace. This is an invariant violation, not a workload property: any sustained rate means threads stop compacting (TKAI-461).",
+    }),
+    toolStopTimeouts: meter.createCounter("valet.tool.stop_timeouts", {
+      description:
+        "Tool calls still running after their turn was stopped and the grace period ended. The turn stopped waiting and the call kept running detached. Any rate means a tool ignores its abort signal: fix that tool.",
+    }),
+    wakeupsTotal: meter.createCounter("valet.wakeups.total", {
+      description:
+        "Wakeups that ended, by kind (process/watch/timer) and cause. See WakeupCause. cause=session_deleted counts open wakeups a session delete ended.",
+    }),
+    wakeupSignalsLost: meter.createCounter("valet.wakeups.signal_lost", {
+      description:
+        "Wakeup signals the WakeWatcher could not deliver after the row moved, by kind (process/watch/timer/hold). The row does not retry, so each count is a turn the agent never got. Any sustained rate needs a human.",
+    }),
+    wakeupKillsFailed: meter.createCounter("valet.wakeups.kill_failed", {
+      description:
+        "Best-effort kills that threw after a wakeup row moved to a terminal status, by kind (process/watch). The row does not retry, so the process may run untracked until its container stops. Any count needs a human.",
+    }),
+    wakeupsActive: meter.createObservableGauge("valet.wakeups.active", {
+      description:
+        "Wakeups currently pending or running, by kind, from a store count each WakeWatcher pass. A count that only grows means wakeups are not reaching a terminal status.",
+    }),
+    leasesOrphanReleased: meter.createCounter("valet.leases.orphan_released", {
+      description:
+        "Process or watch leases the WakeWatcher released outside the normal transition, by owner_kind and reason. reason=missing_owner or terminal_owner: a crash between two writes can cause one; a sustained rate means a lease writer is broken. reason=deadline: the WakeWatcher failed to end the owner at its deadline for two ticks, which is a bug; alert on any count.",
+    }),
+    wakeupBadRows: meter.createCounter("valet.wakeups.bad_rows", {
+      description:
+        "engine_wakeups or engine_leases rows a store read skipped because a field held an unknown value, by table. Any count needs a human: the row is never probed or released.",
+    }),
+    eventWaiterBufferFull: meter.createCounter("valet.event_waiter.buffer_full", {
+      description:
+        "Event matches a store refused because the event waiter already buffered EVENT_BUFFER_MAX_DIGESTS digests. Prometheus exports it as valet_event_waiter_buffer_full_total. A count means delivery is stalled for that waiter: find out why the WakeWatcher does not drain it.",
+    }),
+    eventWaiterMatches: meter.createCounter("valet.event_waiter.matches", {
+      description:
+        "Event matches that ingest appended to an event waiter's buffer, by service. Prometheus exports it as valet_event_waiter_matches_total. A redelivered event the waiter already holds is not counted.",
+    }),
+    eventDerive: meter.createCounter("valet.event_waiter.derive", {
+      description:
+        "Derived event computations for event waiters, by derived key and result (event, null, error). Prometheus exports it as valet_event_waiter_derive_total. result=error means a provider read failed and the match digest was kept; a sustained rate means the provider or its credential is broken.",
+    }),
+    eventMatchFailed: meter.createCounter("valet.wakeups.event_match_failed", {
+      description:
+        "Event waiter matching passes, or single waiter candidates, that failed with an error during ingest. Prometheus exports it as valet_wakeups_event_match_failed_total. The subscription outcome does not change, but a waiter can miss the event: alert on any increase.",
+    }),
+    wakeupSweepOkAt: meter.createObservableGauge("valet.wakeups.sweep_ok_at", {
+      unit: "s",
+      description:
+        "Unix time of the last WakeWatcher pass that finished, or of the watcher start before the first pass. Prometheus exports it as valet_wakeups_sweep_ok_at_seconds. Alert when time() minus it exceeds a few intervals: the other wakeup and lease gauges then hold stale values.",
+    }),
+    jobLogsPruned: meter.createCounter("valet.jobs.logs_pruned", {
+      description:
+        "Detached job file sets a kubernetes kickoff deleted because the job ended more than a day ago. Job logs count against /scratch, so a zero rate with growing scratch use means the prune is not running.",
+    }),
+    dockerJobOutputDropped: meter.createCounter("valet.jobs.docker_output_dropped", {
+      description:
+        "Finished detached job buffers the docker backend dropped because one sandbox's buffers passed their total cap. A dropped job's log reads as empty. Dev backend only.",
+    }),
+    wakeupSweepFailed: meter.createCounter("valet.wakeups.sweep_failed", {
+      description: "WakeWatcher passes that threw before they finished. A sustained rate means no wakeup moves and no hold expires.",
+    }),
+    leasesSettleOverDeadline: meter.createCounter("valet.leases.settle_over_deadline", {
+      description:
+        "Child settles that stopped waiting because a lease stayed active past its deadline plus one poll. The child settled; the lease owner failed to release it.",
+    }),
+    leasesActive: meter.createObservableGauge("valet.leases.active", {
+      description:
+        "Sandbox leases currently held open, by owner kind (process/watch/hold). A lease keeps a sandbox alive independent of session activity. A persistently high count means that many node hours stay held by leases; check it against expected load.",
+    }),
+    leaseNodeSeconds: meter.createCounter("valet.leases.node_seconds", {
+      description:
+        "Sandbox node-seconds held open by a lease, by owner kind. The capacity cost of durable background work; a sustained rise on one owner kind means that kind is pinning sandboxes.",
+    }),
+    leasesOverDeadline: meter.createObservableGauge("valet.leases.over_deadline", {
+      description:
+        "Leases active past their deadline for two ticks, measured at the start of each WakeWatcher pass, before its repair runs. Non-zero means the WakeWatcher failed to end their owners. This is the alert signal for the alert-don't-auto-repair rule; the repair that follows counts in valet.leases.orphan_released{reason=deadline}.",
+    }),
+    leasesUnannotated: meter.createObservableGauge("valet.leases.unannotated", {
+      description:
+        "Leased sandboxes the last WakeWatcher reconcile found without eviction protection: a pod that lacked safe-to-evict=false past two ticks, or a failed patch. A lease whose session has no sandbox yet is not counted. Any non-zero value pages (INV-3).",
+    }),
+    scratchRequestedBytes: meter.createObservableGauge("valet.sandbox.scratch.requested_bytes", {
+      description:
+        "Most recently requested /scratch volume size, by session class. Tracks demand for scratch capacity, not allocated size.",
+    }),
+    errors: meter.createCounter("valet.errors", {
+      description:
+        "Error paths that did not throw, by area, reason, and provider (see reportError in error-report.ts). Prometheus exports it as valet_errors_total. Each reason is one catch block or error branch; a sustained rate on one reason needs a human.",
+    }),
+    scratchRefused: meter.createCounter("valet.sandbox.scratch.refused", {
+      description:
+        "Scratch volume requests the host refused, by source and reason. A sustained rate means sessions of that class cannot get the scratch space they ask for.",
+    }),
   };
+  observeGauge(instruments.wakeupsActive, wakeupsActiveState);
+  observeGauge(instruments.leasesActive, leasesActiveState);
+  observeGauge(instruments.leasesOverDeadline, leasesOverDeadlineState);
+  observeGauge(instruments.leasesUnannotated, leasesUnannotatedState);
+  observeGauge(instruments.scratchRequestedBytes, scratchRequestedState);
+  observeGauge(instruments.wakeupSweepOkAt, wakeupSweepOkState);
+  // Zero-initialize every kind so increase() sees the first failure after a
+  // process start (a series that appears at 1 has no increase).
+  for (const kind of SANDBOX_STARTUP_KINDS) instruments.sandboxStartupFailed.add(0, { kind });
   return instruments;
+}
+
+export function recordChildResultRecovered(): void {
+  inst().childResultsRecovered.add(1);
 }
 
 export function recordTurn(args: {
@@ -143,8 +323,20 @@ export function recordToolExecution(tool: string, durationMs: number, ok: boolea
   inst().toolDuration.record(durationMs, { tool, ok });
 }
 
+/** A tool that ignored its abort signal past the stop grace period. Alert on
+ * any rate: the call keeps running after its turn ended. */
+export function recordToolStopTimeout(tool: string): void {
+  inst().toolStopTimeouts.add(1, { tool });
+}
+
 export function recordCacheBreak(cause: string, model?: string): void {
   inst().cacheBreaks.add(1, { cause, ...(model ? { model } : {}) });
+}
+
+/** A compaction pass that could not cover its head. Alert on any rate: the
+ * thread keeps its history, but it also stops compacting. */
+export function recordCompactionCoverageGap(mode: string): void {
+  inst().compactionCoverageGaps.add(1, { mode });
 }
 
 export function recordSandboxExec(durationMs: number, job: boolean): void {
@@ -211,6 +403,19 @@ export function recordSandboxWorkspaceGrow(outcome: WorkspaceGrowOutcome): void 
   inst().sandboxWorkspaceGrow.add(1, { outcome });
 }
 
+/** Creates the engine instruments at boot, so zero-initialized series
+ * (`valet.sandbox.startup_failed` per kind) exist before the first event. */
+export function initSandboxMetrics(): void {
+  inst();
+}
+
+/** A terminal startup failure. Called once per SandboxStartupError the
+ * attachment observes, so a crash-loop that is retried three times counts
+ * three. */
+export function recordSandboxStartupFailure(kind: SandboxStartupKind): void {
+  inst().sandboxStartupFailed.add(1, { kind });
+}
+
 /** A create's wait at the per-org capacity gate. Recorded only when the
  * create actually waited (or timed out) — an uncontended admit is silent. */
 export function recordSandboxCapacityWait(waitedMs: number, outcome: "admitted" | "timeout"): void {
@@ -219,4 +424,149 @@ export function recordSandboxCapacityWait(waitedMs: number, outcome: "admitted" 
 
 export function recordGateUnownedExpired(gateType: string): void {
   inst().gatesUnownedExpired.add(1, { type: gateType });
+}
+
+/** A wakeup that reached a terminal status. Record once per wakeup, at the
+ * transition into done/cancelled/expired/lost. */
+export function recordWakeupEnded(kind: WakeupKind, cause: WakeupCause | "session_deleted"): void {
+  inst().wakeupsTotal.add(1, { kind, cause });
+}
+
+/** A wakeup signal the WakeWatcher failed to deliver after its CAS. The
+ * watcher does not retry it (spec Deviations, B5), so this counter is the
+ * only record besides the log line. `kind` is the wakeup kind, or `hold`
+ * for `lease.expired`. */
+export function recordWakeupSignalLost(kind: WakeupKind | "hold"): void {
+  inst().wakeupSignalsLost.add(1, { kind });
+}
+
+/** A child retention sweep stopped waiting for a wakeup or hold's terminal signal. */
+export function recordChildTerminalSignalAbandoned(kind: WakeupKind | "hold"): void {
+  inst().wakeupSignalsLost.add(1, { kind, reason: "child_terminal_grace" });
+}
+
+/** A best-effort kill that threw after the row's terminal CAS (fix wave 4
+ * re-review, F5). Nothing retries it: the process may run untracked until
+ * its container stops, so an alert on this counter pages. */
+export function recordWakeupKillFailed(kind: WakeupKind): void {
+  inst().wakeupKillsFailed.add(1, { kind });
+}
+
+/** Wakeups currently pending or running, by kind. The caller (the host's
+ * WakeWatcher sweep) owns re-setting this every pass from a store count. A
+ * stale value means the sweep stopped; `valet.wakeups.sweep_ok_at` shows it. */
+export function recordWakeupsActive(kind: WakeupKind, count: number): void {
+  inst(); // ensure the gauge and its callback exist before the first set
+  setGauge(wakeupsActiveState, { kind }, count);
+}
+
+/** Sandbox leases currently held open, by owner kind. Set by the WakeWatcher
+ * sweep alongside `recordWakeupsActive`. */
+export function recordLeasesActive(ownerKind: LeaseOwnerKind, count: number): void {
+  inst();
+  setGauge(leasesActiveState, { owner_kind: ownerKind }, count);
+}
+
+/** Node-seconds a lease held a sandbox open, by owner kind. The WakeWatcher
+ * records the real time since its previous pass for each active lease. */
+export function recordLeaseNodeSeconds(ownerKind: LeaseOwnerKind, seconds: number): void {
+  inst().leaseNodeSeconds.add(seconds, { owner_kind: ownerKind });
+}
+
+/** Why the WakeWatcher released a process or watch lease outside the normal transition. */
+export type OrphanReleaseReason = "missing_owner" | "terminal_owner" | "deadline";
+
+/** A process or watch lease released by the WakeWatcher's repair: its owner
+ * row was missing or terminal (a crash window), or its owner was not ended
+ * at its deadline (a bug; fix wave 3, M2). */
+export function recordLeaseOrphanReleased(ownerKind: LeaseOwnerKind, reason: OrphanReleaseReason): void {
+  inst().leasesOrphanReleased.add(1, { owner_kind: ownerKind, reason });
+}
+
+/** A wakeup or lease row a store read skipped because it did not narrow. */
+export function recordWakeupBadRow(table: "engine_wakeups" | "engine_leases", count = 1): void {
+  if (count <= 0) return;
+  inst().wakeupBadRows.add(count, { table });
+}
+
+/** A store refused an event match because the waiter's buffer was full. */
+export function recordEventWaiterBufferFull(): void {
+  inst().eventWaiterBufferFull.add(1);
+}
+
+/** Ingest appended one event match to an event waiter for `service`. */
+export function recordEventWaiterMatch(service: string): void {
+  inst().eventWaiterMatches.add(1, { service });
+}
+
+/** The outcome of one derived event computation (spec Part J). */
+export type EventDeriveResult = "event" | "null" | "error";
+
+/** One `DerivedEventDef.derive` call finished with `result`. */
+export function recordEventDerive(key: string, result: EventDeriveResult): void {
+  inst().eventDerive.add(1, { key, result });
+}
+
+/** Event waiter matching failed during ingest. */
+export function recordEventMatchFailed(): void {
+  inst().eventMatchFailed.add(1);
+}
+
+/** The WakeWatcher finished a pass at `unixSeconds`. */
+export function recordWakeupSweepOk(unixSeconds: number): void {
+  inst();
+  setGauge(wakeupSweepOkState, {}, unixSeconds);
+}
+
+/** A kubernetes kickoff deleted `count` job file sets older than a day (fix wave 3, k8s M-B). */
+export function recordJobLogsPruned(count: number): void {
+  inst().jobLogsPruned.add(count);
+}
+
+/** The docker backend dropped one finished detached job's output buffer to stay under its per-sandbox cap. */
+export function recordDockerJobOutputDropped(): void {
+  inst().dockerJobOutputDropped.add(1);
+}
+
+/** A WakeWatcher pass threw before it finished. */
+export function recordWakeupSweepFailed(): void {
+  inst().wakeupSweepFailed.add(1);
+}
+
+/** The ChildWatcher stopped waiting on a lease past its deadline and settled the child. */
+export function recordChildSettleOverDeadline(): void {
+  inst().leasesSettleOverDeadline.add(1);
+}
+
+/** Leases active past their deadline. The WakeWatcher is the only releaser;
+ * this is the alert-don't-auto-repair signal for that invariant, re-set
+ * every sweep pass while the condition persists. */
+export function recordLeasesOverDeadline(count: number): void {
+  inst();
+  setGauge(leasesOverDeadlineState, {}, count);
+}
+
+/** Leased sandboxes the last reconcile found unprotected (spec INV-3). The
+ * WakeWatcher re-sets it every tick. Should stay at zero. */
+export function recordLeasesUnannotated(count: number): void {
+  inst();
+  setGauge(leasesUnannotatedState, {}, count);
+}
+
+/** Most recently requested `/scratch` volume size, by session class. */
+export function recordScratchRequested(sessionClass: string, bytes: number): void {
+  inst();
+  setGauge(scratchRequestedState, { session_class: sessionClass }, bytes);
+}
+
+/** A scratch volume request the host refused, by source (the caller that
+ * asked) and reason. */
+export function recordScratchRefused(source: string, reason: string): void {
+  inst().scratchRefused.add(1, { source, reason });
+}
+
+/** One error path that did not throw. Call `reportError` instead: it also
+ * marks the span and logs. The labels are already bounded there. */
+export function recordError(area: string, reason: string, provider?: string): void {
+  inst().errors.add(1, { area, reason, ...(provider ? { provider } : {}) });
 }

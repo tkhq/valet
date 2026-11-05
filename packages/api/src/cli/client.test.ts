@@ -54,8 +54,50 @@ describe("InstanceClient auth header", () => {
   });
 });
 
+describe("InstanceClient.sendPrompt", () => {
+  function recordBodies(reply: (body: Record<string, unknown>, res: ServerResponse) => void): Array<Record<string, unknown>> {
+    const bodies: Array<Record<string, unknown>> = [];
+    handler = (req, res) => {
+      let raw = "";
+      req.on("data", (chunk: Buffer) => { raw += chunk.toString(); });
+      req.on("end", () => {
+        const body = JSON.parse(raw) as Record<string, unknown>;
+        bodies.push(body);
+        reply(body, res);
+      });
+    };
+    return bodies;
+  }
+
+  it("sends again without a queue mode when a server from before inject refuses it", async () => {
+    const bodies = recordBodies((body, res) => {
+      if (body.queueMode === "inject") {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "queueMode must be 'followup' or 'steer'. Omit it to use the thread default." }));
+        return;
+      }
+      res.writeHead(202, { "content-type": "application/json" });
+      res.end(JSON.stringify({ messageId: "q1", threadId: "t1", activityAt: 1 }));
+    });
+    const client = new InstanceClient({ url: baseUrl });
+    const sent = await client.sendPrompt("s1", { text: "hi", queueMode: "inject" });
+    expect(sent.messageId).toBe("q1");
+    expect(bodies).toEqual([{ text: "hi", queueMode: "inject" }, { text: "hi" }]);
+  });
+
+  it("does not send again for a 400 about anything else", async () => {
+    const bodies = recordBodies((_body, res) => {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "Add a message or an attachment." }));
+    });
+    const client = new InstanceClient({ url: baseUrl });
+    await expect(client.sendPrompt("s1", { text: "", queueMode: "inject" })).rejects.toBeInstanceOf(ApiError);
+    expect(bodies).toHaveLength(1);
+  });
+});
+
 describe("InstanceClient.ensureOrchestrator", () => {
-  it("posts /api/orchestrator for a personal identity", async () => {
+  it("posts /api/workspaces/user/runtime for a personal identity", async () => {
     const calls: string[] = [];
     handler = (req, res) => {
       calls.push(`${req.method} ${req.url}`);
@@ -68,7 +110,7 @@ describe("InstanceClient.ensureOrchestrator", () => {
     };
     const client = new InstanceClient({ url: baseUrl, apiKey: "vlt_personal" });
     expect((await client.ensureOrchestrator()).sessionId).toBe("assistant:u1");
-    expect(calls).toContain("POST /api/orchestrator");
+    expect(calls).toContain("POST /api/workspaces/user/runtime");
     expect(calls.some((c) => c.startsWith("POST /api/teams/"))).toBe(false);
   });
 
@@ -85,8 +127,8 @@ describe("InstanceClient.ensureOrchestrator", () => {
     };
     const client = new InstanceClient({ url: baseUrl, apiKey: "vlt_team" });
     expect((await client.ensureOrchestrator()).sessionId).toBe("assistant:team_1");
-    expect(calls).toContain("POST /api/teams/team_1/orchestrator");
-    expect(calls).not.toContain("POST /api/orchestrator");
+    expect(calls).toContain("POST /api/workspaces/team_1/runtime");
+    expect(calls).not.toContain("POST /api/workspaces/user/runtime");
   });
 });
 
@@ -163,4 +205,29 @@ describe("InstanceClient typed round-trips", () => {
     await client.health();
     expect(lastRequest?.url).toBe("/api/health");
   });
+});
+
+describe("CLI invocation telemetry headers", () => {
+  it("uses one id for all requests and excludes positional arguments", async () => {
+    const { withCliInvocation } = await import("./telemetry.js");
+    const ids: string[] = [];
+    handler = (req, res) => { ids.push(String(req.headers["x-valet-cli-invocation"])); res.end("{}"); };
+    await withCliInvocation("threads", ["show", "private-thread-id", "--json"], async () => {
+      const client = new InstanceClient({ url: baseUrl });
+      await client.me();
+      await client.me();
+    });
+    expect(ids[0]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(ids[0]).toBe(ids[1]);
+    expect(lastRequest?.headers["x-valet-cli-command"]).toBe("threads show");
+    expect(lastRequest?.headers["x-valet-cli-version"]).toBe("0.0.1");
+    expect(JSON.stringify(lastRequest?.headers)).not.toContain("private-thread-id");
+  });
+});
+
+it("records prebuild plan without its working-directory argument", async () => {
+  const { cliCommandPath } = await import("./telemetry.js");
+  expect(cliCommandPath("prebuild", ["plan", "/private/repo"])).toBe("prebuild plan");
+  expect(cliCommandPath("prebuild", ["build", "/private/repo"])).toBe("prebuild build");
+  expect(cliCommandPath("prebuild", ["private-value"])).toBe("prebuild");
 });

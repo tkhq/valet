@@ -141,6 +141,8 @@ export class LocalSandbox implements Sandbox {
       cwd,
       env,
       shell: true,
+      // Own process group, so a kill reaches the shell's children too.
+      detached: true,
       stdio: ["pipe", "pipe", "pipe"],
     });
 
@@ -228,8 +230,19 @@ export class LocalSandbox implements Sandbox {
   async cancelJob(execId: string): Promise<void> {
     const state = this.jobs.get(execId);
     if (!state) return;
-    state.child.kill("SIGKILL");
+    killProcessGroup(state.child);
     await state.closed;
+  }
+}
+
+/** SIGKILL the child's whole process group (it was spawned `detached`). */
+function killProcessGroup(child: ChildProcess): void {
+  if (child.pid === undefined) return;
+  try {
+    process.kill(-child.pid, "SIGKILL");
+  } catch {
+    // The group already exited.
+    child.kill("SIGKILL");
   }
 }
 
@@ -252,6 +265,10 @@ function execShell(command: string, opts: ExecShellOpts): Promise<ExecResult> {
       cwd: opts.cwd,
       env,
       shell: true,
+      // Own process group: `sh -c` forks the real command, and a SIGKILL to
+      // the shell alone leaves that child holding stdout open, so "close"
+      // never fires and a timed-out exec hangs.
+      detached: true,
       // Stdin needs to be 'pipe' when we have data to feed; otherwise inherit
       // would attach to the parent terminal which we don't want.
       stdio: ["pipe", "pipe", "pipe"],
@@ -294,7 +311,7 @@ function execShell(command: string, opts: ExecShellOpts): Promise<ExecResult> {
     if (opts.timeout && opts.timeout > 0) {
       timer = setTimeout(() => {
         timedOut = true;
-        child.kill("SIGKILL");
+        killProcessGroup(child);
       }, opts.timeout);
       // unref so a stuck timer doesn't keep the process alive in tests
       const t = timer as { unref?: () => void };
@@ -302,7 +319,7 @@ function execShell(command: string, opts: ExecShellOpts): Promise<ExecResult> {
     }
 
     const onAbort = () => {
-      child.kill("SIGKILL");
+      killProcessGroup(child);
     };
     opts.signal?.addEventListener("abort", onAbort, { once: true });
 
@@ -368,6 +385,7 @@ export class LocalSandboxProvider implements SandboxProvider {
       warmPool: false,
       hibernation: false,
       customImage: false,
+      nestedKubernetes: false,
       coldStartEstimateMs: 0,
     };
   }

@@ -1,3 +1,4 @@
+import { finishAuthChange } from "~/lib/auth-navigation";
 import { useEffect, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { Section } from "~/components/settings/section";
@@ -7,6 +8,7 @@ import { Button, Input, Spinner } from "~/components/primitives";
 import { ProfilePictureUpload } from "~/components/settings/profile-picture-upload";
 import { useMe, useOrg, usePatchMe, useUploadMyAvatar } from "~/api/settings";
 import { authClient } from "~/lib/auth-client";
+import { useComposerDraftStore } from "~/stores/composer-drafts";
 import { errorText } from "~/lib/error-text";
 
 /**
@@ -20,6 +22,14 @@ export const Route = createFileRoute("/settings/profile")({
   component: ProfilePage,
 });
 
+function timezoneOptions(): string[] {
+  try {
+    return Intl.supportedValuesOf("timeZone");
+  } catch {
+    return [];
+  }
+}
+
 export function ProfilePage() {
   const meQ = useMe();
   const orgQ = useOrg();
@@ -28,6 +38,7 @@ export function ProfilePage() {
 
   const [name, setName] = useState("");
   const [avatarUrl, setAvatarUrl] = useState("");
+  const [timezone, setTimezone] = useState("");
 
   // Seed local edit state once `/api/me` resolves; re-seed if the server
   // value changes underneath us (e.g. after a successful save).
@@ -35,15 +46,24 @@ export function ProfilePage() {
     if (meQ.data) {
       setName(meQ.data.name ?? "");
       setAvatarUrl(meQ.data.avatarUrl ?? "");
+      setTimezone(meQ.data.timezone ?? "");
     }
-  }, [meQ.data?.name, meQ.data?.avatarUrl]);
+  }, [meQ.data?.name, meQ.data?.avatarUrl, meQ.data?.timezone]);
 
   const dirty =
-    !!meQ.data && (name !== (meQ.data.name ?? "") || avatarUrl !== (meQ.data.avatarUrl ?? ""));
+    !!meQ.data &&
+    (name !== (meQ.data.name ?? "") ||
+      avatarUrl !== (meQ.data.avatarUrl ?? "") ||
+      timezone.trim() !== (meQ.data.timezone ?? ""));
 
   function save() {
     if (!dirty) return;
-    patchMe.mutate({ name, avatarUrl });
+    const timezoneChanged = timezone.trim() !== (meQ.data?.timezone ?? "");
+    patchMe.mutate({
+      name,
+      avatarUrl,
+      ...(timezoneChanged ? { timezone: timezone.trim() || null } : {}),
+    });
   }
 
   const showEnableCard =
@@ -51,7 +71,8 @@ export function ProfilePage() {
 
   async function signOut() {
     await authClient.signOut();
-    window.location.href = "/login";
+    useComposerDraftStore.getState().activateOwner("");
+    finishAuthChange("/login");
   }
 
   return (
@@ -93,6 +114,23 @@ export function ProfilePage() {
                   aria-label="Avatar URL"
                 />
               </div>
+            </FieldRow>
+            <FieldRow
+              label="Timezone"
+              hint="IANA name, such as America/Los_Angeles. Agents use it to show your local time. Valet sets it from your browser on first sign-in if it is empty."
+            >
+              <Input
+                value={timezone}
+                onChange={(e) => setTimezone(e.target.value)}
+                placeholder="America/Los_Angeles"
+                aria-label="Timezone"
+                list="timezone-options"
+              />
+              <datalist id="timezone-options">
+                {timezoneOptions().map((tz) => (
+                  <option key={tz} value={tz} />
+                ))}
+              </datalist>
             </FieldRow>
             <FieldRow
               label="Email"

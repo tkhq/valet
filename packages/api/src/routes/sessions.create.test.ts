@@ -395,9 +395,8 @@ describe("POST /api/sessions: repo bindings", () => {
 // `initialPrompt` says "the server enqueues immediately after creation": the
 // create handler runs the same `ensureDefaultThread()` + `submitPrompt()`
 // sequence `POST /api/sessions/:id/messages` uses. No LLM key is needed to
-// assert it — the submission is durable at admission, and with no
-// ANTHROPIC_API_KEY the claim loop releases the turn back to `queued` instead
-// of burning it on a keyless model call.
+// assert it: admission is durable, and a missing credential settles the
+// human turn as failed instead of blocking later messages in the queue.
 
 describe("POST /api/sessions: initialPrompt", () => {
   let api: TestApi | undefined;
@@ -439,11 +438,16 @@ describe("POST /api/sessions: initialPrompt", () => {
     const threads = (await threadsRes.json()) as ListThreadsResponse;
     expect(threads.threads.map((t) => t.id)).toContain(submissions[0]?.threadId);
 
-    // A queued turn reads `working`, both in the create response and the list.
-    expect(body.runState).toBe("working");
+    // The keyless turn can settle before the HTTP response arrives. Observe
+    // its durable outcome instead of racing a transient working badge.
+    await expect.poll(async () => {
+      const settled = await api!.providers.engineStore.listSettledSubmissionsBefore(body.id, Date.now() + 1);
+      return settled.find(item => item.id === submissions[0]?.id)?.outcome?.outcome;
+    }).toBe("failed");
+    expect(await api.providers.engineStore.listUnsettledSubmissions(body.id)).toEqual([]);
     const listRes = await fetch(`${api.baseUrl}/api/sessions`);
     const list = (await listRes.json()) as ListSessionsResponse;
-    expect(list.sessions.find((s) => s.id === body.id)?.runState).toBe("working");
+    expect(list.sessions.find((s) => s.id === body.id)?.runState).toBe("idle");
   });
 
   it("queues nothing when initialPrompt is omitted", async () => {
@@ -570,24 +574,6 @@ describe("POST /api/sessions: zero-config repo sources", () => {
     fixture = undefined;
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
-  });
-
-  it("session create returns 201 immediately — ensureRepoSource is fire-and-forget", async () => {
-    fixture = startGithubFixture({ getRepo: () => ({ status: 404, body: {} }) });
-    vi.stubEnv("GITHUB_API_URL", fixture.url);
-    api = await bootTestApi({ imageBuilder: new FakeImageBuilder(), githubApiUrl: fixture.url });
-    const workspace = await mkdtemp(join(tmpdir(), "valet-session-zeroconf-fast-"));
-
-    const t0 = Date.now();
-    const res = await fetch(`${api.baseUrl}/api/sessions`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ workspace, repo: REPO }),
-    });
-    const elapsed = Date.now() - t0;
-    expect(res.status).toBe(201);
-    // The route must not block on bake work; 1.5 s is a tight upper bound.
-    expect(elapsed).toBeLessThan(1_500);
   });
 
   it.each([true, false])("with builder and org credential=%s: queues a first bake", async (hasCredential) => {

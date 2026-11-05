@@ -21,6 +21,45 @@ describe("extractStructuredOutput", () => {
     expect(output).toEqual({ answer: 2 });
   });
 
+  it("keeps a code fence inside a JSON string value", () => {
+    const text = [
+      "Ran the checks.",
+      "```json",
+      JSON.stringify({ summary: "Run:\n```bash\npnpm test\n```" }),
+      "```",
+    ].join("\n");
+    const { output, error } = extractStructuredOutput(text, Type.Object({ summary: Type.String() }));
+    expect(error).toBeUndefined();
+    expect(output).toEqual({ summary: "Run:\n```bash\npnpm test\n```" });
+  });
+
+  it("reads a reply as before when an earlier block closed on the same line", () => {
+    const schema = Type.Object({ answer: Type.String() });
+    const earlier = ['Example: ```json', '{"answer":"example"}```', ""];
+    const cases: Array<[string[], string]> = [
+      [["Final:", "```json", '{"answer":"42"}', "```"], "42"],
+      [["```bash", "pnpm test", "```"], "example"],
+    ];
+    for (const [rest, answer] of cases) {
+      const { output, error } = extractStructuredOutput([...earlier, ...rest].join("\n"), schema);
+      expect(error).toBeUndefined();
+      expect(output).toEqual({ answer });
+    }
+  });
+
+  it("reads the last block when it is written on one line after a multiline block", () => {
+    const text = ["```json", '{"answer":"stale"}', "```", 'Final: ```json {"answer":"final"}```'].join("\n");
+    const { output, error } = extractStructuredOutput(text, Type.Object({ answer: Type.String() }));
+    expect(error).toBeUndefined();
+    expect(output).toEqual({ answer: "final" });
+  });
+
+  it("still reads a fenced block written on one line", () => {
+    const { output, error } = extractStructuredOutput('Result: ```json {"answer": 3}```', schema);
+    expect(error).toBeUndefined();
+    expect(output).toEqual({ answer: 3 });
+  });
+
   it("prefers the fenced block over surrounding prose", () => {
     const text = 'The answer, as JSON, is:\n```json\n{"answer": 7}\n```\nHope that helps!';
     const { output, error } = extractStructuredOutput(text, schema);

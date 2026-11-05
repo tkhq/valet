@@ -1,3 +1,4 @@
+import { automationProposalRenderer } from "./automation-proposal";
 /**
  * Tool-renderer registry.
  *
@@ -10,8 +11,12 @@
  * first match wins. The fallback MUST stay last.
  */
 import { bashRenderer } from "./bash";
+import { browserRenderer } from "./browser";
 import { editRenderer } from "./edit";
 import { fallbackRenderer } from "./fallback";
+import { fileAttachRenderer } from "./file-attach";
+import { briefRenderer } from "./brief";
+import { homeTaskRenderer, listTasksRenderer } from "./home-task";
 import { findReplaceRenderer } from "./find-replace";
 import { memPatchRenderer } from "./mem-patch";
 import { memReadRenderer } from "./mem-read";
@@ -22,24 +27,34 @@ import { readRenderer } from "./read";
 import { securityRenderers } from "./security";
 import { skillRenderer } from "./skill";
 import { threadReadRenderer } from "./thread-read";
+import { updatePlanRenderer } from "./update-plan";
 import { workflowRenderer } from "./workflow";
+import { widgetRenderer } from "./widget";
 import { writeRenderer } from "./write";
 import { matches, type ToolRenderer } from "./types";
 
 const RENDERERS: ToolRenderer[] = [
   bashRenderer,
+  browserRenderer,
   readRenderer,
   writeRenderer,
   editRenderer,
   memPatchRenderer,
   memReadRenderer,
   memShareRenderer,
+  fileAttachRenderer,
   memWriteRenderer,
   skillRenderer,
   threadReadRenderer,
+  homeTaskRenderer,
+  listTasksRenderer,
+  briefRenderer,
+  updatePlanRenderer,
+  automationProposalRenderer,
   workflowRenderer,
   findReplaceRenderer,
   openaiMediaRenderer,
+  widgetRenderer,
   // The `sec_*` engagement tools (specific cards first, then the family
   // catch-all) — before the fallback, per the registry rule.
   ...securityRenderers,

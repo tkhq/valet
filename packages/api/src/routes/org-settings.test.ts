@@ -146,4 +146,30 @@ describe("anonymous image bake policy", () => {
     expect(invalid.status).toBe(400);
     expect(await invalid.text()).toContain("Send true or false");
   });
+
+  it("stores a compaction window, rejects one out of range, and clears it with null", async () => {
+    api = await bootTestApi();
+    const patch = (body: unknown, headers = ADMIN_HEADERS) => fetch(`${api!.baseUrl}/api/org/settings`, {
+      method: "PATCH", headers, body: JSON.stringify(body),
+    });
+
+    const set = await patch({ compactionWindowTokens: 150_000 });
+    expect(set.status).toBe(200);
+    expect(((await set.json()) as { compactionWindowTokens: number }).compactionWindowTokens).toBe(150_000);
+    expect((await getOrgRow(api))?.compactionWindowTokens).toBe(150_000);
+    const org = (await (await fetch(`${api.baseUrl}/api/org`)).json()) as { compactionWindowTokens: number | null };
+    expect(org.compactionWindowTokens).toBe(150_000);
+
+    for (const bad of [10_000, 2_000_000, 150_000.5, "150000", -1]) {
+      const res = await patch({ compactionWindowTokens: bad });
+      expect(res.status, String(bad)).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toMatch(/0 for no cap/);
+    }
+    expect((await patch({ compactionWindowTokens: 0 })).status).toBe(200);
+    expect((await getOrgRow(api))?.compactionWindowTokens).toBe(0);
+    expect((await patch({ compactionWindowTokens: null })).status).toBe(200);
+    expect((await getOrgRow(api))?.compactionWindowTokens).toBeNull();
+
+    expect((await patch({ compactionWindowTokens: 150_000 }, MEMBER_HEADERS)).status).toBe(403);
+  });
 });

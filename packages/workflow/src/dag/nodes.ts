@@ -12,11 +12,11 @@
  * `personaId`, `repairModel`, `resultMode`, `repo`, and prompt-mode are all
  * dropped (deferred; repo/persona need Phase 6 platform pieces).
  *
- * `LlmNode`, `OrchestratorNode`, `ToolNode`, `ForeachNode` are trimmed per
+ * `LlmNode`, `ThreadNode`, `ToolNode`, `ForeachNode` are trimmed per
  * the node-completion-plan decision 1:
  *   - `LlmNode.model` is REQUIRED (main allowed omitting it and throwing at
  *     runtime; v2 rejects that at validation instead).
- *   - `OrchestratorNode` drops `forceNewThread`/`repairModel`/`resultMode`/
+ *   - `ThreadNode` drops `forceNewThread`/`repairModel`/`resultMode`/
  *     `wait.timeout` (same trims as `SessionNode`).
  *   - `ToolNode` drops `onPolicyDeny`/`retries` (Phase 6 re-adds with
  *     policy).
@@ -26,6 +26,7 @@
  */
 
 import type { WorkflowInputDefinition } from './shape.js';
+import type { ToolScope } from '@valet/shared';
 
 export interface TriggerNode {
   id: string;
@@ -72,6 +73,7 @@ export interface ApprovalNode {
 
 // Session node — start-mode only this phase (decision 3).
 export interface SessionNode {
+  toolScope?: ToolScope;
   id: string;
   type: 'session';
   mode: 'start';
@@ -79,6 +81,8 @@ export interface SessionNode {
   title?: string;
   model?: string;
   outputSchema?: Record<string, unknown>;
+  /** The most model calls this step may make. Default `DEFAULT_STEP_MODEL_CALLS`. */
+  maxModelCalls?: number;
   wait?: {
     mode: 'none' | 'until_idle';
     timeout?: string;
@@ -115,20 +119,37 @@ export interface LlmNode {
   outputSchema?: Record<string, unknown>;
   temperature?: number;
   maxOutputTokens?: number;
+  /** Reasoning level, such as `medium`. Omit for the owner's default, the
+   * same default a chat thread uses. */
+  reasoning?: string;
   /** Omit for `fail`. See `NodeErrorPolicy`. */
   onError?: NodeErrorPolicy;
 }
 
-// Orchestrator node — trimmed per decision 1 (same trims as SessionNode).
-export interface OrchestratorNode {
+// Thread node — trimmed per decision 1 (same trims as SessionNode).
+export interface ThreadNode {
+  toolScope?: ToolScope;
   id: string;
   type: 'orchestrator';
   prompt: string;
   outputSchema?: Record<string, unknown>;
+  /** The most model calls this step may make. Default `DEFAULT_STEP_MODEL_CALLS`. */
+  maxModelCalls?: number;
   wait?: {
     mode: 'none' | 'until_idle';
   };
+  /**
+   * Which assistant thread the step runs on. `run`, the default, queues it
+   * on the run's one thread, after the steps before it, with their
+   * transcript in context. `step` gives the step (each `foreach` entry, when
+   * it is a body) its own thread in the same runtime: a new conversation
+   * that runs alongside the run's other agent work and stops on its own.
+   */
+  thread?: ThreadPlacement;
 }
+
+/** See `ThreadNode.thread`. */
+export type ThreadPlacement = 'run' | 'step';
 
 /**
  * Which identity a `tool` node acts as:
@@ -205,7 +226,7 @@ export interface WorkflowCallNode {
  * runtime executes one body per item. A `workflow` body starts one child
  * run per item (the per-item sub-DAG shape).
  */
-export type ForeachBodyNode = LlmNode | ToolNode | SetNode | OrchestratorNode | SessionNode | WorkflowCallNode;
+export type ForeachBodyNode = LlmNode | ToolNode | SetNode | ThreadNode | SessionNode | WorkflowCallNode;
 
 export interface ForeachNode {
   id: string;
@@ -231,7 +252,7 @@ export type WorkflowNode =
   | StopNode
   | ForeachNode
   | LlmNode
-  | OrchestratorNode
+  | ThreadNode
   | ToolNode
   | WorkflowCallNode;
 

@@ -1,11 +1,11 @@
-import { InMemoryEventStream } from "@valet/engine";
+import { InMemoryEventStream, InMemorySessionStore, type SessionEntry } from "@valet/engine";
 import { eq } from "drizzle-orm";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions, sessionThreads } from "../schema/index.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { autoTitle, type AutoTitleResult } from "./auto-title.js";
-import { AutoTitleHost } from "./auto-title-host.js";
+import { AutoTitleHost, loadOpeningMessages } from "./auto-title-host.js";
 
 const ORIGINS = ["web", "slack", "schedule", "event"] as const;
 
@@ -203,5 +203,26 @@ describe("AutoTitleHost", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(namer).toHaveBeenCalledTimes(1);
     host.stop();
+  });
+});
+
+describe("loadOpeningMessages", () => {
+  it("finds the opening exchange behind more command results than the head read holds", async () => {
+    const store = new InMemorySessionStore();
+    await store.saveSession({ id: "s1", owner: { type: "user", id: "u1" }, userId: "u1", orgId: "org1", workspace: "/", purpose: "interactive", status: "running", createdAt: 0, updatedAt: 0 });
+    const base = { sessionId: "s1", threadId: "t1", parentId: null } as const;
+    const entries: SessionEntry[] = Array.from({ length: 30 }, (_, i) => ({
+      ...base, id: `cmd-${i}`, type: "command_result", command: "/help", source: "builtin", ok: true, output: "help", createdAt: i,
+    }));
+    entries.push(
+      { ...base, id: "u", type: "message", role: "user", content: "plan the offsite", createdAt: 100 },
+      { ...base, id: "a", type: "message", role: "assistant", content: "Here is a plan.", createdAt: 101 },
+    );
+    await store.appendEntries("s1", "t1", entries);
+
+    expect(await loadOpeningMessages(store, "s1", "t1")).toEqual([
+      { role: "user", content: "plan the offsite" },
+      { role: "assistant", content: "Here is a plan." },
+    ]);
   });
 });

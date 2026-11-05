@@ -4,7 +4,7 @@
  * "submission" (a session prompt, or an orchestrator followup), optionally
  * park behind it, and — on settlement — map the outcome onto the node
  * checkpoint with the same bounded, one-shot schema-repair round trip.
- * `session.ts` and `orchestrator.ts` differ only in *how* a submission is
+ * `session.ts` and `thread.ts` differ only in *how* a submission is
  * dispatched (create-session-and-prompt vs. resolve-orchestrator-and-
  * prompt-as-followup) and in the shape of their `completed` results — this
  * module owns everything else: effects read-back, intent-before-dispatch
@@ -58,15 +58,20 @@ export interface SubmissionNodeHooks<TDispatched, TSettled> {
   /** Issues (or, on re-entry with an identical `dispatchId`, re-issues idempotently) the primary submission. */
   dispatch(dispatchId: string): Promise<SubmissionDispatch>;
   /** Issues the ONE bounded repair submission against the already-dispatched session. */
-  dispatchRepair(repairDispatchId: string, repairPrompt: string, sessionId: string): Promise<WorkflowPromptReceipt>;
+  dispatchRepair(repairDispatchId: string, repairPrompt: string, sessionId: string, taskSourceQueueItemId: string): Promise<WorkflowPromptReceipt>;
   buildDispatchedResult(dispatch: SubmissionDispatch): TDispatched;
-  buildSettledResult(sessionId: string, result: SubmissionResult): TSettled;
+  buildSettledResult(sessionId: string, result: SubmissionResult, receipt: WorkflowPromptReceipt): TSettled;
 }
 
 interface SubmissionEffects {
   sessionId?: string;
   receipt?: WorkflowPromptReceipt;
   repairAttempted: boolean;
+  /** First schema failure, retained after repair for checkpoint diagnostics. */
+  firstError?: string;
+  /** The first submission's queue item, kept after a repair replaces
+   * `receipt`, so a reader can find both turns of the step. */
+  firstQueueItemId?: string;
 }
 
 export async function executeSubmissionNode<TDispatched, TSettled>(
@@ -182,7 +187,7 @@ export async function executeSubmissionNode<TDispatched, TSettled>(
     hooks.outputSchema !== undefined ? { resultSchema: hooks.outputSchema } : undefined,
   );
 
-  return await handleOutcome(ctx, hooks, sessionId, receipt, effects.repairAttempted, result);
+  return await handleOutcome(ctx, hooks, sessionId, receipt, effects, result);
 }
 
 async function handleOutcome<TDispatched, TSettled>(
@@ -190,7 +195,7 @@ async function handleOutcome<TDispatched, TSettled>(
   hooks: SubmissionNodeHooks<TDispatched, TSettled>,
   sessionId: string,
   receipt: WorkflowPromptReceipt,
-  repairAttempted: boolean,
+  prior: SubmissionEffects,
   result: SubmissionResult,
 ): Promise<
   | { status: 'completed'; result: TDispatched | TSettled }
@@ -198,6 +203,8 @@ async function handleOutcome<TDispatched, TSettled>(
   | { status: 'parked'; waitingOn: [{ kind: 'submission'; nodeId: string; sessionId: string; threadId: string; queueItemId: string }] }
 > {
   const { run, nodeId, attempt, iteration, store, clock } = ctx;
+  const { repairAttempted, firstQueueItemId } = prior;
+  let firstError = prior.firstError;
 
   if (result.outcome !== 'completed') {
     const error = result.error ?? `${hooks.nodeKind} node "${nodeId}" submission outcome: ${result.outcome}`;
@@ -207,7 +214,7 @@ async function handleOutcome<TDispatched, TSettled>(
       iteration,
       status: 'failed',
       error,
-      effects: effectsToRecord({ sessionId, receipt, repairAttempted }),
+      effects: effectsToRecord({ sessionId, receipt, repairAttempted, firstError, firstQueueItemId }),
       attempt,
       createdAt: clock(),
     });
@@ -215,14 +222,14 @@ async function handleOutcome<TDispatched, TSettled>(
   }
 
   if (hooks.outputSchema === undefined || result.output !== undefined) {
-    const settledResult = hooks.buildSettledResult(sessionId, result);
+    const settledResult = hooks.buildSettledResult(sessionId, result, receipt);
     await store.completeCheckpoint(run.runId, nodeId, iteration, attempt, {
       runId: run.runId,
       nodeId,
       iteration,
       status: 'completed',
       result: settledResult,
-      effects: effectsToRecord({ sessionId, receipt, repairAttempted }),
+      effects: effectsToRecord({ sessionId, receipt, repairAttempted, firstError, firstQueueItemId }),
       attempt,
       createdAt: clock(),
     });
@@ -238,7 +245,7 @@ async function handleOutcome<TDispatched, TSettled>(
       iteration,
       status: 'failed',
       error,
-      effects: effectsToRecord({ sessionId, receipt, repairAttempted }),
+      effects: effectsToRecord({ sessionId, receipt, repairAttempted, firstError, firstQueueItemId }),
       attempt,
       createdAt: clock(),
     });
@@ -249,12 +256,13 @@ async function handleOutcome<TDispatched, TSettled>(
   // schema + validation error, tracked via `repairAttempted` so a second
   // validation failure fails the node instead of repairing forever.
   const schema = hooks.outputSchema;
+  firstError ??= result.error ?? 'result did not match the schema';
   const repairText = buildRepairPrompt(schema, result.error);
   // Same ValidationError containment as the primary dispatch: a definition
   // error settles the node, never poisons the drive.
   let repairReceipt: WorkflowPromptReceipt;
   try {
-    repairReceipt = await hooks.dispatchRepair(`${hooks.dispatchId}:repair`, repairText, sessionId);
+    repairReceipt = await hooks.dispatchRepair(`${hooks.dispatchId}:repair`, repairText, sessionId, firstQueueItemId ?? receipt.queueItemId);
   } catch (err) {
     if (!(err instanceof ValidationError)) throw err;
     const error = err.message;
@@ -264,7 +272,7 @@ async function handleOutcome<TDispatched, TSettled>(
       iteration,
       status: 'failed',
       error,
-      effects: effectsToRecord({ sessionId, receipt, repairAttempted }),
+      effects: effectsToRecord({ sessionId, receipt, repairAttempted, firstError, firstQueueItemId }),
       attempt,
       createdAt: clock(),
     });
@@ -277,7 +285,7 @@ async function handleOutcome<TDispatched, TSettled>(
     status: 'intent',
     attempt,
     createdAt: clock(),
-    effects: effectsToRecord({ sessionId, receipt: repairReceipt, repairAttempted: true }),
+    effects: effectsToRecord({ sessionId, receipt: repairReceipt, repairAttempted: true, firstError, firstQueueItemId: receipt.queueItemId }),
   });
   return {
     status: 'parked',
@@ -285,6 +293,24 @@ async function handleOutcome<TDispatched, TSettled>(
       { kind: 'submission', nodeId, sessionId, threadId: repairReceipt.threadId, queueItemId: repairReceipt.queueItemId },
     ],
   };
+}
+
+/**
+ * Give the model the same output contract that settlement will validate.
+ * The extractor reads the last fenced json block, so the prose stays in
+ * `response` for later steps that template it.
+ */
+export function withOutputSchemaPrompt(prompt: string, schema: Record<string, unknown> | undefined): string {
+  if (schema === undefined) return prompt;
+  return [
+    prompt,
+    '',
+    'Workflow output contract:',
+    'Write your normal response. End it with one fenced ```json block that matches this schema:',
+    JSON.stringify(schema),
+    'Use facts from the requested work. Do not invent empty arrays or default values to satisfy the schema.',
+    'If the work fails, report the failure truthfully instead of returning a fabricated successful result.',
+  ].join('\n');
 }
 
 /** Shared repair-prompt text for both `session` and `orchestrator` — schema + validation error, requesting corrected JSON only. */
@@ -298,7 +324,12 @@ function buildRepairPrompt(schema: Record<string, unknown>, validationError: str
     '',
     `Validation error: ${errorText}`,
     '',
-    'Respond with ONLY the corrected JSON, matching the schema exactly.',
+    'Reuse prior successful tool results. Do not repeat actions with side effects during format repair.',
+    'Do not invent empty arrays or default values to hide failed or incomplete inspection.',
+    'If work remains incomplete but actionable, finish the remaining authorized work using available read tools before returning the result. A progress recap is not completion.',
+    'JSON-only applies to your final reply, not to intervening tool use. Reuse completed work and do not repeat side effects.',
+    'If a genuine blocker prevents completion (such as missing access, necessary input, or an unresolved tool failure), report it truthfully instead of fabricating a successful result.',
+    'Otherwise respond with ONLY the complete corrected JSON, matching the schema exactly.',
   ].join('\n');
 }
 
@@ -316,6 +347,8 @@ function readSubmissionEffects(existingCheckpoint: NodeCheckpoint | undefined): 
     sessionId: typeof raw.sessionId === 'string' ? raw.sessionId : undefined,
     receipt: parseReceipt(raw.receipt),
     repairAttempted: raw.repairAttempted === true,
+    firstError: typeof raw.firstError === 'string' ? raw.firstError : undefined,
+    firstQueueItemId: typeof raw.firstQueueItemId === 'string' ? raw.firstQueueItemId : undefined,
   };
 }
 
@@ -328,6 +361,8 @@ function parseReceipt(value: unknown): WorkflowPromptReceipt | undefined {
 
 function effectsToRecord(effects: SubmissionEffects): Record<string, unknown> {
   const record: Record<string, unknown> = { repairAttempted: effects.repairAttempted };
+  if (effects.firstError !== undefined) record.firstError = effects.firstError;
+  if (effects.firstQueueItemId !== undefined) record.firstQueueItemId = effects.firstQueueItemId;
   if (effects.sessionId !== undefined) record.sessionId = effects.sessionId;
   if (effects.receipt !== undefined) record.receipt = effects.receipt;
   return record;

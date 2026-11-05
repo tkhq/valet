@@ -34,12 +34,17 @@ import { NotFoundError, ValidationError, ValetError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { isValidInternalToken } from "../lib/internal-auth.js";
-import type { RequestPrincipal } from "../lib/request-principal.js";
+import { isAgentCaller, type RequestPrincipal } from "../lib/request-principal.js";
 import { buildMemoryGraph, MAX_GRAPH_NODES } from "../lib/memory-graph.js";
+import { journalHasEntries } from "../orchestrator/bootstrap.js";
 import { ReservedPathError } from "../lib/okf.js";
-import { memoryFiles } from "../schema/index.js";
-import { canAdministerSession, canViewSession, type SessionOwnerLike } from "../services/session-access.js";
-import type { GetMemoryTreeResponse, MemoryTreeEntry } from "../wire/types.js";
+import { getTeamInOrg, isTeamMember } from "../services/teams.js";
+import { assistantMemoryNamespace, workflowMemoryNamespace, memorySessionId } from "../services/memory-scope.js";
+import { parseWorkflowSessionId } from "../workflows/engine-deps.js";
+import { workflowSessionOwner } from "../workflows/session-owner.js";
+import { agentSessions, memoryFiles, securityCells } from "../schema/index.js";
+import { canAccessSessionResources, canAdministerSession, canViewSession, type SessionOwnerLike } from "../services/session-access.js";
+import type { GetMemoryPrinciplesResponse, GetMemoryTreeResponse, MemoryTreeEntry } from "../wire/types.js";
 import {
   copyFileToTeam,
   copyFileFromTeam,
@@ -49,14 +54,36 @@ import {
   linksForFile,
   moveFile,
   patchFile,
+  patchFiles,
   readFile,
   removeFile,
   searchFiles,
   writeFile,
+  listPrincipleFiles,
   type MemoryScope,
+  type WriteSource,
 } from "../services/memory.js";
+import { memoryUsageRecorder, memoryUsageSince, readMemoryUsage } from "../services/memory-usage.js";
 
 export const memoryRouter = new Hono<AppEnv>();
+
+// A security persona child never writes memory, in any cell status. Its tool
+// scope grants no memory action, so this sandbox token path is the only one.
+// A refusal leaves no encoding residual, where a tripwire scan would.
+memoryRouter.use("*", async (c, next) => {
+  const sandbox = c.var.sandbox;
+  if (sandbox && c.req.method !== "GET" && c.req.method !== "HEAD") {
+    const [cell] = await c.var.providers.db
+      .select({ id: securityCells.id })
+      .from(securityCells)
+      .where(eq(securityCells.childSessionId, sandbox.sessionId))
+      .limit(1);
+    if (cell) {
+      return c.json({ error: "A security persona cannot write memory. Record findings with sec_finding_report." }, 403);
+    }
+  }
+  await next();
+});
 
 /** What the caller wants to do with the scope it asked for. A team read and
  * a team write are authorized by different rules — see `authorizeOwner`. */
@@ -153,6 +180,36 @@ function authorizeOwner(db: AppDb, owner: Principal, caller: RequestPrincipal, a
  * `/api/sandbox` prefixes.
  */
 export async function resolveScope(c: Context<AppEnv>, access: ScopeAccess): Promise<MemoryScope> {
+  const scope = await resolveOwnerScope(c, access);
+  if (scope.owner.type !== "team") return scope;
+  const internal = isValidInternalToken(c.req.header("x-valet-internal"));
+  // Explicit team writes retain their authorized shared destination.
+  if (internal && c.req.query("teamId")) return scope;
+  const requestedSessionId = c.var.sandbox?.sessionId ?? (internal ? c.req.header("x-valet-session-id") : c.req.query("sessionId"));
+  if (!requestedSessionId) return scope;
+  // A child session reads its parent's memory: it has no app session row.
+  const sessionId = await memorySessionId(c.var.providers.db, requestedSessionId);
+  const orgId = c.var.sandbox?.orgId ?? (internal ? c.req.header("x-valet-org-id") : c.var.user.orgId);
+  const { db } = c.var.providers;
+  const [session] = await db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)).limit(1);
+  if (session) {
+    if (session.ownerType !== scope.owner.type || session.ownerId !== scope.owner.id || session.status === "deleted"
+      || (orgId && session.orgId !== orgId)) throw new NotFoundError("owner");
+    if (!internal && !c.var.sandbox && !await canAccessSessionResources(c.var.providers, session, c.var.principal)) throw new NotFoundError("owner");
+  } else {
+    // Authenticate the run before deriving its persistent memory audience.
+    const owner = orgId ? await workflowSessionOwner(db, sessionId, orgId) : null;
+    if (!owner || owner.type !== scope.owner.type || owner.id !== scope.owner.id || (!internal && !c.var.sandbox)) {
+      throw new NotFoundError("owner");
+    }
+  }
+  const namespace = session
+    ? await assistantMemoryNamespace(db, sessionId, scope.owner.id, orgId ?? session.orgId)
+    : await workflowMemoryNamespace(db, parseWorkflowSessionId(sessionId).runId, scope.owner.id, orgId!);
+  return { ...scope, namespace };
+}
+
+async function resolveOwnerScope(c: Context<AppEnv>, access: ScopeAccess): Promise<MemoryScope> {
   const internalHeader = c.req.header("x-valet-internal");
   if (isValidInternalToken(internalHeader)) {
     const ownerHeader = c.req.header("x-valet-owner");
@@ -166,17 +223,49 @@ export async function resolveScope(c: Context<AppEnv>, access: ScopeAccess): Pro
     }
     // The verified internal token is what carries the owner tuple, so the
     // `?ownerType=&ownerId=` parameters are ignored on this branch.
+    //
+    // `?teamId=` is the one thing on this branch that a MODEL chooses, so it
+    // is the one thing this branch checks. The header tuple is host-supplied
+    // by the tool from the session's own principal; a tool argument is not,
+    // and the tool must never fold one into the other. The team is named
+    // here instead, and admitted only for a live member — so an id an agent
+    // invents reaches nothing, and a team the actor left stops resolving on
+    // the next call rather than at the next restart.
+    const teamId = c.req.query("teamId");
+    if (teamId !== undefined) {
+      if (teamId.length === 0) {
+        throw new ValidationError("teamId must name a team. Omit it to use your own memory.");
+      }
+      // A `team_members` row is the whole check: it proves the team exists,
+      // that the actor is on it, and — because membership is org-scoped by
+      // construction — that the team is one the actor's org owns. Refusing
+      // as not-found matches the browser branch, so membership stays
+      // unprobeable by id.
+      if (!(await isTeamMember(c.var.providers.db, teamId, actorHeader))) {
+        throw new NotFoundError("owner");
+      }
+      return { owner: { type: "team", id: teamId }, actorUserId: actorHeader };
+    }
     return { owner, actorUserId: actorHeader };
   }
 
-  // Sandbox principal (Task 7): the owner tuple derives from the verified
-  // token, never from headers — a sandbox always acts as the session's
-  // owning user, so any `x-valet-owner`/`x-valet-actor` headers on this
-  // request are ignored. The `?ownerType=&ownerId=` parameters are ignored
-  // here for the same reason: a sandbox does not choose its own scope.
+  // The token actor is fixed at first wake. Resolve the durable session owner
+  // instead; neither query parameters nor headers may select another corpus.
   const sandbox = c.var.sandbox;
   if (sandbox) {
-    return { owner: { type: "user", id: sandbox.userId }, actorUserId: sandbox.userId };
+    const { db } = c.var.providers;
+    const [session] = await db.select().from(agentSessions)
+      .where(and(eq(agentSessions.id, sandbox.sessionId), eq(agentSessions.orgId, sandbox.orgId))).limit(1);
+    if (session?.status === "deleted") throw new NotFoundError("owner");
+    const owner = session
+      ? parsePrincipal(`${session.ownerType}:${session.ownerId || (session.ownerType === "user" ? session.userId : "")}`)
+      : await workflowSessionOwner(db, sandbox.sessionId, sandbox.orgId);
+    if (!owner || (owner.type === "user" && owner.id !== sandbox.userId)
+      || (owner.type === "org" && owner.id !== sandbox.orgId)
+      || (owner.type === "team" && !await getTeamInOrg(db, sandbox.orgId, owner.id))) {
+      throw new NotFoundError("owner");
+    }
+    return { owner, actorUserId: sandbox.userId };
   }
 
   const user = c.var.user;
@@ -197,6 +286,20 @@ export async function resolveScope(c: Context<AppEnv>, access: ScopeAccess): Pro
   }
   // The actor stays the human who sent the request. Only the owner moves.
   return { owner: requested, actorUserId: user.id };
+}
+
+/** The agent session behind a write, read from host headers only. A
+ * browser write has none. A workflow step sends no session header, so it
+ * has none either. The service records it on principle files. */
+function writeSource(c: Context<AppEnv>): WriteSource | undefined {
+  if (isValidInternalToken(c.req.header("x-valet-internal"))) {
+    const sessionId = c.req.header("x-valet-session-id");
+    if (!sessionId) return undefined;
+    const threadId = c.req.header("x-valet-thread-id");
+    return threadId ? { sessionId, threadId } : { sessionId };
+  }
+  const sandbox = c.var.sandbox;
+  return sandbox ? { sessionId: sandbox.sessionId } : undefined;
 }
 
 /** Maps service-layer errors to HTTP responses. Rethrows anything else so
@@ -256,6 +359,16 @@ for (const [route, copy] of [
   });
 }
 
+/** True when an agent, not a person, made this request: a session tool
+ * (internal token), a sandbox, or an MCP or CLI client. Only an agent's
+ * read counts as usage. A person opening a file on the memory page does
+ * not make it "used". */
+function isAgentRead(c: Context<AppEnv>): boolean {
+  if (isValidInternalToken(c.req.header("x-valet-internal")) || c.var.sandbox) return true;
+  const via = c.var.authVia;
+  return via !== undefined && isAgentCaller(via);
+}
+
 memoryRouter.get("/", async (c) => {
   let scope: MemoryScope;
   try {
@@ -270,6 +383,13 @@ memoryRouter.get("/", async (c) => {
   try {
     const { db } = c.var.providers;
     const result = await readFile(db, scope, path);
+    // A directory read lists files without opening them, so it is no use
+    // of any one file. The recorder buffers: the response never waits on it.
+    // A built-in principle with no file (version 0) has no row to count against.
+    if (result.kind === "file" && result.file.version > 0 && isAgentRead(c)) {
+      const { ownerType, ownerId, namespace, path: stored } = result.file;
+      memoryUsageRecorder(db).record({ ownerType, ownerId, namespace, path: stored }, "read");
+    }
     return c.json(result);
   } catch (err) {
     const mapped = handleServiceError(err);
@@ -328,7 +448,9 @@ memoryRouter.get("/journal-summary", async (c) => {
     // Missing journal (404-shaped service error) → no summary yet today.
     return c.json({ date, summary: null });
   }
-  if (!content || content.trim().length === 0) return c.json({ date, summary: null });
+  // The wake bootstrap writes a heading-only journal every day. Sent alone,
+  // the heading gets a refusal from the model instead of a summary.
+  if (!journalHasEntries(content)) return c.json({ date, summary: null });
 
   const cacheKey = `${scope.owner.type}:${scope.owner.id}:${date}:${djb2(content)}`;
   const cached = journalSummaryCache.get(cacheKey);
@@ -375,6 +497,26 @@ memoryRouter.get("/journal-summary", async (c) => {
  * A caller who names a team owner therefore gets that team's files and
  * nothing else — one owner per response, still no union.
  */
+/**
+ * GET /api/memory/principles — every principle file the scope reads: its
+ * own, its teams', and what its org's content sources mirror. The tree is
+ * own-scope only, so the Principles view reads this list instead.
+ */
+memoryRouter.get("/principles", async (c) => {
+  try {
+    const scope = await resolveScope(c, "read");
+    const files = await listPrincipleFiles(c.var.providers.db, scope);
+    const body: GetMemoryPrinciplesResponse = {
+      principles: files.map((file) => ({ path: file.path, title: file.title, description: file.description })),
+    };
+    return c.json(body);
+  } catch (err) {
+    const mapped = handleServiceError(err);
+    if (mapped) return c.json(mapped.body, mapped.status);
+    throw err;
+  }
+});
+
 memoryRouter.get("/tree", async (c) => {
   let scope: MemoryScope;
   try {
@@ -389,21 +531,29 @@ memoryRouter.get("/tree", async (c) => {
   const rows = await db
     .select()
     .from(memoryFiles)
-    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id)));
+    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? "")));
+  const usage = await readMemoryUsage(db, scope);
 
   const entries: MemoryTreeEntry[] = rows
-    .map((r) => ({
-      path: r.path,
-      title: r.title,
-      type: r.type,
-      pinned: r.pinned,
-      updatedAt: r.updatedAt,
-      dir: false,
-      sizeBytes: r.content.length,
-    }))
+    .map((r) => {
+      const u = usage.get(r.path);
+      const used = [u?.lastReadAt ?? null, u?.lastCitedAt ?? null].filter((t): t is number => t !== null);
+      return {
+        path: r.path,
+        title: r.title,
+        type: r.type,
+        pinned: r.pinned,
+        updatedAt: r.updatedAt,
+        dir: false,
+        sizeBytes: r.content.length,
+        lastUsedAt: used.length > 0 ? Math.max(...used) : null,
+        useCount: (u?.readCount ?? 0) + (u?.citeCount ?? 0),
+        lastLoadedAt: u?.lastInjectedAt ?? null,
+      };
+    })
     .sort((a, b) => a.path.localeCompare(b.path));
 
-  const body: GetMemoryTreeResponse = { entries };
+  const body: GetMemoryTreeResponse = { entries, usageSince: await memoryUsageSince(db) };
   return c.json(body);
 });
 
@@ -451,6 +601,7 @@ memoryRouter.put("/", async (c) => {
       origin: body.origin,
       expires: body.expires,
       pinned: body.pinned,
+      source: writeSource(c),
     });
     return c.json(result);
   } catch (err) {
@@ -459,6 +610,18 @@ memoryRouter.put("/", async (c) => {
     throw err;
   }
 });
+
+function parsePatches(value: unknown): { path: string; oldString: string; newString: string }[] | null {
+  if (!Array.isArray(value)) return null;
+  const out: { path: string; oldString: string; newString: string }[] = [];
+  for (const item of value) {
+    if (typeof item !== "object" || item === null || !("path" in item) || !("oldString" in item) || !("newString" in item)) return null;
+    const { path, oldString, newString } = item;
+    if (typeof path !== "string" || !path || typeof oldString !== "string" || typeof newString !== "string") return null;
+    out.push({ path, oldString, newString });
+  }
+  return out;
+}
 
 memoryRouter.post("/patch", async (c) => {
   let scope: MemoryScope;
@@ -470,12 +633,29 @@ memoryRouter.post("/patch", async (c) => {
     throw err;
   }
 
-  let body: { path?: string; oldString?: string; newString?: string };
+  let body: { path?: string; oldString?: string; newString?: string; patches?: unknown };
   try {
     body = await c.req.json();
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
+
+  // A batched patch set: every patch applies, or none does.
+  if (body.patches !== undefined) {
+    const patches = parsePatches(body.patches);
+    if (!patches || body.path !== undefined) {
+      return c.json({ error: "Send patches as an array of { path, oldString, newString }, without a top-level path." }, 400);
+    }
+    try {
+      const results = await patchFiles(c.var.providers.db, scope, { patches, source: writeSource(c) });
+      return c.json({ files: results.map((r) => r.file), warnings: results.flatMap((r) => r.warnings) });
+    } catch (err) {
+      const mapped = handleServiceError(err);
+      if (mapped) return c.json(mapped.body, mapped.status);
+      throw err;
+    }
+  }
+
   if (!body.path || body.oldString === undefined || body.newString === undefined) {
     return c.json({ error: "path, oldString, and newString are required" }, 400);
   }
@@ -486,6 +666,7 @@ memoryRouter.post("/patch", async (c) => {
       path: body.path,
       oldString: body.oldString,
       newString: body.newString,
+      source: writeSource(c),
     });
     return c.json(result);
   } catch (err) {
@@ -627,7 +808,7 @@ memoryRouter.get("/graph", async (c) => {
   const rows = await db
     .select()
     .from(memoryFiles)
-    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id)))
+    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? "")))
     .orderBy(asc(memoryFiles.path))
     .limit(MAX_GRAPH_NODES);
 

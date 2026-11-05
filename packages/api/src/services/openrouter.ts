@@ -43,7 +43,7 @@ export const OPENROUTER_DEFAULT_MODEL_IDS: readonly string[] = [
   "google/gemini-2.5-pro",
   "google/gemini-2.5-flash",
   "deepseek/deepseek-v4-pro",
-  "deepseek/deepseek-r1",
+  "deepseek/deepseek-v4-flash",
   "moonshotai/kimi-k2.6",
   "moonshotai/kimi-k2-thinking",
   "x-ai/grok-4.6",

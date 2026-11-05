@@ -6,14 +6,14 @@
  * single-tier `PatchModelTiersRequest`.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { ModelInfo, WireTierMap } from "@valet/api/wire";
+import type { GetModelTiersResponse, ModelInfo } from "@valet/api/wire";
 
 const patchMutate = vi.fn();
 
 let modelsData: { models: ModelInfo[] } = { models: [] };
-let tiersData: WireTierMap = { xs: [], s: [], m: [], l: [], xl: [] };
+let tiersData: GetModelTiersResponse = { xs: [], s: [], m: [], l: [], xl: [] };
 
 vi.mock("~/api/settings", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/settings")>();
@@ -128,5 +128,47 @@ describe("ModelTiersSection", () => {
     const typeahead = searchInputs[0].closest(".space-y-1") as HTMLElement;
     expect(within(typeahead).queryByText(/Opus 4\.7/)).toBeNull();
     expect(within(typeahead).getByText(/Sonnet 4\.5/)).toBeTruthy();
+  });
+
+  describe("default tier for new threads", () => {
+    function openDefaultTierMenu() {
+      fireEvent.keyDown(screen.getByRole("button", { name: /^Default tier for new threads/ }), { key: "Enter" });
+    }
+
+    it("shows no organization default when the org has none", () => {
+      render(<ModelTiersSection />);
+      expect(screen.getByRole("button", { name: "Default tier for new threads: No organization default" })).toBeTruthy();
+    });
+
+    it("shows the stored default tier", () => {
+      tiersData = { ...tiersData, defaultTier: "xs", defaultTierResolvable: true };
+      render(<ModelTiersSection />);
+      expect(screen.getByRole("button", { name: "Default tier for new threads: Extra Small · Haiku 4.5" })).toBeTruthy();
+      expect(screen.queryByRole("alert")).toBeNull();
+    });
+
+    it("picking a tier patches only defaultTier", () => {
+      render(<ModelTiersSection />);
+      openDefaultTierMenu();
+      fireEvent.click(screen.getByText("Extra Small · Haiku 4.5"));
+      expect(patchMutate).toHaveBeenCalledWith({ defaultTier: "xs" }, expect.anything());
+    });
+
+    it("picking no organization default clears it with null", () => {
+      tiersData = { ...tiersData, defaultTier: "xs", defaultTierResolvable: true };
+      render(<ModelTiersSection />);
+      openDefaultTierMenu();
+      fireEvent.click(screen.getByText("No organization default"));
+      expect(patchMutate).toHaveBeenCalledWith({ defaultTier: null }, expect.anything());
+    });
+
+    it("warns when new sessions skip the stored default tier", () => {
+      tiersData = { ...tiersData, defaultTier: "xs", defaultTierResolvable: false };
+      render(<ModelTiersSection />);
+      expect(screen.getByRole("button", { name: "Default tier for new threads: Extra Small · Haiku 4.5" })).toBeTruthy();
+      expect(screen.getByRole("alert").textContent).toBe(
+        "No provider with a key serves this tier, so new threads use Small. Put a target whose provider has a key first in the tier, or choose another default.",
+      );
+    });
   });
 });

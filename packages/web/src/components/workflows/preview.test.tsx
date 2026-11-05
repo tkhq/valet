@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
-import { WorkflowPreview, canvasHeight, previewMode, summarizeDefinition } from "./preview";
-import type { WorkflowDefinition, WorkflowNode } from "./editor-model";
+import { WorkflowPreview, canvasHeight, previewMode, summarizeDefinition, toPreviewEdges } from "./preview";
+import { toFlow, type WorkflowDefinition, type WorkflowNode } from "./editor-model";
 
 describe("previewMode", () => {
   it("is 'empty' below 2 nodes", () => {
@@ -92,6 +92,27 @@ describe("WorkflowPreview", () => {
       },
     },
   };
+
+  it("offsets sibling labels in the read-only run-detail preview", () => {
+    const offsets = toPreviewEdges(toFlow({
+      ...branching,
+      edges: [
+        { from: "trigger", to: "check" },
+        { from: "check", to: "yes", fromOutput: "true", when: "approved" },
+        { from: "check", to: "no", fromOutput: "false", when: "not approved" },
+      ],
+    }))
+      .filter((edge) => edge.source === "check")
+      .map((edge) => edge.data?.labelOffsetY);
+    expect(new Set(offsets).size).toBe(2);
+  });
+
+  it("keeps read-only edge labels out of the tab order", async () => {
+    render(<WorkflowPreview definition={branching} />);
+    const label = await screen.findByRole("img", { name: "True branch" });
+    expect(label.getAttribute("tabindex")).toBeNull();
+    expect(screen.queryByRole("button", { name: "True branch" })).toBeNull();
+  });
 
   it("draws every branch out of an if node", async () => {
     // An edge attaches to a handle by id. Stripping `sourceOutputs` here

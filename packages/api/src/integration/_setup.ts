@@ -9,15 +9,19 @@
  * Underscore-prefixed filename so vitest's `*.test.ts` glob doesn't pick it
  * up as a test.
  */
+import { wireSessionOutcomeTagging } from "../tagging/session-outcome.js";
+import { taggingDrain } from "../tagging/worker.js";
+import { externalUsageRetention } from "../services/external-usage.js";
+import { drainAttentionDeliveries } from "../events/attention-delivery.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createServer } from "node:net";
 import { eq } from "drizzle-orm";
 import {
   VirtualSandboxProvider,
   type ChildReader,
   type ChildSender,
+  type ChildStopper,
   type ChildSpawner,
   type ChildStatusReader,
   type SandboxProvider,
@@ -32,13 +36,17 @@ import { buildHibernationHooks } from "../engine/hibernation-hooks.js";
 import {
   buildChildReader,
   buildChildSender,
+  buildChildStopper,
   buildChildSpawner,
   buildChildStatusReader,
   ChildWatcher,
+  wireChildGateReports,
 } from "../orchestrator/children.js";
 import { HibernationReaper } from "../engine/hibernation-reaper.js";
 import { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
 import { IdleHibernationSweep } from "../engine/idle-hibernation-sweep.js";
+import { OnlineStatusWatcher } from "../services/online-status-watch.js";
+import { WakeWatcher } from "../engine/wake-watcher.js";
 import { SecurityRunnerDriver } from "../orchestrator/security-runner-driver.js";
 import { submitSessionPrompt } from "../routes/messages.js";
 import { ChannelHost } from "../channels/host.js";
@@ -47,20 +55,24 @@ import { WorkflowScheduler } from "../workflows/scheduler.js";
 import { ContentSyncService } from "../services/content-sync/service.js";
 import { GitHubSkillRepoReader } from "../services/skill-repo-reader.js";
 import { skillRepoReaderFactory } from "../services/content-source-credential.js";
-import { buildOrchestratorTarget } from "../events/orchestrator-target.js";
+import { buildAssistantTarget } from "../events/assistant-target.js";
 import { channelThreadContextFetcher } from "../events/channel-thread-context.js";
 import { channelOriginResolver, channelMessageNormalizer } from "../events/channel-origin.js";
+import { appendClaimedWaiterDigest } from "../events/claim-recovery.js";
+import { waiterMatchDeps } from "../events/waiters.js";
 import { resolveOrgId } from "../lib/org.js";
 import { FsBlobStore } from "../providers/blob-fs.js";
+import { resolveScratchCaps, resolveWakeupLimits } from "../providers/sandbox-backend.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
+import { productionEventWaiterDeriver } from "../events/derive.js";
 import { createOnePasswordService } from "../services/onepassword.js";
-import { getAllowPersonalOnePassword } from "../services/org.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 import { assemblePlugins } from "../plugins/assemble.js";
-import { DynamicToolCounts } from "../plugins/dynamic-tool-count.js";
+import { ServiceProbes } from "../plugins/service-probe.js";
 import { orgMembers, orgs, users, workflowDefinitions } from "../schema/index.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
+import { buildRunSettledAttention, buildRunThreadArchive } from "../workflows/run-attention.js";
 import { writeExecutionGrant } from "../policies/service.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { WorkflowSandboxReclaimer } from "../workflows/sandbox-reclaim.js";
@@ -73,6 +85,7 @@ import { loadAuthConfig } from "../auth/config.js";
 import { buildAuthHooks } from "../auth/provisioning.js";
 import { buildAuth } from "../auth/index.js";
 import { createAutoTitleHost } from "../sessions/auto-title-host.js";
+import type { McpServerDecl } from "../config/instance-config.js";
 
 export interface TestApi {
   baseUrl: string;
@@ -120,6 +133,9 @@ export interface BootTestApiOpts {
    * `true`.
    */
   omitSecurityPlugin?: boolean;
+  /** The instance config's `mcpServers` entries, as `main.ts` passes them to
+   * `buildNodeProviders`. Default `[]`. */
+  mcpServers?: McpServerDecl[];
   /**
    * Boots with a real better-auth instance instead of stub-only mode: sets
    * `BETTER_AUTH_SECRET=test-secret` and unsets `VALET_LOCAL_AUTH` (both
@@ -191,43 +207,13 @@ export interface BootTestApiOpts {
    * when `imageBuilder` is unset), and the content-sync reader. Point it at
    * `startGithubFixture()`'s `url`. */
   githubApiUrl?: string;
-}
-
-/** Pre-allocates a port for the app to bind. `EngineHost` needs its
- * `apiBaseUrl` before `createApp`/`serve` can hand back the port
- * `serve({ port: 0 })` would otherwise assign, so a pre-allocated port is
- * the only order that works here.
- *
- * Allocation probes SEQUENTIALLY inside a per-vitest-worker range instead
- * of `listen(0)` → close → reuse: the OS hands sibling workers the same
- * ephemeral port in the release window, and the resulting EADDRINUSE
- * failed whole 10-minute suite runs. Disjoint ranges make cross-worker
- * collisions impossible; the in-worker cursor never re-probes a port it
- * already handed out. */
-const PORT_RANGE_BASE = 21000;
-const PORT_RANGE_SIZE = 20000;
-// Seed from the PID, not VITEST_POOL_ID: pool ids restart per vitest
-// project, so two projects' workers could share a "unique" id and probe
-// the same cursor simultaneously. Live processes can't share a PID, and
-// the multiplier scatters cursors so even a mod-collision starts far away.
-let portCursor = PORT_RANGE_BASE + ((process.pid * 137) % PORT_RANGE_SIZE);
-
-function canBind(port: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    const srv = createServer();
-    srv.once("error", () => resolve(false));
-    srv.listen(port, () => {
-      srv.close(() => resolve(true));
-    });
-  });
-}
-
-async function getFreePort(): Promise<number> {
-  for (;;) {
-    if (portCursor >= PORT_RANGE_BASE + PORT_RANGE_SIZE) portCursor = PORT_RANGE_BASE;
-    const candidate = portCursor++;
-    if (await canBind(candidate)) return candidate;
-  }
+  /** Host name a sandbox uses to reach this API. The harness joins it with
+   * its own port and forwards the result as `EngineHostOpts.sandboxApiUrl`,
+   * the `VALET_API_URL` and credential-helper base inside the sandbox. A
+   * test on a real docker sandbox sets `host.docker.internal`, the name
+   * `resolveSandboxApiUrl` gives the docker backend. Unset by default, so
+   * `EngineHost` keeps its local dev default. */
+  sandboxApiHost?: string;
 }
 
 export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> {
@@ -239,8 +225,12 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
 
   const prevAuthSecret = process.env.BETTER_AUTH_SECRET;
   const prevLocalAuth = process.env.VALET_LOCAL_AUTH;
+  const prevAuthMethods = process.env.AUTH_METHODS;
   if (opts.auth) {
     process.env.BETTER_AUTH_SECRET = "test-secret";
+    // Login is off until a deployment lists a method. Real-auth tests sign up
+    // with a password unless the test lists its own methods.
+    process.env.AUTH_METHODS ??= "password";
     // Stub auth and real auth are mutually exclusive — the boot check in
     // `main.ts` refuses the pair. A real-auth test must see production's
     // answer to a credential-less request (401), so the stub var comes OFF
@@ -296,13 +286,18 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   const sandboxProvider = opts.sandboxProvider ?? new VirtualSandboxProvider();
   const eventStream = new PgEventStream(pgdb);
   const engineCredentials = new PgCredentialStore(pgdb, deriveSecretKey("test-key"));
+  // Same instance for `/api/plugins`, the policy routes, and the host's
+  // policy resolver, as in `providers/node.ts`.
+  const serviceProbes = new ServiceProbes({ credentials: engineCredentials });
   const blobs = new FsBlobStore(blobsRoot);
 
-  // Pre-allocate the port: EngineHost needs `apiBaseUrl` at construction
-  // time, before `serve()` (below) would otherwise hand back a `port: 0`
-  // assignment. See `getFreePort`'s comment for the tradeoff.
-  const port = await getFreePort();
-  const apiBaseUrl = `http://127.0.0.1:${port}`;
+  // Resolve callback URLs only after the server binds. Keeping port 0 bound
+  // removes the probe/close/rebind race between concurrent test workers.
+  let boundPort: number | undefined;
+  const serverPort = () => {
+    if (boundPort === undefined) throw new Error("Test API has not started listening");
+    return boundPort;
+  };
 
   // The security plugin is a bundled plugin: at real boot it is always in the
   // assembled set (registry.gen.ts), so `EngineHost.isPluginLoaded("security")`
@@ -326,6 +321,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   let readerRef: ChildReader | undefined;
   let senderRef: ChildSender | undefined;
   let statusRef: ChildStatusReader | undefined;
+  let stopperRef: ChildStopper | undefined;
   // Default hibernation hooks are the SAME db-backed implementation real
   // boot uses (`providers/node.ts`) — matches production behavior for tests
   // that don't need to observe the hooks directly. `opts.on*` overrides
@@ -335,14 +331,20 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     opts.onePassword ??
     createOnePasswordService({
       credentials: engineCredentials,
-      getAllowPersonal: (orgId) => getAllowPersonalOnePassword(db, orgId),
     });
+  // Env-driven, same as real boot. A test that wants a non-default cap sets
+  // `process.env.VALET_SANDBOX_SCRATCH_MAX`/`VALET_SANDBOX_SCRATCH_AGENT_MAX`
+  // before calling `bootTestApi()` and restores it afterward.
+  const scratchCaps = resolveScratchCaps(process.env);
+  const wakeupLimits = resolveWakeupLimits(process.env);
   const engineHost = new EngineHost({
     engineStore,
     sandboxProvider,
     eventStream,
     engineCredentials,
     blobs,
+    scratchCaps,
+    wakeupLimits,
     anthropicApiKey: ANTHROPIC_API_KEY,
     defaultImage: opts.defaultImage,
     prebuildPreflight: opts.prebuildPreflight,
@@ -355,9 +357,14 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     githubTokenDeps: opts.githubTokenDeps,
     onePassword,
     db,
-    apiBaseUrl,
+    get apiBaseUrl() { return `http://127.0.0.1:${serverPort()}`; },
+    get sandboxApiUrl() {
+      return opts.sandboxApiHost ? `http://${opts.sandboxApiHost}:${serverPort()}` : undefined;
+    },
+    sandboxTokenMaster: "test-key",
     plugins,
     actionPluginByService,
+    serviceProbes,
     childSpawner: (req, ctx) => {
       if (!spawnerRef) throw new Error("childSpawner invoked before provider wiring completed");
       return spawnerRef(req, ctx);
@@ -373,6 +380,10 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     childStatusReader: (req, ctx) => {
       if (!statusRef) throw new Error("childStatusReader invoked before provider wiring completed");
       return statusRef(req, ctx);
+    },
+    childStopper: (req, ctx) => {
+      if (!stopperRef) throw new Error("childStopper invoked before provider wiring completed");
+      return stopperRef(req, ctx);
     },
   });
   // Prebuilds are out of scope for the integration harness (no real
@@ -396,6 +407,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     eventStream,
     namer: async () => "Test conversation",
   });
+  const stopOutcomeTagging = wireSessionOutcomeTagging(eventStream, db);
   autoTitleHost.start();
 
   const prebuildService = new SourceService({
@@ -404,14 +416,18 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     githubTokenDeps,
   });
 
+  engineHost.setImageFallbackHandler((event) => prebuildService.handleImageFallback(event));
+
   // Child workspaces under the test tmp dir (cleaned up with it) instead of
   // the real ~/.valet/children.
-  const childrenDeps = { db, engineHost, engineStore, prebuildService, workspaceRoot: join(blobsRoot, "children") };
+  const childrenDeps = { db, engineHost, engineStore, prebuildService, workspaceRoot: join(blobsRoot, "children"), scratchCaps };
   const childWatcher = new ChildWatcher(childrenDeps);
+  const stopChildReports = wireChildGateReports(eventStream, childWatcher);
   spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
   readerRef = buildChildReader(childrenDeps);
   senderRef = buildChildSender(childrenDeps, childWatcher);
   statusRef = buildChildStatusReader(childrenDeps);
+  stopperRef = buildChildStopper(childrenDeps);
 
   // retentionMs 0 disables the sweep; behavior is tested in engine/hibernation-reaper.test.ts.
   const hibernationReaper = new HibernationReaper({ db, engineHost, engineStore, retentionMs: 0 });
@@ -431,14 +447,29 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   // engine/idle-hibernation-sweep.test.ts.
   const idleHibernationSweep = new IdleHibernationSweep({ db, engineHost, engineStore, idleMs: 0 });
 
+  // sweepIntervalMs 0 disables the timer; a test drives `sweep()` directly.
+  // Behavior is tested in engine/wake-watcher.test.ts.
+  const wakeWatcher = new WakeWatcher({
+    childEvents: { active: (row) => childWatcher.subscriptionActive(row), deliver: (row, digest) => childWatcher.deliverEvent(row, digest), close: (row) => childWatcher.closeSubscription(row), finish: (row, blocked) => childWatcher.finishDeliveryPass(row, blocked) },
+    db,
+    engineStore,
+    engineHost,
+    provider: sandboxProvider,
+    limits: wakeupLimits,
+    deriveEvent: productionEventWaiterDeriver({ db, plugins, githubTokenDeps }),
+    sweepIntervalMs: 0,
+  });
+
   // sweepIntervalMs 0 disables the sweep; behavior is tested in
   // orchestrator/security-runner-driver.test.ts.
   const securityRunnerDriver = new SecurityRunnerDriver({
     db,
     engineStore,
-    submit: (row, text) => submitSessionPrompt({ db, engineHost }, row, text),
+    submit: (row, text, toolScope) => submitSessionPrompt({ db, engineHost }, row, text, { recordUserActivity: false, toolScope, inheritToolScope: true }),
     sweepIntervalMs: 0,
   });
+
+  const workflowStore = new PgWorkflowStore(pgdb);
 
   const channelHost = new ChannelHost({
     db,
@@ -447,6 +478,8 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     eventStream,
     engineCredentials,
     plugins,
+    workflowStore,
+    actionPluginByService,
     publicUrl: opts.channelPublicUrl,
     resolveOrgId: () => resolveOrgId(db),
     onePassword,
@@ -454,8 +487,6 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   if (opts.startChannelHost) {
     await channelHost.start();
   }
-
-  const workflowStore = new PgWorkflowStore(pgdb);
 
   // Never started on its timer in tests (matches the dispatcher/scheduler
   // convention) — drive `reclaimRun`/`sweep` manually; behavior is tested
@@ -513,6 +544,14 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     engine: workflowEngineDeps,
     executors: createDefaultNodeExecutors(),
     onApprovalGrant,
+    // The settle observers `providers/node.ts` wires, so an integration
+    // test sees what a real settle does: the failed-run notification and
+    // the archive of the run's own assistant thread. The sandbox reclaim
+    // stays manual here, for the reason given above it.
+    onRunSettled: async (info) => {
+      await buildRunSettledAttention({ db, store: workflowStore })(info);
+      await buildRunThreadArchive({ db, store: workflowStore, engineStore })(info);
+    },
   });
   const workflowRunHost = opts.workflowRunHost ?? realWorkflowRunHost;
   // Only start the host loop when it's the real one under test control — a
@@ -530,24 +569,39 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     db,
     workflowStore,
     workflowRunHost,
-    deliverToOrchestrator: buildOrchestratorTarget({
+    deliverToAssistant: buildAssistantTarget({
       db,
       engineHost,
       fetchThreadContext: channelThreadContextFetcher(channelHost),
+      slackAccess: { engineCredentials, onePassword },
     }),
   });
 
   const eventDispatcher = new EventDispatcher({
     db,
+    retainExternalUsage: externalUsageRetention(db),
+    drainTagging: taggingDrain(db, engineCredentials),
+    drainAttention: () => drainAttentionDeliveries({ db, channels: channelHost.attentionDeliverers(), access: { engineCredentials, onePassword } }),
     workflowRunHost,
     workflowStore,
-    deliverToOrchestrator: buildOrchestratorTarget({
+    deliverToAssistant: buildAssistantTarget({
       db,
       engineHost,
       fetchThreadContext: channelThreadContextFetcher(channelHost),
+      slackAccess: { engineCredentials, onePassword },
     }),
     resolveChannelOrigin: channelOriginResolver(channelHost),
     normalizeChannelMessage: channelMessageNormalizer(channelHost),
+    plugins,
+    // A claim redirect to a once-mode waiter ends that waiter after the
+    // delivery lands, with one terminal signal.
+    endMatchedWaiter: (args) => wakeWatcher.endDeliveredWaiter(args),
+    // The follow router's predicate and the Slack twin need the bot id.
+    slackBotUserId: (orgId) => waiterMatchDeps({ db, engineStore, engineCredentials, plugins, channelHost }).slackBotUserId(orgId),
+    // A claimed waiter gets its digest back when its claim delivery is
+    // skipped after ingest (`events/claim-recovery.ts`).
+    recoverClaimedDigest: (args) => appendClaimedWaiterDigest(
+      waiterMatchDeps({ db, engineStore, engineCredentials, plugins, channelHost }, { nudge: (ids) => wakeWatcher.nudge(ids) }), args),
   });
 
   const webhookRateLimiter = new WorkflowWebhookRateLimiter(opts.webhookRateLimit ?? { limit: 30, windowMs: 60_000 });
@@ -582,18 +636,23 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     workflowSandboxReclaimer,
     sandboxReconcileSweep,
     idleHibernationSweep,
+    wakeWatcher,
     securityRunnerDriver,
     channelHost,
     workflowStore,
     workflowRunHost,
     workflowScheduler,
+    // Never started on its timer in tests; drive `tick()` directly.
+    onlineStatusWatcher: new OnlineStatusWatcher({ db, plugins, credentials: engineCredentials }),
     webhookRateLimiter,
     eventDispatcher,
     contentSync,
     plugins,
+    configMcpServers: opts.mcpServers ?? [],
     actionPluginByService,
-    dynamicToolCounts: new DynamicToolCounts({ credentials: engineCredentials }),
+    serviceProbes,
     prebuildService,
+    scratchCaps,
   };
 
   let authWiring: AuthWiring = {};
@@ -609,18 +668,24 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   // Node-only test boot: `createApp` defaults to the Node server adapter.
   const { startServer } = createApp(providers, authWiring, { webDistDir: opts.webDistDir, isReady: opts.isReady });
   const server = await new Promise<ReturnType<typeof startServer>>((resolve) => {
-    const handle = startServer({ port, onListen: () => resolve(handle) });
+    const handle = startServer({ port: 0, onListen: (port) => {
+      boundPort = port;
+      resolve(handle);
+    } });
   });
 
   return {
-    baseUrl: `http://localhost:${port}`,
-    wsUrl: `ws://localhost:${port}`,
+    baseUrl: `http://localhost:${server.port}`,
+    wsUrl: `ws://localhost:${server.port}`,
     providers,
     async cleanup() {
       await server.close();
       await eventDispatcher.stop();
       await channelHost.stop();
+      stopChildReports();
+      await childWatcher.stopRetentionSweep();
       autoTitleHost.stop();
+      stopOutcomeTagging();
       if (!opts.workflowRunHost) await realWorkflowRunHost.stopHost();
       await engineHost.destroyAll();
       rmSync(blobsRoot, { recursive: true, force: true });
@@ -629,6 +694,8 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
         else process.env.BETTER_AUTH_SECRET = prevAuthSecret;
         if (prevLocalAuth === undefined) delete process.env.VALET_LOCAL_AUTH;
         else process.env.VALET_LOCAL_AUTH = prevLocalAuth;
+        if (prevAuthMethods === undefined) delete process.env.AUTH_METHODS;
+        else process.env.AUTH_METHODS = prevAuthMethods;
       }
     },
   };

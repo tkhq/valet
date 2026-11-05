@@ -41,6 +41,8 @@ import type { CredentialOwner, CredentialStore } from "@valet/engine";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { isKnownProviderKind, listLlmProviders, parseModelId, providerNamespace } from "./llm-providers.js";
 import { curatedOpenrouterModels, openrouterRegistry, toProviderModel } from "./openrouter.js";
+import { bedrockRegistry, curatedBedrockModels, discoverBedrockModels } from "./bedrock-discovery.js";
+import { envCredentialFor } from "./model-resolution.js";
 import type { LlmProviderModel } from "../schema/index.js";
 import type { ModelInfo } from "../wire/types.js";
 import { TIER_TOKENS } from "./model-tiers.js";
@@ -79,13 +81,50 @@ const KNOWN_KIND_LABEL: Record<KnownCatalogKind, string> = {
   google: "Google",
 };
 
+
+/**
+ * Known kinds whose catalog is a curated selection rather than the full
+ * registry. `zeroConfigDefaults` is the no-row selection: OpenRouter's is a
+ * static set; Bedrock's is its default set filtered to what the AWS account
+ * can invoke when discovery answered (registry-trusted when it did not).
+ */
+const CURATED_KINDS: readonly {
+  kind: "openrouter" | "amazon-bedrock";
+  label: string;
+  registry: () => Map<string, Model<Api>>;
+  zeroConfigDefaults: () => Promise<LlmProviderModel[]>;
+  /** Treat a row whose `models` is [] as the defaults (see the loop below). */
+  emptySelectionMeansDefaults: boolean;
+}[] = [
+  {
+    kind: "openrouter",
+    label: "OpenRouter",
+    registry: openrouterRegistry,
+    zeroConfigDefaults: async () => curatedOpenrouterModels(),
+    emptySelectionMeansDefaults: false,
+  },
+  {
+    kind: "amazon-bedrock",
+    label: "Amazon Bedrock",
+    registry: bedrockRegistry,
+    emptySelectionMeansDefaults: true,
+    zeroConfigDefaults: async () => {
+      const defaults = curatedBedrockModels();
+      const discovered = await discoverBedrockModels();
+      if (!discovered.live) return defaults;
+      const available = new Set(discovered.models.map((m) => m.id));
+      return defaults.filter((m) => available.has(m.id));
+    },
+  },
+];
+
 /** True when an org credential exists at `llm:{rowId}` — the sole
  * resolvability signal for a custom (`openai_compatible`) row (no env
  * fallback, mirrors `resolveModelSpec`'s throw condition). Exported so
  * `engine/host.ts`'s `firstActivePreference` can reuse this exact check
  * instead of re-deriving "is this row usable" logic that could drift from
  * the catalog's own `active` definition. */
-export async function hasOrgKey(credentials: CredentialStore, orgId: string, rowId: string): Promise<boolean> {
+export async function hasOrgKey(credentials: Pick<CredentialStore, "get">, orgId: string, rowId: string): Promise<boolean> {
   const owner: CredentialOwner = { type: "org", id: orgId };
   const stored = await credentials.get(owner, `llm:${rowId}`);
   return stored !== null;
@@ -162,34 +201,41 @@ export async function buildOrgCatalog(db: AppQueryable, credentials: CredentialS
     }
   }
 
-  // OpenRouter — registry-backed like the known kinds above, but exposure
-  // is the row's curated selection (or the curated defaults on zero-config
-  // env-key boots), never the full registry. Selection entries re-resolve
-  // against the registry when present (pricing/context stay current);
-  // entries the registry doesn't know (added from OpenRouter's LIVE
-  // catalog via the picker) surface with their stored row metadata — same
-  // trust model as custom providers' declared lists.
-  {
-    const row = rows.find((r) => r.kind === "openrouter");
-    const registry = openrouterRegistry();
+  // Curated known kinds (OpenRouter, Amazon Bedrock) — registry-backed like
+  // the kinds above, but exposure is the row's curated selection (or the
+  // kind's defaults on a zero-config boot), never the full registry.
+  // Selection entries re-resolve against the registry when present
+  // (pricing/context stay current); entries the registry doesn't know
+  // (picked from OpenRouter's live catalog or from this AWS account's
+  // discovery) surface with their stored row metadata — same trust model as
+  // custom providers' declared lists.
+  for (const curated of CURATED_KINDS) {
+    const row = rows.find((r) => r.kind === curated.kind);
+    const registry = curated.registry();
     let selection: LlmProviderModel[] | undefined;
     let active = false;
     let resolvable = false;
-    let namespace = "openrouter";
-    let providerId = "openrouter";
-    let providerName = "OpenRouter";
+    let namespace: string = curated.kind;
+    let providerId: string = curated.kind;
+    let providerName = curated.label;
     if (row) {
       const orgKey = await hasOrgKey(credentials, orgId, row.id);
-      resolvable = orgKey || Boolean(getEnvApiKey("openrouter"));
+      resolvable = orgKey || envCredentialFor(curated.kind).present;
       active = row.enabled && resolvable;
       namespace = providerNamespace(row);
       providerId = row.id;
       providerName = row.name;
-      selection = row.models;
-    } else if (getEnvApiKey("openrouter")) {
+      // An empty Bedrock selection means "the defaults": rows created before
+      // Bedrock accepted a selection (valet #1101) stored [] and would
+      // otherwise go blank. OpenRouter rows have always been seeded, so an
+      // empty selection there is an admin's deliberate choice.
+      selection = row.models.length === 0 && curated.emptySelectionMeansDefaults
+        ? await curated.zeroConfigDefaults()
+        : row.models;
+    } else if (envCredentialFor(curated.kind).present) {
       resolvable = true;
       active = true;
-      selection = curatedOpenrouterModels();
+      selection = await curated.zeroConfigDefaults();
     }
     for (const sel of selection ?? []) {
       const reg = registry.get(sel.id);
@@ -201,7 +247,7 @@ export async function buildOrgCatalog(db: AppQueryable, credentials: CredentialS
         contextWindow: m.contextWindow,
         reasoning: reg?.reasoning,
         providerId,
-        providerKind: "openrouter",
+        providerKind: curated.kind,
         providerName,
         active,
         pricing: m.pricing,
@@ -254,6 +300,38 @@ export function catalogValidIds(entries: CatalogEntry[]): Set<string> {
   }
   // Tier tokens are valid model specs (TKAI-285).
   for (const tier of TIER_TOKENS) ids.add(tier);
+  return ids;
+}
+
+/**
+ * The `openrouter/*` ids this org can run BEYOND the catalog's own list.
+ *
+ * `buildOrgCatalog` exposes only the row's curated selection, because the
+ * registry's ~274 entries would flood a picker. Resolution is wider: with an
+ * enabled OpenRouter provider, `resolveModelSpec` resolves any id the
+ * registry knows, curated or not. Validation follows resolution rather than
+ * the picker, so a definition that names a registry id the row never
+ * curated keeps saving. The org's approved list still applies to every id.
+ *
+ * Returns an empty set when the org cannot reach OpenRouter at all.
+ */
+export async function openrouterRegistryIds(
+  db: AppQueryable,
+  credentials: CredentialStore,
+  orgId: string,
+): Promise<Set<string>> {
+  const rows = await listLlmProviders(db, orgId);
+  const row = rows.find((r) => r.kind === "openrouter");
+  const envKey = Boolean(getEnvApiKey("openrouter"));
+  const active = row ? row.enabled && ((await hasOrgKey(credentials, orgId, row.id)) || envKey) : envKey;
+  if (!active) return new Set();
+
+  const approvedList = await getApprovedModels(db, orgId);
+  const ids = new Set<string>();
+  for (const modelId of openrouterRegistry().keys()) {
+    const id = `openrouter/${modelId}`;
+    if (isApproved(approvedList, id)) ids.add(id);
+  }
   return ids;
 }
 

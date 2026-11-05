@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   deriveQueueState,
+  isSlackStopRequest,
   originFromEntries,
   renderSignalEnvelope,
   resolvePartialSubmissionText,
@@ -101,8 +102,24 @@ describe("deriveQueueState (pure)", () => {
     ];
     const state = deriveQueueState(THREAD, items, "collect", false);
     expect(state.collectBuffer?.map((i) => i.id)).toEqual(["a", "b"]);
+    expect(state.collectDeadline).toBeUndefined();
     const none = deriveQueueState(THREAD, [item({ id: "c", status: "queued" })], "collect", false);
     expect(none.collectBuffer).toBeUndefined();
+    expect(none.collectDeadline).toBeUndefined();
+  });
+
+  it("uses the earliest valid collect deadline", () => {
+    const state = deriveQueueState(
+      THREAD,
+      [
+        item({ id: "a", status: "collecting", metadata: { collectDeadline: 3_000 } }),
+        item({ id: "b", status: "collecting", metadata: { collectDeadline: 2_000 } }),
+        item({ id: "c", status: "collecting", metadata: { collectDeadline: "invalid" } }),
+      ],
+      "collect",
+      false,
+    );
+    expect(state.collectDeadline).toBe(2_000);
   });
 
   it("activeItemId is the running or blocked item; undefined otherwise", () => {
@@ -281,5 +298,34 @@ describe("originFromEntries (pure)", () => {
       assistantEntry({ content: "ack", queueItemId: "q-1", stopReason: "end_turn" }),
     ];
     expect(originFromEntries(entries, "q-1")).toBeUndefined();
+  });
+});
+
+describe("isSlackStopRequest", () => {
+  const reply = (body: string, extra: Record<string, unknown> = {}) => ({
+    kind: "signal" as const, signalType: "slack.message", body,
+    origin: { channelType: "slack", threadKey: "slack:C1:1", reply: "auto" as const }, ...extra,
+  });
+
+  it.each(["stop", "Stop!", " CANCEL. ", "wait", "Hold on...", "nevermind", "never mind"])("treats %j as a stop request", (body) => {
+    expect(isSlackStopRequest(reply(body))).toBe(true);
+  });
+
+  it.each(["thanks", "how's it going?", "stop the deploy", "wait, also check logs", "", "stop 🚫", "stop ❤️", "stop™", "🛑"])("lets %j wait for the turn", (body) => {
+    expect(isSlackStopRequest(reply(body))).toBe(false);
+  });
+
+  it("reads the sender's own words when the body carries added context", () => {
+    const body = "This message is from a group conversation. Everyone in it reads your reply.\n\nstop";
+    expect(isSlackStopRequest(reply(body))).toBe(false);
+    expect(isSlackStopRequest(reply(body), "stop")).toBe(true);
+    expect(isSlackStopRequest(reply(body), "stop the deploy")).toBe(false);
+  });
+
+  it("ignores a stop phrase that is not an addressed human reply", () => {
+    expect(isSlackStopRequest("stop")).toBe(false);
+    expect(isSlackStopRequest(reply("stop", { origin: { channelType: "slack", threadKey: "slack:C1:1", reply: "manual" } }))).toBe(false);
+    expect(isSlackStopRequest(reply("stop", { attributes: { senderBot: "true" } }))).toBe(false);
+    expect(isSlackStopRequest(reply("stop", { attachments: [{ type: "image", mimeType: "image/png", url: "data:image/png;base64,AA==" }] }))).toBe(false);
   });
 });

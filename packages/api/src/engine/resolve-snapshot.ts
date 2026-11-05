@@ -10,9 +10,11 @@ import type { SandboxProvider } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import type { ResolveSnapshot } from "./sandbox-spec.js";
 import type { SessionMeta } from "./host.js";
-import { resolvePrebuildImage } from "../prebuilds/resolve.js";
+import { compatible } from "../prebuilds/image-contract.js";
+import { resolvePrebuildImage, contractGateApplies, type OnIncompatibleImage } from "../prebuilds/resolve.js";
 import { prebuildImagePullable, type PrebuildPreflightOpts } from "../prebuilds/registry.js";
 import { imageSources, bakes } from "../schema/index.js";
+import { reportError } from "@valet/engine";
 import { resolveCommitSigning } from "./commit-signing-resolve.js";
 
 export interface ResolveSnapshotDeps {
@@ -24,6 +26,8 @@ export interface ResolveSnapshotDeps {
   preflight?: PrebuildPreflightOpts;
   /** Names the Turnkey session key and scopes its store row; absent skips commit signing. */
   sessionId?: string;
+  /** Called (best-effort) when the repo bake fails the runtime contract gate. */
+  onIncompatible?: OnIncompatibleImage;
 }
 
 /**
@@ -48,7 +52,7 @@ async function resolveBaseImage(
   orgId: string,
   provider: SandboxProvider,
   preflight?: PrebuildPreflightOpts,
-): Promise<string | null> {
+): Promise<{ imageRef: string; sizeBytes: number | null } | null> {
   try {
     if (!provider.capabilities().customImage) return null;
 
@@ -75,6 +79,14 @@ async function resolveBaseImage(
     const bake = bakeRows[0];
     if (!bake) return null;
 
+    // Spec 7.1 item 2: the org base must pass the same contract test; a
+    // failing base degrades to the stock image, which is compatible by
+    // construction (pinned with the API).
+    if (contractGateApplies(provider) && !compatible(bake)) {
+      console.warn(`base bake image ${bake.imageRef} is below the runtime contract (contract ${bake.contractVersion ?? "missing"}) — falling back to stock image`);
+      return null;
+    }
+
     // Pull preflight (kubernetes only) — mirrors the repo-bake preflight in
     // `resolvePrebuildImage`. A down/slow registry or pruned image degrades to
     // null (stock), never blocks provisioning.
@@ -88,9 +100,9 @@ async function resolveBaseImage(
       }
     }
 
-    return bake.imageRef;
+    return { imageRef: bake.imageRef, sizeBytes: bake.sizeBytes ?? null };
   } catch (err) {
-    console.error(`base image resolution failed for org ${orgId}:`, err);
+    reportError({ area: "sandbox", reason: "base_image_resolve" }, `base image resolution failed for org ${orgId}`, err);
     return null;
   }
 }
@@ -111,15 +123,15 @@ async function resolveBaseImage(
  * bricks provisioning.
  */
 export async function resolveSnapshot(deps: ResolveSnapshotDeps): Promise<ResolveSnapshot> {
-  const { db, provider, meta, apiUrl, stockImage, preflight, sessionId } = deps;
+  const { db, provider, meta, apiUrl, stockImage, preflight, onIncompatible, sessionId } = deps;
 
   const repos = meta.repos ?? [];
 
   // Single image lineage: every bake chains on the full base, so repo bakes
   // (prebuilds) are safe for EVERY session shape — docker and full-profile
   // included — and the base lookup needs no per-session profile.
-  const [prebuild, baseBakeRef, commitSigning] = await Promise.all([
-    resolvePrebuildImage(db, meta, provider, preflight),
+  const [prebuild, baseBake, commitSigning] = await Promise.all([
+    resolvePrebuildImage(db, meta, provider, preflight, onIncompatible),
     db ? resolveBaseImage(db, meta.orgId, provider, preflight) : Promise.resolve(null),
     db && sessionId ? resolveCommitSigning(db, { userId: meta.userId, sessionId }) : Promise.resolve(undefined),
   ]);
@@ -133,9 +145,11 @@ export async function resolveSnapshot(deps: ResolveSnapshotDeps): Promise<Resolv
           bakedSha: prebuild.bakedSha,
           recipe: prebuild.recipe,
           bakeId: prebuild.prebuildId,
+          sizeBytes: prebuild.sizeBytes,
         }
       : null,
-    baseBakeRef,
+    baseBakeRef: baseBake?.imageRef ?? null,
+    baseBakeSizeBytes: baseBake?.sizeBytes ?? null,
     // Bindings already carry targetDir from meta (loadSessionMeta supplies it).
     repos: repos.map((binding) => ({ ...binding })),
     userName: meta.userName,

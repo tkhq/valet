@@ -3,73 +3,65 @@
  * Rendered for each `WorkflowPendingGate` with `kind === "policy_gate"`.
  *
  * Split-button: "Approve once" (primary) + chevron trigger opening a
- * DropdownMenu with "Approve for rest of run" and "Always allow" (admin
- * only). Deny is a separate danger button. Note field rides whichever action
+ * DropdownMenu with "Approve for rest of run". "Approve and stop asking"
+ * (secondary, confirmed) saves a permission for later runs of this workflow
+ * only. Deny is a separate danger button. Note field rides whichever action
  * fires. On 409 the query key is invalidated so the stale card disappears.
  */
-import { type ReactElement, useState } from "react";
+import { type ReactElement } from "react";
 import { ChevronDown, ShieldAlert } from "lucide-react";
 import type { WorkflowPendingGate } from "@valet/api/wire";
-import { useResolveApproval } from "~/api/workflows";
+import { actionParamsLabel } from "@valet/shared";
 import { useMe } from "~/api/settings";
+import { useApprovalResponse } from "./use-approval-response";
 import { ApiError } from "~/api/client";
 import { apiErrorMessage } from "~/api/policies";
 import {
   Button,
+  Callout,
+  cardClass,
+  ConfirmDialog,
+  Input,
   Spinner,
+  Time,
   DropdownMenu,
   DropdownMenuTrigger,
   DropdownMenuContent,
   DropdownMenuItem,
 } from "~/components/primitives";
 import { RiskBadge } from "./risk-badge";
+import { GatePayloadPreview, hasGatePayloadPreview, type GateTool } from "~/components/session/gate-payload";
 import { cn } from "~/lib/cn";
 
-export interface PolicyGateCardProps {
+interface PolicyGateCardProps {
   runId: string;
   gate: WorkflowPendingGate; // kind === "policy_gate"
+  confirmActions?: boolean;
 }
 
-export function PolicyGateCard({ runId, gate }: PolicyGateCardProps): ReactElement {
-  const [note, setNote] = useState("");
-  const [confirmAlways, setConfirmAlways] = useState(false);
-  const [busyScope, setBusyScope] = useState<"once" | "run" | "always" | "deny" | null>(null);
-  const resolve = useResolveApproval(runId);
-  const meQ = useMe();
-  const isAdmin = meQ.data?.orgRole === "admin";
+export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGateCardProps): ReactElement {
+  const { note, setNote, confirmation, submitted, resolve, respond, confirm, onConfirmationOpenChange } =
+    useApprovalResponse(runId, gate.nodeId, gate.iteration, gate.gateId);
+  const me = useMe();
 
   const service = gate.service ?? "";
   const action = gate.action ?? "";
   const serviceAction = service && action ? `${service}.${action}` : gate.nodeId;
 
   const busy = resolve.isPending;
+  // Cut parameters could preview a wrong message, so only whole ones do.
+  const previewTool: GateTool | undefined = service && action && isRecord(gate.gateParams) && !gate.gateParamsTruncated
+    ? { id: `${service}.${action}`, args: gate.gateParams }
+    : undefined;
+  const preview = previewTool && hasGatePayloadPreview(previewTool) ? previewTool : undefined;
+  const paramsLabel = preview ? undefined : actionParamsLabel(gate.gateParams);
+  // Only the action permission stops later runs from asking. A lender's
+  // workflow consent covers their account and keeps its own copy.
+  const confirmingStopAsking = confirmation?.approved === true && confirmation.scope === "workflow" && !gate.approver;
+  const borrowScopeCopy = `Approving this step also lets Valet use your ${gate.serviceDisplayName || service || "shared"} account for later actions in this workflow run, including actions requested by other teammates. Only you can approve use of your account.`;
 
-  function fireApprove(scope: "once" | "run" | "always") {
-    setBusyScope(scope);
-    resolve.mutate({
-      nodeId: gate.nodeId,
-      body: {
-        approved: true,
-        scope,
-        note: note.trim() || undefined,
-        iteration: gate.iteration,
-      },
-    });
-    setConfirmAlways(false);
-  }
-
-  function handleDeny() {
-    setBusyScope("deny");
-    resolve.mutate({
-      nodeId: gate.nodeId,
-      body: {
-        approved: false,
-        scope: "once",
-        note: note.trim() || undefined,
-        iteration: gate.iteration,
-      },
-    });
-    setConfirmAlways(false);
+  function fireApprove(scope: "once" | "run" | "workflow" | "team_account") {
+    respond({ approved: true, scope }, confirmActions || scope === "workflow");
   }
 
   // `ApiError.message` is "{method} {path} → {status}" — the server's {error}
@@ -90,8 +82,21 @@ export function PolicyGateCard({ runId, gate }: PolicyGateCardProps): ReactEleme
       ? "Denying skips this node; downstream nodes can branch on the denial."
       : "Denying fails this node.";
 
+  // A step that would use a member's shared account answers to that member.
+  // Everyone else sees that the request went to them.
+  if (gate.approver && gate.approver.userId !== me.data?.id) {
+    return (
+      <div className={cn(cardClass, "p-4")} role="status">
+        <p className="text-sm font-medium text-ink [overflow-wrap:anywhere]">Asked {gate.approver.name ?? "a teammate"} for permission</p>
+        <p className="mt-1 text-xs text-muted [overflow-wrap:anywhere]">
+          {serviceAction} would use {gate.approver.name ? `${gate.approver.name}'s` : "a teammate's"} shared account. The run continues once they allow it.
+        </p>
+      </div>
+    );
+  }
+
   return (
-    <div className="rounded-md border border-amber-300 bg-amber-50/70 dark:border-amber-700/60 dark:bg-amber-950/40 p-4 space-y-3">
+    <Callout tone="warning" className="space-y-3 p-4">
       {/* Header */}
       <div className="flex items-start gap-2.5">
         <span className="mt-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-amber-200 dark:bg-amber-900/60">
@@ -117,10 +122,17 @@ export function PolicyGateCard({ runId, gate }: PolicyGateCardProps): ReactEleme
       )}
 
       {/* Params */}
+      {paramsLabel && (
+        <p className="text-sm [overflow-wrap:anywhere]">
+          <span className="text-muted">{paramsLabel.key}: </span>
+          <span className="font-medium text-ink">{paramsLabel.value}</span>
+        </p>
+      )}
+      {preview && <GatePayloadPreview tool={preview} />}
       {gate.gateParams != null && (
         <details className="text-xs text-muted">
           <summary className="min-h-11 cursor-pointer select-none py-3 font-medium sm:min-h-0 sm:py-0 text-ink">
-            Parameters
+            {preview ? "Details" : "Parameters"}
           </summary>
           <pre className="mt-1.5 overflow-x-auto rounded bg-[--bg] p-2 font-mono text-xs text-muted">
             {JSON.stringify(gate.gateParams, null, 2)}
@@ -133,46 +145,28 @@ export function PolicyGateCard({ runId, gate }: PolicyGateCardProps): ReactEleme
         </details>
       )}
 
+      {gate.approver && (
+        <p className="text-xs text-muted">{borrowScopeCopy} Always allow for this workflow covers its later runs until someone changes its steps.{gate.approver.allowTeamConsent ? " Always allow for this team covers future threads and runs. Choose Stop sharing in Integrations to revoke it. Action approvals still apply." : ""}</p>
+      )}
+
       {/* Note input */}
-      <input
-        type="text"
+      <Input
+        aria-label="Optional note"
         value={note}
         onChange={(e) => setNote(e.target.value)}
         placeholder="Optional note"
         disabled={busy}
-        className={cn(
-          "min-h-11 w-full rounded border border-line bg-[--bg] px-2 py-1.5 sm:min-h-0 text-sm text-ink",
-          "placeholder:text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss",
-          "disabled:opacity-50",
-        )}
       />
-
-      {/* Always-allow confirm step */}
-      {confirmAlways && (
-        <div className="rounded border border-amber-400 bg-amber-100/80 dark:border-amber-600 dark:bg-amber-900/40 p-3 space-y-2">
-          <div className="text-xs font-medium text-ink">
-            Allows {serviceAction} for every user and run in this org.{" "}
-            <a
-              href="/settings/organization"
-              className="underline text-moss hover:opacity-80"
-            >
-              Manage policies
-            </a>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Button size="sm" onClick={() => fireApprove("always")} disabled={busy}>
-              {busy && busyScope === "always" ? <Spinner size={12} /> : null}
-              Confirm
-            </Button>
-            <Button size="sm" variant="ghost" onClick={() => setConfirmAlways(false)} disabled={busy}>
-              Cancel
-            </Button>
-          </div>
-        </div>
-      )}
 
       {/* Action buttons */}
       <div className="flex flex-wrap items-center gap-3">
+        {gate.approver ? (
+          <>
+          <Button size="sm" onClick={() => fireApprove("run")} disabled={busy}>Allow for this run</Button>
+          <Button size="sm" variant="secondary" onClick={() => fireApprove("workflow")} disabled={busy}>Always allow for this workflow</Button>
+          {gate.approver.allowTeamConsent && <Button size="sm" variant="secondary" onClick={() => fireApprove("team_account")} disabled={busy}>Always allow for this team</Button>}
+          </>
+        ) : <>
         {/* Split-button: Approve once + dropdown */}
         <div className="flex items-center">
           <Button
@@ -181,7 +175,7 @@ export function PolicyGateCard({ runId, gate }: PolicyGateCardProps): ReactEleme
             onClick={() => fireApprove("once")}
             disabled={busy}
           >
-            {busy && busyScope === "once" ? <Spinner size={12} /> : null}
+            {busy && submitted?.approved && submitted.scope === "once" ? <Spinner size={12} /> : null}
             Approve once
           </Button>
 
@@ -208,28 +202,16 @@ export function PolicyGateCard({ runId, gate }: PolicyGateCardProps): ReactEleme
                   </div>
                 </div>
               </DropdownMenuItem>
-              <DropdownMenuItem
-                onSelect={() => {
-                  if (isAdmin) setConfirmAlways(true);
-                }}
-                disabled={!isAdmin || busy}
-              >
-                <div>
-                  <div>
-                    Always allow{!isAdmin ? " (org admin only)" : ""}
-                  </div>
-                  <div className="text-xs text-muted">
-                    Writes a durable org-wide allow policy.
-                  </div>
-                </div>
-              </DropdownMenuItem>
+
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
+        <Button size="sm" variant="secondary" onClick={() => fireApprove("workflow")} disabled={busy}>Approve and stop asking</Button>
+        </>}
 
         {/* Deny */}
-        <Button size="sm" variant="danger" onClick={handleDeny} disabled={busy}>
-          {busy && busyScope === "deny" ? <Spinner size={12} /> : null}
+        <Button size="sm" variant="danger" onClick={() => respond({ approved: false, scope: "once" }, confirmActions)} disabled={busy}>
+          {busy && submitted?.approved === false ? <Spinner size={12} /> : null}
           Deny
         </Button>
       </div>
@@ -237,17 +219,38 @@ export function PolicyGateCard({ runId, gate }: PolicyGateCardProps): ReactEleme
       {/* Deny microcopy */}
       <div className="text-[11px] text-muted">{denyMicrocopy}</div>
 
+      <ConfirmDialog
+        open={confirmation !== null}
+        onOpenChange={onConfirmationOpenChange}
+        title={confirmingStopAsking ? "Stop asking on later runs?" : confirmation?.approved === false ? "Deny this tool action?" : "Allow this tool action?"}
+        description={
+          confirmation?.approved && gate.approver
+            ? confirmation.scope === "workflow"
+              ? `Valet can use your ${gate.serviceDisplayName || service || "shared"} account in later runs of this workflow until someone changes its steps or you stop sharing. Action approvals still apply.`
+              : borrowScopeCopy
+            : confirmingStopAsking
+            ? `Valet runs ${serviceAction} now. Later runs of this workflow run ${serviceAction} without asking anyone, until someone changes its steps or resets its saved permissions. Policy rules that require approval still apply.`
+            : confirmation?.scope === "run"
+            ? `Valet runs ${serviceAction} now and allows later calls in this run.`
+            : confirmation?.approved === false
+              ? denyMicrocopy
+              : `Valet runs ${serviceAction} once with the shown parameters.`
+        }
+        confirmLabel={confirmingStopAsking ? "Stop asking" : confirmation?.approved === false ? "Deny action" : "Allow action"}
+        onConfirm={confirm}
+      />
+
       {/* Footer: timeout + error */}
       {(gate.timeoutAt != null || is409AlreadyResolved || errorMsg != null) && (
         <div className="space-y-1">
           {gate.timeoutAt != null && (
             <div className="text-[11px] text-muted">
-              Gate times out {new Date(gate.timeoutAt).toLocaleString()}.
+              Gate times out <Time ts={gate.timeoutAt} format="absolute" />.
             </div>
           )}
           {is409AlreadyResolved && (
             <div className="text-xs text-muted">
-              This gate was already resolved. Refreshing…
+              This gate changed or was already resolved. Refreshing…
             </div>
           )}
           {errorMsg != null && (
@@ -257,6 +260,10 @@ export function PolicyGateCard({ runId, gate }: PolicyGateCardProps): ReactEleme
           )}
         </div>
       )}
-    </div>
+    </Callout>
   );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

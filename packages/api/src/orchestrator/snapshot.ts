@@ -11,20 +11,31 @@
  * directly. Don't "fix" this to go over HTTP; there's no tool boundary to
  * preserve here.
  */
-import { listFiles, readFile, type MemoryScope } from "../services/memory.js";
+import { listFiles, readFile, type MemoryFileKey, type MemoryScope } from "../services/memory.js";
+import { memoryUsageRecorder } from "../services/memory-usage.js";
 import type { AppDb } from "../lib/drizzle.js";
+import { renderPrinciplesSection, selectIndexedPrinciples } from "./principles.js";
 
 export interface AssembleMemorySnapshotOptions {
   budgetChars?: number;
+  /** The session has only the read-only memory tools, so the base
+   * principle must not tell it to write. */
+  readOnly?: boolean;
 }
 
 /** Default snapshot budget, in characters (decision 18). */
 export const DEFAULT_SNAPSHOT_BUDGET_CHARS = 48_000;
 
+/** Budget for a child session or a workflow step. These run often and in
+ * parallel, so their snapshot drops journals and older pinned files sooner.
+ * The Principles section and the root index are never dropped. */
+export const DELEGATED_SNAPSHOT_BUDGET_CHARS = 16_000;
+
 const RECENT_JOURNAL_COUNT = 3;
 
 interface SnapshotBlock {
   path: string;
+  key: MemoryFileKey;
   content: string;
   updatedAt: number;
 }
@@ -33,14 +44,21 @@ function ownerLabel(scope: MemoryScope): string {
   return `${scope.owner.type}:${scope.owner.id}`;
 }
 
-function renderSnapshot(header: string, pinned: SnapshotBlock[], journals: SnapshotBlock[], indexContent: string): string {
+function renderSnapshot(
+  header: string,
+  principles: string,
+  pinned: SnapshotBlock[],
+  journals: SnapshotBlock[],
+  indexContent: string,
+): string {
   const pinnedPart = pinned.map((b) => `\n## pinned: ${b.path}\n\n${b.content}\n`).join("");
   const journalPart = journals.map((b) => `\n## journal: ${b.path}\n\n${b.content}\n`).join("");
-  return `${header}${pinnedPart}${journalPart}\n## index: /\n\n${indexContent}`;
+  return `${header}\n${principles}\n${pinnedPart}${journalPart}\n## index: /\n\n${indexContent}`;
 }
 
 /**
  * Assembles the wake-time memory snapshot for `scope`: a header line, the
+ * Principles section (`./principles.ts`), the
  * full rendered body of every pinned file (path order), the 3 most recent
  * journal files, and the virtual root `index.md`. Own-scope only — never
  * pulls in team-projected files, even though `listFiles`/`readFile` would
@@ -48,7 +66,7 @@ function renderSnapshot(header: string, pinned: SnapshotBlock[], journals: Snaps
  *
  * When the assembled content exceeds `budgetChars`, pinned + journal
  * blocks are dropped oldest-first (by `updatedAt`) until it fits (or until
- * none remain — the header and root index are never dropped), and a
+ * none remain — the header, principles, and root index are never dropped), and a
  * truncation note is appended.
  */
 export async function assembleMemorySnapshot(
@@ -62,7 +80,7 @@ export async function assembleMemorySnapshot(
   // Real stored paths never contain a colon (normalizePath rejects it) —
   // `listFiles`' `team:{id}/…` virtual-prefix entries are the only ones
   // that do, so this filter is an exact own-scope check, not a heuristic.
-  const own = summaries.filter((f) => !f.path.includes(":"));
+  const own = summaries.filter((f) => scope.owner.type === "team" || !f.path.includes(":"));
 
   const pinnedSummaries = own.filter((f) => f.pinned).sort((a, b) => a.path.localeCompare(b.path));
   // "Most recent" journal files means most recent *calendar date*, not
@@ -80,7 +98,7 @@ export async function assembleMemorySnapshot(
   for (const s of pinnedSummaries) {
     const result = await readFile(db, scope, s.path);
     if (result.kind === "file") {
-      pinnedBlocks.push({ path: s.path, content: result.rendered, updatedAt: s.updatedAt });
+      pinnedBlocks.push({ path: s.path, key: s.key, content: result.rendered, updatedAt: s.updatedAt });
     }
   }
 
@@ -88,20 +106,25 @@ export async function assembleMemorySnapshot(
   for (const s of journalSummaries) {
     const result = await readFile(db, scope, s.path);
     if (result.kind === "file") {
-      journalBlocks.push({ path: s.path, content: result.rendered, updatedAt: s.updatedAt });
+      journalBlocks.push({ path: s.path, key: s.key, content: result.rendered, updatedAt: s.updatedAt });
     }
   }
 
   const indexResult = await readFile(db, scope, "");
   const indexContent = indexResult.kind === "directory" ? indexResult.rendered : "";
 
-  const header = `# Memory snapshot — ${ownerLabel(scope)} — ${new Date().toISOString().slice(0, 10)}\n`;
+  // The principle index reads the whole read-union: a team's principles
+  // guide its members too. It is never dropped for the budget, so
+  // `renderPrinciplesSection` caps it.
+  const principles = renderPrinciplesSection(summaries, { readOnly: opts?.readOnly });
+
+  const header = `# Memory snapshot — ${ownerLabel(scope)} — snapshot built ${new Date().toISOString().slice(0, 10)} UTC (the date the snapshot was built, not the current date)\n`;
 
   // `journalBlocks` is already newest-first (see the sort above); its last
   // element is the oldest of the (up to 3) included journals.
   let remainingPinned = [...pinnedBlocks];
   let remainingJournals = [...journalBlocks];
-  let rendered = renderSnapshot(header, remainingPinned, remainingJournals, indexContent);
+  let rendered = renderSnapshot(header, principles, remainingPinned, remainingJournals, indexContent);
   let droppedCount = 0;
 
   // Oldest-first within each section (decision 18): journals (routine,
@@ -112,7 +135,7 @@ export async function assembleMemorySnapshot(
   while (rendered.length > budgetChars && remainingJournals.length > 0) {
     remainingJournals = remainingJournals.slice(0, -1);
     droppedCount++;
-    rendered = renderSnapshot(header, remainingPinned, remainingJournals, indexContent);
+    rendered = renderSnapshot(header, principles, remainingPinned, remainingJournals, indexContent);
   }
   while (rendered.length > budgetChars && remainingPinned.length > 0) {
     let oldestIdx = 0;
@@ -121,12 +144,20 @@ export async function assembleMemorySnapshot(
     }
     remainingPinned = remainingPinned.filter((_, i) => i !== oldestIdx);
     droppedCount++;
-    rendered = renderSnapshot(header, remainingPinned, remainingJournals, indexContent);
+    rendered = renderSnapshot(header, principles, remainingPinned, remainingJournals, indexContent);
   }
 
   if (droppedCount > 0) {
     rendered += `\n\n---\n_[snapshot truncated: ${droppedCount} file(s) omitted to fit the ${budgetChars}-char budget]_\n`;
   }
+
+  // Usage: the files this prompt carries, and the principles its index
+  // lists. The model did not choose them, so they count as injections, not
+  // reads. A block the budget dropped never reached the prompt.
+  const usage = memoryUsageRecorder(db);
+  const injectedAt = Date.now();
+  for (const block of [...remainingPinned, ...remainingJournals]) usage.record(block.key, "inject", injectedAt);
+  for (const principle of selectIndexedPrinciples(summaries)) usage.record(principle.key, "inject", injectedAt);
 
   return rendered;
 }

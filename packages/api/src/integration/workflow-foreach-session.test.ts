@@ -2,7 +2,7 @@
  * Integration tests: a `foreach` whose body dispatches engine work, driven
  * across more than one item.
  *
- * `SessionNode` and `OrchestratorNode` are both legal `ForeachBodyNode`s,
+ * `SessionNode` and `ThreadNode` are both legal `ForeachBodyNode`s,
  * and both mint ids with a `:{iteration}` suffix for every item after the
  * first (`iterationSuffix`). Every method on the `WorkflowEngineDeps` port
  * resolves its run context by parsing one of those ids, so the 4-part form

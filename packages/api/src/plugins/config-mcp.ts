@@ -54,9 +54,7 @@ function buildPlugin(entry: McpServerDecl, env: NodeJS.ProcessEnv): ValetPlugin 
     staticToken = token;
   }
 
-  // The connect UI shows this as the card title, so a missing displayName
-  // must still read like a product name, not a slug.
-  const displayName = entry.displayName ?? titleCaseSlug(entry.name);
+  const displayName = configMcpDisplayName(entry);
 
   const credentials: CredentialDeclaration[] = [];
   if (entry.auth === "oauth") {
@@ -69,6 +67,7 @@ function buildPlugin(entry: McpServerDecl, env: NodeJS.ProcessEnv): ValetPlugin 
       ...(entry.scopes ? { scopes: entry.scopes } : {}),
       configKeys: ["accessToken"],
       oauth: { mode: "mcp", serverUrl: entry.url },
+      ...(entry.oauthOnly ? { oauthOnly: true as const } : {}),
     });
   } else if (entry.auth === "api_key") {
     credentials.push({
@@ -83,21 +82,53 @@ function buildPlugin(entry: McpServerDecl, env: NodeJS.ProcessEnv): ValetPlugin 
     name: `${CONFIG_MCP_PLUGIN_PREFIX}${entry.name}`,
     version: "0.0.0",
     displayName,
-    description: entry.description ?? `Config-declared MCP server (${entry.url})`,
+    // The connect UI shows this text, so it carries the display URL: never
+    // the userinfo or query string a server URL can hold a secret in.
+    description: entry.description ?? `Config-declared MCP server (${configMcpDisplayUrl(entry.url)})`,
     actions: [
-      mcpActionPlugin({
-        mcpUrl: entry.url,
-        serviceName: entry.name,
-        defaultRiskLevel: entry.riskLevel ?? "medium",
-        noAuth: entry.auth === "none",
-        staticToken,
-        authQueryParam: entry.authQueryParam,
-        description: entry.description,
-      }),
+      {
+        ...mcpActionPlugin({
+          mcpUrl: entry.url,
+          serviceName: entry.name,
+          defaultRiskLevel: entry.riskLevel ?? "medium",
+          noAuth: entry.auth === "none",
+          staticToken,
+          authQueryParam: entry.authQueryParam,
+          // An oauth entry's `scopes` come from this file, so a missing
+          // scope it does not list is fixed by editing the entry.
+          configScopes: entry.auth === "oauth" ? (entry.scopes ?? []) : undefined,
+          description: entry.description,
+          // Rejection messages name the server the way the connect UI does.
+          displayName,
+          oauthOnly: entry.oauthOnly,
+        }),
+        // Approval cards name the account by this, as the connect UI does.
+        displayName,
+      },
     ],
   };
   if (credentials.length > 0) plugin.credentials = credentials;
   return plugin;
+}
+
+/**
+ * The name the connect UI shows as the card title, and the org MCP server
+ * list shows too. A missing displayName must still read like a product name,
+ * not a slug.
+ */
+export function configMcpDisplayName(entry: Pick<McpServerDecl, "name" | "displayName">): string {
+  return entry.displayName ?? titleCaseSlug(entry.name);
+}
+
+/**
+ * The entry's URL as the org MCP server list shows it: scheme, host (with
+ * port), and path only. Config validation accepts a URL with userinfo, a
+ * query, or a fragment, and an operator can put a token in any of them
+ * (`?key=...`, `user:token@host`). Those parts never leave the API.
+ */
+export function configMcpDisplayUrl(url: string): string {
+  const parsed = new URL(url);
+  return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
 }
 
 /** "grafana-cloud" → "Grafana Cloud" — the fallback when the entry names no

@@ -1,8 +1,11 @@
-import { useEffect, useRef } from "react";
 import { useRouterState } from "@tanstack/react-router";
 import type { NotificationKind, NotificationSummary } from "@valet/api/wire";
+import { useEffect, useRef } from "react";
 import { useNotifications } from "~/api/queries";
+import { usePageTitleCount } from "./page-title";
+export { titleWithCount } from "./page-title";
 import { playAttentionChime } from "./notification-sound";
+import { useWorkspaceScope } from "./workspace-scope";
 
 /**
  * Tells you when the assistant is waiting on you, out loud.
@@ -52,39 +55,6 @@ export function isActionable(n: NotificationSummary): boolean {
   return n.readAt === undefined && NEEDS_ACTION.includes(n.kind);
 }
 
-/** Kinds that announce a decision gate. For a session with an open WS the
- * stream store holds the live gate set, so these kinds defer to it — the
- * store both lights and clears without waiting for the poll. `escalation`
- * (a stuck submission) has no gate behind it and only the poll carries it. */
-const GATE_BACKED: readonly NotificationKind[] = ["question", "approval"];
-
-/**
- * Sessions with something unanswered waiting on a person, keyed by session
- * id. The notifications query is already polling for the bell, so a caller
- * that wants to mark a row costs no extra request.
- *
- * `livePendingGates` (see `useLivePendingGates`) upgrades the poll to live
- * data where it exists: a key is a session with an open WS, its value
- * whether any gate is pending there. For those sessions the store decides
- * the gate-backed kinds — a poll row lags the truth by up to 30s on open
- * and until the user reads the notification after resolve (TKAI-257).
- */
-export function attentionSessionIds(
-  notifications: NotificationSummary[] | undefined,
-  livePendingGates?: Readonly<Record<string, boolean>>,
-): ReadonlySet<string> {
-  const out = new Set<string>();
-  for (const n of notifications ?? []) {
-    if (!isActionable(n) || n.sessionId === undefined) continue;
-    if (GATE_BACKED.includes(n.kind) && livePendingGates?.[n.sessionId] !== undefined) continue;
-    out.add(n.sessionId);
-  }
-  for (const [sessionId, hasGates] of Object.entries(livePendingGates ?? {})) {
-    if (hasGates) out.add(sessionId);
-  }
-  return out;
-}
-
 export interface PingContext {
   /** Where the user is right now, e.g. `/chat` or `/sessions/abc`. */
   pathname: string;
@@ -93,6 +63,7 @@ export interface PingContext {
   search: string;
   /** `document.visibilityState === "visible"`. */
   tabVisible: boolean;
+  workspace?: string;
 }
 
 /**
@@ -107,39 +78,24 @@ export function shouldPing(n: NotificationSummary, ctx: PingContext): boolean {
   if (!isActionable(n)) return false;
   if (!ctx.tabVisible) return true;
   if (n.href === undefined) return true;
-  return !hrefMatchesLocation(n.href, ctx.pathname, ctx.search);
+  return !hrefMatchesLocation(n.href, ctx.pathname, ctx.search, ctx.workspace);
 }
 
-/**
- * Does `href` point at the conversation currently on screen?
- *
- * The path alone does not answer this. Every assistant conversation lives
- * at `/chat`, with `?assistant=` naming which one, so comparing paths made
- * a gate raised by ANY other assistant silent while the reader sat on
- * `/chat` looking at a different one — the case this product exists to
- * catch, and the common case now that a user has several assistants and
- * teams have their own.
- *
- * `assistant` is compared; `thread` deliberately is not. The assistant
- * identifies the conversation, while a thread is a place within one the
- * reader can already see.
- */
-export function hrefMatchesLocation(href: string, pathname: string, search: string): boolean {
+/** Suppress a sound only when its workspace and target thread are on screen. */
+export function hrefMatchesLocation(href: string, pathname: string, search: string, workspace?: string): boolean {
   const [path, query = ""] = href.split("?");
   if (path !== pathname) return false;
-  const target = new URLSearchParams(query).get("assistant");
-  if (target === null) return true;
-  return new URLSearchParams(search.replace(/^\?/, "")).get("assistant") === target;
-}
-
-/** The document title, with the count of things waiting on you. Restores
- * the bare title at zero rather than leaving a stale `(0)`. */
-export function titleWithCount(base: string, count: number): string {
-  return count > 0 ? `(${count}) ${base}` : base;
+  const target = new URLSearchParams(query);
+  const current = new URLSearchParams(search.replace(/^\?/, ""));
+  const targetWorkspace = target.get("workspace");
+  if (targetWorkspace !== null && targetWorkspace !== (current.get("workspace") ?? workspace)) return false;
+  const thread = target.get("thread");
+  return thread === null || thread === current.get("thread");
 }
 
 export function useAttentionPing(): void {
   const notificationsQ = useNotifications();
+  const { key: workspace } = useWorkspaceScope();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const search = useRouterState({ select: (s) => s.location.searchStr });
 
@@ -173,6 +129,7 @@ export function useAttentionPing(): void {
     const ctx: PingContext = {
       pathname,
       search,
+      workspace,
       tabVisible: typeof document !== "undefined" && document.visibilityState === "visible",
     };
     if (!fresh.some((n) => shouldPing(n, ctx))) return;
@@ -182,25 +139,7 @@ export function useAttentionPing(): void {
     if (now - lastPingAt.current < PING_COOLDOWN_MS) return;
     lastPingAt.current = now;
     playAttentionChime();
-  }, [notifications, pathname, search]);
+  }, [notifications, pathname, search, workspace]);
 
-  // The title the page chose for itself, captured once before this hook
-  // first writes to it. Prefixing THAT rather than a hardcoded product name
-  // means a page that titles itself keeps its title — otherwise every poll
-  // would overwrite it, and several open tabs would be indistinguishable.
-  const baseTitle = useRef<string | null>(null);
-
-  // The title is the fallback that always works: muted tab, blocked
-  // autoplay, headphones out. It costs nothing and it is the only signal
-  // visible from another application's window.
-  useEffect(() => {
-    if (typeof document === "undefined") return;
-    baseTitle.current ??= document.title || "Valet";
-    const base = baseTitle.current;
-    const count = (notifications ?? []).filter(isActionable).length;
-    document.title = titleWithCount(base, count);
-    return () => {
-      document.title = base;
-    };
-  }, [notifications]);
+  usePageTitleCount((notifications ?? []).filter(isActionable).length);
 }

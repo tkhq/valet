@@ -1,3 +1,5 @@
+import { Type } from "typebox";
+import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
 /**
  * `/api/events*` + `/api/event-subscriptions` route tests (event-system plan,
  * Task 7). Real Hono app via `bootTestApi` with the real github plugin's
@@ -5,40 +7,56 @@
  * cases seed rows under a second org id (stub auth pins the caller to
  * `local-org`, so "another org" is expressed in data, not identity).
  */
-import { afterEach, describe, expect, it } from "vitest";
-import { and, eq } from "drizzle-orm";
+import type { ValetPlugin } from "@valet/engine";
 import githubPlugin from "@valet/plugin-github/plugin";
 import linearPlugin from "@valet/plugin-linear/plugin";
 import slackPlugin from "@valet/plugin-slack/plugin";
-import type { ValetPlugin } from "@valet/engine";
 import type { RunHost } from "@valet/workflow";
+import { and, eq, sql } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import { storedAnyChannel } from "@valet/shared";
+import { eventDeliveryDispatchId, eventDeliveryRunId } from "../events/dispatcher.js";
+import { ingestEvent } from "../events/ingest.js";
+import { deriveSecretKey, encryptSecret } from "../lib/secret-crypto.js";
+import { resetThreadAccessCache } from "../services/thread-access.js";
+import { resetChannelNameCaches } from "./workspace-channels.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { createAssistant } from "../assistants/service.js";
 import {
   eventDeliveries,
-  eventDropLog,
+  eventReceipts,
   events,
   eventSubscriptions,
-  teamMembers,
+  githubInstallations,
   orgMembers,
+  sessionThreads,
+  slackChannelPrivacy,
+  teamMembers,
   teams,
   userIdentityLinks,
   workflowDefinitions,
 } from "../schema/index.js";
+import * as teamsService from "../services/teams.js";
+import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
+import { seedAssistantThread } from "../test-helpers/assistant-thread.js";
+import { deleteTeam } from "../services/teams.js";
 import type {
   CreateEventSubscriptionRequest,
   CreateEventSubscriptionResponse,
   EventSubscriptionCollisionErrorWire,
   EventSubscriptionFilterWire,
   EventSubscriptionTargetWire,
+  EventSubscriptionWire,
+  ListSubscriptionDeliveriesResponse,
   GetEventCatalogResponse,
   GetEventResponse,
-  ListEventDropsResponse,
-  ListEventsResponse,
+  EventLogResponse,
+  LineActivityResponse,
   ListEventSubscriptionsResponse,
   PatchEventSubscriptionResponse,
   RedeliverEventResponse,
 } from "../wire/types.js";
+import * as workflowService from "../workflows/service.js";
 
 let api: TestApi | undefined;
 
@@ -61,7 +79,7 @@ const VALID_BODY: CreateEventSubscriptionRequest = {
   name: "pr opens",
   eventKeys: ["github.pull_request.opened"],
   filters: [{ field: "repo", op: "eq", value: "acme/widgets" }],
-  target: { kind: "orchestrator" },
+  target: { kind: "assistant" },
 };
 
 async function postSubscription(
@@ -71,6 +89,19 @@ async function postSubscription(
 ): Promise<Response> {
   return fetch(`${baseUrl}/api/event-subscriptions`, {
     method: "POST",
+    headers: { "Content-Type": "application/json", ...headers },
+    body: JSON.stringify(body),
+  });
+}
+
+async function patchSubscription(
+  baseUrl: string,
+  id: string,
+  body: unknown,
+  headers: Record<string, string> = {},
+): Promise<Response> {
+  return fetch(`${baseUrl}/api/event-subscriptions/${id}`, {
+    method: "PATCH",
     headers: { "Content-Type": "application/json", ...headers },
     body: JSON.stringify(body),
   });
@@ -107,7 +138,7 @@ async function seedSubscriptionRow(
     name: opts.name ?? `seeded ${id}`,
     eventKeys: opts.eventKeys ?? ["github.push"],
     filters: opts.filters ?? [],
-    target: opts.target ?? { kind: "orchestrator" },
+    target: opts.target ?? { kind: "assistant" },
     enabled: opts.enabled ?? true,
     createdBy: "someone",
     createdAt: now,
@@ -117,7 +148,7 @@ async function seedSubscriptionRow(
 
 async function seedEventRow(
   a: TestApi,
-  args: { id: string; orgId?: string; service?: string; eventKey?: string; receivedAt: number },
+  args: { id: string; orgId?: string; service?: string; eventKey?: string; receivedAt: number; subjects?: string[] },
 ): Promise<void> {
   await a.providers.db.insert(events).values({
     id: args.id,
@@ -131,39 +162,9 @@ async function seedEventRow(
     payload: { repository: { full_name: "acme/widgets" } },
     occurredAt: args.receivedAt,
     receivedAt: args.receivedAt,
+    subjects: args.subjects ?? null,
   });
 }
-
-describe("GET /api/events/drops", () => {
-  it("returns org-scoped drops newest-first with the last-event timestamp", async () => {
-    const a = await boot();
-    const now = Date.now();
-    await a.providers.db.insert(eventDropLog).values([
-      { id: "d_old", orgId: "local-org", reason: "filter_excluded", detail: "old", createdAt: now - 3000 },
-      { id: "d_new", orgId: "local-org", reason: "bad_signature", detail: "new", createdAt: now - 1000 },
-      { id: "d_foreign", orgId: "other-org", reason: "unknown_org", detail: "x", createdAt: now },
-    ]);
-    // A matched event is more recent than any drop, so it sets lastEventAt.
-    await seedEventRow(a, { id: "ev_1", receivedAt: now - 500 });
-
-    const res = await fetch(`${a.baseUrl}/api/events/drops`);
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as ListEventDropsResponse;
-
-    expect(body.drops.map((d) => d.id)).toEqual(["d_new", "d_old"]);
-    expect(body.drops[0].reason).toBe("bad_signature");
-    expect(body.lastEventAt).toBe(now - 500);
-  });
-
-  it("resolves /events/drops as the literal path, not an event id", async () => {
-    const a = await boot();
-    const res = await fetch(`${a.baseUrl}/api/events/drops`);
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as ListEventDropsResponse;
-    expect(body.drops).toEqual([]);
-    expect(body.lastEventAt).toBeNull();
-  });
-});
 
 describe("GET /api/events/catalog", () => {
   it("returns the merged plugin catalog grouped by service", async () => {
@@ -179,10 +180,31 @@ describe("GET /api/events/catalog", () => {
     expect(prOpened!.filters.map((f) => f.field)).toContain("repo");
     // Non-actioned family appears as a bare key.
     expect(github!.entries.some((e) => e.key === "github.push")).toBe(true);
+    // The subscription editor never offers a derived key (event wakeups spec, Part G).
+    expect(github!.entries.some((e) => e.key === "github.pull_request.checks_completed")).toBe(false);
   });
 });
 
 describe("POST /api/event-subscriptions", () => {
+  it("persists, replaces, and clears the appearance without changing the match", async () => {
+    const a = await boot();
+    const appearance = { displayName: "Issue helper", avatarUrl: "https://example.com/a.webp" };
+    const created = await postSubscription(a.baseUrl, { ...VALID_BODY, target: { ...VALID_BODY.target, appearance } });
+    expect(created.status).toBe(201);
+    const body = await created.json() as CreateEventSubscriptionResponse;
+    expect(body.target).toMatchObject({ appearance });
+    const invalid = await patchSubscription(a.baseUrl, body.id, { appearance: { avatarUrl: "http://example.com/a" } });
+    expect(invalid.status).toBe(400);
+    const replaced = await patchSubscription(a.baseUrl, body.id, { appearance: { displayName: "New helper" } });
+    expect(replaced.status).toBe(200);
+    expect((await replaced.json() as CreateEventSubscriptionResponse).target).toMatchObject({ appearance: { displayName: "New helper" } });
+    const cleared = await patchSubscription(a.baseUrl, body.id, { appearance: null });
+    expect(cleared.status).toBe(200);
+    const result = await cleared.json() as CreateEventSubscriptionResponse;
+    expect(result.target).not.toHaveProperty("appearance");
+    expect(result.filters).toEqual(VALID_BODY.filters);
+  });
+
   it("201s a valid orchestrator subscription and writes a user-owned row", async () => {
     const a = await boot();
     const res = await postSubscription(a.baseUrl, VALID_BODY);
@@ -219,7 +241,7 @@ describe("POST /api/event-subscriptions", () => {
     const a = await boot();
     const res = await postSubscription(a.baseUrl, {
       ...VALID_BODY,
-      target: { kind: "orchestrator", orchestrator: "org" },
+      target: { kind: "assistant", assistant: "org" },
     });
     expect(res.status).toBe(201);
     const body = (await res.json()) as CreateEventSubscriptionResponse;
@@ -541,7 +563,7 @@ describe("GET /api/event-subscriptions", () => {
     const created = await postSubscription(a.baseUrl, {
       ...VALID_BODY,
       name: "org watch",
-      target: { kind: "orchestrator", orchestrator: "org" },
+      target: { kind: "assistant", assistant: "org" },
     });
     expect(created.status).toBe(201);
     await seedSubscriptionRow(a, "sub_mine", "local-org", { name: "mine", ownerId: "local-user" });
@@ -558,7 +580,7 @@ describe("GET /api/event-subscriptions", () => {
     const created = await postSubscription(a.baseUrl, {
       ...VALID_BODY,
       name: "org watch",
-      target: { kind: "orchestrator", orchestrator: "org" },
+      target: { kind: "assistant", assistant: "org" },
     });
     expect(created.status).toBe(201);
     await seedSubscriptionRow(a, "sub_team", "local-org", {
@@ -595,6 +617,337 @@ describe("GET /api/event-subscriptions", () => {
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe(HALF_FILTER_ERROR);
+  });
+});
+
+// Spec 2026-10-16 presence hub, Part C step 5: a rule whose pinned thread no
+// longer accepts deliveries carries a problem, read from its deliveries.
+describe("GET /api/event-subscriptions problem", () => {
+  const PIN_TEXT = "Pick another thread in Presence.";
+
+  async function seedDelivery(
+    a: TestApi,
+    id: string,
+    subscriptionId: string,
+    over: { status: "dead" | "delivered" | "failed"; lastError?: string; createdAt: number },
+  ): Promise<void> {
+    await a.providers.db.insert(eventDeliveries).values({
+      id, eventId: `ev_${id}`, subscriptionId, status: over.status, attempts: 1,
+      lastError: over.lastError ?? null, nextAttemptAt: over.createdAt, createdAt: over.createdAt,
+    });
+  }
+
+  async function problems(a: TestApi): Promise<Record<string, string | undefined>> {
+    const res = await fetch(`${a.baseUrl}/api/event-subscriptions`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListEventSubscriptionsResponse;
+    return Object.fromEntries(body.subscriptions.map((s) => [s.id, s.problem]));
+  }
+
+  it("sets the problem when the latest delivery dead-lettered on the pin", async () => {
+    const a = await boot();
+    const later = Date.now() + 60_000;
+    await seedSubscriptionRow(a, "sub_pin", "local-org");
+    await seedDelivery(a, "d_old_ok", "sub_pin", { status: "delivered", createdAt: later });
+    await seedDelivery(a, "d_pin", "sub_pin", { status: "dead", lastError: PIN_TEXT, createdAt: later + 1 });
+    expect((await problems(a)).sub_pin).toBe(PIN_TEXT);
+  });
+
+  // A delivery dead-lettered before the pin text changed keeps the old text.
+  it("sets the problem for a dead-letter with the old pin text", async () => {
+    const a = await boot();
+    const later = Date.now() + 60_000;
+    const legacy = "Pick another thread for this rule in Presence.";
+    await seedSubscriptionRow(a, "sub_legacy", "local-org");
+    await seedDelivery(a, "d_legacy", "sub_legacy", { status: "dead", lastError: legacy, createdAt: later });
+    expect((await problems(a)).sub_legacy).toBe(legacy);
+  });
+
+  it("leaves the problem absent for other dead-letters, a later delivery, and an edit after it", async () => {
+    const a = await boot();
+    const later = Date.now() + 60_000;
+    await seedSubscriptionRow(a, "sub_other", "local-org");
+    await seedDelivery(a, "d_boom", "sub_other", { status: "dead", lastError: "boom", createdAt: later });
+    await seedSubscriptionRow(a, "sub_recovered", "local-org");
+    await seedDelivery(a, "d_pin_then", "sub_recovered", { status: "dead", lastError: PIN_TEXT, createdAt: later });
+    await seedDelivery(a, "d_ok_now", "sub_recovered", { status: "delivered", createdAt: later + 1 });
+    // A pending retry after the dead-letter is not a settled answer yet.
+    await seedSubscriptionRow(a, "sub_retrying", "local-org");
+    await seedDelivery(a, "d_pin_r", "sub_retrying", { status: "dead", lastError: PIN_TEXT, createdAt: later });
+    await seedDelivery(a, "d_retry", "sub_retrying", { status: "failed", lastError: "boom", createdAt: later + 1 });
+    // A dead-letter older than the rule's last edit predates the fix.
+    await seedSubscriptionRow(a, "sub_edited", "local-org");
+    await seedDelivery(a, "d_pin_old", "sub_edited", { status: "dead", lastError: PIN_TEXT, createdAt: 1_000 });
+    await seedSubscriptionRow(a, "sub_quiet", "local-org");
+
+    const got = await problems(a);
+    expect(got.sub_other).toBeUndefined();
+    expect(got.sub_recovered).toBeUndefined();
+    expect(got.sub_retrying).toBe(PIN_TEXT);
+    expect(got.sub_edited).toBeUndefined();
+    expect(got.sub_quiet).toBeUndefined();
+    expect(Object.keys(got).sort()).toEqual(["sub_edited", "sub_other", "sub_quiet", "sub_recovered", "sub_retrying"]);
+  });
+});
+
+// Spec 2026-10-16 presence hub, Part C step 4: the listener page lists the
+// rule's own deliveries.
+describe("GET /api/event-subscriptions/:id/deliveries", () => {
+  it("lists one rule's deliveries newest first, each with its event", async () => {
+    const a = await boot();
+    await seedSubscriptionRow(a, "sub_mine", "local-org");
+    await seedSubscriptionRow(a, "sub_other", "local-org");
+    await seedEventRow(a, { id: "ev_a", receivedAt: 1_000 });
+    await seedEventRow(a, { id: "ev_b", receivedAt: 2_000 });
+    await a.providers.db.insert(eventDeliveries).values([
+      { id: "d_a", eventId: "ev_a", subscriptionId: "sub_mine", status: "delivered", attempts: 1, nextAttemptAt: 1_000, deliveredAt: 1_100, createdAt: 1_000 },
+      { id: "d_b", eventId: "ev_b", subscriptionId: "sub_mine", status: "dead", attempts: 1, lastError: "Pick another thread in Presence.", nextAttemptAt: 2_000, createdAt: 2_000 },
+      { id: "d_other", eventId: "ev_a", subscriptionId: "sub_other", status: "delivered", attempts: 1, nextAttemptAt: 1_000, createdAt: 1_000 },
+    ]);
+
+    const res = await fetch(`${a.baseUrl}/api/event-subscriptions/sub_mine/deliveries`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListSubscriptionDeliveriesResponse;
+    expect(body.deliveries.map((d) => [d.id, d.event.id, d.event.summary])).toEqual([
+      ["d_b", "ev_b", "event ev_b"],
+      ["d_a", "ev_a", "event ev_a"],
+    ]);
+    expect(body.deliveries[0]).toMatchObject({ status: "dead", lastError: "Pick another thread in Presence.", nextAttemptAt: null });
+  });
+
+  it("404s a rule in another org and 400s a bad limit", async () => {
+    const a = await boot();
+    await seedSubscriptionRow(a, "sub_foreign", "other-org");
+    await seedSubscriptionRow(a, "sub_here", "local-org");
+    expect((await fetch(`${a.baseUrl}/api/event-subscriptions/sub_foreign/deliveries`)).status).toBe(404);
+    expect((await fetch(`${a.baseUrl}/api/event-subscriptions/sub_here/deliveries?limit=0`)).status).toBe(400);
+  });
+});
+
+// Spec 2026-10-16 presence hub, Part D step 4: a line's Activity merges its
+// deliveries and the receipt decisions that skipped it.
+describe("GET /api/event-subscriptions/:id/activity", () => {
+  const MEMBER = { "x-valet-test-user-id": "test-member" };
+
+  async function seedReceipt(
+    a: TestApi, id: string, createdAt: number,
+    decision: { outcome: string; failedFilters?: Array<{ field: string; op: string }> }, eventId: string | null = null,
+  ): Promise<void> {
+    await a.providers.db.insert(eventReceipts).values({
+      id, orgId: "local-org", service: "github", externalId: null, metadata: {}, stages: [],
+      eventKey: "github.pull_request.opened", eventId, createdAt, updatedAt: createdAt,
+      subscriptions: [{ id: "sub_line", ownerType: "user", ownerId: "someone", target: "assistant", ...decision }],
+    });
+  }
+
+  async function activity(a: TestApi, query = "", headers: Record<string, string> = {}): Promise<LineActivityResponse> {
+    const res = await fetch(`${a.baseUrl}/api/event-subscriptions/sub_line/activity${query}`, { headers });
+    expect(res.status).toBe(200);
+    return (await res.json()) as LineActivityResponse;
+  }
+
+  it("lists acted and skipped entries newest first, with tookMs and the reason", async () => {
+    const a = await boot();
+    await seedSubscriptionRow(a, "sub_line", "local-org", { filters: [{ field: "repo", op: "eq", value: "acme/widgets" }] });
+    await seedEventRow(a, { id: "ev_a", receivedAt: 1_000, subjects: ["github:acme/widgets"] });
+    await a.providers.db.insert(eventDeliveries).values([
+      { id: "d_a", eventId: "ev_a", subscriptionId: "sub_line", status: "delivered", attempts: 2, nextAttemptAt: 1_000, deliveredAt: 1_250, createdAt: 1_000 },
+    ]);
+    await seedReceipt(a, "r_filter", 2_000, { outcome: "filter_excluded", failedFilters: [{ field: "repo", op: "eq" }] });
+    await seedReceipt(a, "r_matched", 3_000, { outcome: "matched" });
+
+    const body = await activity(a);
+    expect(body.entries.map((e) => [e.id, e.kind])).toEqual([["receipt:r_filter", "skipped"], ["d_a", "acted"]]);
+    expect(body.entries[1]).toMatchObject({ eventId: "ev_a", place: "github:acme/widgets", placeLabel: "acme/widgets", tookMs: 250, outcome: { status: "delivered", attempts: 2 } });
+    // An admin sees a skip whose place is unknown; this receipt names no stored event.
+    expect(body.entries[0]).toMatchObject({ reason: "filters", reasonText: "the repository filter", eventId: null });
+    expect(body.lastActedAt).toBe(1_250);
+    expect(body.nextCursor).toBeUndefined();
+  });
+
+  // Review Focus 1.
+  it("shows a member skipped entries only in the line's places", async () => {
+    const a = await boot();
+    await seedSubscriptionRow(a, "sub_line", "local-org", { filters: [{ field: "repo", op: "eq", value: "acme/widgets" }] });
+    await seedEventRow(a, { id: "ev_in", receivedAt: 1_000, subjects: ["github:acme/widgets#7"] });
+    await seedEventRow(a, { id: "ev_out", receivedAt: 1_000, subjects: ["github:acme/other"] });
+    await seedReceipt(a, "r_in", 1_000, { outcome: "authorization_denied" }, "ev_in");
+    await seedReceipt(a, "r_out", 2_000, { outcome: "disabled" }, "ev_out");
+    await seedReceipt(a, "r_unknown", 3_000, { outcome: "key_mismatch" });
+
+    const member = await activity(a, "", MEMBER);
+    expect(member.entries.map((e) => e.id)).toEqual(["receipt:r_in"]);
+    const admin = await activity(a);
+    expect(admin.entries.map((e) => [e.id, e.reason])).toEqual([
+      ["receipt:r_unknown", "other"], ["receipt:r_out", "off"], ["receipt:r_in", "sender"],
+    ]);
+  });
+
+  // Review S9: the strip counts what the timeline lists as acted.
+  it("counts acted entries of any status per UTC day for 30 days", async () => {
+    const a = await boot();
+    const day = 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    await seedSubscriptionRow(a, "sub_line", "local-org");
+    await seedEventRow(a, { id: "ev_a", receivedAt: now });
+    const rows = [
+      { id: "d_29", at: now - 29 * day, status: "delivered" as const },
+      { id: "d_31", at: now - 31 * day, status: "delivered" as const },
+      { id: "d_now", at: now, status: "delivered" as const },
+      { id: "d_dead", at: now, status: "dead" as const },
+      { id: "d_pending", at: now - 1, status: "pending" as const },
+      { id: "d_skip", at: now, status: "skipped" as const },
+      // A dead delivery that a later delivery settled is not listed.
+      { id: "d_settled", at: now - 29 * day - 1, status: "dead" as const },
+    ];
+    await a.providers.db.insert(eventDeliveries).values(rows.map((r) => ({
+      id: r.id, eventId: "ev_a", subscriptionId: "sub_line", status: r.status, attempts: 1, nextAttemptAt: r.at,
+      deliveredAt: r.status === "delivered" ? r.at : null, createdAt: r.at,
+    })));
+    const body = await activity(a);
+    expect(body.perDay).toHaveLength(30);
+    expect(body.perDay[0]).toBe(1);
+    expect(body.perDay[29]).toBe(3);
+    expect(body.actedLast30Days).toBe(4);
+    expect(body.perDay.reduce((sum, n) => sum + n, 0)).toBe(body.entries.filter((e) => e.kind === "acted" && e.at >= now - 29 * day).length);
+    expect(body.lastActedAt).toBe(now);
+  });
+
+  it("pages through both sources with the before cursor", async () => {
+    const a = await boot();
+    await seedSubscriptionRow(a, "sub_line", "local-org");
+    await seedEventRow(a, { id: "ev_a", receivedAt: 1_000 });
+    for (let i = 0; i < 5; i++) {
+      await a.providers.db.insert(eventDeliveries).values({
+        id: `d_${i}`, eventId: "ev_a", subscriptionId: "sub_line", status: "delivered", attempts: 1,
+        nextAttemptAt: 1_000, deliveredAt: 1_000 + i * 20 + 5, createdAt: 1_000 + i * 20,
+      });
+      await seedReceipt(a, `r_${i}`, 1_010 + i * 20, { outcome: "filter_excluded" });
+    }
+    const seen: string[] = [];
+    let query = "?limit=3";
+    for (let page = 0; page < 5; page++) {
+      const body = await activity(a, query);
+      seen.push(...body.entries.map((e) => e.id));
+      if (!body.nextCursor) break;
+      query = `?limit=3&before=${body.nextCursor}`;
+    }
+    expect(seen).toEqual([
+      "receipt:r_4", "d_4", "receipt:r_3", "d_3", "receipt:r_2", "d_2", "receipt:r_1", "d_1", "receipt:r_0", "d_0",
+    ]);
+    expect((await fetch(`${a.baseUrl}/api/event-subscriptions/sub_line/activity?before=bad`)).status).toBe(400);
+    // Review A3: a forged cursor time is a 400 that names the fix, not a 500 that echoes SQL.
+    const real = (await activity(a, "?limit=3")).nextCursor!;
+    const fields: unknown = JSON.parse(Buffer.from(real, "base64url").toString("utf8"));
+    if (typeof fields !== "object" || fields === null) throw new Error("the cursor is not an object");
+    for (const at of [1.5, 1e300]) {
+      const forged = Buffer.from(JSON.stringify({ ...fields, at }), "utf8").toString("base64url");
+      const res = await fetch(`${a.baseUrl}/api/event-subscriptions/sub_line/activity?limit=3&before=${forged}`);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: "The page cursor is not valid for this line. Reload Activity and try again." });
+    }
+  });
+
+  it("keeps a short source's older rows when the other source fills a batch", async () => {
+    const a = await boot();
+    await seedSubscriptionRow(a, "sub_line", "local-org", { filters: [{ field: "repo", op: "eq", value: "acme/widgets" }] });
+    await seedEventRow(a, { id: "ev_a", receivedAt: 1, subjects: ["github:acme/widgets"] });
+    await a.providers.db.insert(eventDeliveries).values([1, 2].map((at) => ({
+      id: `d_${at}`, eventId: "ev_a", subscriptionId: "sub_line", status: "delivered" as const, attempts: 1,
+      nextAttemptAt: at, deliveredAt: at, createdAt: at,
+    })));
+    // A member may not see these skips (their place is unknown), so one read
+    // scans past a full batch of them to reach the older deliveries.
+    for (let i = 0; i < 6; i++) await seedReceipt(a, `r_${i}`, 100 + i, { outcome: "disabled" });
+    const body = await activity(a, "?limit=3", MEMBER);
+    expect(body.entries.map((e) => e.id)).toEqual(["d_2", "d_1"]);
+    expect(body.nextCursor).toBeUndefined();
+  });
+
+  // A GitHub event that no line matched is not stored, so its skip reads
+  // its place from the receipt, which ingest records.
+  it("places an unstored GitHub skip by the place its receipt records", async () => {
+    const a = await boot();
+    // check_run declares no branch filter, so the miss here is on the sender.
+    await seedSubscriptionRow(a, "sub_api", "local-org", {
+      eventKeys: ["github.check_run.completed"],
+      filters: [{ field: "repo", op: "eq", value: "acme/api" }, { field: "sender", op: "eq", value: "someone-else" }],
+    });
+    await seedSubscriptionRow(a, "sub_web", "local-org", {
+      eventKeys: ["github.check_run.completed"], filters: [{ field: "repo", op: "eq", value: "acme/web" }],
+    });
+    const result = await ingestEvent({ db: a.providers.db, plugins: [githubPlugin] }, {
+      orgId: "local-org", service: "github",
+      event: {
+        key: "github.check_run.completed", dedupeKey: "check-run-1", occurredAt: new Date().toISOString(),
+        refs: { repo: "acme/api" }, summary: "Check finished",
+        payload: { action: "completed", repository: { full_name: "acme/api" }, sender: { login: "octocat" }, check_run: { head_sha: "abc123", conclusion: "failure" } },
+        subjects: ["github:acme", "github:acme/api", "github:acme/api@abc123"],
+      },
+    });
+    expect(result.deliveries).toBe(0);
+    const read = async (id: string, headers: Record<string, string>) =>
+      (await (await fetch(`${a.baseUrl}/api/event-subscriptions/${id}/activity`, { headers })).json()) as LineActivityResponse;
+
+    const api = await read("sub_api", MEMBER);
+    expect(api.entries).toHaveLength(1);
+    expect(api.entries[0]).toMatchObject({
+      kind: "skipped", eventId: null, eventKey: "github.check_run.completed", place: "github:acme/api", placeLabel: "acme/api",
+      reason: "filters", reasonText: "the sender filter",
+    });
+    expect((await read("sub_web", MEMBER)).entries).toEqual([]);
+    // An admin sees the skip outside the line's places.
+    expect((await read("sub_web", {})).entries.map((e) => [e.place, e.reasonText])).toEqual([["github:acme/api", "the repository filter"]]);
+  });
+
+  // Review S1 and A11: a Slack place reads as its channel name, and a
+  // credential fault degrades the label to the id instead of failing the page.
+  it("names a Slack channel place, and keeps the id when the credential read fails", async () => {
+    resetChannelNameCaches();
+    api = await bootTestApi({ plugins: [slackPlugin, githubPlugin] });
+    const a = api;
+    // The Slack plugin caches the bot's channel list by token.
+    await a.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack",
+      { type: "oauth2", accessToken: `xoxb-test-${randomUUID()}`, metadata: { teamId: "T1" } });
+    const realFetch = globalThis.fetch;
+    const slackStub = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      if (url.hostname !== "slack.com") return realFetch(input, init);
+      return new Response(JSON.stringify({
+        ok: true, channel: { name: "incidents", is_private: false }, members: [],
+        channels: [{ id: "C900", name: "incidents", is_private: false }],
+      }), { headers: { "content-type": "application/json" } });
+    });
+    onTestFinished(() => { slackStub.mockRestore(); resetThreadAccessCache(); resetChannelNameCaches(); });
+    await seedSubscriptionRow(a, "sub_line", "local-org", {
+      eventKeys: ["slack.message"], filters: [{ field: "channel", op: "eq", value: "C900" }],
+    });
+    await a.providers.db.insert(eventReceipts).values({
+      id: "r_slack", orgId: "local-org", service: "slack", externalId: null, metadata: { channelId: "C900", workspaceId: "T1" }, stages: [],
+      eventKey: "slack.message", eventId: null, createdAt: 1_000, updatedAt: 1_000,
+      subscriptions: [{ id: "sub_line", ownerType: "user", ownerId: "someone", target: "assistant", outcome: "authorization_denied" }],
+    });
+    const named = await activity(a);
+    expect(named.entries.map((e) => [e.place, e.placeLabel])).toEqual([["slack:T1/C900", "#incidents"]]);
+
+    const get = a.providers.engineCredentials.get.bind(a.providers.engineCredentials);
+    const failing = vi.spyOn(a.providers.engineCredentials, "get").mockImplementation(async (owner, service) => {
+      if (service === "slack") throw new Error("credential store unavailable");
+      return get(owner, service);
+    });
+    onTestFinished(() => failing.mockRestore());
+    const res = await fetch(`${a.baseUrl}/api/event-subscriptions/sub_line/activity`);
+    expect(res.status, await res.clone().text()).toBe(200);
+  });
+
+  it("404s a missing line with text that names the fix", async () => {
+    const a = await boot();
+    await seedSubscriptionRow(a, "sub_foreign", "other-org");
+    for (const id of ["sub_missing", "sub_foreign"]) {
+      const res = await fetch(`${a.baseUrl}/api/event-subscriptions/${id}/activity`);
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: "This line was not found. Refresh Presence and try again." });
+    }
   });
 });
 
@@ -668,7 +1021,7 @@ describe("PATCH /api/event-subscriptions/:id", () => {
   it("an org-owned subscription is mutable by any org member", async () => {
     const a = await boot();
     const created = (await (
-      await postSubscription(a.baseUrl, { ...VALID_BODY, target: { kind: "orchestrator", orchestrator: "org" } })
+      await postSubscription(a.baseUrl, { ...VALID_BODY, target: { kind: "assistant", assistant: "org" } })
     ).json()) as CreateEventSubscriptionResponse;
     expect(created.ownerType).toBe("org");
 
@@ -719,203 +1072,6 @@ describe("DELETE /api/event-subscriptions/:id", () => {
       .from(eventSubscriptions)
       .where(eq(eventSubscriptions.id, "sub_colleague"));
     expect(rows).toHaveLength(1);
-  });
-});
-
-describe("GET /api/events", () => {
-  it("returns the org's events newest-first, excluding other orgs", async () => {
-    const a = await boot();
-    await seedEventRow(a, { id: "ev_old", receivedAt: 1_000 });
-    await seedEventRow(a, { id: "ev_new", receivedAt: 3_000 });
-    await seedEventRow(a, { id: "ev_mid", receivedAt: 2_000 });
-    await seedEventRow(a, { id: "ev_foreign", orgId: "other-org", receivedAt: 4_000 });
-
-    const res = await fetch(`${a.baseUrl}/api/events`);
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as ListEventsResponse;
-    expect(body.events.map((e) => e.id)).toEqual(["ev_new", "ev_mid", "ev_old"]);
-    expect(body.events[0].summary).toBe("event ev_new");
-    expect(body.events[0].refs).toEqual({ repo: "acme/widgets" });
-  });
-
-  it("filters by service and key, and honors limit", async () => {
-    const a = await boot();
-    await seedEventRow(a, { id: "ev_a", eventKey: "github.pull_request.opened", receivedAt: 1_000 });
-    await seedEventRow(a, { id: "ev_b", eventKey: "github.push", receivedAt: 2_000 });
-    await seedEventRow(a, { id: "ev_c", service: "linear", eventKey: "linear.issue.create", receivedAt: 3_000 });
-
-    const byKey = (await (await fetch(`${a.baseUrl}/api/events?key=github.push`)).json()) as ListEventsResponse;
-    expect(byKey.events.map((e) => e.id)).toEqual(["ev_b"]);
-
-    const byService = (await (await fetch(`${a.baseUrl}/api/events?service=github`)).json()) as ListEventsResponse;
-    expect(byService.events.map((e) => e.id)).toEqual(["ev_b", "ev_a"]);
-
-    const limited = (await (await fetch(`${a.baseUrl}/api/events?limit=1`)).json()) as ListEventsResponse;
-    expect(limited.events.map((e) => e.id)).toEqual(["ev_c"]);
-  });
-
-  // The owner filter is what the page's "This workspace" state sends. It reads
-  // ownership through the deliveries, because the events table has no owner
-  // column (small-fixes design, decision 2). It also carries a 30-day lower
-  // bound on `received_at`, so these rows are seeded relative to now.
-  it("with an owner, returns only events delivered to that owner's subscriptions", async () => {
-    const a = await boot();
-    await seedSubscriptionRow(a, "sub_mine", "local-org", { ownerId: "local-user" });
-    await seedSubscriptionRow(a, "sub_colleague", "local-org", { ownerId: "someone" });
-
-    const now = Date.now();
-    await seedEventRow(a, { id: "ev_mine", receivedAt: now - 3_000 });
-    await seedEventRow(a, { id: "ev_theirs", receivedAt: now - 4_000 });
-    await seedEventRow(a, { id: "ev_undelivered", receivedAt: now - 5_000 });
-
-    await a.providers.db.insert(eventDeliveries).values([
-      {
-        id: "del_mine",
-        eventId: "ev_mine",
-        subscriptionId: "sub_mine",
-        status: "delivered" as const,
-        attempts: 1,
-        nextAttemptAt: 0,
-        createdAt: 1_000,
-      },
-      {
-        id: "del_theirs",
-        eventId: "ev_theirs",
-        subscriptionId: "sub_colleague",
-        status: "delivered" as const,
-        attempts: 1,
-        nextAttemptAt: 0,
-        createdAt: 1_000,
-      },
-    ]);
-
-    const scoped = (await (
-      await fetch(`${a.baseUrl}/api/events?ownerType=user&ownerId=local-user`)
-    ).json()) as ListEventsResponse;
-    expect(scoped.events.map((e) => e.id)).toEqual(["ev_mine"]);
-
-    // The same three events, unscoped: the filter narrows the feed, it does
-    // not change what the feed holds.
-    const all = (await (await fetch(`${a.baseUrl}/api/events`)).json()) as ListEventsResponse;
-    expect(all.events.map((e) => e.id)).toEqual(["ev_mine", "ev_theirs", "ev_undelivered"]);
-  });
-
-  // The subscriptions list returns org-owned rows in every workspace, so the
-  // feed beside it has to show what those rows received. A workspace that
-  // lists a subscription and hides its events contradicts the tab next to it.
-  it("with an owner, also returns events delivered to an ORG-owned subscription", async () => {
-    const a = await boot();
-    await seedSubscriptionRow(a, "sub_org", "local-org", {
-      ownerType: "org",
-      ownerId: "local-org",
-    });
-    await seedSubscriptionRow(a, "sub_colleague", "local-org", { ownerId: "someone" });
-
-    const now = Date.now();
-    await seedEventRow(a, { id: "ev_org", receivedAt: now - 3_000 });
-    await seedEventRow(a, { id: "ev_theirs", receivedAt: now - 4_000 });
-    await a.providers.db.insert(eventDeliveries).values([
-      {
-        id: "del_org",
-        eventId: "ev_org",
-        subscriptionId: "sub_org",
-        status: "delivered" as const,
-        attempts: 1,
-        nextAttemptAt: 0,
-        createdAt: 1_000,
-      },
-      {
-        id: "del_theirs",
-        eventId: "ev_theirs",
-        subscriptionId: "sub_colleague",
-        status: "delivered" as const,
-        attempts: 1,
-        nextAttemptAt: 0,
-        createdAt: 1_000,
-      },
-    ]);
-
-    // The caller owns no subscription at all here: the org-owned row is the
-    // only reason this event joins their workspace.
-    const scoped = (await (
-      await fetch(`${a.baseUrl}/api/events?ownerType=user&ownerId=local-user`)
-    ).json()) as ListEventsResponse;
-    expect(scoped.events.map((e) => e.id)).toEqual(["ev_org"]);
-  });
-
-  it("combines the owner filter with the service and key filters", async () => {
-    const a = await boot();
-    await seedSubscriptionRow(a, "sub_mine", "local-org", { ownerId: "local-user" });
-    const now = Date.now();
-    await seedEventRow(a, { id: "ev_pr", eventKey: "github.pull_request.opened", receivedAt: now - 2_000 });
-    await seedEventRow(a, { id: "ev_push", eventKey: "github.push", receivedAt: now - 3_000 });
-    await a.providers.db.insert(eventDeliveries).values([
-      {
-        id: "del_pr",
-        eventId: "ev_pr",
-        subscriptionId: "sub_mine",
-        status: "delivered" as const,
-        attempts: 1,
-        nextAttemptAt: 0,
-        createdAt: 1_000,
-      },
-      {
-        id: "del_push",
-        eventId: "ev_push",
-        subscriptionId: "sub_mine",
-        status: "delivered" as const,
-        attempts: 1,
-        nextAttemptAt: 0,
-        createdAt: 1_000,
-      },
-    ]);
-
-    const res = await fetch(
-      `${a.baseUrl}/api/events?ownerType=user&ownerId=local-user&key=github.push`,
-    );
-    const body = (await res.json()) as ListEventsResponse;
-    expect(body.events.map((e) => e.id)).toEqual(["ev_push"]);
-  });
-
-  // Without a lower bound the `EXISTS` walks the org's whole event history
-  // to fill a page it can never fill, because no index can pre-select the
-  // rows it rejects. The window is the bound; "All" keeps the full history.
-  it("with an owner, looks back 30 days only, while All keeps the history", async () => {
-    const a = await boot();
-    await seedSubscriptionRow(a, "sub_mine", "local-org", { ownerId: "local-user" });
-
-    const now = Date.now();
-    const day = 24 * 60 * 60 * 1000;
-    await seedEventRow(a, { id: "ev_recent", receivedAt: now - day });
-    await seedEventRow(a, { id: "ev_old", receivedAt: now - 31 * day });
-    await a.providers.db.insert(eventDeliveries).values(
-      ["ev_recent", "ev_old"].map((eventId) => ({
-        id: `del_${eventId}`,
-        eventId,
-        subscriptionId: "sub_mine",
-        status: "delivered" as const,
-        attempts: 1,
-        nextAttemptAt: 0,
-        createdAt: now,
-      })),
-    );
-
-    const scoped = (await (
-      await fetch(`${a.baseUrl}/api/events?ownerType=user&ownerId=local-user`)
-    ).json()) as ListEventsResponse;
-    expect(scoped.events.map((e) => e.id)).toEqual(["ev_recent"]);
-
-    const all = (await (await fetch(`${a.baseUrl}/api/events`)).json()) as ListEventsResponse;
-    expect(all.events.map((e) => e.id)).toEqual(["ev_recent", "ev_old"]);
-  });
-
-  it("400s a half-specified owner pair, naming both parameters", async () => {
-    const a = await boot();
-
-    const res = await fetch(`${a.baseUrl}/api/events?ownerId=local-user`);
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as { error: string };
-    expect(body.error).toBe(HALF_FILTER_ERROR);
   });
 });
 
@@ -985,6 +1141,169 @@ describe("GET /api/events/:id", () => {
 
     const res = await fetch(`${a.baseUrl}/api/events/ev_foreign`);
     expect(res.status).toBe(404);
+  });
+
+  /** One event with an assistant delivery admitted to the caller's own
+   * assistant thread, a workflow delivery whose run started, and a dead
+   * workflow delivery that started nothing. */
+  async function seedDestinations(a: TestApi): Promise<{ sessionId: string; threadId: string }> {
+    await seedEventRow(a, { id: "ev_dest", receivedAt: 1_000 });
+    const owner = { ownerType: "user" as const, ownerId: "local-user" };
+    await seedSubscriptionRow(a, "sub_assist", "local-org", { ...owner, name: "Triage" });
+    await seedSubscriptionRow(a, "sub_wf", "local-org", { ...owner, target: { kind: "workflow", workflowId: "wf_dest" } });
+    await seedWorkflowRow(a, "wf_dest");
+    const delivered = { eventId: "ev_dest", attempts: 1, nextAttemptAt: 1_000, createdAt: 1_000 };
+    await a.providers.db.insert(eventDeliveries).values([
+      { ...delivered, id: "del_assist", subscriptionId: "sub_assist", status: "delivered", deliveredAt: 2_000 },
+      { ...delivered, id: "del_wf", subscriptionId: "sub_wf", status: "delivered", deliveredAt: 2_000 },
+      { ...delivered, id: "del_wf_dead", subscriptionId: "sub_wf", status: "dead", lastError: "boom" },
+    ]);
+    // The thread is paused, so the admitted delivery waits in the queue and
+    // no model runs.
+    const session = await defaultAssistantSessionFor(a.providers, { type: "user", id: "local-user" }, { actorUserId: "local-user", orgId: "local-org" });
+    const thread = session.thread("events");
+    await thread.pause();
+    await thread.submitPrompt(
+      { kind: "signal", signalType: "github.pull_request.opened", body: "event ev_dest" },
+      { dispatchId: eventDeliveryDispatchId("del_assist") },
+    );
+    const definition = { version: "dag/v1" as const, nodes: [], edges: [] };
+    await a.providers.workflowStore.createRun(eventDeliveryRunId("del_wf"), { workflowId: "wf_dest", definitionVersionId: "v1" }, definition, "v1", owner);
+    return { sessionId: session.id, threadId: thread.id };
+  }
+
+  it("links an assistant delivery to its thread and a workflow delivery to its run", async () => {
+    const a = await boot();
+    const thread = await seedDestinations(a);
+
+    const body = (await (await fetch(`${a.baseUrl}/api/events/ev_dest`)).json()) as GetEventResponse;
+    const byId = new Map(body.deliveries.map((d) => [d.id, d]));
+    expect(byId.get("del_assist")?.thread).toEqual(thread);
+    expect(byId.get("del_assist")?.runId).toBeUndefined();
+    expect(byId.get("del_wf")?.runId).toBe(eventDeliveryRunId("del_wf"));
+    expect(byId.get("del_wf")?.thread).toBeUndefined();
+    // A delivery that started no run links nowhere.
+    expect(byId.get("del_wf_dead")?.runId).toBeUndefined();
+  });
+
+  it("links a claimed delivery to the thread that claimed it, for a viewer who may open it (Part E step 2)", async () => {
+    const a = await boot();
+    const thread = await seedDestinations(a);
+    await a.providers.db.insert(eventDeliveries).values({
+      id: "del_claimed", eventId: "ev_dest", subscriptionId: "sub_assist", status: "skipped", attempts: 1, nextAttemptAt: 1_000, createdAt: 1_000,
+      lastError: `Skipped, claimed by thread ${thread.threadId}.`, destination: { kind: "skip", reason: `claimed by thread ${thread.threadId}` },
+    });
+
+    const body = (await (await fetch(`${a.baseUrl}/api/events/ev_dest`)).json()) as GetEventResponse;
+    const claimed = body.deliveries.find((d) => d.id === "del_claimed");
+    expect(claimed?.claimedBy).toEqual(thread);
+    expect(claimed?.thread).toBeUndefined();
+    expect(body.deliveries.find((d) => d.id === "del_assist")?.claimedBy).toBeUndefined();
+
+    const other = (await (await fetch(`${a.baseUrl}/api/events/ev_dest`, { headers: { "x-valet-test-user-id": "test-member" } })).json()) as GetEventResponse;
+    const hidden = other.deliveries.find((d) => d.id === "del_claimed");
+    expect(hidden?.claimedBy).toBeUndefined();
+    expect(hidden?.lastError).toBe("Skipped, claimed by another thread.");
+  });
+
+  it("names a claiming thread's title and keeps the claim after the thread is archived (presence hub Review Focus 4)", async () => {
+    const a = await boot();
+    const thread = await seedDestinations(a);
+    await a.providers.db.insert(eventDeliveries).values({
+      id: "del_claimed", eventId: "ev_dest", subscriptionId: "sub_assist", status: "skipped", attempts: 1, nextAttemptAt: 1_000, createdAt: 1_000,
+      lastError: `Skipped, claimed by thread ${thread.threadId}.`, destination: { kind: "skip", reason: `claimed by thread ${thread.threadId}` },
+    });
+    const patch = (body: object) => fetch(`${a.baseUrl}/api/threads/${thread.threadId}`, {
+      method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+    expect((await patch({ title: "t-inc" })).status).toBe(200);
+    const read = async () => ((await (await fetch(`${a.baseUrl}/api/events/ev_dest`)).json()) as GetEventResponse).deliveries;
+
+    const live = await read();
+    expect(live.find((d) => d.id === "del_claimed")?.claimedBy).toEqual({ ...thread, title: "t-inc" });
+    expect(live.find((d) => d.id === "del_assist")?.thread).toEqual({ ...thread, title: "t-inc" });
+
+    // The thread holds a queued delivery, so the archive route refuses it;
+    // stamp the archive time the way the route does.
+    await a.providers.db.update(sessionThreads).set({ archivedAt: Date.now() })
+      .where(and(eq(sessionThreads.sessionId, thread.sessionId), eq(sessionThreads.id, thread.threadId)));
+    const archived = await read();
+    expect(archived.find((d) => d.id === "del_claimed")?.claimedBy).toEqual({ ...thread, title: "t-inc", archived: true });
+  });
+
+  it("withholds a hidden claiming thread's title from another member's Log", async () => {
+    const a = await boot();
+    const thread = await seedDestinations(a);
+    // An org rule shows in every workspace's Log; its delivery was claimed
+    // by the owner's personal thread.
+    await seedSubscriptionRow(a, "sub_org", "local-org", { ownerType: "org", ownerId: "local-org", name: "Org triage" });
+    // The Log looks back 30 days, so this event is recent.
+    await seedEventRow(a, { id: "ev_recent", receivedAt: Date.now() });
+    await a.providers.db.insert(eventDeliveries).values({
+      id: "del_org_claimed", eventId: "ev_recent", subscriptionId: "sub_org", status: "skipped", attempts: 1, nextAttemptAt: 1_000, createdAt: 1_000,
+      lastError: `Skipped, claimed by thread ${thread.threadId}.`, destination: { kind: "skip", reason: `claimed by thread ${thread.threadId}` },
+    });
+    const patched = await fetch(`${a.baseUrl}/api/threads/${thread.threadId}`, {
+      method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ title: "secret incident" }),
+    });
+    expect(patched.status).toBe(200);
+    const logFor = async (userId: string) => (await (await fetch(`${a.baseUrl}/api/events/log?ownerType=user&ownerId=${userId}`,
+      { headers: { "x-valet-test-user-id": userId } })).json()) as EventLogResponse;
+
+    const own = (await logFor("local-user")).items.find((item) => item.id === "ev_recent");
+    expect(own?.deliveries?.find((d) => d.id === "del_org_claimed")?.claimedBy).toEqual({ ...thread, title: "secret incident" });
+
+    const other = await logFor("test-member");
+    const row = other.items.find((item) => item.id === "ev_recent");
+    const claimed = row?.deliveries?.find((d) => d.id === "del_org_claimed");
+    expect(claimed).toBeDefined();
+    expect(claimed?.claimedBy).toBeUndefined();
+    expect(claimed?.lastError).toBe("Skipped, claimed by another thread.");
+    expect(JSON.stringify(other)).not.toContain("secret incident");
+    expect(JSON.stringify(other)).not.toContain(thread.threadId);
+  });
+
+  it("omits the thread and the run for a viewer who may not open them", async () => {
+    const a = await boot();
+    await seedDestinations(a);
+
+    // The event and its deliveries are org-visible, but the thread and the
+    // run belong to another member's personal workspace.
+    const res = await fetch(`${a.baseUrl}/api/events/ev_dest`, { headers: { "x-valet-test-user-id": "test-member" } });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as GetEventResponse;
+    expect(body.deliveries).toHaveLength(3);
+    for (const delivery of body.deliveries) {
+      expect(delivery.thread).toBeUndefined();
+      expect(delivery.runId).toBeUndefined();
+    }
+  });
+
+  it("links a personal thread to a member while its owner shares it", async () => {
+    const a = await boot();
+    const thread = await seedDestinations(a);
+    const member = { "x-valet-test-user-id": "test-member" };
+    const threadFor = async () => {
+      const body = (await (await fetch(`${a.baseUrl}/api/events/ev_dest`, { headers: member })).json()) as GetEventResponse;
+      return body.deliveries.find((d) => d.id === "del_assist")?.thread;
+    };
+    const share = (mode: string) => fetch(`${a.baseUrl}/api/threads/${thread.threadId}`, {
+      method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ share: mode }),
+    });
+
+    // Without a share, the member cannot open the owner's thread.
+    expect(await threadFor()).toBeUndefined();
+    expect((await fetch(`${a.baseUrl}/api/threads/${thread.threadId}`, { headers: member })).status).toBe(404);
+
+    // A share admits every member of the organization at /threads/:threadId,
+    // so the event page links the thread for them too.
+    expect((await share("view")).status).toBe(200);
+    expect((await fetch(`${a.baseUrl}/api/threads/${thread.threadId}`, { headers: member })).status).toBe(200);
+    expect(await threadFor()).toEqual(thread);
+
+    // When the owner turns the share off, the link goes away with the access.
+    expect((await share("off")).status).toBe(200);
+    expect(await threadFor()).toBeUndefined();
   });
 });
 
@@ -1123,6 +1442,27 @@ describe("POST /api/events/:id/redeliver", () => {
     expect(await deliveriesFor(a, "ev_1")).toHaveLength(0);
   });
 
+  it("honors a subject filter: redelivers only to the subscription whose subject matches (spec Part G)", async () => {
+    const { a } = await bootWithRunHost();
+    await seedWorkflowRow(a, "wf_redeliver");
+    await seedEventRow(a, { id: "ev_1", receivedAt: 1_000, subjects: ["github:acme", "github:acme/widgets"] });
+    await seedSubscriptionRow(a, "sub_match", "local-org", {
+      eventKeys: ["github.pull_request.opened"],
+      filters: [{ field: "subject", op: "eq", value: "github:acme/widgets" }],
+      target: { kind: "workflow", workflowId: "wf_redeliver" },
+    });
+    await seedSubscriptionRow(a, "sub_miss", "local-org", {
+      eventKeys: ["github.pull_request.opened"],
+      filters: [{ field: "subject", op: "eq", value: "github:acme/other" }],
+      target: { kind: "workflow", workflowId: "wf_redeliver" },
+    });
+
+    const res = await redeliver(a.baseUrl, "ev_1");
+    expect((await res.json()) as RedeliverEventResponse).toEqual({ created: 1 });
+    const rows = await deliveriesFor(a, "ev_1");
+    expect(rows.map((r) => r.subscriptionId)).toEqual(["sub_match"]);
+  });
+
   it("200s with created 0 when nothing matches, so the UI can say so", async () => {
     const a = await boot();
     await seedEventRow(a, { id: "ev_1", receivedAt: 1_000 });
@@ -1170,7 +1510,7 @@ describe("event subscriptions — team ownership", () => {
 
   const teamBody: CreateEventSubscriptionRequest = {
     ...VALID_BODY,
-    target: { kind: "orchestrator", orchestrator: "team", teamId: "team_1" },
+    target: { kind: "assistant", assistant: "team", teamId: "team_1" },
   };
 
   it("stamps a team target with the TEAM as owner, not the creating member", async () => {
@@ -1198,7 +1538,7 @@ describe("event subscriptions — team ownership", () => {
     const a = await bootWithTeam();
     const res = await postSubscription(
       a.baseUrl,
-      { ...VALID_BODY, target: { kind: "orchestrator", orchestrator: "team", teamId: "team_2" } },
+      { ...VALID_BODY, target: { kind: "assistant", assistant: "team", teamId: "team_2" } },
       { "x-valet-test-user-id": "test-member" },
     );
     expect(res.status).toBe(404);
@@ -1207,11 +1547,68 @@ describe("event subscriptions — team ownership", () => {
     expect(body.error).not.toContain("Other");
   });
 
+  // `deleteTeam` deletes a team's own event_subscriptions rows under
+  // `lockTeamForOwnership` (services/teams.ts). An insert that already
+  // passed its membership/ownership checks before the delete's transaction
+  // commits, but writes after, lands as an orphan pointing at a team (or
+  // workflow) that no longer exists — the same race #709 closed for
+  // schedules. These two tests force that race deterministically by
+  // deleting the target from inside the pre-insert check's mock
+  // implementation, which still calls through to the real check first.
+  it("does not leave an orphaned subscription when the team is deleted between the membership check and the insert", async () => {
+    const a = await bootWithTeam();
+    const original = teamsService.isTeamMember;
+    const spy = vi.spyOn(teamsService, "isTeamMember").mockImplementationOnce(async (...args) => {
+      const result = await original(...args);
+      await deleteTeam(a.providers.db, { teamId: "team_1" });
+      return result;
+    });
+    try {
+      const res = await postSubscription(a.baseUrl, teamBody, { "x-valet-test-user-id": "test-member" });
+      expect(res.status).toBe(400);
+      expect(await a.providers.db.select().from(eventSubscriptions)).toHaveLength(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("does not leave an orphaned subscription when its target workflow is deleted before the insert", async () => {
+    const a = await bootWithTeam();
+    const now = Date.now();
+    await a.providers.db.insert(workflowDefinitions).values({
+      id: "wf_team_race",
+      orgId: "local-org",
+      ownerType: "team",
+      ownerId: "team_1",
+      name: "target",
+      definition: { version: "dag/v1", nodes: [], edges: [] },
+      createdAt: now,
+      updatedAt: now,
+    });
+    const original = workflowService.armableDefinitionRow;
+    const spy = vi.spyOn(workflowService, "armableDefinitionRow").mockImplementationOnce(async (...args) => {
+      const result = await original(...args);
+      await a.providers.db.delete(workflowDefinitions).where(eq(workflowDefinitions.id, "wf_team_race"));
+      return result;
+    });
+    try {
+      const res = await postSubscription(
+        a.baseUrl,
+        { ...VALID_BODY, target: { kind: "workflow", workflowId: "wf_team_race" } },
+        { "x-valet-test-user-id": "test-member" },
+      );
+      expect(res.status).toBe(400);
+      expect(await a.providers.db.select().from(eventSubscriptions)).toHaveLength(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("404s a team id that does not exist at all — same answer as one you're not on", async () => {
     const a = await bootWithTeam();
     const res = await postSubscription(
       a.baseUrl,
-      { ...VALID_BODY, target: { kind: "orchestrator", orchestrator: "team", teamId: "team_nope" } },
+      { ...VALID_BODY, target: { kind: "assistant", assistant: "team", teamId: "team_nope" } },
       { "x-valet-test-user-id": "test-member" },
     );
     expect(res.status).toBe(404);
@@ -1221,22 +1618,22 @@ describe("event subscriptions — team ownership", () => {
     const a = await bootWithTeam();
     const res = await postSubscription(
       a.baseUrl,
-      { ...VALID_BODY, target: { kind: "orchestrator", orchestrator: "team" } },
+      { ...VALID_BODY, target: { kind: "assistant", assistant: "team" } },
       { "x-valet-test-user-id": "test-member" },
     );
     expect(res.status).toBe(400);
-    expect(((await res.json()) as { error: string }).error).toBe("team orchestrator target requires teamId");
+    expect(((await res.json()) as { error: string }).error).toBe("A team assistant target requires teamId. Choose the team.");
   });
 
   it("400s a teamId on a user target — it would read as delivering to the team, and does not", async () => {
     const a = await bootWithTeam();
     const res = await postSubscription(
       a.baseUrl,
-      { ...VALID_BODY, target: { kind: "orchestrator", orchestrator: "user", teamId: "team_1" } },
+      { ...VALID_BODY, target: { kind: "assistant", assistant: "user", teamId: "team_1" } },
       { "x-valet-test-user-id": "test-member" },
     );
     expect(res.status).toBe(400);
-    expect(((await res.json()) as { error: string }).error).toBe("teamId is only valid when orchestrator is team");
+    expect(((await res.json()) as { error: string }).error).toBe("teamId is only valid when assistant is team. Remove teamId.");
   });
 
   it("lets another member of the same team change and delete it", async () => {
@@ -1297,13 +1694,13 @@ describe("event-subscription assistant target", () => {
   async function seedAssistants(a: TestApi): Promise<{ mine: string; foreign: string }> {
     const db = a.providers.db;
     // The first create for a principal takes the default slot.
-    await createAssistant(db, "local-org", { type: "user", id: "local-user" }, "Primary");
-    const mine = await createAssistant(db, "local-org", { type: "user", id: "local-user" }, "Ops");
-    const foreign = await createAssistant(db, "local-org", { type: "user", id: "someone-else" }, "Theirs");
+    await seedWorkspaceAssistant(db, "local-org", { type: "user", id: "local-user" });
+    const mine = await seedWorkspaceAssistant(db, "local-org", { type: "user", id: "local-user" });
+    const foreign = await seedWorkspaceAssistant(db, "local-org", { type: "user", id: "someone-else" });
     return { mine: mine.id, foreign: foreign.id };
   }
 
-  it("stores a named assistant on the target and reads it back", async () => {
+  it("rejects selecting a named assistant", async () => {
     const a = await bootTestApi({ plugins: [githubPlugin] });
     const { mine } = await seedAssistants(a);
 
@@ -1313,12 +1710,11 @@ describe("event-subscription assistant target", () => {
       body: JSON.stringify({
         name: "to ops",
         eventKeys: ["github.pull_request.opened"],
-        target: { kind: "orchestrator", orchestrator: "user", assistantId: mine },
+        target: { kind: "assistant", assistant: "user", assistantId: mine },
       }),
     });
-    expect(res.status).toBe(201);
-    const body = (await res.json()) as { target: { assistantId?: string } };
-    expect(body.target.assistantId).toBe(mine);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: expect.stringContaining("Choose the personal or team workspace") });
   });
 
   it("refuses an assistant owned by someone else, without saying it exists", async () => {
@@ -1331,16 +1727,16 @@ describe("event-subscription assistant target", () => {
       body: JSON.stringify({
         name: "nope",
         eventKeys: ["github.pull_request.opened"],
-        target: { kind: "orchestrator", orchestrator: "user", assistantId: foreign },
+        target: { kind: "assistant", assistant: "user", assistantId: foreign },
       }),
     });
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
     // Same message an id that does not exist gets: existence stays hidden.
-    expect(body.error).toBe(`unknown assistant: ${foreign}`);
+    expect(body.error).toContain("Assistant selection is not supported");
   });
 
-  it("patches the assistant, and null restores the owner's default", async () => {
+  it("rejects assistant routing patches", async () => {
     const a = await bootTestApi({ plugins: [githubPlugin] });
     const { mine } = await seedAssistants(a);
 
@@ -1351,29 +1747,40 @@ describe("event-subscription assistant target", () => {
         body: JSON.stringify({
           name: "repoint me",
           eventKeys: ["github.pull_request.opened"],
-          target: { kind: "orchestrator", orchestrator: "user" },
+          target: { kind: "assistant", assistant: "user" },
         }),
       })
     ).json()) as { id: string; target: { assistantId?: string } };
     expect(created.target.assistantId).toBeUndefined();
 
-    const patched = (await (
-      await fetch(`${a.baseUrl}/api/event-subscriptions/${created.id}`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ assistantId: mine }),
-      })
-    ).json()) as { target: { assistantId?: string } };
-    expect(patched.target.assistantId).toBe(mine);
+    const res = await fetch(`${a.baseUrl}/api/event-subscriptions/${created.id}`, {
+      method: "PATCH", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ assistantId: mine }),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: expect.stringContaining("Assistant selection is not supported") });
+    // `null` clears a retired selection, so it is accepted.
+    const cleared = await fetch(`${a.baseUrl}/api/event-subscriptions/${created.id}`, {
+      method: "PATCH", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ assistantId: null }),
+    });
+    expect(cleared.status).toBe(200);
+  });
 
-    const cleared = (await (
-      await fetch(`${a.baseUrl}/api/event-subscriptions/${created.id}`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ assistantId: null }),
-      })
-    ).json()) as { target: { assistantId?: string } };
-    expect(cleared.target.assistantId).toBeUndefined();
+  it("lets an owner disable a rule saved with a retired assistant selection", async () => {
+    const a = await bootTestApi({ plugins: [githubPlugin] });
+    const now = Date.now();
+    await a.providers.db.insert(eventSubscriptions).values({
+      id: "legacy-assistant-rule", orgId: "local-org", ownerType: "user", ownerId: "local-user",
+      name: "legacy", eventKeys: ["github.push"], filters: [],
+      target: { kind: "assistant", assistant: "user", assistantId: "asst_retired" },
+      enabled: true, createdBy: "local-user", createdAt: now, updatedAt: now,
+    });
+    const res = await patchSubscription(a.baseUrl, "legacy-assistant-rule", { enabled: false });
+    expect(res.status).toBe(200);
+    const [row] = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, "legacy-assistant-rule"));
+    expect(row.enabled).toBe(false);
+    expect(row.target).toEqual({ kind: "assistant", assistant: "user" });
   });
 
   it("refuses assistantId on a workflow target", async () => {
@@ -1390,7 +1797,152 @@ describe("event-subscription assistant target", () => {
     });
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
-    expect(body.error).toContain("only valid on an orchestrator target");
+    expect(body.error).toContain("Assistant selection is not supported");
+  });
+});
+
+/**
+ * Prompt templates on an orchestrator target (TKAI-491). The write gate is
+ * what makes the delivery-time renderer total, so every refusal it owes is
+ * asserted here; the rendering itself is `events/prompt-template.test.ts`.
+ */
+describe("event-subscription prompt templates", () => {
+  const PROMPT_BODY = {
+    name: "triage",
+    eventKeys: ["github.pull_request.opened"],
+    target: {
+      kind: "assistant",
+      systemPrompt: "Triage this pull request. Answer in one sentence.",
+      userPromptTemplate: "{{payload.sender}} opened {{payload.repo}}: {{event.summary}}",
+    },
+  };
+
+  it("stores both templates on the target and reads them back", async () => {
+    const a = await boot();
+    const res = await postSubscription(a.baseUrl, PROMPT_BODY);
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateEventSubscriptionResponse;
+    expect(body.target).toMatchObject({
+      kind: "assistant",
+      systemPrompt: PROMPT_BODY.target.systemPrompt,
+      userPromptTemplate: PROMPT_BODY.target.userPromptTemplate,
+    });
+  });
+
+  it("400s a template variable outside the documented set, naming the fix", async () => {
+    const a = await boot();
+    const res = await postSubscription(a.baseUrl, {
+      ...PROMPT_BODY,
+      target: { kind: "assistant", userPromptTemplate: "{{session.history}}" },
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("unknown variable");
+    expect(body.error).toContain("event.summary");
+  });
+
+  it("400s a payload field the selected events do not declare", async () => {
+    const a = await boot();
+    const res = await postSubscription(a.baseUrl, {
+      ...PROMPT_BODY,
+      target: { kind: "assistant", userPromptTemplate: "{{payload.comment_body}}" },
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("payload.comment_body");
+  });
+
+  it("400s a malformed template", async () => {
+    const a = await boot();
+    const res = await postSubscription(a.baseUrl, {
+      ...PROMPT_BODY,
+      target: { kind: "assistant", systemPrompt: "Watch {{refs.repo" },
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("unclosed");
+  });
+
+  it("400s event text in the instruction field, so a sender cannot write the instruction", async () => {
+    const a = await boot();
+    const res = await postSubscription(a.baseUrl, {
+      ...PROMPT_BODY,
+      target: { kind: "assistant", systemPrompt: "Follow this: {{payload.sender}}" },
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("{{payload.sender}}");
+    expect(body.error).toContain("userPromptTemplate");
+  });
+
+  it("stores a template that shows the assistant a JSON shape", async () => {
+    const a = await boot();
+    const res = await postSubscription(a.baseUrl, {
+      ...PROMPT_BODY,
+      target: {
+        kind: "assistant",
+        systemPrompt: 'Reply with JSON like {"summary": {"text": "x"}}',
+      },
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateEventSubscriptionResponse;
+    expect(body.target).toMatchObject({
+      systemPrompt: 'Reply with JSON like {"summary": {"text": "x"}}',
+    });
+  });
+
+  it("400s a prompt template on a workflow target, so workflow prompts stay the workflow's own", async () => {
+    const a = await boot();
+    const res = await postSubscription(a.baseUrl, {
+      ...PROMPT_BODY,
+      target: { kind: "workflow", workflowId: "wf-1", systemPrompt: "Do it" },
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe(
+      "systemPrompt is only valid on an assistant target. Remove systemPrompt, or point the line at an assistant.",
+    );
+  });
+
+  it("patches a template, and null clears it back to the default delivery", async () => {
+    const a = await boot();
+    const created = (await (await postSubscription(a.baseUrl, PROMPT_BODY)).json()) as EventSubscriptionWire;
+
+    const patched = (await (
+      await patchSubscription(a.baseUrl, created.id, { systemPrompt: "Summarize it instead." })
+    ).json()) as PatchEventSubscriptionResponse;
+    expect(patched.target).toMatchObject({
+      systemPrompt: "Summarize it instead.",
+      userPromptTemplate: PROMPT_BODY.target.userPromptTemplate,
+    });
+
+    const cleared = (await (
+      await patchSubscription(a.baseUrl, created.id, { systemPrompt: null, userPromptTemplate: null })
+    ).json()) as PatchEventSubscriptionResponse;
+    expect(cleared.target).toEqual({ kind: "assistant" });
+  });
+
+  it("400s a patched template that names a variable the rule's events do not declare", async () => {
+    const a = await boot();
+    const created = (await (await postSubscription(a.baseUrl, PROMPT_BODY)).json()) as EventSubscriptionWire;
+    const res = await patchSubscription(a.baseUrl, created.id, {
+      userPromptTemplate: "{{payload.comment_body}}",
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("payload.comment_body");
+  });
+
+  it("re-validates a stored template against narrowed eventKeys", async () => {
+    const a = await boot();
+    const created = (await (
+      await postSubscription(a.baseUrl, {
+        name: "pr numbers",
+        eventKeys: ["github.pull_request.opened"],
+        target: { kind: "assistant", userPromptTemplate: "PR {{payload.pr_number}}" },
+      })
+    ).json()) as EventSubscriptionWire;
+
+    // `pr_number` is a pull_request field; an issues-only rule cannot render it.
+    const res = await patchSubscription(a.baseUrl, created.id, { eventKeys: ["github.issues.opened"] });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("payload.pr_number");
   });
 });
 
@@ -1518,6 +2070,121 @@ describe("GET /api/events/filter-options", () => {
     expect(second.reason).toBeUndefined();
     expect(calls).toBe(2);
   });
+
+  // A cache hit used to answer `{ options: [] }` without the reason, and the
+  // picker then showed a search box with no free-text input: a dead end.
+  it("answers a cache hit with the reason the first call gave", async () => {
+    let calls = 0;
+    // Its own source name, as above: the memo outlives the api instance.
+    const emptyPlugin: ValetPlugin = {
+      ...fixturePlugin,
+      filterOptionResolvers: {
+        "fixture.unconnected": async () => {
+          calls += 1;
+          return [];
+        },
+      },
+    };
+    const a = await bootTestApi({ plugins: [emptyPlugin] });
+    api = a;
+    const read = async () => (await (await fetch(`${a.baseUrl}/api/events/filter-options?source=fixture.unconnected`)).json()) as {
+      options: unknown[];
+      reason?: string;
+    };
+
+    const reason = "Connect the integration on the Integrations page to choose from a list. Type the value instead.";
+    expect(await read()).toEqual({ options: [], reason });
+    expect(await read()).toEqual({ options: [], reason });
+    // The second answer came from the cache.
+    expect(calls).toBe(1);
+  });
+
+  // A resolver that lists the token it received, so a test can assert which
+  // credential the route chose. The plugin name is the credential service.
+  function credentialEchoPlugin(name: string, source: string): ValetPlugin {
+    return {
+      ...fixturePlugin,
+      name,
+      filterOptionResolvers: {
+        [source]: async (ctx) =>
+          ctx.credential ? [{ id: `${ctx.credential.type}:${ctx.credential.accessToken ?? ""}`, label: "acme/app" }] : [],
+      },
+    };
+  }
+
+  async function seedInstallation(a: TestApi, token: string): Promise<void> {
+    const now = Date.now();
+    await a.providers.db.insert(githubInstallations).values({
+      id: "ghi_filter_options",
+      orgId: "local-org",
+      installationId: 4242,
+      accountLogin: "acme",
+      accountType: "Organization",
+      repositorySelection: "selected",
+      suspended: false,
+      cachedToken: encryptSecret(token, deriveSecretKey(a.providers.encryptionKey)),
+      cachedTokenExpiresAt: now + 60 * 60_000,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  // Live finding: an org with the GitHub App installed and no org `github`
+  // row got the "connect" reason, because the route read the org row only.
+  // `GET /installation/repositories` accepts the installation token only.
+  it("hands GitHub the org's installation token when no org row exists", async () => {
+    const a = await bootTestApi({ plugins: [credentialEchoPlugin("github", "fixture.gh-installed")] });
+    api = a;
+    await seedInstallation(a, "ghs-install");
+
+    const body = (await (await fetch(`${a.baseUrl}/api/events/filter-options?source=fixture.gh-installed`)).json()) as {
+      options: { id: string }[];
+      reason?: string;
+    };
+    expect(body).toEqual({ options: [{ id: "app_install:ghs-install", label: "acme/app" }] });
+  });
+
+  it("names the GitHub App install when the org has neither, and picks up a later install", async () => {
+    const a = await bootTestApi({ plugins: [credentialEchoPlugin("github", "fixture.gh-later")] });
+    api = a;
+    const read = async () =>
+      (await (await fetch(`${a.baseUrl}/api/events/filter-options?source=fixture.gh-later`)).json()) as {
+        options: { id: string }[];
+        reason?: string;
+      };
+
+    expect(await read()).toEqual({
+      options: [],
+      reason:
+        "Install the Valet GitHub App for this organization on the Integrations page to choose from a list. Type the value instead.",
+    });
+
+    // Inside the memo TTL: the credential source is part of the key, so the
+    // cached "install" answer does not mask the new installation.
+    await seedInstallation(a, "ghs-later");
+    expect(await read()).toEqual({ options: [{ id: "app_install:ghs-later", label: "acme/app" }] });
+  });
+
+  it("hands Slack the org row and keeps the generic reason without one", async () => {
+    const a = await bootTestApi({ plugins: [credentialEchoPlugin("slack", "fixture.slack-org")] });
+    api = a;
+    const read = async () =>
+      (await (await fetch(`${a.baseUrl}/api/events/filter-options?source=fixture.slack-org`)).json()) as {
+        options: { id: string }[];
+        reason?: string;
+      };
+
+    expect(await read()).toEqual({
+      options: [],
+      reason: "Connect the integration on the Integrations page to choose from a list. Type the value instead.",
+    });
+
+    await a.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", {
+      type: "bot_token",
+      accessToken: "xoxb-org",
+    });
+    expect(await read()).toEqual({ options: [{ id: "bot_token:xoxb-org", label: "acme/app" }] });
+  });
 });
 
 // ── Mention scoping (TKAI-299) ─────────────────────────────────────────────
@@ -1548,7 +2215,7 @@ describe("mention scoping (slack.app_mention)", () => {
     name: "my mentions",
     eventKeys: ["slack.app_mention"],
     filters: [{ field: "channel", op: "eq", value: "C123", label: "#eng" }],
-    target: { kind: "orchestrator" },
+    target: { kind: "assistant" },
   };
 
   it("a team-owned mention subscription uses membership instead of a creator filter", async () => {
@@ -1558,7 +2225,7 @@ describe("mention scoping (slack.app_mention)", () => {
     await a.providers.db.insert(teamMembers).values({ teamId: "team_1", userId: "local-user", role: "admin" });
     const res = await postSubscription(a.baseUrl, {
       ...MENTION_BODY,
-      target: { kind: "orchestrator", orchestrator: "team", teamId: "team_1" },
+      target: { kind: "assistant", assistant: "team", teamId: "team_1" },
     });
     expect(res.status).toBe(201);
     const body = (await res.json()) as CreateEventSubscriptionResponse;
@@ -1571,6 +2238,125 @@ describe("mention scoping (slack.app_mention)", () => {
     expect(rows[0].filters).toEqual(body.filters);
   });
 
+  it("a team mention rule takes an organization audience, and an absent one reads back as team", async () => {
+    const a = await bootSlack();
+    const now = Date.now();
+    await a.providers.db.insert(teams).values({ id: "team_1", orgId: "local-org", name: "Platform", createdAt: now });
+    await a.providers.db.insert(teamMembers).values({ teamId: "team_1", userId: "local-user", role: "admin" });
+    const teamTarget: EventSubscriptionTargetWire = { kind: "assistant", assistant: "team", teamId: "team_1" };
+
+    const open = await postSubscription(a.baseUrl, { ...MENTION_BODY, target: teamTarget, audience: "organization" });
+    expect(open.status).toBe(201);
+    const opened = (await open.json()) as CreateEventSubscriptionResponse;
+    expect(opened.audience).toBe("organization");
+    const openRows = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, opened.id));
+    expect(openRows[0].audience).toBe("organization");
+
+    const quiet = await postSubscription(a.baseUrl, {
+      ...MENTION_BODY,
+      name: "team only",
+      filters: [{ field: "channel", op: "eq", value: "C999" }],
+      target: teamTarget,
+    });
+    expect(quiet.status).toBe(201);
+    const quieted = (await quiet.json()) as CreateEventSubscriptionResponse;
+    expect(quieted.audience).toBe("team");
+    const quietRows = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, quieted.id));
+    expect(quietRows[0].audience).toBeNull();
+  });
+
+  it("patches the audience of a team mention rule in both directions", async () => {
+    const a = await bootSlack();
+    const now = Date.now();
+    await a.providers.db.insert(teams).values({ id: "team_1", orgId: "local-org", name: "Platform", createdAt: now });
+    await a.providers.db.insert(teamMembers).values({ teamId: "team_1", userId: "local-user", role: "admin" });
+    const res = await postSubscription(a.baseUrl, {
+      ...MENTION_BODY,
+      target: { kind: "assistant", assistant: "team", teamId: "team_1" },
+    });
+    const created = (await res.json()) as CreateEventSubscriptionResponse;
+
+    const opened = await patchSubscription(a.baseUrl, created.id, { audience: "organization" });
+    expect(opened.status).toBe(200);
+    expect(((await opened.json()) as PatchEventSubscriptionResponse).audience).toBe("organization");
+
+    const closed = await patchSubscription(a.baseUrl, created.id, { audience: "team" });
+    expect(closed.status).toBe(200);
+    expect(((await closed.json()) as PatchEventSubscriptionResponse).audience).toBe("team");
+    const rows = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, created.id));
+    expect(rows[0].audience).toBe("team");
+  });
+
+  // A client that GETs a rule and PATCHes the object back must not be refused
+  // for echoing a field the read itself filled in.
+  it("accepts a read-modify-write patch of a rule that has no audience", async () => {
+    const a = await bootSlack();
+    await linkSlack(a, "local-user", "U_LOCAL");
+    const created = (await (await postSubscription(a.baseUrl, {
+      name: "my mentions", eventKeys: ["slack.app_mention"],
+      filters: [{ field: "channel", op: "eq", value: "C1" }],
+      target: { kind: "assistant", assistant: "user" },
+    })).json()) as CreateEventSubscriptionResponse;
+
+    const list = (await (await fetch(`${a.baseUrl}/api/event-subscriptions`)).json()) as ListEventSubscriptionsResponse;
+    const echoed = list.subscriptions.find((sub) => sub.id === created.id);
+    expect(echoed).toBeDefined();
+    // A personal target carries no audience on the wire at all.
+    expect(echoed?.audience).toBeUndefined();
+
+    const res = await patchSubscription(a.baseUrl, created.id, { ...echoed, name: "renamed" });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as PatchEventSubscriptionResponse).name).toBe("renamed");
+  });
+
+  // The runtime gate treats team ownership plus an orchestrator target as a
+  // team mention rule, with no `assistant: "team"` on the target. The write
+  // gate must read the same rows the same way.
+  it("patches the audience of a team-owned rule whose target names no orchestrator", async () => {
+    const a = await bootSlack();
+    const now = Date.now();
+    await a.providers.db.insert(teams).values({ id: "team_1", orgId: "local-org", name: "Platform", createdAt: now });
+    await a.providers.db.insert(teamMembers).values({ teamId: "team_1", userId: "local-user", role: "admin" });
+    await seedSubscriptionRow(a, "sub_runtime", "local-org", {
+      ownerType: "team", ownerId: "team_1", eventKeys: ["slack.app_mention"],
+      filters: [{ field: "channel", op: "eq", value: "C1" }],
+      target: { kind: "assistant" },
+    });
+
+    const res = await patchSubscription(a.baseUrl, "sub_runtime", { audience: "organization" });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as PatchEventSubscriptionResponse).audience).toBe("organization");
+  });
+
+  it("names the two accepted values when the audience is malformed", async () => {
+    const a = await bootSlack();
+    const now = Date.now();
+    await a.providers.db.insert(teams).values({ id: "team_1", orgId: "local-org", name: "Platform", createdAt: now });
+    await a.providers.db.insert(teamMembers).values({ teamId: "team_1", userId: "local-user", role: "admin" });
+    const res = await postSubscription(a.baseUrl, {
+      ...MENTION_BODY,
+      target: { kind: "assistant", assistant: "team", teamId: "team_1" },
+      audience: "everyone",
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe(
+      'audience must be "team" or "organization". Choose one of those two values, or remove the audience.',
+    );
+  });
+
+  it.each<EventSubscriptionTargetWire>([
+    { kind: "workflow", workflowId: "wf_1" },
+    { kind: "assistant", assistant: "user" },
+  ])("refuses an audience on a target that is not a team assistant (%o)", async (target) => {
+    const a = await bootSlack();
+    await linkSlack(a, "local-user", "U_LOCAL");
+    const res = await postSubscription(a.baseUrl, { ...MENTION_BODY, target, audience: "organization" });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe(
+      "Only a mention line for a team assistant has an invocation audience. Point the line at a team assistant, or remove the audience.",
+    );
+  });
+
   it.each(["team", "organization"])("redelivery rechecks the mentioner's current %s membership", async (removed) => {
     const a = await bootSlack();
     await a.providers.eventDispatcher.stop();
@@ -1580,8 +2366,10 @@ describe("mention scoping (slack.app_mention)", () => {
     await linkSlack(a, "member-b", "U_B");
     await seedSubscriptionRow(a, "sub-replay", "local-org", {
       ownerType: "team", ownerId: "team-replay", eventKeys: ["slack.app_mention"],
-      filters: [{ field: "channel", op: "eq", value: "C1" }], target: { kind: "orchestrator" },
+      filters: [{ field: "channel", op: "eq", value: "C1" }], target: { kind: "assistant" },
     });
+    // An event from a channel nobody has classified stays hidden (`routes/events.ts#eventVisibleTo`).
+    await a.providers.db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId: "C1", isPrivate: false, checkedAt: Date.now() });
     await a.providers.db.insert(events).values({
       id: "event-replay", orgId: "local-org", service: "slack", eventKey: "slack.app_mention",
       dedupeKey: "replay", actor: { externalId: "U_B" }, refs: {}, summary: "Mention",
@@ -1646,7 +2434,7 @@ describe("mention scoping (slack.app_mention)", () => {
     const res = await postSubscription(a.baseUrl, MENTION_BODY);
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
-    expect(body.error).toContain("Connected accounts");
+    expect(body.error).toContain("Integrations → Slack");
   });
 
   it("refuses creation without a channel filter unless anyChannel is set", async () => {
@@ -1655,7 +2443,7 @@ describe("mention scoping (slack.app_mention)", () => {
     const res = await postSubscription(a.baseUrl, { ...MENTION_BODY, filters: [] });
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
-    expect(body.error).toContain("at least one channel");
+    expect(body.error).toMatch(/^A mention line needs at least one channel filter/);
   });
 
   it("a prefix channel filter does not satisfy the channel requirement", async () => {
@@ -1666,6 +2454,22 @@ describe("mention scoping (slack.app_mention)", () => {
       filters: [{ field: "channel", op: "prefix", value: "C" }],
     });
     expect(res.status).toBe(400);
+  });
+
+  it("treats a channel_name condition as any channel, so a mention line with one needs anyChannel", async () => {
+    const a = await bootSlack();
+    await linkSlack(a, "local-user", "U_LOCAL");
+    const named = [{ field: "channel_name", op: "prefix" as const, value: "alerts-" }];
+    const refused = await postSubscription(a.baseUrl, { ...MENTION_BODY, filters: named });
+    expect(refused.status).toBe(400);
+    expect(((await refused.json()) as { error: string }).error).toContain('Choose "Any channel" to keep the name condition');
+
+    const accepted = await postSubscription(a.baseUrl, { ...MENTION_BODY, filters: named, anyChannel: true });
+    expect(accepted.status).toBe(201);
+    const body = (await accepted.json()) as CreateEventSubscriptionResponse;
+    expect(body.filters).toEqual([...named, { field: "user", op: "eq", value: "U_LOCAL" }]);
+    // The stored row reads back as the any-channel state that Presence shows.
+    expect(storedAnyChannel(body.eventKeys, body.filters ?? [])).toBe(true);
   });
 
   it("accepts multiple channels via an in filter", async () => {
@@ -1743,7 +2547,7 @@ describe("mention scoping (slack.app_mention)", () => {
       name: "all channel messages",
       eventKeys: ["slack.message"],
       filters: [],
-      target: { kind: "orchestrator" },
+      target: { kind: "assistant" },
     });
     expect(res.status).toBe(201);
     const body = (await res.json()) as CreateEventSubscriptionResponse;
@@ -1881,6 +2685,9 @@ describe("subscription collision gate (TKAI-294)", () => {
     expect(res.status).toBe(409);
     const body = (await res.json()) as EventSubscriptionCollisionErrorWire;
     expect(body.error).toContain("narrow repo rule");
+    // The editor's button for a create is "Create anyway".
+    // Create anyway keeps both lines, so the text says that.
+    expect(body.error).toContain('Narrow its filters, or choose "Create anyway" to keep both.');
     expect(body.collisions.blocking).toHaveLength(1);
     expect(body.collisions.blocking[0].subscription.id).toBe("sub_narrow");
     expect(body.collisions.blocking[0].relation).toBe("superset");
@@ -1982,6 +2789,8 @@ describe("subscription collision gate (TKAI-294)", () => {
     expect(blocked.status).toBe(409);
     const blockedBody = (await blocked.json()) as EventSubscriptionCollisionErrorWire;
     expect(blockedBody.collisions.blocking[0].subscription.id).toBe("sub_narrow");
+    // The editor's Save shows "Save anyway" for an edit.
+    expect(blockedBody.error).toContain('save again with "Save anyway".');
     // The refused patch changed nothing.
     const rows = await a.providers.db
       .select()
@@ -2010,6 +2819,9 @@ describe("subscription collision gate (TKAI-294)", () => {
       body: JSON.stringify({ enabled: true }),
     });
     expect(arm.status).toBe(409);
+    // The switch shows this text beside its "Turn on anyway" button.
+    expect(((await arm.json()) as EventSubscriptionCollisionErrorWire).error)
+      .toContain('turn it on with "Turn on anyway".');
 
     // A patch that leaves the rule disabled stays uncheckable — nothing fires.
     const rename = await fetch(`${a.baseUrl}/api/event-subscriptions/${created.id}`, {
@@ -2018,5 +2830,584 @@ describe("subscription collision gate (TKAI-294)", () => {
       body: JSON.stringify({ name: "still parked" }),
     });
     expect(rename.status).toBe(200);
+
+    // "Turn on anyway": the switch's flag arms the line over the collision and
+    // reports what it stepped on, as a create with the flag does.
+    const anyway = await fetch(`${a.baseUrl}/api/event-subscriptions/${created.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: true, allowCollision: true }),
+    });
+    expect(anyway.status).toBe(200);
+    const armed = (await anyway.json()) as PatchEventSubscriptionResponse;
+    expect(armed.enabled).toBe(true);
+    expect(armed.collisions?.blocking.map((b) => b.subscription.id)).toEqual(["sub_narrow"]);
+  });
+});
+
+describe("replacement proposals", () => {
+  const MATCH = {
+    eventKeys: ["github.pull_request.opened"],
+    filters: [{ field: "repo", op: "eq" as const, value: "acme/widgets" }],
+  };
+
+  /** The caller's live rule and a disabled proposal that replaces it, with
+   * the same match, so they would collide if both were enabled. */
+  async function seedReplacement(a: TestApi): Promise<void> {
+    const mine = { ownerType: "user" as const, ownerId: "local-user", ...MATCH };
+    await seedSubscriptionRow(a, "sub_live", "local-org", { ...mine, name: "replies v1" });
+    await seedSubscriptionRow(a, "sub_next", "local-org", {
+      ...mine, name: "replies v2", enabled: false, target: { kind: "assistant", replaces: "sub_live" },
+    });
+  }
+
+  async function enabledById(a: TestApi): Promise<Record<string, boolean>> {
+    const rows = await a.providers.db.select().from(eventSubscriptions);
+    return Object.fromEntries(rows.map((r) => [r.id, r.enabled]));
+  }
+
+  it("enabling a replacement disables the replaced subscription, never one in another workspace", async () => {
+    const a = await boot();
+    await seedReplacement(a);
+    // A hand-written link to a colleague's rule is refused: from this
+    // workspace the rule does not exist, and the colleague's rule stays on.
+    await seedSubscriptionRow(a, "sub_colleague", "local-org", {
+      ...MATCH, filters: [{ field: "repo", op: "eq", value: "acme/colleague" }],
+    });
+    await seedSubscriptionRow(a, "sub_stray", "local-org", {
+      ownerType: "user", ownerId: "local-user", enabled: false, eventKeys: MATCH.eventKeys,
+      filters: [{ field: "repo", op: "eq", value: "acme/stray" }], target: { kind: "assistant", replaces: "sub_colleague" },
+    });
+    expect((await patchSubscription(a.baseUrl, "sub_stray", { enabled: true })).status).toBe(409);
+    expect(await enabledById(a)).toMatchObject({ sub_colleague: true, sub_stray: false });
+    // A link to a workflow trigger is refused too: a trigger is not an assistant version.
+    await seedSubscriptionRow(a, "sub_trigger", "local-org", {
+      ownerType: "user", ownerId: "local-user", eventKeys: MATCH.eventKeys,
+      filters: [{ field: "repo", op: "eq", value: "acme/trigger" }], target: { kind: "workflow", workflowId: "wf-1" },
+    });
+    await seedSubscriptionRow(a, "sub_takeover", "local-org", {
+      ownerType: "user", ownerId: "local-user", enabled: false, eventKeys: MATCH.eventKeys,
+      filters: [{ field: "repo", op: "eq", value: "acme/takeover" }], target: { kind: "assistant", replaces: "sub_trigger" },
+    });
+    expect((await patchSubscription(a.baseUrl, "sub_takeover", { enabled: true })).status).toBe(409);
+    expect(await enabledById(a)).toMatchObject({ sub_trigger: true, sub_takeover: false });
+
+    // The replaced rule is not a collision peer, so no override is needed.
+    const res = await patchSubscription(a.baseUrl, "sub_next", { enabled: true });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as PatchEventSubscriptionResponse;
+    expect(body.enabled).toBe(true);
+    expect(body.collisions).toBeUndefined();
+    expect(await enabledById(a)).toMatchObject({ sub_live: false, sub_next: true });
+    // The link is spent and recorded: turning the new version off and on leaves the old one alone.
+    expect(body.target).not.toHaveProperty("replaces");
+    expect(body.target).toMatchObject({ replaced: "sub_live" });
+    expect((await patchSubscription(a.baseUrl, "sub_next", { enabled: false })).status).toBe(200);
+    expect((await patchSubscription(a.baseUrl, "sub_live", { enabled: true })).status).toBe(200);
+    expect((await patchSubscription(a.baseUrl, "sub_next", { enabled: true, allowCollision: true })).status).toBe(200);
+    expect(await enabledById(a)).toMatchObject({ sub_live: true, sub_next: true });
+  });
+
+  // Whatever turned the replaced version off, the 409 sends the reviewer to
+  // the version that replies now and never says to turn the old one back on:
+  // its history decides whether that leaves two versions replying.
+  async function expectStale(a: TestApi, id: string): Promise<void> {
+    const stale = await patchSubscription(a.baseUrl, id, { enabled: true, allowCollision: true });
+    expect(stale.status).toBe(409);
+    const message = ((await stale.json()) as { error: string }).error;
+    expect(message).toContain("Delete this proposal.");
+    expect(message).not.toContain("back on");
+  }
+
+  it("refuses a replacement whose version a sibling already replaced", async () => {
+    const a = await boot();
+    await seedReplacement(a);
+    await seedSubscriptionRow(a, "sub_sibling", "local-org", {
+      ownerType: "user", ownerId: "local-user", ...MATCH, name: "replies v3", enabled: false, target: { kind: "assistant", replaces: "sub_live" },
+    });
+    expect((await patchSubscription(a.baseUrl, "sub_sibling", { enabled: true })).status).toBe(200);
+    await expectStale(a, "sub_next");
+    expect(await enabledById(a)).toMatchObject({ sub_live: false, sub_next: false, sub_sibling: true });
+  });
+
+  it("refuses a replacement of a version that was rolled back, and of one rolled back and then paused", async () => {
+    const a = await boot();
+    await seedReplacement(a);
+    const mine = { ownerType: "user" as const, ownerId: "local-user", ...MATCH, enabled: false };
+    await seedSubscriptionRow(a, "sub_v3", "local-org", { ...mine, name: "replies v3", target: { kind: "assistant", replaces: "sub_next" } });
+    expect((await patchSubscription(a.baseUrl, "sub_next", { enabled: true })).status).toBe(200);
+    // Roll back by hand: the new version off, the original on.
+    expect((await patchSubscription(a.baseUrl, "sub_next", { enabled: false })).status).toBe(200);
+    expect((await patchSubscription(a.baseUrl, "sub_live", { enabled: true, allowCollision: true })).status).toBe(200);
+    await expectStale(a, "sub_v3");
+    expect(await enabledById(a)).toMatchObject({ sub_live: true, sub_next: false, sub_v3: false });
+    // A proposal for the restored original works while it is on; once it is paused, it is stale too.
+    await seedSubscriptionRow(a, "sub_q", "local-org", { ...mine, name: "replies q", target: { kind: "assistant", replaces: "sub_live" } });
+    expect((await patchSubscription(a.baseUrl, "sub_live", { enabled: false })).status).toBe(200);
+    await expectStale(a, "sub_q");
+  });
+
+  it("refuses a stale replacement after the version that replaced it is deleted, and writes nothing onto the replaced row", async () => {
+    const a = await boot();
+    await seedReplacement(a);
+    const [before] = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, "sub_live"));
+    const mine = { ownerType: "user" as const, ownerId: "local-user", ...MATCH, enabled: false };
+    await seedSubscriptionRow(a, "sub_old", "local-org", { ...mine, name: "replies v2b", target: { kind: "assistant", replaces: "sub_live" } });
+    expect((await patchSubscription(a.baseUrl, "sub_next", { enabled: true })).status).toBe(200);
+    // The replaced row keeps its own target, so a retried proposal for it still matches.
+    const [after] = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, "sub_live"));
+    expect(after.target).toEqual(before.target);
+    await a.providers.db.delete(eventSubscriptions).where(eq(eventSubscriptions.id, "sub_next"));
+    await expectStale(a, "sub_old");
+  });
+
+  it("refuses a replacement whose version was removed, and keeps its link", async () => {
+    const a = await boot();
+    await seedSubscriptionRow(a, "sub_orphan", "local-org", {
+      ownerType: "user", ownerId: "local-user", ...MATCH, name: "replies v2", enabled: false, target: { kind: "assistant", replaces: "sub_gone" },
+    });
+    const refused = await patchSubscription(a.baseUrl, "sub_orphan", { enabled: true });
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toMatchObject({ error: expect.stringContaining("Delete this proposal") });
+    const [orphan] = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, "sub_orphan"));
+    expect(orphan).toMatchObject({ enabled: false, target: { replaces: "sub_gone" } });
+  });
+
+  it("stores no replacement link on a direct create", async () => {
+    const a = await boot();
+    const created = await postSubscription(a.baseUrl, { ...VALID_BODY, target: { ...VALID_BODY.target, replaces: "sub_live" } });
+    expect(created.status).toBe(201);
+    expect((await created.json() as CreateEventSubscriptionResponse).target).not.toHaveProperty("replaces");
+  });
+
+  it("rolls back the enable when the replaced subscription cannot be disabled", async () => {
+    const a = await boot();
+    await seedReplacement(a);
+    // Fail only the second write of the transaction: the disable of sub_live.
+    await a.providers.db.execute(sql`
+      CREATE FUNCTION refuse_live_disable() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'refused'; END $$`);
+    await a.providers.db.execute(sql`
+      CREATE TRIGGER refuse_live_disable BEFORE UPDATE ON event_subscriptions
+      FOR EACH ROW WHEN (OLD.id = 'sub_live') EXECUTE FUNCTION refuse_live_disable()`);
+
+    expect((await patchSubscription(a.baseUrl, "sub_next", { enabled: true })).status).toBe(500);
+    expect(await enabledById(a)).toMatchObject({ sub_live: true, sub_next: false });
+  });
+});
+
+describe("event-subscription thread policy (spec 2026-10-16, Part A)", () => {
+  const CROSS_OWNER = "This thread belongs to another owner. Pick a thread in your workspace.";
+  const ARCHIVED = "This thread is archived. Pick an open thread.";
+
+  function withThread(thread: unknown): unknown {
+    return { ...VALID_BODY, target: { kind: "assistant", thread } };
+  }
+
+  it("refuses an existing thread of another owner", async () => {
+    const a = await boot();
+    const foreign = await seedAssistantThread(a.providers.db, {
+      orgId: "local-org", owner: { type: "user", id: "someone-else" }, sessionId: "sess-foreign", threadId: "thr-foreign",
+    });
+    const res = await postSubscription(a.baseUrl, withThread({ mode: "existing", ...foreign }));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: CROSS_OWNER });
+    expect(await a.providers.db.select().from(eventSubscriptions)).toEqual([]);
+  });
+
+  it("refuses a thread id that does not exist like another owner's", async () => {
+    const a = await boot();
+    const res = await postSubscription(a.baseUrl, withThread({ mode: "existing", sessionId: "sess-none", threadId: "thr-none" }));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: CROSS_OWNER });
+  });
+
+  it("refuses an archived thread of the owner", async () => {
+    const a = await boot();
+    const mine = await seedAssistantThread(a.providers.db, {
+      orgId: "local-org", owner: { type: "user", id: "local-user" }, sessionId: "sess-mine", threadId: "thr-old", archived: true,
+    });
+    const res = await postSubscription(a.baseUrl, withThread({ mode: "existing", ...mine }));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: ARCHIVED });
+  });
+
+  it("stores an open thread of the owner and reads it back", async () => {
+    const a = await boot();
+    const mine = await seedAssistantThread(a.providers.db, {
+      orgId: "local-org", owner: { type: "user", id: "local-user" }, sessionId: "sess-mine", threadId: "thr-ci",
+    });
+    const res = await postSubscription(a.baseUrl, withThread({ mode: "existing", ...mine }));
+    expect(res.status).toBe(201);
+    const created = (await res.json()) as CreateEventSubscriptionResponse;
+    expect(created.target).toEqual({ kind: "assistant", thread: { mode: "existing", ...mine } });
+    const [row] = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, created.id));
+    expect(row.target).toEqual({ kind: "assistant", thread: { mode: "existing", ...mine } });
+  });
+
+  it("refuses an owner's thread outside an assistant conversation", async () => {
+    const a = await boot();
+    const plain = await seedAssistantThread(a.providers.db, {
+      orgId: "local-org", owner: { type: "user", id: "local-user" }, sessionId: "sess-plain", threadId: "thr-plain", assistant: false,
+    });
+    const res = await postSubscription(a.baseUrl, withThread({ mode: "existing", ...plain }));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "This thread is not in a live assistant conversation. Pick a thread in your assistant." });
+    expect(await a.providers.db.select().from(eventSubscriptions)).toEqual([]);
+  });
+
+  it("checks a team rule's pin against the team, not the caller", async () => {
+    const a = await boot();
+    await a.providers.db.insert(teams).values({ id: "team_1", orgId: "local-org", name: "Platform", createdAt: Date.now() });
+    await a.providers.db.insert(teamMembers).values({ teamId: "team_1", userId: "test-member", role: "member" });
+    const teamThread = await seedAssistantThread(a.providers.db, {
+      orgId: "local-org", owner: { type: "team", id: "team_1" }, sessionId: "sess-team", threadId: "thr-team",
+    });
+    const personal = await seedAssistantThread(a.providers.db, {
+      orgId: "local-org", owner: { type: "user", id: "test-member" }, sessionId: "sess-personal", threadId: "thr-personal",
+    });
+    const teamTarget = (thread: unknown) => ({ ...VALID_BODY, target: { kind: "assistant", assistant: "team", teamId: "team_1", thread } });
+    const asMember = { "x-valet-test-user-id": "test-member" };
+
+    const refused = await postSubscription(a.baseUrl, teamTarget({ mode: "existing", ...personal }), asMember);
+    expect(refused.status).toBe(400);
+    expect(await refused.json()).toEqual({ error: CROSS_OWNER });
+    expect(await a.providers.db.select().from(eventSubscriptions)).toEqual([]);
+
+    const accepted = await postSubscription(a.baseUrl, teamTarget({ mode: "existing", ...teamThread }), asMember);
+    expect(accepted.status).toBe(201);
+    const created = (await accepted.json()) as CreateEventSubscriptionResponse;
+    expect(created.ownerType).toBe("team");
+    const [row] = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, created.id));
+    expect(row.target).toMatchObject({ thread: { mode: "existing", ...teamThread } });
+  });
+
+  /** Answers Slack's membership check: `members` lists each private channel's members. */
+  async function connectSlack(a: TestApi, members: Record<string, string[]>) {
+    await a.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", { type: "oauth2", accessToken: "xoxb-test" });
+    const realFetch = globalThis.fetch;
+    return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      if (url.hostname !== "slack.com") return realFetch(input, init);
+      const channel = url.searchParams.get("channel") ?? "";
+      const body = url.pathname.endsWith("conversations.members")
+        ? { ok: true, members: members[channel] ?? [] }
+        : { ok: true, channel: { name: channel.toLowerCase(), is_private: members[channel] !== undefined } };
+      return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
+    });
+  }
+
+  it("lets a team rule pin a private-channel thread only for the channel's members", async () => {
+    const a = await boot();
+    await a.providers.db.insert(teams).values({ id: "team_1", orgId: "local-org", name: "Platform", createdAt: Date.now() });
+    await a.providers.db.insert(teamMembers).values([
+      { teamId: "team_1", userId: "local-user", role: "member" },
+      { teamId: "team_1", userId: "test-member", role: "member" },
+    ]);
+    await a.providers.db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId: "CPINPRIV", isPrivate: true, checkedAt: Date.now() });
+    await a.providers.db.insert(userIdentityLinks).values({ id: "uil-local-user", provider: "slack", externalId: "U_LOCAL", userId: "local-user", createdAt: Date.now() });
+    const slack = await connectSlack(a, { CPINPRIV: ["U_LOCAL"] });
+    const privateThread = await seedAssistantThread(a.providers.db, {
+      orgId: "local-org", owner: { type: "team", id: "team_1" }, sessionId: "sess-team", threadId: "thr-incident",
+      key: "sub:incident", slackChannels: ["CPINPRIV"],
+    });
+    const teamTarget = (thread: unknown) => ({ ...VALID_BODY, target: { kind: "assistant", assistant: "team", teamId: "team_1", thread } });
+    const asOutsider = { "x-valet-test-user-id": "test-member" };
+    try {
+      // A team member outside the private channel gets the cross-owner text.
+      const refused = await postSubscription(a.baseUrl, teamTarget({ mode: "existing", ...privateThread }), asOutsider);
+      expect(refused.status).toBe(400);
+      expect(await refused.json()).toEqual({ error: CROSS_OWNER });
+      expect(await a.providers.db.select().from(eventSubscriptions)).toEqual([]);
+
+      // A channel member may pin it.
+      const accepted = await postSubscription(a.baseUrl, teamTarget({ mode: "existing", ...privateThread }));
+      expect(accepted.status).toBe(201);
+      const created = (await accepted.json()) as CreateEventSubscriptionResponse;
+
+      // A patch is checked against the person who sends it, not the rule's creator.
+      const repinned = await patchSubscription(a.baseUrl, created.id, { thread: { mode: "existing", ...privateThread } }, asOutsider);
+      expect(repinned.status).toBe(400);
+      expect(await repinned.json()).toEqual({ error: CROSS_OWNER });
+    } finally {
+      slack.mockRestore();
+    }
+  });
+
+  it("refuses pinning a shared thread to a rule that names a private channel the thread does not hold", async () => {
+    const a = await bootTestApi({ plugins: [slackPlugin] });
+    api = a;
+    await a.providers.db.insert(teams).values({ id: "team_1", orgId: "local-org", name: "Platform", createdAt: Date.now() });
+    await a.providers.db.insert(teamMembers).values([
+      { teamId: "team_1", userId: "local-user", role: "member" },
+      { teamId: "team_1", userId: "test-member", role: "member" },
+    ]);
+    await a.providers.db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId: "CPINPRIV", isPrivate: true, checkedAt: Date.now() });
+    await a.providers.db.insert(userIdentityLinks).values({ id: "uil-local-user", provider: "slack", externalId: "U_LOCAL", userId: "local-user", createdAt: Date.now() });
+    const slack = await connectSlack(a, { CPINPRIV: ["U_LOCAL"] });
+    const shared = await seedAssistantThread(a.providers.db, {
+      orgId: "local-org", owner: { type: "team", id: "team_1" }, sessionId: "sess-team", threadId: "thr-shared", key: "sub:standup",
+    });
+    // A second thread in the same assistant that already holds the channel's content.
+    await a.providers.db.execute(sql`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, metadata, created_at, updated_at)
+      VALUES ('thr-holding', 'sess-team', 'sub:incidents', 'idle', 'steer', ${JSON.stringify({ slackChannels: ["CPINPRIV"] })}, 1, 1)`);
+    const rule = (thread: unknown) => ({
+      name: "incident mentions", eventKeys: ["slack.app_mention"],
+      filters: [{ field: "channel", op: "eq", value: "CPINPRIV", label: "#incidents" }],
+      target: { kind: "orchestrator", orchestrator: "team", teamId: "team_1", thread },
+    });
+    try {
+      const refused = await postSubscription(a.baseUrl, rule({ mode: "existing", ...shared }));
+      expect(refused.status).toBe(400);
+      expect(await refused.json()).toEqual({
+        error: "This thread is shared with people who cannot see #incidents. Pick a thread only you can see, or let this line use its own thread.",
+      });
+      expect(await a.providers.db.select().from(eventSubscriptions)).toEqual([]);
+
+      // A thread that already holds the channel's content keeps its audience.
+      const accepted = await postSubscription(a.baseUrl, rule({ mode: "existing", sessionId: "sess-team", threadId: "thr-holding" }));
+      expect(accepted.status, await accepted.clone().text()).toBe(201);
+
+      // A filter edit that names the private channel on a pinned shared thread is refused too.
+      const own = await postSubscription(a.baseUrl, { ...rule({ mode: "existing", ...shared }), filters: [{ field: "channel", op: "eq", value: "CPUBLIC", label: "#general" }] });
+      expect(own.status, await own.clone().text()).toBe(201);
+      const pinned = (await own.json()) as CreateEventSubscriptionResponse;
+      const narrowed = await patchSubscription(a.baseUrl, pinned.id, { filters: [{ field: "channel", op: "in", value: ["CPUBLIC", "CPINPRIV"] }] });
+      expect(narrowed.status).toBe(400);
+      expect(await narrowed.json()).toEqual({
+        error: "This thread is shared with people who cannot see #CPINPRIV. Pick a thread only you can see, or let this line use its own thread.",
+      });
+    } finally {
+      slack.mockRestore();
+    }
+  });
+
+  it("lets a personal rule pin its own thread to a private channel", async () => {
+    const a = await bootTestApi({ plugins: [slackPlugin] });
+    api = a;
+    await a.providers.db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId: "CPINPRIV", isPrivate: true, checkedAt: Date.now() });
+    await a.providers.db.insert(userIdentityLinks).values({ id: "uil-local-user", provider: "slack", externalId: "U_LOCAL", userId: "local-user", createdAt: Date.now() });
+    const slack = await connectSlack(a, { CPINPRIV: ["U_LOCAL"] });
+    const mine = await seedAssistantThread(a.providers.db, {
+      orgId: "local-org", owner: { type: "user", id: "local-user" }, sessionId: "sess-mine", threadId: "thr-mine", key: "sub:standup",
+    });
+    try {
+      const res = await postSubscription(a.baseUrl, {
+        name: "incident mentions", eventKeys: ["slack.app_mention"],
+        filters: [{ field: "channel", op: "eq", value: "CPINPRIV", label: "#incidents" }],
+        target: { kind: "orchestrator", thread: { mode: "existing", ...mine } },
+      });
+      expect(res.status, await res.clone().text()).toBe(201);
+    } finally {
+      slack.mockRestore();
+    }
+  });
+
+  it("refuses a team rule's pin on a member's personal thread, even for that member", async () => {
+    const a = await boot();
+    await a.providers.db.insert(teams).values({ id: "team_1", orgId: "local-org", name: "Platform", createdAt: Date.now() });
+    await a.providers.db.insert(teamMembers).values({ teamId: "team_1", userId: "test-member", role: "member" });
+    const helper = await seedAssistantThread(a.providers.db, {
+      orgId: "local-org", owner: { type: "team", id: "team_1" }, sessionId: "sess-team", threadId: "thr-helper",
+      key: "app-assistant:test-member",
+    });
+    const body = { ...VALID_BODY, target: { kind: "assistant", assistant: "team", teamId: "team_1", thread: { mode: "existing", ...helper } } };
+    const res = await postSubscription(a.baseUrl, body, { "x-valet-test-user-id": "test-member" });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: CROSS_OWNER });
+    expect(await a.providers.db.select().from(eventSubscriptions)).toEqual([]);
+  });
+
+  it("patches the policy, refuses another owner's thread, and clears it with null", async () => {
+    const a = await boot();
+    const foreign = await seedAssistantThread(a.providers.db, {
+      orgId: "local-org", owner: { type: "user", id: "someone-else" }, sessionId: "sess-foreign", threadId: "thr-foreign",
+    });
+    const created = (await (await postSubscription(a.baseUrl, withThread({ mode: "new" }))).json()) as CreateEventSubscriptionResponse;
+    expect(created.target).toEqual({ kind: "assistant", thread: { mode: "new" } });
+
+    const refused = await patchSubscription(a.baseUrl, created.id, { thread: { mode: "existing", ...foreign } });
+    expect(refused.status).toBe(400);
+    expect(await refused.json()).toEqual({ error: CROSS_OWNER });
+
+    const subject = await patchSubscription(a.baseUrl, created.id, { thread: { mode: "subject" } });
+    expect(subject.status).toBe(200);
+    expect(((await subject.json()) as PatchEventSubscriptionResponse).target).toEqual({ kind: "assistant", thread: { mode: "subject" } });
+
+    const cleared = await patchSubscription(a.baseUrl, created.id, { thread: null });
+    expect(cleared.status).toBe(200);
+    expect(((await cleared.json()) as PatchEventSubscriptionResponse).target).toEqual({ kind: "assistant" });
+    const [row] = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, created.id));
+    expect(row.target).toEqual({ kind: "assistant" });
+  });
+
+  it("refuses a thread patch on a workflow rule", async () => {
+    const a = await boot();
+    await seedSubscriptionRow(a, "sub_wf", "local-org", {
+      ownerId: "local-user", target: { kind: "workflow", workflowId: "wf-1" },
+    });
+    const res = await patchSubscription(a.baseUrl, "sub_wf", { thread: { mode: "new" } });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "A thread choice applies only when the assistant does the work. Remove the thread from this workflow line." });
+  });
+});
+
+// Spec 2026-10-16 presence hub, Part H: `presence` became `appearance`, and
+// the assistant target's `orchestrator` names became `assistant`. The API
+// accepts both on write for one release and emits only the new names.
+describe("Part H renames on /api/event-subscriptions", () => {
+  async function storedTarget(a: TestApi, id: string): Promise<unknown> {
+    const [row] = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, id));
+    return row!.target;
+  }
+
+  it("accepts the old presence field on create, stores and emits appearance", async () => {
+    const a = await boot();
+    const appearance = { displayName: "Issue helper" };
+    const res = await postSubscription(a.baseUrl, { ...VALID_BODY, target: { kind: "orchestrator", presence: appearance } });
+    expect(res.status).toBe(201);
+    const body = await res.json() as CreateEventSubscriptionResponse;
+    expect(body.target).toEqual({ kind: "assistant", appearance });
+    expect(await storedTarget(a, body.id)).toEqual({ kind: "assistant", appearance });
+  });
+
+  it("accepts the new names on create", async () => {
+    const a = await boot();
+    const appearance = { displayName: "Issue helper" };
+    const res = await postSubscription(a.baseUrl, { ...VALID_BODY, target: { kind: "assistant", assistant: "user", appearance } });
+    expect(res.status).toBe(201);
+    const body = await res.json() as CreateEventSubscriptionResponse;
+    expect(body.target).toEqual({ kind: "assistant", assistant: "user", appearance });
+    expect(await storedTarget(a, body.id)).toEqual({ kind: "assistant", assistant: "user", appearance });
+  });
+
+  it("accepts the old orchestrator scope field on create and emits assistant", async () => {
+    const a = await boot();
+    const res = await postSubscription(a.baseUrl, { ...VALID_BODY, target: { kind: "orchestrator", orchestrator: "org" } });
+    expect(res.status).toBe(201);
+    const body = await res.json() as CreateEventSubscriptionResponse;
+    expect(body.ownerType).toBe("org");
+    expect(body.target).toEqual({ kind: "assistant", assistant: "org" });
+    expect(await storedTarget(a, body.id)).toEqual({ kind: "assistant", assistant: "org" });
+  });
+
+  it("refuses a create that sends both presence and appearance", async () => {
+    const a = await boot();
+    const res = await postSubscription(a.baseUrl, {
+      ...VALID_BODY,
+      target: { kind: "assistant", presence: { displayName: "Old" }, appearance: { displayName: "New" } },
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "Send appearance, not presence." });
+    expect(await a.providers.db.select().from(eventSubscriptions)).toEqual([]);
+  });
+
+  it("refuses a create that sends both orchestrator and assistant", async () => {
+    const a = await boot();
+    const res = await postSubscription(a.baseUrl, { ...VALID_BODY, target: { kind: "assistant", orchestrator: "user", assistant: "user" } });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "Send assistant, not orchestrator." });
+  });
+
+  it("accepts the old presence field on patch and refuses both names", async () => {
+    const a = await boot();
+    const created = await (await postSubscription(a.baseUrl, VALID_BODY)).json() as CreateEventSubscriptionResponse;
+    const old = await patchSubscription(a.baseUrl, created.id, { presence: { displayName: "Old name" } });
+    expect(old.status).toBe(200);
+    expect((await old.json() as PatchEventSubscriptionResponse).target).toEqual({ kind: "assistant", appearance: { displayName: "Old name" } });
+    expect(await storedTarget(a, created.id)).toEqual({ kind: "assistant", appearance: { displayName: "Old name" } });
+    const both = await patchSubscription(a.baseUrl, created.id, { presence: { displayName: "A" }, appearance: { displayName: "B" } });
+    expect(both.status).toBe(400);
+    expect(await both.json()).toEqual({ error: "Send appearance, not presence." });
+    const cleared = await patchSubscription(a.baseUrl, created.id, { presence: null });
+    expect(cleared.status).toBe(200);
+    expect((await cleared.json() as PatchEventSubscriptionResponse).target).toEqual({ kind: "assistant" });
+  });
+
+  it("reads a stored row with the old names as the new names", async () => {
+    const a = await boot();
+    const now = Date.now();
+    await a.providers.db.insert(eventSubscriptions).values({
+      id: "legacy-row", orgId: "local-org", ownerType: "user", ownerId: "local-user", name: "legacy",
+      eventKeys: ["github.pull_request.opened"], filters: [],
+      target: { kind: "orchestrator", orchestrator: "user", presence: { displayName: "Legacy helper" } },
+      enabled: true, createdBy: "local-user", createdAt: now, updatedAt: now,
+    });
+    const list = await (await fetch(`${a.baseUrl}/api/event-subscriptions`)).json() as ListEventSubscriptionsResponse;
+    expect(list.subscriptions.find((s) => s.id === "legacy-row")?.target).toEqual({
+      kind: "assistant", assistant: "user", appearance: { displayName: "Legacy helper" },
+    });
+    // A patch rewrites the row it touches with the new names.
+    const renamed = await patchSubscription(a.baseUrl, "legacy-row", { name: "renamed" });
+    expect(renamed.status).toBe(200);
+    expect(await storedTarget(a, "legacy-row")).toEqual({ kind: "assistant", assistant: "user", appearance: { displayName: "Legacy helper" } });
+  });
+});
+
+describe("plugin line settings", () => {
+  const reviewer: ValetPlugin = {
+    name: "reviewer",
+    version: "0.0.1",
+    eventHandlers: [{
+      id: "review",
+      description: "Review a pull request.",
+      events: ["github.pull_request.*"],
+      configSchema: Type.Object({ instructions: Type.Optional(Type.String()) }, { additionalProperties: false }),
+      handle: async () => {},
+    }],
+  };
+
+  it("saves settings with the line, replaces and clears them by patch, and refuses bad ones", async () => {
+    const a = api = await bootTestApi({ plugins: [githubPlugin, reviewer] });
+    const created = await postSubscription(a.baseUrl, {
+      name: "review PRs",
+      eventKeys: ["github.pull_request.synchronize"],
+      target: { kind: "plugin", plugin: "reviewer", handler: "review", config: { instructions: "Check auth." } },
+    });
+    expect(created.status).toBe(201);
+    const { id, target } = (await created.json()) as { id: string; target: Record<string, unknown> };
+    expect(target.config).toEqual({ instructions: "Check auth." });
+
+    const replaced = await patchSubscription(a.baseUrl, id, { config: { instructions: "Check SQL." } });
+    expect(replaced.status).toBe(200);
+    expect(((await replaced.json()) as { target: Record<string, unknown> }).target.config).toEqual({ instructions: "Check SQL." });
+
+    // An appearance-only patch keeps the settings.
+    const renamed = await patchSubscription(a.baseUrl, id, { name: "review all PRs" });
+    expect(((await renamed.json()) as { target: Record<string, unknown> }).target.config).toEqual({ instructions: "Check SQL." });
+
+    const bad = await patchSubscription(a.baseUrl, id, { config: { extra: true } });
+    expect(bad.status).toBe(400);
+    expect(((await bad.json()) as { error: string }).error).toContain("Settings for reviewer/review do not match its schema");
+
+    const cleared = await patchSubscription(a.baseUrl, id, { config: null });
+    expect(cleared.status).toBe(200);
+    expect(((await cleared.json()) as { target: Record<string, unknown> }).target.config).toBeUndefined();
+  });
+
+  it("turns off or renames a line whose saved settings no longer match the handler's schema", async () => {
+    const a = api = await bootTestApi({ plugins: [githubPlugin, reviewer] });
+    const created = await postSubscription(a.baseUrl, {
+      name: "review PRs",
+      eventKeys: ["github.pull_request.synchronize"],
+      target: { kind: "plugin", plugin: "reviewer", handler: "review", config: { instructions: "Check auth." } },
+    });
+    const { id } = (await created.json()) as { id: string };
+    // The plugin's schema changed after the line was saved.
+    await a.providers.db.update(eventSubscriptions)
+      .set({ target: { kind: "plugin", plugin: "reviewer", handler: "review", config: { retired: true } } })
+      .where(eq(eventSubscriptions.id, id));
+    expect((await patchSubscription(a.baseUrl, id, { enabled: false })).status).toBe(200);
+    expect((await patchSubscription(a.baseUrl, id, { name: "old review line" })).status).toBe(200);
+    expect((await patchSubscription(a.baseUrl, id, { config: { retired: true } })).status).toBe(400);
+  });
+
+  it("refuses settings on a line that is not a plugin line", async () => {
+    const a = api = await bootTestApi({ plugins: [githubPlugin, reviewer] });
+    const created = await postSubscription(a.baseUrl, { name: "to me", eventKeys: ["github.pull_request.opened"], target: { kind: "assistant" } });
+    const { id } = (await created.json()) as { id: string };
+    const res = await patchSubscription(a.baseUrl, id, { config: { instructions: "x" } });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe("config is only valid on a plugin line. Remove config, or point the line at a plugin handler.");
   });
 });

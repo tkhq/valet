@@ -8,7 +8,7 @@
  */
 import { eq } from "drizzle-orm";
 import type { CredentialDeclaration, OAuthDeclaration, ValetPlugin } from "@valet/engine";
-import { discoverAuthServer, registerClient, type TokenResponse } from "@valet/sdk";
+import { discoverAuthServer, OAuthTokenError, registerClient, type TokenResponse } from "@valet/sdk";
 import { mcpOauthClients } from "../schema/index.js";
 
 import type { AppQueryable } from "../lib/drizzle.js";
@@ -23,9 +23,39 @@ export interface McpClientRow {
   clientId: string;
   authorizationEndpoint: string;
   tokenEndpoint: string;
+  /** The scopes the client registered with, sorted. The authorize request
+   * names exactly these; [] sends no scope parameter. */
+  scopes: string[];
 }
 
-/** The GitHub service keeps its dedicated App flow (routes/github-connect.ts). */
+/**
+ * The MCP client that issued a credential's tokens. The connect records it on
+ * the credential's metadata, and a refresh uses it, because a refresh token
+ * belongs to the client it was issued to: a later re-registration (a scope
+ * change) must not strand connections made before it.
+ */
+export interface IssuingClient {
+  clientId: string;
+  tokenEndpoint: string;
+}
+
+/** Metadata keys that hold the issuing client. Only the server writes them. */
+export const ISSUING_CLIENT_METADATA_KEYS = ["oauthClientId", "oauthTokenEndpoint"] as const;
+
+export function issuingClientMetadata(client: IssuingClient): { oauthClientId: string; oauthTokenEndpoint: string } {
+  return { oauthClientId: client.clientId, oauthTokenEndpoint: client.tokenEndpoint };
+}
+
+/** The recorded issuing client, or null for a credential connected before
+ * the connect recorded one. */
+export function readIssuingClient(metadata: Record<string, unknown> | undefined): IssuingClient | null {
+  const clientId = metadata?.oauthClientId;
+  const tokenEndpoint = metadata?.oauthTokenEndpoint;
+  if (typeof clientId !== "string" || typeof tokenEndpoint !== "string" || !clientId || !tokenEndpoint) return null;
+  return { clientId, tokenEndpoint };
+}
+
+/** The GitHub service keeps its dedicated App flow (the GitHub plugin's connection routes). */
 export const OAUTH_EXCLUDED_SERVICES = new Set(["github"]);
 
 export function findOAuthDeclaration(
@@ -69,15 +99,38 @@ function warnScopelessEntry(service: string, scopesSupported: string[]): void {
 }
 
 /**
+ * A declared entry can drift from its server: Metabase 1.64 moved every
+ * read tool to `agent:content:read`, a scope the deployed list never named,
+ * and each reconnect minted a token those tools refused. Valet requests only
+ * the declared scopes, so name the advertised ones the entry lacks when it
+ * registers a client (a first connect, or a scope change). A reused client
+ * makes no network call, so a slow discovery endpoint cannot stall the
+ * connect. The protected resource's list (RFC 9728) is what the server
+ * checks; the issuer's own list can name scopes for other resources.
+ */
+function warnUndeclaredResourceScopes(service: string, declared: string[], advertised: string[] | undefined): void {
+  const missing = (advertised ?? []).filter((s) => !declared.includes(s));
+  if (missing.length === 0) return;
+  console.warn(
+    `MCP OAuth: "${service}" does not declare scopes its server advertises (${missing.join(", ")}). ` +
+      `Tools that need one fail with insufficient_scope. If this instance needs them, add them to the ` +
+      `mcpServers "${service}" entry's scopes, then reconnect ${service}.`,
+  );
+}
+
+/**
  * The stored dynamic client for `service`, registering one when none exists
  * or when the DECLARED scope set differs from the registered one. The scope
  * set rides the RFC 7591 registration, not only the authorize request —
  * a server that constrains grants to the registered set would otherwise
  * narrow or refuse authorize-time scopes (TKAI-243).
  *
- * Re-registration replaces the stored client_id, so refresh tokens issued
- * to the old client stop refreshing; users reconnect — the same remedy a
- * scope change already requires for the token itself.
+ * Re-registration replaces the stored client_id for NEW connections only.
+ * Each credential records the client that issued its tokens and refreshes
+ * with it, so existing connections keep working with their old scopes; a
+ * member reconnects (or steps up) only to get the new ones. A credential
+ * connected before that record existed refreshes with the stored client
+ * and records it on its first good refresh.
  */
 export async function ensureMcpOAuthClient(
   deps: OAuthDeps,
@@ -121,6 +174,7 @@ export async function ensureMcpOAuthClient(
   if (declared.length === 0 && (meta.scopes_supported?.length ?? 0) > 0) {
     warnScopelessEntry(service, meta.scopes_supported ?? []);
   }
+  if (declared.length > 0) warnUndeclaredResourceScopes(service, declared, meta.resource_scopes_supported);
   const client = await registerClient(meta.registration_endpoint, {
     clientName: "Valet",
     redirectUris: [redirectUri],
@@ -141,12 +195,13 @@ export async function ensureMcpOAuthClient(
     // writer wins on a concurrent scope change — both writers registered
     // with the same declared set, so either row works.
     await deps.db.update(mcpOauthClients).set(values).where(eq(mcpOauthClients.service, service));
-    // Refresh tokens were issued to the OLD client_id and stop refreshing
-    // now. Nothing repairs that automatically — connected users must
-    // disconnect and reconnect, so tell the operator while they are looking.
+    // Credentials that recorded their issuing client keep refreshing with
+    // it. One with no record still refreshes with the stored client, which
+    // is now the new one, and the provider refuses it: that member reconnects.
     console.warn(
       `MCP OAuth: "${service}" re-registered for scope change (client ${existing[0].clientId} → ${client.client_id}). ` +
-        `Existing ${service} credentials stop refreshing; users must disconnect and reconnect in Integrations.`,
+        `New connections get the new scopes. Existing ${service} connections keep their scopes until the member reconnects; ` +
+        `a connection that never recorded its client stops refreshing.`,
     );
   } else {
     await deps.db
@@ -161,12 +216,24 @@ export async function ensureMcpOAuthClient(
   return toRow(stored[0]);
 }
 
+/**
+ * The stored client for `service`, with no discovery or registration. The
+ * OAuth callback uses it: the authorization code belongs to the client the
+ * connect started with, so the callback must not register a replacement.
+ */
+export async function getMcpOAuthClient(deps: OAuthDeps, service: string): Promise<McpClientRow> {
+  const stored = await deps.db.select().from(mcpOauthClients).where(eq(mcpOauthClients.service, service));
+  if (!stored[0]) throw new Error(`MCP OAuth: ${service} has no registered client. Start the connect again.`);
+  return toRow(stored[0]);
+}
+
 function toRow(r: typeof mcpOauthClients.$inferSelect): McpClientRow {
   return {
     service: r.service,
     clientId: r.clientId,
     authorizationEndpoint: r.authorizationEndpoint,
     tokenEndpoint: r.tokenEndpoint,
+    scopes: normalizeScopes(r.registeredScopes ?? undefined),
   };
 }
 
@@ -199,7 +266,7 @@ async function tokenPostRaw(tokenUrl: string, form: Record<string, string>): Pro
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    throw new Error(`OAuth token request failed: ${res.status} ${body.slice(0, 200)}`);
+    throw new OAuthTokenError(`OAuth token request failed: ${res.status} ${body.slice(0, 200)}`, res.status);
   }
   return res.json();
 }

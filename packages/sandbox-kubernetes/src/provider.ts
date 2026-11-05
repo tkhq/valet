@@ -1,3 +1,4 @@
+import { browserRuntimeFingerprint, browserTargetContainer, hasBrowserCompanion } from "./browser-topology.js";
 /**
  * `SandboxProvider`/`Sandbox` assembly (Task 5) — wires Tasks 1/2/4 (manifest
  * construction, CRD lifecycle, exec/files/job-mode) into the engine's
@@ -10,8 +11,8 @@
  * failure-recovery path calls `provider.create()` again with the same
  * opts). `restore(id)` GETs the CR and never creates. `destroy(id)` is
  * TERMINAL (deletes the CR, cascading to pod+PVC) and is the only method
- * that may delete a CR. `release(id)` is the NON-terminal seam: a no-op
- * that leaves the CR standing, consumed by the engine's
+ * that may delete a CR. `release(id)` is the NON-terminal seam: it suspends
+ * the retained CR and waits for its pod to stop, consumed by the engine's
  * `SandboxAttachment.reportFailure` (liveness-triggered re-provision) in
  * preference to `destroy` when a provider implements it (see
  * `packages/engine/src/types.ts`'s `SandboxProvider.release`). Two
@@ -20,7 +21,8 @@
  *   - `SandboxAttachment.reportFailure` (non-terminal, epoch degradation)
  *     calls `provider.release(oldId)` directly when implemented, else
  *     `provider.destroy(oldId)` — it does NOT go through `Sandbox.destroy`
- *     at all.
+ *     at all. The next upsert resumes the CR with a new pod and the same
+ *     persistent volumes.
  *   - `SandboxAttachment.destroy` (terminal, session deletion) calls
  *     `sandbox.destroy()` when the raw `Sandbox` defines one, else falls
  *     back to `provider.destroy(id)`. `KubernetesSandbox` deliberately does
@@ -64,18 +66,22 @@
  * applies.
  */
 import { findPodEviction, type SandboxEvictionApi } from "./eviction.js";
+import { EXEC_ID_PATTERN, newExecId } from "@valet/engine/wakeups-ids";
 import { HOME_LAYOUT_VERSION } from "./home-persistence.js";
 import type * as k8s from "@kubernetes/client-node";
 import { setHeaderOptions } from "@kubernetes/client-node";
-import { CONTAINER_DEATH_PATTERN, SandboxEvictedError, SandboxStartupError, recordSandboxWorkspaceGrow } from "@valet/engine";
+import { formatSandboxErrorCause, isSandboxTransportError, SandboxEvictedError, SandboxStartupError, recordSandboxWorkspaceGrow, reportError } from "@valet/engine";
 import type {
   ExecJobHandle,
   ExecOpts,
   ExecResult,
   GatewayEndpoint,
   JobPoll,
+  JobPollOpts,
   Sandbox,
   SandboxCapabilities,
+  SandboxCommandChannel,
+  SandboxCommandChannelOptions,
   SandboxCreateOpts,
   SandboxListing,
   SandboxProvider,
@@ -83,6 +89,7 @@ import type {
   WorkspaceGrowth,
 } from "@valet/engine";
 import { execInPod, type ExecDeps, type PodExecApi } from "./exec.js";
+import { openCommandChannelInPod } from "./command-channel.js";
 import {
   mkdirInPod,
   PodFileOpError,
@@ -101,8 +108,11 @@ import {
   classifyPodPending,
   clearNeverReadyOwner,
   deleteSandbox,
+  EVICTION_PROTECT_ANNOTATION,
   getSandbox,
+  resourceOverridesWithLiveScratch,
   imageFingerprint,
+  LEASED_LABEL,
   listSandboxMetadata,
   livePodDrift,
   podTemplateResourceFingerprint,
@@ -115,19 +125,26 @@ import {
   type SandboxCustomObjectsApi,
   type SandboxPodDeleteApi,
   type SandboxPodsApi,
+  type PodEventSummary,
   type SandboxPodStatusApi,
+  startupKindOf,
+  OWNERSHIP_CONDITION_PATTERN,
 } from "./lifecycle.js";
 import {
   buildSandboxManifest,
   credsSecretName,
   DOCKER_LABEL_KEY,
+  BROWSER_LABEL_KEY,
+  NESTED_KUBERNETES_LABEL_KEY,
   resolveWorkspaceStorageRequest,
   SANDBOX_CONTAINER_NAME,
   sandboxCrName,
   SESSION_ANNOTATION_KEY,
+  SESSION_LABEL_KEY,
   NEVER_READY_OWNER_ANNOTATION_KEY,
 } from "./manifest.js";
-import type { K8sProviderConfig } from "./types.js";
+import type { K8sProviderConfig, SandboxCRRead } from "./types.js";
+import { deleteRuntimeState, ensureRuntimeState, listRuntimeStateOwners, readRuntimeStateOwner, RUNTIME_STATE_ANNOTATION, type RuntimeStateApi } from "./runtime-state.js";
 import {
   growWorkspacePvc,
   parseStorageQuantity,
@@ -144,6 +161,11 @@ import {
  * importing it, since this module has no dependency on the policy layer. */
 const READY_TIMEOUT_MS = 60_000;
 const READY_POLL_INTERVAL_MS = 1_000;
+/** Upper bound on waiting for a same-name pod and PVC to disappear, both
+ * after our own failed-create cleanup and before creating over an orphan
+ * left by an earlier delete (spec 8.2, 8.3). */
+export const RESOURCE_GONE_TIMEOUT_MS = 30_000;
+export const RESOURCE_GONE_POLL_MS = 500;
 
 function reportAdoptedWorkspacePvcError(args: {
   sandboxName: string;
@@ -163,7 +185,7 @@ function reportAdoptedWorkspacePvcError(args: {
   recordSandboxWorkspaceGrow("error");
 }
 
-/** How old the Sandbox CR must be before an unscheduled Pending pod is a
+/** How old the backing POD must be before an unscheduled Pending pod is a
  * TERMINAL capacity verdict rather than a retryable timeout. A cluster
  * autoscaler provisions a node in 2–5 minutes, and the retryable timeout
  * RETAINS the CR — whose Pending pod is the autoscaler's scale-up signal.
@@ -171,15 +193,41 @@ function reportAdoptedWorkspacePvcError(args: {
  * would remove the signal and hard-fail sessions a later retry would have
  * served. Past this age, unscheduled means capacity is genuinely absent —
  * fail with the cause instead of re-queueing forever (the 2026-08-22
- * incident's sessions waited 47h behind retryable timeouts). */
+ * incident's sessions waited 47h behind retryable timeouts). The age is the
+ * pod's, not the CR's: a resumed or adopted CR is always older than the
+ * grace while its new pod waits for a node pool to scale up from zero. */
 const PENDING_TERMINAL_GRACE_MS = 10 * 60_000;
+
+/** A `TriggeredScaleUp` event newer than the grace keeps a Pending pod
+ * retryable, but only until the pod is this old. A scale-up that loops
+ * without placing the pod still reaches the terminal verdict. */
+const SCALE_UP_DEFERRAL_CAP_MS = 30 * 60_000;
 
 interface PendingPodDiagnosis {
   detail: string;
+  /** How long the pod has been Pending. A scale-up deferral can push the
+   * verdict past the 10-minute grace, up to `SCALE_UP_DEFERRAL_CAP_MS`. */
+  ageMs: number;
   requests: {
     cpu?: string | number;
     memory?: string | number;
   };
+  ephemeralStorage?: string;
+  scratch?: string;
+}
+
+/** True when the autoscaler's latest verdict on this pod is a scale-up
+ * inside the grace window. A later `NotTriggerScaleUp` or `FailedScaleUp`
+ * ends it. */
+export function scaleUpInFlight(events: readonly PodEventSummary[], nowMs: number): boolean {
+  let latest: PodEventSummary | undefined;
+  for (const event of events) {
+    if (event.timestamp === undefined) continue;
+    if (!["TriggeredScaleUp", "NotTriggerScaleUp", "FailedScaleUp"].includes(event.reason ?? "")) continue;
+    if (latest?.timestamp === undefined || event.timestamp > latest.timestamp) latest = event;
+  }
+  return latest?.reason === "TriggeredScaleUp" && latest.timestamp !== undefined &&
+    nowMs - latest.timestamp < PENDING_TERMINAL_GRACE_MS;
 }
 
 /** This error marks all post-grace Pending failures eligible for owned cleanup. */
@@ -217,6 +265,9 @@ export interface PodLivenessApi {
   /** Returns the pod's current `metadata.uid`, or `null` if the pod does
    * not exist (a 404 from the API server). */
   getPodUid(namespace: string, podName: string): Promise<string | null>;
+  /** Returns the pod's `status.phase`, or `null` if the pod does not exist.
+   * Optional: a fake without it skips the phase check. */
+  getPodPhase?(namespace: string, podName: string): Promise<string | null>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -234,6 +285,15 @@ export function podLivenessApiAdapter(api: k8s.CoreV1Api): PodLivenessApi {
       try {
         const pod = await api.readNamespacedPod({ name: podName, namespace });
         return pod.metadata?.uid ?? null;
+      } catch (err) {
+        if (isNotFoundError(err)) return null;
+        throw err;
+      }
+    },
+    async getPodPhase(namespace, podName) {
+      try {
+        const pod = await api.readNamespacedPod({ name: podName, namespace });
+        return pod.status?.phase ?? null;
       } catch (err) {
         if (isNotFoundError(err)) return null;
         throw err;
@@ -261,13 +321,11 @@ function extractExitCodeFromMessage(message: string): number | undefined {
   return match ? Number(match[1]) : undefined;
 }
 
-/** execId format guard (carried forward from Task 4 review): generated
- * execIds are provider-owned counters, never user input, but this is
- * asserted defensively anyway so a malformed id can never be interpolated
- * into a `/tmp/valet-jobs/{execId}.*` path and traverse out of that
- * directory (no `/`, no `.`, no whitespace). Exported for unit testing. */
-const EXEC_ID_PATTERN = /^job-[0-9]+$/;
-
+/** execId format guard (carried forward from Task 4 review): an execId is
+ * `newExecId()` output, never user input, but this is asserted defensively
+ * anyway so a malformed id can never be interpolated into a
+ * `/tmp/valet-jobs/{execId}.*` path and traverse out of that directory (no
+ * `/`, no `.`, no whitespace). Exported for unit testing. */
 export function assertSafeExecId(execId: string): void {
   if (!EXEC_ID_PATTERN.test(execId)) {
     throw new Error(`invalid execId ${JSON.stringify(execId)}: expected to match ${EXEC_ID_PATTERN}`);
@@ -444,6 +502,9 @@ export interface KubernetesSandboxDeps {
    * `SandboxCreateOpts.docker` at create, and from the CR's
    * `DOCKER_LABEL_KEY` label on restore. */
   docker?: boolean;
+  /** Only colocated browser sessions need the workload no-new-privileges wrapper. */
+  browser?: boolean;
+  podStatusApi?: SandboxPodStatusApi;
 }
 
 /**
@@ -457,7 +518,6 @@ export class KubernetesSandbox implements Sandbox {
   adopted?: boolean;
   resourceOverrides?: Sandbox["resourceOverrides"];
   private readonly deps: KubernetesSandboxDeps;
-  private nextJobId = 1;
   private lastPodContext?: { podName: string; uid: string | null };
   private readonly jobPods = new Map<string, { podName: string; uid: string | null }>();
 
@@ -472,11 +532,33 @@ export class KubernetesSandbox implements Sandbox {
       namespace: this.deps.cfg.namespace,
       containerName: SANDBOX_CONTAINER_NAME,
       docker: this.deps.docker,
+      browser: this.deps.browser,
     };
   }
 
-  private nextExecId(): string {
-    return `job-${this.nextJobId++}`;
+  private async targetExecDeps(podName: string, opts?: Pick<ExecOpts, "target" | "privileged">): Promise<ExecDeps> {
+    if (opts?.target !== "browser") return this.execDeps();
+    if (!opts.privileged) throw new Error("Browser execution requires a trusted caller. Use the managed browser tools.");
+    const cr = await getSandbox(this.deps.objectsApi, this.deps.cfg, this.id);
+    if (!cr) throw new Error("The browser sandbox is missing. Recreate this session before sending browser commands.");
+    const containerName = browserTargetContainer(cr);
+    const live = await this.deps.podStatusApi?.getPodStatus(this.deps.cfg.namespace, podName);
+    const expected = browserRuntimeFingerprint(cr.spec.podTemplate, cr.metadata.name);
+    if (expected === undefined || !live || live.browserFingerprint !== expected || (containerName === "browser" && !live.browserReady)) {
+      throw new Error("The browser container is missing or not ready. Recreate this sandbox or wait for browser readiness.");
+    }
+    return { ...this.execDeps(), containerName, docker: false, browser: false };
+  }
+
+  /**
+   * A job id unique across handles: job files outlive this handle, so a
+   * per-handle counter reused a live job's files after an api restart
+   * (fix wave 2, B1). A caller may request an id it already stored.
+   */
+  private nextExecId(requested?: string): string {
+    if (requested === undefined) return newExecId();
+    assertSafeExecId(requested);
+    return requested;
   }
 
   /** Resolves the current backing pod name PLUS its `uid` baseline (the
@@ -530,10 +612,10 @@ export class KubernetesSandbox implements Sandbox {
    * for a missing file).
    */
   private async translateDeath(podName: string, dispatchUid: string | null, err: unknown): Promise<never> {
-    const error = err instanceof Error ? err : new Error(String(err));
+    const error = err instanceof Error ? err : new Error(formatSandboxErrorCause(err), { cause: err });
     if (error instanceof SandboxEvictedError) throw error;
     await this.checkEviction(podName, dispatchUid);
-    if (CONTAINER_DEATH_PATTERN.test(error.message)) throw error;
+    if (isSandboxTransportError(error)) throw error;
 
     // PodFileOpError carries its exit code as a typed field; jobs.ts's
     // kickoff-failure Error ("execJob kickoff failed (exit N): ...", see
@@ -614,9 +696,14 @@ export class KubernetesSandbox implements Sandbox {
     return this.withPod((pod) => rmInPod(this.execDeps(), pod, path, opts));
   }
 
+  async openCommandChannel(command: string, options: SandboxCommandChannelOptions): Promise<SandboxCommandChannel> {
+    if (options.signal?.aborted) throw options.signal.reason instanceof Error ? options.signal.reason : new Error('Command channel aborted. Open a new channel when needed.');
+    return this.withPodContext(async ({ podName }) => openCommandChannelInPod(await this.targetExecDeps(podName, options), podName, command, options));
+  }
+
   async exec(command: string, opts?: ExecOpts): Promise<ExecResult> {
     return this.withPodContext(async ({ podName, uid }) => {
-      const result = await execInPod(this.execDeps(), podName, command, opts);
+      const result = await execInPod(await this.targetExecDeps(podName, opts), podName, command, opts);
       if (!result.timedOut) await this.checkExitForDeath(podName, uid, result.exitCode);
       return result;
     });
@@ -645,7 +732,8 @@ export class KubernetesSandbox implements Sandbox {
   // directly (see `KubernetesSandboxProvider.release`, below).
 
   async execJob(command: string, opts?: ExecOpts): Promise<ExecJobHandle> {
-    const execId = this.nextExecId();
+    if (opts?.target === "browser") throw new Error("Browser jobs are not supported. Use browser exec or a browser command channel.");
+    const execId = this.nextExecId(opts?.execId);
     return this.withPodContext(async (ctx) => {
       const handle = await execJobInPod(this.execDeps(), ctx.podName, execId, command, opts);
       this.jobPods.set(execId, ctx);
@@ -662,6 +750,7 @@ export class KubernetesSandbox implements Sandbox {
     try {
       // Read the original identity before resolvePodContext can observe a healthy replacement.
       if (original) await this.checkEviction(original.podName, original.uid);
+      else await this.checkRestoredJobPod();
       return await this.withPodContext(async (current) => {
         if (original && (original.podName !== current.podName || (original.uid !== null && original.uid !== current.uid))) {
           await this.checkEviction(original.podName, original.uid);
@@ -676,10 +765,40 @@ export class KubernetesSandbox implements Sandbox {
     }
   }
 
-  async pollJob(execId: string, offset: number): Promise<JobPoll> {
+  /**
+   * A handle with no kickoff identity (restored after an api restart, or
+   * polled again after a terminal poll) cannot compare pod uids. It checks
+   * the backing pod instead. A job's process lives only in the Running pod
+   * that started it, so a missing CR, a missing pod, or a pod in another
+   * phase (a recreated pod still Pending) means the job is gone. The error
+   * text is the one `isSandboxGone` matches, so the wakeup row ends
+   * `sandbox_unavailable` instead of waiting for its deadline (fix wave 3,
+   * concurrency P1).
+   */
+  private async checkRestoredJobPod(): Promise<void> {
+    const podName = await resolvePodName(this.deps.objectsApi, this.deps.podsApi, this.deps.cfg, this.id);
+    if (podName === null) {
+      throw podUnavailableError(this.id, "no backing pod — the job's backing pod was recreated or removed");
+    }
+    const phase = await this.deps.livenessApi.getPodPhase?.(this.deps.cfg.namespace, podName);
+    if (phase === null) {
+      throw podUnavailableError(this.id, `pod ${podName} not found — the job's backing pod was recreated or removed`);
+    }
+    if (phase === "Pending" || phase === "Succeeded" || phase === "Failed") {
+      throw podUnavailableError(this.id, `pod ${podName} is ${phase} — the job's backing pod was recreated or removed`);
+    }
+    if (phase !== undefined && phase !== "Running") {
+      // `Unknown`: the kubelet lost contact. The process may still run, so
+      // this is a transient probe error, not a gone sandbox; the deadline
+      // still bounds the row.
+      throw new Error(`pod ${podName} phase is ${phase}; the job poll retries on the next tick`);
+    }
+  }
+
+  async pollJob(execId: string, offset: number, opts?: JobPollOpts): Promise<JobPoll> {
     assertSafeExecId(execId);
     return this.withJobPod(execId, async ({ podName, uid }) => {
-      const poll = await pollJobInPod(this.execDeps(), podName, execId, offset);
+      const poll = await pollJobInPod(this.execDeps(), podName, execId, offset, opts);
       if (poll.status === "done") await this.checkExitForDeath(podName, uid, poll.exitCode);
       if (poll.status !== "running") this.jobPods.delete(execId);
       return poll;
@@ -737,6 +856,8 @@ export class KubernetesSandbox implements Sandbox {
 // ── Provider ─────────────────────────────────────────────────────────
 
 export interface KubernetesSandboxProviderDeps {
+  /** Required for browser sessions. Owns private PVCs independently of Sandbox CRs. */
+  runtimeStateApi?: RuntimeStateApi;
   objectsApi: SandboxCustomObjectsApi;
   podsApi: SandboxPodsApi;
   execApi: PodExecApi;
@@ -791,6 +912,9 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       // constructed without secretsApi cannot honor updateCreds().
       credsMount: Boolean(this.deps.secretsApi),
       dockerSupport: true,
+      nestedKubernetes: "v1",
+      browserAutomation: Boolean(this.deps.runtimeStateApi && this.cfg.browserEnabled),
+      browserViewer: Boolean(this.deps.runtimeStateApi && this.cfg.browserEnabled),
     };
   }
 
@@ -809,14 +933,69 @@ export class KubernetesSandboxProvider implements SandboxProvider {
    * sweep). */
   async list(): Promise<SandboxListing[]> {
     const items = await listSandboxMetadata(this.deps.objectsApi, this.cfg);
-    return items.map((item) => {
+    // `scratchBytes` feeds the reconcile sweep's fleet scratch gauge. Only a
+    // running CR counts: a suspended one has no pod and no emptyDir.
+    const rows: Array<SandboxListing & { scratchBytes?: number }> = items.map((item) => {
       const createdAtMs = item.creationTimestamp ? Date.parse(item.creationTimestamp) : Number.NaN;
+      const scratchBytes = item.scratch !== undefined && item.operatingMode !== "Suspended"
+        ? parseStorageQuantity(item.scratch) ?? undefined
+        : undefined;
       return {
         id: item.name,
         sessionId: item.annotations?.[SESSION_ANNOTATION_KEY] ?? null,
+        browserEnabled: Boolean(item.annotations?.[RUNTIME_STATE_ANNOTATION]),
         createdAtMs: Number.isNaN(createdAtMs) ? null : createdAtMs,
+        ...(scratchBytes !== undefined ? { scratchBytes } : {}),
       };
     });
+    if (this.deps.runtimeStateApi) {
+      for (const owner of await listRuntimeStateOwners(this.deps.runtimeStateApi, this.cfg.namespace)) {
+        const existing = rows.find((row) => row.id === owner.sandboxId);
+        if (existing) {
+          if (existing.sessionId !== null && existing.sessionId !== owner.sessionId) {
+            throw new Error("The browser volume and sandbox have different session owners. Restore matching ownership before changing this session.");
+          }
+          existing.sessionId = owner.sessionId;
+          existing.browserEnabled = true;
+        } else {
+          rows.push({ id: owner.sandboxId, sessionId: owner.sessionId, browserEnabled: true, createdAtMs: null });
+        }
+      }
+    }
+    return rows;
+  }
+
+  /** The session's runtime-state claim names its browser sandbox, so one
+   * claim read replaces a fleet listing. The claim exists for every sandbox
+   * that holds browser state (`ensureRuntimeState` runs before the CR). */
+  async listBrowserForSession(sessionId: string): Promise<SandboxListing[]> {
+    if (!this.deps.runtimeStateApi) return [];
+    const owner = await readRuntimeStateOwner(this.deps.runtimeStateApi, this.cfg.namespace, sessionId);
+    if (!owner) return [];
+    const row = await this.describe(owner.sandboxId);
+    return [row ?? { id: owner.sandboxId, sessionId, browserEnabled: true, createdAtMs: null }];
+  }
+
+  /** One CR and its runtime-state claim, with the same ownership rules as `list()`. */
+  async describe(id: string): Promise<SandboxListing | null> {
+    const cr = await getSandbox(this.deps.objectsApi, this.cfg, id);
+    const owners = this.deps.runtimeStateApi ? await listRuntimeStateOwners(this.deps.runtimeStateApi, this.cfg.namespace, id) : [];
+    if (!cr && owners.length === 0) return null;
+    const annotations = cr?.metadata.annotations;
+    let sessionId = annotations?.[SESSION_ANNOTATION_KEY] ?? null;
+    for (const owner of owners) {
+      if (sessionId !== null && sessionId !== owner.sessionId) {
+        throw new Error("The browser volume and sandbox have different session owners. Restore matching ownership before changing this session.");
+      }
+      sessionId = owner.sessionId;
+    }
+    const createdAtMs = cr?.metadata.creationTimestamp ? Date.parse(cr.metadata.creationTimestamp) : Number.NaN;
+    return {
+      id,
+      sessionId,
+      browserEnabled: owners.length > 0 || Boolean(annotations?.[RUNTIME_STATE_ANNOTATION]),
+      createdAtMs: Number.isNaN(createdAtMs) ? null : createdAtMs,
+    };
   }
 
   /** Upsert-shaped (decision 5, NON-NEGOTIABLE): `applySandbox` adopts an
@@ -840,16 +1019,72 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     const name = sandboxCrName(opts.workspace);
     const neverReadyOwner = opts.sessionId ?? `cr:${name}`;
     const manifest = buildSandboxManifest(this.cfg, name, opts);
+    const previous = await getSandbox(this.deps.objectsApi, this.cfg, name);
+    const retainedOwners = this.deps.runtimeStateApi
+      ? await listRuntimeStateOwners(this.deps.runtimeStateApi, this.cfg.namespace, name)
+      : [];
+    if (retainedOwners.some((owner) => owner.sessionId !== opts.sessionId)) {
+      throw new Error("This sandbox has another browser session owner. Use a separate working-directory identity for the session.");
+    }
+    const retainedBrowser = Boolean(
+      retainedOwners.length ||
+      previous?.metadata.annotations?.[RUNTIME_STATE_ANNOTATION] ||
+      previous?.metadata.labels?.[BROWSER_LABEL_KEY] === "true",
+    );
+    if (previous && (retainedBrowser || opts.browser?.enabled) && previous.metadata.annotations?.[SESSION_ANNOTATION_KEY] !== opts.sessionId) {
+      throw new Error("This sandbox has another browser session owner. Use a separate working-directory identity for the session.");
+    }
+    if (retainedBrowser && !opts.browser?.enabled) {
+      throw new Error("This session has retained browser state. Re-enable browser isolation before replacing its Kubernetes sandbox.");
+    }
+    let runtimeStateCreated = false;
+    if (opts.browser?.enabled) {
+      if (!this.deps.runtimeStateApi || !opts.sessionId) throw new Error("Browser runtime storage is not configured. Connect the runtime-state Kubernetes API before starting this session.");
+      const runtimeState = await ensureRuntimeState(
+        this.deps.runtimeStateApi,
+        this.cfg.namespace,
+        opts.sessionId,
+        name,
+        this.cfg.browserRuntimeStorage ?? "2Gi",
+        retainedBrowser,
+      );
+      runtimeStateCreated = runtimeState.created;
+    }
+
+    const rollbackUnownedRuntimeState = async (): Promise<void> => {
+      if (!runtimeStateCreated || !this.deps.runtimeStateApi) return;
+      const cr = await getSandbox(this.deps.objectsApi, this.cfg, name);
+      if (cr !== null) return;
+      await deleteRuntimeState(this.deps.runtimeStateApi, this.cfg.namespace, name);
+    };
 
     // Upsert creds Secret BEFORE applying the Sandbox CR — the pod scheduler
     // reads the volume reference at start; the Secret must exist first.
     if (opts.credsFiles && Object.keys(opts.credsFiles).length > 0 && !this.deps.secretsApi) {
-      console.error(
-        `k8s sandbox ${name}: credsFiles provided but secretsApi is not wired — creds mount will be empty`,
-      );
+      reportError({ area: "sandbox", reason: "creds_secret_unwired", provider: "kubernetes" }, `k8s sandbox ${name}: credsFiles provided but secretsApi is not wired — creds mount will be empty`);
     }
     if (this.deps.secretsApi && opts.credsFiles && Object.keys(opts.credsFiles).length > 0) {
-      await this.deps.secretsApi.upsertSecret(this.cfg.namespace, credsSecretName(name), opts.credsFiles);
+      try {
+        await this.deps.secretsApi.upsertSecret(this.cfg.namespace, credsSecretName(name), opts.credsFiles);
+      } catch (error) {
+        await rollbackUnownedRuntimeState().catch((cleanupError) => {
+          reportError({ area: "sandbox", reason: "browser_volume_rollback", provider: "kubernetes" }, `k8s sandbox ${name}: browser volume rollback after credential failure failed`, cleanupError);
+        });
+        throw error;
+      }
+    }
+
+    // A leased session's live pod must survive a cold re-attach (spec
+    // INV-8). Skip the CR update and every roll, and wait for readiness
+    // with no expectations: `waitReady` deletes a pod that does not match
+    // them. The change lands after the lease releases.
+    if (opts.preserveLivePod && previous && previous.spec.operatingMode !== "Suspended" && await this.hasLivePod(name)) {
+      console.log(`k8s sandbox ${name}: keeping the live pod unchanged while a lease is active`);
+      await this.waitReady(name);
+      const kept = this.sandboxFromCr(name, previous);
+      kept.adopted = true;
+      kept.resourceOverrides = resourceOverridesWithLiveScratch(previous);
+      return kept;
     }
 
     // `adopted` decides cleanup for ordinary startup failures below. A CR
@@ -857,30 +1092,49 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     // An adopted CR can hold prior work and stays for those failures.
     // Post-grace capacity failures are different: the provider retained the
     // CR across earlier attempts, and no attempt returned a sandbox handle.
-    const { cpu, memory } = opts.resources ?? {};
-    const { cr: applied, adopted, previousSession, resourceOverrides } = await applySandbox(
-      this.deps.objectsApi, this.cfg, manifest,
-      {
+    const { cpu, memory, scratch } = opts.resources ?? {};
+    // Spec 8.3: a pod or PVC with our name whose Sandbox was deleted is
+    // being garbage-collected. Creating over it makes the controller reject
+    // the new CR ("is owned by Sandbox/... not by sandbox"). Only relevant
+    // when no CR exists; an existing CR is the adopt path and owns them.
+    // `previous` is this call's own GET of the CR above.
+    if (previous === null) {
+      await this.awaitSameNameResourcesGone(name, RESOURCE_GONE_TIMEOUT_MS);
+    }
+    let applyResult: Awaited<ReturnType<typeof applySandbox>>;
+    try {
+      applyResult = await applySandbox(this.deps.objectsApi, this.cfg, manifest, {
         preserveResourcesOnAdopt: opts.preserveResourcesOnAdopt,
         preserveResourceFieldsOnAdopt: opts.preserveResourceFieldsOnAdopt,
-        resourceOverrides: { ...(cpu !== undefined ? { cpu } : {}), ...(memory !== undefined ? { memory } : {}) },
+        resourceOverrides: {
+          ...(cpu !== undefined ? { cpu } : {}),
+          ...(memory !== undefined ? { memory } : {}),
+          ...(scratch !== undefined ? { scratch } : {}),
+        },
         readResourceOverrides: opts.readResourceOverrides
           ? async () => {
             const podName = await resolvePodName(this.deps.objectsApi, this.deps.podsApi, this.cfg, name);
             if (podName === null || await this.deps.livenessApi.getPodUid(this.cfg.namespace, podName) === null) return undefined;
-            return opts.readResourceOverrides?.(this.makeSandbox(name, Boolean(opts.docker)));
+            return opts.readResourceOverrides?.(this.makeSandbox(name, Boolean(opts.docker || opts.nestedKubernetes || opts.browser?.enabled), Boolean(opts.browser?.enabled && !opts.docker && !opts.nestedKubernetes)));
           }
           : undefined,
         neverReadyOwner,
-      },
-    );
+      });
+    } catch (error) {
+      await rollbackUnownedRuntimeState().catch((cleanupError) => {
+        reportError({ area: "sandbox", reason: "browser_volume_rollback", provider: "kubernetes" }, `k8s sandbox ${name}: browser volume rollback after apply failure failed`, cleanupError);
+      });
+      throw error;
+    }
+    const { cr: applied, adopted, previousSession, resourceOverrides } = applyResult;
 
     // Workspace strings are not guaranteed per-session (the web defaults every
     // session on a repo to one shared path), so an adopt can silently hand one
     // sandbox between sessions and the reconcile sweep then attributes it to
     // the wrong owner. Surface it — this is a signal, not a repair (TKAI-402).
     if (adopted && previousSession !== undefined && opts.sessionId !== undefined && previousSession !== opts.sessionId) {
-      console.warn(
+      reportError(
+        { area: "sandbox", reason: "shared_workspace_adopt", provider: "kubernetes", level: "warn" },
         `k8s sandbox ${name}: adopted by session ${opts.sessionId} but previously owned by session ${previousSession} — ` +
           "two sessions share one workspace string; the sandbox and its volume now serve the new session",
       );
@@ -1010,10 +1264,11 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         undefined,
         podTemplateResourceFingerprint(applied.spec.podTemplate),
         imageFingerprint(manifestImage),
+        browserRuntimeFingerprint(applied.spec.podTemplate, applied.metadata.name),
       ).catch(() => null);
       if (check?.differs) {
         const podName = check.podName;
-        const reason = check.imageDrift ? `image ${check.liveImage} → ${manifestImage}` : "CPU/memory changed";
+        const reason = check.browserDrift ? "browser configuration changed" : check.imageDrift ? `image ${check.liveImage} → ${manifestImage}` : "CPU/memory changed";
         console.log(`k8s sandbox ${name}: rolling pod (${reason})`);
         // Capture the old pod UID before deletion so the wait-for-fresh loop
         // below can detect when the controller has reconciled a NEW pod object
@@ -1042,12 +1297,13 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     try {
       await this.waitReady(name, {
         homeLayoutVersion: HOME_LAYOUT_VERSION,
+        browserFingerprint: browserRuntimeFingerprint(applied.spec.podTemplate, applied.metadata.name),
         image: opts.image ?? this.cfg.defaultImage,
         resourceFingerprint: podTemplateResourceFingerprint(applied.spec.podTemplate),
       });
     } catch (err) {
       const ownsPendingCreate = applied.metadata.annotations?.[NEVER_READY_OWNER_ANNOTATION_KEY] === neverReadyOwner;
-      if (err instanceof SandboxStartupError &&
+      if (err instanceof SandboxStartupError && err.kind !== "ownership" &&
         (!adopted || ownsPendingCreate)) {
         // Narrow, documented exception to decision 5 ("only the session-
         // deletion path deletes a CR"): a CR this very call created, whose
@@ -1062,32 +1318,81 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         // on a READY provision, so counting this cleanup would add a
         // destroy with no matching create and drive the created−destroyed
         // leak alarm negative during create-failure storms.
-        await this.destroy(name).catch((cleanupErr) => {
-          console.error(`k8s sandbox ${name}: CR cleanup after failed create failed:`, cleanupErr);
-        });
+        let destroyed = false;
+        await this.destroy(name).then(
+          () => { destroyed = true; },
+          (cleanupErr) => {
+            reportError({ area: "sandbox", reason: "cr_cleanup", provider: "kubernetes" }, `k8s sandbox ${name}: CR cleanup after failed create failed`, cleanupErr);
+          },
+        );
+        // Spec 8.2: do not hand control back while the pod and PVC we just
+        // orphaned are still terminating; the next create would race the
+        // controller's garbage collection.
+        // Skipped when destroy failed: the CR still exists, so the controller
+        // will not garbage-collect the pod or PVC and the wait would only
+        // burn the timeout.
+        if (destroyed) await this.awaitSameNameResourcesGone(name, RESOURCE_GONE_TIMEOUT_MS);
       }
       throw err;
     }
     await clearNeverReadyOwner(this.deps.objectsApi, this.cfg, name);
-    const sandbox = this.makeSandbox(name, Boolean(opts.docker));
+    const sandbox = this.makeSandbox(name, Boolean(opts.docker || opts.nestedKubernetes || opts.browser?.enabled), Boolean(opts.browser?.enabled && !opts.docker && !opts.nestedKubernetes));
     sandbox.adopted = adopted;
     sandbox.resourceOverrides = resourceOverrides;
     return sandbox;
   }
 
+  /** Polls until no pod named `name` and no PVC named `workspace-<name>`
+   * exist, or `timeoutMs` passes. Returns true when both are gone. The pod
+   * check uses the liveness API; the PVC check is skipped when no pvcApi is
+   * wired. Never throws: a read error counts as "still present" and the
+   * deadline bounds the wait. */
+  private async awaitSameNameResourcesGone(name: string, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    const pvcName = workspacePvcName(name);
+    for (;;) {
+      const podPresent = await this.deps.livenessApi.getPodUid(this.cfg.namespace, name).then((uid) => uid !== null, () => true);
+      const pvcPresent = this.deps.pvcApi
+        ? await this.deps.pvcApi.readPvc(this.cfg.namespace, pvcName).then((pvc) => pvc !== null, () => true)
+        : false;
+      if (!podPresent && !pvcPresent) return true;
+      if (Date.now() >= deadline) {
+        reportError({ area: "sandbox", reason: "destroy_timeout", provider: "kubernetes", level: "warn" }, `k8s sandbox ${name}: pod or PVC still present after ${timeoutMs}ms; continuing`);
+        return false;
+      }
+      await sleep(RESOURCE_GONE_POLL_MS);
+    }
+  }
+
   /** Re-asserts (GETs) the same CR name — never creates. The engine
-   * persists `sandboxId` (== the CR name) and calls this at boot; unlike
-   * `sandbox-docker`'s in-memory `Map` (which does not survive an api
-   * restart), this provider is cluster-backed and needs no local registry. */
+   * persists `sandboxId` (== the CR name) and calls this at boot.
+   * The cluster retains ownership and isolation metadata across API restarts. */
   async restore(id: string): Promise<Sandbox> {
     const cr = await getSandbox(this.deps.objectsApi, this.cfg, id);
     if (cr === null) {
       throw new Error(`KubernetesSandboxProvider.restore: Sandbox CR "${id}" not found`);
     }
-    // Re-derive the exec-identity flag from the CR's own label — the CR is
-    // the only per-sandbox state that survives an api restart (there is no
-    // in-memory registry to consult, unlike sandbox-docker).
-    return this.makeSandbox(id, cr.metadata.labels?.[DOCKER_LABEL_KEY] === "true");
+    return this.sandboxFromCr(id, cr);
+  }
+
+  /** True when the CR's backing pod exists. */
+  private async hasLivePod(name: string): Promise<boolean> {
+    const podName = await resolvePodName(this.deps.objectsApi, this.deps.podsApi, this.cfg, name);
+    return podName !== null && (await this.deps.livenessApi.getPodUid(this.cfg.namespace, podName)) !== null;
+  }
+
+  /** A handle shaped by the CR's persisted labels, not by create options. */
+  private sandboxFromCr(id: string, cr: SandboxCRRead): KubernetesSandbox {
+    // Either persisted browser marker requires the protected workload identity.
+    const browser = Boolean(
+      cr.metadata.annotations?.[RUNTIME_STATE_ANNOTATION] ||
+      cr.metadata.labels?.[BROWSER_LABEL_KEY] === "true",
+    );
+    return this.makeSandbox(
+      id,
+      browser || cr.metadata.labels?.[DOCKER_LABEL_KEY] === "true" || cr.metadata.labels?.[NESTED_KUBERNETES_LABEL_KEY] === "true",
+      browser && cr.metadata.labels?.[DOCKER_LABEL_KEY] !== "true" && cr.metadata.labels?.[NESTED_KUBERNETES_LABEL_KEY] !== "true" && !hasBrowserCompanion(cr.spec.podTemplate),
+    );
   }
 
   /** TERMINAL (decision 5, NON-NEGOTIABLE): deletes the CR, cascading to
@@ -1107,28 +1412,35 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       await this.deps.secretsApi.deleteSecret(this.cfg.namespace, credsSecretName(id)).catch(() => {});
     }
     await deleteSandbox(this.deps.objectsApi, this.cfg, id);
+    if (this.deps.runtimeStateApi) await deleteRuntimeState(this.deps.runtimeStateApi, this.cfg.namespace, id);
   }
 
-  /** NON-terminal (decision 5, NON-NEGOTIABLE): a no-op that leaves the CR
-   * (and its owner-referenced pod + workspace PVC) standing. This is the
+  /** NON-terminal (decision 5, NON-NEGOTIABLE): suspends the retained CR and
+   * waits for its pod to stop. This is the
    * seam `SandboxAttachment.reportFailure` calls in preference to `destroy`
    * (see `packages/engine/src/types.ts`'s `SandboxProvider.release` and
    * `packages/engine/src/sandbox/attachment.ts`'s `reportFailure`) — the
-   * subsequent `create()` call (upsert-shaped, same CR name) re-adopts the
-   * retained CR and the controller heals a fresh pod onto the retained PVC,
-   * so the workspace survives a liveness-triggered re-provision instead of
-   * being cascade-deleted the way an unconditional `destroy` would. Verifies
-   * (does not create) the CR still exists and logs when it's unexpectedly
-   * already gone — that's a legitimate race (e.g. a concurrent `destroy`)
-   * this method must never treat as an error, since it makes no state
-   * change of its own. */
+   * subsequent `create()` call re-adopts and resumes the CR. The controller
+   * starts a new pod on the retained workspace and runtime-state PVCs.
+   * Waiting for zero pods ensures that replacement releases browser locks
+   * and ephemeral processes before the new execution starts. */
   async release(id: string): Promise<void> {
     const cr = await getSandbox(this.deps.objectsApi, this.cfg, id);
     if (cr === null) {
-      // Already gone (e.g. raced a concurrent terminal `destroy`) — nothing
-      // to release, and this must not throw: `reportFailure`'s caller
-      // treats `release`/`destroy` as fire-and-forget best-effort.
       console.warn(`KubernetesSandboxProvider.release: Sandbox CR "${id}" was already gone`);
+      return;
+    }
+    await setOperatingMode(this.deps.objectsApi, this.cfg, id, "Suspended");
+    const podName = await resolvePodName(this.deps.objectsApi, this.deps.podsApi, this.cfg, id);
+    if (podName === null) return;
+    const deadline = Date.now() + READY_TIMEOUT_MS;
+    while (await this.deps.livenessApi.getPodUid(this.cfg.namespace, podName) !== null) {
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `k8s sandbox ${id}: backing pod did not stop within ${READY_TIMEOUT_MS}ms during release. Check the sandbox controller before retrying replacement.`,
+        );
+      }
+      await sleep(READY_POLL_INTERVAL_MS);
     }
   }
 
@@ -1168,7 +1480,11 @@ export class KubernetesSandboxProvider implements SandboxProvider {
    */
   async resume(id: string): Promise<void> {
     await resumeWithPersistentHomes(this.deps.objectsApi, this.cfg, id);
-    await this.waitReady(id, { homeLayoutVersion: HOME_LAYOUT_VERSION });
+    const cr = await getSandbox(this.deps.objectsApi, this.cfg, id);
+    await this.waitReady(id, {
+      homeLayoutVersion: HOME_LAYOUT_VERSION,
+      browserFingerprint: browserRuntimeFingerprint(cr?.spec.podTemplate, cr?.metadata.name),
+    });
   }
 
   /** Writes updated credential files into a running sandbox. Replaces the
@@ -1194,7 +1510,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       const cr = await getSandbox(this.deps.objectsApi, this.cfg, id);
       await this.adoptCredsSecret(id, cr?.metadata.uid);
     } catch (err) {
-      console.error(`k8s sandbox ${id}: updateCreds ownerReference adopt failed (non-fatal)`, err);
+      reportError({ area: "sandbox", reason: "creds_owner_adopt", provider: "kubernetes" }, `k8s sandbox ${id}: updateCreds ownerReference adopt failed (non-fatal)`, err);
     }
   }
 
@@ -1215,11 +1531,70 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         uid,
       });
     } catch (err) {
-      console.error(`k8s sandbox ${crName}: creds Secret ownerReference patch failed (non-fatal)`, err);
+      reportError({ area: "sandbox", reason: "creds_owner_patch", provider: "kubernetes" }, `k8s sandbox ${crName}: creds Secret ownerReference patch failed (non-fatal)`, err);
     }
   }
 
-  private makeSandbox(id: string, docker: boolean): KubernetesSandbox {
+  /**
+   * Eviction-protection seam (spec 2026-10-08, wakeups/leases; paired with
+   * `SandboxProvider.setEvictionProtection`). The api-side `WakeWatcher`
+   * calls this around a lease window so cluster-autoscaler leaves the
+   * sandbox's node alone (`EVICTION_PROTECT_ANNOTATION`) while `LEASED_LABEL`
+   * lets `listEvictionProtected` find every protected sandbox by selector.
+   * A missing backing pod (CR not yet reconciled, or already gone) is
+   * reported as `changed: false` and logged at debug level, never thrown:
+   * eviction protection is advisory, and the caller has no pod to mark.
+   * Idempotent: a pod already in the desired state is not re-patched.
+   */
+  async setEvictionProtection(id: string, enabled: boolean): Promise<{ changed: boolean }> {
+    const podName = await resolvePodName(this.deps.objectsApi, this.deps.podsApi, this.cfg, id);
+    if (podName === null) {
+      console.debug(`k8s sandbox ${id}: setEvictionProtection(${enabled}) skipped, no backing pod`);
+      return { changed: false };
+    }
+    // The session label narrows the read to this sandbox's pods. The
+    // watcher calls this per leased sandbox every tick, so an unfiltered
+    // list would read every pod in the namespace each time.
+    const { items } = await this.deps.podsApi.listNamespacedPod({
+      namespace: this.cfg.namespace,
+      labelSelector: `${SESSION_LABEL_KEY}=${id}`,
+    });
+    const pod = items.find((item) => item.name === podName);
+    const hasAnnotation = pod?.annotations?.[EVICTION_PROTECT_ANNOTATION] === "false";
+    const hasLabel = pod?.labels?.[LEASED_LABEL] === "true";
+    // Enabled wants BOTH set; disabled wants BOTH absent. A partial state
+    // (e.g. a crash cleared the label but not the annotation) is not
+    // "already desired" either way, so it always falls through to patch.
+    const hasDesired = enabled ? hasAnnotation && hasLabel : !hasAnnotation && !hasLabel;
+    if (hasDesired) return { changed: false };
+    await this.deps.podsApi.patchNamespacedPod({
+      name: podName,
+      namespace: this.cfg.namespace,
+      body: {
+        metadata: {
+          annotations: { [EVICTION_PROTECT_ANNOTATION]: enabled ? "false" : null },
+          labels: { [LEASED_LABEL]: enabled ? "true" : null },
+        },
+      },
+    });
+    return { changed: true };
+  }
+
+  /** Every sandbox id (Sandbox CR name) this provider currently marks
+   * eviction-protected. The `LEASED_LABEL` selector reads straight off
+   * live pods, so this reflects reality even if a lease crashed mid-release
+   * without clearing the label. */
+  async listEvictionProtected(): Promise<string[]> {
+    const { items } = await this.deps.podsApi.listNamespacedPod({
+      namespace: this.cfg.namespace,
+      labelSelector: `${LEASED_LABEL}=true`,
+    });
+    return items
+      .map((item) => item.labels?.[SESSION_LABEL_KEY])
+      .filter((name): name is string => typeof name === "string");
+  }
+
+  private makeSandbox(id: string, workloadUser: boolean, browser = false): KubernetesSandbox {
     return new KubernetesSandbox(
       {
         objectsApi: this.deps.objectsApi,
@@ -1229,7 +1604,9 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         evictionApi: this.deps.evictionApi,
         pvcApi: this.deps.pvcApi,
         cfg: this.cfg,
-        docker,
+        docker: workloadUser,
+        browser,
+        podStatusApi: this.deps.podStatusApi,
       },
       id,
     );
@@ -1255,16 +1632,20 @@ export class KubernetesSandboxProvider implements SandboxProvider {
    * branch (no `error` state ever observed, just genuinely slow) keeps
    * throwing a plain `Error` — that IS a transient, retry-shaped condition.
    */
-  private async waitReady(name: string, expected?: { image?: string; resourceFingerprint?: string; homeLayoutVersion?: string }): Promise<void> {
-    const deadline = Date.now() + READY_TIMEOUT_MS;
+  private async waitReady(name: string, expected?: { image?: string; resourceFingerprint?: string; homeLayoutVersion?: string; browserFingerprint?: string }): Promise<void> {
+    const startedAtMs = Date.now();
+    const deadline = startedAtMs + READY_TIMEOUT_MS;
     const expectedImageFingerprint = expected?.image !== undefined ? imageFingerprint(expected.image) : undefined;
     const rolledGenerations = new Set<string>();
     let lastReadError: string | undefined;
     let lastState: SandboxStatus["state"] = "provisioning";
+    let lastDetail: string | undefined;
     for (;;) {
-      const pendingError = await this.pendingTerminalError(name);
+      const pendingError = await this.pendingTerminalError(name, startedAtMs);
       if (pendingError !== null) throw pendingError;
       try {
+        const cr = await getSandbox(this.deps.objectsApi, this.cfg, name);
+        lastDetail = cr?.status?.conditions?.find((c) => c.type === "Ready")?.message ?? lastDetail;
         const status = await sandboxStatus(this.deps.objectsApi, this.cfg, name, this.deps.podsApi, this.deps.podStatusApi);
         lastState = status.state;
         if (this.deps.podStatusApi) {
@@ -1280,7 +1661,8 @@ export class KubernetesSandboxProvider implements SandboxProvider {
           const resourcesMatch = expected?.resourceFingerprint === undefined ||
             pod?.resourceFingerprint === expected.resourceFingerprint;
           const homeMatches = expected?.homeLayoutVersion === undefined || pod?.homeLayoutVersion === expected.homeLayoutVersion;
-          const matchesDesired = imageMatches && resourcesMatch;
+          const browserMatches = expected?.browserFingerprint === undefined || pod?.browserFingerprint === expected.browserFingerprint;
+          const matchesDesired = imageMatches && resourcesMatch && browserMatches;
 
           // Admission webhooks can rewrite pod.spec.containers[].image. The
           // immutable env fingerprint records the requested image generation,
@@ -1288,7 +1670,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
           const podReady = pod?.phase === "Running" &&
             pod.conditions?.some((condition) => condition.type === "Ready" && condition.status === "True");
           if (podName !== null && pod !== null && podReady && expected !== undefined && (!matchesDesired || !homeMatches) && this.deps.podDeleteApi) {
-            const generation = `${podName}:${pod.imageFingerprint ?? "missing"}:${pod.resourceFingerprint ?? "missing"}:${pod.homeLayoutVersion ?? "missing"}`;
+            const generation = `${podName}:${pod.imageFingerprint ?? "missing"}:${pod.resourceFingerprint ?? "missing"}:${pod.homeLayoutVersion ?? "missing"}:${pod.browserFingerprint ?? "missing"}`;
             if (!rolledGenerations.has(generation)) {
               console.log(`k8s sandbox ${name}: rolling stale pod generation during readiness`);
               await this.deps.podDeleteApi.deletePod(this.cfg.namespace, podName);
@@ -1304,7 +1686,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
           return;
         }
         if (status.state === "error") {
-          throw new SandboxStartupError(name, status.error ?? "unknown");
+          throw new SandboxStartupError(name, status.error ?? "unknown", startupKindOf(status.error ?? ""));
         }
         lastReadError = undefined;
       } catch (err) {
@@ -1313,10 +1695,23 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       }
       if (Date.now() >= deadline) {
         const readDetail = lastReadError ? ` Last Kubernetes read error: ${lastReadError}.` : "";
-        throw new Error(
-          `Sandbox CR "${name}" did not become ready within ${READY_TIMEOUT_MS}ms (state: ${lastState}).${readDetail} ` +
-            "Check Kubernetes API access, the sandbox controller, and pod events, then retry.",
-        );
+        const conditionDetail = lastDetail ? ` Last condition: ${lastDetail}.` : "";
+        const leading = `Sandbox CR "${name}" did not become ready within ${READY_TIMEOUT_MS}ms (state: ${lastState}).${conditionDetail}${readDetail} `;
+        const message = leading + "Check Kubernetes API access, the sandbox controller, and pod events, then retry.";
+        if (lastDetail && OWNERSHIP_CONDITION_PATTERN.test(lastDetail)) {
+          // Retry-shaped (spec 8.4): the controller heals this once garbage
+          // collection finishes. Surface it fast and let the attachment back
+          // off; create()'s cleanup keeps the CR for kind "ownership", so the
+          // caller's next attempt after the window adopts it. The attachment is
+          // caller-driven and schedules nothing itself, so the message asks for
+          // a retry instead of promising one.
+          throw new SandboxStartupError(
+            name,
+            leading + "The controller is still waiting for the previous sandbox's pod and volume to be removed. Retry shortly; the next attempt reuses this sandbox once they are gone.",
+            "ownership",
+          );
+        }
+        throw new Error(message);
       }
       await sleep(READY_POLL_INTERVAL_MS);
     }
@@ -1324,27 +1719,46 @@ export class KubernetesSandboxProvider implements SandboxProvider {
 
   /** Return the backing pod's post-grace Pending diagnosis. Return null if
    * the pod is absent, past Pending, unresolvable, or inside the grace period.
-   * Transient API errors and autoscaler scale-up windows stay retryable. */
-  private async podPendingDiagnosis(name: string): Promise<PendingPodDiagnosis | null> {
+   * The grace runs from the pod's creation time, or from `startedAtMs` (the
+   * readiness wait's start) when the pod reports none. Transient API errors
+   * and autoscaler scale-up windows stay retryable. */
+  private async podPendingDiagnosis(name: string, startedAtMs: number): Promise<PendingPodDiagnosis | null> {
     if (!this.deps.podStatusApi) return null;
+    // A pod is never older than its CR, so a young CR (or one with no
+    // readable age) skips the pod reads.
     const cr = await getSandbox(this.deps.objectsApi, this.cfg, name).catch(() => null);
-    const bornAtMs = cr?.metadata.creationTimestamp ? Date.parse(cr.metadata.creationTimestamp) : Number.NaN;
-    if (Number.isNaN(bornAtMs) || Date.now() - bornAtMs < PENDING_TERMINAL_GRACE_MS) return null;
+    const crBornAtMs = cr?.metadata.creationTimestamp ? Date.parse(cr.metadata.creationTimestamp) : Number.NaN;
+    if (Number.isNaN(crBornAtMs) || Date.now() - crBornAtMs < PENDING_TERMINAL_GRACE_MS) return null;
     const podName = await resolvePodName(this.deps.objectsApi, this.deps.podsApi, this.cfg, name).catch(() => null);
     if (!podName) return null;
     const pod = await this.deps.podStatusApi.getPodStatus(this.cfg.namespace, podName).catch(() => null);
     const detail = classifyPodPending(pod);
     if (detail === null) return null;
-    return { detail, requests: pod?.sandboxResources?.requests ?? {} };
+    const podBornAtMs = pod?.createdAt ? Date.parse(pod.createdAt) : Number.NaN;
+    const bornAtMs = Number.isNaN(podBornAtMs) ? startedAtMs : podBornAtMs;
+    const ageMs = Date.now() - bornAtMs;
+    if (ageMs < PENDING_TERMINAL_GRACE_MS) return null;
+    if (ageMs < SCALE_UP_DEFERRAL_CAP_MS && this.deps.podStatusApi.listPodEvents) {
+      const events = await this.deps.podStatusApi.listPodEvents(this.cfg.namespace, podName).catch(() => []);
+      if (scaleUpInFlight(events, Date.now())) return null;
+    }
+    return {
+      detail,
+      ageMs,
+      requests: pod?.sandboxResources?.requests ?? {},
+      ...(pod?.ephemeralStorageRequest !== undefined ? { ephemeralStorage: pod.ephemeralStorageRequest } : {}),
+      ...(pod?.sandboxResources?.scratch !== undefined ? { scratch: pod.sandboxResources.scratch } : {}),
+    };
   }
 
   /** Return a terminal error when an unscheduled pod is past the grace period. */
-  private async pendingTerminalError(name: string): Promise<SandboxStartupError | null> {
-    const pending = await this.podPendingDiagnosis(name);
+  private async pendingTerminalError(name: string, startedAtMs: number): Promise<SandboxStartupError | null> {
+    const pending = await this.podPendingDiagnosis(name, startedAtMs);
     if (pending === null) return null;
     const requests = [
       ...(pending.requests.cpu === undefined ? [] : [`cpu=${pending.requests.cpu}`]),
       ...(pending.requests.memory === undefined ? [] : [`memory=${pending.requests.memory}`]),
+      ...(pending.ephemeralStorage === undefined ? [] : [`ephemeral-storage=${pending.ephemeralStorage}`]),
     ];
     const requestDetail = requests.length === 0 ? "" : ` Pod requests: ${requests.join(", ")}.`;
     const shortages = classifyPodCapacityShortages(pending.detail);
@@ -1356,7 +1770,13 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         "If a lower value fails, check the largest node's available CPU and memory.",
       );
     }
-    if (shortages.includes("ephemeral-storage")) {
+    const scratchShortage = shortages.includes("ephemeral-storage") && pending.scratch !== undefined;
+    if (scratchShortage) {
+      actions.push(
+        "Lower resources.scratch in .valet/prebuild.yaml or task.resources.scratch, " +
+        "or ask an admin to add a node pool with enough local disk.",
+      );
+    } else if (shortages.includes("ephemeral-storage")) {
       actions.push(
         "Check node ephemeral-storage capacity. Check the deployment ephemeral-storage request. " +
         "If you correct the capacity mismatch, retry.",
@@ -1364,8 +1784,9 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     }
     const action = actions.length === 0 ? "Free or add node capacity. Then retry." : actions.join(" ");
     const schedulerDetail = pending.detail.replace(/[.!?]+$/, "");
-    const message = `pod has been Pending for over ${Math.round(PENDING_TERMINAL_GRACE_MS / 60_000)} minutes ` +
-      `(${schedulerDetail}).${requestDetail} The cluster has no schedulable capacity for this sandbox. ${action}`;
-    return new PendingTerminalStartupError(name, message);
+    const scratchDetail = scratchShortage ? ` (scratch ${pending.scratch})` : "";
+    const message = `pod has been Pending for ${Math.floor(pending.ageMs / 60_000)} minutes ` +
+      `(${schedulerDetail})${scratchDetail}.${requestDetail} The cluster has no schedulable capacity for this sandbox. ${action}`;
+    return new PendingTerminalStartupError(name, message, "unschedulable");
   }
 }

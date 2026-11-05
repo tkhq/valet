@@ -56,4 +56,32 @@ describe("TabBar", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Three" }));
     expect(onSelect).toHaveBeenCalledWith("three");
   });
+
+  it("a disabled tab ignores clicks, and the arrow keys skip it", () => {
+    const onSelect = vi.fn();
+    const tabs = [TABS[0], { ...TABS[1], disabled: true }, TABS[2]];
+    render(<TabBar tabs={tabs} active="one" onSelect={onSelect} label="Demo" />);
+    fireEvent.click(screen.getByRole("tab", { name: "Two" }));
+    expect(onSelect).not.toHaveBeenCalled();
+    fireEvent.keyDown(screen.getByRole("tab", { name: "One" }), { key: "ArrowRight" });
+    expect(onSelect).toHaveBeenLastCalledWith("three");
+    fireEvent.keyDown(screen.getByRole("tab", { name: "Three" }), { key: "ArrowLeft" });
+    expect(onSelect).toHaveBeenLastCalledWith("one");
+  });
+
+  it("shows a badge inside the tab and an action outside it", () => {
+    const tabs = [
+      { ...TABS[0], badge: <span role="img" aria-label="pending" /> },
+      { ...TABS[1], action: <button type="button">Close two</button> },
+    ];
+    render(<TabBar tabs={tabs} active="one" onSelect={vi.fn()} label="Demo" />);
+    expect(screen.getByRole("tab", { name: "One pending" })).toBeTruthy();
+    const close = screen.getByRole("button", { name: "Close two" });
+    expect(screen.getByRole("tab", { name: "Two" }).contains(close)).toBe(false);
+  });
+
+  it("seeds the panel ids from id when one is given", () => {
+    render(<TabBar tabs={TABS} active="one" onSelect={vi.fn()} label="Demo" id="first" />);
+    expect(screen.getByRole("tab", { name: "One" }).getAttribute("aria-controls")).toBe(tabPanelId("first", "one"));
+  });
 });

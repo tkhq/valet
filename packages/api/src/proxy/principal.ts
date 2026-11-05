@@ -75,9 +75,11 @@ export async function resolveProxyPrincipal(
   headers: Headers, kind: ProviderKind, deps: PrincipalDeps,
 ): Promise<ProxyPrincipal | Response> {
   const key = extractKey(headers);
-  if (!key) return wireError(kind, 401, "Missing API key. Create a proxy key in valet Settings.");
+  if (!key) return wireError(kind, 401, "Missing API key. Run `valet proxy setup <harness>`, or create a proxy key in Valet Settings.");
   const result = await deps.verifyApiKey({ key });
-  if (!result.valid || !result.key) return wireError(kind, 401, "Invalid API key. Create a proxy key in valet Settings.");
+  if (!result.valid || !result.key) {
+    return wireError(kind, 401, "Invalid or revoked API key. Run `valet proxy setup <harness>` to get a new key, or create one in Valet Settings.");
+  }
   if (result.key.teamId !== undefined) {
     const orgId = await deps.teamOrg(result.key.teamId, result.key.id);
     if (!orgId) return wireError(kind, 401, "Team API key is no longer valid. Ask a team admin to create a new key.");

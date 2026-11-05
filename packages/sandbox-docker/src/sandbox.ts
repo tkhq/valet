@@ -1,4 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, posix, resolve } from "node:path";
@@ -8,16 +10,27 @@ import type {
   ExecResult,
   GatewayEndpoint,
   JobPoll,
+  JobPollOpts,
   Sandbox,
   SandboxCapabilities,
   SandboxCreateOpts,
   SandboxProvider,
   SandboxStatus,
+  SandboxListing,
+  SandboxCommandChannel,
+  SandboxCommandChannelOptions,
 } from "@valet/engine";
+import { EXEC_ID_PATTERN, newExecId } from "@valet/engine/wakeups-ids";
+import { openDockerCommandChannel } from './command-channel.js';
+import { DockerInventory, dockerOwnerLabels, parseDockerInspection, validateDockerOwner, validateDockerBrowserOwner, type DockerContainerOwner, type DockerInventoryRecord } from "./inventory.js";
+import { buildBrowserCompanionArgs } from "./browser-companion.js";
+import { READ_RETAINED_BROWSER_AUDIT, parseRetainedBrowserAudit, type RetainedBrowserAudit } from "./browser-audit.js";
 import {
   CappedOutputBuffer,
   CONTAINER_DEATH_PATTERN,
   parseResourceQuantity,
+  recordDockerJobOutputDropped,
+  SandboxGoneError,
 } from "@valet/engine";
 
 /** 5-minute backstop eviction for job entries nobody polls to completion
@@ -25,10 +38,66 @@ import {
  * status; this timer is just a leak guard. */
 const JOB_EVICTION_BACKSTOP_MS = 5 * 60 * 1000;
 
+/**
+ * A detached job's state outlives its first terminal poll: the WakeWatcher
+ * and `process_read` both read it, so neither may consume it (fix wave 2,
+ * H1). It goes `JOB_EVICTION_BACKSTOP_MS` after the first terminal poll, or
+ * this long after exit when nobody polls it.
+ */
+const DETACHED_UNPOLLED_BACKSTOP_MS = 60 * 60 * 1000;
+
+/**
+ * Most bytes of a detached job's output the api keeps in memory (fix wave
+ * 2, H2). Docker writes no log file, so an uncapped buffer let a chatty
+ * job exhaust the api heap. The first quarter streams live; the rest keeps
+ * the tail, which joins at exit (see `CappedOutputBuffer`).
+ */
+const DETACHED_OUTPUT_MAX_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Most bytes all detached job buffers of one sandbox may hold together
+ * (fix wave 3, security L4). The per-thread wakeup cap allows 20 jobs, so
+ * the per-job cap alone allowed about 1.25 GiB of api heap per thread.
+ */
+const DETACHED_OUTPUT_TOTAL_MAX_BYTES = 256 * 1024 * 1024;
+
+/**
+ * Drops the oldest finished detached job buffers until the detached total
+ * fits `capBytes`, and returns the dropped ids. A running job is never
+ * dropped, so the total can stay over the cap while jobs run. A finished
+ * job whose exit no terminal poll has read is never dropped either: the
+ * WakeWatcher would lose its tail (fix wave 4, data N3). A drop empties the
+ * job's output and keeps its status and exit code, so a later poll (an
+ * agent `process_read` can mark a job polled before the watcher reads it)
+ * still reports the real exit instead of an unknown job (re-review F6).
+ */
+export function dropFinishedDetachedOutputs<
+  J extends { detached: boolean; status: string; output: string; terminalPolled?: boolean },
+>(
+  jobs: Map<string, J>,
+  capBytes: number,
+): string[] {
+  let total = 0;
+  for (const job of jobs.values()) if (job.detached) total += Buffer.byteLength(job.output);
+  const dropped: string[] = [];
+  for (const [id, job] of jobs) {
+    if (total <= capBytes) break;
+    if (!job.detached || job.status === "running" || !job.terminalPolled || job.output === "") continue;
+    total -= Buffer.byteLength(job.output);
+    job.output = "";
+    dropped.push(id);
+  }
+  return dropped;
+}
+
 interface DockerJobState {
   status: "running" | "done" | "failed";
   exitCode?: number;
+  /** Kept for `pollJob` by UTF-8 byte offset, not by string index (fix wave 2, L4). */
   output: string;
+  detached: boolean;
+  /** Set on the first terminal poll of a detached job. */
+  terminalPolled?: boolean;
   /** Set when the maxOutputBytes cap dropped bytes — pollJob reports it. */
   truncated?: boolean;
   child: ChildProcess;
@@ -38,6 +107,41 @@ interface DockerJobState {
   transportError?: Error;
   closed: Promise<void>;
   evictTimer?: NodeJS.Timeout;
+}
+
+/** The in-memory output cap for a job: a detached job never exceeds `DETACHED_OUTPUT_MAX_BYTES`. */
+export function jobOutputLimit(opts?: ExecOpts): number | undefined {
+  if (!opts?.detached) return opts?.maxOutputBytes;
+  return Math.min(opts.maxOutputBytes ?? DETACHED_OUTPUT_MAX_BYTES, DETACHED_OUTPUT_MAX_BYTES);
+}
+
+/**
+ * One bounded read of a job's output by UTF-8 byte offset (spec B4, fix
+ * wave 2 L4). A read never splits a codepoint: a tail read starts past a
+ * cut codepoint, and a forward read stops before one, which the next read
+ * returns.
+ */
+export function sliceUtf8(buf: Buffer, offset: number, opts?: JobPollOpts): { text: string; nextOffset: number; more: boolean } {
+  const end = buf.length;
+  const isContinuation = (i: number) => ((buf[i] ?? 0) & 0xc0) === 0x80;
+  let start = Math.min(Math.max(0, offset), end);
+  let stop = end;
+  if (opts?.maxBytes !== undefined) {
+    const max = Math.max(0, Math.floor(opts.maxBytes));
+    if (opts.tail) start = Math.max(start, end - max);
+    else stop = Math.min(end, start + max);
+  }
+  if (opts?.tail) while (start < stop && isContinuation(start)) start++;
+  if (stop < end) {
+    const asked = stop;
+    while (stop > start && isContinuation(stop)) stop--;
+    // A bound smaller than one codepoint still returns that codepoint.
+    if (stop === start && asked > start) {
+      stop = asked;
+      while (stop < end && isContinuation(stop)) stop++;
+    }
+  }
+  return { text: buf.subarray(start, stop).toString("utf8"), nextOffset: stop, more: stop < end };
 }
 
 /**
@@ -91,14 +195,12 @@ async function isContainerAlive(containerId: string): Promise<boolean> {
 /**
  * DockerSandbox runs shell commands inside a long-running Docker container,
  * with the workspace bind-mounted from the host. Filesystem operations
- * (read/write/edit/stat/etc.) execute on the host against the mounted
- * directory — fast, no protocol overhead — while exec() goes through
- * `docker exec`. This gives real container isolation for shell while
- * keeping FS reads cheap.
+ * (read/write/edit/stat/etc.) and shell commands execute inside the
+ * container. Symlinks resolve within the container's mount view.
  *
  * Lifetime: one container per sandbox, started on create() and removed
- * on destroy(). Restarts are not preserved across the engine's
- * restoreSession path; the host re-creates a fresh container.
+ * on release(). Durable inventory supports adoption after API restart.
+ * Final destroy() removes the retained private state.
  *
  * Networking: defaults to bridge (the LocalSandbox-equivalent posture).
  * Override via DockerSandboxCreateOpts.network.
@@ -134,14 +236,23 @@ export interface DockerSandboxOptions {
   containerWorkspace: string;
   /** Image used to start the container. */
   image: string;
+  /** Private session state. Generic file methods never enumerate this mount. */
+  runtimeStateDir?: string;
+  onDestroy?: () => Promise<void>;
+  browser?: boolean;
+  /** Separate browser owner for Docker-enabled sessions. */
+  browserContainerId?: string;
   /** Absolute host path for the creds bind mount (~/.valet/creds/<sandboxId>/).
    * Present only when the sandbox was created with credsFiles. */
   credsHostDir?: string;
+  /** Absolute host path for the scratch bind mount. Present only when the
+   * sandbox was created with resources.scratch. No size limit is enforced
+   * on this backend (dev only). See DockerSandboxProvider.create. */
+  scratchHostDir?: string;
   /** Rootless docker-in-sandbox (SandboxCreateOpts.docker). When set,
    * non-privileged execs run as the `dockerd` workload user (see
-   * `buildDockerExecArgs`). Like `credsHostDir`, this survives `restore()`
-   * because the provider's in-memory sandbox map holds the instance —
-   * there is no on-disk re-derivation path (see `restore`'s docblock). */
+   * `buildDockerExecArgs`). The durable inventory restores this flag and
+   * `credsHostDir` after API restart. */
   docker?: boolean;
 }
 
@@ -150,13 +261,14 @@ const CONTAINER_WORKSPACE = "/workspace";
 /** Port the in-sandbox auth gateway daemon listens on (Task 2 default). */
 const GATEWAY_PORT = 9000;
 
-/** Sentinel file the mount probe writes on the host and reads inside the
- * container. Removed again as soon as the probe ends. */
-const MOUNT_PROBE_FILE = ".valet-mount-probe";
+/** Prefix of the sentinel file the mount probe writes inside the container and
+ * reads on the host. A random token completes the name. The file is removed
+ * again as soon as the probe ends. */
+const MOUNT_PROBE_PREFIX = ".valet-mount-probe-";
 
 /** Bounds the mount probe. macOS file sharing (VirtioFS, gRPC-FUSE) caches
- * directory entries, so a host write can need a moment to appear inside the
- * container — the same delay `awaitCredsPropagation` waits out. */
+ * directory entries, so a write can need a moment to appear on the other side
+ * of the mount — the same delay `awaitCredsPropagation` waits out. */
 const MOUNT_PROBE_TIMEOUT_MS = 5000;
 const MOUNT_PROBE_POLL_MS = 100;
 
@@ -187,40 +299,60 @@ export async function createSandboxWorkspace(prefix: string): Promise<string> {
 }
 
 /**
- * Confirms the container reads the same directory the host writes to.
+ * Confirms the container and the host see the same working directory.
  *
  * A docker daemon inside a virtual machine shares only a subset of the host
  * filesystem. `docker run -v` with a host path outside that subset does not
  * fail: the daemon creates an empty directory inside the VM and mounts that
- * instead. The container then reads a different directory than `readFile` and
- * `writeFile` write to (both run on the host — see the `DockerSandbox`
- * docblock), so every file staged from the host disappears.
+ * instead. The host and the container then read different directories, and
+ * every file staged from the host disappears.
  *
- * The probe exists because the mismatch is otherwise silent, and surfaces far
- * from its cause. Workspace prep, for example, stages the git credential
- * helper with `writeFile` and then installs it with `exec`; all the operator
- * sees is `cp: can't stat '.valet-prep/git-credential-valet'`.
+ * The container writes the sentinel as root and the host reads it. The image
+ * entrypoint can give the working directory to the `dockerd` workload user
+ * (`browser-preflight.sh`, `start-docker.sh`). After that, the API's own user
+ * can still read the directory but can no longer create files in it, so a
+ * host-side write failed with EACCES on every create for that workspace.
+ *
+ * The workspace outlives the sandbox, so an earlier workload could leave a
+ * symlink where the probe goes and turn the root write against any file in the
+ * container. The name therefore carries a random token, and the shell refuses
+ * to write through a path that already exists (`set -C`).
  */
 async function verifyWorkspaceMount(
   containerId: string,
   hostWorkspace: string,
   image: string,
 ): Promise<void> {
-  const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const probeHostPath = join(hostWorkspace, MOUNT_PROBE_FILE);
-  const probeContainerPath = posix.join(CONTAINER_WORKSPACE, MOUNT_PROBE_FILE);
+  const token = randomBytes(16).toString("hex");
+  const probeHostPath = join(hostWorkspace, `${MOUNT_PROBE_PREFIX}${token}`);
+  const probeContainerPath = posix.join(CONTAINER_WORKSPACE, `${MOUNT_PROBE_PREFIX}${token}`);
+  let writeError = "";
+  let written = false;
   try {
-    await fs.writeFile(probeHostPath, token, "utf8");
     const deadline = Date.now() + MOUNT_PROBE_TIMEOUT_MS;
     for (;;) {
-      const read = await execProcess(
-        "docker",
-        ["exec", containerId, "sh", "-c", `cat ${probeContainerPath} 2>/dev/null`],
-        {},
-      );
-      if (read.stdout.trim() === token) return;
+      if (!written) {
+        const write = await execProcess(
+          "docker",
+          ["exec", "--user", "0", containerId, "sh", "-c", `set -C; printf %s ${token} > ${probeContainerPath}`],
+          {},
+        );
+        written = write.exitCode === 0;
+        writeError = (write.stderr.trim() || write.stdout.trim()).slice(0, 2000);
+      }
+      if (written) {
+        const seen = await fs.readFile(probeHostPath, "utf8").catch((error: NodeJS.ErrnoException) => {
+          // Only a missing file means the host reads a different directory.
+          if (error.code === "ENOENT") return "";
+          throw new Error(
+            `DockerSandboxProvider.create: the host cannot read the workspace at ${hostWorkspace}: ${error.message}. ` +
+              `When the image entrypoint changes the owner or mode of ${CONTAINER_WORKSPACE}, keep read and search access for the API user, then create the session again.`,
+          );
+        });
+        if (seen.trim() === token) return;
+      }
       if (Date.now() >= deadline) {
-        // A container whose PID 1 already exited cannot read anything. Say
+        // A container whose PID 1 already exited cannot write anything. Say
         // so, rather than blame a bind mount that may be correct.
         if (!(await isContainerAlive(containerId))) {
           // The container is removed right after this throw, so quote its
@@ -233,8 +365,15 @@ async function verifyWorkspaceMount(
               (tail ? ` Last container output: ${tail}` : ""),
           );
         }
+        if (!written) {
+          throw new Error(
+            `DockerSandboxProvider.create: the container from image "${image}" cannot write to ${CONTAINER_WORKSPACE}. ` +
+              `Make the image run "sh" as root through docker exec, then create the session again.` +
+              (writeError ? ` Last error: ${writeError}` : ""),
+          );
+        }
         throw new Error(
-          `DockerSandboxProvider.create: the container cannot read the workspace bind mount at ${hostWorkspace}. ` +
+          `DockerSandboxProvider.create: the host does not see the workspace bind mount at ${hostWorkspace}. ` +
             `This docker daemon runs in a virtual machine that does not share the path. ` +
             `The host and the container therefore read different directories, and staged files never arrive. ` +
             `Put the workspace under ${homedir()}, which every docker distribution shares by default. ` +
@@ -246,9 +385,23 @@ async function verifyWorkspaceMount(
       await new Promise((r) => setTimeout(r, MOUNT_PROBE_POLL_MS));
     }
   } finally {
-    // Never leave the sentinel in a workspace the agent will see.
+    // Never leave the sentinel in a workspace the agent will see. The container
+    // removes it, because the host may not have write access to the directory.
+    if (written) await execProcess("docker", ["exec", "--user", "0", containerId, "rm", "-f", probeContainerPath], {}).catch(() => undefined);
     await fs.rm(probeHostPath, { force: true }).catch(() => undefined);
   }
+}
+
+async function verifyBrowserPreflight(containerId: string): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const probe = await execProcess("docker", ["exec", containerId, "test", "-f", "/run/valet-browser-ready"], {});
+    if (probe.exitCode === 0) return;
+    if (!await isContainerAlive(containerId)) break;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  const logs = await execProcess("docker", ["logs", "--tail", "30", containerId], {});
+  throw new Error(`Browser preflight failed. Check the runtime image and reviewed seccomp profile. ${(logs.stderr || logs.stdout).trim().slice(0, 3000)}`);
 }
 
 export interface BuildDockerRunArgsOpts {
@@ -269,10 +422,18 @@ export interface BuildDockerRunArgsOpts {
    * (create()) is responsible for writing the files BEFORE invoking docker run.
    * When absent, no creds volume is added. */
   credsHostDir?: string;
+  /** Absolute host path for the scratch bind mount. When set, the directory
+   * is mounted read-write at /scratch and TMPDIR points there. When absent,
+   * no scratch volume is added. */
+  scratchHostDir?: string;
   /** Rootless docker-in-sandbox (SandboxCreateOpts.docker). Adds the
    * seccomp/AppArmor/systempaths relaxations, CAP_SYS_ADMIN, CAP_NET_ADMIN,
    * /dev/fuse, /dev/net/tun, and VALET_SANDBOX_DOCKER=1 — never --privileged. */
   docker?: boolean;
+  runtimeStateDir?: string;
+  browser?: { enabled: boolean; viewer?: boolean };
+  browserSeccompProfile?: string;
+  labels?: Record<string, string>;
 }
 
 /**
@@ -283,11 +444,33 @@ export interface BuildDockerRunArgsOpts {
  * already-resolved values — image/network defaults, workspace realpath,
  * etc. are `create()`'s job).
  */
+function bindMount(source: string, target: string, readonly = false): string[] {
+  if (!source.includes(":")) return ["-v", `${source}:${target}${readonly ? ":ro" : ""}`];
+  // Docker's --mount CSV parser keeps colons in retained execution paths.
+  const src = `src=${source}`;
+  const field = /[,"\n\r]/.test(src) ? `"${src.replaceAll('"', '""')}"` : src;
+  return ["--mount", `type=bind,${field},dst=${target}${readonly ? ",readonly" : ""}`];
+}
+
 export function buildDockerRunArgs(opts: BuildDockerRunArgsOpts): string[] {
   const runArgs: string[] = ["run", "-d", "--name", opts.containerName];
   runArgs.push("--workdir", CONTAINER_WORKSPACE);
-  runArgs.push("-v", `${opts.workspaceHostPath}:${CONTAINER_WORKSPACE}`);
-  if (opts.credsHostDir) runArgs.push("-v", `${opts.credsHostDir}:/etc/valet/creds:ro`);
+  runArgs.push(...bindMount(opts.workspaceHostPath, CONTAINER_WORKSPACE));
+  if (opts.runtimeStateDir) runArgs.push(...bindMount(opts.runtimeStateDir, "/var/lib/valet"));
+  for (const [key, value] of Object.entries(opts.labels ?? {})) runArgs.push("--label", `${key}=${value}`);
+  if (opts.browser?.enabled) {
+    if (!opts.browserSeccompProfile) throw new Error("Browser seccomp profile is missing. Configure the reviewed browser profile before starting this sandbox.");
+    if (opts.docker) throw new Error("Browser isolation cannot use the Docker-in-sandbox security profile. Disable Docker-in-sandbox for this session.");
+    runArgs.push("--security-opt", `seccomp=${opts.browserSeccompProfile}`);
+    runArgs.push("--env", "VALET_BROWSER_ENABLED=1", "--env", "VALET_BROWSER_CONFINE=1", "--env", "VALET_BROWSER_STATE=/var/lib/valet/browser");
+    runArgs.push("--env", `VALET_BROWSER_DEV_PORTS=${opts.env?.VALET_BROWSER_DEV_PORTS ?? "5173,3000,8080"}`);
+    if (opts.browser.viewer) runArgs.push("--env", "VALET_BROWSER_VIEWER=1");
+  }
+  if (opts.credsHostDir) runArgs.push(...bindMount(opts.credsHostDir, "/etc/valet/creds", true));
+  if (opts.scratchHostDir) {
+    runArgs.push(...bindMount(opts.scratchHostDir, "/scratch"));
+    runArgs.push("--env", "TMPDIR=/scratch/tmp");
+  }
   if (opts.docker) {
     runArgs.push("--security-opt", "seccomp=unconfined");
     runArgs.push("--security-opt", "apparmor=unconfined");
@@ -310,6 +493,8 @@ export function buildDockerRunArgs(opts: BuildDockerRunArgsOpts): string[] {
   }
   if (opts.env) {
     for (const [k, v] of Object.entries(opts.env)) {
+      if (opts.browser?.enabled && (["PATH", "NODE_OPTIONS", "BASH_ENV", "ENV"].includes(k) || k.startsWith("LD_") || k.startsWith("BASH_FUNC_"))) continue;
+      if (opts.browser?.enabled && ["VALET_BROWSER_ENABLED", "VALET_BROWSER_CONFINE", "VALET_BROWSER_STATE", "VALET_BROWSER_VIEWER", "VALET_BROWSER_DEV_PORTS", "VALET_BROWSER_WORKSPACE_READONLY"].includes(k)) continue;
       runArgs.push("--env", `${k}=${v}`);
     }
   }
@@ -323,12 +508,12 @@ export function buildDockerRunArgs(opts: BuildDockerRunArgsOpts): string[] {
     }
     runArgs.push("--memory", String(memoryBytes));
   }
+  if (opts.profile === "full" || opts.browser?.viewer) runArgs.push("-p", `127.0.0.1::${GATEWAY_PORT}`);
   if (opts.profile === "full") {
     // Ephemeral loopback-only port — never exposed beyond the host, matches
     // the auth-gateway's JWT-fronted access model (spec: sandbox auth
     // gateway plan). `DockerSandbox.gatewayEndpoint()` resolves the actual
     // assigned port via `docker inspect`.
-    runArgs.push("-p", `127.0.0.1::${GATEWAY_PORT}`);
     // Full-profile containers run the same startup script the kubernetes
     // provider uses (packages/sandbox-kubernetes/src/manifest.ts) — it
     // starts the gateway/ttyd/code-server daemons and keeps the container
@@ -346,6 +531,8 @@ export function buildDockerRunArgs(opts: BuildDockerRunArgsOpts): string[] {
       "-c",
       "[ -f /start-full.sh ] && { [ -x /usr/bin/tini ] && exec /usr/bin/tini -g -- /bin/bash /start-full.sh || exec /bin/bash /start-full.sh; } || exec tail -f /dev/null",
     );
+  } else if (opts.browser?.enabled) {
+    runArgs.push(opts.image, "sh", "-c", "test -x /usr/local/bin/valet-browser-client && test -f /start-headless.sh || { echo 'Browser runtime is missing. Rebuild this sandbox image.' >&2; exit 78; }; exec /usr/bin/tini -g -- /bin/bash /start-headless.sh");
   } else if (opts.docker) {
     // Same probe-and-degrade idiom as the full profile: images without the
     // rootless toolchain still come up (docker commands then fail inside).
@@ -376,6 +563,7 @@ export interface BuildDockerExecArgsOpts {
   docker?: boolean;
   /** ExecOpts.privileged — run with the container's default (root) user. */
   privileged?: boolean;
+  browser?: boolean;
 }
 
 /**
@@ -389,18 +577,29 @@ export interface BuildDockerExecArgsOpts {
  */
 export function buildDockerExecArgs(opts: BuildDockerExecArgsOpts): string[] {
   const args = ["exec"];
+  const browserWorkload = opts.browser && !opts.privileged;
   args.push("--workdir", opts.cwd);
-  if (opts.env) {
+  if (opts.env && !browserWorkload) {
     for (const [k, v] of Object.entries(opts.env)) {
       args.push("--env", `${k}=${v}`);
     }
   }
   if (opts.interactive) args.push("--interactive");
-  if (opts.docker && !opts.privileged) {
+  if ((opts.docker || opts.browser) && !opts.privileged) {
     args.push("-u", "dockerd");
     args.push("--env", "HOME=/home/dockerd");
   }
-  args.push(opts.containerId, "sh", "-c", opts.command);
+  if (browserWorkload) {
+    for (const name of ["VALET_SANDBOX_JWT_SECRET", "LD_PRELOAD", "LD_LIBRARY_PATH", "BASH_ENV", "ENV"]) args.push("--env", `${name}=`);
+    // Keep the trusted-CA flag; user NODE_OPTIONS stays dropped (see distrust-compromised-roots.sh).
+    args.push("--env", "NODE_OPTIONS=--use-openssl-ca");
+  }
+  args.push(opts.containerId);
+  if (browserWorkload) {
+    args.push("/usr/bin/setpriv", "--no-new-privs", "/usr/bin/env", "-u", "VALET_SANDBOX_JWT_SECRET");
+    for (const [key, value] of Object.entries(opts.env ?? {})) if (key !== "VALET_SANDBOX_JWT_SECRET" && key !== "NODE_OPTIONS") args.push(`${key}=${value}`);
+  }
+  args.push(browserWorkload ? "/bin/sh" : "sh", "-c", opts.command);
   return args;
 }
 
@@ -411,9 +610,14 @@ export class DockerSandbox implements Sandbox {
   readonly containerWorkspace: string;
   readonly image: string;
   readonly credsHostDir?: string;
+  readonly scratchHostDir?: string;
   readonly docker?: boolean;
+  readonly runtimeStateDir?: string;
+  readonly browser?: boolean;
+  readonly browserContainerId?: string;
+  private readonly browserWorkload: boolean;
+  private readonly onDestroy?: () => Promise<void>;
   private jobs = new Map<string, DockerJobState>();
-  private nextJobId = 1;
 
   constructor(id: string, opts: DockerSandboxOptions) {
     this.id = id;
@@ -422,7 +626,13 @@ export class DockerSandbox implements Sandbox {
     this.containerWorkspace = opts.containerWorkspace;
     this.image = opts.image;
     this.credsHostDir = opts.credsHostDir;
+    this.scratchHostDir = opts.scratchHostDir;
     this.docker = opts.docker;
+    this.runtimeStateDir = opts.runtimeStateDir;
+    this.onDestroy = opts.onDestroy;
+    this.browser = opts.browser;
+    this.browserContainerId = opts.browserContainerId;
+    this.browserWorkload = opts.browser === true && !opts.docker;
   }
 
   /**
@@ -432,14 +642,19 @@ export class DockerSandbox implements Sandbox {
    * sees the workspace at `/workspace` inside the container.
    */
   private resolveHostPath(p: string): string {
-    if (!isAbsolute(p)) return resolve(this.workspace, p);
+    const allowed = (candidate: string): string => {
+      const normalized = resolve(candidate);
+      if (normalized !== this.workspace && !normalized.startsWith(this.workspace + "/")) throw new Error("File path is outside the working directory. Use a file inside the session working directory.");
+      return normalized;
+    };
+    if (!isAbsolute(p)) return allowed(resolve(this.workspace, p));
     const cw = this.containerWorkspace;
     if (p === cw) return this.workspace;
     const cwSlash = cw.endsWith("/") ? cw : cw + "/";
     if (p.startsWith(cwSlash)) {
-      return resolve(this.workspace, p.slice(cwSlash.length));
+      return allowed(resolve(this.workspace, p.slice(cwSlash.length)));
     }
-    return p;
+    return allowed(p);
   }
 
   /**
@@ -464,59 +679,111 @@ export class DockerSandbox implements Sandbox {
   }
 
   async readFile(path: string): Promise<string> {
-    return fs.readFile(this.resolveHostPath(path), "utf8");
+    if (this.browserWorkload) return this.workloadFile("read", path);
+    return Buffer.from(await this.readBinary(path)).toString("utf8");
   }
 
   async readBinary(path: string): Promise<Uint8Array> {
-    const buf = await fs.readFile(this.resolveHostPath(path));
-    return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+    const output = this.browserWorkload
+      ? await this.workloadFile("readBinary", path)
+      : await this.containerFile(path, quoted => `base64 -w0 ${quoted}`);
+    return new Uint8Array(Buffer.from(output, "base64"));
   }
 
   async writeFile(path: string, content: string): Promise<void> {
-    // No pre-write mkdir: the PolicySandbox wrapper owns write-with-
-    // parent-creation (attempt write, mkdir parent + retry once on
-    // rejection) — see spec decision 3.
-    await fs.writeFile(this.resolveHostPath(path), content, "utf8");
+    await this.writeBinary(path, new Uint8Array(Buffer.from(content, "utf8")));
   }
 
   async writeBinary(path: string, data: Uint8Array): Promise<void> {
-    await fs.writeFile(this.resolveHostPath(path), data);
+    const encoded = Buffer.from(data).toString("base64");
+    if (this.browserWorkload) { await this.workloadFile("writeBinary", path, encoded); return; }
+    await this.containerFile(path, quoted => `base64 -d > ${quoted}`, encoded);
   }
 
   async readdir(path: string): Promise<string[]> {
-    return fs.readdir(this.resolveHostPath(path));
+    if (this.browserWorkload) {
+      const value: unknown = JSON.parse(await this.workloadFile("readdir", path));
+      if (!Array.isArray(value) || !value.every(entry => typeof entry === "string")) throw new Error("Invalid directory response. Inspect the sandbox runtime.");
+      return value;
+    }
+    const output = await this.containerFile(path, quoted => `test -d ${quoted} || exit 1; for entry in ${quoted}/.[!.]* ${quoted}/..?* ${quoted}/*; do if [ -e "$entry" ] || [ -L "$entry" ]; then printf '%s\\0' "\${entry##*/}"; fi; done`);
+    return output.split("\0").filter(Boolean);
   }
 
   async stat(path: string): Promise<{ isFile: boolean; isDirectory: boolean; size: number }> {
-    const s = await fs.stat(this.resolveHostPath(path));
-    return { isFile: s.isFile(), isDirectory: s.isDirectory(), size: s.size };
+    if (this.browserWorkload) {
+      const value: unknown = JSON.parse(await this.workloadFile("stat", path));
+      if (typeof value !== "object" || value === null || !("isFile" in value) || typeof value.isFile !== "boolean" || !("isDirectory" in value) || typeof value.isDirectory !== "boolean" || !("size" in value) || typeof value.size !== "number") throw new Error("Invalid file metadata response. Inspect the sandbox runtime.");
+      return { isFile: value.isFile, isDirectory: value.isDirectory, size: value.size };
+    }
+    const output = await this.containerFile(path, quoted => `if [ -d ${quoted} ]; then printf 'd 0'; elif [ -f ${quoted} ]; then printf 'f '; wc -c < ${quoted}; elif [ -e ${quoted} ]; then printf 'o 0'; else exit 2; fi`, undefined, 2);
+    const match = /^([dfo])\s+(\d+)$/.exec(output.trim());
+    if (!match) throw new Error("Invalid file metadata response. Inspect the sandbox runtime.");
+    return { isFile: match[1] === "f", isDirectory: match[1] === "d", size: Number(match[2]) };
   }
 
   async mkdir(path: string): Promise<void> {
-    await fs.mkdir(this.resolveHostPath(path), { recursive: true });
+    if (this.browserWorkload) { await this.workloadFile("mkdir", path); return; }
+    await this.containerFile(path, quoted => `mkdir -p -- ${quoted}`);
   }
 
   async rm(path: string, opts?: { recursive?: boolean }): Promise<void> {
-    await fs.rm(this.resolveHostPath(path), {
-      recursive: opts?.recursive ?? false,
-      force: true,
-    });
+    if (this.browserWorkload) { await this.workloadFile("rm", path, undefined, opts?.recursive); return; }
+    await this.containerFile(path, quoted => `rm ${opts?.recursive ? "-rf" : "-f"} -- ${quoted}`);
+  }
+
+  /** Generic file operations resolve symlinks only within this container's mount view. */
+  /** `notFoundExit` is the exit code the command uses for a missing path. It
+   * becomes an `ENOENT` error, the code callers test to tell absence from a
+   * failed operation (the upload route writes only after stat says absent). */
+  private async containerFile(path: string, command: (quotedPath: string) => string, stdin?: string, notFoundExit?: number): Promise<string> {
+    this.resolveHostPath(path);
+    const result = await this.exec(command(shQuote(this.resolveContainerPath(path))), { stdin, maxOutputBytes: 150 * 1024 * 1024 });
+    if (notFoundExit !== undefined && result.exitCode === notFoundExit) {
+      throw Object.assign(new Error(`ENOENT: no such file or directory, ${path}`), { code: "ENOENT" });
+    }
+    if (result.exitCode !== 0 || result.truncated) throw new Error(`${result.stderr.trim() || "The sandbox file operation failed"}. Use an accessible file in the session working directory.`);
+    return result.stdout;
+  }
+
+  /** Browser sessions enforce generic file access with the workload UID inside the container. */
+  private async workloadFile(method: string, path: string, data?: string, recursive?: boolean): Promise<string> {
+    this.resolveHostPath(path);
+    const script = `const fs=require('node:fs/promises');(async()=>{let input='';for await(const chunk of process.stdin)input+=chunk;const v=JSON.parse(input);switch(v.method){case 'read':process.stdout.write(await fs.readFile(v.path,'utf8'));break;case 'readBinary':process.stdout.write((await fs.readFile(v.path)).toString('base64'));break;case 'write':await fs.writeFile(v.path,v.data);break;case 'writeBinary':await fs.writeFile(v.path,Buffer.from(v.data,'base64'));break;case 'readdir':process.stdout.write(JSON.stringify(await fs.readdir(v.path)));break;case 'stat':{const s=await fs.stat(v.path);process.stdout.write(JSON.stringify({isFile:s.isFile(),isDirectory:s.isDirectory(),size:s.size}));break;}case 'mkdir':await fs.mkdir(v.path,{recursive:true});break;case 'rm':await fs.rm(v.path,{recursive:v.recursive===true,force:true});break;default:throw Error('Unsupported file method');}})().catch(e=>{process.stderr.write(e.message);process.exit(1)});`;
+    const result = await this.exec(`node -e '${script.replaceAll("'", "'\\''")}'`, { stdin: JSON.stringify({ method, path: this.resolveContainerPath(path), data, recursive }), maxOutputBytes: 150 * 1024 * 1024 });
+    if (result.exitCode !== 0) throw new Error(`${result.stderr.trim()}. Use a file accessible to the workload user in the working directory.`);
+    return result.stdout;
+  }
+
+  private execContainer(opts?: Pick<ExecOpts, "target" | "privileged">): string {
+    if (opts?.target !== "browser") return this.containerId;
+    if (!opts.privileged) throw new Error("Browser commands require privileged execution. Use the trusted browser transport.");
+    if (!this.browser) throw new Error("Browser automation is disabled. Enable it before opening the browser transport.");
+    if (this.docker && !this.browserContainerId) throw new Error("The browser companion is missing. Release this runtime before replacing it.");
+    return this.browserContainerId ?? this.containerId;
   }
 
   private execArgs(command: string, opts?: ExecOpts): string[] {
-    const cwd = opts?.cwd ? this.resolveContainerPath(opts.cwd) : this.containerWorkspace;
+    const containerId = this.execContainer(opts);
+    const cwd = opts?.target === "browser" ? "/" : opts?.cwd ? this.resolveContainerPath(opts.cwd) : this.containerWorkspace;
     return buildDockerExecArgs({
-      containerId: this.containerId,
+      containerId,
       cwd,
       command,
       env: opts?.env,
       interactive: opts?.stdin !== undefined,
       docker: this.docker,
+      browser: this.browserWorkload,
       privileged: opts?.privileged,
     });
   }
 
+  async openCommandChannel(command: string, options: SandboxCommandChannelOptions): Promise<SandboxCommandChannel> {
+    return openDockerCommandChannel(this.execArgs(command, { privileged: options.privileged, target: options.target, stdin: '' }), options);
+  }
+
   async exec(command: string, opts?: ExecOpts): Promise<ExecResult> {
+    const containerId = this.execContainer(opts);
     const result = await execProcess("docker", this.execArgs(command, opts), {
       timeout: opts?.timeout,
       signal: opts?.signal,
@@ -539,7 +806,7 @@ export class DockerSandbox implements Sandbox {
     if (isDockerExecTransportFailure(result.exitCode, result.stderr)) {
       if (
         isGenuineDockerCliFailure(result.exitCode, result.stderr) ||
-        !(await isContainerAlive(this.containerId))
+        !(await isContainerAlive(containerId))
       ) {
         throw new Error(result.stderr.trim() || `docker exec failed (${result.exitCode})`);
       }
@@ -548,7 +815,7 @@ export class DockerSandbox implements Sandbox {
     } else if (
       !result.timedOut &&
       looksSignalKilled(result.exitCode) &&
-      !(await isContainerAlive(this.containerId))
+      !(await isContainerAlive(containerId))
     ) {
       // Our own timeout SIGKILLs the docker CLI child directly (`timedOut`)
       // — that's a normal timeout outcome, not container death. Otherwise, a
@@ -556,7 +823,7 @@ export class DockerSandbox implements Sandbox {
       // ambiguous (see looksSignalKilled) — confirm via `docker inspect`
       // whether the container itself is still running before deciding.
       throw new Error(
-        `No such container: ${this.containerId} is no longer running (exec exited ${result.exitCode})`,
+        `No such container: ${containerId} is no longer running (exec exited ${result.exitCode})`,
       );
     }
     return result;
@@ -571,15 +838,21 @@ export class DockerSandbox implements Sandbox {
   }
 
   async destroy(): Promise<void> {
+    if (this.onDestroy) return this.onDestroy();
     // `docker rm -f` stops + removes; idempotent.
-    try {
-      await execProcess("docker", ["rm", "-f", this.containerId], {});
-    } catch {
-      // already gone
+    for (const containerId of [this.browserContainerId, this.containerId]) {
+      if (!containerId) continue;
+      const removed = await execProcess("docker", ["rm", "-f", containerId], {});
+      if (removed.exitCode !== 0 && !/No such (object|container)/i.test(removed.stderr))
+        throw new Error(`Cannot remove the Docker sandbox. Check the daemon before retrying. ${removed.stderr.trim()}`);
     }
     // Remove the host-side creds dir. Best-effort: a missing dir is not an error.
     if (this.credsHostDir) {
       await fs.rm(this.credsHostDir, { recursive: true, force: true });
+    }
+    // Remove the host-side scratch dir. Best-effort: a missing dir is not an error.
+    if (this.scratchHostDir) {
+      await fs.rm(this.scratchHostDir, { recursive: true, force: true });
     }
   }
 
@@ -589,10 +862,22 @@ export class DockerSandbox implements Sandbox {
    * one capped buffer that pollJob reads incrementally by offset.
    */
   async execJob(command: string, opts?: ExecOpts): Promise<ExecJobHandle> {
-    const execId = `job-${this.nextJobId++}`;
-    const limit = opts?.maxOutputBytes;
+    const containerId = this.execContainer(opts);
+    // Unique per job, not per handle: a later handle on the same container
+    // must never reuse a live job's id (fix wave 2, B1).
+    const execId = opts?.execId ?? newExecId();
+    if (!EXEC_ID_PATTERN.test(execId) || this.jobs.has(execId)) {
+      throw new Error(`execJob refused: job id ${JSON.stringify(execId)} is invalid or already in use. Retry the command; a retry gets a new job id.`);
+    }
+    const detached = opts?.detached === true;
+    const limit = jobOutputLimit(opts);
+    if (detached) this.capDetachedOutputs();
 
-    const child = spawn("docker", this.execArgs(command, opts), {
+    // Killing the host-side `docker exec` client leaves the command running
+    // in the container. The job records its own process group in a pid
+    // file so `cancelJob` can kill the group inside the container (PR
+    // review, finding 3). `setsid -w` keeps this exec attached for output.
+    const child = spawn("docker", this.execArgs(jobWithProcessGroup(execId, command), opts), {
       stdio: ["pipe", "pipe", "pipe"],
     });
 
@@ -600,7 +885,7 @@ export class DockerSandbox implements Sandbox {
     const closed = new Promise<void>((res) => {
       resolveClosed = res;
     });
-    const state: DockerJobState = { status: "running", output: "", child, closed };
+    const state: DockerJobState = { status: "running", output: "", detached, child, closed };
     this.jobs.set(execId, state);
 
     child.stdout?.setEncoding("utf8");
@@ -641,10 +926,8 @@ export class DockerSandbox implements Sandbox {
     child.stdin?.end();
 
     const scheduleEviction = () => {
-      const t = setTimeout(() => this.jobs.delete(execId), JOB_EVICTION_BACKSTOP_MS);
-      const unrefable = t as { unref?: () => void };
-      if (typeof unrefable.unref === "function") unrefable.unref();
-      state.evictTimer = t;
+      if (state.terminalPolled) return;
+      this.scheduleJobEviction(execId, state, detached ? DETACHED_UNPOLLED_BACKSTOP_MS : JOB_EVICTION_BACKSTOP_MS);
     };
 
     child.on("error", (err) => {
@@ -665,7 +948,7 @@ export class DockerSandbox implements Sandbox {
           if (isDockerExecTransportFailure(exitCode, stderrTail)) {
             if (
               isGenuineDockerCliFailure(exitCode, stderrTail) ||
-              !(await isContainerAlive(this.containerId))
+              !(await isContainerAlive(containerId))
             ) {
               state.status = "failed";
               state.transportError = new Error(stderrTail.trim() || `docker exec failed (${exitCode})`);
@@ -673,12 +956,12 @@ export class DockerSandbox implements Sandbox {
               state.status = "done";
               state.exitCode = exitCode;
             }
-          } else if (looksSignalKilled(exitCode) && !(await isContainerAlive(this.containerId))) {
+          } else if (looksSignalKilled(exitCode) && !(await isContainerAlive(containerId))) {
             // Container-death mid-job-exec exits cleanly with a
             // signal-shaped code and no stderr message.
             state.status = "failed";
             state.transportError = new Error(
-              `No such container: ${this.containerId} is no longer running (exec exited ${exitCode})`,
+              `No such container: ${containerId} is no longer running (exec exited ${exitCode})`,
             );
           } else {
             state.status = "done";
@@ -694,6 +977,7 @@ export class DockerSandbox implements Sandbox {
         } finally {
           resolveClosed();
           scheduleEviction();
+          if (detached) this.capDetachedOutputs();
         }
       })();
     });
@@ -701,7 +985,7 @@ export class DockerSandbox implements Sandbox {
     return { execId };
   }
 
-  async pollJob(execId: string, offset: number): Promise<JobPoll> {
+  async pollJob(execId: string, offset: number, opts?: JobPollOpts): Promise<JobPoll> {
     const state = this.jobs.get(execId);
     if (!state) return { status: "failed", output: "", nextOffset: offset };
 
@@ -714,15 +998,27 @@ export class DockerSandbox implements Sandbox {
       throw state.transportError;
     }
 
-    const output = state.output.slice(offset);
-    const nextOffset = state.output.length;
-    const result: JobPoll = { status: state.status, output, nextOffset };
-    if (state.status === "done") result.exitCode = state.exitCode;
+    // Offsets and `maxBytes` count UTF-8 bytes, the same unit as the
+    // kubernetes provider, so the watcher's offset arithmetic holds on both
+    // (fix wave 2, L4).
+    const slice = sliceUtf8(Buffer.from(state.output, "utf8"), offset, opts);
+    // Output left past the cap keeps the job "running" for this caller, so
+    // it polls again and the job state is not evicted early.
+    const status = slice.more ? "running" : state.status;
+    const result: JobPoll = { status, output: slice.text, nextOffset: slice.nextOffset };
+    if (status === "done") result.exitCode = state.exitCode;
     if (state.truncated) result.truncated = true;
 
-    if (state.status !== "running") {
-      if (state.evictTimer) clearTimeout(state.evictTimer);
-      this.jobs.delete(execId);
+    if (status !== "running") {
+      if (!state.detached) {
+        if (state.evictTimer) clearTimeout(state.evictTimer);
+        this.jobs.delete(execId);
+      } else if (!state.terminalPolled) {
+        // A detached job serves the watcher and process_read alike, so a
+        // terminal poll starts the backstop instead of evicting (H1).
+        state.terminalPolled = true;
+        this.scheduleJobEviction(execId, state, JOB_EVICTION_BACKSTOP_MS);
+      }
     }
     return result;
   }
@@ -730,8 +1026,43 @@ export class DockerSandbox implements Sandbox {
   async cancelJob(execId: string): Promise<void> {
     const state = this.jobs.get(execId);
     if (!state) return;
+    if (state.status === "running") {
+      // Kill the command's process group inside the container first; the
+      // exec client below only ends the host side (PR review, finding 3).
+      await this.exec(jobGroupKillCommand(execId), { timeout: 10_000 }).catch(() => {});
+    }
     state.child.kill("SIGKILL");
     await state.closed;
+    if (state.detached) {
+      // Keep the output for process_read until the backstop, like a finished
+      // job. The kubernetes provider keeps the log file the same way. The
+      // killed exec client is not a dead container, so drop any transport
+      // error its close recorded.
+      delete state.transportError;
+      state.terminalPolled = true;
+      this.scheduleJobEviction(execId, state, JOB_EVICTION_BACKSTOP_MS);
+    }
+  }
+
+  /** Keeps this sandbox's detached buffers under their total cap, counting each drop. */
+  private capDetachedOutputs(): void {
+    const before = new Map(this.jobs);
+    for (const id of dropFinishedDetachedOutputs(this.jobs, DETACHED_OUTPUT_TOTAL_MAX_BYTES)) {
+      const timer = before.get(id)?.evictTimer;
+      if (timer) clearTimeout(timer);
+      recordDockerJobOutputDropped();
+      console.warn(`DockerSandbox ${this.id}: dropped the output of finished job ${id} to keep detached job buffers under 256 MiB.`);
+    }
+  }
+
+  private scheduleJobEviction(execId: string, state: DockerJobState, ms: number): void {
+    if (state.evictTimer) clearTimeout(state.evictTimer);
+    const t = setTimeout(() => {
+      if (this.jobs.get(execId) === state) this.jobs.delete(execId);
+    }, ms);
+    const unrefable = t as { unref?: () => void };
+    if (typeof unrefable.unref === "function") unrefable.unref();
+    state.evictTimer = t;
   }
 
   /**
@@ -861,6 +1192,15 @@ function credsHostDir(sandboxId: string): string {
   return join(homedir(), ".valet", "creds", sandboxId);
 }
 
+/** Absolute host path for the scratch dir of a given sandbox id, sibling
+ * of credsHostDir. e.g. ~/.valet/scratch/dsb-1/. The provider itself
+ * derives this path from its configurable inventory root (see
+ * DockerSandboxProvider.create), not this default-root helper. Same
+ * split as credsHostDir above. */
+function scratchHostDir(sandboxId: string): string {
+  return join(homedir(), ".valet", "scratch", sandboxId);
+}
+
 /** Throw when any name is not a plain filename ("../evil", "a/b", ".", "..").
  * Guards every place a creds key becomes part of a path — host writes and
  * the in-container check script alike. */
@@ -923,6 +1263,45 @@ const CREDS_PROPAGATION_TIMEOUT_MS = 5000;
 const CREDS_PROPAGATION_POLL_MS = 100;
 
 /** Escape a string for a single-quoted POSIX shell context. */
+/** Where a docker job records its process group id inside the container. */
+function jobPidPath(execId: string): string {
+  return `/tmp/.valet-job-${execId}.pid`;
+}
+
+/**
+ * Wraps a job so its process group id lands in a pid file before the
+ * command runs. With `setsid` (util-linux) the job gets its own group and
+ * `-w` keeps the exec attached to it for output; without `setsid` the
+ * shell's own pid is recorded and the kill reaches it and its direct
+ * children. Exported for tests.
+ */
+export function jobWithProcessGroup(execId: string, command: string): string {
+  const pid = shQuote(jobPidPath(execId));
+  const inner = shQuote(`echo $$ > ${pid}; exec sh -c ${shQuote(command)}`);
+  // BusyBox `setsid` (alpine) has no `-w` and would return before the job
+  // ends, so only a `setsid` that documents `--wait` is used.
+  return `if setsid --help 2>&1 | grep -q -e --wait; then exec setsid -w sh -c ${inner}; else exec sh -c ${inner}; fi`;
+}
+
+/**
+ * Kills every process in the job's process group (from the pid file), then
+ * the leader, then removes the file. The group members come from a sweep
+ * of `/proc/<pid>/stat` (field 3 after the command name is the pgrp):
+ * dash and BusyBox `kill` builtins disagree on how a negative pid is
+ * spelled, and BusyBox reads `-<pgid>` as a signal, so no `kill -- -pgid`
+ * form works on both. Exported for tests.
+ */
+export function jobGroupKillCommand(execId: string): string {
+  const pid = shQuote(jobPidPath(execId));
+  return (
+    `p=$(cat ${pid} 2>/dev/null); if [ -n "$p" ]; then ` +
+    `for s in /proc/[0-9]*/stat; do d=\${s%/stat}; pid=\${d#/proc/}; ` +
+    `rest=$(sed 's/.*) //' "$s" 2>/dev/null) || continue; set -- $rest; ` +
+    `if [ "$3" = "$p" ] && [ "$pid" != "$$" ]; then kill -9 "$pid" 2>/dev/null; fi; done; ` +
+    `kill -9 "$p" 2>/dev/null; fi; rm -f ${pid}; :`
+  );
+}
+
 function shQuote(s: string): string {
   return `'${s.replaceAll("'", `'\\''`)}'`;
 }
@@ -980,10 +1359,112 @@ async function awaitCredsPropagation(
   }
 }
 
+export interface DockerSandboxProviderOptions {
+  /** Durable inventory and private state. Keep this outside every working directory. */
+  inventoryRoot?: string;
+  /** Reviewed Docker seccomp JSON. The bundled profile is the default. */
+  browserSeccompProfile?: string;
+  browserEnabled?: boolean;
+  /** Stock browser-capable image for Docker-enabled session companions. */
+  browserImage?: string;
+}
 export class DockerSandboxProvider implements SandboxProvider {
   readonly backend = "docker";
   private sandboxes = new Map<string, DockerSandbox>();
-  private nextId = 1;
+  private readonly inventory: DockerInventory;
+  private readonly browserSeccompProfile: string;
+  private readonly browserEnabled: boolean;
+  private readonly browserImage?: string;
+  constructor(options: DockerSandboxProviderOptions = {}) {
+    this.browserEnabled = options.browserEnabled === true;
+    this.browserImage = options.browserImage;
+    this.inventory = new DockerInventory(resolve(options.inventoryRoot ?? join(homedir(), ".valet", "docker-runtime")));
+    this.browserSeccompProfile = options.browserSeccompProfile ?? fileURLToPath(new URL("../seccomp/browser.json", import.meta.url));
+  }
+  private async providerId(): Promise<string> {
+    const result = await execProcess("docker", ["info", "--format", "{{.ID}}"], {});
+    if (result.exitCode !== 0 || !result.stdout.trim()) throw new Error("Cannot identify the Docker daemon. Start the configured daemon before restoring sandbox ownership.");
+    return result.stdout.trim();
+  }
+  private async saved(id: string): Promise<DockerInventoryRecord | undefined> {
+    const value = await this.inventory.read(id);
+    if (value) {
+      const stateDir = join(this.inventory.root, "state", id);
+      const expectedStateDir = value.workloadStateDir ? join(this.inventory.root, "browser-state", id) : stateDir;
+      if (value.runtimeStateDir !== expectedStateDir ||
+          (value.workloadStateDir !== undefined && (value.workloadStateDir !== stateDir || !value.browser?.enabled)) ||
+          (value.credsHostDir !== undefined && value.credsHostDir !== join(this.inventory.root, "creds", id)) ||
+          (value.scratchHostDir !== undefined && value.scratchHostDir !== join(this.inventory.root, "scratch", id)))
+        throw new Error("Docker inventory state paths differ from their owner. Inspect the saved inventory before retrying.");
+    }
+    return value;
+  }
+  private sandbox(value: DockerInventoryRecord): DockerSandbox {
+    if (!value.containerId) throw new Error("Docker inventory has no container identity. Inspect the pending container before retrying.");
+    const sandbox = new DockerSandbox(value.id, { containerId: value.containerId, workspace: value.workspace, containerWorkspace: CONTAINER_WORKSPACE, image: value.image, credsHostDir: value.credsHostDir, scratchHostDir: value.scratchHostDir, runtimeStateDir: value.runtimeStateDir, docker: value.docker, browser: value.browser?.enabled, browserContainerId: value.browserCompanion?.containerId, onDestroy: () => this.destroy(value.id) });
+    this.sandboxes.set(value.id, sandbox);
+    return sandbox;
+  }
+  private async inspectOwner(value: DockerInventoryRecord, browser = false): Promise<DockerContainerOwner | undefined> {
+    const companion = browser ? value.browserCompanion : undefined;
+    const identity = companion ? companion.containerId ?? companion.containerName : value.containerId ?? value.containerName;
+    const inspection = await execProcess("docker", ["inspect", identity], {});
+    if (inspection.exitCode !== 0) {
+      if (/No such (object|container)/i.test(inspection.stderr)) return undefined;
+      throw new Error(`Cannot inspect the Docker owner. Restore Docker connectivity before retrying. ${inspection.stderr.trim()}`);
+    }
+    const owner = parseDockerInspection(JSON.parse(inspection.stdout));
+    if (browser) validateDockerBrowserOwner(value, owner); else validateDockerOwner(value, owner);
+    return owner;
+  }
+
+  private async validateOwnerSet(value: DockerInventoryRecord, owners: string[]): Promise<void> {
+    const result = await execProcess("docker", ["ps", "-aq", "--filter", `label=valet.dev/sandbox-id=${value.id}`, "--no-trunc"], {});
+    if (result.exitCode !== 0 || result.stdout.trim().split(/\s+/).filter(Boolean).some(candidate => !owners.includes(candidate)))
+      throw new Error("Multiple Docker containers claim this sandbox. Inspect their ownership before restoring the browser.");
+  }
+
+  private async inspectCleanupOwners(value: DockerInventoryRecord): Promise<{ workload?: DockerContainerOwner; browser?: DockerContainerOwner }> {
+    const workload = await this.inspectOwner(value);
+    // Explicit cleanup can resolve the crash window between Docker creation and inventory persistence.
+    // Keep the record in creating state; this does not adopt an incomplete runtime.
+    if (value.state === "creating" && workload) {
+      value.containerId ??= workload.id;
+      value.imageId ??= workload.imageId;
+      if (value.browserCompanion) value.browserCompanion.networkOwnerId ??= workload.id;
+    }
+    const browser = value.browserCompanion ? await this.inspectOwner(value, true) : undefined;
+    await this.validateOwnerSet(value, [workload?.id, browser?.id].filter((id): id is string => Boolean(id)));
+    if (value.state === "creating") {
+      if (value.browserCompanion && browser) {
+        value.browserCompanion.containerId ??= browser.id;
+        value.browserCompanion.imageId ??= browser.imageId;
+      }
+      await this.inventory.write(value);
+    }
+    return { workload, browser };
+  }
+
+  private async removeContainer(value: DockerInventoryRecord): Promise<void> {
+    if (value.providerId !== await this.providerId()) throw new Error("Docker daemon differs from the saved owner. Select the original Docker context before deleting this sandbox.");
+    const { workload, browser } = await this.inspectCleanupOwners(value);
+    // Validate both roles before removing either owner. The network owner is removed last.
+    if (browser) {
+      const removed = await execProcess("docker", ["rm", "-f", browser.id], {});
+      if (removed.exitCode !== 0) throw new Error(`Cannot remove the Docker browser companion. Check the daemon before retrying. ${removed.stderr.trim()}`);
+    }
+    if (!workload) return;
+    if (value.browser?.enabled && !value.browserCompanion) {
+      const identity = `${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0}`;
+      const args = workload.running
+        ? ["exec", "--user", "0", workload.id, "chown", "-Rh", identity, "/workspace"]
+        : ["run", "--rm", "--network", "none", "--user", "0", "--cap-drop", "ALL", "--cap-add", "CHOWN", "--cap-add", "DAC_OVERRIDE", "--entrypoint", "chown", ...bindMount(value.workspace, "/workspace"), value.imageId ?? value.image, "-Rh", identity, "/workspace"];
+      const restored = await execProcess("docker", args, {});
+      if (restored.exitCode !== 0) throw new Error(`Cannot restore working-directory ownership. Restore Docker connectivity before deleting this sandbox. ${restored.stderr.trim()}`);
+    }
+    const removed = await execProcess("docker", ["rm", "-f", workload.id], {});
+    if (removed.exitCode !== 0) throw new Error(`Cannot remove the Docker sandbox. Check the daemon before retrying. ${removed.stderr.trim()}`);
+  }
 
   capabilities(): SandboxCapabilities {
     return {
@@ -997,98 +1478,162 @@ export class DockerSandboxProvider implements SandboxProvider {
       coldStartEstimateMs: 8000,
       credsMount: true,
       dockerSupport: true,
+      nestedKubernetes: false,
+      browserAutomation: this.browserEnabled,
+      browserViewer: this.browserEnabled,
     };
+  }
+
+  async list(): Promise<SandboxListing[]> {
+    const owner = await this.providerId();
+    return (await this.inventory.list()).filter(value => value.providerId === owner).map(value => ({ id: value.id, sessionId: value.sessionId, browserEnabled: value.browser?.enabled === true, createdAtMs: null }));
+  }
+
+  /** Reads retained audit. Stops an incomplete or orphaned browser owner without starting Chromium or replaying a cell. */
+  async readBrowserAudit(id: string): Promise<RetainedBrowserAudit> {
+    const value = await this.saved(id);
+    if (!value?.browser?.enabled) return { entries: [], total: 0 };
+    if (value.providerId !== await this.providerId()) throw new Error("Docker daemon differs from the saved owner. Select the original Docker context before reading its retained audit.");
+    const { workload, browser } = await this.inspectCleanupOwners(value);
+    const owner = value.browserCompanion ? browser : workload;
+    if (owner?.running) {
+      if (workload?.running && value.state !== "creating") throw new Error("The browser owner is still running. Flush its audit through the browser client before deleting this session.");
+      // Workload loss and interrupted creation can leave a live browser outside the ready lifecycle.
+      // Stop the verified owner before reading its retained journal.
+      const stopped = await execProcess("docker", ["stop", "--time", "30", owner.id], { timeout: 35_000 });
+      if (stopped.exitCode !== 0 || await isContainerAlive(owner.id))
+        throw new Error(`Cannot stop the Docker browser owner. Restore Docker connectivity before exporting its audit. ${stopped.stderr.trim()}`);
+    }
+    await fs.access(value.runtimeStateDir);
+    try { await fs.access(join(value.runtimeStateDir, "browser/journal.sqlite")); }
+    catch (error) { if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return { entries: [], total: 0 }; throw error; }
+    const result = await execProcess("docker", ["run", "--rm", "--network", "none", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", `${process.getuid?.() || 1501}:${process.getgid?.() || 1501}`, "--env", "NODE_OPTIONS=", "--entrypoint", "/usr/bin/flock", ...bindMount(value.runtimeStateDir, "/var/lib/valet", true), owner?.imageId ?? value.browserCompanion?.imageId ?? value.browserCompanion?.image ?? value.imageId ?? value.image, "--shared", "--nonblock", "/var/lib/valet/browser/owner.lock", "/usr/local/bin/node", "-e", READ_RETAINED_BROWSER_AUDIT], { timeout: 30_000, maxOutputBytes: 8 * 1024 * 1024 });
+    if (result.exitCode !== 0 || result.truncated) throw new Error(`Cannot read the retained browser audit. Restore the runtime image and private state before deleting this session. ${result.stderr.trim()}`);
+    return parseRetainedBrowserAudit(JSON.parse(result.stdout), value.sessionId);
   }
 
   async create(opts: SandboxCreateOpts): Promise<Sandbox> {
     const dockerOpts = opts as DockerSandboxCreateOpts;
-    const workspace = dockerOpts.workspace;
-    if (!workspace) {
-      throw new Error(
-        "DockerSandboxProvider.create: opts.workspace is required (absolute host path).",
-      );
-    }
-    const requested = isAbsolute(workspace) ? workspace : resolve(workspace);
-    const stat = await fs.stat(requested);
-    if (!stat.isDirectory()) {
-      throw new Error(
-        `DockerSandboxProvider.create: workspace is not a directory: ${requested}`,
-      );
-    }
-    // Resolve symlinks so the bind mount survives macOS's /tmp → /private/tmp
-    // indirection. Docker Desktop refuses to follow the symlink itself, so
-    // a bind from /tmp/foo silently maps to a separate, empty volume on the
-    // host side — node:fs ops on the host then can't see what the container
-    // wrote and vice versa. Always pass the realpath to `docker run -v`.
-    const abs = await fs.realpath(requested);
-
+    if (!dockerOpts.workspace) throw new Error("A Docker working directory is required. Configure an absolute working-directory path.");
+    const workspace = await fs.realpath(resolve(dockerOpts.workspace));
+    if (!(await fs.stat(workspace)).isDirectory()) throw new Error("The Docker working directory is not a directory. Select an existing directory.");
+    await fs.mkdir(this.inventory.root, { recursive: true, mode: 0o700 });
+    const privateRoot = await fs.realpath(this.inventory.root);
+    if (workspace === privateRoot || workspace.startsWith(privateRoot + "/") || privateRoot.startsWith(workspace + "/")) throw new Error("The working directory overlaps private Docker session state. Select a separate working directory before creating this sandbox.");
+    const id = opts.sessionId ? `dsb-${createHash("sha256").update(opts.sessionId).digest("hex").slice(0, 32)}` : `dsb-${randomUUID()}`;
     const image = dockerOpts.image ?? DEFAULT_IMAGE;
-    const network = dockerOpts.network ?? "bridge";
-    const id = `dsb-${this.nextId++}`;
-    const containerName = `${CONTAINER_PREFIX}${id}-${Date.now()}`;
-
+    const providerId = await this.providerId();
+    let existing = await this.saved(id);
+    if (existing && (existing.sessionId !== opts.sessionId || existing.providerId !== providerId || existing.workspace !== workspace)) throw new Error("Docker sandbox ownership differs from the requested session. Restore the matching owner before retrying.");
+    if (existing?.browser?.enabled && !opts.browser?.enabled) {
+      throw new Error("This session has retained browser state. Re-enable browser isolation before replacing its Docker sandbox.");
+    }
+    const companion = opts.browser?.enabled === true && opts.docker === true;
+    const browserUpgrade = companion && existing?.docker === true && !existing.browser?.enabled;
+    if (opts.browser?.enabled) {
+      if (!this.browserEnabled) throw new Error("Browser automation is disabled by this provider. Enable browser support before creating this sandbox.");
+      if (opts.nestedKubernetes) throw new Error("The Docker provider does not support nested Kubernetes. Use the Kubernetes provider for this session.");
+      if (companion && !this.browserImage) throw new Error("The browser companion image is missing. Configure the stock browser image before creating this sandbox.");
+      await fs.access(this.browserSeccompProfile).catch(() => { throw new Error("The browser seccomp profile is missing. Install the reviewed profile before creating this sandbox."); });
+    }
+    if (existing && existing.state !== "released" && !browserUpgrade) {
+      // preserveLivePod: a lease holds this container, so keep it on its own image (spec INV-8).
+      if ((existing.image !== image && !opts.preserveLivePod) ||existing.docker !== Boolean(opts.docker) || Boolean(existing.browser?.enabled) !== Boolean(opts.browser?.enabled) || (existing.browserCompanion && existing.browserCompanion.image !== this.browserImage)) throw new Error("The existing Docker sandbox uses another runtime image or browser configuration. Release that execution environment before replacement.");
+      return this.restore(id);
+    }
+    if (browserUpgrade && existing?.state === "creating") throw new Error("Docker creation is pending. Inspect and release the pending runtime before enabling its browser.");
     if (dockerOpts.pullIfMissing !== false) {
       await ensureImage(image);
+      if (companion) await ensureImage(this.browserImage!);
     }
-
-    // Write creds files to the host dir BEFORE docker run so the bind is
-    // populated at container start. Only when credsFiles is provided and
-    // non-empty. The dir uses containerName (which embeds a timestamp) so
-    // the path is always unique — Docker Desktop on macOS silently fails to
-    // propagate file-system changes into a bind-mount whose host path was
-    // previously removed and re-created at the same location.
-    let sandboxCredsDir: string | undefined;
-    if (opts.credsFiles && Object.keys(opts.credsFiles).length > 0) {
-      sandboxCredsDir = credsHostDir(containerName);
-      await writeCredsFiles(sandboxCredsDir, opts.credsFiles, { docker: opts.docker });
+    if (browserUpgrade && existing?.state !== "released") {
+      // A requested browser upgrade changes topology. Release the verified legacy owner before replacing it.
+      await this.release(id);
+      existing = await this.saved(id);
     }
-
-    const runArgs = buildDockerRunArgs({
-      containerName,
-      image,
-      workspaceHostPath: abs,
-      network,
-      env: dockerOpts.env,
-      resources: opts.resources,
-      profile: opts.profile,
-      credsHostDir: sandboxCredsDir,
-      docker: opts.docker,
-    });
-
-    const startResult = await execProcess("docker", runArgs, {});
-    if (startResult.exitCode !== 0) {
-      throw new Error(
-        `docker run failed (${startResult.exitCode}): ${startResult.stderr.trim() || startResult.stdout.trim()}`,
-      );
+    if (existing) await fs.access(existing.runtimeStateDir).catch(() => { throw new Error("Private Docker session state is missing. Restore the retained state directory before replacing this sandbox."); });
+    // Legacy Docker-only state was workload-writable. Keep it for final deletion and reserve fresh private browser state.
+    const workloadStateDir = browserUpgrade ? existing?.runtimeStateDir : existing?.workloadStateDir;
+    const runtimeStateDir = browserUpgrade ? join(this.inventory.root, "browser-state", id) : existing?.runtimeStateDir ?? join(this.inventory.root, "state", id);
+    if (!existing || browserUpgrade) await fs.mkdir(runtimeStateDir, { recursive: true, mode: 0o700 });
+    const value: DockerInventoryRecord = { version: 1, id, sessionId: opts.sessionId ?? id, providerId, containerName: `${CONTAINER_PREFIX}${id}`, workspace, runtimeStateDir, ...(workloadStateDir ? { workloadStateDir } : {}), image, docker: Boolean(opts.docker), state: "creating", ...(opts.browser ? { browser: opts.browser } : {}), ...(companion ? { browserCompanion: { containerName: `${CONTAINER_PREFIX}${id}-browser`, image: this.browserImage! } } : {}), ...(opts.credsFiles && Object.keys(opts.credsFiles).length ? { credsHostDir: join(this.inventory.root, "creds", id) } : {}), ...(opts.resources?.scratch ? { scratchHostDir: join(this.inventory.root, "scratch", id) } : {}) };
+    if (existing) await this.inventory.write(value);
+    else if (!await this.inventory.reserve(value)) return this.restore(id);
+    if (value.credsHostDir && opts.credsFiles) await writeCredsFiles(value.credsHostDir, opts.credsFiles, { docker: Boolean(opts.docker || opts.browser?.enabled) });
+    if (value.scratchHostDir) {
+      await fs.mkdir(value.scratchHostDir, { recursive: true, mode: 0o1777 });
+      // The process umask masks the mkdir mode, so set it explicitly. The
+      // sandbox user must be able to write /scratch. The sticky bit stops
+      // the workload user from replacing a path that root code trusts
+      // (fix wave 3, security H-1).
+      await fs.chmod(value.scratchHostDir, 0o1777);
+      // TMPDIR points at /scratch/tmp, so it must exist before the container
+      // starts. An image whose entrypoint skips start-headless.sh never
+      // creates it, and mktemp then fails.
+      const tmp = join(value.scratchHostDir, "tmp");
+      await fs.mkdir(tmp, { recursive: true });
+      await fs.chmod(tmp, 0o1777);
+      // Deviation from the spec's size-limited /scratch (emptyDir with
+      // ephemeral-storage sums on kubernetes): a docker bind mount has no
+      // quota mechanism. Dev-only backend; tracked for the spec Deviations.
+      console.warn("scratch is not size-limited on the docker backend.");
     }
-    const containerId = startResult.stdout.trim();
-
-    // A workspace the container cannot read is unusable, and fails much later
-    // with an unrelated message. Remove the container first, so a bad path
-    // does not leak one per attempt.
-    try {
-      await verifyWorkspaceMount(containerId, abs, image);
-    } catch (err) {
-      await execProcess("docker", ["rm", "-f", containerId], {});
-      throw err;
+    const uid = process.getuid?.() || 1501;
+    const gid = process.getgid?.() || 1501;
+    const runArgs = buildDockerRunArgs({ containerName: value.containerName, image, workspaceHostPath: workspace, network: dockerOpts.network ?? "bridge", env: { ...(companion ? Object.fromEntries(Object.entries(dockerOpts.env ?? {}).filter(([key]) => !key.startsWith("VALET_BROWSER_"))) : dockerOpts.env), VALET_SESSION_ID: value.sessionId, ...(opts.browser?.enabled && !companion ? { VALET_BROWSER_UID: String(uid), VALET_BROWSER_GID: String(gid) } : {}) }, resources: opts.resources, profile: opts.profile, credsHostDir: value.credsHostDir, scratchHostDir: value.scratchHostDir, docker: opts.docker, runtimeStateDir: companion ? undefined : runtimeStateDir, browser: companion ? undefined : opts.browser, browserSeccompProfile: this.browserSeccompProfile, labels: dockerOwnerLabels(value) });
+    const started = await execProcess("docker", runArgs, {});
+    if (started.exitCode !== 0) {
+      // Keep the reservation and state: a competing creator or transport loss can leave a live owner.
+      throw new Error(`Docker sandbox creation failed. Inspect the reserved container before retrying. ${started.stderr.trim() || started.stdout.trim()}`);
     }
-
-    const sb = new DockerSandbox(id, {
-      containerId,
-      workspace: abs,
-      containerWorkspace: CONTAINER_WORKSPACE,
-      image,
-      credsHostDir: sandboxCredsDir,
-      docker: opts.docker,
-    });
-    this.sandboxes.set(id, sb);
-    return sb;
+    value.containerId = started.stdout.trim();
+    if (value.browserCompanion) value.browserCompanion.networkOwnerId = value.containerId;
+    await this.inventory.write(value);
+    const owner = await this.inspectOwner(value);
+    if (!owner) throw new Error("Cannot record the new Docker owner. Restore Docker connectivity before retrying.");
+    value.imageId = owner.imageId;
+    await this.inventory.write(value);
+    if (value.browserCompanion) {
+      // Persist each role before starting the next one. A failed create remains reserved for explicit release.
+      await verifyWorkspaceMount(value.containerId, workspace, image);
+      const browserStarted = await execProcess("docker", buildBrowserCompanionArgs({ owner: value, seccompProfile: this.browserSeccompProfile, uid, gid, devPorts: dockerOpts.env?.VALET_BROWSER_DEV_PORTS }), {});
+      if (browserStarted.exitCode !== 0) throw new Error(`Docker browser companion creation failed. Release the pending runtime before retrying. ${browserStarted.stderr.trim() || browserStarted.stdout.trim()}`);
+      value.browserCompanion.containerId = browserStarted.stdout.trim();
+      await this.inventory.write(value);
+      const browserOwner = await this.inspectOwner(value, true);
+      if (!browserOwner) throw new Error("Cannot record the Docker browser owner. Release the pending runtime before retrying.");
+      value.browserCompanion.imageId = browserOwner.imageId;
+      await this.inventory.write(value);
+      await verifyBrowserPreflight(browserOwner.id);
+      await this.validateOwnerSet(value, [owner.id, browserOwner.id]);
+    } else {
+      try { await verifyWorkspaceMount(value.containerId, workspace, image); if (opts.browser?.enabled) await verifyBrowserPreflight(value.containerId); }
+      catch (error) { await this.removeContainer(value); value.state = "released"; await this.inventory.write(value); throw error; }
+      await this.validateOwnerSet(value, [owner.id]);
+    }
+    value.state = "running";
+    await this.inventory.write(value);
+    return this.sandbox(value);
   }
 
-  async restore(id: string): Promise<Sandbox> {
-    const sb = this.sandboxes.get(id);
-    if (!sb) throw new Error(`DockerSandbox not found: ${id}`);
-    return sb;
+  async restore(id: string): Promise<DockerSandbox> {
+    const value = await this.saved(id);
+    if (!value || value.state === "released") throw new SandboxGoneError(`Docker sandbox ${id} is unavailable. Restore the retained execution environment before retrying.`);
+    if (value.browserCompanion && value.state === "creating") throw new Error("Docker browser creation is pending. Inspect and release the pending runtime before retrying.");
+    if (value.browser?.enabled && value.docker && !value.browserCompanion) throw new Error("This Docker runtime has no isolated browser companion. Release it before creating a replacement with retained state.");
+    if (value.providerId !== await this.providerId()) throw new Error("Docker daemon differs from the saved owner. Select the original Docker context before restoring this sandbox.");
+    await fs.access(value.runtimeStateDir).catch(() => { throw new Error("Private Docker session state is missing. Restore its directory before adopting this sandbox."); });
+    const owner = await this.inspectOwner(value);
+    if (!owner) throw new SandboxGoneError("The recorded Docker container is missing. Inspect its inventory before replacing it.");
+    if (!owner.running) throw new SandboxGoneError("The recorded Docker container is stopped. Release it before starting a replacement with the retained state.");
+    const browserOwner = value.browserCompanion ? await this.inspectOwner(value, true) : undefined;
+    if (value.browserCompanion && !browserOwner) throw new Error("The recorded Docker browser companion is missing. Release the runtime before creating a replacement.");
+    if (browserOwner && !browserOwner.running) throw new Error("The recorded Docker browser companion is stopped. Release the runtime before creating a replacement.");
+    await this.validateOwnerSet(value, [owner.id, ...(browserOwner ? [browserOwner.id] : [])]);
+    if (value.browser?.enabled) await verifyBrowserPreflight(browserOwner?.id ?? owner.id);
+    value.containerId = owner.id; value.imageId = owner.imageId; value.state = "running";
+    await this.inventory.write(value);
+    return this.sandbox(value);
   }
 
   /** Rewrites the credential files on the host bind dir. The bind mount is
@@ -1105,15 +1650,9 @@ export class DockerSandboxProvider implements SandboxProvider {
    * best-effort: if the container is not running or the deadline passes,
    * the method returns anyway — the host files are the source of truth and
    * the mount converges on its own.
-   *
-   * Known limitation: restore() cannot call updateCreds after an API restart
-   * because the in-memory sandbox map is empty — no on-disk inventory lets us
-   * reconstruct credsHostDir. The sandbox-replacement path covers this case
-   * (new create writes fresh creds); a future design may add a persistent
-   * index. */
+   * Durable inventory restores the credential directory after an API restart. */
   async updateCreds(id: string, files: Record<string, string>): Promise<void> {
-    const sb = this.sandboxes.get(id);
-    if (!sb) throw new Error(`DockerSandboxProvider.updateCreds: sandbox not found: ${id}`);
+    const sb = this.sandboxes.get(id) ?? await this.restore(id);
     if (!sb.credsHostDir) {
       throw new Error(
         `DockerSandboxProvider.updateCreds: sandbox "${id}" was not created with credsFiles`,
@@ -1133,28 +1672,43 @@ export class DockerSandboxProvider implements SandboxProvider {
     await Promise.all(
       removed.map((f) => fs.unlink(join(dir, f)).catch(() => undefined)),
     );
-    await writeCredsFiles(dir, files, { docker: sb.docker });
+    await writeCredsFiles(dir, files, { docker: Boolean(sb.docker || sb.browser) });
     await awaitCredsPropagation(sb, files, removed);
   }
 
-  async destroy(id: string): Promise<void> {
-    const sb = this.sandboxes.get(id);
-    if (sb) await sb.destroy?.();
+  /** Stops one execution environment. The session owns the retained runtime state. */
+  async release(id: string): Promise<void> {
+    const value = await this.saved(id); if (!value) return;
+    await this.removeContainer(value);
+    value.state = "released"; await this.inventory.write(value);
     this.sandboxes.delete(id);
   }
 
+  /** Final deletion. The host must export browser audit records before calling this method. */
+  async destroy(id: string): Promise<void> {
+    const value = await this.saved(id); if (!value) { this.sandboxes.delete(id); return; }
+    await this.removeContainer(value);
+    await fs.rm(value.runtimeStateDir, { recursive: true, force: true });
+    if (value.workloadStateDir) await fs.rm(value.workloadStateDir, { recursive: true, force: true });
+    if (value.credsHostDir) await fs.rm(value.credsHostDir, { recursive: true, force: true });
+    if (value.scratchHostDir) await fs.rm(value.scratchHostDir, { recursive: true, force: true });
+    await this.inventory.remove(id); this.sandboxes.delete(id);
+  }
+
   async status(id: string): Promise<SandboxStatus> {
-    const sb = this.sandboxes.get(id);
-    if (!sb) return { id, state: "released" };
-    const inspect = await execProcess(
-      "docker",
-      ["inspect", "-f", "{{.State.Running}}", sb.containerId],
-      {},
-    );
-    if (inspect.exitCode !== 0) return { id, state: "released" };
-    return inspect.stdout.trim() === "true"
-      ? { id, state: "ready", startedAt: Date.now() }
-      : { id, state: "released" };
+    if (!/^dsb-[a-zA-Z0-9-]+$/.test(id)) return { id, state: "released" };
+    const value = await this.saved(id); if (!value || value.state === "released") return { id, state: "released" };
+    if (value.browser?.enabled && value.docker) {
+      if (!value.browserCompanion || value.state !== "running") return { id, state: "released" };
+      if (value.providerId !== await this.providerId()) throw new Error("Docker daemon differs from the saved owner. Select the original Docker context before checking this sandbox.");
+      const workload = await this.inspectOwner(value);
+      const browser = await this.inspectOwner(value, true);
+      if (!workload?.running || !browser?.running) return { id, state: "released" };
+      await this.validateOwnerSet(value, [workload.id, browser.id]);
+      return { id, state: "ready" };
+    }
+    const result = await execProcess("docker", ["inspect", "-f", "{{.State.Running}}", value.containerId ?? value.containerName], {});
+    return result.exitCode === 0 && result.stdout.trim() === "true" ? { id, state: "ready" } : { id, state: "released" };
   }
 }
 

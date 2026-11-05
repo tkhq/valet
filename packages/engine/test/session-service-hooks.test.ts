@@ -1,5 +1,8 @@
+import { COMPLETE_SUMMARY } from "./fixtures/compaction-summary.js";
 import { describe, it, expect } from "vitest";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
+import { getCurrentSystemPrompt } from "@earendil-works/pi-ai/utils/transcript";
+import { fauxAssistantMessage, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import type { Context } from "@earendil-works/pi-ai/compat";
 import {
   Engine,
@@ -58,7 +61,7 @@ describe("session service hooks (systemContext, toolConfig, owner, compaction ho
     const faux = registerFauxProvider({ provider: "svc1" });
     const capturedPrompts: (string | undefined)[] = [];
     const captureStep = (text: string) => async (context: Context) => {
-      capturedPrompts.push(context.systemPrompt);
+      capturedPrompts.push(getCurrentSystemPrompt(context.messages));
       return fauxAssistantMessage(text);
     };
     faux.setResponses([captureStep("ok")]);
@@ -202,6 +205,18 @@ describe("session service hooks (systemContext, toolConfig, owner, compaction ho
     faux.unregister();
   });
 
+  it("gives a child session no question tool, so its blocking questions go to its parent", async () => {
+    const { engine } = makeEngine();
+    const faux = registerFauxProvider({ provider: "svc-child-tools" });
+    const base = { userId: "u1", orgId: "o1", workspace: "/workspace", sandbox: {}, model: faux.getModel() };
+    const child = await engine.createSession({ ...base, id: "sess-child-tools", purpose: "child", parentSessionId: "p", parentThreadId: "t" });
+    const parent = await engine.createSession({ ...base, id: "sess-parent-tools" });
+    const names = (tools: { name: string }[]) => tools.map((tool) => tool.name);
+    expect(names(child.builtinTools)).not.toContain("ask_question");
+    expect(names(child.builtinTools)).toContain("ask_approval");
+    expect(names(parent.builtinTools)).toContain("ask_question");
+  });
+
   it("parentSessionId/parentThreadId persist via toData and survive a restore that doesn't re-supply them", async () => {
     const { engine, store, bus } = makeEngine();
     const faux = registerFauxProvider({ provider: "svc3b" });
@@ -255,7 +270,7 @@ describe("session service hooks (systemContext, toolConfig, owner, compaction ho
       // The manual compaction's summarizer completion. Before TKAI-306 an
       // exhausted faux queue surfaced as an errored completion that
       // summarize() silently turned into an empty summary; it now throws.
-      fauxAssistantMessage("## Goal\n- test summary"),
+      fauxAssistantMessage(COMPLETE_SUMMARY),
     ]);
 
     const calls: string[] = [];

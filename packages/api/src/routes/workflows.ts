@@ -7,13 +7,15 @@
  * All definition/run logic lives in `../workflows/service.ts` (shared with
  * the agent-facing workflows action plugin); this file is HTTP plumbing.
  */
+import { workflowRunConversations } from "./workflow-run-conversations.js";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { NotFoundError } from "@valet/shared";
-import type { CredentialStore } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { requirePrincipal } from "../middleware/auth.js";
-import { resolveCreateOwner, type RequestPrincipal } from "../lib/request-principal.js";
+import { requireOrgAdmin } from "./_org-admin.js";
+import { checkOrganizationWorkflowSteps } from "../workflows/step-design.js";
+import { resolveCreateOwner } from "../lib/request-principal.js";
 import { isTeamMember } from "../services/teams.js";
 import {
   WorkflowCursorError,
@@ -24,6 +26,7 @@ import {
 } from "@valet/workflow";
 import { stringify as stringifyYaml } from "yaml";
 import {
+  canReadWorkflowRun,
   cancelWorkflowRun,
   createWorkflowDefinition,
   copyWorkflowDefinition,
@@ -35,7 +38,9 @@ import {
   isRunOutcome,
   isRunStatus,
   listRunsForOwner,
+  listWorkflowActionRequired,
   listWorkflowDefinitions,
+  dismissWorkflowRun,
   listWorkflowRuns,
   listWorkflowVersions,
   parseWorkflowOwnerFilter,
@@ -62,9 +67,15 @@ import {
   listWorkflowSchedules,
   type WorkflowScheduleSummary,
 } from "../workflows/schedule-service.js";
-import { buildValidateEnvironment } from "../workflows/validation-env.js";
+import { buildValidateEnvironment, buildOrgValidateEnvironment } from "../workflows/validation-env.js";
+import { workflowRequestContext } from "../workflows/request-context.js";
+import { applyWorkflowModelPatch } from "../workflows/patch.js";
+import { workflowRunStepCosts } from "../workflows/step-cost.js";
+import { workflowRunProvenance } from "../workflows/run-provenance.js";
+import { workflowRunModelChanges } from "../workflows/model-drift.js";
+import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
 import type { TeamServiceReadinessDeps } from "../workflows/team-service-readiness.js";
-import { allowWorkflowPermissions, analyzeWorkflowPermissions } from "../workflows/permissions.js";
+import { allowWorkflowPermissions, analyzeWorkflowPermissions, revokeWorkflowPermissions, revokeOwnWorkflowAccounts } from "../workflows/permissions.js";
 import { parseRepoInput, ContentSourceInputError } from "../services/content-sources.js";
 import {
   GitHubSkillRepoReader,
@@ -81,10 +92,12 @@ import type {
   GetWorkflowPermissionsResponse,
   GetWorkflowImportFileResponse,
   ListAllWorkflowRunsResponse,
+  ListWorkflowActionRequiredResponse,
   CreateScheduleOnWorkflowRequest,
   CreateWorkflowScheduleResponse,
   DeleteWorkflowScheduleResponse,
   DeleteWorkflowWebhookResponse,
+  GetWorkflowWebhookResponse,
   ListWorkflowSchedulesResponse,
   WorkflowScheduleWire,
   GetWorkflowResponse,
@@ -94,15 +107,22 @@ import type {
   ListWorkflowsResponse,
   ResolveWorkflowApprovalRequest,
   ResolveWorkflowApprovalResponse,
+  RetryWorkflowRunRequest,
   RetryWorkflowRunResponse,
   StartWorkflowRunRequest,
   StartWorkflowRunResponse,
+  UpdateWorkflowModelRequest,
+  UpdateWorkflowModelResponse,
   UpdateWorkflowRequest,
   UpdateWorkflowResponse,
   WorkflowWebhookResponse,
+  WorkflowStepCheckResponse,
 } from "../wire/types.js";
 
 export const workflowsRouter = new Hono<AppEnv>();
+
+/** The 404 text for a workflow that is gone or that the caller may not open. */
+export const WORKFLOW_NOT_FOUND = "This workflow was not found. Refresh Workflows and try again.";
 
 /** The credential reads the team arm gate makes before a schedule arms
  * (`workflows/team-service-readiness.ts#teamArmBlock`). */
@@ -141,26 +161,16 @@ function parseRunLimit(raw: string | undefined): { limit?: number } | { error: s
   return { limit };
 }
 
-function serviceCtx(c: {
-  var: {
-    providers: Omit<WorkflowServiceDeps, "credentials"> & { engineCredentials: CredentialStore };
-    user: { id: string; orgId: string };
-    principal?: RequestPrincipal;
-  };
-}): { deps: WorkflowServiceDeps; owner: WorkflowOwner; env: ValidateEnvironment } {
-  const { db, workflowStore, workflowRunHost, actionPluginByService, engineCredentials } = c.var.providers;
-  return {
-    deps: { db, workflowStore, workflowRunHost, actionPluginByService, credentials: engineCredentials },
-    owner: { userId: c.var.user.id, orgId: c.var.user.orgId, principal: c.var.principal },
-    env: buildValidateEnvironment(actionPluginByService),
-  };
+function serviceCtx(c: Parameters<typeof workflowRequestContext>[0]): { deps: WorkflowServiceDeps; owner: WorkflowOwner; env: ValidateEnvironment } {
+  return { ...workflowRequestContext(c), env: buildValidateEnvironment(c.var.providers.actionPluginByService) };
 }
 
 
 // ── Definitions ───────────────────────────────────────────────────────────
 
 workflowsRouter.post("/", async (c) => {
-  const { deps, owner, env } = serviceCtx(c);
+  const { deps, owner } = serviceCtx(c);
+  const env = await buildOrgValidateEnvironment(deps, owner.orgId);
 
   let body: CreateWorkflowRequest;
   try {
@@ -197,7 +207,6 @@ workflowsRouter.post("/", async (c) => {
       name: body.name,
       definition: body.definition,
       teamId: createdOwner.owner.type === "team" ? createdOwner.owner.id : undefined,
-      skipMembershipCheck: principal.type === "team",
     });
   } catch (err) {
     // Same "cross-owner 404, never 403" convention as the rest of this
@@ -303,11 +312,30 @@ workflowsRouter.get("/runs", async (c) => {
   }
   // Same convention as every other handler here: a workflow the caller
   // cannot read is indistinguishable from one that does not exist.
-  if (!page) return c.json({ error: "workflow not found" }, 404);
+  if (!page) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
 
   // Rows carry `workflowName`: this list mixes workflows, so the hub's Runs
   // tab has no heading to name them from.
   const resp: ListAllWorkflowRunsResponse = page;
+  return c.json(resp);
+});
+
+workflowsRouter.get("/action-required", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  const resp: ListWorkflowActionRequiredResponse = await listWorkflowActionRequired(deps, owner);
+  return c.json(resp);
+});
+
+/**
+ * Organization admins: every workflow in the organization with a step-design
+ * warning, such as an approval a run cannot deliver or a trigger read that a
+ * schedule leaves empty (`stepDesignWarnings`).
+ */
+workflowsRouter.get("/step-check", async (c) => {
+  const gate = await requireOrgAdmin(c);
+  if (gate) return gate;
+  const { deps, owner } = serviceCtx(c);
+  const resp: WorkflowStepCheckResponse = await checkOrganizationWorkflowSteps(deps, owner);
   return c.json(resp);
 });
 
@@ -409,7 +437,7 @@ workflowsRouter.get("/import/repo-file", async (c) => {
   if (content.trim() === "") {
     return c.json(
       {
-        error: `${parsed.subpath} in ${parsed.repoFullName}${at} is empty, or larger than the 1 MB GitHub serves inline. Point the path at the exported definition file.`,
+        error: `${parsed.subpath} in ${parsed.repoFullName}${at} is empty, or exceeds GitHub’s 1 MB inline limit. Export a smaller workflow definition, then import that file.`,
       },
       400,
     );
@@ -427,7 +455,7 @@ workflowsRouter.get("/import/repo-file", async (c) => {
 workflowsRouter.get("/:id", async (c) => {
   const { deps, owner } = serviceCtx(c);
   const summary = await getWorkflowDefinition(deps, owner, c.req.param("id"));
-  if (!summary) return c.json({ error: "workflow not found" }, 404);
+  if (!summary) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
   const resp: GetWorkflowResponse = summary;
   return c.json(resp);
 });
@@ -440,7 +468,7 @@ workflowsRouter.get("/:id", async (c) => {
 workflowsRouter.get("/:id/file", async (c) => {
   const { deps, owner } = serviceCtx(c);
   const summary = await getWorkflowDefinition(deps, owner, c.req.param("id"));
-  if (!summary) return c.json({ error: "workflow not found" }, 404);
+  if (!summary) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
 
   const formatRaw = blankToUndefined(c.req.query("format")) ?? "yaml";
   if (formatRaw !== "yaml" && formatRaw !== "json") {
@@ -474,7 +502,8 @@ workflowsRouter.get("/:id/file", async (c) => {
 });
 
 workflowsRouter.put("/:id", async (c) => {
-  const { deps, owner, env } = serviceCtx(c);
+  const { deps, owner } = serviceCtx(c);
+  const env = await buildOrgValidateEnvironment(deps, owner.orgId);
   const id = c.req.param("id");
 
   let body: UpdateWorkflowRequest;
@@ -495,9 +524,53 @@ workflowsRouter.put("/:id", async (c) => {
     name: body.name,
     definition: body.definition,
   });
-  if (!updated) return c.json({ error: "workflow not found" }, 404);
+  if (!updated) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
 
   const resp: UpdateWorkflowResponse = updated;
+  return c.json(resp);
+});
+
+/** Change only model-capable nodes. Existing models stay unchanged unless this route is called. */
+workflowsRouter.patch("/:id/model", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  const env = await buildOrgValidateEnvironment(deps, owner.orgId);
+  let body: UpdateWorkflowModelRequest;
+  try {
+    body = (await c.req.json()) as UpdateWorkflowModelRequest;
+  } catch {
+    return c.json({ error: "invalid JSON body" }, 400);
+  }
+  if (typeof body.model !== "string" || body.model.trim() === "") {
+    return c.json({ error: "model must be an approved model id or an org model tier" }, 400);
+  }
+  if (body.nodeIds !== undefined && (!Array.isArray(body.nodeIds) || body.nodeIds.some((id) => typeof id !== "string"))) {
+    return c.json({ error: "nodeIds must be an array of llm or session node ids" }, 400);
+  }
+  const catalog = await buildOrgCatalog(deps.db, deps.credentials, owner.orgId);
+  if (!catalogValidIds(catalog).has(body.model)) {
+    return c.json({ error: `unknown or inactive model: ${body.model}. Pick a model from GET /api/models, or use xs, s, m, l, or xl.` }, 400);
+  }
+  const concrete = catalog.find((entry) =>
+    entry.id === body.model || (entry.id.startsWith("anthropic/") && entry.id.slice("anthropic/".length) === body.model),
+  );
+  if (concrete && !concrete.approved) {
+    return c.json({ error: `model ${body.model} is not approved. Choose an approved model or an org model tier.` }, 400);
+  }
+  const wf = await getWorkflowDefinition(deps, owner, c.req.param("id"));
+  if (!wf) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
+  const stored = validateDefinitionInput(wf.definition);
+  if (!stored.ok) return c.json({ error: "invalid stored workflow definition", errors: stored.errors }, 409);
+  const patched = applyWorkflowModelPatch(stored.definition, body.model, body.nodeIds);
+  if (!patched.ok) return c.json({ error: "model update is invalid", errors: patched.errors }, 400);
+  const validation = validateDefinitionInput(patched.definition, env);
+  if (!validation.ok) return c.json({ error: "model update is invalid", errors: validation.errors }, 400);
+  const updated = await updateWorkflowDefinition(deps, owner, c.req.param("id"), { definition: patched.definition });
+  if (!updated) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
+  const resp: UpdateWorkflowModelResponse = {
+    workflowId: updated.id,
+    model: body.model,
+    nodeIds: patched.nodeIds,
+  };
   return c.json(resp);
 });
 
@@ -522,14 +595,14 @@ workflowsRouter.post("/:id/copy-to-team", async (c) => {
   });
   if (!destination.ok) return c.json({ error: destination.error }, destination.status);
   const copy = await copyWorkflowDefinition(deps, owner, c.req.param("id"), { teamId: body.teamId, name: body.name });
-  if (!copy) return c.json({ error: "workflow not found" }, 404);
+  if (!copy) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
   return c.json(copy, 201);
 });
 
 workflowsRouter.post("/:id/copy", async (c) => {
   const { deps, owner } = serviceCtx(c);
   const copy = await copyWorkflowDefinition(deps, owner, c.req.param("id"));
-  if (!copy) return c.json({ error: "workflow not found" }, 404);
+  if (!copy) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
   const resp: CreateWorkflowResponse = copy;
   return c.json(resp, 201);
 });
@@ -537,7 +610,7 @@ workflowsRouter.post("/:id/copy", async (c) => {
 workflowsRouter.delete("/:id", async (c) => {
   const { deps, owner } = serviceCtx(c);
   const result = await deleteWorkflowDefinition(deps, owner, c.req.param("id"));
-  if (result === "not_found") return c.json({ error: "workflow not found" }, 404);
+  if (result === "not_found") return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
   if (result === "has_active_runs") {
     return c.json(
       { error: "workflow has runs that are not settled. Cancel them first, then delete." },
@@ -566,7 +639,7 @@ workflowsRouter.post("/:id/runs", async (c) => {
   }
 
   const started = await startWorkflowRun(deps, owner, id, body.input);
-  if (!started) return c.json({ error: "workflow not found" }, 404);
+  if (!started) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
   if ("invalidInput" in started) {
     return c.json(
       {
@@ -597,7 +670,7 @@ workflowsRouter.get("/:id/runs", async (c) => {
     if (err instanceof WorkflowCursorError) return c.json({ error: err.message }, 400);
     throw err;
   }
-  if (!page) return c.json({ error: "workflow not found" }, 404);
+  if (!page) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
 
   const resp: ListWorkflowRunsResponse = page;
   return c.json(resp);
@@ -609,10 +682,23 @@ workflowsRouter.get("/:id/runs", async (c) => {
 
 workflowsRouter.get("/:id/permissions", async (c) => {
   const { deps, owner } = serviceCtx(c);
-  const nodes = await analyzeWorkflowPermissions(deps, owner, c.req.param("id"));
-  if (nodes === null) return c.json({ error: "workflow not found" }, 404);
-  const resp: GetWorkflowPermissionsResponse = { nodes };
+  const resp: GetWorkflowPermissionsResponse | null = await analyzeWorkflowPermissions(deps, owner, c.req.param("id"));
+  if (resp === null) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
   return c.json(resp);
+});
+
+workflowsRouter.delete("/:id/permissions/allow", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  if (!(await revokeWorkflowPermissions(deps, owner, c.req.param("id")))) return c.json({ error: "Workflow not found or permission management is not allowed." }, 404);
+  return c.json({ ok: true });
+});
+
+workflowsRouter.delete("/:id/permissions/accounts", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  if (!(await revokeOwnWorkflowAccounts(deps, owner, c.req.param("id")))) {
+    return c.json({ error: "Workflow not found or account consent cannot be changed here. Sign in and open a team workflow you can access." }, 404);
+  }
+  return c.json({ ok: true });
 });
 
 workflowsRouter.post("/:id/permissions/allow", async (c) => {
@@ -622,7 +708,7 @@ workflowsRouter.post("/:id/permissions/allow", async (c) => {
   // and a bare array has no own `actionIds`, so it would silently take the
   // "omitted → pre-approve all" branch — a narrowing request must never
   // widen on a permissions-granting route.
-  let body: AllowWorkflowPermissionsRequest = {};
+  let body: Partial<AllowWorkflowPermissionsRequest> = {};
   try {
     const text = await c.req.text();
     if (text.length > 0) {
@@ -644,9 +730,12 @@ workflowsRouter.post("/:id/permissions/allow", async (c) => {
     }
   }
 
-  const outcome = await allowWorkflowPermissions(deps, owner, c.req.param("id"), body.actionIds);
-  if (outcome === null) return c.json({ error: "workflow not found" }, 404);
-  if (!outcome.ok) return c.json({ error: outcome.badRequest }, 400);
+  if (typeof body.definitionToken !== "string" || !/^[a-f0-9]{64}$/.test(body.definitionToken)) {
+    return c.json({ error: "definitionToken must identify the reviewed workflow. Refresh the permissions review, then try again." }, 400);
+  }
+  const outcome = await allowWorkflowPermissions(deps, owner, c.req.param("id"), body.actionIds, body.definitionToken);
+  if (outcome === null) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
+  if (!outcome.ok) return c.json({ error: outcome.badRequest }, outcome.stale ? 409 : 400);
 
   const resp: AllowWorkflowPermissionsResponse = outcome.result;
   return c.json(resp);
@@ -655,7 +744,7 @@ workflowsRouter.post("/:id/permissions/allow", async (c) => {
 workflowsRouter.get("/:id/versions", async (c) => {
   const { deps, owner } = serviceCtx(c);
   const versions = await listWorkflowVersions(deps, owner, c.req.param("id"));
-  if (!versions) return c.json({ error: "workflow not found" }, 404);
+  if (!versions) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
   const resp: ListWorkflowVersionsResponse = { versions };
   return c.json(resp);
 });
@@ -692,11 +781,11 @@ workflowsRouter.post("/:id/webhook", async (c) => {
 workflowsRouter.get("/:id/webhook", async (c) => {
   const { deps, owner } = serviceCtx(c);
   const result = await getWorkflowWebhook(deps.db, owner, c.req.param("id"));
-  if (!result.ok) return c.json({ error: "workflow not found" }, 404);
-  if (!result.webhook) return c.json({ error: "no webhook configured for this workflow" }, 404);
-  const resp: WorkflowWebhookResponse = {
-    ...result.webhook,
-    url: workflowWebhookUrl(result.webhook.workflowId, result.webhook.hookId, new URL(c.req.url).origin),
+  if (!result.ok) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
+  const resp: GetWorkflowWebhookResponse = {
+    webhook: result.webhook
+      ? { ...result.webhook, url: workflowWebhookUrl(result.webhook.workflowId, result.webhook.hookId, new URL(c.req.url).origin) }
+      : null,
   };
   return c.json(resp);
 });
@@ -704,7 +793,7 @@ workflowsRouter.get("/:id/webhook", async (c) => {
 workflowsRouter.delete("/:id/webhook", async (c) => {
   const { deps, owner } = serviceCtx(c);
   const result = await deleteWorkflowWebhook(deps.db, owner, c.req.param("id"));
-  if (result === "not_found") return c.json({ error: "workflow not found" }, 404);
+  if (result === "not_found") return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
   const resp: DeleteWorkflowWebhookResponse = { deleted: result === "deleted" };
   return c.json(resp);
 });
@@ -726,6 +815,7 @@ function toScheduleWire(s: WorkflowScheduleSummary, workflowId: string): Workflo
     enabled: s.enabled,
     lastFiredAt: s.lastFiredAt,
     nextFireAt: s.nextFireAt,
+    ...(s.disabledReason !== undefined ? { disabledReason: s.disabledReason } : {}),
   };
 }
 
@@ -733,7 +823,7 @@ workflowsRouter.get("/:id/schedules", async (c) => {
   const { deps, owner } = serviceCtx(c);
   const id = c.req.param("id");
   const summary = await getWorkflowDefinition(deps, owner, id);
-  if (!summary) return c.json({ error: "workflow not found" }, 404);
+  if (!summary) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
   const schedules = await listWorkflowSchedules(deps.db, owner, id);
   const resp: ListWorkflowSchedulesResponse = {
     schedules: schedules.map((s) => toScheduleWire(s, id)),
@@ -745,7 +835,7 @@ workflowsRouter.post("/:id/schedules", async (c) => {
   const { deps, owner } = serviceCtx(c);
   const id = c.req.param("id");
   const summary = await getWorkflowDefinition(deps, owner, id);
-  if (!summary) return c.json({ error: "workflow not found" }, 404);
+  if (!summary) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
 
   let body: CreateScheduleOnWorkflowRequest;
   try {
@@ -787,7 +877,7 @@ workflowsRouter.delete("/:id/schedules/:scheduleId", async (c) => {
   const id = c.req.param("id");
   const scheduleId = c.req.param("scheduleId");
   const summary = await getWorkflowDefinition(deps, owner, id);
-  if (!summary) return c.json({ error: "workflow not found" }, 404);
+  if (!summary) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
   const result = await deleteWorkflowSchedule(deps.db, owner, scheduleId, id);
   if (result === "not_found") return c.json({ error: "schedule not found" }, 404);
   const resp: DeleteWorkflowScheduleResponse = { deleted: true };
@@ -796,9 +886,17 @@ workflowsRouter.delete("/:id/schedules/:scheduleId", async (c) => {
 
 workflowsRouter.get("/runs/:runId", async (c) => {
   const { deps, owner } = serviceCtx(c);
-  const resp = await getWorkflowRunDetail(deps, owner, c.req.param("runId"));
+  const runId = c.req.param("runId");
+  const resp = await getWorkflowRunDetail(deps, owner, runId);
   if (!resp) return c.json({ error: "run not found" }, 404);
-  return c.json(resp);
+  const [conversations, stepCosts, provenance] = await Promise.all([
+    workflowRunConversations(c, runId),
+    workflowRunStepCosts(deps.db, deps.workflowStore, runId),
+    workflowRunProvenance(deps.db, resp.run),
+  ]);
+  const modelChanges = await workflowRunModelChanges(deps.db, deps.workflowStore, resp.run, stepCosts,
+    (id) => canReadWorkflowRun(deps, owner, id));
+  return c.json({ ...resp, conversations, stepCosts, modelChanges, provenance });
 });
 
 workflowsRouter.post("/runs/:runId/approvals/:nodeId", async (c) => {
@@ -815,12 +913,15 @@ workflowsRouter.post("/runs/:runId/approvals/:nodeId", async (c) => {
   if (typeof body.approved !== "boolean") {
     return c.json({ error: "approved is required" }, 400);
   }
+  if (body.gateId !== undefined && typeof body.gateId !== "string") {
+    return c.json({ error: "gateId must be a string. Refresh the run and review its current approval." }, 400);
+  }
   // Reject legacy grantActions field — scope replaces it.
   if ("grantActions" in body) {
     return c.json({ error: "grantActions is no longer supported; use scope instead" }, 400);
   }
-  if (body.scope !== undefined && !["once", "run", "always"].includes(body.scope)) {
-    return c.json({ error: "scope must be one of: once, run, always" }, 400);
+  if (body.scope !== undefined && !["once", "run", "always", "workflow", "team_account"].includes(body.scope)) {
+    return c.json({ error: "scope must be one of: once, run, always, workflow, team_account" }, 400);
   }
   if (body.iteration !== undefined && (!Number.isInteger(body.iteration) || body.iteration < 0)) {
     return c.json({ error: "iteration must be a non-negative integer" }, 400);
@@ -829,6 +930,7 @@ workflowsRouter.post("/runs/:runId/approvals/:nodeId", async (c) => {
   const result = await resolveWorkflowApproval(deps, owner, {
     runId,
     nodeId,
+    gateId: body.gateId,
     approved: body.approved,
     note: body.note,
     scope: body.scope,
@@ -838,14 +940,26 @@ workflowsRouter.post("/runs/:runId/approvals/:nodeId", async (c) => {
 
   if (result === "not_found") return c.json({ error: "run not found" }, 404);
   if (result === "not_parked") return c.json({ error: "run is not parked on this approval gate" }, 409);
+  if (result === "stale_gate") return c.json({ error: "This approval gate changed. Refresh the run and review its current approval." }, 409);
   if (result === "already_resolved") return c.json({ error: "this approval gate has already been resolved" }, 409);
   if (result === "timed_out") return c.json({ error: "this approval gate has timed out" }, 409);
+  if (result === "forbidden_workflow") return c.json({ error: "This workflow permission cannot be saved. Its owner or team admin must review the current workflow and any policy restrictions." }, 403);
   if (result === "forbidden_always") return c.json({ error: "Always allow requires an org admin. Ask an org admin, or approve for the rest of this run." }, 403);
+  if (result === "stale_workflow") return c.json({ error: "This workflow's steps changed after this run started. Approve for this run only, or review the new steps and approve them on the workflow." }, 409);
   if (result === "org_mismatch") return c.json({ error: "not a member of this workflow's org" }, 403);
   if (result === "human_only") return c.json({ error: "policy gates must be resolved by a human from the run page" }, 403);
+  if (result === "not_approver") return c.json({ error: "This step would use another member's shared account. Only that member can answer it." }, 403);
 
   const resp: ResolveWorkflowApprovalResponse = { ok: true };
   return c.json(resp);
+});
+
+workflowsRouter.post("/runs/:runId/dismiss", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  const result = await dismissWorkflowRun(deps, owner, c.req.param("runId"));
+  if (result === "not_found") return c.json({ error: "run not found" }, 404);
+  if (result === "not_failed") return c.json({ error: "Only a failed run can be dismissed." }, 409);
+  return c.json({ ok: true });
 });
 
 workflowsRouter.post("/runs/:runId/cancel", async (c) => {
@@ -863,8 +977,25 @@ workflowsRouter.post("/runs/:runId/retry", async (c) => {
   const { deps, owner } = serviceCtx(c);
   const runId = c.req.param("runId");
 
-  const result = await retryWorkflowRun(deps, owner, runId);
+  let body: RetryWorkflowRunRequest = {};
+  try {
+    const text = await c.req.text();
+    if (text.length > 0) body = JSON.parse(text) as RetryWorkflowRunRequest;
+  } catch {
+    return c.json({ error: "invalid JSON body" }, 400);
+  }
+  if (body.from !== undefined && body.from !== "start" && body.from !== "failed_step") {
+    return c.json({ error: 'from must be "start" or "failed_step".' }, 400);
+  }
+  if (body.input !== undefined && (typeof body.input !== "object" || body.input === null || Array.isArray(body.input))) {
+    return c.json({ error: "input must be an object of run input values. Send a JSON object." }, 400);
+  }
+
+  const result = await retryWorkflowRun(deps, owner, runId, { from: body.from, input: body.input });
   if (result === "not_found") return c.json({ error: "run not found" }, 404);
+  if (result === "input_needs_start") {
+    return c.json({ error: "A retry from the failed step reuses the original input. To change the input, retry from the start." }, 400);
+  }
   if (result === "workflow_deleted") {
     return c.json(
       { error: "This run's workflow was deleted. Create the workflow again, then start a new run." },

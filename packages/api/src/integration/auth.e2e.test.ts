@@ -23,8 +23,9 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "./_setup.js";
-import { users } from "../schema/index.js";
+import { agentSessions, users } from "../schema/index.js";
 import { mintSandboxToken } from "../auth/sandbox-tokens.js";
+import { bootstrapAdminInviteCode } from "../test-helpers/bootstrap-admin-code.js";
 import type {
   AuthConfigResponse,
   CreateInviteResponse,
@@ -52,11 +53,12 @@ describe("auth v2 — end-to-end deployment flow", () => {
   it("signup, invite gate, invited signup, API key, sandbox token, and discovery all compose", async () => {
     api = await bootTestApi({ auth: true });
 
-    // 1. Signup #1 — first-ever signup, no invite needed — is promoted to admin.
+    // 1. Signup #1 uses the one-time admin code the boot log prints on a deployment with no users.
     const signUp1Res = await fetch(`${api.baseUrl}/api/auth/sign-up/email`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "First Admin", email: "admin@nowhere.test", password: "correct-horse-battery" }),
+      body: JSON.stringify({ name: "First Admin", email: "admin@nowhere.test", password: "correct-horse-battery",
+        inviteCode: await bootstrapAdminInviteCode(api.providers.db) }),
     });
     expect(signUp1Res.status).toBe(200);
     const adminCookie = extractSessionCookie(signUp1Res.headers.get("set-cookie"));
@@ -133,6 +135,8 @@ describe("auth v2 — end-to-end deployment flow", () => {
     const adminRow = adminRows[0];
     expect(adminRow).toBeDefined();
 
+    await db.insert(agentSessions).values({ id: "e2e-sandbox-session", userId: adminRow!.id, orgId: adminMe.orgId,
+      ownerType: "user", ownerId: adminRow!.id, workspace: "w", createdAt: 1, updatedAt: 1 });
     const { token: sandboxToken } = await mintSandboxToken(db, {
       sessionId: "e2e-sandbox-session",
       userId: adminRow!.id,

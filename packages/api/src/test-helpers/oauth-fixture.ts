@@ -15,10 +15,21 @@ export interface FakeOAuthServer {
   /** Number of hits on the discovery well-known endpoint. */
   discoveryRequests: { count: number };
   tokenRequests: Array<Record<string, string>>;
+  /** The client each refresh token was issued to. A refresh that names a
+   * different client_id gets 400 invalid_grant, as a real server answers.
+   * The token endpoint fills it; a test that seeds a credential directly
+   * adds its refresh token here. */
+  refreshTokenClients: Map<string, string>;
   /** Next token response body (default below). */
   tokenResponse: Record<string, unknown>;
   /** When set, the token endpoint returns this HTTP status with an error body. */
   tokenFailure?: number;
+  /** The error body a failure returns. Default: `{ error: "invalid_grant" }`. */
+  tokenFailureBody?: Record<string, unknown>;
+  /** The protected resource's `scopes_supported` (RFC 9728). Undefined
+   * serves no protected-resource metadata. Settable, because a server
+   * upgrade changes it. */
+  resourceScopesSupported?: string[];
   close(): Promise<void>;
 }
 
@@ -34,16 +45,30 @@ export function startFakeOAuthServer(opts?: {
   omitRegistration?: boolean;
   /** When set, discovery advertises these as `scopes_supported`. */
   scopesSupported?: string[];
+  /** When set, serves protected-resource metadata with these scopes. */
+  resourceScopesSupported?: string[];
 }): FakeOAuthServer {
   const registrations: FakeOAuthServer["registrations"] = [];
   const tokenRequests: FakeOAuthServer["tokenRequests"] = [];
-  const state: { tokenResponse: Record<string, unknown>; tokenFailure?: number } = {
+  const refreshTokenClients: FakeOAuthServer["refreshTokenClients"] = new Map();
+  const state: {
+    tokenResponse: Record<string, unknown>;
+    tokenFailure?: number;
+    tokenFailureBody?: Record<string, unknown>;
+    resourceScopesSupported?: string[];
+  } = {
     tokenResponse: { access_token: "at-1", refresh_token: "rt-1", expires_in: 3600, token_type: "bearer" },
+    resourceScopesSupported: opts?.resourceScopesSupported,
   };
 
   const app = new Hono();
   let url = "";
   const discoveryRequests = { count: 0 };
+
+  app.get("/.well-known/oauth-protected-resource", (c) => {
+    if (!state.resourceScopesSupported) return c.text("not found", 404);
+    return c.json({ resource: url, authorization_servers: [url], scopes_supported: state.resourceScopesSupported });
+  });
 
   app.get("/.well-known/oauth-authorization-server", (c) => {
     discoveryRequests.count++;
@@ -70,8 +95,14 @@ export function startFakeOAuthServer(opts?: {
     for (const [k, v] of Object.entries(form)) if (typeof v === "string") entries[k] = v;
     tokenRequests.push(entries);
     if (state.tokenFailure) {
-      return c.json({ error: "invalid_grant" }, state.tokenFailure as ContentfulStatusCode);
+      return c.json(state.tokenFailureBody ?? { error: "invalid_grant" }, state.tokenFailure as ContentfulStatusCode);
     }
+    if (entries.grant_type === "refresh_token") {
+      const issuedTo = refreshTokenClients.get(entries.refresh_token ?? "");
+      if (issuedTo !== undefined && issuedTo !== entries.client_id) return c.json({ error: "invalid_grant" }, 400);
+    }
+    const issued = state.tokenResponse.refresh_token;
+    if (typeof issued === "string" && entries.client_id) refreshTokenClients.set(issued, entries.client_id);
     return c.json(state.tokenResponse);
   });
 
@@ -84,6 +115,7 @@ export function startFakeOAuthServer(opts?: {
     registrations,
     discoveryRequests,
     tokenRequests,
+    refreshTokenClients,
     get tokenResponse() {
       return state.tokenResponse;
     },
@@ -95,6 +127,18 @@ export function startFakeOAuthServer(opts?: {
     },
     set tokenFailure(v) {
       state.tokenFailure = v;
+    },
+    get tokenFailureBody() {
+      return state.tokenFailureBody;
+    },
+    set tokenFailureBody(v) {
+      state.tokenFailureBody = v;
+    },
+    get resourceScopesSupported() {
+      return state.resourceScopesSupported;
+    },
+    set resourceScopesSupported(v) {
+      state.resourceScopesSupported = v;
     },
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };

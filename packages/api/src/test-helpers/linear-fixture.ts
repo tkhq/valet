@@ -5,12 +5,10 @@
  * overridable handlers falling back to shape-correct defaults.
  *
  * One server plays both Linear hosts: `POST /oauth/token` (the token
- * endpoint on Linear's API host) and `POST /graphql`. GraphQL requests are
- * routed by inspecting the query string for the mutation name
- * (webhookCreate / webhookDelete), else treated as the workspace/organization
- * query. Tests point `LINEAR_API_URL` here; `LINEAR_OAUTH_URL` may also
- * point here but never receives traffic (it's only used to build the
- * browser authorize URL).
+ * endpoint on Linear's API host, `client_credentials` grant) and
+ * `POST /graphql`. GraphQL requests are
+ * routed by inspecting the query string for `webhookDelete` (legacy cleanup),
+ * else treated as the workspace/organization query. Tests point `LINEAR_API_URL` here.
  */
 import { serve, type ServerType } from "@hono/node-server";
 import { Hono } from "hono";
@@ -34,8 +32,6 @@ export interface LinearFixtureHandlers {
   oauthToken?: (form: Record<string, string>) => LinearFixtureResponse;
   /** `POST /graphql` with the workspace/organization query. */
   organization?: () => LinearFixtureResponse;
-  /** `POST /graphql` with the webhookCreate mutation — receives `variables`. */
-  webhookCreate?: (variables: Record<string, unknown>) => LinearFixtureResponse;
   /** `POST /graphql` with the webhookDelete mutation — receives `variables`. */
   webhookDelete?: (variables: Record<string, unknown>) => LinearFixtureResponse;
 }
@@ -53,11 +49,12 @@ function listenAddress(server: ServerType): number {
 }
 
 const DEFAULTS: Required<LinearFixtureHandlers> = {
-  oauthToken: () => ({ body: { access_token: "lin_test", token_type: "Bearer", scope: "read,write,admin" } }),
+  oauthToken: () => ({
+    body: { access_token: "lin_app_token", token_type: "Bearer", expires_in: 2591999, scope: "read,write" },
+  }),
   organization: () => ({
     body: { data: { organization: { id: "lin-org-1", name: "Turnkey" }, viewer: { id: "u1" } } },
   }),
-  webhookCreate: () => ({ body: { data: { webhookCreate: { success: true, webhook: { id: "wh-1" } } } } }),
   webhookDelete: () => ({ body: { data: { webhookDelete: { success: true } } } }),
 };
 
@@ -93,11 +90,9 @@ export function startLinearFixture(overrides: LinearFixtureHandlers = {}): Linea
 
     const query = isRecord(body) && typeof body.query === "string" ? body.query : "";
     const variables = isRecord(body) && isRecord(body.variables) ? body.variables : {};
-    const { status, body: respBody } = query.includes("webhookCreate")
-      ? handlers.webhookCreate(variables)
-      : query.includes("webhookDelete")
-        ? handlers.webhookDelete(variables)
-        : handlers.organization();
+    const { status, body: respBody } = query.includes("webhookDelete")
+      ? handlers.webhookDelete(variables)
+      : handlers.organization();
     return c.json(respBody as object, status ?? 200);
   });
 

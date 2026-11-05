@@ -10,6 +10,7 @@ import {
   type AutoTitleInput,
   type AutoTitleResult,
   type Namer,
+  skipsAutoTitle,
 } from "./auto-title.js";
 
 export interface AutoTitleHostDeps {
@@ -22,6 +23,8 @@ export interface AutoTitleHostDeps {
 
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_INITIAL_RETRY_MS = 1_000;
+/** Messages the title reads from the start of a thread; it uses the first four user or assistant messages. */
+const AUTO_TITLE_HEAD_ENTRIES = 24;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -38,27 +41,40 @@ export function createAutoTitleHost(deps: {
 }): AutoTitleHost {
   return new AutoTitleHost({
     eventStream: deps.eventStream,
-    title: (input) =>
-      autoTitle(
+    title: async (input) => {
+      // Home is a place with one name, so it never spends a naming call.
+      if (input.threadId && skipsAutoTitle(await deps.engineStore.getThread(input.sessionId, input.threadId))) return { ok: false, reason: "home_thread" };
+      return autoTitle(
         {
           db: deps.db,
           ...(deps.namer ? { namer: deps.namer } : {}),
-          loadMessages: async (sessionId, threadId) => {
-            if (!threadId) return [];
-            const entries = await deps.engineStore.getEntries(sessionId, threadId);
-            const messages: { role: string; content: string }[] = [];
-            for (const entry of entries) {
-              if (entry.type !== "message") continue;
-              if (entry.role !== "user" && entry.role !== "assistant") continue;
-              messages.push({ role: entry.role, content: entry.content ?? "" });
-              if (messages.length === 4) break;
-            }
-            return messages;
-          },
+          loadMessages: async (sessionId, threadId) => threadId ? loadOpeningMessages(deps.engineStore, sessionId, threadId) : [],
         },
         input,
-      ),
+      );
+    },
   });
+}
+
+/**
+ * The first four user or assistant messages of a thread, for naming. It reads
+ * only the first messages, so a long thread is never loaded whole. Command
+ * results and other entries do not count toward the read.
+ */
+export async function loadOpeningMessages(
+  store: Pick<SessionStore, "getEntries">,
+  sessionId: string,
+  threadId: string,
+): Promise<{ role: string; content: string }[]> {
+  const entries = await store.getEntries(sessionId, threadId, { entryTypes: ["message"], headLimit: AUTO_TITLE_HEAD_ENTRIES });
+  const messages: { role: string; content: string }[] = [];
+  for (const entry of entries) {
+    if (entry.type !== "message") continue;
+    if (entry.role !== "user" && entry.role !== "assistant") continue;
+    messages.push({ role: entry.role, content: entry.content ?? "" });
+    if (messages.length === 4) break;
+  }
+  return messages;
 }
 
 /**

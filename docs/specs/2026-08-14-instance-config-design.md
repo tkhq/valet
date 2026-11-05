@@ -454,6 +454,7 @@ mcpServers:
     auth: oauth                 # required; none | oauth | api_key | bearer
     scopes:                     # oauth only: scopes for the authorize request
       - crm:read
+    oauthOnly: true             # oauth only: the server takes no pasted token
     tokenEnv: SF_MCP_TOKEN      # bearer only: env var that holds the token
     authQueryParam: API_KEY     # api_key/bearer only: send token as query param
     connectLabel: Acme API key  # api_key only: connect-UI copy
@@ -473,7 +474,12 @@ Auth modes:
   validation refuses it. Declare them for a scope-gated server: Metabase,
   for one, grants a token with no scopes when the request names none —
   the server does not fall back to the registered client's default scope
-  set — and then lists zero tools with no error anywhere. A scope-less
+  set — and then lists zero tools with no error anywhere. Valet requests
+  only these scopes. When the server's protected resource metadata
+  advertises a scope the entry lacks, the connect that registers the
+  client logs a warning that names it, and a tool call refused with `insufficient_scope` names the
+  missing scope. Add it here, then reconnect: Metabase 1.64 moved its
+  read tools to `agent:content:read`. A scope-less
   entry against a server that advertises `scopes_supported` logs a
   warning at connect naming the entry and the fix. The callback stores
   the scopes the token response grants (RFC 6749 `scope`), not the
@@ -482,6 +488,12 @@ Auth modes:
   (integration-oauth design); connected credentials cannot be upgraded by
   refresh either way — the user must disconnect and reconnect after
   scopes change.
+  The connect UI also offers "Enter a token instead", and the pasted token
+  goes to `url` as a bearer token. Set `oauthOnly: true` when the server
+  accepts only its own OAuth tokens, as Pylon's does. The connect UI then
+  offers no token entry, the save route refuses a pasted token, and a
+  rejected account is told to disconnect and sign in (integration-oauth
+  design, "OAuth-only services").
 - **`api_key`** — per-user manual token entry in the connect UI.
 - **`bearer`** — one instance-wide token, read from `tokenEnv` at boot.
   The file never holds secrets, so the entry names the env var. A `bearer`
@@ -497,12 +509,13 @@ Rules:
   `mcp-config:` prefix so a config entry can never silently dedupe against
   a bundled plugin.
 - Mode-specific keys on the wrong mode fail validation (`tokenEnv` outside
-  `bearer`, `scopes` outside `oauth`, `connectLabel` outside `api_key`,
+  `bearer`, `scopes` and `oauthOnly` outside `oauth`, `connectLabel` outside `api_key`,
   `authQueryParam` outside `api_key`/`bearer`).
 - `displayName` is the human-readable name the connect UI shows as the
   card title (and in the default `connectLabel` for `api_key` entries).
   When absent, the synthesized plugin title-cases `name`
-  ("grafana-cloud" → "Grafana Cloud"). The wire carries it as
+  ("grafana-cloud" → "Grafana Cloud"). Credential rejection messages from
+  `mcpActionPlugin` use the same name. The wire carries it as
   `PluginSummary.displayName`; the web client prefers it over its own
   id-derived label.
 - `riskLevel` is the per-service default. Explicit MCP tool annotations
@@ -517,6 +530,25 @@ Rules:
   assumed, because an unannotated tool would otherwise surface as
   `critical`. The mapping lives in `deriveRiskLevel`
   (`packages/sdk/src/mcp/action-plugin.ts`).
+- `GET /api/org/mcp-servers` lists every entry read-only to an org admin,
+  in file order and with disabled entries included. The entries are
+  deployment configuration, so a plain member gets 403 with an error that
+  says to ask an organization admin. The route uses the `isOrgAdmin` check
+  of the other admin-only org routes. It does not read the `organizations`
+  feature gate: a deployment's first admin joins through an admin invite
+  (`auth/bootstrap-admin.ts`), so even a single-org deployment has one. A user
+  with no live `org_members` row gets its own 403, because a session
+  resolves `orgId` without a membership row. Organization settings shows
+  the list as "MCP servers" to an admin. While organizations are off, the
+  same page opens at `/settings/mcp-servers`, and Personal workspace links
+  to it for an org admin only. The wire carries `name`,
+  `displayName`, `url`, `auth`, `scopes`, `description`, `riskLevel`,
+  `enabled`, and the caller's own `connected` state for `oauth` and
+  `api_key` entries (`null` for `none` and `bearer`). `url` is the scheme,
+  host, and path only: the route drops userinfo, query, and fragment,
+  because an operator can put a token there. It leaves out `tokenEnv` and
+  `authQueryParam`. To change a server, edit the config file; this surface
+  has no write path.
 
 ## Tool policies
 

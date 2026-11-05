@@ -19,13 +19,14 @@
    - **Churn containment:** agent-sandbox is v0.x; all CRD-facing code lives in one lifecycle module (`src/lifecycle.ts`) behind the provider's own surface, with the pinned CRD version in one constant. If the project stalls or the API breaks, the swap-back to plain pods+PVCs is that one module.
    - **Storage/teardown semantics (adversarial-review catch — the controller owner-references the PVC to the CR, so deleting the CR cascade-deletes the workspace; two teardown paths must therefore be distinguished):**
      - `create(opts)` creates the Sandbox CR; the returned sandbox id **is** the CR name, derived deterministically from the session identity. **`create` is upsert-shaped**: the attachment layer's failure-recovery path calls `provider.create()` again with the same opts (Phase 3 behavior), so an existing CR of the same name is adopted/re-asserted, never an error — which is also what makes re-provision workspace-safe (the retained CR keeps its PVC).
-     - **The engine's re-provision must NOT terminally delete the CR — and the existing attachment contract did.** Adversarial review found the real wiring: `SandboxAttachment.reportFailure` (liveness re-provision) calls `provider.destroy(oldId)` *unconditionally* before re-`create`, and `SandboxProvider.restore` is **never called anywhere in the engine** (the `restore(id)` path this spec originally assumed does not exist — the engine only `create`s and `destroy`s). For docker that's fine (destroy = `rm` container, the bind-mounted workspace survives); for k8s `destroy` cascade-deletes the PVC, so re-provision would wipe the workspace. **Fix (engine, additive): a new optional `SandboxProvider.release?(id)` seam.** `reportFailure` calls `provider.release?.(oldId)` when implemented, else falls back to `provider.destroy(oldId)` — so docker/local/virtual behavior is byte-unchanged (they don't implement `release`). The k8s provider implements `release` as a **no-op** (leave the CR standing; the subsequent upsert-`create` re-adopts it and the controller heals the pod onto the retained PVC — workspace survives). Pod death is invisible plumbing beneath a stable CR: **the k8s sandbox identity is the CR, not the pod.**
+     - **The engine's re-provision must NOT terminally delete the CR — and the existing attachment contract did.** Adversarial review found the real wiring: `SandboxAttachment.reportFailure` (liveness re-provision) calls `provider.destroy(oldId)` *unconditionally* before re-`create`, and `SandboxProvider.restore` is **never called anywhere in the engine** (the `restore(id)` path this spec originally assumed does not exist — the engine only `create`s and `destroy`s). For docker that's fine (destroy = `rm` container, the bind-mounted workspace survives); for k8s `destroy` cascade-deletes the PVC, so re-provision would wipe the workspace. **Fix (engine, additive): a new optional `SandboxProvider.release?(id)` seam.** `reportFailure` calls `provider.release?.(oldId)` when implemented, else falls back to `provider.destroy(oldId)` — so docker/local/virtual behavior is byte-unchanged (they don't implement `release`). The Kubernetes provider suspends the retained CR and waits for its pod to stop. The next upsert resumes the CR with a new pod on the retained PVC. Pod identity is ephemeral; the Kubernetes sandbox identity is the CR.
      - `destroy(id)` is TERMINAL: deletes the CR, controller cascade-deletes pod + PVC. Reached on session deletion via `SandboxAttachment.destroy`'s `provider.destroy(id)` branch — so `KubernetesSandbox` must NOT define a `destroy()` method (a no-op there would short-circuit the attachment and leak the CR forever; the terminal delete lives on the provider only).
      - `capabilities()`: `{ snapshot: "none", persistentWorkspace: true, tunnels: false, warmPool: false, coldStartEstimateMs: ~8000 }` (warmPool flips true in the fast-follow). `persistentWorkspace: true` is honest because re-provision goes through `release`-then-adopt, never destroy.
+   - **Exec transport diagnostics:** `execInPod` normalizes client-node rejections into `PodExecTransportError`. WebSocket error events expose the underlying error through `error`; they are not `Error` instances. The typed wrapper extends the engine's `SandboxConnectionError` and retains the original rejection in `cause`. Its message includes bounded diagnostics, namespace, pod, container, and corrective action. Commands, stdin, request headers, and socket objects are excluded. Provider death classification preserves this wrapper instead of converting an event to `[object Object]`. Empty or non-diagnostic event errors do not replace a useful outer message. For typed connection failures, recovery classification reads original messages and string rejections through guarded `cause` and `error` links, independently of display truncation. Other errors retain top-level message classification; nested application diagnostics cannot trigger recovery. Traversal stops after 16 queued objects and tolerates cycles and throwing getters.
    - **File ops ride exec** (no host mount exists): `readFile`/`writeFile`/`readBinary`/`writeBinary`/`readdir`/`stat`/`mkdir`/`rm` are implemented over the exec API with base64 framing for binary safety (`base64 -w0` / `base64 -d`), matching the byte-fidelity the docker provider gets from host fs ops. Paths quoted/escaped exactly as the docker provider's exec path does.
    - **Job-mode exec:** same design as the docker provider — `execJob` starts a detached process inside the pod writing to `/tmp/valet-jobs/{execId}.{out,exit}`, `pollJob` reads output from a byte offset, `cancelJob` kills the process group. This reuses the provider-conformance expectations already pinned by the engine's provider conformance suite, which this package runs (the same suite sandbox-docker and sandbox-local run).
    - **Liveness:** pod deleted/evicted out from under an exec surfaces as the sandbox-unavailable error class the attachment layer already handles (epoch re-provision) — the k8s analog of the docker provider's container-death detection.
-6. **In-cluster wiring:** the api pod runs under a ServiceAccount whose Role (namespaced to the sandbox namespace) grants the agent-sandbox `Sandbox` custom resource create/get/list/watch/**update**/delete (the `update` verb is required — the create-is-upsert adopt path re-asserts the CR via `replaceNamespacedCustomObject`, an HTTP PUT, which is exactly the workspace-preserving re-provision path in decision 5; omitting it 403s there) plus pods + pods/exec + pods/log create/get/list/watch/delete — nothing cluster-scoped (the agent-sandbox controller itself owns PVC management). Provider config (namespace, image default, resource defaults) comes from env vars fed by the chart. Out-of-cluster dev of the provider itself uses the local kubeconfig (client-node's default loading), so the provider's tests can run against Rancher Desktop k3s without deploying the api.
+6. **In-cluster wiring:** the api pod runs under a ServiceAccount with a Role in the sandbox namespace. The Role matches the api call sites: Sandbox CR create/get/list/update/patch/delete; pod get/list/delete; event list; PVC get/patch; pod exec get; pod log get; Job create/get/delete; ConfigMap create/delete; and Secret create/get/patch/update/delete. The api does not watch these resources. The agent-sandbox controller creates pods and PVCs. The Role has no cluster-scoped permissions. A restricted Helm reconciler must already hold the Sandbox CR verbs before it can create this Role. It does not need RBAC `escalate` or `bind`. Provider config (namespace, image default, resource defaults) comes from env vars fed by the chart. Out-of-cluster provider tests use the local kubeconfig.
 7. **Sandbox backend selection at boot:** `VALET_SANDBOX_BACKEND=docker|kubernetes|local` (default `docker`, today's behavior). The k8s deployment sets `kubernetes`. `make dev-local` keeps docker.
 8. **Helm chart** at `deploy/chart/valet/`: api Deployment (replicas pinned 1 — the engine is a stateful singleton; a values comment says so) with an **initContainer that waits for Postgres readiness** (the api runs migrations at boot; without the gate it crash-loops until PG is up), Service, Ingress (Traefik class by default; **TLS terminated at Traefik with a self-signed/default cert and `BETTER_AUTH_URL=https://…` — better-auth marks session cookies `Secure`, so plain-http login would silently fail**; adversarial-review catch), bundled Postgres StatefulSet + Service + Secret (or `externalDatabase.url`; note StatefulSet PVCs survive `helm uninstall` by Kubernetes design — `make k8s-down` documents the explicit PVC delete for a true reset), sandbox Namespace + ServiceAccount + Role + RoleBinding, app Secret (`BETTER_AUTH_SECRET`, `VALET_ENCRYPTION_KEY`, `ANTHROPIC_API_KEY`, optional `AUTH_*`) — **generated values use a `lookup`-based retain guard so `helm upgrade` reuses the existing Secret** (naive `randAlphaNum` regenerates per upgrade, which would invalidate every session AND rotate the sandbox JWT master, since `VALET_SANDBOX_JWT_MASTER` falls back to `BETTER_AUTH_SECRET`), ConfigMap for non-secret config (`BETTER_AUTH_URL`, sandbox backend/namespace/image). **The api pod template carries `checksum/secret` + `checksum/config` annotations** — Kubernetes injects `envFrom`/`secretKeyRef` env vars at pod start only, so without them a key rotation updates the Secret while the running pod keeps the old value and `helm upgrade --wait` still reports success. `checksum/secret` digests the supplied values (`api.secrets.*`, `externalDatabase.url`, `postgres.*`) rather than the rendered Secret: the retain guard emits a fresh `randAlphaNum` on any render that cannot `lookup`, so a digest over the rendered Secret would change when nothing changed and restart the api on the first upgrade after an install. Secrets reached through `api.extraEnvFrom` are outside the chart and outside both digests — rotate those with an explicit `kubectl rollout restart`. `helm test`-style smoke hook: a Job that curls `/api/health`.
 
@@ -35,7 +36,7 @@
 
 ## Exit criteria (the dogfood)
 
-On a clean Rancher Desktop k3s: `make k8s-build k8s-up`, then in the browser — sign up (becomes admin), start a session, run a command that provisions a sandbox (verify `kubectl get sandboxes,pods -n valet-sandboxes` shows the Sandbox CR + backing pod with the session label), run a >60s command (job-mode path over exec), `kubectl delete pod` the backing pod mid-session and watch recovery (controller-recreate or attachment re-provision — either path) land on the same workspace storage with files intact, invite flow works (create invite → second browser profile signs up as member), and everything survives `kubectl rollout restart deployment/valet-api` (boot restore over the bundled Postgres).
+On a clean Rancher Desktop k3s: `make k8s-build k8s-up`, then in the browser — sign up with the one-time admin link from the api log (`grep "No admin yet"`), start a session, run a command that provisions a sandbox (verify `kubectl get sandboxes,pods -n valet-sandboxes` shows the Sandbox CR + backing pod with the session label), run a >60s command (job-mode path over exec), `kubectl delete pod` the backing pod mid-session and watch recovery (controller-recreate or attachment re-provision — either path) land on the same workspace storage with files intact, invite flow works (create invite → second browser profile signs up as member), and everything survives `kubectl rollout restart deployment/valet-api` (boot restore over the bundled Postgres).
 
 ## Testing
 
@@ -130,9 +131,9 @@ Three additive changes to the manifest builder and provider config:
    values `sandbox.ephemeralStorageRequest` / `sandbox.ephemeralStorageLimit`.
    The defaults land on `K8sProviderConfig.defaultResources` and the manifest
    merges them PER-FIELD under `SandboxCreateOpts.resources`, so the disk
-   protection survives a caller that only picks cpu/memory. cpu/memory keep
-   the request-equals-limit shape; ephemeral-storage request and limit differ
-   on purpose.
+   protection survives a caller that only picks cpu/memory. cpu keeps the
+   request-equals-limit shape; memory and ephemeral-storage request and
+   limit differ on purpose (memory since 2026-09-23, below).
 2. **DinD docker-state `emptyDir` gets `sizeLimit`** equal to the resolved
    ephemeral-storage limit (emptyDir usage counts against the container
    limit, so a larger sizeLimit is unreachable). No limit configured →
@@ -207,6 +208,56 @@ do not count toward the new selectors until recreated from an updated template.
 The constraints add no node-pool selector or toleration and do not change
 resource requests or PVC provisioning.
 
+## Update (2026-09-14): chart-native namespace ownership
+
+Chart 0.10.11 adds `sandbox.createNamespace`. The default is `true`, which
+keeps local installs self-contained. The rendered Namespace has
+`helm.sh/resource-policy: keep`. When the value is `false`, Helm omits the
+Namespace and still renders all namespaced application resources. The platform
+must create `sandbox.namespace` before Helm reconciliation.
+
+This mode lets Flux helm-controller render the OCI chart without a
+post-renderer or cluster-scoped Namespace access. An existing release must
+complete these steps in order:
+
+1. Add `helm.sh/resource-policy=keep` to the live Namespace.
+2. Upgrade once with `sandbox.createNamespace=true`.
+3. Verify that `helm get manifest` contains the annotated Namespace.
+4. Transfer the live Namespace to the platform.
+5. Set `sandbox.createNamespace=false`.
+
+The stored-manifest check is required. A live annotation alone does not change
+an old Helm release manifest. Helm can delete the Namespace if the next
+upgrade omits a manifest that lacks the keep annotation.
+
+The reverse transfer does not delete the Namespace. The platform must stop
+reconciling it first. An operator then adds these Helm ownership fields:
+
+- Label `app.kubernetes.io/managed-by=Helm`.
+- Annotation `meta.helm.sh/release-name=<release>`.
+- Annotation `meta.helm.sh/release-namespace=<release namespace>`.
+- Annotation `helm.sh/resource-policy=keep`.
+
+After verification, an operator can upgrade with
+`sandbox.createNamespace=true`. The same adoption must occur before a rollback
+to a revision that renders the Namespace. The chart README contains the exact
+migration, verification, adoption, and rollback commands.
+
+Helm owns application resources, including the api configuration ConfigMap and
+sandbox RBAC. Platform configuration can use `api.extraEnvFrom` to reference
+external ConfigMaps and Secrets. ExternalSecret resources and their target
+Secrets stay outside Helm. These external references do not affect chart
+checksums, so an operator must restart the api Deployment after a referenced
+value changes.
+
+The RBAC audit removed unused watch verbs, pod creation, pod log writes, and
+unused Job verbs. Pod deletion remains for image and resource convergence.
+Secret get, update, and patch remain for credential rotation and owner
+references. Sandbox update and patch remain for adoption, hibernation, and
+retained-home resume. The client-node exec path uses an HTTP GET WebSocket
+upgrade. The `pods/exec` rule grants only `get` and does not grant the SPDY
+`create` path.
+
 ## Non-goals
 
 - CI image publishing / remote clusters (follow-up when a prod cluster exists).
@@ -228,3 +279,59 @@ After pod deletion, the provider checks namespace events from the last ten minut
 Each active job retains its kickoff pod name and UID. Polling and cancellation check that identity before using a replacement pod. Terminal results, cancellation, and rejected polls release the retained identity.
 
 An exec failure without a valid process exit code preserves the Kubernetes status reason and message. Job polling rejects a failed exec before parsing its marker. Empty, malformed, or out-of-range markers cannot report success. Ordinary command exit codes remain command results when eviction evidence is absent.
+
+### Exec stdin completion
+
+Exec bounds provided stdin by its UTF-8 byte count inside the pod. A `head -c` pipe delivers EOF to the command. The client keeps stdin open until the command returns its status. This prevents older WebSocket protocols from closing the transport before the pod consumes the payload. Empty input produces immediate EOF. Command exit codes and output remain intact. Regression tests cover empty input, Unicode input, and a live 1 MB binary round trip.
+
+## Update (2026-09-23): sandbox memory burst limit
+
+A memory limit equal to the request cgroup-OOM-kills the sandbox the moment
+its own workload peaks, regardless of free node memory. On 2026-09-23 a full
+`pnpm test` run OOM-killed a 4Gi sandbox on agents-dev three times on an
+otherwise idle node.
+
+Chart 0.10.16 changes the manifest builder: the sandbox container memory
+LIMIT is now `MEMORY_LIMIT_FACTOR` (3) times the merged memory request. The
+request is unchanged and stays the scheduling unit. The limit is only a
+runaway backstop. Transient bursts ride on free node memory. Under real node
+pressure the kubelet evicts the pod furthest over its request first, so a
+bursting sandbox is still the first casualty when it matters.
+
+The builder computes the limit from parsed bytes and formats it with the
+largest binary suffix that divides evenly. An unparseable request keeps
+limit = request, so admission rejects the same values it rejected before.
+CPU keeps request = limit. The Docker provider is unchanged: `docker run
+--memory` has one knob, and dev machines self-recover from an OOM kill.
+
+Rollout matches the TKAI-349 note above: existing pods keep their old shape
+until their next `create()` adoption, where the resource fingerprint
+mismatch rolls the pod ("CPU/memory changed"). Deploys should pair this
+with a monitoring alert on sandboxes sustained above their memory request.
+
+## Update (2026-09-26): database upgrade startup budget
+
+Database upgrades run during provider construction, before the API binds its HTTP listener.
+The usage-rollup repair can require several minutes for large retained histories.
+Chart 0.10.18 replaces the previous 90-second startup window with a configurable database upgrade budget.
+`api.startupProbe.failureThreshold` defaults to 360 at a fixed five-second interval, allowing 30 minutes.
+`api.progressDeadlineSeconds` defaults to 2100, allowing 35 minutes of rollout progress.
+The startup and liveness probes still use `/api/health`. Readiness still uses `/api/ready`.
+Session restore remains after bind; it does not account for the longer startup budget.
+During a rolling upgrade, the old ready pod serves traffic until the new pod becomes ready.
+For the first usage-rollup upgrade, operators must set the Helm timeout to at least 35 minutes.
+The runbook uses `--wait --timeout 40m` to allow additional deployment work.
+Golden chart tests verify the default budgets and explicit overrides without contacting a cluster.
+
+## Update (2026-11-03): Recreate boot and drain
+
+The 2026-09-26 note above says the old pod serves traffic during an upgrade. That is not correct for `Recreate`: the old pod stops before the new pod starts.
+Chart 0.10.32 and `packages/api/src/lib/lifecycle.ts` make the window shorter and make it answer 503 with `Retry-After`:
+
+- A `pre-upgrade` hook Job pulls the new api image before the old pod stops.
+- The api binds a boot listener before database upgrades. The startup probe now polls every second, and the chart multiplies `api.startupProbe.failureThreshold` by 5, so the 30-minute budget does not change.
+- Gated routes (API, MCP, webhooks, proxy) return 503 with `Retry-After` until the boot chain finishes, and again during the SIGTERM drain.
+- The api Service publishes not-ready addresses, so callers reach the pod during boot and drain.
+- Liveness allows a busy event loop about a minute (`timeoutSeconds: 5`, `failureThreshold: 6`).
+
+The chart README section "Moving to RollingUpdate" lists the changes that two concurrent api pods need.

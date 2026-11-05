@@ -60,6 +60,70 @@ describe('discoverAuthServer', () => {
     );
   });
 
+  it('returns the scopes the protected resource advertises apart from the issuer scopes', async () => {
+    // Metabase 1.64 shape: the resource gates tools on five scopes, while
+    // the issuer also lists the scopes of the older tool surface.
+    mockFetchRoutes({
+      'https://mb.example.com/.well-known/oauth-protected-resource/api/metabase-mcp': {
+        resource: 'https://mb.example.com/api/metabase-mcp',
+        authorization_servers: ['https://mb.example.com'],
+        scopes_supported: ['agent:content:read', 'agent:query:run'],
+      },
+      'https://mb.example.com/.well-known/oauth-authorization-server': {
+        ...AS_METADATA,
+        scopes_supported: ['agent:content:read', 'agent:query', 'agent:query:run'],
+      },
+    });
+
+    const meta = await discoverAuthServer('https://mb.example.com/api/metabase-mcp');
+    expect(meta.resource_scopes_supported).toEqual(['agent:content:read', 'agent:query:run']);
+    expect(meta.scopes_supported).toEqual(['agent:content:read', 'agent:query', 'agent:query:run']);
+  });
+
+  it('returns the resource scopes when the metadata names no authorization server', async () => {
+    // RFC 9728 makes authorization_servers optional; the scopes still count.
+    mockFetchRoutes({
+      'https://mcp.example.com/.well-known/oauth-protected-resource/mcp': {
+        resource: 'https://mcp.example.com/mcp',
+        scopes_supported: ['new:read'],
+      },
+      'https://mcp.example.com/.well-known/oauth-authorization-server': AS_METADATA,
+    });
+
+    const meta = await discoverAuthServer('https://mcp.example.com/mcp');
+    expect(meta.resource_scopes_supported).toEqual(['new:read']);
+    expect(meta.authorization_endpoint).toBe(AS_METADATA.authorization_endpoint);
+  });
+
+  it('ignores resource scopes from metadata that describes a different resource', async () => {
+    // The path document is down; the root document describes another
+    // resource, so its scopes must not reach the authorize request.
+    mockFetchRoutes({
+      'https://mcp.example.com/.well-known/oauth-protected-resource': {
+        resource: 'https://mcp.example.com/',
+        authorization_servers: ['https://auth.example.com'],
+        scopes_supported: ['admin:all'],
+      },
+      'https://auth.example.com/.well-known/oauth-authorization-server': AS_METADATA,
+    });
+
+    const meta = await discoverAuthServer('https://mcp.example.com/api/mcp');
+    expect(meta.resource_scopes_supported).toBeUndefined();
+  });
+
+  it('treats a resource that differs by a trailing slash as a different resource', async () => {
+    mockFetchRoutes({
+      'https://mcp.example.com/.well-known/oauth-protected-resource': {
+        resource: 'https://mcp.example.com/api/mcp/',
+        scopes_supported: ['admin:all'],
+      },
+      'https://mcp.example.com/.well-known/oauth-authorization-server': AS_METADATA,
+    });
+
+    const meta = await discoverAuthServer('https://mcp.example.com/api/mcp');
+    expect(meta.resource_scopes_supported).toBeUndefined();
+  });
+
   it('falls back to AS metadata on the MCP origin when there is no protected-resource metadata', async () => {
     mockFetchRoutes({
       'https://mcp.example.com/.well-known/oauth-authorization-server/mcp': AS_METADATA,

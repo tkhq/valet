@@ -56,12 +56,27 @@ both set, and rung 5 stays inert whenever a real auth instance exists.
 
 Real auth is [better-auth](https://better-auth.com): email/password, optional
 Google/GitHub social login, and generic OIDC SSO (PKCE). The first signup
-becomes org admin. Invite codes are stored hashed. Signup can be restricted
-by email domain (`AUTH_ALLOWED_EMAIL_DOMAINS`).
+is not an admin for being first. Admins come from `AUTH_ADMIN_EMAILS` (on a
+sign-in where SSO, Google, or GitHub vouches for the email), from config- or
+admin-issued admin invites, or, while no admin exists and SSO is off, from a
+one-time admin link the api prints to its log. Password sign-up cannot claim
+an administrator's email without an admin invite code. With SSO on and no
+admin declared, the api refuses to boot. Invite codes are stored hashed.
+Signup can be restricted by email domain (`AUTH_ALLOWED_EMAIL_DOMAINS`).
 
 **MCP** (`/mcp`) uses proper OAuth instead of API keys: RFC 8414 discovery,
 dynamic client registration, and Bearer access tokens validated against the
-better-auth OAuth tables. Tools are scoped to the token's user.
+better-auth OAuth tables. Tools are scoped to the token's user. Registration
+needs no session, as the MCP spec expects. Every redirect URI must be
+`https://` with a full host name, `http://` loopback, or a listed app scheme
+such as `claude://`, without wildcards, user names, or fragments.
+Registrations are limited per address (`AUTH_MCP_REGISTRATION_RATE_PER_HOUR`,
+default 10 an hour) and by a daily cap on unapproved clients
+(`AUTH_MCP_UNCONSENTED_CLIENT_CAP`, default 200). Each registration holds at
+most `AUTH_MCP_MAX_REDIRECT_URIS` (default 5). `AUTH_MCP_APP_SCHEMES` lists
+the allowed app schemes (default `claude,cursor`), and
+`AUTH_MCP_REGISTRATION=off` refuses new registrations. The consent page labels the app name as unverified and shows the
+redirect host.
 
 ## Authorization
 
@@ -198,3 +213,9 @@ default).
   targets, `.env`, or any deployed environment.
 - The API serves one process per deployment. There is no multi-tenant
   cross-org surface — the data model is single-org.
+- Each admin configuration change writes one row to `admin_audit_events`.
+  An org admin reads it at Settings > Organization > Audit log. High-risk
+  changes log `security.admin_change` and count in
+  `valet.security.admin_changes`. To forward these alerts, set
+  `VALET_SECURITY_ALERT_WEBHOOK_URL` at deploy time. See
+  `docs/specs/2026-11-03-admin-audit-log-design.md`.

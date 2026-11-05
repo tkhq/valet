@@ -41,6 +41,7 @@ export function SkillDetailPage() {
       }
       content={skill?.content}
       skillName={skill?.name}
+      skill={skill}
       isLoading={isLoading}
       error={error}
     />

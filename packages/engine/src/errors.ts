@@ -163,9 +163,16 @@ export class TimeoutError extends Error {
 export class WorkspaceProvisioningError extends Error {
   readonly code = "workspace_provisioning";
 
-  constructor(public readonly timeoutMs: number) {
+  /**
+   * @param lastStartError Why the most recent start attempt failed, when one
+   *   did. A start that keeps failing otherwise looked like a slow start: each
+   *   call waited out its timeout and no log named the cause.
+   */
+  constructor(public readonly timeoutMs: number, public readonly lastStartError?: string) {
     super(
-      `[workspace_provisioning] sandbox did not become ready within ${timeoutMs}ms; the workspace is still provisioning in the background — retry shortly.`,
+      lastStartError
+        ? `[workspace_provisioning] sandbox did not become ready within ${timeoutMs}ms. The last start attempt failed: ${lastStartError.replace(/\.+$/, "")}. Retry the operation; if it fails the same way again, check the sandbox image and configuration.`
+        : `[workspace_provisioning] sandbox did not become ready within ${timeoutMs}ms; the workspace is still provisioning in the background — retry shortly.`,
     );
     this.name = "WorkspaceProvisioningError";
   }
@@ -188,6 +195,35 @@ export class SandboxSupersededError extends Error {
   }
 }
 
+/** Bounded classification of a terminal startup failure, for the
+ * `valet.sandbox.startup_failed` counter. Free text stays in `reason`.
+ * `capacity` is the org sandbox ceiling, not an infrastructure failure, so
+ * alert expressions exclude it. */
+export type SandboxStartupKind =
+  | "crash_loop"
+  | "image_pull"
+  | "unschedulable"
+  | "pod_failed"
+  | "ownership"
+  | "capacity"
+  | "other";
+
+// A Record over the union fails to compile when a kind is added or removed
+// without updating this list.
+const SANDBOX_STARTUP_KIND_SET: Record<SandboxStartupKind, true> = {
+  crash_loop: true,
+  image_pull: true,
+  unschedulable: true,
+  pod_failed: true,
+  ownership: true,
+  capacity: true,
+  other: true,
+};
+
+/** Every `SandboxStartupKind`, so the counter can zero-initialize each
+ * series at instrument creation. */
+export const SANDBOX_STARTUP_KINDS: readonly SandboxStartupKind[] = Object.keys(SANDBOX_STARTUP_KIND_SET) as SandboxStartupKind[];
+
 /**
  * Thrown by a `SandboxProvider.create` implementation when a sandbox
  * definitively FAILED to start (a terminal condition — image pull failure,
@@ -205,6 +241,7 @@ export class SandboxStartupError extends Error {
   constructor(
     public readonly sandboxId: string,
     public readonly reason: string,
+    public readonly kind: SandboxStartupKind = "other",
   ) {
     super(`sandbox failed to start: ${reason}`);
     this.name = "SandboxStartupError";
@@ -225,8 +262,100 @@ export class SandboxPreparationError extends Error {
   readonly code = "sandbox_preparation_failed";
 
   constructor(public readonly cause?: unknown) {
-    super(`sandbox preparation failed: ${cause instanceof Error ? cause.message : String(cause)}`);
+    super(`sandbox preparation failed: ${formatSandboxErrorCause(cause)}`);
     this.name = "SandboxPreparationError";
+  }
+}
+
+const MAX_PREPARATION_DETAIL_LENGTH = 2048;
+
+function boundPreparationDetail(detail: string): string {
+  const marker = " [truncated]";
+  return detail.length <= MAX_PREPARATION_DETAIL_LENGTH
+    ? detail
+    : detail.slice(0, MAX_PREPARATION_DETAIL_LENGTH - marker.length) + marker;
+}
+
+function preparationField(cause: object, key: string): string | number | undefined {
+  try {
+    const value: unknown = Reflect.get(cause, key);
+    if (typeof value === "string") return boundPreparationDetail(value);
+    if (typeof value === "number") return value;
+  } catch {
+    // Read fields independently so one throwing getter cannot hide another field.
+  }
+  return undefined;
+}
+
+function preparationFallback(cause: object): string {
+  const details: Record<string, string | number | boolean | null> = {};
+  // Read only known diagnostic fields. Unknown scalar fields can hold secrets.
+  for (const key of ["failure", "retryable", "attempts"]) {
+    try {
+      const descriptor = Object.getOwnPropertyDescriptor(cause, key);
+      if (!descriptor?.enumerable || !("value" in descriptor)) continue;
+      const value: unknown = descriptor.value;
+      if (typeof value === "string") details[key] = boundPreparationDetail(value);
+      else if (typeof value === "bigint") details[key] = boundPreparationDetail(String(value));
+      else if (value === null || typeof value === "number" || typeof value === "boolean") details[key] = value;
+      else if (typeof value === "object") details[key] = Array.isArray(value) ? "[array]" : "[object]";
+    } catch {
+      // A proxy can reject one field while other fields remain readable.
+    }
+  }
+  return Object.keys(details).length ? boundPreparationDetail(JSON.stringify(details)) : "unserializable cause";
+}
+
+/** Bounded sandbox diagnostics. Excludes private payloads and serialization hooks. */
+export function formatSandboxErrorCause(cause: unknown): string {
+  if (cause !== null && (typeof cause === "object" || typeof cause === "function")) {
+    const message = preparationField(cause, "message");
+    const code = preparationField(cause, "code");
+    const messageText = typeof message === "string" ? message : "";
+    const codeText = code === undefined ? "" : String(code);
+    if (messageText && codeText) {
+      // Another wrapper can add context and truncate this message again.
+      // Keep the code at the start, even when this diagnostic fits the limit.
+      return boundPreparationDetail(`(${codeText}) ${messageText}`);
+    }
+    if (messageText || codeText) return messageText || codeText;
+
+    // Only copy scalar diagnostics. Requests, commands, and nested payloads can
+    // contain credentials. Never call a provider object's toJSON or toString.
+    const details: Record<string, string | number> = {};
+    for (const key of ["reason", "status", "statusCode", "exitCode", "signal", "errno", "syscall"]) {
+      const value = preparationField(cause, key);
+      if (value !== undefined) details[key] = value;
+    }
+    return Object.keys(details).length
+      ? boundPreparationDetail(JSON.stringify(details))
+      : preparationFallback(cause);
+  }
+  return boundPreparationDetail(String(cause));
+}
+
+/** Keep first-party stack traces without inspecting retained request causes. */
+export function formatSandboxErrorLog(cause: unknown): { message: string; name?: string; stack?: string } {
+  const details: { message: string; name?: string; stack?: string } = { message: formatSandboxErrorCause(cause) };
+  try {
+    if (cause instanceof Error) {
+      const name = preparationField(cause, "name");
+      if (typeof name === "string") details.name = name;
+      // A long message must not displace every frame from the logged stack.
+      const stack: unknown = Reflect.get(cause, "stack");
+      if (typeof stack === "string") details.stack = stack;
+    }
+  } catch {
+    // Revoked proxies and throwing stack getters must not fail logging.
+  }
+  return details;
+}
+
+/** Provider connection failure. Retains the cause for transport classification. */
+export class SandboxConnectionError extends Error {
+  constructor(message: string, public readonly cause: unknown) {
+    super(message);
+    this.name = "SandboxConnectionError";
   }
 }
 
@@ -245,6 +374,20 @@ export class SandboxUnavailableError extends Error {
       `[sandbox_unavailable] sandbox connection lost mid-operation; the command may or may not have run. The workspace is re-provisioning in the background — retry shortly.`,
     );
     this.name = "SandboxUnavailableError";
+  }
+}
+
+/**
+ * A provider's `restore` found that the sandbox no longer exists or no
+ * longer runs (fix wave 2, M2). The WakeWatcher ends a wakeup on it at once
+ * with `cause=sandbox_unavailable` instead of waiting for its deadline.
+ */
+export class SandboxGoneError extends Error {
+  readonly code = "sandbox_gone";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "SandboxGoneError";
   }
 }
 

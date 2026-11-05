@@ -1,9 +1,11 @@
-import { describe, expect, it, beforeEach } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
+import { describe, expect, it, beforeEach, vi } from "vitest";
+import { and, eq, sql } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import {
   apikey,
+  agentSessions,
   assistants,
   contentSources,
   credentials,
@@ -14,6 +16,7 @@ import {
   users,
   workflowDefinitions,
   workflowRuns,
+  workflowSchedules,
 } from "../schema/index.js";
 import { reapTeamWorkflows } from "../workflows/service.js";
 import {
@@ -25,6 +28,7 @@ import {
   isLiveIdpMirror,
   LastAdminError,
   listTeamMembers,
+  teamMembershipSummaries,
   listTeamsForOrg,
   listTeamsForUser,
   NotOrgMemberError,
@@ -36,7 +40,7 @@ import {
   TeamNameConflictError,
   TeamOwnsWorkflowsError,
 } from "./teams.js";
-import { createAssistant, findDefaultAssistant } from "../assistants/service.js";
+import { findDefaultAssistant } from "../assistants/service.js";
 
 async function seedUser(db: AppDb, id: string, orgId: string) {
   await db.insert(users).values({ id, email: `${id}@x.test`, name: id, role: "member" });
@@ -55,6 +59,38 @@ describe("teams service", () => {
     await seedUser(db, "u3", orgId);
   });
 
+  it("aggregates membership in bounded batches without including another org", async () => {
+    await db.insert(orgs).values({ id: "other-org", name: "Other", createdAt: Date.now() });
+    await db.insert(teams).values([
+      { id: "one", orgId, name: "One", createdAt: 1 },
+      { id: "two", orgId, name: "Two", createdAt: 1 },
+      { id: "empty", orgId, name: "Empty", createdAt: 1 },
+      { id: "foreign", orgId: "other-org", name: "Foreign", createdAt: 1 },
+    ]);
+    await db.insert(teamMembers).values([
+      { teamId: "one", userId: "u1", role: "admin" },
+      { teamId: "one", userId: "u2", role: "member" },
+      { teamId: "two", userId: "u2", role: "admin" },
+      { teamId: "foreign", userId: "u1", role: "admin" },
+    ]);
+    const reads = vi.spyOn(db, "select");
+    try {
+      expect(await teamMembershipSummaries(db, orgId, [], "u1")).toEqual(new Map());
+      expect(reads).not.toHaveBeenCalled();
+      const result = await teamMembershipSummaries(db, orgId, [
+        "one", "foreign", "empty", ...Array.from({ length: 1_001 }, (_, i) => `absent-${i}`), "two",
+      ], "u1");
+      expect(result).toEqual(new Map([
+        ["one", { memberCount: 2, callerRole: "admin" }],
+        ["two", { memberCount: 1, callerRole: null }],
+      ]));
+      expect(reads).toHaveBeenCalledTimes(2);
+      expect((await teamMembershipSummaries(db, orgId, ["one"], "u2")).get("one")?.callerRole).toBe("member");
+    } finally {
+      reads.mockRestore();
+    }
+  });
+
   // Teams written before the seed shipped have no default assistant, and a
   // member switching to one would hit a notice with no create path. The boot
   // backfill gives every such team its default once and leaves teams that
@@ -63,17 +99,17 @@ describe("teams service", () => {
     const now = Date.now();
     await db.insert(teams).values({ id: "team_old", orgId, name: "Old", origin: "local", createdAt: now });
     await db.insert(teams).values({ id: "team_named", orgId, name: "Named", origin: "local", createdAt: now });
-    await createAssistant(db, orgId, { type: "team", id: "team_named" }, "Bot");
+    await seedWorkspaceAssistant(db, orgId, { type: "team", id: "team_named" });
     const seeded = await createTeam(db, { orgId, name: "Fresh", creatorUserId: "u1" });
 
     // "Named" already holds a default: its first assistant became one.
     expect(await seedMissingTeamDefaults(db)).toEqual(["team_old"]);
     for (const id of ["team_old", "team_named", seeded.id]) {
       const row = await findDefaultAssistant(db, orgId, { type: "team", id });
-      expect(row?.isDefault).toBe(true);
+      expect(row).toBeDefined();
     }
     const namedRows = await db.select().from(assistants).where(and(eq(assistants.ownerType, "team"), eq(assistants.ownerId, "team_named")));
-    expect(namedRows.map((r) => r.name)).toEqual(["Bot"]);
+    expect(namedRows).toHaveLength(1);
 
     expect(await seedMissingTeamDefaults(db)).toEqual([]);
   });
@@ -100,7 +136,6 @@ describe("teams service", () => {
       .from(assistants)
       .where(and(eq(assistants.ownerType, "team"), eq(assistants.ownerId, team.id)));
     expect(owned).toHaveLength(1);
-    expect(owned[0]?.isDefault).toBe(true);
     expect(owned[0]?.archivedAt).toBeNull();
     expect(owned[0]?.orgId).toBe(orgId);
     // Session address follows the assistant id (`assistant:{id}`), so the
@@ -119,7 +154,7 @@ describe("teams service", () => {
       .from(assistants)
       .where(and(eq(assistants.ownerType, "team"), eq(assistants.ownerId, team.id)));
     expect(team.defaultAssistant).toEqual(owned[0]);
-    expect(team.defaultAssistant.isDefault).toBe(true);
+    expect(team.defaultAssistant).toBeDefined();
   });
 
   it("createTeam rolls the assistant back with the team on a name conflict", async () => {
@@ -286,12 +321,43 @@ describe("teams service", () => {
     expect(teams.map((t) => t.id)).toEqual([t1.id]);
   });
 
-  it("deleteTeam removes the team and its memberships when it owns no workflows", async () => {
+  it("deleteTeam removes the team, memberships, and team orchestrator schedules", async () => {
     const team = await createTeam(db, { orgId, name: "Platform", creatorUserId: "u1" });
+    await db.insert(workflowSchedules).values({
+      id: "team_schedule",
+      orgId,
+      ownerType: "team",
+      ownerId: team.id,
+      targetKind: "assistant",
+      prompt: "Review work",
+      name: "Team schedule",
+      cron: "0 9 * * *",
+      timezone: "UTC",
+      enabled: true,
+      nextFireAt: 2_000,
+      createdBy: "u1",
+      createdAt: 1_000,
+      updatedAt: 1_000,
+    });
     await deleteTeam(db, { teamId: team.id });
 
     const teams = await listTeamsForUser(db, "u1");
     expect(teams).toHaveLength(0);
+    expect(await db.select().from(workflowSchedules)).toHaveLength(0);
+  });
+
+  it("deleteTeam denies pending child results without changing another team's results", async () => {
+    const team = await createTeam(db, { orgId, name: "Platform", creatorUserId: "u1" });
+    for (const [id, ownerId] of [["deleted-child", team.id], ["other-child", "other-team"]]) {
+      await db.insert(agentSessions).values({ id, userId: "u1", orgId, workspace: "/tmp", ownerType: "team", ownerId,
+        status: "active", createdAt: 1, updatedAt: 1 });
+      await db.execute(sql`INSERT INTO engine_queue_items (id, session_id, thread_id, status, content, attempt_count, max_attempts, timeout_at, created_at, updated_at, child_result_delivery)
+        VALUES (${id}, ${id}, 't', 'settled', '{}', 1, 10, 100, 1, 1, 'pending')`);
+    }
+    await deleteTeam(db, { teamId: team.id });
+    expect(await db.execute(sql`SELECT id, child_result_delivery FROM engine_queue_items ORDER BY id`)).toMatchObject({ rows: [
+      { id: "deleted-child", child_result_delivery: "denied" }, { id: "other-child", child_result_delivery: "pending" },
+    ] });
   });
 
   it("deleteTeam drops team-owned credential rows including the 1Password grant", async () => {

@@ -1,9 +1,9 @@
 /**
- * The Library card grid with its filter chips, scope select, and search box.
+ * The Library skill list with its Skills/Principles chips, scope select, and search box.
  *
  * Extracted from `/skills` so the org Library settings page reuses the exact
- * same grid. `/skills` renders it over the full catalog; the settings page
- * pins the org and hides the scope select (every card is an org card there).
+ * same list. `/skills` renders it over the full catalog; the settings page
+ * pins the org and hides the scope select (every row is an org row there).
  *
  * The controls are CONTROLLED: the page owns the filter set, keeps it in the
  * URL, and sends it to the server with the page request. They used to filter
@@ -12,25 +12,25 @@
  * slice would report "No skills match your search" for a skill sitting on the
  * next page. `~/api/skills` documents the query the filters become.
  *
- * The cards keep the order the server sent, which is delivery order: the
+ * The rows keep the order the server sent, which is delivery order: the
  * plugin skills, then personal, then team, then org. Re-sorting a page in the
- * browser would order that page alone and put a card in a different place
+ * browser would order that page alone and put a row in a different place
  * depending on where the page boundary fell.
  */
+import type { ReactNode } from "react";
 import type { SkillSummary } from "@valet/api/wire";
 import type { SkillListQuery } from "~/api/client";
-import { cn } from "~/lib/cn";
+import { FilterChips, Select } from "~/components/primitives";
 import { SkillCard } from "~/components/skills/skill-card";
 import { type Scope } from "~/components/skills/scope-badge";
 import { SearchInput } from "~/components/search-input";
 
-/** The Library filter: everything, the plain skills, or the prompts. */
-export type SkillFilter = "all" | "skills" | "prompts";
+/** The Library view: the skill catalog, or the principles agents follow. */
+export type SkillFilter = "skills" | "principles";
 
 const FILTER_CHIPS: ReadonlyArray<{ id: SkillFilter; label: string }> = [
-  { id: "all", label: "All" },
   { id: "skills", label: "Skills" },
-  { id: "prompts", label: "Prompts" },
+  { id: "principles", label: "Principles" },
 ];
 
 /** The scope filter: everything, or one library scope. */
@@ -51,12 +51,10 @@ export interface SkillGridFilters {
   query: string;
 }
 
-export const NO_SKILL_FILTERS: SkillGridFilters = { filter: "all", scope: "all", query: "" };
-
 /** True when any control is narrowing the catalog. An empty page means
  * "nothing matched" then, and "nothing here yet" otherwise. */
 export function hasSkillFilters(filters: SkillGridFilters): boolean {
-  return filters.filter !== "all" || filters.scope !== "all" || filters.query.trim().length > 0;
+  return filters.scope !== "all" || filters.query.trim().length > 0;
 }
 
 export function SkillGrid({
@@ -66,6 +64,7 @@ export function SkillGrid({
   showScopeFilter = true,
   emptyLabel = "No skills yet.",
   errorLabel,
+  principles,
 }: {
   /** One page of the catalog, already filtered by the server. */
   skills: SkillSummary[];
@@ -79,60 +78,62 @@ export function SkillGrid({
    * up: a failed SEARCH must keep the box that can change or clear it,
    * or the reader's only way out is a reload. */
   errorLabel?: string;
+  /** The Principles view. Without it the grid shows skills alone, with no chips. */
+  principles?: ReactNode;
 }) {
   const filtering = hasSkillFilters(filters);
   const failed = errorLabel !== undefined;
   // The controls stay up through an empty result and through a failed read.
   // Hiding them would leave a search with no box to clear it in.
   const showControls = skills.length > 0 || filtering || failed;
+  const chips = principles !== undefined && (
+    <FilterChips
+      label="Library view"
+      value={filters.filter}
+      onChange={(filter) => onFiltersChange({ ...filters, filter })}
+      options={FILTER_CHIPS.map((chip) => ({ value: chip.id, label: chip.label }))}
+    />
+  );
+
+  if (principles !== undefined && filters.filter === "principles") {
+    return (
+      <div>
+        {chips}
+        <div className="mt-6 flex min-h-0 flex-col overflow-hidden rounded-2xl bg-ink-wash">{principles}</div>
+      </div>
+    );
+  }
 
   return (
     <div>
-      {showControls && (
+      {(showControls || chips) && (
         <div className="flex flex-wrap items-center gap-3">
-          <div className="flex items-center gap-2" role="tablist" aria-label="Filter skills">
-            {FILTER_CHIPS.map((chip) => (
-              <button
-                key={chip.id}
-                type="button"
-                role="tab"
-                aria-selected={filters.filter === chip.id}
-                onClick={() => onFiltersChange({ ...filters, filter: chip.id })}
-                className={cn(
-                  "max-sm:min-h-11 rounded-full border px-3 py-1 text-xs transition-colors",
-                  filters.filter === chip.id
-                    ? "border-moss bg-moss text-white"
-                    : "border-line bg-paper text-muted hover:text-ink",
-                )}
-              >
-                {chip.label}
-              </button>
-            ))}
-          </div>
+          {chips}
 
-          {showScopeFilter && (
-            <select
+          {showControls && showScopeFilter && (
+            <Select
+              size="sm"
               aria-label="Filter by scope"
               value={filters.scope}
               onChange={(e) => onFiltersChange({ ...filters, scope: readScopeFilter(e.target.value) })}
-              className="max-sm:min-h-11 max-sm:text-base rounded-md border border-line bg-paper px-2 py-1 text-xs text-ink"
             >
               {SCOPE_OPTIONS.map((opt) => (
                 <option key={opt.id} value={opt.id}>
                   {opt.label}
                 </option>
               ))}
-            </select>
+            </Select>
           )}
 
-          <div className="ml-auto w-full sm:w-56">
+          {showControls && <div className="ml-auto w-full sm:w-56">
             <SearchInput
+              size="sm"
               value={filters.query}
               onSettled={(query) => onFiltersChange({ ...filters, query })}
               placeholder="Search skills…"
               aria-label="Search skills"
             />
-          </div>
+          </div>}
         </div>
       )}
 
@@ -140,27 +141,23 @@ export function SkillGrid({
 
       {!failed && skills.length === 0 && filtering && (
         <div className="mt-8 text-sm text-muted">
-          {filters.query.trim().length > 0 || filters.scope !== "all"
-            ? "No skills match your search."
-            : filters.filter === "prompts"
-              ? "No prompts yet. Set a skill's invocation to prompt to list it here."
-              : "No skills match this filter."}
+          No skills match your search.
         </div>
       )}
 
       {!failed && skills.length > 0 && (
-        <div className="mt-8 grid gap-3 sm:grid-cols-2">
+        <ul aria-label="Skills" className="mt-6 divide-y divide-line rounded-2xl bg-ink-wash">
           {skills.map((skill) => (
             <SkillCard
               key={skill.origin === "plugin" ? `plugin:${skill.name}` : skill.id}
               skill={skill}
             />
           ))}
-        </div>
+        </ul>
       )}
 
       {!failed && skills.length === 0 && !filtering && (
-        <div className="text-sm text-muted">{emptyLabel}</div>
+        <div className={chips ? "mt-6 text-sm text-muted" : "text-sm text-muted"}>{emptyLabel}</div>
       )}
     </div>
   );
@@ -173,23 +170,18 @@ export function readScopeFilter(raw: string | undefined): ScopeFilter {
   return SCOPE_OPTIONS.find((opt) => opt.id === raw)?.id ?? "all";
 }
 
-/** The same, for the chip row. */
+/** The same, for the chip row. An old or unknown value reads as the skills. */
 export function readSkillFilter(raw: string | undefined): SkillFilter {
-  return FILTER_CHIPS.find((chip) => chip.id === raw)?.id ?? "all";
+  return raw === "principles" ? "principles" : "skills";
 }
 
 /**
- * The catalog query the three controls become. `all` sends nothing, so the
- * default view asks the plainest question it can.
- *
- * The chips read "Skills" and "Prompts" where the wire reads `skill` and
- * `prompt`: the control is a plural heading over a group of cards, and the
- * parameter names one card's kind.
+ * The catalog query the controls become. `all` sends nothing, so the default
+ * view asks the plainest question it can. The skills view lists every kind.
  */
 export function skillFilterQuery(filters: SkillGridFilters): SkillListQuery {
   const query = filters.query.trim();
   return {
-    ...(filters.filter === "all" ? {} : { kind: filters.filter === "prompts" ? "prompt" : "skill" }),
     ...(filters.scope === "all" ? {} : { scope: filters.scope }),
     ...(query.length === 0 ? {} : { q: query }),
   };

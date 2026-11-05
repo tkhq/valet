@@ -20,10 +20,13 @@
  * a fresh pod object (same name, new uid) out from under a long-lived
  * exec-based provider (see lifecycle.ts's restartPolicy docblock).
  */
-import { PassThrough, Readable } from "node:stream";
+import { PassThrough } from "node:stream";
 import type { Readable as ReadableStream, Writable as WritableStream } from "node:stream";
 import type * as k8s from "@kubernetes/client-node";
-import { CappedOutputBuffer, type ExecOpts, type ExecResult } from "@valet/engine";
+import { Exec } from "@kubernetes/client-node";
+import { WebSocketHandler } from "@kubernetes/client-node/dist/web-socket-handler.js";
+import WebSocket from "ws";
+import { CappedOutputBuffer, SandboxConnectionError, formatSandboxErrorCause, type ExecOpts, type ExecResult, reportError } from "@valet/engine";
 
 /** Directory the job-mode protocol (jobs.ts) writes its `{execId}.{out,exit,pid}`
  * files into. Exported here (rather than jobs.ts) since exec.ts's quoting
@@ -74,7 +77,8 @@ export function shQuote(value: string): string {
  * If the image ever adds `dockerd` to more groups, both providers pick the
  * change up together; that symmetry is why this is not `--clear-groups`.
  */
-export function wrapAsWorkloadUser(shellCommand: string): string {
+export function wrapAsWorkloadUser(shellCommand: string, browser = false): string {
+  if (browser) return "exec /usr/bin/env -u VALET_SANDBOX_JWT_SECRET /usr/bin/setpriv --reuid dockerd --regid dockerd --init-groups --no-new-privs /usr/bin/env HOME=/home/dockerd USER=dockerd LOGNAME=dockerd /bin/sh -c " + shQuote(shellCommand);
   return (
     "exec setpriv --reuid dockerd --regid dockerd --init-groups " +
     "env HOME=/home/dockerd USER=dockerd LOGNAME=dockerd /bin/sh -c " +
@@ -84,6 +88,18 @@ export function wrapAsWorkloadUser(shellCommand: string): string {
 
 /** `^[A-Za-z_][A-Za-z0-9_]*$` — POSIX shell env-var name grammar. */
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * A caller NODE_OPTIONS replaces the image default (`--use-openssl-ca`), which
+ * would drop the eMudhra root distrust. Always prepend the flag so other
+ * options keep working. Do not test for an existing flag: a quoted value can
+ * contain the text. On Node 22.23.3 a duplicate `--use-openssl-ca` is accepted.
+ * `--use-openssl-ca --use-bundled-ca` makes Node exit at startup, so it fails
+ * closed. `--use-openssl-ca --use-system-ca` still rejects the bad roots.
+ */
+export function withTrustedCa(value: string): string {
+  return value.trim() === "" ? "--use-openssl-ca" : `--use-openssl-ca ${value}`;
+}
 
 /**
  * Builds the final `sh -c` payload for a command, folding in `opts.env` and
@@ -101,7 +117,7 @@ export function buildShellCommand(command: string, opts?: ExecOpts): string {
       if (!ENV_NAME_RE.test(name)) {
         throw new Error(`buildShellCommand: invalid env var name ${JSON.stringify(name)}`);
       }
-      parts.push(`export ${name}=${shQuote(value)};`);
+      parts.push(`export ${name}=${shQuote(name === "NODE_OPTIONS" ? withTrustedCa(value) : value)};`);
     }
   }
   if (opts?.cwd) {
@@ -142,6 +158,42 @@ export class PodExecStatusError extends Error {
   }
 }
 
+/** Normalize client-node's WebSocket ErrorEvent before provider classification. */
+export class PodExecTransportError extends SandboxConnectionError {
+  readonly code = "sandbox_exec_transport_failed";
+
+  constructor(
+    readonly namespace: string,
+    readonly podName: string,
+    readonly containerName: string,
+    cause: unknown,
+  ) {
+    super(
+      `Kubernetes exec connection failed for ${namespace}/${podName} (${containerName}): ` +
+      `${formatExecTransportCause(cause)}. Check Kubernetes API access and the sandbox pod status before retrying.`,
+      cause,
+    );
+    this.name = "PodExecTransportError";
+  }
+}
+
+function formatExecTransportCause(cause: unknown): string {
+  // ws exposes the original Error through a prototype getter on ErrorEvent.
+  // Do not traverse event.target: it contains the socket and request headers.
+  if (cause !== null && typeof cause === "object") {
+    try {
+      const underlying: unknown = Reflect.get(cause, "error");
+      if (typeof underlying === "string" || (underlying !== null && typeof underlying === "object")) {
+        const detail = formatSandboxErrorCause(underlying);
+        if (detail.trim() && detail !== "unserializable cause" && detail !== "[object Object]") return detail;
+      }
+    } catch {
+      // Preserve readable fields on the outer rejection if its getter fails.
+    }
+  }
+  return formatSandboxErrorCause(cause);
+}
+
 // ── Narrow client interface (real k8s.Exec adapts to this; tests fake it) ──
 
 /** Just enough of the WebSocket client-node's `Exec.exec` resolves to for
@@ -150,6 +202,11 @@ export class PodExecStatusError extends Error {
  * assignable to `close(): void` (fewer required params), no cast needed. */
 export interface PodExecSocket {
   close(): void;
+  /** Persistent channels observe transport failure and bound queued socket data. */
+  on?(event: "close" | "error", listener: (...args: unknown[]) => void): unknown;
+  off?(event: "close" | "error", listener: (...args: unknown[]) => void): unknown;
+  readonly readyState?: number;
+  readonly bufferedAmount?: number;
 }
 
 /** The subset of `@kubernetes/client-node`'s `Exec` class this module
@@ -167,17 +224,43 @@ export interface PodExecApi {
     stdin: ReadableStream | null,
     tty: boolean,
     statusCallback?: (status: ExecStatus) => void,
+    startup?: { signal: AbortSignal; timeoutMs: number },
   ): Promise<PodExecSocket>;
 }
 
-/** Wraps a real `k8s.Exec` instance. No casts: `k8s.Exec.exec`'s real
- * signature already matches `PodExecApi.exec` structurally (its `V1Status`
- * callback param is a supertype of our `ExecStatus`, and its `WebSocket`
- * return type is a supertype of `PodExecSocket`). */
+/** Ordinary exec keeps the supplied adapter. Channel startup owns a cancellable socket
+ * because client-node does not expose its WebSocket until the upgrade succeeds. */
 export function podExecApiAdapter(exec: k8s.Exec): PodExecApi {
   return {
-    exec: (namespace, podName, containerName, command, stdout, stderr, stdin, tty, statusCallback) =>
-      exec.exec(namespace, podName, containerName, command, stdout, stderr, stdin, tty, statusCallback),
+    exec: async (namespace, podName, containerName, command, stdout, stderr, stdin, tty, statusCallback, startup) => {
+      if (!startup) return exec.exec(namespace, podName, containerName, command, stdout, stderr, stdin, tty, statusCallback);
+      startup.signal.throwIfAborted();
+      if (!(exec.handler instanceof WebSocketHandler)) {
+        throw new Error("The exec adapter cannot cancel channel startup. Use the standard Kubernetes WebSocket handler.");
+      }
+      let socket: WebSocket | undefined;
+      const abort = () => socket?.terminate();
+      startup.signal.addEventListener("abort", abort, { once: true });
+      try {
+        const handler = new WebSocketHandler(exec.handler.config, (uri, protocols, options) => {
+          // Authentication can finish after the channel deadline. Do not create a late connection.
+          startup.signal.throwIfAborted();
+          socket = new WebSocket(uri, protocols, { ...options, handshakeTimeout: startup.timeoutMs });
+          return socket;
+        }, {
+          stdin: stdin ?? new PassThrough(), stdout: stdout ?? new PassThrough(), stderr: stderr ?? new PassThrough(),
+        });
+        const channelExec = new Exec(exec.handler.config, handler);
+        const connected = await channelExec.exec(namespace, podName, containerName, command, stdout, stderr, stdin, tty, statusCallback);
+        if (startup.signal.aborted) {
+          connected.terminate();
+          startup.signal.throwIfAborted();
+        }
+        return connected;
+      } finally {
+        startup.signal.removeEventListener("abort", abort);
+      }
+    },
   };
 }
 
@@ -193,6 +276,7 @@ export interface ExecDeps {
    * every non-privileged exec is wrapped by `wrapAsWorkloadUser` so it runs
    * as the `dockerd` workload user (see `ExecOpts.privileged`). */
   docker?: boolean;
+  browser?: boolean;
 }
 
 /** Caps how long a forcibly-closed (timeout/abort) socket capture is given
@@ -217,6 +301,12 @@ const FLUSH_GRACE_MS = 50;
  * best-effort "stop waiting", not a guaranteed remote kill — same posture
  * sandbox-docker's own `signal`-abort case documents ("best-effort abort").
  */
+/** Shell prefix for a root exec: use the root-only scratch temp dir when the
+ * scratch bootstrap created it (`home-persistence.ts` makes it mode 0700).
+ * Without scratch the test fails and `TMPDIR` stays as the container set it. */
+export const ROOT_TMPDIR_PREFIX =
+  "[ -d /scratch/tmp-root ] && [ ! -L /scratch/tmp-root ] && [ -O /scratch/tmp-root ] && export TMPDIR=/scratch/tmp-root; ";
+
 export async function execInPod(
   deps: ExecDeps,
   podName: string,
@@ -228,7 +318,11 @@ export async function execInPod(
   // the dockerd workload user. Wrapping AFTER env/cwd folding means the
   // whole composed command (env exports, cd, the caller's command) executes
   // under the dropped identity, matching `docker exec -u dockerd`'s effect.
-  const shellCommand = deps.docker && !opts?.privileged ? wrapAsWorkloadUser(composed) : composed;
+  // A root exec must not share the world-writable /scratch/tmp with the
+  // workload user; when the scratch root-only temp dir exists, use it.
+  const shellCommand = deps.docker && !opts?.privileged
+    ? wrapAsWorkloadUser(composed, deps.browser)
+    : `${ROOT_TMPDIR_PREFIX}${composed}`;
 
   const limit = opts?.maxOutputBytes;
   const stdoutBuffer = limit !== undefined ? new CappedOutputBuffer(limit) : undefined;
@@ -251,7 +345,15 @@ export async function execInPod(
   stdout.on("data", onStdoutData);
   stderr.on("data", onStderrData);
 
-  const stdin = opts?.stdin !== undefined ? Readable.from(Buffer.from(opts.stdin, "utf8")) : null;
+  const input = opts?.stdin !== undefined ? Buffer.from(opts.stdin, "utf8") : undefined;
+  // Older exec protocols close the entire socket when stdin ends. Bound
+  // stdin inside the pod so the command receives EOF without closing the
+  // transport before it has consumed the payload and returned its status.
+  const stdin = input !== undefined ? new PassThrough() : null;
+  if (stdin && input) stdin.write(input);
+  const framedCommand = input !== undefined
+    ? `head -c ${input.length} | /bin/sh -c ${shQuote(shellCommand)}`
+    : shellCommand;
 
   let resolveStatus!: (status: ExecStatus) => void;
   const statusPromise = new Promise<ExecStatus>((resolve) => {
@@ -262,13 +364,24 @@ export async function execInPod(
     deps.namespace,
     podName,
     deps.containerName,
-    ["/bin/sh", "-c", shellCommand],
+    ["/bin/sh", "-c", framedCommand],
     stdout,
     stderr,
     stdin,
     false,
     (status) => resolveStatus(status),
-  );
+  ).catch((error: unknown) => {
+    stdin?.destroy();
+    const transportError = new PodExecTransportError(deps.namespace, podName, deps.containerName, error);
+    // Log at the transport chokepoint: every exec transport failure funnels
+    // through here, and until now these were only surfaced to the caller as a
+    // tool result (never written to stdout), so failures were invisible in the
+    // api logs and Loki. A 403 here means the api ServiceAccount lacks `create`
+    // on pods/exec — Kubernetes authorizes the exec *connect* subresource as
+    // the `create` verb regardless of the client's HTTP method.
+    reportError({ area: "sandbox", reason: "exec_transport", provider: "kubernetes" }, "k8s pods/exec transport failed", transportError.message);
+    throw transportError;
+  });
 
   const raced: Array<Promise<{ kind: "status"; status: ExecStatus } | { kind: "timeout" } | { kind: "abort" }>> = [
     statusPromise.then((status) => ({ kind: "status" as const, status })),
@@ -301,6 +414,7 @@ export async function execInPod(
   }
 
   const winner = await Promise.race(raced);
+  stdin?.destroy();
   if (timer) clearTimeout(timer);
   if (signal && abortResolve) signal.removeEventListener("abort", abortResolve);
 

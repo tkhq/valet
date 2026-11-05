@@ -17,7 +17,16 @@
  * is ground truth, so the generated scripts send `x-valet-sandbox` too.)
  *
  * ── Authorization ────────────────────────────────────────────────────────
- * The session id comes from the verified token, never from the body. A
+ * The session id comes from the verified token, never from the body.
+ *
+ * A workflow session (`wf:` id, `workflows/session-owner.ts`) resolves as its
+ * run's OWNER, not as the token's actor. A user owner gets that user's
+ * `auto` ladder. A team or org owner gets the tiers of the session's own
+ * `github.*` tools (`engine/host.ts` `buildCredentialResolver`): the team's
+ * own row, then the App installation, with no member credential and no org
+ * PAT row. An owner that cannot be read answers anonymous. Shared app
+ * sessions use the same owner tiers without member shares: their token actor
+ * does not identify the member running each command. Personal sessions resolve as below. A
  * bound owner (first path segment of a `session_repos.full_name`, compared
  * case-insensitively) resolves with ITS binding's auth mode, exactly as
  * before. An owner with NO binding — including sessions with no bindings at
@@ -53,10 +62,16 @@
 import { Hono } from "hono";
 import { eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
+import { credentialSecret } from "@valet/engine";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { sessionRepos } from "../schema/index.js";
-import { ownerOf, repoOf } from "../services/session-github-token.js";
+import { agentSessions, sessionRepos } from "../schema/index.js";
+import { orgFallbackPolicy, onePasswordScopesFor } from "../services/credential-resolution.js";
+import { canBorrowCredential } from "../services/credential-borrow.js";
+import { membersSharing } from "../services/credential-shares.js";
+import { ownerOf, repoOf, usableTeamGithubRow } from "../services/session-github-token.js";
+import { getTeamInOrg } from "../services/teams.js";
 import { repoHostForUrl, type RepoHostContext } from "../repos/host.js";
+import { workflowSessionOwner } from "../workflows/session-owner.js";
 import type { PostSandboxGitCredentialResponse } from "../wire/types.js";
 
 export const sandboxGitCredentialRouter = new Hono<AppEnv>();
@@ -100,8 +115,27 @@ sandboxGitCredentialRouter.post("/git-credential", async (c) => {
   // sole-installation fallback) for the `gh` shim's REST/GraphQL calls.
   const purpose = rawPurpose === "api" ? "api" : "git";
 
-  const { db, engineCredentials, encryptionKey } = c.var.providers;
+  const { db, engineCredentials, encryptionKey, onePassword, plugins } = c.var.providers;
+  const anonymous: PostSandboxGitCredentialResponse = { anonymous: true };
 
+  // A workflow session acts as its run's owner. Its token carries the run
+  // actor instead: the member who clicked Run, or a synthetic `team:{id}` /
+  // `org:{id}` for a scheduled, event or webhook start. Workflow sessions
+  // bind no repositories, so the owner policy replaces the binding lookup.
+  // Shared app sessions also use owner policy: their token actor is a frozen
+  // first waker, not authority for every later sandbox command.
+  const workflowOwner = await workflowSessionOwner(db, sandbox.sessionId, sandbox.orgId);
+  let executionOwner = workflowOwner;
+  if (workflowOwner === undefined) {
+    const [session] = await db.select({
+      orgId: agentSessions.orgId, status: agentSessions.status,
+      ownerType: agentSessions.ownerType, ownerId: agentSessions.ownerId,
+    }).from(agentSessions).where(eq(agentSessions.id, sandbox.sessionId)).limit(1);
+    if (session && (session.orgId !== sandbox.orgId || session.status === "deleted")) return c.json(anonymous);
+    if (session?.ownerType === "team" || session?.ownerType === "org") {
+      executionOwner = session.ownerId ? { type: session.ownerType, id: session.ownerId } : null;
+    }
+  }
   const bindings = await db.select().from(sessionRepos).where(eq(sessionRepos.sessionId, sandbox.sessionId));
 
   const wantOwner = owner?.toLowerCase();
@@ -115,6 +149,78 @@ sandboxGitCredentialRouter.post("/git-credential", async (c) => {
                 repoOf(b.fullName).toLowerCase() === wantRepo,
             )
           : undefined) ?? bindings.find((b) => ownerOf(b.fullName).toLowerCase() === wantOwner));
+
+  if (executionOwner !== undefined) {
+    const sharedBinding = workflowOwner === undefined ? binding : undefined;
+    const repoHost = repoHostForUrl(sharedBinding?.cloneUrl ?? `https://${host}/`);
+    if (!repoHost) {
+      return c.json({ error: "no credential host for this repo" }, 403);
+    }
+    // No valid owner to act as: never fall back to the token's actor. Team
+    // ownership is valid only while that team belongs to the token's org.
+    if (
+      executionOwner === null ||
+      (executionOwner.type === "team" && !(await getTeamInOrg(db, sandbox.orgId, executionOwner.id))) ||
+      (executionOwner.type === "org" && executionOwner.id !== sandbox.orgId)
+    ) {
+      return c.json(anonymous);
+    }
+    // An explicit personal-account binding cannot select a frozen token actor.
+    if (sharedBinding?.auth === "user") {
+      return c.json({ error: `the selected credential is unavailable for ${ownerOf(sharedBinding.fullName)}` }, 409);
+    }
+    const deps = { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) };
+    if (executionOwner.type === "user") {
+      // The owner's own credentials, in the same order as an unbound
+      // coding session of theirs.
+      const result = await repoHost.resolveGitToken(
+        { orgId: sandbox.orgId, userId: executionOwner.id, deps },
+        { owner: owner ?? "", repo: wantRepo ?? "", purpose, auth: "auto" },
+      );
+      if (result === null || "anonymous" in result) return c.json(anonymous);
+      const cred: PostSandboxGitCredentialResponse = { username: result.username, password: result.token };
+      return c.json(cred);
+    }
+    // A team or org owner resolves through the same tiers as the session's
+    // own `github.*` tools (`engine/host.ts` `buildCredentialResolver`):
+    // the team's own row first, then the App. The team row read can also
+    // match an org 1Password item by the `github` service name (team
+    // credentials design, Deviation 1). It never reads a member's credential
+    // or the org PAT row. The App tier mints the installation of the
+    // repository owner that git names, or the org's sole installation when
+    // no owner is named; the tools of a workflow session, which binds no
+    // repository, use the sole installation. A miss is anonymous, so a
+    // public clone still works and a push fails visibly.
+    if (executionOwner.type === "team" && sharedBinding?.auth !== "app") {
+      const teamRow = await usableTeamGithubRow(
+        { credentials: engineCredentials, onePassword, shares: (teamId, svc) => membersSharing(db, teamId, svc) },
+        {
+          orgId: sandbox.orgId, teamId: executionOwner.id, ...(workflowOwner !== undefined ? { userId: sandbox.userId } : {}), scopes: onePasswordScopesFor("team", executionOwner.id),
+          // A shared runtime token identifies no current thread or actor.
+          // Only workflow sandboxes can use a run-scoped member grant.
+          mayBorrow: async (memberId) => workflowOwner !== undefined && canBorrowCredential(db, { orgId: sandbox.orgId, teamId: executionOwner.id, actorId: sandbox.userId, sessionId: sandbox.sessionId, service: "github", memberId }),
+        },
+        orgFallbackPolicy(plugins, "github"),
+      );
+      const secret = teamRow ? credentialSecret(teamRow) : undefined;
+      if (secret) {
+        const login = teamRow?.metadata?.login;
+        const username = purpose === "api" && typeof login === "string" ? login : "x-access-token";
+        const cred: PostSandboxGitCredentialResponse = { username, password: secret };
+        return c.json(cred);
+      }
+    }
+    const result = await repoHost.resolveGitToken(
+      { orgId: sandbox.orgId, deps },
+      { owner: sharedBinding ? ownerOf(sharedBinding.fullName) : owner ?? "", repo: sharedBinding ? repoOf(sharedBinding.fullName) : wantRepo ?? "", purpose, auth: "app" },
+    );
+    if (result === null && sharedBinding?.auth === "app") {
+      return c.json({ error: `the selected credential is unavailable for ${ownerOf(sharedBinding.fullName)}` }, 409);
+    }
+    if (result === null || "anonymous" in result) return c.json(anonymous);
+    const cred: PostSandboxGitCredentialResponse = { username: result.username, password: result.token };
+    return c.json(cred);
+  }
 
   const ctx: RepoHostContext = {
     orgId: sandbox.orgId,

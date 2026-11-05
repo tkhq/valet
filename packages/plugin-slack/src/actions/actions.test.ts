@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from 'vitest';
 import type {
   Credential,
   CredentialProvider,
@@ -10,9 +10,18 @@ import type {
   ToolContext,
 } from '@valet/engine';
 import { slackPlugin } from './actions.js';
+import { clearChannelNameCache } from './channel-names.js';
 import { SLACK_TEXT_LIMIT } from '../message-chunking.js';
 
-type FakeSandbox = Partial<Sandbox> & { id: string };
+function makeSandbox(overrides: Partial<Sandbox> = {}): Sandbox {
+  const unsupported = async (): Promise<never> => { throw new Error('Unexpected sandbox call in Slack action test'); };
+  return {
+    id: 'sb-1', readFile: unsupported, readBinary: unsupported,
+    writeFile: unsupported, writeBinary: unsupported, readdir: unsupported,
+    stat: unsupported, mkdir: unsupported, rm: unsupported, exec: unsupported,
+    ...overrides,
+  };
+}
 
 function makeCredentials(cred: Credential | null): CredentialProvider {
   return {
@@ -24,14 +33,14 @@ function makeCredentials(cred: Credential | null): CredentialProvider {
 }
 
 function makeCtx(overrides: Partial<ToolContext> = {}): ToolContext {
-  const sandbox: FakeSandbox = { id: 'sb-1' };
+  const sandbox = makeSandbox();
   return {
     userId: 'u1',
     orgId: 'o1',
     sessionId: 's1',
     threadId: 't1',
     credentials: makeCredentials({ accessToken: 'xoxb-test-token' }),
-    sandbox: sandbox as Sandbox,
+    sandbox,
     requestDecision: async (_gate: DecisionGateRequest): Promise<DecisionResolution> => {
       throw new Error('not implemented in test stub');
     },
@@ -65,14 +74,66 @@ function jsonResponse(status: number, body: unknown): Response {
  *  before the action's own fetch mocks are consumed. */
 function mockGuardAllowsPublicChannel(fetchMock: ReturnType<typeof vi.fn>): void {
   fetchMock.mockResolvedValueOnce(
-    jsonResponse(200, { ok: true, channel: { id: 'C1', is_private: false, is_im: false, is_mpim: false } }),
+    jsonResponse(200, {
+      ok: true,
+      channel: { id: 'C1', name: 'general', is_private: false, is_im: false, is_mpim: false },
+    }),
   );
 }
 
+function mockFileAccess(fetchMock: ReturnType<typeof vi.fn>, url: string): void {
+  fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, file: {
+    id: 'F1', name: url.split('/').pop(), url_private: url, channels: ['C1'],
+  } }));
+  mockGuardAllowsPublicChannel(fetchMock);
+}
+
+/** Answer each Slack method by name, so a case does not depend on call order.
+ *  `usersInfo` answers the users.info lookup for one user ID. */
+function mockSlackMethods(
+  fetchMock: ReturnType<typeof vi.fn>,
+  usersInfo: (user: string, init?: RequestInit) => Response | Promise<Response>,
+): void {
+  fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+    const { pathname, searchParams } = new URL(url);
+    const method = pathname.split('/').pop();
+    if (method === 'users.info') return usersInfo(searchParams.get('user') ?? '', init);
+    if (method === 'conversations.info') return jsonResponse(200, { ok: true, channel: { id: 'C1', name: 'general', is_private: false } });
+    if (method === 'conversations.open') return jsonResponse(200, { ok: true, channel: { id: 'D1' } });
+    if (method === 'files.getUploadURLExternal') return jsonResponse(200, { ok: true, upload_url: 'https://uploads.slack.test/file', file_id: 'F1' });
+    return jsonResponse(200, { ok: true, ts: '1.2', channel: 'C1' });
+  });
+}
+
+/** The user IDs the mention check looked up, in call order. */
+function lookedUpUsers(fetchMock: ReturnType<typeof vi.fn>): (string | null)[] {
+  return fetchMock.mock.calls.flatMap(([url]) => {
+    const parsed = new URL(url);
+    return parsed.pathname.endsWith('/users.info') ? [parsed.searchParams.get('user')] : [];
+  });
+}
+
+/** Calls that post, edit, or upload message content. */
+function messageWrites(fetchMock: ReturnType<typeof vi.fn>): unknown[] {
+  return fetchMock.mock.calls.filter(([url]) =>
+    /\/(chat\.postMessage|chat\.update|files\.getUploadURLExternal)$/.test(url));
+}
+
 describe('slack actions', () => {
+  // A fixed claim made the assistant ask a plain approval question before
+  // every post, even when an org policy allowed the action.
+  it('never states a fixed approval mode, which org policy can change', () => {
+    for (const a of slackPlugin.actions) {
+      expect(a.description).not.toMatch(/requires approval on every call|requires approval and/i);
+    }
+    expect(action('slack.send_message').description).toContain('Do not call ask_approval');
+  });
+
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
+    // The name cache lives at module level, so one case must not answer another.
+    clearChannelNameCache();
     fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
   });
@@ -80,6 +141,29 @@ describe('slack actions', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
   });
+
+  it.each(['slack.dm_owner', 'slack.dm_user', 'slack.send_message', 'slack.reply_to_origin'])(
+    '%s sends with the requested name instead of the workspace name', async (id) => {
+      if (id.startsWith('slack.dm_')) {
+        fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { id: 'D1' } }));
+      } else if (id === 'slack.send_message') {
+        mockGuardAllowsPublicChannel(fetchMock);
+      }
+      fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '1.2', channel: 'C1' }));
+      const result = await action(id).execute(
+        { text: 'Welcome', user: 'U999', channel: 'C1', sender_name: 'Hestia · People', sender_avatar_url: 'https://example.com/hestia.png' },
+        pluginCtx({
+          credentials: makeCredentials({ accessToken: 'xoxb-test-token', metadata: { owner_slack_user_id: 'U999' } }),
+          origin: { channelType: 'slack', threadKey: 'slack:C1:1.2', reply: 'manual' },
+          resolveOutboundSender: async () => ({ displayName: 'People' }),
+        }),
+      );
+      expect(result.success).toBe(true);
+      const posts = fetchMock.mock.calls.filter(([url]) => url.endsWith('/chat.postMessage'));
+      expect(posts).toHaveLength(1);
+      expect(JSON.parse(posts[0][1].body)).toMatchObject({ username: 'Hestia · People', icon_url: 'https://example.com/hestia.png', text: 'Welcome' });
+    },
+  );
 
   it('dm_owner opens a DM with the owner and posts the message', async () => {
     fetchMock
@@ -119,7 +203,7 @@ describe('slack actions', () => {
     expect(fetchMock).not.toHaveBeenCalled();
     expect(result).toEqual({
       success: false,
-      error: 'Owner has not linked their Slack identity. Ask them to link it in Settings > Integrations > Slack.',
+      error: 'Owner has not linked their Slack identity. Ask them to link Slack in Integrations → Slack.',
     });
   });
 
@@ -149,6 +233,129 @@ describe('slack actions', () => {
     expect(result).toEqual({ success: true, data: { ts: '111.222', channel: 'D2' } });
   });
 
+  it('get_user_status reports presence, status, and local time for a workspace member', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, {
+        ok: true,
+        user: {
+          id: 'U123', name: 'ada', team_id: 'T1', tz: 'UTC',
+          profile: { real_name: 'Ada L', status_text: 'Heads down', status_emoji: ':headphones:', status_expiration: 0 },
+        },
+      }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, presence: 'active' }));
+
+    const result = await action('slack.get_user_status').execute(
+      { user: 'U123', include_local_time: true },
+      pluginCtx({ credentials: makeCredentials({ accessToken: 'xoxb-test-token', metadata: { teamId: 'T1' } }) }),
+    );
+
+    const urls = fetchMock.mock.calls.map((call) => String(call[0]));
+    expect(urls).toEqual(['https://slack.com/api/users.info?user=U123', 'https://slack.com/api/users.getPresence?user=U123']);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data).toMatchObject({
+      user: 'U123', name: 'ada', real_name: 'Ada L', presence: 'active', online: true,
+      status_text: 'Heads down', status_emoji: ':headphones:', timezone: 'UTC',
+    });
+    expect((result.data as { local_time?: string }).local_time).toMatch(/^[A-Z][a-z]{2},? \d{2}:\d{2}$/);
+  });
+
+  it('get_user_status reports away as not online', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, user: { id: 'U123', name: 'ada', team_id: 'T1', profile: {} } }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, presence: 'away' }));
+
+    const result = await action('slack.get_user_status').execute({ user: 'U123' }, pluginCtx());
+
+    expect(result).toEqual({ success: true, data: { user: 'U123', name: 'ada', presence: 'away', online: false } });
+  });
+
+  it('get_user_status names the reinstall fix for a missing users:read scope', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'missing_scope' }));
+
+    const result = await action('slack.get_user_status').execute({ user: 'U123' }, pluginCtx());
+
+    expect(result).toEqual({
+      success: false,
+      error: 'Reading online status needs the users:read bot scope. Ask a Slack admin to reinstall the Slack app from Settings → Organization → Slack to grant it.',
+    });
+  });
+
+  it('get_user_status refuses a user from another workspace and never reads their presence', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, user: { id: 'U9', name: 'guest', team_id: 'T2', profile: {} } }));
+
+    const result = await action('slack.get_user_status').execute(
+      { user: 'U9' },
+      pluginCtx({ credentials: makeCredentials({ accessToken: 'xoxb-test-token', metadata: { teamId: 'T1' } }) }),
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({
+      success: false,
+      error: 'Slack user U9 is not a member of the connected workspace. Online status is shown only for members of this workspace.',
+    });
+  });
+
+  it('lookup_user_by_email resolves an explicit email for dm_user', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, {
+        ok: true,
+        user: { id: 'U123', name: 'ada', profile: { display_name: 'Ada' } },
+      }),
+    );
+
+    const result = await action('slack.lookup_user_by_email').execute(
+      { email: 'ada@example.com' },
+      pluginCtx(),
+    );
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://slack.com/api/users.lookupByEmail?email=ada%40example.com');
+    expect(init.method).toBe('GET');
+    expect(result).toEqual({ success: true, data: { id: 'U123', display_name: 'Ada' } });
+  });
+
+  it('lookup_user_by_email rejects a missing recipient email without a fallback', async () => {
+    const result = await action('slack.lookup_user_by_email').execute(
+      { email: '   ' },
+      pluginCtx(),
+    );
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      success: false,
+      error: 'Recipient email is required. Provide the exact Slack account email address.',
+    });
+  });
+
+  it('lookup_user_by_email reports a missing Slack lookup scope', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'missing_scope' }));
+
+    const result = await action('slack.lookup_user_by_email').execute(
+      { email: 'ada@example.com' },
+      pluginCtx(),
+    );
+
+    expect(result).toEqual({
+      success: false,
+      error: 'Slack recipient lookup needs the users:read.email bot scope. Reinstall the Slack app to grant it.',
+    });
+  });
+
+  it('lookup_user_by_email reports no matching user without a fallback', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'users_not_found' }));
+
+    const result = await action('slack.lookup_user_by_email').execute(
+      { email: 'nobody@example.com' },
+      pluginCtx(),
+    );
+
+    expect(result).toEqual({
+      success: false,
+      error: 'No Slack user matches nobody@example.com. Check the recipient email, then try again.',
+    });
+  });
+
   it('add_reaction posts reactions.add with channel/timestamp/name', async () => {
     mockGuardAllowsPublicChannel(fetchMock);
     fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true }));
@@ -176,7 +383,7 @@ describe('slack actions', () => {
 
     expect(result).toEqual({
       success: false,
-      error: 'Owner has not linked their Slack identity. Link it in Settings > Integrations > Slack.',
+      error: 'Owner has not linked their Slack identity. Link Slack in Integrations → Slack.',
     });
   });
 
@@ -190,6 +397,105 @@ describe('slack actions', () => {
     expect(url).toBe('https://slack.com/api/chat.postMessage');
     expect(JSON.parse(init.body as string)).toEqual({ channel: 'C1', thread_ts: '1.2', text: 'here is the answer', mrkdwn: true });
     expect(result).toEqual({ success: true, data: { channel: 'C1', ts: '9.9' } });
+  });
+
+  const ticketsChart = {
+    title: 'Tickets opened',
+    chart: {
+      type: 'bar',
+      series: [{ name: 'Email', data: [{ label: 'Mon', value: 40 }, { label: 'Tue', value: 52 }] }],
+      axis_config: { categories: ['Mon', 'Tue'], y_label: 'Tickets' },
+    },
+  };
+  const slackOrigin = { channelType: 'slack', threadKey: 'slack:C1:1.2', reply: 'manual' } as const;
+
+  it('reply_to_origin posts charts as native data_visualization blocks below the text', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '9.9' }));
+    const result = await action('slack.reply_to_origin').execute(
+      { text: 'Tickets this week:', charts: [ticketsChart] },
+      pluginCtx({ origin: slackOrigin }),
+    );
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as { text: string; blocks: Record<string, unknown>[] };
+    expect(body.text).toBe('Tickets this week:');
+    expect(body.blocks.at(-1)).toEqual({ type: 'data_visualization', title: 'Tickets opened', chart: ticketsChart.chart });
+    expect(body.blocks[0]).toMatchObject({ type: 'markdown' });
+    expect(result).toEqual({ success: true, data: { channel: 'C1', ts: '9.9', charts: 1 } });
+  });
+
+  it('reply_to_origin posts each chart as a table when Slack rejects the chart block', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'invalid_blocks' }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '9.9' }));
+    const result = await action('slack.reply_to_origin').execute(
+      { text: 'Tickets this week:', charts: [ticketsChart] },
+      pluginCtx({ origin: slackOrigin }),
+    );
+    const [, retry] = fetchMock.mock.calls[1] as [string, RequestInit];
+    const blocks = JSON.stringify((JSON.parse(retry.body as string) as { blocks: unknown[] }).blocks);
+    expect(blocks).not.toContain('data_visualization');
+    expect(blocks).toContain('Tickets opened');
+    expect(blocks).toContain('Email');
+    expect(result).toMatchObject({ success: true });
+  });
+
+  // A label with a pipe and a newline passes the chart check. The table
+  // fallback put it into a cell unchanged, which split the row and added a
+  // forged one.
+  it('reply_to_origin keeps a label with pipes and newlines in one table cell', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'invalid_blocks' }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '9.9' }));
+    const forged = { title: 'Share', chart: { type: 'pie', segments: [{ label: 'P|\n|forged|9|', value: 1 }] } };
+    await action('slack.reply_to_origin').execute({ text: 'Share:', charts: [forged] }, pluginCtx({ origin: slackOrigin }));
+    const [, retry] = fetchMock.mock.calls[1] as [string, RequestInit];
+    const { blocks } = JSON.parse(retry.body as string) as { blocks: { text?: string }[] };
+    const table = blocks.map((block) => block.text ?? '').join('\n').split('\n').filter((line) => line.startsWith('|'));
+    expect(table).toEqual(['| Segment | Value |', '| --- | ---: |', '| P\\| \\|forged\\|9\\| | 1 |']);
+  });
+
+  // Slack draws the chart block itself, so Valet does no scale math on this
+  // path. Values at the float limits must reach Slack as JSON numbers, not
+  // null, in the chart block and in the table fallback.
+  it('reply_to_origin sends values at the float limits unchanged in the chart block and the table', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'invalid_blocks' }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '9.9' }));
+    const values = [-Number.MAX_VALUE, -Number.MIN_VALUE, Number.MIN_VALUE, Number.MAX_VALUE];
+    const categories = ['a', 'b', 'c', 'd'];
+    const extremes = {
+      title: 'Extremes',
+      chart: { type: 'bar', series: [{ name: 'S', data: values.map((value, i) => ({ label: categories[i], value })) }], axis_config: { categories } },
+    };
+    await action('slack.reply_to_origin').execute({ text: 'Extremes:', charts: [extremes] }, pluginCtx({ origin: slackOrigin }));
+    const [[, first], [, retry]] = fetchMock.mock.calls as [string, RequestInit][];
+    const block = (JSON.parse(first.body as string) as { blocks: unknown[] }).blocks.at(-1);
+    expect(block).toEqual({ type: 'data_visualization', title: 'Extremes', chart: extremes.chart });
+    const text = (JSON.parse(retry.body as string) as { blocks: { text?: string }[] }).blocks.map((b) => b.text ?? '').join('\n');
+    for (const value of values) expect(text).toContain(`| ${String(value)} |`);
+    expect(text).not.toMatch(/NaN|Infinity|null/);
+  });
+
+  // The table fallback is mrkdwn, where Slack reads <@U…> in a label as a
+  // mention. The mention check saw only the reply text.
+  it('reply_to_origin refuses a chart label that mentions an unknown user', async () => {
+    mockSlackMethods(fetchMock, (user) => user === 'U01ZZZZZZZ'
+      ? jsonResponse(200, { ok: false, error: 'user_not_found' })
+      : jsonResponse(200, { ok: true, user: { id: user } }));
+    const mention = { title: 'Owners', chart: { type: 'pie', segments: [{ label: '<@U01ZZZZZZZ>', value: 1 }] } };
+    const result = await action('slack.reply_to_origin').execute({ text: 'Owners:', charts: [mention] }, pluginCtx({ origin: slackOrigin }));
+    expect(result).toMatchObject({ success: false, error: expect.stringContaining('U01ZZZZZZZ') });
+    expect(messageWrites(fetchMock)).toHaveLength(0);
+  });
+
+  it('reply_to_origin refuses a chart Slack would reject, before it posts', async () => {
+    const tooLong = { ...ticketsChart, title: 'x'.repeat(51) };
+    const result = await action('slack.reply_to_origin').execute(
+      { text: 'Tickets', charts: [tooLong] },
+      pluginCtx({ origin: slackOrigin }),
+    );
+    expect(result).toEqual({ success: false, error: 'Chart 1: Give the chart a title of 1 to 50 characters.' });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('reply_to_origin uses the current assistant identity', async () => {
@@ -277,11 +583,11 @@ describe('slack actions', () => {
       .mockResolvedValueOnce(jsonResponse(200, { ok: true, upload_url: 'https://uploads.slack.test/file', file_id: 'F1' }))
       .mockResolvedValueOnce(new Response('', { status: 200 }))
       .mockResolvedValueOnce(jsonResponse(200, { ok: true }));
-    const sandbox = {
+    const sandbox = makeSandbox({
       id: 'sb-file',
       stat: async () => ({ isFile: true, isDirectory: false, size: 3 }),
       readBinary: async () => new Uint8Array([1, 2, 3]),
-    } as Sandbox;
+    });
 
     const result = await action('slack.reply_file_to_origin').execute(
       { path: '/workspace/report.pdf', mime_type: 'application/pdf', caption: 'Report' },
@@ -300,14 +606,123 @@ describe('slack actions', () => {
       thread_ts: '1.2',
       initial_comment: 'Report',
     });
-    expect(result).toEqual({ success: true, data: { channel: 'C1', fileId: 'F1' } });
+    expect(result).toEqual({ success: true, data: { channel: 'C1', fileId: 'F1', mime_type: 'application/pdf' } });
+  });
+
+  const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+
+  it('reply_file_to_origin posts a chart image inline with its alt text and title', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, upload_url: 'https://uploads.slack.test/file', file_id: 'F2' }))
+      .mockResolvedValueOnce(new Response('', { status: 200 }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+    const sandbox = makeSandbox({
+      id: 'sb-chart',
+      stat: async () => ({ isFile: true, isDirectory: false, size: PNG.byteLength }),
+      readBinary: async () => PNG,
+    });
+    // A wrong extension and declared type: the PNG bytes still decide the type.
+    const result = await action('slack.reply_file_to_origin').execute(
+      { path: '/workspace/charts/signups.bin', mime_type: 'application/octet-stream', alt_text: 'Signups rose each week in May', title: 'Weekly signups' },
+      pluginCtx({ sandbox, origin: { channelType: 'slack', threadKey: 'slack:C1:1.2' } }),
+    );
+
+    const [uploadUrlCall, uploadCall, completeCall] = fetchMock.mock.calls as [string, RequestInit][];
+    expect(uploadUrlCall[0]).toBe('https://slack.com/api/files.getUploadURLExternal');
+    const form = new URLSearchParams(uploadUrlCall[1].body as string);
+    expect(Object.fromEntries(form)).toEqual({ filename: 'signups.bin', length: String(PNG.byteLength), alt_txt: 'Signups rose each week in May' });
+    expect((uploadCall[1].body as Blob).type).toBe('image/png');
+    expect(JSON.parse(completeCall[1].body as string)).toMatchObject({
+      files: [{ id: 'F2', title: 'Weekly signups' }],
+      channel_id: 'C1',
+      thread_ts: '1.2',
+    });
+    expect(result).toEqual({ success: true, data: { channel: 'C1', fileId: 'F2', mime_type: 'image/png' } });
+  });
+
+  it('reply_file_to_origin uploads a file this thread saved, by file_id', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, upload_url: 'https://uploads.slack.test/file', file_id: 'F3' }))
+      .mockResolvedValueOnce(new Response('', { status: 200 }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+    const read = vi.fn(async (id: string) => id === 'saved-1'
+      ? { id, name: 'flow.png', mimeType: 'image/png', bytes: PNG.byteLength, url: '/f', webUrl: '/f', data: PNG }
+      : null);
+    const save = vi.fn();
+    const sandbox = makeSandbox({ stat: vi.fn(), readBinary: vi.fn() });
+    const result = await action('slack.reply_file_to_origin').execute(
+      { file_id: 'saved-1', alt_text: 'Request flow from web to api to sandbox' },
+      pluginCtx({ sandbox, threadFiles: { read, save }, origin: { channelType: 'slack', threadKey: 'slack:C1:1.2' } }),
+    );
+    expect(read).toHaveBeenCalledWith('saved-1');
+    expect(sandbox.readBinary).not.toHaveBeenCalled();
+    const form = new URLSearchParams((fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string);
+    expect(form.get('filename')).toBe('flow.png');
+    expect(result).toMatchObject({ success: true, data: { fileId: 'F3', mime_type: 'image/png' } });
+  });
+
+  it.each([
+    ['a file_id saved in another thread', { file_id: 'other-thread-file' }, 'No file with that file_id is saved in this thread'],
+    ['both path and file_id', { path: '/workspace/a.png', file_id: 'saved-1' }, 'Pass exactly one of path or file_id'],
+    ['neither path nor file_id', {}, 'Pass exactly one of path or file_id'],
+  ])('reply_file_to_origin refuses %s and calls no Slack method', async (_label, args, error) => {
+    const read = vi.fn(async () => null);
+    const result = await action('slack.reply_file_to_origin').execute(
+      args,
+      pluginCtx({ threadFiles: { read, save: vi.fn() }, origin: { channelType: 'slack', threadKey: 'slack:C1:1.2' } }),
+    );
+    expect(result).toMatchObject({ success: false, error: expect.stringContaining(error) });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('reply_file_to_origin refuses a turn with no Slack origin before it reads the file', async () => {
+    const sandbox = makeSandbox({ stat: vi.fn(), readBinary: vi.fn() });
+    const result = await action('slack.reply_file_to_origin').execute(
+      { path: '/workspace/chart.png', alt_text: 'Chart' },
+      pluginCtx({ sandbox }),
+    );
+    expect(result).toMatchObject({ success: false, error: expect.stringContaining('did not come from a Slack channel') });
+    expect(sandbox.stat).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['HTML named and declared as a PNG', '/workspace/report.png', '<html>not an image</html>', 'image/png'],
+    ['an SVG with a script', '/workspace/chart.svg', '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>', undefined],
+  ])('reply_file_to_origin uploads %s as a plain file, not an image', async (_label, path, text, declared) => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, upload_url: 'https://uploads.slack.test/file', file_id: 'F5' }))
+      .mockResolvedValueOnce(new Response('', { status: 200 }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+    const bytes = new TextEncoder().encode(text);
+    const sandbox = makeSandbox({ stat: async () => ({ isFile: true, isDirectory: false, size: bytes.byteLength }), readBinary: async () => bytes });
+    const result = await action('slack.reply_file_to_origin').execute(
+      { path, alt_text: 'A chart', ...(declared ? { mime_type: declared } : {}) },
+      pluginCtx({ sandbox, origin: { channelType: 'slack', threadKey: 'slack:C1:1.2' } }),
+    );
+    expect(((fetchMock.mock.calls[1] as [string, RequestInit])[1].body as Blob).type).toBe('application/octet-stream');
+    expect(result).toEqual({ success: true, data: { channel: 'C1', fileId: 'F5', mime_type: 'application/octet-stream' } });
+  });
+
+  it('reply_file_to_origin notes that Slack shows no preview for SVG', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, upload_url: 'https://uploads.slack.test/file', file_id: 'F4' }))
+      .mockResolvedValueOnce(new Response('', { status: 200 }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+    const svg = new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg"/>');
+    const sandbox = makeSandbox({ stat: async () => ({ isFile: true, isDirectory: false, size: svg.byteLength }), readBinary: async () => svg });
+    const result = await action('slack.reply_file_to_origin').execute(
+      { path: '/workspace/diagram.svg', alt_text: 'Diagram' },
+      pluginCtx({ sandbox, origin: { channelType: 'slack', threadKey: 'slack:C1:1.2' } }),
+    );
+    expect(result).toMatchObject({ success: true, data: { mime_type: 'image/svg+xml', note: expect.stringContaining('Upload a PNG copy') } });
   });
 
   it('reply_file_to_origin rejects a directory before calling Slack', async () => {
-    const sandbox = {
+    const sandbox = makeSandbox({
       id: 'sb-directory',
       stat: async () => ({ isFile: false, isDirectory: true, size: 0 }),
-    } as Sandbox;
+    });
     const result = await action('slack.reply_file_to_origin').execute(
       { path: '/workspace/output' },
       pluginCtx({ sandbox, origin: { channelType: 'slack', threadKey: 'slack:C1:1.2' } }),
@@ -355,8 +770,57 @@ describe('slack actions', () => {
     expect((init.headers as Record<string, string>).Authorization).toBe('Bearer xoxb-test-token');
     expect(result).toEqual({
       success: true,
-      data: { channels: [{ id: 'C1', name: 'general', is_private: false, num_members: undefined, topic: undefined, purpose: undefined }], total: 1 },
+      data: {
+        channels: [{ id: 'C1', name: 'general', is_private: false, num_members: undefined, topic: undefined, purpose: undefined }], total: 1,
+        scope: 'joined', visibility: 'public_only',
+        access_note: expect.stringContaining('Link Slack'),
+      },
     });
+  });
+
+  it.each(['team', 'org'] as const)('list_channels includes bot-joined private channels for %s without personal metadata', async (type) => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, {
+      ok: true, channels: [
+        { id: 'C1', name: 'general', is_private: false },
+        { id: 'C2', name: 'secret', is_private: true },
+      ],
+    }));
+    const result = await action('slack.list_channels').execute({}, pluginCtx({
+      owner: { type, id: 'shared1' },
+      credentials: makeCredentials({ accessToken: 'xoxb-test-token' }),
+    }));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ success: true, data: {
+      channels: [{ id: 'C1' }, { id: 'C2' }], total: 2, visibility: 'public_and_authorized_private',
+      access_note: expect.stringContaining('bot is a member'),
+    } });
+    expect(JSON.stringify(result)).toContain('secret');
+  });
+
+  it('list_channels explains that all means public and joined is needed for authorized private channels', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, channels: [] }));
+    const result = await action('slack.list_channels').execute({ scope: 'all' }, pluginCtx({
+      owner: { type: 'user', id: 'u1' },
+      credentials: makeCredentials({ accessToken: 'xoxb-test-token', metadata: { owner_slack_user_id: 'U1' } }),
+    }));
+    expect(result).toMatchObject({ success: true, data: {
+      scope: 'all', visibility: 'public_only', access_note: expect.stringContaining('scope="joined"'),
+    } });
+    expect(fetchMock.mock.calls[0][0]).toContain('types=public_channel&');
+  });
+
+  it.each([true, false])('list_channels checks linked personal membership (member=%s)', async (member) => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, channels: [{ id: 'C2', name: 'private-team', is_private: true }] }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { id: 'C2', is_private: true } }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, members: member ? ['U1'] : ['U2'] }));
+    const result = await action('slack.list_channels').execute({}, pluginCtx({
+      owner: { type: 'user', id: 'u1' },
+      credentials: makeCredentials({ accessToken: 'xoxb-test-token', metadata: { owner_slack_user_id: 'U1' } }),
+    }));
+    expect(result).toMatchObject({ success: true, data: {
+      channels: member ? [{ id: 'C2' }] : [], total: member ? 1 : 0, visibility: 'public_and_authorized_private',
+    } });
   });
 
   it('read_history reads channel history and filters noise subtypes by default', async () => {
@@ -398,6 +862,219 @@ describe('slack actions', () => {
     expect(result).toMatchObject({ success: true, data: { has_more: false, total: 1 } });
   });
 
+  it('read_history names the channel it read', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    // The messages carry no user id, so nothing else reads the Slack API and
+    // the request count stays exact.
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { ok: true, messages: [{ text: 'hello', ts: '1.1' }], has_more: false }),
+    );
+
+    const result = await action('slack.read_history').execute({ channel: 'C1' }, pluginCtx());
+
+    // The access guard already read conversations.info, so the name needs no
+    // second request.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({
+      success: true,
+      data: { channel: 'C1', channel_name: 'general', total: 1 },
+    });
+  });
+
+  it('read_thread names the channel it read', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { ok: true, messages: [{ text: 'reply', ts: '1.2' }], has_more: false }),
+    );
+
+    const result = await action('slack.read_thread').execute({ channel: 'C1', thread_ts: '1.1' }, pluginCtx());
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({
+      success: true,
+      data: { channel: 'C1', channel_name: 'general', total: 1 },
+    });
+  });
+
+  it('read_history returns the messages when Slack gives the channel no name', async () => {
+    // conversations.info answers the guard but carries no name, as it does for
+    // a direct message. The read must still return the messages.
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { ok: true, channel: { id: 'C1', is_private: false, is_im: false, is_mpim: false } }),
+    );
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { ok: true, messages: [{ text: 'hello', ts: '1.1' }], has_more: false }),
+    );
+
+    const result = await action('slack.read_history').execute({ channel: 'C1' }, pluginCtx());
+
+    // The name comes from the guard, so an unnamed conversation costs no
+    // second request.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({ success: true, data: { channel: 'C1', total: 1 } });
+    expect(result).not.toHaveProperty('data.channel_name');
+  });
+
+  it('read_thread returns the replies when a mentioned channel lookup fails', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse(200, { ok: true, messages: [{ text: 'moved to <#C2>', ts: '1.2' }], has_more: false }),
+      )
+      // The mentioned channel cannot be read, so its name stays unresolved.
+      .mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'channel_not_found' }));
+
+    const result = await action('slack.read_thread').execute({ channel: 'C1', thread_ts: '1.1' }, pluginCtx());
+
+    expect(result).toMatchObject({
+      success: true,
+      data: {
+        channel: 'C1',
+        channel_name: 'general',
+        total: 1,
+        messages: [{ text: 'moved to #C2' }],
+      },
+    });
+  });
+
+  it('read_history resolves a channel mention in message text', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse(200, { ok: true, messages: [{ text: 'moved to <#C2>', ts: '1.1' }], has_more: false }),
+      )
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { id: 'C2', name: 'random' } }));
+
+    const result = await action('slack.read_history').execute({ channel: 'C1' }, pluginCtx());
+
+    const [mentionUrl] = fetchMock.mock.calls[2] as [string, RequestInit];
+    expect(mentionUrl).toContain('https://slack.com/api/conversations.info');
+    expect(mentionUrl).toContain('channel=C2');
+    expect(result).toMatchObject({
+      success: true,
+      data: { channel_name: 'general', messages: [{ text: 'moved to #random (C2)' }] },
+    });
+  });
+
+  it('read_history keeps the name from the guard when a mention labels the channel it read', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    // Slack keeps a mention label as the author wrote it, so an old name can
+    // sit in the history of the channel that was renamed.
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { ok: true, messages: [{ text: 'welcome to <#C1|ops-old>', ts: '1.1' }], has_more: false }),
+    );
+
+    const result = await action('slack.read_history').execute({ channel: 'C1' }, pluginCtx());
+
+    // A label costs no request, so the count stays at guard plus history.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({
+      success: true,
+      data: {
+        channel: 'C1',
+        channel_name: 'general',
+        messages: [{ text: 'welcome to #general (C1)' }],
+      },
+    });
+  });
+
+  it('read_history keeps a mention label out of a later read', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { ok: true, messages: [{ text: 'see <#C2|payroll-public> please', ts: '1.1' }], has_more: false }),
+    );
+
+    const first = await action('slack.read_history').execute({ channel: 'C1' }, pluginCtx());
+
+    // The label labels this one message, and it makes no request.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(first).toMatchObject({
+      success: true,
+      data: { messages: [{ text: 'see #payroll-public please' }] },
+    });
+
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          ok: true,
+          channel: { id: 'C3', name: 'eng', is_private: false, is_im: false, is_mpim: false },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, { ok: true, messages: [{ text: 'posted in <#C2>', ts: '2.1' }], has_more: false }),
+      )
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { id: 'C2', name: 'payroll' } }));
+
+    const second = await action('slack.read_history').execute({ channel: 'C3' }, pluginCtx());
+
+    // The second read asks Slack for the name of C2 instead of reusing the
+    // label from the first read.
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    const [lookupUrl] = fetchMock.mock.calls[4] as [string, RequestInit];
+    expect(lookupUrl).toContain('https://slack.com/api/conversations.info');
+    expect(lookupUrl).toContain('channel=C2');
+    expect(second).toMatchObject({
+      success: true,
+      data: { channel: 'C3', channel_name: 'eng', messages: [{ text: 'posted in #payroll (C2)' }] },
+    });
+  });
+
+  it('read_history names the channel when a mention lookup throws', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse(200, { ok: true, messages: [{ text: 'moved to <#C2>', ts: '1.1' }], has_more: false }),
+      )
+      .mockRejectedValueOnce(new Error('network down'));
+
+    const result = await action('slack.read_history').execute({ channel: 'C1' }, pluginCtx());
+
+    // A failed lookup drops the mention name and keeps the read.
+    expect(result).toMatchObject({
+      success: true,
+      data: {
+        channel: 'C1',
+        channel_name: 'general',
+        total: 1,
+        messages: [{ text: 'moved to #C2' }],
+      },
+    });
+  });
+
+  it('read_history does not name a channel with a name read for another credential', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { ok: true, messages: [{ text: 'hello', ts: '1.1' }], has_more: false }),
+    );
+
+    await action('slack.read_history').execute({ channel: 'C1' }, pluginCtx());
+
+    // A second workspace mentions the same ID. Its token cannot read that
+    // channel, so the mention keeps the raw ID.
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          ok: true,
+          channel: { id: 'C9', name: 'ops', is_private: false, is_im: false, is_mpim: false },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, { ok: true, messages: [{ text: 'pasted <#C1>', ts: '2.1' }], has_more: false }),
+      )
+      .mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'channel_not_found' }));
+
+    const other = await action('slack.read_history').execute(
+      { channel: 'C9' },
+      pluginCtx({ credentials: makeCredentials({ accessToken: 'xoxb-other-workspace' }) }),
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(other).toMatchObject({
+      success: true,
+      data: { channel: 'C9', channel_name: 'ops', messages: [{ text: 'pasted #C1' }] },
+    });
+  });
+
   it('list_users lists non-bot, non-deleted members', async () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse(200, {
@@ -423,6 +1100,7 @@ describe('slack actions', () => {
   });
 
   it('fetch_file returns text content for a text file from files.slack.com', async () => {
+    mockFileAccess(fetchMock, 'https://files.slack.com/files-pri/T1-F1/note.txt');
     fetchMock.mockResolvedValueOnce(
       new Response('hello world', { status: 200, headers: { 'Content-Type': 'text/plain' } }),
     );
@@ -432,10 +1110,28 @@ describe('slack actions', () => {
       pluginCtx(),
     );
 
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const [url, init] = fetchMock.mock.calls[2] as [string, RequestInit];
     expect(url).toBe('https://files.slack.com/files-pri/T1-F1/note.txt');
     expect((init.headers as Record<string, string>).Authorization).toBe('Bearer xoxb-test-token');
     expect(result).toEqual({ success: true, data: { content: 'hello world', mimetype: 'text/plain' } });
+  });
+
+  it('fetch_file bounds application text before decoding it', async () => {
+    mockFileAccess(fetchMock, 'https://files.slack.com/files-pri/T1-F1/data.json');
+    fetchMock.mockResolvedValueOnce(
+      new Response('', {
+        status: 200,
+        headers: { 'Content-Type': 'application/json', 'Content-Length': String(1_048_577) },
+      }),
+    );
+
+    const result = await action('slack.fetch_file').execute(
+      { url: 'https://files.slack.com/files-pri/T1-F1/data.json' },
+      pluginCtx(),
+    );
+
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toContain('File too large for text extraction');
   });
 
   it('fetch_file rejects non-slack URLs without calling fetch', async () => {
@@ -447,12 +1143,13 @@ describe('slack actions', () => {
     expect(fetchMock).not.toHaveBeenCalled();
     expect(result).toEqual({
       success: false,
-      error: 'This is an external file (e.g. Google Docs). Open the URL directly — it cannot be fetched through Slack. Only files hosted on Slack (files.slack.com) can be downloaded.',
+      error: 'Use a file ID or an HTTPS files.slack.com URL from Slack message data.',
     });
   });
 
   it('fetch_file returns an image attachment for small images', async () => {
     const bytes = new Uint8Array([137, 80, 78, 71]);
+    mockFileAccess(fetchMock, 'https://files.slack.com/files-pri/T1-F1/pic.png');
     fetchMock.mockResolvedValueOnce(
       new Response(bytes, { status: 200, headers: { 'Content-Type': 'image/png' } }),
     );
@@ -466,6 +1163,206 @@ describe('slack actions', () => {
     expect(result.attachments).toEqual([
       { type: 'image', data: bytes, mimeType: 'image/png', name: 'pic.png' },
     ]);
+  });
+
+
+  it.each([
+    ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'agreement'],
+    ['application/octet-stream', 'nda.docx'],
+    ['application/zip', 'nda.docx'],
+  ])('fetch_file extracts DOCX for %s and %s', async (mime, name) => {
+    const bytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0]);
+    mockFileAccess(fetchMock, `https://files.slack.com/files-pri/T1-F1/${name}`);
+    fetchMock.mockResolvedValueOnce(new Response(bytes, { headers: { 'Content-Type': mime } }));
+    const extractDocument = vi.fn().mockResolvedValue({ markdown: 'Mutual NDA terms' });
+    const result = await action('slack.fetch_file').execute(
+      { url: `https://files.slack.com/files-pri/T1-F1/${name}` },
+      pluginCtx({ extractDocument }),
+    );
+    expect(result).toEqual({ success: true, data: {
+      content: 'Mutual NDA terms', mimetype: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', filename: name,
+    } });
+    expect(extractDocument).toHaveBeenCalledWith(expect.objectContaining({
+      data: bytes, name, mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    }));
+  });
+
+  it('fetch_file leaves arbitrary ZIP archives unsupported', async () => {
+    mockFileAccess(fetchMock, 'https://files.slack.com/files-pri/T1-F1/archive.zip');
+    fetchMock.mockResolvedValueOnce(new Response(new Uint8Array([0x50, 0x4b, 0x03, 0x04]), { headers: { 'Content-Type': 'application/zip' } }));
+    const extractDocument = vi.fn();
+    const result = await action('slack.fetch_file').execute(
+      { url: 'https://files.slack.com/files-pri/T1-F1/archive.zip' }, pluginCtx({ extractDocument }),
+    );
+    expect(result).toMatchObject({ success: true, data: { mimetype: 'application/zip' } });
+    expect(extractDocument).not.toHaveBeenCalled();
+  });
+
+  it('fetch_file rejects a DOCX label without a ZIP signature', async () => {
+    mockFileAccess(fetchMock, 'https://files.slack.com/files-pri/T1-F1/nda.docx');
+    fetchMock.mockResolvedValueOnce(new Response('sign in', { headers: { 'Content-Type': 'application/octet-stream' } }));
+    const extractDocument = vi.fn();
+    const result = await action('slack.fetch_file').execute(
+      { url: 'https://files.slack.com/files-pri/T1-F1/nda.docx' }, pluginCtx({ extractDocument }),
+    );
+    expect(result).toEqual({ success: false, error: 'This file is not a valid DOCX document. Upload a DOCX file exported from Word.' });
+    expect(extractDocument).not.toHaveBeenCalled();
+  });
+
+  it('fetch_file reports the host DOCX extraction failure', async () => {
+    mockFileAccess(fetchMock, 'https://files.slack.com/files-pri/T1-F1/nda.docx');
+    fetchMock.mockResolvedValueOnce(new Response(new Uint8Array([0x50, 0x4b, 0x03, 0x04]), { headers: { 'Content-Type': 'application/octet-stream' } }));
+    const extractDocument = vi.fn().mockRejectedValue(new Error('Invalid DOCX package'));
+    const result = await action('slack.fetch_file').execute(
+      { url: 'https://files.slack.com/files-pri/T1-F1/nda.docx' }, pluginCtx({ extractDocument }),
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Invalid DOCX package');
+  });
+
+  it('fetch_file returns extracted text for a PDF', async () => {
+    const bytes = new TextEncoder().encode('%PDF-1.4 ...');
+    mockFileAccess(fetchMock, 'https://files.slack.com/files-pri/T1-F1/report.pdf');
+    fetchMock.mockResolvedValueOnce(
+      new Response(bytes, { status: 200, headers: { 'Content-Type': 'application/pdf' } }),
+    );
+
+    const result = await action('slack.fetch_file').execute(
+      { url: 'https://files.slack.com/files-pri/T1-F1/report.pdf' },
+      pluginCtx({
+        extractDocument: async () => ({ markdown: '## Quarterly Revenue Report' }),
+      }),
+    );
+
+    // The whole point of the bug: a PDF must come back as readable text, not
+    // as a note saying it cannot be viewed.
+    expect(result).toEqual({
+      success: true,
+      data: {
+        content: '## Quarterly Revenue Report',
+        mimetype: 'application/pdf',
+        filename: 'report.pdf',
+      },
+    });
+  });
+
+  it('fetch_file rejects a declared PDF without a PDF signature', async () => {
+    mockFileAccess(fetchMock, 'https://files.slack.com/files-pri/T1-F1/login.pdf');
+    fetchMock.mockResolvedValueOnce(
+      new Response('<html>sign in</html>', { status: 200, headers: { 'Content-Type': 'application/pdf' } }),
+    );
+    let extracted = false;
+
+    const result = await action('slack.fetch_file').execute(
+      { url: 'https://files.slack.com/files-pri/T1-F1/login.pdf' },
+      pluginCtx({ extractDocument: async () => { extracted = true; return { markdown: 'must not extract' }; } }),
+    );
+
+    expect(result.success).toBe(true);
+    expect(extracted).toBe(false);
+  });
+
+  it('fetch_file normalizes PDF MIME parameters and case', async () => {
+    const bytes = new TextEncoder().encode('%PDF-1.4 ...');
+    mockFileAccess(fetchMock, 'https://files.slack.com/files-pri/T1-F1/report.pdf');
+    fetchMock.mockResolvedValueOnce(
+      new Response(bytes, { status: 200, headers: { 'Content-Type': 'Application/PDF; charset=binary' } }),
+    );
+
+    const result = await action('slack.fetch_file').execute(
+      { url: 'https://files.slack.com/files-pri/T1-F1/report.pdf' },
+      pluginCtx({ extractDocument: async () => ({ markdown: '## Report' }) }),
+    );
+
+    expect(result).toMatchObject({ success: true, data: { content: '## Report', mimetype: 'application/pdf' } });
+  });
+
+  it('reports an oversized generic PDF candidate', async () => {
+    mockFileAccess(fetchMock, 'https://files.slack.com/files-pri/T1-F1/unknown');
+    fetchMock.mockResolvedValueOnce(
+      new Response('%PDF-', {
+        status: 200,
+        headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': String(26 * 1024 * 1024) },
+      }),
+    );
+
+    const result = await action('slack.fetch_file').execute(
+      { url: 'https://files.slack.com/files-pri/T1-F1/unknown' },
+      pluginCtx(),
+    );
+
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toContain('PDF too large');
+  });
+
+  it('keeps an oversized generic non-PDF as unsupported metadata', async () => {
+    mockFileAccess(fetchMock, 'https://files.slack.com/files-pri/T1-F1/archive');
+    fetchMock.mockResolvedValueOnce(
+      new Response('PK\x03\x04', {
+        status: 200,
+        headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': String(26 * 1024 * 1024) },
+      }),
+    );
+
+    const result = await action('slack.fetch_file').execute(
+      { url: 'https://files.slack.com/files-pri/T1-F1/archive' },
+      pluginCtx(),
+    );
+
+    expect(result).toMatchObject({ success: true, data: { mimetype: 'application/octet-stream' } });
+  });
+
+  it('fetch_file says why a scanned PDF has no text', async () => {
+    const bytes = new TextEncoder().encode('%PDF-1.4 ...');
+    mockFileAccess(fetchMock, 'https://files.slack.com/files-pri/T1-F1/scan.pdf');
+    fetchMock.mockResolvedValueOnce(
+      new Response(bytes, { status: 200, headers: { 'Content-Type': 'application/pdf' } }),
+    );
+
+    const result = await action('slack.fetch_file').execute(
+      { url: 'https://files.slack.com/files-pri/T1-F1/scan.pdf' },
+      pluginCtx({ extractDocument: async () => null }),
+    );
+
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toContain('no text layer');
+  });
+
+  it('fetch_file reports a missing extractor instead of blaming the file type', async () => {
+    const bytes = new TextEncoder().encode('%PDF-1.4 ...');
+    mockFileAccess(fetchMock, 'https://files.slack.com/files-pri/T1-F1/report.pdf');
+    fetchMock.mockResolvedValueOnce(
+      new Response(bytes, { status: 200, headers: { 'Content-Type': 'application/pdf' } }),
+    );
+
+    // A host that wires no extractor. The old message told the agent the file
+    // type was unviewable, which sent it looking for a tool that does not
+    // exist; name the real reason instead.
+    const result = await action('slack.fetch_file').execute(
+      { url: 'https://files.slack.com/files-pri/T1-F1/report.pdf' },
+      pluginCtx(),
+    );
+
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toContain('PDF text extraction is not available');
+  });
+
+  it('fetch_file still returns metadata for a file type it cannot read', async () => {
+    const bytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+    mockFileAccess(fetchMock, 'https://files.slack.com/files-pri/T1-F1/bundle.zip');
+    fetchMock.mockResolvedValueOnce(
+      new Response(bytes, { status: 200, headers: { 'Content-Type': 'application/zip' } }),
+    );
+
+    const result = await action('slack.fetch_file').execute(
+      { url: 'https://files.slack.com/files-pri/T1-F1/bundle.zip' },
+      pluginCtx(),
+    );
+
+    expect(result).toMatchObject({
+      success: true,
+      data: { mimetype: 'application/zip' },
+    });
   });
 
   it('get_pins fetches pinned messages and files', async () => {
@@ -484,7 +1381,14 @@ describe('slack actions', () => {
 
     const [url] = fetchMock.mock.calls[1] as [string, RequestInit];
     expect(url).toContain('https://slack.com/api/pins.list');
-    expect(result).toMatchObject({ success: true, data: { total: 2 } });
+    // The action description promises the agent that the result names the
+    // channel, and the spec lists get_pins beside read_history and
+    // read_thread. Pin both fields, or the get_pins half of that promise can
+    // be removed with the suite still green.
+    expect(result).toMatchObject({
+      success: true,
+      data: { channel: 'C1', channel_name: 'general', total: 2 },
+    });
   });
 
   it('get_channel_info returns topic/purpose/creator for a normal channel', async () => {
@@ -584,6 +1488,403 @@ describe('slack actions', () => {
     expect(fetchMock).not.toHaveBeenCalled();
     expect(result).toEqual({ success: false, error: 'Missing bot_token' });
   });
+
+  it.each(['slack.send_message', 'slack.update_message', 'slack.dm_user'])(
+    '%s sends short release tables as native table blocks', async (name) => {
+      if (name === 'slack.dm_user') {
+        fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { id: 'D2' } }));
+      } else {
+        mockGuardAllowsPublicChannel(fetchMock);
+      }
+      fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '123.456', channel: 'C1' }));
+      const text = '**Release infrastructure changes**\n\n| Mono PR | Merged | Description |\n|---|---|---|\n| [tkhq/mono#8240](https://github.com/tkhq/mono/pull/8240) | | Per-instance credentials |';
+      await action(name).execute({ channel: 'C1', user: 'U123', ts: '123.456', text }, pluginCtx());
+      const init = fetchMock.mock.calls[1]?.[1];
+      if (typeof init?.body !== 'string') throw new Error('Expected a JSON request body');
+      expect(JSON.parse(init.body)).toMatchObject({
+        blocks: [
+          { type: 'markdown', text: '**Release infrastructure changes**' },
+          { type: 'table', rows: [[{ type: 'raw_text', text: 'Mono PR' }, { type: 'raw_text', text: 'Merged' }, { type: 'raw_text', text: 'Description' }], [
+            { type: 'rich_text', elements: [{ type: 'rich_text_section', elements: [{ type: 'link', url: 'https://github.com/tkhq/mono/pull/8240', text: 'tkhq/mono#8240' }] }] },
+            { type: 'rich_text', elements: [{ type: 'rich_text_section', elements: [{ type: 'text', text: ' ' }] }] },
+            { type: 'rich_text', elements: [{ type: 'rich_text_section', elements: [{ type: 'text', text: 'Per-instance credentials' }] }] },
+          ]] },
+        ],
+      });
+    },
+  );
+
+  it.each(['slack.send_message', 'slack.update_message', 'slack.dm_user'])(
+    '%s retries with Markdown blocks when Slack rejects the table block', async (name) => {
+      if (name === 'slack.dm_user') {
+        fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { id: 'D2' } }));
+      } else {
+        mockGuardAllowsPublicChannel(fetchMock);
+      }
+      fetchMock.mockImplementation(async (_url: string, init?: RequestInit) => {
+        const body = typeof init?.body === 'string' ? JSON.parse(init.body) as { blocks?: { type: string }[] } : {};
+        if (body.blocks?.some((block) => block.type === 'table')) {
+          return jsonResponse(200, { ok: false, error: 'invalid_blocks' });
+        }
+        return jsonResponse(200, { ok: true, ts: '123.456', channel: 'C1' });
+      });
+      const text = '| Mono PR | Related |\n|---|---|\n| [#1](https://x/1) | [#2](https://x/2)<br>[#3](https://x/3) |';
+      const result = await action(name).execute({ channel: 'C1', user: 'U123', ts: '123.456', text }, pluginCtx());
+      expect(result.success).toBe(true);
+      const posts = fetchMock.mock.calls.slice(1).map(([, init]) => JSON.parse((init as RequestInit).body as string) as { blocks?: { type: string }[] });
+      expect(posts.map((post) => post.blocks?.map((block) => block.type))).toEqual([['table'], ['markdown']]);
+      expect(posts[1].blocks).toEqual([{ type: 'markdown', text }]);
+    },
+  );
+
+  it.each(['slack.send_message', 'slack.update_message', 'slack.dm_user'])(
+    '%s falls back to Markdown only once when Slack rejects every attempt', async (name) => {
+      if (name === 'slack.dm_user') {
+        fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { id: 'D2' } }));
+      } else {
+        mockGuardAllowsPublicChannel(fetchMock);
+      }
+      fetchMock.mockImplementation(async () => jsonResponse(200, { ok: false, error: 'invalid_blocks' }));
+      const text = '| PR | Related |\n|---|---|\n| a | b<br>c |';
+      const result = await action(name).execute({ channel: 'C1', user: 'U123', ts: '123.456', text }, pluginCtx());
+      expect(result).toEqual({ success: false, error: 'Slack API error: invalid_blocks' });
+      const posts = fetchMock.mock.calls.slice(1).map(([, init]) => JSON.parse((init as RequestInit).body as string) as { blocks?: { type: string }[] });
+      expect(posts.map((post) => post.blocks?.map((block) => block.type))).toEqual([['table'], ['markdown']]);
+    },
+  );
+
+  describe('send_message with a table too large for one message', () => {
+    const report = [
+      '**Weekly release report**',
+      '',
+      '| PR | Summary |',
+      '|---|---|',
+      ...Array.from({ length: 80 }, (_, index) => `| [tkhq/mono#${8000 + index}](https://github.com/tkhq/mono/pull/${8000 + index}) | ${'Moves the signer pool behind the new retry budget. '.repeat(3)} |`),
+    ].join('\n');
+
+    /** Answer every call; each post gets its own ts. Returns the posted bodies. */
+    function recordPosts(reject?: (count: number) => string | undefined): Record<string, unknown>[] {
+      const posts: Record<string, unknown>[] = [];
+      fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+        if (!new URL(url).pathname.endsWith('/chat.postMessage')) {
+          return jsonResponse(200, { ok: true, channel: { id: 'C1', name: 'general', is_private: false } });
+        }
+        posts.push(JSON.parse(init?.body as string) as Record<string, unknown>);
+        const error = reject?.(posts.length);
+        return jsonResponse(200, error ? { ok: false, error } : { ok: true, ts: `100.${posts.length}`, channel: 'C1' });
+      });
+      return posts;
+    }
+
+    const tableParts = (posts: Record<string, unknown>[]) =>
+      posts.map((post) => (post.blocks as { type: string }[]).map((block) => block.type));
+
+    it('posts native tables in parts and threads the rest under the first', async () => {
+      const posts = recordPosts();
+
+      const result = await action('slack.send_message').execute({ channel: 'C1', text: report }, pluginCtx());
+
+      expect(posts.length).toBeGreaterThan(1);
+      expect(tableParts(posts).every((types) => types.includes('table'))).toBe(true);
+      expect(posts[0].thread_ts).toBeUndefined();
+      expect(posts.slice(1).every((post) => post.thread_ts === '100.1')).toBe(true);
+      expect(JSON.stringify(posts[0].blocks)).toContain('Continued in the thread.');
+      expect(result).toEqual({
+        success: true,
+        data: { ts: '100.1', channel: 'C1', part_ts: posts.map((_, index) => `100.${index + 1}`) },
+      });
+    });
+
+    it('keeps every part in the thread it was aimed at', async () => {
+      const posts = recordPosts();
+
+      await action('slack.send_message').execute({ channel: 'C1', text: report, thread_ts: '99.9' }, pluginCtx());
+
+      expect(posts.length).toBeGreaterThan(1);
+      expect(posts.every((post) => post.thread_ts === '99.9')).toBe(true);
+      expect(JSON.stringify(posts[0].blocks)).toContain('Continued below.');
+    });
+
+    it('names the posted parts when Slack rejects a later part', async () => {
+      const posts = recordPosts((count) => (count === 2 ? 'msg_too_long' : undefined));
+
+      const result = await action('slack.send_message').execute({ channel: 'C1', text: report }, pluginCtx());
+
+      expect(posts).toHaveLength(2);
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/^Slack posted parts 1-1 of \d+ \(ts 100\.1\) and rejected part 2: Slack API error: msg_too_long\. Delete the posted parts/);
+    });
+  });
+
+  it.each(['slack.send_message', 'slack.update_message', 'slack.dm_user'])(
+    '%s preserves native links and mentions in readable table rows', async (name) => {
+      if (name === 'slack.dm_user') {
+        fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { id: 'D2' } }));
+      } else {
+        mockGuardAllowsPublicChannel(fetchMock);
+      }
+      // The mention check looks up the mentioned user before the post.
+      fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, user: { id: 'U123' } }));
+      fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '123.456', channel: 'C1' }));
+      const text = '| Owner | Doc | Channel |\n|-|-|-|\n| <@U123> <!group> | <https://example.com|the doc> | <#C0123|general> |';
+      await action(name).execute({ channel: 'C1', user: 'U123', ts: '123.456', text }, pluginCtx());
+      const init = fetchMock.mock.calls[2]?.[1];
+      if (typeof init?.body !== 'string') throw new Error('Expected a JSON request body');
+      expect(JSON.parse(init.body)).toMatchObject({ blocks: [{
+        type: 'section',
+        text: { type: 'mrkdwn', text: '*Owner*: <@U123> &lt;!group>\n*Doc*: <https://example.com|the doc>\n*Channel*: <#C0123|general>\n' },
+      }] });
+    },
+  );
+
+  // A mistyped user ID in a mention reached Slack, which showed a broken
+  // mention and reported success, so the assistant never saw its mistake.
+  describe('mentioned user check', () => {
+    const unknownUser = 'U01ZZZZZZZ';
+    const userFound = (user: string) => jsonResponse(200, { ok: true, user: { id: user } });
+    const unknownUserNotFound = (user: string) => user === unknownUser
+      ? jsonResponse(200, { ok: false, error: 'user_not_found' })
+      : userFound(user);
+    const unknownUserError = `Slack has no user with ID ${unknownUser}, so Valet did not send the message. ` +
+      'Look up the user again with slack.list_users or slack.lookup_user_by_email. Then retry with the correct ID.';
+    const mentionCtx = () => pluginCtx({
+      credentials: makeCredentials({ accessToken: 'xoxb-test-token', metadata: { owner_slack_user_id: 'U01OWNER00' } }),
+      origin: { channelType: 'slack', threadKey: 'slack:C1:1.2', reply: 'manual' },
+      sandbox: makeSandbox({
+        stat: async () => ({ isFile: true, isDirectory: false, size: 3 }),
+        readBinary: async () => new Uint8Array([1, 2, 3]),
+      }),
+    });
+
+    it.each([
+      'slack.send_message',
+      'slack.reply_to_origin',
+      'slack.reply_file_to_origin',
+      'slack.dm_owner',
+      'slack.dm_user',
+      'slack.update_message',
+    ])('%s refuses text that mentions an unknown user and sends nothing', async (id) => {
+      mockSlackMethods(fetchMock, unknownUserNotFound);
+      const text = `Ask <@U01AAAAAAA> and <@${unknownUser}> to review.`;
+      const result = await action(id).execute(
+        { channel: 'C1', user: 'U01AAAAAAA', ts: '1.2', path: '/workspace/report.pdf', text, caption: text },
+        mentionCtx(),
+      );
+      expect(result).toEqual({ success: false, error: unknownUserError });
+      expect(messageWrites(fetchMock)).toHaveLength(0);
+    });
+
+    // The formatter turns a Markdown link to @U… into <@U…|label>. A check of
+    // the input text found no mention, and the converted mention went out.
+    it.each([
+      'slack.send_message',
+      'slack.reply_to_origin',
+      'slack.reply_file_to_origin',
+      'slack.dm_owner',
+      'slack.dm_user',
+      'slack.update_message',
+    ])('%s refuses a Markdown link to an unknown user and sends nothing', async (id) => {
+      mockSlackMethods(fetchMock, unknownUserNotFound);
+      const text = `Ask [Reviewer](@${unknownUser}) to review.`;
+      const result = await action(id).execute(
+        { channel: 'C1', user: 'U01AAAAAAA', ts: '1.2', path: '/workspace/report.pdf', text, caption: text },
+        mentionCtx(),
+      );
+      expect(result).toEqual({ success: false, error: unknownUserError });
+      expect(messageWrites(fetchMock)).toHaveLength(0);
+    });
+
+    // Slack reads the parsed blocks. A scan of the raw JSON string missed a
+    // rich-text user element and a mention whose "<" was JSON-escaped.
+    it.each([
+      ['mrkdwn text', JSON.stringify([{ type: 'section', text: { type: 'mrkdwn', text: `Ping <@${unknownUser}>` } }])],
+      ['a rich-text user element', JSON.stringify([{ type: 'rich_text', elements: [{ type: 'rich_text_section', elements: [
+        { type: 'text', text: 'Ping ' },
+        { type: 'user', user_id: unknownUser },
+      ] }] }])],
+      ['JSON-escaped mrkdwn text', `[{"type":"section","text":{"type":"mrkdwn","text":"Ping \\u003c@${unknownUser}>"}}]`],
+    ])('send_message refuses an unknown user mentioned only in blocks as %s', async (_label, blocks) => {
+      mockSlackMethods(fetchMock, unknownUserNotFound);
+      const result = await action('slack.send_message').execute({ channel: 'C1', text: 'Ping', blocks }, pluginCtx());
+      expect(result).toEqual({ success: false, error: unknownUserError });
+      expect(messageWrites(fetchMock)).toHaveLength(0);
+    });
+
+    // Slack shows plain_text literally, so a mention example in a header is
+    // not a mention. The mrkdwn section is still checked.
+    it('send_message skips plain_text when it checks blocks', async () => {
+      mockSlackMethods(fetchMock, unknownUserNotFound);
+      const blocks = JSON.stringify([
+        { type: 'header', text: { type: 'plain_text', text: `Mention syntax: <@${unknownUser}>` } },
+        { type: 'section', text: { type: 'mrkdwn', text: 'Ping <@U01AAAAAAA>' } },
+      ]);
+      const result = await action('slack.send_message').execute({ channel: 'C1', text: 'Mention syntax', blocks }, pluginCtx());
+      expect(result).toEqual({ success: true, data: { ts: '1.2', channel: 'C1' } });
+      expect(lookedUpUsers(fetchMock)).toEqual(['U01AAAAAAA']);
+      expect(messageWrites(fetchMock)).toHaveLength(1);
+    });
+
+    // Slack never shows a button or option value, or image alt text, as
+    // message text, so an ID there is not a mention.
+    it('send_message skips button and option values and image alt text', async () => {
+      mockSlackMethods(fetchMock, unknownUserNotFound);
+      const option = { text: { type: 'plain_text', text: 'Owner' }, value: `<@${unknownUser}>` };
+      const blocks = JSON.stringify([
+        { type: 'actions', elements: [
+          { type: 'button', text: { type: 'plain_text', text: 'Ack' }, action_id: 'ack', value: `<@${unknownUser}>` },
+          { type: 'static_select', action_id: 'owner', options: [option] },
+        ] },
+        { type: 'image', image_url: 'https://example.com/a.png', alt_text: `Chart for <@${unknownUser}>` },
+        { type: 'section', text: { type: 'mrkdwn', text: 'Ping <@U01AAAAAAA>' } },
+      ]);
+      const result = await action('slack.send_message').execute({ channel: 'C1', text: 'Ack', blocks }, pluginCtx());
+      expect(result).toEqual({ success: true, data: { ts: '1.2', channel: 'C1' } });
+      expect(lookedUpUsers(fetchMock)).toEqual(['U01AAAAAAA']);
+    });
+
+    // Slack shows code literally, so a mention example in code is not a
+    // mention. The mention outside the code is still checked.
+    it('send_message skips mentions in inline code and code blocks', async () => {
+      mockSlackMethods(fetchMock, unknownUserNotFound);
+      const text = `Write \`<@${unknownUser}>\` to mention someone. Ask <@U01AAAAAAA>.\n\`\`\`\n<@${unknownUser}>\n\`\`\``;
+      const result = await action('slack.send_message').execute({ channel: 'C1', text }, mentionCtx());
+      expect(result).toEqual({ success: true, data: { ts: '1.2', channel: 'C1' } });
+      expect(lookedUpUsers(fetchMock)).toEqual(['U01AAAAAAA']);
+      expect(messageWrites(fetchMock)).toHaveLength(1);
+    });
+
+    // Slack shows rich-text text and link text literally. A rich-text
+    // mention is a separate user element, which is still checked.
+    it('send_message skips mention syntax in rich-text text and link elements', async () => {
+      mockSlackMethods(fetchMock, unknownUserNotFound);
+      const blocks = JSON.stringify([{ type: 'rich_text', elements: [{ type: 'rich_text_section', elements: [
+        { type: 'text', text: `Literal <@${unknownUser}> ` },
+        { type: 'link', url: 'https://example.com', text: `Profile of <@${unknownUser}>` },
+        { type: 'user', user_id: 'U01AAAAAAA' },
+      ] }] }]);
+      const result = await action('slack.send_message').execute({ channel: 'C1', text: 'Mention syntax', blocks }, pluginCtx());
+      expect(result).toEqual({ success: true, data: { ts: '1.2', channel: 'C1' } });
+      expect(lookedUpUsers(fetchMock)).toEqual(['U01AAAAAAA']);
+      expect(messageWrites(fetchMock)).toHaveLength(1);
+    });
+
+    it('send_message looks up each mentioned user once, labeled or not, and skips special mentions', async () => {
+      mockSlackMethods(fetchMock, userFound);
+      const text = 'Hi <@U01AAAAAAA|reviewer> and <@U01AAAAAAA>, <@W01BBBBBBB>. <!here> <!channel> <!subteam^S01CCCCCCC> <#C01DDDDDDD|general>';
+      const result = await action('slack.send_message').execute({ channel: 'C1', text }, mentionCtx());
+      expect(result.success).toBe(true);
+      // The attribution block mentions the owner, but Valet wrote that mention, so it is not checked.
+      expect(lookedUpUsers(fetchMock).sort()).toEqual(['U01AAAAAAA', 'W01BBBBBBB']);
+      expect(messageWrites(fetchMock)).toHaveLength(1);
+    });
+
+    it.each([
+      ['a missing scope', () => jsonResponse(200, { ok: false, error: 'missing_scope' })],
+      ['a user hidden from the bot', () => jsonResponse(200, { ok: false, error: 'user_not_visible' })],
+      ['a server error', () => jsonResponse(500, { ok: false })],
+      ['a rate limit', () => new Response('{}', { status: 429, headers: { 'Retry-After': '0' } })],
+      ['a network failure', () => Promise.reject(new TypeError('fetch failed'))],
+      ['a malformed body', () => new Response('not json', { status: 200 })],
+    ])('send_message posts when the mention lookup fails with %s', async (_label, answer) => {
+      mockSlackMethods(fetchMock, answer);
+      const result = await action('slack.send_message').execute({ channel: 'C1', text: `Ask <@${unknownUser}>.` }, pluginCtx());
+      expect(result).toEqual({ success: true, data: { ts: '1.2', channel: 'C1' } });
+      expect(messageWrites(fetchMock)).toHaveLength(1);
+    });
+
+    // A retry on 429 slept for Slack's Retry-After before each new attempt,
+    // so one rate limit held the post back for three times that value.
+    it('send_message makes one lookup per user and does not wait out a rate limit', async () => {
+      mockSlackMethods(fetchMock, () => new Response('{}', { status: 429, headers: { 'Retry-After': '120' } }));
+      const started = performance.now();
+      const result = await action('slack.send_message').execute(
+        { channel: 'C1', text: `Ask <@U01AAAAAAA> and <@${unknownUser}>.` },
+        pluginCtx(),
+      );
+      expect(performance.now() - started).toBeLessThan(1_000);
+      expect(result).toEqual({ success: true, data: { ts: '1.2', channel: 'C1' } });
+      expect(lookedUpUsers(fetchMock).sort()).toEqual(['U01AAAAAAA', unknownUser]);
+      expect(messageWrites(fetchMock)).toHaveLength(1);
+    });
+
+    it('send_message posts when a mention lookup outlasts its timeout', async () => {
+      // Keep the 3-second timeout the action asks for out of the test run.
+      const realTimeout = AbortSignal.timeout.bind(AbortSignal);
+      const timeout = vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => realTimeout(10));
+      onTestFinished(() => timeout.mockRestore());
+      // The lookup never answers. Only an abort of its signal ends it.
+      mockSlackMethods(fetchMock, (_user, init) => new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (signal) signal.addEventListener('abort', () => reject(signal.reason));
+      }));
+      const result = await action('slack.send_message').execute({ channel: 'C1', text: `Ask <@${unknownUser}>.` }, pluginCtx());
+      expect(timeout).toHaveBeenCalledWith(3_000);
+      expect(result).toEqual({ success: true, data: { ts: '1.2', channel: 'C1' } });
+      expect(lookedUpUsers(fetchMock)).toEqual([unknownUser]);
+      expect(messageWrites(fetchMock)).toHaveLength(1);
+    });
+
+    it('send_message checks at most 20 distinct mentioned users', async () => {
+      mockSlackMethods(fetchMock, unknownUserNotFound);
+      const known = Array.from({ length: 20 }, (_, i) => `U01AAAAA${String(i).padStart(2, '0')}`);
+      const text = [...known, unknownUser].map((id) => `<@${id}>`).join(' ');
+      const result = await action('slack.send_message').execute({ channel: 'C1', text }, pluginCtx());
+      expect(result.success).toBe(true);
+      expect(lookedUpUsers(fetchMock)).toEqual(known);
+    });
+  });
+
+  it.each(['slack.send_message', 'slack.dm_user'])(
+    '%s sends the Markdown fallback before retrying without the assistant identity', async (name) => {
+      if (name === 'slack.dm_user') {
+        fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { id: 'D2' } }));
+      } else {
+        mockGuardAllowsPublicChannel(fetchMock);
+      }
+      fetchMock.mockImplementation(async (_url: string, init?: RequestInit) => {
+        const body = typeof init?.body === 'string' ? JSON.parse(init.body) as { blocks?: { type: string }[] } : {};
+        if (body.blocks?.some((block) => block.type === 'table')) {
+          return jsonResponse(200, { ok: false, error: 'invalid_blocks' });
+        }
+        return jsonResponse(200, { ok: true, ts: '123.456', channel: 'C1' });
+      });
+      const text = '| PR | Related |\n|---|---|\n| a | b<br>c |';
+      const result = await action(name).execute(
+        { channel: 'C1', user: 'U123', text },
+        pluginCtx({ resolveOutboundSender: async () => ({ displayName: 'Ledger' }) }),
+      );
+      expect(result.success).toBe(true);
+      const posts = fetchMock.mock.calls.slice(1).map(([, init]) => JSON.parse((init as RequestInit).body as string) as { username?: string; blocks?: { type: string }[] });
+      expect(posts.map((post) => [post.username, ...(post.blocks ?? []).map((block) => block.type)])).toEqual([['Ledger', 'table'], ['Ledger', 'markdown']]);
+    },
+  );
+
+  it.each(['slack.send_message', 'slack.dm_user'])(
+    '%s sends the Markdown fallback after retrying without the assistant identity', async (name) => {
+      if (name === 'slack.dm_user') {
+        fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { id: 'D2' } }));
+      } else {
+        mockGuardAllowsPublicChannel(fetchMock);
+      }
+      // A token without chat:write.customize fails on the identity first, so
+      // the table first reaches block validation on the retry without it.
+      fetchMock.mockImplementation(async (_url: string, init?: RequestInit) => {
+        const body = typeof init?.body === 'string' ? JSON.parse(init.body) as { username?: string; blocks?: { type: string }[] } : {};
+        if (body.username !== undefined) return jsonResponse(200, { ok: false, error: 'missing_scope' });
+        if (body.blocks?.some((block) => block.type === 'table')) return jsonResponse(200, { ok: false, error: 'invalid_blocks' });
+        return jsonResponse(200, { ok: true, ts: '123.456', channel: 'C1' });
+      });
+      const text = '| PR | Related |\n|---|---|\n| a | b<br>c |';
+      const result = await action(name).execute(
+        { channel: 'C1', user: 'U123', text },
+        pluginCtx({ resolveOutboundSender: async () => ({ displayName: 'Ledger' }) }),
+      );
+      expect(result.success).toBe(true);
+      const posts = fetchMock.mock.calls.slice(1).map(([, init]) => JSON.parse((init as RequestInit).body as string) as { username?: string; blocks?: { type: string }[] });
+      expect(posts.map((post) => [post.username, ...(post.blocks ?? []).map((block) => block.type)]))
+        .toEqual([['Ledger', 'table'], [undefined, 'table'], [undefined, 'markdown']]);
+    },
+  );
 
   it('send_message converts CommonMark text to Slack mrkdwn', async () => {
     mockGuardAllowsPublicChannel(fetchMock);
@@ -729,6 +2030,34 @@ describe('slack actions', () => {
       elements: [{ type: 'mrkdwn', text: '↳ <@U999>' }],
     });
     expect(result.success).toBe(true);
+  });
+
+  it('send_message renders a release report in both the visible block and notification', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '127.891', channel: 'C1' }));
+    const text = '**Release infrastructure**\n\n- **Deployed:** tkhq/gitops#5169\n- **Example:** `tkhq/mono#8158`';
+
+    const result = await action('slack.send_message').execute(
+      { channel: 'C1', text },
+      pluginCtx({
+        credentials: makeCredentials({
+          accessToken: 'xoxb-test-token',
+          metadata: { owner_slack_user_id: 'U999' },
+        }),
+      }),
+    );
+
+    expect(result.success).toBe(true);
+    const post = fetchMock.mock.calls[1]?.[1];
+    expect(post).toBeDefined();
+    if (typeof post?.body !== 'string') throw new Error('Expected a JSON Slack request body.');
+    expect(JSON.parse(post.body)).toMatchObject({
+      text: '*Release infrastructure*\n\n- *Deployed:* <https://github.com/tkhq/gitops/issues/5169|tkhq/gitops#5169>\n- *Example:* `tkhq/mono#8158`',
+      blocks: [
+        { type: 'markdown', text: text.replace('tkhq/gitops#5169', '[tkhq/gitops#5169](https://github.com/tkhq/gitops/issues/5169)') },
+        { type: 'context', elements: [{ type: 'mrkdwn', text: '↳ <@U999>' }] },
+      ],
+    });
   });
 
   it('send_message does not add attribution block for DM channels', async () => {
@@ -921,6 +2250,108 @@ describe('slack actions', () => {
     expect(Array.isArray(body.blocks)).toBe(true);
     expect(body.blocks.length).toBeGreaterThan(0);
     expect(body.text.length).toBeLessThanOrEqual(SLACK_TEXT_LIMIT);
+  });
+
+  it('update_message cuts the fallback text to 4,000 UTF-8 bytes', async () => {
+    // chat.update rejects a text over 4,000 bytes (msg_too_long); a report row's
+    // "Oct 16 · @author" made a 4,000-character slice 4,004 bytes.
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '123.456', channel: 'C1', text: 'x' }));
+
+    await action('slack.update_message').execute(
+      { channel: 'C1', ts: '123.456', text: `Report\n${'Oct 16 · @author\n'.repeat(400)}` },
+      pluginCtx(),
+    );
+
+    const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as { blocks: unknown[]; text: string };
+    expect(body.blocks.length).toBeGreaterThan(0);
+    const bytes = new TextEncoder().encode(body.text).length;
+    expect(bytes).toBeLessThanOrEqual(4000);
+    expect(bytes).toBeGreaterThan(3990);
+  });
+
+  it('update_message uses blocks for a short text that is over 4,000 bytes', async () => {
+    // 1,400 characters but 4,200 bytes: needsContentBlocks is false, so only the
+    // byte check keeps this edit from sending an over-limit text with no blocks.
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '123.456', channel: 'C1', text: 'x' }));
+
+    await action('slack.update_message').execute(
+      { channel: 'C1', ts: '123.456', text: '中'.repeat(1400) },
+      pluginCtx(),
+    );
+
+    const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as { blocks: unknown[]; text: string };
+    expect(body.blocks.length).toBeGreaterThan(0);
+    expect(new TextEncoder().encode(body.text).length).toBeLessThanOrEqual(4000);
+  });
+
+  // chat.update measures the text after Slack escapes it. A raw `>` or a code
+  // span's `<id>` grows the stored text, so a 4,000-byte cut of the unescaped
+  // text still failed with msg_too_long.
+  it('update_message measures and cuts the fallback in Slack-escaped form', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '123.456', channel: 'C1', text: 'x' }));
+
+    await action('slack.update_message').execute(
+      { channel: 'C1', ts: '123.456', text: `Report\n${'Use `--promotion-id <id>` when x > y.\n'.repeat(150)}` },
+      pluginCtx(),
+    );
+
+    const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as { blocks: unknown[]; text: string };
+    expect(body.text).not.toMatch(/[<>]/);
+    expect(body.text).toContain('&lt;id&gt;');
+    expect(new TextEncoder().encode(body.text).length).toBeLessThanOrEqual(4000);
+  });
+
+  it('update_message does not cut the fallback inside a link', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '123.456', channel: 'C1', text: 'x' }));
+    const link = 'See [tkhq/mono#8632](https://github.com/tkhq/mono/pull/8632) now. ';
+
+    await action('slack.update_message').execute(
+      { channel: 'C1', ts: '123.456', text: `Links \n\n${link.repeat(90).trim()}` },
+      pluginCtx(),
+    );
+
+    const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
+    const { text } = JSON.parse(init.body as string) as { text: string };
+    expect(text.split('<').length).toBe(text.split('>').length);
+    expect(new TextEncoder().encode(text).length).toBeLessThanOrEqual(4000);
+  });
+
+  it('update_message uses blocks when a short text grows past 4,000 bytes once escaped', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '123.456', channel: 'C1', text: 'x' }));
+
+    await action('slack.update_message').execute(
+      { channel: 'C1', ts: '123.456', text: 'a > b '.repeat(600) },
+      pluginCtx(),
+    );
+
+    const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as { blocks: unknown[]; text: string };
+    expect(body.blocks.length).toBeGreaterThan(0);
+    expect(new TextEncoder().encode(body.text).length).toBeLessThanOrEqual(4000);
+  });
+
+  it('update_message includes Slack response_metadata messages in the error', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, {
+      ok: false,
+      error: 'msg_too_long',
+      response_metadata: { messages: ['[ERROR] text is too long'] },
+    }));
+
+    const result = await action('slack.update_message').execute(
+      { channel: 'C1', ts: '123.456', text: 'corrected' },
+      pluginCtx(),
+    );
+
+    expect(result).toEqual({ success: false, error: 'Slack API error: msg_too_long ([ERROR] text is too long)' });
   });
 
   it('update_message maps cant_update_message to a corrective error', async () => {

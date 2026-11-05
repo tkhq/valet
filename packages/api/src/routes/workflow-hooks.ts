@@ -2,7 +2,7 @@
  * PUBLIC arbitrary-URL webhook ingress (overhaul design decision 5,
  * docs/specs/2026-07-16-workflows-overhaul-design.md):
  * `POST /api/hooks/workflows/:workflowId/:hookId`. Same reasoning as
- * `event-webhooks.ts`/`channelsRouter`/`githubAppWebhookRouter` — the
+ * `event-webhooks.ts`/`channelsRouter`/the GitHub plugin webhook — the
  * caller holds a bearer secret in the URL, not a logged-in Valet session,
  * so this router is mounted BEFORE `buildAuthMiddleware` in app.ts and
  * verification happens inside the handler (`webhook-service.ts`'s

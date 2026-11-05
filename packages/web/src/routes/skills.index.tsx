@@ -1,7 +1,7 @@
 import { createFileRoute, Link, useNavigate, useSearch } from "@tanstack/react-router";
-import { useCatalogOwner } from "~/lib/use-list-owner";
+import { useCatalogOwner, useListOwner } from "~/lib/use-list-owner";
 import { useSkills } from "~/api/skills";
-import { Button, Spinner } from "~/components/primitives";
+import { Button, PageHeader, Spinner, TabBar, tabPanelId, pageClass } from "~/components/primitives";
 import { Pager } from "~/components/pager";
 import {
   readScopeFilter,
@@ -12,6 +12,7 @@ import {
 } from "~/components/skills/skill-grid";
 import { RepoSourcesPanel } from "~/components/skills/repo-sources-panel";
 import { WorkspaceClause } from "~/components/workspace-clause";
+import { MemoryPrinciplesPanel } from "~/components/memory/memory-principles";
 import {
   currentCursor,
   formatCursorStack,
@@ -22,35 +23,9 @@ import {
 } from "~/lib/cursor-stack";
 import { textParam } from "~/lib/search-params";
 
-/**
- * `/skills` — markdown documents the assistant can pull into a turn. One
- * grid holds both kinds: skills the installed plugins ship, and skills
- * stored for the caller. Each card carries an origin badge and opens the
- * skill's page.
- *
- * A skill is written here, or by the assistant through the `skills` actions,
- * or synced from a repository. All three land in the same table and reach a
- * session the same way. See docs/specs/2026-08-05-agent-skills-design.md.
- *
- * The repositories panel above the grid is the other half of that rule: it
- * points Valet at a repository to mirror, and never edits a skill. It sits
- * here, over the skills it produces, and lists personal and team sources.
- * Organization repositories are tracked on Organization · Library. Org
- * skills still appear in this grid; only the source rows move.
- *
- * One grid, in delivery order. Grouping into a section per plugin was tried
- * and reverted: 8 of the 9 plugins ship exactly one skill, so it produced 8
- * headed sections holding a single card each and stretched 11 items over
- * roughly nine screens. The origin belongs on the card, not in a header.
- *
- * Both lists are paged, and every piece of that state — the filters and each
- * list's cursor stack — lives in the search params. A page is then a real
- * history entry, so Back pages back instead of leaving Skills.
- *
- * The grid, its filter chips, the scope select, and the search box live in
- * `SkillGrid`, so the org Library settings page reuses the same grid.
- */
+/** The catalog and source management keep independent URL state. */
 interface SkillsSearch {
+  view?: "sources";
   filter?: string;
   scope?: string;
   q?: string;
@@ -65,6 +40,7 @@ interface SkillsSearch {
  * page that gives no reason. */
 function readSkillsSearch(raw: unknown): SkillsSearch {
   return {
+    view: textParam(raw, "view") === "sources" ? "sources" : undefined,
     filter: textParam(raw, "filter"),
     scope: textParam(raw, "scope"),
     q: textParam(raw, "q"),
@@ -83,6 +59,7 @@ export function SkillsIndexPage() {
   // module and never build a real router context.
   const search = readSkillsSearch(useSearch({ strict: false }));
   const navigate = useNavigate();
+  const view = search.view ?? "catalog";
 
   const filters: SkillGridFilters = {
     filter: readSkillFilter(search.filter),
@@ -98,6 +75,7 @@ export function SkillsIndexPage() {
   // owner and would hide every ORG-owned skill, which is most of a catalog
   // built from an org-wide repository. See `useCatalogOwner`.
   const owner = useCatalogOwner();
+  const listOwner = useListOwner();
   const { data, isLoading, error, isPlaceholderData } = useSkills({
     ...skillFilterQuery(filters),
     ...(owner ? { ownerType: owner.ownerType, ownerId: owner.ownerId } : {}),
@@ -111,25 +89,37 @@ export function SkillsIndexPage() {
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6 sm:py-10">
-        <div className="flex flex-wrap items-end justify-between gap-4">
-          <div className="flex min-w-0 flex-wrap items-baseline gap-3">
-            <h1 className="font-display text-2xl text-ink">Skills</h1>
-            <WorkspaceClause />
-          </div>
-          <Button size="sm" className="shrink-0" asChild>
-            <Link to="/skills/new">New skill</Link>
-          </Button>
-        </div>
-
+      <div className={pageClass}>
+        <PageHeader
+          title="Skills"
+          clause={<WorkspaceClause />}
+          actions={
+            <Button size="sm" className="shrink-0" asChild>
+              <Link to="/skills/new">New skill</Link>
+            </Button>
+          }
+          description="Skills give the assistant instructions for a task. Installed skills do not connect accounts or grant access."
+        />
         <div className="mt-6">
+          <TabBar
+            label="Skills views"
+            tabs={[{ id: "catalog", label: "Catalog" }, { id: "sources", label: "Sources" }]}
+            active={view}
+            onSelect={(next) => go({ view: next === "sources" ? "sources" : undefined })}
+          />
+        </div>
+        {view === "sources" && <div className="mt-6" role="tabpanel" id={tabPanelId("Skills views", "sources")} aria-labelledby={`${tabPanelId("Skills views", "sources")}-tab`}>
+          <p className="mb-4 text-sm text-muted">Manage the repositories that supply skills to this workspace.</p>
+          {/* The repositories of the workspace in view, matching the skills below:
+              a personal repository's skills are personal, so a team page must not list it. */}
           <RepoSourcesPanel
+            {...(listOwner ? { owner: { type: listOwner.ownerType, id: listOwner.ownerId } } : {})}
             cursors={sourceCursors}
             onCursorsChange={(next) => go({ sourcePage: formatCursorStack(next) })}
           />
-        </div>
+        </div>}
 
-        <div className="mt-8">
+        {view === "catalog" && <div className="mt-8" role="tabpanel" id={tabPanelId("Skills views", "catalog")} aria-labelledby={`${tabPanelId("Skills views", "catalog")}-tab`}>
           {isLoading && (
             <div className="flex items-center gap-2 text-sm text-muted">
               <Spinner size={14} /> Loading skills…
@@ -144,13 +134,14 @@ export function SkillsIndexPage() {
                 // so the answer starts at its first page.
                 onFiltersChange={(next) =>
                   go({
-                    filter: next.filter === "all" ? undefined : next.filter,
+                    filter: next.filter === "skills" ? undefined : next.filter,
                     scope: next.scope === "all" ? undefined : next.scope,
                     q: next.query.trim().length === 0 ? undefined : next.query,
                     page: undefined,
                   })
                 }
                 emptyLabel="No skills yet. Write one, or ask your assistant to write one for you."
+                principles={<MemoryPrinciplesPanel onSelect={(path) => void navigate({ to: "/memory/$", params: { _splat: path } })} />}
                 // Through the grid, not in its place: a failed SEARCH must
                 // keep the box that can change or clear it.
                 errorLabel={
@@ -159,7 +150,7 @@ export function SkillsIndexPage() {
                     : undefined
                 }
               />
-              {!error && (
+              {!error && filters.filter === "skills" && (
                 <Pager
                   label="skills"
                   page={pageNumber(skillCursors)}
@@ -176,7 +167,7 @@ export function SkillsIndexPage() {
               )}
             </>
           )}
-        </div>
+        </div>}
       </div>
     </div>
   );

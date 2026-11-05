@@ -44,7 +44,7 @@ function makeStoreFactory(db: PgDb, migrated: { done: boolean }, clock?: () => n
     // The shared contract creates runs for workflow ids it never writes a
     // definition for, so the team-run guard (covered in
     // service.delete-cleanup.test.ts) is off here.
-    return new PgWorkflowStore(db, clock, { guardTeamOwnedRuns: false });
+    return new PgWorkflowStore(db, clock, { guardOwnedRuns: false });
   };
 }
 

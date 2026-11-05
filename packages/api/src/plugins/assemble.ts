@@ -29,9 +29,25 @@
  *     happened instead of dropping them in silence.
  */
 import { createHash } from "node:crypto";
-import { pluginCatalogTools, type ActionPlugin, type ValetPlugin } from "@valet/engine";
-import type { PinnedActionSpec, RoleSpec, SkillSource, ToolDef } from "@valet/engine";
-import { buildSkillTool, SKILL_TOOL_NAME } from "./skill-tool.js";
+import {
+  buildPluginCatalog,
+  validatePluginHttpRoutes,
+  pluginCatalogTools,
+  type ActionPlugin,
+  type ValetPlugin,
+} from "@valet/engine";
+import type {
+  PinnedActionSpec,
+  PluginCatalogOptions,
+  PluginCatalog,
+  RoleSpec,
+  SkillSource,
+  ToolDef,
+} from "@valet/engine";
+import { buildToolIndex } from "./action-id.js";
+import { serviceDisplayName } from "../lib/service-display-name.js";
+import { buildSkillScriptTool, SKILL_SCRIPT_TOOL_NAME } from "./skill-script-tool.js";
+import { buildSkillTool, SKILL_TOOL_NAME, type SkillToolSession } from "./skill-tool.js";
 
 export interface AssembledPlugins {
   plugins: ValetPlugin[];
@@ -52,6 +68,10 @@ export interface AssembledPlugins {
  * `ActionPlugin` for the same `service` IS an error (ambiguous routing for
  * that service's credentials and catalog entries) — throws naming both
  * plugins.
+ *
+ * Tool id rule: every static action's canonical id must name one service
+ * (`buildToolIndex`). Two actions with one id, or an id that starts with
+ * another service's name, throws naming both plugins.
  *
  * Within a single source, two plugins sharing a `name` is a hard error (the
  * loader that produced them is broken); across sources it's the expected
@@ -75,6 +95,10 @@ export function assemblePlugins(sources: ValetPlugin[][]): AssembledPlugins {
 
       if (seenNames.has(plugin.name)) continue;
       seenNames.add(plugin.name);
+      const routeIssues = validatePluginHttpRoutes(plugin.httpRoutes);
+      if (routeIssues.length) {
+        throw new Error(`Invalid HTTP routes for plugin ${plugin.name}: ${routeIssues.map((issue) => `${issue.path}: ${issue.message}`).join("; ")}`);
+      }
       plugins.push(plugin);
 
       for (const actionPlugin of plugin.actions ?? []) {
@@ -90,6 +114,8 @@ export function assemblePlugins(sources: ValetPlugin[][]): AssembledPlugins {
     }
   }
 
+  // Each tool id must name exactly one service (`buildToolIndex` throws).
+  buildToolIndex(actionPluginByService);
   return { plugins, actionPluginByService };
 }
 
@@ -97,10 +123,16 @@ export interface PluginSessionExtras {
   tools: ToolDef[];
   skills: SkillSource[];
   roles: RoleSpec[];
+  /** Catalog for action-backed slash commands, with the same availability rules as call_tool. */
+  pluginCatalog: PluginCatalog;
   /** The `extraSkills` entries a name already in the set kept out. Empty for
    * a plugin-only call. `/api/skills` reports these rows as shadowed, so a
    * person can see why a skill they wrote never reaches a session. */
   shadowedSkills: SkillSource[];
+  /** Points the `skill` tool at the session built from these extras, so it
+   * describes and serves that session's refreshed skills. Each session
+   * builder calls it once the session exists. */
+  bindSession: (session: SkillToolSession) => void;
 }
 
 /**
@@ -171,30 +203,39 @@ export function pluginSessionExtras(
   plugins: ValetPlugin[],
   extraSkills: SkillSource[] = [],
   pins: readonly PinnedActionSpec[] = [],
+  catalogOptions: Omit<PluginCatalogOptions, "plugins" | "pins" | "reservedToolNames"> = {},
 ): PluginSessionExtras {
-  const actionPlugins = plugins.flatMap((p) => withCredentialRequirement(p));
-  const tools =
-    actionPlugins.length > 0
-      ? pluginCatalogTools({
-          plugins: actionPlugins,
-          pins,
-          // The `skill` tool is appended below, after the catalog has
-          // already chosen its pinned names — so the catalog has to be told
-          // that name is taken.
-          reservedToolNames: [SKILL_TOOL_NAME],
-          onPinRejected: warnPinRejected,
-        })
-      : [];
+  const actionPlugins = plugins.flatMap((p) => withCredentialRequirement(p)).map(withServiceDisplayName);
+  const tools = pluginCatalogTools({
+    ...catalogOptions,
+    plugins: actionPlugins,
+    pins,
+    // Skill tools are appended after the catalog chooses its pinned names.
+    // Reserve both names so pins cannot shadow them.
+    reservedToolNames: [SKILL_TOOL_NAME, SKILL_SCRIPT_TOOL_NAME],
+    onPinRejected: warnPinRejected,
+  });
+  const pluginCatalog = buildPluginCatalog(actionPlugins, catalogOptions.clock, {
+    serviceAvailability: catalogOptions.serviceAvailability,
+    resolveServiceAvailability: catalogOptions.resolveServiceAvailability,
+  });
   const { skills, shadowed } = mergedSkillSources(plugins, extraSkills);
   const roles = plugins.flatMap((p) => p.roles ?? []);
 
   // The `skill` tool is what makes these skills reachable — without it the
   // markdown is inert. Appended after the catalog tools so `list_tools`/
   // `call_tool` keep their positions.
-  const skillTool = buildSkillTool(skills);
+  let session: SkillToolSession | undefined;
+  const skillTool = buildSkillTool(skills, () => session);
   if (skillTool) tools.push(skillTool);
+  tools.push(buildSkillScriptTool(skills, () => session));
 
-  return { tools, skills, roles, shadowedSkills: shadowed };
+  return {
+    tools, skills, roles, pluginCatalog, shadowedSkills: shadowed,
+    bindSession: (built) => {
+      session = built;
+    },
+  };
 }
 
 /**
@@ -260,6 +301,12 @@ function collectSkills(plugins: ValetPlugin[]): SkillSource[] {
  * silently lost the inference and `list_tools` listed their tools while
  * unconnected. Exported for its tests.
  */
+/** Gives an action plugin the product name approval cards show ("Linear"),
+ * not the service id ("linear"). A name the plugin sets itself wins. */
+export function withServiceDisplayName(plugin: ActionPlugin): ActionPlugin {
+  return plugin.displayName ? plugin : { ...plugin, displayName: serviceDisplayName(plugin.service) };
+}
+
 export function withCredentialRequirement(plugin: ValetPlugin): ActionPlugin[] {
   const credentialServices = new Set(
     (plugin.credentials ?? []).map((c) => c.service ?? plugin.name),

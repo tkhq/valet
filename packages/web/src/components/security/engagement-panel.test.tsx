@@ -98,6 +98,7 @@ const security: GetSessionSecurityResponse = {
     configPersonas: null,
     configTools: null,
     authorizedScope: null,
+    credentialLabels: [],
     createdAt: 1,
     updatedAt: 2,
   },
@@ -282,6 +283,24 @@ describe("SecuritySessionLayout", () => {
     renderPanel();
     expect(await screen.findByText("Configured by .valet/security.yml")).toBeTruthy();
     expect(screen.queryByText("Preset: Code review")).toBeNull();
+  });
+
+  it("lists the declared credential labels under the header", async () => {
+    getSecurityMock.mockResolvedValue({
+      ...security,
+      engagement: { ...security.engagement, credentialLabels: ["admin-login", "api-token"] },
+    });
+    renderPanel();
+    const box = await screen.findByTestId("engagement-credentials");
+    expect(box.textContent).toContain("Credentials declared");
+    expect(box.textContent).toContain("admin-login");
+    expect(box.textContent).toContain("api-token");
+  });
+
+  it("says no credentials are declared when the engagement has none", async () => {
+    renderPanel();
+    const box = await screen.findByTestId("engagement-credentials");
+    expect(box.textContent).toBe("No credentials declared");
   });
 
   it("hides Cancel review for a non-admin on a team-owned engagement", async () => {

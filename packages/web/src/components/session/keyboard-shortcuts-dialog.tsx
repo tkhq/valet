@@ -4,8 +4,9 @@ import { CHAT_KEYBINDINGS, chordParts } from "~/lib/chat-keybindings";
 
 /**
  * The "show all shortcuts" panel (⌘/Ctrl+/). Lists the chat chords the
- * global listener honors. Enter, Shift+Enter and Esc are documented here
- * too, even though the composer owns them rather than the listener.
+ * global listener honors. Enter, Shift+Enter, the Up and Down prompt
+ * recall, and Esc are documented here too, even though the composer owns
+ * them rather than the listener.
  */
 export function KeyboardShortcutsDialog({
   open,
@@ -23,6 +24,8 @@ export function KeyboardShortcutsDialog({
           ))}
           <ShortcutRow label="Send message" keys={["Enter"]} divider />
           <ShortcutRow label="New line" keys={["Shift", "Enter"]} />
+          <ShortcutRow label="Earlier message, in an empty message box" keys={["↑"]} />
+          <ShortcutRow label="Later message" keys={["↓"]} />
           <ShortcutRow label="Stop generation" keys={["Esc"]} />
         </ul>
       </DialogContent>

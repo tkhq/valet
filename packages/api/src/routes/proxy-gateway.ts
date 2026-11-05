@@ -12,6 +12,7 @@ import type { AppEnv } from "../env.js";
 import type { ProviderKind } from "../proxy/types.js";
 import { resolveProxyPrincipal, extractPassthroughKey, wireError } from "../proxy/principal.js";
 import { resolveUpstream, DEFAULT_BASE } from "../proxy/upstream.js";
+import { checkOutboundUrlShape, guardedFetch, OutboundUrlError, recordOutboundRefusal } from "../lib/outbound-url.js";
 import { getProxySettings } from "../services/org.js";
 import type { Upstream } from "../proxy/types.js";
 import { recordProxyCall } from "../proxy/recorder.js";
@@ -34,6 +35,30 @@ const HOP_BY_HOP = new Set([
   "trailer",
   "upgrade",
 ]);
+
+/**
+ * A provider row's base URL replaces the public default. The API refuses a
+ * base URL on these kinds, so only instance config sets one. Check its shape
+ * anyway, so a stored internal target never receives the proxied key.
+ * Returns the refusal message, or null when the upstream may be called.
+ */
+export function refusedUpstream(kind: ProviderKind, baseUrl: string): string | null {
+  if (baseUrl === DEFAULT_BASE[kind]) return null;
+  const check = checkOutboundUrlShape(baseUrl);
+  if (check.ok) return null;
+  recordOutboundRefusal("request");
+  return `The ${kind} provider base URL is refused. ${check.reason}`;
+}
+
+/**
+ * The fetch for a proxied upstream. The public defaults are fixed origins. A
+ * configured base URL goes through `guardedFetch`, which checks DNS answers
+ * at connect time and every redirect hop, so a name that rebinds to an
+ * internal address never receives the proxied key.
+ */
+export function upstreamFetch(kind: ProviderKind, baseUrl: string): typeof fetch {
+  return baseUrl === DEFAULT_BASE[kind] ? (input, init) => fetch(input, init) : guardedFetch;
+}
 
 /**
  * Strip-list, NOT allowlist: forward every incoming header except hop-by-hop
@@ -112,6 +137,21 @@ export function injectIncludeUsage(kind: ProviderKind, subpath: string, body: st
   return JSON.stringify({ ...parsed, stream_options: { ...existing, include_usage: true } });
 }
 
+/**
+ * The upstream subpath for a gateway request path. Every Anthropic API path
+ * starts with `/v1`. Claude Code's base URL is `/proxy/anthropic` and its
+ * client adds `/v1`. Clients built on the AI SDK (OpenCode) append
+ * `/messages` to the base URL directly, so a user who copies the Claude Code
+ * base URL sends `/proxy/anthropic/messages`. Adding the missing `/v1` lets
+ * both base URLs work. OpenAI paths are left alone: an org's custom OpenAI
+ * upstream (Azure) can use other path shapes.
+ */
+export function proxySubpath(kind: ProviderKind, pathname: string): string {
+  const subpath = pathname.replace(new RegExp(`^/proxy/${kind}`), "") || "/";
+  if (kind === "anthropic" && subpath !== "/" && !/^\/v1(\/|$)/.test(subpath)) return `/v1${subpath}`;
+  return subpath;
+}
+
 /** Deps injected at registration time and captured in the handler closure. */
 export interface ProxyGatewayDeps {
   verifyApiKey: PrincipalDeps["verifyApiKey"];
@@ -188,16 +228,40 @@ export function registerProxyGateway(app: Hono<AppEnv>, deps: ProxyGatewayDeps):
       }
       upstream = resolved;
     }
+    const refusal = refusedUpstream(kind, upstream.baseUrl);
+    if (refusal) return wireError(kind, 502, refusal);
 
     const url = new URL(c.req.url);
-    const subpath = url.pathname.replace(new RegExp(`^/proxy/${kind}`), "") || "/";
+    const subpath = proxySubpath(kind, url.pathname);
     // Reject path-traversal attempts (spec finding: reject .. segments).
     if (subpath.split("/").some((s) => s === "..")) {
       return wireError(kind, 400, "Invalid path.");
     }
 
     const hasBody = c.req.method !== "GET" && c.req.method !== "HEAD";
+    let policyPath: string;
+    try {
+      policyPath = decodeURIComponent(subpath).replace(/\/+$/, "");
+    } catch {
+      return wireError(kind, 400, "Invalid path.");
+    }
+    if (c.req.method === "POST" && policyPath === "/v1/batches") {
+      return wireError(kind, 403, "Batch submissions are unavailable through Valet's proxy. Send individual requests so Valet can enforce model restrictions.");
+    }
     const rawBody = hasBody ? await c.req.text() : "";
+    let requestedModel: unknown;
+    try {
+      const parsed: unknown = JSON.parse(rawBody);
+      if (parsed && typeof parsed === "object") {
+        if ("model" in parsed) requestedModel = parsed.model;
+      }
+    } catch {
+      // Keep existing upstream validation for malformed request bodies.
+    }
+    if (c.req.method === "POST" && RECORDABLE.has(policyPath)
+      && (typeof requestedModel !== "string" || requestedModel.trim() === "")) {
+      return wireError(kind, 400, "Specify a model so Valet can enforce model restrictions.");
+    }
     // For streaming Chat/Completions, force include_usage so usage is captured.
     // The forwarded and recorded body are the same mutated string.
     const reqText = injectIncludeUsage(kind, subpath, rawBody);
@@ -205,12 +269,13 @@ export function registerProxyGateway(app: Hono<AppEnv>, deps: ProxyGatewayDeps):
 
     let res: Response;
     try {
-      res = await fetch(`${upstream.baseUrl}${subpath}${url.search}`, {
+      res = await upstreamFetch(kind, upstream.baseUrl)(`${upstream.baseUrl}${subpath}${url.search}`, {
         method: c.req.method,
         headers: outboundHeaders(c.req.raw.headers, kind, upstream.apiKey),
         body: hasBody ? reqText : undefined,
       });
-    } catch {
+    } catch (err) {
+      if (err instanceof OutboundUrlError) return wireError(kind, 502, `The ${kind} provider base URL is refused. ${err.reason}`);
       return wireError(kind, 502, "Upstream provider unreachable.");
     }
 

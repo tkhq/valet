@@ -18,6 +18,7 @@ import { decryptSecret, deriveSecretKey } from "../lib/secret-crypto.js";
 import { orgs, users, githubInstallations } from "../schema/index.js";
 import {
   buildAppConfig,
+  githubIngressConfig,
   discoverInstallations,
   loadAppConfig,
   loadAppConfigWithSource,
@@ -70,6 +71,91 @@ describe("github-app service", () => {
     db = appDb;
     credentials = new PgCredentialStore(pgdb, deriveSecretKey("test-key"));
     await db.insert(orgs).values({ id: orgId, name: "Org", createdAt: Date.now() });
+  });
+
+  it("caches live ingress configuration for one minute with App JWT auth", async () => {
+    await saveAppConfig({ credentials }, orgId, baseConfig);
+    const config = { events: ["check_run"], permissions: { checks: "read" } };
+    const http = vi.fn(async () => Response.json(config));
+    let now = 0;
+    const deps = { credentials, env: {}, fetchImpl: http, apiUrl: "https://github.test", now: () => now };
+    expect(await githubIngressConfig(deps, orgId, "acme", "repo")).toEqual(config);
+    expect(await githubIngressConfig(deps, orgId, "acme", "repo")).toEqual(config);
+    expect(http).toHaveBeenCalledTimes(2);
+    expect(http).toHaveBeenCalledWith("https://github.test/repos/acme/repo/installation", expect.objectContaining({ headers: expect.objectContaining({ Authorization: expect.stringMatching(/^Bearer ey/) }) }));
+    now = 60_001;
+    expect(await githubIngressConfig(deps, orgId, "acme", "repo")).toEqual(config);
+    expect(http).toHaveBeenCalledTimes(4);
+  });
+
+  it("reads granted settings and detects pending owner approval", async () => {
+    await saveAppConfig({ credentials }, orgId, baseConfig);
+    const granted = { events: ["status"], permissions: { statuses: "read" } };
+    const requested = { events: ["status", "check_run"], permissions: { statuses: "read", checks: "read" } };
+    const http = vi.fn(async (input: string | URL | Request) => Response.json(String(input).endsWith("/installation") ? granted : requested));
+    expect(await githubIngressConfig({ credentials, env: {}, fetchImpl: http }, orgId, "acme", "repo"))
+      .toEqual({ ...granted, pendingApproval: true });
+  });
+
+  it("accepts grants broader than the requested permission", async () => {
+    await saveAppConfig({ credentials }, orgId, baseConfig);
+    const http = vi.fn(async (input: string | URL | Request) => Response.json({ events: ["check_run"], permissions: { checks: String(input).endsWith("/installation") ? "write" : "read" } }));
+    expect(await githubIngressConfig({ credentials, env: {}, fetchImpl: http }, orgId, "acme", "repo"))
+      .toEqual({ events: ["check_run"], permissions: { checks: "write" } });
+  });
+
+  it("keeps known granted settings when requested settings cannot be read", async () => {
+    await saveAppConfig({ credentials }, orgId, baseConfig);
+    const granted = { events: ["status"], permissions: { statuses: "read" } };
+    const http = vi.fn(async (input: string | URL | Request) => {
+      if (String(input).endsWith("/app")) throw new Error("network");
+      return Response.json(granted);
+    });
+    expect(await githubIngressConfig({ credentials, env: {}, fetchImpl: http }, orgId, "acme", "repo")).toEqual(granted);
+  });
+
+  it("bypasses a cached negative configuration after approval", async () => {
+    await saveAppConfig({ credentials }, orgId, baseConfig);
+    let approved = false;
+    const http = vi.fn(async () => Response.json(approved ? { events: ["check_run"], permissions: { checks: "read" } } : { events: [], permissions: {} }));
+    const d = { credentials, env: {}, fetchImpl: http };
+    expect((await githubIngressConfig(d, orgId, "acme", "repo"))?.events).toEqual([]);
+    approved = true;
+    expect((await githubIngressConfig(d, orgId, "acme", "repo"))?.events).toEqual([]);
+    expect((await githubIngressConfig(d, orgId, "acme", "repo", true))?.events).toEqual(["check_run"]);
+    expect(http).toHaveBeenCalledTimes(4);
+  });
+
+  it("isolates granted configuration caches by repository", async () => {
+    await saveAppConfig({ credentials }, orgId, baseConfig);
+    const http = vi.fn(async () => Response.json({ events: [], permissions: {} }));
+    const d = { credentials, env: {}, fetchImpl: http };
+    await githubIngressConfig(d, orgId, "acme", "one");
+    await githubIngressConfig(d, orgId, "acme", "two");
+    expect(http).toHaveBeenCalledTimes(4);
+  });
+
+  it("logs configuration read failures without exception contents", async () => {
+    await saveAppConfig({ credentials }, orgId, baseConfig);
+    const log = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const http = vi.fn(async () => { throw new Error("secret-token-in-provider-error"); });
+      expect(await githubIngressConfig({ credentials, env: {}, fetchImpl: http }, orgId, "acme", "repo")).toBeNull();
+      expect(log).toHaveBeenCalledWith("[github-app] granted ingress configuration read failed");
+      expect(JSON.stringify(log.mock.calls)).not.toContain("secret-token");
+    } finally { log.mockRestore(); }
+  });
+
+  it("returns unknown ingress readiness without App credentials", async () => {
+    const http = vi.fn(async () => Response.json({}));
+    expect(await githubIngressConfig({ credentials, env: {}, fetchImpl: http }, orgId, "acme", "repo")).toBeNull();
+    expect(http).not.toHaveBeenCalled();
+  });
+
+  it("returns unknown ingress readiness on a failed configuration read", async () => {
+    await saveAppConfig({ credentials }, orgId, baseConfig);
+    const http = vi.fn(async () => { throw new Error("network"); });
+    expect(await githubIngressConfig({ credentials, env: {}, fetchImpl: http }, orgId, "acme", "repo")).toBeNull();
   });
 
   afterEach(async () => {
@@ -467,22 +553,36 @@ describe("github-app service", () => {
       expect(allRows[0].installationId).toBe(111);
     });
 
-    it("sets linkedUserId when a connected user's github login case-insensitively matches the account login", async () => {
+    it("links a personal installation to the member whose verified GitHub id matches the account id", async () => {
       await saveAppConfig({ credentials }, orgId, baseConfig);
-      await db.insert(users).values({ id: "user1", name: "User One", email: "u1@example.com" });
+      await db.insert(users).values([
+        { id: "user1", name: "User One", email: "u1@example.com" },
+        { id: "user2", name: "User Two", email: "u2@example.com" },
+      ]);
+      // The connect callback saved user1's id; the login is stale after a rename.
       await credentials.save(
         { type: "user", id: "user1" },
         "github",
-        { type: "oauth2", accessToken: "user-token", metadata: { login: "Acme" } },
+        { type: "oauth2", accessToken: "user-token", metadata: { login: "old-name", githubId: "77" } },
+      );
+      // user2 pasted a token that names the installation's login, with no verified id.
+      await credentials.save(
+        { type: "user", id: "user2" },
+        "github",
+        { type: "oauth2", accessToken: "pasted", metadata: { login: "someuser" } },
       );
       fixture = startGithubFixture({
         listInstallations: () => ({
-          body: [{ id: 111, account: { login: "acme", type: "Organization" }, repository_selection: "all", suspended_at: null }],
+          body: [
+            { id: 111, account: { login: "acme", id: 78, type: "Organization" }, repository_selection: "all", suspended_at: null },
+            { id: 222, account: { login: "someuser", id: 77, type: "User" }, repository_selection: "all", suspended_at: null },
+          ],
         }),
       });
 
       const rows = await discoverInstallations(deps(), orgId);
-      expect(rows[0].linkedUserId).toBe("user1");
+      const linked = Object.fromEntries(rows.map((row) => [row.installationId, row.linkedUserId]));
+      expect(linked).toEqual({ 111: null, 222: "user1" });
     });
   });
 

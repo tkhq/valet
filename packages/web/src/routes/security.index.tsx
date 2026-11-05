@@ -5,7 +5,7 @@ import type { SecurityEngagementWire, SessionSummary } from "@valet/api/wire";
 import { useEngagement, useRescanReview, useSecurityReviews } from "~/api/security";
 import { useRepos } from "~/api/repos";
 import { useOrg } from "~/api/settings";
-import { Badge, Button, Input, Label, Spinner } from "~/components/primitives";
+import { Badge, Button, Callout, Input, Label, PageHeader, RadioCard, Select, Spinner, cardClass, pageClass } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import type { SecurityNewSearch } from "./security.new";
 import {
@@ -19,9 +19,8 @@ import { useWorkspaceScope } from "~/lib/workspace-scope";
 
 /**
  * `/security` — the security review hub (valet-security design, §Web
- * Surfaces). Top: a "New review" card — repo picker (the same combobox the
- * new-session dialog uses), the sweep preset, an optional path scope, and the
- * model. Configure navigates to `/security/new`, where the user reviews the
+ * Surfaces). Top: a "New review" card — repo picker, the sweep preset, an
+ * optional path scope, and the model. Configure navigates to `/security/new`, where the user reviews the
  * seeded config + plan, edits them, then starts the review. Below: past
  * engagements from `GET /api/sessions?kind=security`, each row badged with
  * its engagement status from `GET /api/sessions/:id/security`.
@@ -32,20 +31,11 @@ export const Route = createFileRoute("/security/")({
 
 export function SecurityIndexPage() {
   return (
-    <div className="flex-1 flex flex-col min-h-0">
-      <div className="border-b border-line px-4 py-4 sm:px-6">
-        <div className="flex items-baseline gap-3">
-          <h1 className="text-lg font-semibold tracking-tight text-ink font-display">
-            Security reviews
-          </h1>
-          <WorkspaceClause />
-        </div>
-      </div>
-      <div className="flex-1 overflow-y-auto p-4 sm:p-6">
-        <div className="mx-auto max-w-4xl space-y-6 sm:space-y-8">
-          <NewReviewCard />
-          <ReviewList />
-        </div>
+    <div className="min-w-0 flex-1 overflow-y-auto">
+      <div className={cn(pageClass, "space-y-6 sm:space-y-8")}>
+        <PageHeader title="Security reviews" clause={<WorkspaceClause />} />
+        <NewReviewCard />
+        <ReviewList />
       </div>
     </div>
   );
@@ -164,8 +154,8 @@ function splitPaths(input: string): string[] {
 function NewReviewCard() {
   const navigate = useNavigate();
   const reposQ = useRepos();
-  // The nav's switcher answers "whose review is this" — same pass-through
-  // the new-session dialog uses (`CreateScopeLine` states it).
+  // The nav's switcher answers "whose review is this" (`CreateScopeLine`
+  // states it).
   const scope = useWorkspaceScope();
   const orgQ = useOrg({ enabled: scope.teamId !== undefined });
   const [repo, setRepo] = useState<SelectedRepo | null>(null);
@@ -227,7 +217,7 @@ function NewReviewCard() {
   }
 
   return (
-    <section className="min-w-0 rounded-lg border border-line bg-paper p-4 sm:p-5 space-y-5">
+    <section className={cn(cardClass, "min-w-0 p-5 space-y-5")}>
       <div className="flex flex-wrap items-baseline justify-between gap-3">
         <div>
           <h2 className="flex items-center gap-2 text-base font-semibold text-ink sm:text-sm"><ShieldCheck className="h-5 w-5 text-moss sm:hidden" aria-hidden />Start a review</h2>
@@ -264,7 +254,8 @@ function NewReviewCard() {
                 value={repo.ref}
                 placeholder="default branch"
                 onChange={(e) => setRepo({ ...repo, ref: e.target.value })}
-                className="min-h-11 sm:min-h-0 sm:h-8 w-full sm:w-52 text-base sm:text-xs"
+                size="sm"
+                className="sm:w-52"
               />
               <span className="text-[11px] text-muted">Leave blank to scan the default branch.</span>
             </div>
@@ -283,7 +274,7 @@ function NewReviewCard() {
                   Type any public repo as owner/repo or a GitHub URL.{" "}
                   {scope.teamId === undefined ? (
                     <>
-                      <a href="/settings/connected-accounts" className="text-moss underline">Connect GitHub</a>{" "}
+                      <a href="/integrations?service=github&workspace=user" className="text-moss underline">Connect GitHub</a>{" "}
                       to list your organization&apos;s repositories.
                     </>
                   ) : orgQ.data?.callerRole === "admin" ? (
@@ -312,79 +303,53 @@ function NewReviewCard() {
           </span>
         </div>
         <div className="rounded-lg border border-moss bg-moss-wash p-3 sm:hidden">
-          <select
+          <Select
             id="mobile-review-method"
             aria-label="Review method"
             value={preset}
             onChange={(event) => setPreset(event.target.value)}
-            className="h-11 w-full min-w-0 rounded-md border border-line bg-paper px-2 text-base font-medium text-ink"
+            className="w-full min-w-0 font-medium"
           >
             {SECURITY_PRESETS.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
-          </select>
+          </Select>
           <p className="mt-2 text-sm leading-5 text-ink">{selectedPreset.blurb}</p>
           <p className="mt-1 text-xs text-muted">{selectedPreset.phases.length} passes{includeReport ? " · Written report included" : ""}</p>
         </div>
         <div role="radiogroup" aria-label="Review method" className="hidden sm:grid sm:grid-cols-2 gap-2">
-          {SECURITY_PRESETS.map((p) => {
-            const selected = p.id === preset;
-            return (
-              <button
-                key={p.id}
-                type="button"
-                role="radio"
-                aria-checked={selected}
-                aria-label={p.label}
-                onClick={() => setPreset(p.id)}
-                className={cn(
-                  "flex flex-col gap-2 rounded-md border p-3 text-left transition-colors",
-                  selected
-                    ? "border-moss bg-moss-wash ring-1 ring-moss"
-                    : "border-line hover:border-ink-wash-strong",
-                )}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-[13px] font-medium text-ink">{p.label}</span>
-                  <span
-                    className={cn(
-                      "grid h-4 w-4 shrink-0 place-items-center rounded-full border",
-                      selected ? "border-moss bg-moss text-paper" : "border-line",
-                    )}
-                    aria-hidden
-                  >
-                    {selected && (
-                      <svg viewBox="0 0 12 12" className="h-2.5 w-2.5" fill="none">
-                        <path d="M2.5 6.5l2.5 2.5 4.5-5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                      </svg>
-                    )}
-                  </span>
-                </div>
-                <span className="text-[11px] leading-snug text-muted">{p.blurb}</span>
-                <div className="flex flex-wrap gap-1">
-                  {p.phases.map((ph, i) => {
-                    const det = DETERMINISTIC_PHASE_LABELS.has(ph);
-                    return (
-                      <span
-                        key={ph}
-                        className="inline-flex items-center gap-1 rounded bg-ink-wash px-1.5 py-0.5 text-[10px] text-muted"
-                        title={det ? "Deterministic phase: scanner-driven or L0 decision" : undefined}
-                      >
-                        <span>{i + 1}.</span>
-                        <span>{ph}</span>
-                        {det && (
-                          <span
-                            className="font-mono font-bold text-danger-600"
-                            aria-label="Deterministic phase"
-                          >
-                            D
-                          </span>
-                        )}
-                      </span>
-                    );
-                  })}
-                </div>
-              </button>
-            );
-          })}
+          {SECURITY_PRESETS.map((p) => (
+            <RadioCard
+              key={p.id}
+              title={p.label}
+              description={p.blurb}
+              ariaLabel={p.label}
+              selected={p.id === preset}
+              onSelect={() => setPreset(p.id)}
+            >
+              <div className="flex flex-wrap gap-1">
+                {p.phases.map((ph, i) => {
+                  const det = DETERMINISTIC_PHASE_LABELS.has(ph);
+                  return (
+                    <span
+                      key={ph}
+                      className="inline-flex items-center gap-1 rounded bg-ink-wash px-1.5 py-0.5 text-[10px] text-muted"
+                      title={det ? "Deterministic phase: scanner-driven or L0 decision" : undefined}
+                    >
+                      <span>{i + 1}.</span>
+                      <span>{ph}</span>
+                      {det && (
+                        <span
+                          className="font-mono font-bold text-danger-600"
+                          aria-label="Deterministic phase"
+                        >
+                          D
+                        </span>
+                      )}
+                    </span>
+                  );
+                })}
+              </div>
+            </RadioCard>
+          ))}
         </div>
       </div>
 
@@ -403,11 +368,10 @@ function NewReviewCard() {
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div className="grid gap-1.5">
             <Label htmlFor="review-model">Model</Label>
-            <select
+            <Select
               id="review-model"
               value={model}
               onChange={(e) => setModel(e.target.value)}
-              className="min-h-11 sm:min-h-0 sm:h-9 rounded-md border border-line bg-paper px-2 text-base sm:text-xs text-ink"
             >
               {SECURITY_MODELS.map((m) => (
                 <option key={m.id} value={m.id}>
@@ -415,7 +379,7 @@ function NewReviewCard() {
                   {m.note ? ` · ${m.note}` : ""}
                 </option>
               ))}
-            </select>
+            </Select>
             <p className="text-[11px] text-muted">Drives the review and every sub-agent.</p>
           </div>
           <div className="grid gap-1.5">
@@ -425,7 +389,6 @@ function NewReviewCard() {
               value={pathsInput}
               onChange={(e) => setPathsInput(e.target.value)}
               placeholder="packages/api, src/auth"
-              className="min-h-11 sm:min-h-0 sm:h-9 text-base sm:text-xs"
             />
             <p className="text-[11px] text-muted">Optional. Narrows the sweeps to these paths.</p>
           </div>
@@ -483,9 +446,9 @@ function ReviewList() {
           <Spinner size={14} /> Loading reviews…
         </div>
       ) : error ? (
-        <div className="rounded-md border border-danger-500/30 bg-danger-wash px-3 py-2 text-sm text-danger-600">
+        <Callout tone="danger">
           Could not load reviews. Reload the page to retry.
-        </div>
+        </Callout>
       ) : reviews.length === 0 ? (
         <div className="rounded-lg border border-dashed border-line px-4 py-10 text-center">
           <p className="text-sm text-ink">No reviews yet</p>

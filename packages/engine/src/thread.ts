@@ -1,22 +1,34 @@
+import { ThinkingTiming } from "./thinking-timing.js";
+import { normalizeGatePath } from "./builtin-tools/index.js";
+import { skillFileManifest } from "./roles-skills/loader.js";
+import { failedToolResultText, toolResultText } from "./tool-result-text.js";
+import { renderAppPageHint } from "./app-page-hint.js";
+import { stripToolIntent, type ToolUsageFact, CONTINUATION_SOURCE_ITEM_KEY, actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, MODEL_CALL_LIMIT_KEY, readModelCallLimit, readThreadPlan, readTurnPlans, TURN_PLAN_HISTORY_KEY, TURN_PLAN_HISTORY_LIMIT, readToolScope, THREAD_PLAN_KEY, toolInScope, TOOL_SCOPE_KEY, UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY, type ThreadPlan, type ThreadPlanItem, type ToolScope } from "@valet/shared";
+import { mergeAppearance, readAppearance, type Appearance } from "@valet/shared";
+import { classifyProviderFailure, isNonRetryableProviderFailure, isUsageLimitFailure, isRateLimitedProviderFailure } from "@valet/shared";
 import { Agent } from "@earendil-works/pi-agent-core";
-import type { AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
-import { isContextOverflow, streamSimple } from "@earendil-works/pi-ai/compat";
+import { uid } from "./ids.js";
+import type { AgentContext, AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
+import { isContextOverflow } from "@earendil-works/pi-ai/compat";
 // Root import (not /compat): the transient classifier lives in pi-ai's
-// utils and is only re-exported from the package root. It carries the
-// provider-maintained retryable/permanent taxonomy (incl. the quota
-// blacklist) — a hand-rolled copy would drift on every pi-ai upgrade.
+// utils and is only re-exported from the package root. Provider fallback
+// adds billing/quota and network failures to this transient taxonomy.
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
+import { getCurrentSystemMessage } from "@earendil-works/pi-ai/utils/transcript";
 import { classifyCacheBreak, type CacheTurnSnapshot } from "./cache-telemetry.js";
+import { NativeImageBridge, NATIVE_IMAGE_RESULT_TOOL, NATIVE_IMAGE_PLUGIN_ACTION, NATIVE_IMAGE_EDIT_ACTION, NATIVE_IMAGE_TOOL_PARAMS } from "./native-images.js";
+import { isToolDiscoveryApproval, recordHostedActionInvocation, resolveUngatedAction, type HostedActionGrant } from "./plugin-catalog.js";
 import { bundledModel } from "./model-catalog.js";
-import { appendRuntimeModelContext } from "./model-context.js";
+import { appendRuntimeModelContext, entryMessageTime, messageTimeLine, threadStartedSection, type MessageTime } from "./model-context.js";
 import { recordCacheBreak } from "./metrics.js";
-import type { Api, Message, Model, TextContent, ThinkingContent, ToolCall } from "@earendil-works/pi-ai/compat";
+import type { Api, AssistantMessage, ImageContent, JsonObject, Message, Model, TextContent, ThinkingContent, ToolCall } from "@earendil-works/pi-ai/compat";
 
 type PiModel = Model<Api>;
 import type { Session, EmitOptions } from "./session.js";
 import { toAgentTool } from "./tool-bridge.js";
 import {
   DecisionGateExpiredError,
+  DecisionGateHandoffError,
   DecisionGateWithdrawnError,
   findStickyTerminalGate,
   fromRequest,
@@ -26,39 +38,86 @@ import {
   latestGateForResume,
   persistTerminalGate,
   shouldShortCircuit,
+  UNATTENDED_WORKFLOW_DECISION,
   type GateContext,
 } from "./decision-gate.js";
-import { renderTemplate } from "./roles-skills/index.js";
+import { isPlaybook, playbookPlanItems, readPlaybookSteps, renderTemplate, type PlaybookSeedResult } from "./roles-skills/index.js";
 import {
   buildOverheardDigest,
+  completedSubmissionOutcome,
   deriveQueueState,
   formatSenderLine,
+  attributedAuthor,
+  type AuthorAttribution,
   isOverheardDigestMeta,
   isSignalContent,
   MAX_PENDING_PER_THREAD,
   namespaceInternalDispatchId,
   overheardCoalesceKey,
   renderSignalEnvelope,
+  carriedInputIds,
+  carriedInputBridgeIds,
+  MAX_CARRIED_INPUTS,
+  isInteractiveSlackInput,
+  sameSubmissionOrigin,
+  sameSubmissionAuthor,
   resolvePartialSubmissionText,
   resolveSubmissionText,
   SIGNAL_HOP_BUDGET,
+  SUBMISSION_TIMEOUT_MS,
   validateSignalAttributeKeys,
   validateSignalTagName,
 } from "./submission.js";
-import { NoCredentialsError, NotFoundError, StaleAttemptError, TimeoutError, ValidationError } from "./errors.js";
+import { ConflictError, NoCredentialsError, NotFoundError, StaleAttemptError, TimeoutError, ValidationError } from "./errors.js";
+import {
+  BRANCH_NOTE_KEY,
+  THREAD_EDIT_KEY,
+  branchNoteText,
+  pushedFrom,
+  readBranchNote,
+  readThreadEdit,
+  summarizeBranchActions,
+  type BranchNote,
+  type BranchNoteKind,
+  type BranchNoteRepoFiles,
+  type EditPreview,
+  type ForkSeedRecord,
+  type ThreadEdit,
+} from "./branch-note.js";
+import {
+  FILE_CHECKPOINT_KEY,
+  applySeedBundle,
+  changedPaths,
+  checkpointRef,
+  findRepos,
+  WORKSPACE_FILES,
+  planFileUndo,
+  repoDir,
+  restorePaths,
+  returnPlan,
+  snapshotRepo,
+  type RepoCheckpoint,
+  type RepoRestore,
+  type TurnCheckpoint,
+} from "./checkpoints.js";
 import {
   isReasoningLevel,
   parseReasoningLevel,
   REASONING_LEVELS,
   resolveReasoningLevel,
-  THREAD_REASONING_DISABLED,
   type ReasoningLevel,
 } from "./reasoning.js";
 import { extractStructuredOutput } from "./result-schema.js";
 import { buildRepoInstructionsFragment } from "./repo-instructions.js";
+import { planOverlay } from "./builtin-tools/update-plan.js";
 import { formatFileAttachmentsNote } from "./file-attachment-formatter.js";
 import { capturePatch } from "./patch-capture.js";
-import { recordGateUnownedExpired, recordSettlement, recordTurn } from "./metrics.js";
+import {
+  recordCompactionCoverageGap,
+  recordGateUnownedExpired,
+  recordSettlement,
+  recordTurn,
+} from "./metrics.js";
 import {
   TRACEPARENT_METADATA_KEY,
   activeTraceparent,
@@ -71,10 +130,16 @@ import {
 import { context as otelContext, trace as otelTrace, type Span } from "@opentelemetry/api";
 import { Compile } from "typebox/compile";
 import type { TSchema } from "typebox";
+import { MODEL_RESPONSE_METADATA_KEY, modelResponseMetadata, modelRequestEvidence } from "./model-response.js";
+import { modelCallUsage } from "./model-call-usage.js";
 import {
   applyPrune,
+  ELIDED_TOOL_OUTPUT,
+  estimateContextTokens,
   estimateLiveContextTokens,
   estimateTokens,
+  estimateEntryTokens,
+  estimateSummaryEntryTokens,
   estimateTotalTokens,
   extractFileContext,
   inputSpillThreshold,
@@ -82,15 +147,22 @@ import {
   selectCutPoint,
   summarize,
   SummarizeOverflowError,
+  compactionBudget,
+  idleCompactionDelayMs,
   usableTokens,
+  walkTranscriptDag,
+  renderBranchNote,
+  selectSummaryCheckpointTail,
   type PruneResult,
   type SummarizeResult,
 } from "./compaction.js";
 import type {
   ActiveModelState,
   AwaitResultOptions,
+  BranchSummaryEntry,
   CompactionEntry,
   DecisionGate,
+  DecisionGateEntry,
   DecisionGateRequest,
   DecisionResolution,
   DecisionWithdrawReason,
@@ -102,6 +174,7 @@ import type {
   MessageQuery,
   MessageUsage,
   Principal,
+  ChannelTarget,
   PromptAuthor,
   PromptContent,
   PromptOptions,
@@ -111,6 +184,7 @@ import type {
   QueueState,
   ResolvedModel,
   SessionEntry,
+  SessionStore,
   SignalContent,
   SkillContextAttributionFact,
   SkillInvocationFact,
@@ -121,14 +195,22 @@ import type {
   SubmissionOutcome,
   SubmissionResult,
   SuspendedTurnState,
+  ThreadContextUsage,
   ThreadData,
   ToolContext,
   ToolDef,
+  ToolResult,
   WriteFence,
 } from "./types.js";
+import { ENTRY_USER_TIMEZONE_KEY, MESSAGE_TURN_ERROR_KEY, MID_TURN_DELIVERY_KEY, RECORD_ONLY_KEY, THREAD_USER_TIMEZONE_KEY } from "./types.js";
+import { correctImageBlocks } from "./image-media-type.js";
+import { reportError } from "./error-report.js";
 
 /** Bound on `awaitResult`'s merged-constituent delegation chain (Task 6). */
 const MAX_MERGE_DELEGATION_DEPTH = 5;
+
+/** Bound on the provider error text a failed turn keeps on its assistant entry. */
+const TURN_ERROR_MAX_CHARS = 1_000;
 
 /**
  * Credential-less claim attempts before settling `failed` (2 releases + 1
@@ -156,8 +238,27 @@ const MAX_CREDENTIAL_ATTEMPTS = 3;
  */
 const CREDENTIAL_RELEASE_BACKOFF_MS = 4_000;
 
+const WORKFLOW_AUTO_CONTINUE_PROMPT =
+  "You are continuing an unattended workflow task after context compaction. Finish the remaining authorized work using the saved task and available tools. A progress recap is not completion. Return the required final result only after completing the work. If genuinely blocked by missing access, necessary input, or a tool failure you cannot resolve, report that blocker truthfully. Do not invent results, bypass approvals, or repeat completed side effects.";
+
 const AUTO_CONTINUE_PROMPT =
   "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.";
+
+/** Why a submission stopped at its model call limit, and what to change. */
+export function modelCallLimitText(limit: number): string {
+  return `This step stopped after ${limit} model calls, its limit, before it finished. ` +
+    "Split the work: list the items in one step, then handle one item in each iteration of a foreach step. " +
+    "To allow more calls, raise maxModelCalls on this step.";
+}
+
+/** Turn-local guidance for manual-delivery Slack messages. `reply: "manual"`
+ * prevents automatic posting but does not decide whether content is addressed.
+ * A two-participant follow-up remains addressed by the channel convention.
+ * Durable thread muting needs state in the followed-thread model, so this
+ * instruction does not claim to provide it. */
+const SLACK_OVERHEARD_REPLY_GUIDANCE = `## Slack overheard delivery
+
+This Slack turn has manual delivery. Manual delivery prevents automatic posting. Decide whether the message is meant for you: a follow-up without an @mention often is. Reply with reply_to_origin when it asks you something, asks you to do something, names you, or follows up on your last reply. Stay silent when people are talking to each other, when it needs nothing from you, or when someone already answered it. Do not reply only because the content is relevant to you. If someone explicitly tells you to stop, remain silent in this thread until a fresh explicit request.`;
 
 /** Proactive compaction stops retrying after this many consecutive failures (TKAI-306). */
 const MAX_CONSECUTIVE_COMPACTION_FAILURES = 3;
@@ -176,12 +277,25 @@ const TURN_STREAM_MAX_RETRY_DELAY_MS = 30_000;
 const TURN_STREAM_TIMEOUT_MS = 600_000;
 
 /**
- * Turn-level retry defaults for transient provider errors (TKAI-319),
- * applied only to unattended sessions (orchestrator, workflow, child). The
- * last backoff entry repeats when maxAttempts exceeds the list.
+ * Turn-level retry defaults for transient provider errors (TKAI-319). An
+ * unattended turn (orchestrator, workflow, child, not a person's prompt)
+ * waits longer. A person's own prompt retries briefly, so a passing rate
+ * limit does not cost them a resend, and a long provider wait fails at once
+ * instead of holding the thread's queue. The last backoff entry repeats when
+ * maxAttempts exceeds the list. A provider hint ("try again in 2s") raises a
+ * wait up to the max hint; a longer hint ends the retries.
  */
-const UNATTENDED_TURN_RETRY_ATTEMPTS = 2;
-const UNATTENDED_TURN_RETRY_BACKOFF_MS = [10_000, 30_000];
+// A person's prompt gets four tries over about 30s, the order of what Claude
+// Code (10 tries) and Codex (4 request + 5 stream retries) allow, so a
+// passing outage does not cost a resend. An unattended turn has nobody
+// waiting on it, so it rides out a longer outage: six tries over about 13
+// minutes, each wait capped at 5 minutes.
+const UNATTENDED_TURN_RETRY_ATTEMPTS = 6;
+const UNATTENDED_TURN_RETRY_BACKOFF_MS = [10_000, 30_000, 60_000, 120_000, 240_000, 300_000];
+const UNATTENDED_TURN_RETRY_MAX_HINT_MS = 300_000;
+const INTERACTIVE_TURN_RETRY_ATTEMPTS = 4;
+const INTERACTIVE_TURN_RETRY_BACKOFF_MS = [2_000, 4_000, 8_000, 16_000];
+const INTERACTIVE_TURN_RETRY_MAX_HINT_MS = 30_000;
 
 /**
  * In-process background-drive registry: queue item ids whose turn is being
@@ -226,14 +340,40 @@ export function isItemDrivenInProcess(itemId: string): boolean {
 /**
  * What a compaction pass achieved. "compacted" = a summary was persisted;
  * "pruned" = tool-output elision only; "noop" = the pass found nothing to
- * reclaim; "insufficient" = the newest turn alone exceeds the usable window,
- * so summarizing older turns cannot bring the prompt under the limit.
- * Proactive callers treat "noop" and "insufficient" as breaker-worthy: the
- * trigger fired but compaction cannot help, so retrying every turn is futile.
- * The reactive caller treats "insufficient" as "do not retry" — the overflow
- * response already stands and a retry would just overflow again.
+ * reclaim. Two outcomes mean compaction cannot help this thread as it
+ * stands, for different reasons and with different fixes:
+ *
+ * - "insufficient": the newest turn alone exceeds the usable window, so
+ *   summarizing older turns cannot bring the prompt under the limit. The fix
+ *   is to shorten that turn (`context_overflow_unrecoverable`).
+ * - "coverage_gap": the history the checkpoint must replace carries no text
+ *   the summarizer can read, so a checkpoint over it would describe nothing.
+ *   Shortening the newest turn cannot help. The fix is a fresh thread
+ *   (`compaction_coverage_gap`).
+ *
+ * They are separate values because `/compact` prints one diagnosis per
+ * outcome, and one message cannot name both fixes. Both emit their own
+ * actionable error inside compactThreadInner, and neither changes between
+ * attempts on the same transcript. Proactive callers treat "noop" and both
+ * blocked outcomes as breaker-worthy: the trigger fired but compaction
+ * cannot help, so retrying every turn is futile. The reactive caller treats
+ * both as "do not retry": the overflow response already stands and a retry
+ * would just overflow again. Add a blocked outcome here only with its own
+ * user-facing message.
  */
-export type CompactionOutcome = "compacted" | "pruned" | "noop" | "insufficient";
+export type CompactionOutcome =
+  | "compacted"
+  | "pruned"
+  | "noop"
+  | "insufficient"
+  | "coverage_gap";
+
+/**
+ * Why a proactive pass runs. "overflow": the next request would not fit the
+ * model. "budget": it fits, but the context exceeds the compaction budget.
+ * A budget pass never continues the turn and a budget noop is not a failure.
+ */
+type ProactiveCompactionTrigger = "overflow" | "budget";
 
 /**
  * Metadata key stamped on a user entry whose oversized text was spilled to a
@@ -270,10 +410,53 @@ export function buildSpilledInputMarker(args: {
  * prompt-too-long retry (TKAI-306).
  */
 const MAX_SUMMARIZE_OVERFLOW_RETRIES = 3;
+const SUMMARY_CHECKPOINT_TAIL_MAX_TOKENS = 8_000;
+const SUMMARY_INPUT_MAX_TOKENS = 64_000;
 
-let nextId = 1;
-function uid(prefix: string): string {
-  return `${prefix}-${Date.now().toString(36)}-${(nextId++).toString(36)}`;
+const RETRY_HINT_UNIT_MS: Array<[RegExp, number]> = [
+  [/^(?:ms|milliseconds?)$/i, 1],
+  [/^(?:h|hours?)$/i, 3_600_000],
+  [/^(?:m|mins?|minutes?)$/i, 60_000],
+  [/^(?:s|secs?|seconds?)$/i, 1_000],
+];
+
+/**
+ * The wait a provider's error text asks for, in ms, or undefined when it
+ * names none. Reads "try again in 224ms", "try again in 1.722s",
+ * "try again in 6m0s", "retry after 3 seconds", and pi-ai's
+ * "Server requested 45s retry delay". Exported for tests.
+ */
+export function parseProviderRetryHintMs(errorMessage: string | undefined): number | undefined {
+  if (!errorMessage) return undefined;
+  const requested = /server requested (\d+(?:\.\d+)?)s retry delay/i.exec(errorMessage);
+  if (requested) return Math.ceil(Number(requested[1]) * 1000);
+  const unit = "ms|milliseconds?|hours?|h|minutes?|mins?|m|seconds?|secs?|s";
+  const phrase = new RegExp(`(?:try again|retry)(?: after| in)\\s*:?\\s*((?:\\d+(?:\\.\\d+)?\\s*(?:${unit})(?![a-z])\\s*)+)`, "i").exec(errorMessage);
+  if (!phrase) return undefined;
+  let total = 0;
+  for (const part of phrase[1].matchAll(new RegExp(`(\\d+(?:\\.\\d+)?)\\s*(${unit})(?![a-z])`, "gi"))) {
+    const scale = RETRY_HINT_UNIT_MS.find(([re]) => re.test(part[2]))?.[1] ?? 0;
+    total += Number(part[1]) * scale;
+  }
+  return total > 0 ? Math.ceil(total) : undefined;
+}
+
+/**
+ * Each retry wait moves by up to this fraction either way. Threads that share
+ * one provider key fail together in an outage. Without jitter they all retry
+ * at the same moment and fail together again.
+ */
+const TURN_RETRY_JITTER = 0.25;
+
+/**
+ * The wait before one retry: the backoff, raised to the provider's hint, then
+ * moved by up to ±25%. The hint stays a floor, so jitter never retries
+ * sooner than the provider asked. Exported for tests.
+ */
+export function turnRetryWaitMs(backoffMs: number, hintMs: number | undefined, random: () => number = Math.random): number {
+  const base = Math.max(backoffMs, hintMs ?? 0);
+  const jittered = Math.round(base * (1 - TURN_RETRY_JITTER + 2 * TURN_RETRY_JITTER * random()));
+  return Math.max(jittered, hintMs ?? 0);
 }
 
 /** Plain unref'd sleep for retry backoff — abort is re-checked after it. */
@@ -304,6 +487,8 @@ export class Thread {
   /** Persisted pause flag — the only stored piece of queue state. */
   private paused = false;
   private blockedGateId: string | undefined;
+  private gateHandedOff = false;
+  private rearmedGate = false;
   /**
    * The most recent `status` event this instance emitted. In-memory only —
    * feeds `currentAgentStatus` so a client that connects mid-turn can seed
@@ -329,6 +514,10 @@ export class Thread {
    * the item, so the turn aborts and skips settlement (zombie self-fencing).
    */
   private staleFenceDetected = false;
+  /** Model calls the running submission has made, against its `MODEL_CALL_LIMIT_KEY`. */
+  private submissionModelCalls = 0;
+  /** Set when the running submission reached its model call limit. Settlement fails it. */
+  private modelCallLimitReached: number | undefined;
   /** Serializes the claim loop; a second `kick()` while one is running joins the in-flight tail. */
   private kicking = false;
   private kickTail: Promise<void> = Promise.resolve();
@@ -338,6 +527,8 @@ export class Thread {
   private backgroundDriveTail: Promise<void> = Promise.resolve();
   /** In-process collect-window flush timer; armed by the first item of a window. */
   private collectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Idle compaction for an interactive thread over the compaction budget (`armIdleCompaction`). */
+  private idleCompactionTimer: ReturnType<typeof setTimeout> | null = null;
   /** Guards against the in-process timer and the session sweep both flushing the same window. */
   private flushingCollect = false;
   /** Serializes overheard-digest scans; concurrent admissions coalesce one at a time (TKAI-297). */
@@ -352,6 +543,8 @@ export class Thread {
    */
   private gateCycleTail: Promise<void> = Promise.resolve();
   private mode: QueueMode;
+  /** Queue items whose user entry this process wrote during mid-turn delivery. */
+  private readonly midTurnAppended = new Set<string>();
   private aborted = false;
   /**
    * Set by `runItem` when the host resolver threw `NoCredentialsError` at
@@ -376,6 +569,42 @@ export class Thread {
   private turnAgentError: unknown;
   private currentAssistantMessageId: string | undefined;
   private currentAssistantParts: MessagePart[] = [];
+  private thinkingTiming = new ThinkingTiming();
+  private usageToolDef(name: string): ToolDef | undefined {
+    return [this.nativeImages.tool(), ...this.session.builtinTools, ...(this.session.options.tools ?? [])].find(tool => tool.name === name);
+  }
+
+  private startToolUsage(callId: string, name: string, args: Record<string, unknown>): void {
+    const def = this.usageToolDef(name);
+    if (!def || def.intent === "exempt") return;
+    let intent: string | null = null;
+    try { intent = stripToolIntent(def, args).intent; } catch { /* Invalid calls still count. */ }
+    const actionId = def.scopeAction ?? (name === "call_tool" ? "unknown" : name);
+    this.toolUsageStarts.set(callId, { createdAt: Date.now(), waitMs: 0, intent, name: actionId.slice(0, 200) });
+  }
+
+  private finishToolUsage(callId: string, details: unknown, isError: boolean): void {
+    const usage = this.toolUsageStarts.get(callId);
+    this.toolUsageStarts.delete(callId);
+    if (!usage) return;
+    const { waitMs, ...base } = usage;
+    if (details && typeof details === "object" && "usageOutcome" in details && details.usageOutcome && typeof details.usageOutcome === "object" && "name" in details.usageOutcome && typeof details.usageOutcome.name === "string") {
+      base.name = details.usageOutcome.name.slice(0, 200);
+    }
+    const owner = this.session.owner;
+    const actor = this.runningItem?.author?.id ?? this.defaultActorId();
+    const fact: ToolUsageFact = {
+      ...base, ...readToolUsageOutcome(details, isError), id: `${this.session.id}:${callId}`,
+      orgId: this.session.options.orgId, userId: actor.startsWith("team:") ? null : actor,
+      sessionId: this.session.id, threadId: this.id,
+      ownerType: owner.type === "team" ? "team" : "user", ownerId: owner.id,
+      durationMs: Math.max(0, Date.now() - usage.createdAt - waitMs),
+    };
+    try { this.session.options.recordToolUsage?.(fact); }
+    catch { reportError({ area: "engine", reason: "tool_usage_telemetry", level: "warn" }, "Tool usage telemetry failed. Check the host telemetry sink."); }
+  }
+
+  private toolUsageStarts = new Map<string, Pick<ToolUsageFact, "createdAt" | "intent" | "name"> & { waitMs: number }>();
   private currentToolCalls = new Map<string, MessagePart>();
   /**
    * The persisted assistant entry for the current turn. Held so we can
@@ -421,13 +650,15 @@ export class Thread {
   /** True while a reactive (overflow) compaction is rerunning the failed turn. */
   private overflowRetryInProgress = false;
   /**
-   * Set after compactThread runs; cleared by the next runItem before
-   * checking shouldCompactProactive. Prevents recursive compaction loops
-   * where each compaction's auto-continue immediately re-triggers
-   * compaction (e.g. when the summary itself plus the system prompt
-   * still exceeds usable on a small-context model).
+   * Set when a compaction pass in this turn reported an outcome that no
+   * second pass can change: the newest turn is too large, or the head holds
+   * no summarizer-readable text. The reactive path already emitted the
+   * actionable error and counted the failure, so the post-turn proactive
+   * check must not run the same pass again over the same context. Without
+   * this the user saw one failure reported twice in one turn. Cleared at the
+   * start of every turn.
    */
-  private skipNextProactiveCheck = false;
+  private turnCompactionBlocked = false;
   /**
    * Consecutive proactive-compaction failures (TKAI-306). At
    * MAX_CONSECUTIVE_COMPACTION_FAILURES the proactive trigger opens the
@@ -448,6 +679,15 @@ export class Thread {
   private readonly activeSkillInvocations = new Map<string, SkillInvocationFact>();
   /** Previous turn's cache snapshot for break classification (TKAI-320). */
   private prevCacheSnapshot: CacheTurnSnapshot | undefined;
+  /** This turn's first user entry, which names its file checkpoint. */
+  private turnUserEntryId: string | undefined;
+  /** This turn's snapshots from before its first file change (`beginTurnCheckpoint`). */
+  private turnCheckpoint: Promise<PendingCheckpoint | undefined> | undefined;
+  private readonly turnFileWrites = new Map<string, { before?: string; after: string; conflicted: boolean }>();
+  private turnFileWriteBytes = 0;
+  private turnFileWritesUnavailable = false;
+  /** The leaf moved; the next model call logs how much of the prompt the cache served. */
+  private branchSwitchCachePending = false;
   /**
    * True when a transcript was rehydrated from persisted entries (spec
    * decision 5). The next `runItemInner` consumes it: a pre-turn proactive
@@ -456,6 +696,8 @@ export class Thread {
    * hit the model with an over-budget context.
    */
   private rehydratedCheckPending = false;
+  /** The contract added by the last reconstruction; retire it on an unrelated turn. */
+  private retainedTaskSourceQueueItemId?: string;
   /**
    * Per-thread model override (id string, e.g. "claude-opus-4-7"). When set,
    * overlays the session-default at turn start and is restored after.
@@ -469,8 +711,6 @@ export class Thread {
    * here — see `resolveReasoningLevel`.
    */
   private reasoningOverride?: ReasoningLevel;
-  /** True when this thread explicitly bypasses the session reasoning default. */
-  private reasoningDisabled = false;
   /**
    * Agent-initiated escalation, scoped to the CURRENT turn (TKAI-338).
    *
@@ -496,6 +736,10 @@ export class Thread {
   private agentModelSwitch?: string;
   /** Snapshot at turn resolution: a user can change the next turn's pin while this one runs. */
   private assignedModelSpec?: string;
+  private fallbackModelSpec?: string;
+  private requestedMaxOutputTokens?: number;
+  private requestEvidence: ReturnType<typeof modelRequestEvidence> & { requestId?: string | null } = modelRequestEvidence(undefined);
+  private streamedTextLength = 0;
   /** Set only after a role model resolves and is applied. Never persisted. */
   private roleModelSpec?: string;
   /**
@@ -507,9 +751,21 @@ export class Thread {
    */
   private turnApiKey?: string;
   private readonly threadCreatedAt: number;
+  /** Creation-time user timezone from persisted thread state (TKAI-584). */
+  private readonly threadUserTimezone: string | undefined;
+  private threadMetadata: Record<string, unknown> | undefined;
+  /** Tail of the metadata write queue. See `patchThreadMetadata`. */
+  private metadataWrites: Promise<void> = Promise.resolve();
+  /** Durable leaf used to link each new entry into the active transcript path. */
+  private activeLeafEntryId: string | undefined;
 
+  private entryAppendTail: Promise<void> = Promise.resolve();
   private transcriptPending: boolean;
   private transcriptLoad?: Promise<void>;
+  /** When a turn, gate reconcile or compaction last loaded or used the agent transcript. */
+  private transcriptUsedAt = 0;
+  /** Background drives (resume drives, gate replays) in flight. */
+  private backgroundDrives = 0;
 
   constructor(session: Session, data: ThreadData, opts: { restoreTranscript?: boolean } = {}) {
     this.transcriptPending = opts.restoreTranscript ?? false;
@@ -521,9 +777,14 @@ export class Thread {
     // An unrecognized persisted token degrades to "no pin" instead of
     // killing the rehydrate (parseReasoningLevel).
     this.reasoningOverride = parseReasoningLevel(data.reasoning);
-    this.reasoningDisabled = data.reasoning === THREAD_REASONING_DISABLED;
     this.paused = data.paused ?? false;
     this.threadCreatedAt = data.createdAt || Date.now();
+    const initialFocus = session.options.initialToolFocus?.({ key: data.key });
+    this.threadMetadata = data.metadata?.[TOOL_SCOPE_KEY] !== undefined || !initialFocus
+      ? data.metadata : { ...data.metadata, [TOOL_SCOPE_KEY]: initialFocus };
+    const persistedTimezone = data.metadata?.[THREAD_USER_TIMEZONE_KEY];
+    this.threadUserTimezone = typeof persistedTimezone === "string" ? persistedTimezone : undefined;
+    this.activeLeafEntryId = data.activeLeafEntryId;
     this.agent = this.buildAgent();
   }
 
@@ -580,6 +841,31 @@ export class Thread {
     });
   }
 
+  /**
+   * A person who writes while the running turn waits on a question wants to
+   * talk first, for example to ask what an option means. Withdraw the
+   * question with reason `message`: the tool returns, the message joins the
+   * turn after the tool batch, and the model answers it and can ask again.
+   * Only a message that a person typed and that joins the turn at its next
+   * step does this: it must be in the run that `takeMidTurnItems` delivers
+   * (`midTurnRun`). An event, a token caller, or a message queued behind an
+   * item that cannot join leaves the question open.
+   *
+   * `submitPrompt` calls this after it admits a typed message. The gate
+   * cycle saves and announces a question before it registers the waiter, so
+   * it also calls this once the waiter exists, for a message admitted in
+   * between.
+   */
+  private async withdrawQuestionForMessage(): Promise<void> {
+    const running = this.runningItem;
+    if (!running || this.session.isThreadExecutionFenced(this.id)) return;
+    const questions = this.pendingDecisionGates().filter((gate) => gate.type === "question" && gate.queueItemId === running.id);
+    if (questions.length === 0) return;
+    const run = this.midTurnRun(await this.session.providers.store.listUnsettledSubmissions(this.session.id), running);
+    if (!run.some(typedByPerson)) return;
+    for (const gate of questions) this.withdrawDecision(gate.id, "message");
+  }
+
   withdrawDecision(gateId: string, reason: DecisionWithdrawReason): boolean {
     const ok = this.gates.withdraw(gateId, reason);
     if (ok) {
@@ -597,12 +883,30 @@ export class Thread {
   }
 
   async submitPrompt(content: PromptContent, opts: PromptOptions): Promise<PromptReceipt> {
+    if (this.session.options.readOnlyReason) throw new ValidationError(this.session.options.readOnlyReason);
+    // A signal body is machine output (a process log, a watch line), so it
+    // takes the same seam as a tool result; a user prompt does not. This is
+    // the one admission path, so hosts that submit to a thread directly are
+    // covered too.
+    const sanitizer = this.session.providers.sanitizeToolOutput;
+    if (sanitizer && isSignalContent(content)) {
+      const safe = sanitizer(this.session.id, content.body);
+      if (safe !== content.body) content = { ...content, body: String(safe) };
+    }
     if (opts.promoteItemId) {
       throw new ValidationError(
         "submitPrompt does not accept promoteItemId. Call Thread.promoteQueuedItem to promote a queued item.",
       );
     }
-    const effectiveMode: QueueMode = opts.queueMode ?? this.mode;
+    // Reclaim admissions remain durable, but cannot inject into or claim on the retiring attachment.
+    const requestedMode = this.session.isThreadExecutionFenced(this.id) ? "followup" : opts.queueMode ?? this.mode;
+    // A sender override belongs to one submission, never a collect digest.
+    // An `inject` prompt is stored as a followup with a flag, so a turn
+    // boundary can deliver it into the running turn
+    // (`deliverQueuedIntoRunningTurn`) and every other path runs it in order.
+    const effectiveMode: QueueMode = requestedMode === "collect" && readAppearance(opts.metadata?.presence)
+      ? "followup" : requestedMode === "inject" ? "followup" : requestedMode;
+    if (requestedMode === "inject") opts = { ...opts, metadata: { ...opts.metadata, [MID_TURN_DELIVERY_KEY]: true } };
 
     // Validate a per-item model pin at admission, the same way setModel
     // validates a thread pin: an unknown spec is rejected here with the
@@ -612,7 +916,7 @@ export class Thread {
       await this.validateModelSpec(opts.model);
     }
 
-    if (effectiveMode === "collect") {
+    if (effectiveMode === "collect" && !this.session.isThreadExecutionFenced(this.id)) {
       return this.submitCollect(content, opts);
     }
 
@@ -641,22 +945,31 @@ export class Thread {
       metadata: prepared.metadata,
     });
 
-    // Steer admissions are exempt from the pending cap: the same atomic
-    // `admitSubmission({ steer: true })` call supersedes every prior
-    // unsettled item on the thread in the same transaction, so the count
-    // they'd leave behind is always ~0-1 regardless of how many were pending
-    // beforehand. For every other mode, the cap is enforced by the store
-    // INSIDE the admission transaction (opts.maxPending) rather than via a
-    // separate pre-check, so concurrent admissions can't race past it.
+    // Unscoped steering replaces all pending work except workflow tasks and
+    // steps (`steerKeepsSubmission`), so the store counts what it keeps.
+    // Conversation steering preserves queued work, so the store checks the
+    // cap after excluding the active turn it will replace. Admission and the
+    // check are atomic.
     const store = this.session.providers.store;
     const cap = this.session.options.maxPendingPerThread ?? MAX_PENDING_PER_THREAD;
     const { item: admitted, admitted: wasAdmitted, supersededItemIds } = await store.admitSubmission(
       this.session.id,
       this.id,
       item,
-      effectiveMode === "steer" ? { steer: true } : { maxPending: cap },
+      effectiveMode === "steer" && !this.session.isThreadExecutionFenced(this.id)
+        ? { steer: true, ...(opts.steerScope ? { steerScope: opts.steerScope } : {}), maxPending: cap }
+        : { maxPending: cap },
     );
     if (skillFact && wasAdmitted) await this.persistSkillInvocation(skillFact);
+    // A slash-invoked playbook sets the plan before its turn starts, so the
+    // turn's plan overlay already shows the steps. An outside author cannot
+    // change the plan, the same rule as `update_plan` (`refuseOutsideAuthors`).
+    const owner = this.session.options.owner;
+    const outsideAuthor = opts.author?.externalSender === true ||
+      (owner?.type === "user" && opts.author !== undefined && opts.author.id !== owner.id);
+    if (wasAdmitted && !outsideAuthor && opts.skillInvocation && isPlaybook(opts.skillInvocation.skill)) {
+      await this.seedPlaybookPlan(opts.skillInvocation.skill);
+    }
     if (supersededItemIds.length > 0) {
       await this.handleSteerSupersession(supersededItemIds);
     }
@@ -672,12 +985,13 @@ export class Thread {
       const coalesceKey = overheardCoalesceKey(prepared.content);
       if (coalesceKey !== undefined) {
         const run = this.overheardCoalesceChain.then(() =>
-          this.coalesceQueuedOverheard(coalesceKey, item.author?.id),
+          this.coalesceQueuedOverheard(coalesceKey, item.author, readAppearance(admitted.metadata?.presence)),
         );
         this.overheardCoalesceChain = run.catch(() => null);
         receiptItem = (await run) ?? admitted;
       }
     }
+    if (wasAdmitted && typedByPerson(admitted)) await this.withdrawQuestionForMessage();
     await this.emitQueueState();
     void this.kick();
     return {
@@ -703,7 +1017,7 @@ export class Thread {
    * doubled submission. Returns the digest item, or null when there was
    * nothing to merge with.
    */
-  private async coalesceQueuedOverheard(coalesceKey: string, actorId?: string): Promise<QueueItem | null> {
+  private async coalesceQueuedOverheard(coalesceKey: string, author?: PromptAuthor, presence?: Appearance): Promise<QueueItem | null> {
     const store = this.session.providers.store;
     const items = await store.listUnsettledSubmissions(this.session.id);
     const coalescible = items
@@ -711,9 +1025,14 @@ export class Thread {
         (i) =>
           i.threadId === this.id &&
           i.status === "queued" &&
+          // Only combine messages that use the same sender identity.
+          readAppearance(i.metadata?.presence)?.displayName === presence?.displayName &&
+          readAppearance(i.metadata?.presence)?.avatarUrl === presence?.avatarUrl &&
           i.supersededByItemId === undefined &&
           i.abortRequestedAt === undefined &&
-          i.author?.id === actorId &&
+          i.author?.id === author?.id &&
+          // Unlinked senders can share the creator's ID, but not their authority.
+          Boolean(i.author?.externalSender) === Boolean(author?.externalSender) &&
           overheardCoalesceKey(i.content) === coalesceKey,
       )
       .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
@@ -726,7 +1045,7 @@ export class Thread {
       model: newest.model,
       role: newest.role,
       author: newest.author,
-      metadata: { overheardDigest: digest },
+      metadata: { overheardDigest: digest, ...(presence ? { presence } : {}), ...scopeMetadata(coalescible.map((item) => item.metadata)) },
     });
     const { item: admittedMerged } = await store.admitSubmission(this.session.id, this.id, merged);
     for (const constituent of coalescible) {
@@ -737,7 +1056,7 @@ export class Thread {
         { outcome: "merged" },
         { mergedIntoItemId: admittedMerged.id },
       );
-      if (settled) await this.emitSettled(constituent.id, { outcome: "merged" });
+      if (settled) await this.emitSettled(constituent.id, { outcome: "merged" }, { mergedIntoItemId: admittedMerged.id });
     }
     return admittedMerged;
   }
@@ -755,9 +1074,9 @@ export class Thread {
    * their kicks, so a repairable constituent settles before it can be
    * claimed.
    */
-  async repairOverheardDigests(): Promise<void> {
+  async repairOverheardDigests(snapshot?: readonly QueueItem[]): Promise<void> {
     const store = this.session.providers.store;
-    const items = await store.listUnsettledSubmissions(this.session.id);
+    const items = snapshot ?? await store.listUnsettledSubmissions(this.session.id);
     const mine = items.filter((i) => i.threadId === this.id);
     for (const digest of mine) {
       if (digest.status !== "queued" || digest.supersededByItemId !== undefined) continue;
@@ -773,19 +1092,42 @@ export class Thread {
           { outcome: "merged" },
           { mergedIntoItemId: digest.id },
         );
-        if (settled) await this.emitSettled(constituentId, { outcome: "merged" });
+        if (settled) await this.emitSettled(constituentId, { outcome: "merged" }, { mergedIntoItemId: digest.id });
       }
     }
   }
 
   /**
-   * Promote a queued followup into a steer. Admits a new item with the same
-   * content and `steer: true` so the running turn and the original queued
-   * row are superseded together. The original item is never claimed, so it
-   * does not write a second user entry. The caller remaps the optimistic
-   * bubble onto the returned `queueItemId`.
+   * Promote a queued followup into a steer. The promotion-specific steer
+   * scope supersedes the running turn and original queued source while
+   * preserving queued siblings. The successor is atomically placed at the
+   * runnable head. The original item is never claimed, so it does not write
+   * a second user entry. The caller remaps the optimistic bubble onto the
+   * returned `queueItemId`.
    */
   async promoteQueuedItem(itemId: string): Promise<PromptReceipt> {
+    // Admit on the overheard-digest chain, as a cancel and mid-turn delivery
+    // do: either delivery takes the item first and this refuses it as no
+    // longer queued, or this supersedes it first and delivery skips it. The
+    // abort runs after, off the chain, because delivery waits on the chain
+    // inside the turn the abort ends.
+    const run = this.overheardCoalesceChain.then(() => this.admitPromotion(itemId));
+    this.overheardCoalesceChain = run.then(() => null, () => null);
+    const { item: admitted, supersededItemIds } = await run;
+    if (supersededItemIds.length > 0) {
+      await this.handleSteerSupersession(supersededItemIds);
+    }
+    await this.emitQueueState();
+    void this.kick();
+    return {
+      sessionId: this.session.id,
+      threadId: this.id,
+      queueItemId: admitted.id,
+      status: receiptStatus(admitted.status),
+    };
+  }
+
+  private async admitPromotion(itemId: string): Promise<{ item: QueueItem; supersededItemIds: string[] }> {
     const store = this.session.providers.store;
     const existing = await store.getQueueItem(this.session.id, itemId);
     if (!existing || existing.threadId !== this.id) {
@@ -808,19 +1150,13 @@ export class Thread {
       this.session.id,
       this.id,
       item,
-      { steer: true, promoteFromItemId: existing.id },
+      {
+        steer: true,
+        steerScope: "active-and-source",
+        promoteFromItemId: existing.id,
+      },
     );
-    if (supersededItemIds.length > 0) {
-      await this.handleSteerSupersession(supersededItemIds);
-    }
-    await this.emitQueueState();
-    void this.kick();
-    return {
-      sessionId: this.session.id,
-      threadId: this.id,
-      queueItemId: admitted.id,
-      status: receiptStatus(admitted.status),
-    };
+    return { item: admitted, supersededItemIds };
   }
 
   /**
@@ -851,11 +1187,14 @@ export class Thread {
       this.agent.abort();
     }
     for (const g of this.pendingDecisionGates()) {
-      this.withdrawDecision(g.id, "steer");
+      if (supersededItemIds.includes(g.queueItemId)) this.withdrawDecision(g.id, "steer");
     }
+    // A claimed item (the running turn) is not settled here. It settles, and
+    // emits, when its turn ends. Emitting now told clients a turn had ended
+    // while it was still running.
     for (const id of supersededItemIds) {
-      await store.settleUnclaimed(this.session.id, this.id, id, { outcome: "superseded" });
-      await this.emitSettled(id, { outcome: "superseded" });
+      const settled = await store.settleUnclaimed(this.session.id, this.id, id, { outcome: "superseded" });
+      if (settled) await this.emitSettled(id, { outcome: "superseded" });
     }
     if (runningSuperseded) {
       await this.agent.waitForIdle();
@@ -894,6 +1233,7 @@ export class Thread {
       item,
     );
     await this.emitQueueState();
+    this.session.notifyReclaimAdmission();
     if (wasAdmitted) {
       this.armCollectTimer(
         typeof admittedItem.metadata?.collectDeadline === "number"
@@ -926,9 +1266,9 @@ export class Thread {
    * (e.g. the timer never got armed this process, or restart — reconciliation
    * proper is Task 5, this is just the safety net the sweep owns).
    */
-  async checkCollectDeadline(): Promise<void> {
+  async checkCollectDeadline(snapshot?: readonly QueueItem[]): Promise<void> {
     const store = this.session.providers.store;
-    const items = await store.listUnsettledSubmissions(this.session.id);
+    const items = snapshot ?? await store.listUnsettledSubmissions(this.session.id);
     const collecting = items.filter((i) => i.threadId === this.id && i.status === "collecting");
     if (collecting.length === 0) return;
     const now = Date.now();
@@ -978,7 +1318,8 @@ export class Thread {
         channel: collecting[0].channel,
         replyTarget: collecting[0].replyTarget,
         model: collecting[0].model,
-        metadata: { collect: { constituentIds: collecting.map((i) => i.id) } },
+        metadata: { collect: { constituentIds: collecting.map((i) => i.id) },
+          ...scopeMetadata(collecting.map((item) => item.metadata)) },
       });
       const { item: admittedMerged } = await store.admitSubmission(this.session.id, this.id, merged);
       for (const constituent of collecting) {
@@ -989,7 +1330,7 @@ export class Thread {
           { outcome: "merged" },
           { mergedIntoItemId: admittedMerged.id },
         );
-        await this.emitSettled(constituent.id, { outcome: "merged" });
+        await this.emitSettled(constituent.id, { outcome: "merged" }, { mergedIntoItemId: admittedMerged.id });
       }
       await this.emitQueueState();
       void this.kick();
@@ -1084,7 +1425,7 @@ export class Thread {
       status: "queued",
       attemptCount: 0,
       maxAttempts: 10,
-      timeoutAt: now + 3_600_000,
+      timeoutAt: now + SUBMISSION_TIMEOUT_MS,
       createdAt: now,
       updatedAt: now,
     };
@@ -1114,7 +1455,7 @@ export class Thread {
         throw new Error(`skill "${name}" args failed validation:\n${errors}`);
       }
     }
-    const rendered = renderTemplate(skill.content, args);
+    const rendered = renderTemplate(skill.content, args) + skillFileManifest(skill);
     return this.submitPrompt(rendered, {
       author: opts.author,
       channel: opts.channel,
@@ -1128,7 +1469,7 @@ export class Thread {
 
   private replaceActiveSkillInvocations(entries: readonly SessionEntry[]): void {
     this.activeSkillInvocations.clear();
-    for (const fact of skillInvocationsInContext(entries)) {
+    for (const fact of skillInvocationsInContext(entries, this.activeLeafEntryId)) {
       this.activeSkillInvocations.set(fact.id, fact);
     }
   }
@@ -1169,7 +1510,7 @@ export class Thread {
 
   private async recordModelToolSkillInvocation(
     skill: SkillSource,
-    path: "model_tool",
+    path: "model_tool" | "file_read" | "script_run",
     injectedText: string,
     toolCallId: string,
   ): Promise<SkillInvocationFact> {
@@ -1207,8 +1548,94 @@ export class Thread {
     }
   }
 
+  /** Interrupt one active submission and preserve queued work on this thread. */
+  async interrupt(targetItemId: string): Promise<void> {
+    if (this.runningItem?.id === targetItemId) {
+      await this.abortSubmission(targetItemId);
+      return;
+    }
+    // The durable claim can precede this.runningItem during claim and restore.
+    // Match the gesture target atomically so a successor cannot inherit a retry.
+    const active = await this.session.providers.store.requestAbortActiveSubmission(
+      this.session.id,
+      this.id,
+      targetItemId,
+    );
+    if (active) {
+      await this.abortSubmission(active.id);
+      return;
+    }
+    void this.kick();
+  }
+
+  /**
+   * Cancel one queued message a person withdrew. It settles `aborted` only
+   * while the item is unclaimed and no promotion superseded it, in one store
+   * CAS, so a concurrent claim or Send now wins and the caller learns it.
+   * It never touches a running turn; that is Stop.
+   */
+  async cancelQueuedItem(queueItemId: string): Promise<boolean> {
+    // Join the overheard-digest chain: a digest admits first and merges its
+    // constituents after, so a cancel between the two would report success
+    // while the digest still carries the text. On the chain, either the
+    // cancel lands first and the digest is built without the item, or the
+    // merge lands first and the cancel loses.
+    const run = this.overheardCoalesceChain.then(() => this.settleCanceled(queueItemId));
+    this.overheardCoalesceChain = run.then(() => null, () => null);
+    return run;
+  }
+
+  private async settleCanceled(queueItemId: string): Promise<boolean> {
+    const store = this.session.providers.store;
+    const unsettled = await store.listUnsettledSubmissions(this.session.id);
+    // Only a `queued` item. A `collecting` one belongs to the collect
+    // window, which merges it the same way; it never turns back to queued.
+    const item = unsettled.find((i) => i.id === queueItemId);
+    if (!item || item.threadId !== this.id || item.status !== "queued") return false;
+    // A digest that lists the item already carries its text. The item can
+    // still read `queued` when a merge settlement failed after the digest
+    // was admitted (`repairOverheardDigests` settles it later), so the
+    // digest's durable membership decides.
+    const inDigest = unsettled.some((d) => {
+      const meta = d.metadata?.overheardDigest;
+      return d.threadId === this.id && isOverheardDigestMeta(meta) && meta.constituentIds.includes(queueItemId);
+    });
+    if (inDigest) return false;
+    const settled = await store.settleUnclaimed(
+      this.session.id, this.id, queueItemId, { outcome: "aborted" }, { onlyIfUnsuperseded: true },
+    );
+    if (!settled) return false;
+    await this.emitSettled(queueItemId, { outcome: "aborted" });
+    await this.emitQueueState();
+    void this.kick();
+    return true;
+  }
+
+  /** Cancel one submission without aborting other work on this thread. */
+  async abortSubmission(queueItemId: string, withdrawReason: DecisionWithdrawReason = "abort"): Promise<void> {
+    const store = this.session.providers.store;
+    // Mark the live item before I/O so a stale store read cannot start it.
+    if (this.runningItem?.id === queueItemId) this.runningItem.abortRequestedAt ??= Date.now();
+    await store.requestAbort(this.session.id, this.id, queueItemId);
+    const running = this.runningItem?.id === queueItemId;
+    if (running && this.runningItem) {
+      this.runningItem.abortRequestedAt ??= Date.now();
+      this.agent.abort();
+    }
+    for (const gate of this.pendingDecisionGates()) {
+      if (gate.queueItemId === queueItemId) this.withdrawDecision(gate.id, withdrawReason);
+    }
+    const settled = await store.settleUnclaimed(this.session.id, this.id, queueItemId, { outcome: "aborted" });
+    if (settled) await this.emitSettled(queueItemId, { outcome: "aborted" });
+    if (running) await this.agent.waitForIdle();
+    await this.emitQueueState();
+    void this.kick();
+  }
+
   async abort(): Promise<void> {
     this.aborted = true;
+    this.toolUsageStarts.clear();
+    this.clearIdleCompaction();
     if (this.collectTimer) {
       clearTimeout(this.collectTimer);
       this.collectTimer = null;
@@ -1254,10 +1681,13 @@ export class Thread {
   }
 
   async resume(): Promise<void> {
-    if (!this.paused) return;
-    this.paused = false;
-    await this.session.providers.store.saveThread(this.session.id, this.toThreadData());
-    await this.emitQueueState();
+    if (this.paused) {
+      this.paused = false;
+      await this.session.providers.store.saveThread(this.session.id, this.toThreadData());
+      await this.emitQueueState();
+    }
+    // Resume is also the explicit recovery control for a durable queued item
+    // with no local claim (for example, after credential release).
     void this.kick();
   }
 
@@ -1284,7 +1714,10 @@ export class Thread {
     resolution: DecisionResolution;
   }): Promise<void> {
     const { suspended, resolution } = args;
-    const tools = this.buildTools();
+    this.rearmedGate = false;
+    // The replay appends to the live transcript, so it must be loaded.
+    await this.ensureTranscript();
+    const tools = this.buildTools(true);
     const tool = tools.find((t) => t.name === suspended.toolName);
     if (!tool) {
       this.emitError(
@@ -1301,10 +1734,15 @@ export class Thread {
     // the short-circuit won't match and the tool will try to open a
     // brand-new gate.
     const priorActive = this.runningItem;
+    const original = await this.session.providers.store.getQueueItem(this.session.id, suspended.queueItemId);
     this.runningItem = {
       id: suspended.queueItemId,
+      metadata: original?.metadata,
+      author: original?.author,
+      channel: original?.channel,
+      replyTarget: original?.replyTarget,
       threadId: this.id,
-      content: "",
+      content: original?.content ?? "",
       status: "running",
       attemptCount: 0,
       maxAttempts: 10,
@@ -1314,13 +1752,16 @@ export class Thread {
     };
     const fakeAbort = new AbortController();
     let toolResult;
+    this.startToolUsage(suspended.toolCallId, suspended.toolName, suspended.toolArgs);
     try {
+      await this.persistContinuationToolScope();
       toolResult = await tool.execute(
         suspended.toolCallId,
         suspended.toolArgs,
         fakeAbort.signal,
       );
     } catch (err) {
+      this.finishToolUsage(suspended.toolCallId, undefined, true);
       this.runningItem = priorActive;
       this.emitError(
         "replay_tool_failed",
@@ -1328,6 +1769,7 @@ export class Thread {
       );
       return;
     }
+    this.finishToolUsage(suspended.toolCallId, toolResult.details, false);
     this.runningItem = priorActive;
     this.agent.state.messages = [
       ...this.agent.state.messages,
@@ -1345,7 +1787,13 @@ export class Thread {
     // rest-state repair doesn't later rewrite it to an interrupted-error: the
     // tool DID run to completion on replay (its result was pushed above), it
     // just didn't flow through the agent loop's tool_execution_end.
-    await this.persistReplayedToolResult(suspended.toolCallId, toolResult);
+    await this.persistReplayedToolResult(suspended.queueItemId, suspended.toolCallId, toolResult);
+    await this.fencedEmit({
+      type: "tool_end", threadId: this.id, tool: suspended.toolName, callId: suspended.toolCallId,
+      result: toolResultText(toolResult), isError: false,
+      ...(toolResultImages(toolResult).length > 0 ? { resultData: toolResult } : {}),
+      ...toolOutcome(toolResult),
+    }, { queueItemId: suspended.queueItemId });
     await this.session.providers.store.clearSuspendedTurn(this.session.id, this.id, this.fence);
     this.blockedGateId = undefined;
     // Drive the continuation, recording any failure for settlement — a
@@ -1355,18 +1803,29 @@ export class Thread {
     // wedging or mislabeling it.
     let continueError: unknown;
     const baselineModel = this.agent.state.model;
-    const baselinePrompt = this.agent.state.systemPrompt;
     try {
       // Host resolver (if any) delivers this resumed turn's per-turn key
       // before the continuation LLM call; no-op when absent.
       await this.applyResolvedKeyForResume(this.runningItem ?? undefined);
       const runningItem = this.runningItem;
+      if (runningItem && this.fence) {
+        const store = this.session.providers.store;
+        const current = await store.getQueueItem(this.session.id, runningItem.id);
+        const fence = this.fence;
+        if (current?.status === "blocked_on_decision_gate") {
+          await this.fencedWrite(() =>
+            store.setSubmissionBlocked(this.session.id, this.id, runningItem.id, false, fence),
+          );
+        }
+      }
       if (
         runningItem &&
-        await this.publishActiveModelState(runningItem.id, this.agent.state.model)
+        await this.publishActiveModelState(runningItem.id, this.agent.state.model) &&
+        await this.canRunCurrentSubmission()
       ) {
         await this.agent.continue();
         await this.agent.waitForIdle();
+        await this.retryTransientTurnError();
       }
     } catch (err) {
       continueError = err;
@@ -1376,7 +1835,7 @@ export class Thread {
       );
     } finally {
       this.agent.state.model = baselineModel;
-      this.agent.state.systemPrompt = baselinePrompt;
+      this.fallbackModelSpec = undefined;
       this.turnApiKey = undefined;
     }
     // Settle the resumed turn (reconciliation owns a fresh fenced attempt via
@@ -1430,11 +1889,14 @@ export class Thread {
    * live tool_execution_end path.
    */
   private async persistReplayedToolResult(
+    queueItemId: string,
     toolCallId: string,
     result: { content?: unknown; details?: unknown },
   ): Promise<void> {
     const store = this.session.providers.store;
-    const entries = await store.getEntries(this.session.id, this.id);
+    const safeResult = this.session.providers.sanitizeToolOutput?.(this.session.id, result) ?? result;
+    // The suspended turn wrote the tool call, so its entries carry its queue item.
+    const entries = await store.getEntries(this.session.id, this.id, { queueItemId });
     for (const e of entries) {
       if (e.type !== "message" || e.role !== "assistant" || !e.parts) continue;
       const part = e.parts.find(
@@ -1443,13 +1905,27 @@ export class Thread {
       if (part && part.type === "tool_call") {
         part.status = "completed";
         const structured =
-          result && typeof result === "object" ? (result as Record<string, unknown>) : {};
-        part.result = { ...structured, text: renderToolResult(result) };
+          safeResult && typeof safeResult === "object" ? (safeResult as Record<string, unknown>) : {};
+        part.result = { ...structured, text: toolResultText(safeResult) };
         await this.fencedWrite(() =>
           store.updateEntry(this.session.id, this.id, e, this.fence),
         );
         return;
       }
+    }
+  }
+
+  /** Only a durable, registered approval is transferable. Abort the old drive without settling or withdrawing it. */
+  handoffParkedGate(): void {
+    if (!this.blockedGateId || !this.gates.isPending(this.blockedGateId)) return;
+    this.gateHandedOff = true;
+    this.agent.abort();
+    this.gates.handoff(this.blockedGateId);
+    if (this.rearmedGate) {
+      this.runningItem = null;
+      this.fence = undefined;
+      this.blockedGateId = undefined;
+      this.session.notifyExecutionIdle();
     }
   }
 
@@ -1459,6 +1935,7 @@ export class Thread {
    */
   armPendingGateForRestart(gate: DecisionGate, suspended: SuspendedTurnState): void {
     this.blockedGateId = gate.id;
+    this.rearmedGate = true;
     this.gates
       .register(gate, () => {
         // Terminalization is driven off the promise rejection below (which the
@@ -1470,6 +1947,7 @@ export class Thread {
         );
       })
       .catch((err) => {
+        if (err instanceof DecisionGateHandoffError) return;
         // Expiry / withdrawal of a re-armed gate must reach the SAME terminal
         // state as the live path: persist the gate's terminal status, flip the
         // durable block back to running, clear the suspended checkpoint, and
@@ -1491,6 +1969,7 @@ export class Thread {
           err instanceof Error ? err.message : String(err),
         );
       });
+    if (this.session.isExecutionFenced) this.handoffParkedGate();
   }
 
   /**
@@ -1503,10 +1982,10 @@ export class Thread {
    * already-past gate, which self-expires immediately and terminalizes.
    * Complements the low-latency in-memory `setTimeout` in `GateManager.register`.
    */
-  async sweepExpiredGates(): Promise<void> {
+  async sweepExpiredGates(snapshot?: readonly DecisionGate[]): Promise<void> {
     const store = this.session.providers.store;
     const now = Date.now();
-    const gates = await store.listDecisionGates(this.session.id, this.id);
+    const gates = snapshot ?? await store.listDecisionGates(this.session.id, this.id);
     // Lazily fetched once per sweep pass, shared by every lapsed gate.
     let suspended: SuspendedTurnState | null | undefined;
     for (const gate of gates) {
@@ -1701,7 +2180,7 @@ export class Thread {
         dedupeKey: req.dedupeKey,
       });
       if (sticky?.kind === "denied") {
-        return { ...sticky.resolution, gateOrdinal: sticky.gate.ordinal };
+        return { ...sticky.resolution, gateOrdinal: sticky.gate.ordinal, gateContext: sticky.gate.context ?? {} };
       }
       if (sticky?.kind === "expired") {
         throw new DecisionGateExpiredError(sticky.gate.id, sticky.gate.ordinal);
@@ -1751,7 +2230,7 @@ export class Thread {
           createdAt: Date.now(),
         };
         await fencedGateWrite(() =>
-          session.providers.store.appendEntries(session.id, this.id, [gateEntry], fence),
+          this.appendEntry(gateEntry, fence),
         );
       }
 
@@ -1771,11 +2250,7 @@ export class Thread {
       }
       this.lastEmittedStatus = "blocked_on_decision_gate";
       await this.fencedEmit(
-        {
-          type: "status",
-          threadId: this.id,
-          status: "blocked_on_decision_gate",
-        },
+        this.statusEvent("blocked_on_decision_gate"),
         { queueItemId: runningItemId },
       );
       await session.emit(
@@ -1791,7 +2266,7 @@ export class Thread {
     }
 
     try {
-      const rawResolution = await this.gates.register(gate, async (gateId) => {
+      const waiting = this.gates.register(gate, async (gateId) => {
         await session.providers.store.updateDecisionGateEntry(
           session.id,
           this.id,
@@ -1803,6 +2278,9 @@ export class Thread {
           { eventKey: `gate:${gateId}:expired`, queueItemId: runningItemId },
         );
       });
+      if (this.session.isExecutionFenced) this.handoffParkedGate();
+      if (gate.type === "question") await this.withdrawQuestionForMessage();
+      const rawResolution = await waiting;
       // Stamp the gate's ordinal onto the resolution before it is
       // persisted or handed back to the calling tool — the caller (e.g.
       // call_tool's policy audit) needs this to distinguish a
@@ -1829,8 +2307,9 @@ export class Thread {
       await fencedGateWrite(() =>
         session.providers.store.clearSuspendedTurn(session.id, this.id, fence),
       );
-      return resolution;
+      return { ...resolution, gateContext: gate.context ?? {} };
     } catch (err) {
+      if (err instanceof DecisionGateHandoffError) throw err;
       // Withdrawn or expired: persist the terminal status, then propagate.
       const reason = isDecisionGateWithdrawn(err) ? err.reason : undefined;
       await persistTerminalGate(
@@ -1919,23 +2398,791 @@ export class Thread {
     }
   }
 
+  /** Append one entry after the durable active leaf and advance the leaf. */
+  async appendEntry(entry: SessionEntry, fence?: WriteFence): Promise<void> {
+    const append = this.entryAppendTail.then(async () => {
+      if (this.activeLeafEntryId === undefined) {
+        const data = await this.session.providers.store.getThread(this.session.id, this.id);
+        this.activeLeafEntryId = data?.activeLeafEntryId;
+      }
+      entry.parentId = this.activeLeafEntryId ?? null;
+      await this.session.providers.store.appendEntries(
+        this.session.id,
+        this.id,
+        [entry],
+        fence,
+      );
+      this.activeLeafEntryId = entry.id;
+    });
+    this.entryAppendTail = append.catch(() => undefined);
+    return append;
+  }
+
+  /**
+   * `appendEntry`, but only while the active path still holds `anchorId`.
+   * Returns false, with nothing written, when an edit or a return moved the
+   * thread to another branch since the caller read `anchorId`.
+   */
+  private async appendOnPath(entry: SessionEntry, anchorId: string | undefined, fence?: WriteFence): Promise<boolean> {
+    let appended = false;
+    const append = this.entryAppendTail.then(async () => {
+      const store = this.session.providers.store;
+      const snapshot = await store.getThreadSnapshot(this.session.id, this.id);
+      if (!snapshot) return;
+      const leaf = snapshot.thread.activeLeafEntryId ?? null;
+      if (anchorId !== undefined && !walkTranscriptDag(snapshot.entries, leaf ?? undefined).some((e) => e.id === anchorId)) return;
+      entry.parentId = leaf;
+      if (!(await store.appendBranch(this.session.id, this.id, [entry], { expectedLeafId: leaf, fence }))) return;
+      this.activeLeafEntryId = entry.id;
+      appended = true;
+    });
+    this.entryAppendTail = append.catch(() => undefined);
+    await append;
+    return appended;
+  }
+
+  // ── Branches (docs/specs/2026-10-22-thread-edit-fork-design.md) ──────
+
+  /**
+   * Refuse an edit the rules forbid (spec decision 6): the message must be
+   * on the active path, typed by `editorId`, not from a channel, and not
+   * followed by another person's message. One edit waits at a time.
+   * Returns the active path and the message's place on it.
+   */
+  private async checkEdit(entryId: string, editorId: string | undefined): Promise<{ active: SessionEntry[]; index: number }> {
+    if (this.session.options.readOnlyReason) throw new ValidationError(this.session.options.readOnlyReason);
+    if (!editorId) throw new ValidationError("Only a person can edit a message. Send the text as a new message.");
+    const store = this.session.providers.store;
+    const snapshot = await store.getThreadSnapshot(this.session.id, this.id);
+    if (!snapshot) throw new NotFoundError("thread", this.id);
+    const active = walkTranscriptDag(snapshot.entries, snapshot.thread.activeLeafEntryId);
+    const index = this.validateEditPath(active, entryId, editorId);
+    // An edit that already wrote its branch note has started; its turn may
+    // run on, or wait for an approval, without blocking the next edit.
+    const unsettled = await store.listUnsettledSubmissions(this.session.id);
+    const waiting = unsettled.some((item) => item.threadId === this.id && !item.supersededByItemId && readThreadEdit(item.metadata)
+      && !snapshot.entries.some((entry) => entry.type === "branch_summary" && entry.queueItemId === item.id));
+    if (waiting) {
+      throw new ValidationError("Another edit is waiting to start in this thread. Wait for it to start, then edit again.");
+    }
+    return { active, index };
+  }
+
+  /** Recheck ownership against the snapshot used for the branch CAS. */
+  private validateEditPath(active: readonly SessionEntry[], entryId: string, editorId: string | undefined): number {
+    if (!editorId) throw new ValidationError("Only a person can edit a message. Send the text as a new message.");
+    const index = active.findIndex((entry) => entry.id === entryId);
+    const target = active[index];
+    if (!target) {
+      throw new ValidationError("That message is not in this version of the conversation. Reload the thread, then edit it again.");
+    }
+    if (target.type !== "message" || target.role !== "user" || target.signal) {
+      throw new ValidationError("Only a message a person typed can be edited.");
+    }
+    if (target.author?.id !== editorId) {
+      throw new ValidationError("Only the person who wrote a message can edit it. Branch into a new thread to try another version.");
+    }
+    if (target.channel) {
+      throw new ValidationError(`This message came from ${channelLabel(target.channel.channelType)}, and Valet cannot change the copy there. Branch into a new thread instead.`);
+    }
+    const later = laterOtherAuthor(active.slice(index + 1), editorId);
+    if (later) {
+      throw new ValidationError(`${later} wrote after this message, and an edit would remove that message. Branch into a new thread instead.`);
+    }
+    return index;
+  }
+
+  /**
+   * What an edit of `entryId` would replace, from the same records as the
+   * branch note, so the edit bar can show it before Send. A refused edit
+   * returns the reason instead.
+   */
+  async previewEdit(entryId: string, editorId: string | undefined): Promise<EditPreview> {
+    let checked: { active: SessionEntry[]; index: number };
+    try {
+      checked = await this.checkEdit(entryId, editorId);
+    } catch (err) {
+      if (err instanceof ValidationError) return { refusal: err.message, turns: 0, actions: [], moreActions: 0, grants: [], files: [], pushed: false };
+      throw err;
+    }
+    const left = checked.active.slice(checked.index);
+    const ran = summarizeBranchActions(left, this.branchNoteTools());
+    const files = planFileUndo(left).flatMap((repo) => repo.paths.map((p) => ({ repo: repo.repo, path: p.path })));
+    return {
+      turns: left.filter((entry) => entry.type === "message" && entry.role === "user" && !entry.signal).length,
+      actions: ran.actions,
+      moreActions: ran.moreActions,
+      grants: ran.grants,
+      files,
+      pushed: pushedFrom(left),
+    };
+  }
+
+  /**
+   * Queue an edit of one of the author's own earlier messages. The edited
+   * text runs next: it stops the running turn the way steer does, and queued
+   * messages run after it. The leaf moves when the edit is claimed
+   * (`applyEdit`), after the stopped turn settled.
+   */
+  async editMessage(
+    entryId: string,
+    content: PromptContent,
+    opts: PromptOptions,
+    choices: { undoFiles?: boolean } = {},
+  ): Promise<PromptReceipt> {
+    const store = this.session.providers.store;
+    await this.checkEdit(entryId, opts.author?.id);
+
+    const edit: ThreadEdit = { entryId, ...(choices.undoFiles ? { undoFiles: true } : {}) };
+    const prepared = this.prepareSubmissionContent(content, {
+      ...opts,
+      metadata: { ...opts.metadata, [THREAD_EDIT_KEY]: edit },
+    });
+    const item = this.buildQueueItem(prepared.content, {
+      dispatchId: prepared.dispatchId,
+      author: opts.author,
+      channel: opts.channel,
+      replyTarget: opts.replyTarget,
+      model: opts.model,
+      role: opts.role,
+      metadata: prepared.metadata,
+    });
+    // The marker comes before the leaf can move, so a reader never sees a
+    // moved leaf through the one-path read (`readEntries`).
+    await this.patchThreadMetadata((current) => ({ ...current, [THREAD_BRANCHED_KEY]: true }), "after-save");
+    const { item: admitted, supersededItemIds } = await store.admitSubmission(
+      this.session.id,
+      this.id,
+      item,
+      this.session.isThreadExecutionFenced(this.id)
+        ? { maxPending: this.session.options.maxPendingPerThread ?? MAX_PENDING_PER_THREAD }
+        : { steer: true, steerScope: "active" },
+    );
+    // The stopped turn can take a while to wind down (a tool waiting on the
+    // sandbox), and the person who sent the edit must not wait for it. The
+    // abort signal is set synchronously; the claim loop runs the edit once
+    // the stopped turn settles.
+    if (supersededItemIds.length > 0) {
+      void this.handleSteerSupersession(supersededItemIds).catch((err: unknown) => {
+        this.emitError("edit_supersession_failed", err instanceof Error ? err.message : String(err));
+      });
+    }
+    await this.emitQueueState();
+    void this.kick();
+    return {
+      sessionId: this.session.id,
+      threadId: this.id,
+      queueItemId: admitted.id,
+      status: receiptStatus(admitted.status),
+    };
+  }
+
+  /**
+   * Move the leaf for a claimed edit: write a branch note whose parent is the
+   * entry before the edited message, and rebuild the agent transcript from
+   * the new path. The claim comes after the stopped turn settled, so none of
+   * its writes can land on the new branch. A retried attempt finds its note
+   * and does nothing. Returns false when the attempt went stale.
+   */
+  private async applyEdit(item: QueueItem): Promise<boolean> {
+    const edit = readThreadEdit(item.metadata);
+    if (!edit) return true;
+    const store = this.session.providers.store;
+    const fence = this.fence;
+    const move = this.entryAppendTail.then(async (): Promise<string | undefined> => {
+      const snapshot = await store.getThreadSnapshot(this.session.id, this.id);
+      if (!snapshot) throw new NotFoundError("thread", this.id);
+      if (snapshot.entries.some((entry) => entry.type === "branch_summary" && entry.queueItemId === item.id)) return undefined;
+      const leaf = snapshot.thread.activeLeafEntryId ?? null;
+      const active = walkTranscriptDag(snapshot.entries, leaf ?? undefined);
+      const index = this.validateEditPath(active, edit.entryId, item.author?.id);
+      const left = active.slice(index);
+      const noteId = uid("e");
+      // The entry before it on the path, not its parentId: in a transcript
+      // from before TKAI-211, the edited message's parent is null.
+      const note = this.buildBranchNote("edit", {
+        id: noteId,
+        parentId: active[index - 1]?.id ?? null,
+        left,
+        actorId: item.author?.id,
+        queueItemId: item.id,
+      });
+      if (!(await store.appendBranch(this.session.id, this.id, [note], { expectedLeafId: leaf, fence }))) {
+        throw new ConflictError("The thread changed while the edit started. Edit the message again.");
+      }
+      this.activeLeafEntryId = note.id;
+      this.rehydrateTranscript([...snapshot.entries, note]);
+      const restored = edit.undoFiles ? await this.restoreBranchFiles(note, planFileUndo(left), fence) : note;
+      this.rehydrateTranscript([...snapshot.entries, restored]);
+      this.branchSwitchCachePending = true;
+      return note.id;
+    });
+    this.entryAppendTail = move.then(() => undefined, () => undefined);
+    let noteId: string | undefined;
+    try {
+      noteId = await move;
+    } catch (err) {
+      if (!(err instanceof StaleAttemptError)) throw err;
+      this.staleFenceDetected = true;
+      this.emitError("stale_fence", `turn superseded for item ${err.itemId}`);
+      return false;
+    }
+    if (noteId) await this.session.emit({ type: "branch_switched", threadId: this.id, noteEntryId: noteId }, { queueItemId: item.id });
+    return true;
+  }
+
+  /**
+   * Go back to the branch a note left. The thread must be idle: a running
+   * turn writes to the current branch. Writes a note for the branch it
+   * leaves, so the person can return again.
+   */
+  async returnToBranch(
+    noteEntryId: string,
+    actor: { id: string },
+    choices: { restoreFiles?: boolean } = {},
+  ): Promise<{ noteEntryId: string }> {
+    const result = await this.session.claimExecution(() => this.returnToBranchInner(noteEntryId, actor, choices), this.id);
+    if (!result) throw new ValidationError("The session configuration or sandbox is changing. Reload the thread and try again.");
+    return result;
+  }
+
+  private async returnToBranchInner(
+    noteEntryId: string,
+    actor: { id: string },
+    choices: { restoreFiles?: boolean } = {},
+  ): Promise<{ noteEntryId: string }> {
+    if (this.session.options.readOnlyReason) throw new ValidationError(this.session.options.readOnlyReason);
+    const store = this.session.providers.store;
+    const busy = "Valet is working in this thread. Stop it, then go back to the earlier version.";
+    const unsettled = await store.listUnsettledSubmissions(this.session.id);
+    if (this.runningItem || unsettled.some((item) => item.threadId === this.id && (item.status === "running" || item.status === "blocked_on_decision_gate"))) {
+      throw new ValidationError(busy);
+    }
+    await this.patchThreadMetadata((current) => ({ ...current, [THREAD_BRANCHED_KEY]: true }), "after-save");
+    const move = this.entryAppendTail.then(async (): Promise<string> => {
+      // A claim can start between the check above and this point.
+      if (this.runningItem) throw new ValidationError(busy);
+      const snapshot = await store.getThreadSnapshot(this.session.id, this.id);
+      if (!snapshot) throw new NotFoundError("thread", this.id);
+      const leaf = snapshot.thread.activeLeafEntryId ?? null;
+      const active = walkTranscriptDag(snapshot.entries, leaf ?? undefined);
+      const note = active.find((entry) => entry.id === noteEntryId);
+      if (note?.type !== "branch_summary" || readBranchNote(note.metadata)?.kind === "fork") {
+        throw new ValidationError("That version note is not in this conversation. Reload the thread and try again.");
+      }
+      const target = snapshot.entries.find((entry) => entry.id === note.branchLeafId);
+      if (!target) throw new ValidationError("The earlier version is not in this thread, so Valet cannot go back to it.");
+      const onTarget = new Set(walkTranscriptDag(snapshot.entries, target.id).map((entry) => entry.id));
+      const firstLeft = active.findIndex((entry) => !onTarget.has(entry.id));
+      const left = firstLeft < 0 ? [] : active.slice(firstLeft);
+      const other = laterOtherAuthor(left, actor.id);
+      if (other) {
+        throw new ValidationError(`${other} wrote in this version, and going back would remove that message. Branch into a new thread instead.`);
+      }
+      const freshId = uid("e");
+      const fresh = this.buildBranchNote("return", { id: freshId, parentId: target.id, left, actorId: actor.id });
+      if (!(await store.appendBranch(this.session.id, this.id, [fresh], { expectedLeafId: leaf }))) {
+        throw new ConflictError("The thread changed. Reload it and try again.");
+      }
+      this.activeLeafEntryId = fresh.id;
+      const restored = choices.restoreFiles
+        ? await this.restoreBranchFiles(fresh, returnPlan(planFileUndo(left), readBranchNote(note.metadata)?.files ?? []))
+        : fresh;
+      this.branchSwitchCachePending = true;
+      if (this.transcriptPending) return fresh.id;
+      this.rehydrateTranscript([...snapshot.entries, restored]);
+      return fresh.id;
+    });
+    this.entryAppendTail = move.then(() => undefined, () => undefined);
+    const freshId = await move;
+    await this.session.emit({ type: "branch_switched", threadId: this.id, noteEntryId: freshId });
+    return { noteEntryId: freshId };
+  }
+
+  /**
+   * The active path through `lastEntryId` (null: nothing), for a fork to
+   * copy. Refuses a path that holds a tool call still running. Call it
+   * before creating the destination thread, so a refused fork leaves no
+   * empty thread behind.
+   */
+  async forkPath(lastEntryId: string | null): Promise<SessionEntry[]> {
+    const snapshot = await this.session.providers.store.getThreadSnapshot(this.session.id, this.id);
+    if (!snapshot) throw new NotFoundError("thread", this.id);
+    const active = walkTranscriptDag(snapshot.entries, snapshot.thread.activeLeafEntryId);
+    const end = lastEntryId === null ? -1 : active.findIndex((entry) => entry.id === lastEntryId);
+    if (lastEntryId !== null && end < 0) {
+      throw new ValidationError("That message is not in this version of the conversation. Reload the thread and try again.");
+    }
+    const path = active.slice(0, end + 1);
+    if (path.some((entry) => entry.type === "message" && entry.parts?.some((part) => part.type === "tool_call" && part.status === "running"))) {
+      throw new ValidationError("That reply is still running. Wait for it to finish, then branch.");
+    }
+    return path;
+  }
+
+  /**
+   * Fill this empty thread with copies of a fork path (`forkPath`), then a
+   * fork note. Copies get new ids and re-linked parents. They drop their
+   * submission link, usage, and cost, so usage views count each model call
+   * once. Decision-gate entries stay behind: their gate rows belong to the
+   * source thread.
+   */
+  async copyPath(
+    path: readonly SessionEntry[],
+    opts: {
+      source: { sessionId: string; threadId: string };
+      actorId?: string;
+      /** Repositories whose files come along to this thread's own working directory (`exportForkSeed`). */
+      seed?: { repos: ForkSeedRecord[] } | { skipped: string };
+    },
+  ): Promise<void> {
+    const store = this.session.providers.store;
+    const ids = new Map<string, string>();
+    const copies: SessionEntry[] = [];
+    let parentId: string | null = null;
+    for (const entry of path) {
+      if (entry.type === "decision_gate") continue;
+      const copy = copyEntry(entry, { id: uid("e"), sessionId: this.session.id, threadId: this.id, parentId }, ids);
+      ids.set(entry.id, copy.id);
+      copies.push(copy);
+      parentId = copy.id;
+    }
+    const lastEntryId = path[path.length - 1]?.id ?? "";
+    const note = this.buildBranchNote("fork", {
+      parentId,
+      left: [],
+      actorId: opts.actorId,
+      source: { ...opts.source, sameWorkingDirectory: opts.source.sessionId === this.session.id },
+      branchRootId: lastEntryId,
+      branchLeafId: lastEntryId,
+      ...(opts.seed && "repos" in opts.seed ? { seed: opts.seed.repos } : {}),
+      ...(opts.seed && "skipped" in opts.seed ? { seedSkipped: opts.seed.skipped } : {}),
+    });
+    const append = this.entryAppendTail.then(async () => {
+      if (!(await store.appendBranch(this.session.id, this.id, [...copies, note], { expectedLeafId: null }))) {
+        throw new ValidationError("The new thread already has messages. Branch again into a new thread.");
+      }
+      this.activeLeafEntryId = note.id;
+      this.transcriptPending = true;
+    });
+    this.entryAppendTail = append.catch(() => undefined);
+    await append;
+    if (opts.seed && "repos" in opts.seed && opts.seed.repos.length > 0) {
+      await this.patchThreadMetadata((current) => ({ ...current, [FORK_SEED_PENDING_KEY]: true }), "before-save");
+    }
+  }
+
+  /** How a branch note sorts each tool by what its calls leave behind (`ToolDef.sideEffect`). */
+  private branchNoteTools(): { silent: Set<string>; files: Set<string>; plugin: Set<string> } {
+    const defs: ToolDef[] = [this.nativeImages.tool(), ...this.session.builtinTools, ...(this.session.options.tools ?? [])];
+    const names = (keep: (def: ToolDef) => boolean) => new Set(defs.filter(keep).map((def) => def.name));
+    return {
+      silent: names((def) => def.sideEffect === "none" || (def.concurrencySafe === true && !def.requiresApproval)),
+      files: names((def) => def.sideEffect === "files"),
+      plugin: names((def) => def.policyChecked === true),
+    };
+  }
+
+  private buildBranchNote(kind: BranchNoteKind, args: {
+    id?: string;
+    parentId: string | null;
+    left: readonly SessionEntry[];
+    actorId?: string;
+    queueItemId?: string;
+    source?: BranchNote["source"];
+    branchRootId?: string;
+    branchLeafId?: string;
+    files?: BranchNoteRepoFiles[];
+    seed?: ForkSeedRecord[];
+    seedSkipped?: string;
+  }): BranchSummaryEntry {
+    const ran = kind === "fork"
+      ? { actions: [], moreActions: 0, filesChanged: false, grants: [] }
+      : summarizeBranchActions(args.left, this.branchNoteTools());
+    const firstMessage = args.left.find((entry) => entry.type === "message" && entry.role === "user" && !entry.signal);
+    const note: BranchNote = {
+      kind,
+      ...(firstMessage?.type === "message" ? {
+        version: { excerpt: firstMessage.content.replace(/\s+/g, " ").trim().slice(0, 180), createdAt: firstMessage.createdAt },
+      } : {}),
+      ...ran,
+      ...(args.files && args.files.length > 0 ? { files: args.files } : {}),
+      ...(args.actorId ? { actorId: args.actorId } : {}),
+      ...(args.source ? { source: args.source } : {}),
+      ...(args.seed && args.seed.length > 0 ? { seed: args.seed } : {}),
+      ...(args.seedSkipped ? { seedSkipped: args.seedSkipped } : {}),
+    };
+    return {
+      id: args.id ?? uid("e"),
+      sessionId: this.session.id,
+      threadId: this.id,
+      parentId: args.parentId,
+      type: "branch_summary",
+      branchRootId: args.branchRootId ?? args.left[0]?.id ?? "",
+      branchLeafId: args.branchLeafId ?? args.left[args.left.length - 1]?.id ?? "",
+      summary: branchNoteText(note),
+      metadata: { [BRANCH_NOTE_KEY]: note },
+      queueItemId: args.queueItemId,
+      createdAt: Date.now(),
+    };
+  }
+
+  /**
+   * Add a signal to the transcript without a model call, after any running
+   * turn (`RECORD_ONLY_KEY`). Slack edits use it: the model reads what
+   * changed on its next turn and does not reply to the edit itself.
+   */
+  async recordSignal(content: SignalContent, opts: Pick<PromptOptions, "author" | "channel" | "dispatchId">): Promise<PromptReceipt> {
+    return this.submitPrompt(content, { ...opts, queueMode: "followup", metadata: { [RECORD_ONLY_KEY]: true } });
+  }
+
+  // ── File checkpoints (spec: "File checkpoints") ─────────────────────
+
+  /** A tool whose calls can change files snapshots the repositories before the turn's first such call. */
+  private withFileCheckpoint(def: ToolDef): ToolDef {
+    return {
+      ...def,
+      execute: async (args, ctx) => {
+        await this.beginTurnCheckpoint();
+        const sandbox = new Proxy(ctx.sandbox, {
+          get: (target, property) => {
+            if (property === "writeFile") return async (path: string, content: string): Promise<void> => {
+              const key = normalizeGatePath(path, ctx.cwd ?? this.session.options.workspace);
+              if (this.turnFileWritesUnavailable) return target.writeFile(path, content);
+              let before: string | undefined;
+              let tooLarge = content.length > 8 * 1024 * 1024;
+              try { tooLarge ||= (await target.stat(path)).size > 16 * 1024 * 1024; } catch { /* A missing preimage is checked against the snapshot. */ }
+              if (!tooLarge) {
+                try { before = await target.readFile(path); } catch { /* Unreadable preimages cannot match an existing snapshot blob. */ }
+              }
+              const previous = this.turnFileWrites.get(key);
+              await target.writeFile(path, content);
+              this.turnFileWriteBytes += 2 * ((before?.length ?? 0) + content.length);
+              if (tooLarge || this.turnFileWriteBytes > 50 * 1024 * 1024) {
+                this.turnFileWrites.clear();
+                this.turnFileWritesUnavailable = true;
+                return;
+              }
+              this.turnFileWrites.set(key, {
+                before: previous ? previous.before : before, after: content,
+                conflicted: previous?.conflicted === true || (previous !== undefined && previous.after !== before),
+              });
+            };
+            const value: unknown = Reflect.get(target, property, target);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+        return def.execute(args, { ...ctx, sandbox });
+      },
+    };
+  }
+
+  /** Once per turn. A failed snapshot never blocks the tool: the turn just has no checkpoint. */
+  private beginTurnCheckpoint(): Promise<PendingCheckpoint | undefined> {
+    this.turnCheckpoint ??= this.takeBeforeSnapshots().catch((err: unknown) => {
+      reportError({ area: "engine", reason: "file_checkpoint" }, `[engine] file checkpoint skipped session=${this.session.id} thread=${this.id}`, err);
+      return undefined;
+    });
+    return this.turnCheckpoint;
+  }
+
+  private async takeBeforeSnapshots(): Promise<PendingCheckpoint | undefined> {
+    const entryId = this.turnUserEntryId;
+    if (!entryId) return undefined;
+    const sandbox = this.session.sandbox;
+    const workspace = this.session.options.workspace;
+    const repos: PendingCheckpoint["repos"] = [];
+    const unavailable: NonNullable<TurnCheckpoint["unavailable"]> = [];
+    const found = await findRepos(sandbox, workspace);
+    for (const repo of found.includes(".") ? found : [...found, WORKSPACE_FILES]) {
+      try {
+        const snapshot = await snapshotRepo(sandbox, repoDir(workspace, repo), checkpointRef(this.id, entryId, "before"), repo === WORKSPACE_FILES);
+        repos.push({ repo, before: snapshot.commit, partial: snapshot.partial });
+      } catch (err) {
+        unavailable.push({ repo, reason: "The before snapshot failed or exceeded the file size limit." });
+        reportError({ area: "engine", reason: "file_checkpoint" }, `[engine] file checkpoint skipped repo=${repo} thread=${this.id}`, err);
+      }
+    }
+    return { entryId, repos, unavailable, discovered: found };
+  }
+
+  /**
+   * Snapshot the turn's repositories again and record what changed on the
+   * turn's user entry (`FILE_CHECKPOINT_KEY`). Never throws: a turn's
+   * result does not depend on its checkpoint.
+   */
+  private async finishTurnCheckpoint(): Promise<void> {
+    const pending = this.turnCheckpoint;
+    this.turnCheckpoint = undefined;
+    try {
+      const taken = pending ? await pending : undefined;
+      if (!taken) return;
+      const unavailable = [...taken.unavailable];
+      const sandbox = this.session.sandbox;
+      const workspace = this.session.options.workspace;
+      const repos: RepoCheckpoint[] = [];
+      for (const repo of taken.repos) {
+        try {
+          const dir = repoDir(workspace, repo.repo);
+          const after = await snapshotRepo(sandbox, dir, checkpointRef(this.id, taken.entryId, "after"), repo.repo === WORKSPACE_FILES);
+          const changed = await changedPaths(sandbox, dir, repo.before, after.commit, repo.repo === WORKSPACE_FILES);
+          if (repo.repo === WORKSPACE_FILES && changed.length === 0 && after.empty) continue;
+          repos.push({
+            repo: repo.repo,
+            before: repo.before,
+            after: after.commit,
+            changed,
+            authoredPaths: await this.authoredCheckpointPaths(dir, repo.before, after.commit, changed, repo.repo === WORKSPACE_FILES),
+            ...(after.branch ? { branch: after.branch } : {}),
+            ...(repo.partial || after.partial ? { partial: true } : {}),
+          });
+        } catch (err) {
+          unavailable.push({ repo: repo.repo, reason: "The after snapshot failed or exceeded the file size limit." });
+          reportError({ area: "engine", reason: "file_checkpoint" }, `[engine] file checkpoint not recorded repo=${repo.repo} thread=${this.id}`, err);
+        }
+      }
+      for (const repo of await findRepos(sandbox, workspace)) {
+        if (taken.discovered.includes(repo)) continue;
+        try {
+          const after = await snapshotRepo(sandbox, repoDir(workspace, repo), checkpointRef(this.id, taken.entryId, "after"));
+          repos.push({
+            repo, before: after.commit, after: after.commit, changed: [],
+            ...(after.branch ? { branch: after.branch } : {}),
+            ...(after.partial ? { partial: true } : {}),
+            undoUnavailable: "This repository was created during the turn. Its earlier file state was not checkpointed.",
+          });
+        } catch (err) {
+          unavailable.push({ repo, reason: "The new repository snapshot failed." });
+          reportError({ area: "engine", reason: "file_checkpoint" }, `[engine] new repository checkpoint not recorded repo=${repo}`, err);
+        }
+      }
+      if (repos.length === 0 && unavailable.length === 0) return;
+      const store = this.session.providers.store;
+      const entries = await store.getEntries(this.session.id, this.id, this.runningItem ? { queueItemId: this.runningItem.id } : undefined);
+      const entry = entries.find((candidate) => candidate.id === taken.entryId);
+      if (entry?.type !== "message") return;
+      const checkpoint: TurnCheckpoint = { repos, ...(unavailable.length > 0 ? { unavailable } : {}) };
+      const updated: MessageEntry = { ...entry, metadata: { ...entry.metadata, [FILE_CHECKPOINT_KEY]: checkpoint } };
+      await this.fencedWrite(() => store.updateEntry(this.session.id, this.id, updated, this.fence));
+    } catch (err) {
+      reportError({ area: "engine", reason: "file_checkpoint" }, `[engine] file checkpoint not recorded session=${this.session.id} thread=${this.id}`, err);
+    } finally {
+      this.turnFileWrites.clear();
+      this.turnFileWriteBytes = 0;
+      this.turnFileWritesUnavailable = false;
+    }
+  }
+
+  /** Only actual tool writes with matching preimages and results can be undone. */
+  private async authoredCheckpointPaths(dir: string, before: string, after: string, changed: readonly string[], workspaceFiles: boolean): Promise<string[]> {
+    if (changed.length === 0 || this.turnFileWritesUnavailable || this.turnFileWrites.size === 0) return [];
+    const quote = (value: string) => "'" + value.replace(/'/g, "'\\''") + "'";
+    const git = workspaceFiles ? "git --git-dir=.valet-file-checkpoints --work-tree=. --literal-pathspecs" : "git --literal-pathspecs";
+    const tree = async (commit: string) => {
+      const result = await this.session.sandbox.exec(`${git} ls-tree -r -z ${quote(commit)} -- ${changed.map(quote).join(" ")}`, { cwd: dir, timeout: 20_000 });
+      if (result.exitCode !== 0 || result.timedOut) throw new Error("File ownership snapshot lookup failed");
+      const files = new Map<string, { mode: string; hash: string }>();
+      for (const record of result.stdout.split("\0")) {
+        const tab = record.indexOf("\t");
+        if (tab < 0) continue;
+        const [mode, type, hash] = record.slice(0, tab).split(" ");
+        if (mode && type === "blob" && hash) files.set(record.slice(tab + 1), { mode, hash });
+      }
+      return files;
+    };
+    const original = await tree(before);
+    const final = await tree(after);
+    const blob = async (content: string) => {
+      const data = new TextEncoder().encode(content);
+      const header = new TextEncoder().encode(`blob ${data.length}\0`);
+      const bytes = new Uint8Array(header.length + data.length);
+      bytes.set(header); bytes.set(data, header.length);
+      const digest = await crypto.subtle.digest(after.length === 64 ? "SHA-256" : "SHA-1", bytes);
+      return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+    };
+    const authored: string[] = [];
+    for (const path of changed) {
+      const write = this.turnFileWrites.get(normalizeGatePath(path, dir));
+      if (!write || write.conflicted) continue;
+      const old = original.get(path);
+      const current = final.get(path);
+      if (!current || !["100644", "100755"].includes(current.mode) || current.mode !== (old?.mode ?? "100644")) continue;
+      if (current.hash !== await blob(write.after)) continue;
+      if (write.before === undefined ? old !== undefined : old?.hash !== await blob(write.before)) continue;
+      authored.push(path);
+    }
+    return authored;
+  }
+
+  /** Commit the branch first, then journal each restore point before files change. */
+  private async restoreBranchFiles(note: BranchSummaryEntry, plan: readonly RepoRestore[], fence?: WriteFence): Promise<BranchSummaryEntry> {
+    const facts = readBranchNote(note.metadata);
+    if (!facts || plan.length === 0) return note;
+    const store = this.session.providers.store;
+    const update = async (files: BranchNoteRepoFiles[], writeFence?: WriteFence): Promise<BranchSummaryEntry> => {
+      const updatedFacts = { ...facts, files };
+      const updated: BranchSummaryEntry = {
+        ...note, summary: branchNoteText(updatedFacts), metadata: { ...note.metadata, [BRANCH_NOTE_KEY]: updatedFacts },
+      };
+      await store.updateEntry(this.session.id, this.id, updated, writeFence);
+      return updated;
+    };
+    let stale: StaleAttemptError | undefined;
+    const files = await this.undoFileChanges(plan, note.id, async (journal) => {
+      try { await update(journal, fence); }
+      catch (err) {
+        if (err instanceof StaleAttemptError) stale = err;
+        throw err;
+      }
+    });
+    // The result belongs to an already committed note. Keep its recovery data
+    // even if the turn's lease expires while the sandbox finishes restoring.
+    const restored = await update(files ?? []);
+    if (stale) throw stale;
+    return restored;
+  }
+
+  /** Run a file plan with a restore point per repository, named for the note that records it. */
+  private async undoFileChanges(plan: readonly RepoRestore[], noteId: string, onPrepared?: (journal: BranchNoteRepoFiles[]) => Promise<void>): Promise<BranchNoteRepoFiles[] | undefined> {
+    if (plan.length === 0) return undefined;
+    const journal: BranchNoteRepoFiles[] = [];
+    const results = await restorePaths(
+      this.session.sandbox,
+      this.session.options.workspace,
+      plan,
+      (repo) => checkpointRef(this.id, noteId, `restore-${plan.findIndex((r) => r.repo === repo)}`),
+      onPrepared ? async (repo, restorePoint) => {
+        journal.push({
+          repo, restored: [], removed: [], skipped: [], restorePoint,
+          bases: Object.fromEntries((plan.find((entry) => entry.repo === repo)?.paths ?? []).map((path) => [path.path, path.source])),
+          failed: "File restoration has not completed. Stop the turn and go back to recover the restore point.",
+        });
+        await onPrepared(journal);
+      } : undefined,
+    );
+    return results.map((result) => {
+      const sources = new Map(plan.find((r) => r.repo === result.repo)?.paths.map((p) => [p.path, p.source]) ?? []);
+      // A failed command may have changed a path before reporting success.
+      // Retain the full prepared recovery map for every uncertain result.
+      const recoverable = result.failed ? [...sources.keys()] : [...result.restored, ...result.removed];
+      const bases = Object.fromEntries(recoverable.flatMap((path) => {
+        const source = sources.get(path);
+        return source ? [[path, source]] : [];
+      }));
+      return {
+        repo: result.repo,
+        restored: result.restored,
+        removed: result.removed,
+        skipped: result.skipped,
+        ...(result.failed ? { failed: result.failed } : {}),
+        ...(result.restorePoint ? { restorePoint: result.restorePoint } : {}),
+        ...(Object.keys(bases).length > 0 ? { bases } : {}),
+      };
+    });
+  }
+
+  /**
+   * Copy a fork seed's files into this thread's own working directory once,
+   * before its first model call, and rewrite the fork note to say what came
+   * along. Returns without work when there is no pending seed.
+   */
+  private async applyForkSeed(): Promise<void> {
+    // This runs before every turn, so the common case must not read the
+    // thread: only a fork with files pending (or an older fork that has not
+    // checked yet) goes on.
+    const metadata = this.threadMetadata;
+    if (metadata?.[FORK_SEED_APPLIED_KEY] === true) return;
+    if (metadata?.[FORK_SEED_PENDING_KEY] !== true && metadata?.[LEGACY_FORK_OF_KEY] === undefined) return;
+    const store = this.session.providers.store;
+    const snapshot = await this.transcriptSnapshot();
+    const note = walkTranscriptDag(snapshot.entries, snapshot.thread.activeLeafEntryId)
+      // Copied history can contain completed forks. This destination owns
+      // the newest fork note on its active path.
+      .reverse().find((entry): entry is BranchSummaryEntry => entry.type === "branch_summary" && readBranchNote(entry.metadata)?.kind === "fork");
+    const facts = note ? readBranchNote(note.metadata) : undefined;
+    if (!note || !facts?.seed || facts.seedResult) {
+      await this.patchThreadMetadata((current) => ({ ...current, [FORK_SEED_APPLIED_KEY]: true, [FORK_SEED_PENDING_KEY]: false }), "before-save");
+      return;
+    }
+    const blobs = this.session.providers.blobs;
+    const seedResult: NonNullable<BranchNote["seedResult"]> = [];
+    for (const seed of facts.seed) {
+      try {
+        if (!blobs) throw new Error("this deployment has no blob store");
+        const blob = await blobs.get(seed.blobKey);
+        if (!blob) throw new Error("the saved files are gone");
+        const bundle = new Uint8Array(await new Response(blob.data).arrayBuffer());
+        const paths = await applySeedBundle(this.session.sandbox, this.session.options.workspace, seed, bundle);
+        seedResult.push({ repo: seed.repo, paths });
+      } catch (err) {
+        seedResult.push({ repo: seed.repo, paths: [], failed: err instanceof Error ? err.message : String(err) });
+      }
+    }
+    const updatedFacts: BranchNote = { ...facts, seedResult };
+    const updated: BranchSummaryEntry = { ...note, summary: branchNoteText(updatedFacts), metadata: { ...note.metadata, [BRANCH_NOTE_KEY]: updatedFacts } };
+    await this.fencedWrite(() => store.updateEntry(this.session.id, this.id, updated, this.fence));
+    await this.patchThreadMetadata((current) => ({ ...current, [FORK_SEED_APPLIED_KEY]: true, [FORK_SEED_PENDING_KEY]: false }), "before-save");
+    this.rehydrateTranscript(snapshot.entries.map((entry) => entry.id === note.id ? updated : entry));
+  }
+
+  /** Every entry, payloads included. Compaction prunes, selects its cut point
+   * and rebuilds from all path entries, so it must not see stubs. */
+  private async fullSnapshot(): Promise<{ thread: ThreadData; entries: SessionEntry[] }> {
+    const snapshot = await this.session.providers.store.getThreadSnapshot(this.session.id, this.id);
+    if (!snapshot) throw new Error(`thread not found: ${this.id}`);
+    this.activeLeafEntryId = snapshot.thread.activeLeafEntryId;
+    return snapshot;
+  }
+
+  private async transcriptSnapshot(keepQueueItemId?: string): Promise<{ thread: ThreadData; entries: SessionEntry[] }> {
+    const store = this.session.providers.store;
+    const snapshot = store.getTranscriptSnapshot
+      ? await store.getTranscriptSnapshot(this.session.id, this.id, keepQueueItemId === undefined ? undefined : { keepQueueItemId })
+      : await store.getThreadSnapshot(this.session.id, this.id);
+    if (!snapshot) throw new Error(`thread not found: ${this.id}`);
+    this.activeLeafEntryId = snapshot.thread.activeLeafEntryId;
+    return snapshot;
+  }
+
   /** Load restored history only when this thread needs an agent transcript. */
   private async ensureTranscript(): Promise<void> {
+    // Every caller is about to use the transcript, so mark it used even when
+    // it is already loaded: a gate reconcile awaits store calls before it sets
+    // `runningItem`, and the idle release must not land in that gap.
+    this.transcriptUsedAt = Date.now();
     if (!this.transcriptPending) return;
     if (!this.transcriptLoad) {
       this.transcriptLoad = withSpan(
         "thread.hydrate",
         { "valet.session.id": this.session.id, "valet.thread.id": this.id },
         async (span) => {
-          const entries = await this.session.providers.store.getEntries(this.session.id, this.id);
-          span.setAttribute("valet.thread.entries_loaded", entries.length);
-          this.rehydrateTranscript(entries);
+          const snapshot = await this.transcriptSnapshot(this.taskSourceFor());
+          span.setAttribute("valet.thread.entries_loaded", snapshot.entries.length);
+          this.rehydrateTranscript(snapshot.entries);
         },
       ).finally(() => {
         this.transcriptLoad = undefined;
       });
     }
     await this.transcriptLoad;
+    this.transcriptUsedAt = Date.now();
+  }
+
+  /**
+   * Drop the in-memory agent transcript of a thread that has not used it
+   * since `idleSince`, and return whether it did. The store keeps the
+   * history: the next turn, gate reconcile or compaction reloads it through
+   * `ensureTranscript`, as after a restart. Without this, a cached assistant
+   * session holds every transcript it loaded until the process exits.
+   */
+  releaseIdleTranscript(idleSince: number): boolean {
+    if (this.transcriptPending || this.transcriptLoad || this.runningItem || this.kicking
+      || this.backgroundDrives > 0 || this.collectTimer || this.transcriptUsedAt > idleSince) return false;
+    this.replaceAgentMessages([]);
+    this.transcriptPending = true;
+    // Mid-turn ids only matter while their turn runs.
+    this.midTurnAppended.clear();
+    return true;
   }
 
   /**
@@ -1951,10 +3198,12 @@ export class Thread {
    */
   rehydrateTranscript(entries: SessionEntry[]): void {
     this.replaceActiveSkillInvocations(entries);
-    this.agent.state.messages = entriesToAgentMessages(entries, this.effectiveModelLenient(), {
+    this.replaceAgentMessages(entriesToAgentMessages(entries, this.effectiveModelLenient(), {
       attributeAuthors: this.attributeAuthors,
       threadKey: this.key,
-    });
+      activeLeafEntryId: this.activeLeafEntryId,
+      taskSourceQueueItemId: this.taskSourceFor(),
+    }), this.taskSourceFor());
     // Arm the pre-turn proactive check (spec decision 5) so the first
     // post-restart turn is protected. The trigger estimates the rehydrated
     // transcript directly (TKAI-305), so no usage seeding is needed and a
@@ -1965,18 +3214,23 @@ export class Thread {
   }
 
   /**
-   * Whether user messages carry a `[from: …]` sender line in the LLM
-   * transcript. On when the session is shared (team/org-owned) — several
-   * people prompt the same thread there, and the model cannot differentiate
-   * them from the text alone. Personal sessions have one author; the line
-   * would be noise.
+   * Which user messages carry a `[from: …]` sender line in the LLM
+   * transcript. Every authored message on a team or org session: several
+   * people prompt the same thread there, and the model cannot tell them
+   * apart from the text alone. On a personal session, only a message from
+   * someone other than the owner, such as a reply in a shared thread. The
+   * owner's own line would be noise.
    */
-  private get attributeAuthors(): boolean {
-    return this.session.owner.type !== "user";
+  private get attributeAuthors(): AuthorAttribution {
+    return this.session.owner.type !== "user" || { ownerId: this.session.owner.id };
   }
 
-  setMode(mode: QueueMode): void {
+  /** Persist before admission so a restored thread keeps its queue policy. */
+  setMode(mode: QueueMode): Promise<void> {
     this.mode = mode;
+    const write = this.metadataWrites.then(() => this.session.providers.store.saveThread(this.session.id, this.toThreadData()));
+    this.metadataWrites = write.then(() => undefined, () => undefined);
+    return write;
   }
 
   toThreadData(): ThreadData {
@@ -1985,12 +3239,13 @@ export class Thread {
       sessionId: this.session.id,
       key: this.key,
       status: this.paused ? "paused" : "active",
-      activeLeafEntryId: undefined,
+      activeLeafEntryId: this.activeLeafEntryId,
       queueMode: this.mode,
       paused: this.paused,
       model: this.modelOverride,
-      reasoning: this.reasoningDisabled ? THREAD_REASONING_DISABLED : this.reasoningOverride,
+      reasoning: this.reasoningOverride,
       summary: undefined,
+      metadata: this.threadMetadata,
       createdAt: this.threadCreatedAt,
       updatedAt: Date.now(),
     };
@@ -2030,7 +3285,7 @@ export class Thread {
     // everywhere else (see `turnModelSpec`). Leaving it out let a real
     // retarget report "model unchanged" and emit no event.
     const before = isAgentSwitch
-      ? (this.agentModelSwitch ??
+      ? (this.fallbackModelSpec ?? this.agentModelSwitch ??
         this.runningItem?.model ??
         this.modelOverride ??
         sessionDefault)
@@ -2041,6 +3296,7 @@ export class Thread {
       } else {
         const priorLiveModel = this.agent.state.model;
         const priorAgentModelSwitch = this.agentModelSwitch;
+        const priorFallbackModelSpec = this.fallbackModelSpec;
         const priorTurnApiKey = this.turnApiKey;
         // Validate before assigning so an unknown id is rejected and the
         // turn keeps its previous model. The resolution is handed straight
@@ -2055,12 +3311,14 @@ export class Thread {
           // prompt rules mean by "switch_model ... in this turn, then continue".
           await this.applyModelToRunningTurn(modelId, resolved);
           this.agentModelSwitch = modelId;
+          this.fallbackModelSpec = undefined;
           if (
             this.runningItem &&
             !(await this.publishActiveModelState(this.runningItem.id, this.agent.state.model))
           ) {
             this.agent.state.model = priorLiveModel;
             this.agentModelSwitch = priorAgentModelSwitch;
+            this.fallbackModelSpec = priorFallbackModelSpec;
             this.turnApiKey = priorTurnApiKey;
           }
         } catch (err) {
@@ -2069,6 +3327,7 @@ export class Thread {
           // and any continuation stays on the previously disclosed model.
           this.agent.state.model = priorLiveModel;
           this.agentModelSwitch = priorAgentModelSwitch;
+          this.fallbackModelSpec = priorFallbackModelSpec;
           this.turnApiKey = priorTurnApiKey;
           throw err;
         }
@@ -2084,7 +3343,7 @@ export class Thread {
       await this.session.providers.store.saveThread(this.session.id, this.toThreadData());
     }
     const after = isAgentSwitch
-      ? (this.agentModelSwitch ??
+      ? (this.fallbackModelSpec ?? this.agentModelSwitch ??
         this.runningItem?.model ??
         this.modelOverride ??
         sessionDefault)
@@ -2118,7 +3377,6 @@ export class Thread {
   async setReasoning(level: string | null): Promise<void> {
     if (level === null) {
       this.reasoningOverride = undefined;
-      this.reasoningDisabled = false;
     } else {
       // Validate before assigning so a bad token leaves the pin intact.
       if (!isReasoningLevel(level)) {
@@ -2127,7 +3385,6 @@ export class Thread {
         );
       }
       this.reasoningOverride = level;
-      this.reasoningDisabled = false;
     }
     await this.session.providers.store.saveThread(this.session.id, this.toThreadData());
   }
@@ -2362,8 +3619,31 @@ export class Thread {
     this.agent.state.model = resolved.model;
   }
 
-  async readEntries(opts?: MessageQuery): Promise<SessionEntry[]> {
-    return this.session.providers.store.getEntries(this.session.id, this.id, opts);
+  /**
+   * This thread's entries. Without `queueItemId` or `allBranches`, only the
+   * active path: the version the model sees and REST shows. A thread that
+   * never branched has one path, so the bounded store read serves it.
+   */
+  async readEntries(opts?: ThreadEntryQuery): Promise<SessionEntry[]> {
+    const store = this.session.providers.store;
+    const { allBranches, ...query } = opts ?? {};
+    if (allBranches || query.queueItemId !== undefined || this.threadMetadata?.[THREAD_BRANCHED_KEY] !== true) {
+      return store.getEntries(this.session.id, this.id, query);
+    }
+    const snapshot = await store.getThreadSnapshot(this.session.id, this.id);
+    if (!snapshot) return [];
+    let path = walkTranscriptDag(snapshot.entries, snapshot.thread.activeLeafEntryId);
+    // While an edit waits to start, the conversation already ends before
+    // the edited message. The client hides those rows at Send, and a
+    // refetch before the claim must not bring them back.
+    for (const item of await store.listUnsettledSubmissions(this.session.id)) {
+      const edit = item.threadId === this.id && !item.supersededByItemId ? readThreadEdit(item.metadata) : undefined;
+      if (!edit || snapshot.entries.some((entry) => entry.type === "branch_summary" && entry.queueItemId === item.id)) continue;
+      const cut = path.findIndex((entry) => entry.id === edit.entryId);
+      if (cut >= 0) path = path.slice(0, cut);
+    }
+    if (query.includeCompacted === false) path = path.filter((entry) => entry.type !== "compaction");
+    return query.limit && query.limit > 0 ? path.slice(-query.limit) : path;
   }
 
   // ── internals ───────────────────────────────────────────────────
@@ -2411,6 +3691,16 @@ export class Thread {
     return this.lastEmittedStatus;
   }
 
+  /** When the running turn started, for a subscriber that connects mid-turn. */
+  get currentTurnStartedAt(): number | undefined {
+    return this.runningItem ? this.turnStartedAt : undefined;
+  }
+
+  private statusEvent(status: EngineEventStatus): EngineEvent {
+    const turnStartedAt = this.currentTurnStartedAt;
+    return { type: "status", threadId: this.id, status, ...(turnStartedAt !== undefined ? { turnStartedAt } : {}) };
+  }
+
   /**
    * The claim loop. Drives the thread's durable queue: repeatedly claim the
    * thread's runnable head from the store, run the turn under a write fence,
@@ -2440,6 +3730,7 @@ export class Thread {
     drive: () => Promise<void>,
   ): void {
     registerBackgroundDrive(itemId);
+    this.backgroundDrives += 1;
     const p = drive()
       .catch((err: unknown) => {
         this.emitError(errorCode, err instanceof Error ? err.message : String(err));
@@ -2449,12 +3740,15 @@ export class Thread {
         }
       })
       .finally(() => {
+        this.backgroundDrives -= 1;
         unregisterBackgroundDrive(itemId);
+        this.session.notifyExecutionIdle();
       });
     this.backgroundDriveTail = this.backgroundDriveTail.then(() => p);
   }
 
   async kick(): Promise<void> {
+    if (this.session.isExecutionFenced) { this.session.notifyReclaimAdmission(); return; }
     if (this.kicking) return this.kickTail;
     this.kicking = true;
     this.kickTail = this.kickLoop()
@@ -2465,14 +3759,16 @@ export class Thread {
       })
       .finally(() => {
         this.kicking = false;
+        this.session.notifyExecutionIdle();
       });
     return this.kickTail;
   }
 
   private async kickLoop(): Promise<void> {
+    if (this.session.options.readOnlyReason) return;
     const store = this.session.providers.store;
     while (true) {
-      if (this.paused) return;
+      if (this.paused || this.session.isExecutionFenced) return;
       if (this.runningItem) return;
       const head = await this.unsettledHead();
       if (!head) return;
@@ -2498,17 +3794,17 @@ export class Thread {
       }
 
       const attemptId = uid("att");
-      const claimed = await store.claimSubmission({
-        sessionId: this.session.id,
-        threadId: this.id,
-        itemId: head.id,
-        attemptId,
-        ownerId: this.session.ownerId,
-      });
-      if (!claimed) return; // lost the race or head is not actually claimable
-
-      await store.insertAttemptMarker(claimed.id, attemptId);
-      this.runningItem = claimed;
+      const claimed = await this.session.claimExecution(async () => {
+        const item = await store.claimSubmission({
+          sessionId: this.session.id, threadId: this.id, itemId: head.id,
+          attemptId, ownerId: this.session.ownerId,
+        });
+        if (!item) return null;
+        await store.insertAttemptMarker(item.id, attemptId);
+        this.runningItem = item;
+        return item;
+      }, this.id);
+      if (!claimed) return;
       // A fresh turn starts on the user's model. Any escalation belonged to
       // the turn that just ended; clearing here (not only at settle) means
       // no repair path can leak one turn's escalation into the next.
@@ -2542,7 +3838,7 @@ export class Thread {
       // place convergence may act. Idle = no other thread mid-run and no pending
       // exec jobs. Errors degrade to running stale — never fail the turn.
       if (!this.session.hasOtherActiveRuns(this.id) && this.session.pendingJobCount() === 0) {
-        try { await this.session.attachment.reconcile(); } catch (err) { console.error("[thread] reconcile failed, continuing:", err); }
+        try { await this.session.attachment.reconcile(); } catch (err) { reportError({ area: "sandbox", reason: "reconcile_pre_turn" }, "[thread] reconcile failed, continuing", err); }
       }
 
       // First load of repo AGENTS.md instructions (agents-md spec, decision 1):
@@ -2554,7 +3850,7 @@ export class Thread {
       try {
         await this.session.ensureRepoInstructions();
       } catch (err) {
-        console.error("[thread] repo-instructions load failed, continuing:", err);
+        reportError({ area: "engine", reason: "repo_instructions_load" }, "[thread] repo-instructions load failed, continuing", err);
       }
 
       let turnFailed = false;
@@ -2574,6 +3870,10 @@ export class Thread {
       if (!turnFailed && this.turnAgentError !== undefined) {
         turnFailed = true;
         turnError = this.turnAgentError;
+      }
+      if (!turnFailed && this.modelCallLimitReached !== undefined) {
+        turnFailed = true;
+        turnError = new Error(modelCallLimitText(this.modelCallLimitReached));
       }
 
       // The turn couldn't run because the host resolver threw
@@ -2787,6 +4087,7 @@ export class Thread {
     if (!attemptId) return false; // defensive: terminalizing items always carry one
     const fence: WriteFence = { itemId: item.id, attemptId };
     try {
+      await this.notifyTurnComplete(item);
       await store.finalizeSettlement(this.session.id, this.id, item.id, fence);
     } catch (err) {
       if (err instanceof StaleAttemptError) return false; // successor owns it now
@@ -2808,6 +4109,7 @@ export class Thread {
    * signalled that a successor already owns the item.
    */
   private async settleTurn(item: QueueItem, turnFailure?: { error: unknown }): Promise<void> {
+    if (this.gateHandedOff) return;
     return this.inSubmissionContext(() =>
       withSpan(
         "submission.settle",
@@ -2840,7 +4142,12 @@ export class Thread {
     if (current.status === "blocked_on_decision_gate") return;
     if (current.status === "settled" || current.status === "terminalizing") return;
 
-    const outcome = this.decideTurnOutcome(current, turnFailure);
+    const decided = this.decideTurnOutcome(current, turnFailure);
+    // Validate after the agent stops, outside its retry loop. Never replay a
+    // failed result. A record-only item made no model call to validate.
+    const outcome = decided.outcome === "completed" && item.metadata?.[RECORD_ONLY_KEY] !== true
+      ? completedSubmissionOutcome(await store.getEntries(this.session.id, this.id, { queueItemId: item.id }), item.id)
+      : decided;
     span.setAttribute("valet.submission.outcome", outcome.outcome);
     this.submissionSpan?.setAttribute("valet.submission.outcome", outcome.outcome);
     recordSettlement(
@@ -2859,6 +4166,7 @@ export class Thread {
       // between reserve and finalize so the record lands in finalize's own
       // transaction, but its own I/O never throws and never weakens the CAS.
       patchRef = await this.captureSettlePatch(item);
+      await this.notifyTurnComplete(item);
       await store.finalizeSettlement(this.session.id, this.id, item.id, fence, patchRef);
     } catch (err) {
       if (err instanceof StaleAttemptError) {
@@ -2868,8 +4176,16 @@ export class Thread {
       throw err;
     }
     await store.deleteAttemptMarker(item.id, fence.attemptId);
-    await this.emitSettled(item.id, outcome, patchRef);
+    await this.emitSettled(item.id, outcome, { patch: patchRef });
     await this.emitQueueState();
+  }
+
+  private async notifyTurnComplete(item: QueueItem): Promise<void> {
+    await this.session.options.onTurnComplete?.({
+      sessionId: this.session.id, submissionId: item.id, threadId: this.id,
+      actorId: item.author?.id ?? this.session.options.userId, owner: this.session.owner,
+      sandbox: this.session.attachment.current() ?? undefined,
+    });
   }
 
   /**
@@ -2913,9 +4229,9 @@ export class Thread {
     // abort OF THIS ITEM still wins via the durable `abortRequestedAt` stamp
     // checked below, which `Thread.abort` writes before interrupting the
     // stream.
-    const last = this.agent.state.messages[this.agent.state.messages.length - 1];
+    const last = [...this.agent.state.messages].reverse().find((message) => message.role !== "system");
     const stop =
-      this.currentAssistantMessageId !== undefined && last && last.role === "assistant"
+      this.currentAssistantMessageId !== undefined && last?.role === "assistant"
         ? last.stopReason
         : undefined;
     if (current.supersededByItemId) return { outcome: "superseded" };
@@ -2931,8 +4247,7 @@ export class Thread {
       const errText = last && last.role === "assistant" ? last.errorMessage : undefined;
       return { outcome: "failed", error: errText ?? "turn ended with an error" };
     }
-    // "stop" and "length" both settle completed — a length-terminated turn
-    // still ended with usable output (revisit if we want to distinguish).
+    // Settlement validates the persisted terminal response before it accepts completion.
     return { outcome: "completed" };
   }
 
@@ -2947,7 +4262,7 @@ export class Thread {
     errorText: string = "interrupted",
   ): Promise<void> {
     const store = this.session.providers.store;
-    const entries = await store.getEntries(this.session.id, this.id);
+    const entries = await store.getEntries(this.session.id, this.id, { queueItemId: item.id });
     for (const e of entries) {
       if (e.type !== "message" || e.role !== "assistant") continue;
       if (e.queueItemId !== item.id) continue;
@@ -2970,8 +4285,9 @@ export class Thread {
   private async emitSettled(
     itemId: string,
     outcome: SubmissionOutcome,
-    patch?: SettlePatchRef,
+    link: { patch?: SettlePatchRef; mergedIntoItemId?: string } = {},
   ): Promise<void> {
+    const { patch, mergedIntoItemId } = link;
     await this.clearActiveModelState(itemId);
     // Deterministic eventKey `settled:{itemId}`: every settlement path (fenced
     // two-phase, retryFinalize, reconciliation, and the fenceless
@@ -2985,6 +4301,7 @@ export class Thread {
         queueItemId: itemId,
         outcome,
         ...(patch ? { patch } : {}),
+        ...(mergedIntoItemId ? { mergedIntoItemId } : {}),
       },
       { eventKey: `settled:${itemId}`, queueItemId: itemId },
     );
@@ -3003,6 +4320,9 @@ export class Thread {
     suspended: SuspendedTurnState | null,
   ): Promise<void> {
     const store = this.session.providers.store;
+    if (outcome.outcome === "completed") {
+      outcome = completedSubmissionOutcome(await store.getEntries(this.session.id, this.id, { queueItemId: item.id }), item.id);
+    }
 
     if (item.status === "queued" || item.status === "collecting") {
       const ok = await store.settleUnclaimed(this.session.id, this.id, item.id, outcome);
@@ -3064,13 +4384,14 @@ export class Thread {
       // supersession — capture whatever landed on disk, same best-effort
       // contract as the normal settle path.
       patchRef = await this.captureSettlePatch(item);
+      await this.notifyTurnComplete(item);
       await store.finalizeSettlement(this.session.id, this.id, item.id, fence, patchRef);
     } catch (err) {
       if (err instanceof StaleAttemptError) return; // successor owns it now
       throw err;
     }
     await store.deleteAttemptMarker(item.id, attemptId);
-    await this.emitSettled(item.id, outcome, patchRef);
+    await this.emitSettled(item.id, outcome, { patch: patchRef });
     await this.emitQueueState();
   }
 
@@ -3088,26 +4409,38 @@ export class Thread {
   ): Promise<void> {
     // Load before taking ownership so a store failure cannot strand a retained gate claim.
     await this.ensureTranscript();
+    const taskSource = this.taskSourceFor(item);
+    if (taskSource) {
+      const snapshot = await this.transcriptSnapshot(taskSource);
+      this.replaceAgentMessages(entriesToAgentMessages(snapshot.entries, this.effectiveModelLenient(), {
+        attributeAuthors: this.attributeAuthors, threadKey: this.key,
+        activeLeafEntryId: this.activeLeafEntryId, taskSourceQueueItemId: taskSource,
+      }), taskSource);
+    }
     const store = this.session.providers.store;
     const attemptId = uid("att");
     const expectedAttemptId = item.attemptId;
     if (!expectedAttemptId) return;
-    const replaced = await store.replaceSubmissionAttempt(
-      this.session.id,
-      this.id,
-      item.id,
-      {
-        sessionId: this.session.id,
-        threadId: this.id,
-        itemId: item.id,
-        attemptId,
-        ownerId: this.session.ownerId,
-      },
-      { expectedAttemptId },
-    );
-    if (!replaced) return; // lost the CAS
-    await store.insertAttemptMarker(item.id, attemptId);
-    this.runningItem = replaced;
+    const replaced = await this.session.claimExecution(async () => {
+      const claimed = await store.replaceSubmissionAttempt(
+        this.session.id,
+        this.id,
+        item.id,
+        {
+          sessionId: this.session.id,
+          threadId: this.id,
+          itemId: item.id,
+          attemptId,
+          ownerId: this.session.ownerId,
+        },
+        { expectedAttemptId },
+      );
+      if (!claimed) return null;
+      await store.insertAttemptMarker(item.id, attemptId);
+      this.runningItem = claimed;
+      return claimed;
+    }, this.id);
+    if (!replaced) return;
     this.turnStartedAt = Date.now();
     this.fence = { itemId: item.id, attemptId };
     this.staleFenceDetected = false;
@@ -3118,13 +4451,15 @@ export class Thread {
       // Gate vanished between the decision and here — nothing to re-arm.
       this.runningItem = null;
       this.fence = undefined;
+      this.session.notifyExecutionIdle();
       return;
     }
 
     if (mode === "rearm") {
       this.armPendingGateForRestart(gate, suspended);
     } else {
-      const entries = await store.getEntries(this.session.id, this.id);
+      // The gate entry carries the queue item of the turn that opened the gate.
+      const entries = await store.getEntries(this.session.id, this.id, { queueItemId: gate.queueItemId });
       const entry = entries.find(
         (e) => e.type === "decision_gate" && e.gate.id === gate.id,
       );
@@ -3133,6 +4468,7 @@ export class Thread {
         this.emitError("replay_missing_resolution", `gate ${gate.id} resolved but no resolution stored`);
         this.runningItem = null;
         this.fence = undefined;
+        this.session.notifyExecutionIdle();
         return;
       }
       this.kickBackgroundDrive("replay_drive_rejected", suspended.queueItemId, undefined, () =>
@@ -3167,22 +4503,26 @@ export class Thread {
     const attemptId = uid("att");
     const expectedAttemptId = item.attemptId;
     if (!expectedAttemptId) return;
-    const replaced = await store.replaceSubmissionAttempt(
-      this.session.id,
-      this.id,
-      item.id,
-      {
-        sessionId: this.session.id,
-        threadId: this.id,
-        itemId: item.id,
-        attemptId,
-        ownerId: this.session.ownerId,
-      },
-      { expectedAttemptId },
-    );
-    if (!replaced) return; // lost the CAS
-    await store.insertAttemptMarker(item.id, attemptId);
-    this.runningItem = replaced;
+    const replaced = await this.session.claimExecution(async () => {
+      const claimed = await store.replaceSubmissionAttempt(
+        this.session.id,
+        this.id,
+        item.id,
+        {
+          sessionId: this.session.id,
+          threadId: this.id,
+          itemId: item.id,
+          attemptId,
+          ownerId: this.session.ownerId,
+        },
+        { expectedAttemptId },
+      );
+      if (!claimed) return null;
+      await store.insertAttemptMarker(item.id, attemptId);
+      this.runningItem = claimed;
+      return claimed;
+    }, this.id);
+    if (!replaced) return;
     this.turnStartedAt = Date.now();
     this.fence = { itemId: item.id, attemptId };
     this.staleFenceDetected = false;
@@ -3204,6 +4544,7 @@ export class Thread {
    * re-armed-gate expiry/withdrawal terminalization (`terminalizeReconciledGate`).
    */
   private async driveResumeToCompletion(item: QueueItem, repairMessage: string): Promise<void> {
+    await this.ensureTranscript();
     return withSpan(
       "agent.turn",
       {
@@ -3235,8 +4576,8 @@ export class Thread {
     let turnFailed = false;
     let turnError: unknown;
     const baselineModel = this.agent.state.model;
-    const baselinePrompt = this.agent.state.systemPrompt;
     try {
+      await this.persistContinuationToolScope();
       // Rest-state repair FIRST — before appending any recovery output.
       await this.repairRestState(item, fence, repairMessage);
 
@@ -3261,27 +4602,35 @@ export class Thread {
       // toolResult-convertible, satisfying the continuation contract. No
       // separate synthetic append: entriesToAgentMessages is the single owner
       // of toolResult emission (no callId is ever answered twice).
-      const entries = await store.getEntries(this.session.id, this.id);
+      const snapshot = await this.transcriptSnapshot(this.taskSourceFor());
+      const entries = snapshot.entries;
       const resumeModel = this.effectiveModelLenient();
       this.replaceActiveSkillInvocations(entries);
-      this.agent.state.messages = entriesToAgentMessages(
+      this.replaceAgentMessages(entriesToAgentMessages(
         entries,
         {
           api: resumeModel.api,
           provider: resumeModel.provider,
           id: resumeModel.id,
         },
-        { attributeAuthors: this.attributeAuthors, threadKey: this.key },
-      );
+        {
+          attributeAuthors: this.attributeAuthors,
+          threadKey: this.key,
+          activeLeafEntryId: this.activeLeafEntryId,
+          taskSourceQueueItemId: this.taskSourceFor(),
+        },
+      ), this.taskSourceFor());
       this.transcriptPending = false;
       this.agent.state.tools = this.buildTools();
 
       // Host resolver (if any) delivers this resumed turn's per-turn key before
       // the continuation LLM call; no-op when absent.
       await this.applyResolvedKeyForResume(item);
-      if (await this.publishActiveModelState(item.id, this.agent.state.model)) {
+      if (await this.publishActiveModelState(item.id, this.agent.state.model) &&
+          await this.canRunCurrentSubmission()) {
         await this.agent.continue();
         await this.agent.waitForIdle();
+        await this.retryTransientTurnError();
       }
     } catch (err) {
       turnFailed = true;
@@ -3289,7 +4638,7 @@ export class Thread {
       this.emitError("resume_failed", err instanceof Error ? err.message : String(err));
     } finally {
       this.agent.state.model = baselineModel;
-      this.agent.state.systemPrompt = baselinePrompt;
+      this.fallbackModelSpec = undefined;
       this.turnApiKey = undefined;
     }
 
@@ -3335,6 +4684,42 @@ export class Thread {
     );
   }
 
+  /** Validate durable carry links before exposing original content or attachments. */
+  private async carriedInputs(item: QueueItem): Promise<QueueItem[]> {
+    const ids = carriedInputIds(item);
+    const bridgeIds = carriedInputBridgeIds(item);
+    const allIds = [...ids, ...bridgeIds];
+    if (!allIds.length) return [];
+    if (!isInteractiveSlackInput(item) || allIds.length > MAX_CARRIED_INPUTS || new Set(allIds).size !== allIds.length) {
+      throw new ValidationError("Invalid carried Slack inputs. Restore the original submission, then retry.");
+    }
+    const originals = new Map<string, QueueItem>();
+    for (const id of allIds) {
+      const original = await this.session.providers.store.getQueueItem(this.session.id, id);
+      const bridge = bridgeIds.includes(id);
+      const superseded = original?.status === "settled" && original.outcome?.outcome === "superseded";
+      if (!original || original.threadId !== this.id || !isInteractiveSlackInput(original) ||
+          !sameSubmissionOrigin(original.content, item.content) || !sameSubmissionAuthor(original, item) ||
+          (!superseded && !(bridge && original.status === "queued" && original.supersededByItemId))) {
+        throw new ValidationError("Carried input is unavailable. Restore the original submission, then retry.");
+      }
+      originals.set(id, original);
+    }
+    // Every reference must reach this correction. Bridges retain promotion provenance without repeating its body.
+    for (const id of allIds) {
+      let next: string | undefined = id;
+      const visited = new Set<string>();
+      while (next !== item.id) {
+        if (!next || visited.has(next)) {
+          throw new ValidationError("Invalid carried input relationship. Restore the original submission, then retry.");
+        }
+        visited.add(next);
+        next = originals.get(next)?.supersededByItemId;
+      }
+    }
+    return [...originals.values()].filter(original => ids.includes(original.id));
+  }
+
   /**
    * Build and persist the turn's user MessageEntry (signal envelope handling
    * included) under the current fence, and return the text the model actually
@@ -3346,34 +4731,46 @@ export class Thread {
    */
   private async appendUserEntry(
     item: QueueItem,
-  ): Promise<{ text: string; attachments: MessageEntry["attachments"] }> {
+  ): Promise<{ text: string; attachments: MessageEntry["attachments"]; time: MessageTime }> {
+    // Every path that appends the user entry moves an edit's leaf first, the
+    // claim loop's credential-cap path included. It runs once per item.
+    await this.applyEdit(item);
     // Signal content persists as its raw body + `signal` metadata; the text
     // the model actually sees this turn is the same rendered XML envelope
     // `entriesToAgentMessages` would reconstruct on reload (single render
     // function, two call sites).
+    const originals = await this.carriedInputs(item);
     let signalMeta: MessageEntry["signal"];
     let text: string;
     let entryContent: string;
     if (isSignalContent(item.content)) {
       signalMeta = buildSignalMeta(item.content, item.metadata);
-      text = renderSignalEnvelope(signalMeta, item.content.body);
       entryContent = item.content.body;
+      if (originals.length) {
+        const quote = (value: string) => value.split(/\r?\n/).map(line => `> ${line}`).join("\n");
+        const blocks = [...originals, item].map(input => {
+          const author = input.author;
+          const label = [author?.name, author?.id].filter(Boolean).join(" · ") || "Unknown sender";
+          return quote(label) + "\n" + quote(isSignalContent(input.content) ? input.content.body : promptText(input.content));
+        });
+        entryContent = "Messages received while you worked, in order:\n\n" + blocks.join("\n\n");
+      }
+      text = renderSignalEnvelope(signalMeta, entryContent);
     } else {
       text = promptText(item.content);
       entryContent = text;
     }
 
-    // Extract attachments if the prompt content has them.
+    // Preserve carried images and files through the normal model attachment path.
+    const contentInputs = [...originals, item].map(input => input.content);
+    const inputAttachments = contentInputs.flatMap(content =>
+      typeof content === "object" && content !== null && "attachments" in content && Array.isArray(content.attachments)
+        ? content.attachments : []);
     let attachments: MessageEntry["attachments"];
-    if (
-      typeof item.content === "object" &&
-      item.content !== null &&
-      "attachments" in item.content &&
-      Array.isArray(item.content.attachments)
-    ) {
+    if (inputAttachments.length) {
       // Runtime validation of each attachment element to guard against malformed wire data
       const validated: MessageEntry["attachments"] = [];
-      for (const att of item.content.attachments) {
+      for (const att of inputAttachments) {
         if (typeof att !== "object" || att === null) continue;
         if (att.type === "file") {
           // Sandbox file (upload subsystem): persist path/size/hash so the
@@ -3426,27 +4823,30 @@ export class Thread {
     // or a second cap pass) must not duplicate it. Return the persisted
     // entry's attachments (the authoritative on-disk shape) so a retried
     // attempt still feeds the model the same image blocks.
-    const existing = await this.session.providers.store.getEntries(this.session.id, this.id);
+    const existing = await this.session.providers.store.getEntries(this.session.id, this.id, { queueItemId: item.id });
     const existingUserEntry = existing.find(
       (e): e is MessageEntry =>
         e.type === "message" && e.role === "user" && e.queueItemId === item.id,
     );
     if (existingUserEntry) {
+      this.turnUserEntryId ??= existingUserEntry.id;
       // A spilled entry keeps the FULL paste in `content` (durable, REST-
       // visible) and carries the file path in metadata. Reconstruct the
       // pointer for the LLM so a replayed turn re-prompts what fits the window,
       // not the oversized text — matching what entriesToAgentMessages renders.
       const spillPath = existingUserEntry.metadata?.[SPILLED_INPUT_PATH_KEY];
+      const restoredText =
+        typeof spillPath === "string"
+          ? buildSpilledInputMarker({
+              path: spillPath,
+              tokens: estimateTokens(existingUserEntry.content),
+              chars: existingUserEntry.content.length,
+            })
+          : text;
       return {
-        text:
-          typeof spillPath === "string"
-            ? buildSpilledInputMarker({
-                path: spillPath,
-                tokens: estimateTokens(existingUserEntry.content),
-                chars: existingUserEntry.content.length,
-              })
-            : text,
+        text: renderReplyContext(restoredText, existingUserEntry.metadata),
         attachments: existingUserEntry.attachments,
+        time: entryMessageTime(existingUserEntry),
       };
     }
 
@@ -3482,9 +4882,16 @@ export class Thread {
     // compaction_continue survive into the DAG for client UIs and for later
     // restoration.
     const baseMetadata = stripSignalStamp(item.metadata);
-    const metadata = spilledInputPath
-      ? { ...(baseMetadata ?? {}), [SPILLED_INPUT_PATH_KEY]: spilledInputPath }
-      : baseMetadata;
+    // The timezone read now, written once with `createdAt`: together they
+    // render this entry's `[sent: …]` line on every later call.
+    const userTimezone = await this.session.currentUserTimezone();
+    const metadata = {
+      ...(baseMetadata ?? {}),
+      ...(spilledInputPath ? { [SPILLED_INPUT_PATH_KEY]: spilledInputPath } : {}),
+      [ENTRY_USER_TIMEZONE_KEY]: userTimezone ?? null,
+    };
+
+    text = renderReplyContext(text, metadata);
 
     const userEntry: MessageEntry = {
       id: entryId,
@@ -3508,9 +4915,10 @@ export class Thread {
       createdAt: Date.now(),
     };
     await this.fencedWrite(() =>
-      this.session.providers.store.appendEntries(this.session.id, this.id, [userEntry], this.fence),
+      this.appendEntry(userEntry, this.fence),
     );
-    return { text, attachments };
+    this.turnUserEntryId ??= userEntry.id;
+    return { text, attachments, time: entryMessageTime(userEntry) };
   }
 
   /**
@@ -3553,6 +4961,8 @@ export class Thread {
    * nest automatically through the host's context manager.
    */
   private async runItem(item: QueueItem): Promise<void> {
+    this.clearIdleCompaction();
+    await this.persistContinuationToolScope();
     await this.ensureTranscript();
     return this.inSubmissionContext(() =>
       withSpan(
@@ -3574,6 +4984,7 @@ export class Thread {
           try {
             await this.runItemInner(item);
           } finally {
+            this.transcriptUsedAt = Date.now();
             this.turnSpan = undefined;
             this.llmSpan?.end();
             this.llmSpan = undefined;
@@ -3594,9 +5005,34 @@ export class Thread {
     this.aborted = false;
     this.credentialError = undefined;
     this.turnAgentError = undefined;
+    this.submissionModelCalls = 0;
+    this.modelCallLimitReached = undefined;
+    this.nativeImages.beginTurn();
+    this.nativeImageGrant = undefined;
+    // Per-turn: the next turn may hold a transcript compaction can help.
+    this.turnCompactionBlocked = false;
     this.currentAssistantMessageId = undefined;
     this.currentAssistantParts = [];
+    this.thinkingTiming = new ThinkingTiming();
     this.currentToolCalls.clear();
+    this.turnUserEntryId = undefined;
+    this.turnCheckpoint = undefined;
+    this.turnFileWrites.clear();
+    this.turnFileWriteBytes = 0;
+    this.turnFileWritesUnavailable = false;
+    if (!(await this.canRunCurrentSubmission())) return;
+    // An edit moves the leaf before anything else in the turn reads or
+    // writes the transcript (model state, compaction, the user entry).
+    if (!(await this.applyEdit(item))) return;
+    await this.applyForkSeed();
+    // A record-only submission (a Slack edit note) joins the transcript in
+    // queue order and starts no reply. The next turn rebuilds the agent
+    // transcript from the store, so the model reads it then.
+    if (item.metadata?.[RECORD_ONLY_KEY] === true) {
+      await this.appendUserEntry(item);
+      this.transcriptPending = true;
+      return;
+    }
 
     // Warm-on-claim (spec decision 5): kick sandbox provisioning at the
     // start of the claimed turn, in parallel with the LLM call — never at
@@ -3626,12 +5062,17 @@ export class Thread {
     try {
       turnModel = await this.resolveTurnModelForTurn(item);
     } catch (err) {
-      if (err instanceof NoCredentialsError) {
+      if (err instanceof NoCredentialsError && !this.isUserPrompt()) {
         this.credentialError = err;
         return;
       }
       await this.appendUserEntry(item);
       throw err;
+    }
+
+    if (!(await this.canRunCurrentSubmission())) {
+      this.turnApiKey = undefined;
+      return;
     }
 
     // Apply the turn model (resolved above) BEFORE the role overlay so a
@@ -3652,12 +5093,14 @@ export class Thread {
       modelStatePublished = await this.publishActiveModelState(item.id, this.agent.state.model);
     } catch (err) {
       this.agent.state.model = baselineModel;
+      this.fallbackModelSpec = undefined;
       this.turnApiKey = undefined;
       await this.appendUserEntry(item);
       throw err;
     }
     if (!modelStatePublished) {
       this.agent.state.model = baselineModel;
+      this.fallbackModelSpec = undefined;
       this.turnApiKey = undefined;
       return;
     }
@@ -3675,8 +5118,35 @@ export class Thread {
     // runAgent — the model would see the prompt twice.
     if (this.rehydratedCheckPending) {
       this.rehydratedCheckPending = false;
-      if (this.shouldCompactProactive()) {
-        await this.runProactiveCompaction(false);
+      const trigger = this.proactiveCompactionTrigger();
+      // A budget pass here stands in for an idle pass the restart lost: run
+      // it only when the thread has been idle past the idle delay, so its
+      // prompt cache has expired anyway.
+      if (trigger === "overflow" || (trigger === "budget" && this.idleLongerThan(idleCompactionDelayMs(this.session.options)))) {
+        await this.runProactiveCompaction(trigger, false);
+      }
+    }
+
+    // Restore a compacted active task before appending its next message.
+    // A repair can reference an older task without retention metadata.
+    // Retire an injected contract before an unrelated submission runs.
+    const taskSource = this.taskSourceFor(item);
+    if (taskSource || this.retainedTaskSourceQueueItemId) {
+      // Keep the task's covered prompt whole: the rebuild below restores it.
+      const snapshot = await this.transcriptSnapshot(taskSource);
+      const activeEntries = walkTranscriptDag(snapshot.entries, this.activeLeafEntryId);
+      const source = activeEntries.find(entry => entry.type === "message" && entry.role === "user" && entry.queueItemId === taskSource);
+      const checkpoint = findMostRecentCompaction(activeEntries);
+      const retirePrior = this.retainedTaskSourceQueueItemId !== undefined && this.retainedTaskSourceQueueItemId !== taskSource;
+      if (((source && checkpoint?.coveredEntryIds.includes(source.id)) || retirePrior)
+        && !activeEntries.some(entry => entry.type === "message" && entry.role === "user" && entry.queueItemId === item.id)) {
+        this.replaceAgentMessages(entriesToAgentMessages(snapshot.entries, this.agent.state.model, {
+          attributeAuthors: this.attributeAuthors,
+          threadKey: this.key,
+          activeLeafEntryId: this.activeLeafEntryId,
+          taskSourceQueueItemId: taskSource,
+        }), taskSource);
+        this.prevCacheSnapshot = undefined;
       }
     }
 
@@ -3685,10 +5155,19 @@ export class Thread {
     // `attachments` through to `runAgent` is what keeps a turn-1 image in
     // `agent.state.messages` across subsequent turns: the LLM sees the image
     // on every downstream call, not just the turn it was uploaded on.
-    const { text, attachments } = await this.appendUserEntry(item);
+    const { text, attachments, time } = await this.appendUserEntry(item);
     const queuedSkillFact = item.metadata?.skillInvocation;
     if (isSkillInvocationFact(queuedSkillFact)) {
       this.activeSkillInvocations.set(queuedSkillFact.id, queuedSkillFact);
+    }
+
+    // Re-read the session's skills before the tools are built. The host's
+    // `skill` tool describes and serves this map, and a cached session can
+    // outlive many skill edits. A failed read keeps the previous set.
+    try {
+      await this.session.refreshSkills();
+    } catch (err) {
+      reportError({ area: "engine", reason: "skill_refresh" }, `skill refresh failed for session ${this.session.id}; the previous skills stay`, err);
     }
 
     // Build the AgentTool list with closures over this turn's ToolContext.
@@ -3698,7 +5177,7 @@ export class Thread {
     // applied FIRST so the composition is base → systemContext → repo
     // instructions → role → cold hint, and restored LAST so the existing
     // overlays nest unchanged inside it.
-    const repoInstructionsPrompt = this.applyRepoInstructionsForTurn();
+    const repoInstructionsApplied = this.applyRepoInstructionsForTurn();
     // Apply role overlay (system-prompt overlay + optional model override) for
     // this one turn. Restored unconditionally in finally.
     const roleOverlay = this.applyRoleForTurn(item);
@@ -3706,19 +5185,25 @@ export class Thread {
     // so the two compose (role text, then hint). Restored unconditionally in
     // finally, before the role restore, so both idioms nest correctly
     // whether or not a role was applied this turn.
-    const coldHintPrompt = this.applyColdHintForTurn();
+    const coldHintApplied = this.applyColdHintForTurn();
+    // The thread's open plan, read from metadata at each turn start so it
+    // survives compaction.
+    const planApplied = this.applyPlanForTurn();
+    // Followed Slack-thread signals carry `reply: "manual"`. Add the shared
+    // delivery guidance after all other turn overlays so it remains prominent.
+    const slackOverheardApplied = this.applySlackOverheardGuidanceForTurn(item);
     // The sender line must match what entriesToAgentMessages renders for
     // this entry on reload — same gate (shared owner, non-signal), same
     // render function — or the hot and cold transcripts diverge.
     const sender =
-      this.attributeAuthors && !isSignalContent(item.content) ? item.author : undefined;
+      isSignalContent(item.content) ? undefined : attributedAuthor(this.attributeAuthors, item.author);
     try {
       // A role can replace the queue-item model. Publish the replacement
       // after the overlay applies and before the main agent run.
       if (!(await this.publishActiveModelState(item.id, this.agent.state.model))) return;
 
       try {
-        await this.runAgent(text, attachments, sender);
+        await this.runAgent(text, attachments, sender, time);
       } catch (err) {
         // Record the throw for settlement: a stream failing before its first
         // message_start leaves no assistant message this turn, and
@@ -3732,17 +5217,33 @@ export class Thread {
       // Proactive compaction: if this turn pushed us past usable, run a
       // compaction pass before yielding back to the queue. Reactive
       // compaction (overflow retry) is handled inline in runAgent.
-      if (this.shouldCompactProactive()) {
-        await this.runProactiveCompaction();
+      // A submission stopped at its model call limit gets no continuation,
+      // so it runs only a budget pass, which never continues the turn.
+      const proactive = this.proactiveCompactionTrigger();
+      let trigger = this.modelCallLimitReached === undefined || proactive === "budget" ? proactive : undefined;
+      // A budget pass at turn end runs only for a turn nobody watches live
+      // (unattended work, a channel such as Slack) and only when no message
+      // waits: a waiting message reruns this check when its turn ends. An
+      // interactive thread compacts when it goes idle instead, so a person
+      // working in it keeps the full context and a warm prompt cache.
+      if (trigger === "budget" && !(await this.budgetPassAtTurnEnd())) trigger = undefined;
+      if (trigger && await this.canRunCurrentSubmission()) {
+        await this.runProactiveCompaction(trigger);
       }
     } finally {
-      this.restoreColdHintAfterTurn(coldHintPrompt);
+      // The end-of-turn snapshot lands before the next claim, so an edit
+      // that stopped this turn can undo its file changes too.
+      await this.finishTurnCheckpoint();
+      this.restoreSlackOverheardGuidanceAfterTurn(slackOverheardApplied);
+      if (planApplied) this.appendSystemSection("valet-plan", null);
+      this.restoreColdHintAfterTurn(coldHintApplied);
       this.restoreRoleAfterTurn(roleOverlay);
-      this.restoreRepoInstructionsAfterTurn(repoInstructionsPrompt);
+      this.restoreRepoInstructionsAfterTurn(repoInstructionsApplied);
       // Restore the agent's baseline model so the next turn picks up any
       // mutation we made via setModel. We compute the override fresh on
       // each turn anyway, but keeping state tidy avoids surprises.
       this.agent.state.model = baselineModel;
+      this.fallbackModelSpec = undefined;
       // Per-turn key is turn-scoped only — clear it so the next turn re-resolves
       // (rotation applies next turn; a resolver-less session never set it).
       this.turnApiKey = undefined;
@@ -3753,9 +5254,8 @@ export class Thread {
    * Cold-attachment model hint (spec decision 7): when the sandbox
    * attachment isn't ready at turn start, appends a hint to the
    * (role-overlaid) system prompt telling the model filesystem/shell tools
-   * will wait. Returns the pre-hint prompt so the caller can restore it
-   * unconditionally in the turn's finally, regardless of whether a role was
-   * also applied this turn.
+   * will wait. Returns whether it added a section so the caller can remove it
+   * in the turn's finally.
    *
    * For `warmSandboxOnClaim: false` sessions the hint applies only while
    * the attachment is actually `provisioning` — a lazy session's earlier
@@ -3764,45 +5264,86 @@ export class Thread {
    * kick happened), so a "provisioning" hint would be false and the lazy
    * first-touch contract covers it silently instead.
    */
-  private applyColdHintForTurn(): string {
-    const preHintPrompt = this.agent.state.systemPrompt;
-    if (this.session.attachment.state === "ready") return preHintPrompt;
-    if (this.session.options.warmSandboxOnClaim === false && this.session.attachment.state !== "provisioning") {
-      return preHintPrompt;
-    }
-    const estimateMs = this.session.attachment.coldStartEstimateMs ?? 10_000;
-    const hint = `\n\n[workspace status] The workspace sandbox is provisioning (~${Math.ceil(estimateMs / 1000)}s). Filesystem and shell tools will wait for it; sequence non-filesystem work first.`;
-    this.agent.state.systemPrompt = preHintPrompt + hint;
-    return preHintPrompt;
+  private appendSystemSection(name: string, content: string | null): void {
+    this.agent.state.messages = [...this.agent.state.messages, {
+      role: "system",
+      content: "",
+      sections: { [name]: content },
+      timestamp: Date.now(),
+    }];
   }
 
-  private restoreColdHintAfterTurn(preHintPrompt: string): void {
-    this.agent.state.systemPrompt = preHintPrompt;
+  private taskSourceFor(item: QueueItem | null = this.runningItem): string | undefined {
+    if (item?.metadata?.preserveTask !== true) return undefined;
+    const source = item.metadata.taskSourceQueueItemId;
+    return typeof source === "string" ? source : item.id;
+  }
+
+  private replaceAgentMessages(messages: AgentMessage[], taskSourceQueueItemId?: string): void {
+    this.retainedTaskSourceQueueItemId = taskSourceQueueItemId;
+    const system = getCurrentSystemMessage(this.agent.state.messages);
+    this.agent.state.messages = system ? [system, ...messages] : messages;
+  }
+
+  private applyColdHintForTurn(): boolean {
+    if (this.session.attachment.state === "ready") return false;
+    if (this.session.options.warmSandboxOnClaim === false && this.session.attachment.state !== "provisioning") {
+      return false;
+    }
+    const estimateMs = this.session.attachment.coldStartEstimateMs ?? 10_000;
+    this.appendSystemSection(
+      "valet-cold-sandbox",
+      `[workspace status] The workspace sandbox is provisioning (~${Math.ceil(estimateMs / 1000)}s). Filesystem and shell tools will wait for it; sequence non-filesystem work first.`,
+    );
+    return true;
+  }
+
+  private restoreColdHintAfterTurn(applied: boolean): void {
+    if (applied) this.appendSystemSection("valet-cold-sandbox", null);
+  }
+
+  /** Shows the thread's plan to the model while any item is not done. */
+  private applyPlanForTurn(): boolean {
+    const plan = readThreadPlan(this.threadMetadata);
+    const overlay = plan && planOverlay(plan);
+    if (!overlay) return false;
+    this.appendSystemSection("valet-plan", overlay);
+    return true;
+  }
+
+  /** Add the shared Slack guidance only to manual-delivery message signals. */
+  private applySlackOverheardGuidanceForTurn(item: QueueItem): boolean {
+    if (!isSignalContent(item.content) ||
+        !item.content.signalType.endsWith(".message") ||
+        item.content.origin?.channelType !== "slack" ||
+        item.content.origin.reply !== "manual") {
+      return false;
+    }
+    this.appendSystemSection("valet-slack-overheard", SLACK_OVERHEARD_REPLY_GUIDANCE);
+    return true;
+  }
+
+  private restoreSlackOverheardGuidanceAfterTurn(applied: boolean): void {
+    if (applied) this.appendSystemSection("valet-slack-overheard", null);
   }
 
   /**
    * Repo AGENTS.md instructions overlay (agents-md spec, decision 4).
    * Snapshots `session.repoInstructions()` exactly ONCE, here at turn start,
-   * and appends a turn-local fragment — a `refreshRepoInstructions()` that
-   * lands mid-turn replaces the session's reference but cannot change the
-   * prompt this turn already carries; the new value takes effect on the next
-   * turn's overlay. Returns the pre-overlay prompt for the unconditional
-   * restore in the turn's finally.
+   * and appends a turn-local fragment. A mid-turn `refreshRepoInstructions()`
+   * applies to the next turn.
    */
-  private applyRepoInstructionsForTurn(): string {
-    const preOverlayPrompt = this.agent.state.systemPrompt;
+  private applyRepoInstructionsForTurn(): boolean {
     const instructions = this.session.repoInstructions();
-    if (!instructions) return preOverlayPrompt;
+    if (!instructions) return false;
     const fragment = buildRepoInstructionsFragment(instructions);
-    if (!fragment) return preOverlayPrompt;
-    this.agent.state.systemPrompt = preOverlayPrompt
-      ? `${preOverlayPrompt}\n\n${fragment}`
-      : fragment;
-    return preOverlayPrompt;
+    if (!fragment) return false;
+    this.appendSystemSection("valet-repo-instructions", fragment);
+    return true;
   }
 
-  private restoreRepoInstructionsAfterTurn(preOverlayPrompt: string): void {
-    this.agent.state.systemPrompt = preOverlayPrompt;
+  private restoreRepoInstructionsAfterTurn(applied: boolean): void {
+    if (applied) this.appendSystemSection("valet-repo-instructions", null);
   }
 
   private applyRoleForTurn(item: QueueItem): RoleOverlay {
@@ -3817,11 +5358,7 @@ export class Thread {
       this.emitError("role_not_found", `role "${roleName}" not registered on this session`);
       return { restore: false };
     }
-    const baseSystemPrompt = this.agent.state.systemPrompt;
-    const overlaid = baseSystemPrompt
-      ? `${baseSystemPrompt}\n\n${role.content}`
-      : role.content;
-    this.agent.state.systemPrompt = overlaid;
+    this.appendSystemSection("valet-role", role.content);
 
     let priorModel: PiModel | undefined;
     if (role.model) {
@@ -3846,7 +5383,6 @@ export class Thread {
 
     return {
       restore: true,
-      systemPrompt: baseSystemPrompt,
       model: priorModel,
     };
   }
@@ -3854,12 +5390,21 @@ export class Thread {
   private restoreRoleAfterTurn(overlay: RoleOverlay): void {
     this.roleModelSpec = undefined;
     if (!overlay.restore) return;
-    if (overlay.systemPrompt !== undefined) {
-      this.agent.state.systemPrompt = overlay.systemPrompt;
-    }
+    this.appendSystemSection("valet-role", null);
     if (overlay.model !== undefined) {
       this.agent.state.model = overlay.model;
     }
+  }
+
+  /** Recheck durable cancellation after asynchronous turn setup or recovery. */
+  private async canRunCurrentSubmission(): Promise<boolean> {
+    if (this.aborted) return false;
+    const running = this.runningItem;
+    if (!running) return true;
+    const item = await this.session.providers.store.getQueueItem(this.session.id, running.id);
+    return this.runningItem === running && running.abortRequestedAt === undefined &&
+      !!item && item.status === "running" &&
+      item.abortRequestedAt === undefined && !item.supersededByItemId;
   }
 
   /**
@@ -3876,10 +5421,17 @@ export class Thread {
    */
   private async runAgent(
     text: string,
-    attachments?: MessageEntry["attachments"],
-    sender?: PromptAuthor,
+    attachments: MessageEntry["attachments"] | undefined,
+    sender: PromptAuthor | undefined,
+    time: MessageTime,
   ): Promise<void> {
-    const content = userContentBlocks(text, attachments, sender);
+    if (!(await this.canRunCurrentSubmission())) return;
+    const content = userContentBlocks(text, attachments, sender, time);
+    // Delivery steers only inside finishTurn, just before the loop reads the
+    // steered messages, so this queue is empty here. Clearing it keeps an
+    // interrupted boundary from replaying a delivered message into a later
+    // run.
+    this.agent.clearSteeringQueue();
     await this.agent.prompt({
       role: "user",
       content,
@@ -3913,75 +5465,121 @@ export class Thread {
           );
           return;
         }
-        if (outcome === "insufficient") {
-          // The newest turn alone exceeds the window, so compaction cannot
-          // help and a retry would overflow again. compactThreadInner already
-          // emitted the actionable error; leave the recorded overflow response
-          // and stop, instead of looping. This is the bug that bricked a
+        if (outcome === "insufficient" || outcome === "coverage_gap") {
+          // Compaction cannot help this transcript: the newest turn alone
+          // exceeds the window, or the history it must replace carries no
+          // summarizer-readable text. Neither changes on a retry, and a
+          // retry would overflow again. compactThreadInner already emitted
+          // the actionable error; leave the recorded overflow response and
+          // stop, instead of looping. This is the bug that bricked a
           // session when a single pasted transcript exceeded the context.
+          //
+          // Count it once, here. The post-turn proactive check would
+          // otherwise run the identical pass over the identical context: the
+          // user read the same error twice for one failure, and one failure
+          // moved the breaker by one anyway. The breaker still has to move,
+          // or an unhelpable thread runs a doomed pass on every turn.
+          this.turnCompactionBlocked = true;
+          this.bumpCompactionFailureBreaker();
           return;
         }
-        // Drop the failed assistant message from the agent transcript and retry.
+        if (!(await this.canRunCurrentSubmission())) return;
+        // The rebuilt transcript already contains the user prompt and any tool
+        // results. Continue it instead of appending that prompt a second time.
         this.agent.state.messages = this.agent.state.messages.slice(0, -1);
-        await this.agent.prompt({
-          role: "user",
-          content,
-          timestamp: Date.now(),
-        });
+        await this.agent.continue();
         await this.agent.waitForIdle();
       } finally {
         this.overflowRetryInProgress = false;
       }
+      await this.retryTransientTurnError();
       return;
     }
 
     await this.retryTransientTurnError();
   }
 
-  /**
-   * Turn-level retry for transient provider errors (TKAI-319). Engages only
-   * when the turn settled with a classified-transient error AND the session
-   * is unattended (or `turnRetry` is configured explicitly) — an interactive
-   * user sees the error and decides. Each retry drops the failed assistant
-   * message and calls `agent.continue()`, pi-agent-core's native re-run for
-   * a transcript ending on a user/tool-result message — re-prompting would
-   * append a SECOND copy of the user content and the model could act on it
-   * twice. The transport layer already retried underneath; this catches the
-   * failures that exhausted it (long rate-limit windows, capacity events).
-   */
+  private isUserPrompt(): boolean {
+    const purpose = this.session.options.purpose;
+    return !!this.runningItem?.author && !isSignalContent(this.runningItem.content)
+      && purpose !== "workflow" && purpose !== "child";
+  }
+
+  /** Continue the current transcript after a bounded provider recovery attempt. */
   private async retryTransientTurnError(): Promise<void> {
     const cfgd = this.session.options.turnRetry;
     const purpose = this.session.options.purpose;
-    const unattended = purpose === "orchestrator" || purpose === "workflow" || purpose === "child";
-    const maxAttempts = cfgd?.maxAttempts ?? (unattended ? UNATTENDED_TURN_RETRY_ATTEMPTS : 0);
-    if (maxAttempts <= 0) return;
-    // An explicitly configured empty backoff list means "no wait", not
-    // "crash on index" — but an absent/empty list falls back to defaults.
-    const backoff = cfgd?.backoffMs?.length ? cfgd.backoffMs : UNATTENDED_TURN_RETRY_BACKOFF_MS;
+    const unattended = !this.isUserPrompt() && (purpose === "orchestrator" || purpose === "workflow" || purpose === "child");
+    const maxAttempts = cfgd?.maxAttempts ?? (unattended ? UNATTENDED_TURN_RETRY_ATTEMPTS : INTERACTIVE_TURN_RETRY_ATTEMPTS);
+    const backoff = cfgd?.backoffMs?.length
+      ? cfgd.backoffMs
+      : unattended ? UNATTENDED_TURN_RETRY_BACKOFF_MS : INTERACTIVE_TURN_RETRY_BACKOFF_MS;
+    const maxHintMs = cfgd?.maxHintMs ?? (unattended ? UNATTENDED_TURN_RETRY_MAX_HINT_MS : INTERACTIVE_TURN_RETRY_MAX_HINT_MS);
+    const resolveFallback = this.session.options.resolveFallbackModel;
+    const attemptedProviderIds = new Set([this.agent.state.model.provider]);
+    let sameProviderAttempts = 0;
+    let fallbackExhausted = false;
 
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    for (;;) {
+      // Guard only the failed request, not later requests after persisted receipts.
+      if (this.nativeImages.savedInRequest) return;
       const last = this.agent.state.messages[this.agent.state.messages.length - 1];
-      if (
-        !last ||
-        last.role !== "assistant" ||
-        last.stopReason !== "error" ||
-        !isRetryableAssistantError(last)
-      ) {
-        return;
+      if (!last || last.role !== "assistant" || last.stopReason !== "error") return;
+      const error = last.errorMessage ?? "";
+      // Provider capacity cannot override authentication, input, policy, or
+      // application budget failures, even when their text also mentions 429.
+      if (isNonRetryableProviderFailure(error)) return;
+      const quota = isUsageLimitFailure(error);
+      // `isRateLimitedProviderFailure` covers throttling text pi-ai's own
+      // retry pattern misses (Bedrock's "Throttling error: Too many tokens").
+      const transient = !quota && (isRetryableAssistantError(last) || isRateLimitedProviderFailure(error) || /ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|fetch failed|network error/i.test(error));
+      if (!quota && !transient) return;
+      if (!(await this.canRunCurrentSubmission())) return;
+      attemptedProviderIds.add(this.agent.state.model.provider);
+
+      let fallback: ResolvedModel | null = null;
+      if (resolveFallback && !fallbackExhausted && attemptedProviderIds.size < 3) {
+        fallback = await resolveFallback({
+          requestedSpec: this.assignedModelSpec ?? this.turnModelSpec(this.runningItem ?? undefined),
+          failedModel: {
+            model: this.agent.state.model,
+            apiKey: this.turnApiKey,
+            canonicalId: this.fallbackModelSpec ?? this.agentModelSwitch ?? this.roleModelSpec ?? this.assignedModelSpec,
+          },
+          attemptedProviderIds: [...attemptedProviderIds],
+        });
+        if (!(await this.canRunCurrentSubmission())) return;
+        // A broken host resolver must not cycle between providers or reuse a
+        // failed provider under another model name.
+        if (fallback && attemptedProviderIds.has(fallback.model.provider)) fallback = null;
+        if (!fallback) fallbackExhausted = true;
       }
-      const waitMs = backoff[Math.min(attempt - 1, backoff.length - 1)] ?? 0;
-      const errBrief = (last.errorMessage ?? "provider error").slice(0, 200);
-      this.emitError(
-        "turn_transient_retry",
-        `Provider error looks transient (${errBrief}). Retrying in ${Math.round(waitMs / 1000)}s (attempt ${attempt}/${maxAttempts}).`,
-      );
-      if ((await this.backoffOrStandDown(waitMs)) === "stand-down") return;
-      // Drop the failed assistant message; the transcript now ends on the
-      // user/tool-result message, which is exactly Agent.continue()'s
-      // contract for re-running the turn without duplicating the prompt.
+      if (fallback) {
+        const previousProvider = this.agent.state.model.provider;
+        attemptedProviderIds.add(fallback.model.provider);
+        this.turnApiKey = fallback.apiKey;
+        this.agent.state.model = fallback.model;
+        this.fallbackModelSpec = fallback.canonicalId ?? fallback.model.id;
+        if (this.runningItem && !(await this.publishActiveModelState(this.runningItem.id, fallback.model))) return;
+        this.emitTurnRetry({ action: "fallback", provider: previousProvider, reason: classifyProviderFailure(error), toProvider: fallback.model.provider });
+      } else {
+        if (!transient || sameProviderAttempts >= maxAttempts) return;
+        // A provider that asks for a longer wait than this turn allows gets
+        // no retry: the failed turn already shows its text, which says when.
+        const hintMs = parseProviderRetryHintMs(last.errorMessage);
+        if (hintMs !== undefined && hintMs > maxHintMs) return;
+        sameProviderAttempts++;
+        const waitMs = turnRetryWaitMs(backoff[Math.min(sameProviderAttempts - 1, backoff.length - 1)] ?? 0, hintMs);
+        this.emitTurnRetry({
+          action: "retry", provider: this.agent.state.model.provider, reason: classifyProviderFailure(error),
+          attempt: sameProviderAttempts, maxAttempts, waitMs,
+        });
+        if ((await this.backoffOrStandDown(waitMs)) === "stand-down") return;
+      }
+      if (!(await this.canRunCurrentSubmission())) return;
+      // Keep completed tools and the original user message. Only remove the
+      // failed assistant response before continuing the same queue item.
       this.agent.state.messages = this.agent.state.messages.slice(0, -1);
-      // The retry rewinds the transcript, so the next response's cache reads
-      // are expected to differ — do not count that as a break (TKAI-320).
       this.prevCacheSnapshot = undefined;
       await this.agent.continue();
       await this.agent.waitForIdle();
@@ -4052,71 +5650,326 @@ export class Thread {
 
   /**
    * Shared handling for both proactive compaction passes (pre-turn
-   * rehydration and post-turn). A thrown compaction counts as a failure; a
-   * "noop" outcome ALSO counts — the trigger fired but nothing was
+   * rehydration and post-turn). A thrown overflow pass counts as a failure; an
+   * overflow pass's "noop" outcome ALSO counts — the trigger fired but nothing was
    * reclaimable (context dominated by system overhead the estimate cannot
    * reduce), and without the breaker that repeats silently on every turn.
    */
-  private async runProactiveCompaction(autoContinue?: false): Promise<void> {
+  private async runProactiveCompaction(
+    trigger: ProactiveCompactionTrigger,
+    continueTurn?: false,
+    turnModel?: ResolvedModel,
+  ): Promise<void> {
+    // A budget pass runs after the turn finished its work, so it never
+    // continues the turn. The next submission reads the compacted context.
+    const autoContinue = trigger === "budget" ? false : continueTurn;
+    let outcome: CompactionOutcome;
     try {
-      const outcome = await this.compactThread(
-        autoContinue === false ? { mode: "proactive", autoContinue } : { mode: "proactive" },
-      );
-      if (outcome === "noop") {
-        this.recordProactiveCompactionFailure(
-          "compaction_noop",
-          "Compaction found nothing to reclaim: the recent turns already fit the tail budget, so the context is dominated by the system prompt and tool definitions. Reduce enabled tools or start a new thread.",
-        );
-      } else if (outcome === "insufficient") {
-        // The newest turn alone exceeds the window; compaction cannot help.
-        // compactThreadInner ALREADY emitted context_overflow_unrecoverable —
-        // feed the breaker without re-emitting, so the trigger stops re-firing
-        // without surfacing the same error twice for one pass.
-        this.bumpCompactionFailureBreaker();
-      }
+      outcome = await this.compactThread({
+        mode: "proactive",
+        ...(autoContinue === false ? { autoContinue } : {}),
+        ...(turnModel ? { turnModel } : {}),
+      });
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // A budget pass runs while the context still fits the model. Report its
+      // failure, but keep it off the breaker that overflow compaction needs.
+      if (trigger === "budget") this.emitError("compaction_failed", message);
+      else this.recordProactiveCompactionFailure("compaction_failed", message);
+      return;
+    }
+
+    if (outcome === "noop" && trigger === "budget") {
+      // The context still fits the model. A budget pass that finds nothing
+      // to reclaim is expected (one large recent turn, history a checkpoint
+      // already covers), so it must not open the breaker that guards overflow.
+      return;
+    }
+    if (outcome === "noop") {
       this.recordProactiveCompactionFailure(
-        "compaction_failed",
-        err instanceof Error ? err.message : String(err),
+        "compaction_noop",
+        "Compaction found nothing to reclaim: the recent turns already fit the tail budget, so the context is dominated by the system prompt and tool definitions. Reduce enabled tools or start a new thread.",
       );
+    } else if (outcome === "insufficient" || outcome === "coverage_gap") {
+      // Compaction cannot help this transcript. compactThreadInner ALREADY
+      // emitted the actionable error for the reason it found:
+      // context_overflow_unrecoverable, or compaction_coverage_gap.
+      this.bumpCompactionFailureBreaker();
+    } else if (
+      outcome === "compacted" &&
+      autoContinue !== false &&
+      this.session.options.compaction?.autoContinue !== false
+    ) {
+      try {
+        await this.continueAfterCompaction();
+      } catch (err) {
+        this.turnAgentError = err;
+        this.emitError(
+          "compaction_continuation_failed",
+          err instanceof Error ? err.message : String(err),
+        );
+      }
     }
   }
 
-  private shouldCompactProactive(): boolean {
-    if (this.skipNextProactiveCheck) {
-      this.skipNextProactiveCheck = false;
-      return false;
+  private async continueAfterCompaction(): Promise<void> {
+    const prompt = this.isUnattendedTurn() ? WORKFLOW_AUTO_CONTINUE_PROMPT : AUTO_CONTINUE_PROMPT;
+    const item = this.runningItem;
+    if (!item) {
+      throw new Error("Compaction continuation has no active submission.");
     }
+    const entry: MessageEntry = {
+      id: uid("e"),
+      sessionId: this.session.id,
+      threadId: this.id,
+      parentId: null,
+      type: "message",
+      role: "user",
+      content: prompt,
+      channel: item.channel,
+      metadata: { compaction_continue: true, synthetic: true, [ENTRY_USER_TIMEZONE_KEY]: this.session.lastKnownUserTimezone ?? null },
+      queueItemId: item.id,
+      createdAt: Date.now(),
+    };
+    await this.fencedWrite(() => this.appendEntry(entry, this.fence));
+    if (this.staleFenceDetected) return;
+    await this.runAgent(prompt, undefined, undefined, entryMessageTime(entry));
+  }
+
+  /**
+   * Which proactive pass the context needs: "overflow" when the next request
+   * would not fit the model, "budget" when it fits but exceeds the
+   * compaction budget (`compactionBudget`), else undefined.
+   */
+  private proactiveCompactionTrigger(): ProactiveCompactionTrigger | undefined {
     const cfg = this.session.options.compaction;
-    if (cfg?.enabled === false) return false;
+    if (cfg?.enabled === false) return undefined;
+    // A compaction pass in this turn already reported that it cannot help
+    // this transcript. Running the proactive pass now repeats that report
+    // for one failure and advances the breaker twice.
+    if (this.turnCompactionBlocked) return undefined;
     // Circuit breaker (TKAI-306): a thread whose proactive compaction keeps
     // failing must not hammer the summarizer on every turn. A successful
     // compaction (including manual /compact) closes the breaker again.
     if (this.consecutiveCompactionFailures >= MAX_CONSECUTIVE_COMPACTION_FAILURES) {
-      return false;
+      return undefined;
     }
     // Budget against the turn's effective model (spec decision 4):
-    // shouldCompactProactive only runs from runItem's try block, before the
+    // proactiveCompactionTrigger only runs from runItem's try block, before the
     // finally restores the baseline, so `agent.state.model` is the resolved
     // turn model — including resolver-only specs `resolveModelId` can't see.
     const usable = usableTokens(this.agent.state.model, cfg);
-    if (usable === 0) return false;
+    if (usable === 0) return undefined;
     // Trigger on the usage-anchored estimate (TKAI-306): the last real
     // response's reported total is the exact context of that request
     // (system prompt and tool definitions included), and only messages
     // appended since are estimated with the cut-point budget's char ruler.
     // This runs before the turn's finally-block restores the baseline
     // prompt, so the fallback estimate sees the overlays the turn used.
-    // Same role filter as `convertToLlm` — custom AgentMessage kinds never
-    // reach the LLM, so they must not count toward the context estimate.
-    const llmMessages = this.agent.state.messages.filter(
-      (m): m is Message =>
-        m.role === "user" || m.role === "assistant" || m.role === "toolResult",
-    );
     const estimated = estimateLiveContextTokens(
-      this.modelSystemPrompt(this.agent.state.systemPrompt, this.agent.state.model), llmMessages,
+      this.modelSystemPrompt(this.agent.state.systemPrompt, this.agent.state.model),
+      this.agent.state.messages.filter(isLlmMessage),
     );
-    return estimated >= usable;
+    if (estimated >= usable) return "overflow";
+    if (estimated >= compactionBudget(this.agent.state.model, cfg)) return "budget";
+    return undefined;
+  }
+
+  /**
+   * Decide the turn-end budget pass. Unattended and channel turns run it
+   * now unless another message waits. An interactive turn arms the idle
+   * timer instead, unless the idle delay is 0, which means "at turn end".
+   */
+  private async budgetPassAtTurnEnd(): Promise<boolean> {
+    const delay = idleCompactionDelayMs(this.session.options);
+    const channelType = this.runningItem?.channel?.channelType;
+    const unwatched = delay === 0 || this.isUnattendedTurn() || (channelType !== undefined && channelType !== "web");
+    if (!unwatched) {
+      this.armIdleCompaction(delay);
+      return false;
+    }
+    const running = this.runningItem?.id;
+    const items = await this.session.providers.store.listUnsettledSubmissions(this.session.id);
+    return !items.some((i) => i.threadId === this.id && i.id !== running && i.status === "queued");
+  }
+
+  /** True when the newest message in the live transcript is older than `ms`. */
+  private idleLongerThan(ms: number): boolean {
+    const messages = this.agent.state.messages;
+    const last = messages[messages.length - 1];
+    const at = last && "timestamp" in last && typeof last.timestamp === "number" ? last.timestamp : undefined;
+    return at === undefined || Date.now() - at >= ms;
+  }
+
+  private armIdleCompaction(delay: number): void {
+    this.clearIdleCompaction();
+    const timer = setTimeout(() => {
+      this.idleCompactionTimer = null;
+      void this.runIdleCompaction();
+    }, delay);
+    timer.unref?.();
+    this.idleCompactionTimer = timer;
+  }
+
+  private clearIdleCompaction(): void {
+    if (this.idleCompactionTimer) {
+      clearTimeout(this.idleCompactionTimer);
+      this.idleCompactionTimer = null;
+    }
+  }
+
+  /**
+   * Compact an idle interactive thread over its compaction budget, before
+   * its prompt cache expires. It holds the drive lock (`kicking`) so no turn
+   * claims while it runs, and kicks afterwards so a message that arrived
+   * meanwhile runs on the compacted context.
+   */
+  private runIdleCompaction(): Promise<void> {
+    if (this.kicking || this.runningItem || this.aborted || this.paused) return Promise.resolve();
+    if (!this.session.timersActive || this.session.isExecutionFenced || this.session.options.readOnlyReason) {
+      return Promise.resolve();
+    }
+    this.kicking = true;
+    this.kickTail = (async () => {
+      if (await this.unsettledHead()) return;
+      if (this.consecutiveCompactionFailures >= MAX_CONSECUTIVE_COMPACTION_FAILURES) return;
+      const usage = await this.contextUsage();
+      if (!usage?.autoCompact || usage.tokens < usage.limit) return;
+      // The turn cleared its resolver key in its finally. Resolve the model
+      // and key again, as a turn does, so the summarizer does not run on
+      // ambient credentials.
+      await this.runProactiveCompaction("budget", false, await this.resolveIdleCompactionModel());
+    })()
+      .catch((err: unknown) => {
+        this.emitError("compaction_failed", err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        this.kicking = false;
+        void this.kick();
+      });
+    return this.kickTail;
+  }
+
+  /**
+   * The model and key for an idle pass, from the host `resolveModel` seam.
+   * Undefined without a resolver: the pass then uses the thread's model and
+   * no key, as a resolver-less turn does. Like `applyResolvedKeyForResume`,
+   * it fails closed: `NoCredentialsError` and an unknown spec throw.
+   */
+  private async resolveIdleCompactionModel(): Promise<ResolvedModel | undefined> {
+    const resolver = this.session.options.resolveModel;
+    if (!resolver) return undefined;
+    const spec = this.turnModelSpec();
+    const resolved = await resolver(spec);
+    if (resolved === null) throw new Error(`unknown model id: ${spec}`);
+    return resolved;
+  }
+
+  /**
+   * How full the model context is, for display. It measures like
+   * `proactiveCompactionTrigger`: the usage-anchored estimate of the next request
+   * against the compaction budget of the thread's model. A thread that has not
+   * loaded its transcript is read from the store and stays unloaded.
+   * Undefined when the model reports no context window.
+   */
+  async contextUsage(): Promise<ThreadContextUsage | undefined> {
+    const cfg = this.session.options.compaction;
+    const model = await this.budgetModel();
+    const limit = compactionBudget(model, cfg);
+    if (limit === 0) return undefined;
+    let messages: readonly AgentMessage[] = this.agent.state.messages;
+    if (this.transcriptPending) {
+      const snapshot = await this.session.providers.store.getThreadSnapshot(this.session.id, this.id);
+      messages = snapshot
+        ? entriesToAgentMessages(snapshot.entries, model, {
+            attributeAuthors: this.attributeAuthors,
+            threadKey: this.key,
+            activeLeafEntryId: snapshot.thread.activeLeafEntryId,
+          })
+        : [];
+    }
+    const tokens = estimateLiveContextTokens(
+      this.modelSystemPrompt(this.agent.state.systemPrompt, model),
+      messages.filter(isLlmMessage),
+    );
+    return { tokens, limit, contextWindow: model.contextWindow, model: model.id, autoCompact: cfg?.enabled !== false };
+  }
+
+  /** The model the next turn budgets against: the live turn model mid-turn, else the thread's effective spec. */
+  private async budgetModel(): Promise<PiModel> {
+    // A turn publishes its model state at claim and clears it when settlement
+    // starts. The turn's cleanup restores the session's baseline model before
+    // `submission_settled` is delivered, so the live model counts only while
+    // the running item still owns that state.
+    if (this.runningItem && this.committedModelState?.queueItemId === this.runningItem.id) return this.agent.state.model;
+    const spec = this.turnModelSpec();
+    const resolver = this.session.options.resolveModel;
+    // Resolve the spec on every read, as a turn does, so a re-pointed size
+    // tier shows the model and limit that the next turn uses.
+    if (resolver) {
+      try {
+        const resolved = await resolver(spec);
+        if (resolved) return resolved.model;
+      } catch (err) {
+        if (err instanceof NoCredentialsError) return err.model;
+        // A display read must not fail on resolution. The next turn resolves
+        // the same spec and fails loud there (thread pinning spec, decision 3).
+      }
+    }
+    return this.effectiveModelLenient();
+  }
+
+  /** Tool results and model changes can exhaust the budget within one agent loop. */
+  private async fitContextBeforeRequest(
+    context: AgentContext,
+    model: PiModel,
+    signal?: AbortSignal,
+  ): Promise<AgentContext | undefined> {
+    const cfg = this.session.options.compaction;
+    const budget = usableTokens(model, cfg);
+    if (budget === 0) return undefined;
+    const messages = context.messages.filter(isLlmMessage);
+    const prompt = () => this.modelSystemPrompt(this.agent.state.systemPrompt, model);
+    const toolTokens = estimateTokens(JSON.stringify((context.tools ?? []).map((tool) => ({
+      name: tool.name, description: tool.description, parameters: tool.parameters,
+    }))));
+    const freshEstimate = (current: readonly Message[]) => estimateContextTokens(prompt(), current) + toolTokens;
+    // Prior usage cannot account for new role instructions or tool definitions.
+    let tokens = Math.max(estimateLiveContextTokens(prompt(), messages), freshEstimate(messages));
+    if (tokens < budget) return undefined;
+
+    // Each checkpoint covers only the history it actually inspected. A bounded
+    // sequence can cover deferred head entries without losing older history.
+    if (cfg?.enabled !== false && this.consecutiveCompactionFailures < MAX_CONSECUTIVE_COMPACTION_FAILURES) {
+      for (let pass = 0; pass < MAX_CONSECUTIVE_COMPACTION_FAILURES; pass++) {
+        if (signal?.aborted || !(await this.canRunCurrentSubmission())) {
+          throw new Error("Turn cancelled before context preparation completed.");
+        }
+        let outcome: CompactionOutcome;
+        try {
+          outcome = await this.compactThread({ mode: "proactive", autoContinue: false, signal });
+        } catch (error) {
+          if (signal?.aborted || !(await this.canRunCurrentSubmission())) throw error;
+          this.turnCompactionBlocked = true;
+          this.bumpCompactionFailureBreaker();
+          throw new Error("Could not prepare context for the selected model. Run /compact or choose a model with a larger context.", { cause: error });
+        }
+        if (signal?.aborted || !(await this.canRunCurrentSubmission())) {
+          throw new Error("Turn cancelled before context preparation completed.");
+        }
+        const rebuilt = this.agent.state.messages.filter(
+          (message): message is Message => message.role === "user" || message.role === "assistant" || message.role === "toolResult",
+        );
+        // Pruning invalidates the old usage anchor. Measure the rebuilt payload.
+        const nextTokens = freshEstimate(rebuilt);
+        if (nextTokens < budget) return { ...context, messages: this.agent.state.messages.slice() };
+        if (outcome === "noop" || outcome === "insufficient" || outcome === "coverage_gap" || nextTokens >= tokens) break;
+        tokens = nextTokens;
+      }
+    }
+    this.turnCompactionBlocked = true;
+    this.bumpCompactionFailureBreaker();
+    throw new Error("The conversation does not fit the selected model. Run /compact, shorten the message, or choose a larger context.");
   }
 
   /**
@@ -4129,12 +5982,18 @@ export class Thread {
     mode: "proactive" | "reactive" | "manual";
     /** Free-text steer for the summarizer (manual `/compact <text>`). */
     instructions?: string;
+    signal?: AbortSignal;
     /**
      * Force-suppress the proactive auto-continue follow-up. Set by the
      * pre-turn rehydration pass — its turn is about to run anyway, so a
      * synthetic continuation would duplicate work.
      */
     autoContinue?: false;
+    /**
+     * The resolved model and key for a pass outside a claimed turn (the idle
+     * pass). Inside a turn the pass uses the turn's model and key.
+     */
+    turnModel?: ResolvedModel;
   }): Promise<CompactionOutcome> {
     const cfg = this.session.options.compaction;
     if (cfg?.enabled === false) return "noop";
@@ -4146,7 +6005,11 @@ export class Thread {
         "valet.thread.id": this.id,
         "valet.compaction.mode": opts.mode,
       },
-      (span) => this.compactThreadInner(opts, span),
+      async (span) => {
+        const outcome = await this.compactThreadInner(opts, span);
+        span.setAttribute("valet.compaction.outcome", outcome);
+        return outcome;
+      },
     );
   }
 
@@ -4154,7 +6017,9 @@ export class Thread {
     opts: {
       mode: "proactive" | "reactive" | "manual";
       instructions?: string;
+      signal?: AbortSignal;
       autoContinue?: false;
+      turnModel?: ResolvedModel;
     },
     span?: Span,
   ): Promise<CompactionOutcome> {
@@ -4166,14 +6031,18 @@ export class Thread {
     // `agent.state.model` is the resolved turn model — exact, including
     // role overlays and resolver-only specs. A manual `/compact` can run
     // outside a claim, where `agent.state.model` still holds the session
-    // baseline — resolve the pin leniently there instead.
-    const effectiveModel = this.runningItem
+    // baseline — resolve the pin leniently there instead. The idle pass
+    // brings its own resolution (`turnModel`).
+    const effectiveModel = opts.turnModel?.model ?? (this.runningItem
       ? this.agent.state.model
-      : this.effectiveModelLenient();
+      : this.effectiveModelLenient());
     const model = cfg?.summarizerModel ?? effectiveModel;
 
-    // Load full DAG for the thread.
-    const entries = await store.getEntries(session.id, this.id);
+    // Load the full DAG, then follow the active leaf to the root. Other
+    // branches stay durable but must not enter this compaction pass.
+    const snapshot = await this.fullSnapshot();
+    const leafAtSnapshot = this.activeLeafEntryId;
+    const entries = walkTranscriptDag(snapshot.entries, leafAtSnapshot);
 
     // Step 1: pruning pass (cheap, no LLM).
     const protectedTools = new Set<string>();
@@ -4202,8 +6071,31 @@ export class Thread {
       effectiveEntries = mutable;
     }
 
-    // Step 2: cut-point selection.
-    const cut = selectCutPoint({ entries, model: effectiveModel, cfg });
+    // Step 2: cut-point selection. The active task is retained independently
+    // of the summary, so reserve it before choosing the recent tail.
+    const taskSource = this.taskSourceFor();
+    const retainedTask = taskSource ? effectiveEntries.find(entry => entry.type === "message"
+      && entry.role === "user" && entry.queueItemId === taskSource) : undefined;
+    const retainedMessages = retainedTask ? entriesToAgentMessages([retainedTask], effectiveModel, {
+      attributeAuthors: this.attributeAuthors,
+    }).filter((message): message is Message => message.role === "user" || message.role === "assistant" || message.role === "toolResult") : [];
+    const retainedTokens = estimateContextTokens(undefined, retainedMessages);
+    const toolTokens = estimateTokens(JSON.stringify(this.buildTools().map(tool => ({
+      name: tool.name, description: tool.description, parameters: tool.parameters,
+    }))));
+    const fixedPrompt = this.modelSystemPrompt(this.agent.state.systemPrompt, effectiveModel);
+    const supersededCheckpoint = findMostRecentCompaction(entries);
+    const selectTail = (checkpoint: CompactionEntry | undefined) => {
+      const reservedMessages = retainedTask ? entriesToAgentMessages([
+        retainedTask, ...(checkpoint ? [checkpoint] : []),
+      ], effectiveModel, { attributeAuthors: this.attributeAuthors, threadKey: this.key, taskSourceQueueItemId: taskSource })
+        .filter((message): message is Message => message.role === "user" || message.role === "assistant" || message.role === "toolResult") : [];
+      return selectCutPoint({ entries: effectiveEntries, model: effectiveModel, cfg,
+        ...(retainedTask ? { reservedTokens: estimateContextTokens(fixedPrompt, reservedMessages) + toolTokens,
+          tokenize: (entry: SessionEntry) => entry.id === retainedTask.id || entry.type === "compaction" ? 0 : estimateEntryTokens(entry) } : {}),
+      });
+    };
+    let cut = selectTail(supersededCheckpoint);
     if (cut.cutIndex === 0 || cut.cutIndex === entries.length) {
       // Nothing to compact: either the tail already fits everything, or
       // there's no tail to preserve. The pruning pass above may have been
@@ -4232,6 +6124,10 @@ export class Thread {
     const usable = usableTokens(effectiveModel, cfg);
     const tailTokens = estimateTotalTokens(effectiveEntries.slice(cut.cutIndex));
     if (cut.fallbackToFloor && usable > 0 && tailTokens > usable) {
+      span?.setAttributes({
+        "valet.compaction.insufficient_reason": "newest_turn_too_large",
+        "valet.compaction.tail_tokens": tailTokens,
+      });
       this.emitError(
         "context_overflow_unrecoverable",
         `The newest turn is about ${tailTokens} tokens, larger than the model's ${usable}-token ` +
@@ -4239,6 +6135,30 @@ export class Thread {
           `Shorten the last message, split it across turns, or attach it as a file.`,
       );
       return "insufficient";
+    }
+
+    // A checkpoint covers what its summary describes, and no more. The
+    // summarizer input is a budgeted window, so a head bigger than that
+    // budget is summarized across several passes: this pass takes the newest
+    // part the budget holds, and the older part stays in live context for a
+    // later pass to take (TKAI-461).
+    //
+    // Entries the superseded checkpoint already covered stay covered. Their
+    // content reaches this summary through `previousSummary`, and
+    // `entriesToAgentMessages` reads only the NEWEST checkpoint, so leaving
+    // them out would put them back into the context an earlier pass removed.
+    const carriedCoverage = new Set(supersededCheckpoint?.coveredEntryIds ?? []);
+    const pendingHead = head.filter((e) => !carriedCoverage.has(e.id));
+    if (!pendingHead.some((e) => e.type === "message")) {
+      // Nothing left to reclaim: the checkpoint this pass would supersede
+      // covers every head message already, and what remains (an older
+      // checkpoint, a command result, a decision gate) never reaches the
+      // model context. A new checkpoint would repeat the last one and free
+      // nothing. Report it the way the caller handles any futile pass, so
+      // the breaker counts it instead of compacting again on the next turn.
+      // This is not a coverage gap: a gap means live history would be lost,
+      // and there is no live history here.
+      return prunePlan.willCommit ? "pruned" : "noop";
     }
 
     // Step 3: summarize.
@@ -4252,52 +6172,130 @@ export class Thread {
     // the web store's compacting indicator only clears on the end frame. The
     // finally covers the summarizer AND the persist/rebuild steps.
     try {
-      const previousSummary = findMostRecentCompaction(entries)?.summary;
+      const previousSummary = supersededCheckpoint?.summary;
       // Overflow retry (TKAI-306): if the summarize call itself blows the
-      // summarizer model's context, drop the oldest half of the head input
-      // and try again. The CompactionEntry below still covers the FULL head
-      // — under overflow duress losing the oldest detail from the summary
-      // beats failing the compaction outright, and `previousSummary` still
-      // anchors facts from earlier compactions.
-      let headForSummary = head;
+      // summarizer model's context, shrink the input and try again. The
+      // checkpoint covers whatever survives the shrink, so a dropped slice
+      // costs a later pass, not the history. `previousSummary` still anchors
+      // facts from earlier compactions.
+      // Size the summarizer window with the ruler its payload uses. The
+      // conversion caps prose and tool output, so an entry's raw estimate
+      // overstates its summarizer cost, by up to 100x for a tool-heavy turn.
+      // Memoized: the conversion allocates capped copies of an entry's text,
+      // and the window walk, the coverage check, and the evidence budget all
+      // ask for the same entries. Entries do not change within a pass.
+      const summarySizes = new Map<string, number>();
+      const sizeForSummary = (entry: SessionEntry): number => {
+        const cached = summarySizes.get(entry.id);
+        if (cached !== undefined) return cached;
+        const size = estimateSummaryEntryTokens(entry, {
+          toolOutputMaxChars: cfg?.toolOutputMaxChars,
+          attributeAuthors: this.attributeAuthors,
+        });
+        summarySizes.set(entry.id, size);
+        return size;
+      };
+      const summaryInputBudget = Math.min(
+        Math.max(usableTokens(model), SUMMARY_CHECKPOINT_TAIL_MAX_TOKENS),
+        SUMMARY_INPUT_MAX_TOKENS,
+      );
+      // Head coverage is an allocation rule, not a hope. Every covered entry
+      // leaves the model context, so the window the summarizer reads is what
+      // the checkpoint may claim. The window comes from the pending head
+      // alone: a window over [head, tail] aligns onto the newest turn and
+      // leaves the head unread, and a window over already-covered entries
+      // spends the budget on history `previousSummary` already carries
+      // (TKAI-461).
+      let headForSummary = selectSummaryCheckpointTail(pendingHead, summaryInputBudget, {
+        sizeOf: sizeForSummary,
+      });
+      // Recent tail evidence anchors the recovery checkpoint in the current
+      // task. It is optional, so it takes the budget the head leaves, and it
+      // is trimmed to what fits rather than dropped whole. A newest entry
+      // that alone exceeds the evidence budget leaves no evidence. The tail
+      // stays verbatim in live context either way.
+      let tailEvidence = selectSummaryCheckpointTail(
+        effectiveEntries.slice(cut.cutIndex),
+        Math.min(
+          SUMMARY_CHECKPOINT_TAIL_MAX_TOKENS,
+          Math.max(
+            summaryInputBudget -
+              headForSummary.reduce((total, e) => total + sizeForSummary(e), 0),
+            0,
+          ),
+        ),
+        { sizeOf: sizeForSummary, keepNewest: false },
+      );
+      // Coverage is a property of the PAYLOAD, not of entry ids. The
+      // conversion skips non-message entries and assistant entries that
+      // render to nothing, so a window can hold head entries by id and still
+      // send the summarizer no head content.
+      const pendingHeadIds = new Set(pendingHead.map((e) => e.id));
+      const coversHead = (selection: readonly SessionEntry[]): boolean =>
+        selection.some((entry) => pendingHeadIds.has(entry.id) && sizeForSummary(entry) > 0);
+      // This guard handles the pass that can summarize nothing: the pending
+      // head carries no text the summarizer reads, so any checkpoint would
+      // describe an empty transcript. It runs before the summarizer call, so
+      // such a pass costs nothing. A pending head that is only PARTLY
+      // readable is not this case. The checkpoint below claims the window
+      // and no more, so the rest keeps its place in live context.
+      if (!coversHead(headForSummary)) {
+        span?.setAttributes({
+          "valet.compaction.insufficient_reason": "coverage_gap",
+          "valet.compaction.input_budget_tokens": summaryInputBudget,
+          "valet.compaction.head_entries": pendingHead.length,
+        });
+        recordCompactionCoverageGap(opts.mode);
+        this.emitError(
+          "compaction_coverage_gap",
+          `Compaction found no history to summarize. The ${pendingHead.length} entries it must replace hold ` +
+            `no text the summarizer can read. Start a new thread if the context still overflows.`,
+        );
+        return "coverage_gap";
+      }
       for (let attempt = 0; ; attempt++) {
         try {
           summaryResult = await summarize({
-            headEntries: headForSummary,
+            headEntries: [...headForSummary, ...tailEvidence],
             model,
             toolOutputMaxChars: cfg?.toolOutputMaxChars,
             attributeAuthors: this.attributeAuthors,
             previousSummary,
             instructions: opts.instructions,
+            signal: opts.signal,
             // Reactive compaction fires WITHIN a claimed turn (and proactive
             // just after runAgent, still before the turn's finally clears it),
             // so `turnApiKey` is live here. Without this, a BYO-key session
             // whose only key comes from the host `resolveModel` seam would fail
             // the summarizer completion on first context overflow. Undefined
             // when no resolver is wired (env-fallback path) — behavior unchanged.
-            apiKey: this.turnApiKey,
+            // The idle pass runs after that finally and passes its own key.
+            apiKey: opts.turnModel ? opts.turnModel.apiKey : this.turnApiKey,
+            fetch: this.session.options.modelFetch?.(model),
           });
           break;
         } catch (err) {
           if (!(err instanceof SummarizeOverflowError)) throw err;
-          // Align the cut to a user-message boundary: a summarizer input
-          // starting on an assistant message is rejected by providers that
-          // require a user-first transcript, and that 400 is not an
-          // overflow, so it would abort the whole retry loop.
-          const half = Math.floor(headForSummary.length / 2);
-          let start = -1;
-          for (let i = half; i < headForSummary.length; i++) {
-            const e = headForSummary[i];
-            if (e.type === "message" && e.role === "user") {
-              start = i;
-              break;
-            }
+          if (attempt + 1 >= MAX_SUMMARIZE_OVERFLOW_RETRIES) throw err;
+          // Shrink in an order that keeps head coverage: the optional tail
+          // evidence first, then the oldest half of the head. No
+          // user-message alignment: `summarize` prepends its own preface, so
+          // an assistant-first slice is a legal payload. Aligning forward to
+          // the next user entry instead threw away context the budget could
+          // still hold, and a slice with no user entry at all left an input
+          // that providers rejected with a plain 400 that aborted this loop
+          // (TKAI-461).
+          if (tailEvidence.length > 0) {
+            tailEvidence = [];
+            continue;
           }
-          const truncated = start >= 0 ? headForSummary.slice(start) : headForSummary.slice(half);
-          if (
-            attempt + 1 >= MAX_SUMMARIZE_OVERFLOW_RETRIES ||
-            truncated.length === headForSummary.length
-          ) {
+          const truncated = headForSummary.slice(Math.floor(headForSummary.length / 2));
+          // Coverage is checked BEFORE the retry. A slice that carries no
+          // head content would buy a summary this pass must then discard,
+          // and both calls are billed. Neither shrink step can drop head
+          // coverage once this passes, so the checkpoint below needs no
+          // second check.
+          if (truncated.length === headForSummary.length || !coversHead(truncated)) {
             throw err;
           }
           headForSummary = truncated;
@@ -4305,43 +6303,96 @@ export class Thread {
       }
 
       // Step 4: persist CompactionEntry.
+      //
+      // The covered set is the window this pass summarized, plus what the
+      // superseded checkpoint covered. Both halves are described by this
+      // summary: the window through the input above, the carried half
+      // through `previousSummary`. Head entries outside the window are not
+      // claimed, so they keep their place in live context and the next pass
+      // sees a shorter pending head.
+      //
+      // `tokenCountBefore` and `fileContext` measure the same covered set, so
+      // the compression ratio reports the history this checkpoint replaced
+      // and not the history it left behind.
+      const summarized = new Set(headForSummary.map((e) => e.id));
+      const covered = new Set([...carriedCoverage, ...summarized]);
+      const coveredEntries = entries.filter((e) => covered.has(e.id));
       const compactionEntry: CompactionEntry = {
         id: uid("c"),
         sessionId: session.id,
         threadId: this.id,
-        parentId: head[head.length - 1].id,
+        parentId: null,
         type: "compaction",
         summary: summaryResult.summary,
-        coveredEntryIds: head.map((e) => e.id),
-        tokenCountBefore: estimateTotalTokens(head),
-        tokenCountAfter: estimateTokens(summaryResult.summary),
-        fileContext: extractFileContext(head),
+        coveredEntryIds: coveredEntries.map((e) => e.id),
+        tokenCountBefore: estimateTotalTokens(coveredEntries),
+        tokenCountAfter: estimateTokens(summaryResult.summary) + (retainedTask && covered.has(retainedTask.id) ? retainedTokens : 0),
+        fileContext: extractFileContext(coveredEntries),
         createdAt: Date.now(),
       };
+      if (retainedTask && usable > 0) {
+        // The generated summary can displace older tail entries. Keep those
+        // entries uncovered until a later bounded pass actually reads them.
+        // Reserve the rendered checkpoint, including its transcript link.
+        cut = selectTail(compactionEntry);
+        const tail = effectiveEntries.slice(cut.cutIndex);
+        const required = entriesToAgentMessages([
+          ...(!tail.some(entry => entry.id === retainedTask.id) ? [retainedTask] : []),
+          ...tail, compactionEntry,
+        ], effectiveModel, { attributeAuthors: this.attributeAuthors, threadKey: this.key, taskSourceQueueItemId: taskSource })
+          .filter((message): message is Message => message.role === "user" || message.role === "assistant" || message.role === "toolResult");
+        const requiredTokens = estimateContextTokens(fixedPrompt, required) + toolTokens;
+        if (requiredTokens >= usable) {
+          span?.setAttributes({ "valet.compaction.insufficient_reason": "retained_task_too_large", "valet.compaction.required_tokens": requiredTokens });
+          this.emitError("context_overflow_unrecoverable",
+            "The active task, summary, and recent context do not fit the selected model. Choose a larger model or shorten the task.");
+          return "insufficient";
+        }
+      }
+      // Head entries this pass deferred to the next one. They are live
+      // context, not lost history, so this is a size signal and not a
+      // violation: a head that needs many passes shows up here as a large
+      // deferral that shrinks pass over pass.
+      const deferredHead = effectiveEntries.slice(0, cut.cutIndex)
+        .filter((e) => !carriedCoverage.has(e.id) && !summarized.has(e.id));
       span?.setAttributes({
         "valet.compaction.tokens_before": compactionEntry.tokenCountBefore,
         "valet.compaction.tokens_after": compactionEntry.tokenCountAfter,
         "valet.compaction.entries_covered": compactionEntry.coveredEntryIds.length,
+        "valet.compaction.head_entries_deferred": deferredHead.length,
+        "valet.compaction.head_tokens_deferred": estimateTotalTokens(deferredHead),
       });
-      // Fenced under the current turn's attempt (compaction is always in-turn).
-      await store.appendEntries(session.id, this.id, [compactionEntry], this.fence);
+      // Fenced under the current turn's attempt. An edit or a return that
+      // moved the thread to another branch while the summarizer ran makes
+      // this summary describe the branch the thread left, so drop it.
+      if (!(await this.appendOnPath(compactionEntry, leafAtSnapshot, this.fence))) {
+        span?.setAttribute("valet.compaction.dropped", "branch_switched");
+        console.warn(`[engine] compaction dropped: the thread switched branches while it ran session=${session.id} thread=${this.id}`);
+        return "noop";
+      }
       // A persisted summary closes the failure circuit breaker — any mode's
       // success proves the summarizer works again (manual /compact included).
       this.consecutiveCompactionFailures = 0;
 
       // Step 5: rewrite agent.state.messages. The simplest and most
       // correct path is to rebuild from the now-augmented DAG.
-      const updatedEntries = await store.getEntries(session.id, this.id);
+      const updatedSnapshot = await this.fullSnapshot();
+      const updatedEntries = updatedSnapshot.entries;
       this.replaceActiveSkillInvocations(updatedEntries);
-      this.agent.state.messages = entriesToAgentMessages(
+      this.replaceAgentMessages(entriesToAgentMessages(
         updatedEntries,
         {
           api: effectiveModel.api,
           provider: effectiveModel.provider,
           id: effectiveModel.id,
         },
-        { attributeAuthors: this.attributeAuthors, threadKey: this.key },
-      );
+        {
+          attributeAuthors: this.attributeAuthors,
+          threadKey: this.key,
+          activeLeafEntryId: this.activeLeafEntryId,
+          taskSourceQueueItemId: this.taskSourceFor(),
+        },
+      ), this.taskSourceFor());
       // Compaction legitimately rewrites the prefix — the next turn's cache
       // reads SHOULD drop. Reset the break-detector baseline so the expected
       // drop is not counted as a break (TKAI-320).
@@ -4373,33 +6424,8 @@ export class Thread {
       }
     }
 
-    // Step 6: auto-continue (proactive only). Inject a synthetic user
-    // message tagged with metadata.compaction_continue so client UIs can
-    // hide it. Admitted as a durable submission so the claim loop picks it up
-    // after the current turn settles.
-    if (opts.mode === "proactive" && opts.autoContinue !== false && cfg?.autoContinue !== false) {
-      // Durable admission: the claim loop picks this up after the current turn
-      // settles. metadata flags let client UIs hide the synthetic continuation.
-      const followUp = this.buildQueueItem(AUTO_CONTINUE_PROMPT, {
-        metadata: { compaction_continue: true, synthetic: true },
-        // The continuation answers the same reader as the turn it continues.
-        // Without the inherited channel mark, the outbound channel path
-        // classifies the continuation as a web prompt and mutes the rest of
-        // a channel-originated answer (TKAI-323).
-        channel: this.runningItem?.channel,
-      });
-      await store.admitSubmission(session.id, this.id, followUp);
-      await this.emitQueueState();
-    }
-
-    // Cool-down: skip the next proactive check so the auto-continue turn
-    // doesn't immediately re-trigger compaction on a small-context model.
-    // NOT armed for the pre-turn rehydration pass (autoContinue: false) —
-    // there is no follow-up turn there, and arming it would suppress the
-    // SAME turn's legitimate post-turn check.
-    if (opts.autoContinue !== false) {
-      this.skipNextProactiveCheck = true;
-    }
+    // The proactive caller continues this same submission after this method
+    // returns. Settlement therefore cannot race ahead of the continuation.
 
     return "compacted";
   }
@@ -4414,10 +6440,26 @@ export class Thread {
     for (const ids of plan.toElide.values()) {
       for (const id of ids) elidedCallIds.add(id);
     }
+    let elided = false;
     for (const m of this.agent.state.messages) {
-      if (m.role !== "toolResult") continue;
-      if (!elidedCallIds.has(m.toolCallId)) continue;
-      m.content = [{ type: "text", text: "[output elided to save context]" }];
+      if (m.role === "toolResult" && elidedCallIds.has(m.toolCallId)) {
+        m.content = [{ type: "text", text: ELIDED_TOOL_OUTPUT }];
+        elided = true;
+      } else if (m.role === "assistant" && elided) {
+        // This response's usage counted output that is now elided. Clear it
+        // like a rehydrated transcript, so the next request is measured from
+        // its pruned payload. pi-ai sizes the output budget from the newest
+        // usage, and a stale total leaves the model almost no room to answer.
+        // The entry already holds this usage; only the live copy changes.
+        m.usage = {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        };
+      }
     }
   }
 
@@ -4426,10 +6468,12 @@ export class Thread {
     const assignedSelection = this.assignedModelSpec ?? this.turnModelSpec(this.runningItem ?? undefined);
     return appendRuntimeModelContext(prompt, {
       assignedSelection,
-      activeSelection: this.agentModelSwitch ?? this.roleModelSpec ?? assignedSelection,
+      activeSelection: this.fallbackModelSpec ?? this.agentModelSwitch ?? this.roleModelSpec ?? assignedSelection,
       provider: model.provider,
       modelId: model.id,
-      temporaryOverride: this.agentModelSwitch !== undefined
+      temporaryOverride: this.fallbackModelSpec !== undefined
+        ? "provider fallback"
+        : this.agentModelSwitch !== undefined
         ? "switch_model"
         : this.roleModelSpec !== undefined
           ? "role model"
@@ -4437,16 +6481,107 @@ export class Thread {
     });
   }
 
+  private readonly nativeImages = new NativeImageBridge();
+  /** The turn's grant for hosted generation; each saved image is audited against it. */
+  private nativeImageGrant: HostedActionGrant | undefined;
+
+  /**
+   * Native generation spends the chat provider's key, so it is offered only
+   * when the plugin actions it replaces would run now without a gate: the
+   * OpenAI plugin is registered, its service is available, and policy
+   * resolves to allow for the hosted tool's parameters. The hosted tool both
+   * generates and edits images in context, so generation and editing must
+   * both be allowed. A deny or approval policy keeps the plugin actions
+   * visible instead, and `invokeAction` applies and audits them as usual.
+   */
+  private async nativeImageGenerationPermitted(signal: AbortSignal | undefined): Promise<boolean> {
+    if (this.runningItem?.author?.externalSender || !toolInScope(this.effectiveToolScope(), NATIVE_IMAGE_RESULT_TOOL)) return false;
+    const catalog = this.session.options.pluginCatalog;
+    if (!catalog) return false;
+    const ctx = this.buildToolContext({
+      signal: signal ?? new AbortController().signal,
+      toolCallId: "native-image-policy",
+      toolName: NATIVE_IMAGE_RESULT_TOOL,
+      toolArgs: {},
+    });
+    const [generate, edit] = await Promise.all([
+      resolveUngatedAction(catalog, NATIVE_IMAGE_PLUGIN_ACTION, ctx, { ...NATIVE_IMAGE_TOOL_PARAMS }),
+      resolveUngatedAction(catalog, NATIVE_IMAGE_EDIT_ACTION, ctx, { ...NATIVE_IMAGE_TOOL_PARAMS }),
+    ]);
+    this.nativeImageGrant = generate && edit ? generate : undefined;
+    return this.nativeImageGrant !== undefined;
+  }
+
+  /** The assistant entry a native image checkpoint appended before message_end. Its parentId is the DAG link to keep. */
+  private checkpointEntry: MessageEntry | undefined;
+
+  /**
+   * Persist a saved native image before the stream ends. The entry carries the
+   * receipt tool call with its path, so a crash before the terminal event
+   * resumes this turn with the saved original in context instead of paying
+   * for the image again. message_end replaces the entry with the full message.
+   */
+  private async checkpointNativeImage(receipt: { path: string; image_id: string; callId: string }): Promise<void> {
+    const messageId = this.currentAssistantMessageId;
+    if (!messageId) return;
+    const part: MessagePart = {
+      type: "tool_call",
+      callId: receipt.callId,
+      toolName: NATIVE_IMAGE_RESULT_TOOL,
+      status: "running",
+      args: { path: receipt.path, image_id: receipt.image_id },
+    };
+    this.currentToolCalls.set(receipt.callId, part);
+    this.currentAssistantParts.push(part);
+    const entry: MessageEntry = {
+      id: messageId,
+      sessionId: this.session.id,
+      threadId: this.id,
+      parentId: null,
+      type: "message",
+      role: "assistant",
+      content: "",
+      parts: [...this.currentAssistantParts],
+      model: this.agent.state.model.id,
+      queueItemId: this.runningItem?.id,
+      createdAt: Date.now(),
+    };
+    if (this.checkpointEntry?.id === messageId) {
+      entry.parentId = this.checkpointEntry.parentId;
+      await this.fencedWrite(() => this.session.providers.store.updateEntry(this.session.id, this.id, entry, this.fence));
+    } else {
+      // appendEntry assigns the parent and advances the leaf; later replacements must keep that parent.
+      await this.fencedWrite(() => this.appendEntry(entry, this.fence));
+    }
+    this.checkpointEntry = entry;
+  }
+
+  /** Hosted spend appears in the action audit like a plugin invocation would. */
+  private recordNativeImage(receipt: { path: string; image_id: string }): void {
+    const grant = this.nativeImageGrant;
+    if (!grant) return;
+    const ctx = this.buildToolContext({
+      signal: new AbortController().signal,
+      toolCallId: "native-image-audit",
+      toolName: NATIVE_IMAGE_RESULT_TOOL,
+      toolArgs: { ...receipt },
+    });
+    recordHostedActionInvocation(ctx, grant, { ...receipt }, `Generated an image with ${NATIVE_IMAGE_TOOL_PARAMS.model} through the session model`);
+  }
+
   private buildAgent(): Agent {
     // Only wire `getApiKey` when a host resolver is present. Absent → the Agent
     // is constructed with the exact same options as before the seam existed, so
     // pi-ai's env-var fallback stamps StreamOptions.apiKey (byte-identical pin).
-    const hasResolver = this.session.options.resolveModel !== undefined;
+    const hasResolver = this.session.options.resolveModel !== undefined || this.session.options.resolveFallbackModel !== undefined;
     const agent = new Agent({
       initialState: {
         model: this.session.options.model,
         systemPrompt: this.buildBaseSystemPrompt(),
       },
+      // Mid-turn delivery steers every taken item at one boundary; the loop
+      // adds them all before its next request.
+      steeringMode: "all",
       // Deliberate transport-retry policy (TKAI-319): pi-ai wraps provider
       // requests in an abortable backoff only when maxRetries is set — the
       // bare streamSimple left retries to whatever the SDK defaulted to.
@@ -4456,12 +6591,46 @@ export class Thread {
       // from its own config wins — pinning here would silently disable the
       // upstream knob forever.
       streamFn: async (model, context, options) => {
+        this.requestedMaxOutputTokens = options?.maxTokens;
+        this.requestEvidence = modelRequestEvidence(undefined);
         await this.persistSkillContextAttributions();
-        return streamSimple(model, {
-          ...context,
-          systemPrompt: this.modelSystemPrompt(context.systemPrompt, model),
-        }, {
+        const runtimeModelContext = this.modelSystemPrompt(undefined, model);
+        const initialSystemIndex = context.messages.findIndex((message) => message.role === "system");
+        const runtimeSystem = {
+          role: "system" as const,
+          content: "",
+          sections: { "valet-runtime-model": runtimeModelContext },
+          timestamp: Date.now(),
+        };
+        const transcript = {
+          messages: initialSystemIndex === -1
+            ? [runtimeSystem, ...context.messages]
+            : context.messages.map((message, index) =>
+              index === initialSystemIndex && message.role === "system"
+                ? {
+                    ...message,
+                    sections: {
+                      ...message.sections,
+                      "valet-runtime-model": runtimeModelContext,
+                    },
+                  }
+                : message,
+            ),
+        };
+        const modelFetch = this.session.options.modelFetch?.(model);
+        return this.nativeImages.stream(model, transcript, {
           ...options,
+          ...(modelFetch && !options?.fetch ? { fetch: modelFetch } : {}),
+          onPayload: async (payload, requestModel) => {
+            const transformed = (await options?.onPayload?.(payload, requestModel)) ?? payload;
+            this.requestEvidence = modelRequestEvidence(transformed);
+            return transformed;
+          },
+          onResponse: async (response, requestModel) => {
+            const requestId = Object.entries(response.headers).find(([key]) => ["x-request-id", "request-id", "x-amzn-requestid"].includes(key.toLowerCase()))?.[1];
+            this.requestEvidence.requestId = requestId?.slice(0, 200) ?? null;
+            await options?.onResponse?.(response, requestModel);
+          },
           maxRetries: options?.maxRetries ?? TURN_STREAM_MAX_RETRIES,
           maxRetryDelayMs: options?.maxRetryDelayMs ?? TURN_STREAM_MAX_RETRY_DELAY_MS,
           timeoutMs: options?.timeoutMs ?? TURN_STREAM_TIMEOUT_MS,
@@ -4487,17 +6656,25 @@ export class Thread {
             model,
             options?.reasoning,
             this.reasoningOverride,
-            this.reasoningDisabled ? undefined : this.session.options.sampling?.reasoning,
+            this.session.options.sampling?.reasoning,
           ),
           samplingParams: options?.samplingParams ?? this.session.options.sampling?.params,
+        }, this.session.sandbox, {
+          permitted: () => this.nativeImageGenerationPermitted(options?.signal),
+          // Never start or wait for a sandbox on a text turn (orchestrators are sandbox-less by default).
+          sandboxReady: () => this.session.attachment.state === "ready",
+          saved: async (receipt) => {
+            await this.checkpointNativeImage(receipt);
+            this.recordNativeImage({ path: receipt.path, image_id: receipt.image_id });
+          },
         });
       },
       // Filter out custom AgentMessage types (decision_gate, compaction, etc.)
       // before the LLM sees them. They live in the engine DAG, not in LLM context.
       convertToLlm: (messages: AgentMessage[]): Message[] => {
-        return messages.filter(
-          (m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult",
-        ) as Message[];
+        return correctImageBlocks(messages.filter(
+          (m) => m.role === "system" || m.role === "user" || m.role === "assistant" || m.role === "toolResult",
+        ) as Message[]);
       },
       // Re-read the live model between loop iterations (TKAI-338).
       //
@@ -4507,11 +6684,33 @@ export class Thread {
       // turn that called it: the tool moved the model, and the loop kept
       // streaming against the model it started on. Returning the live state
       // here is what makes "takes effect on the next LLM call" true.
-      prepareNextTurn: () => ({ model: this.agent.state.model }),
+      prepareNextTurnWithContext: ({ context }) => ({ model: this.agent.state.model, context: { ...context, tools: this.buildTools() } }),
+      prepareRequest: async ({ context, model }, signal) => {
+        const fitted = await this.fitContextBeforeRequest(context, model, signal);
+        return fitted ? { context: fitted } : undefined;
+      },
       // A stale fenced publication means a successor owns this submission.
-      // abort() is best-effort while a tool is executing, so also stop at the
+      // abort() is best-effort while a tool is executing, so also end at the
       // turn boundary before the loop can start another provider request.
-      shouldStopAfterTurn: () => this.staleFenceDetected,
+      // A turn boundary after a tool batch also delivers queued `inject`
+      // items into the running turn. pi-agent-core reads steered messages
+      // right after this returns, so delivery happens only when the loop
+      // continues: not after an error, an abort, or an `end` decision. It
+      // also skips a boundary after a final answer: a crash before the next
+      // response would leave that answer as the turn's last entry, recovery
+      // would read the turn as complete, and the delivered message would
+      // get no answer. Such items run as the next turn instead.
+      finishTurn: async (turn) => {
+        if (this.staleFenceDetected) return { action: "end" };
+        const decision = this.chargeModelCall(turn.message);
+        if (decision) return decision;
+        // `toolUse` only: a `length` stop also carries (failed) tool results,
+        // but it persists as a terminal entry, the same recovery hazard.
+        if (turn.message.stopReason === "toolUse") {
+          await this.deliverQueuedIntoRunningTurn();
+        }
+        return undefined;
+      },
       // Per-turn key delivery: pi-agent-core calls this with the turn's provider
       // and stamps the result onto StreamOptions.apiKey (undefined → env fallback).
       ...(hasResolver ? { getApiKey: (_provider: string) => this.turnApiKey } : {}),
@@ -4532,7 +6731,12 @@ export class Thread {
    * overlays" ordering; do not "fix" it.
    */
   private buildBaseSystemPrompt(): string {
-    const base = this.session.options.systemPrompt ?? "";
+    const threadContext = this.session.options.threadSystemContext?.({ id: this.id, key: this.key });
+    // TKAI-584: fixed at thread creation (persisted `createdAt`), so the text
+    // is byte-identical on every call and across restarts. It sits in the
+    // stable prefix; a per-call clock would break the prompt cache.
+    const threadStarted = threadStartedSection(this.threadCreatedAt, this.threadUserTimezone);
+    const base = [this.session.options.systemPrompt, threadContext, threadStarted].filter(Boolean).join("\n\n");
     const fragments = this.session.options.systemContext ?? [];
     if (fragments.length === 0) return base;
     const sorted = [...fragments].sort((a, b) => {
@@ -4545,13 +6749,349 @@ export class Thread {
     return base ? `${base}\n\n${fragmentText}` : fragmentText;
   }
 
-  private buildTools(): AgentTool[] {
-    const all: ToolDef[] = [...this.session.builtinTools, ...(this.session.options.tools ?? [])];
-    return all.map((def) =>
-      toAgentTool(def, ({ signal, toolCallId, toolName, toolArgs }) =>
-        this.buildToolContext({ signal, toolCallId, toolName, toolArgs }),
+  /** Persists a refused approval as a resolved gate row for its submission. It
+   * is never pending, so no inbox, waiter, or attention wiring sees it. */
+  private async recordUnattendedRefusal(req: DecisionGateRequest, gateCtx: GateContext, resolution: DecisionResolution): Promise<void> {
+    const store = this.session.providers.store;
+    const prior = await store.listDecisionGatesForQueueItem(this.session.id, this.id, gateCtx.queueItemId);
+    const ordinal = prior.filter((gate) => gate.resumeKey === gateCtx.resumeKey)
+      .reduce((max, gate) => Math.max(max, gate.ordinal + 1), 0);
+    const { expiresAt: _expiresAt, ...gate } = fromRequest(req, { ...gateCtx, ordinal });
+    await store.saveDecisionGate(this.session.id, this.id, { ...gate, status: "resolved", resolution });
+  }
+
+  /**
+   * Counts one model call against the running submission's limit. At the
+   * limit, a reply that asks for more work ends the loop before the next
+   * call; a final reply still completes.
+   */
+  /**
+   * Deliver queued `inject` items into the running turn at a turn boundary
+   * (`MID_TURN_DELIVERY_KEY`). `finishTurn` calls it after the model's
+   * response and its tool calls, before pi-agent-core reads steered
+   * messages, so the model sees them in its next request. A person's
+   * message therefore reaches the turn at its next step, the way a coding
+   * agent takes a message typed while it works. An unattended turn takes
+   * none: a person's message needs a turn that can ask. A failure leaves
+   * the items queued; they run as followups.
+   */
+  private async deliverQueuedIntoRunningTurn(): Promise<void> {
+    const running = this.runningItem;
+    if (!running || this.aborted || running.abortRequestedAt !== undefined) return;
+    if (this.session.options.purpose === "workflow" || this.isUnattendedTurn()) return;
+    // On the overheard-digest chain, like a cancel: a cancel either lands
+    // first and the item is not delivered, or it finds the item settled.
+    // An item is in `taken` once it settles `merged`, so a failure on a
+    // later item still delivers the earlier ones; nothing else would run them.
+    const taken: Array<{ text: string; attachments: MessageEntry["attachments"]; sender?: PromptAuthor; time: MessageTime }> = [];
+    const run = this.overheardCoalesceChain.then(() => this.takeMidTurnItems(running, taken));
+    this.overheardCoalesceChain = run.then(() => null, () => null);
+    try {
+      await run;
+    } catch (err) {
+      this.emitError("mid_turn_delivery_failed", err instanceof Error ? err.message : String(err));
+    }
+    for (const { text, attachments, sender, time } of taken) {
+      this.agent.steer({ role: "user", content: userContentBlocks(text, attachments, sender, time), timestamp: Date.now() });
+    }
+  }
+
+  /**
+   * The leading run of this thread's queued items that may join `running`
+   * (`canDeliverMidTurn`), in admission order. The first item that cannot
+   * join ends the run, so delivery never reorders the queue. An item that a
+   * digest lists also ends it: the digest already carries its text (see
+   * settleCanceled).
+   */
+  private midTurnRun(unsettled: QueueItem[], running: QueueItem): QueueItem[] {
+    const digested = new Set(unsettled.flatMap((d) => {
+      const meta = d.metadata?.overheardDigest;
+      return d.threadId === this.id && isOverheardDigestMeta(meta) ? meta.constituentIds : [];
+    }));
+    const queued = unsettled
+      .filter((i) => i.threadId === this.id && i.status === "queued" && !i.supersededByItemId)
+      .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    const end = queued.findIndex((item) => digested.has(item.id) || !canDeliverMidTurn(item, running, this.defaultActorId()));
+    return end === -1 ? queued : queued.slice(0, end);
+  }
+
+  /**
+   * Take the run of queued items that may join `running` (`midTurnRun`).
+   * Each item's user entry is written first, after the entries of the turn
+   * so far, then the item settles `merged`. An item a claim or cancel
+   * settled first is not delivered.
+   */
+  private async takeMidTurnItems(
+    running: QueueItem,
+    taken: Array<{ text: string; attachments: MessageEntry["attachments"]; sender?: PromptAuthor; time: MessageTime }>,
+  ): Promise<void> {
+    const store = this.session.providers.store;
+    const run = this.midTurnRun(await store.listUnsettledSubmissions(this.session.id), running);
+    const before = taken.length;
+    // A Stop, an abort, or a successor attempt can land while an earlier item
+    // is written. The item then stays queued and runs as a followup.
+    const stopped = () => this.aborted || running.abortRequestedAt !== undefined || this.staleFenceDetected || this.runningItem !== running;
+    try {
+      for (const item of run) {
+        if (stopped()) break;
+        // An entry that an earlier process wrote before it crashed is already
+        // in the transcript this turn was rebuilt from, so it is settled but
+        // not steered again. An entry this process wrote is steered.
+        const recovered = !this.midTurnAppended.has(item.id) && await this.hasUserEntry(item.id);
+        const { text, attachments, time } = await this.appendUserEntry(item);
+        if (stopped()) break;
+        this.midTurnAppended.add(item.id);
+        // `mergedIntoItemId` lets `awaitResult` on the item follow the turn
+        // that answers it.
+        const settled = await store.settleUnclaimed(
+          this.session.id, this.id, item.id, { outcome: "merged" }, { onlyIfUnsuperseded: true, mergedIntoItemId: running.id },
+        );
+        if (!settled) {
+          this.emitError("mid_turn_delivery_conflict", `Queued message ${item.id} settled before it could join the running turn; it was not delivered.`);
+          break;
+        }
+        if (!recovered) {
+          taken.push({
+            text,
+            attachments,
+            time,
+            ...(isSignalContent(item.content) ? {} : { sender: attributedAuthor(this.attributeAuthors, item.author) }),
+          });
+        }
+        await this.emitSettled(item.id, { outcome: "merged" }, { mergedIntoItemId: running.id });
+      }
+    } finally {
+      if (taken.length > before) await this.emitQueueState();
+    }
+  }
+
+  /** Whether the transcript already holds the user entry of queue item `itemId`. */
+  private async hasUserEntry(itemId: string): Promise<boolean> {
+    // Only this item's entries: a whole-thread read here ran once per queued
+    // message that joined a running turn.
+    const entries = await this.session.providers.store.getEntries(this.session.id, this.id, { queueItemId: itemId });
+    return entries.some((e) => e.type === "message" && e.role === "user" && e.queueItemId === itemId);
+  }
+
+  /** The actor of a turn whose item names no author (`buildToolContext`). */
+  private defaultActorId(): string {
+    const session = this.session;
+    return session.owner.type === "team" && session.options.purpose !== "workflow" && session.options.purpose !== "child"
+      ? `team:${session.owner.id}` : session.options.userId;
+  }
+
+  private chargeModelCall(message: AssistantMessage): { action: "end" } | undefined {
+    const limit = readModelCallLimit(this.runningItem?.metadata?.[MODEL_CALL_LIMIT_KEY]);
+    if (limit === undefined) return undefined;
+    this.submissionModelCalls += 1;
+    if (this.submissionModelCalls < limit || !message.content.some((part) => part.type === "toolCall")) return undefined;
+    this.modelCallLimitReached = limit;
+    return { action: "end" };
+  }
+
+  /** A workflow step's own session, a workflow task handed to an assistant thread,
+   * or any turn on a run's own thread that a person did not type. Nobody answers
+   * its decisions, and a task it delegates inherits that. */
+  private isUnattendedWorkflowTask(): boolean {
+    return this.session.options.purpose === "workflow" || this.runningItem?.metadata?.[UNATTENDED_WORKFLOW_KEY] === true
+      || (!this.isUserPrompt() && this.session.options.unattendedThread?.({ id: this.id, key: this.key }) === true);
+  }
+
+  /** An unattended workflow task, or an automated event or schedule delivery.
+   * Nobody answers its decisions, so `requestDecision` refuses them before a
+   * gate opens. A task that a delivery delegates can still ask in the inbox. */
+  private isUnattendedTurn(): boolean {
+    return this.isUnattendedWorkflowTask() || this.runningItem?.metadata?.[UNATTENDED_DELIVERY_KEY] === true
+      || (!this.isUserPrompt() && this.session.options.automatedThread?.({ id: this.id, key: this.key, metadata: this.threadMetadata }) === true);
+  }
+
+  private buildTools(includeRestricted = false): AgentTool[] {
+    const all: ToolDef[] = [this.nativeImages.tool(), ...this.session.builtinTools, ...(this.session.options.tools ?? [])]
+      .map(refuseOutsideAuthors)
+      .map((def) => def.sideEffect === "files" ? this.withFileCheckpoint(def) : def)
+      .map((def) => this.withOutputSanitizer(def));
+    return all.filter((def) => includeRestricted || def.name === "focus_tools" || (def.scopeAction
+      ? actionInScope(this.effectiveToolScope(), def.scopeAction)
+      : toolInScope(this.effectiveToolScope(), def.name))).map((def) =>
+      toAgentTool(def, ({ signal, toolCallId, toolName, toolArgs, toolIntent }) =>
+        this.buildToolContext({ signal, toolCallId, toolName, toolArgs, toolIntent }), includeRestricted,
+        this.session.options.toolStopGraceMs,
       ),
     );
+  }
+
+  /** Wraps a tool so the host's output sanitizer (the credential tripwire)
+   * sees every result before pi-agent-core or the transcript does. */
+  private withOutputSanitizer(def: ToolDef): ToolDef {
+    const sanitizer = this.session.providers.sanitizeToolOutput;
+    if (!sanitizer) return def;
+    return {
+      ...def,
+      execute: async (args, ctx) => {
+        let result: ToolResult;
+        try {
+          result = await def.execute(args, ctx);
+        } catch (err) {
+          // pi-agent-core shows a thrown message to the model as the result.
+          const message = err instanceof Error ? err.message : String(err);
+          const safe = sanitizer(this.session.id, message);
+          if (safe !== message) throw new Error(String(safe));
+          throw err;
+        }
+        const safe = sanitizer(this.session.id, result);
+        // `usageOutcome.name` is the usage action id, not the tool name, so
+        // keep the one the tool reported (call_tool's qualified id).
+        const name = result.usageOutcome?.name;
+        return safe === result ? result : {
+          text: String(safe),
+          ok: false,
+          usageOutcome: { outcome: "error", errorCode: "output_blocked", ...(name ? { name } : {}) },
+        };
+      },
+    };
+  }
+
+  private async persistContinuationToolScope(): Promise<void> {
+    const scope = this.toolScopeCeiling();
+    const source = this.runningItem?.metadata?.[CONTINUATION_SOURCE_ITEM_KEY];
+    if (!scope && source === undefined && this.threadMetadata?.[CONTINUATION_TOOL_SCOPE_KEY] === undefined) return;
+    await this.patchThreadMetadata((current) => ({ ...current, [CONTINUATION_TOOL_SCOPE_KEY]: scope ?? {},
+      ...(source !== undefined ? { [CONTINUATION_SOURCE_ITEM_KEY]: source } : {}) }), "after-save");
+  }
+
+  /**
+   * The one read-modify-write path for thread metadata. Every writer goes
+   * through it, and the writes run one at a time.
+   *
+   * `patch` always runs against the current `threadMetadata`, never a copy
+   * taken before an await. Thus a write cannot erase a value that another
+   * writer added while it waited. This matters for security: a lost
+   * `slackChannels` entry reopens the private-channel read gate.
+   *
+   * - "before-save" publishes the patch in memory at once, then persists it.
+   *   Use it for values that only narrow access. If the save fails, the value
+   *   stays in memory, and the next save persists it.
+   * - "after-save" persists first and publishes only after the save succeeds.
+   *   Use it for values that can widen access. A failed save cannot change
+   *   live access.
+   */
+  private patchThreadMetadata(
+    patch: (current: Record<string, unknown> | undefined) => Record<string, unknown> | undefined,
+    publish: "before-save" | "after-save",
+  ): Promise<void> {
+    const store = this.session.providers.store;
+    if (publish === "before-save") {
+      const next = patch(this.threadMetadata);
+      if (next === undefined) return Promise.resolve();
+      this.threadMetadata = next;
+    }
+    const write = this.metadataWrites.then(async () => {
+      if (publish === "before-save") {
+        await store.saveThread(this.session.id, this.toThreadData());
+        return;
+      }
+      const next = patch(this.threadMetadata);
+      if (next === undefined) return;
+      await store.saveThread(this.session.id, { ...this.toThreadData(), metadata: next });
+      // Apply the patch again to the value as it is now. A "before-save"
+      // writer may have changed memory while the save above waited.
+      this.threadMetadata = patch(this.threadMetadata) ?? this.threadMetadata;
+    });
+    this.metadataWrites = write.then(() => undefined, () => undefined);
+    return write;
+  }
+
+  toolScopeCeiling(): ToolScope | undefined {
+    return intersectToolScopes(this.session.options.toolScope, readToolScope(this.runningItem?.metadata?.[TOOL_SCOPE_KEY]),
+      this.runningItem?.metadata?.[INHERIT_TOOL_SCOPE_KEY] === true ? readToolScope(this.threadMetadata?.[CONTINUATION_TOOL_SCOPE_KEY]) : undefined);
+  }
+
+  effectiveToolScope(): ToolScope | undefined {
+    return intersectToolScopes(this.toolScopeCeiling(),
+      readToolScope(this.threadMetadata?.[TOOL_SCOPE_KEY]));
+  }
+
+  /**
+   * Add `value` to the string list at `metadata[key]` and persist it. A
+   * value already in the list is a no-op. Hosts use it to record facts about
+   * a thread's content, such as where its messages came from.
+   *
+   * The in-memory metadata takes the value before the write, so a save that
+   * runs while this one waits carries it too. Such a fact narrows who may
+   * read the thread, so if the write fails the value stays in memory, and the
+   * next save persists it. Other metadata writers patch the current value
+   * (see `patchThreadMetadata`), so they cannot erase it.
+   */
+  async addToMetadataList(key: string, value: string): Promise<void> {
+    await this.patchThreadMetadata((current) => {
+      const listed = current?.[key];
+      const items = Array.isArray(listed) ? listed.filter((item): item is string => typeof item === "string") : [];
+      return items.includes(value) ? undefined : { ...current, [key]: [...items, value] };
+    }, "before-save");
+  }
+
+  /**
+   * Set `metadata[key]` to `true` and persist it. A flag already set is a
+   * no-op. Hosts use it to record a lasting fact about a thread, such as
+   * that a person now takes part in it.
+   */
+  async setMetadataFlag(key: string): Promise<boolean> {
+    let added = false;
+    await this.patchThreadMetadata((current) => {
+      if (current?.[key] === true) return undefined;
+      added = true;
+      return { ...current, [key]: true };
+    }, "before-save");
+    return added;
+  }
+
+  /** Set `metadata[key]` to a JSON value and persist it, such as the thread a fork came from. */
+  async setMetadataValue(key: string, value: unknown): Promise<void> {
+    await this.patchThreadMetadata((current) => ({ ...current, [key]: value }), "before-save");
+  }
+
+  /** Replace the thread's plan (`update_plan`). The next turn shows it to the model. */
+  async setPlan(items: ThreadPlanItem[], title?: string): Promise<ThreadPlan> {
+    const turnId = this.runningItem?.id;
+    const safeTitle = title?.trim().slice(0, 200);
+    let plan: ThreadPlan = { items: [], updatedAt: Date.now(), ...(turnId ? { turnId } : {}), ...(safeTitle ? { title: safeTitle } : {}) };
+    await this.patchThreadMetadata((current) => {
+      if (plan.items.length === 0) {
+        const previous = readThreadPlan(current);
+        const retainedTitle = !safeTitle && turnId && previous?.turnId === turnId ? previous.title : undefined;
+        const available = [...(previous?.items ?? [])];
+        plan = { ...plan, ...(retainedTitle ? { title: retainedTitle } : {}), items: items.map((item) => {
+          const index = available.findIndex((step) => step.text === item.text);
+          const match = index >= 0 ? available.splice(index, 1)[0] : undefined;
+          return { text: item.text, status: item.status, id: match?.id ?? uid("plan") };
+        }) };
+      }
+      const history = readTurnPlans(current).filter((entry) => entry.turnId !== turnId);
+      if (turnId) history.push(plan);
+      return { ...current, [THREAD_PLAN_KEY]: plan, [TURN_PLAN_HISTORY_KEY]: history.slice(-TURN_PLAN_HISTORY_LIMIT) };
+    }, "after-save");
+    return plan;
+  }
+
+  /**
+   * Seed the plan from a playbook's steps, so the model spends no tokens to
+   * write it. An open plan (an item not `done`) stays: the person or the
+   * model made it, and a playbook load must not erase it.
+   */
+  async seedPlaybookPlan(skill: SkillSource): Promise<PlaybookSeedResult> {
+    const read = readPlaybookSteps(skill.content);
+    if (read.kind === "invalid") return read;
+    const current = readThreadPlan(this.threadMetadata);
+    if (current?.items.some((item) => item.status !== "done")) return { kind: "kept", steps: read.steps };
+    await this.setPlan(playbookPlanItems(read.steps));
+    return { kind: "seeded", steps: read.steps };
+  }
+
+  async setToolFocus(scope: ToolScope | undefined): Promise<void> {
+    // Write before publishing the change. A failed save cannot expand live access.
+    await this.patchThreadMetadata((current) => ({ ...current, [TOOL_SCOPE_KEY]: scope ?? {} }), "after-save");
+    this.nativeImages.invalidatePermission();
+    this.agent.state.tools = this.buildTools();
   }
 
   private buildToolContext(args: {
@@ -4559,21 +7099,50 @@ export class Thread {
     toolCallId: string;
     toolName: string;
     toolArgs: Record<string, unknown>;
+    toolIntent?: string;
   }): ToolContext {
-    const { signal, toolCallId, toolName, toolArgs } = args;
+    const { signal, toolCallId, toolName, toolArgs, toolIntent } = args;
     const session = this.session;
     const runningContent = this.runningItem?.content;
+    const presence = mergeAppearance(readAppearance(this.runningItem?.metadata?.presence));
+    const resolveDefaultSender = session.options.resolveOutboundSender;
+    const actorId = this.runningItem?.author?.id ?? this.defaultActorId();
     const origin =
       runningContent !== undefined && isSignalContent(runningContent) ? runningContent.origin : undefined;
+    const directChannel = this.runningItem?.author?.directChannel === true && origin !== undefined &&
+      this.runningItem.channel !== undefined && this.runningItem.channel.channelType === origin.channelType;
+    const thread = this;
     return {
+      get toolScope() { return thread.effectiveToolScope(); },
+      get toolScopeCeiling() { return thread.toolScopeCeiling(); },
+      setToolFocus: (scope) => this.setToolFocus(scope),
+      setThreadPlan: (items, title) => this.setPlan(items, title),
+      seedPlaybookPlan: (skill) => this.seedPlaybookPlan(skill),
       // Author is persisted with the submission; session credentials stay fixed.
-      userId: this.runningItem?.author?.id ?? session.options.userId,
+      invocationId: toolCallId,
+      // Only while the hosted tool was actually offered: a replayed approval after a restart must reach the plugin action.
+      nativeImageGeneration: this.nativeImages.offered,
+      userId: actorId,
+      ...(this.runningItem?.author?.interactive === true && !this.runningItem.author.externalSender &&
+        runningContent !== undefined && (!isSignalContent(runningContent) || directChannel) &&
+        session.options.purpose !== "workflow" && session.options.purpose !== "child"
+        ? { interactiveActor: { id: this.runningItem.author.id } } : {}),
+      ...(this.runningItem?.author?.externalSender ? { externalSender: true } : {}),
+      ...(this.isUnattendedWorkflowTask() ? { unattendedWorkflow: true } : {}),
       orgId: session.options.orgId,
       sessionId: session.id,
       threadId: this.id,
       sessionPurpose: session.options.purpose,
+      currentUserTimezone: () => session.currentUserTimezone(),
       cwd: session.options.workspace,
-      credentials: session.credentialProvider(),
+      // The turn's author picks whose account a team read uses first. A
+      // channel sender with no Valet account acts for nobody.
+      credentials: session.credentialProvider({
+        ...(!this.runningItem?.author?.externalSender ? { actorId } : {}),
+        ...(this.runningItem?.author?.externalSender ? { externalSender: true } : {}),
+        threadId: this.id,
+        ...(this.runningItem ? { queueItemId: this.runningItem.id } : {}),
+      }),
       sandbox: session.sandbox,
       recordSkillInvocation: (skill, path, injectedText) =>
         this.recordModelToolSkillInvocation(skill, path, injectedText, toolCallId),
@@ -4582,18 +7151,32 @@ export class Thread {
         record: (path, contentHash) => this.fileReadHashes.set(path, contentHash),
       },
       config: session.options.toolConfig,
+      wakeups: session.options.wakeups,
       owner: session.owner,
       policyResolver: session.options.policyResolver,
       pluginStoreFactory: session.options.pluginStoreFactory,
+      browserPolicy: session.options.browserPolicy,
+      extractDocument: session.options.extractDocument,
+      threadFiles: session.options.threadFiles?.({ orgId: session.options.orgId, sessionId: session.id, threadId: this.id }),
       queueItemId: this.runningItem?.id,
       // The running submission's channel origin, when it came from a channel,
       // so reply_to_origin / react_to_origin answer the right conversation.
       origin,
-      resolveOutboundSender: session.options.resolveOutboundSender,
+      sharedTranscript: session.options.sharedTranscript,
+      resolveOutboundSender: presence
+        ? async () => mergeAppearance(await resolveDefaultSender?.(), presence)
+        : resolveDefaultSender,
       signal,
       decisionGateId: this.toolCtxOverlay.gateId,
       suspendedDecision: this.suspendedDecisionForReplay,
       requestDecision: async (req: DecisionGateRequest): Promise<DecisionResolution> => {
+        if (toolIntent && req.type === "approval" && toolName !== "ask_question" && toolName !== "ask_approval") req = { ...req, agentReason: toolIntent };
+        // A channel sender with no Valet account may not put an approval or a
+        // question in front of a teammate: the request is refused here, before
+        // any gate opens, so a newcomer cannot flood the team with requests.
+        if (this.runningItem?.author?.externalSender) {
+          return { actionId: "deny", resolvedBy: "external-sender", resolvedAt: Date.now() };
+        }
         if (!req.resumeKey) {
           throw new Error(
             "DecisionGateRequest.resumeKey is required for restart-safe gates.",
@@ -4613,16 +7196,33 @@ export class Thread {
         });
         if (sc.match) {
           const replayOrdinal = this.suspendedDecisionForReplay?.ordinal;
+          const replayGateId = this.suspendedDecisionForReplay?.gateId;
           this.suspendedDecisionForReplay = undefined; // one-shot
           // The persisted resolution already carries gateOrdinal from the
           // original (non-replay) requestDecision call below, but stamp it
           // defensively so a replay is self-describing even if the stored
           // record predates this field.
-          return { ...sc.resolution, gateOrdinal: sc.resolution.gateOrdinal ?? replayOrdinal };
+          const storedGate = replayGateId ? await session.providers.store.getDecisionGate(session.id, replayGateId) : null;
+          return { ...sc.resolution, gateOrdinal: sc.resolution.gateOrdinal ?? replayOrdinal,
+            gateContext: storedGate ? storedGate.context ?? {} : req.context };
+        }
+        // Nobody watches an unattended workflow task, so a new gate would wait
+        // until it expires. Refuse it here, after replay, so a gate opened
+        // before this rule still resolves. The author grants approvals when
+        // the workflow is saved.
+        if (this.isUnattendedTurn()) {
+          const refusal: DecisionResolution = { actionId: "deny", resolvedBy: UNATTENDED_WORKFLOW_DECISION, resolvedAt: Date.now() };
+          // A refused approval means an action did not run. Record it as an
+          // already-resolved gate, never pending, so the workflow can fail the
+          // step after a restart too (`workflows/engine-deps.ts#awaitResult`).
+          // A refused tool discovery only hides that service's tools.
+          if (req.type === "approval" && !isToolDiscoveryApproval(req.context)) await this.recordUnattendedRefusal(req, gateCtx, refusal);
+          return refusal;
         }
         // One gate cycle at a time per thread (see gateCycleTail): the next
         // open waits until the previous gate resolves and releases the
         // durable blocked toggle (TKAI-238).
+        const waitStarted = Date.now();
         const prevCycle = this.gateCycleTail;
         let releaseCycle!: () => void;
         this.gateCycleTail = new Promise<void>((r) => {
@@ -4630,20 +7230,21 @@ export class Thread {
         });
         await prevCycle;
         try {
-          return await this.runGateCycle({ req, gateCtx, signal, toolCallId, toolName, toolArgs });
+          return await this.runGateCycle({ req, gateCtx, signal, toolCallId, toolName,
+            toolArgs: toolIntent && toolName !== "call_tool" && !this.usageToolDef(toolName)?.scopeAction ? { ...toolArgs, intent: toolIntent } : toolArgs });
         } finally {
           releaseCycle();
+          const usage = this.toolUsageStarts.get(toolCallId);
+          if (usage) usage.waitMs += Date.now() - waitStarted;
         }
       },
-      threadRead: async (key, opts) => {
-        const sibling = await this.session.threadByKey(key);
-        if (!sibling) return [];
-        return sibling.readEntries(opts);
-      },
+      // The same lookup slash commands use: a key, or a thread id (a pasted
+      // link reaches here as its id).
+      threadRead: (key, opts) => this.session.readEntries(key, opts, this),
       listThreads: async () => {
         // Pull from the store so paused/archived threads not currently
         // hydrated in memory still surface.
-        const datas = await session.providers.store.listThreads(session.id);
+        const datas = await session.readableThreads(this);
         return datas.map((d) => ({
           id: d.id,
           key: d.key,
@@ -4672,14 +7273,16 @@ export class Thread {
         );
         this.lastEmittedStatus = "thinking";
         await this.fencedEmit(
-          { type: "status", threadId: this.id, status: "thinking" },
+          this.statusEvent("thinking"),
           { queueItemId: this.runningItem?.id },
         );
         break;
       case "message_start": {
         if (event.message.role === "assistant") {
           this.currentAssistantMessageId = uid("e");
+          this.streamedTextLength = 0;
           this.currentAssistantParts = [];
+          this.thinkingTiming = new ThinkingTiming();
           this.currentToolCalls.clear();
           this.currentAssistantEntry = undefined;
           // One llm.generate span per assistant round, parented under the
@@ -4720,17 +7323,45 @@ export class Thread {
         // painting a dead attempt's output into live clients.
         if (this.staleFenceDetected) break;
         const ev = event.assistantMessageEvent;
-        if (ev.type === "text_delta") {
+        if (ev.type === "text_start" || ev.type === "toolcall_start") {
+          const finished = this.thinkingTiming.finish(Date.now());
+          for (const index of finished) {
+            if (!this.currentAssistantMessageId) break;
+            await this.session.emit({
+              type: "thinking_update", threadId: this.id, messageId: this.currentAssistantMessageId,
+              index, part: this.thinkingTiming.part(index),
+            });
+          }
+        }
+        if (ev.type === "thinking_start" || ev.type === "thinking_delta" || ev.type === "thinking_end") {
+          if (ev.type === "thinking_start") this.thinkingTiming.start(ev.contentIndex, Date.now());
+          if (ev.type === "thinking_end") this.thinkingTiming.end(ev.contentIndex, Date.now());
+          const block = ev.partial.content[ev.contentIndex];
+          if (block?.type === "thinking") this.thinkingTiming.summarize(ev.contentIndex, block);
+          if (this.currentAssistantMessageId && block?.type === "thinking") {
+            // The summary rides the block's end, not every delta: a running
+            // summary resent per delta would grow the live stream quadratically.
+            const { summary, ...timing } = this.thinkingTiming.part(ev.contentIndex);
+            await this.session.emit({
+              type: "thinking_update", threadId: this.id, messageId: this.currentAssistantMessageId,
+              index: ev.contentIndex, part: ev.type === "thinking_end" && summary !== undefined ? { ...timing, summary } : timing,
+            });
+          }
+        } else if (ev.type === "text_delta") {
+          this.streamedTextLength += ev.delta.length;
           await this.session.emit({
             type: "text_delta",
             threadId: this.id,
             text: ev.delta,
           });
         } else if (ev.type === "toolcall_start" || ev.type === "toolcall_delta") {
-          // Live-only args streaming: forward the raw JSON chunk keyed by
-          // callId so clients can render the tool call before it executes.
+          // A credential-bearing session cannot emit raw argument chunks. A
+          // split credential can cross chunk boundaries before the completed
+          // argument object reaches the sanitizer at toolcall_end.
+          const canStream =
+            this.session.providers.canStreamToolCallArguments?.(this.session.id) ?? true;
           const block = ev.partial.content[ev.contentIndex];
-          if (block?.type === "toolCall") {
+          if (canStream && block?.type === "toolCall") {
             await this.session.emit({
               type: "tool_call_update",
               threadId: this.id,
@@ -4740,12 +7371,19 @@ export class Thread {
             });
           }
         } else if (ev.type === "toolcall_end") {
+          // A native image receipt was checkpointed when its file was saved; keep that part.
+          if (this.currentToolCalls.has(ev.toolCall.id)) break;
+          const safeArgs =
+            this.session.providers.sanitizeToolOutput?.(
+              this.session.id,
+              ev.toolCall.arguments,
+            ) ?? ev.toolCall.arguments;
           const part: MessagePart = {
             type: "tool_call",
             callId: ev.toolCall.id,
             toolName: ev.toolCall.name,
             status: "running",
-            args: ev.toolCall.arguments,
+            args: sanitizedToolArgs(safeArgs),
           };
           this.currentToolCalls.set(ev.toolCall.id, part);
           this.currentAssistantParts.push(part);
@@ -4774,14 +7412,32 @@ export class Thread {
           }
           this.llmRoundStartedAt = Date.now();
           const text = textOf(event.message);
-          // Compose parts: leading text + tool calls (already tracked)
+          this.thinkingTiming.finish(Date.now());
           const parts: MessagePart[] = [];
-          if (text) parts.push({ type: "text", text });
-          for (const p of this.currentAssistantParts) parts.push(p);
+          for (const [index, block] of event.message.content.entries()) {
+            if (block.type === "text") parts.push({ type: "text", text: block.text });
+            else if (block.type === "thinking") {
+              this.thinkingTiming.summarize(index, block);
+              parts.push(this.thinkingTiming.part(index));
+            }
+            else if (block.type === "toolCall") {
+              const call = this.currentToolCalls.get(block.id);
+              if (call) parts.push(call);
+            }
+          }
+          for (const p of this.currentAssistantParts) {
+            // A call the stream removed from the final message (a truncated call after a
+            // saved image) never runs. Settle its part, or it stays "running" forever.
+            if (p.type === "tool_call" && p.status === "running"
+              && !event.message.content.some((block) => block.type === "toolCall" && block.id === p.callId)) {
+              p.status = "error";
+              p.error = "The response ended before this call completed. It did not run.";
+            }
+            if (!parts.includes(p)) parts.push(p);
+          }
 
-          // "length" maps to end_turn: a length-terminated turn still ended
-          // with usable output (Task 6 resolves result text from the last
-          // assistant entry with stopReason end_turn).
+          // Keep the transcript's legacy stop mapping. Result validation uses
+          // the uncollapsed adapted stop reason below to reject incomplete output.
           const stopReason: MessageEntry["stopReason"] | undefined =
             event.message.stopReason === "aborted"
               ? "abort"
@@ -4790,6 +7446,12 @@ export class Thread {
               : event.message.stopReason === "stop" || event.message.stopReason === "length"
               ? "end_turn"
               : undefined; // toolUse (mid-turn) carries no stopReason
+          // The live `error` event is gone after a reload. Keep the provider's
+          // reason on the entry, so the transcript can show why the turn failed.
+          const turnError =
+            event.message.stopReason === "error" && event.message.errorMessage
+              ? attrTruncate(event.message.errorMessage, TURN_ERROR_MAX_CHARS)
+              : undefined;
           const entry: MessageEntry = {
             id: this.currentAssistantMessageId,
             sessionId: this.session.id,
@@ -4802,15 +7464,33 @@ export class Thread {
             model: event.message.model,
             queueItemId: this.runningItem?.id,
             stopReason,
+            metadata: {
+              [MODEL_RESPONSE_METADATA_KEY]: modelResponseMetadata(event.message, this.streamedTextLength, this.requestedMaxOutputTokens, this.requestEvidence),
+              ...(turnError ? { [MESSAGE_TURN_ERROR_KEY]: turnError } : {}),
+            },
             createdAt: Date.now(),
           };
-          await this.fencedWrite(() =>
-            this.session.providers.store.appendEntries(this.session.id, this.id, [entry], this.fence),
-          );
+          if (this.checkpointEntry?.id === entry.id) {
+            // The native image checkpoint already appended this entry. Replace it with the
+            // full message, keeping the DAG parent appendEntry assigned to the checkpoint.
+            entry.parentId = this.checkpointEntry.parentId;
+            await this.fencedWrite(() =>
+              this.session.providers.store.updateEntry(this.session.id, this.id, entry, this.fence),
+            );
+          } else {
+            await this.fencedWrite(() =>
+              this.appendEntry(entry, this.fence),
+            );
+          }
+          this.checkpointEntry = undefined;
           // Hold a reference so tool_execution_end can re-persist as each
           // tool completes (`parts` is shared by reference; mutating a
           // tool_call's status flows through to this entry's parts array).
           this.currentAssistantEntry = entry;
+          await this.fencedEmit(
+            { type: "message_update", threadId: this.id, messageId: entry.id, parts, content: text },
+            { queueItemId: this.runningItem?.id },
+          );
           await this.fencedEmit(
             {
               type: "message_end",
@@ -4821,6 +7501,8 @@ export class Thread {
                   ? "abort"
                   : event.message.stopReason === "error"
                   ? "error"
+                  : event.message.stopReason === "toolUse"
+                  ? "tool_use"
                   : "end_turn",
             },
             { queueItemId: this.runningItem?.id },
@@ -4828,28 +7510,38 @@ export class Thread {
         }
         break;
       }
-      case "tool_execution_start":
+      case "tool_execution_start": {
+        this.startToolUsage(event.toolCallId, event.toolName, event.args ?? {});
         this.turnToolCallCount++;
         this.toolCtxOverlay.gateId = undefined;
+        const safeArgs =
+          this.session.providers.sanitizeToolOutput?.(
+            this.session.id,
+            event.args ?? {},
+          ) ?? event.args ?? {};
         await this.fencedEmit(
           {
             type: "tool_start",
             threadId: this.id,
             tool: event.toolName,
             callId: event.toolCallId,
-            args: event.args ?? {},
+            args: sanitizedToolArgs(safeArgs),
           },
           { queueItemId: this.runningItem?.id },
         );
         this.lastEmittedStatus = "tool_calling";
         await this.fencedEmit(
-          { type: "status", threadId: this.id, status: "tool_calling" },
+          this.statusEvent("tool_calling"),
           { queueItemId: this.runningItem?.id },
         );
         break;
+      }
       case "tool_execution_end": {
+        this.finishToolUsage(event.toolCallId, event.result?.details, event.isError);
         const part = this.currentToolCalls.get(event.toolCallId);
-        const resultText = renderToolResult(event.result);
+        const safeResult =
+          this.session.providers.sanitizeToolOutput?.(this.session.id, event.result) ?? event.result;
+        const resultText = toolResultText(safeResult);
         if (part && part.type === "tool_call") {
           part.status = event.isError ? "error" : "completed";
           // Persist the *flattened* text alongside the raw structured
@@ -4861,8 +7553,8 @@ export class Thread {
           // Get something readable; clients that want the raw blocks can
           // still inspect `result.content`.
           const structured =
-            event.result && typeof event.result === "object"
-              ? (event.result as Record<string, unknown>)
+            safeResult && typeof safeResult === "object"
+              ? (safeResult as Record<string, unknown>)
               : {};
           part.result = { ...structured, text: resultText };
           const skillFact = this.activeSkillInvocations.get(
@@ -4889,13 +7581,16 @@ export class Thread {
             tool: event.toolName,
             callId: event.toolCallId,
             result: resultText,
+            ...(toolResultImages(safeResult).length > 0 ? { resultData: part?.type === "tool_call" ? part.result : safeResult } : {}),
             isError: event.isError,
+            ...(event.isError ? {} : toolOutcome(safeResult)),
           },
           { queueItemId: this.runningItem?.id },
         );
         break;
       }
       case "turn_end": {
+        this.toolUsageStarts.clear();
         const stopReason =
           event.message.role === "assistant" ? event.message.stopReason : undefined;
         const errorMessage =
@@ -4908,17 +7603,21 @@ export class Thread {
         let turnModel: string | undefined;
         if (event.message.role === "assistant") {
           const u = event.message.usage;
-          this.lastAssistantUsage = {
-            input: u.input,
-            output: u.output,
-            cacheRead: u.cacheRead,
-            cacheWrite: u.cacheWrite,
-            total: u.totalTokens || u.input + u.output + u.cacheRead + u.cacheWrite,
-          };
-          // All-zero usage (dev fakes, providers that don't report) is
-          // "no usage reported" — omit, mirroring the cost-is-null rule.
-          if (this.lastAssistantUsage.total > 0) turnUsage = { ...this.lastAssistantUsage };
+          // The shared rule (`modelCallUsage`): all-zero usage is "no usage
+          // reported", and an unpriced call has no cost, never "$0".
+          const call = modelCallUsage(u);
+          this.lastAssistantUsage = call.reported;
+          turnUsage = call.usage;
+          turnCost = call.cost;
           turnModel = event.message.model;
+          // Cache-safe rewind (spec P1): the first model call after a branch
+          // switch shows how much of the shared prefix the cache served.
+          if (this.branchSwitchCachePending) {
+            this.branchSwitchCachePending = false;
+            console.warn(`[engine] first model call after a branch switch session=${this.session.id} thread=${this.id} cache_read=${u.cacheRead} cache_write=${u.cacheWrite} input=${u.input}`);
+            this.turnSpan?.setAttribute("valet.turn.after_branch_switch", true);
+            this.turnSpan?.setAttribute("valet.turn.branch_switch_cache_read_tokens", u.cacheRead);
+          }
           // Cache-break telemetry (TKAI-320): compare against the previous
           // turn's snapshot and count breaks by cause. Alert-only — nothing
           // here changes behavior.
@@ -4943,19 +7642,6 @@ export class Thread {
               }
             }
             this.prevCacheSnapshot = snapshot;
-          }
-          // Cost is null, not zero: unpriced models (custom providers, dev
-          // fakes) omit the field entirely — a missing value reads
-          // "unpriced", never "$0".
-          const c = u.cost;
-          if (c && c.total > 0) {
-            turnCost = {
-              input: c.input,
-              output: c.output,
-              cacheRead: c.cacheRead,
-              cacheWrite: c.cacheWrite,
-              total: c.total,
-            };
           }
           if (this.currentAssistantEntry && turnUsage) {
             const entry = this.currentAssistantEntry;
@@ -5006,7 +7692,7 @@ export class Thread {
             }
           }
         }
-        if (errorMessage) {
+        if (errorMessage && stopReason !== "aborted") {
           // Same stdout mirror as `emitError`: the event is best-effort (a
           // dead WS drops it), and this is the path provider failures take
           // (bad key, exhausted credits, 4xx/5xx) — without a log line the
@@ -5047,7 +7733,7 @@ export class Thread {
         );
         this.lastEmittedStatus = "idle";
         await this.fencedEmit(
-          { type: "status", threadId: this.id, status: "idle" },
+          this.statusEvent("idle"),
           { queueItemId: this.runningItem?.id },
         );
         break;
@@ -5198,11 +7884,18 @@ export class Thread {
     }
   }
 
+  /** Progress for a failed model call this turn retries. Not an error: see
+   * the `turn_retry` event. Logged too, as `emitError` is. */
+  private emitTurnRetry(retry: Omit<Extract<EngineEvent, { type: "turn_retry" }>, "type" | "threadId">): void {
+    console.warn(`[engine] thread retry session=${this.session.id} thread=${this.id} ${retry.action} ${retry.provider} ${retry.reason}${retry.attempt ? ` ${retry.attempt}/${retry.maxAttempts}` : ""}${retry.toProvider ? ` -> ${retry.toProvider}` : ""}`);
+    void this.session.emit({ type: "turn_retry", threadId: this.id, ...retry });
+  }
+
   private emitError(code: string, message: string): void {
     // Event delivery is best-effort (a dead WS drops it silently), so also
     // log to stderr — otherwise a failing turn (bad key, exhausted credits,
     // provider outage) leaves zero trace in the host process output.
-    console.error(`[engine] thread error session=${this.session.id} thread=${this.id} ${code}: ${message}`);
+    reportError({ area: "engine", reason: "thread_error" }, `[engine] thread error session=${this.session.id} thread=${this.id} ${code}: ${message}`);
     void this.session.emit({
       type: "error",
       threadId: this.id,
@@ -5269,19 +7962,7 @@ export class Thread {
       }
       return this.resolveResult(item.mergedIntoItemId, opts, depth + 1);
     }
-    const entries = await this.session.providers.store.getEntries(this.session.id, item.threadId);
-    const text =
-      outcome.outcome === "superseded"
-        ? resolvePartialSubmissionText(entries, item.id)
-        : resolveSubmissionText(entries, item.id);
-    const result: SubmissionResult = { queueItemId: item.id, outcome: outcome.outcome, text };
-    if (outcome.error !== undefined) result.error = outcome.error;
-    if (opts.resultSchema && outcome.outcome === "completed") {
-      const extracted = extractStructuredOutput(text ?? "", opts.resultSchema);
-      if (extracted.output !== undefined) result.output = extracted.output;
-      if (extracted.error !== undefined) result.error = extracted.error;
-    }
-    return result;
+    return settledSubmissionResult(this.session.providers.store, this.session.id, item, outcome, opts);
   }
 
   /**
@@ -5302,13 +7983,15 @@ export class Thread {
       let done = false;
       let unsubscribe: (() => void) | undefined;
       let timer: ReturnType<typeof setTimeout> | undefined;
-      let poll: ReturnType<typeof setInterval> | undefined;
+      let poll: ReturnType<typeof setTimeout> | undefined;
+      let checking = false;
+      let recheck = false;
       let onAbort: (() => void) | undefined;
 
       const cleanup = () => {
         unsubscribe?.();
         if (timer !== undefined) clearTimeout(timer);
-        if (poll !== undefined) clearInterval(poll);
+        if (poll !== undefined) clearTimeout(poll);
         if (onAbort && opts.signal) opts.signal.removeEventListener("abort", onAbort);
       };
       const finish = (err?: Error) => {
@@ -5319,9 +8002,28 @@ export class Thread {
         else resolve();
       };
       const checkStore = () => {
-        void store.getQueueItem(this.session.id, itemId).then((current) => {
-          if (current?.status === "settled") finish();
-        });
+        if (done) return;
+        if (checking) {
+          // An event during a read must get a fresh check after that read.
+          recheck = true;
+          return;
+        }
+        if (poll !== undefined) clearTimeout(poll);
+        checking = true;
+        void store.getQueueItem(this.session.id, itemId)
+          .then((current) => {
+            if (current?.status === "settled") finish();
+          })
+          // A transient read failure does not settle or abandon the item.
+          // Retry through the bounded fallback, without an unhandled rejection.
+          .catch(() => { recheck = false; })
+          .finally(() => {
+            checking = false;
+            if (done) return;
+            poll = setTimeout(checkStore, recheck ? 0 : 1_000);
+            recheck = false;
+            poll.unref?.();
+          });
       };
 
       unsubscribe = this.session.providers.stream.subscribe(
@@ -5340,8 +8042,8 @@ export class Thread {
       // collect-window constituents settle via settleUnclaimed with no
       // event), so a poll is the only way to guarantee this promise
       // eventually resolves against store truth.
-      poll = setInterval(checkStore, 50);
-      poll.unref?.();
+      // checkStore schedules the next fallback after its read completes.
+      // Slow reads cannot build an unbounded queue of pending database work.
 
       const timeoutMs = opts.timeoutMs;
       if (timeoutMs !== undefined) {
@@ -5425,6 +8127,88 @@ function buildSignalMeta(
 }
 
 /** Map a submission's live status onto the narrower PromptReceipt status. */
+/**
+ * Thread metadata key set once a thread's leaf has moved (an edit or a
+ * return). Until then the thread has one path, and `readEntries` serves the
+ * active path from the bounded store read.
+ */
+export const THREAD_BRANCHED_KEY = "branched";
+
+/** Thread metadata key set once a fork's files were copied into its working directory. */
+export const FORK_SEED_APPLIED_KEY = "forkSeedApplied";
+/** Set by `copyPath` when a fork brings files along; `applyForkSeed` runs only then. */
+export const FORK_SEED_PENDING_KEY = "forkSeedPending";
+/** Forks made before `FORK_SEED_PENDING_KEY` carry only this marker (api `thread-links.ts`). */
+const LEGACY_FORK_OF_KEY = "forkOf";
+
+/** A turn's snapshots from before its first file change. */
+interface PendingCheckpoint {
+  /** The turn's first user entry. */
+  entryId: string;
+  repos: Array<{ repo: string; before: string; partial: boolean }>;
+  unavailable: NonNullable<TurnCheckpoint["unavailable"]>;
+  discovered: string[];
+}
+
+/** A thread entry read: the store query, plus every branch on request. */
+export type ThreadEntryQuery = MessageQuery & { allBranches?: boolean };
+
+/** The name of the first person other than `actorId` who wrote one of these entries. */
+function laterOtherAuthor(entries: readonly SessionEntry[], actorId: string): string | undefined {
+  for (const entry of entries) {
+    if (entry.type !== "message" || entry.role !== "user" || !entry.author) continue;
+    if (entry.author.id === actorId) continue;
+    return entry.author.name || entry.author.email || "Someone else";
+  }
+  return undefined;
+}
+
+function channelLabel(channelType: string): string {
+  return channelType === "slack" ? "Slack" : channelType;
+}
+
+/**
+ * One entry copied into another thread for a fork. `ids` maps the source ids
+ * copied so far to their copies, so compaction coverage and branch-note
+ * links follow the copy.
+ */
+function copyEntry(
+  entry: Exclude<SessionEntry, DecisionGateEntry>,
+  at: { id: string; sessionId: string; threadId: string; parentId: string | null },
+  ids: ReadonlyMap<string, string>,
+): SessionEntry {
+  const base = { ...at, queueItemId: undefined, sequence: undefined };
+  switch (entry.type) {
+    case "message":
+      return { ...entry, ...base, usage: undefined, cost: undefined };
+    case "compaction":
+      return {
+        ...entry,
+        ...base,
+        coveredEntryIds: entry.coveredEntryIds.flatMap((id) => {
+          const copied = ids.get(id);
+          return copied ? [copied] : [];
+        }),
+      };
+    case "branch_summary": {
+      const facts = readBranchNote(entry.metadata);
+      return {
+        ...entry,
+        ...base,
+        ...(facts ? { metadata: { ...entry.metadata, [BRANCH_NOTE_KEY]: {
+          ...facts, ...(facts.summarizedEntryIds ? { summarizedEntryIds: facts.summarizedEntryIds.map((id) => ids.get(id) ?? id) } : {}),
+        } } } : {}),
+        // The version a copied note left is not in the copy, so the copy
+        // cannot go back to it.
+        branchRootId: ids.get(entry.branchRootId) ?? "",
+        branchLeafId: ids.get(entry.branchLeafId) ?? "",
+      };
+    }
+    case "command_result":
+      return { ...entry, ...base };
+  }
+}
+
 function receiptStatus(status: QueueItem["status"]): PromptReceipt["status"] {
   if (status === "running") return "running";
   if (status === "blocked_on_decision_gate") return "blocked_on_decision_gate";
@@ -5440,19 +8224,21 @@ function textOf(message: AgentMessage): string {
   return parts.map((p) => p.text).join("");
 }
 
-function renderToolResult(result: unknown): string {
-  if (!result || typeof result !== "object") return String(result ?? "");
-  const r = result as { content?: Array<{ type: string; text?: string }> };
-  if (!r.content) return JSON.stringify(result);
-  return r.content
-    .filter((c) => c.type === "text")
-    .map((c) => c.text ?? "")
-    .join("");
+/**
+ * Tool-call arguments after the host sanitizer ran.
+ *
+ * The sanitizer returns the arguments unchanged, or a replacement string
+ * when it refuses them. A string is not an argument object, so it is
+ * carried under one key that every consumer can render.
+ */
+function sanitizedToolArgs(safeArgs: unknown): Record<string, unknown> {
+  // The cast is narrowed by the typeof check on the same line.
+  if (safeArgs && typeof safeArgs === "object") return safeArgs as Record<string, unknown>;
+  return { blocked: String(safeArgs) };
 }
 
 interface RoleOverlay {
   restore: boolean;
-  systemPrompt?: string;
   model?: PiModel;
 }
 
@@ -5484,20 +8270,17 @@ export function resolveModelId(spec: string): PiModel | undefined {
 // Back-compat alias used by applyRoleForTurn in this file.
 const resolveRoleModel = resolveModelId;
 
-/** Extract readable text from a persisted tool_call `result` (any shape). */
-function toolResultText(result: unknown): string {
-  if (result && typeof result === "object") {
-    const r = result as { text?: unknown; content?: Array<{ type: string; text?: string }> };
-    if (typeof r.text === "string") return r.text;
-    if (Array.isArray(r.content)) {
-      return r.content
-        .filter((c) => c.type === "text")
-        .map((c) => c.text ?? "")
-        .join("");
-    }
-    return JSON.stringify(result);
+/** Retain selected tool evidence on reload without reviving malformed content. */
+function toolResultImages(result: unknown): ImageContent[] {
+  if (!result || typeof result !== "object" || !("content" in result) || !Array.isArray(result.content)) return [];
+  const images: ImageContent[] = [];
+  for (const block of result.content) {
+    if (!block || typeof block !== "object" || block.type !== "image") continue;
+    if (typeof block.data !== "string" || !block.data || typeof block.mimeType !== "string") continue;
+    if (!["image/png", "image/jpeg", "image/webp", "image/gif"].includes(block.mimeType)) continue;
+    images.push({ type: "image", data: block.data, mimeType: block.mimeType });
   }
-  return String(result ?? "");
+  return images;
 }
 
 function findMostRecentCompaction(
@@ -5536,11 +8319,17 @@ function findMostRecentCompaction(
  * model can tell which person sent the message. Callers pass it only on
  * shared (team/org-owned) sessions — on a personal session every prompt has
  * the same author and the line would be noise.
+ *
+ * `time` renders as the first line, `[sent: …]` (`messageTimeLine`). Every
+ * engine caller passes the persisted entry's `entryMessageTime`, so the
+ * newest message tells the model the current time and older messages keep
+ * their bytes.
  */
 export function userContentBlocks(
   text: string,
   attachments: MessageEntry["attachments"] | undefined,
   sender?: PromptAuthor,
+  time?: MessageTime,
 ): Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> {
   const files = (attachments ?? []).filter(
     (a): a is Extract<NonNullable<MessageEntry["attachments"]>[number], { type: "file" }> =>
@@ -5548,13 +8337,75 @@ export function userContentBlocks(
   );
   const note = formatFileAttachmentsNote(files);
   const senderLine = formatSenderLine(sender);
-  const prefixed = [senderLine, note, text].filter((s) => s !== undefined && s !== "").join("\n\n");
+  const timeLine = time ? messageTimeLine(time) : undefined;
+  const prefixed = [timeLine, senderLine, note, text].filter((s) => s !== undefined && s !== "").join("\n\n");
   return [
     { type: "text" as const, text: prefixed },
     ...attachmentsToImageBlocks(attachments),
   ];
 }
 
+
+/**
+ * Whether queued `item` may join the running turn of `running` at its next
+ * step (`Thread` mid-turn delivery). The turn keeps the running item's
+ * actor, tools, model, channel and approvals, so an item joins only when it
+ * adds no authority and needs no other routing:
+ * - it was admitted with `inject`;
+ * - neither item comes from a channel sender with no Valet account;
+ * - both act for the same person (`defaultActorId` stands in for an item
+ *   with no author, such as a wake-up);
+ * - a message sent with a token does not join a signed-in person's turn;
+ * - both use the same channel, reply target, model pin and role;
+ * - both carry the same turn-scoped metadata (`TURN_SCOPED_METADATA_KEYS`):
+ *   the running item's tool scope, model-call limit, unattended flags and
+ *   sender appearance apply to the joined item, so they must already match;
+ * - a signal has no channel origin, whose reply would route elsewhere.
+ */
+export function canDeliverMidTurn(item: QueueItem, running: QueueItem, defaultActorId: string): boolean {
+  if (item.metadata?.[MID_TURN_DELIVERY_KEY] !== true) return false;
+  // Another agent's signal, such as a child's result, joins only a turn that
+  // runs another signal from the same owner. It never joins a person's own
+  // turn, where its text would act with that person's authority.
+  const stamp = readSignalStamp(item.metadata);
+  if (stamp) {
+    const runningStamp = readSignalStamp(running.metadata);
+    if (!runningStamp || runningStamp.senderOwner.type !== stamp.senderOwner.type || runningStamp.senderOwner.id !== stamp.senderOwner.id) return false;
+  }
+  if (TURN_SCOPED_METADATA_KEYS.some((key) => JSON.stringify(item.metadata?.[key]) !== JSON.stringify(running.metadata?.[key]))) return false;
+  if (isSignalContent(item.content) && item.content.origin !== undefined) return false;
+  if (item.author?.externalSender || running.author?.externalSender) return false;
+  if ((item.author?.id ?? defaultActorId) !== (running.author?.id ?? defaultActorId)) return false;
+  if (item.author && running.author?.interactive === true && item.author.interactive !== true) return false;
+  if (channelTargetKey(item.channel) !== channelTargetKey(running.channel)) return false;
+  if (channelTargetKey(item.replyTarget) !== channelTargetKey(running.replyTarget)) return false;
+  return (item.model === undefined || item.model === running.model) && item.role === running.role;
+}
+
+/**
+ * Whether a person typed `item`, in the web composer or a direct channel.
+ * Only such a message closes the person's open question
+ * (`Thread.withdrawQuestionForMessage`).
+ */
+function typedByPerson(item: QueueItem): boolean {
+  const author = item.author;
+  return author !== undefined && !author.externalSender && (author.interactive === true || author.directChannel === true);
+}
+
+/** Item metadata that sets how its turn runs. A joined item runs under the running item's values. */
+const TURN_SCOPED_METADATA_KEYS = [
+  TOOL_SCOPE_KEY,
+  INHERIT_TOOL_SCOPE_KEY,
+  CONTINUATION_TOOL_SCOPE_KEY,
+  MODEL_CALL_LIMIT_KEY,
+  UNATTENDED_DELIVERY_KEY,
+  UNATTENDED_WORKFLOW_KEY,
+  "presence",
+] as const;
+
+function channelTargetKey(target: ChannelTarget | undefined): string {
+  return target ? [target.channelType, target.channelId, target.threadId ?? ""].join("\u0000") : "";
+}
 
 export function attachmentsToImageBlocks(
   attachments: MessageEntry["attachments"] | undefined,
@@ -5599,17 +8450,19 @@ function isSkillInvocationFact(value: unknown): value is SkillInvocationFact {
 /** Return skill bodies that are still present in the active transcript. */
 export function skillInvocationsInContext(
   entries: readonly SessionEntry[],
+  activeLeafEntryId?: string,
 ): SkillInvocationFact[] {
+  const activeEntries = walkTranscriptDag(entries, activeLeafEntryId);
   let covered = new Set<string>();
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const entry = entries[i];
+  for (let i = activeEntries.length - 1; i >= 0; i--) {
+    const entry = activeEntries[i];
     if (entry.type === "compaction") {
       covered = new Set(entry.coveredEntryIds);
       break;
     }
   }
   const facts: SkillInvocationFact[] = [];
-  for (const entry of entries) {
+  for (const entry of activeEntries) {
     if (entry.type !== "message" || covered.has(entry.id)) continue;
     const promptFact = entry.metadata?.skillInvocation;
     if (isSkillInvocationFact(promptFact)) facts.push(promptFact);
@@ -5622,6 +8475,46 @@ export function skillInvocationsInContext(
   return facts;
 }
 
+interface ReplyMetadata {
+  messageId: string;
+  excerpt: string;
+}
+
+function replyMetadata(metadata: Record<string, unknown> | undefined): ReplyMetadata | undefined {
+  const value = metadata?.replyTo;
+  if (!value || typeof value !== "object") return undefined;
+  const ref = value as Record<string, unknown>;
+  if (typeof ref.messageId !== "string" || typeof ref.excerpt !== "string") return undefined;
+  return { messageId: ref.messageId, excerpt: ref.excerpt };
+}
+
+function escapeReplyContext(value: string): string {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+/** Adds explicit topical context without changing transcript position or branching. */
+export function renderReplyContext(
+  text: string,
+  metadata: Record<string, unknown> | undefined,
+): string {
+  text = renderAppPageHint(text, metadata?.appPageHint);
+  const ref = replyMetadata(metadata);
+  if (!ref) return text;
+  return [
+    "<reply-context>",
+    "The user is replying to assistant message " + escapeReplyContext(ref.messageId) + ".",
+    "Immutable excerpt: " + escapeReplyContext(ref.excerpt),
+    "</reply-context>",
+    "",
+    text,
+  ].join("\n");
+}
+
+/** The roles `convertToLlm` sends. Custom agent message kinds never reach the model, so context estimates skip them. */
+function isLlmMessage(message: AgentMessage): message is Message {
+  return message.role === "user" || message.role === "assistant" || message.role === "toolResult";
+}
+
 export function entriesToAgentMessages(
   entries: readonly SessionEntry[],
   modelHint: { api: string; provider: string; id: string },
@@ -5631,7 +8524,7 @@ export function entriesToAgentMessages(
      * team/org sessions, where prompts come from different people). Signal
      * entries are exempt — their envelope already names the sender.
      */
-    attributeAuthors?: boolean;
+    attributeAuthors?: AuthorAttribution;
     /**
      * This thread's key. When set and a compaction is active, the
      * <previous-context> wrapper tells the model the covered entries are
@@ -5640,17 +8533,29 @@ export function entriesToAgentMessages(
      * adapted (TKAI-306).
      */
     threadKey?: string;
+    /** Durable leaf of the active transcript branch. */
+    activeLeafEntryId?: string;
+    /** Original task of the active submission or repair. Omit for settled history. */
+    taskSourceQueueItemId?: string;
   },
 ): AgentMessage[] {
+  const activeEntries = walkTranscriptDag(entries, opts?.activeLeafEntryId);
   // 1. Find the most recent CompactionEntry. Everything in its coveredEntryIds is dropped.
   let activeCompaction: { summary: string; covered: Set<string> } | undefined;
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const e = entries[i];
+  for (let i = activeEntries.length - 1; i >= 0; i--) {
+    const e = activeEntries[i];
     if (e.type === "compaction") {
       activeCompaction = { summary: e.summary, covered: new Set(e.coveredEntryIds) };
       break;
     }
   }
+
+  // Only a caller holding an active submission selects a task contract.
+  // Historical markers alone must not resurrect completed workflow requests.
+  const taskEntryId = activeCompaction && opts?.taskSourceQueueItemId
+    ? activeEntries.find(entry => entry.type === "message" && entry.role === "user"
+      && entry.queueItemId === opts.taskSourceQueueItemId)?.id
+    : undefined;
 
   const out: AgentMessage[] = [];
   if (activeCompaction) {
@@ -5672,9 +8577,13 @@ export function entriesToAgentMessages(
     });
   }
 
-  for (const e of entries) {
+  for (const e of activeEntries) {
+    if (e.type === "branch_summary" && !activeCompaction?.covered.has(e.id)) {
+      out.push({ role: "user", content: [{ type: "text", text: renderBranchNote(e.summary) }], timestamp: e.createdAt });
+      continue;
+    }
     if (e.type !== "message") continue;
-    if (activeCompaction?.covered.has(e.id)) continue;
+    if (activeCompaction?.covered.has(e.id) && e.id !== taskEntryId) continue;
 
     if (e.role === "user") {
       // A spilled entry keeps the full paste in `content` but must reach the
@@ -5684,16 +8593,19 @@ export function entriesToAgentMessages(
       const spillPath = e.metadata?.[SPILLED_INPUT_PATH_KEY];
       const text =
         typeof spillPath === "string"
-          ? buildSpilledInputMarker({
-              path: spillPath,
-              tokens: estimateTokens(e.content),
-              chars: e.content.length,
-            })
+          ? renderReplyContext(
+              buildSpilledInputMarker({
+                path: spillPath,
+                tokens: estimateTokens(e.content),
+                chars: e.content.length,
+              }),
+              e.metadata,
+            )
           : e.signal
           ? renderSignalEnvelope(e.signal, e.content)
-          : e.content;
-      const sender = opts?.attributeAuthors && !e.signal ? e.author : undefined;
-      const contentBlocks = userContentBlocks(text, e.attachments, sender);
+          : renderReplyContext(e.content, e.metadata);
+      const sender = e.signal ? undefined : attributedAuthor(opts?.attributeAuthors, e.author);
+      const contentBlocks = userContentBlocks(text, e.attachments, sender, entryMessageTime(e));
       out.push({
         role: "user",
         content: contentBlocks,
@@ -5713,7 +8625,7 @@ export function entriesToAgentMessages(
             type: "toolCall",
             id: p.callId,
             name: p.toolName,
-            arguments: (p.args as Record<string, unknown>) ?? {},
+            arguments: (p.args as JsonObject) ?? {},
           });
         }
       }
@@ -5760,11 +8672,12 @@ export function entriesToAgentMessages(
               // Elided parts keep their stored result for the summarizer and
               // the UI; the LIVE context is where the elision applies.
               text: isError
-                ? p.error ?? "tool call failed"
+                ? failedToolResultText(p)
                 : p.elided
-                  ? "[output elided to save context]"
+                  ? ELIDED_TOOL_OUTPUT
                   : toolResultText(p.result),
             },
+            ...(!isError && !p.elided ? toolResultImages(p.result) : []),
           ],
           isError,
           timestamp: e.createdAt,
@@ -5773,4 +8686,101 @@ export function entriesToAgentMessages(
     }
   }
   return out;
+}
+
+/** The confirmed side effect a tool reported in its result details, if any. */
+const TOOL_OUTCOME_KINDS: ReadonlyArray<NonNullable<ToolResult["outcome"]>["kind"]> = ["pull_request_created", "review_submitted", "pull_request_comment"];
+
+/** The outcome a tool's result reports, for `tool_end`. Exported for tests. */
+export function toolOutcome(result: unknown): { outcome?: ToolResult["outcome"] } {
+  if (typeof result !== "object" || result === null || !("details" in result)) return {};
+  const details = result.details;
+  if (typeof details !== "object" || details === null || !("outcome" in details)) return {};
+  const outcome = details.outcome;
+  if (typeof outcome !== "object" || outcome === null || !("kind" in outcome)) return {};
+  const kind = TOOL_OUTCOME_KINDS.find((known) => known === outcome.kind);
+  if (!kind) return {};
+  const url = "url" in outcome && typeof outcome.url === "string" ? outcome.url : undefined;
+  return { outcome: { kind, ...(url ? { url } : {}) } };
+}
+
+/** The tools a turn from a channel sender with no Valet account may run
+ * beyond policy-checked plugin actions: listing actions, reading the
+ * threads its conversation may read (`threadAccess`). Persistent plans,
+ * sandbox, file, memory, artifact, and child tools act as the
+ * workspace, so they refuse that turn. */
+const EXTERNAL_SENDER_TOOLS = new Set(["list_tools", "list_threads", "thread_read"]);
+
+/** A member other than the owner wrote this turn in a personal session: a
+ * reply in a shared thread. Policy-checked plugin actions run with the
+ * owner's accounts and ask the owner. The tools a sender with no Valet
+ * account may not run, and the owner's other threads and memory
+ * (`ToolDef.ownerOnly`), stay the owner's. */
+function guestTurn(ctx: ToolContext): boolean {
+  return ctx.owner?.type === "user" && ctx.userId !== ctx.owner.id;
+}
+
+function refuseOutsideAuthors(def: ToolDef): ToolDef {
+  const actsAsWorkspace = !def.policyChecked && !EXTERNAL_SENDER_TOOLS.has(def.name);
+  if (!actsAsWorkspace && !def.ownerOnly) return def;
+  return {
+    ...def,
+    execute: (args, ctx) => {
+      if (actsAsWorkspace && ctx.externalSender) {
+        return Promise.resolve({ text: `[not_available] ${def.name} acts as the workspace, and this message came from someone with no Valet account. Answer in words, or ask a teammate with a Valet account to do it.` });
+      }
+      if (guestTurn(ctx)) {
+        return Promise.resolve({ text: `[not_available] ${def.name} acts as the owner's workspace, and this message came from a member replying in a shared thread. Answer from this thread, or ask the owner to do it.` });
+      }
+      return def.execute(args, ctx);
+    },
+  };
+}
+
+function scopeMetadata(items: (Record<string, unknown> | undefined)[]): Record<string, unknown> {
+  const toolScope = intersectToolScopes(...items.map((metadata) => readToolScope(metadata?.[TOOL_SCOPE_KEY])));
+  return toolScope ? { [TOOL_SCOPE_KEY]: toolScope } : {};
+}
+
+function readToolUsageOutcome(details: unknown, isError: boolean): Pick<ToolUsageFact, "outcome" | "errorCode"> {
+  if (details && typeof details === "object") {
+    if ("usageOutcome" in details && details.usageOutcome && typeof details.usageOutcome === "object") {
+      const status = details.usageOutcome;
+      if ("outcome" in status && (status.outcome === "ok" || status.outcome === "error" || status.outcome === "denied" || status.outcome === "pending-approval")) {
+        return { outcome: status.outcome, errorCode: "errorCode" in status && typeof status.errorCode === "string" ? status.errorCode : null };
+      }
+    }
+    if ("ok" in details && details.ok === false) return { outcome: "error", errorCode: "tool_error" };
+  }
+  return { outcome: isError ? "error" : "ok", errorCode: isError ? "tool_error" : null };
+}
+
+/**
+ * The result of a settled, non-merged submission, read from the store alone.
+ * `Thread.awaitResult` uses it after waiting; a host that only has the
+ * session id (a plugin reading its child's result) uses it directly.
+ */
+export async function settledSubmissionResult(
+  store: SessionStore,
+  sessionId: string,
+  item: QueueItem,
+  outcome: SubmissionOutcome,
+  opts: Pick<AwaitResultOptions, "resultSchema"> = {},
+): Promise<SubmissionResult> {
+  // Every reader below looks at this submission only.
+  const entries = await store.getEntries(sessionId, item.threadId, { queueItemId: item.id });
+  const text =
+    outcome.outcome === "superseded"
+      ? resolvePartialSubmissionText(entries, item.id)
+      : resolveSubmissionText(entries, item.id);
+  // Check terminal semantics before applying the caller's optional output contract.
+  const validated = outcome.outcome === "completed" ? completedSubmissionOutcome(entries, item.id) : outcome;
+  const result: SubmissionResult = { queueItemId: item.id, outcome: validated.outcome, text };
+  if (validated.error !== undefined) result.error = validated.error;
+  if (opts.resultSchema && validated.outcome === "completed") {
+    const extracted = extractStructuredOutput(text ?? "", opts.resultSchema);
+    if (extracted.output !== undefined) result.output = extracted.output;
+    if (extracted.error !== undefined) result.error = extracted.error;
+  }
+  return result;
 }

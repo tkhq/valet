@@ -227,8 +227,15 @@ describe("SandboxAttachment specProvider seam", () => {
     await expect(wrapper.readFile("/x.txt")).rejects.toThrow("sandbox preparation failed");
     expect(attachment.state).toBe("error");
 
-    provider.nextDeferred().resolve(makeFakeSandbox("sb-2"));
-    await expect(wrapper.readFile("/y.txt")).resolves.toBe("content");
+    // A terminal preparation failure arms the startup backoff window (spec 8.1).
+    vi.useFakeTimers();
+    try {
+      await vi.advanceTimersByTimeAsync(15_000);
+      provider.nextDeferred().resolve(makeFakeSandbox("sb-2"));
+      await expect(wrapper.readFile("/y.txt")).resolves.toBe("content");
+    } finally {
+      vi.useRealTimers();
+    }
     expect(attachment.state).toBe("ready");
     expect(applyFn).toHaveBeenCalledTimes(2);
   });

@@ -6,6 +6,7 @@
  * the full linter before persisting, so a bad patch surfaces as lint
  * errors, never a bad save.
  */
+import { validateAppearance, type Appearance } from "@valet/shared";
 import type { WorkflowDefinition, WorkflowEdge, WorkflowNode } from "@valet/workflow";
 
 export interface WorkflowEdgeRef {
@@ -15,6 +16,8 @@ export interface WorkflowEdgeRef {
 }
 
 export interface WorkflowPatch {
+  /** Replace channel identity. Null clears it; omission preserves it. */
+  presence?: Appearance | null;
   /** Replace-by-id, or append when the id is new. */
   upsertNodes?: unknown[];
   /** Also drops every edge touching a removed node, and its ui position. */
@@ -32,9 +35,65 @@ export type PatchResult =
   | { ok: true; definition: WorkflowDefinition }
   | { ok: false; errors: string[] };
 
+export type ModelPatchResult =
+  | { ok: true; definition: WorkflowDefinition; nodeIds: string[] }
+  | { ok: false; errors: string[] };
+
+/**
+ * Set the model on `llm` and `session` nodes, including a `foreach` body.
+ * Orchestrator nodes use their assistant's model and have no per-node model.
+ *
+ * A patch that targets every node also moves `ui.defaultModel`, the model
+ * the editor gives a node the user adds next. Leaving it behind made the
+ * next added node carry the model the user just changed away from. A patch
+ * that names a subset leaves it alone: the rest of the workflow keeps its
+ * own models, so the editor default still describes them.
+ */
+export function applyWorkflowModelPatch(
+  definition: WorkflowDefinition,
+  model: string,
+  nodeIds?: string[],
+): ModelPatchResult {
+  const next = structuredClone(definition);
+  const requested = nodeIds === undefined ? undefined : new Set(nodeIds);
+  const changed: string[] = [];
+
+  const apply = (node: WorkflowNode): void => {
+    if ((node.type === "llm" || node.type === "session") && (requested === undefined || requested.has(node.id))) {
+      node.model = model;
+      changed.push(node.id);
+      requested?.delete(node.id);
+    }
+    if (node.type === "foreach") apply(node.body);
+  };
+  for (const node of next.nodes) apply(node);
+
+  if (requested && requested.size > 0) {
+    return {
+      ok: false,
+      errors: [...requested].map(
+        (id) => `node ${JSON.stringify(id)} is not an llm or session node. Choose a model-capable node.`,
+      ),
+    };
+  }
+  if (changed.length === 0) {
+    return { ok: false, errors: ["workflow has no llm or session nodes. Add a model-capable node first."] };
+  }
+  if (nodeIds === undefined && next.ui) next.ui.defaultModel = model;
+  return { ok: true, definition: next, nodeIds: changed };
+}
+
 export function applyWorkflowPatch(definition: WorkflowDefinition, patch: WorkflowPatch): PatchResult {
   const errors: string[] = [];
   const next: WorkflowDefinition = structuredClone(definition);
+
+  if (patch.presence === null) {
+    delete next.presence;
+  } else if (patch.presence !== undefined) {
+    const error = validateAppearance(patch.presence);
+    if (error) return { ok: false, errors: [error] };
+    next.presence = structuredClone(patch.presence);
+  }
 
   for (const raw of patch.upsertNodes ?? []) {
     if (typeof raw !== "object" || raw === null || typeof (raw as { id?: unknown }).id !== "string") {

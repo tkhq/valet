@@ -1,20 +1,24 @@
-import { useEffect, useState } from "react";
+import { IntegrationDetails } from "./integration-details";
+import { useEffect, useState, type ReactNode } from "react";
 import type { PluginServiceSummary } from "@valet/api/wire";
 import { useConnectCredential, useCredentials, usePlugins } from "~/api/integrations";
-import { useGithubOrgStatus } from "~/api/repos";
-import { Button, Dialog, DialogContent, ErrorRow, LoadingRow, Textarea } from "~/components/primitives";
+import { Button, Dialog, DialogContent, ErrorRow, Textarea } from "~/components/primitives";
 import { SearchInput } from "~/components/search-input";
-import { CardHeading, CardFooter, IntegrationCard } from "./integration-card";
+import { Section } from "~/components/settings/section";
+import { CardHeading, IntegrationCard, IntegrationList } from "./integration-card";
 import { errorText } from "~/lib/error-text";
-import { displayName } from "./display-name";
-import { githubOrgAppState } from "./github-org-app";
+import { displayName, pluginDisplayName } from "./display-name";
 
-/** Only explicit org-provided services qualify; personal connected flags do not. */
-export function TeamConnectionSetup({ teamId, canManage, orgAdmin }: {
-  teamId: string; canManage: boolean; orgAdmin: boolean;
+/** Connect an account intended for one team. Organization connections live in Organization settings. */
+export function TeamConnectionSetup({ teamId, canManage, children }: {
+  teamId: string; canManage: boolean;
+  /** Team connections with their own row, such as 1Password, shown first in the list. */
+  children?: ReactNode;
 }) {
-  const plugins = usePlugins();
-  const github = useGithubOrgStatus();
+  // The team catalog reports effective credentials for this team. In
+  // particular, an org-managed Slack bot is connected for team workflows
+  // even though the team has no Slack credential row of its own.
+  const plugins = usePlugins(teamId);
   const credentials = useCredentials("team", { teamId });
   const [selected, setSelected] = useState<PluginServiceSummary | null>(null);
   const [query, setQuery] = useState("");
@@ -22,67 +26,84 @@ export function TeamConnectionSetup({ teamId, canManage, orgAdmin }: {
   useEffect(() => {
     if (!canConnect) setSelected(null);
   }, [canConnect]);
-  const githubState = github.data ? githubOrgAppState(github.data) : undefined;
   const services = [...new Map((plugins.error ? [] : plugins.data?.plugins ?? [])
     .flatMap((p) => p.services).map((s) => [s.service, s])).values()];
-  const provided = services.filter((s) => s.connect === "org" || s.service === "slack");
-  const occupied = new Set(credentials.data?.credentials.map((c) => c.service));
+  // Only the team's own connection fills a service's slot. A member's shared
+  // account sits beside it, so an admin can still connect the team's own.
+  const occupied = new Set(credentials.data?.credentials.filter((c) => !c.delegatedFrom).map((c) => c.service));
   const choices = services.filter((s) => s.configKeys.length > 0 &&
     s.service !== "slack-user" && s.service !== "slack" && s.service !== "github" &&
+    // `onepassword` is a service-account TOKEN, not one service's credential.
+    // The team list skips reserved rows, so an already-connected token never
+    // reads as occupied here, and this dialog's create-only promise does not
+    // reach `mutateTeamOnePassword`, which upserts. It would replace a live
+    // team token with no 409 and no confirmation. `TeamOnePasswordToken` is
+    // the control for it, and the team Integrations page renders it.
     s.service !== "onepassword" && s.connect !== "org" && !occupied.has(s.service))
     .sort((a, b) => displayName(a.service).localeCompare(displayName(b.service)));
 
   const available = choices.filter((s) => displayName(s.service).toLowerCase().includes(query.toLowerCase()));
-  return <div className="space-y-6">
-    <section aria-label="Organization connections">
-      <h3 className="text-sm font-medium text-ink">Organization access</h3>
-      <p className="mt-1 text-sm text-muted">
-        Slack and the GitHub App are managed in Organization settings.
-      </p>
-      {plugins.error && <ErrorRow>Could not load organization access. Reload the page.</ErrorRow>}
-      {github.error && <ErrorRow>Could not load GitHub App status. Reload the page.</ErrorRow>}
-      {(plugins.isFetching || github.isFetching) && <LoadingRow label="Loading organization access…" />}
-      <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-muted">
-        {!plugins.isFetching && provided.filter((s) => s.service !== "github").map((s) =>
-          <span key={s.service}>{displayName(s.service)}{s.connect === "org" ? " · Organization connection" : ""}</span>)}
-        {!github.error && !github.isFetching && githubState && <span>GitHub App{githubState === "installed" ? " · Installed" : githubState === "suspended" ? " · Suspended" : ""}</span>}
-        {orgAdmin && <a className="text-ink underline" href="/settings/organization">Organization settings</a>}
-      </div>
-    </section>
-    <section aria-label="Dedicated team connection">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div><h3 className="text-sm font-medium text-ink">Connect a service</h3>
-          <p className="mt-1 text-sm text-muted">Connect an account intended for this team.</p></div>
-        <div className="w-full sm:w-56"><SearchInput value={query} onSettled={setQuery} placeholder="Search integrations…" /></div>
-      </div>
-      {credentials.error && <ErrorRow>Could not check team connections. Reload the page.</ErrorRow>}
-      {!plugins.isLoading && !plugins.error && available.length === 0 && <p className="mt-4 text-sm text-muted">No available integrations match.</p>}
-      <div className="grid gap-3 pt-4 sm:grid-cols-2">
-        {available.map((service) => {
-          const blocked = service.connect === "unconfigured" && service.connectBlockedBy !== "org";
-          return <IntegrationCard key={service.service}>
-            <CardHeading title={displayName(service.service)} slug={service.iconSlug ?? service.service}
-              description={blocked ? "Ask an organization admin to configure OAuth for this service." : "Connect an account this team can use."} />
-            <CardFooter meta={blocked ? undefined : canManage ? "Team connection" : "Team admin required"}
-              right={<Button size="sm" variant="secondary" disabled={blocked || !canConnect} onClick={() => setSelected(service)}>Connect {displayName(service.service)}</Button>} />
-          </IntegrationCard>;
-        })}
-      </div>
-      {canConnect && selected && <TeamConnectionDialog key={selected.service} teamId={teamId} service={selected} onClose={() => setSelected(null)} />}
-    </section>
-  </div>;
+  const withTools = plugins.error ? [] : (plugins.data?.plugins ?? []).filter((plugin) => plugin.services.length > 0);
+  return <>
+    <div className="space-y-3">
+      <div className="ml-auto w-full sm:w-56"><SearchInput value={query} onSettled={setQuery} placeholder="Search integrations…" aria-label="Search integrations" /></div>
+      <Section title="Available" description="Connect an account intended for this team.">
+        {credentials.error && <ErrorRow>Could not check team connections. Reload the page.</ErrorRow>}
+        <IntegrationList label="Available">
+          {children}
+          {available.map((service) => {
+            const blocked = service.connect === "unconfigured" && service.connectBlockedBy !== "org";
+            const reason = blocked ? "Ask an organization admin to configure OAuth for this service." : canManage ? undefined : "Team member required";
+            const label = blocked ? "Set up" : "Connect";
+            const name = displayName(service.service);
+            return <IntegrationCard key={service.service}>
+              {/* The accessible name starts with the visible label (WCAG
+                  2.5.3), and the reason stays on screen at every width. */}
+              <CardHeading compact title={name} slug={service.iconSlug ?? service.service}
+                description={reason} phoneNote={reason}
+                right={<Button size="sm" variant="secondary" disabled={blocked || !canConnect} aria-label={`${label} ${name}`} title={reason} onClick={() => setSelected(service)}>{label}</Button>} />
+            </IntegrationCard>;
+          })}
+        </IntegrationList>
+        {!plugins.isLoading && !plugins.error && available.length === 0 && <p className="text-sm text-muted">No available integrations match.</p>}
+      </Section>
+    </div>
+    {canConnect && selected && <TeamConnectionDialog key={selected.service} teamId={teamId} service={selected} onClose={() => setSelected(null)} />}
+    <Section title="Tools and skills" description="Installed capabilities for this team.">
+      {plugins.error && <ErrorRow>Could not load plugin details. Reload the page to try again.</ErrorRow>}
+      {/* Collapsed: a list of every plugin's tools would bury the
+          connections above it. */}
+      {withTools.length > 0 && <details className="group">
+        <summary className="flex min-h-11 cursor-pointer list-none items-center gap-2 text-sm text-muted hover:text-ink [&::-webkit-details-marker]:hidden">
+          <span className="transition-transform group-open:rotate-90" aria-hidden>›</span>
+          {`Show the tools of ${withTools.length} ${withTools.length === 1 ? "integration" : "integrations"}`}
+        </summary>
+        <IntegrationList label="Tools and skills">
+          {withTools.map((plugin) => <IntegrationCard key={plugin.name}>
+            <CardHeading title={pluginDisplayName(plugin)} slug={plugin.services[0]?.iconSlug ?? plugin.name} description={plugin.description} />
+            <IntegrationDetails plugin={plugin} />
+          </IntegrationCard>)}
+        </IntegrationList>
+      </details>}
+    </Section>
+  </>;
 }
 
-function TeamConnectionDialog({ teamId, service, onClose }: {
-  teamId: string; service: PluginServiceSummary; onClose: () => void;
+/** Connect a team account, or with `reconnect`, sign in again to replace the
+ * team's dead connection (OAuth only; any team member may). */
+export function TeamConnectionDialog({ teamId, service, reconnect = false, onClose }: {
+  teamId: string; service: Pick<PluginServiceSummary, "service" | "type" | "connect">; reconnect?: boolean; onClose: () => void;
 }) {
   const connect = useConnectCredential();
   const [token, setToken] = useState("");
   const [confirmed, setConfirmed] = useState(false);
   const oauth = service.connect === "oauth" && service.service !== "github";
+  const name = displayName(service.service);
   return <Dialog open onOpenChange={(next) => { if (!next) onClose(); }}>
-    <DialogContent title={`Connect ${displayName(service.service)} to this team`}
-      description={oauth ? "Sign in to the account intended for this team. Everyone on the team can use the permissions you grant." : "Paste a token for the account intended for this team. Everyone on this team can use its permissions."}>
+    <DialogContent title={reconnect ? `Reconnect ${name} for this team` : `Connect ${name} to this team`}
+      description={reconnect
+        ? `The team's ${name} connection can no longer refresh. Sign in to replace it. Everyone on the team uses the account you sign in with.`
+        : oauth ? "Sign in to the account intended for this team. Everyone on the team can use the permissions you grant." : "Paste a token for the account intended for this team. Everyone on this team can use its permissions."}>
       {!oauth && <label className="text-sm">Team account token
         <Textarea value={token} onChange={(e) => setToken(e.target.value)} autoComplete="off" spellCheck={false} />
       </label>}
@@ -90,11 +111,11 @@ function TeamConnectionDialog({ teamId, service, onClose }: {
         <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} />
         I authorize team members to use this account’s permissions.
       </label>
-      <p className="text-xs text-muted">One connection per service. Disconnect the existing account before replacing it.</p>
+      {!reconnect && <p className="text-xs text-muted">One connection per service. Disconnect the existing account before replacing it.</p>}
       {connect.error && <ErrorRow>{errorText(connect.error)}</ErrorRow>}
       <Button disabled={(!oauth && !token.trim()) || !confirmed || connect.isPending} onClick={() => {
         if (oauth) {
-          window.location.href = `/api/credentials/${encodeURIComponent(service.service)}/connect?scope=team&teamId=${encodeURIComponent(teamId)}`;
+          window.location.href = `/api/credentials/${encodeURIComponent(service.service)}/connect?scope=team&teamId=${encodeURIComponent(teamId)}${reconnect ? "&reconnect=1" : ""}`;
           return;
         }
         connect.mutate({ service: service.service, body: {

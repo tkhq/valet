@@ -29,9 +29,11 @@ import {
   type ToolDef,
   type ValetPlugin,
 } from "@valet/engine";
+import { gatewayModelResolver, viaGateway, type LlmGateway } from "./gateway.js";
 import { buildRealCatalogTools } from "./integration.js";
 import { EvalMemoryStore, buildEvalMemoryTools } from "./memory-tools.js";
 import { buildMockCatalogTools } from "./mock-catalog.js";
+import { runPullRequestCase } from "./pull-request.js";
 import { extractTrajectory, findSpawnCallId } from "./trajectory.js";
 import type { EvalCase, ReasoningLevel, Trajectory, VerificationResult } from "./types.js";
 
@@ -85,6 +87,17 @@ export interface RunnerOptions {
    * `reasoning:` wins). Threaded to pi-ai via the engine sampling seam.
    */
   reasoning?: ReasoningLevel;
+  /** provider/model for code-review verifiers. Unset: the model under test. */
+  verifyModel?: string;
+  /** Code-review verification for every case. Unset: each case's `pull_request.verify`. */
+  verify?: boolean;
+  /** Independent code-review passes per case. */
+  reviewPasses?: number;
+  /**
+   * Send every model call through this Valet LLM gateway with its `vlt_`
+   * key, instead of provider keys from the environment.
+   */
+  gateway?: LlmGateway;
 }
 
 /** Resolve an eval model through the engine's bundled catalog. */
@@ -165,7 +178,7 @@ export async function runCase(evalCase: EvalCase, opts: RunnerOptions): Promise<
   // for the duration of the case.
   const keepalive = setInterval(() => {}, 60_000);
   try {
-    return await runCaseInner(evalCase, opts);
+    return await (evalCase.pull_request !== undefined ? runPullRequestCase(evalCase, opts) : runCaseInner(evalCase, opts));
   } finally {
     clearInterval(keepalive);
   }
@@ -253,7 +266,8 @@ async function runCaseInner(evalCase: EvalCase, opts: RunnerOptions): Promise<Ca
       parentSessionId: ctx.parentSessionId,
       parentThreadId: ctx.parentThreadId,
       sandbox: {},
-      model: childModel,
+      model: opts.gateway !== undefined ? viaGateway(childModel, opts.gateway) : childModel,
+      ...(opts.gateway !== undefined ? { resolveModel: gatewayModelResolver(opts.gateway) } : {}),
       owner: ctx.owner,
     });
     const receipt = await child.prompt(req.prompt);
@@ -286,12 +300,18 @@ async function runCaseInner(evalCase: EvalCase, opts: RunnerOptions): Promise<Ca
     workspace: "/workspace",
     purpose: isOrchestrator ? "orchestrator" : "interactive",
     sandbox: sandboxOpts,
-    model,
+    model: opts.gateway !== undefined ? viaGateway(model, opts.gateway) : model,
     modelSpec,
+    ...(opts.gateway !== undefined ? { resolveModel: gatewayModelResolver(opts.gateway) } : {}),
     owner,
     builtinTools: restricted.filter((t) => builtinNames.has(t.name)),
     tools: restricted.filter((t) => !builtinNames.has(t.name)),
     warmSandboxOnClaim: false,
+    ...(evalCase.context_budget_tokens !== undefined
+      // Idle delay 0: a case's turns arrive back to back, so it compacts at
+      // each turn end instead of waiting for an idle thread.
+      ? { compaction: { contextBudgetTokens: evalCase.context_budget_tokens, idleCompactionMs: 0 } }
+      : {}),
     ...(evalCase.temperature !== undefined || evalCase.reasoning !== undefined || opts.reasoning !== undefined
       ? {
           sampling: {

@@ -40,6 +40,10 @@ export type OnApprovalPending = (info: {
   action?: string;
   params?: unknown;
   iteration?: number;        // set only when > 0
+  /** Persisted identity of this gate occurrence. Absent on older gates. */
+  gateId?: string;
+  /** The one member who may answer: the action would use their shared account. */
+  approver?: { userId: string; name?: string; shareGeneration?: string; allowTeamConsent?: true };
 }) => Promise<void> | void;
 
 /** Host audit seam: the tool executor reports gate settlements the HTTP
@@ -50,8 +54,9 @@ export type OnGateResolved = (info: {
   nodeId: string;
   iteration: number;
   invocationId: string;
-  outcome: 'denied' | 'timeout';
-  resolvedBy: string;
+  outcome: 'denied' | 'timeout' | 'error';
+  resolvedBy?: string;
+  error?: string;
 }) => Promise<void> | void;
 
 /**
@@ -130,6 +135,16 @@ export function iterationSuffix(iteration: number): string {
   return iteration > 0 ? `:${iteration}` : '';
 }
 
+/**
+ * The session id a step's model usage bills to: `wf:{runId}:{nodeId}`, plus
+ * the iteration suffix inside a foreach body. A session step runs in this
+ * session. An LLM step has no session, but the host records its usage under
+ * the same id, so Usage reads every step's cost from one key.
+ */
+export function workflowStepSessionId(runId: string, nodeId: string, iteration: number): string {
+  return `wf:${runId}:${nodeId}${iterationSuffix(iteration)}`;
+}
+
 export type NodeExecuteResult =
   | { status: 'completed'; result: unknown; terminate?: 'completed' | 'failed' }
   | { status: 'skipped'; result?: unknown }
@@ -153,7 +168,7 @@ export { executeApproval } from './approval.js';
 export { executeSession } from './session.js';
 export { executeLlm, llmUsageSpanAttributes } from './llm.js';
 export { executeTool } from './tool.js';
-export { executeOrchestrator } from './orchestrator.js';
+export { executeThread } from './thread.js';
 export { executeForeach } from './foreach.js';
 export { executeWorkflowCall, deriveChildRunId } from './workflow-call.js';
 
@@ -166,7 +181,7 @@ import { executeApproval } from './approval.js';
 import { executeSession } from './session.js';
 import { executeLlm } from './llm.js';
 import { executeTool } from './tool.js';
-import { executeOrchestrator } from './orchestrator.js';
+import { executeThread } from './thread.js';
 import { executeForeach } from './foreach.js';
 import { executeWorkflowCall } from './workflow-call.js';
 
@@ -182,7 +197,7 @@ export function createDefaultNodeExecutors(): NodeExecutorRegistry {
     session: { execute: executeSession },
     llm: { execute: executeLlm },
     tool: { execute: executeTool },
-    orchestrator: { execute: executeOrchestrator },
+    orchestrator: { execute: executeThread },
     foreach: { execute: executeForeach },
     workflow: { execute: executeWorkflowCall },
   };

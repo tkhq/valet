@@ -4,12 +4,15 @@
  * search/export/import round trip through real HTTP requests. Doesn't need
  * ANTHROPIC_API_KEY — the memory routes never touch the engine.
  */
+import { eq } from "drizzle-orm";
 import { describe, it, expect, afterEach } from "vitest";
 import { bootTestApi, type TestApi } from "./_setup.js";
 import { internalToken } from "../lib/internal-auth.js";
 import { mintSandboxToken } from "../auth/sandbox-tokens.js";
-import { teamMembers, teams } from "../schema/index.js";
+import { agentSessions, securityCells, teamMembers, teams, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import type { GetMemoryTreeResponse } from "../wire/types.js";
+import { writeFile, type MemoryScope } from "../services/memory.js";
+import { memoryUsageRecorder, readMemoryUsage } from "../services/memory-usage.js";
 
 describe("api integration: memory routes", () => {
   it("session user can write/read/search/patch/export their own scope", async () => {
@@ -59,6 +62,72 @@ describe("api integration: memory routes", () => {
     }
   });
 
+  it("records an agent's file read as usage, but not a person's read or a directory read", async () => {
+    const api = await bootTestApi();
+    try {
+      const { db } = api.providers;
+      const own: MemoryScope = { owner: { type: "user", id: "local-user" }, actorUserId: "local-user" };
+      const team: MemoryScope = { owner: { type: "team", id: "team-use" }, actorUserId: "local-user" };
+      await db.insert(teams).values({ id: "team-use", orgId: "local-org", name: "Use", createdAt: Date.now() });
+      await db.insert(teamMembers).values({ teamId: "team-use", userId: "local-user", role: "member" });
+      await writeFile(db, own, { path: "notes/a.md", content: "# A\n" });
+      await writeFile(db, own, { path: "notes/person.md", content: "# Person\n" });
+      await writeFile(db, team, { path: "notes/t.md", content: "# T\n" });
+      const agent = {
+        "x-valet-internal": internalToken(),
+        "x-valet-owner": "user:local-user",
+        "x-valet-actor": "local-user",
+        "x-valet-session-id": "sess-use",
+      };
+      const read = (path: string, headers: Record<string, string> = {}) =>
+        fetch(`${api.baseUrl}/api/memory?${new URLSearchParams({ path })}`, { headers });
+
+      expect((await read("notes/a.md", agent)).status).toBe(200);
+      expect((await read("notes/", agent)).status).toBe(200);
+      expect((await read("team:team-use/notes/t.md", agent)).status).toBe(200);
+      // The browser session is a person looking at the memory page.
+      expect((await read("notes/person.md")).status).toBe(200);
+      await memoryUsageRecorder(db).flush();
+
+      const ownUsage = await readMemoryUsage(db, own);
+      expect(ownUsage.get("notes/a.md")).toMatchObject({ readCount: 1, injectCount: 0 });
+      expect(ownUsage.has("notes/person.md")).toBe(false);
+      expect((await readMemoryUsage(db, team)).get("notes/t.md")).toMatchObject({ readCount: 1 });
+    } finally {
+      await api.cleanup();
+    }
+  });
+
+  it("lists each file's last use, use count and last load in the tree", async () => {
+    const api = await bootTestApi();
+    try {
+      const { db } = api.providers;
+      const own: MemoryScope = { owner: { type: "user", id: "local-user" }, actorUserId: "local-user" };
+      await writeFile(db, own, { path: "notes/used.md", content: "# Used\n" });
+      await writeFile(db, own, { path: "notes/never.md", content: "# Never\n" });
+      await writeFile(db, own, { path: "preferences/pinned.md", content: "# Pinned\n", pinned: true });
+      const usage = memoryUsageRecorder(db);
+      usage.record({ ownerType: "user", ownerId: "local-user", namespace: "", path: "notes/used.md" }, "read", 1_000);
+      usage.record({ ownerType: "user", ownerId: "local-user", namespace: "", path: "notes/used.md" }, "cite", 3_000);
+      usage.record({ ownerType: "user", ownerId: "local-user", namespace: "", path: "preferences/pinned.md" }, "inject", 2_000);
+      await usage.flush();
+
+      const res = await fetch(`${api.baseUrl}/api/memory/tree`);
+      expect(res.status).toBe(200);
+      const tree = (await res.json()) as GetMemoryTreeResponse;
+      // When tracking started. Before that, "never used" means "not seen".
+      expect(tree.usageSince).toBeGreaterThan(0);
+      expect(tree.usageSince).toBeLessThanOrEqual(Date.now());
+      const byPath = new Map(tree.entries.map((e) => [e.path, e]));
+      expect(byPath.get("notes/used.md")).toMatchObject({ lastUsedAt: 3_000, useCount: 2, lastLoadedAt: null });
+      expect(byPath.get("notes/never.md")).toMatchObject({ lastUsedAt: null, useCount: 0, lastLoadedAt: null });
+      // Loading at wake is not a use the agent chose.
+      expect(byPath.get("preferences/pinned.md")).toMatchObject({ lastUsedAt: null, useCount: 0, lastLoadedAt: 2_000 });
+    } finally {
+      await api.cleanup();
+    }
+  });
+
   it("rejects without a valid session or internal token", async () => {
     const api = await bootTestApi();
     try {
@@ -73,6 +142,72 @@ describe("api integration: memory routes", () => {
       // since the internal token didn't match — proving a bad token never
       // grants internal trust.
       expect(res.status).toBe(404); // valid session fallback, file just doesn't exist
+    } finally {
+      await api.cleanup();
+    }
+  });
+
+  // TKAI-484. `?teamId=` is the one value on the internal branch that a MODEL
+  // chooses, so it is the one value that branch checks. The owner header is
+  // host-supplied by the tool from the session's own principal and keeps its
+  // existing trust; an id an agent invents reaches nothing.
+  it("authorizes ?teamId against the actor's membership, not the owner header", async () => {
+    const api = await bootTestApi();
+    try {
+      const { db } = api.providers;
+      await db.insert(teams).values({ id: "team-mem", orgId: "local-org", name: "Mem", createdAt: Date.now() });
+      const headers = {
+        "Content-Type": "application/json",
+        "x-valet-internal": internalToken(),
+        // The header names the actor's OWN scope throughout: the team only
+        // ever arrives as the query parameter.
+        "x-valet-owner": "user:test-member",
+        "x-valet-actor": "test-member",
+      };
+      const write = (teamId?: string) =>
+        fetch(`${api.baseUrl}/api/memory${teamId ? `?teamId=${teamId}` : ""}`, {
+          method: "PUT",
+          headers,
+          body: JSON.stringify({ path: "knowledge/x.md", content: "# X\n" }),
+        });
+
+      // Not a member yet: refused, and refused as not-found so membership
+      // cannot be probed by trying ids.
+      expect((await write("team-mem")).status).toBe(404);
+      // An id that names no team at all is refused the same way.
+      expect((await write("no-such-team")).status).toBe(404);
+
+      await db.insert(teamMembers).values({ teamId: "team-mem", userId: "test-member", role: "member" });
+      const ok = await write("team-mem");
+      expect(ok.status).toBe(200);
+      const body = (await ok.json()) as { file: { ownerType: string; ownerId: string } };
+      expect(body.file).toMatchObject({ ownerType: "team", ownerId: "team-mem" });
+
+      // A team principle reaches every member's assistant, so membership is
+      // not enough: it takes the team-admin check mem_copy_to_team makes.
+      const writePrinciple = () =>
+        fetch(`${api.baseUrl}/api/memory?teamId=team-mem`, {
+          method: "PUT",
+          headers: { ...headers, "x-valet-session-id": "sess-1", "x-valet-thread-id": "thread-1" },
+          body: JSON.stringify({ path: "principles/ship-small.md", content: "# Ship small\n" }),
+        });
+      const refused = await writePrinciple();
+      expect(refused.status).toBe(400);
+      expect(((await refused.json()) as { error: string }).error).toContain("Ask a team admin");
+      await db.update(teamMembers).set({ role: "admin" });
+      const admitted = await writePrinciple();
+      expect(admitted.status).toBe(200);
+      const read = await fetch(`${api.baseUrl}/api/memory?${new URLSearchParams({ path: "team:team-mem/principles/ship-small.md" })}`, { headers });
+      const rendered = ((await read.json()) as { rendered: string }).rendered;
+      expect(rendered).toContain('source-session: "sess-1"');
+      expect(rendered).toContain('source-thread: "thread-1"');
+
+      // Leaving the team stops the next write resolving, without a restart.
+      await db.delete(teamMembers);
+      expect((await write("team-mem")).status).toBe(404);
+
+      // No parameter is still the actor's own scope, untouched by any of this.
+      expect((await write()).status).toBe(200);
     } finally {
       await api.cleanup();
     }
@@ -428,6 +563,51 @@ describe("api integration: memory owner scope", () => {
     expect(((await badType.json()) as { error: string }).error).toBe("ownerType must be 'user', 'team' or 'org'.");
   });
 
+  it.each(["local-user", "team:team_1"])("sandbox memory follows team ownership after first wake by %s", async (actor) => {
+    const target = api = await bootWithTeam([{ userId: "local-user", role: "admin" }]);
+    await target.providers.db.insert(agentSessions).values({ id: "team-runtime", userId: actor, orgId: "local-org",
+      ownerType: "team", ownerId: "team_1", workspace: "w", createdAt: 1, updatedAt: 1 });
+    const { token } = await mintSandboxToken(target.providers.db, { sessionId: "team-runtime", userId: actor, orgId: "local-org" });
+    const put = await fetch(`${target.baseUrl}/api/memory?ownerType=user&ownerId=local-user`, {
+      method: "PUT", headers: { ...JSON_HEADERS, "x-valet-sandbox": token },
+      body: JSON.stringify({ path: "notes/runtime.md", content: "# Team runtime" }),
+    });
+    expect(put.status).toBe(200);
+    const read = (owner: string) => fetch(`${target.baseUrl}/api/memory?path=notes/runtime.md`, {
+      headers: { "x-valet-internal": internalToken(), "x-valet-owner": owner, "x-valet-actor": "local-user",
+        "x-valet-session-id": "team-runtime", "x-valet-org-id": "local-org" },
+    });
+    expect((await read("team:team_1")).status).toBe(200);
+    expect((await fetch(`${target.baseUrl}/api/memory?path=notes/runtime.md&${TEAM_QUERY}`)).status).toBe(404);
+    expect((await read("user:local-user")).status).toBe(404);
+    await target.providers.db.update(agentSessions).set({ status: "deleted" }).where(eq(agentSessions.id, "team-runtime"));
+    expect((await fetch(`${target.baseUrl}/api/memory?path=notes/runtime.md`, { headers: { "x-valet-sandbox": token } })).status).toBe(404);
+    await target.providers.db.delete(agentSessions).where(eq(agentSessions.id, "team-runtime"));
+    expect((await fetch(`${target.baseUrl}/api/memory?path=notes/runtime.md`, { headers: { "x-valet-sandbox": token } })).status).toBe(404);
+  });
+
+  it("preserves shared workflow memory across nodes and subsequent runs", async () => {
+    const target = api = await bootWithTeam([{ userId: "local-user", role: "admin" }]);
+    await target.providers.db.insert(workflowDefinitions).values({ id: "memory-wf", orgId: "local-org", ownerType: "team",
+      ownerId: "team_1", name: "Memory", definition: {}, createdAt: 1, updatedAt: 1 });
+    await target.providers.db.insert(workflowRuns).values({ id: "memory-run", workflowId: "memory-wf", definitionVersionId: "v",
+      definition: {}, params: {}, ownerType: "team", ownerId: "team_1", createdAt: 1, updatedAt: 1 });
+    const { token } = await mintSandboxToken(target.providers.db, { sessionId: "wf:memory-run:step", userId: "local-user", orgId: "local-org" });
+    expect((await fetch(`${target.baseUrl}/api/memory`, { method: "PUT", headers: { ...JSON_HEADERS, "x-valet-sandbox": token },
+      body: JSON.stringify({ path: "notes/workflow.md", content: "# Team workflow" }) })).status).toBe(200);
+    expect((await fetch(`${target.baseUrl}/api/memory?path=notes/workflow.md&${TEAM_QUERY}`)).status).toBe(200);
+    expect((await fetch(`${target.baseUrl}/api/memory?path=notes/workflow.md`, { headers: { "x-valet-sandbox": token } })).status).toBe(200);
+    const next = await mintSandboxToken(target.providers.db, { sessionId: "wf:memory-run:next", userId: "local-user", orgId: "local-org" });
+    expect((await fetch(`${target.baseUrl}/api/memory?path=notes/workflow.md`, { headers: { "x-valet-sandbox": next.token } })).status).toBe(200);
+    await target.providers.db.insert(workflowRuns).values({ id: "memory-run-again", workflowId: "memory-wf", definitionVersionId: "v",
+      definition: {}, params: {}, ownerType: "team", ownerId: "team_1", createdAt: 2, updatedAt: 2 });
+    const again = await mintSandboxToken(target.providers.db, { sessionId: "wf:memory-run-again:step", userId: "local-user", orgId: "local-org" });
+    const persisted = await fetch(`${target.baseUrl}/api/memory?path=notes/workflow.md`, { headers: { "x-valet-sandbox": again.token } });
+    expect(persisted.status).toBe(200);
+    expect(await persisted.json()).toMatchObject({ rendered: expect.stringContaining("Team workflow") });
+    expect((await fetch(`${target.baseUrl}/api/memory?path=notes/workflow.md`)).status).toBe(404);
+  });
+
   // The internal token and the sandbox token derive their owner from a
   // verified credential. Request-supplied owners must not reach either.
   it("ignores owner parameters on the internal-token branch", async () => {
@@ -456,6 +636,8 @@ describe("api integration: memory owner scope", () => {
 
   it("ignores owner parameters on the sandbox-token branch", async () => {
     api = await bootWithTeam([{ userId: "sbx-user", role: "admin" }]);
+    await api.providers.db.insert(agentSessions).values({ id: "sbx-sess", userId: "sbx-user", orgId: "local-org",
+      ownerType: "user", ownerId: "sbx-user", workspace: "w", createdAt: 1, updatedAt: 1 });
     const { token } = await mintSandboxToken(api.providers.db, {
       sessionId: "sbx-sess",
       userId: "sbx-user",
@@ -488,5 +670,47 @@ describe("api integration: memory owner scope", () => {
       },
     });
     expect(onUser.status).toBe(200);
+  });
+
+  it("refuses every memory write from a security persona child, in any cell status", async () => {
+    api = await bootTestApi();
+    const { db } = api.providers;
+    await db.insert(agentSessions).values({ id: "sec-child", userId: "local-user", orgId: "local-org",
+      ownerType: "user", ownerId: "local-user", workspace: "w", createdAt: 1, updatedAt: 1 });
+    await db.insert(securityCells).values({ id: "cell-1", engagementId: "eng-1", ordinal: 1, persona: "sast",
+      goal: "Scan", dir: "01-scan", status: "running", childSessionId: "sec-child", createdAt: 1 });
+    const { token } = await mintSandboxToken(db, { sessionId: "sec-child", userId: "local-user", orgId: "local-org" });
+    const refusal = "A security persona cannot write memory. Record findings with sec_finding_report.";
+    const writes: Array<[string, string, unknown]> = [
+      ["PUT", "/api/memory", { path: "notes/leak.md", content: "# Leak\n" }],
+      ["POST", "/api/memory/patch", { path: "notes/leak.md", find: "a", replace: "b" }],
+      ["DELETE", "/api/memory?path=notes/leak.md", undefined],
+    ];
+    for (const status of ["running", "completed"] as const) {
+      await db.update(securityCells).set({ status }).where(eq(securityCells.id, "cell-1"));
+      for (const [method, path, body] of writes) {
+        const res = await fetch(`${api.baseUrl}${path}`, {
+          method,
+          headers: { ...JSON_HEADERS, "x-valet-sandbox": token },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        });
+        expect(res.status).toBe(403);
+        expect(((await res.json()) as { error: string }).error).toBe(refusal);
+      }
+    }
+    // A read is not a write: the persona still gets the ordinary answer.
+    const read = await fetch(`${api.baseUrl}/api/memory?path=notes/leak.md`, { headers: { "x-valet-sandbox": token } });
+    expect(read.status).toBe(404);
+
+    // A sandbox session with no cell row still writes its memory.
+    await db.insert(agentSessions).values({ id: "plain-child", userId: "local-user", orgId: "local-org",
+      ownerType: "user", ownerId: "local-user", workspace: "w", createdAt: 1, updatedAt: 1 });
+    const plain = await mintSandboxToken(db, { sessionId: "plain-child", userId: "local-user", orgId: "local-org" });
+    const put = await fetch(`${api.baseUrl}/api/memory`, {
+      method: "PUT",
+      headers: { ...JSON_HEADERS, "x-valet-sandbox": plain.token },
+      body: JSON.stringify({ path: "notes/plain.md", content: "# Plain\n" }),
+    });
+    expect(put.status).toBe(200);
   });
 });

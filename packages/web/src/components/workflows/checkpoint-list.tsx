@@ -1,6 +1,13 @@
+import { useState } from "react";
+import { StepLogs } from "./step-logs";
 import { Link } from "@tanstack/react-router";
 import { RUN_STATUS_GLYPH, type NodeRunStatus } from "./editor/flow-node";
-import { jsonPreview } from "./run-detail-helpers";
+import { formatRunDuration, formatRunOutput } from "./run-detail-helpers";
+import { humanize } from "./editor/steps-model";
+import { CopyButton } from "~/components/session/tool-renderers/tool-shell";
+import type { WorkflowModelChange, WorkflowStepCost } from "@valet/api/wire";
+import { Badge, Button } from "~/components/primitives";
+import { formatTokens, formatUsdPrecise } from "~/lib/format-usage";
 
 export interface CheckpointLike {
   nodeId: string;
@@ -8,30 +15,44 @@ export interface CheckpointLike {
   status: string;
   error?: string | null;
   result?: unknown;
-  /** The session a `session` node drove, when it started one. */
   sessionId?: string;
-  /** The run a `workflow` node started, when it started one. */
   childRunId?: string;
-  /** The thread a `session`/`orchestrator` node submitted to, when it had one. */
   threadId?: string;
+  queueItemId?: string;
+  /** For a running step, its latest intent write; otherwise when it finished. */
+  createdAt?: number;
+  /** When the step began. */
+  startedAt?: number;
+  /** Copied from an earlier run by a retry: it did not run again. */
+  reused?: boolean;
 }
 
-/** Raw checkpoint status strings → the same `NodeRunStatus` vocabulary the
- * canvas uses, so a node reads the same way in both places. `"intent"` is
- * the store's write-ahead marker for a node that has started but not yet
- * settled — everything else not recognized falls back to `pending`. */
+/** The run's start and end (or now), for each step's timing bar. */
+export interface RunTimeline {
+  start: number;
+  end: number;
+}
+
+/** When a step ran: a running step runs until `now`. Undefined for a step a
+ * retry reused (its times belong to the earlier run) and for a step recorded
+ * before start times were kept. */
+export function stepSpan(checkpoint: CheckpointLike, now: number): { start: number; end: number } | undefined {
+  if (checkpoint.createdAt === undefined || checkpoint.reused) return undefined;
+  if (checkpoint.status === "intent") {
+    const start = checkpoint.startedAt ?? checkpoint.createdAt;
+    return { start, end: Math.max(now, start) };
+  }
+  if (checkpoint.startedAt === undefined) return undefined;
+  return { start: checkpoint.startedAt, end: checkpoint.createdAt };
+}
+
 function toRunStatus(raw: string): NodeRunStatus {
   switch (raw) {
-    case "completed":
-      return "succeeded";
-    case "failed":
-      return "failed";
-    case "skipped":
-      return "skipped";
-    case "intent":
-      return "running";
-    default:
-      return "pending";
+    case "completed": return "succeeded";
+    case "failed": return "failed";
+    case "skipped": return "skipped";
+    case "intent": return "running";
+    default: return "pending";
   }
 }
 
@@ -44,6 +65,15 @@ const TEXT_COLOR: Record<NodeRunStatus, string> = {
   waiting: "text-amber",
 };
 
+const BAR_COLOR: Record<NodeRunStatus, string> = {
+  pending: "bg-muted",
+  running: "bg-accent-500",
+  succeeded: "bg-moss",
+  failed: "bg-danger-500",
+  skipped: "bg-muted",
+  waiting: "bg-amber-500",
+};
+
 const LABEL: Record<NodeRunStatus, string> = {
   pending: "Pending",
   running: "Running",
@@ -53,9 +83,7 @@ const LABEL: Record<NodeRunStatus, string> = {
   waiting: "Waiting",
 };
 
-/** The result body a policy-denied tool checkpoint carries. A denial is a
- * completed checkpoint, so the status alone cannot tell it from a success —
- * only the result body says the action never ran. */
+/** A completed checkpoint can record a denied action. */
 function deniedResult(result: unknown): { resolvedBy?: string } | null {
   if (typeof result !== "object" || result === null) return null;
   if (!("policyDenied" in result) || result.policyDenied !== true) return null;
@@ -63,107 +91,292 @@ function deniedResult(result: unknown): { resolvedBy?: string } | null {
   return { resolvedBy: typeof resolvedBy === "string" ? resolvedBy : undefined };
 }
 
-/**
- * A run's checkpoints as scannable status rows — same glyph/color language
- * as the canvas (`flow-node.tsx`'s `NodeRunStatus`), so "which node failed"
- * reads at a glance instead of requiring every row's text to be read.
- * Result JSON is collapsed by default and auto-open on failure, so a run
- * with many successful nodes doesn't bury the one that needs attention
- * under walls of JSON.
- */
+/** Compact step rows. Expand once for complete output and agent logs. A step
+ * that ran once per item shows one row with a summary; its items open below. */
 export function CheckpointList({
   checkpoints,
   promotedNodeId,
+  nodeStatuses,
+  nodeOrder = [],
+  stepCosts = [],
+  modelChanges = [],
+  onExplainFailure,
+  timeline,
+  settled = false,
+  now = Date.now(),
 }: {
   checkpoints: CheckpointLike[];
-  /** The node whose result is already displayed above the list (the run
-   * result panel). Its row keeps the result collapsed, so the same body is
-   * not opened twice on one screen. */
+  /** Shows "Explain this failure" on each failed step. */
+  onExplainFailure?: (nodeId: string, iteration: number) => void;
+  /** Model spend per step; a step with no model calls has none. */
+  stepCosts?: WorkflowStepCost[];
+  /** Steps whose models changed since the previous run with the same steps. */
+  modelChanges?: WorkflowModelChange[];
+  /** Keep output collapsed when the result panel already shows it. */
   promotedNodeId?: string;
+  nodeStatuses?: Record<string, NodeRunStatus>;
+  nodeOrder?: string[];
+  /** Draws each step's timing bar against the whole run. */
+  timeline?: RunTimeline;
+  /** The run settled, so a step that never finished stopped with it. */
+  settled?: boolean;
+  /** The current time, for steps still running. */
+  now?: number;
 }) {
   if (checkpoints.length === 0) {
-    return <p className="text-sm text-muted">No checkpoints yet.</p>;
+    return <p className="text-sm text-muted">No steps have started yet.</p>;
   }
+  const order = new Map(nodeOrder.map((id, index) => [id, index]));
+  const costs = new Map(stepCosts.map((cost) => [`${cost.nodeId}:${cost.iteration}`, cost]));
+  const changes = new Map(modelChanges.map((change) => [change.nodeId, change]));
+  const sorted = [...checkpoints].sort((a, b) =>
+    (order.get(a.nodeId) ?? nodeOrder.length) - (order.get(b.nodeId) ?? nodeOrder.length) ||
+    a.nodeId.localeCompare(b.nodeId) || a.iteration - b.iteration,
+  );
+  // A settled run's leftover intent ends with the run, not the page clock.
+  const clock = timeline ? Math.min(now, timeline.end) : now;
+  const groups: CheckpointLike[][] = [];
+  for (const cp of sorted) {
+    const last = groups.at(-1);
+    if (last?.[0]?.nodeId === cp.nodeId) last.push(cp);
+    else groups.push([cp]);
+  }
+  const rowProps = (cp: CheckpointLike, index: number) => ({
+    checkpoint: cp,
+    cost: costs.get(`${cp.nodeId}:${cp.iteration}`),
+    number: (order.get(cp.nodeId) ?? index) + 1,
+    promoted: cp.nodeId === promotedNodeId,
+    waiting: cp.status === "intent" && nodeStatuses?.[cp.nodeId] === "waiting",
+    stopped: settled && cp.status === "intent",
+    onExplainFailure,
+    timeline,
+    now: clock,
+  });
   return (
-    <ul className="space-y-2">
-      {checkpoints.map((cp) => (
-        <CheckpointRow
-          key={`${cp.nodeId}:${cp.iteration}`}
-          checkpoint={cp}
-          promoted={cp.nodeId === promotedNodeId}
-        />
+    <ol className="overflow-hidden rounded-lg border border-line divide-y divide-line">
+      {groups.map((items, index) => items.length === 1 ? (
+        <CheckpointRow key={`${items[0].nodeId}:${items[0].iteration}`} {...rowProps(items[0], index)} modelChange={changes.get(items[0].nodeId)} />
+      ) : (
+        <ItemGroup key={items[0].nodeId} items={items} rowProps={rowProps} index={index}
+          modelChange={changes.get(items[0].nodeId)} costs={costs} timeline={timeline} now={clock} />
       ))}
-    </ul>
+    </ol>
   );
 }
 
-function CheckpointRow({
-  checkpoint,
-  promoted = false,
-}: {
-  checkpoint: CheckpointLike;
-  promoted?: boolean;
+type RowProps = Omit<Parameters<typeof CheckpointRow>[0], "modelChange">;
+
+/** One row for a step that ran once per item: counts, spend, and time across
+ * the items. It opens when an item failed or is still going. */
+function ItemGroup({ items, rowProps, index, modelChange, costs, timeline, now }: {
+  items: CheckpointLike[];
+  rowProps: (cp: CheckpointLike, index: number) => RowProps;
+  index: number;
+  modelChange?: WorkflowModelChange;
+  costs: Map<string, WorkflowStepCost>;
+  timeline?: RunTimeline;
+  now: number;
 }) {
-  const status = toRunStatus(checkpoint.status);
+  const first = rowProps(items[0], index);
+  // An item that never finished in a settled run stopped; it shows as ⊘ and is counted apart.
+  const stopped = items.filter((cp) => rowProps(cp, index).stopped).length;
+  const statuses = items.map((cp): NodeRunStatus => rowProps(cp, index).stopped ? "skipped"
+    : rowProps(cp, index).waiting ? "waiting" : toRunStatus(cp.status));
+  const counts = new Map<NodeRunStatus, number>();
+  for (const status of statuses) counts.set(status, (counts.get(status) ?? 0) + 1);
+  const skipped = (counts.get("skipped") ?? 0) - stopped;
+  const overall: NodeRunStatus = counts.has("failed") ? "failed" : stopped > 0 ? "skipped" : counts.has("waiting") ? "waiting"
+    : counts.has("running") ? "running" : counts.has("pending") ? "pending"
+    : counts.has("succeeded") ? "succeeded" : "skipped";
+  const spans = items.flatMap((cp) => stepSpan(cp, now) ?? []);
+  const span = spans.length > 0
+    ? { start: Math.min(...spans.map((s) => s.start)), end: Math.max(...spans.map((s) => s.end)) }
+    : undefined;
+  const itemCosts = items.flatMap((cp) => costs.get(`${cp.nodeId}:${cp.iteration}`) ?? []);
+  const models = [...new Set(itemCosts.flatMap((cost) => cost.models))];
+  const total: WorkflowStepCost | undefined = itemCosts.length > 0 ? {
+    nodeId: items[0].nodeId,
+    iteration: 0,
+    costUsd: itemCosts.reduce((sum, cost) => sum + cost.costUsd, 0),
+    turns: itemCosts.reduce((sum, cost) => sum + cost.turns, 0),
+    unpricedTurns: itemCosts.reduce((sum, cost) => sum + cost.unpricedTurns, 0),
+    totalTokens: itemCosts.reduce((sum, cost) => sum + cost.totalTokens, 0),
+    models,
+  } : undefined;
+  const reused = items.filter((cp) => cp.reused).length;
+  // A denied item records as completed, so count it apart, as a single row shows it.
+  const denied = items.filter((cp) => deniedResult(cp.result)).length;
+  const summary = [
+    ...(["succeeded", "failed", "running", "waiting", "pending"] as const)
+      .flatMap((status) => counts.has(status) ? [`${counts.get(status)} ${LABEL[status].toLowerCase()}`] : []),
+    ...(skipped > 0 ? [`${skipped} ${LABEL.skipped.toLowerCase()}`] : []),
+    ...(stopped > 0 ? [`${stopped} stopped`] : []),
+    ...(denied > 0 ? [`${denied} denied`] : []),
+    ...(reused > 0 ? [`${reused} reused`] : []),
+  ].join(" · ");
+  const open = overall === "failed" || overall === "running" || overall === "waiting" || denied > 0;
+  return (
+    <li className="min-w-0 bg-paper">
+      <details className="group/items" open={open}>
+        <summary className="flex min-h-11 cursor-pointer list-none items-baseline gap-3 px-4 py-3 hover:bg-ink-wash [&::-webkit-details-marker]:hidden">
+          <span className="text-muted transition-transform group-open/items:rotate-90" aria-hidden>›</span>
+          <span className="w-5 shrink-0 text-xs text-muted tabular-nums" aria-hidden>{first.number}</span>
+          <span className={`shrink-0 text-sm ${TEXT_COLOR[overall]}`} aria-hidden>{RUN_STATUS_GLYPH[overall]}</span>
+          <span className="min-w-0 flex-1">
+            <span className="block break-words text-sm font-medium text-ink" title={items[0].nodeId}>{humanize(items[0].nodeId)}</span>
+            <span className="block break-words text-xs text-muted">{items.length} items · {summary}{models.length > 0 ? ` · ${models.join(", ")}` : ""}</span>
+            {modelChange && <ModelChangeBadge change={modelChange} />}
+            {span && timeline && <TimingBar span={span} timeline={timeline} status={overall} />}
+          </span>
+          {span && <StepDuration span={span} running={overall === "running" || overall === "waiting"} />}
+          {total && <StepCost cost={total} />}
+          <span className={`text-xs ${overall === "succeeded" ? "sr-only sm:not-sr-only sm:shrink-0" : "shrink-0"} ${TEXT_COLOR[overall]}`}>{overall === "skipped" && stopped > 0 ? "Stopped" : LABEL[overall]}</span>
+        </summary>
+        <ol className="divide-y divide-line border-t border-line">
+          {items.map((cp) => <CheckpointRow key={`${cp.nodeId}:${cp.iteration}`} {...rowProps(cp, index)} item />)}
+        </ol>
+      </details>
+    </li>
+  );
+}
+
+function ModelChangeBadge({ change }: { change: WorkflowModelChange }) {
+  return (
+    <Badge variant="warning" className="mt-1 whitespace-normal break-words">
+      {`Model changed since the last run: ${change.previous.join(", ")} → ${change.current.join(", ")}. The workflow was not edited.`}
+    </Badge>
+  );
+}
+
+/** Where the step sat in the run: a thin bar, offset by when it started. */
+function TimingBar({ span, timeline, status }: { span: { start: number; end: number }; timeline: RunTimeline; status: NodeRunStatus }) {
+  const total = Math.max(timeline.end - timeline.start, 1);
+  const left = Math.min(Math.max((span.start - timeline.start) / total, 0), 1);
+  const width = Math.min(Math.max((span.end - span.start) / total, 0), 1 - left);
+  return (
+    <span className="relative mt-1.5 block h-1 max-w-sm overflow-hidden rounded-full bg-ink-wash" aria-hidden>
+      <span className={`absolute inset-y-0 rounded-full ${BAR_COLOR[status]}`}
+        style={{ left: `${left * 100}%`, width: `max(${width * 100}%, 2px)` }} />
+    </span>
+  );
+}
+
+function StepDuration({ span, running }: { span: { start: number; end: number }; running: boolean }) {
+  const text = formatRunDuration(span.start, span.end);
+  if (!text) return null;
+  return (
+    <span className="shrink-0 text-xs tabular-nums text-muted" title={`Started ${new Date(span.start).toLocaleString()}`}>
+      {running ? `${text} so far` : text}
+    </span>
+  );
+}
+
+function CheckpointRow({ checkpoint, cost, modelChange, number, promoted, waiting, stopped = false, onExplainFailure, timeline, now, item = false }: {
+  checkpoint: CheckpointLike;
+  cost?: WorkflowStepCost;
+  modelChange?: WorkflowModelChange;
+  number: number;
+  promoted: boolean;
+  waiting: boolean;
+  /** The step never finished, and the run settled: it stopped with the run. */
+  stopped?: boolean;
+  onExplainFailure?: (nodeId: string, iteration: number) => void;
+  timeline?: RunTimeline;
+  now: number;
+  /** A row inside a step's item list: named by its item number. */
+  item?: boolean;
+}) {
+  const [showLogs, setShowLogs] = useState(false);
+  // A stopped step shows the skipped glyph and colors, labeled Stopped.
+  const status: NodeRunStatus = stopped ? "skipped" : waiting ? "waiting" : toRunStatus(checkpoint.status);
+  const active = status === "running" || status === "waiting";
   const denied = deniedResult(checkpoint.result);
-  const hasBody = checkpoint.error != null || checkpoint.result !== undefined;
+  const output = formatRunOutput(checkpoint.result);
+  const open = (status === "failed" && !promoted) || active || Boolean(denied);
+  const span = stepSpan(checkpoint, now);
 
   return (
-    <li className="rounded border border-line bg-paper p-3">
-      <div className="flex items-center gap-2">
-        <span className={`text-sm ${TEXT_COLOR[status]}`} aria-hidden>
-          {RUN_STATUS_GLYPH[status]}
-        </span>
-        <span className="min-w-0 flex-1 break-all text-sm sm:truncate font-medium text-ink">{checkpoint.nodeId}</span>
-        <span className={`text-xs ${TEXT_COLOR[status]}`}>{LABEL[status]}</span>
-      </div>
-      {/* The work the node started. On a failed node this is the only way
-          to read what actually went wrong. */}
-      {(checkpoint.sessionId || checkpoint.childRunId) && (
-        <div className="mt-1 flex flex-wrap gap-x-3 pl-6 text-xs">
-          {checkpoint.sessionId && (
-            <Link
-              to="/sessions/$sessionId"
-              params={{ sessionId: checkpoint.sessionId }}
-              // The thread, when the node recorded one. That route forwards
-              // it to /chat for the caller's own assistant, which is the
-              // only way to land on THIS run's thread instead of the newest.
-              search={checkpoint.threadId ? { thread: checkpoint.threadId } : undefined}
-              className="inline-flex min-h-11 items-center text-muted hover:underline sm:min-h-0"
-            >
-              Open session
-            </Link>
+    <li className="min-w-0 bg-paper">
+      <details className="group" open={open}>
+        <summary className="flex min-h-11 cursor-pointer list-none items-baseline gap-3 px-4 py-3 hover:bg-ink-wash [&::-webkit-details-marker]:hidden">
+          <span className="text-muted transition-transform group-open:rotate-90" aria-hidden>›</span>
+          <span className="w-5 shrink-0 text-xs text-muted tabular-nums" aria-hidden>{item ? "" : number}</span>
+          <span className={`shrink-0 text-sm ${TEXT_COLOR[status]}`} aria-hidden>{RUN_STATUS_GLYPH[status]}</span>
+          <span className="min-w-0 flex-1">
+            <span className="block break-words text-sm font-medium text-ink" title={checkpoint.nodeId}>
+              {item ? `Item ${checkpoint.iteration + 1}` : humanize(checkpoint.nodeId)}
+            </span>
+            {cost && cost.models.length > 0 && <span className="block break-words text-xs text-muted">{cost.models.join(", ")}</span>}
+            {modelChange && <ModelChangeBadge change={modelChange} />}
+            {span && timeline && <TimingBar span={span} timeline={timeline} status={status} />}
+          </span>
+          {!item && checkpoint.iteration > 0 && <span className="shrink-0 text-xs text-muted">Item {checkpoint.iteration + 1}</span>}
+          {checkpoint.reused && <span className="shrink-0 text-xs text-muted" title="This retry reused the step's result from the earlier run.">Reused</span>}
+          {span && <StepDuration span={span} running={active} />}
+          {cost && <StepCost cost={cost} />}
+          {/* On a phone the ✓ alone says Completed, so that label gives the
+              name its room. A denied step also shows ✓, so it and every
+              other state keep their label. */}
+          <span className={`text-xs ${status === "succeeded" && !denied ? "sr-only sm:not-sr-only sm:shrink-0" : "shrink-0"} ${TEXT_COLOR[status]}`}>{denied ? "Denied" : stopped ? "Stopped" : LABEL[status]}</span>
+        </summary>
+        <div className="min-w-0 space-y-3 border-t border-line px-4 py-3 sm:pl-16">
+          {(checkpoint.threadId || checkpoint.sessionId || checkpoint.childRunId) && (
+            <div className="flex flex-wrap gap-x-4 text-xs">
+              {checkpoint.sessionId && checkpoint.threadId && checkpoint.queueItemId ? (
+                <button type="button" aria-expanded={showLogs} onClick={() => setShowLogs(!showLogs)} className="inline-flex min-h-11 items-center text-accent hover:underline sm:min-h-0">
+                  {showLogs ? "Hide agent logs" : "View agent logs"}
+                </button>
+              ) : (checkpoint.sessionId || checkpoint.threadId) && (
+                <span className="text-muted">Scoped agent logs were not recorded for this step.</span>
+              )}
+              {checkpoint.childRunId && (
+                <Link to="/workflows/runs/$runId" params={{ runId: checkpoint.childRunId }} className="inline-flex min-h-11 items-center text-accent hover:underline sm:min-h-0">
+                  Open child run
+                </Link>
+              )}
+            </div>
           )}
-          {checkpoint.childRunId && (
-            <Link
-              to="/workflows/runs/$runId"
-              params={{ runId: checkpoint.childRunId }}
-              className="inline-flex min-h-11 items-center text-muted hover:underline sm:min-h-0"
-            >
-              Open child run
-            </Link>
+          {showLogs && checkpoint.sessionId && checkpoint.threadId && checkpoint.queueItemId && (
+            <StepLogs key={`${checkpoint.sessionId}:${checkpoint.threadId}:${checkpoint.queueItemId}`}
+              sessionId={checkpoint.sessionId} threadId={checkpoint.threadId} queueItemId={checkpoint.queueItemId}
+              active={active} />
+          )}
+          {denied ? (
+            <p className="break-words text-xs text-danger-500">Denied by {denied.resolvedBy ?? "policy"}</p>
+          ) : output ? (
+            <>
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-xs font-medium text-muted">Result</h3>
+                <CopyButton getText={() => output.text} label="Copy result" className="opacity-100" />
+              </div>
+              <pre className="max-h-96 overflow-auto rounded bg-[--bg] p-3 font-mono text-xs text-ink">{output.text}</pre>
+            </>
+          ) : (
+            <p className="text-xs text-muted">{active ? "This step has not produced output yet." : stopped ? "This step stopped with the run before it produced output." : "No output recorded for this step."}</p>
           )}
         </div>
-      )}
-      {checkpoint.error != null && (
-        <div className="mt-1 break-words pl-6 text-xs text-danger-500">{checkpoint.error}</div>
-      )}
-      {denied && (
-        <div className="mt-1 break-words pl-6 text-xs text-danger-500">
-          Denied by {denied.resolvedBy ?? "policy"}
+      </details>
+      {checkpoint.error != null && <p className="break-words px-4 pb-3 text-xs text-danger-500 sm:pl-16">{checkpoint.error}</p>}
+      {status === "failed" && onExplainFailure && (
+        <div className="px-4 pb-3 sm:pl-16">
+          <Button size="sm" variant="secondary" onClick={() => onExplainFailure(checkpoint.nodeId, checkpoint.iteration)}>
+            Explain this failure
+          </Button>
         </div>
-      )}
-      {/* A denial's result body is the denial record, not a tool result.
-          The line above already states it, so showing the raw JSON too
-          would report the same fact twice. */}
-      {checkpoint.result !== undefined && hasBody && !denied && (
-        <details className="mt-2 pl-6" open={status === "failed" && !promoted}>
-          <summary className="min-h-11 cursor-pointer py-3 text-xs sm:min-h-0 sm:py-0 text-muted hover:text-ink">Result</summary>
-          <pre className="mt-1 overflow-x-auto rounded bg-[--bg] p-2 font-mono text-xs text-muted">
-            {jsonPreview(checkpoint.result)}
-          </pre>
-        </details>
       )}
     </li>
+  );
+}
+
+/** What the step's model calls cost. Unpriced calls make it a lower bound. */
+function StepCost({ cost }: { cost: WorkflowStepCost }) {
+  const unpriced = cost.unpricedTurns > 0;
+  const detail = `${formatTokens(cost.totalTokens)} tokens over ${cost.turns} ${cost.turns === 1 ? "call" : "calls"}`
+    + (unpriced ? ` · ${cost.unpricedTurns} unpriced` : "");
+  return (
+    <span className="shrink-0 text-xs tabular-nums text-muted" title={detail}>
+      {formatUsdPrecise(cost.costUsd)}{unpriced ? "+" : ""}
+      <span className="sr-only"> model spend, {detail}</span>
+    </span>
   );
 }

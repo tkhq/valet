@@ -30,6 +30,8 @@ Does NOT cover: real login / identity providers (auth design pass, separate); in
 
 ## Routes & navigation
 
+> **Superseded 2026-10-08** by `2026-10-08-settings-redesign-design.md`: the rail lists every scope at once and no longer follows the workspace switcher. Team settings live at `/settings/teams/$teamId`.
+
 ```
 /settings                    → redirect to /settings/profile
 /settings/profile            YOU · Profile
@@ -95,11 +97,12 @@ id from the session. It never accepts a target user id from the client.
 - Member list: avatar, name, email, role badge, joined date — `GET /api/org/members`.
 - Role select per row (admin | member) → `PATCH /api/org/members/:userId {role}`; optimistic update with rollback on error.
 - Last-admin guard: server rejects demoting the only admin (400 `{error:"an organization needs at least one admin"}`); UI disables the control on the sole admin row with a tooltip.
-- Footer note: "Invites arrive with real login." No invite/remove controls this phase.
+- Pending invites follow the member list in a separate section with top padding. The separator must not touch the heading or Invite button.
 
 ### Organization · Teams
 - Team list: name, member count, created date — `GET /api/teams` (existing).
 - New team: name input + Create button (existing `POST /api/teams`); inline validation on duplicate name (409 from api).
+- Team rename: a team admin or org admin edits the Name field, which sends `PATCH /api/teams/:id { name }`. The API trims the name and refuses an empty name, and a name that another team in the org or the config file uses, compared without case. It also refuses a team that the config file names under `teams` or `skillSources`, because the config reconciler matches those by name at boot. An identity-provider team can be renamed, because the team sync matches it by group path. The panel hides the field for a declared team.
 - Per-team expandable panel: member rows (name, role badge), role toggle (existing `PATCH /api/teams/:id/members/:userId`), Remove member (existing `DELETE`), Add member (select from the org directory, `GET /api/org/directory`, filtered to people not yet on the team → existing `POST /api/teams/:id/members`).
 - Delete team: per-team overflow menu → confirm dialog → existing `DELETE /api/teams/:id`.
 
@@ -150,4 +153,16 @@ Creating an org makes the creator its `org_members.role = "admin"`. First login 
 
 ### Narrow settings navigation (2026-09-11)
 
+> **Superseded 2026-10-08** by `2026-10-08-settings-redesign-design.md`: the rail lists every scope at once and no longer follows the workspace switcher. Team settings live at `/settings/teams/$teamId`.
+
 Below the small-screen breakpoint, each settings group uses a horizontal list so the selected page stays near the top. Navigation keeps the active link in view. Desktop retains the left rail and the same route and permission gates.
+
+### Personal settings with a selected team (2026-09-14)
+
+> **Superseded 2026-10-08** by `2026-10-08-settings-redesign-design.md`: the rail lists every scope at once and no longer follows the workspace switcher. Team settings live at `/settings/teams/$teamId`.
+
+The settings rail keeps the You group visible when a team is selected. Profile,
+Appearance, Assistant, Notifications, and Connected accounts remain reachable.
+Team adds General and the workspace-aware API keys, Proxy, and Policies routes.
+Those routes appear only under Team while a team is selected. The mobile menu
+uses the same groups. Changing workspace still clears section drafts.

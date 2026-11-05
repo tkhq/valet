@@ -13,12 +13,17 @@ import type {
   DecisionGate,
   Message,
   MessagePart,
+  MessageReplyReference,
   PromptImageAttachment,
   WireEvent,
   WireQueueState,
 } from "@valet/api/wire";
 
 export type ConnectionStatus = "idle" | "connecting" | "open" | "closed" | "error";
+
+/** A failed model call the running turn retries, from the wire `turn_retry`
+ * event. `at` is when this client received it, for the countdown. */
+export type ThreadRetry = Omit<Extract<WireEvent, { type: "turn_retry" }>, "seq" | "ts" | "offset" | "type"> & { at: number };
 
 /**
  * Terminal outcome of a queued submission, stashed on the originating user
@@ -46,8 +51,13 @@ export type AgentStatus =
  * comment on `submission.settled` for the fallback this store uses instead).
  */
 export interface StreamMessage extends Message {
+  thinkingIndices?: Record<number, number>;
   /** Client-only rows stay until REST confirms the same message or queue item. */
   persistence?: "optimistic" | "streaming";
+  /** Next canonical row seen when this client-only row first needs reconciliation. */
+  restAnchor?: { id: string; createdAt: number; sequence?: number };
+  /** Prior canonical row, used when an equal-time snapshot omits the next row. */
+  restPreviousAnchor?: { id: string; createdAt: number; sequence?: number };
   settledOutcome?: SettledOutcome;
   /**
    * Reason for a non-clean `settledOutcome`, taken from the wire event's
@@ -113,6 +123,12 @@ export interface SessionStreamState {
    * other thread in the session. A thread with no entry is idle.
    */
   statusByThread: Record<string, ThreadLiveStatus>;
+  /**
+   * Browser clock minus API clock, measured when the socket's `init`
+   * arrives. Wire timestamps are API time; a turn's start is kept in
+   * browser time so a skewed clock cannot freeze or inflate the timer.
+   */
+  serverClockOffset?: number;
   /** Live message list. Server `init` seeds it; wire events mutate it. */
   messages: StreamMessage[];
   /**
@@ -121,6 +137,11 @@ export interface SessionStreamState {
    * raised on thread A is not visible while the user views thread B.
    */
   pendingGates: Record<string, DecisionGate>;
+  /**
+   * When a wire frame last opened or closed each gate (client clock). A REST
+   * snapshot fetched before that frame does not override it.
+   */
+  gateFrameAt: Record<string, number>;
   /**
    * Per-thread submission queue state, mirroring the wire `queue.state`
    * frame. Drives the composer's "N queued" / paused indicator.
@@ -145,6 +166,12 @@ export interface SessionStreamState {
    * with no entry is not compacting.
    */
   compactingByThread: Record<string, boolean>;
+  /**
+   * The retry a running turn is waiting on, per thread. It is progress for
+   * the working line, never an error. Cleared when the next attempt streams
+   * or the submission settles.
+   */
+  retryByThread: Record<string, ThreadRetry>;
   /**
    * Bumps on every `compaction_end` wire event. The session-view hook
    * watches it and refetches the messages query so the persisted
@@ -181,7 +208,24 @@ export interface SessionStreamState {
    * message_start / turn_end / abort-or-error message_end.
    */
   streamingArgs?: Record<string, { text: string; parsedLen: number }>;
+  /**
+   * Settlements whose queue item id no message carries yet, keyed by that
+   * id. A settle can arrive before `POST /messages` resolves, so the badge
+   * waits here until `setMessageQueueItemId` links the message. It is never
+   * guessed onto another message. Bounded to the newest
+   * `UNMATCHED_SETTLEMENT_LIMIT` entries.
+   */
+  unmatchedSettlements?: Record<string, UnmatchedSettlement>;
 }
+
+interface UnmatchedSettlement {
+  threadId: string;
+  outcome: SettledOutcome | undefined;
+  error?: string;
+}
+
+/** Acknowledgments arrive within one request, so a short buffer is enough. */
+const UNMATCHED_SETTLEMENT_LIMIT = 50;
 
 export interface StreamStore {
   bySession: Record<string, SessionStreamState>;
@@ -202,17 +246,20 @@ export interface StreamStore {
     text: string,
     threadId: string,
     attachments?: PromptImageAttachment[],
+    replyTo?: MessageReplyReference,
   ): string;
   /**
    * Stamp the queue item id onto an existing message (typically the
    * optimistic user message `addUserMessage` just created) once the
    * `POST /messages` response resolves. `SendPromptResponse.messageId` is
    * the engine's queue item id — closing this linkage lets
-   * `submission.settled` match the exact originating message instead of
-   * falling back to a recency heuristic. No-op if the message isn't found
-   * (e.g. it was already reconciled away by a REST snapshot).
+   * `submission.settled` match the exact originating message, and applies
+   * a settlement that arrived before the link. No-op if the message isn't
+   * found (e.g. it was already reconciled away by a REST snapshot).
    */
   setMessageQueueItemId(sessionId: string, messageId: string, queueItemId: string): void;
+  /** Remove a failed local send without removing a confirmed server message. */
+  discardOptimisticMessage(sessionId: string, messageId: string): void;
   /**
    * Merge one thread with a REST snapshot. If REST returns a bounded tail,
    * preserve the current prefix before the first overlap. Keep only typed
@@ -227,9 +274,11 @@ export interface StreamStore {
   ): void;
   /**
    * Seed pending gates from REST (the bootstrap path on session detail
-   * mount). Replaces the current pending-gates map for the session.
+   * mount). Replaces the current pending-gates map for the session, except
+   * gates that a wire frame opened or closed after `snapshotAt`: a cached or
+   * slow snapshot must not remove a card that just arrived.
    */
-  setPendingGates(sessionId: string, gates: DecisionGate[]): void;
+  setPendingGates(sessionId: string, gates: DecisionGate[], snapshotAt?: number): void;
   reset(sessionId: string): void;
   remove(sessionId: string): void;
 }
@@ -241,15 +290,28 @@ const EMPTY: SessionStreamState = {
   errorByThread: {},
   messages: [],
   pendingGates: {},
+  gateFrameAt: {},
   queueByThread: {},
   activeModelByThread: {},
   modelSwitchNonce: 0,
   compactingByThread: {},
+  retryByThread: {},
   compactionNonce: 0,
 };
 
 function ensure(state: StreamStore, sessionId: string): SessionStreamState {
   return state.bySession[sessionId] ?? { ...EMPTY };
+}
+
+/** Add one held settlement and drop the oldest past the limit. */
+function holdSettlement(
+  held: Record<string, UnmatchedSettlement> | undefined,
+  queueItemId: string,
+  settlement: UnmatchedSettlement,
+): Record<string, UnmatchedSettlement> {
+  const entries = Object.entries(held ?? {}).filter(([id]) => id !== queueItemId);
+  entries.push([queueItemId, settlement]);
+  return Object.fromEntries(entries.slice(-UNMATCHED_SETTLEMENT_LIMIT));
 }
 
 /**
@@ -286,12 +348,14 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       // GET /decisions seeds them on first load; subsequent gates arrive
       // on the wire.
       next.errorByThread = {};
+      next.retryByThread = {};
       next.sessionError = undefined;
       next.statusByThread = {};
       next.activeModelByThread = {};
+      next.serverClockOffset = Date.now() - ev.ts;
       // Compacting is transient too: the engine balances the start/end pair
       // in-process, but an api crash mid-compaction orphans the start frame
-      // — without this reset the "Compacting context…" strip would survive
+      // — without this reset the "Valet is compacting context…" status line would survive
       // every reconnect. A live compaction re-arms via durable replay.
       next.compactingByThread = {};
       return next;
@@ -305,6 +369,11 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       if (slice.errorByThread[ev.threadId]) {
         const { [ev.threadId]: _, ...rest } = slice.errorByThread;
         next.errorByThread = rest;
+      }
+      // The retried attempt is streaming: the retry is over.
+      if (slice.retryByThread[ev.threadId]) {
+        const { [ev.threadId]: _, ...rest } = slice.retryByThread;
+        next.retryByThread = rest;
       }
       // Any part still `streaming` on this thread belongs to a dead attempt
       // (zombie deltas from a superseded run are unfenced and can arrive
@@ -324,9 +393,28 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
         content: "",
         parts: [],
         createdAt: ev.ts,
+        ...(ev.role === "assistant" ? { completed: false } : {}),
         persistence: "streaming",
       };
       next.messages = [...next.messages, newMsg];
+      return next;
+    }
+
+    case "thinking_update": {
+      const idx = lastIndex(slice.messages, (m) => m.id === ev.messageId && m.threadId === ev.threadId);
+      if (idx < 0) return next;
+      const m = slice.messages[idx];
+      const partIndex = m.thinkingIndices?.[ev.index] ?? m.parts.length;
+      const previous = m.parts[partIndex];
+      if (previous?.kind === "thinking" && previous.durationMs !== undefined && ev.part.durationMs === undefined) return next;
+      const parts = [...m.parts];
+      // The summary arrives once, at the block's end; a later timing-only
+      // update for the same block keeps it.
+      const summary = ev.part.summary ?? (previous?.kind === "thinking" ? previous.summary : undefined);
+      parts[partIndex] = summary !== undefined ? { ...ev.part, summary } : ev.part;
+      next.messages = replaceAt(slice.messages, idx, {
+        ...m, parts, thinkingIndices: { ...m.thinkingIndices, [ev.index]: partIndex },
+      });
       return next;
     }
 
@@ -344,9 +432,10 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       const idx = lastIndex(slice.messages, (m) => m.id === ev.messageId);
       if (idx < 0) return next;
       const m = slice.messages[idx];
-      const updated: Message = {
+      const updated: StreamMessage = {
         ...m,
         parts: ev.parts,
+        thinkingIndices: undefined,
         content: ev.content ?? m.content,
       };
       next.messages = replaceAt(slice.messages, idx, updated);
@@ -354,15 +443,22 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
     }
 
     case "message_end": {
+      const idx = lastIndex(slice.messages, (m) => m.id === ev.messageId);
+      if (idx >= 0) {
+        next.messages = replaceAt(slice.messages, idx, {
+          ...slice.messages[idx],
+          completed: ev.reason === "end_turn",
+          stopReason: ev.reason === "tool_use" ? undefined : ev.reason,
+        });
+      }
       // On abort/error, sweep parts still in `streaming` status: their tool
       // call never reached toolcall_end, so the engine never persisted them —
       // keeping them would show a phantom card that vanishes on reload. The
       // sweep is thread-wide (not by messageId) so a client that attached
       // the part to an older message (mid-turn connect) still cleans up.
-      // On end_turn the streaming parts are about to execute — tool_start
-      // upgrades them in place.
-      if (ev.reason === "end_turn") return next;
-      sweepStreamingParts(next, ev.threadId);
+      // On end_turn or tool_use, the streaming parts are about to execute —
+      // tool_start upgrades them in place.
+      if (ev.reason === "error" || ev.reason === "abort") sweepStreamingParts(next, ev.threadId);
       return next;
     }
 
@@ -461,7 +557,7 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       const updatedPart: MessagePart = {
         ...old,
         status: ev.isError ? "error" : "completed",
-        result: ev.result,
+        result: ev.resultData ?? ev.result,
         error: ev.isError ? ev.result : undefined,
       };
       const parts = replaceAt(m.parts, pidx, updatedPart);
@@ -472,8 +568,14 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
     case "status": {
       const prev = slice.statusByThread[ev.threadId];
       const wasIdle = prev === undefined || prev.status === "idle";
+      // A frame seeded at connect names the turn's real start; otherwise
+      // the first non-idle frame starts the clock. Both are API time, so
+      // they move to browser time before the timer subtracts them from it.
+      const offset = slice.serverClockOffset ?? Date.now() - ev.ts;
       const turnStartedAt =
-        ev.status === "idle" ? undefined : wasIdle ? ev.ts : prev.turnStartedAt;
+        ev.status === "idle" ? undefined
+          : ev.turnStartedAt !== undefined ? ev.turnStartedAt + offset
+          : wasIdle ? ev.ts + offset : prev.turnStartedAt;
       // Duplicate frames are routine (the engine re-emits tool_calling per
       // tool; the handshake seed and durable replay overlap) — skip them so
       // the entry keeps its identity and subscribers do not re-render. An
@@ -506,6 +608,13 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
     }
 
     case "error": {
+      // Older servers recorded intentional interruption as a provider error.
+      if (ev.code === "aborted") return next;
+      // A model call that ended in an error. The engine sends this before it
+      // decides to retry, so it is not yet a failed turn: `turn_retry` follows
+      // when it retries. When retries run out, the failed reply in the
+      // transcript names the failure and a `failed` settlement marks the thread.
+      if (ev.code === "error") return next;
       // Engine-originated errors name their thread; store the banner and
       // flip the badge for that thread only. A session-level error (no
       // threadId, e.g. `ws_open_failed`) lands in `sessionError` and shows
@@ -541,6 +650,15 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       return next;
     }
 
+    case "branch_switched": {
+      // The thread now continues on another branch. Rows still streaming
+      // there belong to the branch it left; the messages refetch that this
+      // event cues brings the new branch from REST.
+      const kept = slice.messages.filter((m) => m.threadId !== ev.threadId || m.persistence !== "streaming");
+      if (kept.length !== slice.messages.length) next.messages = kept;
+      return next;
+    }
+
     case "compaction_start": {
       next.compactingByThread = { ...slice.compactingByThread, [ev.threadId]: true };
       return next;
@@ -561,6 +679,7 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       // approval/question/credential card scoped to the originating
       // thread.
       next.pendingGates = { ...slice.pendingGates, [ev.gate.id]: ev.gate };
+      next.gateFrameAt = { ...slice.gateFrameAt, [ev.gate.id]: Date.now() };
       return next;
     }
 
@@ -570,6 +689,7 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       // Whichever way a gate leaves the pending state, drop it from
       // local state. The engine will emit a status change back to
       // running/idle on its own.
+      next.gateFrameAt = { ...slice.gateFrameAt, [ev.gateId]: Date.now() };
       if (!slice.pendingGates[ev.gateId]) return next;
       const { [ev.gateId]: _, ...rest } = slice.pendingGates;
       next.pendingGates = rest;
@@ -606,19 +726,23 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       if (slice.activeModelByThread[ev.threadId]?.queueItemId === ev.queueItemId) {
         const { [ev.threadId]: _, ...rest } = slice.activeModelByThread;
         next.activeModelByThread = rest;
+        if (slice.retryByThread[ev.threadId]) {
+          const { [ev.threadId]: _retry, ...retries } = slice.retryByThread;
+          next.retryByThread = retries;
+        }
+        // The turn failed after its retries ran out. The thread now shows as
+        // failed until its next turn starts.
+        if (ev.outcome === "failed") {
+          next.statusByThread = { ...slice.statusByThread, [ev.threadId]: { status: "error" } };
+        }
       }
-      // Mark the originating user message with a terminal badge.
-      //
-      // Matching: prefer an exact `queueItemId` match — REST rows carry the
-      // engine's queue_item_id via `entryToMessage`
-      // (packages/api/src/routes/messages.ts), and the web client stamps it
-      // onto optimistic messages once `POST /messages` resolves (see
-      // `setMessageQueueItemId`). Only when no message carries a matching
-      // `queueItemId` do we fall back to a recency heuristic — and even
-      // then, ONLY when there is exactly one unsettled user message on the
-      // thread. With two or more candidates the heuristic is ambiguous
-      // (queued prompt A vs. B), so we drop the event rather than badge the
-      // wrong message.
+      // Mark the originating user message with a terminal badge. Match by
+      // queue item id only: REST rows carry the engine's queue_item_id via
+      // `entryToMessage` (packages/api/src/routes/messages.ts), and the web
+      // client stamps it onto an optimistic message once `POST /messages`
+      // resolves (`setMessageQueueItemId`). A settle that arrives before
+      // that link waits in `unmatchedSettlements`. Guessing a message by
+      // recency badged the wrong prompt when another item settled first.
       //
       // Promote remaps the same bubble from the followup id to the steer
       // successor. A superseded settle for the old id must not badge that
@@ -631,31 +755,33 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       ) {
         return next;
       }
-      const idx = (() => {
-        const direct = lastIndex(
-          slice.messages,
-          (m) => m.threadId === ev.threadId && m.queueItemId === ev.queueItemId,
-        );
-        if (direct >= 0) return direct;
-        const unsettled: number[] = [];
-        for (let i = 0; i < slice.messages.length; i++) {
-          const m = slice.messages[i];
-          if (m.threadId === ev.threadId && m.role === "user" && m.settledOutcome === undefined) {
-            unsettled.push(i);
-          }
-        }
-        return unsettled.length === 1 ? unsettled[0] : -1;
-      })();
-      if (idx < 0) return next;
-      const m = slice.messages[idx];
       // A clean run needs no badge and no reason. Every other outcome keeps
       // the engine's `error` text next to the outcome, so a consumer can
       // render why the turn ended instead of a bare grey chip.
       const settledOutcome: SettledOutcome | undefined =
         ev.outcome === "completed" ? undefined : ev.outcome;
       const settledError = ev.outcome === "completed" ? undefined : ev.error;
+      const idx = lastIndex(
+        slice.messages,
+        (m) => m.threadId === ev.threadId && m.queueItemId === ev.queueItemId,
+      );
+      if (idx < 0) {
+        next.unmatchedSettlements = holdSettlement(slice.unmatchedSettlements, ev.queueItemId, {
+          threadId: ev.threadId,
+          outcome: settledOutcome,
+          ...(settledError !== undefined ? { error: settledError } : {}),
+        });
+        return next;
+      }
+      const m = slice.messages[idx];
       const updated: StreamMessage = { ...m, settledOutcome, settledError };
       next.messages = replaceAt(slice.messages, idx, updated);
+      return next;
+    }
+
+    case "turn_retry": {
+      const { seq: _seq, ts: _ts, offset: _offset, type: _type, ...retry } = ev;
+      next.retryByThread = { ...slice.retryByThread, [ev.threadId]: { ...retry, at: Date.now() } };
       return next;
     }
 
@@ -670,11 +796,15 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
     }
 
     case "ping":
-    case "title.updated": {
-      // These frames carry no stream state. Title updates trigger query-cache
-      // invalidation in the socket hook after the persisted write completes.
+    case "title.updated":
+    case "thread.activity": {
+      // These frames carry no stream state. Title and activity updates mutate
+      // the query cache in the socket hook after the persisted write completes.
       return ev.offset && ev.offset > slice.lastOffset ? next : slice;
     }
+    case "thread.viewers":
+      // Viewer lists live in their own store (`api/active-viewers.ts`).
+      return slice;
 
     case "command_result": {
       // Command results reach the message list through the REST refetch in
@@ -775,7 +905,7 @@ export const useStreamStore = create<StreamStore>((set) => ({
       return { bySession: { ...state.bySession, [sessionId]: updated } };
     }),
 
-  addUserMessage: (sessionId, text, threadId, attachments) => {
+  addUserMessage: (sessionId, text, threadId, attachments, replyTo) => {
     // Synthetic id; the next REST snapshot replaces this row with the
     // persisted message. A short collision window with content-based
     // dedupe is acceptable for v1.
@@ -794,6 +924,7 @@ export const useStreamStore = create<StreamStore>((set) => ({
         // Optimistic mirror of the wire projection: the REST refetch will
         // overwrite this row with the server's canonical attachments field.
         ...(attachments && attachments.length > 0 ? { attachments } : {}),
+        ...(replyTo ? { replyTo } : {}),
       };
       // A fresh prompt supersedes this thread's lingering error banner from
       // the previous failed turn (see the `turn_end` reducer note). Other
@@ -814,6 +945,15 @@ export const useStreamStore = create<StreamStore>((set) => ({
     return id;
   },
 
+  discardOptimisticMessage: (sessionId, messageId) => set((state) => {
+    const slice = state.bySession[sessionId];
+    if (!slice) return state;
+    const messages = slice.messages.filter((message) => message.id !== messageId
+      || message.persistence !== "optimistic" || message.queueItemId !== undefined);
+    if (messages.length === slice.messages.length) return state;
+    return { bySession: { ...state.bySession, [sessionId]: { ...slice, messages } } };
+  }),
+
   setMessageQueueItemId: (sessionId, messageId, queueItemId) =>
     set((state) => {
       const slice = ensure(state, sessionId);
@@ -822,7 +962,7 @@ export const useStreamStore = create<StreamStore>((set) => ({
       const prev = slice.messages[idx];
       const remapping =
         prev.queueItemId !== undefined && prev.queueItemId !== queueItemId;
-      const updated: StreamMessage = remapping
+      const linked: StreamMessage = remapping
         ? {
             ...prev,
             queueItemId,
@@ -833,10 +973,20 @@ export const useStreamStore = create<StreamStore>((set) => ({
             settledError: undefined,
           }
         : { ...prev, queueItemId };
+      // A settle that arrived before this link applies now.
+      const held = slice.unmatchedSettlements?.[queueItemId];
+      const updated: StreamMessage = held && held.threadId === prev.threadId
+        ? { ...linked, settledOutcome: held.outcome, settledError: held.error }
+        : linked;
+      let unmatchedSettlements = slice.unmatchedSettlements;
+      if (held && unmatchedSettlements) {
+        const { [queueItemId]: _, ...rest } = unmatchedSettlements;
+        unmatchedSettlements = rest;
+      }
       return {
         bySession: {
           ...state.bySession,
-          [sessionId]: { ...slice, messages: replaceAt(slice.messages, idx, updated) },
+          [sessionId]: { ...slice, messages: replaceAt(slice.messages, idx, updated), unmatchedSettlements },
         },
       };
     }),
@@ -846,43 +996,186 @@ export const useStreamStore = create<StreamStore>((set) => ({
       const slice = ensure(state, sessionId);
       const others = slice.messages.filter((message) => message.threadId !== threadId);
       const current = slice.messages.filter((message) => message.threadId === threadId);
-      const freshIds = new Set(freshMessages.map((message) => message.id));
-      const freshQueueItemIds = new Set(
-        freshMessages.flatMap((message) => message.queueItemId ? [message.queueItemId] : []),
+      const freshIndexById = new Map(
+        freshMessages.map((message, index) => [message.id, index]),
       );
-      const freshUserContents = new Set(
-        freshMessages.filter((message) => message.role === "user").map((message) => message.content),
-      );
-      const isConfirmedOptimisticUser = (message: StreamMessage): boolean => {
-        if (message.persistence !== "optimistic" || message.role !== "user") return false;
-        if (message.queueItemId) return freshQueueItemIds.has(message.queueItemId);
-        return freshUserContents.has(message.content);
+      const freshUserIndexesByQueueItem = new Map<string, number[]>();
+      const freshUserIndexesByContent = new Map<string, number[]>();
+      for (let index = 0; index < freshMessages.length; index++) {
+        const message = freshMessages[index];
+        if (message.role !== "user") continue;
+        const contentIndexes = freshUserIndexesByContent.get(message.content) ?? [];
+        contentIndexes.push(index);
+        freshUserIndexesByContent.set(message.content, contentIndexes);
+        if (message.queueItemId) {
+          const queueIndexes = freshUserIndexesByQueueItem.get(message.queueItemId) ?? [];
+          queueIndexes.push(index);
+          freshUserIndexesByQueueItem.set(message.queueItemId, queueIndexes);
+        }
+      }
+      const usedFreshIndexes = new Set<number>();
+      const queueCursor = new Map<string, number>();
+      const contentCursor = new Map<string, number>();
+      const takeIndex = (
+        indexes: number[] | undefined,
+        key: string,
+        cursors: Map<string, number>,
+      ): number | undefined => {
+        if (!indexes) return undefined;
+        let cursor = cursors.get(key) ?? 0;
+        while (cursor < indexes.length && usedFreshIndexes.has(indexes[cursor])) cursor++;
+        cursors.set(key, cursor + 1);
+        return indexes[cursor];
       };
+      // Reserve authoritative IDs before matching weaker queue or content
+      // identities. A new identical prompt must not consume an existing row.
+      const matchedFreshIndexes = current.map((message) => {
+        const index = freshIndexById.get(message.id);
+        if (index !== undefined) usedFreshIndexes.add(index);
+        return index;
+      });
+      for (const byQueue of [true, false]) {
+        for (let index = 0; index < current.length; index++) {
+          const message = current[index];
+          if (matchedFreshIndexes[index] !== undefined || message.persistence !== "optimistic" || message.role !== "user") continue;
+          if (Boolean(message.queueItemId) !== byQueue) continue;
+          const matched = message.queueItemId
+            ? takeIndex(freshUserIndexesByQueueItem.get(message.queueItemId), message.queueItemId, queueCursor)
+            : takeIndex(freshUserIndexesByContent.get(message.content), message.content, contentCursor);
+          if (matched !== undefined) usedFreshIndexes.add(matched);
+          matchedFreshIndexes[index] = matched;
+        }
+      }
+      // Record both canonical neighbors once. Exact neighbors preserve order
+      // when createdAt ties and REST omits one side of the relationship.
+      const anchoredCurrent = [...current];
+      let previousCanonical: StreamMessage | undefined;
+      for (let index = 0; index < anchoredCurrent.length; index++) {
+        const message = anchoredCurrent[index];
+        const matchedIndex = matchedFreshIndexes[index];
+        const canonical =
+          message.persistence === undefined
+            ? message
+            : matchedIndex !== undefined
+              ? freshMessages[matchedIndex]
+              : undefined;
+        if (canonical) {
+          previousCanonical = canonical;
+        } else if (!message.restPreviousAnchor && previousCanonical) {
+          anchoredCurrent[index] = {
+            ...message,
+            restPreviousAnchor: {
+              id: previousCanonical.id,
+              createdAt: previousCanonical.createdAt,
+              sequence: previousCanonical.sequence,
+            },
+          };
+        }
+      }
+      let nextCanonical: StreamMessage | undefined;
+      for (let index = anchoredCurrent.length - 1; index >= 0; index--) {
+        const message = anchoredCurrent[index];
+        const matchedIndex = matchedFreshIndexes[index];
+        if (message.persistence === undefined) {
+          nextCanonical = message;
+        } else if (matchedIndex !== undefined) {
+          nextCanonical = freshMessages[matchedIndex];
+        } else if (!message.restAnchor && nextCanonical) {
+          anchoredCurrent[index] = {
+            ...message,
+            restAnchor: {
+              id: nextCanonical.id,
+              createdAt: nextCanonical.createdAt,
+              sequence: nextCanonical.sequence,
+            },
+          };
+        }
+      }
       const overlap = hasMore
-        ? current.findIndex((message) => freshIds.has(message.id))
+        ? anchoredCurrent.findIndex((message) => freshIndexById.has(message.id))
         : -1;
-      const prefix = overlap >= 0 ? current.slice(0, overlap) : [];
-      const afterTail = overlap >= 0 ? current.slice(overlap) : current;
-      const transient = afterTail.filter(
-        (message) =>
-          message.persistence !== undefined &&
-          !freshIds.has(message.id) &&
-          !isConfirmedOptimisticUser(message),
+      const prefix =
+        overlap >= 0
+          ? anchoredCurrent
+              .slice(0, overlap)
+              .filter((message, index) =>
+                message.persistence === undefined
+                  ? true
+                  : matchedFreshIndexes[index] === undefined,
+              )
+          : [];
+      const afterTailStart = overlap >= 0 ? overlap : 0;
+      const afterTail = overlap >= 0 ? anchoredCurrent.slice(overlap) : anchoredCurrent;
+      const beforeFresh = Array.from(
+        { length: freshMessages.length + 1 },
+        (): StreamMessage[] => [],
       );
+      const unresolved: StreamMessage[] = [];
+      for (let index = 0; index < afterTail.length; index++) {
+        const message = afterTail[index];
+        if (matchedFreshIndexes[afterTailStart + index] !== undefined) continue;
+        if (message.persistence === undefined) continue;
+        const anchorIndex = message.restAnchor
+          ? freshIndexById.get(message.restAnchor.id)
+          : undefined;
+        const previousAnchorIndex = message.restPreviousAnchor
+          ? freshIndexById.get(message.restPreviousAnchor.id)
+          : undefined;
+        if (anchorIndex !== undefined) beforeFresh[anchorIndex].push(message);
+        else if (previousAnchorIndex !== undefined) beforeFresh[previousAnchorIndex + 1].push(message);
+        else unresolved.push(message);
+      }
+
+      // Anchors and REST rows use canonical (createdAt, sequence) order. One
+      // forward cursor places each missing anchor after rows at or before it.
+      // If either sequence is absent, equal timestamps do not establish order.
+      const atOrBeforeAnchor = (
+        fresh: Message,
+        anchor: NonNullable<StreamMessage["restAnchor"]>,
+      ): boolean => {
+        if (fresh.createdAt !== anchor.createdAt) return fresh.createdAt < anchor.createdAt;
+        return fresh.sequence !== undefined && anchor.sequence !== undefined
+          ? fresh.sequence <= anchor.sequence
+          : false;
+      };
+      let freshCursor = 0;
+      for (const message of unresolved) {
+        if (message.restAnchor) {
+          while (
+            freshCursor < freshMessages.length &&
+            atOrBeforeAnchor(freshMessages[freshCursor], message.restAnchor)
+          ) freshCursor++;
+          beforeFresh[freshCursor].push(message);
+        } else {
+          beforeFresh[freshMessages.length].push(message);
+        }
+      }
+      const mergedTail: StreamMessage[] = [];
+      for (let index = 0; index < freshMessages.length; index++) {
+        mergedTail.push(...beforeFresh[index], freshMessages[index]);
+      }
+      mergedTail.push(...beforeFresh[freshMessages.length]);
       return {
         bySession: {
           ...state.bySession,
           [sessionId]: {
             ...slice,
-            messages: [...others, ...prefix, ...freshMessages, ...transient],
+            messages: [...others, ...prefix, ...mergedTail],
           },
         },
       };
     }),
 
-  setPendingGates: (sessionId, gates) =>
+  setPendingGates: (sessionId, snapshot, snapshotAt) =>
     set((state) => {
       const slice = ensure(state, sessionId);
+      // For a gate with a frame newer than the snapshot, local state is the
+      // truth: keep the local copy if the frame opened it, drop it if closed.
+      const newer = (id: string) => snapshotAt !== undefined && (slice.gateFrameAt[id] ?? 0) > snapshotAt;
+      const gates = [
+        ...snapshot.filter((g) => !newer(g.id)),
+        ...Object.values(slice.pendingGates).filter((g) => newer(g.id)),
+      ];
       // Identity guard: seeding is idempotent, and more than one surface
       // seeds (SessionView and ThreadTree both call usePendingGatesSeed).
       // Rebuilding the record for equal content would re-render every
@@ -969,6 +1262,11 @@ export function useErrorForThread(
   });
 }
 
+/** The retry this thread's running turn is waiting on, if any. */
+export function useRetryForThread(sessionId: string, threadId: string | undefined): ThreadRetry | undefined {
+  return useStreamStore((s) => (threadId ? s.bySession[sessionId]?.retryByThread[threadId] : undefined));
+}
+
 /** True while this thread is between `compaction_start` and `compaction_end`. */
 export function useCompactingForThread(
   sessionId: string,
@@ -1018,8 +1316,8 @@ export function useQueueStateForThread(
  * interrupt alongside `agentStatus`: the queue state comes from durable
  * rows (seeded by the WS handshake), so it stays correct across reconnects
  * and page loads that would miss the live `status` transition events.
- * Everything it reports true for is abortable — `Thread.abort` interrupts a
- * running turn, withdraws pending gates, and settles queued items.
+ * A true result does not mean interactive Stop can abort work. Stop targets
+ * only the active running or gate-blocked item and preserves queued work.
  */
 export function queueBusy(state: WireQueueState | undefined): boolean {
   if (!state) return false;
@@ -1039,6 +1337,6 @@ export function queueBusy(state: WireQueueState | undefined): boolean {
   if (state.status === "paused" && state.activeItemId !== undefined) return true;
   // Waiting submissions are busy whatever the status says: collect-buffer
   // items ride an `idle` status until their window flushes, and a paused
-  // queue holds its pending items. Both are abortable.
+  // queue holds its pending items. Both states are busy but not active Stop targets.
   return state.pendingIds.length > 0 || state.collectingIds.length > 0;
 }

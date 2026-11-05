@@ -8,7 +8,7 @@
  * cares that navigation was requested, not that the router resolved it.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import type { ReactNode } from "react";
 import type {
   GetReposResponse,
@@ -45,6 +45,7 @@ const engagementsBySession: Record<string, GetSessionSecurityResponse> = {
       configPersonas: null,
       configTools: null,
       authorizedScope: null,
+      credentialLabels: [],
       createdAt: 1,
       updatedAt: 2,
     },
@@ -110,13 +111,6 @@ vi.mock("~/api/repos", () => ({
 
 // The workspace scope provider reads the assistants list to let an open
 // assistant win over the stored key; no assistant is open here.
-vi.mock("~/api/assistants", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("~/api/assistants")>();
-  return {
-    ...actual,
-    useAssistants: () => ({ data: { assistants: [] }, isLoading: false, error: null }),
-  };
-});
 
 // `useListOwner` reads the caller's own id; `WorkspaceClause` reads teams +
 // org features (none here, so the clause renders nothing).
@@ -226,6 +220,7 @@ describe("SecurityIndexPage", () => {
         configPersonas: null,
         configTools: null,
         authorizedScope: null,
+        credentialLabels: [],
         createdAt: 1,
         updatedAt: 2,
       },
@@ -356,11 +351,11 @@ describe("SecurityIndexPage", () => {
 
 
 describe("GitHub connection recovery", () => {
-  it("keeps personal GitHub setup in personal connected accounts", () => {
+  it("keeps personal GitHub setup on personal Integrations", () => {
     reposData.connected = false;
     renderPage();
     expect(screen.getByRole("link", { name: "Connect GitHub" }).getAttribute("href"))
-      .toBe("/settings/connected-accounts");
+      .toBe("/integrations?service=github&workspace=user");
   });
 
   it("takes team org admins directly to GitHub App settings", () => {

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  fallbackLabel,
+  fallbackTier,
   isSizeTier,
   resolveTierModel,
   selectionLabel,
@@ -34,6 +36,28 @@ describe("isSizeTier", () => {
   it("rejects null and undefined", () => {
     expect(isSizeTier(null)).toBe(false);
     expect(isSizeTier(undefined)).toBe(false);
+  });
+});
+
+describe("fallbackTier / fallbackLabel", () => {
+  const empty: GetModelTiersResponse = { xs: [], s: [], m: [], l: [], xl: [] };
+
+  it("names Small when the org has no default tier", () => {
+    expect(fallbackTier({ ...empty, defaultTier: null, defaultTierResolvable: false })).toBe("s");
+    expect(fallbackLabel("Organization default", undefined)).toBe("Organization default");
+  });
+
+  it("names the org default tier when a provider with a key serves it", () => {
+    const tiers: GetModelTiersResponse = { ...empty, defaultTier: "m", defaultTierResolvable: true };
+    expect(fallbackTier(tiers)).toBe("m");
+    expect(fallbackLabel("Organization default", tiers)).toBe("Medium (Organization default)");
+  });
+
+  it("names Small when new sessions skip the saved default tier", () => {
+    const tiers: GetModelTiersResponse = { ...empty, defaultTier: "m", defaultTierResolvable: false };
+    expect(fallbackTier(tiers)).toBe("s");
+    expect(fallbackLabel("Organization default", tiers)).toBe("Small (Organization default)");
+    expect(fallbackTier({ ...empty, defaultTier: "m" })).toBe("s");
   });
 });
 
@@ -104,8 +128,8 @@ describe("resolved tier selections", () => {
       approved: true,
     },
     {
-      id: "openai/gpt-5.6-sol",
-      name: "GPT-5.6 Sol",
+      id: "openai/gpt-6.1-sol",
+      name: "GPT-6.1 Sol",
       providerId: "openai",
       providerKind: "openai",
       providerName: "OpenAI",
@@ -117,20 +141,20 @@ describe("resolved tier selections", () => {
     xs: [],
     s: [],
     m: [],
-    l: ["openai/gpt-5.6-luna", "openai/gpt-5.6-sol"],
+    l: ["openai/gpt-5.6-luna", "openai/gpt-6.1-sol"],
     xl: [],
   };
 
   it("uses the first active configured target", () => {
-    expect(resolveTierModel("l", tierMap, models)?.name).toBe("GPT-5.6 Sol");
+    expect(resolveTierModel("l", tierMap, models)?.name).toBe("GPT-6.1 Sol");
   });
 
   it("shows a concrete model name for a selected tier", () => {
-    expect(selectionLabel("l", tierMap, models)).toBe("GPT-5.6 Sol");
+    expect(selectionLabel("l", tierMap, models)).toBe("GPT-6.1 Sol");
   });
 
   it("shows the catalog name for a selected concrete model", () => {
-    expect(selectionLabel("openai/gpt-5.6-sol", tierMap, models)).toBe("GPT-5.6 Sol");
+    expect(selectionLabel("openai/gpt-6.1-sol", tierMap, models)).toBe("GPT-6.1 Sol");
   });
 
   it("falls back to the tier label when no target resolves", () => {

@@ -3,12 +3,16 @@
  *
  *   ANTHROPIC_API_KEY=sk-... VALET_LOCAL_AUTH=1 pnpm --filter @valet/api dev
  *
- * `startServer()` boots the API on `PORT` (default 8787) reading all effective
+ * `startServer()` boots the API on `PORT` (default 8788) reading all effective
  * values from `process.env`, and returns a handle whose `close()` performs the
  * graceful shutdown. Importing this module has NO side effects — the server
  * only boots when this file is run as the direct entry (`tsx src/main.ts`), or
  * when a caller (e.g. the `valet serve` command) invokes `startServer()`.
  */
+import { imageSourceApprovalMode } from "./bakes/source-change-requests.js";
+import { currentOutboundPolicy } from "./lib/outbound-url.js";
+import { wireSessionOutcomeTagging } from "./tagging/session-outcome.js";
+import { configureSlackIngress } from "./channels/slack-inbox.js";
 import { eq } from "drizzle-orm";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
@@ -32,12 +36,23 @@ import {
   type InstanceConfig,
 } from "./config/instance-config.js";
 import { reconcileInstanceConfig } from "./services/config-reconcile.js";
+import { AdminBootstrapError, ensureAdminAccess } from "./auth/bootstrap-admin.js";
 import { seedMissingTeamDefaults } from "./services/teams.js";
 import { ModelRegistry, getModelRegistry, setModelRegistry } from "./services/model-registry.js";
 import { syncAllAppWebhookUrls } from "./services/github-app.js";
 import { publicUrlFromEnv } from "./channels/host.js";
 import { wireAttentionRouter } from "./orchestrator/attention-wiring.js";
+import { wireHomeTaskReports } from "./home/service.js";
+import { wireChildGateReports } from "./orchestrator/children.js";
+import { wireThreadPullRequests, startPullRequestSweep } from "./services/thread-pull-requests.js";
+import { wireDeliveryTurnFailures } from "./events/delivery-turn.js";
+import { memoryUsageRecorder } from "./services/memory-usage.js";
+import { wirePrincipleCitations } from "./orchestrator/principle-citations.js";
 import { initTelemetry } from "./observability/otel.js";
+import { initImageFallbackMetrics } from "./observability/image-fallback-metrics.js";
+import { initSandboxMetrics, reportError } from "@valet/engine";
+import { startProcessHealthSampler } from "./observability/process-health.js";
+import { Lifecycle, startBootListener } from "./lib/lifecycle.js";
 import { recordBootRestoreTimeout } from "./observability/security-metrics.js";
 import { ensureWorkflowSession } from "./workflows/engine-deps.js";
 import { restoreOneSession, runBoundedRestore, type RestoreSessionDeps } from "./boot-restore.js";
@@ -45,7 +60,6 @@ import { ensureEnvProviders } from "./proxy/upstream.js";
 import { resolveOrgId } from "./lib/org.js";
 import { webDistPath } from "./assets/base.js";
 import { startSigningKeySweep, type SigningKeySweepHandle } from "./engine/signing-key-sweep.js";
-import { startRotateSweep, type RotateSweepHandle } from "./engine/rotate-sweep.js";
 import {
   startInstallationSweep,
   type InstallationSweepHandle,
@@ -89,7 +103,7 @@ async function restoreUnsettledSessions(providers: Providers, shouldStop: () => 
   try {
     ids = await providers.engineStore.listSessionIdsWithUnsettledSubmissions();
   } catch (err) {
-    console.error("boot restore: failed to list unsettled sessions:", err);
+    reportError({ area: "boot", reason: "restore_list" }, "boot restore: failed to list unsettled sessions", err);
     return;
   }
   const deps: RestoreSessionDeps = {
@@ -167,7 +181,7 @@ async function restoreUnsettledSessions(providers: Providers, shouldStop: () => 
  * ready flip, so in Kubernetes the pod dies NotReady.
  */
 export async function startServer(): Promise<ServerHandle> {
-const port = Number.parseInt(process.env.PORT ?? "8787", 10);
+const port = Number.parseInt(process.env.PORT ?? "8788", 10);
 const dataDir = process.env.VALET_DATA_DIR ?? resolve(homedir(), ".valet");
 const databaseUrl = process.env.DATABASE_URL;
 const pgDataDir = process.env.VALET_PG_DATA_DIR ?? resolve(dataDir, "pg");
@@ -191,6 +205,20 @@ if (!anthropicApiKey) {
 const authConflict = authModeConflict(process.env);
 if (authConflict) {
   console.error(authConflict);
+  process.exit(1);
+}
+
+if (imageSourceApprovalMode() === "off") {
+  console.warn("[security] VALET_IMAGE_SOURCE_APPROVAL=off: image-source changes apply without a second org admin.");
+}
+
+// The outbound URL guard reads its allowlist lazily; parse it now so a
+// malformed VALET_OUTBOUND_URL_ALLOWLIST stops boot instead of refusing
+// every custom provider at request time.
+try {
+  currentOutboundPolicy();
+} catch (e) {
+  console.error(e instanceof Error ? e.message : String(e));
   process.exit(1);
 }
 
@@ -279,7 +307,20 @@ const sandboxApiUrl = resolveSandboxApiUrl(
 // are live for everything built below — HTTP spans, engine spans, store
 // spans all resolve through this one registration.
 const telemetry = initTelemetry();
+// Counters are zero-initialized at boot so increase() sees the first event after a restart.
+initImageFallbackMetrics();
+initSandboxMetrics();
+// Memory, heap, and event-loop samples for the process gauges and the
+// diagnostics.process_health tool. Stopped in close().
+const stopProcessHealthSampler = startProcessHealthSampler();
 if (telemetry) console.log(`otel: exporting traces to ${telemetry.endpoint}`);
+
+// Booting → ready → draining (`lib/lifecycle.ts`). The boot listener holds
+// the port through database upgrades and provider setup, so callers get 503 +
+// Retry-After instead of a refused connection; it hands the port to the real
+// app below. Port 0 (tests) has nothing to hold.
+const lifecycle = new Lifecycle();
+const bootListener = port === 0 ? null : await startBootListener(port);
 
 // `buildNodeProviders` can throw `InstanceConfigError` (e.g. the plugins
 // both-set guard). Fail boot with the corrective-action message only — no
@@ -297,7 +338,7 @@ try {
     sandboxJwtMaster: authConfig?.sandboxJwtMaster,
     sandboxApiUrl,
     // Real auth configured → skip seeding the local-dev identity so the
-    // "zero users → first signup becomes admin" provisioning rule can fire
+    // first admin comes from an invite (`auth/bootstrap-admin.ts`)
     // (see `NodeProviderOpts.seedLocalIdentity`). The stub rung cannot be on
     // here — the boot check above refuses that pair.
     seedLocalIdentity: shouldSeedLocalIdentity(!!authConfig),
@@ -323,10 +364,22 @@ wireAttentionRouter({
   db: providers.db,
   engineStore: providers.engineStore,
   eventStream: providers.eventStream,
-  channels: [providers.channelHost.attentionDeliverer()],
+  channels: providers.channelHost.attentionDeliverers(),
+  access: providers,
 });
-// A restored submission can settle during the first boot-chain step. Subscribe
-// before that work starts so automatic naming does not miss the completion.
+// A child stopped at a gate tells its parent thread (TKAI-564). Settlement
+// alone left the parent unaware of a blocked child until it finished.
+wireChildGateReports(providers.eventStream, providers.childWatcher);
+wireThreadPullRequests(providers.eventStream, providers.db);
+wirePrincipleCitations(providers.eventStream, providers.db);
+// A task started from home reports back to home when its first run ends.
+wireHomeTaskReports(providers.eventStream, providers);
+// An event delivery is marked failed when the turn it queued fails. Restored
+// work can settle in the boot chain, so this subscribes before it.
+wireDeliveryTurnFailures(providers.eventStream, providers.db);
+// Subscribe to outcome tagging before restored submissions can settle.
+wireSessionOutcomeTagging(providers.eventStream, providers.db);
+// Subscribe to automatic naming before restored submissions can settle.
 providers.autoTitleHost.start();
 
 // `authConfig` was loaded above (before `buildNodeProviders`, which needs
@@ -368,10 +421,9 @@ getAttachmentRefStore().startSweep();
 // chain checks it between steps: a shutdown during boot must stop the chain
 // from starting more services.
 let closed = false;
-let bootReady = false;
-let rotateSweep: RotateSweepHandle | undefined;
 let signingKeySweep: SigningKeySweepHandle | undefined;
 let installationSweep: InstallationSweepHandle | undefined;
+let pullRequestSweep: ReturnType<typeof startPullRequestSweep> | undefined;
 
 // `startServer` from createApp is renamed at the destructure so it can't
 // shadow this module's exported `startServer()` (we're inside its body).
@@ -381,7 +433,7 @@ let installationSweep: InstallationSweepHandle | undefined;
 const { startServer: startListening, webServed } = createApp(
   providers,
   authWiring,
-  { webDistDir, isReady: () => bootReady && !closed },
+  { webDistDir, isReady: () => lifecycle.isReady() && !closed, lifecycle },
   adapter,
 );
 // A set-but-unmounted dist means the bundled image shipped without a valid
@@ -394,6 +446,7 @@ if (webDistDir && !webServed) {
   process.exit(1);
 }
 
+await bootListener?.close();
 const server = startListening({
   port,
   onListen: (boundPort) => {
@@ -422,8 +475,8 @@ const server = startListening({
 // the port's critical path for exactly this reason; the whole chain now
 // follows it.
 //
-// The chain has two halves around the `bootReady` flip:
-//   1. Traffic-protecting steps — session restore, child-watch re-arm, the
+// The chain has two halves around the `lifecycle.markReady()` flip:
+//   1. Traffic-protecting steps — session restore, the
 //      config reconcile (fail-fast `process.exit(1)`: a bad config dies
 //      while still NotReady and never takes traffic), team-sync report.
 //   2. Best-effort service starts — channel host, webhook sync, workflow
@@ -442,18 +495,13 @@ async function runBootChain(): Promise<void> {
   // `runBoundedRestore`) so one wedged sandbox exec can't hold readiness
   // forever.
   await restoreUnsettledSessions(providers, () => closed).catch((err) => {
-    console.error("boot restore: unexpected failure (continuing to serve):", err);
+    reportError({ area: "boot", reason: "restore_pass" }, "boot restore: unexpected failure (continuing to serve)", err);
   });
 
   if (closed) return;
 
-  // Re-arm every unsettled child_watches row (Phase 4 decision 11) — the
-  // restart-mid-child-run survival mechanism. Alongside
-  // restoreUnsettledSessions above; a failure here must likewise never block
-  // boot.
-  await providers.childWatcher.rearm().catch((err) => {
-    console.error("boot restore: childWatcher.rearm failed (continuing to serve):", err);
-  });
+  // Recovery scans only delivery-active rows. It must not delay WakeWatcher or readiness.
+  providers.childWatcher.startRecovery();
 
   if (closed) return;
 
@@ -481,6 +529,10 @@ async function runBootChain(): Promise<void> {
   // cache — the in-memory idle sweep only walks the cache, and the reaper
   // only reaps hibernated rows, so these were stranded with running pods.
   providers.idleHibernationSweep.start();
+
+  // Probes due wakeups, delivers their signals, expires hold leases, and
+  // reconciles eviction protection on leased pods (spec 2026-10-08, B5, C5).
+  providers.wakeWatcher.start();
 
   // Autonomy nudge sweep (valet-security spec §Autonomy): re-drives an idle
   // security runner that stopped with work remaining. The only pause is the
@@ -524,6 +576,20 @@ async function runBootChain(): Promise<void> {
   if (seededTeams.length > 0) {
     console.log(`seeded a default assistant for ${seededTeams.length} team(s) without one: ${seededTeams.join(", ")}`);
   }
+  // With real auth, make sure an admin exists or can sign in: promote
+  // AUTH_ADMIN_EMAILS users, print the one-time admin link, or stop boot
+  // (SSO with no admin declared). After the reconcile, so config-declared
+  // admin invites count, and before the ready flip, so a bad setup never
+  // takes traffic.
+  if (authConfig) {
+    try {
+      await ensureAdminAccess(providers.db, authConfig, { publicUrl: publicUrlFromEnv(process.env), log: (line) => console.log(line) });
+    } catch (e) {
+      if (!(e instanceof AdminBootstrapError)) throw e;
+      console.error(e.message);
+      process.exit(1);
+    }
+  }
 
   if (closed) return;
 
@@ -533,14 +599,14 @@ async function runBootChain(): Promise<void> {
   // readiness on them bought no guarantee — but a HANGING one (a webhook
   // registration against a slow provider) would stall every rolling pod's
   // readiness for work the pod serves fine without.
-  bootReady = true;
+  lifecycle.markReady();
   console.log("boot chain: traffic-critical steps complete — /api/ready now reports ready");
 
   // Channel ingress (Task 8): resolves credentials into transports, then
   // starts webhook registration or the long-poll loop per transport. A
   // failure here must never block boot — channels are best-effort.
   await providers.channelHost.start().catch((err) => {
-    console.error("boot restore: channelHost.start failed (continuing to serve):", err);
+    reportError({ area: "boot", reason: "channel_host_start" }, "boot restore: channelHost.start failed (continuing to serve)", err);
   });
   console.log("channel host started");
 
@@ -572,7 +638,9 @@ async function runBootChain(): Promise<void> {
   // Event dispatcher (event-system plan Task 6): begin the delivery drain loop
   // so pending/failed event_deliveries left over from a prior process (and
   // freshly-ingested ones between nudges) get delivered.
+  configureSlackIngress(providers);
   providers.eventDispatcher.start();
+  providers.onlineStatusWatcher.start();
 
   // Repository content sync: re-reads every tracked repository on its own
   // schedule, and imports any source added while this process was down.
@@ -585,7 +653,7 @@ async function runBootChain(): Promise<void> {
   const modelRegistry = new ModelRegistry(providers.db);
   setModelRegistry(modelRegistry);
   await modelRegistry.start().catch((err) => {
-    console.error("modelRegistry.start failed:", err);
+    reportError({ area: "boot", reason: "model_registry_start" }, "modelRegistry.start failed", err);
   });
 
   // Prebuild orchestration (sandbox images v2 plan, Task 3): sweep any
@@ -594,7 +662,7 @@ async function runBootChain(): Promise<void> {
   // backend (`imageBuilder: null`) still starts harmlessly — every pass
   // short-circuits.
   await providers.prebuildService.start().catch((err) => {
-    console.error("prebuildService.start failed:", err);
+    reportError({ area: "boot", reason: "prebuild_service_start" }, "prebuildService.start failed", err);
   });
 
   // LLM proxy env-key bootstrap (llm-recording-gateway plan, Task 8): for each
@@ -602,22 +670,15 @@ async function runBootChain(): Promise<void> {
   // provider, seed one named `env:{kind}` so the recording proxy works with
   // zero setup. Idempotent; a failure must never block boot.
   await ensureEnvProviders(providers.db, providers.engineCredentials, await resolveOrgId(providers.db)).catch((err) => {
-    console.error("ensureEnvProviders failed (continuing to serve):", err);
+    reportError({ area: "boot", reason: "env_providers" }, "ensureEnvProviders failed (continuing to serve)", err);
   });
 
   if (closed) return;
 
-  // Hourly sandbox-token rotation (sandbox-reconciliation plan, Task 12):
-  // re-mints tokens for long-running sandboxes whose initial token is > 12 h
-  // old, pushing the fresh token via `SandboxProvider.updateCreds` into the
-  // live /etc/valet/creds/ mount. A no-op when the provider does not report
-  // `credsMount` (docker dev, local). The interval is `.unref()`'d inside
-  // `startRotateSweep` so it never prevents process exit on its own.
-  rotateSweep = startRotateSweep({
-    host: providers.engineHost,
-    provider: providers.sandboxProvider,
-    db: providers.db,
-  });
+  // Repair PR state when GitHub webhook delivery is absent or missed.
+  pullRequestSweep = startPullRequestSweep({
+    db: providers.db, credentials: providers.engineCredentials, key: deriveSecretKey(encryptionKey),
+  }, providers.db);
 
   // Commit signing keys past their window: remove the GitHub key and close
   // the row (agent commit signing design). Expiry is expected in normal
@@ -661,12 +722,41 @@ void runBootChain().catch((err) => {
 // serve command) owns process lifecycle. Idempotent so repeated close() /
 // double signals are harmless.
 
+/**
+ * Starts a stop at once and returns a promise that settles when it ends.
+ * A throw, sync or async, is logged, never rethrown.
+ */
+function startStop(name: string, stop: () => Promise<void>): Promise<void> {
+  try {
+    return stop().catch((err: unknown) => {
+      console.error(`${name}.stop failed:`, err);
+    });
+  } catch (err) {
+    console.error(`${name}.stop failed:`, err);
+    return Promise.resolve();
+  }
+}
+
 async function close(): Promise<void> {
   if (closed) return;
   // Also read by the boot chain between steps: services not yet started
   // after this point stay unstarted, so the stops below can meet a service
   // that never ran — each one tolerates that.
   closed = true;
+  // Readiness goes 503 and new external API requests get 503 + Retry-After
+  // from here on; the stops below end the claim loops and schedulers.
+  const requestsDrained = lifecycle.beginDrain();
+  stopProcessHealthSampler();
+  // The WakeWatcher's stop flag goes up first: the awaited stops below can
+  // take most of the hard-exit budget, and a pass must not start new rows
+  // meanwhile (fix wave 4, concurrency M6). It is awaited below, before
+  // evictAll.
+  const wakeWatcherStopped = startStop("wakeWatcher", () => providers.wakeWatcher.stop());
+  try {
+    await providers.onlineStatusWatcher.stop();
+  } catch (err) {
+    console.error("onlineStatusWatcher.stop failed:", err);
+  }
   try {
     providers.workflowScheduler.stop();
   } catch (err) {
@@ -701,9 +791,12 @@ async function close(): Promise<void> {
     console.error("prebuildService.stop failed:", err);
   }
   try {
-    rotateSweep?.stop();
+    // Awaited, unlike the sweeps above it: a pass in flight holds a database
+    // query open, and closing the store under it logs errors that look like
+    // real failures during every shutdown.
+    await pullRequestSweep?.stop();
   } catch (err) {
-    console.error("rotateSweep.stop failed:", err);
+    console.error("pullRequestSweep.stop failed:", err);
   }
   try {
     signingKeySweep?.stop();
@@ -711,15 +804,12 @@ async function close(): Promise<void> {
     console.error("signingKeySweep.stop failed:", err);
   }
   try {
-    // Awaited, unlike the sweeps above it: a pass in flight holds a database
-    // query open, and closing the store under it logs errors that look like
-    // real failures during every shutdown.
     await installationSweep?.stop();
   } catch (err) {
     console.error("installationSweep.stop failed:", err);
   }
   try {
-    providers.childWatcher.stopRetentionSweep();
+    await providers.childWatcher.stopRetentionSweep();
   } catch (err) {
     console.error("childWatcher.stopRetentionSweep failed:", err);
   }
@@ -743,6 +833,9 @@ async function close(): Promise<void> {
   } catch (err) {
     console.error("idleHibernationSweep.stop failed:", err);
   }
+  // Awaited: a pass in flight can sit between a wakeup's CAS and its
+  // signal delivery, and evictAll below must not run under it.
+  await wakeWatcherStopped;
   try {
     providers.securityRunnerDriver.stop();
   } catch (err) {
@@ -758,6 +851,12 @@ async function close(): Promise<void> {
   } catch (err) {
     console.error("autoTitleHost.stop failed:", err);
   }
+  // Requests already in flight finish before their sessions are evicted.
+  // The wait started at beginDrain(), alongside the stops above, so a slow
+  // stop (an active workflow drive) does not use up the requests' window.
+  if (!(await requestsDrained)) {
+    console.warn(`shutdown: drain window ended with ${lifecycle.requestsInFlight} request(s) still in flight`);
+  }
   try {
     // Evict, never destroy: Session.destroy() deletes the session's durable
     // rows (threads, queue items, transcript). Shutdown must leave the store
@@ -766,6 +865,12 @@ async function close(): Promise<void> {
     providers.engineHost.evictAll();
   } catch (err) {
     console.error("evictAll failed:", err);
+  }
+  try {
+    // Write the memory reads and injections still in the buffer.
+    await memoryUsageRecorder(providers.db).stop();
+  } catch (err) {
+    console.error("memory usage flush failed:", err);
   }
   try {
     // Flush any batched spans before the process goes away.
@@ -781,10 +886,10 @@ async function close(): Promise<void> {
 // handler that's swallowing the error; these are belt-and-braces so the dev
 // experience doesn't get whiplashed when one slips through.
 process.on("unhandledRejection", (reason) => {
-  console.error("unhandledRejection:", reason);
+  reportError({ area: "api", reason: "unhandled_rejection" }, "unhandledRejection", reason);
 });
 process.on("uncaughtException", (err) => {
-  console.error("uncaughtException:", err);
+  reportError({ area: "api", reason: "uncaught_exception" }, "uncaughtException", err);
 });
 
   return { close, port, backend: parseSandboxBackend(process.env.VALET_SANDBOX_BACKEND) };
@@ -795,12 +900,18 @@ process.on("uncaughtException", (err) => {
  * the direct-entry boot below; the serve command wires its own handler so it
  * can also clean up its pidfile.
  */
+/** How long a SIGINT/SIGTERM shutdown may run before the process exits anyway. */
+export const SHUTDOWN_HARD_EXIT_MS = 20_000;
+
 function installSignalShutdown(handle: ServerHandle): void {
   const onSignal = (signal: NodeJS.Signals) => {
     console.log(`\nReceived ${signal}, shutting down (sessions evicted, durable state kept)...`);
     void handle.close().finally(() => process.exit(0));
     // Hard-exit if close() takes too long (containers can be slow to stop).
-    setTimeout(() => process.exit(1), 5_000).unref();
+    // close() waits for the WakeWatcher's row in flight, which can sit in a
+    // 60-second exec, so the bound is 20 seconds, not 5. A cut row loses at
+    // most its signal, never its lease (fix wave 3, concurrency M6).
+    setTimeout(() => process.exit(1), SHUTDOWN_HARD_EXIT_MS).unref();
   };
   process.on("SIGINT", () => onSignal("SIGINT"));
   process.on("SIGTERM", () => onSignal("SIGTERM"));

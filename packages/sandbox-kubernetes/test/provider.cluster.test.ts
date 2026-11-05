@@ -258,7 +258,7 @@ describe.skipIf(!isClusterReady)("KubernetesSandboxProvider targeted behaviors (
   );
 
   it(
-    "NON-TERMINAL re-provision via provider.release(): create -> write workspace file -> release() (no-op) -> create() SAME opts re-adopts CR -> file still present",
+    "NON-TERMINAL re-provision stops the old pod and retains the workspace",
     async () => {
       // Simulates exactly what `SandboxAttachment.reportFailure` now does
       // (spec decision 5, adversarial-review fix): on a liveness-triggered
@@ -275,6 +275,7 @@ describe.skipIf(!isClusterReady)("KubernetesSandboxProvider targeted behaviors (
 
       try {
         await sandbox.writeFile("/workspace/release-marker.txt", "should survive release\n");
+        await sandbox.writeFile("/root/release-ephemeral.txt", "must not survive release\n");
         await expect(sandbox.readFile("/workspace/release-marker.txt")).resolves.toContain(
           "should survive release",
         );
@@ -282,9 +283,13 @@ describe.skipIf(!isClusterReady)("KubernetesSandboxProvider targeted behaviors (
         const pvcBefore = kubectl(["-n", namespace, "get", "pvc", "-o", "name"]).stdout.trim();
         expect(pvcBefore.length).toBeGreaterThan(0);
 
-        // release(): no-op, must leave the CR (and its PVC) standing.
+        const podUidBefore = kubectl(["-n", namespace, "get", "pod", name, "-o", "jsonpath={.metadata.uid}"]).stdout;
+        expect(podUidBefore).not.toBe("");
+
+        // release() retains the CR and PVC, but waits until the old pod stops.
         await provider.release(name);
         expect(kubectl(["-n", namespace, "get", "sandbox", name]).status).toBe(0);
+        expect(kubectl(["-n", namespace, "get", "pod", name]).status).not.toBe(0);
         const pvcAfterRelease = kubectl(["-n", namespace, "get", "pvc", "-o", "name"]).stdout.trim();
         expect(pvcAfterRelease).toBe(pvcBefore);
 
@@ -292,10 +297,13 @@ describe.skipIf(!isClusterReady)("KubernetesSandboxProvider targeted behaviors (
         // shape): upsert-adopts the retained CR rather than erroring.
         const reprovisioned = await provider.create(opts);
         expect(reprovisioned.id).toBe(name);
+        const podUidAfter = kubectl(["-n", namespace, "get", "pod", name, "-o", "jsonpath={.metadata.uid}"]).stdout;
+        expect(podUidAfter).not.toBe(podUidBefore);
 
         await expect(reprovisioned.readFile("/workspace/release-marker.txt")).resolves.toContain(
           "should survive release",
         );
+        await expect(reprovisioned.readFile("/root/release-ephemeral.txt")).rejects.toThrow();
       } finally {
         await provider.destroy(name);
       }

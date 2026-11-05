@@ -1,23 +1,36 @@
 import { PGlite } from "@electric-sql/pglite";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { and, eq } from "drizzle-orm";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { InMemoryWorkflowStore, type RunHost, type WorkflowDefinition } from "@valet/workflow";
 import {
   findingKey,
   formatEditLintErrors,
   ownerFromContext,
+  gatesStillWaiting,
+  runReportsToThread,
   workflowsActionPlugin,
 } from "./actions.js";
-import type { PluginActionContext } from "@valet/engine";
+import type { ActionPlugin, PluginActionContext, SessionEntry, ValetPlugin } from "@valet/engine";
+import { Type } from "typebox";
+import { Value } from "typebox/value";
 import {
   createWorkflowDefinition,
   getWorkflowDefinition,
+  retryWorkflowRun,
+  workflowActionOrigin,
   type WorkflowServiceDeps,
 } from "./service.js";
 import { buildAppDb, buildAppQueryable, applyAppMigrations, type AppDb } from "../lib/drizzle.js";
-import { teams, teamMembers, eventSubscriptions, workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
+import { actionPolicies, credentials, credentialShares, teams, teamMembers, eventSubscriptions, orgs, slackChannelPrivacy, workflowActionGrants, workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
 import githubPlugin from "@valet/plugin-github/plugin";
-import { InMemoryCredentialStore } from "@valet/engine";
+import { InMemoryCredentialStore, InMemorySessionStore } from "@valet/engine";
 import { OnePasswordAuthError } from "../services/onepassword.js";
+import { createLlmProvider } from "../services/llm-providers.js";
+import { setApprovedModels } from "../services/approved-models.js";
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 const noDeps = (): WorkflowServiceDeps => {
   throw new Error("deps not needed for this test");
@@ -34,11 +47,19 @@ function ctx(overrides?: Partial<PluginActionContext>): PluginActionContext {
 }
 
 describe("workflowsActionPlugin", () => {
+  it("rejects an unsupported patch format instead of accepting an unchanged save", () => {
+    const patch = workflowsActionPlugin(noDeps).actions.find((item) => item.id === "workflows.patch_workflow");
+    if (!patch) throw new Error("patch action missing");
+    expect(Value.Check(patch.parameters, { workflow_id: "wf-test", changes: [{ op: "replace", path: "/nodes/1/values/marker", value: "blue" }] })).toBe(false);
+    expect(Value.Check(patch.parameters, { workflow_id: "wf-test", upsert_nodes: [{ id: "marker", type: "set", values: { marker: "blue" } }] })).toBe(true);
+  });
+
   it("exposes every workflow action under a workflows.* id", () => {
     const plugin = workflowsActionPlugin(noDeps);
     expect(plugin.service).toBe("workflows");
     expect(plugin.actions.map((a) => a.id).sort()).toEqual([
       "workflows.add_aggregate",
+      "workflows.allow_permissions",
       "workflows.cancel_run",
       "workflows.copy_to_team",
       "workflows.create_schedule",
@@ -48,7 +69,10 @@ describe("workflowsActionPlugin", () => {
       "workflows.delete_trigger",
       "workflows.delete_webhook",
       "workflows.delete_workflow",
+      "workflows.get_node_diagnostics",
       "workflows.get_node_result",
+      "workflows.get_node_transcript",
+      "workflows.get_permissions",
       "workflows.get_run",
       "workflows.get_webhook",
       "workflows.get_workflow",
@@ -58,12 +82,77 @@ describe("workflowsActionPlugin", () => {
       "workflows.list_triggers",
       "workflows.list_workflows",
       "workflows.patch_workflow",
+      "workflows.preview_workflow",
+      "workflows.propose_schedule",
+      "workflows.propose_trigger",
+      "workflows.request_workflow_deletion",
       "workflows.resolve_approval",
+      "workflows.retry_run",
       "workflows.save_workflow",
       "workflows.start_run",
+      "workflows.update_model",
       "workflows.update_schedule",
       "workflows.update_trigger",
+      "workflows.validate_definition",
     ]);
+  });
+
+  // The assistant repeats these words to the person, so they name the Presence UI.
+  it("sends the person to Presence to review a proposal", () => {
+    const description = (id: string) => workflowsActionPlugin(noDeps).actions.find(a => a.id === id)!.description;
+    expect(description("workflows.propose_trigger")).toContain("Ask the user to review and turn it on in Presence.");
+    expect(description("workflows.propose_schedule")).toContain("Ask the user to review and turn it on under On a schedule in Presence.");
+    expect(description("workflows.propose_trigger")).not.toMatch(/in Events|in Scheduled/);
+    expect(description("workflows.propose_schedule")).not.toMatch(/in Events|in Scheduled/);
+  });
+
+  // The "end your turn" advice holds only when the run's signals reach the
+  // approving conversation; elsewhere the assistant must read get_run.
+  it("says a run reports to this thread only when this thread started it", () => {
+    const origin = { assistantSessionId: "s-a", threadId: "t-a" };
+    expect(runReportsToThread({ origin }, "s-a", "t-a")).toBe(true);
+    expect(runReportsToThread({ origin }, "s-a", "t-b")).toBe(false);
+    expect(runReportsToThread({ origin }, "s-b", "t-a")).toBe(false);
+    expect(runReportsToThread({}, "s-a", "t-a")).toBe(false);
+    expect(runReportsToThread({ origin, parentRunId: "run-parent" }, "s-a", "t-a")).toBe(false);
+  });
+
+  // The read after an approval races the drive the approval wakes.
+  it("counts only gates that waited before the approval and still wait", () => {
+    const signal = (signalType: string) => ({ kind: "signal", signalType });
+    const before = [signal("approval:a"), signal("approval:b"), signal("approval:each:2")];
+    // The drive consumed `a` but has not parked again: `a` still shows.
+    expect(gatesStillWaiting(before, { nodeId: "a" }, [{ nodeId: "a" }, { nodeId: "b" }])).toEqual([{ nodeId: "b" }]);
+    // The drive already opened `c`, which gets its own signal.
+    expect(gatesStillWaiting(before, { nodeId: "a" }, [{ nodeId: "b" }, { nodeId: "c" }])).toEqual([{ nodeId: "b" }]);
+    // Iterations after the first carry their suffix.
+    expect(gatesStillWaiting(before, { nodeId: "b" }, [{ nodeId: "each", iteration: 2 }, { nodeId: "each", iteration: 3 }]))
+      .toEqual([{ nodeId: "each", iteration: 2 }]);
+    expect(gatesStillWaiting([signal("approval:only")], { nodeId: "only" }, [{ nodeId: "only" }])).toEqual([]);
+  });
+
+  // An approval that settles the run fast tempted the assistant to poll
+  // get_run and report, and then the settle signal made it report again.
+  it("tells the assistant to end its turn after resolving a gate, like after starting a run", () => {
+    const actions = workflowsActionPlugin(noDeps).actions;
+    for (const id of ["workflows.start_run", "workflows.resolve_approval"]) {
+      const description = actions.find((a) => a.id === id)?.description ?? "";
+      expect(description).toContain("workflow.settled signal");
+      expect(description).toContain("do not poll");
+    }
+  });
+
+  it("describes the explicit source, destination, and collision rule for team copies", () => {
+    const copy = workflowsActionPlugin(noDeps).actions.find((a) => a.id === "workflows.copy_to_team");
+    expect(copy?.description).toContain("Leaves the original and its triggers unchanged");
+    expect(copy?.parameters).toMatchObject({
+      required: ["workflow_id", "team_id", "name"],
+      properties: {
+        workflow_id: { description: expect.stringContaining("personal workflow ID") },
+        team_id: { description: expect.stringContaining("destination team ID") },
+        name: { description: expect.stringContaining("Must not exist") },
+      },
+    });
   });
 
   it("marks reads low-risk and writes medium-risk", () => {
@@ -71,17 +160,24 @@ describe("workflowsActionPlugin", () => {
     const byId = new Map(plugin.actions.map((a) => [a.id, a.riskLevel]));
     expect(byId.get("workflows.list_workflows")).toBe("low");
     expect(byId.get("workflows.get_workflow")).toBe("low");
+    expect(byId.get("workflows.get_permissions")).toBe("low");
     expect(byId.get("workflows.get_run")).toBe("low");
+    expect(byId.get("workflows.get_node_transcript")).toBe("low");
+    expect(byId.get("workflows.preview_workflow")).toBe("low");
+    expect(byId.get("workflows.validate_definition")).toBe("low");
     expect(byId.get("workflows.save_workflow")).toBe("medium");
     expect(byId.get("workflows.start_run")).toBe("medium");
     expect(byId.get("workflows.delete_workflow")).toBe("medium");
     expect(byId.get("workflows.list_runs")).toBe("low");
     expect(byId.get("workflows.cancel_run")).toBe("medium");
-    // High → the plugin catalog's default policy gates it behind a human
-    // decision — the agent cannot silently approve its own gates.
-    expect(byId.get("workflows.resolve_approval")).toBe("high");
+    expect(byId.get("workflows.retry_run")).toBe("medium");
+    // Low: the action itself always shows the person an approval card.
+    expect(byId.get("workflows.allow_permissions")).toBe("low");
+    // Medium → the action asks a person itself on every call, so the
+    // catalog's card would only repeat the question.
+    expect(byId.get("workflows.resolve_approval")).toBe("medium");
     // High → minting the hookId grants a new bearer credential that alone
-    // authorizes starting runs, same reasoning as resolve_approval.
+    // authorizes starting runs.
     expect(byId.get("workflows.create_webhook")).toBe("high");
     expect(byId.get("workflows.get_webhook")).toBe("low");
     expect(byId.get("workflows.delete_webhook")).toBe("medium");
@@ -89,8 +185,48 @@ describe("workflowsActionPlugin", () => {
 });
 
 describe("ownerFromContext", () => {
+  it("refuses a turn from a channel sender with no Valet account", () => {
+    expect(ownerFromContext({ ...ctx(), externalSender: true })).toBeNull();
+  });
+
   it("derives the owner from ctx.userId/orgId", () => {
-    expect(ownerFromContext(ctx())).toEqual({ userId: "user1", orgId: "org1" });
+    expect(ownerFromContext(ctx())).toEqual({ userId: "user1", orgId: "org1", agentEditor: true });
+  });
+
+  it("keeps the session owner as the workflow principal", () => {
+    expect(ownerFromContext(ctx({ owner: { type: "team", id: "team1" } }))).toEqual({
+      userId: "user1",
+      orgId: "org1",
+      principal: { type: "team", id: "team1" },
+      requireTeamMembership: true,
+      agentEditor: true,
+    });
+  });
+
+  it("uses the current actor instead of the cached session creator", () => {
+    expect(ownerFromContext(ctx({
+      owner: { type: "team", id: "team1" }, actor: { id: "current-member" },
+    }))).toEqual({
+      userId: "current-member", orgId: "org1",
+      principal: { type: "team", id: "team1" }, requireTeamMembership: true, agentEditor: true,
+    });
+  });
+
+  it("trusts a workflow run's server-derived team principal", () => {
+    expect(ownerFromContext(ctx({
+      owner: { type: "team", id: "team1" },
+      sessionPurpose: "workflow",
+    }))).toEqual({
+      userId: "user1",
+      orgId: "org1",
+      principal: { type: "team", id: "team1" },
+      requireTeamMembership: false,
+      agentEditor: true,
+    });
+  });
+
+  it("rejects a mismatched user principal", () => {
+    expect(ownerFromContext(ctx({ owner: { type: "user", id: "someone-else" } }))).toBeNull();
   });
 
   it("returns null when the context has no user", () => {
@@ -106,6 +242,56 @@ describe("save_workflow validation", () => {
     const result = await save.execute({ definition: { nodes: "nope" } }, ctx());
     expect(result.success).toBe(false);
     expect(result.error).toContain("definition.nodes");
+  });
+});
+
+// An agent checks a draft before it calls the draft ready, so the check must
+// answer exactly what a save of the same draft would answer.
+describe("validate_definition", () => {
+  const plugin = workflowsActionPlugin(noDeps);
+  const validate = plugin.actions.find((a) => a.id === "workflows.validate_definition");
+  const save = plugin.actions.find((a) => a.id === "workflows.save_workflow");
+  if (!validate || !save) throw new Error("workflow action missing");
+
+  it("returns the errors save_workflow returns for the same draft", async () => {
+    // Both shapes that drafts copied from an old skill example: a run outcome
+    // on a stop step, and a foreach body written as a list of node ids.
+    const definition = {
+      version: "dag/v1",
+      nodes: [
+        { id: "start", type: "trigger" },
+        { id: "each", type: "foreach", items: "{{trigger.data.rows}}", body: ["draft"] },
+        { id: "done", type: "stop", outcome: "completed" },
+      ],
+      edges: [{ from: "start", to: "each" }, { from: "each", to: "done" }],
+    };
+    const checked = await validate.execute({ definition }, ctx());
+    expect(checked).toEqual(await save.execute({ definition }, ctx()));
+    expect(checked.error).toContain('stop.outcome must be "success" or "failure", got "completed"');
+    expect(checked.error).toContain("foreach.body must be a single inline node object");
+  });
+
+  it("accepts a valid draft", async () => {
+    const definition = {
+      version: "dag/v1",
+      nodes: [{ id: "start", type: "trigger" }, { id: "done", type: "stop", outcome: "success" }],
+      edges: [{ from: "start", to: "done" }],
+    };
+    expect(await validate.execute({ definition }, ctx())).toEqual({ success: true, data: { valid: true } });
+  });
+
+  it("returns the design warnings for a valid draft, without blocking it", async () => {
+    const definition = {
+      version: "dag/v1",
+      nodes: [
+        { id: "start", type: "trigger" },
+        { id: "refresh", type: "session", mode: "start", prompt: "Commit and push data/dashboard.json to main." },
+      ],
+      edges: [{ from: "start", to: "refresh" }],
+    };
+    const checked = await validate.execute({ definition }, ctx({ owner: { type: "team", id: "team1" } }));
+    expect(checked).toMatchObject({ success: true, data: { valid: true, warnings: [{ nodeId: "refresh", warnings: [expect.stringContaining("Valet Agent <agent@valet.local>")] }] } });
+    expect(await validate.execute({ definition }, ctx())).toEqual({ success: true, data: { valid: true } });
   });
 });
 
@@ -185,9 +371,13 @@ describe("DB-backed actions", () => {
   let db: AppDb;
   let pglite: PGlite;
   let deps: WorkflowServiceDeps;
+  let runHost: StubRunHost;
 
   class StubRunHost implements RunHost {
-    async start(): Promise<void> {}
+    readonly started: Array<Parameters<RunHost["start"]>> = [];
+    async start(...args: Parameters<RunHost["start"]>): Promise<void> {
+      this.started.push(args);
+    }
     async wake(): Promise<void> {}
     async scheduleWake(): Promise<void> {}
     async terminate(): Promise<void> {}
@@ -207,12 +397,14 @@ describe("DB-backed actions", () => {
 
   beforeEach(async () => {
     await buildAppQueryable(pglite).query(
-      `TRUNCATE workflow_webhooks, workflow_definitions, workflow_runs, workflow_schedules, event_subscriptions RESTART IDENTITY CASCADE`,
+      `TRUNCATE workflow_webhooks, workflow_definitions, workflow_runs, workflow_schedules, event_subscriptions, action_policies, credentials, credential_shares RESTART IDENTITY CASCADE`,
     );
+    runHost = new StubRunHost();
     deps = {
       db,
       workflowStore: new InMemoryWorkflowStore(),
-      workflowRunHost: new StubRunHost(),
+      workflowRunHost: runHost,
+      engineStore: new InMemorySessionStore(),
       credentials: new InMemoryCredentialStore(),
     };
   });
@@ -225,6 +417,391 @@ describe("DB-backed actions", () => {
     );
     return created.id;
   }
+
+  it("proposes disabled schedules and preserves enabled records on concurrent retries", async () => {
+    const tool = workflowsActionPlugin(() => deps).actions.find(a => a.id === "workflows.propose_schedule")!;
+    const input = { proposal_key: "morning", name: "Morning", prompt: "Check work", cron: "0 9 * * *" };
+    const results = await Promise.all([tool.execute(input, ctx()), tool.execute(input, ctx())]);
+    for (const result of results) expect(result).toMatchObject({ success: true, data: { proposal: { kind: "schedule", enabled: false, reviewUrl: expect.stringContaining("/presence/routines?routine=") } } });
+    expect(await db.select().from(workflowSchedules)).toHaveLength(1);
+    await db.update(workflowSchedules).set({ enabled: true });
+    expect(await tool.execute(input, ctx())).toMatchObject({ success: true, data: { proposal: { enabled: true, config: { name: "Morning" } } } });
+    expect(await tool.execute({ ...input, prompt: "Different work" }, ctx())).toMatchObject({ success: false, error: expect.stringContaining("new proposal_key") });
+    expect(await db.select().from(workflowSchedules)).toHaveLength(1);
+  });
+
+  it("proposes disabled event triggers and refuses foreign workflows", async () => {
+    deps.plugins = [githubPlugin];
+    const workflowId = await seedWorkflow();
+    const tool = workflowsActionPlugin(() => deps).actions.find(a => a.id === "workflows.propose_trigger")!;
+    const input = { proposal_key: "pulls", workflow_id: workflowId, name: "Pulls", event_keys: ["github.pull_request.opened"], presence: { displayName: "PR helper" } };
+    expect(await tool.execute(input, ctx({ userId: "other" }))).toMatchObject({ success: false });
+    const results = await Promise.all([tool.execute(input, ctx()), tool.execute(input, ctx())]);
+    for (const result of results) expect(result).toMatchObject({ success: true, data: { proposal: { enabled: false, config: { target: { kind: "workflow", workflowId, appearance: input.presence } } } } });
+    expect(await db.select().from(eventSubscriptions)).toHaveLength(1);
+    await db.update(eventSubscriptions).set({ enabled: true });
+    expect(await tool.execute(input, ctx())).toMatchObject({ success: true, data: { proposal: { enabled: true } } });
+    expect(await tool.execute({ ...input, presence: { displayName: "Different" } }, ctx())).toMatchObject({ success: true, data: { proposal: { config: { target: { appearance: input.presence } } } } });
+  });
+
+  it("keeps one proposal key separate per workflow", async () => {
+    deps.plugins = [githubPlugin];
+    const first = await seedWorkflow();
+    const second = (await createWorkflowDefinition(deps, { userId: "user1", orgId: "org1" },
+      { name: "second-target", definition: { version: "dag/v1", nodes: [], edges: [] } })).id;
+    const tool = workflowsActionPlugin(() => deps).actions.find(a => a.id === "workflows.propose_trigger")!;
+    const input = { proposal_key: "pulls", name: "Pulls", event_keys: ["github.pull_request.opened"] };
+    expect(await tool.execute({ ...input, workflow_id: first }, ctx())).toMatchObject({ success: true, data: { proposal: { config: { target: { workflowId: first } } } } });
+    expect(await tool.execute({ ...input, workflow_id: second }, ctx())).toMatchObject({ success: true, data: { proposal: { config: { target: { workflowId: second } } } } });
+    expect(await db.select().from(eventSubscriptions)).toHaveLength(2);
+  });
+
+  it("updates selected workflow models through the focused assistant action", async () => {
+    // Size tiers only validate while a target provider holds a key.
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
+    const created = await createWorkflowDefinition(
+      deps,
+      { userId: "user1", orgId: "org1" },
+      {
+        name: "model-target",
+        definition: {
+          version: "dag/v1",
+          nodes: [
+            { id: "trigger", type: "trigger" },
+            { id: "draft", type: "llm", model: "s", prompt: "Draft" },
+            { id: "review", type: "session", mode: "start", model: "m", prompt: "Review" },
+            { id: "stop", type: "stop" },
+          ],
+          edges: [
+            { from: "trigger", to: "draft" },
+            { from: "draft", to: "review" },
+            { from: "review", to: "stop" },
+          ],
+        },
+      },
+    );
+    const update = workflowsActionPlugin(() => deps).actions.find((a) => a.id === "workflows.update_model");
+    if (!update) throw new Error("update_model action missing");
+
+    const result = await update.execute(
+      { workflow_id: created.id, model: "l", node_ids: ["review"] },
+      ctx(),
+    );
+    expect(result).toEqual({
+      success: true,
+      data: { workflowId: created.id, model: "l", nodeIds: ["review"] },
+    });
+    const saved = await getWorkflowDefinition(deps, { userId: "user1", orgId: "org1" }, created.id);
+    const definition = saved?.definition as WorkflowDefinition | undefined;
+    expect(definition?.nodes
+      .filter((node) => node.type === "llm" || node.type === "session")
+      .map((node) => [node.id, node.model])).toEqual([["draft", "s"], ["review", "l"]]);
+  });
+
+  it("saves and updates custom catalog models through assistant actions", async () => {
+    await db.insert(orgs).values({ id: "org1", name: "Test org", createdAt: Date.now() }).onConflictDoNothing();
+    const provider = await createLlmProvider(db, {
+      orgId: "org1", kind: "openai_compatible", name: "Custom",
+      baseUrl: "https://models.example.test/v1", models: [{ id: "writer", name: "Writer" }],
+    });
+    await deps.credentials.save({ type: "org", id: "org1" }, `llm:${provider.id}`, {
+      type: "api_key", apiKey: "test-custom-key",
+    });
+    const model = `${provider.id}/writer`;
+    const definition = {
+      version: "dag/v1", nodes: [
+        { id: "trigger", type: "trigger" }, { id: "draft", type: "llm", model, prompt: "Draft" },
+      ], edges: [{ from: "trigger", to: "draft" }],
+    };
+    const created = await createWorkflowDefinition(deps, { userId: "user1", orgId: "org1" }, {
+      name: "custom-model", definition,
+    });
+    const actions = workflowsActionPlugin(() => deps).actions;
+    const save = actions.find((action) => action.id === "workflows.save_workflow");
+    const update = actions.find((action) => action.id === "workflows.update_model");
+    if (!save || !update) throw new Error("Expected workflow actions");
+    expect(await save.execute({ workflow_id: created.id, definition }, ctx())).toMatchObject({ success: true });
+    expect(await update.execute({ workflow_id: created.id, model }, ctx())).toMatchObject({ success: true });
+    const saved = await getWorkflowDefinition(deps, { userId: "user1", orgId: "org1" }, created.id);
+    expect(saved?.definition).toMatchObject({ nodes: [{ id: "trigger" }, { id: "draft", model }] });
+  });
+
+  it("rejects invalid model choices and node targets through the focused assistant action", async () => {
+    const created = await createWorkflowDefinition(
+      deps,
+      { userId: "user1", orgId: "org1" },
+      {
+        name: "invalid-model-target",
+        definition: {
+          version: "dag/v1",
+          nodes: [{ id: "trigger", type: "trigger" }, { id: "stop", type: "stop" }],
+          edges: [{ from: "trigger", to: "stop" }],
+        },
+      },
+    );
+    const workflowId = created.id;
+    const update = workflowsActionPlugin(() => deps).actions.find((a) => a.id === "workflows.update_model");
+    if (!update) throw new Error("update_model action missing");
+    expect(await update.execute({ workflow_id: workflowId, model: "not-a-model" }, ctx()))
+      .toMatchObject({ success: false, error: expect.stringContaining("unknown or inactive model") });
+    expect(await update.execute({ workflow_id: workflowId, model: "l", node_ids: ["stop"] }, ctx()))
+      .toMatchObject({ success: false, error: expect.stringContaining("not an llm or session node") });
+  });
+
+  it("rejects a concrete model that the org did not approve", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
+    const created = await createWorkflowDefinition(
+      deps,
+      { userId: "user1", orgId: "org1" },
+      {
+        name: "approval-target",
+        definition: {
+          version: "dag/v1",
+          nodes: [
+            { id: "trigger", type: "trigger" },
+            { id: "draft", type: "llm", model: "s", prompt: "Draft" },
+          ],
+          edges: [{ from: "trigger", to: "draft" }],
+        },
+      },
+    );
+    await db.insert(orgs).values({ id: "org1", name: "Test org", createdAt: Date.now() }).onConflictDoNothing();
+    await setApprovedModels(db, "org1", []);
+    const update = workflowsActionPlugin(() => deps).actions.find((action) => action.id === "workflows.update_model");
+    if (!update) throw new Error("update_model action missing");
+    const result = await update.execute(
+      { workflow_id: created.id, model: "anthropic/claude-haiku-4-5" },
+      ctx(),
+    );
+    await setApprovedModels(db, "org1", null);
+    expect(result).toMatchObject({ success: false, error: expect.stringContaining("not approved") });
+  });
+
+  it("validates a draft against the org's approved models, as a save does, and stores nothing", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
+    await db.insert(orgs).values({ id: "org1", name: "Test org", createdAt: Date.now() }).onConflictDoNothing();
+    await setApprovedModels(db, "org1", []);
+    const actions = workflowsActionPlugin(() => deps).actions;
+    const validate = actions.find((action) => action.id === "workflows.validate_definition");
+    const save = actions.find((action) => action.id === "workflows.save_workflow");
+    if (!validate || !save) throw new Error("workflow action missing");
+    const definition = {
+      version: "dag/v1",
+      nodes: [
+        { id: "trigger", type: "trigger" },
+        { id: "draft", type: "llm", model: "anthropic/claude-haiku-4-5", prompt: "Draft" },
+      ],
+      edges: [{ from: "trigger", to: "draft" }],
+    };
+    const checked = await validate.execute({ definition }, ctx());
+    const saved = await save.execute({ definition }, ctx());
+    await setApprovedModels(db, "org1", null);
+    expect(checked).toMatchObject({ success: false, error: expect.stringContaining("approved") });
+    expect(checked).toEqual(saved);
+    expect(await db.select().from(workflowDefinitions)).toHaveLength(0);
+  });
+
+  it.each(["wf:invoke:workflow:parent:tool", "wf:parent:agent", "wf:parent:agent:1"])(
+    "chains originless workflows from %s without inventing a conversation", async (sessionId) => {
+      const workflowId = await seedWorkflow();
+      await db.insert(workflowRuns).values({ id: "parent", workflowId, definitionVersionId: "v",
+        definition: {}, params: {}, ownerType: "user", ownerId: "user1", createdAt: 1, updatedAt: 1 });
+      const start = workflowsActionPlugin(() => deps).actions.find(action => action.id === "workflows.start_run")!;
+      expect(await start.execute({ workflow_id: workflowId }, ctx({ sessionId, threadId: "invoke", toolScope: { actions: ["demo.echo"] }, toolScopeCeiling: { actions: ["demo.echo"] } }))).toMatchObject({ success: true });
+      expect(runHost.started.at(-1)?.[1].origin).toBeUndefined();
+      expect(runHost.started.at(-1)?.[1].toolScope).toEqual({ actions: ["demo.echo"] });
+    },
+  );
+
+  it("gives a run the caller's ceiling, not the caller's thread focus", async () => {
+    // A validate focus keeps run controls only; the run's sandbox steps still need a shell.
+    const workflowId = await seedWorkflow();
+    const start = workflowsActionPlugin(() => deps).actions.find(action => action.id === "workflows.start_run")!;
+    const toolScope = { tools: ["workflows"], actions: ["workflows.start_run"] };
+    const toolScopeCeiling = { tools: ["workflows", "bash", "artifact_publish"] };
+    expect(await start.execute({ workflow_id: workflowId }, ctx({ toolScope, toolScopeCeiling }))).toMatchObject({ success: true });
+    expect(runHost.started.at(-1)?.[1].toolScope).toEqual(toolScopeCeiling);
+  });
+
+  it("marks a run an agent starts on its own, but not one the person's own prompt starts", async () => {
+    const workflowId = await seedWorkflow();
+    const start = workflowsActionPlugin(() => deps).actions.find(action => action.id === "workflows.start_run")!;
+    expect(await start.execute({ workflow_id: workflowId }, ctx())).toMatchObject({ success: true });
+    expect(runHost.started.at(-1)?.[1].startedBy).toBe("agent");
+    expect(await start.execute({ workflow_id: workflowId }, ctx({ interactiveActor: { id: "user1" } }))).toMatchObject({ success: true });
+    expect(runHost.started.at(-1)?.[1].startedBy).toBeUndefined();
+    expect(await start.execute({ workflow_id: workflowId }, ctx({ interactiveActor: { id: "user1" }, sessionPurpose: "workflow" }))).toMatchObject({ success: true });
+    expect(runHost.started.at(-1)?.[1].startedBy).toBe("agent");
+  });
+
+  it("keeps the agent-started marker when a person retries the run", async () => {
+    const workflowId = await seedWorkflow();
+    await deps.workflowStore.createRun("agent-run", { workflowId, definitionVersionId: "v", startedBy: "agent",
+      input: { type: "manual", timestamp: "t", data: {}, metadata: {} } }, {}, "v", { ownerType: "user", ownerId: "user1", actorUserId: "user1" });
+    await deps.workflowStore.settleRun("agent-run", "failed");
+    const person = { userId: "user1", orgId: "org1", principal: { type: "user" as const, id: "user1" }, humanAccountConsent: true };
+    expect(await retryWorkflowRun(deps, person, "agent-run")).toMatchObject({ runId: expect.any(String) });
+    expect(runHost.started.at(-1)?.[1].startedBy).toBe("agent");
+  });
+
+  it("inherits a stored workflow audience and rejects unknown or foreign parents", async () => {
+    const workflowId = await seedWorkflow();
+    const origin = { assistantSessionId: "private-runtime", threadId: "private-thread" };
+    await db.insert(workflowRuns).values({ id: "parent", workflowId, definitionVersionId: "v", definition: {},
+      params: { origin }, ownerType: "user", ownerId: "user1", createdAt: 1, updatedAt: 1 });
+    expect(await workflowActionOrigin(deps, { orgId: "org1", userId: "user1" }, "wf:parent:agent", "t")).toEqual(origin);
+    for (const owner of [{ orgId: "other", userId: "user1" }, { orgId: "org1", userId: "other" }]) {
+      await expect(workflowActionOrigin(deps, owner, "wf:parent:agent", "t")).rejects.toThrow("parent workflow is unavailable");
+    }
+    await expect(workflowActionOrigin(deps, { orgId: "org1", userId: "user1" }, "wf:missing:agent", "t")).rejects.toThrow("parent workflow is unavailable");
+  });
+
+  it.each([undefined, { assistantSessionId: "runtime", threadId: "public" }])("does not widen a team Slack event audience when chaining (%j)", async (origin) => {
+    const workflowId = await seedWorkflow();
+    await db.insert(workflowRuns).values({ id: "parent", workflowId, definitionVersionId: "v", definition: {},
+      params: { input: { data: { key: "slack.message" } }, ...(origin ? { origin } : {}) }, ownerType: "team", ownerId: "team", createdAt: 1, updatedAt: 1 });
+    await expect(workflowActionOrigin(deps, { orgId: "org1", userId: "team:team", principal: { type: "team", id: "team" } },
+      "wf:invoke:workflow:parent:tool", "invoke")).rejects.toThrow("cannot keep the channel audience in a chained run");
+  });
+
+  it("uses the execution owner for org-owned workflow parents", async () => {
+    const workflowId = await seedWorkflow();
+    await db.insert(workflowRuns).values({ id: "parent", workflowId, definitionVersionId: "v", definition: {},
+      params: {}, ownerType: "org", ownerId: "org1", createdAt: 1, updatedAt: 1 });
+    expect(await workflowActionOrigin(deps, { orgId: "org1", userId: "org:org1" },
+      "wf:parent:agent", "t", { type: "org", id: "org1" })).toBeUndefined();
+  });
+
+  it("does not drop a chained workflow's missing private origin", async () => {
+    const workflowId = await seedWorkflow();
+    await db.insert(workflowRuns).values({ id: "parent", workflowId, definitionVersionId: "v", definition: {},
+      params: { origin: { assistantSessionId: "missing-private", threadId: "private" } },
+      ownerType: "user", ownerId: "user1", createdAt: 1, updatedAt: 1 });
+    const start = workflowsActionPlugin(() => deps).actions.find(action => action.id === "workflows.start_run")!;
+    await expect(start.execute({ workflow_id: workflowId }, ctx({ sessionId: "wf:parent:agent", threadId: "t" }))).rejects.toThrow("origin is unavailable");
+    expect(runHost.started).toHaveLength(0);
+  });
+
+  it("stores team assistant workflows in the team scope and keeps personal creation personal", async () => {
+    const teamId = "assistant-owner-team";
+    await db.insert(teams).values({ id: teamId, orgId: "org1", name: "Assistant owner", createdAt: 1 });
+    await db.insert(teamMembers).values({ teamId, userId: "user1", role: "member" });
+
+    const plugin = workflowsActionPlugin(() => deps);
+    const save = plugin.actions.find((action) => action.id === "workflows.save_workflow");
+    const list = plugin.actions.find((action) => action.id === "workflows.list_workflows");
+    const start = plugin.actions.find((action) => action.id === "workflows.start_run");
+    const schedule = plugin.actions.find((action) => action.id === "workflows.create_schedule");
+    if (!save || !list || !start || !schedule) throw new Error("workflow action missing");
+    const definition = {
+      version: "dag/v1",
+      nodes: [{ id: "trigger", type: "trigger" }, { id: "done", type: "stop" }],
+      edges: [{ from: "trigger", to: "done" }],
+    };
+    const teamContext = ctx({ owner: { type: "team", id: teamId } });
+
+    const teamSave = await save.execute({ name: "Team workflow", definition }, teamContext);
+    if (!teamSave.success) throw new Error(teamSave.error);
+    const teamWorkflowId = (teamSave.data as { workflowId: string }).workflowId;
+    const personalSave = await save.execute(
+      { name: "Personal workflow", definition },
+      ctx({ owner: { type: "user", id: "user1" } }),
+    );
+    if (!personalSave.success) throw new Error(personalSave.error);
+    const personalWorkflowId = (personalSave.data as { workflowId: string }).workflowId;
+
+    const rows = await db.select().from(workflowDefinitions);
+    expect(rows.find((row) => row.id === teamWorkflowId)).toMatchObject({ ownerType: "team", ownerId: teamId });
+    expect(rows.find((row) => row.id === personalWorkflowId)).toMatchObject({ ownerType: "user", ownerId: "user1" });
+
+    const teamList = await list.execute({}, teamContext);
+    expect(teamList).toMatchObject({
+      success: true,
+      data: { workflows: [{ workflowId: teamWorkflowId, name: "Team workflow" }] },
+    });
+
+    const started = await start.execute({ workflow_id: teamWorkflowId }, teamContext);
+    if (!started.success) throw new Error(started.error);
+    const runId = (started.data as { runId: string }).runId;
+    expect(runHost.started.at(-1)?.[0]).toBe(runId);
+    expect(runHost.started.at(-1)?.[3]).toEqual({
+      ownerType: "team",
+      ownerId: teamId,
+      actorUserId: "user1",
+    });
+
+    const scheduled = await schedule.execute(
+      { prompt: "Review team work", name: "Team prompt", cron: "0 9 * * *" },
+      teamContext,
+    );
+    if (!scheduled.success) throw new Error(scheduled.error);
+    expect(await db.select().from(workflowSchedules)).toContainEqual(
+      expect.objectContaining({ ownerType: "team", ownerId: teamId, targetKind: "assistant" }),
+    );
+  });
+
+  it("rejects a channel-linked nonmember acting through a team assistant", async () => {
+    const teamId = "channel-team";
+    await db.insert(teams).values({ id: teamId, orgId: "org1", name: "Channel team", createdAt: 1 });
+    const plugin = workflowsActionPlugin(() => deps);
+    const save = plugin.actions.find((action) => action.id === "workflows.save_workflow")!;
+    const schedule = plugin.actions.find((action) => action.id === "workflows.create_schedule")!;
+    const definition = {
+      version: "dag/v1",
+      nodes: [{ id: "trigger", type: "trigger" }, { id: "done", type: "stop" }],
+      edges: [{ from: "trigger", to: "done" }],
+    };
+    const nonmemberContext = ctx({ owner: { type: "team", id: teamId } });
+
+    await expect(save.execute({ name: "Forbidden", definition }, nonmemberContext)).rejects.toThrow("not found");
+    expect(await schedule.execute(
+      { prompt: "Forbidden", name: "Forbidden", cron: "0 9 * * *" },
+      nonmemberContext,
+    )).toMatchObject({ success: false });
+    expect(await db.select().from(workflowDefinitions)).toHaveLength(0);
+    expect(await db.select().from(workflowSchedules)).toHaveLength(0);
+  });
+
+  it("keeps team assistants out of other teams and personal workflow scopes", async () => {
+    await db.insert(teams).values([
+      { id: "scope-team-a", orgId: "org1", name: "Scope A", createdAt: 1 },
+      { id: "scope-team-b", orgId: "org1", name: "Scope B", createdAt: 1 },
+    ]);
+    await db.insert(teamMembers).values({ teamId: "scope-team-a", userId: "user1", role: "member" });
+    await db.insert(workflowDefinitions).values([
+      {
+        id: "scope-team-b-workflow", orgId: "org1", ownerType: "team", ownerId: "scope-team-b", name: "Team B",
+        definition: { version: "dag/v1", nodes: [], edges: [] }, createdAt: 1, updatedAt: 1,
+      },
+      {
+        id: "scope-personal-workflow", orgId: "org1", ownerType: "user", ownerId: "user1", name: "Personal",
+        definition: { version: "dag/v1", nodes: [], edges: [] }, createdAt: 1, updatedAt: 1,
+      },
+    ]);
+    const plugin = workflowsActionPlugin(() => deps);
+    const teamContext = ctx({ owner: { type: "team", id: "scope-team-a" } });
+    const definition = {
+      version: "dag/v1",
+      nodes: [{ id: "trigger", type: "trigger" }, { id: "done", type: "stop" }],
+      edges: [{ from: "trigger", to: "done" }],
+    };
+
+    for (const workflowId of ["scope-team-b-workflow", "scope-personal-workflow"]) {
+      for (const [actionId, args] of [
+        ["workflows.get_workflow", { workflow_id: workflowId }],
+        ["workflows.save_workflow", { workflow_id: workflowId, name: "Changed", definition }],
+        ["workflows.start_run", { workflow_id: workflowId }],
+        ["workflows.delete_workflow", { workflow_id: workflowId }],
+      ] as const) {
+        const action = plugin.actions.find((candidate) => candidate.id === actionId)!;
+        expect(await action.execute(args, teamContext)).toMatchObject({ success: false });
+      }
+    }
+    expect(await plugin.actions.find((action) => action.id === "workflows.list_workflows")!.execute({}, teamContext))
+      .toMatchObject({ success: true, data: { workflows: [] } });
+    expect(await db.select().from(workflowDefinitions)).toHaveLength(2);
+    expect(runHost.started).toHaveLength(0);
+  });
 
   it("copies a personal graph to a team through the agent action and rejects team assistant context", async () => {
     const workflowId = await seedWorkflow();
@@ -276,7 +853,7 @@ describe("DB-backed actions", () => {
     ] as const) {
       const action = plugin.actions.find((a) => a.id === id);
       if (!action) throw new Error(`missing ${id}`);
-      expect(await action.execute(args, ctx())).toMatchObject({ success: true });
+      expect(await action.execute(args, ctx({ owner: { type: "team", id: teamId } }))).toMatchObject({ success: true });
     }
     expect(calls).toEqual(teamToken
       ? ["team:linear", "team:linear"]
@@ -297,6 +874,18 @@ describe("DB-backed actions", () => {
     expect(data.workflowId).toBe(workflowId);
     expect(data.hookId).toMatch(/^[0-9a-f]{64}$/);
     expect(data.url).toBe(`/api/hooks/workflows/${workflowId}/${data.hookId}`);
+  });
+
+  it("create_webhook tells the assistant to offer a schedule for a connected source", async () => {
+    const workflowId = await seedWorkflow();
+    const plugin = workflowsActionPlugin(() => deps);
+    const create = plugin.actions.find((a) => a.id === "workflows.create_webhook")!;
+
+    const result = await create.execute({ workflow_id: workflowId }, ctx());
+    if (!result.success) throw new Error("expected the mint to succeed");
+    const { next } = result.data as { next: string };
+    expect(next).toContain("register it in the source");
+    expect(next).toContain("always end your reply with one sentence that offers a schedule");
   });
 
   it("create_webhook called twice rotates — second hookId differs from the first", async () => {
@@ -367,6 +956,279 @@ describe("DB-backed actions", () => {
     expect(typeof hugeCp.result.jsonPrefix).toBe("string");
   });
 
+  it("preview_workflow skips a newest run from a private Slack channel, as get_node_result does", async () => {
+    const teamId = "preview-private-team";
+    await db.insert(teams).values({ id: teamId, orgId: "org1", name: "Preview team", createdAt: 1 });
+    await db.insert(teamMembers).values({ teamId, userId: "user1", role: "member" });
+    await db.insert(slackChannelPrivacy).values({ orgId: "org1", channelId: "CPRIV-PREVIEW", isPrivate: true, checkedAt: Date.now() });
+    const definition = {
+      version: "dag/v1",
+      nodes: [{ id: "trigger", type: "trigger" }, { id: "copy", type: "set", values: { text: "{{trigger.data.text}}" } }],
+      edges: [{ from: "trigger", to: "copy" }],
+    };
+    const created = await createWorkflowDefinition(deps, { userId: "user1", orgId: "org1" }, { name: "Team preview", definition, teamId });
+
+    // The older run is public. The newer run came from a private channel the
+    // member is not shown to. The ids order the private run first on a tie.
+    const seed = async (runId: string, trigger: { type: string; timestamp: string; data: Record<string, unknown>; metadata: Record<string, unknown> }) => {
+      await deps.workflowStore.createRun(runId, { workflowId: created.id, definitionVersionId: "v1", input: trigger },
+        created.definition, "v1", { ownerType: "team", ownerId: teamId });
+      const claim = await deps.workflowStore.claimRun(runId, "host", 30_000);
+      if (!claim) throw new Error("claim failed");
+      const base = { runId, nodeId: "trigger", iteration: 0, attempt: claim.attempt, createdAt: 1 };
+      await deps.workflowStore.putIntent({ ...base, status: "intent" });
+      await deps.workflowStore.completeCheckpoint(runId, "trigger", 0, claim.attempt, { ...base, status: "completed", result: trigger });
+    };
+    await seed("run-1-public", { type: "manual", timestamp: "2026-01-01T00:00:00Z", data: { text: "public note" }, metadata: {} });
+    await seed("run-2-private", {
+      type: "event",
+      timestamp: "2026-01-02T00:00:00Z",
+      data: { key: "slack.message", refs: { channel: "CPRIV-PREVIEW" }, payload: { channel: "CPRIV-PREVIEW", text: "secret plan" }, text: "secret plan" },
+      metadata: {},
+    });
+
+    const plugin = workflowsActionPlugin(() => deps);
+    const action = (id: string) => plugin.actions.find((a) => a.id === id)!;
+    const member = ctx({ owner: { type: "team", id: teamId } });
+
+    expect(await action("workflows.get_node_result").execute({ run_id: "run-2-private", node_id: "trigger" }, member))
+      .toEqual({ success: false, error: "run not found: run-2-private" });
+    const preview = await action("workflows.preview_workflow").execute({ workflow_id: created.id }, member);
+    expect(preview).toMatchObject({ success: true, data: { sample: { kind: "last_run", runId: "run-1-public" } } });
+    expect(JSON.stringify(preview)).toContain("public note");
+    expect(JSON.stringify(preview)).not.toContain("secret plan");
+  });
+
+  it("get_run lists the steps that wait for approval and the teammate who must approve one", async () => {
+    const plugin = workflowsActionPlugin(() => deps);
+    const action = (id: string) => plugin.actions.find((a) => a.id === id)!;
+    const params = {
+      workflowId: "wf-g", definitionVersionId: "v1",
+      input: { type: "manual", timestamp: "2026-01-01T00:00:00Z", data: {}, metadata: {} },
+    };
+    const definition = { version: "dag/v1", nodes: [
+      { id: "post", type: "tool", service: "slack", action: "send_message", params: {} },
+      { id: "check", type: "approval", prompt: "Ship it?" },
+    ], edges: [] };
+    await deps.workflowStore.createRun("run-g", params, definition, "v1", { ownerType: "user", ownerId: "user1" });
+    const claim = await deps.workflowStore.claimRun("run-g", "host", 30_000);
+    if (!claim) throw new Error("claim failed");
+    await deps.workflowStore.putIntent({ runId: "run-g", nodeId: "post", iteration: 0, status: "intent", attempt: claim.attempt, createdAt: 1,
+      effects: { gate: true, provenance: "shared_account", approver: { userId: "user2", name: "Teammate" } } });
+    await deps.workflowStore.putIntent({ runId: "run-g", nodeId: "check", iteration: 0, status: "intent", attempt: claim.attempt, createdAt: 1 });
+    await deps.workflowStore.parkRun("run-g", claim.attempt, [
+      { kind: "signal", nodeId: "post", signalType: "approval:post" },
+      { kind: "signal", nodeId: "check", signalType: "approval:check" },
+    ]);
+
+    const run = await action("workflows.get_run").execute({ run_id: "run-g" }, ctx());
+    expect(run.success).toBe(true);
+    if (!run.success) return;
+    expect((run.data as { pendingGates: unknown[] }).pendingGates).toEqual([
+      { nodeId: "post", kind: "policy_gate", service: "slack", action: "send_message", approver: { userId: "user2", name: "Teammate" } },
+      { nodeId: "check", kind: "approval" },
+    ]);
+  });
+
+  it("distinguishes an originless start from a registered completion follow-up", async () => {
+    const workflowId = await seedWorkflow();
+    const start = workflowsActionPlugin(() => deps).actions.find(a => a.id === "workflows.start_run");
+    if (!start) throw new Error("start_run missing");
+    expect(await start.execute({ workflow_id: workflowId }, ctx())).toMatchObject({
+      success: true, data: { followUp: { registered: false, status: "no_origin" }, next: expect.stringContaining("get_run") },
+    });
+  });
+
+  it("diagnoses original and repair responses without selecting another submission's text", async () => {
+    const plugin = workflowsActionPlugin(() => deps);
+    const diagnostics = plugin.actions.find(a => a.id === "workflows.get_node_diagnostics");
+    expect(diagnostics, "diagnostics action is discoverable").toBeDefined();
+    if (!diagnostics) return;
+    await deps.workflowStore.createRun("run-diag", { workflowId: "wf-diag", definitionVersionId: "v1" },
+      { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "user", ownerId: "user1" });
+    const claim = await deps.workflowStore.claimRun("run-diag", "host", 30_000);
+    if (!claim) throw new Error("claim failed");
+    const sessionId = "wf:run-diag:research";
+    const threadId = "research-thread";
+    const base = { runId: "run-diag", nodeId: "research", iteration: 0, attempt: claim.attempt, createdAt: 1 };
+    await deps.workflowStore.putIntent({ ...base, status: "intent" });
+    await deps.workflowStore.completeCheckpoint("run-diag", "research", 0, claim.attempt, {
+      ...base, status: "failed", error: "no JSON content found in result text",
+      effects: { sessionId, firstQueueItemId: "original", repairAttempted: true, firstError: "no JSON content",
+        receipt: { sessionId, threadId, queueItemId: "repair" } },
+    });
+    await deps.engineStore.saveSession({ id: sessionId, orgId: "org1", userId: "user1", owner: { type: "user", id: "user1" },
+      workspace: "/tmp", purpose: "workflow", status: "running", createdAt: 1, updatedAt: 1 });
+    await deps.engineStore.saveThread(sessionId, { id: threadId, sessionId, key: "workflow", status: "active", queueMode: "followup", createdAt: 1, updatedAt: 1 });
+    for (const id of ["original", "repair"]) {
+      await deps.engineStore.admitSubmission(sessionId, threadId, { id, threadId, content: "research", status: "queued", attemptCount: 0,
+        maxAttempts: 10, timeoutAt: 999999, createdAt: 1, updatedAt: 1 });
+      await deps.engineStore.settleUnclaimed(sessionId, threadId, id, { outcome: "completed" });
+    }
+    const entry = { sessionId, threadId, parentId: null, type: "message" as const, role: "assistant" as const, createdAt: 1 };
+    await deps.engineStore.appendEntries(sessionId, threadId, [
+      { ...entry, id: "first-blank", queueItemId: "original", content: "", stopReason: "end_turn", model: "openai/gpt-6.1-sol" },
+      { ...entry, id: "repair-blank", queueItemId: "repair", content: "", stopReason: "end_turn" },
+      { ...entry, id: "provider-error", queueItemId: "repair", content: "", stopReason: "error", metadata: { turnError: "upstream failed" } },
+      { ...entry, id: "foreign", queueItemId: "other", content: "SECRET FROM ANOTHER SUBMISSION", stopReason: "end_turn" },
+    ]);
+    const result = await diagnostics.execute({ run_id: "run-diag", node_id: "research" }, ctx());
+    expect(result).toMatchObject({ success: true, data: { checkpoints: [{
+      repairAttempted: true, submissions: [
+        { phase: "original", queueItemId: "original", selectedMessageId: "first-blank", selectedTextLength: 0, textState: "empty" },
+        { phase: "repair", queueItemId: "repair", selectedMessageId: "repair-blank", selectedTextLength: 0, textState: "empty",
+          lastAssistant: { messageId: "provider-error", stopReason: "error", providerError: "upstream failed" } },
+      ],
+    }] } });
+    expect(JSON.stringify(result)).not.toContain("SECRET FROM ANOTHER SUBMISSION");
+    expect(await diagnostics.execute({ run_id: "run-diag", node_id: "research" }, ctx({ userId: "other" })))
+      .toMatchObject({ success: false, error: expect.stringContaining("run not found") });
+  });
+
+  it("get_node_transcript reads a step's prompt, tool errors, and format repair, and get_run flags the repair", async () => {
+    const plugin = workflowsActionPlugin(() => deps);
+    const action = (id: string) => plugin.actions.find((a) => a.id === id)!;
+    const owner = { ownerType: "user", ownerId: "user1" };
+    const params = {
+      workflowId: "wf-t", definitionVersionId: "v1",
+      input: { type: "manual", timestamp: "2026-01-01T00:00:00Z", data: {}, metadata: {} },
+    };
+    await deps.workflowStore.createRun("run-t", params, { version: "dag/v1", nodes: [], edges: [] }, "v1", owner);
+    const claim = await deps.workflowStore.claimRun("run-t", "host", 30_000);
+    if (!claim) throw new Error("claim failed");
+    const sessionId = "wf:run-t:verify";
+    const threadId = "verify-thread";
+    const base = { runId: "run-t", attempt: claim.attempt, createdAt: 1 };
+    await deps.workflowStore.putIntent({ ...base, nodeId: "verify", iteration: 0, status: "intent" });
+    await deps.workflowStore.completeCheckpoint("run-t", "verify", 0, claim.attempt, {
+      ...base, nodeId: "verify", iteration: 0, status: "completed", result: { output: { notification_text: "Review incomplete." } },
+      effects: {
+        sessionId, repairAttempted: true, firstError: "no fenced json block in the reply",
+        receipt: { sessionId, threadId, queueItemId: "q1" },
+      },
+    });
+    await deps.engineStore.saveSession({ id: sessionId, orgId: "org1", userId: "user1", owner: { type: "user", id: "user1" }, workspace: "/tmp", purpose: "interactive", status: "running", createdAt: 1, updatedAt: 1 });
+    await deps.engineStore.saveThread(sessionId, { id: threadId, sessionId, key: "workflow", status: "active", queueMode: "followup", createdAt: 1, updatedAt: 1 });
+    const entry = { sessionId, threadId, parentId: null, type: "message" as const, createdAt: 1 };
+    await deps.engineStore.appendEntries(sessionId, threadId, [
+      { ...entry, id: "e1", role: "user", content: "Use this research result as the draft: {...}" },
+      { ...entry, id: "e2", role: "assistant", content: "", parts: [{ type: "tool_call", callId: "c1", toolName: "github.list_pull_requests", status: "error", args: { repo: "tkhq/gitops" }, error: "GitHub App installation is not connected for this team." }] },
+      { ...entry, id: "e3", role: "user", content: "Your previous response did not match the required JSON schema." },
+      { ...entry, id: "e4", role: "assistant", content: "The release review is incomplete.", stopReason: "end_turn" },
+    ]);
+
+    const run = await action("workflows.get_run").execute({ run_id: "run-t" }, ctx());
+    expect(run.success).toBe(true);
+    if (!run.success) return;
+    expect((run.data as { checkpoints: unknown[] }).checkpoints).toEqual([
+      expect.objectContaining({ nodeId: "verify", repairAttempted: true, schemaError: "no fenced json block in the reply" }),
+    ]);
+
+    const transcript = await action("workflows.get_node_transcript").execute({ run_id: "run-t", node_id: "verify" }, ctx());
+    expect(transcript.success).toBe(true);
+    if (!transcript.success) return;
+    const data = transcript.data as { total: number; repairAttempted: boolean; messages: Array<{ index: number; role: string; text?: string; toolCalls?: Array<{ tool: string; status: string; error?: string }> }> };
+    expect(transcript).toMatchObject({ data: { messages: [
+      { messageId: "e1" }, { messageId: "e2", textLength: 0 }, { messageId: "e3" }, { messageId: "e4", textLength: 33 },
+    ] } });
+    expect(data.total).toBe(4);
+    expect(data.repairAttempted).toBe(true);
+    expect(data.messages.map((m) => m.role)).toEqual(["user", "assistant", "user", "assistant"]);
+    expect(data.messages[0]?.text).toContain("Use this research result as the draft");
+    expect(data.messages[1]?.toolCalls).toEqual([expect.objectContaining({
+      tool: "github.list_pull_requests", status: "error", error: "GitHub App installation is not connected for this team.",
+    })]);
+    expect(data.messages[2]?.text).toContain("did not match the required JSON schema");
+
+    const slice = await action("workflows.get_node_transcript").execute({ run_id: "run-t", node_id: "verify", message_id: "e1", content_field: "text", offset: 4 }, ctx());
+    expect(slice).toMatchObject({ success: true, data: { content: { text: "this research result as the draft: {...}", offset: 4, nextOffset: null } } });
+    const missing = await action("workflows.get_node_transcript").execute({ run_id: "run-t", node_id: "verify", message_id: "another-step" }, ctx());
+    expect(missing).toMatchObject({ success: true, data: { contentError: expect.any(String) } });
+
+    const older = await action("workflows.get_node_transcript").execute({ run_id: "run-t", node_id: "verify", before: 2, limit: 1 }, ctx());
+    expect(older.success && (older.data as { messages: Array<{ index: number }> }).messages.map((m) => m.index)).toEqual([1]);
+
+    const notSession = await action("workflows.get_node_transcript").execute({ run_id: "run-t", node_id: "missing" }, ctx());
+    expect(notSession).toMatchObject({ success: false, error: expect.stringContaining("no checkpoint") });
+  });
+
+  it("get_node_transcript pages by message index, bounds every page, keeps an orchestrator step to its own turn, and asks for an iteration", async () => {
+    const plugin = workflowsActionPlugin(() => deps);
+    const transcript = plugin.actions.find((a) => a.id === "workflows.get_node_transcript")!;
+    const owner = { ownerType: "user", ownerId: "user1" };
+    const params = {
+      workflowId: "wf-p", definitionVersionId: "v1",
+      input: { type: "manual", timestamp: "2026-01-01T00:00:00Z", data: {}, metadata: {} },
+    };
+    await deps.workflowStore.createRun("run-p", params, { version: "dag/v1", nodes: [], edges: [] }, "v1", owner);
+    const claim = await deps.workflowStore.claimRun("run-p", "host", 30_000);
+    if (!claim) throw new Error("claim failed");
+    const base = { runId: "run-p", attempt: claim.attempt, createdAt: 1 };
+    const checkpoint = async (nodeId: string, iteration: number, effects: Record<string, unknown>) => {
+      await deps.workflowStore.putIntent({ ...base, nodeId, iteration, status: "intent" });
+      await deps.workflowStore.completeCheckpoint("run-p", nodeId, iteration, claim.attempt, { ...base, nodeId, iteration, status: "completed", result: {}, effects });
+    };
+    const seed = async (sessionId: string, threadId: string, entries: SessionEntry[]) => {
+      await deps.engineStore.saveSession({ id: sessionId, orgId: "org1", userId: "user1", owner: { type: "user", id: "user1" }, workspace: "/tmp", purpose: "interactive", status: "running", createdAt: 1, updatedAt: 1 });
+      await deps.engineStore.saveThread(sessionId, { id: threadId, sessionId, key: threadId, status: "active", queueMode: "followup", createdAt: 1, updatedAt: 1 });
+      await deps.engineStore.appendEntries(sessionId, threadId, entries);
+    };
+    const message = (sessionId: string, threadId: string, id: string, content: string, queueItemId?: string): SessionEntry =>
+      ({ id, sessionId, threadId, parentId: null, type: "message", role: "assistant", content, createdAt: 1, ...(queueItemId ? { queueItemId } : {}) });
+
+    // A session step whose thread holds a non-message entry among 6 messages.
+    const stepSession = "wf:run-p:verify";
+    await seed(stepSession, "t-step", [
+      message(stepSession, "t-step", "m0", "zero"), message(stepSession, "t-step", "m1", "one"),
+      { id: "cmd", sessionId: stepSession, threadId: "t-step", parentId: null, type: "command_result", command: "/status", source: "builtin", ok: true, output: "ok", createdAt: 1 },
+      message(stepSession, "t-step", "m2", "two"), message(stepSession, "t-step", "m3", "three"),
+      message(stepSession, "t-step", "m4", "four"), message(stepSession, "t-step", "m5", "five"),
+    ]);
+    await checkpoint("verify", 0, { sessionId: stepSession, receipt: { sessionId: stepSession, threadId: "t-step", queueItemId: "q" } });
+    const page = async (args: Record<string, unknown>) => {
+      const r = await transcript.execute({ run_id: "run-p", node_id: "verify", ...args }, ctx());
+      if (!r.success) throw new Error(r.error);
+      return r.data as { total: number; messages: Array<{ index: number; text?: string }> };
+    };
+    const latest = await page({ limit: 2 });
+    expect(latest.total).toBe(6);
+    expect(latest.messages.map((m) => [m.index, m.text])).toEqual([[4, "four"], [5, "five"]]);
+    const older = await page({ limit: 2, before: latest.messages[0]!.index });
+    expect(older.messages.map((m) => m.text)).toEqual(["two", "three"]);
+    expect((await page({ limit: 2, before: -1 })).messages).toEqual([]);
+
+    // An orchestrator step shares its thread; it reads only its own submission.
+    const shared = "assistant-session";
+    await seed(shared, "t-shared", [
+      message(shared, "t-shared", "o1", "another step's turn", "q-other"),
+      message(shared, "t-shared", "o2", "this step's turn", "q-mine"),
+    ]);
+    await checkpoint("summarize", 0, { sessionId: shared, receipt: { sessionId: shared, threadId: "t-shared", queueItemId: "q-mine" } });
+    const mine = await transcript.execute({ run_id: "run-p", node_id: "summarize" }, ctx());
+    expect(mine.success && (mine.data as { messages: Array<{ text?: string }> }).messages.map((m) => m.text)).toEqual(["this step's turn"]);
+
+    // After a format repair the receipt names the repair; both turns load.
+    await deps.engineStore.appendEntries(shared, "t-shared", [
+      message(shared, "t-shared", "r1", "first try with the tool error", "q-first"),
+      message(shared, "t-shared", "r2", "a later step's turn", "q-later"),
+      message(shared, "t-shared", "r3", "repaired reply", "q-repair"),
+    ]);
+    await checkpoint("repaired", 0, {
+      sessionId: shared, repairAttempted: true, firstError: "no json block", firstQueueItemId: "q-first",
+      receipt: { sessionId: shared, threadId: "t-shared", queueItemId: "q-repair" },
+    });
+    const repaired = await transcript.execute({ run_id: "run-p", node_id: "repaired" }, ctx());
+    expect(repaired.success && (repaired.data as { messages: Array<{ text?: string }> }).messages.map((m) => m.text))
+      .toEqual(["first try with the tool error", "repaired reply"]);
+
+    // A foreach body has one checkpoint per iteration.
+    await checkpoint("each", 0, { sessionId: stepSession, receipt: { sessionId: stepSession, threadId: "t-step", queueItemId: "q" } });
+    await checkpoint("each", 1, { sessionId: stepSession, receipt: { sessionId: stepSession, threadId: "t-step", queueItemId: "q" } });
+    expect(await transcript.execute({ run_id: "run-p", node_id: "each" }, ctx()))
+      .toMatchObject({ success: false, error: expect.stringContaining("Pass iteration") });
+    expect((await transcript.execute({ run_id: "run-p", node_id: "each", iteration: 1 }, ctx())).success).toBe(true);
+  });
+
   it("list_runs names a parked run's waitingOn conditions", async () => {
     const workflowId = await seedWorkflow();
     const plugin = workflowsActionPlugin(() => deps);
@@ -407,6 +1269,183 @@ describe("DB-backed actions", () => {
     expect(parked?.waitingOn).toEqual([
       { kind: "signal", nodeId: "get_pr", signalType: "approval:get_pr" },
     ]);
+  });
+
+  /** A static catalog with two high-risk actions, so a step gates unless a
+   * policy allows it. */
+  function chatCatalog(): NonNullable<WorkflowServiceDeps["actionPluginByService"]> {
+    const fixture = (id: string) => ({
+      id, name: id, description: `fixture action ${id}`, riskLevel: "high" as const,
+      parameters: Type.Object({}), execute: async () => ({ success: true, data: {} }),
+    });
+    const actionPlugin: ActionPlugin = { service: "chat", actions: [fixture("send_message"), fixture("deploy")] };
+    const plugin: ValetPlugin = { name: "chat", version: "0.0.1", actions: [actionPlugin] };
+    return new Map([["chat", { plugin, actionPlugin }]]);
+  }
+
+  async function seedToolWorkflow(id: string, owner: { ownerType: "user" | "team"; ownerId: string }): Promise<void> {
+    await db.insert(workflowDefinitions).values({
+      id, orgId: "org1", ...owner, name: "Release", createdAt: 1, updatedAt: 1,
+      definition: {
+        version: "dag/v1",
+        nodes: [
+          { id: "trigger", type: "trigger" },
+          { id: "post", type: "tool", service: "chat", action: "send_message", params: {} },
+          { id: "ship", type: "tool", service: "chat", action: "deploy", params: {} },
+        ],
+        edges: [{ from: "trigger", to: "post" }, { from: "post", to: "ship" }],
+      },
+    });
+  }
+
+  it("get_permissions reports an org allow policy as allow and an uncovered high-risk step as require_approval", async () => {
+    deps.actionPluginByService = chatCatalog();
+    await seedToolWorkflow("perm-wf", { ownerType: "user", ownerId: "user1" });
+    await db.insert(actionPolicies).values({
+      id: "org-allow-post", orgId: "org1", principalType: "org", principalId: "org1",
+      actionId: "chat.send_message", mode: "allow", paramMatchers: [], appliesIn: "any",
+      origin: "settings", createdAt: 1, updatedAt: 1,
+    });
+    const get = workflowsActionPlugin(() => deps).actions.find((a) => a.id === "workflows.get_permissions")!;
+
+    const result = await get.execute({ workflow_id: "perm-wf" }, ctx());
+
+    expect(result).toEqual({
+      success: true,
+      data: {
+        workflowId: "perm-wf",
+        nodes: [
+          { nodeId: "post", service: "chat", action: "send_message", actionId: "chat.send_message", riskLevel: "high", mode: "allow", provenance: "org_policy" },
+          { nodeId: "ship", service: "chat", action: "deploy", actionId: "chat.deploy", riskLevel: "high", mode: "require_approval", provenance: "risk_default" },
+        ],
+        unchecked: [],
+      },
+    });
+  });
+
+  it("get_permissions reads templates literally and flags a rule that keys on one", async () => {
+    deps.actionPluginByService = chatCatalog();
+    await db.insert(workflowDefinitions).values({
+      id: "perm-tpl", orgId: "org1", ownerType: "user", ownerId: "user1", name: "Templated", createdAt: 1, updatedAt: 1,
+      definition: {
+        version: "dag/v1",
+        nodes: [
+          { id: "trigger", type: "trigger" },
+          { id: "post", type: "tool", service: "chat", action: "send_message", params: { channel: "{{trigger.data.channel}}" } },
+          { id: "note", type: "tool", service: "chat", action: "send_message", params: { text: "{{trigger.data.text}}" } },
+        ],
+        edges: [{ from: "trigger", to: "post" }, { from: "post", to: "note" }],
+      },
+    });
+    await db.insert(actionPolicies).values({
+      id: "org-deny-general", orgId: "org1", principalType: "org", principalId: "org1", actionId: "chat.send_message", mode: "deny",
+      paramMatchers: [{ path: "channel", op: "eq", value: "#general" }], appliesIn: "any", origin: "settings", createdAt: 1, updatedAt: 1,
+    });
+    const get = workflowsActionPlugin(() => deps).actions.find((a) => a.id === "workflows.get_permissions")!;
+    const result = await get.execute({ workflow_id: "perm-tpl" }, ctx());
+    // The mode stays what a workflow grant reads; only the channel step is
+    // flagged, because the deny keys on the channel it renders at run time.
+    expect(result).toMatchObject({
+      success: true,
+      data: { nodes: [
+        { nodeId: "post", mode: "require_approval", provenance: "risk_default", runtimeParams: true },
+        { nodeId: "note", mode: "require_approval", provenance: "risk_default" },
+      ] },
+    });
+    expect(JSON.stringify(result)).toContain('"nodeId":"note","service":"chat","action":"send_message","actionId":"chat.send_message","riskLevel":"high","mode":"require_approval","provenance":"risk_default"}');
+  });
+
+  it("get_permissions flags a team step that a member's shared account would answer, and lists agent steps", async () => {
+    deps.actionPluginByService = chatCatalog();
+    await db.insert(teams).values({ id: "perm-team-share", orgId: "org1", name: "Share", createdAt: 1 });
+    await db.insert(teamMembers).values({ teamId: "perm-team-share", userId: "user1", role: "member" });
+    await db.insert(workflowDefinitions).values({
+      id: "perm-share", orgId: "org1", ownerType: "team", ownerId: "perm-team-share", name: "Shared", createdAt: 1, updatedAt: 1,
+      definition: {
+        version: "dag/v1",
+        nodes: [
+          { id: "trigger", type: "trigger" },
+          { id: "draft", type: "session", prompt: "Draft it." },
+          { id: "each", type: "foreach", items: "{{trigger.data.items}}", body: { id: "child", type: "workflow", workflowId: "wf-child" } },
+          { id: "post", type: "tool", service: "chat", action: "send_message", params: {} },
+        ],
+        edges: [{ from: "trigger", to: "draft" }, { from: "draft", to: "each" }, { from: "each", to: "post" }],
+      },
+    });
+    await db.insert(teamMembers).values({ teamId: "perm-team-share", userId: "user2", role: "member" });
+    await db.insert(credentialShares).values({ teamId: "perm-team-share", service: "chat", userId: "user2", createdAt: 1 });
+    const get = workflowsActionPlugin(() => deps).actions.find((a) => a.id === "workflows.get_permissions")!;
+    const teamCtx = ctx({ owner: { type: "team", id: "perm-team-share" } });
+
+    expect(await get.execute({ workflow_id: "perm-share" }, teamCtx)).toMatchObject({
+      success: true,
+      data: {
+        nodes: [{ nodeId: "post", sharedAccount: true }],
+        unchecked: [{ nodeId: "draft", type: "session" }, { nodeId: "each", type: "workflow" }],
+      },
+    });
+    // A share from someone who left the team is not one a run would use.
+    await db.delete(teamMembers).where(eq(teamMembers.userId, "user2"));
+    const former = await get.execute({ workflow_id: "perm-share" }, teamCtx);
+    expect(JSON.stringify(former)).not.toContain("sharedAccount");
+    await db.insert(teamMembers).values({ teamId: "perm-team-share", userId: "user2", role: "member" });
+    // With a connection of its own, the team does not borrow the share.
+    await db.insert(credentials).values({ ownerType: "team", ownerId: "perm-team-share", service: "chat", type: "api_key", createdAt: 1, updatedAt: 1 });
+    const own = await get.execute({ workflow_id: "perm-share" }, teamCtx);
+    expect(own).toMatchObject({ success: true });
+    expect(JSON.stringify(own)).not.toContain("sharedAccount");
+    // A dead team connection does not answer: the run falls through to the share.
+    await db.update(credentials).set({ type: "oauth2", expiresAt: 1, metadata: { refreshRefused: true } })
+      .where(and(eq(credentials.ownerType, "team"), eq(credentials.ownerId, "perm-team-share")));
+    expect(await get.execute({ workflow_id: "perm-share" }, teamCtx)).toMatchObject({
+      success: true, data: { nodes: [{ nodeId: "post", sharedAccount: true }] },
+    });
+  });
+
+  it("get_permissions reads matcher paths the way the matcher does", async () => {
+    deps.actionPluginByService = chatCatalog();
+    await db.insert(workflowDefinitions).values({
+      id: "perm-paths", orgId: "org1", ownerType: "user", ownerId: "user1", name: "Paths", createdAt: 1, updatedAt: 1,
+      definition: {
+        version: "dag/v1",
+        nodes: [
+          { id: "trigger", type: "trigger" },
+          { id: "dm", type: "tool", service: "chat", action: "send_message", params: { to: "{{trigger.data.who}}" } },
+          { id: "note", type: "tool", service: "chat", action: "send_message", params: { text: "{{trigger.data.text}}" } },
+        ],
+        edges: [{ from: "trigger", to: "dm" }, { from: "dm", to: "note" }],
+      },
+    });
+    const policy = (id: string, path: string): typeof actionPolicies.$inferInsert => ({
+      id, orgId: "org1", principalType: "org", principalId: "org1", actionId: "chat.send_message", mode: "deny",
+      paramMatchers: [{ path, op: "exists" }], appliesIn: "any", origin: "settings", createdAt: 1, updatedAt: 1,
+    });
+    await db.insert(actionPolicies).values(policy("org-deny-first", "to[0]"));
+    const get = workflowsActionPlugin(() => deps).actions.find((a) => a.id === "workflows.get_permissions")!;
+    const flagged = async () => ((await get.execute({ workflow_id: "perm-paths" }, ctx())) as { data: { nodes: Array<{ nodeId: string; runtimeParams?: true }> } })
+      .data.nodes.filter((node) => node.runtimeParams).map((node) => node.nodeId);
+    expect(await flagged()).toEqual(["dm"]);
+    // The whole-object path reads every parameter.
+    await db.insert(actionPolicies).values(policy("org-deny-any", ""));
+    expect(await flagged()).toEqual(["dm", "note"]);
+  });
+
+  it("get_permissions refuses a workflow the caller cannot read", async () => {
+    deps.actionPluginByService = chatCatalog();
+    await db.insert(teams).values({ id: "perm-other-team", orgId: "org1", name: "Other", createdAt: 1 });
+    await seedToolWorkflow("perm-personal", { ownerType: "user", ownerId: "user1" });
+    await seedToolWorkflow("perm-team", { ownerType: "team", ownerId: "perm-other-team" });
+    const get = workflowsActionPlugin(() => deps).actions.find((a) => a.id === "workflows.get_permissions")!;
+
+    // The owner reads it, so each refusal below is the access check.
+    expect(await get.execute({ workflow_id: "perm-personal" }, ctx())).toMatchObject({ success: true });
+    expect(await get.execute({ workflow_id: "perm-personal" }, ctx({ userId: "someone-else" })))
+      .toEqual({ success: false, error: "workflow not found: perm-personal" });
+    // user1 is not a member of the owning team.
+    expect(await get.execute({ workflow_id: "perm-team" }, ctx({ owner: { type: "team", id: "perm-other-team" } })))
+      .toEqual({ success: false, error: "workflow not found: perm-team" });
+    expect(await get.execute({ workflow_id: "perm-team" }, ctx()))
+      .toEqual({ success: false, error: "workflow not found: perm-team" });
   });
 
   it("get_webhook fails for a workflow the caller doesn't own", async () => {
@@ -854,6 +1893,7 @@ describe("update actions", () => {
       db,
       workflowStore: new InMemoryWorkflowStore(),
       workflowRunHost: new StubRunHost(),
+      engineStore: new InMemorySessionStore(),
       credentials: new InMemoryCredentialStore(),
       plugins: [githubPlugin],
     };
@@ -881,6 +1921,82 @@ describe("update actions", () => {
     return found;
   }
 
+  it("validate_definition reads the schedules of the saved workflow it names", async () => {
+    await db.insert(workflowSchedules).values({
+      id: "sched_validate_draft",
+      orgId: DB_USER.orgId,
+      ownerType: "user",
+      ownerId: DB_USER.id,
+      targetKind: "workflow",
+      workflowId: "wf_actions_1",
+      prompt: null,
+      name: "Nightly refresh",
+      cron: "0 18 * * *",
+      timezone: "UTC",
+      input: { push: true },
+      enabled: true,
+      nextFireAt: NOW + 3600_000,
+      lastFiredAt: null,
+      createdBy: DB_USER.id,
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+    const definition = {
+      version: "dag/v1",
+      nodes: [
+        { id: "start", type: "trigger" },
+        { id: "refresh", type: "session", mode: "start", prompt: "Scheduled push: {{trigger.data.input.push}}. If {{trigger.data.push}} is true, save the report." },
+      ],
+      edges: [{ from: "start", to: "refresh" }],
+    };
+    const validate = findAction("workflows.validate_definition");
+    const person = ctx({ orgId: DB_USER.orgId, userId: DB_USER.id });
+    try {
+      expect(await validate.execute({ definition, workflow_id: "wf_actions_1" }, person)).toMatchObject({
+        success: true,
+        data: { valid: true, warnings: [{ nodeId: "refresh", warnings: [expect.stringContaining("{{trigger.data.input.push || trigger.data.push}}")] }] },
+      });
+      // A new draft has no schedule yet.
+      expect(await validate.execute({ definition }, person)).toEqual({ success: true, data: { valid: true } });
+      expect(await validate.execute({ definition, workflow_id: "wf_missing" }, person)).toMatchObject({ success: false, error: expect.stringContaining("wf_missing") });
+    } finally {
+      await db.delete(workflowSchedules).where(eq(workflowSchedules.id, "sched_validate_draft"));
+    }
+  });
+
+  it("validate_definition counts saved permissions only for a draft that keeps the saved steps", async () => {
+    const finish = (prompt: string) => ({
+      version: "dag/v1",
+      nodes: [
+        { id: "start", type: "trigger" },
+        { id: "finish", type: "session", mode: "start", prompt, toolScope: { actions: ["linear.save_milestone"] } },
+      ],
+      edges: [{ from: "start", to: "finish" }],
+    });
+    await db.insert(workflowDefinitions).values({
+      id: "wf_actions_granted", orgId: DB_USER.orgId, ownerType: "user", ownerId: DB_USER.id, name: "granted workflow",
+      definition: finish("Add the milestones."), createdAt: NOW, updatedAt: NOW,
+    });
+    await db.insert(workflowActionGrants).values({
+      id: "grant_validate_draft", orgId: DB_USER.orgId, workflowId: "wf_actions_granted", ownerType: "user", ownerId: DB_USER.id,
+      actionId: "linear.save_milestone", grantedBy: DB_USER.id, createdAt: NOW,
+    });
+    const validate = findAction("workflows.validate_definition");
+    const person = ctx({ orgId: DB_USER.orgId, userId: DB_USER.id });
+    try {
+      expect(await validate.execute({ definition: finish("Add the milestones."), workflow_id: "wf_actions_granted" }, person))
+        .toEqual({ success: true, data: { valid: true } });
+      // A save of changed steps revokes the grant, so the draft warns.
+      expect(await validate.execute({ definition: finish("Add the milestones and the issues."), workflow_id: "wf_actions_granted" }, person)).toMatchObject({
+        success: true,
+        data: { valid: true, warnings: [{ nodeId: "finish", warnings: [expect.stringContaining("linear.save_milestone")] }] },
+      });
+    } finally {
+      await db.delete(workflowActionGrants).where(eq(workflowActionGrants.id, "grant_validate_draft"));
+      await db.delete(workflowDefinitions).where(eq(workflowDefinitions.id, "wf_actions_granted"));
+    }
+  });
+
   it("update_schedule updates an existing schedule and returns the summary", async () => {
     const schedId = `sched_act_${Date.now()}`;
     await db.insert(workflowSchedules).values({
@@ -888,7 +2004,7 @@ describe("update actions", () => {
       orgId: DB_USER.orgId,
       ownerType: "user",
       ownerId: DB_USER.id,
-      targetKind: "orchestrator",
+      targetKind: "assistant",
       workflowId: null,
       prompt: "hello",
       name: "original name",
@@ -957,5 +2073,22 @@ describe("update actions", () => {
     );
     expect(result.success).toBe(false);
     expect(result.error).toContain("not found");
+  });
+});
+
+describe("standing automations need a person by default", () => {
+  it("rates schedule and event-trigger creation and updates high, so the risk default requires approval", async () => {
+    // A schedule or trigger keeps prompting the assistant after the thread
+    // ends, and an agent can steer the assistant through a thread.
+    const { workflowsActionPlugin } = await import("./actions.js");
+    const plugin = workflowsActionPlugin(() => {
+      throw new Error("not called when listing actions");
+    });
+    const risk = (id: string) => plugin.actions.find((a) => a.id === id)?.riskLevel;
+    for (const id of ["workflows.create_schedule", "workflows.update_schedule", "workflows.create_trigger", "workflows.update_trigger", "workflows.create_webhook"]) {
+      expect(risk(id), id).toBe("high");
+    }
+    // A proposal does nothing until a person accepts it.
+    expect(risk("workflows.propose_schedule")).toBe("low");
   });
 });

@@ -6,9 +6,14 @@
  * are present.
  */
 import { describe, it, expect, afterEach } from "vitest";
+import { serve, type ServerType } from "@hono/node-server";
+import { Hono } from "hono";
 import { Type } from "typebox";
 import type { PluginAction, ValetPlugin } from "@valet/engine";
+import { mcpActionPlugin } from "@valet/sdk/mcp";
+import { shareCredential } from "../services/credential-shares.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { addMember, createTeam } from "../services/teams.js";
 import type { ListPluginsResponse } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -33,6 +38,7 @@ const FIXTURE_PLUGIN: ValetPlugin = {
   name: "fixture-plugin",
   version: "0.1.0",
   description: "A fixture plugin for route tests",
+  skills: [{ name: "fixture-guide", description: "Use fixture tools.", content: "Private playbook body" }],
   actions: [
     {
       service: "fixture",
@@ -68,6 +74,8 @@ describe("GET /api/plugins", () => {
     const fixture = plugins.find((p) => p.name === "fixture-plugin");
     expect(fixture).toBeDefined();
     expect(fixture?.version).toBe("0.1.0");
+    expect(fixture?.skills).toEqual([{ name: "fixture-guide", description: "Use fixture tools." }]);
+    expect(JSON.stringify(fixture)).not.toContain("Private playbook body");
     // Static actions only — the resolveActions-produced "fixture.dynamic" doesn't count.
     expect(fixture?.actionCount).toBe(2);
     expect(fixture?.services).toEqual([
@@ -94,6 +102,31 @@ describe("GET /api/plugins", () => {
     expect(bare?.services).toEqual([]);
     expect(bare?.actionCount).toBe(1);
     expect(bare?.dynamic).toBeUndefined();
+  });
+
+  it("lists event handlers with their events and settings schema, and leaves them out for a plugin with none", async () => {
+    const withHandler: ValetPlugin = {
+      name: "handler-plugin",
+      version: "1.0.0",
+      eventHandlers: [{
+        id: "review-pull-request",
+        description: "Review each push.",
+        events: ["github.pull_request.opened"],
+        configSchema: Type.Object({ reviewDrafts: Type.Boolean({ default: false }) }),
+        handle: async () => {},
+      }],
+    };
+    api = await bootTestApi({ plugins: [withHandler, NO_DECLARATIONS_PLUGIN] });
+
+    const { plugins } = (await (await fetch(`${api.baseUrl}/api/plugins`)).json()) as ListPluginsResponse;
+
+    expect(plugins.find((p) => p.name === "handler-plugin")?.eventHandlers).toEqual([{
+      id: "review-pull-request",
+      description: "Review each push.",
+      events: ["github.pull_request.opened"],
+      configSchema: { type: "object", properties: { reviewDrafts: { type: "boolean", default: false } }, required: ["reviewDrafts"] },
+    }]);
+    expect(plugins.find((p) => p.name === "bare-plugin")?.eventHandlers).toBeUndefined();
   });
 
   it("exposes actions:[] for a declared credential service with no matching action plugin", async () => {
@@ -290,7 +323,86 @@ describe("GET /api/plugins connect mode", () => {
 
     const after = await fetch(`${api.baseUrl}/api/plugins`);
     const afterBody = (await after.json()) as ListPluginsResponse;
-    expect(afterBody.plugins.find((p) => p.name === "slack")?.services[0]?.connect).toBe("org");
+    const service = afterBody.plugins.find((p) => p.name === "slack")?.services[0];
+    expect(service?.connect).toBe("org");
+    // A personal catalog must not offer to disconnect the organization bot.
+    expect(service?.connected).toBe(false);
+
+    const emptyTeamId = await fetch(`${api.baseUrl}/api/plugins?teamId=`);
+    const emptyTeamIdBody = (await emptyTeamId.json()) as ListPluginsResponse;
+    expect(emptyTeamIdBody.plugins.find((p) => p.name === "slack")?.services[0]).toMatchObject({
+      connect: "org", connected: false,
+    });
+  });
+
+  it("lists an organization Slack bot as connected for its team without a personal identity", async () => {
+    const plugins: ValetPlugin[] = [{
+      name: "slack", version: "0.1.0",
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    }];
+    api = await bootTestApi({ plugins });
+    const team = await createTeam(api.providers.db, {
+      orgId: "local-org", name: "Slack workflows", creatorUserId: "local-user",
+    });
+    await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", {
+      type: "bot_token", accessToken: "xoxb-org-token",
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/plugins?teamId=${team.id}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListPluginsResponse;
+    expect(body.plugins.find((p) => p.name === "slack")?.services[0]).toMatchObject({
+      service: "slack", connect: "org", connected: true,
+    });
+  });
+
+  it("keeps a broken delegated team credential out of the catalog", async () => {
+    const plugins: ValetPlugin[] = [{
+      name: "slack", version: "0.1.0",
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    }];
+    api = await bootTestApi({ plugins });
+    const team = await createTeam(api.providers.db, {
+      orgId: "local-org", name: "Broken delegation", creatorUserId: "local-user",
+    });
+    // A share from someone who left the team, whose account is gone too.
+    await shareCredential(api.providers.db, { teamId: team.id, service: "slack", userId: "former-member", createdAt: 1 });
+
+    const res = await fetch(`${api.baseUrl}/api/plugins?teamId=${team.id}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListPluginsResponse;
+    const service = body.plugins.find((p) => p.name === "slack")?.services[0];
+    expect(service).toMatchObject({ service: "slack", connected: false, connect: "unconfigured" });
+    expect(service?.health).toBeUndefined();
+    expect(JSON.stringify(body)).not.toContain("former-member");
+  });
+
+  it("does not disclose a team catalog to another team member", async () => {
+    const plugins: ValetPlugin[] = [{
+      name: "slack", version: "0.1.0",
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    }];
+    api = await bootTestApi({ plugins });
+    const team = await createTeam(api.providers.db, {
+      orgId: "local-org", name: "Private Slack workflows", creatorUserId: "local-user",
+    });
+    await addMember(api.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
+    await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", {
+      type: "bot_token", accessToken: "xoxb-org-token",
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/plugins?teamId=${team.id}`, {
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(res.status).toBe(200);
+
+    const other = await createTeam(api.providers.db, {
+      orgId: "local-org", name: "Other workflows", creatorUserId: "local-user",
+    });
+    const denied = await fetch(`${api.baseUrl}/api/plugins?teamId=${other.id}`, {
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(denied.status).toBe(404);
   });
 
   /**
@@ -521,6 +633,37 @@ describe("GET /api/plugins toolCount (connected dynamic services)", () => {
     expect(resolveCalls.count).toBe(1);
   });
 
+  it("lists a connected dynamic service's resolved tools as actions, in both groupings", async () => {
+    const resolveCalls = { count: 0 };
+    api = await bootTestApi({ plugins: [dynamicPlugin(resolveCalls)] });
+    const read = async () => {
+      const res = await fetch(`${api!.baseUrl}/api/plugins`);
+      return (await res.json() as ListPluginsResponse).plugins.find((p) => p.name === "dyn");
+    };
+
+    // Disconnected: nothing to list, so the service offers no actions yet.
+    const before = await read();
+    expect(before?.services[0]?.actions).toEqual([]);
+    expect(before?.actionServices?.[0]?.actions).toEqual([]);
+
+    await fetch(`${api.baseUrl}/api/credentials/dyn`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "api_key", apiKey: "k-1" }),
+    });
+
+    // Connected: the listing's tools are the service's actions, in the same
+    // wire shape as static ones, so the Policies combobox offers them and an
+    // override row written from one matches at resolution time.
+    const after = await read();
+    const expected = ["dyn.a", "dyn.b", "dyn.c"].map((id) => ({ id, name: id, riskLevel: "low", requiresApproval: false }));
+    expect(after?.services[0]?.actions).toEqual(expected);
+    expect(after?.actionServices?.[0]?.actions).toEqual(expected);
+    // The manifest's static count stays static (the wire doc promises that).
+    expect(after?.actionCount).toBe(0);
+    expect(resolveCalls.count).toBe(1);
+  });
+
   it("fails soft to no toolCount when resolveActions rejects", async () => {
     const plugin: ValetPlugin = {
       name: "dyn",
@@ -547,6 +690,116 @@ describe("GET /api/plugins toolCount (connected dynamic services)", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as ListPluginsResponse;
     expect(body.plugins.find((p) => p.name === "dyn")?.services[0]?.toolCount).toBeUndefined();
+  });
+});
+
+/**
+ * The MCP health probe (integration OAuth design, "MCP health probe"): the
+ * tool listing behind `toolCount` also reports a refused connection and the
+ * scopes a grant lacks. A real `mcpActionPlugin` talks to an in-process MCP
+ * server that answers like Pylon (401 for a pasted token) or like Metabase
+ * 1.64 (every tool listed, each naming its scope).
+ */
+describe("GET /api/plugins health from the MCP probe", () => {
+  let server: ServerType | undefined;
+
+  afterEach(async () => {
+    await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
+    server = undefined;
+  });
+
+  async function fakeMcpServer(answer: {
+    tools?: Array<{ name: string; securitySchemes?: Array<{ type: string; scopes?: string[] }> }>;
+    failure?: { status: 401 | 403; wwwAuthenticate: string };
+  }): Promise<string> {
+    const app = new Hono();
+    app.post("/mcp", async (c) => {
+      const body = await c.req.json<{ method: string; id?: number }>();
+      if (body.method === "initialize") {
+        c.header("mcp-session-id", "sess-1");
+        return c.json({ jsonrpc: "2.0", id: body.id, result: { protocolVersion: "2024-11-05", capabilities: {}, serverInfo: { name: "fake", version: "1" } } });
+      }
+      if (body.method === "notifications/initialized") return c.body(null, 202);
+      if (answer.failure) {
+        c.header("www-authenticate", answer.failure.wwwAuthenticate);
+        return c.text("refused", answer.failure.status);
+      }
+      return c.json({ jsonrpc: "2.0", id: body.id, result: { tools: answer.tools ?? [] } });
+    });
+    const port = await new Promise<number>((resolve) => {
+      server = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" }, (info) => resolve(info.port));
+    });
+    return `http://127.0.0.1:${port}/mcp`;
+  }
+
+  function mcpPlugin(url: string): ValetPlugin {
+    return {
+      name: "probed",
+      version: "0.1.0",
+      actions: [mcpActionPlugin({ mcpUrl: url, serviceName: "probed", defaultRiskLevel: "medium" })],
+      credentials: [{ service: "probed", type: "oauth2", configKeys: ["accessToken"] }],
+    };
+  }
+
+  async function probedService(): Promise<ListPluginsResponse["plugins"][number]["services"][number] | undefined> {
+    const res = await fetch(`${api!.baseUrl}/api/plugins`);
+    const body = (await res.json()) as ListPluginsResponse;
+    return body.plugins.find((p) => p.name === "probed")?.services[0];
+  }
+
+  it("marks a connection the server refuses as rejected", async () => {
+    const url = await fakeMcpServer({ failure: { status: 401, wwwAuthenticate: 'Bearer error="invalid_token"' } });
+    api = await bootTestApi({ plugins: [mcpPlugin(url)] });
+    await fetch(`${api.baseUrl}/api/credentials/probed`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "oauth2", accessToken: "pasted-api-key" }),
+    });
+
+    const service = await probedService();
+    expect(service?.connected).toBe(true);
+    expect(service?.health?.rejected).toBe(true);
+    expect(service?.toolCount).toBeUndefined();
+  });
+
+  it("names the scope the grant lacks for tools that declare one", async () => {
+    const url = await fakeMcpServer({
+      tools: [
+        { name: "search", securitySchemes: [{ type: "oauth2", scopes: ["agent:content:read"] }] },
+        { name: "browse_data", securitySchemes: [{ type: "oauth2", scopes: ["agent:content:read"] }] },
+        { name: "execute_query", securitySchemes: [{ type: "oauth2", scopes: ["agent:query:run"] }] },
+      ],
+    });
+    api = await bootTestApi({ plugins: [mcpPlugin(url)] });
+    await api.providers.engineCredentials.save({ type: "user", id: "local-user" }, "probed", {
+      type: "oauth2",
+      accessToken: "granted-token",
+      scopes: ["agent:query:run"],
+    });
+
+    const service = await probedService();
+    expect(service?.toolCount).toBe(3);
+    expect(service?.health?.missingScopes).toEqual(["agent:content:read"]);
+    expect(service?.health?.blockedTools).toBe(2);
+    expect(service?.health?.rejected).toBeUndefined();
+  });
+
+  it("adds no probe fields for a connection the server accepts in full", async () => {
+    const url = await fakeMcpServer({
+      tools: [{ name: "execute_query", securitySchemes: [{ type: "oauth2", scopes: ["agent:query:run"] }] }],
+    });
+    api = await bootTestApi({ plugins: [mcpPlugin(url)] });
+    await api.providers.engineCredentials.save({ type: "user", id: "local-user" }, "probed", {
+      type: "oauth2",
+      accessToken: "granted-token",
+      scopes: ["agent:query:run"],
+    });
+
+    const service = await probedService();
+    expect(service?.toolCount).toBe(1);
+    expect(service?.health?.rejected).toBeUndefined();
+    expect(service?.health?.missingScopes).toBeUndefined();
+    expect(service?.health?.blockedTools).toBeUndefined();
   });
 });
 

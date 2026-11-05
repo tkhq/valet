@@ -41,7 +41,7 @@ Users connect their personal GitHub account at **Settings → Integrations → G
 - `github.get_repository` — get repo details by owner/name
 - `github.create_repository` — create a new repository
 - `github.fork_repository` — fork a repository
-- `github.read_repo_file` — read a file from a repository
+- `github.read_repo_file` — read a file from a repository. A PDF comes back as extracted text.
 
 ### Issues
 - `github.list_issues` — list issues for a repo
@@ -58,6 +58,7 @@ Users connect their personal GitHub account at **Settings → Integrations → G
 - `github.merge_pull_request` — merge a PR
 - `github.create_comment` — comment on an issue or PR
 - `github.create_review` — post a PR review with optional inline comments; set `updateExisting` to replace its own previous review
+- `github.request_reviewers` — request GitHub users, team slugs, or both for PR review; this does not change assignees
 
 ### Branches & Commits
 - `github.create_branch` — create a branch from a ref
@@ -66,7 +67,7 @@ Users connect their personal GitHub account at **Settings → Integrations → G
 
 ### Search
 - `github.search_code` — search code across repositories
-- `github.search_issues` — search issues and PRs
+- `github.search_issues` — search issues and PRs, up to 1000 results in one call. `@now-7d` and `@today-1w` in a date qualifier become ISO dates, so a workflow tool step can ask for the last 7 days.
 
 ### Releases & CI
 - `github.create_release` — create a release with tag

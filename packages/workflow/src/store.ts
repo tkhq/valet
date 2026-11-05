@@ -1,3 +1,6 @@
+import type { Appearance } from "@valet/shared";
+import type { ToolScope } from "@valet/shared";
+
 /**
  * The `WorkflowStore` port — checkpoints, signals, run ownership.
  *
@@ -24,6 +27,13 @@ export interface NodeCheckpoint {
   effects?: Record<string, unknown>;
   attempt: number; // the attempt that wrote the current status
   createdAt: number;
+  /**
+   * When the step began: the time of its first intent write. A rewritten
+   * intent (a schema repair, a dispatch receipt, a re-claimed attempt) and
+   * the terminal write keep it. Absent on a terminal row written without an
+   * intent, and on rows written before stores kept it.
+   */
+  startedAt?: number;
 }
 
 /** What a parked run is waiting for. */
@@ -44,12 +54,28 @@ export interface RunParkState {
   updatedAt: number;
 }
 
+/** Assistant conversation that explicitly started a workflow run. */
+export interface WorkflowRunOrigin {
+  /** The assistant session id. Thread ids are scoped to this session. */
+  assistantSessionId: string;
+  /** The exact durable assistant thread that started the run. */
+  threadId: string;
+}
+
 /** Parameters to start a run. JSON-serializable. */
 export interface RunParams {
+  /** Delegated execution scope, including the starting thread's mutable focus. */
+  toolScope?: ToolScope;
+  /** Origin authorization ceiling for reports. An empty scope records unrestricted authority. */
+  originToolScope?: ToolScope;
   workflowId: string;
   definitionVersionId: string;
   triggerId?: string;
+  /** Per-run sender identity override, captured when the run starts. */
+  presence?: Appearance;
   input?: unknown; // JSON-serializable trigger/manual input
+  /** Present only when an assistant conversation explicitly started this run. */
+  origin?: WorkflowRunOrigin;
   /**
    * Set when this run was started by a `workflow` node in another run
    * (batch-fanout design decision 1). `parentRunId` wires settle-time
@@ -59,6 +85,11 @@ export interface RunParams {
   parentRunId?: string;
   parentNodeId?: string;
   parentIteration?: number;
+  /** The server build that started this run. A reader can check whether a fix was live for it. */
+  build?: string;
+  /** An agent started this run on its own and chose its input, so its agent
+   * steps use no saved workflow grants. A nested run keeps the parent's value. */
+  startedBy?: 'agent';
 }
 
 /**
@@ -83,8 +114,11 @@ export interface WorkflowRun extends RunParkState {
    */
   owner?: WorkflowRunPrincipal;
   /**
-   * Who clicked Run. Display and audit only. Absent on a scheduled,
-   * event, or webhook start, and never used for credential resolution.
+   * The member a run acts for: who clicked Run, or who set up the schedule
+   * or event rule that started it. Absent on a webhook start. A team run
+   * uses this member's own shared accounts first. It also names the one
+   * member who may see a run whose private origin thread is gone
+   * (`runOriginVisible` in the api).
    */
   actorUserId?: string;
 }
@@ -156,7 +190,7 @@ export interface WorkflowRunListItem {
   createdAt: number;
   updatedAt: number;
   owner?: WorkflowRunPrincipal;
-  /** Who clicked Run. Absent on an unattended start. */
+  /** The member a run acts for. Absent on a webhook start. */
   actorUserId?: string;
   /** What a parked run is blocked on. Carried on the list item so a run
    * list can name the gate without a per-run fetch. Empty unless parked. */
@@ -350,8 +384,9 @@ export interface WorkflowStore {
 
   /**
    * Atomically CAS `consumedAt` on the signal (only if currently
-   * unconsumed) and write the terminal checkpoint — both succeed or
-   * neither does. Subject to the same checkpoint-row and run-level
+   * unconsumed) and write the checkpoint — both succeed or
+   * neither does. The checkpoint can retain an intent when account consent
+   * opens a separate action approval. Subject to the same checkpoint-row and run-level
    * `attempt` fences as `completeCheckpoint` (rejects a lower-attempt
    * write against an existing higher-attempt intent row, and rejects if
    * the write's `attempt` is lower than the run's current `attempt`).

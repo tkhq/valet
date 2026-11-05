@@ -27,9 +27,24 @@ function entryMatches(entry: ChangelogEntry, query: string): boolean {
     .includes(query);
 }
 
+/** Invalid or missing timestamps sort after dated entries; equal times use SHA ascending. */
+function entryTime(entry: ChangelogEntry): number | null {
+  const timestamp = entry.authoredAt ? Date.parse(entry.authoredAt) : Number.NaN;
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+export function compareChangelogEntries(left: ChangelogEntry, right: ChangelogEntry): number {
+  const leftTime = entryTime(left);
+  const rightTime = entryTime(right);
+  if (leftTime !== null && rightTime !== null && leftTime !== rightTime) return rightTime - leftTime;
+  if (leftTime !== null && rightTime === null) return -1;
+  if (leftTime === null && rightTime !== null) return 1;
+  return left.sources.commitSha < right.sources.commitSha ? -1 : left.sources.commitSha > right.sources.commitSha ? 1 : 0;
+}
+
 export function groupChangelogEntries(entries: ChangelogEntry[]): ChangelogEntryGroup[] {
   return CHANGELOG_CATEGORIES.flatMap((category) => {
-    const categoryEntries = entries.filter((entry) => entry.category === category);
+    const categoryEntries = entries.filter((entry) => entry.category === category).sort(compareChangelogEntries);
     return categoryEntries.length > 0 ? [{ category, entries: categoryEntries }] : [];
   });
 }

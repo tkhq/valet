@@ -223,6 +223,8 @@ root. Consequences:
     create `k3s_evac` below that sibling without evacuating sandbox
     services or enabling controllers at a populated manager. Mono owns
     creation and cleanup of `tkhq-k3s`; Valet does not create it.
+    The proposed first-class replacement moves this ownership to Valet.
+    See `2026-09-12-nested-kubernetes-design.md`.
   - Containment: the private cgroup namespace makes the sandbox container
     cgroup appear as `/sys/fs/cgroup`. The visible root and all CPU,
     memory, and PID limit files stay owned by mapped root. Ancestor limits
@@ -345,6 +347,12 @@ Mitigations shipped:
   (empirically starts on masked-proc clusters) and probes storage drivers
   in order overlay2 → fuse-overlayfs → vfs. The daemon now starts
   everywhere; inner containers still need an unmasked /proc.
+- The fuse-overlayfs probe mounts a layer and executes a copied binary
+  inside the rootless user namespace. An open `/dev/fuse` does not prove
+  that executable layers work. Docker Desktop LinuxKit 6.10.14 can reject
+  execution with `EINVAL` after a successful mount. The probe selects vfs
+  if execution fails. It unmounts the probe before removing its files.
+  `scripts/e2e/docker-storage.test.ts` checks driver selection with stubbed mount and privilege boundaries, including successful mounts with failed execution.
 - The manifest sets `hostUsers: false` on docker pods. Kubernetes >= 1.31
   validation requires it for `procMount: Unmasked` and REJECTS the pod
   without it once the ProcMountType gate is on (default from 1.33). On
@@ -374,3 +382,32 @@ kubernetes is degraded: the daemon runs, `docker pull`/`system df` work,
 - Per-org policy to forbid `docker: true` (add when org policy
   machinery exists).
 - The legacy stack (`packages/worker`, Modal) — frozen.
+
+## Managed browser provider boundary (2026-09-23)
+
+Browser capabilities require explicit provider opt-in. Plain images retain their existing execution identity.
+Docker and Helm default to disabled until the managed image and required security profile are installed.
+A browser-enabled sandbox uses the separate reviewed seccomp profile in `packages/sandbox-docker/seccomp/browser.json`.
+It cannot combine that profile with Docker-in-sandbox or nested Kubernetes.
+
+The workload uses UID 1500 for shell, file APIs, terminal, and editor.
+The browser daemon uses another UID and private state outside `/workspace`.
+The fixed root-owned client drops to that UID and clears inherited environment values.
+Workload commands cannot inherit the gateway signing secret.
+
+Docker keeps an atomic owner inventory and a private state bind mount for each session.
+Each API data directory has its own Docker inventory so independent API instances do not reap each other's sessions.
+API restart adopts the validated owner; release retains its profile and audit journal.
+Docker rejects replacement without browser isolation while the owner has retained browser state.
+Final deletion exports the audit first and then removes private state.
+A stopped owner uses a read-only journal helper with a shared owner lock.
+Before release or deletion, Docker restores working-directory ownership to the API process.
+
+Kubernetes uses a session-owned private PVC without a Sandbox CR owner reference.
+Both providers reject browser isolation downgrades while private state remains.
+Kubernetes lists private PVC owners after CR deletion so failed state deletion remains retryable.
+The provider checks the saved browser owner before it changes credentials or the Sandbox CR.
+It uses the node Localhost profile and waits for the browser preflight marker.
+Missing retained state fails closed. See `deploy/browser.md` for node installation and image requirements.
+
+Retained execution paths containing colons use CSV-escaped `--mount` bind arguments during creation and restoration. Existing directories remain in place.

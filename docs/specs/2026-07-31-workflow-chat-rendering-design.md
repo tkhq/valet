@@ -59,8 +59,18 @@ a drawer — plus a lightweight V2 list/detail UI for browsing workflows and run
   must include V2 ids in their outputs. Tools that don't yet are updated as part
   of this work (small, tool-side change; requires `IMAGE_BUILD_VERSION` bump).
 - **Run status freshness:** while a run is non-terminal, the card/drawer polls
-  the run endpoint (~3s interval). Wiring run updates into the session event
+  the run endpoint every five seconds. Wiring run updates into the session event
   stream is an explicit follow-up, not part of this slice.
+- **Background run status (2026-10-15).** A successful `start_run` result adds
+  a compact status row outside the collapsible tool card. The launch tool keeps
+  its `done` state. The status row stays mounted after collapse and reload.
+  It uses `useRunDetail` to poll every five seconds until the run settles.
+  It shows the current run status or final outcome and an **Open run** link.
+  Loading, failed requests, and missing or inaccessible runs have separate messages.
+  The row shows **Completion follow-up registered** only when the persisted result
+  has `followUp.registered === true`. A settled run does not prove delivery of that follow-up.
+  A false registration shows that no automatic chat follow-up exists. Older results
+  without registration data show no follow-up promise. Both workflow call shapes use this row.
 - **Two call shapes (2026-08-17).** One workflows action can arrive under two
   tool names. Through the plugin catalog it is `call_tool`, with the action in
   `args.tool_id` and its parameters under `args.params`. Through a pinned
@@ -134,6 +144,12 @@ edit, the form resets and shows a "workflow was updated by the orchestrator"
 notice instead of silently clobbering either side.
 
 ## 4. Run overlay + approvals
+
+The run page shows results, pending approvals, and compact expandable step rows.
+Running and waiting steps show their current state. Failed steps open their output.
+Steps follow the saved definition order. Repeated iterations keep separate rows. Each row links to its agent logs or child run.
+Expanded output stays complete; it is not a truncated preview.
+The optional Workflow diagram follows the steps and mounts only when expanded.
 
 - Per-node run states derived from the run row + checkpoints:
   `pending / running / succeeded / failed / skipped / waiting`.
@@ -221,3 +237,56 @@ UI. They are repurposed as the V2 surface:
   what the orchestrator did at a glance.
 - Rendering V1 step-array workflows as diagrams.
 - Retiring or modifying the V1 `/automation` UI.
+
+
+### October 5: large structured replies
+
+A completed assistant reply can contain a JSON result for the next workflow step. The transcript previously rendered that result as ordinary prose.
+Large, complete JSON objects and arrays now use the existing disclosure-card style and shared JSON code display.
+The card shows the result's summary, when supplied, and its item or field count. The user can expand the complete result.
+Message copying preserves the original reply. The code display mounts only when expanded.
+User messages, streaming replies, failed replies, diagnostic objects, malformed JSON, and prose remain visible.
+This is presentation only. It does not change schema validation, approval decisions, stored history, or workflow data.
+
+
+### Workflow diagnostics and completion follow-up (2026-10-15)
+
+`workflows.get_node_diagnostics` reads submissions named by an authorized checkpoint.
+It reports the original and repair queue IDs, submission states, and selected assistant message ID.
+For normal outcomes, selection follows `awaitResult`: the last assistant entry with `stopReason: end_turn` supplies stored `content`.
+Superseded submissions show the last partial assistant entry. Merged submissions identify their target without selecting local output.
+The tool shows content and text-part lengths separately, plus model, usage, cost, and persisted provider errors.
+It returns no prompt or result bodies. Each submission read loads at most 2,000 entries.
+A foreach step requires an explicit iteration when multiple checkpoints match.
+Missing receipts, messages, or provider errors remain unavailable evidence. Historical records are not backfilled.
+Transcripts also expose message and queue IDs, stored text length, model, and persisted provider errors.
+
+`start_run` reports whether it registered an origin for automatic completion follow-up.
+An originless start instructs the agent to check `get_run` instead of promising a later reply.
+`get_run.followUp` reports the stored completion signal's queue state and outcome.
+The reader follows existing isolated team execution mappings without creating a runtime.
+A settled run with no signal admission reports `not_recorded`; it does not claim delivery succeeded.
+A queued signal proves admission only. A settled signal proves the follow-up turn ended, not that Slack received a message.
+The completion signal instructs the agent to inspect results and report the requested checks to the user.
+Approval and completion continue to use the existing event-driven follow-up path.
+
+### Completion evidence and unattended recovery (2026-10-15)
+
+`get_node_transcript` exposes saved compaction summaries, their token counts and covered-entry count,
+synthetic continuation markers, usage, and allowlisted response metadata. It still clips normal pages.
+To read retained content in full, pass `message_id`, `content_field` (`text`, `tool_args`, `tool_result`,
+`tool_error`), `call_id` for tool fields, and `offset`. `data.content` contains at most 6,000 characters,
+`totalLength`, and `nextOffset` (null at the end). Tool-call previews include call IDs and truncation flags.
+Content slices use the same authorized checkpoint thread and submission filters as transcript pages.
+The 2,000-entry store cap is reported; the tool does not promise to recover deleted history.
+
+Response evidence records numeric output caps from the provider request payload after caller transformations,
+and an allowlisted response request ID. No payloads, credentials, arbitrary headers, or private reasoning are saved.
+Absent hooks or fields remain unavailable. Provider terminal status and incomplete details still remain unavailable
+when the adapter does not expose them. A sent output cap is distinct from actual consumed tokens.
+
+After compaction, sessions whose purpose is `workflow` receive unattended-task guidance: finish remaining
+authorized work, treat a progress recap as incomplete, and report genuine blockers truthfully. Interactive
+sessions keep their existing continuation. The single schema-repair submission tells an agent to complete
+unfinished actionable work using read tools before its final JSON response. It preserves prior results,
+approvals, and side-effect protections. There is no added retry loop and no guarantee a model will recover.

@@ -192,6 +192,32 @@ describe('executeLlm: outputSchema set and valid on first try', () => {
       usage: ZERO_USAGE,
     });
   });
+
+  it('states the output schema in the first prompt, so the model can answer without a repair call', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const outputSchema = { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] };
+    const { engine, calls } = makeEngine([{ text: '```json\n{"answer":"42"}\n```' }]);
+
+    await store.createRun('run-2b', runParams({ input: { type: 'manual', timestamp: '2026-01-01T00:00:00Z', data: { thing: 'logs' }, metadata: {} } }), llmDefinition({ outputSchema }), 'v1');
+    const attempt = await claimAttempt(store, 'run-2b');
+    await driveUntilPark('run-2b', attempt, { store, engine, clock: clock.now });
+
+    expect(calls[0]?.req.prompt.startsWith('summarize logs')).toBe(true);
+    expect(calls[0]?.req.prompt).toContain(JSON.stringify(outputSchema));
+  });
+
+  it('leaves a prompt with no output schema as written', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const { engine, calls } = makeEngine([{ text: 'the summary' }]);
+
+    await store.createRun('run-2c', runParams({ input: { type: 'manual', timestamp: '2026-01-01T00:00:00Z', data: { thing: 'logs' }, metadata: {} } }), llmDefinition(), 'v1');
+    const attempt = await claimAttempt(store, 'run-2c');
+    await driveUntilPark('run-2c', attempt, { store, engine, clock: clock.now });
+
+    expect(calls[0]?.req.prompt).toBe('summarize logs');
+  });
 });
 
 // ─── 3. Schema invalid then valid after ONE repair ───────────────────────────
@@ -212,6 +238,8 @@ describe('executeLlm: schema invalid, then valid after one repair', () => {
     expect(calls).toHaveLength(2);
 
     const repairReq = calls[1]?.req;
+    // Both the first call and the repair call bill to the step.
+    expect(calls.map(({ req }) => [req.nodeId, req.iteration])).toEqual([['l', 0], ['l', 0]]);
     expect(repairReq?.prompt).toContain(JSON.stringify(outputSchema));
     // First failure is a JSON-parse error (not a schema-mismatch error) —
     // still asserted verbatim in the repair prompt.
@@ -665,6 +693,8 @@ describe('executeLlm: iteration > 0', () => {
 
     expect(result.status).toBe('completed');
     expect(calls[0]?.req.prompt).toBe('process widget-7 at index 1');
+    // The host bills the call to this step and iteration.
+    expect(calls[0]?.req).toMatchObject({ runId: 'run-10', nodeId: 'l', iteration: 1 });
 
     const checkpoints = await store.getCheckpoints('run-10');
     const cp = checkpoints.find((c) => c.nodeId === 'l' && c.iteration === 1);

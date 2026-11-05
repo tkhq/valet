@@ -1,37 +1,40 @@
 // @vitest-environment jsdom
-/**
- * `useCreateTeam` — what the team create writes into the assistants cache.
- *
- * `createTeam` seeds the team's default assistant in the same transaction,
- * and the hook writes that row into the list cache before the refetch so
- * `/chat` opens it at once. The write applies only to a WARM cache. A cold
- * one is left cold and the invalidation fetches the real list: a one-row
- * list seeded here would satisfy every "list resolved" gate on the page
- * with the caller's own assistants missing until the refetch landed.
- */
 import { describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
-import { renderHook, waitFor } from "@testing-library/react";
+import { renderHook } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type {
-  AssistantSummary,
   CreateTeamRequest,
   CreateTeamResponse,
-  ListAssistantsResponse,
 } from "@valet/api/wire";
 
 const createTeam = vi.fn();
+const patchMe = vi.fn();
+const providerCall = vi.fn(async () => undefined);
 
 vi.mock("./client", () => ({
-  api: { createTeam: (body: CreateTeamRequest) => createTeam(body) },
+  api: {
+    createTeam: (body: CreateTeamRequest) => createTeam(body),
+    patchMe: (body: unknown) => patchMe(body),
+    createLlmProvider: () => providerCall(),
+    patchLlmProvider: () => providerCall(),
+    deleteLlmProvider: () => providerCall(),
+    putLlmProviderKey: () => providerCall(),
+    deleteLlmProviderKey: () => providerCall(),
+  },
 }));
 
-import { qkAssistants } from "./assistants";
-import { qkSettings, teamCreateQueryKeys, useCreateTeam } from "./settings";
-
-function assistant(id: string, owner: AssistantSummary["owner"]): AssistantSummary {
-  return { id, owner, sessionId: `assistant:${id}`, isDefault: true, createdAt: 1 };
-}
+import {
+  qkSettings,
+  teamCreateQueryKeys,
+  useCreateLlmProvider,
+  useCreateTeam,
+  useDeleteLlmProvider,
+  useDeleteLlmProviderKey,
+  usePatchLlmProvider,
+  usePatchMe,
+  usePutLlmProviderKey,
+} from "./settings";
 
 const created: CreateTeamResponse = {
   team: {
@@ -45,7 +48,7 @@ const created: CreateTeamResponse = {
     callerRole: "admin",
     defaultModel: null,
   },
-  defaultAssistant: assistant("asst_team", { type: "team", id: "team_1" }),
+  runtime: { sessionId: "assistant:asst_team" },
 };
 
 function makeClient() {
@@ -58,48 +61,71 @@ function wrapperFor(client: QueryClient) {
   };
 }
 
-describe("teamCreateQueryKeys", () => {
-  it("invalidates teams and the bare assistants prefix", () => {
-    // `createTeam` writes the team's default assistant in the same
-    // transaction. The assistants key is the prefix (`["assistants"]`) so
-    // every workspace's cache entry refreshes, same convention as
-    // `qk.sessions()`.
-    expect(teamCreateQueryKeys()).toEqual([qkSettings.teams(), qkAssistants.list()]);
-    expect(qkAssistants.list()).toEqual(["assistants"]);
-  });
-});
-
-describe("useCreateTeam", () => {
-  it("appends the seeded assistant to a warm list cache", async () => {
-    createTeam.mockResolvedValueOnce(created);
-    const client = makeClient();
-    const mine = assistant("asst_own", { type: "user", id: "u1" });
-    client.setQueryData<ListAssistantsResponse>(qkAssistants.list(), { assistants: [mine] });
-
-    const { result } = renderHook(() => useCreateTeam(), { wrapper: wrapperFor(client) });
-    await result.current.mutateAsync({ name: "Platform" });
-
-    await waitFor(() =>
-      expect(client.getQueryData<ListAssistantsResponse>(qkAssistants.list())).toEqual({
-        assistants: [mine, created.defaultAssistant],
-      }),
-    );
-  });
-
-  it("leaves a cold list cache cold and relies on the invalidation", async () => {
-    // Nothing has fetched the list yet. Seeding `{assistants: [row]}` here
-    // would stand in for the whole list until the refetch: the personal
-    // group vanishes from the rail and `/chat` treats the one-row list as
-    // resolved.
+describe("workspace creation", () => {
+  it("invalidates the team list without an assistant-list cache", async () => {
+    expect(teamCreateQueryKeys()).toEqual([qkSettings.teams()]);
     createTeam.mockResolvedValueOnce(created);
     const client = makeClient();
     const invalidate = vi.spyOn(client, "invalidateQueries");
-
     const { result } = renderHook(() => useCreateTeam(), { wrapper: wrapperFor(client) });
     await result.current.mutateAsync({ name: "Platform" });
-
-    expect(client.getQueryData(qkAssistants.list())).toBeUndefined();
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: qkAssistants.list() });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: qkSettings.teams() });
+    expect(client.getQueryData(["assistants"])).toBeUndefined();
+  });
+});
+
+describe("LLM provider mutations", () => {
+  // The model tiers response says whether the org default tier can run, and
+  // that answer depends on the providers and their keys.
+  it("each provider and key change refreshes the model tiers", async () => {
+    const client = makeClient();
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    const wrapper = wrapperFor(client);
+    const mutations: Record<string, () => Promise<unknown>> = {
+      create: () => renderHook(() => useCreateLlmProvider(), { wrapper }).result.current
+        .mutateAsync({ kind: "openai", name: "OpenAI" }),
+      patch: () => renderHook(() => usePatchLlmProvider(), { wrapper }).result.current
+        .mutateAsync({ id: "p1", body: { enabled: false } }),
+      delete: () => renderHook(() => useDeleteLlmProvider(), { wrapper }).result.current.mutateAsync("p1"),
+      putKey: () => renderHook(() => usePutLlmProviderKey(), { wrapper }).result.current
+        .mutateAsync({ id: "p1", body: { apiKey: "sk-test" } }),
+      deleteKey: () => renderHook(() => useDeleteLlmProviderKey(), { wrapper }).result.current.mutateAsync("p1"),
+    };
+    for (const [name, run] of Object.entries(mutations)) {
+      invalidate.mockClear();
+      await run();
+      expect(invalidate, name).toHaveBeenCalledWith({ queryKey: qkSettings.modelTiers() });
+    }
+  });
+});
+
+describe("usePatchMe timezone", () => {
+  const me = {
+    id: "u1", email: "a@b.c", name: "A", avatarUrl: null, role: "member", orgId: "o1", orgRole: "member",
+    defaultModel: null, defaultReasoning: null, newThreadBehavior: "keep_current",
+    timezone: "Europe/Paris", timezoneReportDone: false,
+  } as const;
+
+  it("marks the report done as soon as the user clears the timezone, before the server answers", async () => {
+    let release: (value: unknown) => void = () => {};
+    patchMe.mockReturnValueOnce(new Promise((resolve) => { release = resolve; }));
+    const client = makeClient();
+    client.setQueryData(qkSettings.me(), me);
+    const { result } = renderHook(() => usePatchMe(), { wrapper: wrapperFor(client) });
+    result.current.mutate({ timezone: null });
+    await vi.waitFor(() => {
+      expect(client.getQueryData(qkSettings.me())).toMatchObject({ timezone: null, timezoneReportDone: true });
+    });
+    release({ ...me, timezone: null, timezoneReportDone: true });
+  });
+
+  it("does not copy the browser report into the visible profile", async () => {
+    patchMe.mockResolvedValueOnce({ ...me, timezone: "America/New_York", timezoneReportDone: true });
+    const client = makeClient();
+    client.setQueryData(qkSettings.me(), { ...me, timezone: null });
+    const { result } = renderHook(() => usePatchMe(), { wrapper: wrapperFor(client) });
+    result.current.mutate({ reportedTimezone: "America/New_York" });
+    await vi.waitFor(() => expect(patchMe).toHaveBeenCalledWith({ reportedTimezone: "America/New_York" }));
+    expect(client.getQueryData(qkSettings.me())).not.toHaveProperty("reportedTimezone");
   });
 });

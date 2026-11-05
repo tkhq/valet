@@ -8,7 +8,7 @@
 import { describe, expect, it } from "vitest";
 import { buildSkillBlock } from "@valet/shared";
 import type { StreamMessage } from "~/stores/stream";
-import { isEmptyAssistantMessage, messageCopyText, senderLabel } from "./message-item";
+import { isEmptyInterruption, isEmptyAssistantMessage, messageCopyText, senderLabel } from "./message-item";
 
 function msg(over: Partial<StreamMessage>): StreamMessage {
   return {
@@ -34,6 +34,15 @@ describe("isEmptyAssistantMessage", () => {
     expect(
       isEmptyAssistantMessage(msg({ parts: [{ kind: "text", text: "hi" }] })),
     ).toBe(false);
+  });
+});
+
+describe("intentional interruptions", () => {
+  it("hides an empty interrupted reply but keeps partial output and real failures", () => {
+    expect(isEmptyInterruption(msg({ stopReason: "abort" }))).toBe(true);
+    expect(isEmptyInterruption(msg({ stopReason: "abort", content: "Partial answer" }))).toBe(false);
+    expect(isEmptyInterruption(msg({ stopReason: "error" }))).toBe(false);
+    expect(isEmptyInterruption(msg({ role: "user", stopReason: "abort" }))).toBe(false);
   });
 });
 
@@ -97,6 +106,10 @@ describe("messageCopyText", () => {
 });
 
 describe("senderLabel", () => {
+  it("names a Slack sender who ran as the viewer, instead of 'You'", () => {
+    expect(senderLabel({ id: "viewer", name: "Sam from Slack", externalSender: true }, "viewer")).toBe("Sam from Slack");
+  });
+
   it("is undefined for the viewer's own messages (renders as 'You')", () => {
     expect(senderLabel({ id: "u1", name: "Alice" }, "u1")).toBeUndefined();
   });

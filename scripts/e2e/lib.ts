@@ -81,9 +81,13 @@ const MIN = 60_000;
 const INTEGRATION_CORE_FILES = [
   "src/integration/artifacts.test.ts",
   "src/integration/assistants.test.ts",
+  "src/integration/workspace-assistant.test.ts",
+  "src/integration/workspace-assistant-context.test.ts",
   "src/integration/auth.e2e.test.ts",
   "src/integration/auto-title.test.ts",
+  "src/integration/slack-conversation-routing.test.ts",
   "src/integration/memory-routes.test.ts",
+  "src/integration/thread-timezone.test.ts",
   "src/integration/memory-tree.test.ts",
   "src/integration/sessions-list-filter.test.ts",
   "src/integration/sessions-run-state.test.ts",
@@ -92,22 +96,38 @@ const INTEGRATION_CORE_FILES = [
   "src/integration/orchestrator-info.test.ts",
   "src/integration/team-copy.test.ts",
   "src/integration/team-dashboard.test.ts",
+  "src/integration/team-conversation-default-thread.test.ts",
   "src/integration/thread-archive.test.ts",
   "src/integration/lazy-session-history.test.ts",
   "src/integration/thread-rename.test.ts",
   "src/integration/thread-create-settings.test.ts",
-  "src/integration/child-dismiss.test.ts",
-  "src/integration/orchestrator-children-scope.test.ts",
+  "src/integration/thread-pagination.test.ts",
+  "src/integration/child-gate-report.test.ts",
   "src/integration/command-route.test.ts",
   "src/integration/policies.e2e.test.ts",
   "src/integration/github-repo.e2e.test.ts",
   "src/integration/workflow-github-credential.e2e.test.ts",
+  "src/integration/native-credential-acceptance.test.ts",
   "src/integration/usage-summary.test.ts",
   "src/integration/plugin-entitlements.test.ts",
+  "src/integration/org-mcp-servers.test.ts",
   "src/integration/profile-pictures.test.ts",
+  "src/integration/workflow-avatar.test.ts",
+  "src/integration/openai-images.test.ts",
+  // Wakeups acceptance runs keyless: a faux model and a scripted virtual sandbox.
+  "src/integration/wakeups-acceptance.test.ts",
+  // Event wakeups, claims, and delivery threads acceptance run keyless: a faux model,
+  // the GitHub fixture, and a fetch stub for Slack and Linear.
+  "src/integration/event-wakeups.test.ts",
+  "src/integration/event-claims.test.ts",
+  "src/integration/delivery-threads.test.ts",
+  // The Presence hub acceptance's data half runs keyless: event ingest, the
+  // dispatcher, and the scheduler over PGlite, with a fetch stub for Slack.
+  "src/integration/presence-hub.test.ts",
   // Valet Security integration suites run keyless: the virtual sandbox
   // provider and abort-based settlement need no model key.
   "src/integration/security-settlement.test.ts",
+  "src/integration/security-scope-nudge.test.ts",
   "src/integration/security-persona.test.ts",
   "src/integration/security-yield.test.ts",
   "src/integration/security-routes.test.ts",
@@ -120,8 +140,10 @@ const INTEGRATION_CORE_FILES = [
   "src/integration/security-comments.test.ts",
   "src/integration/security-coverage.test.ts",
   "src/integration/security-finding-location.test.ts",
+  "src/integration/security-issue-routes.test.ts",
   "src/integration/security-report.test.ts",
   "src/integration/security-needs.test.ts",
+  "src/integration/security-needs-attention.test.ts",
   "src/integration/security-setup.test.ts",
 ];
 
@@ -138,6 +160,7 @@ const INTEGRATION_AGENT_FILES = [
 
 /** Integration files owned by dedicated rows (see lists above). */
 export const DEDICATED_INTEGRATION_FILES = [
+  "src/integration/browser.docker.test.ts",
   "src/integration/cli.e2e.test.ts",
   "src/integration/telegram.e2e.test.ts",
   "src/integration/github-repo.e2e.test.ts",
@@ -155,13 +178,16 @@ export const INTEGRATION_LIST_FILES = { core: INTEGRATION_CORE_FILES, agent: INT
  * `vitest run` script with no config/tests, which explodes resolving the
  * ROOT workspace config from the wrong cwd — enumerate instead of globbing.
  * A new plugin gaining tests must be added here (guarded by lib.test.ts). */
-const TESTED_PLUGINS = [
+export const TESTED_PLUGINS = [
+  "@valet/plugin-browser",
   "@valet/plugin-github",
   "@valet/plugin-gmail",
   "@valet/plugin-google-calendar",
   "@valet/plugin-google-workspace",
   "@valet/plugin-linear",
+  "@valet/plugin-native-documents",
   "@valet/plugin-openai",
+  "@valet/plugin-pr-review",
   "@valet/plugin-security",
   "@valet/plugin-slack",
   "@valet/plugin-slack-user",
@@ -188,18 +214,19 @@ export const STEPS: StepDef[] = [
   // Advisory STE prose lint over maintained docs (CLAUDE.md "Writing").
   // Soft-skips when python3 is absent rather than failing the scorecard.
   { id: "docs-lint", group: "static", title: "STE prose lint (maintained docs)", command: ["bash", "-c", "command -v python3 >/dev/null || { echo 'python3 not found - skipping'; exit 0; }; python3 scripts/docs/docs_lint.py"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 5 * MIN },
-  { id: "unit", group: "static", title: "root unit sweep (shared, sdk, api, web)", command: ["pnpm", "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 15 * MIN },
+  { id: "unit", group: "static", title: "root unit sweep (shared, sdk, api, web)", command: ["pnpm", "test", "--project", "unit", "--project", "integration", "--project", "@valet/shared", "--project", "@valet/sdk", "--project", "@valet/web", "--project", "scripts"], env: { VALET_E2E_DEDICATED_CORE: "1" }, needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 15 * MIN },
   { id: "engine-unit", group: "static", title: "engine unit suite", command: ["pnpm", "--filter", "@valet/engine", "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 10 * MIN },
+  { id: "browser-runtime", group: "static", title: "browser runtime, cells, journal and page fixtures", command: ["pnpm", "--filter", "@valet/browser-runtime", "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 10 * MIN },
   { id: "workflow-unit", group: "static", title: "workflow interpreter suite", command: ["pnpm", "--filter", "@valet/workflow", "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 10 * MIN },
   { id: "gateway-unit", group: "static", title: "sandbox gateway (JWT, WS proxy)", command: ["pnpm", "--filter", "@valet/sandbox-gateway", "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 10 * MIN },
   { id: "plugins-unit", group: "static", title: "plugin package suites", command: ["pnpm", ...TESTED_PLUGINS.flatMap((n) => ["--filter", n]), "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 15 * MIN },
   { id: "sandbox-local", group: "static", title: "sandbox-local suite", command: ["pnpm", "--filter", "@valet/sandbox-local", "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 10 * MIN },
   { id: "sandbox-k8s-unit", group: "static", title: "sandbox-kubernetes unit tests (no cluster)", command: ["pnpm", "--filter", "@valet/sandbox-kubernetes", "test", "--exclude", "test/**/*.cluster.test.ts"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 10 * MIN },
   { id: "store-postgres-unit", group: "static", title: "store-postgres PGlite tests (no docker)", command: ["pnpm", "--filter", "@valet/store-postgres", "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 10 * MIN },
-  { id: "web-build", group: "static", title: "web production build (vite)", command: ["pnpm", "--filter", "@valet/web", "build"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 10 * MIN },
-  { id: "api-bundle", group: "static", title: "api production bundle + bundle-guard", command: ["bash", "-c", "pnpm --filter @valet/api build && pnpm --filter @valet/api test src/bundle-guard"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 15 * MIN },
+  { id: "web-build", group: "static", title: "web production build (vite)", command: ["pnpm", "--filter", "@valet/web", "build"], needs: [], scrubKeys: true, timeoutMs: 10 * MIN },
+  { id: "api-bundle", group: "static", title: "api production bundle + bundle-guard", command: ["bash", "-c", "pnpm --filter @valet/api build && pnpm --filter @valet/api test src/bundle-guard"], needs: [], scrubKeys: true, timeoutMs: 15 * MIN },
   { id: "helm-golden", group: "static", title: "helm chart lint + golden templates", command: ["bash", "deploy/chart/valet/test/golden.sh"], needs: ["helm"], scrubKeys: true, parallelSafe: true, timeoutMs: 5 * MIN },
-  { id: "sandbox-docker-unit", group: "static", title: "sandbox-docker unit tests (no daemon)", command: ["pnpm", "--filter", "@valet/sandbox-docker", "test", "test/run-args.test.ts"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 5 * MIN },
+  { id: "sandbox-docker-unit", group: "static", title: "sandbox-docker unit tests (no daemon)", command: ["pnpm", "--filter", "@valet/sandbox-docker", "test", "test/run-args.test.ts", "test/browser-companion.test.ts", "test/browser-companion-lifecycle.test.ts"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 5 * MIN },
   // Regenerate the plugin registry and fail on drift; the pre-drift file is
   // restored so the runner never leaves the tree dirty.
   { id: "registry-drift", group: "static", title: "plugin registry matches plugin.yaml manifests", command: ["bash", "-c", "set -e; f=packages/api/src/plugins/registry.gen.ts; pnpm tsx scripts/generate-v2-registry.ts >/dev/null; if ! git diff --quiet -- \"$f\"; then git checkout -- \"$f\"; echo \"registry.gen.ts is out of date - run 'make generate-registries' and commit\"; exit 1; fi"], needs: [], scrubKeys: true, timeoutMs: 5 * MIN },
@@ -212,9 +239,10 @@ export const STEPS: StepDef[] = [
   { id: "cli", group: "integration", title: "CLI e2e (T9)", command: apiTest("src/integration/cli.e2e.test.ts"), needs: [], env: { VALET_CLI_E2E: "1" }, timeoutMs: 15 * MIN },
 
   // ── docker / cluster gated ───────────────────────────────────────────────
-  { id: "sandbox-docker", group: "docker", title: "sandbox-docker suite", command: ["pnpm", "--filter", "@valet/sandbox-docker", "test"], needs: ["docker"], timeoutMs: 15 * MIN },
+  { id: "browser-docker", group: "docker", title: "managed browser isolation, persistence, approvals and HTTP flow", command: ["pnpm", "exec", "tsx", "scripts/e2e/browser.ts"], needs: ["docker"], timeoutMs: 20 * MIN },
+  { id: "sandbox-docker", group: "docker", title: "sandbox-docker suite", command: ["pnpm", "--filter", "@valet/sandbox-docker", "test", "--exclude", "test/run-args.test.ts", "--exclude", "test/browser-companion.test.ts", "--exclude", "test/browser-companion-lifecycle.test.ts", "--exclude", "test/dind.e2e.test.ts"], needs: ["docker"], timeoutMs: 15 * MIN },
   { id: "sandbox-dind", group: "docker", title: "rootless docker-in-sandbox", command: ["pnpm", "--filter", "@valet/sandbox-docker", "test", "test/dind.e2e.test.ts"], needs: ["docker"], timeoutMs: 15 * MIN },
-  { id: "sandbox-k8s", group: "docker", title: "sandbox-kubernetes cluster suite", command: ["pnpm", "--filter", "@valet/sandbox-kubernetes", "test"], needs: ["k8sContext"], timeoutMs: 20 * MIN },
+  { id: "sandbox-k8s", group: "docker", title: "sandbox-kubernetes cluster suite", command: ["pnpm", "--filter", "@valet/sandbox-kubernetes", "test", ".cluster.test.ts"], needs: ["k8sContext"], timeoutMs: 20 * MIN },
   { id: "store-postgres", group: "docker", title: "real-Postgres conformance", command: ["make", "test-pg"], needs: ["docker"], timeoutMs: 15 * MIN },
   { id: "workspace-prep-docker", group: "docker", title: "workspace prep against real sandbox", command: apiTest("src/engine/workspace-prep.docker.test.ts", "src/engine/workspace-prep-prebuilt.docker.test.ts"), needs: ["docker"], timeoutMs: 15 * MIN },
   { id: "prebuilds-docker", group: "docker", title: "image prebuild pipeline", command: apiTest("src/integration/prebuilds.e2e.test.ts"), needs: ["docker"], timeoutMs: 20 * MIN },
@@ -227,7 +255,7 @@ export const STEPS: StepDef[] = [
 
   // ── live external ────────────────────────────────────────────────────────
   { id: "telegram", group: "live", title: "live Telegram outbound", command: apiTest("src/integration/telegram.e2e.test.ts"), needs: ["telegram"], timeoutMs: 10 * MIN },
-  { id: "github-live", group: "live", title: "live GitHub App", command: apiTest("src/integration/github-repo.e2e.test.ts"), needs: ["githubLive"], timeoutMs: 10 * MIN },
+  { id: "github-live", group: "live", title: "live GitHub App", command: apiTest("src/integration/github-repo.e2e.test.ts", "-t", "live App JWT check"), needs: ["githubLive"], timeoutMs: 10 * MIN },
   { id: "openai", group: "live", title: "OpenAI provider path", command: apiTest("src/integration/llm-providers.e2e.test.ts"), needs: ["openai"], timeoutMs: 10 * MIN },
   {
     id: "onepassword",

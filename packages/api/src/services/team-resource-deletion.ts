@@ -1,8 +1,8 @@
 /** Shared deletion operations for direct requests and approved requests. */
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { NotFoundError } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
-import { apikey, assistants, credentials } from "../schema/index.js";
+import { apikey, credentials } from "../schema/index.js";
 import { invalidateWorkflowSources } from "./content-sync/invalidation.js";
 import { deleteTeam } from "./teams.js";
 import { reapTeamWorkflows } from "../workflows/service.js";
@@ -34,9 +34,12 @@ export async function deleteTeamApiKey(db: AppDb, actor: Actor, teamId: string, 
 export async function deleteTeamResources(db: AppDb, actor: Actor, teamId: string): Promise<string[]> {
   return db.transaction(async (tx) => {
     if (!(await lockTeamDeletionAccess(tx, actor, teamId))) throw new TeamAdminRequiredError(teamId, "team", teamId);
-    const rows = await tx.select({ sessionId: assistants.sessionId }).from(assistants)
-      .where(and(eq(assistants.ownerType, "team"), eq(assistants.ownerId, teamId)));
+    const result = await tx.execute(sql`
+      SELECT id AS "sessionId" FROM agent_sessions WHERE org_id = ${actor.orgId} AND owner_type = 'team' AND owner_id = ${teamId}
+      UNION SELECT session_id FROM assistants WHERE org_id = ${actor.orgId} AND owner_type = 'team' AND owner_id = ${teamId}
+      UNION SELECT x.session_id FROM assistant_executions x JOIN assistants a ON a.id = x.assistant_id
+        WHERE a.org_id = ${actor.orgId} AND a.owner_type = 'team' AND a.owner_id = ${teamId}`) as { rows: Array<{ sessionId: string }> };
     await deleteTeam(tx, { teamId, reapOwnedWorkflows: (inner) => reapTeamWorkflows(inner, teamId) });
-    return rows.map((r) => r.sessionId);
+    return result.rows.map((r) => r.sessionId);
   });
 }

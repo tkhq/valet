@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { addMember, createTeam, removeMember } from "../services/teams.js";
-import { apikey, credentials, notifications, orgMembers, orgs, skills, teamDeletionRequests, teams, users, workflowDefinitions, workflowRuns } from "../schema/index.js";
+import { apikey, notifications, orgMembers, orgs, skills, teamDeletionRequests, teams, users, workflowDefinitions, workflowRuns } from "../schema/index.js";
 
 let api: TestApi;
 let teamId: string;

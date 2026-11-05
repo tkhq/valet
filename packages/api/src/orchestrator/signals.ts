@@ -1,3 +1,4 @@
+import { readToolScope, type ToolScope } from "@valet/shared";
 /**
  * Signal edge ACL (Phase 4 decision 16). `admitSignal` is the ONLY path
  * through which host code admits a `SignalContent` on another session's
@@ -41,6 +42,7 @@ export interface AdmitSignalDeps {
 }
 
 export interface AdmitSignalArgs {
+  toolScope?: ToolScope;
   from: { sessionId: string; owner: Principal };
   /** Recipient session id. */
   to: string;
@@ -70,7 +72,7 @@ export class SignalEdgeDeniedError extends Error {
  */
 export async function writeDropLog(
   db: AppDb,
-  fields: { orgId: string; reason: string; conversationKey?: string; detail: string },
+  fields: { orgId: string; reason: string; conversationKey?: string; eventKey?: string; eventMetadata?: Record<string, string>; detail: string },
 ): Promise<void> {
   await db
     .insert(eventDropLog)
@@ -79,6 +81,8 @@ export async function writeDropLog(
       orgId: fields.orgId,
       reason: fields.reason,
       conversationKey: fields.conversationKey ?? null,
+      eventKey: fields.eventKey ?? null,
+      eventMetadata: fields.eventMetadata ?? null,
       detail: fields.detail,
       createdAt: Date.now(),
     });
@@ -88,6 +92,12 @@ export async function writeDropLog(
  * Edge authorization (decision 16). Returns the two sessions' durable
  * `SessionData` rows on success (callers reuse them — no need to re-fetch).
  * Throws `SignalEdgeDeniedError` (and drop-logs) on denial.
+ *
+ * This is also the bound on a second rule. `admitSignal` submits with no
+ * author, and `workflows/actions.ts#ownerFromContext` reads an author-less
+ * turn as a machine turn, which waives the team-membership check on the
+ * `workflows.*` tools. The edges below are what keep that safe, so read
+ * that gate before you widen one.
  */
 async function authorizeEdge(
   deps: AdmitSignalDeps,
@@ -193,7 +203,8 @@ async function resolveThread(
     });
     throw new SignalEdgeDeniedError(args.from.sessionId, args.to, "thread not found");
   }
-  return session.thread(args.threadKey);
+  // `createThread` stamps the user's current timezone on a new thread (TKAI-584).
+  return session.createThread(args.threadKey);
 }
 
 /**
@@ -242,14 +253,17 @@ export async function admitSignal(deps: AdmitSignalDeps, args: AdmitSignalArgs):
 
   try {
     return await thread.submitPrompt(args.content, {
+      ...(args.toolScope !== undefined ? { metadata: { toolScope: readToolScope(args.toolScope) } } : {}),
       dispatchId: args.dispatchId,
-      // Internal signals always queue behind in-flight work. User-owned
-      // orchestrator threads run queueMode 'steer' (decision 17) — without
-      // this override, a child.settled signal admitted mid-turn would
-      // SUPERSEDE and abort the parent's own running turn (steer semantics),
-      // which is backwards for an observed event: signals are context for
-      // the next turn, never an interrupt.
-      queueMode: "followup",
+      // Internal signals never interrupt. User-owned orchestrator threads
+      // run queueMode 'steer' (decision 17) — without this override, a
+      // child.settled signal admitted mid-turn would SUPERSEDE and abort the
+      // parent's own running turn (steer semantics), which is backwards for
+      // an observed event. A child's result is `inject`: it joins a running
+      // turn that handles another result from the same owner at its next
+      // tool boundary (`canDeliverMidTurn`), so close results are read
+      // together. It never joins a person's own turn; there it waits.
+      queueMode: args.content.signalType.startsWith("child.") ? "inject" : "followup",
       internalSender: { sessionId: args.from.sessionId, owner: args.from.owner, hopCount: args.hopCount },
     });
   } catch (err) {

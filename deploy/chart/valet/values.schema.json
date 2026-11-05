@@ -2,9 +2,35 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
   "properties": {
+    "sandbox": {
+      "type": "object",
+      "properties": {
+        "browserEnabled": {
+          "type": "boolean",
+          "description": "Enable the managed browser after installing its image and node seccomp profile."
+        },
+        "browserSeccompProfile": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+(/[A-Za-z0-9_.-]+)*\\.json$",
+          "description": "Relative profile path beneath each node's kubelet seccomp directory."
+        },
+        "browserRuntimeStorage": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Storage request for each session's private browser PVC."
+        },
+        "createNamespace": {
+          "description": "Create the sandbox namespace as part of the Helm release.",
+          "type": "boolean"
+        }
+      }
+    },
     "registry": {
       "type": "object",
-      "required": ["minFreeGb", "minFreePercent"],
+      "required": [
+        "minFreeGb",
+        "minFreePercent"
+      ],
       "properties": {
         "minFreeGb": {
           "description": "Set the absolute free-space reserve to zero or a positive number of GB.",
@@ -16,6 +42,43 @@
           "type": "number",
           "exclusiveMinimum": 0,
           "exclusiveMaximum": 100
+        }
+      }
+    },
+    "api": {
+      "type": "object",
+      "properties": {
+        "startupProbe": {
+          "type": "object",
+          "properties": {
+            "failureThreshold": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Startup budget in 5-second units. The probe polls every second, so the chart multiplies this value by 5."
+            }
+          }
+        },
+        "progressDeadlineSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Positive rollout progress deadline in seconds. Allow more time than the startup probe budget."
+        },
+        "terminationGracePeriodSeconds": {
+          "type": "integer",
+          "minimum": 21,
+          "description": "Pod termination grace period. Keep it above the api's 20-second shutdown bound."
+        },
+        "publishNotReadyAddresses": {
+          "type": "boolean",
+          "description": "Route traffic to the api pod while it boots or drains. Set false for RollingUpdate."
+        },
+        "imagePrepull": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "replicas": { "type": "integer", "minimum": 1 },
+            "activeDeadlineSeconds": { "type": "integer", "minimum": 1 }
+          }
         }
       }
     }

@@ -10,15 +10,18 @@ const driveMd = readFileSync(fileURLToPath(new URL("../skills/google-drive/SKILL
 const docsMd = readFileSync(fileURLToPath(new URL("../skills/google-docs/SKILL.md", import.meta.url)), "utf8");
 const sheetsMd = readFileSync(fileURLToPath(new URL("../skills/google-sheets/SKILL.md", import.meta.url)), "utf8");
 
+const slidesMd = readFileSync(fileURLToPath(new URL("../skills/google-slides/SKILL.md", import.meta.url)), "utf8");
+
 const plugin: ValetPlugin = {
   name: "google-workspace",
   version: "0.1.0",
-  description: "Google Workspace integration — Drive, Docs, and Sheets with unified OAuth and labels-based access guard",
+  description: "Google Workspace integration — Drive, Docs, Sheets, and Slides with unified OAuth and labels-based access guard",
   actions: [googleWorkspacePlugin],
   skills: [
     loadSkillFromMarkdown(driveMd, "plugin", "google-drive"),
     loadSkillFromMarkdown(docsMd, "plugin", "google-docs"),
     loadSkillFromMarkdown(sheetsMd, "plugin", "google-sheets"),
+    loadSkillFromMarkdown(slidesMd, "plugin", "google-slides"),
   ],
   credentials: [
     {

@@ -12,12 +12,13 @@
  * for rows hibernated before that column existed. Race rules mirror
  * `ChildWatcher.sweepRetention`.
  */
-import { and, eq, isNull, lte } from "drizzle-orm";
-import { recordSandboxDestroyed, type AttachmentState } from "@valet/engine";
+import { and, eq, isNull, lte, sql } from "drizzle-orm";
+import { recordSandboxDestroyed, type AttachmentState, reportError } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions } from "../schema/index.js";
 import { revokeSandboxTokens } from "../auth/sandbox-tokens.js";
 import { startSweepTimer, type SweepTimer } from "../lib/sweep-timer.js";
+import { sandboxReclaimBackoff } from "../lib/retry-backoff.js";
 
 const DEFAULT_SWEEP_INTERVAL_MS = 5 * 60_000;
 
@@ -54,6 +55,7 @@ export interface HibernationReaperDeps {
 
 export class HibernationReaper {
   private timer: SweepTimer | null = null;
+  private readonly backoff = sandboxReclaimBackoff();
 
   constructor(private readonly deps: HibernationReaperDeps) {}
 
@@ -67,11 +69,15 @@ export class HibernationReaper {
       .where(
         and(
           eq(agentSessions.status, "hibernated"),
+          // Legacy team roots retain mixed-audience files for explicit recovery.
+          // Only isolated executions resume normal destructive retention.
+          sql`NOT EXISTS (SELECT 1 FROM assistants a WHERE a.session_id=${agentSessions.id} AND a.owner_type='team')`,
           isNull(agentSessions.sandboxReclaimedAt),
           lte(agentSessions.updatedAt, cutoff),
         ),
       );
     for (const row of rows) {
+      if (!this.backoff.ready(row.id, now)) continue;
       try {
         const unsettled = await this.deps.engineStore.listUnsettledSubmissions(row.id);
         if (unsettled.length > 0) continue;
@@ -112,8 +118,10 @@ export class HibernationReaper {
           .update(agentSessions)
           .set({ sandboxReclaimedAt: now, updatedAt: now })
           .where(and(eq(agentSessions.id, row.id), eq(agentSessions.status, "hibernated")));
+        this.backoff.succeeded(row.id);
       } catch (err) {
-        console.error(`HibernationReaper: reclaim failed for session ${row.id}:`, err);
+        const waitMs = this.backoff.failed(row.id, now);
+        reportError({ area: "sandbox", reason: "hibernation_reclaim" }, `HibernationReaper: reclaim failed for session ${row.id}; next attempt in ${Math.round(waitMs / 60_000)} min`, err);
       }
     }
   }

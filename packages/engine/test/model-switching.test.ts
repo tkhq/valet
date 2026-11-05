@@ -1,3 +1,4 @@
+import { getCurrentSystemPrompt } from "@earendil-works/pi-ai/utils/transcript";
 /**
  * Model switching: layered resolution + the `switch_model` builtin tool.
  *
@@ -26,7 +27,7 @@
 import { afterEach, describe, it, expect, vi } from "vitest";
 import {
   fauxAssistantMessage,
-  fauxToolCall,
+
   getModel,
   registerBuiltInApiProviders,
   registerFauxProvider,
@@ -34,6 +35,7 @@ import {
   type FauxProvider,
   type Model,
 } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import {
   builtinTools,
   Engine,
@@ -136,16 +138,14 @@ async function waitForCondition(predicate: () => boolean, timeoutMs = 3000): Pro
 }
 
 describe("engine: model switching", () => {
-  it("resolves Astra without a host registry using bare and provider-qualified ids", () => {
-    const astra = resolveModelId("gpt-6-astra");
-    expect(astra).toMatchObject({
-      id: "gpt-6-astra",
-      provider: "openai",
-      api: "openai-responses",
-      contextWindow: 272000,
-      maxTokens: 128000,
-    });
-    expect(resolveModelId("openai/gpt-6-astra")).toEqual(astra);
+  it("resolves Astra and accepts a thread model pin", async () => {
+    expect(resolveModelId("gpt-6-astra")?.id).toBe("gpt-6-astra");
+    expect(resolveModelId("openai/gpt-6-astra")?.id).toBe("gpt-6-astra");
+    const { engine, baseModel } = setup();
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: baseModel, modelSpec: "openai/gpt-6-astra" });
+    const thread = await session.ensureDefaultThread();
+    await thread.setModel("openai/gpt-6-astra");
+    expect(thread.modelId()).toBe("openai/gpt-6-astra");
   });
 
   it("keeps tool guidance consistent with supervisor-selected drafting and review tiers", () => {
@@ -314,7 +314,7 @@ describe("engine: model switching", () => {
     expect(await session.threadByKey("web:configured")).toBe(thread);
   });
 
-  it("createThread persists an explicit no-reasoning setting across restore", async () => {
+  it("restores a legacy \"off\" reasoning row as no pin", async () => {
     const { engine, newEngine, store, baseModel } = setup();
     const session = await engine.createSession({
       userId: "u1",
@@ -324,19 +324,18 @@ describe("engine: model switching", () => {
       model: baseModel,
       sampling: { reasoning: "high" },
     });
-
-    const thread = await session.createThread("web:no-reasoning", {
-      model: "s",
-      reasoning: null,
-    });
-    expect(thread.reasoning()).toBeUndefined();
-    expect((await store.getThread(session.id, thread.id))?.reasoning).toBe("off");
+    const thread = await session.createThread("web:legacy-off", { model: "s" });
+    // Older builds wrote "off" for a new thread with no resolved default.
+    await store.saveThread(session.id, { ...thread.toThreadData(), reasoning: "off" });
 
     const restored = await newEngine().restoreSession({
       sessionId: session.id,
       options: { userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: baseModel },
     });
-    expect(restored.threadById(thread.id)?.toThreadData().reasoning).toBe("off");
+    const legacy = restored.threadById(thread.id);
+    expect(legacy?.reasoning()).toBeUndefined();
+    expect(legacy?.toThreadData().reasoning).toBeUndefined();
+    expect(restored.options.sampling?.reasoning).toBe("high");
   });
 
   it("createThread does not expose a thread when persistence fails", async () => {
@@ -726,7 +725,7 @@ describe("engine: active submission model state", () => {
     let rolePrompt: string | undefined;
     roleFaux.setResponses([
       (context) => {
-        rolePrompt = context.systemPrompt;
+        rolePrompt = getCurrentSystemPrompt(context.messages);
         return fauxAssistantMessage("review completed");
       },
     ]);
@@ -735,7 +734,7 @@ describe("engine: active submission model state", () => {
       | undefined;
     baseFaux.setResponses([
       (context, _options, _state, model) => {
-        nextRun = { provider: model.provider, systemPrompt: context.systemPrompt };
+        nextRun = { provider: model.provider, systemPrompt: getCurrentSystemPrompt(context.messages) };
         return fauxAssistantMessage("plain follow-up completed");
       },
     ]);
@@ -796,7 +795,7 @@ Role-only instructions.
       { type: "model_state", threadId: thread.id, queueItemId: null, model: null },
     ]);
     expect(rolePrompt).toMatch(
-      /^Base instructions\.\n\nRole-only instructions\.\n{2,3}## Runtime model\n/,
+      /^Base instructions\.\n\n## Thread started[\s\S]*?\n\n## Runtime model[\s\S]*Temporary override: role model; expires when this turn ends\n\nRole-only instructions\.\n$/,
     );
     expect(rolePrompt).toContain(`Active selection: ${HAIKU}`);
     expect(rolePrompt).toContain("Temporary override: role model; expires when this turn ends");
@@ -810,7 +809,7 @@ Role-only instructions.
       ),
     );
     expect(nextRun?.provider).toBe(baseFaux.getModel().provider);
-    expect(nextRun?.systemPrompt).toMatch(/^Base instructions\.\n\n## Runtime model\n/);
+    expect(nextRun?.systemPrompt).toMatch(/^Base instructions\.\n\n## Thread started[\s\S]*?\n\n## Runtime model\n/);
     expect(nextRun?.systemPrompt).not.toContain("Role-only instructions.");
     expect(nextRun?.systemPrompt).toContain("Temporary override: none");
   });
@@ -835,7 +834,7 @@ Role-only instructions.
       | undefined;
     baseFaux.setResponses([
       (context, _options, _state, model) => {
-        nextRun = { provider: model.provider, systemPrompt: context.systemPrompt };
+        nextRun = { provider: model.provider, systemPrompt: getCurrentSystemPrompt(context.messages) };
         return fauxAssistantMessage("plain follow-up completed");
       },
     ]);
@@ -909,7 +908,7 @@ Role-only instructions.
       ),
     );
     expect(nextRun?.provider).toBe(baseFaux.getModel().provider);
-    expect(nextRun?.systemPrompt).toMatch(/^Base instructions\.\n\n## Runtime model\n/);
+    expect(nextRun?.systemPrompt).toMatch(/^Base instructions\.\n\n## Thread started[\s\S]*?\n\n## Runtime model\n/);
     expect(nextRun?.systemPrompt).not.toContain("Role-only instructions.");
     expect(nextRun?.systemPrompt).toContain("Temporary override: none");
   });
@@ -922,7 +921,7 @@ Role-only instructions.
       | undefined;
     baseFaux.setResponses([
       (ctx, _opts, _state, model) => {
-        nextRun = { provider: model.provider, systemPrompt: ctx.systemPrompt };
+        nextRun = { provider: model.provider, systemPrompt: getCurrentSystemPrompt(ctx.messages) };
         return fauxAssistantMessage("next prompt completed");
       },
     ]);
@@ -1003,7 +1002,7 @@ Role-only instructions.
       ),
     );
     expect(nextRun?.provider).toBe(baseFaux.getModel().provider);
-    expect(nextRun?.systemPrompt).toMatch(/^Base instructions\.\n\n## Runtime model\n/);
+    expect(nextRun?.systemPrompt).toMatch(/^Base instructions\.\n\n## Thread started[\s\S]*?\n\n## Runtime model\n/);
     expect(nextRun?.systemPrompt).not.toContain("Role-only instructions.");
     expect(nextRun?.systemPrompt).toContain("Temporary override: none");
   });

@@ -50,8 +50,13 @@ export interface GithubFixtureHandlers {
   oauthAccessToken?: () => GithubFixtureResponse;
   /** `GET /user/repos` */
   listUserRepos?: () => GithubFixtureResponse;
-  /** `GET /installation/repositories` */
-  listInstallationRepositories?: () => GithubFixtureResponse;
+  /** `GET /installation/repositories`. Receives the `authorization` header,
+   * so a fixture with several installations can answer per installation
+   * token. */
+  listInstallationRepositories?: (authHeader: string | undefined) => GithubFixtureResponse;
+  /** `GET /user/installations`, read with a user's OAuth token. GitHub
+   * wraps the array in `{ installations }`. */
+  listUserInstallations?: (authHeader: string | undefined) => GithubFixtureResponse;
   /** `POST /app-manifests/:code/conversions` */
   convertManifest?: (code: string) => GithubFixtureResponse;
   /** `GET /app/hook/config` — the App's OWN webhook config. */
@@ -79,9 +84,29 @@ export interface GithubFixtureHandlers {
    * request path rather than a single Hono `:path` param. `ref` is the
    * parsed `?ref=` query value. */
   getContents?: (owner: string, repo: string, path: string, ref: string | undefined) => GithubFixtureResponse;
+  /** `GET /repos/:owner/:repo/git/blobs/:sha` — what the reader falls back
+   * to when the contents endpoint answers `encoding: "none"` (files over
+   * 1 MB). */
+  getBlob?: (owner: string, repo: string, sha: string) => GithubFixtureResponse;
   /** `GET /repos/:owner/:repo/compare/:base...:head` — the diff-scoped re-scan
    * flow reads `files[].filename`. `range` is the raw `base...head` segment. */
   getCompare?: (owner: string, repo: string, range: string) => GithubFixtureResponse;
+  /** `GET /repos/:owner/:repo/issues/:number`. GitHub numbers issues and
+   * pull requests in one sequence; a pull request's issue carries
+   * `pull_request`. */
+  getIssue?: (owner: string, repo: string, number: string, authHeader: string | undefined) => GithubFixtureResponse;
+  /** `GET /repos/:owner/:repo/pulls/:number`. */
+  getPull?: (owner: string, repo: string, number: string) => GithubFixtureResponse;
+  /** `GET /repos/:owner/:repo/commits/:sha/check-runs`. Receives the parsed
+   * query string, so a fixture can page on `page`/`per_page`. */
+  listCheckRuns?: (owner: string, repo: string, sha: string, query: Record<string, string>) => GithubFixtureResponse;
+  /** `GET /repos/:owner/:repo/commits/:sha/status`, the combined status. */
+  getCombinedStatus?: (owner: string, repo: string, sha: string) => GithubFixtureResponse;
+  getRepoInstallation?: (owner: string, repo: string) => GithubFixtureResponse;
+  listCheckSuites?: () => GithubFixtureResponse;
+  listWorkflowRuns?: () => GithubFixtureResponse;
+  /** `GET /users/:login`. */
+  getUserByLogin?: (login: string) => GithubFixtureResponse;
 }
 
 export interface GithubFixture {
@@ -118,6 +143,7 @@ const DEFAULTS: Required<GithubFixtureHandlers> = {
   oauthAccessToken: () => ({ body: { access_token: "fixture-oauth-token", token_type: "bearer", scope: "" } }),
   listUserRepos: () => ({ body: [] }),
   listInstallationRepositories: () => ({ body: { total_count: 0, repositories: [] } }),
+  listUserInstallations: () => ({ body: { total_count: 0, installations: [] } }),
   convertManifest: () => ({
     body: {
       id: 1,
@@ -140,10 +166,19 @@ const DEFAULTS: Required<GithubFixtureHandlers> = {
   }),
   updateHookConfig: () => ({ body: { content_type: "json", insecure_ssl: "0", secret: "********" } }),
   getRepo: (owner, repo) => ({ body: { default_branch: "main", full_name: `${owner}/${repo}`, clone_url: `https://github.com/${owner}/${repo}.git` } }),
-  getCommit: () => ({ body: commitBody("fixture-head-sha") }),
+  getCommit: () => ({ body: commitBody("f".repeat(40)) }),
   getTree: () => ({ body: { sha: "fixture-tree-sha", tree: [], truncated: false } }),
   getContents: () => ({ status: 404, body: { message: "Not Found" } }),
+  getBlob: () => ({ status: 404, body: { message: "Not Found" } }),
   getCompare: () => ({ body: { files: [] } }),
+  getIssue: () => ({ status: 404, body: { message: "Not Found" } }),
+  getPull: () => ({ status: 404, body: { message: "Not Found" } }),
+  listCheckRuns: () => ({ body: { total_count: 0, check_runs: [] } }),
+  getCombinedStatus: () => ({ body: { state: "pending", statuses: [] } }),
+  getRepoInstallation: () => ({ status: 404, body: { message: "Not Found" } }),
+  listCheckSuites: () => ({ body: { total_count: 0, check_suites: [] } }),
+  listWorkflowRuns: () => ({ body: { total_count: 0, workflow_runs: [] } }),
+  getUserByLogin: () => ({ status: 404, body: { message: "Not Found" } }),
 };
 
 /**
@@ -193,6 +228,12 @@ export function startGithubFixture(overrides: GithubFixtureHandlers = {}): Githu
   const calls: GithubFixtureCall[] = [];
 
   const app = new Hono();
+  // Each test owns a short-lived server on an ephemeral port. Do not leave
+  // pooled client connections available when that server shuts down.
+  app.use("*", async (c, next) => {
+    c.header("Connection", "close");
+    await next();
+  });
 
   function record(
     c: {
@@ -289,7 +330,16 @@ export function startGithubFixture(overrides: GithubFixtureHandlers = {}): Githu
 
   app.get("/installation/repositories", (c) => {
     record(c, {});
-    const { status, body } = handlers.listInstallationRepositories();
+    const { status, body } = handlers.listInstallationRepositories(c.req.header("authorization"));
+    return c.json(body as object, status ?? 200);
+  });
+
+  app.get("/user/installations", (c) => {
+    record(c, {});
+    const { status, body, headers } = handlers.listUserInstallations(c.req.header("authorization"));
+    if (headers) {
+      for (const [name, value] of Object.entries(headers)) c.header(name, value);
+    }
     return c.json(body as object, status ?? 200);
   });
 
@@ -329,6 +379,15 @@ export function startGithubFixture(overrides: GithubFixtureHandlers = {}): Githu
     return c.json(body as object, status ?? 200);
   });
 
+  app.get("/repos/:owner/:repo/git/blobs/:sha", (c) => {
+    const owner = c.req.param("owner");
+    const repo = c.req.param("repo");
+    const sha = c.req.param("sha");
+    record(c, { owner, repo, sha });
+    const { status, body } = handlers.getBlob(owner, repo, sha);
+    return c.json(body as object, status ?? 200);
+  });
+
   app.get("/repos/:owner/:repo/compare/*", (c) => {
     const owner = c.req.param("owner");
     const repo = c.req.param("repo");
@@ -350,6 +409,60 @@ export function startGithubFixture(overrides: GithubFixtureHandlers = {}): Githu
     const ref = c.req.query("ref");
     record(c, { owner, repo, path });
     const { status, body } = handlers.getContents(owner, repo, path, ref);
+    return c.json(body as object, status ?? 200);
+  });
+
+  app.get("/repos/:owner/:repo/issues/:number", (c) => {
+    const { owner, repo, number } = c.req.param();
+    record(c, { owner, repo, number });
+    const { status, body } = handlers.getIssue(owner, repo, number, c.req.header("authorization"));
+    return c.json(body as object, status ?? 200);
+  });
+
+  app.get("/repos/:owner/:repo/pulls/:number", (c) => {
+    const { owner, repo, number } = c.req.param();
+    record(c, { owner, repo, number });
+    const { status, body } = handlers.getPull(owner, repo, number);
+    return c.json(body as object, status ?? 200);
+  });
+
+  app.get("/repos/:owner/:repo/commits/:sha/check-runs", (c) => {
+    const { owner, repo, sha } = c.req.param();
+    record(c, { owner, repo, sha });
+    const { status, body } = handlers.listCheckRuns(owner, repo, sha, c.req.query());
+    return c.json(body as object, status ?? 200);
+  });
+
+  app.get("/repos/:owner/:repo/commits/:sha/status", (c) => {
+    const { owner, repo, sha } = c.req.param();
+    record(c, { owner, repo, sha });
+    const { status, body } = handlers.getCombinedStatus(owner, repo, sha);
+    return c.json(body as object, status ?? 200);
+  });
+
+  app.get("/repos/:owner/:repo/installation", (c) => {
+    const { owner, repo } = c.req.param();
+    record(c, { owner, repo });
+    const { status, body } = handlers.getRepoInstallation(owner, repo);
+    return c.json(body as object, status ?? 200);
+  });
+
+  app.get("/repos/:owner/:repo/commits/:sha/check-suites", (c) => {
+    record(c, c.req.param());
+    const { status, body } = handlers.listCheckSuites();
+    return c.json(body as object, status ?? 200);
+  });
+
+  app.get("/repos/:owner/:repo/actions/runs", (c) => {
+    record(c, c.req.param());
+    const { status, body } = handlers.listWorkflowRuns();
+    return c.json(body as object, status ?? 200);
+  });
+
+  app.get("/users/:login", (c) => {
+    const login = c.req.param("login");
+    record(c, { login });
+    const { status, body } = handlers.getUserByLogin(login);
     return c.json(body as object, status ?? 200);
   });
 

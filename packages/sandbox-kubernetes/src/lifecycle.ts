@@ -1,3 +1,4 @@
+import { browserRuntimeFingerprint, hasBrowserCompanion } from "./browser-topology.js";
 import { withPersistentHomes, HOME_LAYOUT_ENV } from "./home-persistence.js";
 /**
  * CRD lifecycle module (decision 5's "churn containment" clause — all
@@ -101,13 +102,15 @@ import { withPersistentHomes, HOME_LAYOUT_ENV } from "./home-persistence.js";
 import type * as k8s from "@kubernetes/client-node";
 import { createHash } from "node:crypto";
 import { setHeaderOptions } from "@kubernetes/client-node";
-import type { Sandbox, SandboxResourceField, SandboxStatus } from "@valet/engine";
+import type { Sandbox, SandboxResourceField, SandboxStartupKind, SandboxStatus } from "@valet/engine";
 import {
   IMAGE_FINGERPRINT_ENV,
   imageFingerprint,
   NEVER_READY_OWNER_ANNOTATION_KEY,
   SANDBOX_CONTAINER_NAME,
+  SCRATCH_VOLUME_NAME,
   SESSION_ANNOTATION_KEY,
+  withScratchState,
 } from "./manifest.js";
 import type {
   K8sProviderConfig,
@@ -189,15 +192,22 @@ function withResourceFingerprint(
   return { ...template, metadata: { ...template.metadata, annotations }, spec };
 }
 
-/** Fingerprint desired requests/limits, not admission-mutated pod resources. */
+/** Fingerprint desired requests/limits, not admission-mutated pod resources.
+ * Also covers `scratch` (absent vs present counts as a change): the
+ * scratch emptyDir is node-local disk the same way cpu/memory are node
+ * compute, so a scratch-only change must roll the pod exactly like a
+ * cpu/memory change does. The scratch slot is appended only when scratch
+ * is set, so a scratch-less spec keeps its pre-scratch hash byte for byte
+ * and an upgrade does not roll every pod. */
 export function resourceFingerprint(resources: SandboxCpuMemoryResources): string {
-  const values = (["requests", "limits"] as const).flatMap((side) =>
+  const values: (string | null)[] = (["requests", "limits"] as const).flatMap((side) =>
     (["cpu", "memory"] as const).map((field) => normalizeQuantity(resources[side]?.[field]) ?? null),
   );
+  if (resources.scratch !== undefined) values.push(normalizeQuantity(resources.scratch) ?? null);
   return createHash("sha256").update(JSON.stringify(values)).digest("hex");
 }
 
-function readResourceOverridesAnnotation(cr: SandboxCRRead): Sandbox["resourceOverrides"] {
+export function readResourceOverridesAnnotation(cr: SandboxCRRead): Sandbox["resourceOverrides"] {
   const serialized = cr.metadata.annotations?.[RESOURCE_OVERRIDES_ANNOTATION];
   if (serialized === undefined) return undefined;
   let value: unknown;
@@ -205,10 +215,23 @@ function readResourceOverridesAnnotation(cr: SandboxCRRead): Sandbox["resourceOv
   if (!isRecord(value) || Array.isArray(value)) return undefined;
   if (value.cpu !== undefined && (typeof value.cpu !== "number" || !Number.isFinite(value.cpu) || value.cpu <= 0)) return undefined;
   if (value.memory !== undefined && (typeof value.memory !== "string" || value.memory.trim().length === 0)) return undefined;
+  if (value.scratch !== undefined && (typeof value.scratch !== "string" || value.scratch.trim().length === 0)) return undefined;
   return {
     ...(typeof value.cpu === "number" ? { cpu: value.cpu } : {}),
     ...(typeof value.memory === "string" ? { memory: value.memory } : {}),
+    ...(typeof value.scratch === "string" ? { scratch: value.scratch } : {}),
   };
+}
+
+/** The override record with scratch read from the live template: the
+ * emptyDir is the scratch the pod runs, and an annotation written before
+ * scratch was recorded lacks it. Undefined when the CR has no record. */
+export function resourceOverridesWithLiveScratch(cr: SandboxCRRead): Sandbox["resourceOverrides"] {
+  const recorded = readResourceOverridesAnnotation(cr);
+  if (recorded === undefined || recorded === null) return recorded;
+  const { scratch: _recorded, ...rest } = recorded;
+  const live = sandboxCpuMemoryResources(cr.spec.podTemplate).scratch;
+  return live === undefined ? rest : { ...rest, scratch: live };
 }
 
 function resourceOverridesMetadata(
@@ -330,13 +353,29 @@ export interface ListPodsParams {
   labelSelector?: string;
 }
 
+/** Cluster-autoscaler's own annotation (spec 2026-10-08, wakeups/leases).
+ * `"false"` tells the autoscaler not to drain this pod's node, even while
+ * the node is otherwise a scale-down candidate. The autoscaler reads this
+ * from the LIVE pod, so it must be a real annotation, not CR-level state. */
+export const EVICTION_PROTECT_ANNOTATION = "cluster-autoscaler.kubernetes.io/safe-to-evict";
+
+/** Marks a pod as currently held open by a lease. `listEvictionProtected`
+ * selects on this label rather than `EVICTION_PROTECT_ANNOTATION` because
+ * labels (not annotations) support `labelSelector` list queries. */
+export const LEASED_LABEL = "valet.dev/leased";
+
 /** The subset of `@kubernetes/client-node`'s `CoreV1Api` this module
- * drives — just enough for `resolvePodName`'s ownerReference-scan
- * fallback. Real `CoreV1Api` returns a properly typed `V1PodList`, so
- * (unlike `SandboxCustomObjectsApi`) no runtime validation is needed here
- * beyond the adapter's own defensive field access. */
+ * drives, enough for `resolvePodName`'s ownerReference-scan fallback and
+ * for the eviction-protection patch. Real `CoreV1Api` returns a properly
+ * typed `V1PodList`, so (unlike `SandboxCustomObjectsApi`) no runtime
+ * validation is needed here beyond the adapter's own defensive field
+ * access. */
 export interface SandboxPodsApi {
   listNamespacedPod(params: ListPodsParams): Promise<{ items: PodSummary[] }>;
+  /** JSON merge-patch (`Content-Type: application/merge-patch+json`), same
+   * device as `SandboxCustomObjectsApi.patchNamespacedCustomObject`. A
+   * `null` annotation/label value removes that key. */
+  patchNamespacedPod(params: { name: string; namespace: string; body: unknown }): Promise<unknown>;
 }
 
 // ── Production adapters over the real client-node classes ─────────────
@@ -368,11 +407,12 @@ export function customObjectsApiAdapter(api: k8s.CustomObjectsApi): SandboxCusto
 
 function podOwnerReferencesFrom(refs: k8s.V1OwnerReference[] | undefined): PodOwnerReference[] | undefined {
   if (!refs) return undefined;
-  return refs.map((ref) => ({ kind: ref.kind, name: ref.name, controller: ref.controller }));
+  return refs.map((ref) => ({ kind: ref.kind, name: ref.name, uid: ref.uid, controller: ref.controller }));
 }
 
 /** Wraps a real `k8s.CoreV1Api` instance, projecting `V1Pod` down to the
- * minimal `PodSummary` shape `resolvePodName` needs. */
+ * minimal `PodSummary` shape `resolvePodName` and the eviction-protection
+ * methods need. */
 export function podsApiAdapter(api: k8s.CoreV1Api): SandboxPodsApi {
   return {
     listNamespacedPod: async (params) => {
@@ -385,9 +425,15 @@ export function podsApiAdapter(api: k8s.CoreV1Api): SandboxPodsApi {
         .map((pod) => ({
           name: pod.metadata.name,
           ownerReferences: podOwnerReferencesFrom(pod.metadata.ownerReferences),
+          annotations: pod.metadata.annotations,
+          labels: pod.metadata.labels,
         }));
       return { items };
     },
+    // Same Content-Type device as `customObjectsApiAdapter.patchNamespacedCustomObject`
+    // above. client-node's patch negotiation otherwise picks json-patch first.
+    patchNamespacedPod: (params) =>
+      api.patchNamespacedPod(params, setHeaderOptions("Content-Type", "application/merge-patch+json")),
   };
 }
 
@@ -507,26 +553,87 @@ function parseApiVersion(apiVersion: K8sProviderConfig["apiVersion"]): { group: 
 export interface SandboxCpuMemoryResources {
   requests?: { cpu?: string | number; memory?: string | number };
   limits?: { cpu?: string | number; memory?: string | number };
+  /** The `scratch` emptyDir's `sizeLimit`, read from the pod template's
+   * volumes (not a container request/limit, see `SandboxResourceOpts`). */
+  scratch?: string;
 }
 
-/** Read only the named sandbox container's CPU/memory requests and limits. */
+/** Reads the `scratch` emptyDir volume's `sizeLimit` off a pod template's
+ * `spec.volumes`, or undefined when no such volume is declared. */
+function scratchSizeLimit(spec: unknown): string | undefined {
+  if (!isRecord(spec) || !Array.isArray(spec.volumes)) return undefined;
+  const volume: unknown = spec.volumes.find(
+    (value: unknown) => isRecord(value) && value.name === SCRATCH_VOLUME_NAME,
+  );
+  if (!isRecord(volume) || !isRecord(volume.emptyDir)) return undefined;
+  return typeof volume.emptyDir.sizeLimit === "string" ? volume.emptyDir.sizeLimit : undefined;
+}
+
+/** Read the named sandbox container's CPU/memory requests and limits, plus
+ * the scratch emptyDir's size (read separately: it lives on `spec.volumes`,
+ * not the container's resources). */
 export function sandboxCpuMemoryResources(template: unknown): SandboxCpuMemoryResources {
+  if (!isRecord(template) || !isRecord(template.spec) || !Array.isArray(template.spec.containers)) return {};
+  const result: SandboxCpuMemoryResources = {};
+  const container: unknown = template.spec.containers.find(
+    (value: unknown) => isRecord(value) && value.name === SANDBOX_CONTAINER_NAME,
+  );
+  if (isRecord(container) && isRecord(container.resources)) {
+    for (const side of ["requests", "limits"] as const) {
+      const values = container.resources[side];
+      if (!isRecord(values)) continue;
+      const known: NonNullable<SandboxCpuMemoryResources["requests"]> = {};
+      for (const field of ["cpu", "memory"] as const) {
+        if (typeof values[field] === "string" || typeof values[field] === "number") known[field] = values[field];
+      }
+      if (Object.keys(known).length > 0) result[side] = known;
+    }
+  }
+  const scratch = scratchSizeLimit(template.spec);
+  if (scratch !== undefined) result.scratch = scratch;
+  return result;
+}
+
+/** Every engine resource field. The `Record` key type makes the compiler
+ * reject a new `SandboxResourceField` until it is listed here. */
+const RESOURCE_FIELD_SET: Record<SandboxResourceField, true> = { cpu: true, memory: true, scratch: true };
+const ALL_RESOURCE_FIELDS: readonly SandboxResourceField[] = ["cpu", "memory", "scratch"];
+
+/** True when the preserve mask names every resource field, in any order. */
+export function preservesEveryResourceField(fields: readonly SandboxResourceField[]): boolean {
+  const named = new Set<string>(fields);
+  return Object.keys(RESOURCE_FIELD_SET).every((field) => named.has(field));
+}
+
+/** The live sandbox container's ephemeral-storage request and limit. */
+function ephemeralStorageOf(template: unknown): { request?: string; limit?: string } {
   if (!isRecord(template) || !isRecord(template.spec) || !Array.isArray(template.spec.containers)) return {};
   const container: unknown = template.spec.containers.find(
     (value: unknown) => isRecord(value) && value.name === SANDBOX_CONTAINER_NAME,
   );
   if (!isRecord(container) || !isRecord(container.resources)) return {};
-  const result: SandboxCpuMemoryResources = {};
-  for (const side of ["requests", "limits"] as const) {
-    const values = container.resources[side];
-    if (!isRecord(values)) continue;
-    const known: NonNullable<SandboxCpuMemoryResources["requests"]> = {};
-    for (const field of ["cpu", "memory"] as const) {
-      if (typeof values[field] === "string" || typeof values[field] === "number") known[field] = values[field];
-    }
-    if (Object.keys(known).length > 0) result[side] = known;
-  }
-  return result;
+  const read = (side: unknown): string | undefined =>
+    isRecord(side) && typeof side["ephemeral-storage"] === "string" ? side["ephemeral-storage"] : undefined;
+  const request = read(container.resources.requests);
+  const limit = read(container.resources.limits);
+  return { ...(request !== undefined ? { request } : {}), ...(limit !== undefined ? { limit } : {}) };
+}
+
+/** Copy the preserved fields from the live template into the incoming one.
+ * cpu/memory come from the container's requests/limits. scratch is the
+ * emptyDir, its mount, TMPDIR, the init container, and the ephemeral sums
+ * that include it. Incoming storage applies when scratch does not change. */
+function preserveResources(
+  template: SandboxCR["spec"]["podTemplate"],
+  previousTemplate: unknown,
+  previous: SandboxCpuMemoryResources,
+  fields: readonly SandboxResourceField[],
+): SandboxCR["spec"]["podTemplate"] {
+  const withCpuMemory = preserveCpuMemory(template, previous, fields);
+  if (!fields.includes("scratch")) return withCpuMemory;
+  const incomingScratch = sandboxCpuMemoryResources(template).scratch;
+  if (normalizeQuantity(incomingScratch) === normalizeQuantity(previous.scratch)) return withCpuMemory;
+  return withScratchState(withCpuMemory, previous.scratch, ephemeralStorageOf(previousTemplate));
 }
 
 /** Copy prior CPU/memory into a new template while keeping incoming storage. */
@@ -545,9 +652,13 @@ function preserveCpuMemory(
           requests?: { cpu?: string | number; memory?: string | number; "ephemeral-storage"?: string };
           limits?: { cpu?: string | number; memory?: string | number; "ephemeral-storage"?: string };
         } = { ...container.resources };
+        // Only cpu/memory live on the container's resources.requests/limits.
+        // "scratch" is a node-local emptyDir volume; `preserveResources`
+        // handles it with `withScratchState`.
+        const cpuMemoryFields = fields.filter((field): field is "cpu" | "memory" => field !== "scratch");
         for (const side of ["requests", "limits"] as const) {
           const values: NonNullable<typeof resources.requests> = { ...resources[side] };
-          for (const field of fields) {
+          for (const field of cpuMemoryFields) {
             delete values[field];
             const previousValue = previous[side]?.[field];
             if (previousValue !== undefined) values[field] = previousValue;
@@ -642,7 +753,7 @@ export async function applySandbox(
   // Migrate before the CR update can start replacement. Once stored, the
   // record survives pod deletion and a crash before create() returns.
   const preserveResourceFields = opts.preserveResourceFieldsOnAdopt ??
-    (opts.preserveResourcesOnAdopt ? (["cpu", "memory"] as const) : []);
+    (opts.preserveResourcesOnAdopt ? ALL_RESOURCE_FIELDS : []);
   const previousResourceOverrides = preserveResourceFields.length > 0
     ? readResourceOverridesAnnotation(existing) ?? await opts.readResourceOverrides?.() ?? null
     : undefined;
@@ -652,7 +763,7 @@ export async function applySandbox(
       resourceOverrides = null;
     } else {
       resourceOverrides = { ...previousResourceOverrides };
-      for (const field of ["cpu", "memory"] as const) {
+      for (const field of ["cpu", "memory", "scratch"] as const) {
         if (preserveResourceFields.includes(field)) continue;
         delete resourceOverrides[field];
         if (field === "cpu" && opts.resourceOverrides?.cpu !== undefined) {
@@ -661,6 +772,18 @@ export async function applySandbox(
         if (field === "memory" && opts.resourceOverrides?.memory !== undefined) {
           resourceOverrides.memory = opts.resourceOverrides.memory;
         }
+        if (field === "scratch" && opts.resourceOverrides?.scratch !== undefined) {
+          resourceOverrides.scratch = opts.resourceOverrides.scratch;
+        }
+      }
+      // A preserved scratch is the live emptyDir, which the template keeps.
+      // Record it here too: an annotation written before scratch was
+      // recorded lacks it, and a record without it reads as drift at the
+      // next reconcile, which replaces the pod and wipes /scratch (H-A).
+      if (preserveResourceFields.includes("scratch")) {
+        delete resourceOverrides.scratch;
+        const liveScratch = sandboxCpuMemoryResources(existing.spec.podTemplate).scratch;
+        if (liveScratch !== undefined) resourceOverrides.scratch = liveScratch;
       }
     }
   }
@@ -690,10 +813,13 @@ export async function applySandbox(
       : { ...manifest.spec, podTemplate: requestedTemplate };
   if (preserveResourceFields.length > 0) {
     const previousResources = sandboxCpuMemoryResources(existing.spec.podTemplate);
-    // Legacy no-opinion adoption keeps fingerprint absence. Only an
-    // authoritative opinion can start the one-time fingerprint migration roll.
-    const preservedTemplate = preserveCpuMemory(manifest.spec.podTemplate, previousResources, preserveResourceFields);
-    const resourceFingerprintValue = preserveResourceFields.length === 2
+    const preservedTemplate = preserveResources(
+      manifest.spec.podTemplate, existing.spec.podTemplate, previousResources, preserveResourceFields,
+    );
+    // A no-opinion adopt (every field preserved) keeps the live generation,
+    // including fingerprint absence on a legacy CR. Only an authoritative
+    // opinion can start the one-time fingerprint migration roll.
+    const resourceFingerprintValue = preservesEveryResourceField(preserveResourceFields)
       ? podTemplateResourceFingerprint(existing.spec.podTemplate)
       : resourceFingerprint(sandboxCpuMemoryResources(preservedTemplate));
     const template = withImageFingerprint(
@@ -859,6 +985,10 @@ export interface SandboxMetadataListing {
   name: string;
   annotations?: Record<string, string>;
   creationTimestamp?: string;
+  /** `spec.operatingMode`, when the CR sets one. */
+  operatingMode?: string;
+  /** The template's `scratch` emptyDir sizeLimit, when declared. */
+  scratch?: string;
 }
 
 /**
@@ -902,6 +1032,10 @@ export async function listSandboxMetadata(
     if (typeof metadata.creationTimestamp === "string") {
       listing.creationTimestamp = metadata.creationTimestamp;
     }
+    const spec = isRecord(item) && isRecord(item.spec) ? item.spec : undefined;
+    if (typeof spec?.operatingMode === "string") listing.operatingMode = spec.operatingMode;
+    const scratch = sandboxCpuMemoryResources(spec?.podTemplate).scratch;
+    if (scratch !== undefined) listing.scratch = scratch;
     listings.push(listing);
   }
   return listings;
@@ -962,6 +1096,10 @@ const IMAGE_PULL_WAITING_REASONS = new Set([
 
 /** This pattern identifies node resource capacity shortages in scheduler messages. */
 const CAPACITY_UNSCHEDULABLE_PATTERN = /Insufficient (cpu|memory|ephemeral-storage)/g;
+const TRANSIENT_STORAGE_UNSCHEDULABLE_PATTERNS = [
+  /persistentvolumeclaim "[^"]+" not found/,
+  /pod has unbound immediate PersistentVolumeClaims/,
+];
 
 export type PodCapacityShortage = "cpu" | "memory" | "ephemeral-storage";
 
@@ -989,6 +1127,10 @@ export interface PodContainerStatus {
   image?: string;
   waitingReason?: string;
   waitingMessage?: string;
+  /** `status.lastState.terminated`, present after at least one crash. With
+   * `terminationMessagePolicy: FallbackToLogsOnError` the kubelet fills
+   * `message` with the log tail, which is the line a human needs. */
+  lastTerminated?: { exitCode?: number; reason?: string; message?: string };
 }
 
 /** Standard Kubernetes pod condition shape (`type`/`status`/`reason`/
@@ -1004,6 +1146,8 @@ export interface PodStatusCondition {
 
 /** Pod status and container spec fields used for startup and drift checks. */
 export interface PodStatusInfo {
+  browserFingerprint?: string;
+  browserReady?: boolean;
   /** Home mount generation, captured in the live pod spec. */
   homeLayoutVersion?: string;
   phase?: string;
@@ -1018,6 +1162,19 @@ export interface PodStatusInfo {
   resourceFingerprint?: string;
   /** Requested-image generation, unchanged when admission rewrites the image. */
   imageFingerprint?: string;
+  /** The pod's own `metadata.creationTimestamp` (ISO 8601). The Pending
+   * grace runs from here: a resumed or adopted CR is older than its pod. */
+  createdAt?: string;
+  /** The sandbox container's ephemeral-storage request, scratch included. */
+  ephemeralStorageRequest?: string;
+}
+
+/** One Kubernetes event about a pod, reduced to what the Pending verdict reads. */
+export interface PodEventSummary {
+  reason?: string;
+  message?: string;
+  /** Last observed time, epoch milliseconds. */
+  timestamp?: number;
 }
 
 /** The subset of `@kubernetes/client-node`'s `CoreV1Api` needed to GET a
@@ -1029,6 +1186,9 @@ export interface SandboxPodStatusApi {
    * the "absent" case, since a Sandbox CR that hasn't reconciled a pod yet
    * is a normal (not-error) state. */
   getPodStatus(namespace: string, podName: string): Promise<PodStatusInfo | null>;
+  /** Events whose involved object is this pod. Optional: without it the
+   * Pending verdict ignores autoscaler scale-up events. */
+  listPodEvents?(namespace: string, podName: string): Promise<PodEventSummary[]>;
 }
 
 /** The subset of `@kubernetes/client-node`'s `CoreV1Api` needed to delete
@@ -1040,8 +1200,21 @@ export interface SandboxPodDeleteApi {
 }
 
 /** Wraps a real `k8s.CoreV1Api` instance. */
-export function podStatusApiAdapter(api: Pick<k8s.CoreV1Api, "readNamespacedPod">): SandboxPodStatusApi {
+export function podStatusApiAdapter(
+  api: Pick<k8s.CoreV1Api, "readNamespacedPod"> & Partial<Pick<k8s.CoreV1Api, "listNamespacedEvent">>,
+): SandboxPodStatusApi {
+  const listEvent = api.listNamespacedEvent?.bind(api);
   return {
+    ...(listEvent ? {
+      async listPodEvents(namespace: string, podName: string): Promise<PodEventSummary[]> {
+        const result = await listEvent({ namespace, fieldSelector: `involvedObject.kind=Pod,involvedObject.name=${podName}` });
+        return result.items.map((event) => ({
+          reason: event.reason,
+          message: event.message,
+          timestamp: (event.series?.lastObservedTime ?? event.lastTimestamp ?? event.eventTime ?? event.metadata?.creationTimestamp)?.getTime(),
+        }));
+      },
+    } : {}),
     async getPodStatus(namespace, podName) {
       let pod: k8s.V1Pod;
       try {
@@ -1060,6 +1233,13 @@ export function podStatusApiAdapter(api: Pick<k8s.CoreV1Api, "readNamespacedPod"
         image: images.get(cs.name) ?? cs.image,
         waitingReason: cs.state?.waiting?.reason,
         waitingMessage: cs.state?.waiting?.message,
+        ...(cs.lastState?.terminated
+          ? { lastTerminated: {
+              exitCode: cs.lastState.terminated.exitCode,
+              reason: cs.lastState.terminated.reason,
+              message: cs.lastState.terminated.message,
+            } }
+          : {}),
       }));
       const conditions: PodStatusCondition[] = (pod.status?.conditions ?? [])
         .filter(
@@ -1071,8 +1251,14 @@ export function podStatusApiAdapter(api: Pick<k8s.CoreV1Api, "readNamespacedPod"
       const fingerprint = sandboxContainer?.env?.find((entry) => entry.name === RESOURCE_FINGERPRINT_ENV);
       const requestedImage = sandboxContainer?.env?.find((entry) => entry.name === IMAGE_FINGERPRINT_ENV);
       const homeLayout = sandboxContainer?.env?.find((entry) => entry.name === HOME_LAYOUT_ENV);
+      const ephemeralRequest: unknown = sandboxContainer?.resources?.requests?.["ephemeral-storage"];
+      const createdAt = pod.metadata?.creationTimestamp;
       return {
+        ...(createdAt instanceof Date && !Number.isNaN(createdAt.getTime()) ? { createdAt: createdAt.toISOString() } : {}),
+        ...(typeof ephemeralRequest === "string" ? { ephemeralStorageRequest: ephemeralRequest } : {}),
         phase: pod.status?.phase, containerStatuses, conditions,
+        browserFingerprint: browserRuntimeFingerprint({ spec: pod.spec }),
+        browserReady: pod.status?.containerStatuses?.find(container => container.name === "browser")?.ready,
         sandboxImage: images.get(SANDBOX_CONTAINER_NAME),
         sandboxResources: sandboxCpuMemoryResources({ spec: pod.spec }),
         resourceFingerprint: fingerprint?.valueFrom === undefined ? fingerprint?.value : undefined,
@@ -1177,12 +1363,14 @@ export async function livePodDrift(
   resources?: SandboxCpuMemoryResources,
   expectedResourceFingerprint?: string,
   expectedImageFingerprint?: string,
+  expectedBrowserFingerprint?: string,
 ): Promise<{
   differs: true;
   podName: string;
   liveImage: string | undefined;
   imageDrift: boolean;
   resourcesDrift: boolean;
+  browserDrift?: boolean;
 } | { differs: false }> {
   const podName = await resolvePodName(objectsApi, podsApi, cfg, name);
   if (!podName) return { differs: false };
@@ -1199,14 +1387,22 @@ export async function livePodDrift(
     : Boolean(liveImage) && liveImage !== manifestImage;
   const resourcesDrift = expectedResourceFingerprint !== undefined
     ? status.resourceFingerprint !== expectedResourceFingerprint
-    : resources !== undefined && (["requests", "limits"] as const).some((side) =>
+    : resources !== undefined && ((["requests", "limits"] as const).some((side) =>
     (["cpu", "memory"] as const).some((field) =>
       normalizeQuantity(status.sandboxResources?.[side]?.[field]) !== normalizeQuantity(resources[side]?.[field]),
     ),
-  );
-  if (!imageDrift && !resourcesDrift) return { differs: false };
-  return { differs: true, podName, liveImage, imageDrift, resourcesDrift };
+  ) || normalizeQuantity(status.sandboxResources?.scratch) !== normalizeQuantity(resources.scratch));
+  const browserDrift = expectedBrowserFingerprint !== undefined && status.browserFingerprint !== expectedBrowserFingerprint;
+  if (!imageDrift && !resourcesDrift && !browserDrift) return { differs: false };
+  return { differs: true, podName, liveImage, imageDrift, resourcesDrift, ...(browserDrift ? { browserDrift } : {}) };
 }
+
+/** The agent-sandbox controller refuses to adopt a pod or PVC whose owner
+ * UID belongs to a deleted Sandbox of the same name. Kubernetes garbage
+ * collection removes those dependents once the old owner is gone and the
+ * controller then creates fresh ones, so this condition heals on its own.
+ * It must read as provisioning, never as a terminal failure. */
+export const OWNERSHIP_CONDITION_PATTERN = /is owned by Sandbox\//;
 
 /**
  * Pure classification of a backing pod's status (plus, for the `PodFailed`
@@ -1224,9 +1420,9 @@ export async function livePodDrift(
  *      "container crash-looping (CrashLoopBackOff)"
  *   3. `pod.phase === "Failed"`, or the CR's `Ready` condition has
  *      `reason === "PodFailed"` → "pod failed: <detail>"
- *   4. `pod.phase === "Pending"` with a non-capacity `PodScheduled=False,
+ *   4. `pod.phase === "Pending"` with a structural `PodScheduled=False,
  *      reason=Unschedulable` condition → "unschedulable: <message>".
- *      Capacity shortages stay Pending so the autoscaler can observe them.
+ *      Capacity shortages and temporary PVC propagation stay Pending.
  *   5. otherwise `null` (defer to `mapConditionsToStatus`'s CR-Ready mapping)
  *
  * `pod === null` (CR has no backing pod yet, or the GET 404'd) always
@@ -1245,12 +1441,19 @@ export function classifyPodFailure(pod: PodStatusInfo | null, crReadyCondition?:
 
   for (const cs of pod.containerStatuses ?? []) {
     if (cs.waitingReason === "CrashLoopBackOff") {
-      return "container crash-looping (CrashLoopBackOff)";
+      const base = "container crash-looping (CrashLoopBackOff)";
+      const last = cs.lastTerminated;
+      if (!last) return base;
+      const detail = (last.message?.trim().split("\n").filter(Boolean).pop() ?? last.reason ?? "").trim();
+      const exit = last.exitCode !== undefined ? `exit ${last.exitCode}` : "";
+      const parts = [exit, detail].filter(Boolean).join(": ");
+      return parts ? `${base}: ${parts}` : base;
     }
   }
 
   if (pod.phase === "Failed" || crReadyCondition?.reason === "PodFailed") {
     const detail = crReadyCondition?.message ?? crReadyCondition?.reason ?? "pod entered phase Failed";
+    if (OWNERSHIP_CONDITION_PATTERN.test(detail)) return null;
     return `pod failed: ${detail}`;
   }
 
@@ -1259,11 +1462,31 @@ export function classifyPodFailure(pod: PodStatusInfo | null, crReadyCondition?:
     if (scheduled?.status === "False" && scheduled.reason === "Unschedulable") {
       const message = scheduled.message ?? "no message";
       if (classifyPodCapacityShortages(message).length > 0) return null;
+      if (TRANSIENT_STORAGE_UNSCHEDULABLE_PATTERNS.some((pattern) => pattern.test(message))) return null;
       return `unschedulable: ${message}`;
     }
   }
 
   return null;
+}
+
+/** Bounded kind for the `valet.sandbox.startup_failed` counter, derived
+ * from the reason strings this module and the provider produce. Matched on
+ * stable prefixes so detail appended after a colon does not change the
+ * answer. */
+export function startupKindOf(reason: string): SandboxStartupKind {
+  if (reason.startsWith("container crash-looping")) return "crash_loop";
+  if (reason.startsWith("image pull failed")) return "image_pull";
+  if (reason.includes("is owned by Sandbox/")) return "ownership";
+  if (reason.startsWith("pod failed")) return "pod_failed";
+  if (
+    reason.startsWith("pod unschedulable") ||
+    reason.startsWith("unschedulable") ||
+    reason.includes("Unschedulable")
+  ) {
+    return "unschedulable";
+  }
+  return "other";
 }
 
 /**
@@ -1329,14 +1552,20 @@ export async function sandboxStatus(
   }
   const conditions = cr.status?.conditions ?? [];
   const baseline = mapConditionsToStatus(name, conditions, cr.spec.operatingMode);
+  const browserFingerprint = browserRuntimeFingerprint(cr.spec.podTemplate, cr.metadata.name);
+  const companion = hasBrowserCompanion(cr.spec.podTemplate);
 
   if (podsApi && podStatusApi) {
     const podName = await resolvePodName(api, podsApi, cfg, name).catch(() => null);
+    if (!podName && browserFingerprint !== undefined) return { id: name, state: "provisioning" };
     if (podName) {
       const pod = await podStatusApi.getPodStatus(cfg.namespace, podName).catch(() => null);
       const readyCondition = conditions.find((c) => c.type === "Ready");
       const reason = classifyPodFailure(pod, readyCondition);
       if (reason) return { id: name, state: "error", error: reason };
+      if (browserFingerprint !== undefined && (pod?.browserFingerprint !== browserFingerprint || (companion && !pod.browserReady))) {
+        return { id: name, state: "provisioning" };
+      }
     }
   }
 
@@ -1372,8 +1601,13 @@ export async function resolvePodName(
     namespace: cfg.namespace,
     labelSelector: cr.status?.selector,
   });
+  // Match by owner uid when the CR has one: a same-name predecessor pod
+  // owned by a deleted-and-recreated Sandbox must not be returned.
+  const crUid = cr.metadata.uid;
   const owned = items.find((pod) =>
-    pod.ownerReferences?.some((ref) => ref.kind === SANDBOX_KIND && ref.name === name && ref.controller === true),
+    pod.ownerReferences?.some(
+      (ref) => ref.kind === SANDBOX_KIND && ref.controller === true && (crUid ? ref.uid === crUid : ref.name === name),
+    ),
   );
   return owned?.name ?? null;
 }

@@ -196,7 +196,71 @@ drops the `orgPreferredModel` tier and its final fallback becomes the `s`
 tier token:
 
 `existing?.model → overrideId → assistantDefault → childDefault →
-userDefault → teamDefault → opts.defaultModelId → "s"`.
+userDefault → teamDefault → orgDefaultTier → opts.defaultModelId → "s"`.
+
+`orgDefaultTier` is `orgs.default_tier`, a tier token that an org admin
+sets as "Default tier for new threads" on the org Models page
+(`PATCH /api/org/model-tiers` with `defaultTier`, null clears it). Without
+it, an orchestrator with no personal or team default ran on `s`, and
+teams set an expensive concrete model as the team default to avoid that.
+A workflow session step without its own model has no `childDefault`, so
+it also falls to this tier; delegated children stay on `s`. The setting's
+hint says both. When the column is null, the cascade is unchanged. The Models page
+select has a "No organization default" option that sends
+`defaultTier: null`.
+
+One test decides whether new sessions can run a tier:
+`resolvableTiers`. The PATCH, the cascade, and the GET response all use
+it. It takes the one target that the tier walk picks and asks the
+resolver itself (`canRunSpec`): the provider must be enabled, the model
+must still exist on it, and the key must not be blank. A provider test
+alone is not enough. A custom provider can stay enabled and keyed after
+its model leaves its `models` list, and session start treats a key of
+only spaces as no key.
+
+The PATCH refuses a `defaultTier` that fails the test, checked against
+the tier map that the same request writes. On every tier edit, it also
+checks the saved default against the resulting map: a map saved before
+the tier-token rule can resolve the default through another tier. The
+PATCH refuses an edit that breaks a saved default that worked. Clearing
+the default instead would move every new thread to `s` as a side effect
+of a tier edit, so the PATCH refuses and the error names both fixes. A
+saved default that an earlier key or provider change broke does not
+block tier edits, and the response reports it as unusable.
+
+The PATCH runs every check under the org policy lock, against the tier
+map and default tier that it then writes over, so a save that another
+save overtook checks the newer state. PGlite runs one query at a time,
+so no credential read can happen inside that transaction. The PATCH
+copies the org's provider keys before the lock (`orgKeySnapshot`), and
+the locked check reads the copy.
+
+A later provider, key, or tier-map change can still leave the saved tier
+unusable, for example when an enabled provider loses its org key. The
+cascade then skips the tier with a warning and continues to `s`, as it
+does for an inactive team default. A child passes
+`childDefault: "s"`, so delegated work stays on `s` whatever the org
+default tier is.
+
+`GET /api/org/model-tiers` returns `defaultTierResolvable`, the result of
+the same test. The personal and team pickers label their clear state with
+the tier it falls to, for example "Medium (Organization default)". When
+the saved default is unusable, the label names Small, and the Models page
+shows a warning under the select. Provider and key changes refresh the
+tier map read, so the label and the warning follow them.
+
+A tier target must be a model, not a tier token. The catalog accepts tier
+tokens as model specs, so before this rule `{ "m": ["m"] }` saved a tier
+whose resolution recursed without end. The PATCH now refuses a tier token
+as a target, and the error names the fix. A map saved before the rule can
+still hold one. The PATCH accepts a tier token that the same tier's stored
+list already holds, so the Models page, which sends a tier's full list on
+each edit, can add a model to that tier and then remove the token. No
+request can add a new tier-to-tier link. The tier walk follows a tier-token target into its
+tier and keeps a set of the tiers it has entered. A tier that the walk
+enters twice is a cycle: that branch resolves to nothing, and the walk
+continues to the next target. The walk never returns a tier token, so
+`resolveModelSpec` recurses at most once.
 
 `resolveModelSpec` already resolves tier tokens and persists the token as
 the canonical id, so the fallback works exactly like an explicit tier pick:
@@ -205,6 +269,17 @@ provider, and a remap of that tier reaches every session that bottoms out
 at this fallback. `firstActivePreference` (the active-provider walk) stays
 — `teamDefaultModel` still uses it for the team tier above.
 
+At runtime, transient provider failures and exhausted provider credits can
+continue the same turn on another provider in the selected tier's ordered
+list. A concrete model uses the first matching tier (xs through xl); no
+matching tier means no cross-provider fallback. Only approved, enabled,
+credentialed models with compatible input capabilities qualify. Recovery
+tries at most three providers per recovery loop, preserves completed tool results, and does
+not change the saved model selection. Authentication, invalid input,
+policy, context-length, and application-budget errors do not trigger it.
+A tier with no usable cross-provider alternative cannot fail over. Slack
+receives a terminal notice in the original thread when recovery fails.
+
 Sessions built for an assistant pass `assistants.model` as
 `assistantDefault`. The value may be a tier token; `resolveModelSpec`
 already handles the token and persists it as the canonical id.
@@ -212,7 +287,7 @@ already handles the token and persists it as the canonical id.
 Reasoning (new, parallel, resolved in `host.ts` at session build):
 
 `session/thread override → assistantDefault → userDefault → teamDefault →
-orgDefault → unset`.
+orgDefault → VALET_DEFAULT_REASONING (medium)`.
 
 The resolved level is clamped to `orgs.reasoning_settings.max` and then fed
 to `engine.createSession({ sampling: { reasoning } })`. The engine clamps to
@@ -269,8 +344,9 @@ Chat picker (`model-picker.tsx`):
   stays.
 - A compact reasoning row below the list (one popover, two knobs). Levels a
   model does not support are disabled; levels above the org cap are hidden.
-- The header chip renders the tier label, and appends the level when it is
-  not default, for example "Large · high".
+- The chip renders the tier label, and appends the level when it is
+  not default, for example "Large · high". Since 2026-11-02 the chip sits in
+  the composer beside Send, not in the thread header.
 
 `ModelCombobox` gains the same tier-first "Size" group and an optional
 reasoning control, then is used at:
@@ -316,9 +392,18 @@ Recorded during implementation (2026-09-03):
   `session.setReasoning` reaches existing threads.
 - **No engine event on `setReasoning`.** The web UI reads the value back
   over REST. Add a `reasoning_switched` event if live sync is needed later.
-- **Clear vs unset.** `PATCH reasoning: null` clears the stored value. After
-  the next cache-eviction rebuild the cascade re-applies user/org defaults,
-  so a deliberate clear does not survive a rebuild when a default exists.
+- **Clear vs unset.** On a thread, `PATCH reasoning: null` clears the pin,
+  and the thread follows the session default. On a session, it sets the
+  level a new thread gets now (the cascade, ending at the Valet default).
+  A restore that finds no stored session level stores the resolved one.
+- **Valet default reasoning (2026-10-19).** If no assistant, user, team, or
+  org default is set, the cascade resolves `VALET_DEFAULT_REASONING`
+  (`medium`), clamped to the org max. LLM workflow steps do not use it: a
+  step may set `temperature`, which reasoning models reject. Agent workflow
+  steps run in an assistant session and get it. Before this change, an
+  unset cascade sent no level, so the provider default applied. OpenAI
+  reasoning models then ran at minimal effort. The unset Default option on
+  the org Models page names this level.
 - **The cap is not retroactive.** A persisted level is never re-clamped. If
   an admin lowers the max after a session pinned a higher level, that
   session keeps its level across rebuilds ("clamp the cascade result only").

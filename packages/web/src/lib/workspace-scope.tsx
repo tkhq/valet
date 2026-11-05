@@ -1,25 +1,5 @@
-/**
- * Which workspace you are working in — your own, or one of your teams.
- *
- * This used to be derived from the open assistant alone, which is correct on
- * `/chat` and useless everywhere else: `/skills`, `/workflows` and `/events`
- * have no assistant in the URL, so the switcher always read "Personal" there
- * and every one of those pages was implicitly personal. The gap showed up as
- * a second Owner dropdown inside each create form, asking again what the
- * switcher in the nav already claimed to answer.
- *
- * So the scope is held here and persisted, and the surfaces read it.
- *
- * The open assistant still WINS when there is one. That keeps the property
- * the derived version had and which a plain persisted value would lose: the
- * control cannot disagree with what is on screen. Following a notification
- * into a team conversation moves the scope on arrival, rather than leaving
- * the nav insisting you are somewhere else.
- *
- * A stored key naming a team you have left resolves back to your own
- * workspace. The alternative is a scope pointing at a workspace whose every
- * list answers 404.
- */
+import { useSearch } from "@tanstack/react-router";
+
 import {
   createContext,
   useCallback,
@@ -29,12 +9,12 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { useSearch } from "@tanstack/react-router";
-import type { AssistantSummary, TeamSummary } from "@valet/api/wire";
-import { useAssistants } from "~/api/assistants";
+
 import { useOrg, useTeams } from "~/api/settings";
+import { PageTitleProvider } from "~/lib/page-title";
 import { eligibleTeams } from "~/components/session/assistant-rail";
 
+// Keep each browser tab's workspace independent, including after a reload.
 const STORAGE_KEY = "valet:workspace";
 
 /** Your own workspace. Not a team id, and never a user id — the key is a
@@ -44,7 +24,7 @@ export const PERSONAL = "user";
 
 function loadStored(): string {
   try {
-    return window.localStorage.getItem(STORAGE_KEY) ?? PERSONAL;
+    return window.sessionStorage.getItem(STORAGE_KEY) ?? PERSONAL;
   } catch {
     return PERSONAL;
   }
@@ -68,26 +48,9 @@ export interface WorkspaceScope {
 
 const WorkspaceScopeContext = createContext<WorkspaceScope | null>(null);
 
-/**
- * The workspace the open assistant belongs to, or `undefined` when no
- * assistant is open — which is every route except `/chat`.
- *
- * A team assistant counts only when its team is one the caller may open
- * (`eligibleTeams`). The list still carries the row for a team you left, or
- * one the `organizations` flag hides, and `?assistant=` can name it from a
- * stale bookmark. Scoping to that team would put `/chat` on a workspace
- * with no group, which the page reads as an empty team: no name, no create
- * action, and the rail drops the thread tree. So the stored key stands.
- */
-export function workspaceOfAssistant(
-  active: AssistantSummary | undefined,
-  teams: readonly TeamSummary[],
-): string | undefined {
-  if (!active) return undefined;
-  if (active.owner.type !== "team") return PERSONAL;
-  const teamId = active.owner.id;
-  return teams.some((t) => t.id === teamId) ? teamId : undefined;
-}
+/** Sets the workspace the tab title names while a pinned subtree is
+ * mounted (`PinnedWorkspaceScope`), or clears it with `undefined`. */
+const PinTitleContext = createContext<(key: string | undefined) => void>(() => {});
 
 /**
  * Which workspace is active, given what is currently known.
@@ -114,37 +77,42 @@ export function resolveWorkspaceKey(args: {
   return args.available.includes(args.stored) ? args.stored : PERSONAL;
 }
 
-export function WorkspaceScopeProvider({ children }: { children: ReactNode }) {
+export function WorkspaceScopeProvider({ children, persist = true }: {
+  children: ReactNode;
+  /** False keeps the selection in memory only. The UI stress gallery sets it:
+   * its fixture teams lack the tab's real team, and writing its fallback
+   * would replace the workspace the tab had selected. */
+  persist?: boolean;
+}) {
   const [stored, setStored] = useState<string>(() => loadStored());
 
   const setKey = useCallback((next: string) => {
     setStored(next);
+    if (!persist) return;
     try {
-      window.localStorage.setItem(STORAGE_KEY, next);
+      window.sessionStorage.setItem(STORAGE_KEY, next);
     } catch {
       // Non-persistent environments still get the in-session behaviour.
     }
-  }, []);
+  }, [persist]);
 
   // `strict: false` because this provider sits above the route tree and must
   // read the same search param from any route, including those that declare
   // none.
-  const search = (useSearch({ strict: false }) ?? {}) as { assistant?: string };
-  const assistantsQ = useAssistants();
+  const search = (useSearch({ strict: false }) ?? {}) as { workspace?: string };
   const teamsQ = useTeams();
   const orgQ = useOrg();
 
   const teams = eligibleTeams(teamsQ.data?.teams, orgQ.data?.features.organizations);
   const available = useMemo(() => [PERSONAL, ...teams.map((t) => t.id)], [teams]);
 
-  const open = (assistantsQ.data?.assistants ?? []).find((a) => a.id === search.assistant);
-  const derived = workspaceOfAssistant(open, teams);
+  const derived = search.workspace;
 
   // Both queries, not either: `available` is derived from the two together.
   const membershipKnown = teamsQ.data !== undefined && orgQ.data !== undefined;
   const key = resolveWorkspaceKey({ derived, stored, available, membershipKnown });
 
-  // Persist what the open assistant decided, so leaving `/chat` keeps the
+  // Persist the explicit workspace, so leaving `/chat` keeps the
   // workspace you were last actually in.
   useEffect(() => {
     if (key !== stored) setKey(key);
@@ -160,7 +128,15 @@ export function WorkspaceScopeProvider({ children }: { children: ReactNode }) {
     [key, available, setKey],
   );
 
-  return <WorkspaceScopeContext.Provider value={value}>{children}</WorkspaceScopeContext.Provider>;
+  // A pinned settings page names its own scope in the title, not the switcher's.
+  const [pinnedKey, setPinnedKey] = useState<string>();
+  const titleKey = pinnedKey ?? key;
+  const workspaceName = titleKey === PERSONAL ? "Personal" : teams.find(team => team.id === titleKey)?.name ?? "Team workspace";
+  return <WorkspaceScopeContext.Provider value={value}>
+    <PinTitleContext.Provider value={setPinnedKey}>
+      <PageTitleProvider workspaceName={workspaceName}>{children}</PageTitleProvider>
+    </PinTitleContext.Provider>
+  </WorkspaceScopeContext.Provider>;
 }
 
 /**
@@ -189,6 +165,30 @@ export function useWorkspaceScope(): WorkspaceScope {
 }
 
 /**
+ * A fixed scope for one subtree. Settings names its scope in the URL (a
+ * personal workspace page, or `/settings/teams/$teamId`), so its sections
+ * must not follow the switcher. They keep reading `useWorkspaceScope()`, and
+ * this answers it for them. The switcher itself does not change:
+ * `available` and `setKey` still act on the outer scope. The tab title
+ * names the pinned workspace while the subtree is mounted.
+ */
+export function PinnedWorkspaceScope({ teamId, children }: { teamId: string | undefined; children: ReactNode }) {
+  const outer = useWorkspaceScope();
+  // The tab title follows the pin too, so a personal page never carries a
+  // team's name. Cleanup runs before the next page's pin on navigation.
+  const pinTitle = useContext(PinTitleContext);
+  useEffect(() => {
+    pinTitle(teamId ?? PERSONAL);
+    return () => pinTitle(undefined);
+  }, [teamId, pinTitle]);
+  const value = useMemo<WorkspaceScope>(
+    () => ({ key: teamId ?? PERSONAL, teamId, available: outer.available, setKey: outer.setKey }),
+    [teamId, outer.available, outer.setKey],
+  );
+  return <WorkspaceScopeContext.Provider value={value}>{children}</WorkspaceScopeContext.Provider>;
+}
+
+/**
  * Adopt a resource's workspace when you land on its page — from a
  * notification, a shared link, or a bookmark. The switcher then matches what
  * is on screen instead of leaving you in the workspace you came from, which
@@ -196,8 +196,8 @@ export function useWorkspaceScope(): WorkspaceScope {
  * arrived with the nav still on Personal while the page belonged to a team.
  *
  * This is the same "the thing you have open decides the workspace" rule the
- * scope provider already applies to the open assistant on `/chat`, extended
- * to detail pages that carry no `?assistant=`. A user-owned resource adopts
+ * scope provider already applies to the workspace URL on `/chat`, extended
+ * to detail pages that carry no `?workspace=`. A user-owned resource adopts
  * your personal workspace for the same reason.
  *
  * Keyed on the owner, so a manual switch made afterward on the same page is

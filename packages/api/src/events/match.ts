@@ -2,11 +2,28 @@
  * Pure subscription-matching primitives for the event system. No IO — the
  * ingest transaction and the subscriptions CRUD validator both call these.
  */
+import { eventKeyMatches } from "@valet/shared";
+export { eventKeyMatches } from "@valet/shared";
 import type { EventCatalogEntry } from "@valet/engine";
+
+/**
+ * The filter operators a subscription accepts. `not_in`, `not_prefix`, and
+ * `not_regex` exclude events: they match when the value is absent, because
+ * an absent value is not in the excluded set (see `filtersMatch`). The write
+ * validator (`subscription-write.ts`) re-exports this list, and the
+ * `event-subscriptions` skill names each one.
+ */
+export const FILTER_OPS = ["eq", "in", "prefix", "contains", "regex", "not_in", "not_prefix", "not_regex"] as const;
+export type SubscriptionFilterOp = (typeof FILTER_OPS)[number];
+
+/** True for an op that excludes events: it matches when the value is absent. */
+export function isExclusionOp(op: SubscriptionFilterOp): op is "not_in" | "not_prefix" | "not_regex" {
+  return op === "not_in" || op === "not_prefix" || op === "not_regex";
+}
 
 export interface SubscriptionFilter {
   field: string;
-  op: "eq" | "in" | "prefix" | "contains" | "regex";
+  op: SubscriptionFilterOp;
   value: string | string[];
 }
 
@@ -69,17 +86,6 @@ function compileRegexCached(pattern: string): RegExp | null {
   return compiled;
 }
 
-/** Trailing-wildcard key match: "github.pull_request.*" matches
- * "github.pull_request.opened" but not "github.pull_request_review.x" —
- * the wildcard only crosses a `.` boundary. */
-export function eventKeyMatches(eventKey: string, patterns: string[]): boolean {
-  return patterns.some((pattern) => {
-    if (pattern === eventKey) return true;
-    if (pattern.endsWith(".*")) return eventKey.startsWith(pattern.slice(0, -1));
-    return false;
-  });
-}
-
 export function resolvePath(payload: unknown, path: string): unknown {
   let cur: unknown = payload;
   for (const segment of path.split(".")) {
@@ -94,6 +100,53 @@ function asString(v: unknown): string | undefined {
 }
 
 /**
+ * The implicit filter field every catalog entry carries (spec 2026-10-15:
+ * event wakeups, Part G). It reads the event's normalized `subjects` array,
+ * not a payload path, so it is handled as a special case in `filtersMatch`
+ * and is never looked up through a catalog entry's declared `path`. The
+ * catalog builders in `ingest.ts` (`withSubjectFilter`) still add it to every
+ * entry's declared filters, so the subscription write validator and the
+ * collision checker — which read catalog declarations directly, not through
+ * `filtersMatch` — see it as a field every key supports.
+ */
+export const SUBJECT_FILTER_FIELD = "subject";
+
+const SUBJECT_FILTER_DESCRIPTOR = {
+  field: SUBJECT_FILTER_FIELD,
+  path: "",
+  description:
+    "The key of the event's place or thread (for example github:acme/lean-proofs#42). " +
+    "Matches with eq (a key equals the value) or prefix (a key starts with the value).",
+};
+
+/**
+ * Adds the implicit `subject` filter field to one catalog entry's declared
+ * filters, when not already present. Pure; the catalog builders in
+ * `ingest.ts` apply it to every entry they assemble.
+ */
+export function withSubjectFilter(entry: EventCatalogEntry): EventCatalogEntry {
+  if (entry.filters.some((f) => f.field === SUBJECT_FILTER_FIELD)) return entry;
+  return { ...entry, filters: [...entry.filters, SUBJECT_FILTER_DESCRIPTOR] };
+}
+
+/**
+ * Whether a `subject` filter passes, against the event's normalized subjects
+ * (coarse to fine, spec Part A1). `eq` matches when any subject equals the
+ * value; `prefix` matches when any subject starts with it. The binding spec
+ * (Part G) defines only these two ops for `subject`; the write validator
+ * (`subscription-write.ts`) refuses any other op at write time, so any other
+ * op reaching here is defensive fail-closed, never a throw.
+ */
+function subjectFilterMatches(subjects: string[] | undefined, filter: SubscriptionFilter): boolean {
+  if (!subjects || subjects.length === 0) return false;
+  const value = filter.value;
+  if (typeof value !== "string") return false;
+  if (filter.op === "eq") return subjects.includes(value);
+  if (filter.op === "prefix") return subjects.some((s) => s.startsWith(value));
+  return false;
+}
+
+/**
  * Whether one subscription matches an event: its key patterns match AND its
  * filters pass. The single predicate the ingest gate, the delivery match, and
  * the redeliver route all share, so a change to match semantics cannot make
@@ -102,6 +155,13 @@ function asString(v: unknown): string | undefined {
  * The two casts narrow the `unknown` jsonb columns; their shapes are owned by
  * the subscriptions CRUD validator (`routes/events.ts`), the only writer of
  * these columns, which writes exactly these types.
+ *
+ * `subjects` is the event's normalized subjects array (spec Part A1), used
+ * only by the implicit `subject` filter field. Redelivery and the team
+ * coverage recheck pass the stored event row's `subjects` column (Part G).
+ * A row stored before that column existed holds null, which callers pass
+ * as undefined; a subscription with a `subject` filter then fails closed,
+ * same as any other field it cannot evaluate.
  */
 export function subscriptionMatchesEvent(
   sub: { eventKeys: unknown; filters: unknown },
@@ -109,13 +169,14 @@ export function subscriptionMatchesEvent(
   payload: unknown,
   catalog: EventCatalogEntry[],
   teamMentionScope = false,
+  subjects?: string[],
 ): boolean {
   if (!eventKeyMatches(eventKey, sub.eventKeys as string[])) return false;
   // The async team gate replaces legacy creator filters with live membership.
   // Callers must authorize the team before persisting or delivering the event.
   if (eventKey === "slack.app_mention" && teamMentionScope) {
     return filtersMatch(payload, eventKey,
-      (sub.filters as SubscriptionFilter[]).filter((f) => f.field !== "user"), catalog);
+      (sub.filters as SubscriptionFilter[]).filter((f) => f.field !== "user"), catalog, subjects);
   }
   // The match-time arm of the mention-scope rule (events/mention-scope.ts,
   // TKAI-299). A `slack.app_mention` subscription with no user filter
@@ -130,7 +191,7 @@ export function subscriptionMatchesEvent(
   ) {
     return false;
   }
-  return filtersMatch(payload, eventKey, sub.filters as SubscriptionFilter[], catalog);
+  return filtersMatch(payload, eventKey, sub.filters as SubscriptionFilter[], catalog, subjects);
 }
 
 /**
@@ -143,20 +204,34 @@ export function subscriptionNamesKey(sub: { eventKeys: unknown }, eventKey: stri
   return eventKeyMatches(eventKey, sub.eventKeys as string[]);
 }
 
+/**
+ * Whether every filter passes for one event (AND).
+ *
+ * A value is absent when the event's catalog entry does not declare the
+ * field, or the payload holds no text or number at its path. An absent value
+ * fails every op that names what to match (`eq`, `in`, `prefix`, `contains`,
+ * `regex`). It passes the exclusion ops (`not_in`, `not_prefix`,
+ * `not_regex`), because an absent value is not in the excluded set:
+ * `bot_id not_in [B1]` still matches a message a person wrote, and
+ * `channel_name not_prefix alerts-dev` still matches a direct message, which
+ * has no channel name.
+ */
 export function filtersMatch(
   payload: unknown,
   eventKey: string,
   filters: SubscriptionFilter[],
   catalog: EventCatalogEntry[],
+  subjects?: string[],
 ): boolean {
   if (filters.length === 0) return true;
-  // No catalog entry for this key → all field filters are undeclared → no match.
   const entry = catalog.find((e) => e.key === eventKey);
   return filters.every((filter) => {
+    // `subject` reads the event's normalized subjects array, not a payload
+    // path, so it is matched before (and independent of) catalog lookup.
+    if (filter.field === SUBJECT_FILTER_FIELD) return subjectFilterMatches(subjects, filter);
     const declared = entry?.filters.find((f) => f.field === filter.field);
-    if (!declared) return false;
-    const actual = asString(resolvePath(payload, declared.path));
-    if (actual === undefined) return false;
+    const actual = declared ? asString(resolvePath(payload, declared.path)) : undefined;
+    if (actual === undefined) return isExclusionOp(filter.op);
     switch (filter.op) {
       case "eq":
         return actual === filter.value;
@@ -166,16 +241,22 @@ export function filtersMatch(
         return typeof filter.value === "string" && actual.startsWith(filter.value);
       case "contains":
         return typeof filter.value === "string" && actual.includes(filter.value);
-      case "regex": {
-        // A bad pattern fails closed — it never matches and never throws, so a
-        // malformed rule cannot break the ingest transaction. The pattern is
-        // compiled once (cached) and tested against a bounded slice of the
-        // input, so backtracking cost stays bounded per event.
+      case "regex":
+      case "not_regex": {
+        // A bad pattern fails closed — the filter never passes and never
+        // throws, so a malformed rule cannot break the ingest transaction or
+        // wake the assistant. The pattern is compiled once (cached) and tested
+        // against a bounded slice of the input, so backtracking cost stays
+        // bounded per event.
         if (typeof filter.value !== "string") return false;
         const re = compileRegexCached(filter.value);
         if (re === null) return false;
-        return re.test(actual.slice(0, MAX_REGEX_INPUT_LENGTH));
+        return re.test(actual.slice(0, MAX_REGEX_INPUT_LENGTH)) === (filter.op === "regex");
       }
+      case "not_in":
+        return Array.isArray(filter.value) && !filter.value.includes(actual);
+      case "not_prefix":
+        return typeof filter.value === "string" && !actual.startsWith(filter.value);
     }
   });
 }

@@ -5,11 +5,11 @@
  * admin. The API enforces the same gate (`canMutateTeam`); this suite pins
  * that the UI stops offering controls that would 404.
  */
-import type { ReactNode } from "react";
-import { describe, expect, it, vi, afterEach, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { OrgDirectoryUserWire, TeamSummary } from "@valet/api/wire";
+import type { ReactNode } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /** Renders a real anchor so `getByRole("link")` and href assertions work
  * without mounting a router. */
@@ -37,14 +37,22 @@ function RouterLinkStub({
 
 // The request panel has its own real-query integration tests. Keep this suite
 // focused on team settings and authority controls.
+// Team credential rows let a member request removal through this hook.
+vi.mock("~/api/team-deletion-requests", () => ({
+  useSubmitTeamDeletionRequest: () => ({ mutate: vi.fn(), reset: vi.fn(), isPending: false, error: null }),
+}));
 vi.mock("./team-deletion-requests", () => ({
   TeamDeletionRequests: ({ teamId, canManage }: { teamId: string; canManage: boolean }) =>
     <section aria-label="Deletion requests" data-team-id={teamId} data-can-manage={canManage} />,
 }));
 
+const navigate = vi.fn();
 vi.mock("@tanstack/react-router", () => ({
   Link: RouterLinkStub,
+  useNavigate: () => navigate,
 }));
+
+const removeMemberMutate = vi.fn();
 
 /** Shared across renders so the add-member tests can assert on the call. */
 const addMemberMutate = vi.fn();
@@ -88,33 +96,9 @@ const teamsData = () => ({
 let teamDefaultModel: string | null = null;
 let teamDefaultReasoning: string | null = null;
 
-// The Assistant link points at the team's DEFAULT assistant, whose id only
-// the assistants list carries.
-vi.mock("~/api/assistants", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("~/api/assistants")>();
-  return {
-    ...actual,
-    useAssistants: () => ({
-      data: {
-        assistants: [
-          {
-            id: "asst_team_1",
-            owner: { type: "team" as const, id: "team_1" },
-            sessionId: "assistant:asst_team_1",
-            isDefault: true,
-            createdAt: 1,
-          },
-        ],
-      },
-      isLoading: false,
-      error: null,
-    }),
-  };
-});
-
 vi.mock("~/api/settings", () => ({
   useTeams: () => ({ data: selectedTeamsOverride ? { teams: selectedTeamsOverride } : teamsData(), isLoading: selectedTeamsLoading, error: selectedTeamsError }),
-  useMe: () => ({ data: { orgRole }, isLoading: false, error: null }),
+  useMe: () => ({ data: { id: "u1", orgRole }, isLoading: false, error: null }),
   useTeamMembers: () => ({
     data: {
       members: [
@@ -137,7 +121,7 @@ vi.mock("~/api/settings", () => ({
     isPending: addMemberPending,
     error: addMemberError,
   }),
-  useRemoveTeamMember: () => ({ mutate: vi.fn(), isPending: false }),
+  useRemoveTeamMember: () => ({ mutate: removeMemberMutate, isPending: false }),
   useSetTeamMemberRole: () => ({ mutate: vi.fn(), isPending: false }),
   usePatchTeam: () => ({ mutate: patchTeamMutate, isPending: false, error: null }),
   // The default-model combobox reads the org catalog through this hook.
@@ -187,6 +171,7 @@ let teamCredentials: Array<{
 }> = [];
 
 /** Shared across renders so the disconnect tests can assert on the call. */
+const revokeMutate = vi.fn();
 const disconnectMutate = vi.fn();
 let disconnectPending = false;
 let disconnectError: Error | null = null;
@@ -200,6 +185,7 @@ vi.mock("~/api/integrations", () => ({
     isLoading: false,
     error: null,
   }),
+  useRevokeDelegation: () => ({ mutate: revokeMutate, isPending: false, error: null, reset: vi.fn() }),
   useDisconnectCredential: () => ({
     mutate: disconnectMutate,
     isPending: disconnectPending,
@@ -247,6 +233,38 @@ describe("TeamsPanel — identity-provider provenance", () => {
   });
 });
 
+describe("TeamsPanel — rename", () => {
+  beforeEach(() => {
+    patchTeamMutate.mockClear();
+  });
+
+  afterEach(() => {
+    origin = "local";
+  });
+
+  it("team admin saves a trimmed new name", () => {
+    callerRole = "admin";
+    orgRole = "member";
+    openTeam();
+    fireEvent.change(screen.getByRole("textbox", { name: "Team name" }), { target: { value: "  Infra  " } });
+    // The Name section is first, so its Save is the first one.
+    fireEvent.click(screen.getAllByRole("button", { name: "Save" })[0]);
+    expect(patchTeamMutate).toHaveBeenCalledWith({ id: "team_1", body: { name: "Infra" } });
+  });
+
+  it("offers no rename to a plain member or for a declared team", () => {
+    callerRole = "member";
+    orgRole = "member";
+    openTeam();
+    expect(screen.queryByRole("textbox", { name: "Team name" })).toBeNull();
+    cleanup();
+    callerRole = "admin";
+    origin = "config";
+    openTeam();
+    expect(screen.queryByRole("textbox", { name: "Team name" })).toBeNull();
+  });
+});
+
 describe("TeamsPanel — team default model (TKAI-255)", () => {
   beforeEach(() => {
     patchTeamMutate.mockClear();
@@ -277,7 +295,7 @@ describe("TeamsPanel — team default model (TKAI-255)", () => {
     expect(screen.getByText("Sonnet 4.5")).toBeTruthy();
     // The hint reaches members too — they are the ones whose sessions the
     // setting shapes, and whose personal default wins.
-    expect(screen.getByText(/personal\s+default wins/)).toBeTruthy();
+    expect(screen.getByText(/personal default/)).toBeTruthy();
   });
 
   it("plain member sees the catalog name for a non-curated model, not the raw id", () => {
@@ -289,11 +307,13 @@ describe("TeamsPanel — team default model (TKAI-255)", () => {
     expect(screen.queryByText("custom_1/llama-3")).toBeNull();
   });
 
-  it("plain member with no team override reads 'Organization default' for both model and reasoning", () => {
+  it("plain member with no team override reads the org fallback for model and reasoning", () => {
     callerRole = "member";
     orgRole = "member";
     openTeam();
-    expect(screen.getAllByText("Organization default")).toHaveLength(2);
+    // The model label names the tier unset falls to: Small with no org default tier.
+    expect(screen.getByText("Small (Organization default)")).toBeTruthy();
+    expect(screen.getByText("Organization default")).toBeTruthy();
   });
 
   it("team admin picks a reasoning level → PATCH with the level", () => {
@@ -442,21 +462,23 @@ describe("TeamsPanel — deleting a team", () => {
   });
 });
 
+describe("TeamsPanel — Slack", () => {
+  it("opens Presence in this team's workspace", () => {
+    openTeam();
+    const link = screen.getByRole("link", { name: "Open Presence" });
+    const url = new URL(link.getAttribute("href") ?? "", "http://x");
+    expect(url.pathname).toBe("/presence");
+    expect(url.searchParams.get("workspace")).toBe(teamsData().teams[0]!.id);
+  });
+});
+
 describe("TeamsPanel — 1Password connection", () => {
-  it("removes reference preferences and shows team token controls", () => {
+  it("leaves the team token to the team's Integrations page", () => {
     callerRole = "admin";
     orgRole = "member";
     openTeam();
-    expect(screen.queryByRole("button", { name: "Grant" })).toBeNull();
-    expect(screen.queryByText("1Password references")).toBeNull();
-    expect(screen.getByLabelText("1Password service account token for Platform")).toBeTruthy();
-  });
-  it("does not expose token controls to a member", () => {
-    callerRole = "member";
-    orgRole = "member";
-    openTeam();
+    expect(screen.queryByText("1Password")).toBeNull();
     expect(screen.queryByRole("button", { name: "Connect token" })).toBeNull();
-    expect(screen.getByText("No team token connected. Team sessions use the organization token when available.")).toBeTruthy();
   });
 });
 
@@ -621,13 +643,6 @@ describe("TeamsPanel — add-member picker", () => {
   });
 });
 
-/**
- * The Assistant control is a plain cross-link into `/chat`, which owns the
- * get-or-create. Settings is no longer the door to a team's assistant — it
- * is one entrance among several (the chat rail, the dashboard card, the
- * owner badges), so this row creates nothing and needs no pending or error
- * state of its own.
- */
 describe("TeamsPanel — team credentials", () => {
   beforeEach(() => {
     callerRole = "admin";
@@ -659,10 +674,10 @@ describe("TeamsPanel — team credentials", () => {
       },
     ];
     openTeam();
-    expect(screen.getByText("Linear")).toBeTruthy();
-    expect(screen.getByText("Shared by Two · broken")).toBeTruthy();
+    expect(screen.getByText("Linear MCP")).toBeTruthy();
+    expect(screen.getByText("Shared by Two")).toBeTruthy();
     expect(screen.getByText("Broken")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Stop sharing Linear with Platform" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Stop sharing Two's Linear with Platform" })).toBeTruthy();
   });
 
   it("hides the removal control from a plain member", () => {
@@ -671,7 +686,7 @@ describe("TeamsPanel — team credentials", () => {
       { service: "linear", type: "oauth2", connectedAt: "2026-09-01T00:00:00Z" },
     ];
     openTeam();
-    expect(screen.getByText("Stored on the team")).toBeTruthy();
+    expect(screen.getByText("Team connection")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Disconnect Linear from Platform" })).toBeNull();
     expect(screen.queryByRole("button", { name: /Stop sharing/ })).toBeNull();
   });
@@ -687,7 +702,7 @@ describe("TeamsPanel — team credentials", () => {
 describe("TeamsPanel — removing a team credential", () => {
   /** linear is stored on the team. slack is shared by Two. */
   const DIRECT = "Disconnect Linear from Platform";
-  const SHARED = "Stop sharing Slack with Platform";
+  const SHARED = "Stop sharing Two's Slack with Platform";
 
   beforeEach(() => {
     callerRole = "admin";
@@ -740,7 +755,7 @@ describe("TeamsPanel — removing a team credential", () => {
     openTeam();
     const dialog = await clickRemove(DIRECT);
     expect(within(dialog).getByText("Disconnect Linear from Platform?")).toBeTruthy();
-    expect(within(dialog).getByText(/lose access to Linear\./)).toBeTruthy();
+    expect(within(dialog).getByText(/lose the team's own Linear connection/)).toBeTruthy();
     expect(within(dialog).queryByText(/linear/)).toBeNull();
   });
 
@@ -749,7 +764,7 @@ describe("TeamsPanel — removing a team credential", () => {
     // state. A single boolean would name whichever row rendered first.
     openTeam();
     const dialog = await clickRemove(SHARED);
-    expect(within(dialog).getByText("Stop sharing Slack with Platform?")).toBeTruthy();
+    expect(within(dialog).getByText("Stop sharing Two's Slack with Platform?")).toBeTruthy();
     expect(within(dialog).queryByText("Disconnect Linear from Platform?")).toBeNull();
   });
 
@@ -764,8 +779,12 @@ describe("TeamsPanel — removing a team credential", () => {
     const dialog = await clickRemove(SHARED);
     expect(within(dialog).getByRole("button", { name: "Stop sharing" })).toBeTruthy();
     expect(within(dialog).queryByRole("button", { name: "Disconnect" })).toBeNull();
-    expect(within(dialog).getByText(/removes the team's link only/)).toBeTruthy();
-    expect(within(dialog).getByText(/Two keeps their own Slack connection/)).toBeTruthy();
+    expect(within(dialog).getByText(/Team actions stop using Two's Slack account/)).toBeTruthy();
+    expect(within(dialog).getByText(/keep their own Slack connection/)).toBeTruthy();
+    // Ending a share ends that member's share, never the team's own connection.
+    fireEvent.click(within(dialog).getByRole("button", { name: "Stop sharing" }));
+    expect(revokeMutate.mock.calls[0]?.[0]).toEqual({ service: "slack", teamId: "team_1", userId: "u2" });
+    expect(disconnectMutate).not.toHaveBeenCalled();
   });
 
   it("keeps Disconnect for the team's own credential, and says how to get it back", async () => {
@@ -775,7 +794,7 @@ describe("TeamsPanel — removing a team credential", () => {
     const dialog = await clickRemove(DIRECT);
     expect(within(dialog).getByRole("button", { name: "Disconnect" })).toBeTruthy();
     expect(within(dialog).queryByRole("button", { name: "Stop sharing" })).toBeNull();
-    expect(within(dialog).getByText(/deletes the credential stored on the team/)).toBeTruthy();
+    expect(within(dialog).getByText(/Members' shared accounts stay/)).toBeTruthy();
     expect(within(dialog).getByText(/Connect Linear again from Integrations/)).toBeTruthy();
   });
 
@@ -841,23 +860,12 @@ describe("TeamsPanel — removing a team credential", () => {
   });
 });
 
-describe("TeamsPanel — team assistant link", () => {
-  beforeEach(() => {
-    callerRole = "member";
-    orgRole = "member";
-  });
-
-  it("shows the Assistant link to a plain member, not just admins", () => {
-    render(<TeamsPanel orgMembers={orgMembers} />);
-    expect(screen.getByRole("link", { name: /Assistant/ })).toBeTruthy();
-  });
-
-  it("points at the team's default assistant on /chat", () => {
-    // A team owns several assistants now, so the link names one: the
-    // default. The rail is where the others are chosen.
-    render(<TeamsPanel orgMembers={orgMembers} />);
-    const link = screen.getByRole("link", { name: /Assistant/ });
-    expect(link.getAttribute("href")).toBe("/chat?assistant=asst_team_1");
+describe("TeamsPanel — team settings page", () => {
+  it("drops the collapsible header the page already shows, and stays open", () => {
+    render(<TeamsPanel orgMembers={orgMembers} teamId="team_1" page />);
+    expect(screen.queryByRole("button", { name: /^(Collapse|Expand) / })).toBeNull();
+    expect(screen.getByRole("region", { name: "Deletion requests" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Platform actions" })).toBeTruthy();
   });
 });
 
@@ -948,3 +956,53 @@ vi.mock("~/api/onepassword", () => ({
   useTeamOnePasswordStatus: () => ({ data: { tokenConnected: false }, isPending: false, isError: false, isSuccess: true }),
   useTeamOnePasswordToken: () => ({ mutate: vi.fn(), isPending: false, reset: vi.fn() }),
 }));
+
+describe("TeamsPanel — leaving a team's own page", () => {
+  beforeEach(() => {
+    callerRole = "admin";
+    orgRole = "member";
+    navigate.mockClear();
+    deleteTeamMutate.mockImplementation((_id: string, opts?: { onSuccess?: () => void }) => opts?.onSuccess?.());
+    removeMemberMutate.mockImplementation((_vars: unknown, opts?: { onSuccess?: () => void }) => opts?.onSuccess?.());
+  });
+
+  afterEach(() => {
+    deleteTeamMutate.mockReset();
+    removeMemberMutate.mockReset();
+  });
+
+  async function deleteFromMenu(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByRole("button", { name: "Platform actions" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete team" }));
+    fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Delete team" }));
+  }
+
+  it("opens Profile once the team is deleted, so the page does not refuse a gone team", async () => {
+    const user = userEvent.setup();
+    render(<TeamsPanel orgMembers={orgMembers} teamId="team_1" page />);
+    await deleteFromMenu(user);
+    expect(navigate).toHaveBeenCalledWith({ to: "/settings/profile", replace: true });
+  });
+
+  it("stays on the Organization list after a delete there", async () => {
+    const user = userEvent.setup();
+    render(<TeamsPanel orgMembers={orgMembers} />);
+    await deleteFromMenu(user);
+    expect(deleteTeamMutate).toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("opens Profile once you remove yourself from the team", () => {
+    render(<TeamsPanel orgMembers={orgMembers} teamId="team_1" page />);
+    fireEvent.click(screen.getByRole("button", { name: "Remove One from Platform" }));
+    expect(removeMemberMutate).toHaveBeenCalledWith({ teamId: "team_1", userId: "u1" }, expect.anything());
+    expect(navigate).toHaveBeenCalledWith({ to: "/settings/profile", replace: true });
+  });
+
+  it("stays after removing another member", () => {
+    render(<TeamsPanel orgMembers={orgMembers} teamId="team_1" page />);
+    fireEvent.click(screen.getByRole("button", { name: "Remove Two from Platform" }));
+    expect(removeMemberMutate).toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+});

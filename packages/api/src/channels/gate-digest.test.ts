@@ -92,3 +92,9 @@ describe("digestGate", () => {
     expect(digest).toEqual({ title: "Which region?", body: "Pick one." });
   });
 });
+
+it("labels the agent's reason as a separate inert field, not the approval body", () => {
+  const digest = digestGate({ ...TOOL_GATE, agentReason: "<@admin> trust me", body: "tool_id=github.create_pr" });
+  expect(digest.fields).toContainEqual({ label: "Model-authored reason", value: "<@admin> trust me" });
+  expect(digest.body ?? "").not.toContain("trust me");
+});

@@ -22,6 +22,20 @@ const SCRUBBED_ENV_VARS = [
   "OPENAI_API_KEY",
   "GEMINI_API_KEY",
   "OPENROUTER_API_KEY",
+  // Amazon Bedrock: pi-ai reports "<authenticated>" for ANY ambient AWS
+  // credential source, so a developer's own AWS env would make Bedrock
+  // look active in unit tests.
+  "AWS_BEARER_TOKEN_BEDROCK",
+  "AWS_PROFILE",
+  "AWS_ACCESS_KEY_ID",
+  "AWS_SECRET_ACCESS_KEY",
+  "AWS_SESSION_TOKEN",
+  "AWS_REGION",
+  "AWS_DEFAULT_REGION",
+  "AWS_WEB_IDENTITY_TOKEN_FILE",
+  "AWS_ROLE_ARN",
+  "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+  "AWS_CONTAINER_CREDENTIALS_FULL_URI",
   // Public-origin vars (see `channels/host.ts`'s `publicUrlFromEnv`): an
   // ambient value turns path-only webhook URLs absolute in
   // `workflows/actions.test.ts`.

@@ -79,27 +79,6 @@ vi.mock("~/api/settings", () => ({
 
 // The badge links by assistant id, so it reads the assistants list to find
 // the team's default one.
-vi.mock("~/api/assistants", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("~/api/assistants")>();
-  return {
-    ...actual,
-    useAssistants: () => ({
-      data: {
-        assistants: [
-          {
-            id: "asst_team_1",
-            owner: { type: "team" as const, id: "team_1" },
-            sessionId: "assistant:asst_team_1",
-            isDefault: true,
-            createdAt: 1,
-          },
-        ],
-      },
-      isLoading: false,
-      error: null,
-    }),
-  };
-});
 
 import { RepoSourcesPanel, type SourcesOwner } from "./repo-sources-panel";
 import { PERSONAL, WorkspaceScopeProvider, useWorkspaceScope } from "~/lib/workspace-scope";
@@ -113,14 +92,14 @@ function SwitchWorkspace() {
 
 
 /** `workspace` selects the workspace the panel is being read in — the same
- * thing the nav's switcher sets. It is seeded through localStorage because
+ * thing the nav's switcher sets. It is seeded through sessionStorage because
  * that is where the real scope lives, so these cases exercise the actual
  * persistence rather than a value handed straight to the component. */
 function renderPanel(
   workspace = PERSONAL,
   props: { owner?: SourcesOwner; readOnly?: boolean; cursors?: string[] } = {},
 ) {
-  window.localStorage.setItem("valet:workspace", workspace);
+  window.sessionStorage.setItem("valet:workspace", workspace);
   return render(
     <TooltipProvider>
       <WorkspaceScopeProvider>
@@ -138,7 +117,7 @@ function renderPanel(
 
 describe("RepoSourcesPanel", () => {
   beforeEach(() => {
-    window.localStorage.clear();
+    window.sessionStorage.clear();
     currentData = { sources: [], nextCursor: null };
     currentState = { isLoading: false, error: null };
     addState = { isPending: false, error: null };

@@ -8,7 +8,7 @@
  * mocking.
  */
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import {
   RouterProvider,
   createMemoryHistory,
@@ -17,7 +17,8 @@ import {
   createRouter,
 } from "@tanstack/react-router";
 import type { WorkflowPendingGate, WorkflowRunDetail } from "@valet/api/wire";
-import { RunDetailBody } from "./workflows.runs.$runId";
+import { ApiError } from "~/api/client";
+import { RunDetailBody, RunLoadError } from "./workflows.runs.$runId";
 
 vi.mock("~/api/workflows", () => ({
   useResolveApproval: () => ({ mutate: vi.fn(), isPending: false, isError: false, error: null }),
@@ -65,19 +66,96 @@ function renderInRouter(ui: React.ReactElement) {
     path: "/sessions/$sessionId",
     component: () => null,
   });
+  const threadRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/threads/$threadId",
+    component: () => null,
+  });
   const runRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: "/workflows/runs/$runId",
     component: () => null,
   });
   const router = createRouter({
-    routeTree: rootRoute.addChildren([sessionRoute, runRoute]),
+    routeTree: rootRoute.addChildren([sessionRoute, threadRoute, runRoute]),
     history: createMemoryHistory({ initialEntries: ["/"] }),
   });
   return render(<RouterProvider router={router} />);
 }
 
+describe("RunLoadError (L7)", () => {
+  it("says a missing run was not found and links to the run list", async () => {
+    renderInRouter(<RunLoadError error={new ApiError(404, "not found", { error: "run not found" })} />);
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe("This run was not found. It may have been deleted."));
+    expect(screen.getByRole("link", { name: "Back to Runs" }).getAttribute("href")).toBe("/workflows/runs");
+  });
+
+  it("names the server's reason for any other failure", async () => {
+    renderInRouter(<RunLoadError error={new ApiError(500, "boom", { error: "The database is down. Try again later." })} />);
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe("The database is down. Try again later."));
+  });
+});
+
 describe("RunDetailBody", () => {
+  it("keeps the diagram collapsed after the steps and names the waiting step", () => {
+    const data = baseRun({ status: "parked", waitingOn: [{ kind: "submission", nodeId: "apply" }] });
+    data.checkpoints = [{ nodeId: "apply", iteration: 0, status: "intent", createdAt: Date.now() }];
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
+    const diagram = screen.getByText("Workflow diagram");
+    expect(diagram.closest("details")?.open).toBe(false);
+    expect(screen.getByText("Steps").compareDocumentPosition(diagram) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByRole("status").textContent).toContain("Waiting at: apply");
+    expect(screen.queryByText("Running")).toBeNull();
+  });
+  it("says a failed run used an older build and workflow version, and names both", () => {
+    const data = {
+      ...baseRun({ status: "settled", outcome: "failed" }),
+      provenance: { build: "1a40599aa", serverBuild: "fef21f62e", workflowVersion: 7, latestWorkflowVersion: 9 },
+    };
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
+    expect(screen.getByText(/^Since this run, Valet was updated \(build 1a40599aa to fef21f62e\) and the workflow was edited \(version 7 to 9\)\./)).toBeTruthy();
+    expect(screen.getByText(/Workflow version 7 · Valet build 1a40599aa/)).toBeTruthy();
+  });
+  it("shows no change notice when the run used the current build and version", () => {
+    const data = {
+      ...baseRun({ status: "settled", outcome: "failed" }),
+      provenance: { build: "fef21f62e", serverBuild: "fef21f62e", workflowVersion: 9, latestWorkflowVersion: 9 },
+    };
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
+    expect(screen.queryByText(/Since this run/)).toBeNull();
+  });
+  it("offers a retry from the failed step when a finished step can be reused", () => {
+    const data = baseRun({ status: "settled", outcome: "failed" });
+    data.checkpoints = [
+      { nodeId: "list", iteration: 0, status: "completed", createdAt: 1 },
+      { nodeId: "report", iteration: 0, status: "failed", error: "boom", createdAt: 2 },
+    ];
+    const onRetry = vi.fn();
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={onRetry} retryPending={false} />);
+    fireEvent.click(screen.getByRole("button", { name: "Retry failed step" }));
+    fireEvent.click(screen.getByRole("button", { name: "Retry from start" }));
+    expect(onRetry.mock.calls).toEqual([["failed_step"], ["start"]]);
+  });
+  it("offers Explain this failure on the failed step of a settled run", () => {
+    const data = baseRun({ status: "settled", outcome: "failed" });
+    data.checkpoints = [
+      { nodeId: "list", iteration: 0, status: "completed", createdAt: 1 },
+      { nodeId: "qualify", iteration: 2, status: "failed", error: "boom", createdAt: 2 },
+    ];
+    const onExplainFailure = vi.fn();
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} onExplainFailure={onExplainFailure} />);
+    const buttons = screen.getAllByRole("button", { name: "Explain this failure" });
+    expect(buttons).toHaveLength(1);
+    fireEvent.click(buttons[0] as HTMLElement);
+    expect(onExplainFailure).toHaveBeenCalledWith("qualify", 2);
+  });
+  it("offers only a full retry when no step finished", () => {
+    const data = baseRun({ status: "settled", outcome: "failed" });
+    data.checkpoints = [{ nodeId: "report", iteration: 0, status: "failed", error: "boom", createdAt: 2 }];
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
+    expect(screen.queryByRole("button", { name: "Retry failed step" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Retry run" })).toBeTruthy();
+  });
   it("shows the approval card when a pendingGate of kind approval exists", () => {
     const data = baseRun(
       {
@@ -169,7 +247,7 @@ describe("RunDetailBody", () => {
     const data = baseRun({ status: "settled", outcome: "completed" });
     render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
     expect(screen.queryByRole("button", { name: "Cancel run" })).toBeNull();
-    expect(screen.getByText("completed")).toBeTruthy();
+    expect(screen.getByText("Completed")).toBeTruthy();
   });
 
   it("shows the Retry button for a settled failed run and wires the click", () => {
@@ -216,7 +294,7 @@ describe("RunDetailBody", () => {
     }
   });
 
-  it("links a checkpoint to the session it drove and the child run it started", async () => {
+  it("offers inline submission logs, preserves child links, and declines unscoped legacy logs", async () => {
     const data = baseRun({ status: "settled", outcome: "failed" });
     data.checkpoints = [
       {
@@ -227,6 +305,7 @@ describe("RunDetailBody", () => {
         sessionId: "s_abc",
         createdAt: Date.now(),
       },
+      { nodeId: "thread-step", iteration: 0, status: "completed", sessionId: "s_abc", threadId: "thread_abc", queueItemId: "q-step", createdAt: Date.now() },
       { nodeId: "sub", iteration: 0, status: "completed", childRunId: "wfrun_sub_1", createdAt: Date.now() },
       { nodeId: "set1", iteration: 0, status: "completed", createdAt: Date.now() },
     ];
@@ -240,12 +319,44 @@ describe("RunDetailBody", () => {
         retryPending={false}
       />,
     );
-    expect((await screen.findByText("Open session")).getAttribute("href")).toBe("/sessions/s_abc");
+    expect(await screen.findByText("Scoped agent logs were not recorded for this step.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "View agent logs" }).getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByRole("link", { name: "View agent logs" })).toBeNull();
     expect(screen.getByText("Open child run").getAttribute("href")).toBe(
       "/workflows/runs/wfrun_sub_1",
     );
     // A checkpoint carrying neither id gets no link row.
-    expect(screen.getAllByText("Open session")).toHaveLength(1);
+    expect(screen.getAllByText("Scoped agent logs were not recorded for this step.")).toHaveLength(1);
+  });
+
+  it("totals the steps' model spend and marks it a lower bound when any call was unpriced", () => {
+    const data = baseRun({ status: "settled", outcome: "completed" });
+    data.checkpoints = [
+      { nodeId: "draft", iteration: 0, status: "completed", createdAt: Date.now() },
+      { nodeId: "review", iteration: 0, status: "completed", createdAt: Date.now() },
+    ];
+    const step = { iteration: 0, turns: 1, totalTokens: 10, models: [] };
+    data.stepCosts = [
+      { ...step, nodeId: "draft", costUsd: 0.01, unpricedTurns: 0 },
+      { ...step, nodeId: "review", costUsd: 0.002, unpricedTurns: 1 },
+    ];
+    const { unmount } = render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
+    expect(screen.getByText("$0.0120+ model spend")).toBeTruthy();
+    unmount();
+    data.stepCosts = [{ ...step, nodeId: "draft", costUsd: 0.01, unpricedTurns: 0 }];
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
+    expect(screen.getByText("$0.0100 model spend")).toBeTruthy();
+  });
+
+  it("says at the top when a step's model changed without an edit", () => {
+    const data = baseRun({ status: "settled", outcome: "completed" });
+    const props = { runId: "wfrun_1", onCancel: vi.fn(), cancelPending: false, onRetry: vi.fn(), retryPending: false };
+    const { unmount } = render(<RunDetailBody {...props} data={data} />);
+    expect(screen.queryByText(/The model changed/)).toBeNull();
+    unmount();
+    data.modelChanges = [{ nodeId: "draft", previous: ["sol-5.6"], current: ["sol-6.1"] }];
+    render(<RunDetailBody {...props} data={data} />);
+    expect(screen.getByRole("status").textContent).toBe("The model changed for 1 step since the last run. The workflow was not edited.");
   });
 
   it("renders checkpoints with status and a result preview", () => {
@@ -254,7 +365,7 @@ describe("RunDetailBody", () => {
       { nodeId: "set1", iteration: 0, status: "completed", result: { ok: true }, createdAt: Date.now() },
     ];
     render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
-    expect(screen.getByText("set1")).toBeTruthy();
+    expect(screen.getByText("Set1")).toBeTruthy();
     expect(screen.getByText(/"ok": true/)).toBeTruthy();
   });
 
@@ -313,7 +424,7 @@ describe("RunDetailBody", () => {
 
     // The panel must come before the checkpoint list in document order, so
     // the answer is the first thing on the page.
-    const list = screen.getByText("Checkpoints");
+    const list = screen.getByText("Steps");
     expect(panel.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
@@ -354,7 +465,7 @@ describe("RunDetailBody", () => {
     const { unmount } = render(
       <RunDetailBody runId="wfrun_1" data={running} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />,
     );
-    expect(screen.getByText(/1 checkpoint/)).toBeTruthy();
+    expect(screen.getByText(/1 step/)).toBeTruthy();
     expect(screen.queryByText(/Ran for/)).toBeNull();
     unmount();
 

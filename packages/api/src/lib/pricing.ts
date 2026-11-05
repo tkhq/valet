@@ -1,5 +1,5 @@
 import { calculateCost } from "@earendil-works/pi-ai/compat";
-import { bundledModel } from "@valet/engine/model-catalog";
+import { bundledPricingModel } from "@valet/engine/model-catalog";
 import type { ProviderKind, ProxyUsage } from "../proxy/types.js";
 
 /** pi-ai provider key for our two proxy kinds. Codex talks the Responses
@@ -10,7 +10,7 @@ function piProvider(kind: ProviderKind): "anthropic" | "openai" {
 
 function inRegistry(kind: ProviderKind, id: string): boolean {
   try {
-    return !!bundledModel(piProvider(kind), id);
+    return !!bundledPricingModel(piProvider(kind), id);
   } catch {
     return false;
   }
@@ -50,10 +50,11 @@ export function priceUsage(kind: ProviderKind, modelId: string, usage: ProxyUsag
   try {
     const canonical = resolveCanonicalModel(kind, modelId);
     if (!canonical) return null;
-    const model = bundledModel(piProvider(kind), canonical);
+    const model = bundledPricingModel(piProvider(kind), canonical);
     if (!model) return null;
     const cost = calculateCost(model, {
-      input: usage.input,
+      // OpenAI includes cached tokens in input; pi-ai expects uncached input.
+      input: kind === "openai" ? Math.max(0, usage.input - usage.cacheRead) : usage.input,
       output: usage.output,
       cacheRead: usage.cacheRead,
       cacheWrite: usage.cacheWrite,

@@ -1,0 +1,181 @@
+import { useState } from "react";
+import { useInfiniteQuery } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
+import { ArrowDownLeft, ArrowUpRight, FileText, Image as ImageIcon, GitMerge, GitPullRequest, GitPullRequestClosed, Link2, Plus, Terminal } from "lucide-react";
+import type { Message, ThreadPullRequest } from "@valet/api/wire";
+import { api, type OwnerFilter } from "~/api/client";
+import { qkCatchUp } from "~/api/catch-up";
+import { useThreadChannelActivity } from "~/api/channels";
+import { usePlaceSubject } from "~/api/presence";
+import { relativeTime } from "~/lib/relative-time";
+import { BackgroundWorkSection } from "./background-work";
+import { parseFileDownload, type FileDownload } from "./tool-renderers/file-attach";
+
+/** The pull request's icon, for its state. */
+function PullRequestIcon({ state }: { state: ThreadPullRequest["state"] }) {
+  const Icon = state === "merged" ? GitMerge : state === "closed" ? GitPullRequestClosed : GitPullRequest;
+  return <Icon className="h-4 w-4 shrink-0" aria-hidden />;
+}
+
+/** The link to the channel's place page, by its team-qualified place key. */
+function ChannelPlaceLink({ channelKey }: { channelKey: string }) {
+  const subject = usePlaceSubject(channelKey);
+  return <Link to="/presence/places/$subject" params={{ subject }} className="text-xs hover:text-ink">Open channel</Link>;
+}
+
+/** `repo #n`, the way the thread header names a pull request. */
+function pullRequestLabel(pr: ThreadPullRequest): string {
+  return `${pr.repo.split("/").at(-1) ?? pr.repo} #${pr.number}`;
+}
+
+/**
+ * Context belongs to the selected thread, never the entire shared runtime.
+ *
+ * Outputs are what the thread produced: its files and sites, and the pull
+ * requests it opened. Work the thread delegated produces outputs too, so a
+ * pull request a child opened bubbles up, in its own group and named by the
+ * child, apart from the thread's own. A child's inputs stay on the child:
+ * Sources lists only what was shared with this thread, never a child's report.
+ * Background work lists this thread's open wakeups and holds, and shows only
+ * while the thread has some.
+ */
+export function ThreadContextPanel({ owner, sessionId, threadId, messages, busy, pullRequests = [], canCancelWork = false, onCreate, onAttach, onReveal }: {
+  owner: OwnerFilter;
+  sessionId: string;
+  threadId: string;
+  messages: Message[];
+  busy: boolean;
+  /** The thread's pull requests, from its summary. */
+  pullRequests?: ThreadPullRequest[];
+  /** The viewer may stop this thread's background work. */
+  canCancelWork?: boolean;
+  onCreate: () => void;
+  onAttach: () => void;
+  onReveal: (messageId: string) => void;
+}) {
+  const [showAll, setShowAll] = useState(false);
+  const artifacts = useInfiniteQuery({
+    queryKey: qkCatchUp.workArtifacts(owner, sessionId, threadId),
+    initialPageParam: undefined as string | undefined,
+    queryFn: ({ pageParam }) => api.listArtifacts(owner, { sourceSessionId: sessionId, sourceThreadId: threadId, limit: 10, cursor: pageParam }),
+    getNextPageParam: (page) => page.nextCursor ?? undefined,
+    refetchInterval: 10_000,
+  });
+  const outputs = artifacts.error ? [] : artifacts.data?.pages.flatMap((page) => page.artifacts) ?? [];
+  const ownPullRequests = pullRequests.filter((pr) => !pr.delegatedFrom);
+  const delegatedPullRequests = pullRequests.filter((pr) => pr.delegatedFrom);
+  const threadMessages = messages.filter((message) => message.threadId === threadId);
+  // Uploads download under their original name; links open in a new tab.
+  const sources = new Map<string, { title: string; href: string; download?: string }>();
+  for (const message of threadMessages) {
+    // A child's completion report arrives as a signal on this thread. Its
+    // links are the child's work, not something shared here.
+    if (message.role !== "user" || message.signal?.signalType.startsWith("child.")) continue;
+    for (const attachment of message.attachments ?? []) {
+      const href = attachment.kind === "file" ? api.threadFileUrl(sessionId, threadId, attachment.path) : attachment.url;
+      sources.set(href, { title: attachment.name, href, download: attachment.name });
+    }
+    const text = message.content;
+    for (const match of text.matchAll(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>\]\)]+)/g)) {
+      const href = (match[2] ?? match[3]).replace(/[.,;!?]+$/, "");
+      try {
+        const url = new URL(href);
+        if (url.protocol !== "http:" && url.protocol !== "https:") continue;
+        sources.set(href, { title: match[1] ?? `${url.hostname}${url.pathname === "/" ? "" : url.pathname}`, href });
+      } catch { /* Incomplete streamed URL. */ }
+    }
+  }
+  const sourceRows = [...sources.entries()];
+  // Files the assistant saved to the thread (file_attach, render_diagram) are
+  // outputs too: durable downloads, listed with their image titles.
+  const savedFiles = new Map<string, FileDownload>();
+  for (const message of threadMessages) {
+    if (message.role !== "assistant") continue;
+    for (const part of message.parts) {
+      if (part.kind !== "tool_call" || part.status !== "completed" || (part.toolName !== "file_attach" && part.toolName !== "render_diagram")) continue;
+      const file = parseFileDownload(part.result);
+      if (file) savedFiles.set(file.url, file);
+    }
+  }
+  const fileRows = [...savedFiles.values()];
+  const activeTools = busy ? threadMessages.flatMap((message) => message.parts.flatMap((part) => {
+    if (part.kind !== "tool_call" || part.status !== "running") return [];
+    const args = part.args;
+    const command = args && typeof args === "object" && "command" in args && typeof args.command === "string" ? args.command : part.toolName;
+    return [{ id: part.callId, label: command, messageId: message.id }];
+  })) : [];
+  const channelActivity = useThreadChannelActivity(sessionId, threadId).data;
+  const latest = channelActivity?.latest;
+  const LatestIcon = latest?.direction === "out" ? ArrowUpRight : ArrowDownLeft;
+  const latestLabel = latest ? `${latest.direction === "out" ? "Valet" : latest.author ?? "Someone"}: ${latest.text ?? "(message)"}` : "";
+  const rowClass = "flex w-full min-w-0 items-center gap-2.5 rounded-md py-1.5 text-left text-sm text-muted hover:text-ink";
+  return (
+    <aside aria-label="Thread context" className="rounded-2xl bg-ink-wash p-4 text-sm">
+      <section aria-label="Outputs" className="pb-3">
+        <div className="mb-2 flex items-center justify-between text-muted">
+          <h2 className="font-medium">Outputs</h2>
+          <button type="button" onClick={onCreate} aria-label="Create an output" className="rounded p-1 hover:bg-ink-wash-strong hover:text-ink"><Plus className="h-4 w-4" /></button>
+        </div>
+        {artifacts.isLoading && <p className="text-xs text-muted">Loading outputs…</p>}
+        {artifacts.error && <p className="text-xs text-muted">Could not load outputs. <button className="underline" onClick={() => void artifacts.refetch()}>Retry</button></p>}
+        {!artifacts.isLoading && !artifacts.error && outputs.length === 0 && pullRequests.length === 0 && fileRows.length === 0 && <button onClick={onCreate} className="text-muted hover:text-ink">Create a file or site</button>}
+        {ownPullRequests.map((pr) => <a key={pr.url} href={pr.url} target="_blank" rel="noopener noreferrer" className={rowClass} title={pr.url}>
+          <PullRequestIcon state={pr.state} /><span className="truncate">{pullRequestLabel(pr)}</span>
+          {pr.state !== "open" && <span className="ml-auto shrink-0 text-xs">{pr.state === "merged" ? "Merged" : "Closed"}</span>}
+        </a>)}
+        {fileRows.map((file) => <a key={file.url} href={file.url} download={file.name} className={rowClass} title={file.image?.alt ?? file.name}>
+          {file.image ? <ImageIcon className="h-4 w-4 shrink-0" aria-hidden /> : <FileText className="h-4 w-4 shrink-0" aria-hidden />}
+          <span className="truncate">{file.image?.title ?? file.name}</span>
+        </a>)}
+        {outputs.map((output) => <Link key={output.id} to="/a/$token" params={{ token: output.token }} className={rowClass}><FileText className="h-4 w-4 shrink-0" /><span className="truncate">{output.title}</span></Link>)}
+        {!artifacts.error && artifacts.hasNextPage && <button className="mt-2 text-xs text-muted hover:text-ink" disabled={artifacts.isFetchingNextPage} onClick={() => void artifacts.fetchNextPage()}>View more outputs</button>}
+        {delegatedPullRequests.length > 0 && (
+          <div role="group" aria-label="From delegated work" className="mt-2 border-l border-line pl-3">
+            <p className="text-xs text-muted">From delegated work</p>
+            {delegatedPullRequests.map((pr) => {
+              const child = pr.delegatedFrom?.title ?? "a delegated thread";
+              return <a key={pr.url} href={pr.url} target="_blank" rel="noopener noreferrer" className={rowClass} title={`${pr.url} · opened by ${child}`}>
+                <PullRequestIcon state={pr.state} />
+                <span className="min-w-0 flex-1 truncate">{pullRequestLabel(pr)}<span className="text-xs"> · via {child}</span></span>
+                {pr.state !== "open" && <span className="shrink-0 text-xs">{pr.state === "merged" ? "Merged" : "Closed"}</span>}
+              </a>;
+            })}
+          </div>
+        )}
+      </section>
+      <section aria-label="Active tools" className="border-t border-line py-3">
+        <h2 className="mb-2 font-medium text-muted">Active tools</h2>
+        {activeTools.length === 0 && <p className="text-xs text-muted">No active tool calls</p>}
+        {activeTools.map((tool) => <button key={tool.id} onClick={() => onReveal(tool.messageId)} className={rowClass} title={tool.label}><Terminal className="h-4 w-4 shrink-0 text-ink" /><span className="truncate text-ink">{tool.label}</span></button>)}
+      </section>
+      <BackgroundWorkSection sessionId={sessionId} threadId={threadId} canCancel={canCancelWork} />
+      {latest && channelActivity && (
+        // One summary row, whatever the thread's length: the transcript already holds every message.
+        <section aria-label="Channel" className="border-t border-line py-3">
+          <div className="mb-2 flex items-center justify-between text-muted">
+            <h2 className="font-medium">Channel</h2>
+            <ChannelPlaceLink channelKey={latest.channelKey} />
+          </div>
+          <p className="text-xs text-muted">
+            {channelActivity.total} {channelActivity.total === 1 ? "message" : "messages"} in the channel · latest {relativeTime(latest.createdAt)}
+          </p>
+          {latest.url
+            ? <a href={latest.url} target="_blank" rel="noopener noreferrer" className={rowClass} title={latestLabel}><LatestIcon className="h-4 w-4 shrink-0" /><span className="truncate">{latestLabel}</span></a>
+            : <p className={rowClass} title={latestLabel}><LatestIcon className="h-4 w-4 shrink-0" /><span className="truncate">{latestLabel}</span></p>}
+        </section>
+      )}
+      <section aria-label="Sources" className="border-t border-line pt-3">
+        <div className="mb-2 flex items-center justify-between text-muted">
+          <h2 className="font-medium">Sources</h2>
+          <button type="button" onClick={onAttach} aria-label="Add a source" className="rounded p-1 hover:bg-ink-wash-strong hover:text-ink"><Plus className="h-4 w-4" /></button>
+        </div>
+        {sourceRows.length === 0 && <p className="text-xs text-muted">Files and links you share appear here.</p>}
+        {(showAll ? sourceRows : sourceRows.slice(0, 3)).map(([key, source]) => {
+          const Icon = source.download ? FileText : Link2;
+          return <a key={key} href={source.href} {...(source.download ? { download: source.download } : { target: "_blank", rel: "noopener noreferrer" })} className={rowClass} title={source.title}><Icon className="h-4 w-4 shrink-0" /><span className="truncate">{source.title}</span></a>;
+        })}
+        {sourceRows.length > 3 && <button onClick={() => setShowAll(!showAll)} className="mt-2 text-xs text-muted hover:text-ink">{showAll ? "Show less" : `View all (${sourceRows.length})`}</button>}
+      </section>
+    </aside>
+  );
+}

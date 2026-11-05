@@ -116,6 +116,8 @@ export interface Trajectory {
   durationMs: number;
   /** Stop reason of the final assistant message. */
   stopReason?: string;
+  /** Compaction checkpoints the thread wrote. */
+  compactions?: number;
   metadata?: Record<string, unknown>;
   /**
    * Child trajectories for orchestrator cases — one per child session the
@@ -182,6 +184,12 @@ export type DeterministicCheck =
       per_submission?: boolean;
     }
   | { type: "max_tokens"; value: number }
+  /**
+   * The thread wrote at least `value` compaction checkpoints. Pair it with
+   * `context_budget_tokens` so a recall case fails when compaction never
+   * ran, instead of passing on the uncompacted transcript.
+   */
+  | { type: "min_compactions"; value: number }
   | { type: "max_cost"; value: number }
   | { type: "max_duration"; value: number }
   | {
@@ -201,7 +209,104 @@ export type DeterministicCheck =
       expect_exit_code?: number;
       /** Command timeout in seconds. Default 120. */
       timeout_s?: number;
-    };
+    }
+  | WorkflowDefinitionCheck;
+
+/**
+ * Workflow-authoring check. Scores the workflow definition the agent
+ * drafted: the saved definition when the case saved one, else the last
+ * definition the agent sent to the save validator. A case asks for one
+ * workflow, so saving more than one fails. Every definition must pass the
+ * product's save validator (a saved definition did; a draft did when its
+ * call succeeded), give each stop step a `success` or `failure` outcome,
+ * give each `foreach` step one inline body and `maxItems`, and keep
+ * approval requests out of agent step prompts. The optional fields add
+ * case-specific rules.
+ *
+ * The check also reports metrics: the drafts sent to the validator, the
+ * validator rejections (repair effort), and whether the first full draft
+ * was already correct (initial correctness). A small draft before the
+ * first full one is a probe, and a call to a tool that does not exist is
+ * not a draft; the check counts each on its own.
+ *
+ * Selectors name steps. A selector with a dot is an action id glob that
+ * matches tool steps and `foreach` tool bodies (`sheets.write_*`). A
+ * selector without a dot is a step type (`approval`). `|` separates
+ * alternatives. A part that starts with `!` excludes what it names:
+ * `sheets.*|!sheets.read_*` names every sheets action except the reads.
+ */
+export interface WorkflowDefinitionCheck {
+  type: "workflow_definition";
+  /** Require at least one `foreach` step. */
+  foreach?: boolean;
+  /** Each selector must match at least one tool step. */
+  tool_steps?: string[];
+  /**
+   * Actions a person approves on each run. Each selector must match a tool
+   * step. Every agent step must set `toolScope.actions` (an agent step
+   * without it can run every action), and no entry may match.
+   */
+  approved_actions?: string[];
+  /**
+   * Steps that match these selectors must occur in this order on one path.
+   * After a selector that names approval steps, every step that matches
+   * the next selector must run after an approval. A step on an approval
+   * step's denial branch (a `"false"` edge, or any edge with
+   * `onDeny: "skip"` and no `fromOutput`) does not run after it.
+   */
+  order?: string[];
+  /**
+   * The workflow runs on a schedule: some step reads the schedule input,
+   * and no `trigger.data` read is one that a scheduled run leaves empty
+   * (`scheduledRunMisses`, the scheduler's own rule).
+   */
+  schedule_input?: boolean;
+  /** Some template reads `trigger.timestamp`, and no step holds a literal date. */
+  run_date?: boolean;
+  /** Every `trigger.data.<field>` read has a `dataSchema` entry on the trigger. */
+  declared_inputs?: boolean;
+  /**
+   * The case must save the workflow (`metadata.savedWorkflows`, product
+   * drive). A save that returns an error stores nothing, so a rejected
+   * draft does not satisfy it.
+   */
+  saved?: boolean;
+}
+
+/** One known issue a code reviewer should find (Martian golden comment). */
+export interface GoldenComment {
+  comment: string;
+  severity?: string;
+  /** Martian category: bug, security, concurrency, data, api, perf, test_gap, doc_defect, style, speculative. */
+  category: string;
+}
+
+/** Martian scoring profiles: which golden categories count toward TP and FN. */
+export const REVIEW_PROFILES = ["strict", "core", "all"] as const;
+export type ReviewProfile = (typeof REVIEW_PROFILES)[number];
+
+/**
+ * Scores a `pull_request` case's submitted review against golden comments
+ * with Martian Code Review Bench's method: an LLM splits the review into
+ * issues, groups duplicates, then matches every issue against every golden
+ * comment. Reports tp/fp/fn as metrics; the scorecard sums them into
+ * precision, recall, F1 and F2 next to the `reference` tools.
+ */
+export interface ReviewMatchCheck {
+  type: "review_match";
+  golden: GoldenComment[];
+  /** Default `core`, Martian's primary metric. */
+  profile?: ReviewProfile;
+  /** Pass when recall on this case reaches this fraction. Default 0: any submitted review passes. */
+  min_recall?: number;
+  /** Default anthropic/claude-sonnet-4-5, the judge Martian published vendor results with. */
+  judge_model?: string;
+  /**
+   * Published results for other review tools on the same PR, under the same
+   * judge: the golden indexes each tool matched and its unmatched issue count.
+   */
+  reference?: Record<string, { matched: number[]; fp: number }>;
+}
 
 /** LLM-as-judge checks — score with a grading model, pass at score >= threshold. */
 export type JudgeCheck =
@@ -215,7 +320,7 @@ export type JudgeCheck =
       judge_model?: string;
     };
 
-export type Check = DeterministicCheck | JudgeCheck;
+export type Check = DeterministicCheck | JudgeCheck | ReviewMatchCheck;
 
 /** Every legal `Check.type` value, used by the case loader for validation. */
 export const CHECK_TYPES = [
@@ -230,12 +335,15 @@ export const CHECK_TYPES = [
   "no_errors",
   "max_turns",
   "max_tokens",
+  "min_compactions",
   "max_cost",
   "max_duration",
   "verify_command",
+  "workflow_definition",
   "judge_output",
   "judge_trajectory",
   "judge_equivalence",
+  "review_match",
 ] as const;
 
 /** Outcome of one check against one trajectory. */
@@ -246,6 +354,12 @@ export interface CheckResult {
   detail?: string;
   /** Judge score (1-5) for judge checks. */
   score?: number;
+  /**
+   * Measurements a check reports whether it passes or fails, such as the
+   * repair effort of a workflow draft. The scorecard prints them, and
+   * multi-run entries keep one set per run.
+   */
+  metrics?: Record<string, number | boolean>;
 }
 
 // ── Eval cases ──────────────────────────────────────────────────────────────
@@ -279,13 +393,37 @@ export interface MockToolSpec {
   response: string;
 }
 
+/**
+ * A pull request for the code reviewer to review. The runner checks out
+ * `head` from a cached bare repo (fetched from `remote` on first use), runs
+ * the `@valet/plugin-pr-review` reviewer on a local sandbox over that
+ * checkout, and records the submitted review in `trajectory.metadata.review`.
+ */
+export interface PullRequestSpec {
+  /** Cache key for the bare repo, e.g. `sentry`. Cases of one project share it. */
+  repo: string;
+  /** Git URL that holds both commits. */
+  remote: string;
+  base: string;
+  head: string;
+  title: string;
+  body?: string;
+  /** Check each finding with a verifier agent before scoring. Default true. */
+  verify?: boolean;
+}
+
 /** One eval case, loaded from a YAML file in `evals/cases/`. */
 export interface EvalCase {
   /** Unique id, kebab-case. Doubles as the baseline directory name. */
   id: string;
   description?: string;
-  /** User turns, in order. Single-prompt cases use a one-element array. */
+  /**
+   * User turns, in order. Single-prompt cases use a one-element array.
+   * Empty for `pull_request` cases: the reviewer builds its own prompt.
+   */
   turns: EvalTurn[];
+  /** Run the code reviewer on this pull request instead of scripted turns. */
+  pull_request?: PullRequestSpec;
   /** Model spec pin. Absent → the suite default model. */
   model?: string;
   /** Per-case timeout. Absent → the suite default. */
@@ -318,6 +456,13 @@ export interface EvalCase {
   /** `orchestrator` sets up the full orchestrator environment. */
   session_type?: "default" | "orchestrator";
   /**
+   * Compaction budget for the case session (`compaction.contextBudgetTokens`).
+   * A small value makes a short case compact at each turn end (the runner
+   * sets the idle delay to 0), so a recall check scores what survives a
+   * compaction. Engine drive only.
+   */
+  context_budget_tokens?: number;
+  /**
    * How the case is driven. `engine` (default): in-process engine with
    * eval stand-ins — fast, cheap, lab conditions. `product`: boots the
    * real api per case and drives the REAL orchestrator session over its
@@ -339,6 +484,13 @@ export interface EvalCase {
   mock_tools?: Record<string, MockToolSpec>;
   /** Credential services the case needs. Missing credentials → SKIP. */
   required_credentials?: string[];
+  /**
+   * Action services that look connected in a `drive: product` case, with
+   * placeholder credentials (`@valet/api/eval-connections`). The catalog
+   * then shows their action schemas, as it does for a person who connected
+   * them. Any call that reaches the real service fails on authentication.
+   */
+  connected?: string[];
   checks: Check[];
 }
 
@@ -359,6 +511,11 @@ export interface SamplingStats {
   tokensStd: number;
   /** Per-run recursive cost totals; absent when unpriced. */
   costPerRun?: number[];
+  /**
+   * Per-run check metrics, in run order: each run's `CheckResult.metrics`
+   * merged into one record. Absent when no check reports metrics.
+   */
+  metricsPerRun?: Array<Record<string, number | boolean>>;
 }
 
 /** Result of one case (one or more runs), as the scorecard reports it. */

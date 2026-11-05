@@ -9,6 +9,11 @@ export function formatTokens(n: number): string {
   return `${trimZero((n / 1_000_000_000).toFixed(1))}B`;
 }
 
+/** A turn count with its noun: "1 turn", "1,204 turns". */
+export function formatTurns(n: number): string {
+  return `${n.toLocaleString()} ${n === 1 ? "turn" : "turns"}`;
+}
+
 /** Dollar display tuned for LLM spend: sub-cent shows "<$0.01", under $10
  * keeps cents, larger amounts round to whole dollars. */
 export function formatUsd(n: number): string {
@@ -17,6 +22,46 @@ export function formatUsd(n: number): string {
   if (n < 10) return `$${n.toFixed(2)}`;
   if (n < 1_000) return `$${Math.round(n)}`;
   return `$${trimZero((n / 1_000).toFixed(1))}k`;
+}
+
+/** Dollar display for the Usage page and workflow step costs: four
+ * decimals below a dollar, so a small step's cost never reads as zero, and
+ * cents from a dollar up, so a total reads as money ($184.20). */
+export function formatUsdPrecise(n: number): string {
+  if (n > 0 && n < 0.00005) return "<$0.0001";
+  return `$${n.toFixed(Math.abs(n) >= 1 ? 2 : 4)}`;
+}
+
+/** One per-million list rate: "$0.62", a third decimal below a cent so a
+ * cheap model does not read as free ("$0.005"); undefined for a missing or
+ * non-positive number so callers render nothing. */
+export function formatRate(n: number | undefined): string | undefined {
+  if (n === undefined || !Number.isFinite(n) || n <= 0) return undefined;
+  return `$${n < 0.01 ? n.toFixed(3) : n.toFixed(2)}`;
+}
+
+/** List price per million tokens for a model picker: "$0.62 in / $1.85 out
+ * per 1M tokens", or "$0.62 / $1.85" in `short` form for a chip. A missing
+ * or all-zero price returns undefined so callers render nothing. */
+export function formatPerMillion(
+  pricing: { input: number; output: number } | undefined,
+  form: "long" | "short" = "long",
+): string | undefined {
+  if (!pricing) return undefined;
+  const { input, output } = pricing;
+  if (!Number.isFinite(input) || !Number.isFinite(output)) return undefined;
+  if (input <= 0 && output <= 0) return undefined;
+  const rate = (n: number) => formatRate(n) ?? "$0.00";
+  return form === "short"
+    ? `${rate(input)} / ${rate(output)}`
+    : `${rate(input)} in / ${rate(output)} out per 1M tokens`;
+}
+
+/** A context window: 131072 → "131k", 1000000 and 1048576 → "1M". */
+export function formatContext(n: number | undefined): string | undefined {
+  if (n === undefined || !Number.isFinite(n) || n <= 0) return undefined;
+  if (n < 1_000_000) return `${Math.round(n / 1_000)}k`;
+  return `${trimZero((n / 1_000_000).toFixed(1))}M`;
 }
 
 function trimZero(s: string): string {

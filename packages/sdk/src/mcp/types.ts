@@ -11,6 +11,18 @@ export interface McpTool {
     idempotentHint?: boolean;
     openWorldHint?: boolean;
   };
+  /**
+   * The ways a caller may authenticate to call this tool (draft SEP-1488).
+   * Any one scheme is enough. Absent means the server says nothing.
+   */
+  securitySchemes?: McpSecurityScheme[];
+}
+
+/** One `securitySchemes` entry. `noauth` needs no credential; `oauth2`
+ * needs every scope in `scopes`. Other types are passed through unread. */
+export interface McpSecurityScheme {
+  type: string;
+  scopes?: string[];
 }
 
 /** Result of calling an MCP tool via tools/call. */

@@ -12,10 +12,13 @@
  * See the "Channel transports" section below for the v2 ChannelTransport
  * contract (Telegram, Phase 7).
  */
+import type { TurnProgress } from "@valet/shared";
+import { validatePluginHttpRoutes, type PluginHttpRoute } from "./plugin-http.js";
 import type { ActionPlugin } from "./plugin-catalog.js";
 import type { RiskLevel, SkillSource, RoleSpec, StoredCredential } from "./types.js";
 import { BUILTIN_COMMAND_NAMES, type CommandDef } from "./commands/types.js";
 import type { WorkflowTemplate } from "./workflow-template.js";
+import type { PluginEventHandler } from "./plugin-agents.js";
 
 export interface OAuthIdentity {
   provider: string;
@@ -76,6 +79,10 @@ export interface CredentialDeclaration {
   connectLabel?: string;
   /** How the connect UI obtains this credential via OAuth. Absent = manual token entry only. Only valid on `type: "oauth2"`. */
   oauth?: OAuthDeclaration;
+  /** The provider accepts only tokens from the `oauth` sign-in, so the
+   * connect UI offers no token entry and `PUT /api/credentials` refuses a
+   * pasted token. Pylon's MCP server is one. Only valid with `oauth`. */
+  oauthOnly?: true;
   /** Deployment/org prerequisite for offering this credential. Absent = the
    * credential is self-sufficient (a personal token works with no org setup)
    * and the service is always offered. `orgCredential: true` = the org-scoped
@@ -92,6 +99,17 @@ export interface VerifiedEvent {
   eventType: string;
   deliveryId: string;
   payload: unknown;
+  /** Envelope-level facts the inner payload may not carry, e.g. Slack's
+   * `team_id` for an inner event with no `team` field (spec Part A3). */
+  context?: Record<string, string>;
+}
+
+/** Why a trigger declined a request. Only `bad_signature` means the request
+ * may not come from the provider. `detail` names the delivery's type, action,
+ * and webhook, never its content. */
+export interface TriggerRejection {
+  reason: "bad_signature" | "stale_delivery" | "unsupported_event" | "malformed_callback";
+  detail: string;
 }
 
 /** A provider webhook normalized into the generic event pipeline. */
@@ -103,18 +121,66 @@ export interface NormalizedEvent {
   /** ISO timestamp of when the event happened at the provider. */
   occurredAt: string;
   /** External actor, when the payload carries one (enables identity-link attribution). */
-  actor?: { externalId: string; login?: string };
+  actor?: { externalId: string; login?: string; bot?: boolean };
   /** Flat scope refs for filtering/display: repo, installation_id, team_id, … */
   refs: Record<string, string>;
   /** One-line human summary (used as the SignalContent body for orchestrator delivery). */
   summary: string;
   /** Raw provider payload. */
   payload: unknown;
+  /** Canonical subjects, coarse to fine (spec Part A1). */
+  subjects?: string[];
+  /** One normalized outcome, when the event has one (spec Part A). */
+  status?: string;
+  /** The status before this update, when the provider reports it. */
+  previousStatus?: string;
+}
+
+/** A permission denial consumes the source instead of repeating the read each tick. */
+export class DerivePermissionError extends Error {}
+
+/** What a `DerivedEventDef.derive` call receives (spec Part B). */
+export interface DeriveContext {
+  orgId: string;
+  /** Org app credential for the plugin's service. Null when not connected. */
+  appToken(): Promise<string | null>;
+  fetch: typeof fetch;
+}
+
+/**
+ * A native plugin's declared derived event (spec Part B). Ingest never
+ * calls `derive` — only the WakeWatcher does, for a match digest that a
+ * clause on a derived key produced.
+ */
+export interface DerivedEventDef {
+  key: string;
+  description: string;
+  /** Source event keys, globs allowed. */
+  sources: string[];
+  derive(ctx: DeriveContext, subject: string, source: NormalizedEvent): Promise<NormalizedEvent | null>;
+}
+
+/** A native plugin's subject helpers (spec Part A5, Part H). */
+export interface EventSubjects {
+  fromUrl(url: string): { subject: string; slackChannel?: string } | null;
+  label(subject: string): string;
+  url(subject: string): string | null;
+}
+
+/** A native plugin's provider-state status mapping (spec Part E, `from_status`). */
+export interface StatusResolver {
+  /** Maps a provider state reference to a normalized status. */
+  resolve(ctx: DeriveContext, ref: { teamKey?: string; stateId: string }): Promise<string | null>;
 }
 
 export interface EventCatalogEntry {
   key: string;
   description: string;
+  /**
+   * True for a key from a plugin's `derivedEvents` (spec Part B). An event
+   * waiter accepts it; a subscription does not.
+   */
+  derived?: boolean;
   /** Filterable fields: `field` is the user-facing name, `path` a dot-path into the raw payload. */
   filters: {
     field: string;
@@ -170,6 +236,16 @@ export interface TriggerDef {
     req: { headers: Record<string, string>; rawBody: Uint8Array },
     secrets: Record<string, string>,
   ): VerifiedEvent | null | Promise<VerifiedEvent | null>;
+  /**
+   * Says why no trigger of this service verified a request. The ingress
+   * acknowledges a correctly signed delivery it does not handle, so the
+   * provider does not retry it or disable the webhook, and answers a bad
+   * signature with an error. Without this, every rejection is a bad signature.
+   */
+  explainRejection?(
+    req: { headers: Record<string, string>; rawBody: Uint8Array },
+    secrets: Record<string, string>,
+  ): TriggerRejection | Promise<TriggerRejection>;
   /** Normalize a verified event for the generic event pipeline. */
   toEvent(event: VerifiedEvent): NormalizedEvent;
   /** Subscribable event keys this trigger can emit, with their filterable fields. */
@@ -209,6 +285,8 @@ export interface InboundChannelMedia {
 
 /** Where a sent message landed; also the correlation handle for gate edits. */
 export interface SendRef {
+  /** Provider channel identifier, when separate from the conversation key. */
+  channelId?: string;
   conversationKey: string;
   messageId: string;
 }
@@ -225,8 +303,15 @@ export interface InboundChannelEvent {
    * carries no text. The host answers it with suggested prompts, so an
    * empty conversation offers a way in.
    */
-  kind: "message" | "command" | "gate_callback" | "surface_opened";
+  kind: "message" | "command" | "gate_callback" | "surface_opened" | "edit";
+  /** The new text when kind === "edit". */
   text?: string;
+  /**
+   * Set when kind === "edit": the person changed an earlier message, and this
+   * was its text before. The host records the change for the model without
+   * starting a reply.
+   */
+  previousText?: string;
   /** Set when kind === "command" (e.g. /start <code>). */
   command?: { name: string; args?: string };
   media?: InboundChannelMedia[];
@@ -236,11 +321,9 @@ export interface InboundChannelEvent {
     callbackId: string;
     ref: GatePromptRef;
     /**
-     * Explicit gate id when the transport can embed it in the callback
-     * payload (Slack Block Kit button values hold 2,000 chars). Gates then
-     * survive a host restart. Transports with tiny callback payloads
-     * (Telegram's 64-byte callback_data) omit it, and the host falls back to
-     * its in-memory ref map.
+     * Advisory gate id supplied by a transport. It does not authorize a
+     * callback. The host requires a recorded prompt reference and validates
+     * the acting user's access before resolving the gate.
      */
     gateId?: string;
   };
@@ -250,6 +333,17 @@ export interface InboundChannelEvent {
    * Advisory only — treat `type` as an open enum.
    */
   context?: { entities?: Array<{ type: string; value: string }> };
+  /**
+   * Set when people other than the sender read the conversation (Slack: a
+   * group DM). The host tells the assistant so. On the assistant's first turn
+   * there, it reads the thread's messages before `messageTs` as context.
+   * `external` is set when the conversation includes people from another
+   * organization (Slack Connect); the host refuses such a conversation.
+   * `followUp` is set when the message is a thread reply that does not
+   * mention the app. The host delivers it, with no automatic reply, only to
+   * a chat that the sender's own mention opened in that thread.
+   */
+  group?: { channelId: string; messageTs: string; external?: boolean; followUp?: true };
   /**
    * Provider-side reply anchor for the turn this message starts (Slack's
    * `thread_ts`). The streaming bridge sends it back on `startStream` so the
@@ -273,6 +367,9 @@ export interface ChannelSenderIdentity {
 }
 
 export interface OutboundChannelMessage {
+  signal?: AbortSignal;
+  /** Opaque per-row token for provider-side reconciliation. Never a gate or derived job id. */
+  attentionDeliveryId?: string;
   markdown: string;
   /** Assistant identity override. Absent = the bot's own identity. */
   sender?: ChannelSenderIdentity;
@@ -283,6 +380,8 @@ export type OutboundChannelAttachment =
   | { type: "file"; data: Uint8Array; mimeType: string; name: string; caption?: string };
 
 export interface ChannelGatePrompt {
+  signal?: AbortSignal;
+  attentionDeliveryId?: string;
   gateId: string;
   title: string;
   body?: string;
@@ -301,6 +400,9 @@ export interface ChannelGatePrompt {
 }
 
 export interface ChannelGateResolution {
+  signal?: AbortSignal;
+  /** Settlement of an attention card uses the attention request deadline. */
+  attention?: boolean;
   actionId?: string;
   /** Human-readable outcome line, e.g. "✅ Approved by Conner". */
   label: string;
@@ -353,6 +455,22 @@ export class ChannelStreamError extends Error {
   }
 }
 
+/** A definite per-recipient rejection, not a transport outage. Use bounded provider reason codes. */
+export class ChannelDeliveryRejectedError extends Error {
+  constructor(readonly channel: string, readonly reason: string) {
+    super("The recipient cannot receive this message. Check the linked messaging account.");
+    this.name = "ChannelDeliveryRejectedError";
+  }
+}
+
+/** A confirmed rejection created no progress message. Retrying creation is safe. */
+export class ChannelProgressRejectedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ChannelProgressRejectedError";
+  }
+}
+
 export interface ChannelTransport {
   readonly channelType: string;
   /**
@@ -368,6 +486,12 @@ export interface ChannelTransport {
   /** Normalize one raw update. `null` = not something we handle. */
   parseUpdate(update: RawChannelUpdate): InboundChannelEvent | null;
   send(conversationKey: string, message: OutboundChannelMessage): Promise<SendRef>;
+  /** Match an opaque attention token. gateCard identifies an interactive prompt, not a summary. */
+  reconcileAttention?(conversationKey: string, deliveryId: string, sendingAt: number, signal?: AbortSignal): Promise<(SendRef & { gateCard?: boolean }) | null>;
+  /** Start a new message in a provider channel, without changing inbound subscriptions. */
+  sendToChannel?(channelId: string, message: OutboundChannelMessage): Promise<SendRef>;
+  /** Send a notice visible only to one channel member. Failures must reject. */
+  sendPrivateNotice?(channelId: string, userId: string, text: string): Promise<void>;
   sendMedia(conversationKey: string, attachment: OutboundChannelAttachment): Promise<SendRef>;
   sendGatePrompt(conversationKey: string, gate: ChannelGatePrompt): Promise<GatePromptRef>;
   updateGatePrompt(ref: GatePromptRef, resolution: ChannelGateResolution): Promise<void>;
@@ -429,10 +553,16 @@ export interface ChannelTransport {
    * it to re-hydrate the gap between a follow's last delivered message and a
    * new one, so an overheard line after downtime carries the missed context.
    * The bot's own posts are excluded — the agent already has its own replies.
+   * `keepAppPostsExcept` keeps the bot's posts except the listed message ids:
+   * in a group DM each person's assistant posts as the same bot, so one
+   * assistant needs the others' replies but not its own.
    * `null` when the window is empty or the thread is unreadable. Optional:
    * providers without thread history omit it.
    */
-  fetchThreadWindow?(channelId: string, threadTs: string, afterTs: string, beforeTs: string): Promise<string | null>;
+  fetchThreadWindow?(
+    channelId: string, threadTs: string, afterTs: string, beforeTs: string,
+    opts?: { keepAppPostsExcept?: readonly string[] },
+  ): Promise<string | null>;
   /**
    * Normalize an inbound message into what an agent should read: the sender's
    * display name (not a raw id) and the message text with the bot's own mention
@@ -457,12 +587,23 @@ export interface ChannelTransport {
   // `ChannelStreamError` so the host can tell a retryable rate limit from a
   // dead stream without reading provider error codes.
 
-  /** Open a stream. `threadTs` anchors it to the user's own message. */
-  startStream?(conversationKey: string, ctx: { threadTs: string }): Promise<StreamRef>;
+  /**
+   * Open a stream. `threadTs` anchors it to the user's own message.
+   * `recipient` names the person the stream is for, in provider ids. Slack
+   * requires it outside a 1:1 DM. It travels with the turn, because two
+   * people's turns can share one conversation.
+   */
+  startStream?(conversationKey: string, ctx: { threadTs: string; recipient?: { userId: string; teamId: string } }): Promise<StreamRef>;
   /** Append markdown to an open stream. */
   appendStream?(ref: StreamRef, markdown: string): Promise<void>;
   /** Close a stream. `final` carries the last markdown and any trailing blocks. */
   stopStream?(ref: StreamRef, final?: { markdown?: string }): Promise<void>;
+  /** Create or update a durable task-progress message. Recovery only finds existing messages. */
+  publishProgress?(
+    conversationKey: string,
+    progress: TurnProgress,
+    options: { threadTs: string; idempotencyKey: string; messageId?: string; recoverOnly?: boolean },
+  ): Promise<{ messageId: string } | null>;
   /** Show a transient working indicator on a thread. */
   setStatus?(conversationKey: string, threadTs: string, status: string): Promise<void>;
   /** Offer starter prompts. `threadTs` omitted = the conversation's entry point. */
@@ -511,28 +652,25 @@ export interface IdentityLinkDeclaration {
    *  null when the transport is not ready. */
   deepLink?: (ctx: { botUsername: string | null; code: string }) => string | null;
   /**
-   * The anchor DM the bot sends in the "DM me" flow. It MUST NOT contain
-   * the link code or any code-shaped token. The code is returned only in
-   * the authenticated web response, and the user carries it into the chat
-   * themselves — that trip IS the ownership proof (web session + provider
-   * account). A code in the DM would collapse it to bot→user→bot, and a DM
-   * sent to a picked member would become a one-reply account takeover.
-   * Point the reader at the command shown in the web UI, name the expiry
-   * window, and tell an unexpecting recipient to ignore the message. Keep
-   * it plain prose: no backticks or angle brackets — the mrkdwn path
-   * restores code spans unescaped, so a `<` inside one reaches Slack raw.
-   * Meaningful only for providers whose transport implements
-   * `lookupUserByEmail`; the deliver flow also needs `deliveryReply`.
+   * The DM the bot sends in the "DM me" and "Find me by name" flows. It
+   * carries the link code, and the person types that code into the web app.
+   * Reading the DM proves control of the provider account; typing the code
+   * into the signed-in web app proves the Valet user. The host binds the
+   * code to the account it DMed and to the requesting user, and never
+   * redeems it from chat, so a picked recipient who replies with it links
+   * nothing. Tell the reader to enter the code in Valet, name the expiry
+   * window, and tell an unexpecting recipient to ignore the message. Never
+   * phrase the code as a chat command. Meaningful only for providers whose
+   * transport implements `lookupUserByEmail`.
    */
-  deliveryDm?: string;
+  deliveryDm?: (ctx: { code: string }) => string;
   /**
-   * Build the exact reply the user sends back after the anchor DM (Slack:
-   * `link ${code}`). Shown ONLY in the authenticated web response — never
-   * sent to the provider — so embedding the code here is safe and is the
-   * point: the card renders one copyable line the transport's parser
-   * accepts verbatim.
+   * The credential service whose OAuth connect also writes this identity
+   * link (Slack: `slack-user`, "Sign in with Slack"). The web card offers it
+   * as a one-click alternative to the code flow when the deployment has
+   * that service's OAuth client configured.
    */
-  deliveryReply?: (ctx: { code: string }) => string;
+  oauthService?: string;
 }
 
 /**
@@ -564,6 +702,13 @@ export interface ValetPlugin {
   description?: string;
   actions?: ActionPlugin[];
   triggers?: TriggerDef[];
+  /** Portable HTTP handlers mounted and authorized by the host. */
+  httpRoutes?: PluginHttpRoute[];
+  /**
+   * Handlers that plugin subscriptions route events to. A handler runs AI
+   * work through `ctx.threads` and keeps pointers in `ctx.store`.
+   */
+  eventHandlers?: PluginEventHandler[];
   skills?: SkillSource[];
   roles?: RoleSpec[];
   credentials?: CredentialDeclaration[];
@@ -599,6 +744,41 @@ export interface ValetPlugin {
    * else rather than build an index from unsanitized text.
    */
   storeIndexes?: PluginStoreIndex[];
+  /**
+   * Marks a native integration: Valet owns an app identity for it, and an
+   * action falls back to that identity when no person's credential applies
+   * (docs/specs/2026-10-15-native-integration-credential-policy-design.md).
+   * Today only GitHub, Slack, and Linear set it. Config-declared MCP servers
+   * never do. A native plugin MUST name `appCredentialService`.
+   */
+  native?: boolean;
+  /**
+   * The credential service that answers with this integration's app
+   * identity, as a bare token: `github:installation`, `slack`, `linear:app`.
+   * Valid only with `native: true`.
+   */
+  appCredentialService?: string;
+  /** Subject helpers for this plugin's service (spec Part A5, Part H). */
+  eventSubjects?: EventSubjects;
+  /** Derived event keys this plugin computes from other events and provider state (spec Part B). */
+  derivedEvents?: DerivedEventDef[];
+  /**
+   * Names the natural subject of one normalized event: the narrowest subject
+   * a human would call "what this event is about" (spec Part D). Returns
+   * null when the event names no subject this plugin recognizes. A plugin
+   * without this hook offers no `subject` delivery mode (spec Part A step 4).
+   */
+  naturalSubject?(event: NormalizedEvent): { subject: string; label: string } | null;
+  /**
+   * Predicts the other half of a split delivery: one real-world action a
+   * provider reports as two separate events (spec Part C step 8, Part D).
+   * Returns null when the event implies no twin. `identity` carries
+   * provider-specific context the prediction needs, such as the bot's own
+   * user id, to decide whether the twin applies.
+   */
+  conversationalTwin?(event: NormalizedEvent, identity: { botUserId?: string }): NormalizedEvent | null;
+  /** Provider-state status mapping for `from_status` resolution (spec Part E). */
+  statusResolver?: StatusResolver;
 }
 
 /** One declared `plugin_store` expression index (see `ValetPlugin.storeIndexes`). */
@@ -654,6 +834,19 @@ export function validateValetPlugin(
   if (v.description !== undefined && typeof v.description !== "string") {
     issues.push({ path: "description", message: "must be a string when present" });
   }
+
+  if (v.native !== undefined && typeof v.native !== "boolean") {
+    issues.push({ path: "native", message: "must be a boolean when present" });
+  }
+  if (v.appCredentialService !== undefined && (typeof v.appCredentialService !== "string" || v.appCredentialService.length === 0)) {
+    issues.push({ path: "appCredentialService", message: "must be a non-empty string when present" });
+  } else if (v.native === true && v.appCredentialService === undefined) {
+    issues.push({ path: "appCredentialService", message: "required when native is true" });
+  } else if (v.native !== true && v.appCredentialService !== undefined) {
+    issues.push({ path: "appCredentialService", message: "only valid when native is true" });
+  }
+
+  issues.push(...validatePluginHttpRoutes(v.httpRoutes));
 
   checkArray(v.actions, "actions", issues, (p, path) => {
     const plugin = asRecord(p, path, issues);
@@ -753,6 +946,9 @@ export function validateValetPlugin(
     }
     if (cred.service !== undefined && typeof cred.service !== "string") {
       issues.push({ path: `${path}.service`, message: "must be a string when present" });
+    }
+    if (cred.oauthOnly !== undefined && (cred.oauthOnly !== true || cred.oauth === undefined)) {
+      issues.push({ path: `${path}.oauthOnly`, message: "must be true, and only with oauth" });
     }
     if (cred.oauth !== undefined) {
       const oauth = asRecord(cred.oauth, `${path}.oauth`, issues);
@@ -922,11 +1118,11 @@ export function validateValetPlugin(
       if (link.deepLink !== undefined && typeof link.deepLink !== "function") {
         issues.push({ path: "identityLink.deepLink", message: "must be a function when present" });
       }
-      if (link.deliveryDm !== undefined && (typeof link.deliveryDm !== "string" || link.deliveryDm === "")) {
-        issues.push({ path: "identityLink.deliveryDm", message: "must be a non-empty string when present" });
+      if (link.deliveryDm !== undefined && typeof link.deliveryDm !== "function") {
+        issues.push({ path: "identityLink.deliveryDm", message: "must be a function when present" });
       }
-      if (link.deliveryReply !== undefined && typeof link.deliveryReply !== "function") {
-        issues.push({ path: "identityLink.deliveryReply", message: "must be a function when present" });
+      if (link.oauthService !== undefined && (typeof link.oauthService !== "string" || !NAME_RE.test(link.oauthService))) {
+        issues.push({ path: "identityLink.oauthService", message: "must match /^[a-z][a-z0-9-]*$/ when present" });
       }
     }
   }
@@ -942,6 +1138,32 @@ export function validateValetPlugin(
     }
   }
 
+  const handlerIds = new Set<string>();
+  checkArray(v.eventHandlers, "eventHandlers", issues, (h, path) => {
+    const record = asRecord(h, path, issues);
+    if (!record) return;
+    if (typeof record.id !== "string" || !NAME_RE.test(record.id)) {
+      issues.push({ path: `${path}.id`, message: "must match /^[a-z][a-z0-9-]*$/" });
+    } else if (handlerIds.has(record.id)) {
+      issues.push({ path: `${path}.id`, message: `duplicate handler id ${record.id}` });
+    } else {
+      handlerIds.add(record.id);
+    }
+    if (typeof record.description !== "string" || record.description === "") {
+      issues.push({ path: `${path}.description`, message: "required non-empty string" });
+    }
+    if (!Array.isArray(record.events) || record.events.length === 0 || record.events.some((e) => typeof e !== "string" || e === "")) {
+      issues.push({ path: `${path}.events`, message: "required non-empty array of event keys" });
+    }
+    if (typeof record.handle !== "function") issues.push({ path: `${path}.handle`, message: "required function" });
+    if (record.concurrency !== undefined && record.concurrency !== "parallel" && record.concurrency !== "supersede") {
+      issues.push({ path: `${path}.concurrency`, message: 'must be "parallel" or "supersede"' });
+    }
+    if (record.configSchema !== undefined && (typeof record.configSchema !== "object" || record.configSchema === null || Array.isArray(record.configSchema))) {
+      issues.push({ path: `${path}.configSchema`, message: "must be a JSON Schema object" });
+    }
+  });
+
   checkArray(v.storeIndexes, "storeIndexes", issues, (idx, path) => {
     const record = asRecord(idx, path, issues);
     if (!record) return;
@@ -951,6 +1173,49 @@ export function validateValetPlugin(
       }
     }
   });
+
+  if (v.eventSubjects !== undefined) {
+    const es = asRecord(v.eventSubjects, "eventSubjects", issues);
+    if (es) {
+      for (const key of ["fromUrl", "label", "url"] as const) {
+        if (typeof es[key] !== "function") {
+          issues.push({ path: `eventSubjects.${key}`, message: "required function" });
+        }
+      }
+    }
+  }
+
+  checkArray(v.derivedEvents, "derivedEvents", issues, (d, path) => {
+    const def = asRecord(d, path, issues);
+    if (!def) return;
+    if (typeof def.key !== "string" || def.key.length === 0) {
+      issues.push({ path: `${path}.key`, message: "required non-empty string" });
+    }
+    if (typeof def.description !== "string" || def.description.length === 0) {
+      issues.push({ path: `${path}.description`, message: "required non-empty string" });
+    }
+    if (!Array.isArray(def.sources) || def.sources.length === 0) {
+      issues.push({ path: `${path}.sources`, message: "required non-empty array" });
+    }
+    if (typeof def.derive !== "function") {
+      issues.push({ path: `${path}.derive`, message: "required function" });
+    }
+  });
+
+  if (v.naturalSubject !== undefined && typeof v.naturalSubject !== "function") {
+    issues.push({ path: "naturalSubject", message: "must be a function when present" });
+  }
+
+  if (v.conversationalTwin !== undefined && typeof v.conversationalTwin !== "function") {
+    issues.push({ path: "conversationalTwin", message: "must be a function when present" });
+  }
+
+  if (v.statusResolver !== undefined) {
+    const resolver = asRecord(v.statusResolver, "statusResolver", issues);
+    if (resolver && typeof resolver.resolve !== "function") {
+      issues.push({ path: "statusResolver.resolve", message: "required function" });
+    }
+  }
 
   if (issues.length > 0) return { ok: false, issues };
   return { ok: true, plugin: value as ValetPlugin };

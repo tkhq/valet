@@ -1,3 +1,4 @@
+import { TOOL_INTENT_SCHEMA, actionInScope, scopeRefusal } from "@valet/shared";
 import { IsObject, ObjectOptions, Type } from "typebox";
 import { Value } from "typebox/value";
 import type { Static, TSchema } from "typebox";
@@ -18,8 +19,9 @@ import type {
   ToolDef,
   ToolResult,
 } from "./types.js";
-import { isDecisionGateExpired } from "./decision-gate.js";
-import { encodeToolOutput } from "./tool-output.js";
+import { isDecisionGateExpired, isUnattendedWorkflowRefusal } from "./decision-gate.js";
+import { decodeToolOutput, encodeToolOutput } from "./tool-output.js";
+import { reportError } from "./error-report.js";
 
 /**
  * Plugin catalog: indirection layer that exposes plugin actions to the LLM
@@ -66,6 +68,8 @@ export interface PluginAction<TParams extends TSchema = TSchema> {
   name: string;
   description: string;
   riskLevel: RiskLevel;
+  /** Each call requires the verified prompt author's one-shot consent, regardless of policy allows or grants. */
+  approvalScope?: "actor";
   parameters: TParams;
   execute: (
     args: Static<TParams>,
@@ -108,6 +112,9 @@ export type ApprovalMode = "allow" | "require_approval" | "deny";
 export interface ActionPlugin {
   /** Service id (e.g. "github"). Used as the credential service name and as a routing key. */
   service: string;
+  /** The product name people read in approval cards (e.g. "GitHub").
+   * Defaults to `service`. */
+  displayName?: string;
   description?: string;
   actions: PluginAction[];
   /** Override credential service name (defaults to `service`). */
@@ -122,6 +129,15 @@ export interface ActionPlugin {
    * credential-less plugins (e.g. workflows), which are never probed.
    */
   requiresCredential?: boolean;
+  /**
+   * The credential service that answers with the native integration's app
+   * identity (for example `linear:app`). When set, the `list_tools`
+   * credential probe tries this service after `credentialService` and
+   * counts the service as connected when either answers
+   * (docs/specs/2026-10-15-native-integration-credential-policy-design.md
+   * Part C).
+   */
+  appCredentialService?: string;
   /**
    * Default approval policy. Unset = derived from each action's riskLevel:
    * low/medium → allow; high/critical → require_approval.
@@ -165,8 +181,34 @@ export interface PinnedActionSpec {
 /** Why one pin was refused. The host logs this text, so it names the fix. */
 export type PinRejectedHandler = (actionId: string, reason: string) => void;
 
-export interface PluginCatalogOptions {
+export type ServiceAvailabilityState =
+  | "available"
+  | "not_connected"
+  | "deployment_unconfigured"
+  | "disabled_by_org"
+  | "limited_by_workspace"
+  | "load_failed";
+
+export interface ServiceAvailability {
+  service: string;
+  state: ServiceAvailabilityState;
+  reason: string;
+  fix?: string;
+}
+
+export interface PluginCatalogAvailabilityOptions {
+  /** Build-time snapshot used only for the compact tool description. */
+  serviceAvailability?: readonly ServiceAvailability[];
+  /** Live inventory read. A service narrows the check without caching permissions. */
+  resolveServiceAvailability?: (service?: string) =>
+    | readonly ServiceAvailability[]
+    | Promise<readonly ServiceAvailability[]>;
+}
+
+export interface PluginCatalogOptions extends PluginCatalogAvailabilityOptions {
   plugins: ActionPlugin[];
+  /** Native tools are outside this integration-action catalog. */
+  nativeToolNames?: readonly string[];
   /** Clock used for the dynamic-action-resolution TTL cache. Default: Date.now. */
   clock?: () => number;
   /**
@@ -237,8 +279,11 @@ export function pinnedToolName(actionId: string): string | undefined {
   return actionId.replace(".", "__");
 }
 
-/** TTL for the dynamic `resolveActions` cache, keyed per plugin service. */
+/** TTL for dynamic action discovery within an actor and thread scope. */
 export const RESOLVE_TTL_MS = 300_000;
+
+// Reserved from plugin action names: discovery approval is never execution approval.
+const DISCOVERY_ACTION_NAME = "__valet_discovery__";
 
 /**
  * Applies TypeBox `Value.Default` to a cloned copy of `params`, then
@@ -285,8 +330,9 @@ export type PluginCatalog = Catalog;
 export function buildPluginCatalog(
   plugins: ActionPlugin[],
   clock?: () => number,
+  availability: PluginCatalogAvailabilityOptions = {},
 ): PluginCatalog {
-  return buildCatalog(plugins, clock ?? Date.now);
+  return buildCatalog(plugins, clock ?? Date.now, availability);
 }
 
 /**
@@ -298,9 +344,9 @@ export function buildPluginCatalog(
  */
 export function pluginCatalogTools(opts: PluginCatalogOptions): ToolDef[] {
   const now = opts.clock ?? Date.now;
-  const catalog = buildCatalog(opts.plugins, now);
+  const catalog = buildCatalog(opts.plugins, now, opts);
   const pinned = resolvePins(catalog, opts);
-  return [makeListTool(catalog, pinned.nameByActionId), makeCallTool(catalog), ...pinned.tools];
+  return [makeListTool(catalog, pinned.nameByActionId, opts), makeCallTool(catalog), ...pinned.tools];
 }
 
 /**
@@ -309,14 +355,30 @@ export function pluginCatalogTools(opts: PluginCatalogOptions): ToolDef[] {
  * (`ToolResult` text vs. a `command_result` markdown output).
  */
 export type InvokeActionResult =
-  | { kind: "ok"; result: PluginActionResult }
+  | { kind: "ok"; result: PluginActionResult; automatic?: true }
   | { kind: "unknown"; toolId: string }
   | { kind: "invalid-args"; error: string }
-  | { kind: "denied-policy"; scope?: "team" }
+  /** `shared_account`: the action needs a teammate's shared account, and
+   * the policy resolver refused to ask that teammate for this caller. */
+  | { kind: "denied-policy"; scope?: "team" | "shared_account" | "tool" }
+  /** The action needs approval and the turn came from a channel sender with
+   * no Valet account (`ToolContext.externalSender`). No gate opens, so a
+   * newcomer can never send a teammate an approval request. */
+  | { kind: "denied-external-sender" }
+  /** The action needs approval and no one watches this unattended workflow
+   * task (`ToolContext.unattendedWorkflow`). No gate opened. */
+  | { kind: "denied-unattended" }
   | { kind: "denied-approval"; reason?: "approval-processing-failed" }
   | { kind: "expired-approval" }
   | { kind: "pending-approval" }
   | { kind: "missing-credential"; service: string }
+  | {
+      kind: "service-unavailable";
+      service: string;
+      state: ServiceAvailabilityState;
+      reason: string;
+      fix?: string;
+    }
   | { kind: "error"; message: string }
   | { kind: "resolve-failed"; service: string; message: string };
 
@@ -343,11 +405,14 @@ async function requestApprovalDecision(
   ctx: ToolContext,
   req: DecisionGateRequest,
 ): Promise<
-  | { kind: "resolved"; resolution: DecisionResolution }
+  | { kind: "resolved"; resolution: DecisionResolution; gateContext: Record<string, unknown> | undefined }
   | { kind: "expired"; gateOrdinal?: number }
 > {
   try {
-    return { kind: "resolved", resolution: await ctx.requestDecision(req) };
+    // The original gate context distinguishes a legacy team approval from
+    // a new requester-only gate. An empty stored context is authoritative.
+    const resolution = await ctx.requestDecision(req);
+    return { kind: "resolved", resolution, gateContext: resolution.gateContext ?? req.context };
   } catch (err) {
     // Carry the expired gate's ordinal into the audit record — the policy
     // sink derives its deterministic invocation id from it.
@@ -369,10 +434,20 @@ export interface ToolApprovalGateContext {
   service?: string;
   args?: Record<string, unknown>;
   summary?: string;
+  /** True when "approve" allows exactly this one call and writes no grant.
+   * A gate that lends a member's shared account is not one-shot: allowing it
+   * also covers later calls in the thread or run. */
+  oneShot: boolean;
 }
 
 /** Narrow a gate's context to {@link ToolApprovalGateContext}; `null` when
  * the gate is not a tool approval (e.g. `ask_approval`, question gates). */
+/** An approval to list a service's tools through a teammate's account, not to
+ * run an action. Refusing it only hides those tools. */
+export function isToolDiscoveryApproval(context: Record<string, unknown> | undefined): boolean {
+  return toolApprovalGateContext(context)?.toolId.endsWith(`.${DISCOVERY_ACTION_NAME}`) === true;
+}
+
 export function toolApprovalGateContext(
   context: Record<string, unknown> | undefined,
 ): ToolApprovalGateContext | null {
@@ -384,6 +459,7 @@ export function toolApprovalGateContext(
     service: typeof context.service === "string" ? context.service : undefined,
     args: args !== null && typeof args === "object" && !Array.isArray(args) ? (args as Record<string, unknown>) : undefined,
     summary: typeof context.summary === "string" ? context.summary : undefined,
+    oneShot: context.oneShot === true,
   };
 }
 
@@ -400,11 +476,13 @@ function approvalGateRequest(
   args: Record<string, unknown> | undefined,
   summary: string,
   resumeKey: string,
+  ctx: ToolContext,
 ): DecisionGateRequest {
   return {
     type: "approval",
     title: `Approve ${entry.action.name}?`,
-    body: `${summary}\n\ntool_id=${actionId}\nargs=${stableJson(args ?? {})}`,
+    body: `tool_id=${actionId}\nargs=${stableJson(args ?? {})}`,
+    agentReason: summary,
     resumeKey,
     dedupeKey: qualifiedId(entry),
     context: {
@@ -415,8 +493,146 @@ function approvalGateRequest(
       // The one-line human summary, separate from the machine-readable body
       // above. Channel deliverers render it instead of the tool_id/args dump.
       summary,
+      // Approvals are not sticky (`findStickyTerminalGate`): a later call
+      // opens a new gate. The policy path clears this for a borrow gate.
+      oneShot: true,
+      ...(answeredByAsker(entry, ctx) && ctx.interactiveActor
+        ? { approver: { userId: ctx.interactiveActor.id, ...(ctx.actor?.id === ctx.interactiveActor.id && ctx.actor.name ? { name: ctx.actor.name } : {}) } } : {}),
     },
   };
+}
+
+/**
+ * Only the person who asked answers this approval: an action that says so,
+ * and any action in a team session that a person asked for. A teammate who
+ * opens a shared thread sees who the request waits on, not buttons that act
+ * for someone else's request.
+ */
+function answeredByAsker(entry: CatalogEntry, ctx: ToolContext): boolean {
+  return entry.action.approvalScope === "actor" || (ctx.owner?.type === "team" && ctx.interactiveActor !== undefined);
+}
+
+function approvalActorMatches(
+  entry: CatalogEntry,
+  ctx: ToolContext,
+  resolution: DecisionResolution,
+  gateContext: Record<string, unknown> | undefined,
+): boolean {
+  if (entry.action.approvalScope === "actor" &&
+    (!ctx.interactiveActor || resolution.resolvedBy !== ctx.interactiveActor.id)) return false;
+  const approver = gateContext?.approver;
+  // Unmarked legacy team gates retain member-authorized approval. New gates
+  // carry the requester in their stored context, including on replay.
+  return !approver || typeof approver !== "object" || !("userId" in approver) ||
+    resolution.resolvedBy === approver.userId;
+}
+
+/**
+ * The grant a hosted provider tool holds while it stands in for a plugin
+ * action: the action's identity and the policy decision that allowed it.
+ * `recordHostedActionInvocation` audits each hosted execution against it.
+ */
+export interface HostedActionGrant {
+  service: string;
+  actionId: string;
+  riskLevel: RiskLevel;
+  params: Record<string, unknown>;
+  decision: PolicyDecision;
+}
+
+/**
+ * Resolve whether `actionId` would run now without a gate: the action is
+ * registered, its service is available, and policy resolves to allow for
+ * `params`, the parameters the hosted tool will use. The resolver sees them
+ * as partial: a matcher on a parameter the model supplies later, such as the
+ * prompt, may match a deny or approval row. A hosted provider tool asks this
+ * before it is offered, so an administrator's deny, approval, or
+ * parameter-scoped policy on the action still holds. It opens no gate and
+ * writes no audit record: the plugin path audits the real invocation when
+ * the hosted tool is withheld. Resolver failures fail closed.
+ */
+export async function resolveUngatedAction(
+  catalog: PluginCatalog,
+  actionId: string,
+  ctx: ToolContext,
+  params: Record<string, unknown>,
+): Promise<HostedActionGrant | undefined> {
+  if (ctx.externalSender || !actionInScope(ctx.toolScope, actionId)) return undefined;
+  const entry = catalog.byId.get(actionId);
+  if (!entry) return undefined;
+  if (entry.action.approvalScope === "actor") return undefined;
+  const availability = await checkServiceAvailability(catalog, entry.service, entry.plugin.requiresCredential === true);
+  if (availability.unavailable || availability.error) return undefined;
+  const grant = { service: entry.service, actionId: qualifiedId(entry), riskLevel: entry.action.riskLevel, params };
+  const resolver = ctx.policyResolver;
+  if (!resolver) {
+    const mode = approvalModeFor(entry);
+    if (mode !== "allow") return undefined;
+    return { ...grant, decision: { mode, provenance: { baseMode: mode, source: entry.plugin.defaultApprovalMode ? "plugin_default" : "risk_default" } } };
+  }
+  try {
+    const decision = await resolver.resolve({
+      teamId: ctx.owner?.type === "team" ? ctx.owner.id : undefined,
+      service: entry.service,
+      actionId: grant.actionId,
+      riskLevel: entry.action.riskLevel,
+      params,
+      userId: ctx.userId,
+      orgId: ctx.orgId,
+      sessionId: ctx.sessionId,
+      threadId: ctx.threadId,
+      ...(ctx.queueItemId ? { queueItemId: ctx.queueItemId } : {}),
+      appliesIn: "session",
+      partialParams: true,
+    });
+    return decision.mode === "allow" ? { ...grant, decision } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** True when {@link resolveUngatedAction} grants `actionId` for `params`. */
+export async function actionRunsUngated(
+  catalog: PluginCatalog,
+  actionId: string,
+  ctx: ToolContext,
+  params: Record<string, unknown> = {},
+): Promise<boolean> {
+  return (await resolveUngatedAction(catalog, actionId, ctx, params)) !== undefined;
+}
+
+/**
+ * Audit one hosted execution as the plugin action it replaced, with the same
+ * record shape `call_tool` emits for a completed invocation. `params` adds
+ * the execution's outputs, such as the saved path, to the grant's inputs.
+ */
+export function recordHostedActionInvocation(
+  ctx: ToolContext,
+  grant: HostedActionGrant,
+  params: Record<string, unknown>,
+  summary: string,
+): void {
+  const resolver = ctx.policyResolver;
+  if (!resolver) return;
+  const merged = { ...grant.params, ...params };
+  emitInvocation(resolver, {
+    service: grant.service,
+    actionId: grant.actionId,
+    toolId: grant.actionId,
+    riskLevel: grant.riskLevel,
+    sessionId: ctx.sessionId,
+    threadId: ctx.threadId,
+    userId: ctx.userId,
+    orgId: ctx.orgId,
+    appliesIn: "session",
+    summary,
+    resumeKey: `${grant.actionId}:${boundedArgsKey(stableJson(merged))}`,
+    queueItemId: ctx.queueItemId,
+    params: merged,
+    status: "completed",
+    resolvedMode: "allow",
+    provenance: grant.decision.provenance,
+  });
 }
 
 export async function invokeAction(
@@ -426,27 +642,57 @@ export async function invokeAction(
   ctx: ToolContext,
   summary: string,
 ): Promise<InvokeActionResult> {
+  actionId = canonicalActionId(catalog, actionId);
+  if (!actionInScope(ctx.toolScope, actionId)) return { kind: "denied-policy", scope: "tool" };
+  if (ctx.nativeImageGeneration && actionId === "openai.generate_image") {
+    return { kind: "unknown", toolId: actionId };
+  }
+  let availabilityCheckedService: string | undefined;
+  const dotIdx = actionId.indexOf(".");
+  if (dotIdx > 0) {
+    const prefix = actionId.slice(0, dotIdx);
+    const availability = await checkServiceAvailability(
+      catalog,
+      prefix,
+      serviceRequiresCredential(catalog, prefix),
+    );
+    const outcome = availabilityOutcome(availability);
+    if (outcome) return outcome;
+    availabilityCheckedService = prefix;
+  }
+
   let entry = catalog.byId.get(actionId);
-  if (!entry) {
-    const dotIdx = actionId.indexOf(".");
-    if (dotIdx > 0) {
-      const prefix = actionId.slice(0, dotIdx);
-      const plugin = catalog.dynamicPlugins.find((p) => p.service === prefix);
-      if (plugin) {
-        try {
-          const resolvedDyn = await resolveDynamic(catalog, plugin, ctx);
-          entry = resolvedDyn.byId.get(actionId);
-        } catch (err) {
-          return {
-            kind: "resolve-failed",
-            service: prefix,
-            message: err instanceof Error ? err.message : String(err),
-          };
-        }
+  if (!entry && availabilityCheckedService) {
+    const plugin = catalog.dynamicPlugins.find((p) => p.service === availabilityCheckedService);
+    if (plugin) {
+      try {
+        const resolvedDyn = await resolveDynamic(catalog, plugin, ctx);
+        entry = resolvedDyn.byId.get(actionId);
+      } catch (err) {
+        return {
+          kind: "resolve-failed",
+          service: availabilityCheckedService,
+          message: err instanceof Error ? err.message : String(err),
+        };
       }
     }
   }
   if (!entry) return { kind: "unknown", toolId: actionId };
+
+  if (availabilityCheckedService !== entry.service) {
+    const availability = await checkServiceAvailability(
+      catalog,
+      entry.service,
+      entry.plugin.requiresCredential === true,
+    );
+    const outcome = availabilityOutcome(availability);
+    if (outcome) return outcome;
+  }
+
+  const actorApproval = entry.action.approvalScope === "actor";
+  if (actorApproval && (ctx.externalSender || !ctx.interactiveActor || ctx.interactiveActor.id !== ctx.userId)) {
+    return { kind: "error", message: "This action requires a verified interactive author. Ask for it in a signed-in browser session." };
+  }
 
   const resolver = ctx.policyResolver;
   // Deterministic per-(tool_id, args) key — identical to the resumeKey handed
@@ -465,17 +711,27 @@ export async function invokeAction(
   if (!resolver) {
     const approvalMode = approvalModeFor(entry);
     if (approvalMode === "deny") return { kind: "denied-policy" };
-    if (approvalMode === "require_approval") {
+    if (approvalMode === "require_approval" && ctx.externalSender) return { kind: "denied-external-sender" };
+    if (approvalMode === "require_approval" || actorApproval) {
       const gateOutcome = await requestApprovalDecision(
         ctx,
-        approvalGateRequest(entry, actionId, args, summary, resumeKey),
+        approvalGateRequest(entry, actionId, args, summary, resumeKey, ctx),
       );
       if (gateOutcome.kind === "expired") return { kind: "expired-approval" };
       const resolution = gateOutcome.resolution;
       // No resolution / an explicit "pending" action means the gate has not
       // yet been decided — distinct from an outright deny.
+      if (isUnattendedWorkflowRefusal(resolution)) return { kind: "denied-unattended" };
       if (resolution.actionId === "pending") return { kind: "pending-approval" };
       if (resolution.actionId !== "approve") return { kind: "denied-approval" };
+      if (!approvalActorMatches(entry, ctx, resolution, gateOutcome.gateContext)) return { kind: "denied-approval" };
+      const availability = await checkServiceAvailability(
+        catalog,
+        entry.service,
+        entry.plugin.requiresCredential === true,
+      );
+      const outcome = availabilityOutcome(availability);
+      if (outcome) return outcome;
     }
     return executeAction(entry, actionId, args, summary, ctx);
   }
@@ -487,17 +743,24 @@ export async function invokeAction(
   // canonical form means one actionId an admin can target that matches both
   // the session and workflow paths.
   const policyActionId = qualifiedId(entry);
+  // Policy sees the effective parameters: schema defaults applied, so an
+  // omitted field cannot slip past a matcher on its default value. Invalid
+  // params keep the raw shape here; executeAction reports the validation error.
+  const prepared = prepareActionArgs(entry.action.parameters, args);
+  const effectiveArgs = prepared.ok ? prepared.args : args;
   const input: PolicyResolveInput = {
     teamId: ctx.owner?.type === "team" ? ctx.owner.id : undefined,
     service: entry.service,
     actionId: policyActionId,
     riskLevel: entry.action.riskLevel,
-    params: args,
+    params: effectiveArgs,
     userId: ctx.userId,
     orgId: ctx.orgId,
     sessionId: ctx.sessionId,
     threadId: ctx.threadId,
+    ...(ctx.queueItemId ? { queueItemId: ctx.queueItemId } : {}),
     appliesIn: "session",
+    ...(ctx.externalSender ? { externalSender: true } : {}),
   };
   const baseRecord: BaseInvocationRecord = {
     service: entry.service,
@@ -512,16 +775,20 @@ export async function invokeAction(
     summary,
     resumeKey,
     queueItemId: ctx.queueItemId,
-    params: args,
+    params: effectiveArgs,
   };
 
   let decision: PolicyDecision;
   try {
     decision = await resolver.resolve(input);
-  } catch {
+  } catch (err) {
+    // Log and keep the cause: without it, every team action fails with no
+    // trace of why the policy check threw.
+    const cause = innermostMessage(err);
+    reportError({ area: "plugins", reason: "policy_resolution" }, `[policy] resolve failed for ${policyActionId} in ${ctx.sessionId}`, err);
     // A failed read cannot establish whether the team has an absolute deny.
     if (ctx.owner?.type === "team") {
-      return { kind: "error", message: "Could not check this team's action policies. Retry the action when policy checks are available." };
+      return { kind: "error", message: `Could not check this team's action policies (${cause.slice(0, 300)}). Retry the action when policy checks are available.` };
     }
     // Fail closed but keep a human in the loop — degrade to an approval
     // gate rather than hard-deny on a transient resolver/store error.
@@ -538,12 +805,28 @@ export async function invokeAction(
       resolvedMode: "deny",
       provenance: decision.provenance,
     });
-    return decision.provenance.source === "team_policy" ? { kind: "denied-policy", scope: "team" } : { kind: "denied-policy" };
+    if (decision.provenance.source === "team_policy") return { kind: "denied-policy", scope: "team" };
+    if (decision.provenance.source === "shared_account") return { kind: "denied-policy", scope: "shared_account" };
+    return { kind: "denied-policy" };
   }
+
+  // Policy allows and stored grants cannot replace the current author's consent.
+  // Actor gates accept one-shot answers only and cannot create lasting grants.
+  if (actorApproval) decision = { ...decision, mode: "require_approval", extraGateActions: undefined };
 
   // Populated only when a gate actually opens below (require_approval), so
   // the terminal audit record can carry it — absent for allow/deny.
   let gateOrdinal: number | undefined;
+
+  if (decision.mode === "require_approval" && ctx.externalSender) {
+    emitInvocation(resolver, {
+      ...baseRecord,
+      status: "denied",
+      resolvedMode: "require_approval",
+      provenance: decision.provenance,
+    });
+    return { kind: "denied-external-sender" };
+  }
 
   if (decision.mode === "require_approval") {
     // Reject reserved ids up front: "approve"/"deny" are the engine's own
@@ -565,16 +848,34 @@ export async function invokeAction(
     // Pass `approves` through to the gate — DecisionAction persists it on
     // the row so denial stickiness classifies host rejection actions the
     // same way isApprovedResolution does.
-    const extras: DecisionAction[] = decision.extraGateActions ?? [];
-    const baseReq = approvalGateRequest(entry, actionId, args, summary, resumeKey);
+    const extras: DecisionAction[] = decision.approver
+      ? decision.approver.allowTeamConsent ? (decision.extraGateActions ?? []).filter(a => a.id === "always_allow_account") : []
+      : decision.extraGateActions ?? [];
+    const baseReq = approvalGateRequest(entry, actionId, args, summary, resumeKey, ctx);
+    if (decision.approver?.shareGeneration) {
+      const share = `:share:${decision.approver.shareGeneration}`;
+      baseReq.dedupeKey = `${qualifiedId(entry)}${share}`;
+      baseReq.resumeKey = `${baseReq.dedupeKey}:${boundedArgsKey(stableJson(args ?? {}))}`;
+      baseRecord.resumeKey = baseReq.resumeKey;
+    }
+    // Another member's account: only they answer, so the gate asks them.
+    const borrowScope = ctx.sessionId.startsWith("wf:") ? "workflow run" : "thread";
+    const label = entry.plugin.displayName ?? entry.service;
+    const borrowed = decision.approver
+      ? { title: `Let a teammate use your ${label} account?`, body: `Valet would use your ${label} account for "${entry.action.name}". If you allow it, later ${label} actions in this ${borrowScope} can use it too, including ones other teammates ask for. Only you can answer.${decision.approver.allowTeamConsent ? " Always allow for this team covers future threads and runs until you choose Stop sharing in Integrations. Action approvals still apply." : ""}` }
+      : {};
     const gateOutcome = await requestApprovalDecision(ctx, {
       ...baseReq,
+      ...borrowed,
       actions: [
-        { id: "approve", label: "Approve", style: "primary" },
+        // A policy approval covers this one call, so it says so. A borrow
+        // approval also covers later calls, so it keeps "Allow".
+        { id: "approve", label: decision.approver ? "Allow" : "Approve once", style: "primary" },
         { id: "deny", label: "Deny", style: "danger" },
         ...extras,
       ],
-      context: { ...baseReq.context, provenance: decision.provenance },
+      // A borrow approval also covers later calls, so it drops `oneShot`.
+      context: { ...baseReq.context, provenance: decision.provenance, ...(decision.approver ? { approver: decision.approver, oneShot: undefined } : {}) },
     });
     if (gateOutcome.kind === "expired") {
       // The gate opened and nobody answered before the deadline — a terminal
@@ -591,6 +892,17 @@ export async function invokeAction(
       return { kind: "expired-approval" };
     }
     const resolution = gateOutcome.resolution;
+    // No gate opened for an unattended workflow task, so no host resolution
+    // runs. Audit it like the external-sender refusal.
+    if (isUnattendedWorkflowRefusal(resolution)) {
+      emitInvocation(resolver, {
+        ...baseRecord,
+        status: "denied",
+        resolvedMode: "require_approval",
+        provenance: decision.provenance,
+      });
+      return { kind: "denied-unattended" };
+    }
     // An undecided gate (command path): no resolution happened, so no
     // onResolution side effects run and no audit record is emitted here —
     // the re-driven invocation after the gate resolves emits the terminal
@@ -599,8 +911,12 @@ export async function invokeAction(
     gateOrdinal = resolution.gateOrdinal;
     // onResolution is awaited BEFORE the outcome is interpreted; a throw
     // fails the approval closed (treated as not-approved).
+    const approverMatches = decision.approver
+      ? resolution.resolvedBy === decision.approver.userId
+      : approvalActorMatches(entry, ctx, resolution, gateOutcome.gateContext);
+    const oneShotResolution = !actorApproval || resolution.actionId === "approve" || resolution.actionId === "deny";
     let onResolutionThrew = false;
-    if (resolver.onResolution) {
+    if (resolver.onResolution && approverMatches && oneShotResolution) {
       try {
         await resolver.onResolution(input, decision, resolution);
       } catch {
@@ -608,7 +924,7 @@ export async function invokeAction(
       }
     }
     const approved =
-      !onResolutionThrew && isApprovedResolution(resolution, decision.extraGateActions);
+      approverMatches && oneShotResolution && !onResolutionThrew && isApprovedResolution(resolution, decision.extraGateActions);
     if (!approved) {
       emitInvocation(resolver, {
         ...baseRecord,
@@ -621,10 +937,31 @@ export async function invokeAction(
         ? { kind: "denied-approval", reason: "approval-processing-failed" }
         : { kind: "denied-approval" };
     }
+    if (decision.approver && resolution.actionId === "always_allow_account") {
+      // Account consent never grants the action's separate policy permission.
+      return invokeAction(catalog, actionId, args, ctx, summary);
+    }
+    const availability = await checkServiceAvailability(
+      catalog,
+      entry.service,
+      entry.plugin.requiresCredential === true,
+    );
+    const outcome = availabilityOutcome(availability);
+    if (outcome) {
+      emitInvocation(resolver, {
+        ...baseRecord,
+        status: outcome.kind === "service-unavailable" ? "rejected" : "error",
+        resolvedMode: "require_approval",
+        provenance: decision.provenance,
+        gateOrdinal,
+        ...(outcome.kind === "error" ? { error: outcome.message } : {}),
+      });
+      return outcome;
+    }
   }
 
   // allow, or an approved require_approval → execute with audit.
-  return executeAction(entry, actionId, args, summary, ctx, {
+  const executed = await executeAction(entry, actionId, args, summary, ctx, {
     resolver,
     record: {
       ...baseRecord,
@@ -633,6 +970,7 @@ export async function invokeAction(
       gateOrdinal,
     },
   });
+  return executed.kind === "ok" && decision.provenance.source === "thread_bypass" ? { ...executed, automatic: true } : executed;
 
 }
 
@@ -655,8 +993,10 @@ interface Catalog {
   byId: Map<string, CatalogEntry>;
   /** Plugins with a `resolveActions` seam, resolved on demand (not eagerly at catalog build). */
   dynamicPlugins: ActionPlugin[];
-  /** TTL cache of resolved dynamic actions, keyed by plugin service. */
+  /** TTL cache of dynamic actions, scoped to service, actor, thread, and sender class. */
   resolved: Map<string, ResolvedDynamic>;
+  serviceAvailability: readonly ServiceAvailability[];
+  resolveServiceAvailability?: PluginCatalogAvailabilityOptions["resolveServiceAvailability"];
   now: () => number;
 }
 
@@ -668,6 +1008,9 @@ function buildEntries(
   const entries: CatalogEntry[] = [];
   const byId = new Map<string, CatalogEntry>();
   for (const action of actions) {
+    if (action.id === DISCOVERY_ACTION_NAME || action.id.endsWith(`.${DISCOVERY_ACTION_NAME}`)) {
+      throw new Error("Plugin action uses the reserved discovery identity");
+    }
     const entry: CatalogEntry = { service, plugin, action };
     entries.push(entry);
     const fqid = action.id.includes(".") ? action.id : `${service}.${action.id}`;
@@ -678,7 +1021,11 @@ function buildEntries(
   return { entries, byId };
 }
 
-function buildCatalog(plugins: ActionPlugin[], now: () => number): Catalog {
+function buildCatalog(
+  plugins: ActionPlugin[],
+  now: () => number,
+  availability: PluginCatalogAvailabilityOptions = {},
+): Catalog {
   const entries: CatalogEntry[] = [];
   const byId = new Map<string, CatalogEntry>();
   const dynamicPlugins: ActionPlugin[] = [];
@@ -693,7 +1040,76 @@ function buildCatalog(plugins: ActionPlugin[], now: () => number): Catalog {
     }
     if (plugin.resolveActions) dynamicPlugins.push(plugin);
   }
-  return { entries, byId, dynamicPlugins, resolved: new Map(), now };
+  return {
+    entries,
+    byId,
+    dynamicPlugins,
+    resolved: new Map(),
+    serviceAvailability: availability.serviceAvailability ?? [],
+    resolveServiceAvailability: availability.resolveServiceAvailability,
+    now,
+  };
+}
+
+interface ServiceAvailabilityCheck {
+  unavailable?: ServiceAvailability;
+  error?: string;
+}
+
+function serviceRequiresCredential(catalog: Catalog, service: string): boolean {
+  return [
+    ...catalog.entries.map((entry) => entry.plugin),
+    ...catalog.dynamicPlugins,
+  ].some((plugin) => plugin.service === service && plugin.requiresCredential === true);
+}
+
+async function checkServiceAvailability(
+  catalog: Catalog,
+  service: string,
+  requiresCredential: boolean,
+): Promise<ServiceAvailabilityCheck> {
+  try {
+    const availability = catalog.resolveServiceAvailability
+      ? await catalog.resolveServiceAvailability(service)
+      : catalog.serviceAvailability;
+    return {
+      unavailable: availability.find((item) => item.service === service && item.state !== "available"),
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const hasStaticUnavailable = catalog.serviceAvailability.some(
+      (item) => item.service === service && item.state !== "available",
+    );
+    return requiresCredential || hasStaticUnavailable
+      ? { error: `could not verify service availability: ${message}; retry` }
+      : {};
+  }
+}
+
+/** The innermost error's message. A database error wraps the driver's
+ * failure in `cause` behind the query text, and the driver's message is the
+ * one that names the problem. The full error goes to the server log. */
+function innermostMessage(err: unknown): string {
+  let current = err;
+  while (current instanceof Error && current.cause !== undefined) current = current.cause;
+  return current instanceof Error ? current.message : String(current);
+}
+
+function availabilityOutcome(check: ServiceAvailabilityCheck): InvokeActionResult | undefined {
+  if (check.unavailable) return serviceUnavailableOutcome(check.unavailable);
+  return check.error ? { kind: "error", message: check.error } : undefined;
+}
+
+function serviceUnavailableOutcome(
+  availability: ServiceAvailability,
+): InvokeActionResult {
+  return {
+    kind: "service-unavailable",
+    service: availability.service,
+    state: availability.state,
+    reason: availability.reason,
+    ...(availability.fix ? { fix: availability.fix } : {}),
+  };
 }
 
 /**
@@ -707,7 +1123,8 @@ async function resolveDynamic(
   ctx: ToolContext,
 ): Promise<ResolvedDynamic> {
   const now = catalog.now();
-  const cached = catalog.resolved.get(plugin.service);
+  const cacheKey = JSON.stringify([plugin.service, ctx.userId, ctx.threadId, ctx.externalSender === true]);
+  const cached = catalog.resolved.get(cacheKey);
   if (cached && now - cached.fetchedAt < RESOLVE_TTL_MS) {
     return cached;
   }
@@ -715,12 +1132,54 @@ async function resolveDynamic(
   const resolveActions = plugin.resolveActions;
   if (!resolveActions) throw new Error(`plugin ${plugin.service} has no resolveActions`);
   const credentialService = plugin.credentialService ?? plugin.service;
-  const actions = await resolveActions({
+  const discover = () => resolveActions({
     credentials: scopedCredentialProvider(ctx, credentialService),
   });
+  let actions: PluginAction[];
+  if (ctx.owner?.type === "team" && ctx.policyResolver) {
+    // Discovery can transmit a member's credential before any remote action
+    // schema is known. Reuse the ordinary policy/gate/audit pipeline first.
+    let discovered: PluginAction[] | undefined;
+    const label = plugin.displayName ?? plugin.service;
+    const action: PluginAction = {
+      id: `${plugin.service}.${DISCOVERY_ACTION_NAME}`, name: `List ${label} tools`,
+      description: "Read the tools available through this account.", riskLevel: "low",
+      parameters: Type.Object({}),
+      execute: async () => {
+        discovered = await discover();
+        return { success: true };
+      },
+    };
+    const entry: CatalogEntry = { service: plugin.service, plugin, action };
+    const outcome = await invokeAction(
+      { ...catalog, entries: [entry], byId: new Map([[action.id, entry]]), dynamicPlugins: [] },
+      action.id, {}, ctx.toolScope?.actions ? { ...ctx, toolScope: { ...ctx.toolScope, actions: [...ctx.toolScope.actions, action.id] } } : ctx, `Read the list of ${label} tools this account can use.`,
+    );
+    if (outcome.kind !== "ok" || !outcome.result.success || !discovered) {
+      // Keep the cause. A connector error, a missing account, and a policy
+      // denial need different fixes, and the caller sees only this text.
+      // A pending gate is not a refusal: an unattended run waits for the
+      // account owner, so it must not read as "did not approve".
+      const label = `${plugin.service} tool discovery`;
+      const detail = outcome.kind === "pending-approval"
+        ? "pending-approval: waiting for the account owner to approve this account's use. Retry after they answer."
+        : outcome.kind === "ok" && outcome.result.success
+          ? "the connector returned no tool list"
+          : renderInvokeOutcome(outcome, label).text;
+      throw new Error(`${label} failed: ${detail}`);
+    }
+    actions = discovered;
+  } else {
+    actions = await discover();
+  }
   const built = buildEntries(plugin.service, plugin, actions);
   const result: ResolvedDynamic = { ...built, fetchedAt: now };
-  catalog.resolved.set(plugin.service, result);
+  // Actor/thread scoping can create many keys in a long-lived runtime.
+  if (!catalog.resolved.has(cacheKey) && catalog.resolved.size >= 200) {
+    const oldest = catalog.resolved.keys().next().value;
+    if (oldest !== undefined) catalog.resolved.delete(oldest);
+  }
+  catalog.resolved.set(cacheKey, result);
   return result;
 }
 
@@ -736,7 +1195,11 @@ const LIST_LIMIT_MAX = 200;
  * the host pins, so hiding the row would make the same catalog answer
  * differently in two deployments. The row names its direct tool instead.
  */
-function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>): ToolDef {
+function makeListTool(
+  catalog: Catalog,
+  pinnedNames: ReadonlyMap<string, string>,
+  opts: PluginCatalogOptions,
+): ToolDef {
   // Name every service in the description. The catalog indirection hides
   // integration actions from the visible tool list, so this line is the only
   // zero-cost signal the model gets that a service exists at all — without
@@ -748,18 +1211,46 @@ function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>
       ...catalog.dynamicPlugins.map((p) => p.service),
     ]),
   ].sort();
-  const serviceLine =
-    services.length > 0 ? ` Available services: ${services.join(", ")}.` : "";
-  return {
+  const initialUnavailable = new Map(
+    (opts.serviceAvailability ?? [])
+      .filter((item) => item.state !== "available")
+      .map((item) => [item.service, item]),
+  );
+  const availableServices = services.filter((service) => !initialUnavailable.has(service));
+  const configurableServices = [...initialUnavailable.values()]
+    .filter((item) => item.state === "not_connected" || item.state === "deployment_unconfigured")
+    .map((item) => item.service)
+    .sort();
+  const gatedServices = [...initialUnavailable.values()]
+    .filter((item) => item.state !== "not_connected" && item.state !== "deployment_unconfigured")
+    .map((item) => `${item.service} (${item.state})`)
+    .sort();
+  const serviceLine = [
+    // "Installed", not "connected": this line is built once per session from
+    // deployment and org state. A person's own connection is probed only when
+    // list_tools runs, so the line must not read as a connection report.
+    availableServices.length > 0
+      ? ` Installed services: ${availableServices.join(", ")}. This list does not show whether the person connected each one;` +
+        " call list_tools before you say a service is connected or reachable."
+      : "",
+    configurableServices.length > 0
+      ? ` Configurable but not connected: ${configurableServices.join(", ")}.`
+      : "",
+    gatedServices.length > 0 ? ` Unavailable services: ${gatedServices.join(", ")}.` : "",
+  ].join("");
+  const listTool: ToolDef = {
     name: "list_tools",
+    sideEffect: "none",
     description:
-      "List available plugin tools. Filter by service or search by name/description. " +
-      "Returns tool_ids plus their parameter schemas; use call_tool to invoke one." +
+      "List integration actions only. Native tools are already on your own tool list and are not listed here. " +
+      "Filter by service or search by name/description. Focused tasks return compact summaries. Use detail: schema with an exact query before calling an action." +
       serviceLine +
       " If a request could be covered by one of these services, check here before " +
       "you say it is not possible. A service that is not connected is reported " +
       "here with the corrective action, so a check is never wasted.",
     parameters: Type.Object({
+      outside_focus: Type.Optional(Type.Boolean({ description: "Discover compact summaries outside thread focus, within the inherited ceiling. This does not enable calls or return schemas." })),
+      detail: Type.Optional(Type.Union([Type.Literal("summary"), Type.Literal("schema")], { description: "Summary lists IDs and descriptions. Schema also returns parameters. Focused tasks default to summary." })),
       service: Type.Optional(
         Type.String({
           description:
@@ -781,8 +1272,11 @@ function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>
       ),
     }),
     execute: async (args, ctx): Promise<ToolResult> => {
-      const a = args as { service?: string; query?: string; limit?: number };
-      const limit = clamp(a.limit ?? LIST_LIMIT_DEFAULT, 1, LIST_LIMIT_MAX);
+      const a = args as { service?: string; query?: string; limit?: number; detail?: "summary" | "schema"; outside_focus?: boolean };
+      const discoveryScope = a.outside_focus ? ctx.toolScopeCeiling : ctx.toolScope;
+      const discoveryCtx: ToolContext = a.outside_focus ? { ...ctx, toolScope: discoveryScope } : ctx;
+      const withSchemas = !a.outside_focus && (a.detail === "schema" || (a.detail !== "summary" && ctx.toolScope === undefined));
+      const limit = clamp(a.limit ?? (ctx.toolScope ? 8 : LIST_LIMIT_DEFAULT), 1, LIST_LIMIT_MAX);
       const query = parseSearchQuery(a.query ?? "");
       const actionFields = (action: PluginAction): string[] => [
         action.id,
@@ -792,25 +1286,61 @@ function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>
       const matchesQuery = (action: PluginAction): boolean =>
         matchesSearchQuery(query, actionFields(action));
 
-      let entries = catalog.entries;
+      let entries = catalog.entries.filter((entry) => actionInScope(discoveryScope, qualifiedId(entry)));
       if (a.service) entries = entries.filter((e) => e.service === a.service);
       if (query.hasInput) entries = entries.filter((e) => matchesQuery(e.action));
 
-      const warnings: Array<{ service: string; reason: string }> = [];
+      const warnings: Array<{
+        service: string;
+        reason: string;
+        state?: ServiceAvailabilityState;
+        fix?: string;
+      }> = [];
+      let availability = catalog.serviceAvailability;
+      try {
+        availability = catalog.resolveServiceAvailability
+          ? await catalog.resolveServiceAvailability(a.service || undefined)
+          : catalog.serviceAvailability;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        warnings.push({
+          service: a.service ?? "catalog",
+          reason: `availability check failed: ${message} — availability states may be incomplete; retry`,
+        });
+      }
+      const unavailable = availability.filter((item) => item.state !== "available");
+      for (const item of unavailable) {
+        entries = entries.filter((entry) => entry.service !== item.service);
+      }
+      const warnedUnavailable = unavailable.filter(
+        (item) =>
+          (!a.service || item.service === a.service) &&
+          (!query.hasInput || matchesSearchQuery(query, [item.service])),
+      );
+      for (const item of warnedUnavailable) {
+        warnings.push({
+          service: item.service,
+          state: item.state,
+          reason: item.reason,
+          ...(item.fix ? { fix: item.fix } : {}),
+        });
+      }
 
       // Merge in dynamic (resolveActions-backed) plugins whose service
       // passes the filter. Discovery failures become warnings, not throws.
       const dynamicServicesConsidered = new Set<string>();
       for (const plugin of catalog.dynamicPlugins) {
+        if (unavailable.some((item) => item.service === plugin.service)) continue;
         if (a.service && plugin.service !== a.service) continue;
+        if (discoveryScope?.actions && !discoveryScope.actions.some((id) => id.startsWith(`${plugin.service}.`))) continue;
         dynamicServicesConsidered.add(plugin.service);
         try {
-          const resolvedDyn = await resolveDynamic(catalog, plugin, ctx);
+          const resolvedDyn = await resolveDynamic(catalog, plugin, discoveryCtx);
           const dynEntries =
             query.hasInput
               ? resolvedDyn.entries.filter((e) => matchesQuery(e.action))
               : resolvedDyn.entries;
-          entries = entries.concat(dynEntries);
+          entries = entries.concat(dynEntries.filter((entry) => actionInScope(discoveryScope, qualifiedId(entry))));
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           warnings.push({ service: plugin.service, reason: `action discovery failed: ${message}` });
@@ -836,6 +1366,9 @@ function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>
         let probeReason: string | undefined;
         try {
           cred = await ctx.credentials.get(credService);
+          if (!cred && plugin.appCredentialService) {
+            cred = await ctx.credentials.get(plugin.appCredentialService);
+          }
         } catch (err) {
           // A resolver may throw instead of returning null (e.g. a
           // GitHubAuthError when the org has no installation). Treat that
@@ -848,23 +1381,32 @@ function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>
         }
         if (!cred) {
           if (a.service === service) {
-            warnings.push({ service, reason: probeReason ?? "no credential connected" });
+            warnings.push({
+              service,
+              state: "not_connected",
+              reason: probeReason ?? "not connected",
+              fix: `Connect ${service} on the Integrations page (/integrations). After connecting, call list_tools (service: "${service}") to confirm — actions appear when the connection worked; otherwise this warning returns with the reason.`,
+            });
           } else {
             entries = entries.filter((e) => e.service !== service);
             warnings.push({
               service,
-              reason: `not connected — tools hidden. ${
-                probeReason ?? "Connect the integration in Settings, or list with service filter to inspect schemas."
-              }`,
+              state: "not_connected",
+              reason: `not connected; tools hidden. ${probeReason ?? ""}`.trim(),
+              fix: `Connect ${service} on the Integrations page (/integrations). After connecting, call list_tools (service: "${service}") to confirm — actions appear when the connection worked; otherwise this warning returns with the reason.`,
             });
           }
         }
       }
 
+      if (ctx.nativeImageGeneration) {
+        entries = entries.filter((entry) => qualifiedId(entry) !== "openai.generate_image");
+      }
       if (query.hasInput) {
         entries = rankSearchResults(query, entries, (entry) => actionFields(entry.action));
       }
 
+      entries = entries.filter((entry) => actionInScope(discoveryScope, qualifiedId(entry)));
       const tools = entries.slice(0, limit).map((e) => {
         const toolId = qualifiedId(e);
         const directTool = pinnedNames.get(toolId);
@@ -874,22 +1416,88 @@ function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>
           name: e.action.name,
           description: e.action.description,
           riskLevel: e.action.riskLevel,
-          params: e.action.parameters,
+          ...(withSchemas ? { params: e.action.parameters } : {}),
           ...(directTool ? { direct_tool: directTool } : {}),
         };
       });
 
       const total = entries.length;
+      // A focused thread (a workflow editor starts in one) sees only its focus.
+      // When nothing in focus matches, or the call searches, search the
+      // ceiling too and name what the focus hides. Otherwise an integration
+      // such as Granola reads as missing, and a diagnose focus answers
+      // "update schedule" with list_schedules alone.
+      const searched = query.hasInput || Boolean(a.service);
+      const outsideFocus = (total === 0 || searched) && !a.outside_focus && ctx.toolScope !== undefined && ctx.toolScope !== ctx.toolScopeCeiling
+        // Filter before the limit: focused matches must not fill the rows.
+        ? outsideFocusMatches(await listTool.execute({ ...a, outside_focus: true, limit: LIST_LIMIT_MAX }, ctx))
+          .filter((t) => !actionInScope(ctx.toolScope, t.tool_id))
+          .slice(0, limit)
+        : [];
+      const nativeMatches = nativeToolMatches(a.query, opts.nativeToolNames ?? []);
+      // An outside_focus listing names its own rows, so it needs the same
+      // next step.
+      const hidden = a.outside_focus ? tools.filter((t) => !actionInScope(ctx.toolScope, t.tool_id)) : outsideFocus;
+      if (hidden.length > 0) {
+        warnings.push({
+          service: "catalog",
+          reason: "these actions are outside this thread's focus. To use them, call focus_tools with your phase and actions: " +
+            JSON.stringify(hidden.map((t) => t.tool_id)) + ", then call list_tools again for their schemas.",
+        });
+      } else if (total === 0) {
+        const matched = nativeMatches.length > 0 ? ` (matched: ${nativeMatches.join(", ")})` : "";
+        warnings.push({
+          service: "catalog",
+          reason: `no integration action matched; native tools are not listed here — check your own tool list${matched}`,
+        });
+      }
       return {
         text: encodeToolOutput({
           tools,
           total,
           ...(total > limit ? { truncated: total - limit } : {}),
+          ...(outsideFocus.length > 0 ? { outside_focus: outsideFocus } : {}),
           ...(warnings.length > 0 ? { warnings } : {}),
         }),
       };
     },
   };
+  return listTool;
+}
+
+/** The tool summaries from a list_tools result run with `outside_focus` (TOON or JSON text). */
+function outsideFocusMatches(result: ToolResult): Array<{ tool_id: string; name?: string; description?: string }> {
+  try {
+    const text = typeof result.text === "string" ? result.text : "";
+    const parsed: unknown = text.trimStart().startsWith("{") ? JSON.parse(text) : decodeToolOutput(text);
+    if (typeof parsed !== "object" || parsed === null || !("tools" in parsed) || !Array.isArray(parsed.tools)) return [];
+    return parsed.tools.flatMap((t: unknown) =>
+      typeof t === "object" && t !== null && "tool_id" in t && typeof t.tool_id === "string"
+        ? [{ tool_id: t.tool_id, ...("name" in t && typeof t.name === "string" ? { name: t.name } : {}), ...("description" in t && typeof t.description === "string" ? { description: t.description } : {}) }]
+        : []);
+  } catch {
+    return [];
+  }
+}
+
+function nativeToolMatches(query: string | undefined, names: readonly string[]): string[] {
+  const terms =
+    (query ?? "")
+      .toLowerCase()
+      .match(/[a-z0-9_*.-]+/g)
+      ?.filter((term) => term !== "or" && !term.startsWith("-"))
+      .map((term) => term.replaceAll("*", ""))
+      .filter((term) => term.length > 0) ?? [];
+  if (terms.length === 0) return [];
+  return [...new Set(names)]
+    .filter((name) => terms.some((term) => name.toLowerCase().includes(term)))
+    .sort();
+}
+
+function resolveFailurePrefix(message: string): string {
+  return /(?:auth|unauthori[sz]ed|forbidden|credential|token|\b401\b|\b403\b)/i.test(message)
+    ? "authentication failed: "
+    : "upstream failure: ";
 }
 
 // ── call_tool ────────────────────────────────────────────────────
@@ -897,6 +1505,8 @@ function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>
 function makeCallTool(catalog: Catalog): ToolDef {
   return {
     name: "call_tool",
+    intent: "summary",
+    policyChecked: true,
     description:
       "Invoke a plugin action by tool_id (discovered via list_tools). Approval gates may suspend execution for high/critical risk actions.",
     parameters: Type.Object({
@@ -910,8 +1520,9 @@ function makeCallTool(catalog: Catalog): ToolDef {
         }),
       ),
       summary: Type.String({
+        ...TOOL_INTENT_SCHEMA,
         description:
-          "One-line human-readable summary of what this call does. Shown in approval gates and audit logs.",
+          "State in one sentence what you are trying to accomplish and why you need this action. This is model-authored text, shown as the agent’s stated reason.",
       }),
     }),
     execute: async (args, ctx): Promise<ToolResult> => {
@@ -921,7 +1532,13 @@ function makeCallTool(catalog: Catalog): ToolDef {
         summary: string;
       };
       const outcome = await invokeAction(catalog, a.tool_id, a.params, ctx, a.summary);
-      return renderInvokeOutcome(outcome, a.tool_id);
+      const toolId = canonicalActionId(catalog, a.tool_id);
+      const entry = catalog.byId.get(toolId);
+      const result = renderInvokeOutcome(outcome, toolId, similarActionIds(catalog, a.tool_id));
+      // A tool from a connected MCP server is resolved at call time and is
+      // not in the static catalog; an id the model made up is not in either.
+      // Record the requested id for both, so usage names the failing tool.
+      return { ...result, usageOutcome: { ...result.usageOutcome!, name: entry ? qualifiedId(entry) : toolId.slice(0, 200) } };
     },
   };
 }
@@ -932,18 +1549,43 @@ function makeCallTool(catalog: Catalog): ToolDef {
  * denial, validation and credential wording cannot drift apart between the
  * two routes.
  */
-function renderInvokeOutcome(outcome: InvokeActionResult, toolId: string): ToolResult {
+function renderInvokeOutcome(outcome: InvokeActionResult, toolId: string, similar: readonly string[] = []): ToolResult {
+  const result = renderInvokeResult(outcome, toolId, similar);
+  const status = outcome.kind === "ok" ? (result.ok === false ? "error" : "ok")
+    : outcome.kind === "pending-approval" ? "pending-approval" : (outcome.kind.startsWith("denied") || outcome.kind === "expired-approval") ? "denied" : "error";
+  return { ...result, usageOutcome: { outcome: status, errorCode: status === "ok" ? null : outcome.kind === "denied-policy" ? "policy_denied"
+    : outcome.kind === "pending-approval" ? "approval_required" : outcome.kind === "ok" || outcome.kind === "error" ? "action_failed"
+    : outcome.kind.replaceAll("-", "_") } };
+}
+
+function renderInvokeResult(outcome: InvokeActionResult, toolId: string, similar: readonly string[] = []): ToolResult {
   switch (outcome.kind) {
     case "ok":
-      return actionResultToToolResult(outcome.result, toolId);
+      return { ...actionResultToToolResult(outcome.result, toolId), ...(outcome.automatic ? { approval: "automatic" as const } : {}) };
     case "unknown":
       return {
-        text: `unknown tool_id: "${toolId}". Use list_tools to find available actions.`,
+        text: `unknown tool_id: "${toolId}".${similar.length ? ` Did you mean ${similar.map((id) => `"${id}"`).join(" or ")}?` : ""} Use list_tools to find available actions.`,
       };
     case "resolve-failed":
-      return { text: `error resolving ${outcome.service} tools: ${outcome.message}` };
+      return {
+        text: `error resolving ${outcome.service} tools: ${resolveFailurePrefix(outcome.message)}${outcome.message}`,
+      };
     case "denied-policy":
+      if (outcome.scope === "tool") return { text: scopeRefusal(toolId) };
+      if (outcome.scope === "shared_account") {
+        return {
+          text: `denied: ${toolId} would use a teammate's shared account, and this caller cannot ask the account owner for approval. Do not retry it. Tell the user to ask a team member to run it, or to ask a team admin to connect a team account on the team's Integrations page.`,
+        };
+      }
       return { text: `denied: ${toolId} is blocked by ${outcome.scope === "team" ? "team" : "org"} policy` };
+    case "denied-external-sender":
+      return {
+        text: `denied: ${toolId} needs approval, and this message came from someone with no Valet account. Do not retry it. Tell them a teammate with a Valet account must ask for this.`,
+      };
+    case "denied-unattended":
+      return {
+        text: `not run: ${toolId} needs approval, and an unattended run (a workflow, an automated event, or a schedule) cannot ask for it. Valet sent no approval request. Do not retry it, and do not ask anyone in a message. Do not say that you asked for approval or that approval is pending. In your result, say that ${toolId} did not run because it needs approval. Also say the fixes. In a workflow, to approve it on each run, move ${toolId} to a Tool step, which asks for approval on each run; to let it run without asking, list ${toolId} in this step's actions, then use Review permissions on the workflow page. Saved permissions do not apply to a run that an agent started or retried. For any run, allow it by policy in Settings: its owner for a personal run, a team admin for a team run, an org admin for an org run. For a teammate's shared account, connect a team account on the team's Integrations page.`,
+      };
     // The LLM tool path has no distinct "pending" state — requestDecision
     // blocks until the gate resolves — so both approval outcomes collapse
     // to the same "did not approve" text.
@@ -961,10 +1603,16 @@ function renderInvokeOutcome(outcome: InvokeActionResult, toolId: string): ToolR
     case "pending-approval":
       return { text: `denied: user did not approve ${toolId}` };
     case "invalid-args":
-      return { text: `invalid params for ${toolId}: ${outcome.error}` };
+      return {
+        text: `invalid params for ${toolId}: ${outcome.error}. Call list_tools (service: "${toolId.split(".")[0]}", query: "${toolId}", detail: "schema") to read its parameter schema, then call ${toolId} again with params that match.`,
+      };
     case "missing-credential":
       return {
-        text: `${toolId} failed: credential ${outcome.service} not connected`,
+        text: `${toolId} failed: credential ${outcome.service} not connected — Connect ${outcome.service} on the Integrations page (/integrations). After connecting, call list_tools (service: "${outcome.service}") to confirm — actions appear when the connection worked; otherwise this warning returns with the reason.`,
+      };
+    case "service-unavailable":
+      return {
+        text: `${toolId} unavailable: ${outcome.reason}${outcome.fix ? ` ${outcome.fix}` : ""}`,
       };
     case "error":
       return { text: `error: ${outcome.message}` };
@@ -1072,12 +1720,12 @@ const PINNED_SUMMARY_ARG = "summary";
 
 /** Published on the added argument. Matches `call_tool`'s wording. */
 const PINNED_SUMMARY_DESCRIPTION =
-  "One-line human-readable summary of what this call does. Shown in approval gates and audit logs.";
+  "State in one sentence what you are trying to accomplish and why you need this action. This is model-authored text, shown as the agent’s stated reason.";
 
 /**
  * Publishes the action's schema with a `summary` argument added.
  *
- * WHY. The summary is the first line of an approval gate body and the
+ * WHY. The summary is the labelled model-authored reason on an approval gate and the
  * `summary` field of every audit record. `call_tool` takes it from the
  * model. A pinned tool that derived a constant instead would ask a person
  * to approve an action with no statement of intent, and would write the
@@ -1085,7 +1733,7 @@ const PINNED_SUMMARY_DESCRIPTION =
  * `require_approval` at any time through an org policy, so a pinned tool
  * must carry the model's own sentence.
  *
- * The added argument is optional and it is stripped before validation, so
+ * The added argument is required and it is stripped before validation, so
  * the two routes still agree about what the ACTION accepts. `carriesSummary`
  * is false in two cases, and the caller then falls back to a derived
  * constant: the schema is not an object, or the action already declares its
@@ -1100,9 +1748,7 @@ function withSummaryArg(schema: TSchema): { schema: TSchema; carriesSummary: boo
   const published = Type.Object(
     {
       ...schema.properties,
-      [PINNED_SUMMARY_ARG]: Type.Optional(
-        Type.String({ description: PINNED_SUMMARY_DESCRIPTION }),
-      ),
+      [PINNED_SUMMARY_ARG]: Type.String({ ...TOOL_INTENT_SCHEMA, description: PINNED_SUMMARY_DESCRIPTION }),
     },
     // Keeps `description`, `additionalProperties` and every other keyword
     // the action set on its own object schema. `ObjectOptions` discards the
@@ -1157,6 +1803,9 @@ function makePinnedTool(
   // sends no summary or the schema cannot carry one.
   const derivedSummary = `${entry.action.name} (${name})`;
   return {
+    scopeAction: actionId,
+    intent: published.carriesSummary ? "summary" : "passthrough",
+    policyChecked: true,
     name,
     description: parts.join(" "),
     parameters: published.schema,
@@ -1238,7 +1887,7 @@ async function executeAction(
     actionId: entry.action.id,
     service: entry.service,
     summary,
-    credentials: scopedCredentialProvider(ctx, credentialService),
+    credentials: scopedCredentialProvider(ctx, credentialService, true),
     ...(pluginStore ? { pluginStore } : {}),
   };
 
@@ -1272,7 +1921,9 @@ async function executeAction(
     // present, no cred) or "credential <service> not available (no store)"
     // (no store at all). Both mean the same thing to the user — surface a
     // missing-credential outcome so callers can name the corrective action.
-    if (/credential .* not (connected|available)/.test(message)) {
+    // An MCP server plugin says "<service>: no credential connected"
+    // (`@valet/sdk` resolveToken).
+    if (/credential .* not (connected|available)|^\S+: no credential connected$/.test(message)) {
       return { kind: "missing-credential", service: credentialService };
     }
     return { kind: "error", message };
@@ -1338,6 +1989,37 @@ function qualifiedId(entry: CatalogEntry): string {
   return entry.action.id.includes(".") ? entry.action.id : `${entry.service}.${entry.action.id}`;
 }
 
+const serviceKey = (service: string) => service.toLowerCase().replaceAll("-", "_");
+
+/**
+ * The catalog id for a tool id written with the service name that
+ * `list_tools` reports. Some services name their tools under another
+ * prefix (`google_calendar` has `calendar.list_events`, `google_workspace`
+ * has `drive.search_files`, `slack-user` has `slack_user.set_status`), and
+ * agents write `google_calendar.list_events` or
+ * `google_workspace.drive.search_files`. Those name one tool, so they run
+ * as it, and every scope and policy check sees the catalog id. An id that
+ * fits no tool, or more than one, is returned unchanged.
+ */
+function canonicalActionId(catalog: Catalog, actionId: string): string {
+  if (catalog.byId.has(actionId)) return actionId;
+  const dot = actionId.indexOf(".");
+  if (dot <= 0) return actionId;
+  const service = serviceKey(actionId.slice(0, dot));
+  const rest = actionId.slice(dot + 1);
+  const entries = catalog.entries.filter((entry) => serviceKey(entry.service) === service);
+  const exact = entries.find((entry) => qualifiedId(entry) === rest);
+  if (exact) return qualifiedId(exact);
+  const named = entries.filter((entry) => qualifiedId(entry).endsWith(`.${rest}`));
+  return named.length === 1 ? qualifiedId(named[0]!) : actionId;
+}
+
+/** Catalog tools with the same action name as an unknown id, for the error's "Did you mean". */
+function similarActionIds(catalog: Catalog, actionId: string): string[] {
+  const name = actionId.slice(actionId.lastIndexOf(".") + 1);
+  return catalog.entries.map(qualifiedId).filter((id) => id.slice(id.lastIndexOf(".") + 1) === name).slice(0, 3);
+}
+
 /**
  * Wrap the engine's CredentialProvider to default lookups to the
  * plugin's credential service. The plugin still gets a CredentialProvider
@@ -1346,12 +2028,18 @@ function qualifiedId(entry: CatalogEntry): string {
  * plugin's `credentialService` setting rather than the bare
  * action.service.
  */
+/** `ctx.credentials` with the plugin's own service as the default. Set
+ * `forAction` for the provider an action executes with, so the host can
+ * tell its reads from discovery and probes (`CredentialRead`). */
 function scopedCredentialProvider(
   ctx: ToolContext,
   defaultService: string,
+  forAction = false,
 ): ToolContext["credentials"] {
   return {
-    get: (service?: string) => ctx.credentials.get(service ?? defaultService),
+    get: (service?: string) => forAction
+      ? ctx.credentials.get(service ?? defaultService, { forAction: true })
+      : ctx.credentials.get(service ?? defaultService),
     request: (service: string, reason: string) => ctx.credentials.request(service, reason),
   };
 }
@@ -1375,10 +2063,14 @@ function actionResultToToolResult(
       ok: true,
     };
   }
+  const createdPullRequest = /^github[.:]create_pull_request$/.test(toolId) && typeof result.data === "object" && result.data !== null
+    && "url" in result.data && typeof result.data.url === "string" ? result.data.url : undefined;
   return {
     text: typeof result.data === "string" ? result.data : encodeToolOutput(result.data),
     attachments: attachments && attachments.length > 0 ? attachments : undefined,
     ok: true,
+    // Usage counts terminal PRs from bash parts only; the action has its own fact.
+    ...(createdPullRequest ? { outcome: { kind: "pull_request_created" as const, url: createdPullRequest } } : {}),
   };
 }
 

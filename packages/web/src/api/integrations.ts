@@ -1,7 +1,7 @@
 /**
  * Plugins + credentials queries (plugin-system-v2 plan Task 15 — connect
  * surface, manual token entry only). House pattern: a query-key factory per
- * resource file, mirroring `~/api/workflows` / `~/api/orchestrator`.
+ * resource file, mirroring `~/api/workflows` / `~/api/workspace-runtime`.
  */
 import {
   useMutation,
@@ -24,7 +24,9 @@ import { onePasswordKeys } from "./onepassword";
 export type CredentialScope = "user" | "org" | "team";
 
 export const qkIntegrations = {
-  plugins: () => ["plugins"] as const,
+  /** Prefix for every personal and team plugin catalog. */
+  pluginsAll: () => ["plugins"] as const,
+  plugins: (teamId?: string) => ["plugins", teamId ?? ""] as const,
   /** `scope` defaults to "user" — the caller's own credentials. "org"
    * (admin-only server-side) is a distinct cache entry, not a filter over
    * the same list. `/integrations` reads both when the caller is an admin.
@@ -33,10 +35,10 @@ export const qkIntegrations = {
     ["credentials", scope, teamId ?? ""] as const,
 };
 
-export function usePlugins(opts?: Partial<UseQueryOptions<ListPluginsResponse>>) {
+export function usePlugins(teamId?: string, opts?: Partial<UseQueryOptions<ListPluginsResponse>>) {
   return useQuery<ListPluginsResponse>({
-    queryKey: qkIntegrations.plugins(),
-    queryFn: () => api.listPlugins(),
+    queryKey: qkIntegrations.plugins(teamId),
+    queryFn: () => api.listPlugins(teamId),
     ...opts,
   });
 }
@@ -63,7 +65,7 @@ export function useConnectCredential() {
   return useMutation<PutCredentialResponse, Error, { service: string; body: PutCredentialRequest }>({
     mutationFn: ({ service, body }) => api.putCredential(service, body),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkIntegrations.plugins() });
+      qc.invalidateQueries({ queryKey: qkIntegrations.pluginsAll() });
       qc.invalidateQueries({ queryKey: ["credentials"] });
       // The 1Password panel's Connected state reads its own settings query.
       qc.invalidateQueries({ queryKey: onePasswordKeys.settings() });
@@ -82,20 +84,27 @@ export function useDisconnectCredential() {
       api.deleteCredential(service, scope ? { scope, teamId } : undefined),
     onSuccess: (_data, { scope, teamId }) => {
       if (scope === "team") {
-        // The completed request owns this invalidation, even after a workspace switch.
+        // The completed request owns these invalidations, even after a
+        // workspace switch. The team catalog includes direct credentials.
         qc.invalidateQueries({ queryKey: qkIntegrations.credentials("team", teamId) });
+        qc.invalidateQueries({ queryKey: qkIntegrations.plugins(teamId) });
         return;
       }
-      qc.invalidateQueries({ queryKey: qkIntegrations.plugins() });
+      qc.invalidateQueries({ queryKey: qkIntegrations.pluginsAll() });
       qc.invalidateQueries({ queryKey: ["credentials"] });
       qc.invalidateQueries({ queryKey: onePasswordKeys.settings() });
     },
   });
 }
 
+/** Returned from `onSuccess`, so the mutation stays pending until the lists
+ * refetch. Settling first rendered the pre-change state for one round trip:
+ * Share → Stop sharing blinked back to Share before it stuck. */
 function invalidateCredentialCaches(qc: ReturnType<typeof useQueryClient>) {
-  qc.invalidateQueries({ queryKey: qkIntegrations.plugins() });
-  qc.invalidateQueries({ queryKey: ["credentials"] });
+  return Promise.all([
+    qc.invalidateQueries({ queryKey: qkIntegrations.pluginsAll() }),
+    qc.invalidateQueries({ queryKey: ["credentials"] }),
+  ]);
 }
 
 export function useDelegateCredential() {
@@ -112,8 +121,8 @@ export function useDelegateCredential() {
 
 export function useRevokeDelegation() {
   const qc = useQueryClient();
-  return useMutation<DeleteCredentialResponse, Error, { service: string; teamId: string }>({
-    mutationFn: ({ service, teamId }) => api.revokeDelegation(service, teamId),
+  return useMutation<DeleteCredentialResponse, Error, { service: string; teamId: string; userId?: string }>({
+    mutationFn: ({ service, teamId, userId }) => api.revokeDelegation(service, teamId, userId),
     onSuccess: () => invalidateCredentialCaches(qc),
   });
 }

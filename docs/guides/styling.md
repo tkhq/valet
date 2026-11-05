@@ -81,6 +81,29 @@ wrap a Radix primitive and add tokens.
 Never build a custom control for something `primitives/` already provides, and
 never reach past a primitive to style its internals from a consumer.
 
+### Reusing feature components
+
+Search existing feature components before adding UI. Extend typed variants or sizes when a primitive almost fits.
+Keep one-off components beside their feature. Promote them when a second caller appears. Update both callers.
+Use `WorkRow` inside `WorkList` or `WorkSection` for work lists, and `SubSection` for titled settings sections.
+Reuse `cardClass`/`Card`, `pageClass`, `FilterChips`, `TabBar`, and `RadioCard` for existing layout patterns.
+Use `textLinkClass` for text links and `Button asChild` for links presented as buttons.
+Delete superseded implementations. Preserve test seams and unique coverage for code that still runs.
+Check unused locals with `pnpm --filter @valet/web exec tsc --noEmit -p . --noUnusedLocals`. Check export references with `rg`.
+
+### Shared page parts
+
+Use these primitives instead of hand-written classes:
+
+- `Button`, `Input`, `Select`, `FilterChips`, and `TabBar` take their height from `CONTROL_SIZE` (`primitives/control.ts`). `sm` is 32px with `text-xs`. Use it in toolbars, filter rows, and row actions. `md` is 36px with `text-sm`. Use it in forms and dialogs. Below the `sm` breakpoint, every control is at least 44px tall with 16px text, so a field does not trigger iOS zoom and a row keeps one text size. Give every control in one row the same `size`. Do not set `h-*`, `py-*`, or a text size in a control's `className`. `control.test.ts` fails on that, and on a raw `<select>`, text `<input>`, `role="tab"`, or `role="radio"` outside `primitives/`.
+- `TabBar` is the strip for panels inside one page. A tab can be `disabled`, show a `badge` such as a `StatusDot`, and carry an `action` outside its button, such as a close button. If the strip can show more than once on a page, pass a `useId()` value as `id`. `LinkTabs` is the strip for tabs that are routes.
+- `RadioCard` is the selectable card in a `role="radiogroup"`. Put extra content, such as a list of passes, in `children`.
+- `Select` is a native `<select>` with the field surface and focus ring of `Input`. It has no default width, so pass `w-full` for a form field.
+- `Callout` is a tinted notice box. Set `tone` to `neutral`, `warning`, `danger`, or `success`. If the notice can appear after the first paint, add `role="alert"` or `role="status"`. Use `asChild` to put its classes on a `label` or a `ul`.
+- `PageHeader` is the top of a page: the `h1` title, an optional `clause` such as `WorkspaceClause`, the `actions` on the right, and an optional `description`. Pass one element as `actions`, and wrap two or more actions in a `div`.
+- `BackLink` is a "← label" link to the parent page. It takes the props of `Link`, so the route and its params stay typed. Pass it to `PageHeader` as `back`, or use it alone in a toolbar.
+- `Time` shows a timestamp in a `<time>` element. The text is relative by default, or absolute with `format="absolute"`. The `title` always shows the full date. Do not show `toLocaleString()` output directly.
+
 ### Accepting `className` for composition
 
 A primitive takes `className`, merges it, and forwards its remaining props:
@@ -169,26 +192,24 @@ exposes the tokens as Tailwind colors (`paper`, `ink`, `muted`, `line`, `moss`,
 `accent`, and the `*-wash` variants). Use the token colors rather than raw
 Tailwind palette values, so a brand change reaches every surface at once.
 
-### The opacity-modifier trap
+### Opacity modifiers
 
-Tailwind's slash-opacity syntax (`bg-ink/10`) only works when a theme color is
-registered as a function receiving an `<alpha-value>` placeholder. Valet's
-tokens are plain color strings pointing at CSS variables, so Tailwind cannot
-inject an alpha channel:
+Slash opacity (`bg-ink/10`, `bg-danger-500/10`) works on every theme color.
+The fixed OKLCH scales (`neutral`, `accent`, `danger`, `success`) carry an
+`<alpha-value>` placeholder. The CSS-variable tokens (`paper`, `ink`,
+`muted`, `line`, `moss`, and the `*-wash` colors) go through `varColor` in
+`tailwind.config.ts`, which emits `color-mix(...)` only when a class names an
+opacity. Until 2026-10-18 both kinds silently emitted no CSS, which left
+rows without hover states and pills without backgrounds.
+
+Arbitrary variable colors (`text-[--fg]/85`) still emit no CSS. Use the token
+instead (`text-ink/85`).
 
 ```tsx
-// Wrong — silently produces NO rule. Not a subtle bug: nothing renders.
-<div className="bg-ink/10 hover:bg-moss/20" />
-
-// Right — use the pre-mixed wash token.
+// For hover and press states, prefer the pre-mixed wash token: it keeps one
+// tuned alpha per theme.
 <div className="bg-ink-wash hover:bg-moss-wash" />
 ```
-
-This has already produced an invisible badge and a pill with no background.
-When you need a translucent surface, use the `*-wash` token, or add one to
-`theme.css` built with native `oklch(... / <alpha>)` at the same lightness,
-chroma, and hue as the base token. Do not reach for a hardcoded
-`hover:bg-neutral-100 dark:hover:bg-neutral-900` stopgap.
 
 ### Dark mode
 
@@ -216,6 +237,17 @@ at that breakpoint and above:
 ```tsx
 <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
 ```
+
+## Long text and the UI stress gallery
+
+Ids, URLs, hashes, emails, and team names arrive as long unbroken words. The body sets `overflow-wrap: break-word`, so a word breaks only when it would overflow its line. Two cases still need a local rule:
+
+- A flex item keeps its content's minimum width. Give it `min-w-0`, and `[overflow-wrap:anywhere]` when its text is an id.
+- A `whitespace-nowrap` element never wraps. A button whose label comes from data (a service name, a question option) sets `h-auto whitespace-normal` and wraps.
+
+A badge truncates a long name only when a tooltip shows the full name. A compact list clamps a long title (`line-clamp-2`) and puts the full title in `title`.
+
+Check a change against `/dev/ui-stress` in a dev server at 375, 760, and 1280 px. It renders the real components with extreme fixtures (40 approvals, 200 threads, long team names, deep JSON). Its layout audit lists every element whose content passes its card, popover, or scroll container. The route does not exist in a production build.
 
 ## Accessibility
 

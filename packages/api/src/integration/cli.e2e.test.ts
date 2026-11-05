@@ -49,8 +49,9 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createServer, type AddressInfo } from "node:net";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createRequire } from "node:module";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { VALET_VERSION } from "../version.js";
 import type { InstanceListJson } from "../cli/commands/instance.js";
@@ -65,10 +66,10 @@ import type {
 // ── Locations ────────────────────────────────────────────────────────────────
 // `../../` from this file (…/src/integration/) resolves to the package root
 // (…/packages/api/), the cwd every child must run in (bare-specifier + tsx
-// resolution). The CLI entry and the local `tsx` binary hang off it.
+// resolution). Resolve the tsx loader through the workspace dependency graph.
 const apiRoot = fileURLToPath(new URL("../../", import.meta.url));
 const cliEntry = join(apiRoot, "src", "cli.ts");
-const tsxBin = join(apiRoot, "node_modules", ".bin", "tsx");
+const tsxImport = pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
 
 const e2eEnabled = Boolean(process.env.VALET_CLI_E2E);
 const describeE2E = e2eEnabled ? describe : describe.skip;
@@ -137,7 +138,7 @@ function runCli(args: string[], env: Record<string, string> = {}, timeoutMs = 60
     // default-profile resolution the core cases depend on — drop it unless a
     // case explicitly set one.
     if (env.VALET_INSTANCE === undefined) delete childEnv.VALET_INSTANCE;
-    const child = spawn(tsxBin, [cliEntry, ...args], { cwd: apiRoot, env: childEnv });
+    const child = spawn(process.execPath, ["--import", tsxImport, cliEntry, ...args], { cwd: apiRoot, env: childEnv });
     let stdout = "";
     let stderr = "";
     // Watchdog: never let a hung CLI child outlive the call and orphan itself —
@@ -183,8 +184,8 @@ async function spawnServe(): Promise<ServeHandle> {
   delete serveEnv.BETTER_AUTH_SECRET;
 
   const child = spawn(
-    tsxBin,
-    [cliEntry, "serve", "--port", String(port), "--data-dir", dataDir, "--sandbox", "local"],
+    process.execPath,
+    ["--import", tsxImport, cliEntry, "serve", "--port", String(port), "--data-dir", dataDir, "--sandbox", "local"],
     { cwd: apiRoot, env: serveEnv },
   );
 
@@ -193,6 +194,8 @@ async function spawnServe(): Promise<ServeHandle> {
   child.stdout?.on("data", (d: Buffer) => (buf += d.toString()));
   child.stderr?.on("data", (d: Buffer) => (buf += d.toString()));
 
+  let spawnError: Error | undefined;
+  child.once("error", (error) => { spawnError = error; });
   let exited = false;
   let exitCode: number | null = null;
   child.once("exit", (code) => {
@@ -202,6 +205,10 @@ async function spawnServe(): Promise<ServeHandle> {
 
   const deadline = Date.now() + 45_000;
   while (Date.now() < deadline) {
+    if (spawnError) {
+      rmSync(dataDir, { recursive: true, force: true });
+      throw spawnError;
+    }
     if (exited) {
       rmSync(dataDir, { recursive: true, force: true });
       throw new Error(`valet serve exited early (code ${exitCode}) before becoming healthy:\n${buf}`);
@@ -377,7 +384,15 @@ describeE2E("CLI e2e against a real `valet serve`", () => {
         };
         expect(receipt.sessionId).toBe(session.id);
         expect(receipt.messageId).not.toBe("");
-        expect(receipt.url).toContain(session.id);
+        expect(receipt.threadId).not.toBe("");
+        expect(new URL(receipt.url).pathname).toBe(`/threads/${encodeURIComponent(receipt.threadId)}`);
+
+        const status = await runCli(["status", "--thread", receipt.threadId, "--json"], dataEnv());
+        expect(status.code, `stderr: ${status.stderr}`).toBe(0);
+        expect(JSON.parse(status.stdout)).toMatchObject({ thread: { id: receipt.threadId }, runtime: { id: session.id } });
+        const followup = await runCli(["handoff", docPath, "--thread", receipt.threadId, "--json"], dataEnv());
+        expect(followup.code, `stderr: ${followup.stderr}`).toBe(0);
+        expect(JSON.parse(followup.stdout)).toMatchObject({ sessionId: session.id, threadId: receipt.threadId, url: receipt.url });
 
         // The doc must be persisted as a user message carrying the provenance
         // header — read it back over the same REST surface the web UI uses.

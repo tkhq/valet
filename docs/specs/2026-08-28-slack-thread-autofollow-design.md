@@ -32,13 +32,18 @@ bot on every line.
 
 - **Addressed**: a direct mention or DM. The host posts the first assistant
   text once. Later updates use `reply_to_origin`.
-- **Overheard**: a message in a followed thread without a mention. The assistant
-  stays silent unless it can add something useful. It uses
-  `reply_to_origin` or `react_to_origin` when it chooses to participate.
+- **Overheard**: a message in a followed thread that is not a direct request.
+  The assistant stays silent by default. It does not reply merely because the
+  content is relevant, general, or solicits an update.
+- **Two-participant follow-up**: when the conversation context shows that the
+  sender is the assistant's only other participant, the sender's follow-up is
+  addressed. The assistant uses `reply_to_origin` to answer it.
 
 The mode rides on `ChannelOrigin.reply: "auto" | "manual"`. The `auto` value
-enables one automatic first reply. The `manual` value keeps the turn silent
-unless an explicit Slack action posts or reacts.
+enables one automatic first reply. The `manual` value prevents automatic
+posting. It does not by itself mean the message is overheard or unaddressed:
+the origin has no participant-count field. The prompt uses the thread context
+to apply the two-participant exception.
 
 ### 2. The follow record
 
@@ -105,9 +110,15 @@ An action called with no origin returns a corrective error.
 
 ### 6. Persona guidance for a followed thread
 
-Appended when the turn is overheard: "You are following this thread. Reply with
-reply_to_origin only when you can add something useful; a light acknowledgement
-can be react_to_origin. Otherwise, do nothing." So silence is the easy default.
+The engine appends shared high-priority guidance to every Slack `.message`
+signal with `origin.reply = "manual"`. It says that manual delivery prevents
+automatic posting but does not itself mean unaddressed. It sets silence as the
+default for actual overheard content. It permits a reply only for an explicit
+@mention, a direct request, or a follow-up from the only other participant.
+The existing channel persona uses the same precedence. This guidance does not
+apply to addressed turns, DMs, schedules, non-Slack signals, or `child.settled`
+signals that inherit a Slack origin. Durable "stop until re-mentioned" state
+needs a separate followed-thread design; the guidance is not durable state.
 
 ### 7. Outcome-first wizard
 
@@ -173,6 +184,8 @@ constituent `merged` pointing at it. Properties:
 - The envelope drops the per-message `sender` attribute and gains
   `digest="<N>"`. The origin (and `messageTs`) comes from the newest
   constituent, so `react_to_origin` targets the latest message.
+- The digest carries the attachments of every constituent, oldest first,
+  because the constituents settle as merged and never reach the model.
 - Constituents are never claimed, so they write no user entries, and a Slack
   redelivery of a constituent's `dispatchId` dedups against its settled row.
   A dedup replay never re-digests.
@@ -209,8 +222,10 @@ follow the persona's "answer by name". These fixes make one inbound view:
 - `renderSignalEnvelope` renders `addressed="true"|"false"` from the origin's
   reply mode, so the agent tells an addressed mention (answer normally) from an
   overheard follow (reply only via `reply_to_origin`) without guessing.
-- The transcript resolves in-text mentions to names, keeps a `[shared: file]`
-  marker for a file-only message, attributes the bot's own prior posts as "You",
+- The transcript resolves in-text mentions to names, names a message's files in
+  a `[shared: file]` marker beside its text (adding `+N unnamed` for entries
+  Slack sends without a name, such as a tombstoned deletion), attributes the
+  bot's own prior posts as "You",
   and preserves the thread's opening message when it trims a long thread.
 
 ### Gap re-hydration (TKAI-284, added 2026-09-01)
@@ -236,6 +251,32 @@ digest. A redelivery whose recomputed body differs from the first delivery
 (the cursor advanced, so the prefix is gone) hits the dispatchId content
 check; the follow-router swallows that `ConflictError` as a clean dedup.
 
+### Dropped-reply feedback (TKAI-553, restored 2026-09-23)
+
+A terminal manual-delivery turn that writes assistant text without a successful
+channel action submits one `channel.reply_dropped` signal on the same assistant
+thread. The thread-scoped submission ID limits the reminder to one per
+assistant thread, even if later turns use another channel origin. The signal
+uses manual delivery and bypasses overheard digests. Its origin-agnostic body
+tells the agent to do nothing for intentional silence. It names the current
+signal origin's `reply_to_origin` action only when the agent intended to reply.
+A feedback-triggered turn cannot submit more feedback.
+
+Successful Slack text replies, file replies, reactions, sends, and DMs suppress
+the manual signal for every destination. Successful personal Slack posts, DMs,
+file uploads, and reactions also suppress the manual signal. An addressed file
+reply does not suppress the first assistant text. Only a text
+`reply_to_origin` call suppresses addressed automatic posting.
+
+An addressed automatic send failure submits queue-item-scoped feedback with an allowlisted public reason.
+The host makes three process-local admission attempts with bounded backoff. Shutdown cancels the retry.
+Attempts use one dispatch ID, never repeat the normal send, and do not survive process shutdown.
+
+Manual `child.settled` turns use the same once-per-thread reminder and remain
+non-automatic. PR #772 separately owns durable automatic child completion. Its
+dispatcher must retain send errors and must not route automatic failures through
+this live best-effort feedback path.
+
 ### First-turn seed hardening (TKAI-284, added 2026-09-01)
 
 `deliverToAssistantThread` serializes deliveries per assistant thread with an
@@ -257,7 +298,8 @@ admit and claim. Two rapid mentions on one new thread seed the transcript once.
 ## Testing
 
 - Origin `reply`/`messageTs` round-trip. Addressed turns post only the first
-  assistant text. Overheard turns stay internal without an explicit action.
+  assistant text. A swallowed manual-delivery response submits one deduplicated
+  feedback signal. Successful channel actions and feedback turns submit none.
 - Dispatcher writes a `followed_threads` row for a follow-enabled mention;
   writes none when `follow` is off.
 - Follow-router: a threaded channel message on a followed thread delivers to the
@@ -300,9 +342,35 @@ this order:
 
 ### Transcript line boundaries (TKAI-434)
 
+Until 2026-09-17 the file marker was a FALLBACK for an empty message body, so
+a file posted with a caption went unmentioned: the transcript carried the
+caption and nothing else. An assistant asked about that file then reported,
+accurately about its input, that it could see no attachment. The marker now
+rides beside the text. Because it is built for every captioned message rather
+than only file-only posts, it reads each entry defensively: a throw inside the
+per-message map would reject the enclosing `Promise.all`, and the caller turns
+that into a null transcript, so one malformed entry would cost the whole
+thread. It names the file rather than fetching it, because
+`read_thread` already returns each file with its `url` and
+`slack.fetch_file` reads a PDF, and downloading every file in a thread to
+seed one turn would cost far more than naming them.
+
 Thread hydration replaces line breaks in message text, speaker names, and file markers with a visible `⏎` separator. Each Slack message occupies one attributed line. This prevents embedded newlines from creating a second speaker line; it does not make message content trusted.
 
 Thread hydration and overheard digests share the engine's `formatTranscriptText` helper through Slack's existing engine dependency.
 The helper scans whitespace runs in linear time, including long runs with no line break.
 Runs containing CR, LF, VT, FF, NEL, LS, or PS become one visible `⏎` separator.
 It preserves internal whitespace without line breaks and trims outer whitespace. Legitimate multiline lists retain visible boundaries between steps.
+
+### Sender authority on followed messages
+
+A followed thread does not delegate its binding actor's authority to participants.
+Each live message requires a linked Slack identity and current organization membership.
+Personal assistants accept their owner's messages. Team assistants also require the
+binding rule's current invocation audience. Organization assistants accept current
+members of their owning organization. Unknown owner types fail closed.
+
+The delivery uses the authorized sender as its actor and message author. Missing,
+unlinked, or unauthorized senders do not trigger a turn, normalization, or history fetch.
+The existing binding membership check remains in effect. Historical messages remain
+explicitly labeled context only; they do not establish authority for a live delivery.

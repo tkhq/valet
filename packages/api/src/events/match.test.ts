@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { eventKeyMatches, filtersMatch, resolvePath, validateRegexPattern } from "./match.js";
+import {
+  eventKeyMatches,
+  filtersMatch,
+  resolvePath,
+  SUBJECT_FILTER_FIELD,
+  subscriptionMatchesEvent,
+  subscriptionNamesKey,
+  validateRegexPattern,
+  withSubjectFilter,
+} from "./match.js";
 import type { EventCatalogEntry } from "@valet/engine";
+import slackPlugin from "@valet/plugin-slack/plugin";
 
 const CATALOG: EventCatalogEntry[] = [
   {
@@ -78,5 +88,144 @@ describe("filtersMatch", () => {
 
   it("empty filter list always matches", () => {
     expect(filtersMatch(payload, "github.pull_request.opened", [], CATALOG)).toBe(true);
+  });
+});
+
+describe("Slack channel_name filter", () => {
+  const catalog = (slackPlugin.triggers ?? []).flatMap((t) => t.catalog);
+  // Intake adds `channel_name` to a message payload (`withEventChannelName`).
+  const post = (channelName?: string) => ({
+    type: "message", channel: "C1", bot_id: "B1", text: "CPU high",
+    ...(channelName !== undefined ? { channel_name: channelName } : {}),
+  });
+  const prefix = [{ field: "channel_name", op: "prefix" as const, value: "alerts-" }];
+  const regex = [{ field: "channel_name", op: "regex" as const, value: "^alerts-(prod|preprod)$" }];
+
+  it.each(["slack.message", "slack.bot_message", "slack.app_mention"])("matches %s by name prefix and by regex", (key) => {
+    expect(filtersMatch(post("alerts-prod"), key, prefix, catalog)).toBe(true);
+    expect(filtersMatch(post("alerts-new-service"), key, prefix, catalog)).toBe(true);
+    expect(filtersMatch(post("general"), key, prefix, catalog)).toBe(false);
+    expect(filtersMatch(post("alerts-preprod"), key, regex, catalog)).toBe(true);
+    expect(filtersMatch(post("alerts-dev"), key, regex, catalog)).toBe(false);
+  });
+
+  it("keeps the saved ID prefix and exact ID conditions as an intersection", () => {
+    const saved = [{ field: "channel", op: "prefix" as const, value: "lead-" },
+      { field: "channel", op: "eq" as const, value: "C0BKL72FS93" }];
+    const lead = { channel: "C0CC7CS2WHE", channel_name: "lead-acme" };
+    const biz = { channel: "C0BKL72FS93", channel_name: "biz-dev" };
+    expect(filtersMatch(lead, "slack.app_mention", saved, catalog)).toBe(false);
+    expect(filtersMatch(biz, "slack.app_mention", saved, catalog)).toBe(false);
+    const byName = [{ field: "channel_name", op: "prefix" as const, value: "lead-" }];
+    const exact = [{ field: "channel", op: "eq" as const, value: "C0BKL72FS93" }];
+    expect(filtersMatch(lead, "slack.app_mention", byName, catalog)).toBe(true);
+    expect(filtersMatch(biz, "slack.app_mention", exact, catalog)).toBe(true);
+    expect(filtersMatch(lead, "slack.app_mention", [...byName, ...exact], catalog)).toBe(false);
+  });
+
+  it("fails closed when intake has no name for the channel", () => {
+    expect(filtersMatch(post(), "slack.bot_message", prefix, catalog)).toBe(false);
+    expect(filtersMatch(post(), "slack.bot_message", [{ field: "channel_name", op: "regex", value: ".*" }], catalog)).toBe(false);
+  });
+
+  it("matches a renamed channel by its new name only", () => {
+    // Intake reads the current name for each event, so the stored rule sees the rename.
+    expect(filtersMatch(post("alerts-billing"), "slack.bot_message", prefix, catalog)).toBe(true);
+    expect(filtersMatch(post("archive-billing"), "slack.bot_message", prefix, catalog)).toBe(false);
+  });
+});
+
+describe("exclusion filters (not_in, not_prefix, not_regex)", () => {
+  const catalog = (slackPlugin.triggers ?? []).flatMap((t) => t.catalog);
+  const post = (fields: Record<string, string>) => ({ type: "message", channel: "C1", text: "CPU high", ...fields });
+  const botIdNotIn = [{ field: "bot_id", op: "not_in" as const, value: ["B1", "B2"] }];
+  const nameNotPrefix = [{ field: "channel_name", op: "not_prefix" as const, value: "alerts-dev" }];
+  const botIdNotRegex = [{ field: "bot_id", op: "not_regex" as const, value: "^B(1|2)$" }];
+
+  // An absent value is not in the excluded set, so an exclusion passes it:
+  // the payload has no value, or the key does not declare the field at all.
+  it.each([
+    ["not_in: value in the list", "slack.bot_message", post({ bot_id: "B2" }), botIdNotIn, false],
+    ["not_in: value not in the list", "slack.bot_message", post({ bot_id: "B3" }), botIdNotIn, true],
+    ["not_in: value absent from the payload", "slack.bot_message", post({}), botIdNotIn, true],
+    ["not_in: field the key does not declare", "slack.message", post({ user: "U1" }), botIdNotIn, true],
+    ["not_prefix: value starts with it", "slack.bot_message", post({ channel_name: "alerts-dev-billing" }), nameNotPrefix, false],
+    ["not_prefix: value equals it", "slack.bot_message", post({ channel_name: "alerts-dev" }), nameNotPrefix, false],
+    ["not_prefix: value does not start with it", "slack.bot_message", post({ channel_name: "alerts-prod" }), nameNotPrefix, true],
+    ["not_prefix: value absent (no name read)", "slack.bot_message", post({}), nameNotPrefix, true],
+    ["not_prefix: field the key does not declare", "slack.reaction_added", { reaction: "eyes", channel: "C1" }, nameNotPrefix, true],
+    ["not_regex: value matches the pattern", "slack.bot_message", post({ bot_id: "B2" }), botIdNotRegex, false],
+    ["not_regex: value does not match the pattern", "slack.bot_message", post({ bot_id: "B22" }), botIdNotRegex, true],
+    ["not_regex: value absent from the payload", "slack.bot_message", post({}), botIdNotRegex, true],
+    ["not_regex: field the key does not declare", "slack.message", post({ user: "U1" }), botIdNotRegex, true],
+  ] as const)("%s", (_label, key, payload, filters, expected) => {
+    expect(filtersMatch(payload, key, [...filters], catalog)).toBe(expected);
+  });
+
+  it("fails closed on a malformed value that is present", () => {
+    expect(filtersMatch(post({ bot_id: "B1" }), "slack.bot_message", [{ field: "bot_id", op: "not_in", value: "B2" }], catalog)).toBe(false);
+    expect(filtersMatch(post({ channel_name: "general" }), "slack.bot_message", [{ field: "channel_name", op: "not_prefix", value: ["x"] }], catalog)).toBe(false);
+    // A pattern that does not compile never passes, for regex and not_regex alike.
+    expect(filtersMatch(post({ bot_id: "B1" }), "slack.bot_message", [{ field: "bot_id", op: "not_regex", value: "(" }], catalog)).toBe(false);
+  });
+
+  it("not_regex tests the same bounded slice of the value as regex", () => {
+    const long = `${"x".repeat(2_000)}B1`;
+    expect(filtersMatch(post({ bot_id: long }), "slack.bot_message", [{ field: "bot_id", op: "regex", value: "B1$" }], catalog)).toBe(false);
+    expect(filtersMatch(post({ bot_id: long }), "slack.bot_message", [{ field: "bot_id", op: "not_regex", value: "B1$" }], catalog)).toBe(true);
+  });
+
+  it("ANDs with the other filters: alert channels minus two bots", () => {
+    const filters = [{ field: "channel_name", op: "prefix" as const, value: "alerts-" }, ...botIdNotIn];
+    expect(filtersMatch(post({ channel_name: "alerts-prod", bot_id: "B9" }), "slack.bot_message", filters, catalog)).toBe(true);
+    expect(filtersMatch(post({ channel_name: "alerts-prod", bot_id: "B1" }), "slack.bot_message", filters, catalog)).toBe(false);
+    expect(filtersMatch(post({ channel_name: "general", bot_id: "B9" }), "slack.bot_message", filters, catalog)).toBe(false);
+  });
+
+  it("keeps a person's message on a line that listens for messages and app posts", () => {
+    const sub = { eventKeys: ["slack.message", "slack.bot_message"], filters: botIdNotIn };
+    expect(subscriptionMatchesEvent(sub, "slack.message", post({ user: "U1" }), catalog)).toBe(true);
+    expect(subscriptionMatchesEvent(sub, "slack.bot_message", post({ bot_id: "B1" }), catalog)).toBe(false);
+  });
+});
+
+describe("subject filter (spec 2026-10-15 event wakeups, Part G)", () => {
+  const key = "github.check_run.completed";
+  // No individual plugin declares `subject`; it is implicit for every key, so
+  // the test catalog entry declares no filters at all (`withSubjectFilter` is
+  // what the real catalog builders apply).
+  const catalog: EventCatalogEntry[] = [{ key, description: "", filters: [] }];
+  const pr42 = ["github:acme", "github:acme/lean-proofs", "github:acme/lean-proofs#42"];
+  const pr43 = ["github:acme", "github:acme/lean-proofs", "github:acme/lean-proofs#43"];
+
+  it("eq matches when any subject equals the value", () => {
+    expect(filtersMatch({}, key, [{ field: "subject", op: "eq", value: "github:acme/lean-proofs#42" }], catalog, pr42)).toBe(true);
+    expect(filtersMatch({}, key, [{ field: "subject", op: "eq", value: "github:acme/lean-proofs#42" }], catalog, pr43)).toBe(false);
+  });
+
+  it("prefix matches when any subject starts with the value", () => {
+    expect(filtersMatch({}, key, [{ field: "subject", op: "prefix", value: "github:acme/lean-proofs" }], catalog, pr42)).toBe(true);
+    expect(filtersMatch({}, key, [{ field: "subject", op: "prefix", value: "github:acme/lean-proofs" }], catalog, pr43)).toBe(true);
+    expect(filtersMatch({}, key, [{ field: "subject", op: "prefix", value: "github:other/repo" }], catalog, pr42)).toBe(false);
+  });
+
+  it("fails closed with no subjects and on ops the spec does not define for subject", () => {
+    expect(filtersMatch({}, key, [{ field: "subject", op: "eq", value: "github:acme/lean-proofs#42" }], catalog, undefined)).toBe(false);
+    expect(filtersMatch({}, key, [{ field: "subject", op: "eq", value: "github:acme/lean-proofs#42" }], catalog, [])).toBe(false);
+    expect(filtersMatch({}, key, [{ field: "subject", op: "contains", value: "lean-proofs" }], catalog, pr42)).toBe(false);
+  });
+
+  it("subscriptionMatchesEvent: a key match with a differing subject is a filter miss, not a key miss", () => {
+    const sub = { eventKeys: [key], filters: [{ field: "subject", op: "eq" as const, value: "github:acme/lean-proofs#42" }] };
+    expect(subscriptionNamesKey(sub, key)).toBe(true);
+    expect(subscriptionMatchesEvent(sub, key, {}, catalog, false, pr43)).toBe(false);
+    expect(subscriptionMatchesEvent(sub, key, {}, catalog, false, pr42)).toBe(true);
+  });
+
+  it("withSubjectFilter adds the implicit field once, idempotently", () => {
+    const entry: EventCatalogEntry = { key, description: "", filters: [{ field: "repo", path: "repository.full_name", description: "" }] };
+    const withSubject = withSubjectFilter(entry);
+    expect(withSubject.filters.map((f) => f.field)).toEqual(["repo", SUBJECT_FILTER_FIELD]);
+    expect(withSubjectFilter(withSubject).filters.length).toBe(2);
   });
 });

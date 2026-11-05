@@ -6,9 +6,8 @@ import type {
   TeamSummary,
 } from "@valet/api/wire";
 import { Section } from "~/components/settings/section";
-import { Badge, Checkbox, Spinner } from "~/components/primitives";
+import { Badge, Checkbox, RadioCard, Spinner } from "~/components/primitives";
 import { useOrg, useOrgPlugins, usePatchOrgPlugin, useTeams } from "~/api/settings";
-import { cn } from "~/lib/cn";
 
 /**
  * `/settings/organization/plugins` — Organization · Plugins
@@ -145,51 +144,17 @@ function PluginRow({
         aria-label={`${plugin.label} access`}
         className="grid gap-2 sm:grid-cols-3"
       >
-        {MODES.map((m) => {
-          const selected = m.id === mode;
-          return (
-            <button
-              key={m.id}
-              type="button"
-              role="radio"
-              aria-checked={selected}
-              aria-label={m.label}
-              disabled={disabled}
-              onClick={() => chooseMode(m.id)}
-              className={cn(
-                "flex flex-col gap-1.5 rounded-md border p-3 text-left transition-colors",
-                "disabled:pointer-events-none disabled:opacity-50",
-                selected
-                  ? "border-moss bg-moss-wash ring-1 ring-moss"
-                  : "border-line hover:border-ink-wash-strong",
-              )}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-[13px] font-medium text-ink">{m.label}</span>
-                <span
-                  className={cn(
-                    "grid h-4 w-4 shrink-0 place-items-center rounded-full border",
-                    selected ? "border-moss bg-moss text-paper" : "border-line",
-                  )}
-                  aria-hidden
-                >
-                  {selected && (
-                    <svg viewBox="0 0 12 12" className="h-2.5 w-2.5" fill="none">
-                      <path
-                        d="M2.5 6.5l2.5 2.5 4.5-5"
-                        stroke="currentColor"
-                        strokeWidth="1.8"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                    </svg>
-                  )}
-                </span>
-              </div>
-              <span className="text-[11px] leading-snug text-muted">{m.blurb}</span>
-            </button>
-          );
-        })}
+        {MODES.map((m) => (
+          <RadioCard
+            key={m.id}
+            title={m.label}
+            description={m.blurb}
+            ariaLabel={m.label}
+            selected={m.id === mode}
+            disabled={disabled}
+            onSelect={() => chooseMode(m.id)}
+          />
+        ))}
       </div>
 
       {mode === "teams" && (

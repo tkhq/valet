@@ -23,6 +23,20 @@ export class InMemoryCredentialStore implements CredentialStore {
     this.creds.set(key(owner, service), { credential, connectedAt: new Date().toISOString() });
   }
 
+  async compareAndSwap(owner: CredentialOwner, service: string, expected: StoredCredential, next: StoredCredential): Promise<boolean> {
+    const entry = this.creds.get(key(owner, service));
+    // Sort object keys so JSON metadata key order does not change equality.
+    const snapshot = (credential: StoredCredential) => JSON.stringify(credential, (_key, value: unknown) => {
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)));
+      }
+      return value;
+    });
+    if (!entry || snapshot(entry.credential) !== snapshot(expected)) return false;
+    this.creds.set(key(owner, service), { ...entry, credential: next });
+    return true;
+  }
+
   async delete(owner: CredentialOwner, service: string): Promise<void> {
     this.creds.delete(key(owner, service));
   }

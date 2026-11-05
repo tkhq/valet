@@ -1,5 +1,7 @@
+import { intersectToolScopes, readToolScope, TOOL_SCOPE_KEY } from "@valet/shared";
 import { Thread, isItemDrivenInProcess, resolveModelId as resolveSessionModel } from "./thread.js";
-import { builtinTools } from "./builtin-tools/index.js";
+import { uid } from "./ids.js";
+import { builtinTools, CHILD_EXCLUDED_TOOL_NAMES, WAKEUP_TOOL_NAMES } from "./builtin-tools/index.js";
 import { decideReconciliation, type ReconcileContext } from "./submission.js";
 import { buildCommandRegistry, type CommandRegistry } from "./commands/registry.js";
 import { dispatchCommand } from "./commands/dispatch.js";
@@ -19,12 +21,11 @@ import type {
 } from "./commands/types.js";
 import type { SandboxAttachment, AttachmentStatus } from "./sandbox/attachment.js";
 import type { PolicySandbox } from "./sandbox/policy.js";
-import { NoCredentialsError, StaleAttemptError, ValidationError } from "./errors.js";
+import { ConflictError, NoCredentialsError, StaleAttemptError, ValidationError } from "./errors.js";
 import {
   isReasoningLevel,
   parseReasoningLevel,
   REASONING_LEVELS,
-  THREAD_REASONING_DISABLED,
   type ReasoningLevel,
 } from "./reasoning.js";
 import { detachedFromTrace, withSpan } from "./tracing.js";
@@ -38,6 +39,7 @@ import type {
   MessageEntry,
   CreateSessionOptions,
   CredentialOwner,
+  CredentialUse,
   CredentialProvider,
   DecisionGate,
   DecisionGateRequest,
@@ -59,17 +61,25 @@ import type {
   SessionEntry,
   SessionStartRef,
   SkillSource,
-  StoredCredential,
+  ResolvedCredential,
+  CredentialRead,
   ThreadData,
   ToolContext,
   ToolDef,
   WriteFence,
 } from "./types.js";
-import { credentialSecret } from "./types.js";
+import { credentialSecret, THREAD_USER_TIMEZONE_KEY } from "./types.js";
+import { reportError } from "./error-report.js";
 
-let nextId = 1;
-function uid(prefix: string): string {
-  return `${prefix}-${Date.now().toString(36)}-${(nextId++).toString(36)}`;
+
+function submissionsByThread(items: readonly QueueItem[]): Map<string, QueueItem[]> {
+  const grouped = new Map<string, QueueItem[]>();
+  for (const item of items) {
+    const threadItems = grouped.get(item.threadId) ?? [];
+    threadItems.push(item);
+    grouped.set(item.threadId, threadItems);
+  }
+  return grouped;
 }
 
 /**
@@ -98,7 +108,7 @@ function withText(content: PromptContent, text: string): PromptContent {
  * `command_result` entry carries. Error variants name the corrective action,
  * per the repo's user-facing-error rule.
  */
-function formatPluginOutcome(
+export function formatPluginOutcome(
   outcome: InvokeActionResult,
   actionId: string,
 ): { ok: boolean; output: string } {
@@ -130,7 +140,19 @@ function formatPluginOutcome(
     case "denied-policy":
       return {
         ok: false,
-        output: "This action is blocked by org policy. Ask an administrator to allow it.",
+        output: outcome.scope === "shared_account"
+          ? "This action would use a teammate's shared account, and you cannot ask its owner for approval here. Connect your own account on the Integrations page, or ask a teammate who can use the account."
+          : "This action is blocked by org policy. Ask an administrator to allow it.",
+      };
+    case "denied-external-sender":
+      return {
+        ok: false,
+        output: "This action needs approval. Only a teammate with a Valet account can run it.",
+      };
+    case "denied-unattended":
+      return {
+        ok: false,
+        output: "This action needs approval, and an unattended run (a workflow, an automated event, or a schedule) cannot ask for it. Valet sent no approval request. In a workflow, to approve it on each run, move the action to a Tool step, which asks for approval on each run; to let it run without asking, use Review permissions on the workflow page. Saved permissions do not apply to a run that an agent started or retried. For any run, allow it by policy in Settings: its owner for a personal run, a team admin for a team run, an org admin for an org run.",
       };
     case "denied-approval":
       return {
@@ -152,7 +174,12 @@ function formatPluginOutcome(
     case "missing-credential":
       return {
         ok: false,
-        output: `Connect the ${outcome.service} integration in Settings.`,
+        output: `Connect ${outcome.service} on the Integrations page (/integrations). After connecting, call list_tools (service: "${outcome.service}") to confirm — actions appear when the connection worked; otherwise this warning returns with the reason.`,
+      };
+    case "service-unavailable":
+      return {
+        ok: false,
+        output: `${outcome.service} is unavailable. ${outcome.reason}${outcome.fix ? ` ${outcome.fix}` : ""}`,
       };
     case "error":
       return { ok: false, output: `Action failed. ${outcome.message}` };
@@ -192,7 +219,13 @@ export interface EmitOptions {
 /** Settings pinned when an API caller creates a new thread. */
 export interface ThreadInitialSettings {
   model?: string;
-  reasoning?: ReasoningLevel | null;
+  reasoning?: ReasoningLevel;
+  /** A display title for the new thread, stored as `metadata.title`. */
+  title?: string;
+  /** Host facts the new thread starts with, merged into its metadata in the
+   * same write that creates it. A host uses it for a fact that must hold
+   * before anyone can list the thread, such as where its content came from. */
+  metadata?: Record<string, unknown>;
 }
 
 export class Session {
@@ -244,6 +277,7 @@ export class Session {
   readonly skills = new Map<string, SkillSource>();
   private threads = new Map<string, Thread>();
   private threadsByKey = new Map<string, Thread>();
+  private creatingThreads = new Map<string, Promise<Thread>>();
   /** Lazily-built slash-command registry; invalidated by refreshCommandRegistry(). */
   private commandRegistryCache: CommandRegistry | null = null;
   /**
@@ -272,9 +306,133 @@ export class Session {
    * `null` result) doesn't re-exec the scan on every turn.
    */
   private repoInstructionsLoaded = false;
+  /** Last known user timezone (TKAI-584). Stamped into each new thread. */
+  private latestUserTimezone: string | undefined;
   private destroyed = false;
+  private reclaiming = false;
+  private retiring = false;
+  private claimsInFlight = new Map<string, number>();
+  private executionOwners = new Set<Session>([this]);
+  private reclaimRecovery: (() => Promise<void>) | undefined;
+  private reclaimRecoveryTail: Promise<void> = Promise.resolve();
+
+  /** Reserve claim ownership before any store await. Reclaim and claims cannot cross this synchronous boundary. */
+  async claimExecution<T>(claim: () => Promise<T>, threadId = ""): Promise<T | null> {
+    if (this.isExecutionFenced || this.destroyed || this.attachment.state === "released" || this.options.isExecutionCurrent?.() === false || this.threadOwnedElsewhere(threadId)) return null;
+    this.claimsInFlight.set(threadId, (this.claimsInFlight.get(threadId) ?? 0) + 1);
+    try { return await claim(); }
+    finally {
+      const remaining = (this.claimsInFlight.get(threadId) ?? 1) - 1;
+      if (remaining) this.claimsInFlight.set(threadId, remaining); else this.claimsInFlight.delete(threadId);
+      this.notifyExecutionIdle();
+    }
+  }
+
+  get hasActiveExecution(): boolean {
+    return [...this.executionOwners].some(owner => owner.hasOwnActiveExecution);
+  }
+
+  get hasDrainingExecution(): boolean {
+    return [...this.executionOwners].some(owner => owner.retiring && owner.hasOwnActiveExecution);
+  }
+
+  get hasOwnActiveExecution(): boolean {
+    return this.claimsInFlight.size > 0 || this.listThreads().some(thread => thread.hasActiveRun);
+  }
+
+  private threadOwnedElsewhere(threadId: string): boolean {
+    return [...this.executionOwners].some(owner => owner !== this && (owner.claimsInFlight.has(threadId)
+      || owner.listThreads().some(thread => thread.id === threadId && thread.hasActiveRun)));
+  }
+
+  /** Handoff shares the exact attachment and policy wrapper; active-thread reservations span every generation. */
+  sharedExecutionRuntime(): { attachment: SandboxAttachment; sandbox: Sandbox; policySandbox?: PolicySandbox } {
+    return { attachment: this.attachment, sandbox: this.sandbox, ...(this.policySandbox ? { policySandbox: this.policySandbox } : {}) };
+  }
+
+  isThreadExecutionFenced(threadId: string): boolean {
+    return this.isExecutionFenced || this.threadOwnedElsewhere(threadId);
+  }
+
+  get isReclaiming(): boolean { return this.reclaiming; }
+  get isExecutionFenced(): boolean { return this.reclaiming || this.retiring; }
+
+  /** False once the session is destroyed or its timers are stopped for good. */
+  get timersActive(): boolean { return !this.destroyed && !this.timersStopped; }
+
+  /** Config invalidation fences new claims immediately but lets already-reserved execution finish. */
+  retireExecution(recover: () => Promise<void>): void {
+    this.retiring = true;
+    for (const thread of this.threads.values()) thread.handoffParkedGate();
+    this.completeReclaim(recover);
+  }
+
+  /** Shutdown includes every generation sharing this attachment, not just the newest cached owner. */
+  stopExecutionOwners(): void {
+    for (const owner of this.executionOwners) {
+      owner.retireExecution(async () => {});
+      owner.suspendTimers({ permanent: true });
+    }
+  }
+
+  /** Also called after normal, gate-replay, and interrupted-resume execution releases local ownership. */
+  notifyExecutionIdle(): void {
+    if (this.retiring) this.notifyReclaimAdmission();
+  }
+
+  async refreshExecutionThreads(): Promise<void> {
+    for (const data of await this.providers.store.listThreads(this.id)) {
+      if (!this.threads.has(data.id)) this.attachThread(new Thread(this, data, { restoreTranscript: true }));
+    }
+    await this.reconcile();
+    // Old references remain permanently fenced; completed generations need not retain their tools and transcripts.
+    for (const owner of this.executionOwners) {
+      if (owner !== this && owner.retiring && !owner.hasOwnActiveExecution) {
+        owner.suspendTimers({ permanent: true });
+        this.executionOwners.delete(owner);
+      }
+    }
+  }
+
+  /** Call under the host cleanup barrier. Fence claims first, then recheck durable and in-process ownership. */
+  async beginReclaim(): Promise<boolean> {
+    if (this.isExecutionFenced || this.hasActiveExecution) return false;
+    this.reclaiming = true;
+    try {
+      if ((await this.providers.store.listUnsettledSubmissions(this.id)).length > 0 || this.hasActiveExecution) {
+        this.cancelReclaim();
+        return false;
+      }
+      return true;
+    } catch (error) { this.cancelReclaim(); throw error; }
+  }
+
+  /** A refused reclaim leaves this attachment usable. Never clear the fence after a terminal release. */
+  cancelReclaim(): void {
+    if (this.attachment.state === "released") return;
+    this.reclaiming = false;
+    for (const thread of this.threads.values()) void thread.kick();
+  }
+
+  /** Keep old references fenced. The host schedules recovery after its cleanup barrier, never inside a claim. */
+  completeReclaim(recover: () => Promise<void>): void {
+    this.reclaimRecovery = recover;
+    this.notifyReclaimAdmission();
+  }
+
+  notifyReclaimAdmission(): void {
+    if (!this.reclaimRecovery) return;
+    const recover = this.reclaimRecovery;
+    this.reclaimRecoveryTail = this.reclaimRecoveryTail.then(recover).catch(error => {
+      reportError({ area: "engine", reason: "reclaim_recovery" }, `Session ${this.id}: reclaim recovery failed; resolve the session to retry`, error);
+    });
+  }
+
+  private timersStopped = false;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
+  private sweepInFlight: Promise<void> | undefined;
+  private heartbeatInFlight: Promise<void> | undefined;
   /**
    * The `PolicySandbox` wrapper when the session's sandbox was constructed via
    * the engine's normal materialization path. `null` when the session was
@@ -298,8 +456,17 @@ export class Session {
     this.sandbox = sandbox;
     this.attachment = attachment;
     this.policySandbox = policySandbox ?? null;
-    this.builtinTools = options.builtinTools ?? builtinTools;
+    // A session with no wakeup seam (a bare engine, a test) gets no wakeup
+    // tools: each one would only refuse, and six tool schemas widen every
+    // prompt. The api gives every session a seam (`host.ts`).
+    // A child never asks a person: nobody watches its conversation. It ends
+    // its turn with the question as its result, and its parent answers it
+    // or asks the person in the thread they watch.
+    this.builtinTools = options.builtinTools
+      ?? builtinTools.filter((tool) => (options.wakeups || !WAKEUP_TOOL_NAMES.has(tool.name))
+        && !(options.purpose === "child" && CHILD_EXCLUDED_TOOL_NAMES.has(tool.name)));
     this.principal = options.owner ?? { type: "user", id: options.userId };
+    this.latestUserTimezone = options.userTimezone;
     this.parentSessionId = options.parentSessionId;
     this.parentThreadId = options.parentThreadId;
     for (const role of options.roles ?? []) this.roles.set(role.name, role);
@@ -348,7 +515,7 @@ export class Session {
    * the process alive, and are cleared in `destroy()`.
    */
   ensureTimers(): void {
-    if (this.destroyed) return;
+    if (this.destroyed || this.timersStopped) return;
     if (this.heartbeatTimer === null) {
       this.heartbeatTimer = setInterval(() => {
         // A transient store error inside the tick must not become an
@@ -360,10 +527,7 @@ export class Session {
         // trace forever.
         detachedFromTrace(() =>
           this.heartbeatOnce().catch((err) => {
-            console.error(
-              `[engine] heartbeat failed (session=${this.id}):`,
-              err instanceof Error ? err.message : String(err),
-            );
+            reportError({ area: "engine", reason: "heartbeat" }, `[engine] heartbeat failed (session=${this.id})`, err);
           }),
         );
       }, 10_000);
@@ -377,10 +541,7 @@ export class Session {
         // stale-context reasoning as the heartbeat above.
         detachedFromTrace(() =>
           this.sweepOnce().catch((err) => {
-            console.error(
-              `[engine] sweep failed (session=${this.id}):`,
-              err instanceof Error ? err.message : String(err),
-            );
+            reportError({ area: "engine", reason: "session_sweep" }, `[engine] sweep failed (session=${this.id})`, err);
           }),
         );
       }, 5_000);
@@ -401,13 +562,11 @@ export class Session {
    * `destroy()`'s store deletion or thread aborts — this instance's
    * transcript and store rows must survive.
    *
-   * The object must not be reused after this without a fresh claim: no
-   * caller should hold a reference across an eviction. If one somehow does,
-   * `ensureTimers` will restart the timers lazily on the next claim (it
-   * checks `this.destroyed`, which `suspendTimers` does not set), so this
-   * is not a poison-pill — just an idle instance.
+   * Permanent suspension is for retired owners: an already-reserved claim that installs after eviction
+   * must not restart timers. Default suspension remains resumable on the next claim.
    */
-  suspendTimers(): void {
+  suspendTimers(opts: { permanent?: boolean } = {}): void {
+    if (opts.permanent) this.timersStopped = true;
     if (this.heartbeatTimer !== null) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
@@ -419,7 +578,15 @@ export class Session {
   }
 
   /** Renew leases for every submission this instance is currently running. */
-  async heartbeatOnce(): Promise<void> {
+  heartbeatOnce(): Promise<void> {
+    if (this.heartbeatInFlight) return this.heartbeatInFlight;
+    this.heartbeatInFlight = this.renewRunningLeases().finally(() => {
+      this.heartbeatInFlight = undefined;
+    });
+    return this.heartbeatInFlight;
+  }
+
+  private async renewRunningLeases(): Promise<void> {
     const ids = this.runningItemIds();
     if (ids.length === 0) return;
     await this.providers.store.renewLeases(this.ownerId, ids);
@@ -430,7 +597,16 @@ export class Session {
    * passed (safety net for a missed/never-armed in-process timer), then
    * re-kick every thread so missed wakeups can't strand queued work.
    */
-  async sweepOnce(): Promise<void> {
+  sweepOnce(): Promise<void> {
+    if (this.sweepInFlight) return this.sweepInFlight;
+    this.sweepInFlight = this.sweepThreads().finally(() => {
+      this.sweepInFlight = undefined;
+    });
+    return this.sweepInFlight;
+  }
+
+  private async sweepThreads(): Promise<void> {
+    if (this.retiring) return;
     // Reclaim expired leases: any running/blocked item of this session whose
     // lease has lapsed is reconciled through the tree (Task 5 lease-expiry
     // reclaim). QueueItem carries no sessionId, so we scan this session's own
@@ -438,22 +614,38 @@ export class Session {
     // listExpiredSubmissions scan — equivalent for one session, and avoids
     // touching other sessions' work.
     const now = Date.now();
-    const mine = await this.providers.store.listUnsettledSubmissions(this.id);
+    let mine = await this.providers.store.listUnsettledSubmissions(this.id);
+    let reconciled = false;
     for (const item of mine) {
       const claimed = item.status === "running" || item.status === "blocked_on_decision_gate";
       const leaseExpired = item.leaseExpiresAt !== undefined && item.leaseExpiresAt < now;
       if (claimed && leaseExpired) {
         await this.reconcileItem(item);
+        reconciled = true;
       }
     }
-    for (const t of this.threads.values()) {
+    if (reconciled) mine = await this.providers.store.listUnsettledSubmissions(this.id);
+    // Share one snapshot across threads. Idle history needs no per-thread reads.
+    const byThread = submissionsByThread(mine);
+    const gatesByThread = new Map<string, DecisionGate[]>();
+    for (const gate of await this.providers.store.listDecisionGates(this.id, undefined, "pending")) {
+      const gates = gatesByThread.get(gate.threadId) ?? [];
+      gates.push(gate);
+      gatesByThread.set(gate.threadId, gates);
+    }
+    for (const threadId of new Set([...byThread.keys(), ...gatesByThread.keys()])) {
+      const t = this.threads.get(threadId);
+      if (!t || this.threadOwnedElsewhere(threadId)) continue;
       // Durable expiry backstop for pending decision gates whose in-process
       // timer was lost (e.g. across restart). Runs before the kick so an
       // expired gate terminalizes and unblocks the thread's queued work.
-      await t.sweepExpiredGates();
-      await t.checkCollectDeadline();
-      await t.repairOverheardDigests();
-      await t.kick();
+      await t.sweepExpiredGates(gatesByThread.get(threadId) ?? []);
+      const items = byThread.get(threadId) ?? [];
+      await t.checkCollectDeadline(items);
+      await t.repairOverheardDigests(items);
+      // A drive can wait for a model or approval. It must not hold the
+      // sweep open and prevent the next pass from repairing other threads.
+      void t.kick();
     }
   }
 
@@ -477,8 +669,14 @@ export class Session {
     sandbox: Sandbox,
     attachment: SandboxAttachment,
     policySandbox?: PolicySandbox,
+    predecessor?: Session,
   ): Promise<Session> {
+    options.toolScope = intersectToolScopes(readToolScope(data.metadata?.[TOOL_SCOPE_KEY]), options.toolScope);
     const session = new Session(data.id, options, providers, sandbox, attachment, policySandbox);
+    if (predecessor) {
+      session.executionOwners = predecessor.executionOwners;
+      session.executionOwners.add(session);
+    }
     // The host's restore-time options usually don't re-supply `owner` (it's
     // not something callers round-trip through CreateSessionOptions on
     // every restart) — preserve the persisted value in that case rather
@@ -536,6 +734,10 @@ export class Session {
    * re-running is safe.
    */
   async reconcile(): Promise<void> {
+    if (this.options.readOnlyReason) {
+      await this.settleReadOnlySubmissions(this.options.readOnlyReason);
+      return;
+    }
     const items = await this.providers.store.listUnsettledSubmissions(this.id);
     for (const item of items) {
       // startup: this instance is the definitive new owner (restoreSession's
@@ -556,8 +758,9 @@ export class Session {
     // retry backoff.
     // Settle a crashed coalesce's leftover constituents BEFORE the kick below
     // can claim one (see Thread.repairOverheardDigests).
-    for (const t of this.threads.values()) {
-      await t.repairOverheardDigests();
+    const repairItems = await this.providers.store.listUnsettledSubmissions(this.id);
+    for (const [threadId, threadItems] of submissionsByThread(repairItems)) {
+      await this.threads.get(threadId)?.repairOverheardDigests(threadItems);
     }
     const remaining = await this.providers.store.listUnsettledSubmissions(this.id);
     const queuedThreadIds = new Set(
@@ -570,13 +773,40 @@ export class Session {
     }
   }
 
+  /** A cutover must terminate old work without restoring its tools or sandbox. */
+  private async settleReadOnlySubmissions(reason: string): Promise<void> {
+    const store = this.providers.store;
+    for (const item of await store.listUnsettledSubmissions(this.id)) {
+      try {
+        await store.forceSettle(this.id, item.id, "aborted", reason);
+      } catch (error) {
+        if (!(error instanceof ConflictError)) throw error;
+        continue; // Another restore already settled it.
+      }
+      await this.emit({ type: "submission_settled", sessionId: this.id, threadId: item.threadId,
+        queueItemId: item.id, outcome: { outcome: "aborted", error: reason } },
+      { eventKey: `settled:${item.id}`, queueItemId: item.id });
+    }
+    // Also repair a crash between settlement and gate cleanup. No gate is re-armed.
+    for (const gate of await store.listDecisionGates(this.id)) {
+      if (gate.status !== "pending" || !gate.queueItemId) continue;
+      const item = await store.getQueueItem(this.id, gate.queueItemId);
+      if (item?.outcome?.outcome !== "aborted" || item.outcome.error !== reason) continue;
+      await persistTerminalGate(store, this.id, gate.threadId, gate, { status: "withdrawn", reason: "cancel" });
+      await this.emit({ type: "decision_gate_withdrawn", threadId: gate.threadId, gateId: gate.id, reason: "cancel" },
+        { eventKey: `gate:${gate.id}:withdrawn`, queueItemId: item.id });
+      await store.clearSuspendedTurn(this.id, gate.threadId);
+    }
+  }
+
   /**
    * Gather the ReconcileContext from the store, consult the pure decision
    * function, and apply the resulting action via the owning Thread. Also
    * observes the stuck-head condition for the attention signal.
    */
   private async reconcileItem(item: QueueItem, opts?: { startup?: boolean }): Promise<void> {
-    if (item.status === "settled") return;
+    if (this.options.readOnlyReason) return;
+    if (item.status === "settled" || this.threadOwnedElsewhere(item.threadId)) return;
     const thread = this.threads.get(item.threadId);
     if (!thread) return; // thread not hydrated — nothing to drive it with
 
@@ -594,7 +824,7 @@ export class Session {
     }
 
     const now = Date.now();
-    const entries = await store.getEntries(this.id, item.threadId);
+    const entries = await store.getEntries(this.id, item.threadId, { queueItemId: item.id });
     const hasTerminalAssistantEntry = entries.some(
       (e) =>
         e.type === "message" &&
@@ -639,7 +869,7 @@ export class Session {
     // a `wait` item is owned by a live attempt or a collect window, not a
     // wedged head.
     if (action.kind !== "wait") {
-      this.maybeEmitStuck(item, now);
+      this.maybeEmitStuck(item, now, opts?.startup === true);
     }
     switch (action.kind) {
       case "wait":
@@ -689,11 +919,16 @@ export class Session {
    * submission crosses the retry threshold or wall-clock bound. Gate-blocked
    * items are excluded (their bound is the gate's own expiry). Once per
    * observation pass — no dedup in Phase 1.
+   *
+   * The startup pass checks only the retry threshold. A restart interrupts
+   * every running turn, and resuming them is the designed recovery, so a
+   * long turn's age at startup is not evidence of a wedge. A crash loop
+   * still pages: each resume adds an attempt.
    */
-  private maybeEmitStuck(item: QueueItem, now: number): void {
+  private maybeEmitStuck(item: QueueItem, now: number, startup: boolean): void {
     if (item.status === "blocked_on_decision_gate") return;
     const ageMs = now - item.createdAt;
-    const stuck = item.attemptCount >= 3 || ageMs > 15 * 60_000;
+    const stuck = item.attemptCount >= 3 || (!startup && ageMs > 15 * 60_000);
     if (!stuck) return;
     void this.emit({
       type: "submission_stuck",
@@ -711,7 +946,33 @@ export class Session {
   }
 
   async ensureDefaultThread(): Promise<Thread> {
+    if (!this.threadsByKey.has("web:default")) await this.refreshUserTimezone();
     return this.thread("web:default");
+  }
+
+  /**
+   * Read the user's current timezone for a new user entry's `[sent: …]` line.
+   * A failure keeps the last known value.
+   */
+  async currentUserTimezone(): Promise<string | undefined> {
+    await this.refreshUserTimezone();
+    return this.latestUserTimezone;
+  }
+
+  /** Last known user timezone, without a read. */
+  get lastKnownUserTimezone(): string | undefined {
+    return this.latestUserTimezone;
+  }
+
+  /** Read the user's current timezone before a thread is created. A failure keeps the last value. */
+  private async refreshUserTimezone(): Promise<void> {
+    const resolve = this.options.resolveUserTimezone;
+    if (!resolve) return;
+    try {
+      this.latestUserTimezone = await resolve();
+    } catch {
+      // Keep the last known value. An unknown timezone is a valid prompt state.
+    }
   }
 
   private buildThreadData(key: string, initial?: ThreadInitialSettings): ThreadData {
@@ -727,13 +988,23 @@ export class Session {
       // default/channel/workflow threads all funnel through here; rehydrate
       // constructs Thread from persisted data and never re-stamps.
       model: initial?.model ?? this.options.modelSpec ?? this.options.model.id,
-      reasoning:
-        initial?.reasoning === null ? THREAD_REASONING_DISABLED : initial?.reasoning,
+      reasoning: initial?.reasoning,
+      // Stamped with `createdAt` and never rewritten: a later timezone change
+      // must not alter this thread's prompt (TKAI-584).
+      metadata: { ...initial?.metadata, [THREAD_USER_TIMEZONE_KEY]: this.latestUserTimezone ?? null,
+        ...(this.options.initialToolFocus?.({ key }) ? { [TOOL_SCOPE_KEY]: this.options.initialToolFocus({ key }) } : {}),
+        ...(initial?.title ? { title: initial.title } : {}) },
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
   }
 
+  /**
+   * Get or create a thread synchronously. A new thread stamps the last known
+   * user timezone and cannot call `resolveUserTimezone`. Callers that create
+   * threads should use `createThread` or `ensureDefaultThread`, which read the
+   * current value first (TKAI-584).
+   */
   thread(key?: string): Thread {
     const k = key ?? "web:default";
     const existing = this.threadsByKey.get(k);
@@ -749,15 +1020,52 @@ export class Session {
   async createThread(key: string, initial?: ThreadInitialSettings): Promise<Thread> {
     const existing = this.threadsByKey.get(key);
     if (existing) return existing;
-    const data = this.buildThreadData(key, initial);
-    await this.providers.store.saveThread(this.id, data);
-    const thread = new Thread(this, data);
+    const pending = this.creatingThreads.get(key);
+    if (pending) return pending;
+    const creating = this.createKeyedThread(key, initial);
+    this.creatingThreads.set(key, creating);
+    try {
+      return await creating;
+    } finally {
+      this.creatingThreads.delete(key);
+    }
+  }
+
+  private async createKeyedThread(key: string, initial?: ThreadInitialSettings): Promise<Thread> {
+    await this.refreshUserTimezone();
+    let data = this.buildThreadData(key, initial);
+    let restoreTranscript = false;
+    try {
+      await this.providers.store.saveThread(this.id, data);
+    } catch (error) {
+      // A different host can win the durable (session_id, key) constraint.
+      // Recover only when that winner exists; preserve unrelated failures.
+      const winner = (await this.providers.store.listThreads(this.id)).find(thread => thread.key === key);
+      if (!winner) throw error;
+      data = winner;
+      restoreTranscript = true;
+    }
+    const thread = new Thread(this, data, { restoreTranscript });
     this.attachThread(thread);
     return thread;
   }
 
   threadById(id: string): Thread | null {
     return this.threads.get(id) ?? null;
+  }
+
+  /** Attach a persisted thread by ID, with lazy history restoration and no row creation. */
+  async loadThread(id: string): Promise<Thread | null> {
+    const existing = this.threads.get(id);
+    if (existing) return existing;
+    const data = await this.providers.store.getThread(this.id, id);
+    if (!data) return null;
+    // Concurrent lookups must share one in-process thread and its queue driver.
+    const loaded = this.threads.get(id);
+    if (loaded) return loaded;
+    const thread = new Thread(this, data, { restoreTranscript: true });
+    this.attachThread(thread);
+    return thread;
   }
 
   async threadByKey(key: string): Promise<Thread | null> {
@@ -768,6 +1076,14 @@ export class Session {
     return [...this.threads.values()];
   }
 
+  /** Release the agent transcripts of loaded threads idle since `idleSince`
+   * (see `Thread.releaseIdleTranscript`). Returns how many it released. */
+  releaseIdleTranscripts(idleSince: number): number {
+    let released = 0;
+    for (const thread of this.listThreads()) if (thread.releaseIdleTranscript(idleSince)) released += 1;
+    return released;
+  }
+
   /**
    * Returns true when any thread OTHER than `excludeThreadId` currently has
    * an active run (i.e. is mid-turn). Used by the run-start reconcile window
@@ -775,10 +1091,7 @@ export class Session {
    * sandbox convergence.
    */
   hasOtherActiveRuns(excludeThreadId: string): boolean {
-    for (const t of this.threads.values()) {
-      if (t.id !== excludeThreadId && t.hasActiveRun) return true;
-    }
-    return false;
+    return [...this.executionOwners].some(owner => [...owner.threads.values()].some(thread => thread.id !== excludeThreadId && thread.hasActiveRun));
   }
 
   /**
@@ -794,6 +1107,7 @@ export class Session {
   // ── public API ──────────────────────────────────────────────────
 
   async prompt(content: PromptContent, opts: PromptOptions = {}): Promise<PromptReceipt> {
+    if (this.options.readOnlyReason) throw new ValidationError(this.options.readOnlyReason);
     const thread = this.resolveTargetThread(opts.threadId);
     const text = commandText(content);
     if (text?.startsWith("/")) {
@@ -812,7 +1126,7 @@ export class Session {
         return thread.submitPrompt(withText(content, outcome.text), opts2);
       }
       if (outcome.kind === "execute") {
-        return this.executeCommand(thread, outcome.resolved, outcome.args, text, opts.author, opts.channel);
+        return this.executeCommand(thread, outcome.resolved, outcome.args, text, opts.author, opts.channel, opts.forkThread);
       }
       if (outcome.kind === "pass" && outcome.nearMiss !== undefined) {
         const receipt = await thread.submitPrompt(content, opts);
@@ -837,7 +1151,8 @@ export class Session {
    * even while a turn streams.
    *
    * `PromptOptions` other than `threadId` (resolved by the caller),
-   * `author`, and `channel` are intentionally not forwarded: they shape
+   * `author`, `channel`, and the request-scoped `forkThread` host hook are
+   * intentionally not forwarded: they shape
    * queue submissions (queueMode, model, ...) and a command takes no queue
    * item. `author` IS forwarded, onto the echo entry — the echo is a
    * persisted user message, and on a shared session an authorless echo
@@ -854,6 +1169,7 @@ export class Session {
     raw: string,
     author?: PromptAuthor,
     channel?: ChannelTarget,
+    forkThread?: PromptOptions["forkThread"],
   ): Promise<PromptReceipt> {
     // Echo the typed command as a persisted user message BEFORE the result.
     // A command takes no queue item, so nothing else persists the user's
@@ -874,7 +1190,7 @@ export class Session {
       channel,
       createdAt: echoAt,
     };
-    await this.providers.store.appendEntries(this.id, thread.id, [echo]);
+    await thread.appendEntry(echo);
     let source: CommandSource;
     let name: string;
     let result: { ok: boolean; output: string };
@@ -886,7 +1202,9 @@ export class Session {
       // ok:false command_result next to the already-persisted echo entry,
       // not reject the whole submission into a raw HTTP 500 (TKAI-306).
       try {
-        result = await executeBuiltin(name, args, this, this.options.commandContext, thread);
+        result = name === "fork" && forkThread
+          ? { ok: true, output: await forkThread(thread.id, raw.replace(/^\/\S+[ \t\n]?/, "").trim()) }
+          : await executeBuiltin(name, args, this, this.options.commandContext, thread);
       } catch (err) {
         result = {
           ok: false,
@@ -973,7 +1291,7 @@ export class Session {
       channel,
       createdAt: Math.max(Date.now(), notBefore + 1),
     };
-    await this.providers.store.appendEntries(this.id, thread.id, [entry]);
+    await thread.appendEntry(entry);
     await this.emit({ type: "command_result", threadId: thread.id, entry });
   }
 
@@ -1029,6 +1347,9 @@ export class Session {
   private buildCommandToolContext(thread: Thread): ToolContext {
     const requestDecision = this.options.commandRequestDecision;
     return {
+      get toolScope() { return thread.effectiveToolScope(); },
+      get toolScopeCeiling() { return thread.toolScopeCeiling(); },
+      setToolFocus: (scope) => thread.setToolFocus(scope),
       userId: this.options.userId,
       orgId: this.options.orgId,
       sessionId: this.id,
@@ -1056,9 +1377,9 @@ export class Session {
         // `resolveDecision`, same as every other gate.
         return this.awaitCommandGate(thread, req);
       },
-      threadRead: (key, opts) => this.readEntries(key, opts),
+      threadRead: (key, opts) => this.readEntries(key, opts, thread),
       listThreads: async () => {
-        const datas = await this.providers.store.listThreads(this.id);
+        const datas = await this.readableThreads(thread);
         return datas.map((d) => ({
           id: d.id,
           key: d.key,
@@ -1117,15 +1438,34 @@ export class Session {
       skillsProvider ? skillsProvider() : Promise.resolve(null),
     ]);
     this.workspaceSkillsCache = workspaceSkills;
-    if (managedSkills !== null) {
-      // Replace, not merge: the provider returns the full merged set (plugin
-      // + stored). A deleted or renamed stored skill must drop out here, and
-      // `skill`-tool lookups (thread.ts) read this same map, so both surfaces
-      // stay consistent.
-      this.skills.clear();
-      for (const skill of managedSkills) this.skills.set(skill.name, skill);
-    }
+    if (managedSkills !== null) this.replaceSkills(managedSkills);
     this.commandRegistryCache = null;
+  }
+
+  /**
+   * Re-read the session's skill map from the host `skillsProvider` only.
+   * Each turn calls this before it builds its tools, so a skill created,
+   * edited, or deleted while the session sat in the host cache reaches the
+   * model on the next turn. The `workspaceSkillsProvider` is not read: repo
+   * templates reach slash commands only, and that read can need the sandbox.
+   * No provider === no-op. A provider rejection propagates, and the previous
+   * map keeps serving.
+   */
+  async refreshSkills(): Promise<void> {
+    const skillsProvider = this.options.skillsProvider;
+    if (!skillsProvider) return;
+    this.replaceSkills(await skillsProvider());
+    this.commandRegistryCache = null;
+  }
+
+  /**
+   * Replace, not merge: the provider returns the full merged set (plugin +
+   * stored). A deleted or renamed stored skill must drop out here. The host's
+   * `skill` tool reads this same map, so both surfaces stay consistent.
+   */
+  private replaceSkills(skills: SkillSource[]): void {
+    this.skills.clear();
+    for (const skill of skills) this.skills.set(skill.name, skill);
   }
 
   /**
@@ -1258,7 +1598,7 @@ export class Session {
       gate,
       createdAt: Date.now(),
     };
-    await this.providers.store.appendEntries(this.id, thread.id, [gateEntry]);
+    await thread.appendEntry(gateEntry);
     await this.emit(
       { type: "decision_gate", threadId: thread.id, gate },
       { eventKey: `gate:${gate.id}:pending` },
@@ -1309,7 +1649,14 @@ export class Session {
     }
     for (const t of this.threads.values()) {
       if (t.isPendingGate(gateId)) {
-        t.withdrawDecision(gateId, reason);
+        const gate = t.pendingDecisionGates().find((pending) => pending.id === gateId);
+        if (reason === "cancel" && gate) {
+          // Stamp abort intent before unblocking the tool. Otherwise its
+          // cancellation error triggers another model call.
+          await t.abortSubmission(gate.queueItemId, reason);
+        } else {
+          t.withdrawDecision(gateId, reason);
+        }
         return;
       }
     }
@@ -1391,6 +1738,7 @@ export class Session {
   }
 
   async resume(opts: { threadId?: string } = {}): Promise<void> {
+    if (this.options.readOnlyReason) throw new ValidationError(this.options.readOnlyReason);
     if (opts.threadId) {
       await this.threads.get(opts.threadId)?.resume();
       return;
@@ -1398,7 +1746,8 @@ export class Session {
     await Promise.all([...this.threads.values()].map((t) => t.resume()));
   }
 
-  async destroy(): Promise<void> {
+  /** Required host cleanup runs after execution stops and before durable history is deleted. */
+  async destroy(beforeStoreDelete?: () => Promise<void>): Promise<void> {
     if (this.destroyed) return;
     this.destroyed = true;
     if (this.heartbeatTimer !== null) {
@@ -1410,8 +1759,13 @@ export class Session {
       this.sweepTimer = null;
     }
     try {
-      await Promise.all([...this.threads.values()].map((t) => t.abort()));
+      for (const owner of this.executionOwners) {
+        owner.retiring = true;
+        owner.suspendTimers({ permanent: true });
+      }
+      await Promise.all([...this.executionOwners].flatMap(owner => [...owner.threads.values()].map(thread => thread.abort())));
       await this.attachment.destroy();
+      await beforeStoreDelete?.();
       await this.providers.store.deleteSession(this.id);
     } catch (err) {
       // A partial destroy must stay retryable. The delete routes call
@@ -1428,10 +1782,29 @@ export class Session {
     return this.providers.store.listDecisionGates(this.id);
   }
 
-  async readEntries(threadKey: string, opts?: MessageQuery): Promise<SessionEntry[]> {
-    const t = await this.threadByKey(threadKey);
-    if (!t) return [];
+  /** Reads a thread by key, or by id when no thread has that key. */
+  /** A thread's entries by key or id. With `reader`, only a thread that
+   * reader may see (`CreateSessionOptions.threadAccess`); any other reads as
+   * missing. */
+  async readEntries(threadKey: string, opts?: MessageQuery, reader?: { id: string; key: string }): Promise<SessionEntry[]> {
+    const t = (await this.threadByKey(threadKey)) ?? this.threadById(threadKey);
+    if (!t || (reader && !(await this.threadReadable(reader, t)))) return [];
     return t.readEntries(opts);
+  }
+
+  /** Whether `reader` may see `target` (`CreateSessionOptions.threadAccess`). */
+  async threadReadable(reader: { id: string; key: string }, target: { id: string; key: string }): Promise<boolean> {
+    const check = this.options.threadAccess;
+    if (!check || reader.id === target.id) return true;
+    return check({ owner: this.principal, orgId: this.options.orgId, reader: { id: reader.id, key: reader.key }, target: { id: target.id, key: target.key } })
+      .catch(() => false);
+  }
+
+  /** The stored threads `reader` may see, for `list_threads`. */
+  async readableThreads(reader: { id: string; key: string }): Promise<ThreadData[]> {
+    const datas = await this.providers.store.listThreads(this.id);
+    const shown = await Promise.all(datas.map((d) => this.threadReadable(reader, d)));
+    return datas.filter((_, i) => shown[i]);
   }
 
   /** Owning principal (Phase 4 decision 8). See `principal` field doc. */
@@ -1457,6 +1830,7 @@ export class Session {
       model: this.options.modelSpec ?? this.options.model.id,
       reasoning: this.options.sampling?.reasoning,
       startRef: this.options.startRef,
+      ...(this.options.toolScope ? { metadata: { [TOOL_SCOPE_KEY]: this.options.toolScope } } : {}),
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -1566,9 +1940,9 @@ export class Session {
       event,
       timestamp: Date.now(),
     };
-    // text_delta / tool_call_update are the high-frequency streaming plane —
+    // Text, thinking, and tool argument updates use the streaming plane —
     // never durable.
-    if (event.type === "text_delta" || event.type === "tool_call_update") {
+    if (event.type === "text_delta" || event.type === "tool_call_update" || event.type === "thinking_update") {
       this.providers.stream.publishEphemeral(busEvent);
       return;
     }
@@ -1584,16 +1958,13 @@ export class Session {
       await this.providers.stream.append(busEvent, opts?.eventKey ?? uid("ev"), opts?.fence);
     } catch (err) {
       if (err instanceof StaleAttemptError || opts?.throwOnAppendError) throw err;
-      console.error(
-        `[engine] event append failed (session=${this.id}, type=${event.type}):`,
-        err instanceof Error ? err.message : String(err),
-      );
+      reportError({ area: "engine", reason: "event_append" }, `[engine] event append failed (session=${this.id}, type=${event.type})`, err);
     }
   }
 
   // ── credential provider for tools ───────────────────────────────
 
-  credentialProvider(): CredentialProvider {
+  credentialProvider(use: CredentialUse = {}): CredentialProvider {
     // The session owner is the credential owner. A user session stays
     // `{ type: "user", id: userId }` because that is the default principal.
     // A team session must not read as the synthetic `team:{id}` actor.
@@ -1609,13 +1980,13 @@ export class Session {
     // or raw store read — is one `credentials.get` span, nesting under the
     // running tool/turn span via the active context. Values never land on
     // the span; only the service name and hit/miss.
-    const read = (service: string): Promise<StoredCredential | null> =>
+    const read = (service: string, readUse: CredentialUse = use): Promise<ResolvedCredential | null> =>
       withSpan(
         "credentials.get",
         { "valet.credential.service": service, "valet.credential.via_resolver": !!resolver },
         async (span) => {
           const stored = resolver
-            ? await resolver(owner, service)
+            ? await resolver(owner, service, readUse)
             : credStore
               ? await credStore.get(owner, service)
               : null;
@@ -1625,10 +1996,10 @@ export class Session {
         },
       );
     return {
-      async get(service?: string) {
+      async get(service?: string, purpose?: CredentialRead) {
         if (!resolver && !credStore) return null;
         if (!service) return null; // session-level provider has no default service
-        const stored = await read(service);
+        const stored = await read(service, purpose?.forAction ? { ...use, forAction: true } : use);
         if (!stored) return null;
         return {
           accessToken: credentialSecret(stored) ?? "",
@@ -1636,6 +2007,7 @@ export class Session {
           expiresAt: stored.expiresAt,
           scopes: stored.scopes,
           metadata: stored.metadata,
+          ...(stored.source ? { source: stored.source } : {}),
         };
       },
       async request(service: string, reason: string) {
@@ -1651,6 +2023,7 @@ export class Session {
           expiresAt: stored.expiresAt,
           scopes: stored.scopes,
           metadata: stored.metadata,
+          ...(stored.source ? { source: stored.source } : {}),
         };
       },
     };

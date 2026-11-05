@@ -7,9 +7,9 @@
  * mocks `@tanstack/react-router`, since these tests only care what the
  * shell renders/requests, not that the router itself resolves it.
  */
-import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const useOrgMock = vi.fn();
 const pathnameMock = vi.fn<() => string>();
@@ -27,8 +27,7 @@ vi.mock("@tanstack/react-router", () => ({
   redirect: (opts: { to: string }) => ({ isRedirect: true as const, ...opts }),
 }));
 
-// importOriginal: see -new-session-dialog.test.tsx (packages/web root) for
-// why a bare replacement here is unsafe under vitest.config.ts's isolate:false.
+// importOriginal keeps the module's other exports real (see vitest.config.ts).
 vi.mock("~/api/settings", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/settings")>();
   return {
@@ -38,10 +37,10 @@ vi.mock("~/api/settings", async (importOriginal) => {
 });
 
 import { SettingsRail } from "~/components/settings/settings-rail";
-import { OrgRouteGuard } from "./settings.organization";
 import { redirectToProfile } from "./settings.index";
+import { OrgRouteGuard } from "./settings.organization";
 
-const YOU_LABELS = ["Profile", "Assistant", "Appearance", "Notifications"];
+const YOU_LABELS = ["Profile", "Thread defaults", "Appearance", "Notifications"];
 const ORG_LABELS = ["General", "Members", "Teams"];
 
 function mockOrg(data: { organizations: boolean; callerRole: "admin" | "member" } | undefined, isLoading = false) {
@@ -68,74 +67,6 @@ function mockOrgError() {
     refetch: vi.fn(),
   });
 }
-
-describe("SettingsRail", () => {
-  it("always renders the four You items", () => {
-    mockOrg({ organizations: false, callerRole: "member" });
-    render(<SettingsRail />);
-    for (const label of YOU_LABELS) {
-      expect(screen.getByText(label)).toBeTruthy();
-    }
-  });
-
-  it("hides the Organization group when the gate is off", () => {
-    mockOrg({ organizations: false, callerRole: "admin" });
-    render(<SettingsRail />);
-    for (const label of ORG_LABELS) {
-      expect(screen.queryByText(label)).toBeNull();
-    }
-  });
-
-  it("shows a gate-on member only the Teams item in the Organization group", () => {
-    mockOrg({ organizations: true, callerRole: "member" });
-    render(<SettingsRail />);
-    expect(screen.getByText("Teams")).toBeTruthy();
-    for (const label of ORG_LABELS.filter((l) => l !== "Teams")) {
-      expect(screen.queryByText(label)).toBeNull();
-    }
-  });
-
-  it("shows NO Models item to a gate-on member — every section of that page is admin-only", () => {
-    mockOrg({ organizations: true, callerRole: "member" });
-    render(<SettingsRail />);
-    expect(screen.queryByText("Models")).toBeNull();
-  });
-
-  it("shows the Organization group when the gate is on and the caller is admin", () => {
-    mockOrg({ organizations: true, callerRole: "admin" });
-    render(<SettingsRail />);
-    for (const label of ORG_LABELS) {
-      expect(screen.getByText(label)).toBeTruthy();
-    }
-  });
-
-  it("renders nothing for the Organization group before the org query resolves", () => {
-    mockOrg(undefined, true);
-    render(<SettingsRail />);
-    for (const label of ORG_LABELS) {
-      expect(screen.queryByText(label)).toBeNull();
-    }
-  });
-
-  it("shows a You·Models item in single-user mode (org gate off)", () => {
-    mockOrg({ organizations: false, callerRole: "admin" });
-    render(<SettingsRail />);
-    expect(screen.getByText("Models")).toBeTruthy();
-  });
-
-  it("does NOT duplicate Models under You when the Organization group is visible", () => {
-    mockOrg({ organizations: true, callerRole: "admin" });
-    render(<SettingsRail />);
-    // Exactly one "Models" — the Organization group's.
-    expect(screen.getAllByText("Models")).toHaveLength(1);
-  });
-
-  it("shows no Models item before the org query resolves (no flash)", () => {
-    mockOrg(undefined, true);
-    render(<SettingsRail />);
-    expect(screen.queryByText("Models")).toBeNull();
-  });
-});
 
 describe("/settings index redirect", () => {
   it("redirects to /settings/profile", () => {

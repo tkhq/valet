@@ -118,19 +118,50 @@ text. This message is the immediate reply or acknowledgement.
 
 **Later replies are explicit.** The host does not post later assistant messages
 or the final result. The agent uses `reply_to_origin` for progress updates
-and results. Slack also provides `reply_file_to_origin` for sandbox files.
+and results. Slack also provides `reply_file_to_origin` for sandbox files and saved thread files (`docs/specs/2026-11-03-images-in-replies-design.md`).
 The `react_to_origin` action remains the explicit reaction path.
 
-**One delivery.** The host evaluates origin-reply calls across every
-assistant entry in the submission, including text-less entries before the first
-eligible text. Any completed call with persisted `details.ok=true` owns
-delivery. Otherwise, any running call defers automatic delivery. Only after all
-attempted origin replies become terminal failures does the host post the
-original first eligible text once as a fallback. An aborted submission never
-posts this fallback. Event redelivery cannot post it twice.
+**One delivery.** The host evaluates text `reply_to_origin` calls across
+every assistant entry in the submission. This includes text-less entries before
+the first eligible text. Any completed text reply with persisted
+`details.ok=true` owns delivery. Otherwise, any running text reply defers
+automatic delivery. Only after all attempted text replies become terminal
+failures does the host post the original first eligible text once as a fallback.
+A file reply does not suppress this addressed first text. An aborted submission
+never posts this fallback. Event redelivery cannot post it twice.
 
-**Overheard turns stay silent.** A turn with `reply="manual"` has no automatic
-reply. The agent must call a channel action when it chooses to participate.
+**Manual delivery and overheard turns.** A turn with `reply="manual"` has no
+automatic reply. Manual delivery does not itself mean the message is
+unaddressed. Slack `.message` turns receive shared guidance to stay silent by
+default for actual overheard content. They can reply to an explicit mention, a
+direct request, or a follow-up from the only other participant shown in thread
+context. The agent must call a channel action to post.
+
+**Dropped-reply feedback (TKAI-553).** When a terminal manual-delivery turn
+contains assistant text but no successful channel action, the host submits one
+`channel.reply_dropped` signal on the same assistant thread. The signal uses
+manual delivery, bypasses overheard digests, and queues behind active work.
+Later inbound channel input can supersede a queued recovery item because its
+thread uses steer mode. Thus recovery is best effort when the thread is busy.
+It tells the agent to do nothing for intentional silence. It tells the agent to call
+`reply_to_origin` only
+when it intended to reply. The origin-agnostic body uses the signal's structured
+origin for that action. The thread-scoped submission ID limits this reminder to
+one per assistant thread, even if later turns use another channel origin. A
+feedback-triggered turn cannot submit another feedback signal.
+
+A successful text or file origin reply, reaction, send, or DM suppresses the
+manual signal. A successful same-service send suppresses it for every
+destination. For a Slack origin, successful personal Slack posts, DMs, file
+uploads, and reactions also suppress it. These manual suppression rules do not
+change addressed first-response selection.
+
+If an addressed first-response send fails before text lands, the host submits queue-item-scoped feedback.
+The feedback contains an allowlisted public reason. The host makes at most three process-local admission attempts.
+It waits 50 ms and then 100 ms between attempts. Shutdown cancels either wait.
+Attempts keep one dispatch ID and never repeat the normal send. A reason mismatch
+deduplicates by that ID. If the session is not live, the host logs a warning and
+does not retry. This path does not survive shutdown.
 
 Direct channel messages and channel events use `SignalContent`. It carries the
 origin and supported image attachments. The engine gives this origin to the
@@ -158,26 +189,44 @@ and `signal` records engine-routed admissions.
 - **Sender.** `#441` renders a sender line for user messages. Confirm the
   channel-origin signal carries an author (1.2 sets it from `event.actor`) so
   the same line renders. If a gap remains on the events path, close it here.
-- **Outbound identity (TKAI-387).** Every gate card, command result,
-  attention summary, and Slack outbound action carries the sending assistant's
-  identity. This includes `reply_to_origin`, `send_message`, `dm_owner`, and
-  `dm_user`. `ChannelHost` resolves the session's `assistants` row for host
-  deliveries. The engine gives session actions a dynamic
-  `resolveOutboundSender` callback. Headless workflow actions and workflow
-  session nodes resolve the run owner's default assistant when they post.
-  Child-agent sessions resolve the assistant that owns their parent session,
-  then use the owner's default assistant when the parent has no assistant.
-  Both paths read the current row, so profile edits apply without a
-  cached-session rebuild. The Slack
-  paths map `name` and `avatar_url` to `username` and `icon_url` on
-  `chat.postMessage` with the `chat:write.customize` scope. They sanitize the
-  name to Slack's 80-character limit and omit malformed avatar URLs. If Slack
-  rejects an identity override, they retry once without it. A network failure
-  does not retry because Slack might have accepted the first request. An
-  assistant with neither field set posts under the bot's own identity.
+- **Outbound identity (TKAI-387).** Host deliveries and Slack actions resolve
+  the current workspace name. Team and organization runs use their owner's
+  name. Personal runs use the bot identity. A workspace whose assistant had a
+  custom name or avatar before the workspace runtime (2026-10-06) keeps it as
+  the workspace default. The legacy continuity spec
+  (`2026-10-06-legacy-continuity-design.md`, "Carried-over assistant
+  profile") describes that read and its limits. Workflows may set
+  `definition.presence: { displayName?, avatarUrl? }`; event subscriptions may
+  set `target.presence` for either an assistant or workflow target. Fields
+  inherit in order: workspace, workflow, subscription, explicit action arguments.
+  The editor exposes these as Presence settings. Clearing a field restores its
+  inherited default. Settings change appearance, never the runtime owner.
+  Runs retain the definition and subscription presence captured at admission;
+  assistant turns carry presence in durable submission metadata. Followed Slack
+  replies read the bound subscription's current settings. No schema migration
+  or rewrite of existing definitions, chats, files, or memories is required.
+  `reply_to_origin`, `send_message`, `dm_owner`, and `dm_user` accept optional
+  `sender_name` and `sender_avatar_url` parameters. Each parameter overrides
+  its default for that message. Workflow tool steps persist these parameters.
+  Existing per-step overrides continue to work.
+  Agent steps pass the same parameters through their tool calls.
+  These settings do not change credentials, permissions, or the bot's DM identity.
+  `profile_pictures.publish_avatar` converts a current-chat image attachment
+  into a durable avatar URL. It reads at most 50 entries from the invoking
+  thread and rejects other organizations or externally linked images.
+  The existing profile-picture normalizer bounds the size, removes metadata,
+  and writes a WebP copy. Only this copy is public under `/avatars/workflows/`.
+  The publication tool uses the normal high-risk action approval path.
+  Workflow authors store its URL in `presence.avatarUrl`; later runs do not
+  depend on the source chat. Retries reuse the same source-scoped content key.
+  Automatic replies and approval cards use the asking submission's presence.
+  Slack maps the display name and avatar URL to `username` and `icon_url` on
+  `chat.postMessage`, using `chat:write.customize`. Names have an 80-character
+  limit. Avatar URLs must use HTTPS and be accessible to Slack.
+  If Slack rejects an override, Valet retries once without it. Network failures
+  do not retry because Slack might have accepted the first request.
   Resolution edits (`chat.update`) keep the identity the card posted with.
-  File attachments keep the app identity because Slack's upload API has no
-  equivalent override.
+  File uploads keep the app identity because Slack has no equivalent override.
 
 ### Part 2 — one routing wizard, names not ids
 
@@ -204,6 +253,14 @@ is a per-plugin **option source**, not a hardcoded set of Slack endpoints.
   that cannot resolve right now (missing credential, provider error) returns an
   empty list plus a reason the picker shows, and the field falls back to free
   text so the rule is still creatable.
+- **GitHub reads the installation token.** The endpoint resolves each plugin's
+  org credential, but for GitHub it first mints the org's App installation
+  token, because `GET /installation/repositories` accepts no other token. A
+  branch lookup's repo owner picks the installation; otherwise the org's sole
+  installation applies. With no installation, the org `github` row is the
+  fallback, and with neither the reason tells the reader to install the Valet
+  GitHub App. The credential source is part of the cache key, so a new
+  install shows a list on the next request.
 - **Plugin contract.** A plugin exports its resolvers alongside its trigger
   defs; the api registers them by `source` name the same way it registers
   transports. A new provider adds option sources without touching the api.
@@ -265,27 +322,134 @@ Expected footprint:
 
 ## Invariants (alert, do not auto-repair)
 
-An addressed turn has at most one automatic assistant-text delivery: its first eligible response. Later and final text requires an explicit channel action. An overheard turn has no automatic delivery.
+An addressed turn has at most one automatic assistant-text delivery: its first eligible response. Later and final text requires an explicit channel action. A manual-delivery turn has no automatic delivery. Manual delivery does not decide whether a thread message is overheard.
 
 ## Testing
 
 - **Engine.** Channel-signal origins reach the tool context.
-- **API.** An addressed turn posts its first assistant text once. Later and final text stays internal. An overheard turn stays silent.
+- **API.** An addressed turn posts its first assistant text once. Later and final text stays internal. Swallowed manual turns submit at most one feedback signal per assistant thread. Successful bot and connected-user delivery actions suppress it. Failed addressed delivery submits one actionable signal. Admission retries do not repeat the normal send. Duplicate terminal events and feedback turns do not create extra signals.
   Command results and gate cards retain their existing surface checks.
 - **Slack.** `reply_to_origin` posts text exactly once.
   `reply_file_to_origin` uploads a sandbox file exactly once.
   `react_to_origin` still reacts to the triggering message.
 - **Telegram.** `telegram.reply_to_origin` posts text exactly once to the
   origin DM.
-- **Persona.** The channel instructions explain the automatic first reply and explicit later replies. They keep overheard chatter silent by default.
+- **Persona.** The channel instructions explain automatic and explicit replies. They keep actual overheard Slack content silent by default and preserve direct and two-participant follow-ups.
 - **Full `make e2e` scorecard**, per CLAUDE.md, before claiming done.
 
 ## Deviations (Part 1, as built)
 
 - **Only the first addressed response posts automatically.** Final-message fallback delivery remains removed. A successful explicit origin reply anywhere in the submission suppresses the automatic copy. A pending call anywhere in the submission defers it. When all calls fail, the host falls back to the original first text.
-- **`child.settled` inherits the spawning submission's origin.** The parent
-  can post the child result with `reply_to_origin`. The settlement itself does
-  not post.
+- **`child.settled` preserves the spawning submission's origin and reply policy.**
+  For an automatic origin, the parent's first response to the settlement posts
+  to the original channel thread. A manual settlement does not post
+  automatically. It uses the same once-per-thread silence reminder as other
+  manual turns. The child result itself does not post directly.
+  The watch stores the spawning origin in `origin_json`, which never
+  changes, because it also decides whether the child shares its transcript.
+  Reply-route state is a separate `reply_route` column. `origin` follows
+  the origin's own policy, `manual` downgrades the settlement to a manual
+  reply, and `none` sends the settlement with no origin. Only the spawner
+  writes `origin`. A null route marks a watch from before this column. Its
+  takeover or cross-thread history is unknown, so it reads as `manual`.
+  `child_send` passes the sending turn's channel origin to the host. The
+  route stays automatic only when a channel turn on the delegating parent
+  thread replies to the same channel thread, and restart recovery keeps that
+  route. A `child_send` from another parent thread, or from a web turn on the
+  delegating thread, sets `reply_route` to `manual`. The web composer can
+  post to a channel-keyed parent thread, so that turn's context can be
+  private. The parent can still reply to the channel thread explicitly.
+  The spawner and `child_send` stamp each child submission with parent
+  delegation provenance (`metadata.parentDelegation`): the parent session,
+  the parent thread that sent it, and the sending turn's channel thread when
+  that turn replies there automatically. When the watcher follows delegated
+  work from another parent thread, it sets `reply_route` to `manual`. This
+  covers a `child_send` whose sender stopped before it stored the route.
+  Promotion copies
+  metadata, so delegated work that a person sends now keeps it. The watcher
+  is the only owner of the takeover decision. When the watched submission
+  is superseded, the watcher follows its successor and sets `reply_route`
+  to `none` only when the successor has no parent delegation provenance: a
+  person took over the child. Parent work sent after a takeover, from any parent
+  thread, sets the route back to `manual`. The `child_send` sender reads
+  the route under a row lock in the same transaction as its write, so a
+  takeover while it wakes the child still ends in `manual`. The person's input is in the
+  child's transcript, so the parent can answer the channel thread with
+  `reply_to_origin` but never posts there automatically.
+  Before the watcher admits a settlement with an `origin` route, it checks
+  the child's queue for a submission from a person that ran before the
+  settled work on the same thread: a prompt while the child was idle, a
+  followup, or a steer. A submission without parent delegation provenance
+  counts, except a signal. Parent work counts too when it would not keep
+  the route, for example work from a private parent thread whose sender
+  failed to store the `manual` route after admission. It counts only if its
+  entries come before the settled work's entries in the child's transcript.
+  A run writes its submission into the transcript, so a followup that later
+  work replaced before it started does not count. The check uses transcript
+  order, not queue `createdAt`, because two promotions can get the same
+  timestamp. If one exists, the
+  watcher sets `reply_route` to
+  `manual` for good, because the result can carry that input. A followup
+  queued behind the delegated work does not affect that work's result. It does not read `author`, because a
+  `child_send` names the steering member as its author. A followup, input on
+  another child thread, and a rejected prompt never supersede the watched
+  submission, so they leave the route intact. Parent-directed steering
+  keeps the route, including recovery after an interrupted `child_send`.
+- **Automatic child completion replies have durable delivery intents.** The
+  watcher stores an intent before it submits `child.settled`. It stores the
+  parent submission ID before it marks the watch settled. If a person
+  sends a queued parent update now, the engine supersedes it with a
+  promoted successor, and the dispatcher moves the intent to that
+  successor. The `child_status`
+  repair, which marks a stale watch settled when the child's work is done,
+  skips only a watch whose automatic reply has no admitted parent update.
+  Every other watch, including a manual one, is repaired and frees its
+  active-child slot. Restart recovery
+  resolves missing receipts by the immutable, namespaced dispatch ID, even if
+  later work changed the child watch. `SessionStore.getQueueItemByDispatchId`
+  scopes this lookup to the parent session in both store implementations.
+  The channel host polls up to 20 due intents per pass. A conditional lease
+  prevents concurrent workers from claiming the same intent during that lease.
+  The dispatcher bypasses the live dropped-reply feedback path. A waiting
+  intent records no failure. The dispatcher checks it after a tenth of the
+  time it has waited, from two seconds up to one minute. It reads no
+  transcript before the parent turn starts, and then reads only that turn's
+  entries through the queue item index. The engine settles every
+  submission, so a wait after admission ends. A wait has no time limit, but
+  a wait longer than one hour is logged once per process and counted in
+  `valet.channels.child_reply.over_age_waits`. The intent stays open.
+  The watcher owns admission. It retries a failed admission, including on
+  the next boot, and marks its watch settled only after it admits. So an
+  intent with no admitted parent update waits, with no time limit. The
+  intent stores its child submission. A settled watch with no admitted
+  update is a failed attempt. A watch that moved to later work is not proof
+  that admission failed, because the admission can still be in flight. Only
+  the watcher ends such an intent: when an attempt for that work finds the
+  watch moved, and on `rearm()` after a restart, when no admission is in
+  flight. It records the landed receipt if there is one, and otherwise
+  completes the intent without a send. A landed admission re-opens an
+  intent that was never sent. Before each admission
+  attempt, the watcher re-opens an intent that failed before any update
+  was admitted, and deletes its problem row.
+  A provider send error or a missing route (for example, a stopped channel)
+  is a failed attempt. Each failed attempt records `attempts` and
+  `last_error`, logs the intent ID, and increments the
+  `valet.channels.child_reply.failures` counter. The next attempt waits one
+  second, doubling to a five-minute cap. After 20 failed attempts, which
+  span about one hour, the dispatcher sets `failed_at` and writes a
+  `child_reply_failed` problem row in one transaction. It does not try
+  again. A provider outage or channel restart longer than one hour needs a
+  person to ask the agent to post the result again. A successful send
+  completes the intent and clears `last_error`. The dispatcher deletes
+  completed intents after seven days and failed intents after 30 days, at
+  most once per hour. An explicit reply or an
+  aborted parent turn suppresses automatic delivery. Assistant entries that
+  ended in an error or abort are never selected, so a parent round that fails
+  and then succeeds under the same submission posts the successful text.
+  The live event handler does not also send automatic child replies.
+  Delivery is at least once: a crash after provider acceptance but before the
+  completion write can duplicate a reply. No provider-independent atomic send
+  and database commit exists. This queue does not replay older untracked replies.
 - **Telegram has an explicit text reply action.** `telegram.reply_to_origin`
   sends text to the origin DM through the organization bot credential.
 - **Slack text uses the CommonMark converter.** The channel transport,
@@ -357,3 +521,190 @@ reviewable and the reply fix lands first:
 2. Reply mechanisms (1.4): explicit reply and reaction actions.
 3. Name resolution service (2.1) + name-aware filters (2.2, 2.3).
 4. The unified wizard (2.4).
+
+### Explicit GitHub references in Slack text
+
+The Slack mrkdwn formatter links `owner/repo#number` references to GitHub's
+`/issues/number` route, which also resolves pull requests. It leaves bare
+`#number` and ownerless references unchanged because they lack repository context.
+Code spans, fenced code, existing links, and URL fragments retain their content.
+This applies to complete mrkdwn messages, action text, and generated Markdown
+content blocks. Attributed posts and long messages link references in the visible
+block as well as the notification fallback. Markdown blocks retain headings,
+bullet line breaks, tables, and original code fences. The block size check includes
+the generated links. Streamed Markdown chunks retain their existing formatting
+because references can span chunks.
+
+Optional Markdown autolinking has a synchronous work budget: at most 12,000
+characters and 256 ASCII punctuation, tab, or line-break characters. Messages
+without a `#` bypass parsing. Over-budget messages retain their original Markdown,
+including explicit links. This prevents nested link syntax from blocking the API
+event loop for seconds. The limit applies before CommonMark parsing starts.
+
+### Short Slack tables (2026-09-21)
+
+Bot message actions, DM actions, message edits, and discrete transport replies
+use Markdown blocks when text contains a pipe-table delimiter row, even below
+4,000 characters. This preserves table rows, empty cells, and Markdown links.
+Short prose keeps the existing mrkdwn path. Explicit caller blocks take priority.
+Transport-generated blocks neutralize Slack mention and broadcast tokens.
+
+The existing 12,000-character Markdown limit and section fallback still apply.
+This change does not repair tables whose source has no row breaks. Streaming
+replies already use Slack's Markdown input and do not change.
+
+Tables accept compact delimiter cells with one or two dashes. Messages containing
+Slack-native spans use `mrkdwn` section blocks. Their tables become labeled rows;
+this keeps native link labels, user mentions, channel references, and user-group
+mentions on Slack's documented rendering path. Action text preserves intentional
+native spans. Transport text keeps them inert. Both paths use the existing
+formatter's control-token policy, including suppression of `<!group>`.
+
+The row conversion preserves empty cells and skips fenced and indented code.
+Row expansion stops at the caller's text budget before formatting. Section splits
+keep complete native spans together. Truncated output includes a visible notice.
+This is a deliberate compatibility fallback, not a claim that Markdown blocks
+support native spans.
+
+### Native Slack table blocks (2026-09-22)
+
+A Markdown block renders a pipe table, but a GFM cell has no line break: a
+newline ends the row and Slack shows `<br>` as literal text. Release notes need
+several related pull requests in one cell, one per line. The same block builder
+now renders each pipe table as a Block Kit `table` block and the prose around it
+as `markdown` blocks. This applies to message actions, DM actions, message edits,
+and discrete transport replies. Messages with Slack-native spans keep the labeled
+row path.
+
+Inside a table block, a `<br>` tag in a cell becomes a line break, and links,
+bold, italic, strikethrough, inline code, and bare URLs become rich text
+elements. A cell is parsed as inline GFM with block constructs disabled, so a
+`<br>` inside a code span or behind a backslash stays literal, and a list
+marker, quote marker, heading marker, or rule keeps its characters. Explicit
+GitHub references are linked before the table is parsed, so they become links
+inside cells too. A line that opens a blockquote, list item, or heading never
+starts a table; the text stays in its Markdown block.
+Rich text shows an emoji shortcode as typed, so a shortcode in a body cell, such
+as `:smile:` or a custom `:murg'd:`, becomes an `emoji` element. A shortcode in a
+code span stays literal, and a shortcode with a letter or digit on either side
+stays text, so `10:30:45` keeps its colons. Slack accepts an element with an
+unknown name, so a typo does not lose the message (verified 2026-10-14).
+Header cells are plain text. An empty cell holds a single space, because Slack
+rejects an empty rich text cell and drops the whole message. The delimiter row
+sets column alignment. A column wraps only when one of its cells holds a `<br>`
+line break; every other column keeps one line per row, so a wide table stays
+flat and Slack scrolls it sideways (2026-10-18; before, every column wrapped and
+a long description turned each row into a tall block).
+
+Each cell line is parsed as CommonMark under the same synchronous work budget as
+optional autolinking: 12,000 characters and 256 punctuation characters per line.
+A cell over that budget keeps its whole table in the Markdown block. Prose
+segments keep their leading indentation, so an indented code block before a
+table still renders as code.
+
+Slack limits a table block to 100 rows and 20 columns, and limits the cells of one
+message to 10,000 characters in total. A table outside these limits, a header-only
+table, or a result that needs more blocks than the caller's budget keeps the single
+Markdown block, so nothing renders worse than before. If Slack still rejects a
+generated table block with `invalid_blocks`, the sender posts the same content
+once more as a Markdown block. The sender checks for this rejection after
+every attempt, the retry without the assistant identity included. A token
+without `chat:write.customize` fails on the identity first, so that retry can
+be the first request Slack validates the blocks on. A table rejection that
+comes first switches to the Markdown block before the identity retry, so that
+retry carries the content Slack accepted. Caller-supplied blocks never get
+this retry.
+
+A message with more than one pipe table keeps the single Markdown block. Slack
+has documented a limit of one table per message and rejected a second table
+with `only_one_table_allowed`, which the `invalid_blocks` retry does not catch.
+
+The message is split only where Markdown reads the table as a block of its
+own. The single Markdown block stays when a table continues a blockquote or
+list item, follows an indented line with no blank line between them, or has an
+indented delimiter row. A line without a pipe in the table body is a one-cell
+row, as in GFM, with one exception (2026-10-19): when it is the last line of the
+block and reads as a sentence (it has a space and ends with `.`, `!`, or `?`),
+it ends the table and stays prose. A thematic break (`---`, `***`, `___`) also
+ends the table, as in GFM. GFM reads a closing sentence as another row, but a
+model that ends a table with a sentence means prose, and Slack's `markdown`
+block showed such a table as raw pipes: a 1-day release report short enough for
+one message lost its table this way. It also stays when the message has a link
+reference or footnote definition, because a definition applies to the whole
+document, when it has an HTML block, and when it has a fence inside a list
+item or blockquote, because the scanner tracks top-level fences only.
+Messages with Slack-native spans use the labeled-row path, which converts
+every table, also one that continues a list or blockquote.
+
+### Tables too large for one message (2026-10-18)
+
+A weekly release report had a 79-row table and about 25,000 characters. The
+message was over the Markdown limit, so `slack.send_message` fell back to
+`mrkdwn` sections and the table showed as plain text.
+
+`slack.send_message` now splits a message with one table when the message is
+too large for one Markdown block and would fall back to sections. A message
+that fits one Markdown block keeps it, even when its table is over the
+native-table limits. Each part is a native table that repeats the header and delimiter
+rows. The splitter fills each part with rows until the next row would stop the
+part from rendering as a native table. So each part keeps the limits above and
+the 12,000-character text check. The text before the table opens the first
+part. The text after the table closes the last part, or goes in its own message
+when it does not fit.
+
+The first part goes to the channel or thread that the caller named. The other
+parts go in the thread of the first part, or in the caller's thread, about one
+second apart. Each part except the last ends with "Continued in the thread."
+(or "Continued below." in a thread). The action returns the first part's `ts`,
+so replies threaded under it come after the table, and `part_ts` lists every
+part. If Slack rejects a later part, the action fails and names the parts it
+posted, so the caller can delete them before it sends the message again.
+
+The split keeps the single-message rendering when the message has Slack-native
+spans, more than one table, a table that a list item or indented delimiter
+keeps from standing alone, or more than 10 parts. A line without a pipe
+directly after the rows stays prose, as it does in a single message, so it
+closes the last part.
+
+### Images in question answers
+
+The web question card accepts image uploads, clipboard images, and dropped images. An answer can contain images without text. Failed submissions retain the draft and its images. Changing questions clears that draft.
+
+Question resolutions retain inline images for restart replay. The question tool returns them as model-visible image attachments. The avatar publishing tool can select a question-answer photo from the same thread. Approval and credential gates do not accept images. Existing image count and size limits apply; remote URLs are rejected.
+
+### A reply answers an open question
+
+An open question (a question gate with no options) has no button, so its Slack card says "Reply in this thread to answer." A person's text reply answers it instead of waiting in the queue behind the turn that asked it (`channels/open-question-reply.ts`). Three paths reach it:
+
+1. A reply under the card. The reply's conversation key ends with the card's own timestamp, so the host finds the card's gate (`cardForReply`). This covers an attention DM card for a question in another thread.
+2. A reply in a bound DM conversation answers the open question its thread waits on.
+3. A reply in a followed channel thread does the same through `deliverToAssistantThread`'s `answer` argument. Only the follow router sets it; automated deliveries never answer a question. When the delivery carries missed thread messages, the router does not set it: the whole body goes in as a message, so the assistant reads the missed lines, and the question stays open.
+
+The reply needs the same right as a button click: the person may resolve the session's gates, and a gate that names an approver answers to that person only. A reply with files, or a reply when no open question waits, goes in as a message. The resolution records the inbound dispatch id as its source message. The host checks it with the queue items before it handles a message (`replyAnswered`), so a replayed delivery is recognized after a restart too, when no card reference is left, and does not also queue the reply. Resolving a gate that another answer settled first does not fail, so the reply path reads the stored resolution back: when this reply is not the answer, it goes in as a message.
+
+### Agent configuration tools
+
+`events.list_subscriptions` lists the current personal or team workspace's subscriptions.
+It supports an exact name filter and bounded pagination (default 25, maximum 100).
+`events.set_subscription_presence` replaces the selected subscription's presence; null clears it.
+Both tools require organization membership. Team access also requires current team membership.
+A team's unattended run (a schedule, event, or webhook) acts as the team's own principal id, `team:{id}`, not as a person.
+That run can list its own team's subscriptions but cannot change them.
+Unlinked channel senders cannot use either tool. Organization-owned subscriptions remain outside these tools.
+The write changes only the target's presence field and update timestamp with an atomic JSONB operation.
+It preserves concurrent target edits, matching rules, ownership, and enabled state.
+`workflows.create_trigger` and `workflows.propose_trigger` accept presence for new workflow event subscriptions.
+
+## Presence during follow and replay
+
+Every subscription-created follow binding retains its subscription ID, including personal subscriptions. Followed replies read current presence from that rule.
+Empty presence objects behave as unset, including previously stored values. Overheard messages coalesce only when their display name and avatar overrides match.
+The digest retains those overrides. Different identities and sender authorities remain separate. Approval replay retains the blocked submission metadata across restart.
+
+## Slack processing status
+
+Processing status follows the submission lifecycle independently of reply streaming.
+Pending gates take priority over queued follow-ups. Completion, failure, cancellation, and shutdown clear the status when no work remains.
+Reply delivery restores the status if the submission still needs work.
+Startup subscribes before restoring unsettled Slack submissions and their pending gates from organization-scoped pages of 100.
+Shutdown prevents late admission or recovery callbacks from creating new status registrations.

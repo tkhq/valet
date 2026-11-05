@@ -23,7 +23,7 @@ Every row below was read, not inferred. "Member" means a live row in `team_membe
 | Skill, `origin='repo'` | sync only | refused for all | refused for all (`routes/skills.ts:563-567`) | 409 |
 | Content source, workflows or templates | Admin (`services/content-sources.ts:328-340`) | n/a | Admin (`content-sources.ts:562-566`) | 404 |
 | Content source, skills only | Member (`content-sources.ts:376-380`) | n/a | Admin (`content-sources.ts:562-566`) | 404 |
-| Credential | Admin (`routes/credentials.ts:143-149`) | Admin | Admin (`routes/credentials.ts:765-771`) | 404 |
+| Credential | Member since 2026-10-14 (OAuth connect and create-only token); was Admin | Admin | Admin (`routes/credentials.ts:765-771`) | 404 |
 | API key | Admin (`routes/team-api-keys.ts:101`) | n/a | Admin (`routes/team-api-keys.ts:158`) | 404 |
 | Assistant or session | Member | Admin (`services/session-access.ts:106-114`) | Admin | 404 |
 | Memory file | Admin (`routes/memory.ts:132-135`) | Admin | Admin | 404 |
@@ -270,3 +270,28 @@ Regression tests cover an oldest pending request behind 100 newer closed
 requests (including duplicate submission), all 105 pending requests across
 pages with tied timestamps, deletion of the cursor row, expired-history
 filtering, invalid inputs, tenant scope, and UI paging/filter/recovery behavior.
+
+
+### Direct chat deletion authority
+
+A direct authenticated prompt carries `interactiveActor` from its persisted author.
+Signals, external senders, and workflow or child sessions never set this field.
+The assistant creator and an ordinary tool approval cannot supply this authority.
+
+For workflow deletion, every tool call passes explicit `deletionAuthority`.
+This identifies its matching direct author or marks the call as automated. The service preserves the exact team scope and checks the
+current organization and team roles under its existing transaction locks.
+A current admin deletes directly. This does not require a second deletion request.
+An automated tool call remains refused for team resources, even when its personal
+owner or team creator is an admin. Authenticated HTTP deletion keeps its role check.
+
+Members can use `workflows.request_workflow_deletion` from direct web chat.
+The action uses the existing request service, including target ownership checks,
+duplicate detection, expiry, and admin-only decision rules. Its result explicitly
+reports `deleted: false`, the pending request ID, and the team review URL.
+A generic tool approval never approves this request or changes the person's role.
+Other-team and cross-organization targets remain hidden. Removed members cannot
+open requests; existing requests remain available to current administrators.
+
+Channel messages encoded as signals do not carry direct interactive authority.
+Their corrective action is to continue in signed-in web chat or team settings.

@@ -11,9 +11,13 @@
  */
 import { describe, it, expect } from "vitest";
 import { bootTestApi } from "./_setup.js";
+import { agentSessions, teamMembers } from "../schema/index.js";
+import { ensureDefaultAssistantSession } from "../assistants/service.js";
+import { createTeam } from "../services/teams.js";
 import { internalToken } from "../lib/internal-auth.js";
 import type {
   AddArtifactCommentResponse,
+  ArtifactCommentsResponse,
   GetArtifactResponse,
   ListArtifactCommentsResponse,
   ListArtifactsResponse,
@@ -111,6 +115,10 @@ describe("api integration: artifacts", () => {
   it("internal token + owner/actor headers share on behalf of a session (mem_share path)", async () => {
     const api = await bootTestApi();
     try {
+      await api.providers.db.insert(agentSessions).values({
+        id: "sess-123", userId: "local-user", orgId: "local-org", workspace: "/tmp",
+        ownerType: "user", ownerId: "local-user", createdAt: 1, updatedAt: 1,
+      });
       const headers = {
         "Content-Type": "application/json",
         "x-valet-internal": internalToken(),
@@ -648,6 +656,15 @@ describe("api integration: artifact pages", () => {
       const added = (await add.json()) as AddArtifactCommentResponse;
       expect(added.sent).toBe(true);
       expect(added.comment.sentToSession).toBe(sessionId);
+      const items = [
+        ...await api.providers.engineStore.listUnsettledSubmissions(sessionId),
+        ...await api.providers.engineStore.listSettledSubmissionsBefore(sessionId, Date.now() + 1),
+      ];
+      const queued = items.find(item => {
+        const text = typeof item.content === "string" ? item.content : "text" in item.content ? item.content.text : undefined;
+        return text?.includes("Add a per-region breakdown");
+      });
+      expect(queued?.author).toMatchObject({ id: "local-user", interactive: true });
 
       // `sent: true` + `sentToSession` IS the delivery contract: the route
       // returns them only after `submitSessionPrompt` hands back a queue
@@ -667,6 +684,101 @@ describe("api integration: artifact pages", () => {
       const foreign = (await foreignAdd.json()) as AddArtifactCommentResponse;
       expect(foreign.sent).toBe(false);
       expect(foreign.comment.sentToSession).toBeNull();
+    } finally {
+      await api.cleanup();
+    }
+  });
+
+  it("does not send a comment into another member's helper thread", async () => {
+    const api = await bootTestApi();
+    try {
+      const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Comments", creatorUserId: "local-user" });
+      const { session, sessionId } = await ensureDefaultAssistantSession(api.providers, { type: "team", id: team.id }, { actorUserId: "local-user", orgId: "local-org" });
+      await api.providers.db.insert(teamMembers).values({ teamId: team.id, userId: "test-member", role: "member" });
+      const publish = async (threadId: string, key: string, actorUserId = "local-user") => {
+        const res = await fetch(`${api.baseUrl}/api/artifacts/share`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json", "x-valet-internal": internalToken(), "x-valet-owner": `team:${team.id}`,
+            "x-valet-actor": actorUserId, "x-valet-session-id": sessionId, "x-valet-thread-id": threadId,
+          },
+          body: JSON.stringify({ key, content: "<h1>Draft</h1>", format: "html" }),
+        });
+        expect(res.status).toBe(200);
+        return new URL(((await res.json()) as ShareArtifactResponse).url).pathname.replace(/^\/a\//, "");
+      };
+      const theirs = await publish((await session.createThread("app-assistant:test-member")).id, "pages/theirs", "test-member");
+      const mine = await publish((await session.createThread("app-assistant:local-user")).id, "pages/mine");
+      const canSend = async (token: string) =>
+        ((await (await fetch(`${api.baseUrl}/api/artifacts/${token}/comments`)).json()) as ListArtifactCommentsResponse).canSendToSession;
+      expect(await canSend(theirs)).toBe(false);
+      expect(await canSend(mine)).toBe(true);
+      const add = await fetch(`${api.baseUrl}/api/artifacts/${theirs}/comments`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body: "Change this", sendToSession: true }),
+      });
+      expect(((await add.json()) as AddArtifactCommentResponse).sent).toBe(false);
+    } finally {
+      await api.cleanup();
+    }
+  });
+
+  it("agents read comment threads by link token or id, under the list's thread rule", async () => {
+    const api = await bootTestApi();
+    try {
+      const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Reviews", creatorUserId: "local-user" });
+      const { session, sessionId } = await ensureDefaultAssistantSession(api.providers, { type: "team", id: team.id }, { actorUserId: "local-user", orgId: "local-org" });
+      await api.providers.db.insert(teamMembers).values({ teamId: team.id, userId: "test-member", role: "member" });
+      const internal = (actor: string) => ({
+        "x-valet-internal": internalToken(), "x-valet-owner": `team:${team.id}`, "x-valet-actor": actor, "x-valet-session-id": sessionId,
+      });
+      const publishFrom = async (threadId: string, key: string, actor: string) => {
+        const res = await fetch(`${api.baseUrl}/api/artifacts/share`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...internal(actor), "x-valet-thread-id": threadId },
+          body: JSON.stringify({ key, content: "<h1>Storyboard</h1>", format: "html" }),
+        });
+        expect(res.status).toBe(200);
+        return (await res.json()) as ShareArtifactResponse;
+      };
+      const mine = await publishFrom((await session.createThread("app-assistant:local-user")).id, "pages/storyboard", "local-user");
+      const theirs = await publishFrom((await session.createThread("app-assistant:test-member")).id, "pages/theirs", "test-member");
+      const token = new URL(mine.url).pathname.replace(/^\/a\//, "");
+
+      const comment = async (body: Record<string, unknown>, user?: string) => {
+        const res = await fetch(`${api.baseUrl}/api/artifacts/${token}/comments`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...(user ? { "x-valet-test-user-id": user } : {}) },
+          body: JSON.stringify(body),
+        });
+        expect(res.status).toBe(200);
+        return ((await res.json()) as AddArtifactCommentResponse).comment;
+      };
+      const root = await comment({ body: "Swap shots 3 and 4", vdid: "a1b2c3d4e5f60718", anchorLabel: "  Shot 4:\n  the reveal " }, "test-member");
+      expect(root.anchorLabel).toBe("Shot 4: the reveal");
+      await comment({ body: "Agreed", parentId: root.id });
+      const page = await comment({ body: "Tighten the intro", anchorLabel: "ignored without an element" });
+      expect(page.anchorLabel).toBeNull();
+      await fetch(`${api.baseUrl}/api/artifacts/${token}/comments/${page.id}/resolve`, { method: "POST" });
+
+      const read = async (ref: string, headers: Record<string, string> = {}) =>
+        fetch(`${api.baseUrl}/api/artifacts/${encodeURIComponent(ref)}/comment-threads`, { headers });
+      const byId = await read(mine.id);
+      expect(byId.status).toBe(200);
+      const body = (await byId.json()) as ArtifactCommentsResponse;
+      expect(body.artifact).toMatchObject({ id: mine.id, url: mine.url, version: 1 });
+      expect(body.threads.map((t) => [t.body, t.anchorLabel, t.authorName, t.replies.map((r) => r.body), t.resolvedAt !== null])).toEqual([
+        ["Swap shots 3 and 4", "Shot 4: the reveal", "Test Member", ["Agreed"], false],
+        ["Tighten the intro", null, expect.any(String), [], true],
+      ]);
+
+      // The assistant's tool call: internal token, the actor's own access.
+      const byToken = await read(token, internal("local-user"));
+      expect(((await byToken.json()) as ArtifactCommentsResponse).threads).toHaveLength(2);
+      expect((await read(token, internal("outsider"))).status).toBe(404);
+      // Another member's helper thread stays hidden, as in the list.
+      expect((await read(theirs.id, internal("local-user"))).status).toBe(404);
+      expect((await read("no-such-artifact")).status).toBe(404);
     } finally {
       await api.cleanup();
     }

@@ -12,6 +12,7 @@ export interface GeneratedEntry {
   title: string;
   description: string;
   category: "feature" | "improvement" | "fix" | "security";
+  authoredAt: string;
   sources: { commitSha: string; pullRequest?: number };
   links?: Array<{ label: string; url: string }>;
   followUp: boolean;

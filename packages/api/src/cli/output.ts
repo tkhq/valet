@@ -56,24 +56,69 @@ export function parseGlobalFlags(args: string[]): ParsedFlags {
   return { json: flags.json === true, rest, flags };
 }
 
+/**
+ * The last write queued on each stream. A stream finishes its writes in
+ * order, so when this write finishes, all earlier writes have finished.
+ * Do not replace this record with an empty `write("", cb)`: Bun calls that
+ * callback before the earlier data reaches a pipe.
+ */
+const lastWrite = new Map<NodeJS.WriteStream, Promise<void>>();
+
+function write(stream: NodeJS.WriteStream, text: string): void {
+  lastWrite.set(
+    stream,
+    new Promise((resolve) => {
+      // Node and Bun call this callback when the write finishes or fails.
+      stream.write(text, () => resolve());
+    }),
+  );
+}
+
 /** Write a pretty-printed JSON value to stdout, newline-terminated. */
 export function printJson(value: unknown): void {
-  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+  write(process.stdout, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 /** Write a line to stdout. */
 export function printLine(s: string): void {
-  process.stdout.write(`${s}\n`);
+  write(process.stdout, `${s}\n`);
+}
+
+/** Write text to stdout with no newline (streamed reply text). */
+export function printText(s: string): void {
+  write(process.stdout, s);
 }
 
 /** Write a line to stderr. */
 export function printErr(s: string): void {
-  process.stderr.write(`${s}\n`);
+  write(process.stderr, `${s}\n`);
 }
 
 /** Write one compact JSON object per line to stdout (NDJSON stream). */
 export function emitNdjson(value: unknown): void {
-  process.stdout.write(`${JSON.stringify(value)}\n`);
+  write(process.stdout, `${JSON.stringify(value)}\n`);
+}
+
+function ignoreClosedPipe(err: NodeJS.ErrnoException): void {
+  if (err.code !== "EPIPE") throw err;
+}
+
+/**
+ * Exit the process after every write made through this module finishes.
+ * Node and Bun write to a pipe asynchronously, and `process.exit` drops the
+ * queued data. Without this wait, a `--json` result piped to `jq` stops at
+ * the pipe buffer size (64 KiB). The CLI dispatcher (`cli.ts`) calls this
+ * function as its only exit.
+ *
+ * If the reader closes the pipe early (`valet … | head`), the queued writes
+ * fail with EPIPE. The output has no reader then, so the CLI ignores that
+ * error and keeps the exit code of the command.
+ */
+export async function exitAfterOutput(code: number): Promise<never> {
+  process.stdout.on("error", ignoreClosedPipe);
+  process.stderr.on("error", ignoreClosedPipe);
+  await Promise.all(lastWrite.values());
+  process.exit(code);
 }
 
 /**

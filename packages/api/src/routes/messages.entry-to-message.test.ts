@@ -9,8 +9,21 @@
  * attachments — the field is dropped for those.
  */
 import { describe, expect, it } from "vitest";
-import type { CompactionEntry, MessageEntry } from "@valet/engine";
-import { entryToMessage } from "./messages.js";
+import { MESSAGE_TURN_ERROR_KEY, type CommandResultEntry, type CompactionEntry, type MessageEntry } from "@valet/engine";
+import { entryToMessage, promptAuthorFromUser } from "./messages.js";
+import type { AuthVia } from "../lib/request-principal.js";
+
+describe("HTTP prompt author provenance", () => {
+  it.each(["session", "stub", "apiKey", "cli", "mcp", undefined] satisfies Array<AuthVia | undefined>)("marks only authenticated direct human auth (%s)", (via) => {
+    const author = promptAuthorFromUser({ id: "person", email: "person@example.test" }, { type: "user", id: "person" }, via);
+    expect(author.id).toBe("person");
+    expect(author.interactive).toBe(via === "session" || via === "stub" ? true : undefined);
+  });
+
+  it("never marks a team credential as a direct human", () => {
+    expect(promptAuthorFromUser({ id: "admin", email: "admin@example.test" }, { type: "team", id: "team" }, "apiKey")).toEqual({ id: "team:team", name: "Team API key" });
+  });
+});
 
 function baseEntry(overrides: Partial<MessageEntry> = {}): MessageEntry {
   const base: MessageEntry = {
@@ -25,6 +38,73 @@ function baseEntry(overrides: Partial<MessageEntry> = {}): MessageEntry {
   };
   return { ...base, ...overrides };
 }
+
+describe("entryToMessage — stable order projection", () => {
+  it("projects measured reasoning without deriving timing from the whole turn", () => {
+    const entry = baseEntry({ role: "assistant", parts: [
+      { type: "thinking", text: "first", startedAt: 1000, durationMs: 2400 },
+      { type: "thinking", text: "old reasoning" },
+      { type: "thinking", text: "", startedAt: 9000, durationMs: 500 },
+    ], createdAt: 60000 });
+    expect(entryToMessage(entry, "sess", "th")?.parts).toEqual([
+      { kind: "thinking", text: "first", startedAt: 1000, durationMs: 2400 },
+      { kind: "thinking", text: "old reasoning" },
+      { kind: "thinking", text: "", startedAt: 9000, durationMs: 500 },
+    ]);
+  });
+
+  it("projects the store sequence on a message entry", () => {
+    expect(entryToMessage(baseEntry({ sequence: 17 }), "sess", "th")?.sequence).toBe(17);
+  });
+
+  it("projects the store sequence on a command result", () => {
+    const entry: CommandResultEntry = {
+      id: "cmd_1",
+      sessionId: "sess",
+      threadId: "th",
+      parentId: null,
+      type: "command_result",
+      command: "/status",
+      source: "builtin",
+      ok: true,
+      output: "idle",
+      createdAt: 1,
+      sequence: 18,
+    };
+    expect(entryToMessage(entry, "sess", "th")?.sequence).toBe(18);
+  });
+});
+
+describe("entryToMessage — assistant completed flag", () => {
+  it("marks an end_turn assistant message completed", () => {
+    const entry = baseEntry({ role: "assistant", stopReason: "end_turn" });
+    expect(entryToMessage(entry, "sess", "th")?.completed).toBe(true);
+  });
+
+  it("marks an errored assistant message not completed", () => {
+    const entry = baseEntry({ role: "assistant", stopReason: "error" });
+    expect(entryToMessage(entry, "sess", "th")?.completed).toBe(false);
+  });
+
+  it("marks an aborted assistant message not completed", () => {
+    const entry = baseEntry({ role: "assistant", stopReason: "abort" });
+    expect(entryToMessage(entry, "sess", "th")?.completed).toBe(false);
+  });
+
+  it("projects the provider error of a failed turn", () => {
+    const providerError = "429 Rate limit reached for m on tokens per min (TPM). Please try again in 2.5s.";
+    const entry = baseEntry({
+      role: "assistant",
+      content: "",
+      parts: [],
+      stopReason: "error",
+      metadata: { [MESSAGE_TURN_ERROR_KEY]: providerError },
+    });
+    expect(entryToMessage(entry, "sess", "th")?.errorMessage).toBe(providerError);
+    const success = entryToMessage(baseEntry({ role: "assistant", stopReason: "end_turn" }), "sess", "th");
+    expect(success && "errorMessage" in success).toBe(false);
+  });
+});
 
 describe("entryToMessage — attachments projection", () => {
   it("passes through a data: URL attachment unchanged", () => {
@@ -264,6 +344,7 @@ describe("entryToMessage — compaction projection", () => {
     tokenCountBefore: 12000,
     tokenCountAfter: 300,
     createdAt: Date.parse("2024-01-01T00:00:00.000Z"),
+    sequence: 19,
   };
 
   it("projects a CompactionEntry as a system message with a compaction field", () => {
@@ -273,6 +354,7 @@ describe("entryToMessage — compaction projection", () => {
     // Content degrades to the summary for clients without a divider renderer.
     expect(msg?.content).toBe("## Goal\n- keep going");
     expect(msg?.parts).toEqual([]);
+    expect(msg?.sequence).toBe(19);
     expect(msg?.compaction).toEqual({
       summary: "## Goal\n- keep going",
       tokensBefore: 12000,
@@ -301,6 +383,21 @@ describe("entryToMessage — author projection", () => {
     expect(msg?.author).toEqual({ id: "u_bob", name: "Bob" });
   });
 
+  it("marks a sender with no Valet account without sending their channel id", () => {
+    const entry = baseEntry({
+      author: { id: "u_creator", name: "Sam from Slack", externalId: "U999", externalSender: true },
+    });
+    expect(entryToMessage(entry, "sess", "th")?.author).toEqual({ id: "u_creator", name: "Sam from Slack", externalSender: true });
+  });
+
+  it("marks a verified browser send, and leaves an agent's message under the same id unmarked", () => {
+    const sent = baseEntry({ author: { id: "u_owner", name: "Owner", interactive: true } });
+    expect(entryToMessage(sent, "sess", "th")?.author).toEqual({ id: "u_owner", name: "Owner", interactive: true });
+    // A parent session's child_send stamps the person's id with the assistant's name.
+    const steering = baseEntry({ author: { id: "u_owner", name: "Valet" } });
+    expect(entryToMessage(steering, "sess", "th")?.author).toEqual({ id: "u_owner", name: "Valet" });
+  });
+
   it("omits the field for authorless entries and non-user roles", () => {
     expect(entryToMessage(baseEntry(), "sess", "th")?.author).toBeUndefined();
     const assistant = baseEntry({
@@ -309,4 +406,11 @@ describe("entryToMessage — author projection", () => {
     });
     expect(entryToMessage(assistant, "sess", "th")?.author).toBeUndefined();
   });
+});
+
+it("preserves interruption state when loading message history", () => {
+  const aborted = entryToMessage(baseEntry({ role: "assistant", content: "", stopReason: "abort" }), "sess", "th");
+  expect(aborted).toMatchObject({ completed: false, stopReason: "abort" });
+  const failed = entryToMessage(baseEntry({ role: "assistant", content: "", stopReason: "error" }), "sess", "th");
+  expect(failed).toMatchObject({ completed: false, stopReason: "error" });
 });

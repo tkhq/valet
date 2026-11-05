@@ -6,8 +6,9 @@
  * triple, the assistant thread methods, auth.test, users.list,
  * apps.connections.open, files.info, url_private downloads).
  */
+import { ChannelDeliveryRejectedError } from "@valet/engine";
 import { createHash } from "node:crypto";
-import { SLACK_API, slackFetch, slackGet } from "../actions/api.js";
+import { SLACK_API, SLACK_REQUEST_TIMEOUT_MS, slackFetch, slackGet, slackGetOnce } from "../actions/api.js";
 import { markdownToSlackMrkdwn } from "./format.js";
 
 export class SlackApiError extends Error {
@@ -61,6 +62,8 @@ export interface SlackChannel {
   id: string;
   name: string;
   isArchived: boolean;
+  /** A private channel (`is_private`). */
+  isPrivate: boolean;
 }
 
 export class SlackApi {
@@ -85,10 +88,15 @@ export class SlackApi {
     return this.cachedDirectoryKey;
   }
 
-  private async call(method: string, body: Record<string, unknown>): Promise<SlackResponse> {
-    const res = await slackFetch(method, this.token, body, this.baseUrl);
+  private async call(method: string, body: Record<string, unknown>, attention = false, signal?: AbortSignal): Promise<SlackResponse> {
+    signal?.throwIfAborted();
+    const deadline = attention ? AbortSignal.timeout(SLACK_REQUEST_TIMEOUT_MS) : undefined;
+    const res = await slackFetch(method, this.token, body, this.baseUrl, signal && deadline ? AbortSignal.any([signal, deadline]) : signal ?? deadline);
     const parsed = (await res.json()) as SlackResponse;
     if (!parsed.ok) {
+      if (attention && res.ok && ["user_not_found", "cannot_dm_bot", "channel_not_found"].includes(parsed.error ?? "")) {
+        throw new ChannelDeliveryRejectedError("slack", parsed.error!);
+      }
       throw new SlackApiError(
         method,
         parsed.error ?? `http ${res.status}`,
@@ -129,8 +137,12 @@ export class SlackApi {
   }
 
   async postMessage(opts: {
+    signal?: AbortSignal;
     channel: string;
     text: string;
+    attentionDeliveryId?: string;
+    progressDeliveryId?: string;
+    attentionGateCard?: boolean;
     threadTs?: string;
     blocks?: Record<string, unknown>[];
     /** Per-assistant display name override (`chat:write.customize` scope).
@@ -146,17 +158,80 @@ export class SlackApi {
       mrkdwn: true,
       unfurl_links: false,
     };
+    if (opts.attentionDeliveryId !== undefined) body.metadata = {
+      event_type: opts.attentionGateCard ? "valet_attention_gate" : "valet_attention", event_payload: { delivery_id: opts.attentionDeliveryId },
+    };
+    if (opts.progressDeliveryId !== undefined) body.metadata = {
+      event_type: "valet_progress", event_payload: { delivery_id: opts.progressDeliveryId },
+    };
     if (opts.threadTs !== undefined) body.thread_ts = opts.threadTs;
     if (opts.blocks !== undefined) body.blocks = opts.blocks;
     if (opts.username !== undefined) body.username = opts.username;
     if (opts.iconUrl !== undefined) body.icon_url = opts.iconUrl;
-    const res = await this.call("chat.postMessage", body);
+    const res = await this.call("chat.postMessage", body, opts.attentionDeliveryId !== undefined || opts.progressDeliveryId !== undefined, opts.signal);
     const ts = str(res.ts);
     if (!ts) throw new SlackApiError("chat.postMessage", "response missing ts");
     return { ts };
   }
 
+  /** Bounded recent DM history. A miss or a lookup failure permits a resend. */
+  async findAttentionMessage(channel: string, deliveryId: string, sendingAt: number, signal?: AbortSignal): Promise<{ ts: string; gateCard?: boolean } | null> {
+    let cursor: string | undefined;
+    for (let page = 0; page < 5; page++) {
+      // Recovery is best effort. Never sleep through Retry-After while an
+      // approval's fallback waits behind this history lookup.
+      const response = await slackGetOnce("conversations.history", this.token, {
+        channel, oldest: String(Math.max(0, sendingAt - 60_000) / 1_000),
+        limit: 100, include_all_metadata: true, ...(cursor ? { cursor } : {}),
+      }, 2_000, this.baseUrl, signal);
+      const res = rec(await response.json());
+      if (!response.ok || res?.ok !== true) throw new SlackApiError("conversations.history", str(res?.error) ?? `http ${response.status}`);
+      for (const raw of Array.isArray(res.messages) ? res.messages : []) {
+        const message = rec(raw);
+        const metadata = rec(message?.metadata);
+        if ((metadata?.event_type === "valet_attention" || metadata?.event_type === "valet_attention_gate") && rec(metadata.event_payload)?.delivery_id === deliveryId) {
+          const ts = str(message?.ts);
+          if (ts) {
+            return { ts, ...(metadata?.event_type === "valet_attention_gate" ? { gateCard: true } : {}) };
+          }
+        }
+      }
+      cursor = str(rec(res.response_metadata)?.next_cursor);
+      if (!cursor) break;
+    }
+    return null;
+  }
+
+  /** Find an uncertain progress post without creating a second message. */
+  async findProgressMessage(
+    channel: string, threadTs: string, deliveryId: string, identity: { userId?: string; botId?: string },
+  ): Promise<string | null> {
+    if (!identity.userId && !identity.botId) throw new SlackApiError("conversations.replies", "Missing app identity. Reconnect Slack before recovering progress.");
+    let cursor: string | undefined;
+    for (let page = 0; page < 10; page++) {
+      const response = await slackGetOnce("conversations.replies", this.token, {
+        channel, ts: threadTs, include_all_metadata: true, limit: 100, ...(cursor ? { cursor } : {}),
+      }, 2_000, this.baseUrl);
+      const body = rec(await response.json());
+      if (!response.ok || body?.ok !== true) throw new SlackApiError("conversations.replies", str(body?.error) ?? `http ${response.status}`);
+      for (const raw of Array.isArray(body.messages) ? body.messages : []) {
+        const message = rec(raw);
+        const own = (identity.userId && message?.user === identity.userId) || (identity.botId && message?.bot_id === identity.botId);
+        if (!own) continue;
+        const metadata = rec(message?.metadata);
+        if (metadata?.event_type !== "valet_progress" || rec(metadata.event_payload)?.delivery_id !== deliveryId) continue;
+        const ts = str(message?.ts);
+        if (ts) return ts;
+      }
+      cursor = str(rec(body.response_metadata)?.next_cursor);
+      if (!cursor) return null;
+    }
+    throw new SlackApiError("conversations.replies", "Progress recovery reached its thread history limit. Open Valet to check the turn.");
+  }
+
   async updateMessage(opts: {
+    signal?: AbortSignal;
+    attention?: boolean;
     channel: string;
     ts: string;
     text: string;
@@ -166,7 +241,21 @@ export class SlackApi {
     const body: Record<string, unknown> = { channel: opts.channel, ts: opts.ts, text: opts.text };
     if (opts.blocks !== undefined) body.blocks = opts.blocks;
     if (opts.parse !== undefined) body.parse = opts.parse;
-    await this.call("chat.update", body);
+    await this.call("chat.update", body, opts.attention === true, opts.signal);
+  }
+
+  /**
+   * chat.postEphemeral → a message only one reader sees, in place.
+   * The transport answers a rejected approval click with it when the click's
+   * own `response_url` is gone.
+   */
+  async postEphemeral(opts: { channel: string; user: string; text: string }): Promise<void> {
+    await this.call("chat.postEphemeral", {
+      channel: opts.channel,
+      user: opts.user,
+      text: opts.text,
+      mrkdwn: false,
+    });
   }
 
   /**
@@ -196,8 +285,8 @@ export class SlackApi {
   }
 
   /** conversations.open with a user id → the IM channel id. */
-  async openConversation(userId: string): Promise<string> {
-    const res = await this.call("conversations.open", { users: userId });
+  async openConversation(userId: string, attention = false, signal?: AbortSignal): Promise<string> {
+    const res = await this.call("conversations.open", { users: userId }, attention, signal);
     const channelId = str(rec(res.channel)?.id);
     if (!channelId) throw new SlackApiError("conversations.open", "response missing channel.id");
     return channelId;
@@ -205,8 +294,13 @@ export class SlackApi {
 
   // ─── v2 external file upload flow ─────────────────────────────────────
 
-  async getUploadUrlExternal(filename: string, length: number): Promise<{ uploadUrl: string; fileId: string }> {
-    const res = await this.callForm("files.getUploadURLExternal", { filename, length });
+  /** `altText` is the screen-reader description Slack keeps on an image file. */
+  async getUploadUrlExternal(filename: string, length: number, altText?: string): Promise<{ uploadUrl: string; fileId: string }> {
+    const res = await this.callForm("files.getUploadURLExternal", {
+      filename,
+      length,
+      ...(altText !== undefined ? { alt_txt: altText } : {}),
+    });
     const uploadUrl = str(res.upload_url);
     const fileId = str(res.file_id);
     if (!uploadUrl || !fileId) throw new SlackApiError("files.getUploadURLExternal", "response missing upload_url/file_id");
@@ -223,13 +317,15 @@ export class SlackApi {
 
   async completeUploadExternal(opts: {
     fileId: string;
+    /** Shown above the file in Slack. Slack uses the filename when it is absent. */
+    title?: string;
     channelId: string;
     threadTs?: string;
     initialComment?: string;
     preserveSlackNativeSpans?: boolean;
   }): Promise<void> {
     const body: Record<string, unknown> = {
-      files: [{ id: opts.fileId }],
+      files: [opts.title !== undefined ? { id: opts.fileId, title: opts.title } : { id: opts.fileId }],
       channel_id: opts.channelId,
     };
     if (opts.threadTs !== undefined) body.thread_ts = opts.threadTs;
@@ -380,7 +476,7 @@ export class SlackApi {
       const id = str(c.id);
       const name = str(c.name);
       if (!id || !name) continue;
-      channels.push({ id, name, isArchived: c.is_archived === true });
+      channels.push({ id, name, isArchived: c.is_archived === true, isPrivate: c.is_private === true });
     }
     const nextCursor = str(rec(res.response_metadata)?.next_cursor);
     return { channels, nextCursor: nextCursor !== undefined && nextCursor !== "" ? nextCursor : undefined };

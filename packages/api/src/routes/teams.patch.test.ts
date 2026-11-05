@@ -4,17 +4,23 @@
  * team admin of that team, or org admin), and validation matches
  * `PATCH /api/me`'s `defaultModel` (org-catalog id set, null clears).
  */
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { orgMembers, teamMembers, teams, users } from "../schema/index.js";
 import { setApprovedModels } from "../services/approved-models.js";
 import { setOrgReasoningSettings } from "../services/reasoning.js";
+import { resetThreadAccessCache } from "../services/thread-access.js";
 import type { ListTeamsResponse, PatchTeamResponse } from "../wire/types.js";
 
 let api: TestApi | undefined;
 
 afterEach(async () => {
   vi.unstubAllEnvs();
+  vi.restoreAllMocks();
+  resetThreadAccessCache();
   await api?.cleanup();
   api = undefined;
 });
@@ -47,6 +53,99 @@ async function patchTeam(
 }
 
 describe("PATCH /api/teams/:id", () => {
+  it("home channel is admin-only, rejects DM IDs, and can be cleared", async () => {
+    api = await bootTestApi();
+    await seedTeam(api);
+    // Slack answers that C0PRIVATE is private with no members; every other channel is public.
+    await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", { type: "oauth2", accessToken: "xoxb-test" });
+    const realFetch = globalThis.fetch;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      if (url.hostname !== "slack.com") return realFetch(input, init);
+      const isPrivate = url.searchParams.get("channel") === "C0PRIVATE";
+      const body = url.pathname.endsWith("conversations.members") ? { ok: true, members: [] } : { ok: true, channel: { is_private: isPrivate } };
+      return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
+    });
+    // A private channel the admin is not in cannot become the team's home.
+    expect((await patchTeam(api, { slackHomeChannelId: "C0PRIVATE" }, "test-lead")).status).toBe(403);
+    expect((await patchTeam(api, { slackHomeChannelId: "C0123456789" }, "test-member")).status).toBe(404);
+    expect((await patchTeam(api, { slackHomeChannelId: "D0123456789" }, "test-lead")).status).toBe(400);
+    const saved = await patchTeam(api, { slackHomeChannelId: "C0123456789" }, "test-lead");
+    expect(saved.status).toBe(200);
+    expect(((await saved.json()) as PatchTeamResponse).team.slackHomeChannelId).toBe("C0123456789");
+    // Another team already uses this channel as its home.
+    await api.providers.db.insert(teams).values({ id: "other-team", orgId: "local-org", name: "Other", createdAt: 1, slackHomeChannelId: "C0999999999" });
+    const taken = await patchTeam(api, { slackHomeChannelId: "C0999999999" }, "test-lead");
+    expect(taken.status).toBe(409);
+    expect(((await taken.json()) as { error: string }).error).toContain("Other already uses this channel");
+    // The database enforces it too: a second team on the same channel is refused.
+    await expect(api.providers.db.insert(teams).values({ id: "racing-team", orgId: "local-org", name: "Racing", createdAt: 2, slackHomeChannelId: "C0999999999" }))
+      .rejects.toThrow();
+    const cleared = await patchTeam(api, { slackHomeChannelId: null }, "test-lead");
+    expect(((await cleared.json()) as PatchTeamResponse).team.slackHomeChannelId).toBeNull();
+  });
+
+  it("team admin renames a team; members, taken names, and declared teams are refused", async () => {
+    api = await bootTestApi();
+    await seedTeam(api);
+    await api.providers.db.insert(teams).values([
+      { id: "other-team", orgId: "local-org", name: "Other", createdAt: 1 },
+      { id: "declared-team", orgId: "local-org", name: "Declared", origin: "config", createdAt: 2 },
+      { id: "mirror-team", orgId: "local-org", name: "Mirror", origin: "idp", externalId: "/mirror", createdAt: 3 },
+    ]);
+
+    expect((await patchTeam(api, { name: "Infra" }, "test-member")).status).toBe(404);
+    expect((await patchTeam(api, { name: "   " }, "test-lead")).status).toBe(400);
+    const taken = await patchTeam(api, { name: "Other" }, "test-lead");
+    expect(taken.status).toBe(409);
+    expect(((await taken.json()) as { error: string }).error).toContain("Another team already uses the name Other");
+
+    const renamed = await patchTeam(api, { name: "  Infra  " }, "test-lead");
+    expect(renamed.status).toBe(200);
+    expect(((await renamed.json()) as PatchTeamResponse).team.name).toBe("Infra");
+
+    const declared = await fetch(`${api.baseUrl}/api/teams/declared-team`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Renamed" }),
+    });
+    expect(declared.status).toBe(409);
+    expect(((await declared.json()) as { error: string }).error).toContain("instance config file");
+
+    // The team sync matches a mirror by group path, so a mirror can be renamed.
+    const mirror = await fetch(`${api.baseUrl}/api/teams/mirror-team`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Mirror renamed" }),
+    });
+    expect(mirror.status).toBe(200);
+  });
+
+  it("refuses renames that the next boot's config reconcile would reject", async () => {
+    api = await bootTestApi();
+    await seedTeam(api);
+    await api.providers.db.insert(teams).values({ id: "mirror-team", orgId: "local-org", name: "Mirror", origin: "idp", externalId: "/mirror", createdAt: 3 });
+    // The config file names the local team Platform for a skill source, and declares Declared.
+    const dir = mkdtempSync(join(tmpdir(), "valet-rename-"));
+    const configPath = join(dir, "valet.yaml");
+    writeFileSync(configPath, "version: 1\nteams:\n  - name: Declared\nskillSources:\n  - repo: owner/repo\n    team: Platform\n");
+    vi.stubEnv("VALET_CONFIG", configPath);
+
+    const referenced = await patchTeam(api, { name: "Infra" }, "test-lead");
+    expect(referenced.status).toBe(409);
+    expect(((await referenced.json()) as { error: string }).error).toContain("instance config file names this team");
+
+    const mirrorPatch = (name: string) => fetch(`${api!.baseUrl}/api/teams/mirror-team`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    // A case variant of another team's name, or of a name in the config file, is taken.
+    expect((await mirrorPatch("platform")).status).toBe(409);
+    expect((await mirrorPatch("declared")).status).toBe(409);
+    expect((await mirrorPatch("Mirror two")).status).toBe(200);
+  });
+
   it("team admin sets the default model; GET /api/teams reflects it", async () => {
     // The catalog reports an Anthropic entry as valid only when a key
     // exists (zero-config env fallback), same as me.test.ts.
@@ -132,7 +231,7 @@ describe("PATCH /api/teams/:id", () => {
     api = await bootTestApi();
     await seedTeam(api);
 
-    const res = await patchTeam(api, { name: "Renamed" }, "test-lead");
+    const res = await patchTeam(api, { origin: "local" }, "test-lead");
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
     expect(body.error).toMatch(/unknown field/);

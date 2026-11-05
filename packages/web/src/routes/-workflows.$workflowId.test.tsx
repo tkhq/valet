@@ -39,10 +39,13 @@ let blocker: BlockerResolver = IDLE_BLOCKER;
 let blockerDisabled: boolean | undefined;
 const updateMutateAsync = vi.fn().mockResolvedValue({});
 const startMutateAsync = vi.fn().mockResolvedValue({ runId: "wfrun_1" });
+const revokeAccountsMutate = vi.fn();
 const allowMutateAsync = vi.fn().mockResolvedValue({ allowed: ["widgets.deploy"], blocked: [] });
 /** Per-test permissions payload. Default: nothing gates, so the header
  * badge stays absent everywhere it is not the subject. */
 let permissionsData: {
+  definitionToken: string;
+  accountConsent?: { teamId: string; teamName: string; services: string[]; pending?: string[] };
   nodes: Array<{
     nodeId: string;
     service: string;
@@ -51,9 +54,13 @@ let permissionsData: {
     riskLevel?: string;
     mode: "allow" | "require_approval" | "deny" | "unknown";
     provenance?: string;
+    sharedAccount?: true;
+    agentStep?: true;
+    granted?: true;
   }>;
-} = { nodes: [] };
+} = { definitionToken: "review-a", nodes: [] };
 const downloadWorkflowFile = vi.fn().mockResolvedValue("deploy-pipeline.yaml");
+const deleteMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const useWorkflowTriggersMock = vi.fn((_workflowId?: string) => ({
   data: { triggers: [] },
   isLoading: false,
@@ -96,11 +103,15 @@ vi.mock("@tanstack/react-router", () => ({
 
 vi.mock("~/api/workflows", () => ({
   downloadWorkflowFile: (...args: unknown[]) => downloadWorkflowFile(...args),
+  useDeleteWorkflow: () => ({ mutateAsync: deleteMutateAsync, isPending: false }),
   useCopyWorkflow: () => ({ mutateAsync: vi.fn().mockResolvedValue({ id: "wf_copy" }), isPending: false }),
   useWorkflow: () => ({ data: workflowData, isLoading: false, error: null }),
   useUpdateWorkflow: () => ({ mutateAsync: updateMutateAsync, isPending: false }),
   useStartRun: () => ({ mutateAsync: startMutateAsync, isPending: false }),
+  useRetryRun: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useWorkflowPermissions: () => ({ data: permissionsData, isLoading: false, error: null }),
+  useRevokeOwnWorkflowAccounts: () => ({ mutate: revokeAccountsMutate, isPending: false, error: null }),
+  useRevokeWorkflowPermissions: () => ({ mutate: vi.fn(), isPending: false, error: null }),
   useAllowWorkflowPermissions: () => ({
     mutateAsync: allowMutateAsync,
     isPending: false,
@@ -109,6 +120,7 @@ vi.mock("~/api/workflows", () => ({
   }),
   // A page with `nextCursor` set: the workflow has more runs than this page
   // holds, which is what the count and the drawer notice must say.
+  useRunDetail: () => ({ data: undefined }),
   useWorkflowRuns: () => ({
     data: {
       runs: [{ runId: "wfrun_0", workflowId: "wf_1", status: "settled", outcome: "completed", createdAt: 1, updatedAt: 1 }],
@@ -151,25 +163,47 @@ vi.mock("~/api/workflows", () => ({
   useTriggerCatalog: () => ({ data: { catalog: [] } }),
 }));
 
-/**
- * The assistant panel resolves a session and watches its transcript, both
- * of which need a live QueryClient. This file mocks the data layer rather
- * than providing one, so the two hooks are stubbed here as well. Left
- * un-resolved on purpose: the panel then renders its own "opening" state
- * instead of mounting `SessionView`, which keeps these page-level tests off
- * the whole chat stack. Its header and its openings render either way,
- * which is what the tests below reach for. What the panel does once a
- * session resolves belongs to the session tests.
- */
+// The panel lists the listeners that run this workflow from the rules list.
+vi.mock("~/api/events", () => ({
+  useEventSubscriptions: () => ({ data: { subscriptions: [] }, isPending: false, error: null }),
+}));
+
+// Thread titles for pinned listeners and routines; none here pins a thread.
+// The sentences name the viewer and the org members; this suite names no one.
+vi.mock("~/api/settings", () => ({
+  useMe: () => ({ data: { id: "u-001" } }),
+  useOrgDirectory: () => ({ data: { users: [] } }),
+  // The breadcrumb's space step: a solo caller shows none.
+  useTeams: () => ({ data: { teams: [] } }),
+  useOrg: () => ({ data: { features: { organizations: true } } }),
+}));
+vi.mock("~/api/rule", () => ({ usePinnedThreadTitles: () => ({}) }));
+vi.mock("~/api/presence", async (importOriginal) => ({
+  ...await importOriginal<typeof import("~/api/presence")>(),
+  usePresencePlaces: () => ({ data: { places: [] } }),
+}));
+
+vi.mock("~/components/presence/editor/line-editor", async () => (await import("~/components/presence/editor/test-editor-stub")).stubModule);
+
+/** The assistant has a stable conversation address. SessionView renders its
+ * header through a stub, so page tests do not need the chat transport. */
 vi.mock("~/hooks/use-workflow-assistant", () => ({
-  useWorkflowAssistant: () => ({ opening: true }),
+  useWorkflowAssistant: () => ({ sessionId: "workflow-assistant", threadId: "workflow-thread", opening: false, retry: vi.fn() }),
+}));
+vi.mock("~/components/session/session-view", () => ({
+  SessionView: ({ renderPanelHeader }: { renderPanelHeader?: () => ReactNode }) => <div>{renderPanelHeader?.()}</div>,
 }));
 vi.mock("~/hooks/use-workflow-patch-watch", () => ({
   useWorkflowPatchWatch: () => undefined,
 }));
+const sendPromptMutate = vi.fn();
+vi.mock("~/api/queries", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("~/api/queries")>()),
+  useSendPrompt: () => ({ mutate: sendPromptMutate }),
+}));
 
 import { ApiError } from "~/api/client";
-import { useComposerPrefillStore } from "~/stores/composer-prefill";
+import { draftKey, useComposerDraftStore } from "~/stores/composer-drafts";
 import { WorkflowEditorPage } from "./workflows.$workflowId";
 
 /** JSON mode is deliberately behind the editor's overflow menu — the
@@ -183,6 +217,7 @@ describe("WorkflowEditorPage", () => {
   beforeEach(() => {
     navigate.mockClear();
     downloadWorkflowFile.mockClear();
+    deleteMutateAsync.mockClear();
     updateMutateAsync.mockClear();
     startMutateAsync.mockClear();
     blockerProceed.mockClear();
@@ -190,9 +225,23 @@ describe("WorkflowEditorPage", () => {
     blocker = IDLE_BLOCKER;
     blockerDisabled = undefined;
     allowMutateAsync.mockClear();
-    permissionsData = { nodes: [] };
+    permissionsData = { definitionToken: "review-a", nodes: [] };
     delete (workflowData as { origin?: string }).origin;
     delete (workflowData as { upstream?: unknown }).upstream;
+  });
+
+  it("asks the assistant once to explain a failed step, then drops the request from the URL", () => {
+    sendPromptMutate.mockReset();
+    navigate.mockClear();
+    const { rerender } = render(<WorkflowEditorPage workflowId="wf_1" explain={{ runId: "wfrun_9", nodeId: "research" }} />);
+    rerender(<WorkflowEditorPage workflowId="wf_1" explain={{ runId: "wfrun_9", nodeId: "research" }} />);
+    expect(sendPromptMutate).toHaveBeenCalledTimes(1);
+    expect(sendPromptMutate.mock.calls[0]?.[0]).toMatchObject({
+      threadId: "workflow-thread",
+      queueMode: "followup",
+      text: expect.stringContaining('Explain why run wfrun_9 failed at step "research".'),
+    });
+    expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ search: {}, replace: true }));
   });
 
   it("loads the fetched definition into the editor and the name field", () => {
@@ -306,7 +355,9 @@ describe("WorkflowEditorPage", () => {
     render(<WorkflowEditorPage workflowId="wf_1" />);
     // `1+`, not `1`: the count is the page's length, not the run total.
     fireEvent.click(screen.getByRole("button", { name: "Runs (1+)" }));
-    expect(screen.getByText("wfrun_0")).toBeTruthy();
+    // The row names the run; the raw id is only its tooltip.
+    const row = screen.getByTitle("wfrun_0");
+    expect(row.textContent).toMatch(/run · /);
     expect(screen.getByText(/Newest 1 runs shown/)).toBeTruthy();
   });
 
@@ -330,13 +381,51 @@ describe("WorkflowEditorPage", () => {
     expect(downloadWorkflowFile).toHaveBeenCalledWith("wf_1");
   });
 
-  it("renders the scoped triggers panel for this workflow", () => {
+  it("deletes from the overflow menu with the list's confirm, then goes to the list (L8)", async () => {
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    fireEvent.keyDown(screen.getByRole("button", { name: "More" }), { key: "Enter" });
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    expect(deleteMutateAsync).not.toHaveBeenCalled();
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(/Settled run history is kept/)).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete workflow" }));
+    await waitFor(() => expect(deleteMutateAsync).toHaveBeenCalledWith("wf_1"));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: "/workflows", ignoreBlocker: true }));
+  });
+
+  it("keeps a refused delete open with the server's reason", async () => {
+    deleteMutateAsync.mockRejectedValueOnce(new Error("The workflow has active runs. Cancel them, then delete it."));
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    fireEvent.keyDown(screen.getByRole("button", { name: "More" }), { key: "Enter" });
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Delete workflow" }));
+    expect(await screen.findByText("The workflow has active runs. Cancel them, then delete it.")).toBeTruthy();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("offers no Delete for a mirrored workflow", async () => {
+    Object.assign(workflowData, { origin: "repo", upstream: { repoFullName: "tkhq/automation", ref: "main", path: "w.yaml" } });
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    fireEvent.keyDown(screen.getByRole("button", { name: "More" }), { key: "Enter" });
+    await screen.findByText("Download");
+    expect(screen.queryByRole("menuitem", { name: "Delete" })).toBeNull();
+  });
+
+  it("renders the listeners and routines panel for this workflow", () => {
     useWorkflowTriggersMock.mockClear();
     render(<WorkflowEditorPage workflowId="wf_1" />);
-    // The panel lives in the Triggers drawer, which starts closed, so the
-    // scoped read only happens after the toolbar button opens it.
-    fireEvent.click(screen.getByRole("button", { name: "Triggers" }));
+    // The panel lives in a drawer, which starts closed, so the scoped read
+    // only happens after the toolbar button opens it.
+    fireEvent.click(screen.getByRole("button", { name: "What starts it" }));
     expect(useWorkflowTriggersMock).toHaveBeenCalledWith("wf_1");
+    expect(screen.queryByText(/Triggers/)).toBeNull();
+  });
+
+  it("opens the editor on a line for this workflow when created from the new-workflow dialog", async () => {
+    useWorkflowTriggersMock.mockClear();
+    render(<WorkflowEditorPage workflowId="wf_1" newTrigger="event" />);
+    expect(useWorkflowTriggersMock).toHaveBeenCalledWith("wf_1");
+    expect((await screen.findByTestId("line-editor")).textContent).toBe("Editor: create fixed workflow wf_1");
   });
 
   it("history drawer lists versions newest-first with a current badge, restore only on older ones", async () => {
@@ -437,12 +526,50 @@ describe("WorkflowEditorPage", () => {
   });
 
   it("puts a suggestion in the composer of the assistant that is already open", () => {
-    useComposerPrefillStore.setState({ text: null });
+    useComposerDraftStore.setState({ byKey: {} });
     render(<WorkflowEditorPage workflowId="wf_1" />);
     // The openings name steps from this workflow, so they are instructions
     // the agent can act on, not a generic "ask me anything".
     fireEvent.click(screen.getByRole("button", { name: "Add a step" }));
-    expect(useComposerPrefillStore.getState().text).toContain("wf_1");
+    expect(useComposerDraftStore.getState().byKey[draftKey("workflow-assistant", "workflow-thread")]?.text).toContain("wf_1");
+    expect(useComposerDraftStore.getState().byKey[draftKey("workflow-assistant", "other-thread")]).toBeUndefined();
+  });
+
+  it("puts a test request in the assistant's composer and stays in the editor when Test is clicked", () => {
+    useComposerDraftStore.setState({ byKey: {} });
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Test" }));
+
+    expect(useComposerDraftStore.getState().byKey[draftKey("workflow-assistant", "workflow-thread")]?.text).toBe(
+      "Test this workflow: state the checks, dry-run it, then ask me before a real run.",
+    );
+    // A narrow screen shows one view at a time, so Test switches to the conversation.
+    expect(screen.getByRole("button", { name: "Show assistant" }).getAttribute("aria-pressed")).toBe("true");
+    // The assistant asks before a real run, so Test starts nothing and goes nowhere.
+    expect(startMutateAsync).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("disables Test while the definition has unsaved edits, because the assistant tests the saved workflow", async () => {
+    const user = userEvent.setup();
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    const testButton = () => screen.getByRole("button", { name: "Test" }) as HTMLButtonElement;
+    expect(testButton().disabled).toBe(false);
+    expect(screen.queryByTitle(/Save your changes/)).toBeNull();
+
+    await openJsonMode(user);
+    const textarea = screen.getByLabelText("Definition (JSON)") as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: textarea.value.replace('"success"', '"failure"') } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+    expect(testButton().disabled).toBe(true);
+    // The disabled button takes no pointer events, so its wrapper carries the reason.
+    expect(screen.getByTitle("Save your changes first. Test checks the saved workflow.").contains(testButton())).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(testButton().disabled).toBe(false);
+    expect(screen.queryByTitle(/Save your changes/)).toBeNull();
   });
 
   it("offers Leave without saving while a departure is held, and proceeds on confirm", () => {
@@ -457,9 +584,12 @@ describe("WorkflowEditorPage", () => {
 
 describe("WorkflowEditorPage — permissions badge and pre-approval", () => {
   beforeEach(() => {
+    blocker = IDLE_BLOCKER;
+    revokeAccountsMutate.mockClear();
     allowMutateAsync.mockClear();
     allowMutateAsync.mockResolvedValue({ allowed: ["widgets.deploy"], blocked: [] });
     permissionsData = {
+      definitionToken: "review-a",
       nodes: [
         {
           nodeId: "ship",
@@ -494,13 +624,13 @@ describe("WorkflowEditorPage — permissions badge and pre-approval", () => {
     };
   });
 
-  it("directs team workflows to team policies without a personal pre-approval action", () => {
+  it("offers workflow-scoped review for team workflows", () => {
     workflowData.ownerType = "team";
     workflowData.ownerId = "team-1";
+    permissionsData = { ...permissionsData, accountConsent: { teamId: "team-1", teamName: "Fixture team", services: ["widgets"] } };
     try {
       render(<WorkflowEditorPage workflowId="wf_1" />);
-      expect(screen.queryByTestId("workflow-gate-badge")).toBeNull();
-      expect(screen.getByText(/Team Policies · 1 action/).getAttribute("to")).toBe("/settings/policies");
+      expect(screen.getByTestId("workflow-gate-badge")).toBeTruthy();
       expect(screen.queryByText("Pre-approve actions")).toBeNull();
       expect(allowMutateAsync).not.toHaveBeenCalled();
     } finally { workflowData.ownerType = "user"; workflowData.ownerId = "u1"; }
@@ -509,13 +639,89 @@ describe("WorkflowEditorPage — permissions badge and pre-approval", () => {
   it("shows the header badge with the count of unique gating actions", () => {
     render(<WorkflowEditorPage workflowId="wf_1" />);
     const badge = screen.getByTestId("workflow-gate-badge");
-    expect(badge.textContent).toContain("1 action needs approval");
+    expect(badge.textContent).toContain("Review permissions");
+  });
+
+  it("asks for approval up front in a banner that opens the review", async () => {
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    const banner = screen.getByTestId("approval-needed-banner");
+    expect(banner.textContent).toContain("1 action needs your approval. Runs stop at these steps until you allow them.");
+    fireEvent.click(within(banner).getByRole("button", { name: "Review and allow" }));
+    expect(await screen.findByTestId("preapprove-actions")).toBeTruthy();
+  });
+
+  it("names only the viewer's own shared accounts when no action needs approval", () => {
+    permissionsData = { definitionToken: "review-a", accountConsent: { teamId: "team-1", teamName: "Fixture team", services: ["widgets"], pending: ["widgets"] },
+      nodes: [{ nodeId: "read", service: "widgets", action: "list", actionId: "widgets.list", mode: "allow", sharedAccount: true }] };
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    expect(screen.getByTestId("approval-needed-banner").textContent).toContain("Your shared widgets account needs your permission.");
+  });
+
+  it("shows no approval banner when nothing waits for the viewer", () => {
+    permissionsData = { definitionToken: "review-a", accountConsent: { teamId: "team-1", teamName: "Fixture team", services: ["widgets"], pending: [] }, nodes: [] };
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    expect(screen.queryByTestId("approval-needed-banner")).toBeNull();
+  });
+
+  it("stops asking once saved permissions cover an agent step's dynamic action", () => {
+    permissionsData = { definitionToken: "review-a", nodes: [{ nodeId: "finish", service: "widgets", action: "save", actionId: "widgets.save",
+      mode: "unknown", agentStep: true, granted: true }] };
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    expect(screen.queryByTestId("approval-needed-banner")).toBeNull();
+    expect(screen.queryByText(/1 need approval/)).toBeNull();
   });
 
   it("hides the badge when nothing gates", () => {
-    permissionsData = { nodes: [] };
+    permissionsData = { definitionToken: "review-a", nodes: [] };
     render(<WorkflowEditorPage workflowId="wf_1" />);
     expect(screen.queryByTestId("workflow-gate-badge")).toBeNull();
+  });
+
+  it("offers account consent when the tool action itself is already allowed", async () => {
+    permissionsData = { definitionToken: "review-a", accountConsent: { teamId: "team-1", teamName: "Fixture team", services: ["widgets"] }, nodes: [{ nodeId: "read", service: "widgets", action: "list", actionId: "widgets.list", mode: "allow", sharedAccount: true }] };
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    fireEvent.click(screen.getByTestId("workflow-gate-badge"));
+    expect(await screen.findByText(/accounts already shared with this team/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Save workflow permissions" }));
+    await waitFor(() => expect(allowMutateAsync).toHaveBeenCalledWith({ actionIds: [], definitionToken: "review-a" }));
+  });
+
+  it("can review shared accounts separately from action grants", async () => {
+    workflowData.ownerType = "team";
+    workflowData.ownerId = "team-1";
+    permissionsData = { ...permissionsData, accountConsent: { teamId: "team-1", teamName: "Fixture team", services: ["widgets"] } };
+    try {
+      render(<WorkflowEditorPage workflowId="wf_1" />);
+      fireEvent.click(screen.getByTestId("workflow-gate-badge"));
+      fireEvent.click(await screen.findByRole("button", { name: "Allow my shared accounts" }));
+      await waitFor(() => expect(allowMutateAsync).toHaveBeenCalledWith({ actionIds: [], definitionToken: "review-a" }));
+    } finally { workflowData.ownerType = "user"; workflowData.ownerId = "u1"; }
+  });
+
+  it("lets team members withdraw their own workflow account consent", () => {
+    workflowData.ownerType = "team";
+    workflowData.ownerId = "team-1";
+    permissionsData = { ...permissionsData, accountConsent: { teamId: "team-1", teamName: "Fixture team", services: ["widgets"] } };
+    try {
+      render(<WorkflowEditorPage workflowId="wf_1" />);
+      fireEvent.click(screen.getByText(/^Permissions ·/));
+      fireEvent.click(screen.getByRole("button", { name: "Remove my account permission" }));
+      expect(revokeAccountsMutate).toHaveBeenCalledTimes(1);
+      expect(allowMutateAsync).not.toHaveBeenCalled();
+    } finally { workflowData.ownerType = "user"; workflowData.ownerId = "u1"; }
+  });
+
+  it("pre-approves an agent step's exact dynamic action and says the agent picks values", async () => {
+    permissionsData = { definitionToken: "review-a", nodes: [
+      { nodeId: "writer", service: "granola", action: "list_meetings", actionId: "granola.list_meetings", mode: "unknown", agentStep: true },
+    ] };
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    fireEvent.click(screen.getByText(/^Permissions ·/));
+    expect(screen.getByText("Risk unknown before a run")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("workflow-gate-badge"));
+    expect(await screen.findByText(/the agent chooses when to use an action/)).toBeTruthy();
+    fireEvent.click(screen.getByTestId("preapprove-confirm"));
+    await waitFor(() => expect(allowMutateAsync).toHaveBeenCalledWith({ actionIds: ["granola.list_meetings"], definitionToken: "review-a" }));
   });
 
   it("pre-approves through the dialog: lists the actions, confirms, closes", async () => {
@@ -527,9 +733,35 @@ describe("WorkflowEditorPage — permissions badge and pre-approval", () => {
     expect(within(list).queryByText("widgets.list")).toBeNull();
 
     fireEvent.click(screen.getByTestId("preapprove-confirm"));
-    await waitFor(() => expect(allowMutateAsync).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(allowMutateAsync).toHaveBeenCalledWith({ actionIds: ["widgets.deploy"], definitionToken: "review-a" }));
     await waitFor(() => expect(screen.queryByTestId("preapprove-actions")).toBeNull());
     expect(screen.queryByTestId("preapprove-blocked")).toBeNull();
+  });
+
+  it("shows the complete current team account scope even when the editor graph is older", async () => {
+    permissionsData = { ...permissionsData, definitionToken: "review-b",
+      accountConsent: { teamId: "team-new", teamName: "Current team", services: ["widgets", "new-mail-account"] },
+      nodes: [...permissionsData.nodes, { nodeId: "mail", service: "mail", action: "list", actionId: "mail.list", mode: "allow" }] };
+    const view = render(<WorkflowEditorPage workflowId="wf_1" />);
+    fireEvent.click(screen.getByTestId("workflow-gate-badge"));
+    expect(await screen.findByText("Accounts shared with Current team")).toBeTruthy();
+    expect(screen.getByTestId("preapprove-account-services").textContent).toContain("new-mail-account");
+    permissionsData = { ...permissionsData, definitionToken: "review-c",
+      accountConsent: { teamId: "team-later", teamName: "Later team", services: ["unreviewed-service"] } };
+    view.rerender(<WorkflowEditorPage workflowId="wf_1" />);
+    expect(screen.getByTestId("preapprove-account-services").textContent).not.toContain("unreviewed-service");
+    fireEvent.click(screen.getByRole("button", { name: "Allow my shared accounts" }));
+    await waitFor(() => expect(allowMutateAsync).toHaveBeenCalledWith({ actionIds: [], definitionToken: "review-b" }));
+  });
+
+  it("submits the definition the dialog reviewed even after a permissions refresh", async () => {
+    const view = render(<WorkflowEditorPage workflowId="wf_1" />);
+    fireEvent.click(screen.getByTestId("workflow-gate-badge"));
+    await screen.findByTestId("preapprove-actions");
+    permissionsData = { ...permissionsData, definitionToken: "review-b", nodes: [] };
+    view.rerender(<WorkflowEditorPage workflowId="wf_1" />);
+    fireEvent.click(screen.getByTestId("preapprove-confirm"));
+    await waitFor(() => expect(allowMutateAsync).toHaveBeenCalledWith({ actionIds: ["widgets.deploy"], definitionToken: "review-a" }));
   });
 
   it("surfaces org-blocked actions after a pre-approval attempt", async () => {

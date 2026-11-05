@@ -1,3 +1,4 @@
+import { COMPLETE_SUMMARY } from "./fixtures/compaction-summary.js";
 import { describe, it, expect } from "vitest";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import {
@@ -85,6 +86,30 @@ describe("marker helpers", () => {
     expect(marker).toContain("900 tokens");
     expect(marker).toContain("sed -n '1,400p'");
     expect(marker.length).toBeLessThan(600); // the pointer is small, not the paste
+  });
+
+  it("keeps reply context around a spilled marker during rehydration", () => {
+    const entry: MessageEntry = {
+      id: "e-reply-spill",
+      sessionId: "s1",
+      threadId: "t1",
+      parentId: null,
+      type: "message",
+      role: "user",
+      content: "large original text",
+      metadata: {
+        valetSpilledInputPath: "/workspace/.valet/large-inputs/e-reply-spill.txt",
+        replyTo: { messageId: "assistant-7", excerpt: "Use the blue deployment." },
+      },
+      createdAt: 1,
+    };
+
+    const messages = entriesToAgentMessages([entry], { api: "a", provider: "p", id: "m" });
+    const text = (messages[0].content as Array<{ type: string; text?: string }>)[0].text;
+    expect(text).toContain("<reply-context>");
+    expect(text).toContain("assistant-7");
+    expect(text).toContain("[Large input saved to a file]");
+    expect(text).not.toContain("large original text");
   });
 });
 
@@ -243,8 +268,7 @@ describe("compaction fail-safe: newest turn larger than the window", () => {
     });
     // One summarizer response for the head; the tail is elided, not summarized.
     faux.setResponses([
-      fauxAssistantMessage(
-        "## Goal\n- t\n\n## Constraints & Preferences\n- (none)\n\n## Progress\n### Done\n- x\n\n### In Progress\n- (none)\n\n### Blocked\n- (none)\n\n## Key Decisions\n- (none)\n\n## Next Steps\n- (none)\n\n## Critical Context\n- (none)\n\n## Relevant Files\n- (none)",
+      fauxAssistantMessage(COMPLETE_SUMMARY,
       ),
     ]);
 

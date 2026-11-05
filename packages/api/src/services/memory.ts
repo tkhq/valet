@@ -18,15 +18,16 @@
 import { and, asc, desc, eq, gt, isNull, or, sql, type SQL } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import type { Principal } from "@valet/engine";
-import { NotFoundError, parseSearchQuery, ValidationError } from "@valet/shared";
+import { builtinPrincipleAt, builtinPrincipleBody, NotFoundError, parseSearchQuery, ValidationError, type BuiltinPrinciple } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
 import { extractLinkTargets, isPathShaped, rewriteLinkTargets } from "../lib/memory-graph.js";
-import { memoryFiles, teamMembers, teams, orgMembers, type MemoryFileRow } from "../schema/index.js";
+import { memoryFileUsage, memoryFiles, teamMembers, teams, orgMembers, type MemoryFileRow } from "../schema/index.js";
 import { listTeamsForUser, canAdministerTeam, lockTeamForOwnership } from "./teams.js";
 import {
   assertWritablePath,
   normalizePath,
   parseConcept,
+  ReservedPathError,
   remapImportPath,
   renderConcept,
   type RenderableConcept,
@@ -35,7 +36,15 @@ import {
 /** Personal memory spans organizations; team access follows live membership, not an active org. */
 export interface MemoryScope {
   owner: Principal;
+  /** Host-selected execution scope; empty means explicitly shared owner memory. */
+  namespace?: string;
   actorUserId: string;
+  /**
+   * Limits the teams and orgs a read reaches to this org. Absent: a
+   * person's read reaches every team and org they belong to. A plugin
+   * handler sets it, so a line in one org never reads another org's memory.
+   */
+  orgId?: string;
 }
 
 // ─── Directory type defaults (OKF spec "Type vocabulary") ─────────────────
@@ -46,7 +55,68 @@ const DIRECTORY_DEFAULT_TYPE: Record<string, string> = {
   workflows: "workflow",
   journal: "journal-entry",
   people: "person",
+  principles: "principle",
 };
+
+// ─── Principles (docs/specs/2026-10-27-brain-principles-playbooks-design.md) ──
+
+/** The memory directory that holds principles. */
+export const PRINCIPLES_DIR = "principles/";
+
+/** Where content sync mounts a repository's `.valet/memory/principles/`.
+ * The files there are principles too, and `lib/` keeps them read-only. */
+export const SYNCED_PRINCIPLES_DIR = "lib/principles/";
+
+/** The row a built-in principle reads as while the scope has no file at its
+ * path. Version 0 marks it: no write made it, and no table holds it. */
+export function builtinPrincipleRow(scope: MemoryScope, principle: BuiltinPrinciple): MemoryFileRow {
+  return {
+    ownerType: scope.owner.type, ownerId: scope.owner.id, namespace: scope.namespace ?? "",
+    path: `principles/${principle.name}.md`, title: principle.rule, content: builtinPrincipleBody(principle),
+    type: "principle", description: principle.when, tags: "[]", resource: "", extras: "{}",
+    sensitivity: "private", origin: "built-in", expires: null, pinned: false, actorUserId: "",
+    sourceSessionId: "", orgId: "", version: 0, sourceId: null, upstreamPath: null, contentSha: null,
+    createdAt: 0, updatedAt: 0,
+  };
+}
+
+/** True for a stored (own-scope, normalized) path at or under `principles/`. */
+export function isPrinciplePath(path: string): boolean {
+  return path === PRINCIPLES_DIR.slice(0, -1) || path.startsWith(PRINCIPLES_DIR);
+}
+
+/**
+ * A team principle reaches every member's assistant at its next wake, so a
+ * write under a team's `principles/` takes the authority `copyFileToTeam`
+ * takes: a team admin or an admin of the team's organization. Membership,
+ * which the internal `?teamId=` branch checks, is not enough.
+ */
+async function assertTeamPrincipleWriter(db: AppDb, scope: MemoryScope, paths: string[]): Promise<void> {
+  if (scope.owner.type !== "team" || !paths.some(isPrinciplePath)) return;
+  if (await canAdministerTeam(db, scope.owner.id, scope.actorUserId)) return;
+  throw new ValidationError(
+    "Only a team admin or an admin of this team's organization can change team principles. Ask a team admin to add the rule, or save it as a personal principle.",
+  );
+}
+
+/** Where an agent write came from. The route fills it from host headers,
+ * never from model arguments. */
+export interface WriteSource {
+  sessionId: string;
+  threadId?: string;
+}
+
+/** Provenance frontmatter for a principle an agent writes: the person the
+ * agent acted for, and the session and thread of the write. It is stored in
+ * `extras`, so it renders as frontmatter with no schema change. */
+function principleProvenance(existingExtras: string, scope: MemoryScope, source: WriteSource): string {
+  const extras: Record<string, string> = { ...safeParseRecord(existingExtras) };
+  extras["source-actor"] = scope.actorUserId;
+  extras["source-session"] = source.sessionId;
+  if (source.threadId) extras["source-thread"] = source.threadId;
+  else delete extras["source-thread"];
+  return JSON.stringify(extras);
+}
 
 function defaultTypeForPath(path: string): string {
   const first = path.split("/")[0];
@@ -112,20 +182,46 @@ export function renderFile(row: MemoryFileRow): string {
 interface ReadableOwner {
   ownerType: string;
   ownerId: string;
+  namespace: string;
   /** '' for the caller's own scope; `team:{id}/` for a read-time-projected
    * team scope. Never stored — purely a display/routing prefix. */
   prefix: string;
 }
 
 async function resolveReadableOwners(db: AppDb, scope: MemoryScope): Promise<ReadableOwner[]> {
-  const owners: ReadableOwner[] = [{ ownerType: scope.owner.type, ownerId: scope.owner.id, prefix: "" }];
+  const owners: ReadableOwner[] = [{ ownerType: scope.owner.type, ownerId: scope.owner.id, namespace: scope.namespace ?? "", prefix: "" }];
+  if (scope.owner.type === "team" && scope.namespace) {
+    owners.push({ ownerType: "team", ownerId: scope.owner.id, namespace: "", prefix: `team:${scope.owner.id}/` });
+  }
   if (scope.owner.type === "user") {
     const teams = await listTeamsForUser(db, scope.owner.id);
     for (const team of teams) {
-      owners.push({ ownerType: "team", ownerId: team.id, prefix: `team:${team.id}/` });
+      if (scope.orgId !== undefined && team.orgId !== scope.orgId) continue;
+      owners.push({ ownerType: "team", ownerId: team.id, namespace: "", prefix: `team:${team.id}/` });
     }
   }
+  for (const orgId of await readableOrgIds(db, scope)) {
+    owners.push({ ownerType: "org", ownerId: orgId, namespace: "", prefix: `org:${orgId}/` });
+  }
   return owners;
+}
+
+/**
+ * The orgs whose memory a scope reads: a user's orgs, or a team's org. Org
+ * memory holds what an org content source mirrors, such as a company brain's
+ * principles. No write path accepts an `org:{id}/` path, so it stays read-only
+ * to agents and members.
+ */
+async function readableOrgIds(db: AppDb, scope: MemoryScope): Promise<string[]> {
+  let orgIds: string[] = [];
+  if (scope.owner.type === "user") {
+    const rows = await db.select({ orgId: orgMembers.orgId }).from(orgMembers).where(eq(orgMembers.userId, scope.owner.id));
+    orgIds = rows.map((row) => row.orgId);
+  } else if (scope.owner.type === "team") {
+    const rows = await db.select({ orgId: teams.orgId }).from(teams).where(eq(teams.id, scope.owner.id)).limit(1);
+    orgIds = rows.map((row) => row.orgId);
+  }
+  return scope.orgId === undefined ? orgIds : orgIds.filter((id) => id === scope.orgId);
 }
 
 async function isTeamMember(db: AppDb, teamId: string, userId: string): Promise<boolean> {
@@ -138,6 +234,7 @@ async function isTeamMember(db: AppDb, teamId: string, userId: string): Promise<
 }
 
 const TEAM_PREFIX_RE = /^team:([^/]+)\/(.*)$/;
+const ORG_PREFIX_RE = /^org:([^/]+)\/(.*)$/;
 
 /** Resolves a caller-supplied path (which may carry a `team:{id}/` virtual
  * prefix) to the real `(ownerType, ownerId, realPath)` it maps to, for
@@ -149,16 +246,29 @@ async function resolveReadTarget(
   db: AppDb,
   scope: MemoryScope,
   path: string,
-): Promise<{ ownerType: string; ownerId: string; realPath: string } | null> {
+): Promise<{ ownerType: string; ownerId: string; namespace: string; realPath: string } | null> {
+  const org = ORG_PREFIX_RE.exec(path);
+  if (org) {
+    const [, orgId, rest] = org;
+    if (!(await readableOrgIds(db, scope)).includes(orgId)) return null;
+    return { ownerType: "org", ownerId: orgId, namespace: "", realPath: rest };
+  }
   const m = TEAM_PREFIX_RE.exec(path);
   if (!m) {
-    return { ownerType: scope.owner.type, ownerId: scope.owner.id, realPath: path };
+    return { ownerType: scope.owner.type, ownerId: scope.owner.id, namespace: scope.namespace ?? "", realPath: path };
+  }
+  const [, teamId, rest] = m;
+  if (scope.owner.type === "team" && scope.namespace && scope.owner.id === teamId) {
+    return { ownerType: "team", ownerId: teamId, namespace: "", realPath: rest };
   }
   if (scope.owner.type !== "user") return null;
-  const [, teamId, rest] = m;
   const member = await isTeamMember(db, teamId, scope.owner.id);
   if (!member) return null;
-  return { ownerType: "team", ownerId: teamId, realPath: rest };
+  if (scope.orgId !== undefined) {
+    const [team] = await db.select({ orgId: teams.orgId }).from(teams).where(eq(teams.id, teamId)).limit(1);
+    if (team?.orgId !== scope.orgId) return null;
+  }
+  return { ownerType: "team", ownerId: teamId, namespace: "", realPath: rest };
 }
 
 // ─── writeFile ─────────────────────────────────────────────────────────
@@ -178,6 +288,9 @@ export interface WriteFileParams {
    * unchanged. */
   expires?: number | null;
   pinned?: boolean;
+  /** The agent session that made the write. Set only by the route, from
+   * host headers. A principle write records it as provenance. */
+  source?: WriteSource;
 }
 
 export interface WriteFileResult {
@@ -191,6 +304,7 @@ export interface WriteFileResult {
 export async function writeFile(db: AppDb, scope: MemoryScope, params: WriteFileParams): Promise<WriteFileResult> {
   assertWritablePath(params.path);
   const path = normalizePath(params.path);
+  await assertTeamPrincipleWriter(db, scope, [path]);
 
   if (params.content === "") {
     throw new ValidationError("to clear a file use removeFile; to update metadata only, omit content");
@@ -199,7 +313,7 @@ export async function writeFile(db: AppDb, scope: MemoryScope, params: WriteFile
   const existingRows = await db
     .select()
     .from(memoryFiles)
-    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.path, path)))
+    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? ""), eq(memoryFiles.path, path)))
     .limit(1);
   const existing = existingRows[0];
 
@@ -232,6 +346,7 @@ export async function writeFile(db: AppDb, scope: MemoryScope, params: WriteFile
   const row: MemoryFileRow = {
     ownerType: scope.owner.type,
     ownerId: scope.owner.id,
+    namespace: scope.namespace ?? "",
     path,
     title,
     content: finalContent,
@@ -239,7 +354,9 @@ export async function writeFile(db: AppDb, scope: MemoryScope, params: WriteFile
     description: params.description !== undefined ? params.description : (existing?.description ?? ""),
     tags: JSON.stringify(params.tags ?? (existing ? safeParseArray(existing.tags) : [])),
     resource: params.resource !== undefined ? params.resource : (existing?.resource ?? ""),
-    extras: existing?.extras ?? "{}",
+    extras: params.source && isPrinciplePath(path)
+      ? principleProvenance(existing?.extras ?? "{}", scope, params.source)
+      : existing?.extras ?? "{}",
     sensitivity: params.sensitivity ?? existing?.sensitivity ?? "private",
     origin: params.origin !== undefined ? params.origin : (existing?.origin ?? ""),
     expires: params.expires !== undefined ? params.expires : (existing?.expires ?? null),
@@ -264,7 +381,7 @@ export async function writeFile(db: AppDb, scope: MemoryScope, params: WriteFile
       await tx
         .update(memoryFiles)
         .set(row)
-        .where(and(eq(memoryFiles.ownerType, row.ownerType), eq(memoryFiles.ownerId, row.ownerId), eq(memoryFiles.path, row.path)));
+        .where(and(eq(memoryFiles.ownerType, row.ownerType), eq(memoryFiles.ownerId, row.ownerId), eq(memoryFiles.namespace, row.namespace), eq(memoryFiles.path, row.path)));
     } else {
       await tx.insert(memoryFiles).values(row);
     }
@@ -279,6 +396,8 @@ export interface PatchFileParams {
   path: string;
   oldString: string;
   newString: string;
+  /** Passed through to `writeFile`. */
+  source?: WriteSource;
 }
 
 /** Exact-replace patch on the body. Patch-created files are allowed
@@ -290,25 +409,75 @@ export async function patchFile(db: AppDb, scope: MemoryScope, params: PatchFile
   const existingRows = await db
     .select()
     .from(memoryFiles)
-    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.path, path)))
+    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? ""), eq(memoryFiles.path, path)))
     .limit(1);
-  const existing = existingRows[0];
+  // A built-in principle with no file yet patches from its shipped text. The
+  // write creates the file, which then replaces the built-in for this scope.
+  const builtin = existingRows[0] ? undefined : builtinPrincipleAt(path);
+  const existing = existingRows[0] ?? (builtin ? builtinPrincipleRow(scope, builtin) : undefined);
 
   if (!existing) {
     if (params.oldString !== "") {
       throw new NotFoundError("memory file", path);
     }
-    return writeFile(db, scope, { path, content: params.newString });
+    return writeFile(db, scope, { path, content: params.newString, source: params.source });
   }
 
   const idx = existing.content.indexOf(params.oldString);
   if (idx === -1) {
     throw new ValidationError(`oldString not found in ${path}`);
   }
+  // Both callers (mem_patch and the MCP patch_memory) promise an exact single
+  // match. Replacing the first of several would silently edit the wrong passage.
+  if (existing.content.indexOf(params.oldString, idx + params.oldString.length) !== -1) {
+    throw new ValidationError(`oldString appears more than once in ${path}. Include more surrounding text so it matches exactly once.`);
+  }
   const newContent =
     existing.content.slice(0, idx) + params.newString + existing.content.slice(idx + params.oldString.length);
 
-  return writeFile(db, scope, { path, content: newContent });
+  return writeFile(db, scope, {
+    path, content: newContent, source: params.source,
+    ...(builtin ? { type: existing.type, description: existing.description, origin: existing.origin } : {}),
+  });
+}
+
+// ─── patchFiles ────────────────────────────────────────────────────────
+
+/** Most patches one `patchFiles` call applies. */
+export const MAX_PATCH_BATCH = 20;
+
+export interface PatchFilesParams {
+  patches: Array<Omit<PatchFileParams, "source">>;
+  /** Passed through to every patch. */
+  source?: WriteSource;
+}
+
+/**
+ * A batched patch set: several exact-replace patches in one transaction.
+ * Every patch applies, or none does. Patches run in order, so a later patch
+ * to the same file sees the earlier one's edit. Each patch takes the same
+ * path and authority rules as `patchFile`.
+ */
+export async function patchFiles(db: AppDb, scope: MemoryScope, params: PatchFilesParams): Promise<WriteFileResult[]> {
+  const { patches } = params;
+  if (patches.length === 0) throw new ValidationError("Send at least one patch.");
+  if (patches.length > MAX_PATCH_BATCH) {
+    throw new ValidationError(`Send at most ${MAX_PATCH_BATCH} patches in one call. Put the rest in another call.`);
+  }
+  return db.transaction(async (tx) => {
+    const results: WriteFileResult[] = [];
+    for (const [i, patch] of patches.entries()) {
+      try {
+        results.push(await patchFile(tx, scope, { ...patch, source: params.source }));
+      } catch (err) {
+        if (err instanceof ValidationError || err instanceof NotFoundError || err instanceof ReservedPathError) {
+          throw new ValidationError(`Patch ${i + 1} of ${patches.length} (${patch.path}) failed: ${err.message.replace(/\.$/, "")}. No patch was applied.`);
+        }
+        throw err;
+      }
+    }
+    return results;
+  });
 }
 
 // ─── removeFile ────────────────────────────────────────────────────────
@@ -321,13 +490,14 @@ export async function removeFile(db: AppDb, scope: MemoryScope, path: string): P
   // removed in between.
   assertWritablePath(path);
   const normalized = normalizePath(path);
+  await assertTeamPrincipleWriter(db, scope, [normalized]);
   const existingRows = await db
     .select({ path: memoryFiles.path })
     .from(memoryFiles)
     .where(
       and(
         eq(memoryFiles.ownerType, scope.owner.type),
-        eq(memoryFiles.ownerId, scope.owner.id),
+        eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? ""),
         eq(memoryFiles.path, normalized),
       ),
     )
@@ -335,15 +505,29 @@ export async function removeFile(db: AppDb, scope: MemoryScope, path: string): P
   if (existingRows.length === 0) {
     throw new NotFoundError("memory file", normalized);
   }
-  await db
-    .delete(memoryFiles)
-    .where(
-      and(
-        eq(memoryFiles.ownerType, scope.owner.type),
-        eq(memoryFiles.ownerId, scope.owner.id),
-        eq(memoryFiles.path, normalized),
-      ),
-    );
+  await db.transaction(async (tx) => {
+    await tx
+      .delete(memoryFiles)
+      .where(
+        and(
+          eq(memoryFiles.ownerType, scope.owner.type),
+          eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? ""),
+          eq(memoryFiles.path, normalized),
+        ),
+      );
+    // Usage belongs to the file. A later file at this path starts unused.
+    await tx.delete(memoryFileUsage).where(usageKey(scope, normalized));
+  });
+}
+
+/** The `memory_file_usage` row for one own-scope path. */
+function usageKey(scope: MemoryScope, path: string): SQL | undefined {
+  return and(
+    eq(memoryFileUsage.ownerType, scope.owner.type),
+    eq(memoryFileUsage.ownerId, scope.owner.id),
+    eq(memoryFileUsage.namespace, scope.namespace ?? ""),
+    eq(memoryFileUsage.path, path),
+  );
 }
 
 // ─── moveFile ──────────────────────────────────────────────────────────
@@ -377,11 +561,12 @@ export async function moveFile(db: AppDb, scope: MemoryScope, params: MoveFilePa
   if (from === to) {
     throw new ValidationError("from and to are the same path — nothing to move");
   }
+  await assertTeamPrincipleWriter(db, scope, [from, to]);
 
   const rows = await db
     .select()
     .from(memoryFiles)
-    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id)));
+    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? "")));
   const source = rows.find((r) => r.path === from);
   if (!source) {
     throw new NotFoundError("memory file", from);
@@ -408,13 +593,17 @@ export async function moveFile(db: AppDb, scope: MemoryScope, params: MoveFilePa
         updatedAt: now,
         actorUserId: scope.actorUserId,
       })
-      .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.path, from)));
+      .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? ""), eq(memoryFiles.path, from)));
+    // Usage moves with the file. A row left at `to` by a file that a
+    // repository sync removed would block the move, so it goes first.
+    await tx.delete(memoryFileUsage).where(usageKey(scope, to));
+    await tx.update(memoryFileUsage).set({ path: to }).where(usageKey(scope, from));
     for (const ref of referencers) {
       await tx
         .update(memoryFiles)
         .set({ content: ref.content, version: ref.row.version + 1, updatedAt: now, actorUserId: scope.actorUserId })
         .where(
-          and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.path, ref.row.path)),
+          and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? ""), eq(memoryFiles.path, ref.row.path)),
         );
     }
   });
@@ -427,7 +616,7 @@ export async function moveFile(db: AppDb, scope: MemoryScope, params: MoveFilePa
   const movedRows = await db
     .select()
     .from(memoryFiles)
-    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.path, to)))
+    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? ""), eq(memoryFiles.path, to)))
     .limit(1);
   const moved = movedRows[0];
   if (!moved) {
@@ -464,7 +653,7 @@ export async function linksForFile(db: AppDb, scope: MemoryScope, path: string):
   const rows = await db
     .select()
     .from(memoryFiles)
-    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id)));
+    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? "")));
   const byPath = new Map(rows.map((r) => [r.path, r]));
   const source = byPath.get(normalized);
   if (!source) {
@@ -579,7 +768,7 @@ async function readDirectory(db: AppDb, scope: MemoryScope, path: string): Promi
   const rows = await db
     .select()
     .from(memoryFiles)
-    .where(and(eq(memoryFiles.ownerType, target.ownerType), eq(memoryFiles.ownerId, target.ownerId)));
+    .where(and(eq(memoryFiles.ownerType, target.ownerType), eq(memoryFiles.ownerId, target.ownerId), eq(memoryFiles.namespace, target.namespace)));
 
   const { subdirs: subdirSet0, files } = groupEntries(rows, normalizedReal);
 
@@ -619,9 +808,18 @@ export async function readFile(
   const rowRows = await db
     .select()
     .from(memoryFiles)
-    .where(and(eq(memoryFiles.ownerType, target.ownerType), eq(memoryFiles.ownerId, target.ownerId), eq(memoryFiles.path, normalized)))
+    .where(and(eq(memoryFiles.ownerType, target.ownerType), eq(memoryFiles.ownerId, target.ownerId), eq(memoryFiles.namespace, target.namespace), eq(memoryFiles.path, normalized)))
     .limit(1);
   const row = rowRows[0];
+
+  // An own-scope read of a built-in principle's path returns the shipped text
+  // until the scope writes a file there.
+  const builtin = !row && target.ownerType === scope.owner.type && target.ownerId === scope.owner.id
+    && target.namespace === (scope.namespace ?? "") ? builtinPrincipleAt(normalized) : undefined;
+  if (builtin) {
+    const file = builtinPrincipleRow(scope, builtin);
+    return { kind: "file", path, rendered: renderFile(file), file };
+  }
 
   if (!row) {
     // Fall back to a directory read: a path prefix that matches existing
@@ -629,7 +827,7 @@ export async function readFile(
     const rows = await db
       .select({ path: memoryFiles.path })
       .from(memoryFiles)
-      .where(and(eq(memoryFiles.ownerType, target.ownerType), eq(memoryFiles.ownerId, target.ownerId)));
+      .where(and(eq(memoryFiles.ownerType, target.ownerType), eq(memoryFiles.ownerId, target.ownerId), eq(memoryFiles.namespace, target.namespace)));
     const prefix = `${normalized}/`;
     if (rows.some((r) => r.path.startsWith(prefix))) {
       return readDirectory(db, scope, `${path}/`);
@@ -655,7 +853,7 @@ export async function readOwnFile(db: AppDb, scope: MemoryScope, path: string): 
   const rows = await db
     .select()
     .from(memoryFiles)
-    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.path, normalized)))
+    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? ""), eq(memoryFiles.path, normalized)))
     .limit(1);
   return rows[0] ?? null;
 }
@@ -739,12 +937,12 @@ async function copyTeamFile(
     const sourceOwner = direction === "push" ? scope.owner : teamOwner;
     const destinationOwner = direction === "push" ? teamOwner : scope.owner;
     const [source] = await tx.select().from(memoryFiles).where(and(
-      eq(memoryFiles.ownerType, sourceOwner.type), eq(memoryFiles.ownerId, sourceOwner.id),
+      eq(memoryFiles.ownerType, sourceOwner.type), eq(memoryFiles.ownerId, sourceOwner.id), eq(memoryFiles.namespace, direction === "push" ? scope.namespace ?? "" : ""),
       eq(memoryFiles.path, from),
     )).limit(1);
     if (!source) throw new NotFoundError("memory file", input.from);
     const destinationWhere = and(eq(memoryFiles.ownerType, destinationOwner.type),
-      eq(memoryFiles.ownerId, destinationOwner.id), eq(memoryFiles.path, path));
+      eq(memoryFiles.ownerId, destinationOwner.id), eq(memoryFiles.namespace, direction === "pull" ? scope.namespace ?? "" : ""), eq(memoryFiles.path, path));
     // The row lock serializes revision comparison with all updates and deletes,
     // including writers that do not acquire the team ownership lock.
     const [destination] = await tx.select().from(memoryFiles).where(destinationWhere).for("update");
@@ -758,7 +956,7 @@ async function copyTeamFile(
     const now = Date.now();
     const row: MemoryFileRow = {
       ...source,
-      ownerType: destinationOwner.type, ownerId: destinationOwner.id, path,
+      ownerType: destinationOwner.type, ownerId: destinationOwner.id, namespace: direction === "pull" ? scope.namespace ?? "" : "", path,
       orgId: direction === "push" ? team.orgId : "",
       actorUserId: scope.actorUserId, sourceSessionId: "", version: (destination?.version ?? 0) + 1,
       sourceId: null, upstreamPath: null, contentSha: null,
@@ -780,9 +978,19 @@ async function copyTeamFile(
 
 // ─── listFiles ─────────────────────────────────────────────────────────
 
+/** One stored memory file: its owner tuple and its real (unprefixed) path. */
+export interface MemoryFileKey {
+  ownerType: string;
+  ownerId: string;
+  namespace: string;
+  path: string;
+}
+
 export interface MemoryFileSummary {
   /** Caller-facing path, including any `team:{id}/` virtual prefix. */
   path: string;
+  /** The stored row this entry projects. */
+  key: MemoryFileKey;
   title: string;
   description: string;
   type: string;
@@ -800,12 +1008,13 @@ export async function listFiles(db: AppDb, scope: MemoryScope, opts?: { prefix?:
     const rows = await db
       .select()
       .from(memoryFiles)
-      .where(and(eq(memoryFiles.ownerType, owner.ownerType), eq(memoryFiles.ownerId, owner.ownerId)));
+      .where(and(eq(memoryFiles.ownerType, owner.ownerType), eq(memoryFiles.ownerId, owner.ownerId), eq(memoryFiles.namespace, owner.namespace)));
     for (const row of rows) {
       const virtualPath = `${owner.prefix}${row.path}`;
       if (opts?.prefix && !virtualPath.startsWith(opts.prefix)) continue;
       out.push({
         path: virtualPath,
+        key: { ownerType: row.ownerType, ownerId: row.ownerId, namespace: row.namespace, path: row.path },
         title: row.title,
         description: row.description,
         type: row.type,
@@ -815,6 +1024,40 @@ export async function listFiles(db: AppDb, scope: MemoryScope, opts?: { prefix?:
     }
   }
   out.sort((a, b) => a.path.localeCompare(b.path));
+  return out;
+}
+
+/** Most principle files `listPrincipleFiles` reads from each owner. More
+ * than the snapshot index lists, so a principle past the index cap still
+ * resolves, but bounded. */
+export const MAX_PRINCIPLE_FILES = 200;
+
+export type PrincipleFileSummary = Pick<MemoryFileSummary, "path" | "key" | "title" | "description">;
+
+/** The principle files `scope` can read across its read-union, projected
+ * like `listFiles`, without their bodies. */
+export async function listPrincipleFiles(db: AppDb, scope: MemoryScope): Promise<PrincipleFileSummary[]> {
+  const owners = await resolveReadableOwners(db, scope);
+  const out: PrincipleFileSummary[] = [];
+  for (const owner of owners) {
+    const rows = await db
+      .select({ path: memoryFiles.path, title: memoryFiles.title, description: memoryFiles.description })
+      .from(memoryFiles)
+      .where(and(
+        eq(memoryFiles.ownerType, owner.ownerType), eq(memoryFiles.ownerId, owner.ownerId), eq(memoryFiles.namespace, owner.namespace),
+        or(sql`${memoryFiles.path} LIKE ${`${PRINCIPLES_DIR}%`}`, sql`${memoryFiles.path} LIKE ${`${SYNCED_PRINCIPLES_DIR}%`}`),
+      ))
+      .orderBy(asc(memoryFiles.path))
+      .limit(MAX_PRINCIPLE_FILES);
+    for (const row of rows) {
+      out.push({
+        path: `${owner.prefix}${row.path}`,
+        key: { ownerType: owner.ownerType, ownerId: owner.ownerId, namespace: owner.namespace, path: row.path },
+        title: row.title,
+        description: row.description,
+      });
+    }
+  }
   return out;
 }
 
@@ -978,7 +1221,7 @@ export async function searchFiles(db: AppDb, scope: MemoryScope, params: SearchF
   const now = Date.now();
 
   const ownerClause = or(
-    ...owners.map((o) => and(eq(memoryFiles.ownerType, o.ownerType), eq(memoryFiles.ownerId, o.ownerId))),
+    ...owners.map((o) => and(eq(memoryFiles.ownerType, o.ownerType), eq(memoryFiles.ownerId, o.ownerId), eq(memoryFiles.namespace, o.namespace))),
   );
 
   const rankExpr = sql<number>`ts_rank_cd(search_vector, ${tsQuery})`;
@@ -1001,6 +1244,7 @@ export async function searchFiles(db: AppDb, scope: MemoryScope, params: SearchF
     type: string;
     ownerType: string;
     ownerId: string;
+    namespace: string;
     rank: number;
     snippet: string;
   }>;
@@ -1013,6 +1257,7 @@ export async function searchFiles(db: AppDb, scope: MemoryScope, params: SearchF
         type: memoryFiles.type,
         ownerType: memoryFiles.ownerType,
         ownerId: memoryFiles.ownerId,
+        namespace: memoryFiles.namespace,
         rank: rankExpr,
         snippet: snippetExpr,
       })
@@ -1039,10 +1284,10 @@ export async function searchFiles(db: AppDb, scope: MemoryScope, params: SearchF
     throw err;
   }
 
-  const prefixByOwner = new Map(owners.map((o) => [`${o.ownerType}:${o.ownerId}`, o.prefix]));
+  const prefixByOwner = new Map(owners.map((o) => [`${o.ownerType}:${o.ownerId}:${o.namespace}`, o.prefix]));
 
   return rows.map((r) => ({
-    path: `${prefixByOwner.get(`${r.ownerType}:${r.ownerId}`) ?? ""}${r.path}`,
+    path: `${prefixByOwner.get(`${r.ownerType}:${r.ownerId}:${r.namespace}`) ?? ""}${r.path}`,
     title: r.title,
     description: r.description,
     type: r.type,
@@ -1068,7 +1313,7 @@ export async function exportFiles(db: AppDb, scope: MemoryScope): Promise<Record
   const rows = await db
     .select()
     .from(memoryFiles)
-    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id)));
+    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? "")));
 
   const manifest: Record<string, ExportEntry> = {};
   for (const row of rows) {
@@ -1191,6 +1436,16 @@ export async function importFiles(db: AppDb, scope: MemoryScope, params: ImportF
     }
     claimedBy.set(finalPath, rawPath);
 
+    if (isPrinciplePath(finalPath)) {
+      try {
+        await assertTeamPrincipleWriter(db, scope, [finalPath]);
+      } catch (err) {
+        if (!(err instanceof ValidationError)) throw err;
+        skipped.push({ path: rawPath, reason: err.message });
+        continue;
+      }
+    }
+
     const parsed = parseConcept(content);
     if (parsed.droppedValetKeys.length > 0) {
       warnings.push(`${finalPath}: dropped unknown valet keys: ${parsed.droppedValetKeys.join(", ")}`);
@@ -1199,7 +1454,7 @@ export async function importFiles(db: AppDb, scope: MemoryScope, params: ImportF
     const existingRows = await db
       .select()
       .from(memoryFiles)
-      .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.path, finalPath)))
+      .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? ""), eq(memoryFiles.path, finalPath)))
       .limit(1);
     const existing = existingRows[0];
 
@@ -1223,6 +1478,7 @@ export async function importFiles(db: AppDb, scope: MemoryScope, params: ImportF
     const row: MemoryFileRow = {
       ownerType: scope.owner.type,
       ownerId: scope.owner.id,
+      namespace: scope.namespace ?? "",
       path: finalPath,
       title,
       content: parsed.body,
@@ -1254,7 +1510,7 @@ export async function importFiles(db: AppDb, scope: MemoryScope, params: ImportF
         await tx
           .update(memoryFiles)
           .set(row)
-          .where(and(eq(memoryFiles.ownerType, row.ownerType), eq(memoryFiles.ownerId, row.ownerId), eq(memoryFiles.path, row.path)));
+          .where(and(eq(memoryFiles.ownerType, row.ownerType), eq(memoryFiles.ownerId, row.ownerId), eq(memoryFiles.namespace, row.namespace), eq(memoryFiles.path, row.path)));
       } else {
         await tx.insert(memoryFiles).values(row);
       }

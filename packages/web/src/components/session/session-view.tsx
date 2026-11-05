@@ -1,12 +1,20 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { ListTree } from "lucide-react";
+import { QuickReplies } from "./quick-replies";
+import { useMobileLayout } from "~/hooks/use-mobile-layout";
+import { ResolvedGateNotice, useResolvedGateNotice } from "./gate-outcome";
+import { Popover, PopoverContent, PopoverTrigger } from "~/components/primitives/popover";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { X, ExternalLink } from "lucide-react";
 import {
+  useForkThread,
+  TRANSCRIPT_FULL,
+  TRANSCRIPT_TAIL,
   useMessages,
   useSession,
   useThreads,
 } from "~/api/queries";
-import { useSessionWebSocket } from "~/api/ws";
+import { useAnnounceThreadView, useSessionWebSocket } from "~/api/ws";
 import {
   queueBusy,
   useSessionStream,
@@ -15,24 +23,50 @@ import {
   useQueueStateForThread,
   useThreadLiveStatus,
   useErrorForThread,
+  useRetryForThread,
   useCompactingForThread,
+  type StreamMessage,
 } from "~/stores/stream";
 import { Composer } from "~/components/session/composer";
+import { useThreadEdit } from "~/components/session/use-thread-edit";
+import { errorText } from "~/lib/error-text";
 import {
   ComposerDropContext,
   type ComposerDropChannel,
   type ComposerDropIntake,
 } from "~/components/session/composer-drop-context";
 import { DecisionGateCard } from "~/components/session/decision-gate-card";
-import { MessageList } from "~/components/session/message-list";
+import { MessageList, ThreadShell } from "~/components/session/message-list";
+import { ThreadRecapDock, useThreadRecap } from "~/components/session/thread-recap";
+import { PinnedPlan, useCurrentStep, useProgressCardActive } from "~/components/session/thread-plan";
+import { ProcessingStatus, type WorkingLineInput } from "./processing-status";
+import { TypingLine } from "~/components/session/viewer-faces";
+import { useActiveViewers } from "~/api/active-viewers";
 import { PageDropTarget } from "~/components/session/page-drop-target";
 import { SandboxTabs, type SandboxTabId } from "~/components/session/sandbox-tabs";
+import { MobileBrowser, useMobileBrowserLayout } from "~/components/session/browser/mobile-browser";
+import { BrowserOverlay } from "~/components/session/browser/browser-overlay";
+import { useBrowserWatch } from "~/components/session/browser/use-browser-watch";
+import { ThreadContextPanel } from "~/components/session/thread-context-panel";
+import { BackgroundWorkStatusLine } from "~/components/session/background-work";
+import { useCanAdministerSession } from "~/components/session/use-can-administer-session";
+import { draftKey, useComposerDraftStore } from "~/stores/composer-drafts";
 import { SessionHeader } from "~/components/session/session-header";
 import { useMe } from "~/api/settings";
 import { useInvalidateSessionOnModelSwitch } from "~/hooks/use-invalidate-session-on-model-switch";
 import { useInvalidateMessagesOnCompaction } from "~/hooks/use-invalidate-messages-on-compaction";
+import { useInvalidateMessagesOnQueueState } from "~/hooks/use-invalidate-messages-on-queue-state";
 import { usePendingGatesSeed } from "~/hooks/use-pending-gates-seed";
-import { Button, Spinner } from "~/components/primitives";
+import { Button, Dialog, DialogContent, DialogTitle } from "~/components/primitives";
+import { useSwipeDismiss } from "~/hooks/use-swipe-dismiss";
+import type { MessageReplyReference } from "@valet/api/wire";
+import { defaultThreadId, isAppAssistantThread } from "~/lib/thread-default";
+import { flattenChildWork, useChildWork } from "~/api/child-work";
+import { ChildGateCards } from "./child-gate-cards";
+import { AgentsLine } from "./agents-line";
+import { ThreadReplyContext } from "./send-as-person";
+import { ChildTitlesContext } from "./work-group";
+import { MobileConversationLayout, MobileConversationToolbar, type MobileConversationView } from "~/components/home/mobile-conversation-layout";
 
 /**
  * Reusable session view (assistant-centered web UI, decisions 13/14):
@@ -56,15 +90,48 @@ import { Button, Spinner } from "~/components/primitives";
 export function SessionView({
   sessionId,
   panel,
+  hidePanelHeader = false,
+  renderPanelHeader,
   activeThreadId,
   onClose,
   onOpenChild,
   activeTab,
   onTabChange,
+  enableReplies = false,
+  onOpenThread,
+  scopeNotice,
+  chatOnly = false,
+  sharedConversationChrome = false,
+  active = true,
+  composerAccessory,
+  suppressComposer = false,
+  emptyState,
+  cover,
+  headerActions,
 }: {
+  /** Shown above the composer, under the thread's own pending gate. Home
+   * uses it for approvals from work in other threads. */
+  composerAccessory?: ReactNode;
+  /** An external response form occupies the phone composer area. */
+  suppressComposer?: boolean;
+  /** Shown in place of the transcript while the thread has no messages. */
+  emptyState?: ReactNode;
+  /** Shown in place of the transcript, under the header, while set. Desktop
+   * Home uses it for its idle view; the composer stays below. */
+  cover?: ReactNode;
+  /** Extra controls at the end of the thread header, before the summary. */
+  headerActions?: ReactNode;
+  /** Hidden embedded views keep drafts/streams but suppress floating overlays. */
+  active?: boolean;
+  chatOnly?: boolean;
+  /** Home supplies the shared conversation toolbar around its embedded view. */
+  sharedConversationChrome?: boolean;
+  scopeNotice?: string;
   sessionId: string;
   /** Renders the compact slide-over header instead of `SessionHeader`. */
   panel?: boolean;
+  hidePanelHeader?: boolean;
+  renderPanelHeader?: (summary: ReactNode) => ReactNode;
   /**
    * Controlled active thread id, typically derived from the host route's
    * `?thread=` search param (full/standalone). When omitted (panel), the
@@ -91,7 +158,28 @@ export function SessionView({
   activeTab?: SandboxTabId;
   /** Required alongside a controlled `activeTab`; ignored otherwise. */
   onTabChange?: (tab: SandboxTabId) => void;
+  /** Enable message-level replies on an orchestrator chat surface. */
+  enableReplies?: boolean;
+  /**
+   * Opens another thread of this workspace. A host that can switch threads
+   * passes it, and messages then offer "Branch into a new thread".
+   */
+  onOpenThread?: (threadId: string) => void;
 }) {
+  // The summary is a popover over the transcript, so it opens only on request.
+  const [summaryOpen, setSummaryOpen] = useState(false);
+  const summarySwipe = useSwipeDismiss("down", () => setSummaryOpen(false));
+  // A summary action that targets the composer or the transcript waits for
+  // the phone sheet to close: the open modal would cover the composer and
+  // pull focus back into itself.
+  const afterSummaryClose = useRef<(() => void) | null>(null);
+  const [composerModelTarget, setComposerModelTarget] = useState<HTMLDivElement | null>(null);
+  const mobile = useMobileLayout();
+  const mobileNavigation = mobile && !panel;
+  const mobileConversation = mobile && (!panel || sharedConversationChrome);
+  const [mobileView, setMobileView] = useState<MobileConversationView>("chat");
+  useEffect(() => setMobileView("chat"), [sessionId, activeThreadId, mobileNavigation]);
+  const chatActive = active && (!mobileNavigation || mobileView === "chat");
   const session = useSession(sessionId);
   // Keep the header's model picker honest for switches this client did not
   // make itself (/model command, other tabs, direct API).
@@ -100,29 +188,65 @@ export function SessionView({
   // engine persists the CompactionEntry before emitting `compaction_end`,
   // and this refetch is what pulls it into the transcript.
   useInvalidateMessagesOnCompaction(sessionId);
+  // Signal turns (child.settled, process.exited, timer.fired, watch.event)
+  // reach the client through REST only. A queue change is the cue to
+  // refetch, in every view that renders a session, not only the assistant chat.
+  useInvalidateMessagesOnQueueState(sessionId, activeThreadId);
   const [localTab, setLocalTab] = useState<SandboxTabId>("chat");
-  const tab = activeTab ?? localTab;
   const setTab = onTabChange ?? setLocalTab;
-  const threads = useThreads(sessionId);
+  const viewRef = useRef<HTMLDivElement>(null);
+  const restoreTabFocus = useRef(false);
+  function changeTab(next: SandboxTabId) {
+    const active = document.activeElement;
+    restoreTabFocus.current = next !== tab && active instanceof HTMLElement
+      && (active.getAttribute("role") === "tab" || (mobileConversation && next === "chat"))
+      && Boolean(viewRef.current?.contains(active));
+    if (tab === "browser" && next !== "browser") browserWatch.open();
+    setTab(next);
+  }
+  const threads = useThreads(sessionId, undefined, activeThreadId);
+  // Stopping background work is a lifecycle control, like pause.
+  const canCancelWork = useCanAdministerSession(session.data?.owner);
   // Open the WS — pipes events into the store keyed by sessionId.
   useSessionWebSocket(sessionId);
   const stream = useSessionStream(sessionId);
 
-  // No explicit ?thread → land on the MOST RECENT thread (matches the
-  // sidebar's newest-first ordering), not the oldest.
-  const newestThreadId = threads.data?.threads.reduce<{ id: string; createdAt: number } | undefined>(
-    (best, t) => (best === undefined || t.createdAt > best.createdAt ? { id: t.id, createdAt: t.createdAt } : best),
-    undefined,
-  )?.id;
-  const effectiveThreadId = activeThreadId ?? newestThreadId ?? undefined;
+  // The shared default keeps an omitted ?thread aligned with the sidebar, regardless of its sort mode.
+  const effectiveThreadId = activeThreadId ?? threads.data?.defaultThreadId ?? defaultThreadId(threads.data?.threads ?? []);
+  const helperThread = threads.data?.threads.find((thread) => thread.id === effectiveThreadId);
+  const mobileBrowser = useMobileBrowserLayout();
+  const hideBrowser = chatOnly || Boolean(helperThread && isAppAssistantThread(helperThread));
+  const tab = hideBrowser && !mobileConversation ? "chat" : activeTab ?? localTab;
+  useLayoutEffect(() => {
+    if (!restoreTabFocus.current) return;
+    restoreTabFocus.current = false;
+    // The compact phone back button unmounts on Chat. Return focus to
+    // its menu without opening the keyboard; desktop keeps the selected tab.
+    const selector = mobileConversation ? '[aria-label="Thread menu"]' : '[role="tab"][aria-selected="true"]';
+    const root = mobileConversation ? viewRef.current?.closest("[data-mobile-conversation]") : viewRef.current;
+    root?.querySelector<HTMLElement>(selector)?.focus({ preventScroll: true });
+  }, [tab, mobileConversation]);
+  const [replyTarget, setReplyTarget] = useState<MessageReplyReference>();
+  useEffect(() => setReplyTarget(undefined), [effectiveThreadId]);
+  // Fork (docs/specs/2026-10-22-thread-edit-fork-design.md).
+  const [branchError, setBranchError] = useState<string>();
+  useEffect(() => setBranchError(undefined), [effectiveThreadId]);
+  const forkThread = useForkThread(sessionId);
 
   // Load this thread's persisted messages from REST and pipe into the
   // stream store. Background refetches are disabled (see `useMessages`) so
   // this never wipes live state mid-session.
-  const messagesQ = useMessages(sessionId, effectiveThreadId);
+  // The newest page first; the whole recent history once the reader scrolls up.
+  const [fullHistoryFor, setFullHistoryFor] = useState<string>();
+  const fullHistory = fullHistoryFor !== undefined && fullHistoryFor === effectiveThreadId;
+  const messagesQ = useMessages(sessionId, effectiveThreadId, undefined, fullHistory ? TRANSCRIPT_FULL : TRANSCRIPT_TAIL);
+  const showEarlier = useCallback(() => setFullHistoryFor(effectiveThreadId), [effectiveThreadId]);
   // Viewer identity, for message attribution: the list renders another
   // member's user messages under their name instead of "You".
   const me = useMe();
+  // Who else has this thread open; this view reports it on the session socket.
+  useAnnounceThreadView(sessionId, chatActive ? effectiveThreadId : undefined);
+  const viewers = useActiveViewers(sessionId, effectiveThreadId, me.data?.id);
   const setThreadMessages = useStreamStore((s) => s.setThreadMessages);
   useEffect(() => {
     if (!effectiveThreadId || !messagesQ.data) return;
@@ -133,11 +257,38 @@ export function SessionView({
       messagesQ.data.hasMore,
     );
   }, [sessionId, effectiveThreadId, messagesQ.data, setThreadMessages]);
+  const edit = useThreadEdit(sessionId, effectiveThreadId, messagesQ, stream.messages, { readOnly: Boolean(session.data?.readOnlyReason) });
+
+  async function branch(message: StreamMessage, destination?: "private") {
+    if (!effectiveThreadId || !onOpenThread || forkThread.isPending) return;
+    setBranchError(undefined);
+    try {
+      const result = await forkThread.mutateAsync({ threadId: effectiveThreadId, entryId: message.id, ...(destination ? { destination } : {}) });
+      if (result.draft) useComposerDraftStore.getState().setText(draftKey(result.thread.sessionId, result.thread.id), result.draft);
+      onOpenThread(result.thread.id);
+    } catch (err) {
+      setBranchError(errorText(err, "Could not branch into a new thread. Try again."));
+    }
+  }
 
   usePendingGatesSeed(sessionId);
 
   const pendingGate = usePendingGateForThread(sessionId, effectiveThreadId);
+  const resolvedGate = useResolvedGateNotice(pendingGate ?? undefined);
+  const answeringQuestion = pendingGate?.type === "question" &&
+    (!pendingGate.approver || pendingGate.approver.userId === me.data?.id);
+  const responseFormActive = mobile && (answeringQuestion || (!pendingGate && suppressComposer));
+  // The agents this session started: their titles name them in work lines,
+  // and the ones this thread is running show as one line under the transcript.
+  const childWorkQuery = useChildWork(sessionId);
+  const childWork = useMemo(() => flattenChildWork(childWorkQuery.data), [childWorkQuery.data]);
+  const childTitles = useMemo(() => new Map(childWork.map(child => [child.sessionId, child.title])), [childWork]);
+  // A widget's buttons reply into the thread on screen, as the person.
+  const widgetReplyTarget = useMemo(() => effectiveThreadId && !session.data?.readOnlyReason
+    ? { sessionId, threadId: effectiveThreadId } : null, [sessionId, effectiveThreadId, session.data?.readOnlyReason]);
+  // Quick replies are a phone affordance: tap an answer instead of typing it.
   const threadError = useErrorForThread(sessionId, effectiveThreadId);
+  const threadRetry = useRetryForThread(sessionId, effectiveThreadId);
   const compacting = useCompactingForThread(sessionId, effectiveThreadId);
 
   // "Agent is busy" for the header badge and the transcript indicator, from
@@ -145,10 +296,42 @@ export function SessionView({
   // live `status` events plus the durable queue state (which the WS
   // handshake seeds, so it survives a mid-turn page load or reconnect).
   const threadQueueState = useQueueStateForThread(sessionId, effectiveThreadId);
+  const queuedMessages = useMemo(() => {
+    const byItemId = new Map(
+      stream.messages
+        .filter((message) => message.role === "user" && message.queueItemId)
+        .map((message) => [message.queueItemId, message]),
+    );
+    return (threadQueueState?.pendingIds ?? [])
+      .map((itemId) => byItemId.get(itemId))
+      .filter((message) => message !== undefined);
+  }, [stream.messages, threadQueueState?.pendingIds]);
   const threadStatus = useThreadLiveStatus(sessionId, effectiveThreadId);
+  const currentStep = useCurrentStep(effectiveThreadId);
+  const progressCardActive = useProgressCardActive(effectiveThreadId);
+  const workingLine: WorkingLineInput = { status: threadStatus.status, queue: threadQueueState, needsResponse: Boolean(pendingGate),
+    activity: currentStep, startedAt: threadStatus.turnStartedAt, retry: threadRetry, compacting };
   const agentBusy =
     (threadStatus.status !== "idle" && threadStatus.status !== "error") ||
     queueBusy(threadQueueState);
+  const recap = useThreadRecap({ threadId: effectiveThreadId, thread: helperThread, messages: stream.messages, viewerId: me.data?.id, working: agentBusy });
+
+  const browserWatch = useBrowserWatch({
+    sessionId,
+    threadId: effectiveThreadId,
+    messages: stream.messages,
+    agentBusy,
+  });
+  function closeBrowserPreview() {
+    browserWatch.close();
+    viewRef.current
+      ?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')
+      ?.focus({ preventScroll: true });
+  }
+  function expandBrowserPreview() {
+    restoreTabFocus.current = true;
+    setTab("browser");
+  }
 
   // Composer publishes its intake pipeline into this ref. The page-level
   // drop target reads it on drop — SessionView is the closest common
@@ -180,56 +363,181 @@ export function SessionView({
 
   if (session.isLoading) {
     return (
-      <div className="flex-1 grid place-items-center text-sm text-muted">
-        <Spinner /> Loading session…
+      <div className="flex min-h-0 flex-1 flex-col">
+        {panel && !hidePanelHeader && renderPanelHeader?.(null)}
+        <ThreadShell header={!panel} />
       </div>
     );
   }
   if (session.error || !session.data) {
     return (
-      <div className="flex-1 grid place-items-center text-center text-sm text-danger-500 p-8">
-        Failed to load session
-        <div className="text-xs text-muted mt-1">{(session.error as Error)?.message}</div>
+      <div className="flex min-h-0 flex-1 flex-col">
+        {panel && !hidePanelHeader && renderPanelHeader?.(null)}
+        <div role="alert" className="flex flex-1 flex-col items-center justify-center gap-2 p-8 text-center text-sm text-danger-500">
+          Failed to load conversation
+          <div className="text-xs text-muted">{session.error?.message}</div>
+          <Button size="sm" variant="secondary" onClick={() => void session.refetch()}>Retry</Button>
+        </div>
       </div>
     );
   }
 
-  return (
+  const runAfterSummary = (action: () => void) => {
+    if (!mobileConversation || !summaryOpen) return action();
+    afterSummaryClose.current = action;
+    setSummaryOpen(false);
+  };
+  const summaryPanel = effectiveThreadId ? (
+    <ThreadContextPanel
+      key={`${sessionId}:${effectiveThreadId}`}
+      owner={{ ownerType: session.data.owner.type, ownerId: session.data.owner.id }}
+      sessionId={sessionId} threadId={effectiveThreadId} messages={stream.messages} busy={agentBusy}
+      canCancelWork={canCancelWork}
+      pullRequests={helperThread?.pullRequests}
+      onCreate={() => runAfterSummary(() => {
+        const key = draftKey(sessionId, effectiveThreadId);
+        const store = useComposerDraftStore.getState();
+        const text = store.byKey[key]?.text ?? "";
+        store.setText(key, text ? `${text}\nCreate a file or site: ` : "Create a file or site: ");
+        viewRef.current?.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')?.focus();
+      })}
+      onAttach={() => runAfterSummary(() => viewRef.current?.querySelector<HTMLButtonElement>('[aria-label="Attach files"], [aria-label="Attach images"]')?.click())}
+      onReveal={(messageId) => runAfterSummary(() => {
+        const row = [...(viewRef.current?.querySelectorAll<HTMLElement>('[data-message-id]') ?? [])].find((el) => el.dataset.messageId === messageId);
+        row?.scrollIntoView({ behavior: "smooth", block: "center" });
+      })}
+    />
+  ) : null;
+  const summaryIcon = <ListTree className="h-4 w-4" aria-hidden />;
+  // A phone opens the summary as a bottom sheet: a popover anchored to the
+  // tab row covers the transcript without a clear way out. A swipe down
+  // closes it.
+  const summaryControl = !effectiveThreadId ? null : mobileConversation ? <>
+    <Button variant="ghost" size="sm" aria-label="Toggle summary" title="Toggle summary" aria-expanded={chatActive && summaryOpen}
+      onClick={() => setSummaryOpen((open) => !open)} className="shrink-0 max-md:min-w-11">{summaryIcon}</Button>
+    <Dialog open={chatActive && summaryOpen} onOpenChange={setSummaryOpen}>
+      <DialogContent hideClose aria-describedby={undefined} onOpenAutoFocus={(event) => event.preventDefault()} {...summarySwipe}
+        onCloseAutoFocus={(event) => {
+          const action = afterSummaryClose.current;
+          if (!action) return;
+          afterSummaryClose.current = null;
+          event.preventDefault();
+          action();
+        }}
+        className="bottom-0 left-0 top-auto max-h-[85dvh] w-full max-w-none translate-x-0 translate-y-0 gap-0 rounded-b-none rounded-t-2xl border-x-0 border-b-0 p-0 pb-[env(safe-area-inset-bottom)] data-[state=open]:animate-in data-[state=open]:slide-in-from-bottom motion-reduce:animate-none [&>aside]:rounded-none [&>aside]:bg-transparent">
+        <DialogTitle className="sr-only">Thread summary</DialogTitle>
+        <div aria-hidden className="mx-auto mb-1 mt-2 h-1 w-9 shrink-0 rounded-full bg-line" />
+        {summaryPanel}
+      </DialogContent>
+    </Dialog>
+  </> : (
+    <Popover key={`${sessionId}:${effectiveThreadId}`} open={chatActive && summaryOpen} onOpenChange={setSummaryOpen}>
+      <PopoverTrigger asChild>
+        <Button variant="ghost" size="sm" aria-label="Toggle summary" title="Toggle summary" className="shrink-0 data-[state=open]:bg-ink-wash">
+          {summaryIcon}
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent aria-label="Thread summary" align="end" sideOffset={12} onOpenAutoFocus={(event) => event.preventDefault()} className="w-80 max-w-[calc(100vw-2rem)] max-h-[var(--radix-popover-content-available-height)] overflow-y-auto p-0 rounded-2xl">
+        {summaryPanel}
+      </PopoverContent>
+    </Popover>
+  );
+
+  const sessionHeader = (
+    <SessionHeader
+      session={session.data}
+      agentStatus={threadStatus.status}
+      conn={stream.conn}
+      sandbox={stream.sandbox}
+      threadId={effectiveThreadId}
+      messages={stream.messages}
+      summaryControl={headerActions ? <>{headerActions}{summaryControl}</> : summaryControl}
+      onOpenView={hideBrowser && !mobileConversation ? undefined : changeTab}
+      compact={mobileConversation}
+      modelControlTarget={mobileConversation || !panel ? composerModelTarget : null}
+      viewers={viewers}
+      scopeNotice={scopeNotice}
+      onOpenThread={onOpenThread}
+    />
+  );
+  const sandboxTabs = (!hideBrowser || mobileConversation) && (
+    <SandboxTabs
+      sessionId={sessionId}
+      profile={session.data.profile}
+      activeTab={tab}
+      onTabChange={changeTab}
+      notice={scopeNotice}
+      sandbox={stream.sandbox}
+      viewsInMenu={!panel}
+      compact={mobileConversation}
+    />
+  );
+
+  const content = (
     <ComposerDropContext.Provider value={dropChannel}>
-    <div className="flex-1 flex flex-col min-h-0">
-      {panel ? (
-        <PanelHeader sessionId={sessionId} title={session.data.title} onClose={onClose} />
-      ) : (
-        <SessionHeader
-          session={session.data}
-          agentStatus={threadStatus.status}
-          turnStartedAt={threadStatus.turnStartedAt}
-          conn={stream.conn}
-          sandbox={stream.sandbox}
-          threadId={effectiveThreadId}
-          messages={stream.messages}
-        />
+    <div ref={viewRef} className="flex-1 flex flex-col min-h-0 min-w-0">
+      {mobileConversation && <MobileConversationToolbar>{sessionHeader}</MobileConversationToolbar>}
+      {(panel || tab !== "chat" || mobileNavigation) && (
+        <>
+          {mobileConversation ? null : panel ? (!hidePanelHeader && (renderPanelHeader ? renderPanelHeader(summaryControl) : <div className="flex shrink-0 items-center border-b border-line pr-3"><PanelHeader sessionId={sessionId} threadId={effectiveThreadId} title={session.data.title} onClose={onClose} />{summaryControl}</div>)) : sessionHeader}
+          {sandboxTabs}
+        </>
       )}
-      <SandboxTabs
-        sessionId={sessionId}
-        profile={session.data.profile}
-        activeTab={tab}
-        onTabChange={setTab}
-        sandbox={stream.sandbox}
-      />
       {tab === "chat" ? (
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <PageDropTarget>
-          <MessageList
-            messages={stream.messages}
-            threadId={effectiveThreadId}
-            onOpenChild={onOpenChild}
-            agentBusy={agentBusy}
-            pendingIds={threadQueueState?.pendingIds}
-            viewerId={me.data?.id}
-          />
-          {compacting && (
-            <div className="border-t border-[--border] px-4 py-1.5 text-[11px] text-muted">
-              Compacting context…
+          <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+            <ThreadReplyContext.Provider value={widgetReplyTarget}>
+            <ChildTitlesContext.Provider value={childTitles}>
+            {cover ? <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+              {!(panel || mobileNavigation) && <div className="sticky top-0 z-20 shrink-0 bg-paper">{sessionHeader}{sandboxTabs}</div>}
+              {cover}
+            </div> : (
+              <MessageList
+                footer={<AgentsLine children={childWork} threadId={effectiveThreadId} onOpenChild={onOpenChild} />}
+                header={panel || mobileNavigation ? undefined : <>{sessionHeader}{sandboxTabs}</>}
+                messages={stream.messages}
+                threadId={effectiveThreadId}
+                loading={messagesQ.isPending}
+                onShowEarlier={messagesQ.data?.hasMore && !fullHistory ? showEarlier : undefined}
+                loadingEarlier={fullHistory && messagesQ.isPlaceholderData}
+                onOpenChild={onOpenChild}
+                agentBusy={agentBusy}
+                pendingIds={threadQueueState?.pendingIds}
+                viewerId={me.data?.id}
+                onReply={enableReplies ? (target) => { edit.cancelEdit(); setReplyTarget(target); } : undefined}
+                {...edit.list}
+                onEdit={edit.list.onEdit && ((message) => { setReplyTarget(undefined); setBranchError(undefined); edit.startEdit(message); })}
+                onBranch={onOpenThread ? (message) => void branch(message) : undefined}
+                onBranchPrivately={onOpenThread && session.data?.owner.type === "team" ? (message) => void branch(message, "private") : undefined}
+                onOpenThread={onOpenThread}
+                newSince={recap?.divider ? { anchorId: recap.anchorId, label: recap.divider } : undefined}
+                emptyState={emptyState}
+              />
+            )}
+            </ChildTitlesContext.Provider>
+            </ThreadReplyContext.Provider>
+            {chatActive && !mobileBrowser && !hideBrowser && (browserWatch.mode === "open" || browserWatch.mode === "minimized") && (
+              <BrowserOverlay
+                key={JSON.stringify([sessionId, effectiveThreadId])}
+                sessionId={sessionId}
+                threadId={effectiveThreadId}
+                working={browserWatch.working}
+                minimized={browserWatch.mode === "minimized"}
+                onMinimize={browserWatch.minimize}
+                onRestore={browserWatch.open}
+                onClose={closeBrowserPreview}
+                onExpand={expandBrowserPreview}
+              />
+            )}
+          </div>
+          {chatActive && mobileBrowser && browserWatch.hasActivity && (
+            <MobileBrowser key={JSON.stringify([sessionId, effectiveThreadId])} sessionId={sessionId} threadId={effectiveThreadId} working={browserWatch.working} />
+          )}
+          {branchError && (
+            <div role="alert" className="border-t border-danger-500/30 bg-danger-500/5 px-4 py-2 text-xs text-danger-600">
+              {branchError}
             </div>
           )}
           {threadError && (
@@ -240,43 +548,79 @@ export function SessionView({
           {/* Keyed by gate id: the question input's draft must not carry
               over when the pending gate changes (e.g. a thread switch to a
               different pending gate). */}
+          <ThreadRecapDock recap={recap} collapsed={Boolean(pendingGate)} />
+          <PinnedPlan threadId={effectiveThreadId} live={workingLine} />
           {pendingGate && (
-            <DecisionGateCard key={pendingGate.id} sessionId={sessionId} gate={pendingGate} />
+            <DecisionGateCard key={pendingGate.id} sessionId={sessionId} gate={pendingGate} collapsible />
           )}
+          {!pendingGate && resolvedGate && <ResolvedGateNotice label={resolvedGate.label} title={resolvedGate.gate.title} className="mx-auto w-full max-w-[52rem]" />}
+          <ChildGateCards children={childWork} threadId={effectiveThreadId} onOpenChild={onOpenChild} />
+          {mobile && <QuickReplies sessionId={sessionId} threadId={effectiveThreadId} messages={stream.messages.filter(m => m.threadId === effectiveThreadId)}
+            disabled={Boolean(pendingGate) || threadStatus.status !== "idle" || Boolean(session.data?.readOnlyReason)} />}
+          <div className={mobile && pendingGate ? "hidden" : "contents"} aria-hidden={mobile && pendingGate ? true : undefined}>{composerAccessory}</div>
+          <TypingLine viewers={viewers} />
+          {/* While the task card shows a running turn, it carries this line: one row, one mascot. */}
+          <ProcessingStatus {...workingLine} inCard={progressCardActive} />
           {/* No key: drafts are per-thread in the composer-drafts store, so
               a thread switch swaps the draft without a remount (a remount
               would orphan in-flight uploads). */}
-          <Composer
+          <div className={responseFormActive ? "hidden" : "contents"} aria-hidden={responseFormActive || undefined}>
+          {session.data?.readOnlyReason ? <p className="border-t border-border px-4 py-3 text-sm text-muted" role="status">{session.data.readOnlyReason}</p> : <Composer
+            modelControlRef={(mobileConversation || !panel) && canCancelWork ? setComposerModelTarget : undefined}
+            active={chatActive && !responseFormActive}
             sessionId={sessionId}
             threadId={effectiveThreadId}
             agentStatus={threadStatus.status}
-          />
+            queuedMessages={queuedMessages}
+            queuedItemCount={threadQueueState?.pendingIds.length ?? 0}
+            replyTarget={replyTarget}
+            onCancelReply={() => setReplyTarget(undefined)}
+            {...edit.composer}
+            statusLine={
+              <BackgroundWorkStatusLine
+                sessionId={sessionId}
+                threadId={effectiveThreadId}
+                canCancel={canCancelWork}
+                className="mt-1.5 self-start"
+              />
+            }
+          />}
+          </div>
         </PageDropTarget>
+        </div>
+
+        </div>
       ) : null}
     </div>
     </ComposerDropContext.Provider>
   );
+  return mobileNavigation
+    ? <MobileConversationLayout view={mobileView} onViewChange={setMobileView}>{content}</MobileConversationLayout>
+    : content;
 }
 
 function PanelHeader({
   sessionId,
+  threadId,
   title,
   onClose,
 }: {
   sessionId: string;
+  threadId?: string;
   title?: string;
   onClose?: () => void;
 }) {
   return (
-    <header className="border-b border-line px-4 py-3 flex items-center gap-3">
+    <header className="min-w-0 flex-1 px-4 py-3 flex items-center gap-3">
       <div className="min-w-0 flex-1">
         <div className="text-sm font-semibold tracking-tight truncate text-ink">
-          {title || "Untitled session"}
+          {title || "Untitled thread"}
         </div>
       </div>
       <Link
         to="/sessions/$sessionId"
         params={{ sessionId }}
+        search={{ thread: threadId }}
         className="inline-flex items-center gap-1 text-xs text-muted hover:text-moss"
         aria-label="Open full page"
       >

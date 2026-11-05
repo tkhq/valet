@@ -1,3 +1,4 @@
+import { MID_TURN_DELIVERY_KEY, toolApprovalGateContext } from "@valet/engine";
 import type {
   CommandResultEntry,
   DeliveredBusEvent,
@@ -5,8 +6,11 @@ import type {
   DecisionResolution as EngineDecisionResolution,
   MessageEntry as EngineMessageEntry,
   MessagePart as EngineMessagePart,
+  QueueItem as EngineQueueItem,
   QueueState as EngineQueueState,
+  SignalContent as EngineSignalContent,
 } from "@valet/engine";
+import { gateApprover, isSharedAccountGate } from "../services/session-access.js";
 import type {
   DecisionGate as WireDecisionGate,
   DecisionGateProvenance,
@@ -15,7 +19,9 @@ import type {
   MessagePart as WireMessagePart,
   MessageSignal as WireMessageSignal,
   WireEvent,
+  WireQueuedItem,
 } from "../wire/types.js";
+import { QUEUED_TEXT_MAX } from "../wire/types.js";
 
 /**
  * Project an engine DecisionGate to its wire shape. Drops engine-only fields
@@ -23,10 +29,19 @@ import type {
  * commit us to a contract before we know what we want). The ONE typed
  * extraction is `context.provenance` (policy gates, action-policies spec
  * decision 4): the wire carries a validated `DecisionGateProvenance` so gate
- * surfaces can render WHY the gate opened.
+ * surfaces can render WHY the gate opened. `context.approver` rides along the
+ * same way, so a surface can say whose answer the gate waits on.
+ * `oneShot` and `riskLevel` come from the tool approval context the engine
+ * stamps (`toolApprovalGateContext`); the bell's bulk answer reads both.
+ * `tool` carries the gated call for a payload preview (see `gateTool`).
  */
 export function engineGateToWire(g: EngineDecisionGate): WireDecisionGate {
   const provenance = gateProvenance(g.context);
+  const approver = gateApprover(g);
+  const toolContext = g.type === "approval" ? toolApprovalGateContext(g.context) : null;
+  const oneShot = !isSharedAccountGate(g) && toolContext?.oneShot === true;
+  const riskLevel = WIRE_RISK_LEVELS.find((level) => level === toolContext?.riskLevel);
+  const tool = gateTool(g.body, toolContext);
   return {
     id: g.id,
     sessionId: g.sessionId,
@@ -34,13 +49,54 @@ export function engineGateToWire(g: EngineDecisionGate): WireDecisionGate {
     type: g.type,
     title: g.title,
     body: g.body,
+    agentReason: g.agentReason,
     actions: g.actions,
     expiresAt: g.expiresAt,
     status: g.status,
     createdAt: g.createdAt,
     updatedAt: g.updatedAt,
     ...(provenance ? { provenance } : {}),
+    ...(approver ? { approver } : {}),
+    ...(oneShot ? { oneShot: true as const } : {}),
+    ...(riskLevel ? { riskLevel } : {}),
+    ...(tool ? { tool } : {}),
   };
+}
+
+const WIRE_RISK_LEVELS = ["low", "medium", "high", "critical"] as const;
+
+/** A preview needs the start of a long message, not all of it. */
+const TOOL_ARG_MAX_CHARS = 4000;
+
+/** The gated call from a tool approval context. A gate whose body does not
+ * show this call's `tool_id=`/`args=` lines gets none: a shared-account gate
+ * replaces that body, and the wire must not show more than the body does. */
+function gateTool(
+  body: string | undefined,
+  context: ReturnType<typeof toolApprovalGateContext>,
+): WireDecisionGate["tool"] {
+  if (!context || !body?.includes(`tool_id=${context.toolId}\nargs=`)) return undefined;
+  return {
+    id: context.toolId,
+    ...(context.args ? { args: boundArgs(context.args) } : {}),
+  };
+}
+
+function boundArgs(args: object): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(args).map(([key, value]: [string, unknown]) => [key, boundArg(value)]));
+}
+
+/** Cuts every string at any depth to `TOOL_ARG_MAX_CHARS` code points, so a
+ * cut never splits a surrogate pair. */
+function boundArg(value: unknown): unknown {
+  if (typeof value === "string") {
+    if (value.length <= TOOL_ARG_MAX_CHARS) return value;
+    const points = [...value];
+    return points.length > TOOL_ARG_MAX_CHARS ? `${points.slice(0, TOOL_ARG_MAX_CHARS).join("")}…` : value;
+  }
+  if (Array.isArray(value)) return value.map(boundArg);
+  if (value !== null && typeof value === "object") return boundArgs(value);
+  return value;
 }
 
 const WIRE_APPROVAL_MODES: ReadonlySet<string> = new Set(["allow", "require_approval", "deny"]);
@@ -101,7 +157,7 @@ export function engineToWireParts(parts?: EngineMessagePart[]): WireMessagePart[
         });
         break;
       case "thinking":
-        out.push({ kind: "thinking", text: p.text });
+        out.push({ kind: "thinking", text: p.text, ...(p.summary !== undefined ? { summary: p.summary } : {}), ...(p.startedAt !== undefined ? { startedAt: p.startedAt } : {}), ...(p.durationMs !== undefined ? { durationMs: p.durationMs } : {}) });
         break;
       // attachment, error parts: dropped on the wire (UI ignores).
       case "attachment":
@@ -127,6 +183,9 @@ export function engineSignalToWire(
     signalType: signal.signalType,
     attributes: signal.attributes,
     senderSessionId: signal.senderSessionId,
+    // Only the channel type ships. The thread key is a host-side routing
+    // handle and stays off the wire.
+    ...(signal.origin ? { origin: { channelType: signal.origin.channelType } } : {}),
   };
 }
 
@@ -152,6 +211,7 @@ export function commandResultEntryToMessage(
     content: e.output,
     parts: [],
     createdAt: Number.isFinite(created) ? created : Date.now(),
+    sequence: e.sequence,
     queueItemId: e.queueItemId,
     command: {
       // Strip the leading slash from the stored command string.
@@ -182,12 +242,47 @@ export type WireEventDraft = WireEvent extends infer T
     : never
   : never;
 
+function isQueuedSignal(content: EngineQueueItem["content"]): content is EngineSignalContent {
+  return typeof content === "object" && "kind" in content && content.kind === "signal";
+}
+
 /**
- * Project the engine's full QueueState to a `queue.state` frame with id
- * lists — the live socket stays thin; the admin surface returns full items.
- * Shared by the bus-event path below and the WS handshake, which seeds one
- * frame per thread so a client connecting mid-turn sees the queue without
- * waiting for the next transition.
+ * One pending item as the composer's queued stack shows it: its text, cut
+ * to `QUEUED_TEXT_MAX`, and an attachment count, never the files.
+ */
+export function queuedItemToWire(item: EngineQueueItem): WireQueuedItem {
+  const content = item.content;
+  let text = "";
+  let signalType: string | undefined;
+  let attachments = 0;
+  if (typeof content === "string") {
+    text = content;
+  } else if (isQueuedSignal(content)) {
+    text = content.body;
+    // A named tag, such as "wakeup", names the kind. The engine's default
+    // tag "signal" names nothing, so a child's result reads as its
+    // signalType, "child.settled".
+    signalType = content.tagName && content.tagName !== "signal" ? content.tagName : content.signalType;
+    attachments = content.attachments?.length ?? 0;
+  } else {
+    text = content.text ?? "";
+    attachments = content.attachments?.length ?? 0;
+  }
+  return {
+    id: item.id,
+    text: text.length > QUEUED_TEXT_MAX ? `${text.slice(0, QUEUED_TEXT_MAX)}…` : text,
+    ...(signalType ? { signal: { type: signalType } } : {}),
+    midTurn: item.metadata?.[MID_TURN_DELIVERY_KEY] === true,
+    ...(attachments > 0 ? { attachments } : {}),
+  };
+}
+
+/**
+ * Project the engine's full QueueState to a `queue.state` frame: id lists,
+ * plus each pending item's text for the queued stack. Shared by the
+ * bus-event path below and the WS handshake, which seeds one frame per
+ * thread so a client connecting mid-turn sees the queue without waiting for
+ * the next transition.
  */
 export function queueStateToWire(
   sessionId: string,
@@ -203,7 +298,9 @@ export function queueStateToWire(
       status: state.status,
       activeItemId: state.activeItemId,
       pendingIds: state.pending.map((i) => i.id),
+      pending: state.pending.map(queuedItemToWire),
       collectingIds: (state.collectBuffer ?? []).map((i) => i.id),
+      collectDeadline: state.collectDeadline,
       blockedGateId: state.blockedGateId,
     },
   };
@@ -221,6 +318,10 @@ export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
           role: e.role === "system" ? "system" : "assistant",
         },
       ];
+
+    case "thinking_update":
+      return [{ type: "thinking_update", threadId: e.threadId, messageId: e.messageId, index: e.index,
+        part: { kind: "thinking", text: e.part.text, ...(e.part.summary !== undefined ? { summary: e.part.summary } : {}), startedAt: e.part.startedAt, durationMs: e.part.durationMs } }];
 
     case "text_delta":
       // Wire delta carries messageId so the client can target the right row.
@@ -287,6 +388,7 @@ export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
           toolName: e.tool,
           callId: e.callId,
           result: e.result,
+          ...(e.resultData !== undefined ? { resultData: e.resultData } : {}),
           isError: e.isError,
         },
       ];
@@ -297,6 +399,7 @@ export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
           type: "status",
           threadId: e.threadId,
           status: e.status,
+          ...(e.turnStartedAt !== undefined ? { turnStartedAt: e.turnStartedAt } : {}),
         },
       ];
 
@@ -407,6 +510,7 @@ export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
           queueItemId: e.queueItemId,
           outcome: e.outcome.outcome,
           error: e.outcome.error,
+          ...(e.mergedIntoItemId ? { mergedIntoItemId: e.mergedIntoItemId } : {}),
         },
       ];
 
@@ -418,6 +522,16 @@ export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
           threadId: e.threadId,
           sessionTitle: e.sessionTitle,
           threadTitle: e.threadTitle,
+        },
+      ];
+
+    case "thread_user_activity":
+      return [
+        {
+          type: "thread.activity",
+          sessionId: ev.sessionId,
+          threadId: e.threadId,
+          lastUserActivityAt: e.activityAt,
         },
       ];
 
@@ -443,6 +557,12 @@ export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
         },
       ];
 
+    case "turn_retry":
+      return [{ ...e }];
+
+    case "branch_switched":
+      return [{ type: "branch_switched", threadId: e.threadId, noteEntryId: e.noteEntryId }];
+
     // Out of agent-loop v1 scope — silently dropped. Future plans:
     // child-task events, thread lifecycle.
     case "thread_start":
@@ -450,6 +570,9 @@ export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
     case "task_end":
     // submission_stuck is an attention signal routed in Phase 4; no wire mapping yet.
     case "submission_stuck":
+    // principle_cited feeds memory usage and stays in the durable thread
+    // log. No client shows it yet.
+    case "principle_cited":
       return [];
 
     case "sandbox_status":

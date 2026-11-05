@@ -3,64 +3,104 @@
  * Consumes `GET /api/usage/breakdown`, `GET /api/usage/items`.
  * Routed through the central `api` client for 401→login handling.
  */
-import { useQuery, type UseQueryOptions } from "@tanstack/react-query";
+import { keepPreviousData, type UseQueryOptions } from "@tanstack/react-query";
 import type {
+  SessionOutcomeUsage,
+  ExternalUsageResponse,
   UsageDrillResponse,
+  UsagePeriodSelection,
   UsageBreakdownResponse,
-  UsageSessionsResponse,
   UsageScopeName,
+  UsageToolEfficiencyResponse,
+  UsageOutcomesResponse,
   UsageUseCase,
 } from "@valet/api/wire";
 import { api } from "~/api/client";
+import { useCancellableQuery } from "./use-cancellable-query";
 
 export const qkUsage = {
-  breakdown: (window: string, scope: UsageScopeName = "me", teamId?: string) =>
-    ["usage", "breakdown", window, scope, teamId] as const,
-  sessions: (window: string, useCase?: "orchestrator" | "session") =>
-    ["usage", "sessions", window, useCase] as const,
-  items: (window: string, scope: UsageScopeName, useCase: UsageUseCase, teamId?: string) =>
-    ["usage", "items", window, scope, useCase, teamId] as const,
+  sessionOutcomes: (period: UsagePeriodSelection, scope: UsageScopeName, teamId?: string) =>
+    ["usage", "session-outcomes", period, scope, teamId] as const,
+  external: (period: UsagePeriodSelection, scope: UsageScopeName, teamId: string | undefined, search: string, offset: number, surface?: string, key?: string) =>
+    ["usage", "external", period, scope, teamId, search, offset, surface, key] as const,
+  breakdown: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string) =>
+    ["usage", "breakdown", period, scope, teamId] as const,
+  items: (period: UsagePeriodSelection, scope: UsageScopeName, useCase: UsageUseCase, teamId?: string) =>
+    ["usage", "items", period, scope, useCase, teamId] as const,
+  toolEfficiency: (period: UsagePeriodSelection, scope: UsageScopeName, teamId?: string) =>
+    ["usage", "tool-efficiency", period, scope, teamId] as const,
+  outcomes: (period: UsagePeriodSelection, scope: UsageScopeName, teamId?: string) =>
+    ["usage", "outcomes", period, scope, teamId] as const,
 };
 
+export function useUsageOutcomes(
+  period: UsagePeriodSelection,
+  scope: UsageScopeName,
+  teamId?: string,
+  opts?: Partial<UseQueryOptions<UsageOutcomesResponse>>,
+) {
+  return useCancellableQuery<UsageOutcomesResponse>({
+    queryKey: qkUsage.outcomes(period, scope, teamId),
+    queryFn: ({ signal }) => api.usageOutcomes(period, scope, teamId, signal),
+    staleTime: 60_000,
+    ...opts,
+  });
+}
+
+export function useUsageToolEfficiency(
+  period: UsagePeriodSelection,
+  scope: UsageScopeName,
+  teamId?: string,
+  opts?: Partial<UseQueryOptions<UsageToolEfficiencyResponse>>,
+) {
+  return useCancellableQuery<UsageToolEfficiencyResponse>({
+    queryKey: qkUsage.toolEfficiency(period, scope, teamId),
+    queryFn: ({ signal }) => api.usageToolEfficiency(period, scope, teamId, signal),
+    staleTime: 60_000,
+    ...opts,
+  });
+}
+
 export function useUsageBreakdown(
-  window: string = "7d",
+  period: UsagePeriodSelection,
   scope: UsageScopeName = "me",
   teamId?: string,
   opts?: Partial<UseQueryOptions<UsageBreakdownResponse>>,
 ) {
-  return useQuery<UsageBreakdownResponse>({
-    queryKey: qkUsage.breakdown(window, scope, teamId),
-    queryFn: () => api.usageBreakdown(window, scope, teamId),
+  return useCancellableQuery<UsageBreakdownResponse>({
+    queryKey: qkUsage.breakdown(period, scope, teamId),
+    queryFn: ({ signal }) => api.usageBreakdown(period, scope, teamId, signal),
     staleTime: 60_000,
     ...opts,
   });
 }
 
 export function useUsageItems(
-  window: string,
+  period: UsagePeriodSelection,
   scope: UsageScopeName,
   useCase: UsageUseCase,
   teamId?: string,
   opts?: Partial<UseQueryOptions<UsageDrillResponse>>,
 ) {
-  return useQuery<UsageDrillResponse>({
-    queryKey: qkUsage.items(window, scope, useCase, teamId),
-    queryFn: () => api.usageItems(window, scope, useCase, teamId),
+  return useCancellableQuery<UsageDrillResponse>({
+    queryKey: qkUsage.items(period, scope, useCase, teamId),
+    queryFn: ({ signal }) => api.usageItems(period, scope, useCase, teamId, signal),
     staleTime: 60_000,
     ...opts,
   });
 }
 
-/** Kept for backward compatibility with any other callers. */
-export function useUsageSessions(
-  window: string = "7d",
-  useCase?: "orchestrator" | "session",
-  opts?: Partial<UseQueryOptions<UsageSessionsResponse>>,
-) {
-  return useQuery<UsageSessionsResponse>({
-    queryKey: qkUsage.sessions(window, useCase),
-    queryFn: () => api.usageSessions(window, useCase),
-    staleTime: 60_000,
-    ...opts,
+export function useExternalUsage(period: UsagePeriodSelection, scope: UsageScopeName, teamId: string | undefined,
+  search: string, offset: number, surface?: "hosted" | "mcp" | "cli", key?: string) {
+  return useCancellableQuery<ExternalUsageResponse>({
+    queryKey: qkUsage.external(period, scope, teamId, search, offset, surface, key),
+    queryFn: ({ signal }) => api.externalUsage(period, scope, teamId, search, offset, surface, signal, key),
+    staleTime: 30_000,
+    placeholderData: keepPreviousData,
   });
+}
+
+export function useSessionOutcomeUsage(period: UsagePeriodSelection, scope: UsageScopeName, teamId?: string) {
+  return useCancellableQuery<SessionOutcomeUsage>({ queryKey: qkUsage.sessionOutcomes(period, scope, teamId),
+    queryFn: ({ signal }) => api.sessionOutcomeUsage(period, scope, teamId, signal), staleTime: 30_000 });
 }

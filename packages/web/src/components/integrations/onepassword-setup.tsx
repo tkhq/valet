@@ -1,0 +1,333 @@
+import { useEffect, useState } from "react";
+import { errorText } from "~/lib/error-text";
+import { useConnectCredential, useDisconnectCredential } from "~/api/integrations";
+import {
+  Badge,
+  Button,
+  ConfirmDialog,
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  Input,
+} from "~/components/primitives";
+import { FieldRow } from "~/components/settings/field-row";
+import { CardHeading, IntegrationCard } from "./integration-card";
+
+/**
+ * The 1Password token controls, shared by the two pages that carry a token:
+ * Integrations holds your own, and Organization · 1Password holds the one
+ * the whole org shares. Both reach the same setup dialog, so the
+ * instructions are written once and a reader meets them wherever they start.
+ */
+
+/**
+ * Setup links. `www.1password.dev` is the current developer-docs host —
+ * `developer.1password.com` answers every path with a 301 to it. Creating a
+ * vault is an end-user task with no developer-docs page, so that one points
+ * at the support site.
+ */
+const OP_CREATE_VAULT_URL = "https://support.1password.com/create-share-vaults-teams/";
+const OP_SERVICE_ACCOUNT_URL = "https://www.1password.dev/service-accounts/get-started/";
+const OP_SECRET_REFERENCE_URL = "https://www.1password.dev/cli/secret-reference-syntax/";
+const VALET_SECRETS_GUIDE_URL =
+  "https://github.com/tkhq/valet/blob/dev-v2/docs/onepassword-secrets.md";
+
+/** Inline external link, the treatment the other setup pages already use. */
+const LINK = "text-moss underline";
+
+export type OnePasswordTokenScope = "personal" | "org";
+
+/**
+ * What each scope reads, in the reader's words. The dialog says this before
+ * it asks for a token, because pasting an org-wide service account into the
+ * personal row is the mistake that is hard to see afterwards.
+ */
+const SCOPE_COPY: Record<OnePasswordTokenScope, { title: string; reach: string; input: string }> = {
+  personal: {
+    title: "Connect your 1Password account",
+    reach: "This token is yours alone. It reads your own vaults, for runtimes you own.",
+    input: "1Password personal token",
+  },
+  org: {
+    title: "Connect 1Password for the organization",
+    reach:
+      "This token is shared across the organization. Every member's runtimes resolve org references through it.",
+    input: "Organization 1Password token",
+  },
+};
+
+/**
+ * The numbered setup steps. Rendered inside the setup dialog below on both
+ * token pages, and inside the team dialog on Organization · Teams.
+ *
+ * Step 2 can be refused: creating a service account needs a 1Password
+ * account permission, and 1Password answers "contact your administrator"
+ * without it (its own docs say to ask for access). That refusal stranded a
+ * reader on 1Password's screen with nothing to act on, so the steps name the
+ * condition and both ways out.
+ *
+ * The note is not scoped to the personal dialog. Valet cannot see anyone's
+ * 1Password permissions, and holding the org-admin role here says nothing
+ * about holding one in 1Password, so either reader can be refused.
+ */
+export function OnePasswordInstructions() {
+  return (
+    <div className="space-y-3 text-sm text-muted">
+      <ol className="list-decimal space-y-1 pl-5">
+        <li>
+          <a className={LINK} href={OP_CREATE_VAULT_URL} target="_blank" rel="noreferrer">
+            Create a vault
+          </a>{" "}
+          and put the items an agent needs into it.
+        </li>
+        <li>
+          <a className={LINK} href={OP_SERVICE_ACCOUNT_URL} target="_blank" rel="noreferrer">
+            Create a service account
+          </a>{" "}
+          with read access to that vault. 1Password shows the token once, so copy it before you
+          leave the screen.
+        </li>
+        <li>Paste the token below. Valet encrypts it and never shows it again.</li>
+      </ol>
+      <p>
+        If 1Password tells you to contact your administrator, your 1Password account cannot create
+        service accounts, and no Valet setting changes that. Ask a 1Password owner or administrator
+        for either of two things: permission to create and manage service accounts, or a service
+        account with read-only access to that vault alone. Have them send the token to you with a 1Password share
+        link, not in Slack or a chat. Keep the token outside every vault the service account can
+        read, for example in your own vault. If the token is in a vault it reads, an agent can read
+        its own token.
+      </p>
+      <p>
+        An item is addressed by a{" "}
+        <a className={LINK} href={OP_SECRET_REFERENCE_URL} target="_blank" rel="noreferrer">
+          secret reference
+        </a>
+        , written <span className="font-mono">op://Vault/Item/field</span>. The{" "}
+        <a className={LINK} href={VALET_SECRETS_GUIDE_URL} target="_blank" rel="noreferrer">
+          secrets guide
+        </a>{" "}
+        shows how an agent uses one.
+      </p>
+    </div>
+  );
+}
+
+/** The instructions and the token field, in one dialog. */
+export function OnePasswordSetupDialog({
+  scope,
+  open,
+  onOpenChange,
+}: {
+  scope: OnePasswordTokenScope;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const connect = useConnectCredential();
+  const [token, setToken] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const copy = SCOPE_COPY[scope];
+
+  // A dialog that keeps a typed token after it closes would offer it back on
+  // the next open, under a heading that may now name the other scope.
+  useEffect(() => {
+    if (!open) {
+      setToken("");
+      setError(null);
+      connect.reset();
+    }
+    // `connect` is a stable mutation handle; re-running on it would loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  async function save() {
+    const trimmed = token.trim();
+    if (!trimmed) return;
+    setError(null);
+    try {
+      await connect.mutateAsync({
+        service: "onepassword",
+        body:
+          scope === "org"
+            ? { type: "service_account", apiKey: trimmed, scope: "org" }
+            : { type: "service_account", apiKey: trimmed },
+      });
+      onOpenChange(false);
+    } catch (err) {
+      setError(errorText(err, "Couldn't save the token."));
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent title={copy.title} description={copy.reach}>
+        <OnePasswordInstructions />
+        <div className="mt-4 space-y-2">
+          <Input
+            type="password"
+            aria-label={copy.input}
+            value={token}
+            onChange={(e) => setToken(e.target.value)}
+            placeholder="ops_…"
+          />
+          {error && <p className="text-xs text-danger-500">{error}</p>}
+        </div>
+        <DialogFooter>
+          <Button type="button" variant="secondary" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            disabled={connect.isPending || !token.trim()}
+            onClick={() => void save()}
+          >
+            {connect.isPending ? "Saving…" : "Connect"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
+ * A token row the reader may change: the status, and the controls that open
+ * the setup dialog or remove what is there.
+ */
+export function OnePasswordTokenRow({
+  label,
+  hint,
+  ...controls
+}: OnePasswordTokenControlsProps & { hint: string }) {
+  return (
+    <FieldRow label={label} hint={hint}>
+      <OnePasswordTokenControls label={label} {...controls} />
+    </FieldRow>
+  );
+}
+
+const REMOVE_PERSONAL_TOKEN_NOTE =
+  "This token is yours alone. Credentials that read their secret through it stop resolving for " +
+  "you, and other members and the organization token are not affected. You can connect a new " +
+  "token here.";
+
+/**
+ * Your own token as a row on personal Integrations. A personal service
+ * account token needs no organization permission, so a member never opens
+ * an Organization page to set one up (TKAI-487).
+ */
+export function PersonalOnePasswordRow({ connected }: { connected: boolean }) {
+  return (
+    <IntegrationCard>
+      <CardHeading
+        compact
+        title="1Password"
+        slug="onepassword"
+        description="Lets an agent read a credential from your vaults instead of you pasting it."
+        right={
+          <OnePasswordTokenControls
+            scope="personal"
+            connected={connected}
+            label="1Password"
+            removeNote={REMOVE_PERSONAL_TOKEN_NOTE}
+          />
+        }
+      />
+    </IntegrationCard>
+  );
+}
+
+interface OnePasswordTokenControlsProps {
+  scope: OnePasswordTokenScope;
+  connected: boolean;
+  label: string;
+  removeNote: string;
+}
+
+function OnePasswordTokenControls({ scope, connected, label, removeNote }: OnePasswordTokenControlsProps) {
+  const disconnect = useDisconnectCredential();
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState(false);
+
+  return (
+    <>
+      <div className="flex flex-wrap items-center gap-2" role="group" aria-label={label}>
+        {connected ? (
+          <>
+            <Badge variant="success">Connected</Badge>
+            <Button type="button" variant="ghost" size="sm" onClick={() => setSetupOpen(true)}>
+              Replace
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={disconnect.isPending}
+              onClick={() => {
+                // Radix fires no `onOpenChange(true)` here, so the stale
+                // refusal is cleared on open.
+                disconnect.reset();
+                setConfirmRemove(true);
+              }}
+            >
+              {disconnect.isPending ? "Removing…" : "Remove token"}
+            </Button>
+          </>
+        ) : (
+          <Button type="button" size="sm" onClick={() => setSetupOpen(true)}>
+            Connect 1Password
+          </Button>
+        )}
+      </div>
+
+      <OnePasswordSetupDialog scope={scope} open={setupOpen} onOpenChange={setSetupOpen} />
+
+      <ConfirmDialog
+        open={confirmRemove}
+        onOpenChange={setConfirmRemove}
+        title={scope === "org" ? "Remove the organization 1Password token?" : "Remove your personal 1Password token?"}
+        description={removeNote}
+        confirmLabel="Remove token"
+        pendingLabel="Removing…"
+        pending={disconnect.isPending}
+        error={disconnect.error != null ? errorText(disconnect.error) : undefined}
+        onConfirm={() =>
+          disconnect.mutate(
+            scope === "org" ? { service: "onepassword", scope: "org" } : { service: "onepassword" },
+            { onSuccess: () => setConfirmRemove(false) },
+          )
+        }
+      />
+    </>
+  );
+}
+
+/**
+ * A token row the reader may not change: the same labelled row, with the
+ * status where the controls are and a line naming who can change it.
+ * Read-only rather than hidden — a reader who cannot find the row cannot
+ * tell a missing token from a page that is not showing it.
+ */
+export function OnePasswordTokenStatus({
+  connected,
+  label,
+  hint,
+  note,
+}: {
+  connected: boolean;
+  label: string;
+  hint: string;
+  note: string;
+}) {
+  return (
+    <FieldRow label={label} hint={hint}>
+      <div className="space-y-1" role="group" aria-label={label}>
+        {connected ? (
+          <Badge variant="success">Connected</Badge>
+        ) : (
+          <p className="text-sm text-ink">Not connected</p>
+        )}
+        <p className="text-xs text-muted">{note}</p>
+      </div>
+    </FieldRow>
+  );
+}

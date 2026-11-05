@@ -314,10 +314,103 @@ After adding the new actions and skill:
 - Run `make generate-registries` to update the content registry with the new skill.
 - The skill is delivered to sandboxes via the Runner WebSocket (existing content plugin mechanism).
 
+### 6. Channel Names on Read Results
+
+Added 2026-09-16.
+
+A Slack read takes a channel ID and returned that same ID back. The agent then
+reasoned and wrote about `C0A8DNWV9FS` although Slack knows the channel is
+`#alerts`. Mentions inside message text were already resolved, so the gap was
+the channel that was read.
+
+#### Where a name comes from
+
+A name comes from a `conversations.info` response and from nowhere else.
+
+The private-channel guard reads `conversations.info` for every guarded action.
+`guardPrivateChannel` returns that name with its access answer, and the three
+read actions build `channel_name` from it. The channel that is read therefore
+costs no extra request, and message content cannot reach the field. The guard
+runs on each read, so a rename reaches the result on the next read.
+
+A channel mention in message text can carry a label, as in `<#C123|general>`.
+Slack keeps a label as the author wrote it at post time and does not rewrite it
+on a rename, and the sender of a message chooses that text. A label is
+therefore not a name. It labels the one message that holds it, and it never
+enters the cache.
+
+#### The name cache
+
+`packages/plugin-slack/src/actions/channel-names.ts` holds one bounded map for
+the names of mentioned channels:
+
+```typescript
+export function rememberChannelName(token: string, channelId: string, name: string | null): void;
+export function cachedChannelName(token: string, channelId: string): string | undefined;
+export async function resolveChannelName(token: string, channelId: string): Promise<string | undefined>;
+```
+
+Each key holds the channel ID and a one-way fingerprint of the token that read
+the name. One API process serves more than one Slack workspace, and a name that
+one token can read must not label a channel for a token that cannot read it.
+The cache keeps no token.
+
+The map holds 256 entries and drops the oldest entry first. A `null` value
+records a conversation that Slack gives no name, such as a direct message,
+which keeps a lookup that cannot succeed from running again. A failed lookup is
+not cached, so the next read retries it.
+
+Two callers fill the cache. The guard writes the name of the channel it
+checked, because message text can mention that same channel.
+`resolveChannelName` writes the name of a mentioned channel that no guard
+checked. `resolveAndEnrichMessages` uses this cache instead of its own map.
+
+#### Mention text
+
+`resolveAndEnrichMessages` names a mention in this order:
+
+1. The cached name, as `#alerts (C123)`.
+2. The label in the mention, as `#alerts`.
+3. The raw ID, as `#C123`.
+
+A mention with a label costs no request. A resolved name takes the shape that
+bare mentions already used, and it wins over a label because Slack can have
+renamed the channel since the message. The transport enrichment
+(`packages/plugin-slack/src/transport/text-enrich.ts`) reads no names and
+renders a labeled mention as `#alerts`, so the two paths differ for a mention
+whose channel this cache knows. That difference is deliberate: the action path
+serves an agent that reads history and must name a channel as Slack names it
+now, and the transport path cleans one inbound message for the prompt.
+
+#### Result shape
+
+`slack.read_history`, `slack.read_thread`, and `slack.get_pins` return the
+channel ID in `channel` and the readable name in `channel_name`:
+
+```json
+{
+  "channel": "C0A8DNWV9FS",
+  "channel_name": "alerts",
+  "total": 2,
+  "messages": []
+}
+```
+
+`channel_name` is omitted when the name is unknown. The name is for prose the
+agent writes; the ID stays the value for tool arguments and follow-up actions.
+The action descriptions and the `slack-tools` skill say which field to use
+where.
+
+A name lookup never fails a read. `resolveChannelName` returns undefined for a
+transport error, a Slack error envelope, and a response with no name. The
+mention then keeps its label or its raw ID, and the read still returns its
+messages. The access guard is a separate check and keeps its own error path: a
+channel Valet cannot read still fails with the access error.
+
 ## What This Does NOT Cover
 
 - **Slack search** (`search.messages`) — requires user-level OAuth tokens, which is a separate project.
 - **Thread summaries** — expensive (API call per threaded message) and the agent can already `read_thread` selectively.
 - **Video/audio file content** — `fetch_file` handles images and text; other media types return metadata only.
 - **Outbound file uploads** — agent sending files to Slack (separate feature).
-- **Caching beyond module-level Maps** — centralized caching (KV, D1) for entity resolution is a future optimization.
+- **Caching beyond module-level Maps.** Centralized caching (KV, D1) for entity resolution is a future optimization. The channel name cache is bounded (section 6). The user and bot maps are not.

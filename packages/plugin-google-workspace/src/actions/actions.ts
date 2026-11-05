@@ -1,6 +1,7 @@
 import type { ActionPlugin, PluginAction, PluginActionContext, PluginActionResult } from '@valet/engine';
 import { driveActions } from './drive-actions.js';
 import { docsActions } from './docs-actions.js';
+import { slidesActions } from './slides-actions.js';
 import { sheetsActions } from './sheets-actions.js';
 import {
   classifyAction,
@@ -210,12 +211,12 @@ function withLabelsGuard(action: PluginAction): PluginAction {
   };
 }
 
-const allActions: PluginAction[] = [...driveActions, ...docsActions, ...sheetsActions].map(withLabelsGuard);
+const allActions: PluginAction[] = [...driveActions, ...docsActions, ...sheetsActions, ...slidesActions].map(withLabelsGuard);
 
 // Service id preserved verbatim from the legacy provider (see provider.ts /
 // worker resolvers) — this is the credential lookup key.
 export const googleWorkspacePlugin: ActionPlugin = {
   service: 'google_workspace',
-  description: 'Google Workspace integration — Drive, Docs, and Sheets with unified OAuth and labels-based access guard',
+  description: 'Google Workspace integration — Drive, Docs, Sheets, and Slides with unified OAuth and labels-based access guard',
   actions: allActions,
 };

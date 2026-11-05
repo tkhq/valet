@@ -36,8 +36,8 @@
  *
  * ── Why every template here is manual ──
  *
- * A scheduled run puts `{ scheduleName, cron, input }` in `trigger.data`
- * and applies NO `dataSchema` defaults (`scheduler.ts`). A schedule
+ * A scheduled run fills `trigger.data` only from the schedule's static
+ * input and `dataSchema` defaults (`scheduledTriggerData`). A schedule
  * therefore cannot deliver the per-run text these templates work on. Adding
  * a cron would make each one read null every night, forever, and nothing
  * would report it. They collect their inputs in the run form instead.
@@ -344,17 +344,17 @@ export const builtinWorkflowTemplates: WorkflowTemplate[] = [
     name: "Break a spec into ordered tasks",
     description:
       "Turn a spec into a dependency-ordered task list with sizes, risks, and the questions the spec leaves " +
-      "open, then hand it to your orchestrator to review with you.",
+      "open, then hand it to your workspace assistant to review with you.",
     category: "planning",
     apps: ["claude"],
     steps: [
       "Paste the spec, and the team context if it helps.",
       "Break it into tasks, each with a reason, a size, and its dependencies.",
       "Collect the risks and the questions the spec leaves open.",
-      "Hand the list to your orchestrator, which posts it and waits.",
+      "Hand the list to your workspace assistant, which posts it and waits.",
     ],
     caveats: [
-      "It files nothing. The orchestrator holds the list until you say which tasks to create.",
+      "It files nothing. The assistant holds the list until you say which tasks to create.",
       "Sizes are an estimate from the spec text alone.",
     ],
     definition: specToTasks,

@@ -6,12 +6,13 @@
  * "does the shell parse this back to the original bytes", not "does it look
  * like some particular escaping convention".
  */
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import {
   buildShellCommand,
   execInPod,
   exitCodeFromStatus,
+  ROOT_TMPDIR_PREFIX,
   shQuote,
   wrapAsWorkloadUser,
   type ExecDeps,
@@ -81,6 +82,18 @@ describe("buildShellCommand", () => {
     expect(built).toContain(`export FOO=${shQuote("bar baz")}`);
   });
 
+  it("prepends the trusted CA flag to a caller NODE_OPTIONS", () => {
+    const run = (value: string) => {
+      const built = buildShellCommand("printf %s \"$NODE_OPTIONS\"", { env: { NODE_OPTIONS: value } });
+      return spawnSync("/bin/sh", ["-c", built], { encoding: "utf8" }).stdout;
+    };
+    expect(run("--max-old-space-size=256")).toBe("--use-openssl-ca --max-old-space-size=256");
+    expect(run("--max-old-space-size=256 --use-openssl-ca")).toBe("--use-openssl-ca --max-old-space-size=256 --use-openssl-ca");
+    expect(run('--title="has --use-openssl-ca inside"')).toBe('--use-openssl-ca --title="has --use-openssl-ca inside"');
+    expect(run("")).toBe("--use-openssl-ca");
+    expect(run("--use-system-ca")).toBe("--use-openssl-ca --use-system-ca");
+  });
+
   it("rejects env var names that aren't valid shell identifiers", () => {
     expect(() => buildShellCommand("echo", { env: { "not-valid": "x" } })).toThrow();
     expect(() => buildShellCommand("echo", { env: { "1LEADING": "x" } })).toThrow();
@@ -102,6 +115,11 @@ const SETPRIV_PREFIX =
   "env HOME=/home/dockerd USER=dockerd LOGNAME=dockerd /bin/sh -c ";
 
 describe("wrapAsWorkloadUser", () => {
+  it("scrubs the browser signing secret while still root, before switching to the workload UID", () => {
+    const command=wrapAsWorkloadUser("echo hi",true);
+    expect(command).toContain("exec /usr/bin/env -u VALET_SANDBOX_JWT_SECRET /usr/bin/setpriv --reuid dockerd");
+    expect(command).toContain("--no-new-privs /usr/bin/env");
+  });
   it("wraps the shell command in the exact setpriv prefix, single-quoted", () => {
     expect(wrapAsWorkloadUser("echo hi")).toBe(`${SETPRIV_PREFIX}${shQuote("echo hi")}`);
   });
@@ -156,19 +174,19 @@ describe("execInPod workload-user wrapping", () => {
     expect(api.commands[0]).toEqual(["/bin/sh", "-c", `${SETPRIV_PREFIX}${shQuote("echo hi")}`]);
   });
 
-  it("docker-enabled + privileged stays unwrapped", async () => {
+  it("docker-enabled + privileged stays unwrapped and uses the root temp dir", async () => {
     const { deps: d, api } = deps(true);
     await execInPod(d, "pod-1", "echo hi", { privileged: true });
-    expect(api.commands[0]).toEqual(["/bin/sh", "-c", "echo hi"]);
+    expect(api.commands[0]).toEqual(["/bin/sh", "-c", `${ROOT_TMPDIR_PREFIX}echo hi`]);
   });
 
-  it("non-docker sandboxes stay unwrapped either way", async () => {
+  it("non-docker sandboxes stay unwrapped either way and use the root temp dir", async () => {
     const { deps: d, api } = deps(false);
     await execInPod(d, "pod-1", "echo hi");
     await execInPod(d, "pod-1", "echo hi", { privileged: true });
     expect(api.commands).toEqual([
-      ["/bin/sh", "-c", "echo hi"],
-      ["/bin/sh", "-c", "echo hi"],
+      ["/bin/sh", "-c", `${ROOT_TMPDIR_PREFIX}echo hi`],
+      ["/bin/sh", "-c", `${ROOT_TMPDIR_PREFIX}echo hi`],
     ]);
   });
 
@@ -210,5 +228,36 @@ describe("exitCodeFromStatus", () => {
 
   it("rejects a failure when causes is empty", () => {
     expect(() => exitCodeFromStatus({ status: "Failure", details: { causes: [] } })).toThrow("no process exit status");
+  });
+});
+
+
+describe("exec stdin transport lifetime", () => {
+  it.each(["", "hello\n", "🚀".repeat(262_144)])("delivers complete stdin before transport closure (%#)", async (input) => {
+    let prematureClose = false;
+    const api: PodExecApi = {
+      async exec(_namespace, _pod, _container, command, stdout, stderr, stdin, _tty, statusCallback) {
+        const child = spawn("/bin/sh", command.slice(1));
+        if (stdout) child.stdout.pipe(stdout);
+        if (stderr) child.stderr.pipe(stderr);
+        if (stdin) {
+          stdin.pipe(child.stdin);
+          stdin.on("end", () => {
+            prematureClose = true;
+            child.kill();
+          });
+        }
+        child.on("close", (code) => statusCallback?.({
+          status: "Failure",
+          reason: "NonZeroExitCode",
+          details: { causes: [{ reason: "ExitCode", message: String(code ?? 1) }] },
+        }));
+        return { close: () => { child.kill(); } };
+      },
+    };
+    const result = await execInPod({ api, namespace: "test", containerName: "test" }, "test", "cat; exit 7", { stdin: input });
+    expect(result.stdout).toBe(input);
+    expect(result.exitCode).toBe(7);
+    expect(prematureClose).toBe(false);
   });
 });

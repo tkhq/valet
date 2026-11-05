@@ -106,6 +106,14 @@ describe("PolicyOverridesSection — create", () => {
 });
 
 describe("PolicyOverridesSection — list + delete", () => {
+  it("identifies legacy allow overrides as inactive", () => {
+    overridesData = { overrides: [{ id: "legacy", service: "gmail", actionId: null,
+      riskLevel: null, mode: "allow", legacyUnscoped: true, paramMatchers: [], createdAt: 0, updatedAt: 0 }] };
+    render(<PolicyOverridesSection />);
+    expect(screen.getByText("Reapproval required")).toBeTruthy();
+    expect(screen.getByText(/This legacy permission is inactive/)).toBeTruthy();
+  });
+
   it("renders existing overrides and deletes by target, not by id", async () => {
     const user = userEvent.setup();
     overridesData = {

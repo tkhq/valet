@@ -22,11 +22,19 @@
  *      (`services/credential-resolution.ts#resolveTeamCredentialRead`,
  *      stopped at the team row).
  *   3. The service is in `orgProvidedServiceSet` (an org-mode connection
- *      every member already rides).
+ *      every member already rides). For a native service, a node pinned
+ *      `"user"` does not count that org row: it is the app identity, and
+ *      the run refuses the pin without a person's credential.
  *   4. Every tool node naming that service pins `credential: "app"` and
- *      the organization has an active App installation. A literal owner
- *      must match; a repository supplied later is verified during template
- *      installation before GitHub event subscriptions are written.
+ *      the app identity answers. For github that is an active App
+ *      installation: a literal owner must match, and a repository supplied
+ *      later is verified during template installation before GitHub event
+ *      subscriptions are written. For another native service it is the
+ *      service's app credential (the Linear app token, the Slack bot row).
+ *      A non-native service cannot pin `"app"`, so it is blocked.
+ *      An unpinned node of a native service whose app credential is an org
+ *      row (Linear) is ready on that app token when no team credential
+ *      answers, as the run reads it (native credential policy, Part B).
  *   5. Every unpinned github node (no `credential`, or `"auto"`) has an App
  *      installation to act through: the one for the node's literal `owner`
  *      parameter, or the org's sole one
@@ -63,9 +71,13 @@ import type { AppDb } from "../lib/drizzle.js";
 import { workflowDefinitions } from "../schema/index.js";
 import { credentialSecret } from "@valet/engine";
 import { CredentialReferenceBrokenError, TeamCredentialStore } from "../plugins/team-credential-store.js";
+import { listTeamShares, membersSharing } from "../services/credential-shares.js";
 import {
+  isAppCredentialRowService,
   lookupInOnePassword,
+  nativeAppCredentialServiceFor,
   onePasswordScopesFor,
+  resolveNativeAppCredentialRead,
   resolveTeamCredentialRead,
 } from "../services/credential-resolution.js";
 import { installationResolvesFor, isUsableGithubUserRow } from "../services/github-tokens.js";
@@ -100,11 +112,23 @@ export interface UnverifiableWorkflowCall {
   reason: string;
 }
 
+/**
+ * A service that is ready, but under a condition the team should repair.
+ * A warning never blocks an install or an arm — the run resolves the
+ * credential — so it carries the corrective action and nothing else.
+ */
+export interface TeamServiceWarning {
+  service: string;
+  reason: string;
+}
+
 export interface TeamServiceReadiness {
   ready: string[];
   organizationProvided?: string[];
   blocked: BlockedTeamService[];
   unverifiable: UnverifiableWorkflowCall[];
+  /** Repairs worth reporting on a ready service. Never a refusal. */
+  warnings: TeamServiceWarning[];
 }
 
 export interface TeamReadinessRefusal {
@@ -207,7 +231,7 @@ function credentialFreeServices(plugins: ValetPlugin[]): Set<string> {
  * `broken` is a delegated reference whose delegator left the team or lost
  * the source row. `refused` is a row the run's read rejects with a typed
  * message: a 1Password reference no client can dereference. `empty` is a stub with no secret and no
- * delegation, which gates like no row at all so an org-provided service is
+ * share, which gates like no row at all so an org-provided service is
  * not blocked by it.
  */
 type TeamRowState = { kind: "resolves" } | { kind: "broken" } | { kind: "refused"; reason: string } | { kind: "empty" };
@@ -219,16 +243,18 @@ type TeamRowState = { kind: "resolves" } | { kind: "broken" } | { kind: "refused
  * would refuse on every fire is blocked with the message the run gives.
  */
 async function teamRowState(
-  deps: { credentials: TeamCredentialStore; onePassword?: OnePasswordService },
+  deps: { credentials: TeamCredentialStore; onePassword?: OnePasswordService; shares: (teamId: string, service: string) => Promise<string[]> },
   orgId: string,
   teamId: string,
   service: string,
 ): Promise<TeamRowState> {
   let row: StoredCredential | null;
   try {
+    // Any member's working share counts: a run uses its creator's own share,
+    // or asks the member whose share it would use.
     row = await resolveTeamCredentialRead(
       deps,
-      { orgId, teamId, userId: "", scopes: onePasswordScopesFor("team", teamId) },
+      { orgId, teamId, userId: "", scopes: onePasswordScopesFor("team", teamId), mayBorrow: async () => true },
       service,
       "none",
     );
@@ -314,6 +340,16 @@ async function unpinnedGithubGate(
   return { ready: true };
 }
 
+/** The fix for a native service pinned `"user"` that only the org's app
+ * identity answers. The run refuses it (`plugins/action-invoker.ts`). */
+function userPinnedOrgRowReason(service: string): string {
+  return (
+    `This workflow has ${service} nodes that use the "user" credential, and this team has no ${service} credential of a person. ` +
+    `The organization ${service} connection is the app identity, so it does not count. ` +
+    `Connect a ${service} credential for the team, or remove the credential field from those nodes.`
+  );
+}
+
 export async function teamServiceReadiness(
   deps: TeamServiceReadinessDeps,
   opts: {
@@ -335,16 +371,11 @@ export async function teamServiceReadiness(
       `another owner, so the call fails on every run. Reference a workflow this team owns, or remove the call.`,
   }));
   const services = [...new Set(nodes.map((node) => node.service))];
-  if (services.length === 0) return { ready: [], blocked: [], unverifiable };
+  if (services.length === 0) return { ready: [], blocked: [], unverifiable, warnings: [] };
   const credentialFree = credentialFreeServices(deps.plugins);
 
-  // A team row is read through the same decorator a run resolves it with,
-  // so a delegated reference counts only while it still follows to a live
-  // member's row. Wrapping a store that already follows references is a
-  // no-op: the inner store returns the source row, and the outer keeps it.
-  const store = new TeamCredentialStore(deps.credentials, {
-    isMember: (teamId, userId) => isTeamMember(deps.db, teamId, userId),
-  });
+  // A team row is read through the same decorator a run resolves it with.
+  const store = new TeamCredentialStore(deps.credentials);
 
   const env = deps.env ?? process.env;
   const [teamRows, orgProvided] = await Promise.all([
@@ -356,11 +387,12 @@ export async function teamServiceReadiness(
       env,
     }),
   ]);
-  const teamServices = new Set(teamRows.map((row) => row.service));
+  const teamServices = new Set([...teamRows.map((row) => row.service), ...(await listTeamShares(deps.db, opts.teamId)).map((share) => share.service)]);
 
   const ready: string[] = [];
   const organizationProvided: string[] = [];
   const blocked: BlockedTeamService[] = [];
+  const warnings: TeamServiceWarning[] = [];
   for (const service of services) {
     if (credentialFree.has(service)) {
       ready.push(service);
@@ -368,22 +400,45 @@ export async function teamServiceReadiness(
     }
     const forService = nodes.filter((node) => node.service === service);
     const appNodes = forService.filter((node) => node.credential === "app");
+    // The native app identity behind this service, other than GitHub's
+    // installation, which has its own conditions (native credential policy,
+    // Part E). `undefined` for a service that is not native.
+    const appService = service === "github" ? undefined : nativeAppCredentialServiceFor(deps.plugins, service);
+    const appAnswers = appService
+      ? (await resolveNativeAppCredentialRead({ credentials: deps.credentials, onePassword: deps.onePassword }, { orgId: opts.orgId }, service, appService, deps.plugins)) !== null
+      : false;
     // App pins never borrow a team token, including mixed App/user definitions.
     if (appNodes.length > 0) {
+      if (service !== "github" && !appService) {
+        // The invoker refuses this node on every run (`plugins/action-invoker.ts`).
+        blocked.push({
+          service,
+          reason: `The ${service} service cannot select an "app" credential. Remove the credential field from its tool nodes.`,
+        });
+        continue;
+      }
       if (appNodes.length === forService.length) organizationProvided.push(service);
-      let appReady = true;
-      for (const node of appNodes) {
-        const result = await installationResolvesFor(
-          { db: deps.db, credentials: deps.credentials, env }, opts.orgId, literalRepoOwner(node.params),
-          { strictOwner: true, dynamicOwner: typeof node.params.owner === "string" && node.params.owner.includes("{{") },
-        );
-        if (!result.ok) {
-          appReady = false;
-          break;
+      let appReady = appAnswers;
+      if (service === "github") {
+        appReady = true;
+        for (const node of appNodes) {
+          const result = await installationResolvesFor(
+            { db: deps.db, credentials: deps.credentials, env }, opts.orgId, literalRepoOwner(node.params),
+            { strictOwner: true, dynamicOwner: typeof node.params.owner === "string" && node.params.owner.includes("{{") },
+          );
+          if (!result.ok) {
+            appReady = false;
+            break;
+          }
         }
       }
       if (!appReady) {
-        blocked.push({ service, reason: "The organization GitHub App needs an active installation for this workflow. An admin can configure or refresh installations in Settings → Organization → GitHub." });
+        blocked.push({
+          service,
+          reason: service === "github"
+            ? "The organization GitHub App needs an active installation for this workflow. An admin can configure or refresh installations in Settings → Organization → GitHub."
+            : `This workflow acts as the ${service} app, and the ${service} app is not connected for this organization. An admin can connect it in Settings → Organization.`,
+        });
         continue;
       }
       if (appNodes.length === forService.length) {
@@ -391,9 +446,19 @@ export async function teamServiceReadiness(
         continue;
       }
     }
+    // An unpinned node of a native service with a row-backed app credential
+    // ends at the app token when no team credential answers (Part B). A
+    // `"user"` pin never reaches it, so it keeps the team-row path.
+    const userPinned = forService.some((node) => node.credential === "user");
+    const appTierCovers = appAnswers && appService !== undefined && isAppCredentialRowService(appService) && !userPinned;
+    // For a native service, an org-provided org row is the app identity
+    // (the Slack bot, the Linear app), not a person's credential. The
+    // invoker reads it only as a 1Password reference for a `"user"` pin
+    // (`plugins/action-invoker.ts`), so it does not arm that pin here.
+    const orgRowAnswers = orgProvided.has(service) && !(appService !== undefined && userPinned);
     if (teamServices.has(service)) {
       const state = await teamRowState(
-        { credentials: store, onePassword: deps.onePassword },
+        { credentials: store, onePassword: deps.onePassword, shares: (teamId, svc) => membersSharing(deps.db, teamId, svc) },
         opts.orgId,
         opts.teamId,
         service,
@@ -402,7 +467,37 @@ export async function teamServiceReadiness(
         ready.push(service);
         continue;
       }
+      if (state.kind === "broken" && appTierCovers) {
+        // The run reaches the app token past a broken share or a dead team
+        // connection, and counts it as `dead_delegated`. The share is still
+        // worth repairing, so it reports as a warning.
+        ready.push(service);
+        warnings.push({
+          service,
+          reason:
+            `${service} was shared by a member who is no longer on the team, or whose connection is gone. ` +
+            `Runs use the ${service} app instead. Share it again, or store a team credential.`,
+        });
+        continue;
+      }
       if (state.kind === "broken") {
+        // The run does not stop here when the organization provides the
+        // service: `resolveTeamCredentialRead` falls through to the org
+        // row once the shared account breaks. Readiness gives the run's
+        // answer, or a team's workflows stay disarmed while every run of
+        // them succeeds. The broken row is still worth repairing, so it
+        // reports as a warning that blocks nothing.
+        if (orgRowAnswers) {
+          organizationProvided.push(service);
+          ready.push(service);
+          warnings.push({
+            service,
+            reason:
+              `${service} was shared by a member who is no longer on the team, or whose connection is gone. ` +
+              `Runs use the organization credential instead. Remove the team credential, or share it again.`,
+          });
+          continue;
+        }
         blocked.push({
           service,
           reason:
@@ -416,7 +511,12 @@ export async function teamServiceReadiness(
         continue;
       }
     }
-    if (orgProvided.has(service)) {
+    if (orgRowAnswers) {
+      organizationProvided.push(service);
+      ready.push(service);
+      continue;
+    }
+    if (appTierCovers) {
       organizationProvided.push(service);
       ready.push(service);
       continue;
@@ -430,7 +530,6 @@ export async function teamServiceReadiness(
     let needsOrganizationGithub = false;
     if (service === "github") {
       const unpinned = forService.filter((node) => node.credential === undefined || node.credential === "auto");
-      const userPinned = forService.some((node) => node.credential === "user");
       const gate = unpinned.length > 0 ? await unpinnedGithubGate(deps, opts.orgId, unpinned) : { ready: true as const };
       if (gate.ready && !userPinned) {
         organizationProvided.push(service);
@@ -491,8 +590,10 @@ export async function teamServiceReadiness(
     if (needsOrganizationGithub) organizationProvided.push(service);
     blocked.push({
       service,
-      reason: unpinnedReason ?? `Connect ${service} for this team.`,
+      reason: unpinnedReason ?? (appService !== undefined && userPinned && orgProvided.has(service)
+        ? userPinnedOrgRowReason(service)
+        : `Connect ${service} for this team.`),
     });
   }
-  return { ready, blocked, unverifiable, ...(organizationProvided.length > 0 ? { organizationProvided } : {}) };
+  return { ready, blocked, unverifiable, warnings, ...(organizationProvided.length > 0 ? { organizationProvided } : {}) };
 }

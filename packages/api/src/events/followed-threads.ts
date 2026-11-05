@@ -26,10 +26,13 @@ export interface FollowedThreadRow extends FollowedThreadKey {
    * router's gap re-hydration has a starting point before the first overheard
    * delivery. Absent → tracking starts at the first delivery. */
   lastSeenTs?: string;
-  /** The assistant that answered the binding mention. Absent → the owner's
-   * default, which is what the rule that bound this follow also resolved to.
-   * Carried so a followed thread keeps talking to the SAME assistant. */
-  assistantId?: string;
+  /** The mention rule this bind came from, so the router can read that rule's
+   * current invocation audience on every later message. Absent → team-only,
+   * which is what every follow bound before the column means. */
+  subscriptionId?: string;
+  /** The assistant thread the binding delivery landed in. Later messages in
+   * the Slack thread go there. Absent → the router keeps the Slack thread key. */
+  target?: { sessionId: string; threadId: string };
 }
 
 /** Bind a thread to an owner's assistant. Idempotent on `(org, channel, thread)`. */
@@ -49,7 +52,9 @@ export async function upsertFollowedThread(db: AppDb, row: FollowedThreadRow): P
       createdAt: now,
       lastActivityAt: now,
       lastSeenTs: row.lastSeenTs ?? null,
-      assistantId: row.assistantId ?? null,
+      subscriptionId: row.subscriptionId ?? null,
+      sessionId: row.target?.sessionId ?? null,
+      threadId: row.target?.threadId ?? null,
     });
   const target = [followedThreads.orgId, followedThreads.channelType,
     followedThreads.channelId, followedThreads.threadTs];
@@ -61,16 +66,20 @@ export async function upsertFollowedThread(db: AppDb, row: FollowedThreadRow): P
     target,
     // `createdBy` too: it is the actor the follow-router runs the assistant
     // session as, so a re-bind by a different owner must carry the new
-    // binder's actor, not the first one's. `assistantId` follows the same
-    // rule — a re-bind by a rule naming a different assistant re-points the
-    // thread, and a rule naming none resets it to the owner's default.
+    // binder's actor, not the first one's. The workspace owner stays fixed.
     // `lastSeenTs` is deliberately NOT in the update set: a re-mention on an
     // already-followed thread must not rewind the router's gap tracking.
     set: {
       ownerType: row.ownerType,
       ownerId: row.ownerId,
       createdBy: row.createdBy,
-      assistantId: row.assistantId ?? null,
+      // `subscriptionId` follows `createdBy`: the rule that re-binds the
+      // thread decides which membership the router re-checks for the new
+      // actor.
+      subscriptionId: row.subscriptionId ?? null,
+      // A re-bind moves later messages to the thread this mention landed in.
+      sessionId: row.target?.sessionId ?? null,
+      threadId: row.target?.threadId ?? null,
       lastActivityAt: now,
     },
   });
@@ -100,4 +109,22 @@ export async function touchFollowedThread(db: AppDb, id: string, lastSeenTs?: st
     .update(followedThreads)
     .set({ lastActivityAt: Date.now(), ...(lastSeenTs !== undefined ? { lastSeenTs } : {}) })
     .where(eq(followedThreads.id, id));
+}
+
+/**
+ * Move a follow binding off a thread that can no longer receive deliveries
+ * (archived, or its session is gone) to `target`, the thread a re-mention
+ * just landed in. The binding keeps its actor and rule. The write applies
+ * only while the row still points at `stale`, so a concurrent re-bind wins.
+ */
+export async function repointFollowedThread(
+  db: AppDb,
+  id: string,
+  stale: { sessionId: string; threadId: string },
+  target: { sessionId: string; threadId: string },
+): Promise<void> {
+  await db
+    .update(followedThreads)
+    .set({ sessionId: target.sessionId, threadId: target.threadId, lastActivityAt: Date.now() })
+    .where(and(eq(followedThreads.id, id), eq(followedThreads.sessionId, stale.sessionId), eq(followedThreads.threadId, stale.threadId)));
 }

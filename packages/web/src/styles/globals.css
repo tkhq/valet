@@ -4,6 +4,19 @@
 
 @tailwind base;
 @tailwind components;
+
+@layer components {
+  /* The native select arrow sits flush against the border and differs per
+     browser. `Select` hides it and draws one chevron inset from the edge; its
+     right padding keeps the text clear of it. The gray reads on both themes. */
+  .field-select {
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%238b9098' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m4 6 4 4 4-4'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.625rem center;
+    background-size: 0.875rem 0.875rem;
+  }
+}
 @tailwind utilities;
 
 @layer base {
@@ -23,9 +36,64 @@
 
   body {
     @apply bg-[--bg] text-[--fg] font-sans antialiased;
+    /* Mobile browsers paint a gray box over a tapped control. Controls
+       show their own pressed and focus states, so the box only adds noise. */
+    -webkit-tap-highlight-color: transparent;
+    /* Ids, URLs, hashes and emails arrive as one unbroken word. Break one
+       only when it would overflow its line, so normal text is unchanged.
+       Flex items and `whitespace-nowrap` text still need their own rule. */
+    overflow-wrap: break-word;
+  }
+
+  /* Only the signed-in phone shell owns the document viewport. Public
+     pages keep normal document scrolling, as does the desktop layout. */
+  @media (max-width: 767px) {
+    html:has([data-mobile-app-shell]), body:has([data-mobile-app-shell]) {
+      overflow: hidden;
+      overscroll-behavior: none;
+    }
+    body:has([data-mobile-app-shell]) {
+      position: fixed;
+      inset: 0;
+    }
+    #root [data-mobile-app-shell] {
+      position: fixed;
+      left: 0;
+      right: 0;
+      top: var(--app-viewport-top, 0px);
+      height: var(--app-viewport-height, 100dvh);
+      overscroll-behavior: none;
+    }
+  }
+
+  @media (max-width: 767px) {
+    body [data-mobile-model-settings] {
+      top: calc(var(--app-viewport-top, 0px) + var(--app-viewport-height, 100dvh) / 2);
+      max-height: calc(var(--app-viewport-height, 100dvh) - 2rem);
+    }
+  }
+
+  /* Phone gestures pan app content without scaling the fixed app shell.
+     Inheritance covers nested scrollers and portaled menus. Components
+     with their own gestures (for example React Flow) keep their overrides. */
+  @media (pointer: coarse) {
+    body {
+      touch-action: pan-x pan-y;
+    }
+
+    * {
+      touch-action: inherit;
+    }
   }
 
   *, *::before, *::after {
     @apply border-[--border];
+  }
+}
+
+/* The element the current tour step points at (components/tour). */
+@layer components {
+  [data-tour-active] {
+    @apply rounded-md ring-2 ring-moss ring-offset-1 ring-offset-[--bg];
   }
 }

@@ -1,0 +1,234 @@
+/**
+ * Workspace delivery history, optionally merged with organization-wide diagnostics.
+ * Each source uses keyset order. Diagnostics and delivery history share one cursor.
+ * Problems-only mode keeps failed deliveries and any requested diagnostics. A
+ * delivery whose assistant turn failed is dead (`events/delivery-turn.ts`).
+ */
+import { sql, type SQL } from "drizzle-orm";
+import type { Principal } from "@valet/engine";
+import type { AppDb } from "../lib/drizzle.js";
+import type { EventLogItem, EventLogStatus } from "../wire/types.js";
+
+/** A workspace-scoped Log reaches this far back for events, like the old feed. */
+export const EVENT_LOG_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** Drop reasons that mean the event never reached a subscription on purpose. */
+const REJECTED_REASONS = [
+  "slack_classifier_rejected", "slack_interaction_unmatched", "bad_signature", "foreign_workspace", "unknown_org",
+  "unlinked_sender", "unauthorized", "verify_failed", "malformed_callback", "duplicate", "unsupported_kind", "slack_retry",
+  "unsupported_event", "stale_delivery",
+];
+/** Reasons only org admins see: they identify Slack form activity. */
+const ADMIN_ONLY_REASONS = ["slack_interaction_unmatched", "slack_classifier_rejected"];
+
+export function dropStatus(reason: string): EventLogStatus {
+  if (reason === "filter_excluded") return "filtered";
+  if (reason === "no_subscription_match") return "no_match";
+  if (REJECTED_REASONS.includes(reason)) return "rejected";
+  return "failed";
+}
+
+/** A dead delivery that a later delivery for the same event and line settled,
+ * such as a redelivery. It no longer counts as a failure. */
+const SUPERSEDED = sql`EXISTS (SELECT 1 FROM event_deliveries later
+  WHERE later.event_id = d.event_id AND later.subscription_id = d.subscription_id
+    AND later.status = 'delivered' AND later.created_at > d.created_at)`;
+
+/** An event's status from this workspace's deliveries: a failure wins, then
+ * work in flight, then a delivery. A superseded dead delivery is no failure.
+ * Only skipped deliveries read as skipped. */
+const EVENT_STATUS = sql`CASE
+  WHEN BOOL_OR(d.status = 'failed' OR (d.status = 'dead' AND NOT ${SUPERSEDED})) THEN 'failed'
+  WHEN BOOL_OR(d.status = 'pending') THEN 'pending'
+  WHEN BOOL_OR(d.status = 'delivered') THEN 'delivered'
+  ELSE 'skipped' END`;
+
+export interface EventLogQuery {
+  orgId: string;
+  /** Events reach the Log when this workspace's rules (or the org's) received them. */
+  owner: Principal;
+  admin: boolean;
+  /** Only failed events and recorded problems. */
+  problemsOnly?: boolean;
+  /** Include organization-wide ingestion diagnostics, independently of deliveries. */
+  diagnostics?: boolean;
+  q?: string;
+  before?: { at: number; id: string };
+  limit: number;
+  now?: number;
+  /** Whether the viewer may see a Slack channel (`slack:<id>`). A Slack event
+   * from a channel they may not see stays out of their Log, as its page does. */
+  channelVisible?: (channelKey: string) => Promise<boolean>;
+  /** The ids of the events to keep from one scanned batch, such as the events
+   * in one place. Rows it drops do not count toward the page, like hidden
+   * channels. Absent keeps every event. */
+  keepEvents?: (ids: readonly string[]) => Promise<ReadonlySet<string>>;
+}
+
+function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/g, (match) => `\\${match}`);
+}
+
+/** How many pages of events one Log read scans past hidden rows. */
+const MAX_SCAN_BATCHES = 20;
+
+/** One Log page. `next` is the sort key the next page reads before, or null
+ * when nothing older remains. */
+export interface EventLogPage {
+  items: EventLogItem[];
+  hasMore: boolean;
+  next: { at: number; id: string } | null;
+}
+
+/** Whether `a` sorts at or before `b`, newest first by time, then by id. */
+function atOrNewer(a: { at: number; id: string }, b: { at: number; id: string }): boolean {
+  return a.at > b.at || (a.at === b.at && a.id >= b.id);
+}
+
+export async function listEventLog(db: AppDb, query: EventLogQuery): Promise<EventLogPage> {
+  const { orgId, owner, problemsOnly, limit } = query;
+  const like = query.q ? `%${escapeLike(query.q)}%` : undefined;
+  const take = limit + 1;
+
+  const eventRows: EventLogItem[] = [];
+  let moreEvents = false;
+  // The last event row the scan read when it stopped at its bound.
+  let frontier: { at: number; id: string } | undefined;
+  {
+    const where: SQL[] = [
+      sql`e.org_id = ${orgId}`,
+      sql`e.received_at >= ${(query.now ?? Date.now()) - EVENT_LOG_WINDOW_MS}`,
+      // Only this workspace's deliveries (and the org's) count, so another
+      // workspace's failure never marks this workspace's event failed.
+      sql`s.org_id = ${orgId}`,
+      sql`((s.owner_type = ${owner.type} AND s.owner_id = ${owner.id}) OR s.owner_type = 'org')`,
+    ];
+    if (like) where.push(sql`(e.summary ILIKE ${like} ESCAPE '\\' OR e.event_key ILIKE ${like} ESCAPE '\\')`);
+    const having = problemsOnly ? sql`HAVING ${EVENT_STATUS} = 'failed'` : sql``;
+    // Rows a viewer may not see (a private Slack channel's) are dropped after
+    // the read, so a page keeps reading until it holds `take` visible rows or
+    // the events run out. The scan is bounded; past it the page says more.
+    let before = query.before;
+    for (let batch = 0; eventRows.length < take; batch++) {
+      if (batch === MAX_SCAN_BATCHES) { moreEvents = true; frontier = before; break; }
+      const scoped = before ? [...where, sql`(e.received_at, e.id) < (${before.at}, ${before.id})`] : where;
+      const result = await db.execute(sql`
+        SELECT e.id, e.service, e.event_key, e.summary, e.actor, e.received_at, ${EVENT_STATUS} AS status, COUNT(d.id)::int AS deliveries,
+          CASE WHEN e.service = 'slack' THEN COALESCE(e.refs->>'channel', e.payload->'item'->>'channel', e.payload->>'channel_id',
+            e.payload->'channel'->>'id', e.payload->>'channel') END AS slack_channel,
+          MIN(d.last_error) FILTER (WHERE d.status = 'skipped') AS skipped_reason,
+          (ARRAY_AGG(d.last_error ORDER BY d.created_at DESC) FILTER (WHERE d.status = 'failed' OR (d.status = 'dead' AND NOT ${SUPERSEDED})))[1] AS failed_reason
+        FROM events e JOIN event_deliveries d ON d.event_id = e.id JOIN event_subscriptions s ON s.id = d.subscription_id
+        WHERE ${sql.join(scoped, sql` AND `)}
+        GROUP BY e.id
+        ${having}
+        ORDER BY e.received_at DESC, e.id DESC
+        LIMIT ${take}`) as { rows: Array<{
+          id: string; service: string; event_key: string; summary: string | null; actor: unknown;
+          received_at: string | number; status: EventLogStatus; deliveries: number; skipped_reason: string | null;
+          failed_reason: string | null; slack_channel: string | null;
+        }> };
+      const kept = query.keepEvents ? await query.keepEvents(result.rows.map((row) => row.id)) : undefined;
+      for (const row of result.rows) {
+        if (kept && !kept.has(row.id)) continue;
+        if (row.slack_channel && query.channelVisible && !(await query.channelVisible(`slack:${row.slack_channel}`))) continue;
+        const actor = row.actor && typeof row.actor === "object" ? row.actor as { login?: string; externalId?: string } : null;
+        eventRows.push({
+          kind: "event", id: row.id, at: Number(row.received_at), status: row.status,
+          service: row.service, eventKey: row.event_key, summary: row.summary, actor: actor?.login ?? actor?.externalId ?? null,
+          reason: null, deliveryCount: Number(row.deliveries),
+          // A failed event names why, such as the assistant turn that failed after its prompt was queued.
+          detail: row.status === "skipped" ? row.skipped_reason : row.status === "failed" ? row.failed_reason : null,
+        });
+      }
+      const last = result.rows.at(-1);
+      if (result.rows.length < take || !last) break;
+      before = { at: Number(last.received_at), id: last.id };
+    }
+  }
+
+  // Problems carry no owner, so the organization's are listed in every workspace.
+  // A filter miss is the exception: only the enabled subscriptions that name
+  // its event key excluded it (ingest checks no disabled rule). It shows in a
+  // workspace whose enabled rules (or the org's) name that key, so a workspace that never asked for the event does not read
+  // another workspace's filter as its own.
+  const problemRows: EventLogItem[] = [];
+  if (query.diagnostics) {
+    const where: SQL[] = [sql`org_id = ${orgId}`, sql`(reason <> 'filter_excluded' OR event_key IS NULL OR EXISTS (
+      SELECT 1 FROM event_subscriptions s, jsonb_array_elements_text(s.event_keys) AS k(pattern)
+      WHERE s.org_id = ${orgId} AND s.enabled
+        AND ((s.owner_type = ${owner.type} AND s.owner_id = ${owner.id}) OR s.owner_type = 'org')
+        AND (k.pattern = event_drop_log.event_key
+          OR (right(k.pattern, 2) = '.*' AND starts_with(event_drop_log.event_key, left(k.pattern, -1))))))`];
+    if (!query.admin) where.push(sql`reason NOT IN (${sql.join(ADMIN_ONLY_REASONS.map((r) => sql`${r}`), sql`, `)})`);
+    if (like) where.push(sql`(reason ILIKE ${like} ESCAPE '\\' OR detail ILIKE ${like} ESCAPE '\\')`);
+    if (query.before) where.push(sql`(created_at, id) < (${query.before.at}, ${query.before.id})`);
+    const result = await db.execute(sql`
+      SELECT id, reason, detail, event_key, created_at FROM event_drop_log
+      WHERE ${sql.join(where, sql` AND `)}
+      ORDER BY created_at DESC, id DESC
+      LIMIT ${take}`) as { rows: Array<{ id: string; reason: string; detail: string | null; event_key: string | null; created_at: string | number }> };
+    for (const row of result.rows) {
+      problemRows.push({
+        kind: "problem", id: row.id, at: Number(row.created_at), status: dropStatus(row.reason),
+        service: row.event_key?.split(".")[0] ?? null, eventKey: row.event_key, summary: null, actor: null,
+        reason: row.reason, detail: row.detail, deliveryCount: 0,
+      });
+    }
+  }
+
+  let merged = [...eventRows, ...problemRows].sort((a, b) => b.at - a.at || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
+  // A scan that stopped at its bound read no event older than its frontier,
+  // so the page ends there: an older problem waits for the next page, which
+  // reads on from the frontier. A page whose scan kept no row still carries
+  // the frontier, so the reader can continue past rows it may not see.
+  if (frontier !== undefined) {
+    const end = frontier;
+    merged = merged.filter((item) => atOrNewer(item, end));
+  }
+  const items = merged.slice(0, limit);
+  const last = items.at(-1);
+  const next = merged.length > limit && last ? { at: last.at, id: last.id } : frontier ?? null;
+  return { items, hasMore: next !== null, next };
+}
+
+/** One delivery row as `supersedingDeliveries` reads it. */
+export interface SupersessionRow {
+  id: string;
+  eventId: string;
+  subscriptionId: string;
+  status: string;
+  createdAt: number;
+}
+
+/**
+ * For each dead delivery that a later delivery for the same event and line
+ * settled, the id of that later delivery. The earliest settling delivery
+ * wins. Matches `SUPERSEDED`, which decides the event's status.
+ */
+export function supersedingDeliveries(rows: readonly SupersessionRow[]): Map<string, string> {
+  const result = new Map<string, string>();
+  for (const dead of rows) {
+    if (dead.status !== "dead") continue;
+    let settledBy: SupersessionRow | undefined;
+    for (const later of rows) {
+      if (later.status !== "delivered" || later.eventId !== dead.eventId || later.subscriptionId !== dead.subscriptionId) continue;
+      if (later.createdAt <= dead.createdAt) continue;
+      if (settledBy === undefined || later.createdAt < settledBy.createdAt) settledBy = later;
+    }
+    if (settledBy !== undefined) result.set(dead.id, settledBy.id);
+  }
+  return result;
+}
+
+/** When anything last reached ingest: a stored event or a visible problem. */
+export async function lastEventLogActivity(db: AppDb, orgId: string, admin: boolean, diagnostics = false): Promise<number | null> {
+  const hidden = !diagnostics ? sql`AND false` : admin ? sql`` : sql`AND reason NOT IN (${sql.join(ADMIN_ONLY_REASONS.map((r) => sql`${r}`), sql`, `)})`;
+  const result = await db.execute(sql`
+    SELECT GREATEST(
+      (SELECT MAX(received_at) FROM events WHERE org_id = ${orgId}),
+      (SELECT MAX(created_at) FROM event_drop_log WHERE org_id = ${orgId} ${hidden})
+    ) AS at`) as { rows: Array<{ at: string | number | null }> };
+  const at = result.rows[0]?.at;
+  return at === null || at === undefined ? null : Number(at);
+}

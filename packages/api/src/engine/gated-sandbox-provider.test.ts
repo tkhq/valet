@@ -113,6 +113,8 @@ describe("withSandboxCapacityGate", () => {
 
     await expect(createAs(gated, h, "org1", "s1")).rejects.toThrow(SandboxStartupError);
     await expect(createAs(gated, h, "org1", "s1")).rejects.toThrow(/VALET_ORG_SANDBOX_CEILING/);
+    const err = await createAs(gated, h, "org1", "s1").catch((e: unknown) => e);
+    expect((err as SandboxStartupError).kind).toBe("capacity");
     expect(inner.created).toEqual([]);
   });
 
@@ -301,21 +303,35 @@ describe("withSandboxCapacityGate", () => {
     await expect(createAs(gated, h, "org2", "b")).resolves.toBeDefined();
   });
 
-  it("preserves optional-member ABSENCE (capability presence checks stay honest)", () => {
+  it("preserves optional-member ABSENCE (capability presence checks stay honest)", async () => {
     const bare = fakeInner();
     const gatedBare = withSandboxCapacityGate(bare, { ceiling: 1, waitMs: 0, host: () => null });
     expect(gatedBare.updateCreds).toBeUndefined();
     expect(gatedBare.deriveId).toBeUndefined();
     expect(gatedBare.list).toBeUndefined();
     expect(gatedBare.suspend).toBeUndefined();
+    expect(gatedBare.readBrowserAudit).toBeUndefined();
+    expect(gatedBare.setEvictionProtection).toBeUndefined();
+    expect(gatedBare.listEvictionProtected).toBeUndefined();
 
     const full = fakeInner({
       deriveId: (key) => `d-${key}`,
       updateCreds: async () => {},
+      // The lease eviction protection must pass through the gate (PR review, finding 1).
+      setEvictionProtection: async (id, enabled) => ({ changed: id === "leased" && enabled }),
+      listEvictionProtected: async () => ["leased"],
+      async readBrowserAudit(id) {
+        expect(this.backend).toBe('fake');
+        expect(id).toBe('retained');
+        return { entries: [], total: 4 };
+      },
     });
     const gatedFull = withSandboxCapacityGate(full, { ceiling: 1, waitMs: 0, host: () => null });
     expect(gatedFull.deriveId?.("k")).toBe("d-k");
     expect(gatedFull.updateCreds).toBeDefined();
     expect(gatedFull.list).toBeUndefined();
+    await expect(gatedFull.readBrowserAudit?.('retained')).resolves.toEqual({ entries: [], total: 4 });
+    await expect(gatedFull.setEvictionProtection?.("leased", true)).resolves.toEqual({ changed: true });
+    await expect(gatedFull.listEvictionProtected?.()).resolves.toEqual(["leased"]);
   });
 });

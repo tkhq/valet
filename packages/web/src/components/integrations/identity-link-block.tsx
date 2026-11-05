@@ -1,37 +1,31 @@
 /**
- * Account pairing for an org-provided service tile (`/integrations`).
- *
- * An org-provided service ("org" connect mode) has no token for the member
- * to paste — the org credential powers the integration. The member's own
- * step is pairing: link their provider account to their Valet account
- * through the identity-link code flow. Two ways in when the provider can
- * DM (`codeDelivery`):
+ * Account pairing: link a provider account to the Valet user. The
+ * org-provided Integrations panel renders it, for Slack and Telegram.
+ * Two ways in when the provider can DM (`codeDelivery`), as in v1:
  *
  *   DM me on <title> → `POST /api/me/identity-links/:provider/deliver`. The
  *                      server finds the member by their Valet email and DMs
- *                      them a codeless anchor message; the card shows the
- *                      exact reply line (`replyText`) to send back. The code
- *                      stays in the authenticated session — carrying it into
- *                      the chat is the ownership proof, so the DM must never
- *                      hold it.
+ *                      them a link code. The person enters that code here
+ *                      (`POST .../verify`). Reading the DM proves the
+ *                      provider account; entering the code here proves the
+ *                      Valet user. The code is bound to both and is never
+ *                      redeemable from chat.
  *   Find me by name  → `GET .../members` typeahead; picking a member DMs
  *                      that account. For users whose provider email differs
  *                      from their Valet email. Requires `memberSearch`.
  *
+ * When the deployment can run the provider's OAuth connect
+ * (`link.oauthService`), "Sign in with <title>" links the account with no
+ * code. Once linked, the block offers the attention ping and Unlink.
+ *
  * The show-code flow (`POST .../start`: the card shows the code and the
- * provider's delivery instructions) is never a third button. It is the
- * single "Link account" flow for providers without `codeDelivery`
- * (Telegram), and the automatic fallback when the email lookup 202s and
- * the provider has no member directory.
+ * provider's delivery instructions) is never a third button. It is the single "Link account" flow for
+ * providers without `codeDelivery` (Telegram), and the automatic fallback
+ * when the email lookup 202s and the provider has no member directory.
  *
  * The block renders only for providers `GET /api/me/identity-links` lists,
  * i.e. plugins that declare `identityLink`. Once a code is out, the block
- * polls the link list so the tile flips to "Linked" the moment the user
- * completes the flow in the provider app.
- *
- * The same flow lives on Settings → Connected accounts (`LinkAccountCard`)
- * with notify controls; this block is the tile-sized version so the
- * integrations page offers the pairing where members look for it.
+ * polls the link list so it flips to "Linked" when the flow completes.
  */
 import { useEffect, useState, type ReactNode } from "react";
 import type {
@@ -40,14 +34,16 @@ import type {
   LinkMemberEntry,
   StartIdentityLinkResponse,
 } from "@valet/api/wire";
-import { Button, ConfirmDialog, Input } from "~/components/primitives";
+import { Button, ConfirmDialog, Input, Switch } from "~/components/primitives";
 import { CopyButton } from "~/components/session/tool-renderers/tool-shell";
 import {
   useDeliverIdentityLink,
   useIdentityLinks,
   useLinkMembers,
+  useSetLinkNotify,
   useStartIdentityLink,
   useUnlinkIdentity,
+  useVerifyIdentityLink,
 } from "~/api/queries";
 import { ApiError } from "~/api/client";
 import { errorText } from "~/lib/error-text";
@@ -67,12 +63,12 @@ export function useServiceIdentityLink(provider: string): {
   };
 }
 
-function startErrorMessage(err: unknown, title: string): string {
+function startErrorMessage(err: unknown, title: string, fallback = `Couldn't start the ${title} link. Try again.`): string {
   if (err instanceof ApiError && err.payload && typeof err.payload === "object") {
     const message = (err.payload as Record<string, unknown>).error;
     if (typeof message === "string" && message) return message;
   }
-  return `Couldn't start the ${title} link. Try again.`;
+  return fallback;
 }
 
 function ExpiryLine({ seconds }: { seconds: number }) {
@@ -112,6 +108,60 @@ function CodePanel({
   );
 }
 
+/** After the bot DMs a code: the person types it here, as in v1. Reading
+ * the DM proves the provider account; entering the code here proves the
+ * Valet user. A match links the account and the card flips to "Linked". */
+function EnterCodeForm({
+  provider,
+  recipient,
+  title,
+  expiresInSeconds,
+}: {
+  provider: string;
+  recipient: string;
+  title: string;
+  expiresInSeconds: number;
+}) {
+  const [code, setCode] = useState("");
+  const verify = useVerifyIdentityLink();
+  return (
+    <form
+      className="space-y-1 rounded-md border border-line bg-ink-wash p-3"
+      onSubmit={(e) => {
+        e.preventDefault();
+        verify.mutate({ provider, code: code.trim() });
+      }}
+    >
+      <p className="text-xs leading-relaxed text-muted">
+        We DMed <span className="font-medium text-ink">{recipient}</span> on {title}. Enter the code from that
+        message.
+      </p>
+      <div className="flex items-center gap-2">
+        <Input
+          type="text"
+          value={code}
+          onChange={(e) => setCode(e.target.value)}
+          placeholder="Link code"
+          aria-label={`${title} link code`}
+          autoFocus
+          autoComplete="one-time-code"
+          size="sm"
+          className="font-mono"
+        />
+        <Button type="submit" size="sm" disabled={verify.isPending || code.trim() === ""}>
+          {verify.isPending ? "Linking…" : "Link"}
+        </Button>
+      </div>
+      {verify.error && (
+        <p className="text-xs text-danger-500">
+          {startErrorMessage(verify.error, title, "Couldn't check the code. Submit it again.")}
+        </p>
+      )}
+      <ExpiryLine seconds={expiresInSeconds} />
+    </form>
+  );
+}
+
 /** The find-me-by-name step: search the workspace directory, pick yourself,
  * and the bot DMs the picked account the code. */
 function MemberSearch({
@@ -147,7 +197,7 @@ function MemberSearch({
           placeholder={`Your name on ${title}…`}
           aria-label={`Search ${title} members`}
           autoFocus
-          className="h-8 text-xs"
+          size="sm"
         />
         <Button type="submit" variant="ghost" size="sm" disabled={busy || query.trim() === ""}>
           Search
@@ -194,6 +244,7 @@ export function IdentityLinkBlock({ link, title }: { link: IdentityLinkStatus; t
   const startLink = useStartIdentityLink();
   const deliver = useDeliverIdentityLink();
   const unlink = useUnlinkIdentity(link.provider);
+  const setNotify = useSetLinkNotify(link.provider);
 
   // A code is out — poll so the tile flips to "Linked" as soon as the user
   // completes the flow in the provider app.
@@ -220,13 +271,26 @@ export function IdentityLinkBlock({ link, title }: { link: IdentityLinkStatus; t
     // pings on the provider stop with them.
     const unlinkDescription =
       `Messages from this ${title} account stop reaching your assistant, and it stops ` +
-      `pinging you there when a session needs you. To undo this, link the account ` +
+      `pinging you there when a thread needs you. To undo this, link the account ` +
       `again with a new code.`;
     return (
-      <div className="space-y-1">
+      <div className="space-y-2">
         <p className="text-xs leading-relaxed text-muted">
           Linked as <span className="font-mono text-ink">{link.externalId}</span>.
         </p>
+        <label className="flex min-h-11 items-center justify-between gap-3 text-xs text-ink sm:min-h-0">
+          <span>
+            Notify on attention
+            <span className="block text-muted">Ping you on {title} when your assistant needs you.</span>
+          </span>
+          <Switch
+            checked={link.notifyAttention ?? false}
+            disabled={setNotify.isPending}
+            onCheckedChange={(next) => setNotify.mutate({ notifyAttention: next })}
+            aria-label={`Notify on ${title} when your assistant needs you`}
+          />
+        </label>
+        {setNotify.error && <p className="text-xs text-danger-500">{errorText(setNotify.error)}</p>}
         <Button
           variant="ghost"
           size="sm"
@@ -306,12 +370,19 @@ export function IdentityLinkBlock({ link, title }: { link: IdentityLinkStatus; t
   }
 
   const busy = startLink.isPending || deliver.isPending;
+  const oauthService = link.oauthService;
 
   return (
     <div className="space-y-2">
       <p className="text-xs leading-relaxed text-muted">
         Link your {title} account to chat with your assistant there.
       </p>
+      {oauthService && !searching && (
+        <p className="text-xs leading-relaxed text-muted">
+          Sign in with {title} also lets Valet search, read, and post in {title} as you. The DM options link
+          your account only.
+        </p>
+      )}
       {searching ? (
         <MemberSearch
           provider={link.provider}
@@ -322,6 +393,17 @@ export function IdentityLinkBlock({ link, title }: { link: IdentityLinkStatus; t
         />
       ) : (
         <div className="flex flex-wrap items-center gap-2">
+          {oauthService && (
+            <Button
+              size="sm"
+              disabled={busy}
+              onClick={() => {
+                window.location.href = `/api/credentials/${encodeURIComponent(oauthService)}/connect`;
+              }}
+            >
+              Sign in with {title}
+            </Button>
+          )}
           {link.codeDelivery ? (
             <>
               <Button
@@ -359,22 +441,27 @@ export function IdentityLinkBlock({ link, title }: { link: IdentityLinkStatus; t
       {startError && <p className="text-xs text-danger-500">{startError}</p>}
       {fallbackNote && <p className="text-xs leading-relaxed text-muted">{fallbackNote}</p>}
       {delivery && (
-        <CodePanel
-          intro={
-            <p className="text-xs leading-relaxed text-muted">
-              We DMed{" "}
-              <span className="font-medium text-ink">
-                {delivery.displayName ? `@${delivery.displayName}` : "you"}
-              </span>{" "}
-              on {title}. Reply with:
-            </p>
-          }
-          value={delivery.replyText}
+        <EnterCodeForm
+          provider={link.provider}
+          recipient={delivery.displayName ? `@${delivery.displayName}` : "you"}
+          title={title}
           expiresInSeconds={delivery.expiresInSeconds}
         />
       )}
       {pendingLink && (
         <CodePanel
+          intro={
+            pendingLink.deepLink ? (
+              <a
+                href={pendingLink.deepLink}
+                target="_blank"
+                rel="noreferrer"
+                className="text-xs font-medium text-moss underline"
+              >
+                Open {title} and press Start
+              </a>
+            ) : undefined
+          }
           value={pendingLink.code}
           note={pendingLink.instructions}
           expiresInSeconds={pendingLink.expiresInSeconds}

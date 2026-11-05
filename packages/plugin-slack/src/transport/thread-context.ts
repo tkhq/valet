@@ -14,6 +14,7 @@ const MAX_TRANSCRIPT_CHARS = 6000;
 
 interface RawReply {
   user?: unknown;
+  bot_id?: unknown;
   username?: unknown;
   bot_profile?: unknown;
   text?: unknown;
@@ -25,13 +26,31 @@ function str(v: unknown): string | undefined {
   return typeof v === "string" && v !== "" ? v : undefined;
 }
 
-/** A short marker for a message that carries files but no words, so a
- *  screenshot that IS the point does not vanish from the transcript. */
+/** A short marker naming the files a message carries, so an attachment does
+ *  not vanish from the transcript. It rides BESIDE the message text rather
+ *  than standing in for it: the marker used to be a fallback for an empty
+ *  body, which meant a file posted with a caption went unmentioned, and the
+ *  assistant then reported truthfully that it could see no attachment. The
+ *  name is enough to act on, because `read_thread` returns each file with its
+ *  `url` and `slack.fetch_file` reads it. Downloading every file in a thread
+ *  to seed one turn would cost far more than naming them. */
 function fileMarker(raw: RawReply): string | null {
-  const files = Array.isArray(raw.files) ? (raw.files as Record<string, unknown>[]) : [];
+  const files = Array.isArray(raw.files) ? (raw.files as unknown[]) : [];
   if (files.length === 0) return null;
-  const named = files.map((f) => str(f.name)).filter((n): n is string => !!n);
-  return named.length ? `[shared: ${named.join(", ")}]` : `[shared ${files.length} file(s)]`;
+  // Read `.name` defensively. This runs on every captioned message now, and
+  // a throw here rejects the enclosing Promise.all: the caller turns that
+  // rejection into a null transcript, so one malformed entry would cost the
+  // whole thread. Slack tombstones a deleted file as an object with no name,
+  // so a nameless entry is ordinary rather than hostile.
+  const named = files
+    .map((f) => (typeof f === "object" && f !== null ? str((f as Record<string, unknown>).name) : undefined))
+    .filter((n): n is string => !!n);
+  const unnamed = files.length - named.length;
+  if (named.length === 0) return `[shared ${files.length} file(s)]`;
+  // Name what can be named and still account for the rest, so a mixed array
+  // does not hide a file behind its neighbour.
+  const rest = unnamed > 0 ? `, +${unnamed} unnamed` : "";
+  return `[shared: ${named.join(", ")}${rest}]`;
 }
 
 /** Keep the thread's opening message (the topic) and the most recent tail; drop
@@ -63,15 +82,24 @@ export async function fetchThreadTranscript(
     channelId: string;
     threadTs: string;
     selfUserId?: string;
+    /** The app's bot id. A post under a custom name (a team's Valet) carries
+     * only this, with no `user`, so it is the bot's own post too. */
+    selfBotId?: string;
     limit?: number;
     /** With `beforeTs`: keep only messages STRICTLY BETWEEN the two ts values
      * (the follow-router's gap window), and drop the bot's own posts — the
      * agent already holds its own replies as tool calls. */
     afterTs?: string;
     beforeTs?: string;
+    /** With a window: keep the bot's posts except these message ts values.
+     * In a group DM every person's assistant posts as the same bot, so an
+     * assistant reads the other assistants' replies but not its own. */
+    keepAppPostsExcept?: readonly string[];
   },
 ): Promise<string | null> {
   const windowed = opts.afterTs !== undefined && opts.beforeTs !== undefined;
+  const isSelf = (raw: RawReply) => (opts.selfUserId !== undefined && str(raw.user) === opts.selfUserId)
+    || (opts.selfBotId !== undefined && str(raw.bot_id) === opts.selfBotId);
   const limit = opts.limit ?? 100;
   let messages: Record<string, unknown>[];
   try {
@@ -94,7 +122,8 @@ export async function fetchThreadTranscript(
       const raw = m as RawReply;
       const ts = Number.parseFloat(str(raw.ts) ?? "");
       if (!Number.isFinite(ts) || ts <= after || ts >= before) return false;
-      return !(opts.selfUserId !== undefined && str(raw.user) === opts.selfUserId);
+      if (!isSelf(raw)) return true;
+      return opts.keepAppPostsExcept !== undefined && !opts.keepAppPostsExcept.includes(str(raw.ts) ?? "");
     });
     if (messages.length === 0) return null;
   }
@@ -117,14 +146,18 @@ export async function fetchThreadTranscript(
   const formatted = await Promise.all(
     (messages as RawReply[]).map(async (raw) => {
       const body = await enrichSlackText(api, str(raw.text) ?? "", opts.selfUserId);
-      const content = body || fileMarker(raw); // a file-only post keeps a marker, not nothing.
+      const marker = fileMarker(raw);
+      // Words and files both, either alone, or neither.
+      const content = body && marker ? `${body} ${marker}` : body || marker;
       if (!content) return null; // a join notice carries neither words nor files.
       const userId = str(raw.user);
-      const who = userId
-        ? userId === opts.selfUserId
-          ? "You" // the assistant's own earlier reply — so it does not answer itself.
-          : authors.get(userId) ?? `@${userId}`
-        : str(raw.username) ?? str((raw.bot_profile as Record<string, unknown> | undefined)?.name) ?? "app";
+      // The assistant's own earlier reply reads as "You", so it does not answer
+      // itself. A kept app post is another person's assistant answering them.
+      const who = isSelf(raw)
+        ? opts.keepAppPostsExcept !== undefined ? "Valet (answering someone else)" : "You"
+        : userId
+          ? authors.get(userId) ?? `@${userId}`
+          : str(raw.username) ?? str((raw.bot_profile as Record<string, unknown> | undefined)?.name) ?? "app";
       // Both halves are flattened, so one message is always exactly one line.
       return `${formatTranscriptText(who)}: ${formatTranscriptText(content)}`;
     }),

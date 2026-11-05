@@ -8,7 +8,11 @@ import { isValidInternalToken } from "../lib/internal-auth.js";
 import { resolveOrgId } from "../lib/org.js";
 import type { ValetAuth } from "../auth/index.js";
 import { verifySandboxToken } from "../auth/sandbox-tokens.js";
+import { mcpCallerFor, mcpRouteAllowed } from "../auth/mcp-caller.js";
+import { CLI_ACCESS_PREFIX, verifyCliAccessToken } from "../auth/cli-tokens.js";
 import {
+  isAgentCaller,
+  isProxyScopedKeyMetadata,
   teamApiKeyPathAllowed,
   teamIdFromApiKeyMetadata,
   userPrincipal,
@@ -81,7 +85,7 @@ const TEAM_KEY_SCOPE_ERROR =
   "This team API key can only create and read this team's sessions and workflows. Sign in for other settings.";
 
 /** After the ladder: a team principal stays on sessions, workflows, GET
- * /api/me, and its own team's orchestrator. */
+ * /api/me, and its own team's workspace runtime. */
 export function refuseTeamKeyOutsideScope(): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
     const principal = requirePrincipal(c);
@@ -133,12 +137,25 @@ async function userFromSession(auth: ValetAuth, db: AppDb, headers: Headers): Pr
 export interface RequestIdentity {
   user: AuthUser;
   principal: RequestPrincipal;
+  /** Retained by optional-auth surfaces that forward a user's submission. */
+  authVia?: AuthVia;
+  /** A `valet login` CLI token (`auth/cli-tokens.ts`), not an API key. */
+  cli?: boolean;
 }
 
 /** The AuthUser (and team principal, when metadata carries `teamId`)
  * behind a valid api key, or `undefined` for an invalid, malformed,
  * dangling, or orphaned-team key. Shared by rung 4 and `resolveOptionalIdentity`. */
 async function identityFromApiKey(auth: ValetAuth, db: AppDb, key: string): Promise<RequestIdentity | undefined> {
+  // A `valet login` CLI token travels in the same header as an API key.
+  if (key.startsWith(CLI_ACCESS_PREFIX)) {
+    const token = await verifyCliAccessToken(db, key);
+    if (!token) return undefined;
+    const [row] = await db.select().from(users).where(eq(users.id, token.userId)).limit(1);
+    if (!row) return undefined;
+    const user: AuthUser = { id: row.id, email: row.email, name: row.name ?? undefined, role: row.role, orgId: await resolveOrgId(db) };
+    return { user, principal: userPrincipal(user.id), cli: true };
+  }
   let result: Awaited<ReturnType<ValetAuth["api"]["verifyApiKey"]>>;
   try {
     result = await auth.api.verifyApiKey({ body: { key } });
@@ -146,6 +163,9 @@ async function identityFromApiKey(auth: ValetAuth, db: AppDb, key: string): Prom
     return undefined;
   }
   if (!result.valid || !result.key) return undefined;
+  // A proxy key (`valet proxy setup`) sits in a local file that agents can
+  // read. It works only at the gateway, which verifies keys on its own path.
+  if (isProxyScopedKeyMetadata(result.key.metadata)) return undefined;
   const rows = await db.select().from(users).where(eq(users.id, result.key.referenceId)).limit(1);
   const row = rows[0];
   if (!row) return undefined;
@@ -216,9 +236,12 @@ export async function resolveOptionalIdentity(
   const { auth, db } = opts;
   if (auth) {
     const sessionUser = await userFromSession(auth, db, c.req.raw.headers);
-    if (sessionUser) return { user: sessionUser, principal: userPrincipal(sessionUser.id) };
+    if (sessionUser) return { user: sessionUser, principal: userPrincipal(sessionUser.id), authVia: "session" };
     const apiKeyHeader = c.req.header("x-api-key");
-    if (apiKeyHeader) return identityFromApiKey(auth, db, apiKeyHeader);
+    if (apiKeyHeader) {
+      const identity = await identityFromApiKey(auth, db, apiKeyHeader);
+      return identity ? { ...identity, authVia: identity.cli ? "cli" : "apiKey" } : undefined;
+    }
     return undefined;
   }
 
@@ -243,11 +266,11 @@ export async function resolveOptionalIdentity(
           role: row.role,
           orgId: LOCAL_ORG.id,
         };
-        return { user: impersonated, principal: userPrincipal(impersonated.id) };
+        return { user: impersonated, principal: userPrincipal(impersonated.id), authVia: "stub" };
       }
     }
     const stub = stubUser();
-    return { user: stub, principal: userPrincipal(stub.id) };
+    return { user: stub, principal: userPrincipal(stub.id), authVia: "stub" };
   }
 
   return undefined;
@@ -257,6 +280,10 @@ export async function resolveOptionalIdentity(
  * Auth middleware ladder (auth-v2 design). First match wins:
  *
  *   1. `x-valet-internal` valid → `next()`, no `c.var.user`/`c.var.sandbox`.
+ *   1b. An MCP tool call: the `/mcp` handler attached an OAuth-verified user to
+ *      this in-process `Request` (`auth/mcp-caller.ts`). Sets a user principal
+ *      with `authVia: "mcp"` on the MCP allow-listed routes and 403s every
+ *      other route. No header can produce this identity.
  *   2. `x-valet-sandbox` present → `verifySandboxToken`; invalid 401s even
  *      in stub mode — an explicit credential beats every fallback below it.
  *      Valid tokens only set `c.var.sandbox` and `next()` when the path
@@ -306,6 +333,20 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
       return;
     }
 
+    // 1b. MCP tool call. The `/mcp` handler verified the OAuth bearer token
+    // and attached the user to this in-process `Request` object. No header
+    // can produce this identity, and it applies only to the MCP routes.
+    const mcpCaller = mcpCallerFor(c.req.raw);
+    if (mcpCaller) {
+      if (!mcpRouteAllowed(c.req.method, c.req.path)) {
+        return c.json({ error: "This route is not available to MCP clients." }, 403);
+      }
+      setCaller(c, mcpCaller.user, "mcp", userPrincipal(mcpCaller.user.id), auth);
+      c.set("mcpClientId", mcpCaller.clientId);
+      await next();
+      return;
+    }
+
     // 2. Sandbox token — explicit credential, invalid always 401s. Valid
     // sandbox principals are only accepted on the allow-listed prefixes
     // (memory + git-credential routes) — every other route reads
@@ -345,7 +386,7 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
         if (!identity) {
           return c.json({ error: "invalid api key" }, 401);
         }
-        setCaller(c, identity.user, "apiKey", identity.principal, auth);
+        setCaller(c, identity.user, identity.cli ? "cli" : "apiKey", identity.principal, auth);
         await next();
         return;
       }
@@ -381,5 +422,61 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
 
     // 6. Nothing matched.
     return c.json({ error: "unauthorized" }, 401);
+  };
+}
+
+/**
+ * The writes an agent credential (`isAgentCaller`: an MCP app or a
+ * `valet login` CLI) may make: the routes the CLI and the MCP tools use.
+ * Every other write gets 403. An allow-list, not a deny-list, so a new
+ * route that changes approvals, policies, grants, accounts, or settings is
+ * closed to agents until someone adds it here on purpose. Reads stay open:
+ * an agent reads what its person can read.
+ *
+ * Thread and session decisions are on the list, and `resolveDecision`
+ * refuses an agent everything but a question gate.
+ */
+const AGENT_WRITES: ReadonlyArray<{ method: string; pattern: RegExp }> = [
+  // Threads and sessions: start work, send prompts, upload files, answer questions.
+  { method: "POST", pattern: /^\/api\/threads$/ },
+  { method: "POST", pattern: /^\/api\/threads\/[^/]+\/messages$/ },
+  { method: "POST", pattern: /^\/api\/threads\/[^/]+\/decisions\/[^/]+\/resolve$/ },
+  // Stop a turn. The route needs the turn's queue item, so a late Stop cannot hit its successor.
+  { method: "POST", pattern: /^\/api\/threads\/[^/]+\/abort$/ },
+  { method: "POST", pattern: /^\/api\/sessions$/ },
+  { method: "POST", pattern: /^\/api\/sessions\/[^/]+\/messages$/ },
+  { method: "POST", pattern: /^\/api\/sessions\/[^/]+\/files$/ },
+  { method: "POST", pattern: /^\/api\/sessions\/[^/]+\/decisions\/[^/]+\/resolve$/ },
+  { method: "POST", pattern: /^\/api\/workspaces\/[^/]+\/runtime$/ },
+  // Tools, memory, workflow runs, and artifacts.
+  { method: "POST", pattern: /^\/api\/actions\/[^/]+\/invoke$/ },
+  { method: "PUT", pattern: /^\/api\/memory$/ },
+  { method: "DELETE", pattern: /^\/api\/memory$/ },
+  { method: "POST", pattern: /^\/api\/memory\/(patch|move)$/ },
+  { method: "POST", pattern: /^\/api\/workflows\/[^/]+\/runs$/ },
+  // Cancel and retry act on a run. Neither changes the workflow definition or its grants.
+  { method: "POST", pattern: /^\/api\/workflows\/runs\/[^/]+\/(cancel|retry)$/ },
+  { method: "POST", pattern: /^\/api\/artifacts\/share$/ },
+  { method: "DELETE", pattern: /^\/api\/artifacts\/[^/]+$/ },
+  // A policy preview changes nothing.
+  { method: "POST", pattern: /^\/api\/org\/policies\/preview$/ },
+  // `valet proxy remove` revokes the CLI's proxy key. Removing a key grants nothing,
+  // and the route deletes only proxy-scoped keys.
+  { method: "DELETE", pattern: /^\/api\/proxy\/keys\/[^/]+$/ },
+];
+
+/** Whether an agent caller is refused this request. */
+export function agentRefusedRoute(method: string, path: string): boolean {
+  if (method === "GET" || method === "HEAD" || method === "OPTIONS") return false;
+  return !AGENT_WRITES.some((route) => route.method === method && route.pattern.test(path));
+}
+
+/** Mount after the auth middleware. Refuses an agent caller every write outside `AGENT_WRITES`. */
+export function refuseAgentAuthority(): MiddlewareHandler<AppEnv> {
+  return async (c, next) => {
+    if (c.var.authVia && isAgentCaller(c.var.authVia) && agentRefusedRoute(c.req.method, c.req.path)) {
+      return c.json({ error: "A person must do this in Valet in the browser. Agent credentials (MCP apps and `valet login`) can start, continue, and stop threads, answer questions, use tools, run, cancel, and retry workflow runs, edit memory, and publish and unpublish artifacts, and nothing else." }, 403);
+    }
+    await next();
   };
 }

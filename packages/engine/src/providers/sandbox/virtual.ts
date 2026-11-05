@@ -286,6 +286,7 @@ export class VirtualSandboxProvider implements SandboxProvider {
       warmPool: false,
       hibernation: false,
       customImage: false,
+      nestedKubernetes: false,
       coldStartEstimateMs: 0,
     };
   }

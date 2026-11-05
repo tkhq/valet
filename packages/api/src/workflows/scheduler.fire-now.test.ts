@@ -13,7 +13,7 @@ import {
 import { WorkflowScheduler, scheduledRunId } from "./scheduler.js";
 import type { AppDb } from "../lib/drizzle.js";
 import type { RunHost } from "@valet/workflow";
-import type { OrchestratorDeliverFn } from "../events/dispatcher.js";
+import type { AssistantDeliverFn } from "../events/dispatcher.js";
 import { PgWorkflowStore } from "./pg-store.js";
 import type { PgDb } from "@valet/store-postgres";
 import { InMemoryCredentialStore } from "@valet/engine";
@@ -55,19 +55,18 @@ function makeRunHost(): { host: RunHost; start: ReturnType<typeof vi.fn> } {
   return { host, start };
 }
 
-/** Recording stub for `deliverToOrchestrator`. */
-function makeDeliver(): { deliver: OrchestratorDeliverFn; calls: ReturnType<typeof vi.fn> } {
-  const calls = vi.fn().mockResolvedValue(undefined);
-  const deliver: OrchestratorDeliverFn = (args) => (calls(args) as Promise<void>);
-  return { deliver, calls };
+/** Recording stub for `deliverToAssistant`. */
+function makeDeliver(): { deliver: AssistantDeliverFn; calls: ReturnType<typeof vi.fn<AssistantDeliverFn>> } {
+  const calls = vi.fn<AssistantDeliverFn>(async () => ({ sessionId: "sess-1", threadId: "thr-1" }));
+  return { deliver: calls, calls };
 }
 
-function buildScheduler(host: RunHost, deliver: OrchestratorDeliverFn): WorkflowScheduler {
+function buildScheduler(host: RunHost, deliver: AssistantDeliverFn): WorkflowScheduler {
   return new WorkflowScheduler({
     db,
     workflowStore: new PgWorkflowStore(pgdb),
     workflowRunHost: host,
-    deliverToOrchestrator: deliver,
+    deliverToAssistant: deliver,
     now: () => FIXED_NOW,
   });
 }
@@ -158,7 +157,7 @@ describe("WorkflowScheduler.fireNow", () => {
     if (!created.ok) throw new Error(created.error);
     const scheduleId = created.schedule.scheduleId;
 
-    await updateWorkflowSchedule(db, OWNER, scheduleId, { enabled: false }, FIXED_NOW - 500);
+    await updateWorkflowSchedule(armDeps(), OWNER, scheduleId, { enabled: false }, FIXED_NOW - 500);
 
     const { deliver, calls } = makeDeliver();
     const { host } = makeRunHost();

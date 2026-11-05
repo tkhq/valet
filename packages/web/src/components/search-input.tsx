@@ -12,15 +12,15 @@
  * echo never clobbers characters typed while a send was in flight. A prop
  * change the box did NOT send — Back, or a link — wins over the draft.
  */
-import { useEffect, useRef, useState, type InputHTMLAttributes } from "react";
-import { Input } from "~/components/primitives";
+import { useEffect, useRef, useState } from "react";
+import { Input, type InputProps } from "~/components/primitives";
 import { useDebouncedValue } from "~/hooks/use-debounced-value";
 
 /** How long the box lets typing settle before it calls `onSettled`. */
 export const SEARCH_DEBOUNCE_MS = 250;
 
 export interface SearchInputProps
-  extends Omit<InputHTMLAttributes<HTMLInputElement>, "value" | "onChange" | "type"> {
+  extends Omit<InputProps, "value" | "onChange" | "type"> {
   /** The settled query the page holds, as it echoes back — "" when unset. */
   value: string;
   /** Called with the draft once typing settles and the draft differs from

@@ -72,17 +72,26 @@ export interface K8sProviderConfig {
    * (EACCES; containerd issue #12182). Unset → field omitted (the daemon
    * still starts; running containers fails on such clusters). */
   dockerRuntimeClassName?: string;
+  /** Relative path beneath each node's kubelet seccomp directory. Never Unconfined. */
+  browserSeccompProfile?: string;
+  /** Stock browser companion image. Defaults to defaultImage. */
+  browserImage?: string;
+  browserEnabled?: boolean;
+  /** Session-owned private runtime volume size. Default: 2Gi. */
+  browserRuntimeStorage?: string;
 }
 
 /** `corev1.SeccompProfile` subset — only the two profile types the manifest
  * builder emits (Unconfined for rootless DinD, RuntimeDefault for future use). */
 export interface SeccompProfile {
-  type: "Unconfined" | "RuntimeDefault";
+  type: "Unconfined" | "RuntimeDefault" | "Localhost";
+  localhostProfile?: string;
 }
 
 /** `corev1.SecurityContext` subset — container-level security context fields
  * the manifest builder sets for rootless DinD sandboxes. */
 export interface ContainerSecurityContext {
+  privileged?: boolean;
   seccompProfile?: SeccompProfile;
   /** `corev1.Capabilities` subset — capabilities to add to the container.
    * Used for rootless DinD: adds SYS_ADMIN (uid_map write) and NET_ADMIN
@@ -94,11 +103,12 @@ export interface ContainerSecurityContext {
   procMount?: "Unmasked" | "Default";
 }
 
-/** `corev1.EnvVar` subset — name/value pairs only (we never emit valueFrom). */
-export interface EnvVar {
+/** `corev1.EnvVar` subset used by sandbox manifests. */
+export type EnvVar = { name: string; value: string; valueFrom?: never } | {
   name: string;
-  value: string;
-}
+  value?: never;
+  valueFrom: { fieldRef: { fieldPath: "metadata.uid" } };
+};
 
 /** The provider-facing resource-options shape — mirrors
  * `SandboxCreateOpts.resources` (packages/engine/src/types.ts). Field docs
@@ -109,6 +119,12 @@ export interface SandboxResourceOpts {
   memory?: string;
   ephemeralStorage?: string;
   ephemeralStorageLimit?: string;
+  /** Node-local /scratch emptyDir size, as a Kubernetes quantity string
+   * (e.g. "100Gi"). Mirrors `SandboxResources.scratch` (@valet/engine).
+   * Adds to `ephemeralStorage`/`ephemeralStorageLimit` on the sandbox
+   * container's `ephemeral-storage` requests/limits: the scratch volume's
+   * usage counts against the same node-disk accounting (TKAI-349). */
+  scratch?: string;
 }
 
 /** `corev1.ResourceList` subset — quantities as strings, the wire format
@@ -126,6 +142,7 @@ export interface ResourceRequirements {
 }
 
 export interface VolumeMount {
+  readOnly?: boolean;
   subPath?: string;
   name: string;
   mountPath: string;
@@ -142,6 +159,7 @@ export interface SecretVolumeSource {
 
 export interface Volume {
   name: string;
+  persistentVolumeClaim?: { claimName: string };
   secret?: SecretVolumeSource;
   /** `corev1.EmptyDirVolumeSource` subset. `sizeLimit` bounds the emptyDir
    * (the DinD docker-state volume — image layers + container rootfs — is
@@ -162,6 +180,7 @@ export interface SandboxContainer {
   resources?: ResourceRequirements;
   volumeMounts?: VolumeMount[];
   securityContext?: ContainerSecurityContext;
+  readinessProbe?: { exec: { command: string[] }; initialDelaySeconds?: number; periodSeconds?: number };
   /** `corev1.Container.workingDir` — set to `WORKSPACE_MOUNT_PATH` by the
    * manifest builder so relative paths in `exec`/file ops resolve against
    * the persistent `/workspace` volume by default (the k8s `pods/exec` API
@@ -171,6 +190,10 @@ export interface SandboxContainer {
    * lost on pod recreate — caught live by the conformance suite's
    * "workspace survives destroy + recreate" case). */
   workingDir?: string;
+  /** `FallbackToLogsOnError` makes the kubelet copy the log tail into
+   * `lastState.terminated.message` when a container exits non-zero with no
+   * termination file, which is how crash-loop errors learn the last line. */
+  terminationMessagePolicy?: "File" | "FallbackToLogsOnError";
 }
 
 /** `corev1.PodSecurityContext` subset — pod-level fields the manifest
@@ -194,6 +217,7 @@ export interface TopologySpreadConstraint {
 
 /** `corev1.PodSpec` subset — only the fields the manifest builder sets. */
 export interface SandboxPodSpec {
+  automountServiceAccountToken?: boolean;
   initContainers?: SandboxContainer[];
   containers: SandboxContainer[];
   /** Soft (ScheduleAnyway) spread of sandbox pods across nodes and zones. */
@@ -363,10 +387,17 @@ export interface SandboxCRRead {
 export interface PodOwnerReference {
   kind: string;
   name: string;
+  uid?: string;
   controller?: boolean;
 }
 
 export interface PodSummary {
   name: string;
   ownerReferences?: PodOwnerReference[];
+  /** The pod's current annotations, when the caller's projection includes
+   * them. Populated for eviction-protection reads (lifecycle.ts's
+   * `setEvictionProtection`/`listEvictionProtected`), absent otherwise. */
+  annotations?: Record<string, string>;
+  /** The pod's current labels, same conditions as `annotations`. */
+  labels?: Record<string, string>;
 }

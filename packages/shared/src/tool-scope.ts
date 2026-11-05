@@ -1,0 +1,117 @@
+/** Task capability limits. Existing authorization and approval policies still apply. */
+export interface ToolScope {
+  tools?: string[];
+  actions?: string[];
+}
+
+export const TOOL_SCOPE_KEY = "toolScope";
+/** Last started task ceiling, retained after queue history is pruned. */
+export const CONTINUATION_TOOL_SCOPE_KEY = "continuationToolScope";
+/** Submission whose started turn supplied an autonomous continuation. Copied at claim, not settlement. */
+export const CONTINUATION_SOURCE_ITEM_KEY = "continuationSourceItemId";
+export const INHERIT_TOOL_SCOPE_KEY = "inheritToolScope";
+/** Marks a workflow task that nobody watches. The engine refuses its decision requests before a gate opens. */
+export const UNATTENDED_WORKFLOW_KEY = "unattendedWorkflow";
+/** Marks an automated event or schedule delivery that nobody watches. The engine refuses its decision requests, but a task it delegates can still ask. */
+export const UNATTENDED_DELIVERY_KEY = "unattendedDelivery";
+/** The workflow agent step `{ runId, nodeId }` a submission belongs to. Only host dispatch writes it. */
+export const WORKFLOW_STEP_KEY = "workflowStep";
+
+/**
+ * True for a submission a steer must not supersede: a workflow task or step.
+ * A person's message in the same thread queues behind it instead. A
+ * superseded workflow step fails its run (submission outcome "superseded").
+ */
+export function steerKeepsSubmission(metadata: Record<string, unknown> | undefined): boolean {
+  return metadata?.[WORKFLOW_STEP_KEY] !== undefined || metadata?.[UNATTENDED_WORKFLOW_KEY] === true;
+}
+/** The most model calls one submission may make. The engine stops before the next call and fails the submission. */
+export const MODEL_CALL_LIMIT_KEY = "modelCallLimit";
+
+/** A stored model call limit, or undefined when it is not a positive integer. */
+export function readModelCallLimit(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined;
+}
+/** The service part of an action name: the text before the first dot. */
+export const SCOPE_SERVICE_NAME = /^[a-zA-Z0-9_-]+$/;
+const TOOL_NAME = SCOPE_SERVICE_NAME;
+const ACTION_NAME = /^[a-zA-Z0-9_-]+\.(?:[a-zA-Z0-9_.-]+|\*)$/;
+
+/** Invalid persisted scope data must never remove a restriction. */
+function parseToolScope(value: unknown): ToolScope | undefined | false {
+  if (value === undefined) return undefined;
+  const denied = false;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return denied;
+  if (Object.keys(value).some((key) => key !== "tools" && key !== "actions")) return denied;
+  const read = (key: "tools" | "actions", pattern: RegExp): string[] | undefined | false => {
+    const input: unknown = key === "tools"
+      ? ("tools" in value ? value.tools : undefined)
+      : ("actions" in value ? value.actions : undefined);
+    if (input === undefined) return undefined;
+    if (!Array.isArray(input) || input.length > 200) return false;
+    const result: string[] = [];
+    for (const item of input) {
+      if (typeof item !== "string" || item.length > 200 || !pattern.test(item)) return false;
+      result.push(item);
+    }
+    return [...new Set(result)];
+  };
+  const tools = read("tools", TOOL_NAME);
+  const actions = read("actions", ACTION_NAME);
+  if (tools === false || actions === false) return denied;
+  return { ...(tools ? { tools } : {}), ...(actions ? { actions } : {}) };
+}
+
+function includesAction(pattern: string, action: string): boolean {
+  return pattern === action || (pattern.endsWith(".*") && action.startsWith(pattern.slice(0, -1)));
+}
+
+export function actionInScope(scope: ToolScope | undefined, action: string): boolean {
+  return scope?.actions === undefined || scope.actions.some((pattern) => includesAction(pattern, action));
+}
+
+export function toolInScope(scope: ToolScope | undefined, tool: string): boolean {
+  return scope?.tools === undefined || scope.tools.includes(tool);
+}
+
+/** Every layer can only narrow the preceding layer. */
+export function intersectToolScopes(...scopes: (ToolScope | undefined)[]): ToolScope | undefined {
+  let tools: string[] | undefined;
+  let actions: string[] | undefined;
+  for (const scope of scopes) {
+    if (scope?.tools !== undefined) tools = tools === undefined ? [...scope.tools] : tools.filter((tool) => scope.tools?.includes(tool));
+    if (scope?.actions !== undefined) {
+      const next = scope.actions;
+      actions = actions === undefined ? [...next] : [...new Set(actions.flatMap((left) =>
+        next.flatMap((right) => includesAction(left, right) ? [right] : includesAction(right, left) ? [left] : [])))];
+    }
+  }
+  return tools === undefined && actions === undefined ? undefined : {
+    ...(tools !== undefined ? { tools } : {}), ...(actions !== undefined ? { actions } : {}),
+  };
+}
+
+export function scopeRefusal(name: string): string {
+  return `${name} is outside this task's tool scope. Select the needed focus, or ask the parent to delegate a new task.`;
+}
+
+export function readToolScope(value: unknown): ToolScope | undefined {
+  const parsed = parseToolScope(value);
+  return parsed === false ? { tools: [], actions: [] } : parsed;
+}
+
+/**
+ * A session-wide autonomous continuation has no single originating thread.
+ * It keeps the session or submission ceiling and every thread's durable
+ * continuation ceiling. A thread's focus is reversible and stays on that
+ * thread, where each turn still applies it; saving it here would turn it into
+ * a ceiling that clearing focus cannot lift.
+ */
+export function continuationToolScope(metadata: Record<string, unknown> | undefined, threads: readonly { metadata?: Record<string, unknown> }[]): ToolScope | undefined {
+  return intersectToolScopes(readToolScope(metadata?.[TOOL_SCOPE_KEY]),
+    ...threads.map((thread) => readToolScope(thread.metadata?.[CONTINUATION_TOOL_SCOPE_KEY])));
+}
+
+export function isToolScope(value: unknown): value is ToolScope {
+  return value !== undefined && parseToolScope(value) !== false;
+}

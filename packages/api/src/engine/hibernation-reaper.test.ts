@@ -1,9 +1,9 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import type { AttachmentState } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { agentSessions } from "../schema/index.js";
+import { agentSessions, assistants } from "../schema/index.js";
 import { HibernationReaper, type HibernationReaperDeps } from "./hibernation-reaper.js";
 
 const RETENTION_MS = 60 * 60_000;
@@ -100,6 +100,18 @@ describe("HibernationReaper", () => {
     expect(after?.status).toBe("hibernated");
   });
 
+  it("retains legacy team root files while isolated executions expire normally", async () => {
+    const root = await seed({ id: "assistant:legacy" });
+    const execution = await seed({ id: "execution:isolated" });
+    await db.update(agentSessions).set({ ownerType: "team", ownerId: "team" });
+    await db.insert(assistants).values({ id: "legacy", sessionId: root, orgId: "org1", ownerType: "team", ownerId: "team",
+      createdAt: 1 });
+    const { deps, destroyedSandboxes } = fakeDeps();
+    await new HibernationReaper(deps).sweep(NOW);
+    expect(destroyedSandboxes).toEqual([`sbx-${execution}`]);
+    expect((await row(root))?.sandboxReclaimedAt).toBeNull();
+  });
+
   it("a stamped row stops sweeping: the second pass destroys nothing", async () => {
     await seed();
     const { deps, destroyedSandboxes } = fakeDeps();
@@ -109,6 +121,29 @@ describe("HibernationReaper", () => {
     await reaper.sweep(NOW + 1);
 
     expect(destroyedSandboxes).toHaveLength(1);
+  });
+
+  it("spaces retries of a failing reclaim instead of retrying it every pass", async () => {
+    await seed();
+    const { deps } = fakeDeps();
+    let attempts = 0;
+    deps.engineHost.destroySandbox = async () => {
+      attempts++;
+      throw new Error("apiserver timeout");
+    };
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const reaper = new HibernationReaper(deps);
+
+    await reaper.sweep(NOW);
+    await reaper.sweep(NOW + 60_000);
+    expect(attempts).toBe(1);
+    await reaper.sweep(NOW + 5 * 60_000);
+    expect(attempts).toBe(2);
+    // The second failure doubles the wait to 10 minutes.
+    await reaper.sweep(NOW + 10 * 60_000);
+    expect(attempts).toBe(2);
+    await reaper.sweep(NOW + 15 * 60_000);
+    expect(attempts).toBe(3);
   });
 
   it("skips rows still inside the retention window", async () => {

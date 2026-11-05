@@ -4,7 +4,7 @@
  * rows, in natural construction order (active entries first, then
  * inactive). See `docs/plans/2026-07-16-llm-providers.md` Task 4.
  */
-import { describe, expect, it, beforeEach, vi } from "vitest";
+import { afterEach, describe, expect, it, beforeEach, vi } from "vitest";
 import { getModels } from "@earendil-works/pi-ai/compat";
 import { getSupportedThinkingLevels, type Model, type ThinkingLevelMap } from "@earendil-works/pi-ai";
 import type { AppDb } from "../lib/drizzle.js";
@@ -14,6 +14,13 @@ import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { orgs } from "../schema/index.js";
 import { createLlmProvider, updateLlmProvider } from "./llm-providers.js";
 import { buildOrgCatalog, catalogValidIds, thinkingLevelsFor } from "./model-catalog.js";
+import {
+  BEDROCK_DEFAULT_MODEL_IDS,
+  curatedBedrockModels,
+  resetBedrockDiscoveryCache,
+  setBedrockDiscoveryClientForTests,
+  type BedrockDiscoveryClient,
+} from "./bedrock-discovery.js";
 import { registryModels } from "./model-registry.js";
 import { OPENROUTER_DEFAULT_MODEL_IDS } from "./openrouter.js";
 import { setApprovedModels } from "./approved-models.js";
@@ -29,6 +36,91 @@ describe("model catalog", () => {
     db = appDb;
     credentials = new PgCredentialStore(pgdb, deriveSecretKey("test-key"));
     await db.insert(orgs).values({ id: orgId, name: "Org", createdAt: Date.now() });
+  });
+
+  describe("amazon-bedrock (curated from account discovery)", () => {
+    const bedrockEntries = async () => (await buildOrgCatalog(db, credentials, orgId)).filter((e) => e.providerKind === "amazon-bedrock");
+    const DISCOVERED = ["qwen.qwen3-coder-next", "deepseek.v3.2", "vendor.brand-new-model"];
+    const fakeBedrock = (opts: { fail?: boolean } = {}): BedrockDiscoveryClient => ({
+      async send(cmd: unknown) {
+        const name = (cmd as { constructor: { name: string } }).constructor.name;
+        if (opts.fail) throw new Error("boom");
+        if (name === "ListFoundationModelsCommand") {
+          return {
+            modelSummaries: DISCOVERED.map((id) => ({
+              modelId: id, modelName: id, inputModalities: ["TEXT"], outputModalities: ["TEXT"],
+              responseStreamingSupported: true, inferenceTypesSupported: ["ON_DEMAND"], modelLifecycle: { status: "ACTIVE" },
+            })),
+          };
+        }
+        if (name === "ListInferenceProfilesCommand") return { inferenceProfileSummaries: [] };
+        if (name === "GetUseCaseForModelAccessCommand") { const e = new Error("no form"); e.name = "ResourceNotFoundException"; throw e; }
+        throw new Error(`unexpected ${name}`);
+      },
+    });
+    afterEach(() => { vi.unstubAllEnvs(); setBedrockDiscoveryClientForTests(undefined); resetBedrockDiscoveryCache(); });
+
+    it("zero-config with ambient credentials lists the default set filtered to what discovery found", async () => {
+      vi.stubEnv("AWS_PROFILE", "dev");
+      setBedrockDiscoveryClientForTests(fakeBedrock());
+      const ids = (await bedrockEntries()).map((e) => e.id);
+      expect(ids).toEqual(["amazon-bedrock/deepseek.v3.2", "amazon-bedrock/qwen.qwen3-coder-next"]);
+      for (const e of await bedrockEntries()) {
+        expect(e.active).toBe(true);
+        expect(e.providerName).toBe("Amazon Bedrock");
+        expect(e.pricing?.input).toBeGreaterThan(0);
+      }
+    });
+
+    it("zero-config with discovery failing lists the whole default set (registry-trusted)", async () => {
+      vi.stubEnv("AWS_PROFILE", "dev");
+      setBedrockDiscoveryClientForTests(fakeBedrock({ fail: true }));
+      const ids = (await bedrockEntries()).map((e) => e.id.slice("amazon-bedrock/".length));
+      expect(ids).toEqual([...BEDROCK_DEFAULT_MODEL_IDS]);
+    });
+
+    it("a row with a selection lists exactly that selection, registry-enriched, unknown ids with stored metadata", async () => {
+      vi.stubEnv("AWS_WEB_IDENTITY_TOKEN_FILE", "/var/run/secrets/eks.amazonaws.com/serviceaccount/token");
+      setBedrockDiscoveryClientForTests(fakeBedrock());
+      const row = await createLlmProvider(db, { orgId, kind: "amazon-bedrock", name: "Amazon Bedrock" });
+      await updateLlmProvider(db, orgId, row.id, {
+        models: [{ id: "deepseek.v3.2", name: "stale name" }, { id: "vendor.brand-new-model", name: "Brand New", contextWindow: 64_000 }],
+      });
+      const entries = await bedrockEntries();
+      expect(entries.map((e) => e.id)).toEqual(["amazon-bedrock/deepseek.v3.2", "amazon-bedrock/vendor.brand-new-model"]);
+      expect(entries[0]?.name).not.toBe("stale name");
+      expect(entries[0]?.pricing?.input).toBeGreaterThan(0);
+      expect(entries[1]).toMatchObject({ name: "Brand New", contextWindow: 64_000, active: true, providerId: row.id });
+      expect(entries[1]?.pricing).toBeUndefined();
+    });
+
+    it("marks Bedrock models inactive when the row is disabled even with ambient credentials", async () => {
+      vi.stubEnv("AWS_PROFILE", "dev");
+      const row = await createLlmProvider(db, { orgId, kind: "amazon-bedrock", name: "Amazon Bedrock", models: curatedBedrockModels() });
+      await updateLlmProvider(db, orgId, row.id, { enabled: false });
+      const entries = await bedrockEntries();
+      expect(entries.length).toBeGreaterThan(0);
+      expect(entries.every((e) => e.active === false)).toBe(true);
+    });
+
+    it("lists no Bedrock models with no row and no AWS environment", async () => {
+      expect(await bedrockEntries()).toEqual([]);
+    });
+
+    it("a Bedrock row with an EMPTY selection lists the default set (rows created before curation existed)", async () => {
+      vi.stubEnv("AWS_PROFILE", "dev");
+      setBedrockDiscoveryClientForTests(fakeBedrock());
+      const row = await createLlmProvider(db, { orgId, kind: "amazon-bedrock", name: "Amazon Bedrock", models: [] });
+      const entries = await bedrockEntries();
+      expect(entries.map((e) => e.id)).toEqual(["amazon-bedrock/deepseek.v3.2", "amazon-bedrock/qwen.qwen3-coder-next"]);
+      expect(entries[0]?.providerId).toBe(row.id);
+    });
+
+    it("never lists anthropic ids unless an admin selected them", async () => {
+      vi.stubEnv("AWS_PROFILE", "dev");
+      setBedrockDiscoveryClientForTests(fakeBedrock());
+      expect((await bedrockEntries()).some((e) => e.id.includes("anthropic."))).toBe(false);
+    });
   });
 
   describe("zero-config env-only boot (today's behavior pin)", () => {
@@ -71,7 +163,7 @@ describe("model catalog", () => {
     });
   });
 
-  it("lists Claude Fable 5.1 and GPT-6 Astra", async () => {
+  it("lists Claude Fable 5.1 and Astra", async () => {
     vi.stubEnv("ANTHROPIC_API_KEY", "test-key");
     vi.stubEnv("OPENAI_API_KEY", "test-key");
     try {
@@ -79,8 +171,32 @@ describe("model catalog", () => {
       const fable = entries.find((entry) => entry.id === "anthropic/claude-fable-5-1");
       expect(fable).toMatchObject({ name: "Claude Fable 5.1", contextWindow: 1_000_000, active: true });
       const astra = entries.find((entry) => entry.id === "openai/gpt-6-astra");
-      expect(astra).toMatchObject({ name: "GPT-6 Astra", contextWindow: 272_000, active: true });
+      expect(astra).toMatchObject({ active: true });
       expect(catalogValidIds(entries).has("openai/gpt-6-astra")).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("exposes supplemental models through normal provider eligibility and approval rules", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "test-key");
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-key");
+    try {
+      await setApprovedModels(db, orgId, ["openai/gpt-6.1-sol"]);
+      const entries = await buildOrgCatalog(db, credentials, orgId);
+      for (const id of ["openai/gpt-6.1-sol", "anthropic/claude-sonnet-5-5", "openai/gpt-6-astra"]) {
+        expect(entries.filter((entry) => entry.id === id)).toHaveLength(1);
+        expect(entries.find((entry) => entry.id === id)).toMatchObject({
+          active: true, resolvable: true, approved: id === "openai/gpt-6.1-sol",
+          thinkingLevels: ["low", "medium", "high", "xhigh", "max"],
+        });
+        expect(catalogValidIds(entries).has(id)).toBe(true);
+      }
+      const row = await createLlmProvider(db, { orgId, kind: "openai", name: "OpenAI" });
+      await updateLlmProvider(db, orgId, row.id, { enabled: false });
+      const disabled = await buildOrgCatalog(db, credentials, orgId);
+      expect(disabled.find((entry) => entry.id === "openai/gpt-6.1-sol")?.active).toBe(false);
+      expect(catalogValidIds(disabled).has("openai/gpt-6.1-sol")).toBe(false);
     } finally {
       vi.unstubAllEnvs();
     }

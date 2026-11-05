@@ -9,9 +9,11 @@
  * This module is the bundle entry (see `build.mjs`). Importing it must not
  * have side effects beyond running `main()` at the bottom.
  */
+import { withCliInvocation } from "./cli/telemetry.js";
 import { loadConfig } from "./cli/config.js";
+import { refreshSelectedProfile } from "./cli/token-refresh.js";
 import { CliError, ExitCode } from "./cli/exit.js";
-import { printErr, printLine } from "./cli/output.js";
+import { exitAfterOutput, printErr, printLine } from "./cli/output.js";
 import type { CommandModule } from "./cli/types.js";
 import { VALET_VERSION } from "./version.js";
 
@@ -29,6 +31,7 @@ type CommandImporter = () => Promise<CommandModule>;
  */
 const COMMANDS: Record<string, CommandImporter> = {
   serve: () => import("./cli/commands/serve.js"),
+  threads: () => import("./cli/commands/threads.js"),
   sessions: () => import("./cli/commands/sessions.js"),
   send: () => import("./cli/commands/send.js"),
   upload: () => import("./cli/commands/upload.js"),
@@ -41,28 +44,44 @@ const COMMANDS: Record<string, CommandImporter> = {
   config: () => import("./cli/commands/config.js"),
   chat: () => import("./cli/commands/chat.js"),
   mcp: () => import("./cli/commands/mcp.js"),
+  tools: () => import("./cli/commands/tools.js"),
   reset: () => import("./cli/commands/reset.js"),
   prebuild: () => import("./cli/commands/prebuild.js"),
+  proxy: () => import("./cli/commands/proxy.js"),
+  validate: () => import("./cli/commands/validate.js"),
 };
+
+/** Commands that never call an instance with the selected profile's credential. */
+const NO_INSTANCE_COMMANDS = new Set(["serve", "login", "logout", "instance", "config", "reset", "validate"]);
+
+/** Whether the command skips the device sign-in refresh. `valet proxy token`
+ * is a harness key helper: it must print the key fast, with no network call. */
+function skipsRefresh(command: string, rest: string[]): boolean {
+  return NO_INSTANCE_COMMANDS.has(command) || (command === "proxy" && rest[0] === "token");
+}
 
 const USAGE = `valet <command> [options]
 
 Commands:
   serve       Boot the Valet server (the full product)
-  sessions    List and inspect sessions on an instance
-  send        Send a prompt to a session
-  upload      Upload files to a session sandbox
+  threads     List, create, and inspect workspace threads
+  sessions    Legacy runtime commands (compatible with existing scripts)
+  send        Send a prompt to a thread
+  upload      Upload files with --thread <id>
   handoff     Hand off work from a local agent to Valet
   gates       List and resolve decision gates
-  status      Show instance / session status
+  status      Show instance health or --thread <id> status
   login       Add or authenticate an instance profile
   logout      Remove an instance profile
   instance    Manage instance profiles
   config      View or edit CLI config
-  chat        Interactive chat with a session
+  chat        Interactive chat with a thread
   mcp         MCP client operations
+  tools       Search, describe, and call Valet-brokered tools
   reset       Reset local state
   prebuild    Test a repo's .valet/prebuild.yaml locally (plan / docker build)
+  proxy       Point a local coding tool (claude-code) at the Valet LLM proxy
+  validate    Check a brain repository's skills, playbooks, memory, and workflows
 
 Global options:
   --json          Machine-readable JSON output (where supported)
@@ -99,15 +118,17 @@ async function main(): Promise<number> {
     return ExitCode.Usage;
   }
 
-  const config = loadConfig();
+  let config = loadConfig();
+  // Commands that call an instance get a fresh device sign-in first.
+  if (!skipsRefresh(first, rest)) config = await refreshSelectedProfile(config, rest);
   const mod = await importer();
-  return await mod.run(rest, { command: first, config });
+  return await withCliInvocation(first, rest, () => mod.run(rest, { command: first, config }));
 }
 
 main()
-  .then((code) => process.exit(code))
   .catch((err: unknown) => {
     const message = err instanceof Error ? err.message : String(err);
     printErr(message);
-    process.exit(err instanceof CliError ? err.exitCode : 1);
-  });
+    return err instanceof CliError ? err.exitCode : 1;
+  })
+  .then(exitAfterOutput);

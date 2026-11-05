@@ -1,3 +1,6 @@
+import { attentionGatePending } from "../events/attention-delivery.js";
+import { webPresence } from "../services/web-presence.js";
+import { listNotificationPreferences, parseNotificationPreference, saveNotificationPreference } from "../services/notification-preferences.js";
 /**
  * Notifications — web delivery surface for the attention router (Phase 4
  * decision 19).
@@ -13,26 +16,125 @@
  * else 404s, same existence-hiding treatment used elsewhere in this
  * package (teams.ts) for cross-tenant access.
  *
- * Preferences mirror `isWebEnabled`'s default in `orchestrator/attention.ts`:
- * a kind with no row reports `web: true`. The table only ever needs a row
- * for someone who opted OUT.
+ * Preferences live in `services/notification-preferences.ts`, which the
+ * settings actions share.
  */
+import { decryptSecret, deriveSecretKey, encryptSecret } from "../lib/secret-crypto.js";
 import { Hono } from "hono";
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, ne, sql, type SQL } from "drizzle-orm";
 import { NotFoundError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
-import { notifications, userNotificationPreferences, type NotificationRow } from "../schema/index.js";
+import { agentSessions, workflowRuns, workflowDefinitions, pendingChannelDeliveries, notifications, type NotificationRow } from "../schema/index.js";
+import { canResolveSessionGate, gateApprover } from "../services/session-access.js";
+import { engineGateToWire } from "../engine/bridge.js";
+import type { WorkflowRunOrigin } from "@valet/workflow";
+import { runVisible, threadsVisibleTo } from "./_thread-access.js";
 import type {
   ListNotificationPreferencesResponse,
   ListNotificationsResponse,
-  NotificationKind,
+  ListNotificationDecisionsResponse,
   NotificationSummary,
-  SetNotificationPreferenceRequest,
 } from "../wire/types.js";
 
 export const notificationsRouter = new Hono<AppEnv>();
 
-const NOTIFICATION_KINDS: NotificationKind[] = ["notification", "question", "escalation", "approval", "review"];
+notificationsRouter.post("/presence", async c => {
+  if (c.var.authVia !== "session" && c.var.authVia !== "stub") return c.json({ error: "Web presence requires a browser session. Sign in to Valet." }, 403);
+  const body: unknown = await c.req.json().catch(() => null);
+  if (!body || typeof body !== "object" || !("tabId" in body) || !("active" in body)
+    || typeof body.tabId !== "string" || body.tabId.length < 1 || body.tabId.length > 128 || typeof body.active !== "boolean") {
+    return c.json({ error: "Invalid presence report. Send a tabId and an active boolean." }, 400);
+  }
+  webPresence(c.var.providers.db).report(c.var.user.id, body.tabId, body.active);
+  return c.json({ ok: true });
+});
+
+/** Read durable gates without waking their sessions or relying on notification read state. */
+notificationsRouter.get("/decisions", async (c) => {
+  const { db, engineStore } = c.var.providers;
+  const caller = c.var.principal;
+  // The same reach canViewSession grants, as SQL, so each poll reads only the
+  // caller's own and team sessions instead of every pending gate in the org.
+  // canResolveSessionGate below stays the authority.
+  const reachable = (ownerType: SQL, ownerId: SQL, userId: SQL) => caller.type === "team"
+    ? sql`(${ownerType} = 'team' AND ${ownerId} = ${caller.id})`
+    : sql`((${ownerType} = 'team' AND EXISTS (SELECT 1 FROM team_members tm WHERE tm.team_id = ${ownerId} AND tm.user_id = ${caller.id}))
+        OR (${ownerType} <> 'team' AND ${userId} = ${caller.id}))`;
+  const encodedCursor = c.req.query("cursor");
+  const cursorKey = deriveSecretKey(JSON.stringify(["approval-inbox", c.var.providers.encryptionKey, c.var.user.orgId, caller.type, caller.id]));
+  let cursor: { createdAt: number; id: string } | undefined;
+  try {
+    if (encodedCursor && encodedCursor.length <= 65_536) {
+      const decoded: unknown = JSON.parse(decryptSecret(Buffer.from(encodedCursor, "base64url").toString("utf8"), cursorKey));
+      if (Array.isArray(decoded) && decoded.length === 2 && typeof decoded[0] === "number" && Number.isSafeInteger(decoded[0])
+        && decoded[0] >= 0 && typeof decoded[1] === "string" && decoded[1].length > 0) {
+        cursor = { createdAt: decoded[0], id: decoded[1] };
+      }
+    }
+  } catch { /* Invalid or foreign cursors fail below. */ }
+  if (encodedCursor && !cursor) {
+    return c.json({ error: "Invalid approval cursor. Reload notifications and try again." }, 400);
+  }
+  const after = cursor ? sql`(g.created_at, g.id COLLATE "C") > (${cursor.createdAt}, ${cursor.id} COLLATE "C")` : sql`TRUE`;
+  const pending = and(sql`g.status = 'pending'`, after);
+  const gateFields = { id: sql<string>`g.id`, createdAt: sql<number>`g.created_at`.mapWith(Number) };
+  const limit = 100;
+  // Page gates, not sessions: a single parked session can contain many gates.
+  const [appRows, workflowRows] = await Promise.all([
+    db.select({ ...gateFields, session: agentSessions }).from(sql`engine_decision_gates g`)
+      .innerJoin(agentSessions, sql`${agentSessions.id} = g.session_id`)
+      .where(and(pending, eq(agentSessions.orgId, c.var.user.orgId), ne(agentSessions.status, "deleted"),
+        reachable(sql`${agentSessions.ownerType}`, sql`${agentSessions.ownerId}`, sql`${agentSessions.userId}`)))
+      .orderBy(sql`g.created_at`, sql`g.id COLLATE "C"`).limit(limit + 1),
+    db.select({ ...gateFields,
+      sessionId: sql<string>`g.session_id`, ownerType: workflowRuns.ownerType, ownerId: workflowRuns.ownerId,
+      title: workflowDefinitions.name, origin: sql<WorkflowRunOrigin | null>`${workflowRuns.params}->'origin'`,
+      actorUserId: workflowRuns.actorUserId, input: sql<unknown>`${workflowRuns.params}->'input'`,
+    }).from(sql`engine_decision_gates g`)
+      .innerJoin(workflowRuns, sql`${workflowRuns.id} = split_part(g.session_id, ':', 2)`)
+      .innerJoin(workflowDefinitions, eq(workflowDefinitions.id, workflowRuns.workflowId))
+      .where(and(pending, eq(workflowDefinitions.orgId, c.var.user.orgId), sql`g.session_id LIKE 'wf:%'`,
+        sql`NOT EXISTS (SELECT 1 FROM agent_sessions a WHERE a.id = g.session_id)`,
+        reachable(sql`${workflowRuns.ownerType}`, sql`${workflowRuns.ownerId}`, sql`${workflowRuns.ownerId}`)))
+      .orderBy(sql`g.created_at`, sql`g.id COLLATE "C"`).limit(limit + 1),
+  ]);
+  const candidates = [
+    ...appRows.map(row => ({ ...row, kind: "app" as const })),
+    ...workflowRows.map(row => ({ ...row, kind: "workflow" as const })),
+  ].sort((a, b) => a.createdAt - b.createdAt || Buffer.compare(Buffer.from(a.id), Buffer.from(b.id)));
+  const page = candidates.slice(0, limit);
+  const items: ListNotificationDecisionsResponse["items"] = [];
+  const authority = new Map<string, Promise<boolean>>();
+  const visibility = new Map<string, Promise<boolean>>();
+  // Limit concurrent authorization/store work; never hydrate or wake an agent.
+  for (let offset = 0; offset < page.length; offset += 10) {
+    const batch = await Promise.all(page.slice(offset, offset + 10).map(async row => {
+      const session = row.kind === "app" ? row.session : {
+        ownerType: row.ownerType, ownerId: row.ownerId, userId: row.ownerType === "user" ? row.ownerId : "",
+      };
+      const sessionId = row.kind === "app" ? row.session.id : row.sessionId;
+      if (!authority.has(sessionId)) authority.set(sessionId, canResolveSessionGate(db, session, caller));
+      if (!await authority.get(sessionId)) return null;
+      const gate = await engineStore.getDecisionGate(sessionId, row.id);
+      if (!gate || gate.status !== "pending") return null;
+      const approver = gateApprover(gate);
+      if (approver && (caller.type !== "user" || approver.userId !== caller.id)) return null;
+      const key = JSON.stringify([sessionId, gate.threadId]);
+      if (!visibility.has(key)) visibility.set(key, row.kind === "app"
+        ? engineStore.getThread(sessionId, gate.threadId).then(thread => thread ? threadsVisibleTo(c, session)(thread) : false)
+        : runVisible(c, { ownerType: row.ownerType, origin: row.origin, actorUserId: row.actorUserId, params: { input: row.input } }));
+      const canOpenThread = await visibility.get(key) ?? false;
+      if (!approver && !canOpenThread) return null;
+      return { canOpenThread, sessionId, title: row.kind === "app" ? row.session.title || "Thread approval" : row.title,
+        gate: engineGateToWire(gate) };
+    }));
+    items.push(...batch.filter(item => item !== null));
+  }
+  const last = page.at(-1);
+  // Advance past hidden candidates too, without exposing their identifiers.
+  const nextCursor = candidates.length > limit && last ? Buffer.from(encryptSecret(JSON.stringify([last.createdAt, last.id]), cursorKey)).toString("base64url") : null;
+  return c.json({ items, nextCursor } satisfies ListNotificationDecisionsResponse);
+});
 
 function rowToSummary(row: NotificationRow): NotificationSummary {
   return {
@@ -95,54 +197,44 @@ notificationsRouter.post("/read-all", async (c) => {
   await db
     .update(notifications)
     .set({ readAt: Date.now() })
-    .where(and(eq(notifications.userId, userId), isNull(notifications.readAt)));
+    // The bell's Updates list excludes approvals. Clearing it must not suppress
+    // a pending decision's personal-channel fallback.
+    .where(and(eq(notifications.userId, userId), isNull(notifications.readAt), ne(notifications.kind, "approval")));
+
+  // Completed or legacy approval copies must remain clearable. Only a
+  // durable pending gate may retain a row that still has a channel fallback.
+  const approvals = await db.select({ id: notifications.id, event: pendingChannelDeliveries.event }).from(notifications)
+    .leftJoin(pendingChannelDeliveries, and(eq(pendingChannelDeliveries.notificationId, notifications.id), inArray(pendingChannelDeliveries.status, ["pending", "sending"])))
+    .where(and(eq(notifications.userId, userId), isNull(notifications.readAt), eq(notifications.kind, "approval")));
+  const seen = new Set<string>();
+  const handled: string[] = [];
+  for (const approval of approvals) {
+    if (seen.has(approval.id)) continue;
+    seen.add(approval.id);
+    const event = approval.event;
+    if (event && (event.gate || event.workflowGate) && await attentionGatePending({ db }, event)) continue;
+    handled.push(approval.id);
+  }
+  if (handled.length > 0) await db.update(notifications).set({ readAt: Date.now() })
+    .where(and(eq(notifications.userId, userId), inArray(notifications.id, handled), isNull(notifications.readAt)));
 
   return c.json({ ok: true });
 });
 
 notificationsRouter.get("/preferences", async (c) => {
-  const { db } = c.var.providers;
-  const userId = c.var.user.id;
-
-  const rows = await db
-    .select()
-    .from(userNotificationPreferences)
-    .where(eq(userNotificationPreferences.userId, userId));
-  const byKind = new Map(rows.map((r) => [r.kind, r]));
-
-  const preferences = NOTIFICATION_KINDS.map((kind) => ({
-    kind,
-    web: byKind.get(kind)?.web ?? true,
-  }));
-
-  const body: ListNotificationPreferencesResponse = { preferences };
+  const body: ListNotificationPreferencesResponse = { preferences: await listNotificationPreferences(c.var.providers.db, c.var.user.id) };
   return c.json(body);
 });
 
 notificationsRouter.put("/preferences", async (c) => {
-  const { db } = c.var.providers;
-  const userId = c.var.user.id;
-
-  let body: SetNotificationPreferenceRequest;
+  let body: unknown;
   try {
-    body = (await c.req.json()) as SetNotificationPreferenceRequest;
+    body = await c.req.json();
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
-  if (!NOTIFICATION_KINDS.includes(body.kind)) {
-    return c.json({ error: `kind must be one of ${NOTIFICATION_KINDS.join(", ")}` }, 400);
-  }
-  if (typeof body.web !== "boolean") {
-    return c.json({ error: "web must be a boolean" }, 400);
-  }
-
-  await db
-    .insert(userNotificationPreferences)
-    .values({ userId, kind: body.kind, web: body.web })
-    .onConflictDoUpdate({
-      target: [userNotificationPreferences.userId, userNotificationPreferences.kind],
-      set: { web: body.web },
-    });
-
+  const pref = parseNotificationPreference(body);
+  if ("error" in pref) return c.json({ error: pref.error }, 400);
+  await saveNotificationPreference(c.var.providers.db, c.var.user.id, pref);
   return c.json({ ok: true });
 });

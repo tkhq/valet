@@ -162,3 +162,64 @@ workspace switcher and could contradict it. The workflows list badges
 team-owned rows with the team name. `TeamSummary` gains `callerRole` so
 the teams settings panel can hide mutation controls the API's
 `canAdministerTeam` gate would 404 anyway.
+
+## 2026-09-11 addendum: agent workflow ownership follows the assistant
+
+The workflow action context carries the assistant session owner. Workflow
+actions now use that principal for authorization and creation.
+
+- A team assistant creates team-owned workflow definitions. It can read and
+  change only that team's workflows through these actions.
+- A personal assistant still creates personal workflow definitions.
+- A team assistant's orchestrator-prompt schedule belongs to the team.
+  Workflow-target schedules and event triggers continue to follow the target
+  workflow.
+- An `orchestrator` node still resolves the run owner's default assistant.
+  A run of a team-owned definition therefore targets the team's default
+  assistant, not the acting member's personal default assistant.
+
+The tool schemas do not accept an owner id. The server-derived session or run
+owner is the explicit scope, so a caller cannot name an unrelated team. For a
+live team-assistant action, workflow and orchestrator-schedule creation also
+re-check the acting user's current membership, team existence, and organization
+under the same ownership lock used by team deletion. A workflow tool node uses
+the run's server-derived owner instead; it does not borrow a member's personal
+scope.
+
+Workflow actions use the current `ctx.actor.id` when the dispatched event carries
+an actor. They retain the session user fallback for contexts without an actor.
+Membership checks use that same resolved actor. Assistant routing still follows
+the workflow definition and the creating assistant.
+
+This change does not move existing rows. An automatic update cannot distinguish
+a wrongly filed workflow from an intentionally personal workflow. To move an
+affected graph safely, use `workflows.copy_to_team` from a personal assistant.
+Check the copied graph in the team workspace. Recreate its schedules, event
+triggers, and webhook in the team scope because the copy does not move them.
+Delete the personal workflow only after the team workflow runs successfully.
+
+Team schedule creation holds the team ownership lock for both workflow and assistant targets. It rechecks the target after readiness checks. Deletion cannot leave a new schedule behind.
+
+## 2026-09-14 addendum: team event subscriptions hold the same lock
+
+A team-owned event trigger (`trigger-service.ts`) or event subscription
+(`routes/events.ts`) insert now holds the same team ownership lock the
+schedule create path takes, and for the same reason: `deleteTeam` deletes a
+team's schedules, triggers, and subscriptions under that lock, so an insert
+that only checks readiness or ownership beforehand can still land after the
+delete commits, orphaned against a team or workflow that no longer exists.
+
+Both insert paths recheck the target inside the lock before writing the row.
+A workflow target rechecks the workflow row — team, org, and workflow id
+must all still match. An orchestrator team target rechecks team existence
+and membership, and, when the target names an assistant, rechecks that
+assistant the same way `schedule-service.ts` does: `deleteTeam` archives a
+team's assistants under this same lock, so a named assistant is exposed to
+the identical race as a workflow target. A recheck failure returns the same
+"no longer available" error the schedule path uses, naming the retry as the
+fix.
+
+The lock's own authorization check (`withAuthorizedTeamOwnership`) also
+requires the team row itself to still exist (`getTeamInOrg`), not just live
+membership — a stricter bar than the plain membership check either insert
+path made before this addendum.

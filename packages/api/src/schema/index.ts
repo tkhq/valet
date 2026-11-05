@@ -1,5 +1,6 @@
 import {
   pgTable,
+  customType,
   text,
   integer,
   bigint,
@@ -11,8 +12,10 @@ import {
   uniqueIndex,
   check,
   doublePrecision,
+  numeric,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
+import type { NormalizedEvent } from "@valet/engine";
 import type { ParamMatcher } from "../policies/matchers.js";
 import type { PrebuildResources } from "../prebuilds/recipe.js";
 
@@ -65,6 +68,12 @@ export const orgs = pgTable("orgs", {
   allowAnonymousImageBakes: boolean("allow_anonymous_image_bakes").notNull().default(false),
   /** Allow members to install the GitHub App on personal accounts. */
   allowPersonalInstallations: boolean("allow_personal_installations").notNull().default(true),
+  /**
+   * Context size, in tokens, that threads compact to stay under (the engine's
+   * `compaction.contextBudgetTokens`). Null: the Valet default (200k). 0: no
+   * cap, so threads compact only near the model's context limit.
+   */
+  compactionWindowTokens: integer("compaction_window_tokens"),
   // Tier map: `{ xs: ["anthropic/claude-haiku-4-5"], ... }`. Nullable — null
   // means "use built-in defaults" (same pattern as `ssoTeamGroups`).
   modelTiers: jsonb("model_tiers"),
@@ -74,6 +83,12 @@ export const orgs = pgTable("orgs", {
   /** { default?: ThinkingLevel, max?: ThinkingLevel }. Null = no default,
    * no cap. */
   reasoningSettings: jsonb("reasoning_settings"),
+  /** Tier token (xs|s|m|l|xl) for new sessions that no personal or team
+   * default covers. Null = the engine's "s" fallback. */
+  defaultTier: text("default_tier"),
+  /** Raised by an org admin's "Show the tour to everyone again". A member
+   * whose stored org version is lower sees the tour on next load. */
+  tutorialVersion: integer("tutorial_version").notNull().default(0),
 });
 
 // better-auth's default model name for the user table is "user" (singular);
@@ -114,6 +129,13 @@ export const users = pgTable("user", {
   newThreadBehavior: text("new_thread_behavior", {
     enum: ["keep_current", "use_defaults"],
   }).notNull().default("keep_current"),
+  /** IANA timezone (TKAI-584). Null = unknown. Validated with `Intl` on write. */
+  timezone: text("timezone"),
+  /**
+   * True once the timezone was set or cleared by the user, or auto-reported
+   * from the browser. The auto-report never runs again, so a clear sticks.
+   */
+  timezoneReportDone: boolean("timezone_report_done").notNull().default(false),
 });
 
 // ─── better-auth core + plugin tables ───────────────────────────────────────
@@ -291,6 +313,50 @@ export const oauthConsent = pgTable(
   ],
 );
 
+/**
+ * MCP client registrations the gate admitted (`auth/mcp-registration.ts`).
+ * Every api replica reads and writes these rows under one advisory lock, so
+ * the per-address hourly limit and the unapproved cap hold across replicas.
+ * `pending` marks an admission whose better-auth insert has not finished.
+ */
+export const mcpRegistrations = pgTable(
+  "mcp_registrations",
+  {
+    id: text("id").primaryKey(),
+    address: text("address").notNull(),
+    pending: boolean("pending").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [index("mcp_registrations_address_idx").on(t.address, t.createdAt)],
+);
+
+// `admin_audit_events` — one row per successful admin configuration change
+// (docs/specs/2026-11-03-admin-audit-log-design.md). Written only by
+// `services/admin-audit.ts`. `changes` holds a redacted field summary and
+// never holds a secret value. Reads are keyset-paginated on
+// (org_id, created_at desc, id desc).
+export const adminAuditEvents = pgTable(
+  "admin_audit_events",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    /** Null when the system made the change (for example a boot promotion). */
+    actorUserId: text("actor_user_id"),
+    actorEmail: text("actor_email"),
+    action: text("action").notNull(),
+    targetType: text("target_type").notNull(),
+    targetId: text("target_id"),
+    targetName: text("target_name"),
+    changes: jsonb("changes").$type<Record<string, unknown>>(),
+    ip: text("ip"),
+    userAgent: text("user_agent"),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [index("admin_audit_events_org_created").on(t.orgId, t.createdAt.desc(), t.id.desc())],
+);
+
+export type AdminAuditEventRow = typeof adminAuditEvents.$inferSelect;
+
 // ─── Valet-owned auth adjuncts ──────────────────────────────────────────────
 //
 // `invites` and `sandbox_tokens` are Valet-owned (not part of the CLI-
@@ -378,8 +444,10 @@ export const agentSessions = pgTable(
     // Request a rootless docker daemon inside this session's sandbox
     // (docker-in-sandbox). See docs/specs/2026-08-15-sandbox-docker-design.md.
     docker: boolean("docker").notNull().default(false),
-    // Per-child CPU and memory overrides from the task tool. Null means the
-    // session uses repository or deployment defaults.
+    // Persisted repository capability. Failed YAML reads preserve this value.
+    kubernetes: boolean("kubernetes").notNull().default(false),
+    // Per-child CPU, memory, and scratch overrides from the task tool. Null
+    // means the session uses repository or deployment defaults.
     sandboxResourceOverrides: jsonb("sandbox_resource_overrides").$type<PrebuildResources>(),
     // Which authoring surface the session drives ('code' default,
     // 'security' = engagement runner). Distinct from the engine's
@@ -392,6 +460,9 @@ export const agentSessions = pgTable(
     // matching source/bake, or a `customImage: false` provider). Nullable
     // — the vast majority of sessions never resolve a bake.
     bakeId: text("bake_id"),
+    // Set when session start fell back from the repo image (spec 7.1);
+    // cleared by the spec provider once a compatible repo bake resolves.
+    imageFallback: jsonb("image_fallback").$type<ImageFallback>(),
     // Sandbox id recorded at hibernate time — the reaper's destroy handle
     // for sessions an api restart evicts from the host cache (same rationale
     // as child_watches.parked_sandbox_id).
@@ -411,6 +482,7 @@ export const agentSessions = pgTable(
   },
   (t) => [
     index("agent_sessions_user").on(t.userId),
+    index("agent_sessions_usage_scope").on(t.orgId, t.userId, t.id),
     index("agent_sessions_status").on(t.status),
   ],
 );
@@ -424,9 +496,20 @@ export const sessionThreads = pgTable(
     sessionId: text("session_id").notNull(),
     title: text("title"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    // Most recent user action on this thread. Agent events never update it.
+    lastUserActivityAt: bigint("last_user_activity_at", { mode: "number" }),
     // Display-state only: an archived thread leaves the default sidebar
     // list. The engine thread and its history are untouched.
     archivedAt: bigint("archived_at", { mode: "number" }),
+    // Who else in the org may open this personal thread by its link:
+    // null (only the owner), "view", or "reply" (`services/thread-share.ts`).
+    shareMode: text("share_mode", { enum: ["view", "reply"] }),
+    // "Run without asking": the person who turned it on, and when. Null when
+    // it is off. Approvals that this person could stop for good themselves
+    // run without a card in this thread and the child agents it starts
+    // (`services/thread-approval-bypass.ts`).
+    approvalBypassBy: text("approval_bypass_by"),
+    approvalBypassAt: bigint("approval_bypass_at", { mode: "number" }),
   },
   (t) => [index("session_threads_session").on(t.sessionId)],
 );
@@ -506,10 +589,13 @@ export const teams = pgTable(
     defaultModel: text("default_model"),
     /** Team default reasoning level. Null = inherit. */
     defaultReasoning: text("default_reasoning"),
+    slackHomeChannelId: text("slack_home_channel_id"),
   },
   (t) => [
     uniqueIndex("teams_org_name").on(t.orgId, t.name),
     uniqueIndex("teams_org_external").on(t.orgId, t.origin, t.externalId),
+    // One team per home channel, so two admins saving at once cannot both win.
+    uniqueIndex("teams_org_slack_home").on(t.orgId, t.slackHomeChannelId).where(sql`"slack_home_channel_id" IS NOT NULL`),
   ],
 );
 
@@ -543,17 +629,11 @@ export const teamJoinEligibilities = pgTable(
 
 // ─── Assistants ─────────────────────────────────────────────────────────────
 
-/**
- * An assistant: a named agent a principal owns, with its own session.
- *
- * Replaces `orchestrator_identities`, whose `UNIQUE (org, owner_type,
- * owner_id)` was the one-assistant-per-principal rule. A principal now owns
- * any number, and is the assistant's OWNER and SCOPE rather than its
- * identity. See `docs/specs/2026-08-13-assistants-design.md`.
- *
- * `sessionId` is `assistant:{id}` for every row, the default included — one
- * address, so no consumer has to branch on which kind of assistant it holds.
- */
+/** One runtime identity per personal or team workspace. Ownership is unique,
+ * including retired identities. Threads share this identity and execution
+ * sessions retain separate sandbox lifecycles. */
+// Legacy profile/default columns remain in SQL for rollback. This model omits
+// them so the workspace runtime cannot overwrite an older binary's settings.
 export const assistants = pgTable(
   "assistants",
   {
@@ -561,42 +641,26 @@ export const assistants = pgTable(
     orgId: text("org_id").notNull(),
     ownerType: text("owner_type", { enum: ["user", "team", "org"] }).notNull(),
     ownerId: text("owner_id").notNull(),
-    /** What the reader calls it. Was `orchestrator_identities.handle`. Also
-     * the outbound display name on channel posts (Slack `username`). */
-    name: text("name"),
-    /** Avatar image URL for outbound channel posts (Slack `icon_url`).
-     * Null falls back to the bot's own icon. */
-    avatarUrl: text("avatar_url"),
-    /** Per-assistant persona text. Null falls back to the owner's
-     * assistant/personality.md memory file (the pre-config behavior). */
-    personality: text("personality"),
-    /** JSON `AssistantBehavior` (wire/types.ts). Null means every skill and
-     * integration. Validated on write (`validateAssistantBehavior`); parsed
-     * fail-open on read (`parseAssistantBehavior`). */
-    behavior: text("behavior"),
-    /** Tier token or catalog model id. Null = inherit the cascade. */
-    model: text("model"),
-    /** Reasoning level. Null = inherit the cascade. */
-    reasoning: text("reasoning"),
     sessionId: text("session_id").notNull(),
-    /**
-     * The one a machine picks when nobody chose. Workflow orchestrator
-     * nodes, event subscriptions and channel bindings all say "the team's
-     * assistant" and have no basis for choosing between several, so they
-     * resolve to this. Exactly one per principal, held by a partial unique
-     * index — see the migration.
-     */
-    isDefault: boolean("is_default").notNull().default(false),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
-    /** Null while live. Archiving hides an assistant without destroying the
-     * conversation it held; the default cannot be archived while default. */
+    /** Null while live. Team teardown retires the workspace identity; the
+     * owner slot remains reserved. */
     archivedAt: bigint("archived_at", { mode: "number" }),
   },
   (t) => [
     uniqueIndex("assistants_session").on(t.sessionId),
-    index("assistants_owner").on(t.orgId, t.ownerType, t.ownerId),
+    uniqueIndex("assistants_workspace").on(t.orgId, t.ownerType, t.ownerId),
   ],
 );
+
+/** Execution state is separate from the workspace assistant's identity. */
+export const assistantExecutions = pgTable("assistant_executions", {
+  sessionId: text("session_id").primaryKey(),
+  assistantId: text("assistant_id").notNull(),
+  conversationKey: text("conversation_key").notNull(),
+  governingThreadId: text("governing_thread_id").notNull(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+}, (t) => [uniqueIndex("assistant_executions_conversation").on(t.assistantId, t.conversationKey)]);
 
 // ─── Child watches ───────────────────────────────────────────────────────────
 //
@@ -605,11 +669,7 @@ export const assistants = pgTable(
 // re-arms every unsettled row on boot — this table is the restart-survival
 // mechanism for `child.settled` reporting. `settled` is a plain 0/1 flag
 // with no arithmetic on it (only `eq(childWatches.settled, 0)` equality
-// filters) — boolean per decision 7's "boolean-as-integer" rule. NOTE for
-// Task 7 (cutover): every `eq(childWatches.settled, 0)` call site
-// (`routes/orchestrator.ts`, `orchestrator/children.ts`) must flip to
-// `eq(childWatches.settled, false)`, and `r.settled === 1` (`routes/
-// orchestrator.ts`) to `r.settled`.
+// filters) — boolean per decision 7's "boolean-as-integer" rule.
 
 export const childWatches = pgTable(
   "child_watches",
@@ -618,33 +678,62 @@ export const childWatches = pgTable(
     queueItemId: text("queue_item_id").notNull(),
     parentSessionId: text("parent_session_id").notNull(),
     parentThreadId: text("parent_thread_id").notNull(),
+    // The parent's queue item whose turn spawned this child. A workflow step
+    // waits only for children its own turns spawned. Null for rows from
+    // before this column.
+    parentQueueItemId: text("parent_queue_item_id"),
+    // The parent-thread queue item that this child's latest report started.
+    // A workflow step returns the result of its newest report turn.
+    reportQueueItemId: text("report_queue_item_id"),
     actorUserId: text("actor_user_id").notNull(),
     orgId: text("org_id").notNull(),
+    deliveryActive: boolean("delivery_active").notNull().default(false),
+    pendingCapIncident: text("pending_cap_incident"),
+    eventsStartedAt: bigint("events_started_at", { mode: "number" }),
     settled: boolean("settled").notNull().default(false),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     // The spawning submission's ChannelOrigin as JSON, inherited by the
     // child.settled signal so the settlement turn can reach the channel
     // that asked. Null for spawns from non-channel turns.
     originJson: text("origin_json"),
+    // False for a plugin's child: its settlement does not wake the parent
+    // thread, because the plugin reads the result itself (plugin-threads.ts).
+    reportToParent: boolean("report_to_parent").notNull().default(true),
+    /** The plugin event delivery whose run started or adopted this child.
+     * Cancelling that delivery (line off, superseded) stops the child. */
+    pluginDeliveryId: text("plugin_delivery_id"),
+    // Reply-route state, kept apart from the origin above, which never
+    // changes and also decides transcript sharing. "origin": the origin's
+    // own reply policy, written only at spawn. "manual": explicit replies
+    // only. "none": a person took over the child. Null: a row from before
+    // this column, read as "manual" (`ChildReplyRoute`).
+    replyRoute: text("reply_route"),
     // Display-state only: a dismissed watch leaves the thread tree. The
     // child session row and its history stay reachable from Sessions.
     dismissedAt: bigint("dismissed_at", { mode: "number" }),
-    // Retention clock: stamped by markSettled, re-stamped on every settle.
+    // Retention starts once per delegated submission, not on boot retries.
     // The retention sweep destroys a parked sandbox once this is older
     // than the retention window.
     settledAt: bigint("settled_at", { mode: "number" }),
     // Set once the child's sandbox is actually destroyed (eagerly on a
     // non-hibernating backend, by the retention sweep on a hibernating
     // one). NULL on a settled row means a reclaim is still owed;
-    // markSettled clears it so a re-opened child starts a fresh cycle.
+    // child_send clears it when the child starts a fresh reclaim cycle.
     sandboxReclaimedAt: bigint("sandbox_reclaimed_at", { mode: "number" }),
     // Provider sandbox id recorded at park time. The retention sweep needs
     // it for a child evicted from the host cache (an api restart) — the
     // engine session row's sandbox_id is only written at creation, before
     // any sandbox provisions, so it cannot serve as the handle.
     parkedSandboxId: text("parked_sandbox_id"),
+    // The `task` batch this child reports with. Children of one parent
+    // thread with the same batch report together, after the last settles.
+    batchKey: text("batch_key"),
+    // A settled batch member's report, held as JSON until the last member
+    // settles and one signal carries every report. Null when nothing is held.
+    batchHeldJson: text("batch_held_json"),
   },
   (t) => [
+    index("child_watches_delivery").on(t.childSessionId).where(sql`${t.deliveryActive} = true OR ${t.settled} = false`),
     index("child_watches_parent").on(t.parentSessionId),
     index("child_watches_settled").on(t.settled),
     // Partial index for the retention sweep: rows are never deleted and
@@ -655,6 +744,20 @@ export const childWatches = pgTable(
       .where(sql`${t.settled} = true AND ${t.sandboxReclaimedAt} IS NULL`),
   ],
 );
+
+/** Durable config invalidations survive active turns and process restarts. */
+export const sessionConfigInvalidations = pgTable("session_config_invalidations", {
+  sessionId: text("session_id").primaryKey(),
+  token: text("token").notNull(),
+});
+
+/** Internal events waiting for ingestion or acknowledgement. This is not an org event receipt. */
+export const childEventOutbox = pgTable("child_event_outbox", {
+  id: text("id").primaryKey(),
+  childSessionId: text("child_session_id").notNull(),
+  event: jsonb("event").$type<NormalizedEvent>().notNull(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+}, (t) => [index("child_event_outbox_child").on(t.childSessionId, t.createdAt)]);
 
 // ─── Notifications + preferences ────────────────────────────────────────────
 
@@ -686,9 +789,34 @@ export const userNotificationPreferences = pgTable(
     userId: text("user_id").notNull(),
     kind: text("kind").notNull(),
     web: boolean("web").notNull().default(true),
+    teamDm: boolean("team_dm").notNull().default(false),
+    channelGraceSeconds: integer("channel_grace_seconds"),
   },
   (t) => [primaryKey({ columns: [t.userId, t.kind] })],
 );
+
+/** Personal attention outbox. The event dispatcher owns due delivery. */
+export const pendingChannelDeliveries = pgTable("pending_channel_deliveries", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  tierId: text("tier_id").notNull(),
+  notificationId: text("notification_id"),
+  // Terminal dedupe tombstones use JSON null, not SQL NULL.
+  event: jsonb("event").$type<import("../orchestrator/attention.js").AttentionEvent | null>().notNull(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull().default(sql`(extract(epoch FROM clock_timestamp()) * 1000)::bigint`),
+  deliverAfter: bigint("deliver_after", { mode: "number" }).notNull(),
+  status: text("status", { enum: ["pending", "sending", "sent", "dropped"] }).notNull().default("pending"),
+  sendingAt: bigint("sending_at", { mode: "number" }),
+  firstSendingAt: bigint("first_sending_at", { mode: "number" }),
+  deliveryToken: text("delivery_token").notNull().default(sql`gen_random_uuid()::text`),
+  attempts: integer("attempts").notNull().default(0),
+  messageRefs: jsonb("message_refs").$type<import("../orchestrator/attention.js").AttentionDeliveryRef[]>(),
+  lastError: text("last_error"),
+}, (t) => [
+  index("pending_channel_deliveries_age").on(t.createdAt).where(sql`${t.status} IN ('pending', 'sending')`),
+  index("pending_channel_deliveries_due").on(t.deliverAfter).where(sql`${t.status} IN ('pending', 'sending')`),
+  index("pending_channel_deliveries_notification").on(t.notificationId).where(sql`${t.notificationId} IS NOT NULL`),
+]);
 
 // ─── Event drop log ──────────────────────────────────────────────────────────
 //
@@ -699,6 +827,20 @@ export const userNotificationPreferences = pgTable(
 // non-member senders, unbound conversations, trigger-mode filtering) once
 // channel routing lands.
 
+export const eventReceipts = pgTable("event_receipts", {
+  id: text("id").primaryKey(),
+  orgId: text("org_id").notNull(),
+  service: text("service").notNull(),
+  externalId: text("external_id"),
+  metadata: jsonb("metadata").notNull().default({}),
+  stages: jsonb("stages").notNull().default([]),
+  eventKey: text("event_key"),
+  eventId: text("event_id"),
+  subscriptions: jsonb("subscriptions").notNull().default([]),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+}, (t) => [index("event_receipts_page").on(t.orgId, t.createdAt, t.id), index("event_receipts_event").on(t.orgId, t.eventId)]);
+
 export const eventDropLog = pgTable(
   "event_drop_log",
   {
@@ -706,10 +848,18 @@ export const eventDropLog = pgTable(
     orgId: text("org_id").notNull(),
     reason: text("reason").notNull(),
     conversationKey: text("conversation_key"),
+    /** Normalized key for an event-ingest diagnostic. Null for non-event drops. */
+    eventKey: text("event_key"),
+    /** Redacted event identity only. Never retain the source payload here. */
+    eventMetadata: jsonb("event_metadata"),
     detail: text("detail").notNull(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },
-  (t) => [index("event_drop_log_org").on(t.orgId)],
+  (t) => [
+    index("event_drop_log_org").on(t.orgId),
+    index("event_drop_log_page").on(t.orgId, t.createdAt, t.id),
+    index("event_drop_log_event_key").on(t.orgId, t.eventKey, t.createdAt),
+  ],
 );
 
 // ─── Channel bindings + identity links ──────────────────────────────────────
@@ -741,6 +891,21 @@ export const channelBindings = pgTable(
   ],
 );
 
+/** The first thread selected for one user's direct-channel conversation. */
+export const channelConversationBindings = pgTable(
+  "channel_conversation_bindings",
+  {
+    orgId: text("org_id").notNull(),
+    userId: text("user_id").notNull(),
+    sessionId: text("session_id").notNull(),
+    channelType: text("channel_type").notNull(),
+    conversationKey: text("conversation_key").notNull(),
+    threadId: text("thread_id").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.orgId, t.userId, t.sessionId, t.channelType, t.conversationKey] })],
+);
+
 export const userIdentityLinks = pgTable(
   "user_identity_links",
   {
@@ -765,6 +930,9 @@ export const identityLinkCodes = pgTable(
     codeHash: text("code_hash").notNull(),
     expiresAt: bigint("expires_at", { mode: "number" }).notNull(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    /** Set for a code the bot DMed to one provider account (the "DM me"
+     * flow). Only the minting user redeems it, in the web app. */
+    externalId: text("external_id"),
   },
   (t) => [index("identity_link_codes_provider").on(t.provider, t.codeHash)],
 );
@@ -837,6 +1005,7 @@ export const memoryFiles = pgTable(
   {
     ownerType: text("owner_type").notNull(),
     ownerId: text("owner_id").notNull(),
+    namespace: text("namespace").notNull().default(""),
     path: text("path").notNull(),
     title: text("title").notNull().default(""),
     content: text("content").notNull(),
@@ -866,8 +1035,39 @@ export const memoryFiles = pgTable(
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
-  (t) => [primaryKey({ columns: [t.ownerType, t.ownerId, t.path] })],
+  (t) => [primaryKey({ columns: [t.ownerType, t.ownerId, t.namespace, t.path] })],
 );
+
+// How agents use each memory file (brain spec, "Usage"). Keyed like
+// `memory_files`, but a separate table: an update there recomputes the
+// generated `search_vector`. `services/memory-usage.ts` writes it in
+// batches. Times are ms epoch, null until the first use of that kind.
+export const memoryFileUsage = pgTable(
+  "memory_file_usage",
+  {
+    ownerType: text("owner_type").notNull(),
+    ownerId: text("owner_id").notNull(),
+    namespace: text("namespace").notNull().default(""),
+    path: text("path").notNull(),
+    /** Reads the agent chose: `mem_read`, an MCP or CLI read. */
+    readCount: integer("read_count").notNull().default(0),
+    lastReadAt: bigint("last_read_at", { mode: "number" }),
+    /** Times the memory snapshot put the file, or its principle index line, in a prompt. */
+    injectCount: integer("inject_count").notNull().default(0),
+    lastInjectedAt: bigint("last_injected_at", { mode: "number" }),
+    /** Turns whose answer or plan named the principle. */
+    citeCount: integer("cite_count").notNull().default(0),
+    lastCitedAt: bigint("last_cited_at", { mode: "number" }),
+  },
+  (t) => [primaryKey({ columns: [t.ownerType, t.ownerId, t.namespace, t.path] })],
+);
+
+// When memory usage tracking started: one row, set when the table is
+// created. The memory page calls no file stale before 30 days of tracking.
+export const memoryUsageTracking = pgTable("memory_usage_tracking", {
+  id: boolean("id").primaryKey().default(true),
+  startedAt: bigint("started_at", { mode: "number" }).notNull(),
+});
 
 // ─── Artifacts ──────────────────────────────────────────────────────────────
 //
@@ -903,6 +1103,7 @@ export const artifacts = pgTable(
     orgId: text("org_id").notNull(),
     actorUserId: text("actor_user_id").notNull(),
     sourceSessionId: text("source_session_id").notNull().default(""),
+    sourceThreadId: text("source_thread_id"),
     sourceMemoryPath: text("source_memory_path").notNull(),
     title: text("title").notNull().default(""),
     content: text("content").notNull(),
@@ -948,8 +1149,10 @@ export const artifactVersions = pgTable(
 
 // Element-anchored comments on a published page (artifact-pages design).
 // `vdid` is the content-hashed element id the viewer's comment runtime
-// computes (null = a page-level comment); `version` records what the
-// commenter was looking at. `parent_id` threads replies one level under a
+// computes (null = a page-level comment); `anchor_label` is that element's
+// leading text as the viewer showed it, so an agent reading the comment knows
+// what it points at; `version` records what the commenter was looking at.
+// `parent_id` threads replies one level under a
 // root. `sent_to_session` records delivery of the comment into the source
 // session's prompt queue — allowed only when the commenter passes
 // `canViewSession` there, so sending grants nothing that typing into the
@@ -961,6 +1164,7 @@ export const artifactComments = pgTable(
     artifactId: text("artifact_id").notNull(),
     version: bigint("version", { mode: "number" }).notNull(),
     vdid: text("vdid"),
+    anchorLabel: text("anchor_label"),
     parentId: text("parent_id"),
     body: text("body").notNull(),
     authorUserId: text("author_user_id").notNull(),
@@ -1015,6 +1219,8 @@ export const skills = pgTable(
     contentSha: text("content_sha").notNull(),
     /** Path of the `SKILL.md` inside its repository. Null for a local skill. */
     upstreamPath: text("upstream_path"),
+    /** Last body Git blob, for retrying companions without re-reading bodies. */
+    upstreamBlobSha: text("upstream_blob_sha"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
@@ -1023,6 +1229,21 @@ export const skills = pgTable(
     uniqueIndex("skills_owner_name").on(t.orgId, t.ownerType, t.ownerId, t.name),
   ],
 );
+
+const skillBytes = customType<{ data: Uint8Array; driverData: Buffer }>({
+  dataType: () => "bytea",
+  toDriver: (value) => Buffer.from(value),
+  fromDriver: (value) => new Uint8Array(value),
+});
+
+export const skillFiles = pgTable("skill_files", {
+  skillId: text("skill_id").notNull().references(() => skills.id, { onDelete: "cascade" }),
+  path: text("path").notNull(),
+  blobSha: text("blob_sha").notNull(),
+  size: integer("size").notNull(),
+  mode: text("mode").notNull(),
+  bytes: skillBytes("bytes").notNull(),
+}, (t) => [primaryKey({ columns: [t.skillId, t.path] })]);
 
 // Immutable facts for skill adoption and marginal context telemetry.
 export const skillInvocations = pgTable(
@@ -1036,7 +1257,7 @@ export const skillInvocations = pgTable(
     invokerUserId: text("invoker_user_id"),
     invocationEntryId: text("invocation_entry_id"),
     path: text("path", {
-      enum: ["model_tool", "host_thread_skill", "slash_context", "slash_prompt"],
+      enum: ["model_tool", "file_read", "script_run", "host_thread_skill", "slash_context", "slash_prompt"],
     }).notNull(),
     skillKey: text("skill_key").notNull(),
     skillName: text("skill_name").notNull(),
@@ -1051,6 +1272,7 @@ export const skillInvocations = pgTable(
     index("skill_invocations_org_created").on(t.orgId, t.createdAt),
     index("skill_invocations_session_thread_created").on(t.sessionId, t.threadId, t.createdAt),
     index("skill_invocations_skill_created").on(t.skillKey, t.createdAt),
+    index("skill_invocations_usage_window").on(t.createdAt, t.sessionId),
   ],
 );
 
@@ -1064,7 +1286,8 @@ export const skillContextAttributions = pgTable(
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     estimatedSkillTokens: integer("estimated_skill_tokens").notNull(),
   },
-  (t) => [primaryKey({ columns: [t.skillInvocationId, t.llmRequestId] })],
+  (t) => [primaryKey({ columns: [t.skillInvocationId, t.llmRequestId] }),
+    index("skill_context_attributions_window").on(t.createdAt, t.skillInvocationId)],
 );
 
 /** What one tracked repository mirrors. `skills` is the kind that ships; the
@@ -1105,6 +1328,12 @@ export type ContentKind = "skills" | "workflows" | "templates" | "memories";
 // The SQL name stays `skill_sources`, and so do its three indexes. The
 // release before this one repairs `skill_sources` by name at boot, so a
 // rename would crash-loop the api a rollback lands on.
+export type SkillWalkCache = Record<string, {
+  directorySha: string;
+  bodySha: string | null;
+  entries?: { path: string; type: string; mode: string; sha: string; size?: number }[];
+}>;
+
 export const contentSources = pgTable(
   "skill_sources",
   {
@@ -1141,6 +1370,7 @@ export const contentSources = pgTable(
      * the current head takes no head-commit short-circuit, which is what
      * makes the mechanism survive a release that does not write it. */
     discoveryScan: text("discovery_scan"),
+    skillWalkCache: jsonb("skill_walk_cache").notNull().default({}).$type<SkillWalkCache>(),
     /** Fences sync completion against newer passes and readiness changes. */
     syncRevision: bigint("sync_revision", { mode: "number" }).notNull().default(0),
     lastSyncedAt: bigint("last_synced_at", { mode: "number" }),
@@ -1301,13 +1531,18 @@ export const workflowRuns = pgTable(
     // path once it resolves the workflow's owner.
     ownerType: text("owner_type").notNull().default("user"),
     ownerId: text("owner_id").notNull().default(""),
-    // Who clicked Run. Null on a scheduled, event, or webhook start.
-    // Display and audit only — credential resolution uses owner_type/owner_id.
+    // The member a run acts for: who clicked Run, or who set up the schedule
+    // or event rule. Null on a webhook start. A team run uses this member's
+    // own shared accounts first (`services/credential-shares.ts`).
     actorUserId: text("actor_user_id"),
     // When the settled-run sandbox reclaim destroyed this run's session
     // sandboxes (workflows/sandbox-reclaim.ts). NULL until the run settles
     // AND every session sandbox is gone — the sweep retries NULL rows.
     sandboxReclaimedAt: bigint("sandbox_reclaimed_at", { mode: "number" }),
+    // The workflow's org when the run started, written by the
+    // `workflow_runs_org` insert trigger. Usage reads it, so a run's spend
+    // keeps its org after the workflow is deleted.
+    orgId: text("org_id"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
@@ -1331,6 +1566,8 @@ export const workflowCheckpoints = pgTable(
     effects: jsonb("effects"),
     error: text("error"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    /** When the step began: the replaced intent row's `created_at`. */
+    startedAt: bigint("started_at", { mode: "number" }),
   },
   (t) => [
     primaryKey({ columns: [t.runId, t.nodeId, t.iteration] }),
@@ -1383,6 +1620,26 @@ export const credentials = pgTable(
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
   (t) => [primaryKey({ columns: [t.ownerType, t.ownerId, t.service] })],
+);
+
+/** A member's own account for `service`, shared with a team. The row holds
+ * no secret: a read follows it to the member's live user credential. Each
+ * member keeps their own share, so a team can hold several per service
+ * (`services/credential-shares.ts`). */
+export const credentialShares = pgTable(
+  "credential_shares",
+  {
+    teamId: text("team_id").notNull(),
+    service: text("service").notNull(),
+    userId: text("user_id").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    generation: text("generation").notNull().default(sql`gen_random_uuid()::text`),
+    borrowConsentAt: bigint("borrow_consent_at", { mode: "number" }),
+  },
+  (t) => [
+    primaryKey({ columns: [t.teamId, t.service, t.userId] }),
+    index("credential_shares_user").on(t.userId, t.service),
+  ],
 );
 
 // `mcp_oauth_clients` — one dynamically-registered OAuth client per MCP
@@ -1499,6 +1756,7 @@ export const actionPolicyOverrides = pgTable(
     actionId: text("action_id"),
     riskLevel: text("risk_level", { enum: ["low", "medium", "high", "critical"] }),
     mode: text("mode", { enum: ["allow", "require_approval", "deny"] }).notNull(),
+    legacyUnscoped: boolean("legacy_unscoped").notNull().default(false),
     paramMatchers: jsonb("param_matchers").notNull().default([]).$type<ParamMatcher[]>(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
@@ -1547,6 +1805,10 @@ export const actionInvocations = pgTable(
       enum: ["pending", "allowed", "denied", "approved", "rejected", "error", "completed", "cancelled", "timeout"],
     }),
     sessionId: text("session_id"),
+    /** The thread the action ran in, so a team feed can apply that thread's
+     * access (`thread-access.ts`). Null on rows from before the column and on
+     * workflow actions. */
+    threadId: text("thread_id"),
     workflowExecutionId: text("workflow_execution_id"),
     userId: text("user_id"),
     orgId: text("org_id"),
@@ -1556,10 +1818,21 @@ export const actionInvocations = pgTable(
     error: text("error"),
     startedAt: bigint("started_at", { mode: "number" }),
     resolvedBy: text("resolved_by"),
+    /** Who made an external call (`pol:ext:` rows): `mcp:<OAuth client id>`,
+     * `cli`, `apiKey`, or `session`. Null on other rows. */
+    caller: text("caller"),
+    /** The queue item whose turn made a model-directed call. Usage bills the
+     * action with that turn (`valet_action_fact`). Null on other rows. */
+    queueItemId: text("queue_item_id"),
   },
   (t) => [
     index("action_invocations_session").on(t.sessionId),
+    index("action_invocations_outcome_time").on(t.orgId, sql`COALESCE(${t.startedAt}, ${t.createdAt})`)
+      .where(sql`${t.status} = 'completed' AND ${t.durationMs} IS NOT NULL AND ${t.actionId} IN
+        ('github.create_pull_request', 'github.create_review', 'slack.send_message', 'slack.reply_to_origin', 'slack.dm_owner', 'slack.dm_user')`),
     index("action_invocations_org_created").on(t.orgId, t.createdAt),
+    index("action_invocations_usage_time").on(t.orgId, sql`COALESCE(${t.startedAt}, ${t.createdAt})`)
+      .where(sql`${t.status} IN ('completed', 'error') AND ${t.durationMs} IS NOT NULL`),
   ],
 );
 
@@ -1593,7 +1866,7 @@ export const llmProviders = pgTable(
     id: text("id").primaryKey(),
     orgId: text("org_id").notNull(),
     kind: text("kind", {
-      enum: ["anthropic", "openai", "google", "openrouter", "openai_compatible"],
+      enum: ["anthropic", "openai", "google", "openrouter", "amazon-bedrock", "openai_compatible"],
     }).notNull(),
     name: text("name").notNull(),
     baseUrl: text("base_url"),
@@ -1640,7 +1913,7 @@ export const llmProxyRequests = pgTable(
     userId: text("user_id"),
     teamId: text("team_id"),
     apiKeyId: text("api_key_id").notNull(),
-    providerKind: text("provider_kind", { enum: ["anthropic", "openai"] }).notNull(),
+    providerKind: text("provider_kind", { enum: ["anthropic", "openai", "tagging"] }).notNull(),
     model: text("model"),
     harness: text("harness"),
     endpoint: text("endpoint").notNull(),
@@ -1659,6 +1932,7 @@ export const llmProxyRequests = pgTable(
     latencyMs: integer("latency_ms"),
     error: text("error"),
     parsed: jsonb("parsed"),
+    hourlyAccounted: boolean("hourly_accounted").notNull().default(false),
     parseVersion: integer("parse_version"),
     parseError: text("parse_error"),
   },
@@ -1721,6 +1995,8 @@ export const sessionRepos = pgTable(
     fullName: text("full_name").notNull(),
     cloneUrl: text("clone_url").notNull(),
     ref: text("ref"),
+    // Immutable startup snapshot; `ref` remains the user-selected branch/tag.
+    resolvedRef: text("resolved_ref"),
     auth: text("auth", { enum: ["auto", "app", "user"] })
       .notNull()
       .default("auto"),
@@ -1785,6 +2061,21 @@ export const githubInstallations = pgTable(
 //   kind='external'/'base' sources may never bake. `commit_sha` is optional
 //   for the same reason.
 
+/** Spec 6.1: persisted source health, written by the scheduler. */
+export type SourceHealth = "healthy" | "stale" | "incompatible" | "failing" | "unbaked";
+export type SourceHealthReason =
+  | "ok" | "resolve_failed" | "repo_unreachable" | "credentials" | "registry_full"
+  | "bake_failed" | "contract" | "contract_unknown" | "waiting_for_base";
+/** Spec 5.2: where a bake's contract value came from. */
+export type ContractSource = "label" | "missing" | "override";
+/** Spec 7.1: why a session is not on its repo image. */
+export interface ImageFallback {
+  reason: "contract";
+  sourceId: string;
+  bakeId: string;
+  at: number;
+}
+
 export const imageSources = pgTable(
   "image_sources",
   {
@@ -1812,6 +2103,14 @@ export const imageSources = pgTable(
       .default("nightly"),
     enabled: boolean("enabled").notNull().default(true),
     lastBoundAt: bigint("last_bound_at", { mode: "number" }),
+    // Spec 6.1. Defaults are what a row looked like before health existed;
+    // the first scheduler pass after deploy overwrites them.
+    health: text("health", { enum: ["healthy", "stale", "incompatible", "failing", "unbaked"] }).notNull().default("healthy"),
+    healthReason: text("health_reason", {
+      enum: ["ok", "resolve_failed", "repo_unreachable", "credentials", "registry_full", "bake_failed", "contract", "contract_unknown", "waiting_for_base"],
+    }).notNull().default("ok"),
+    healthDetail: text("health_detail"),
+    healthCheckedAt: bigint("health_checked_at", { mode: "number" }),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
@@ -1844,6 +2143,15 @@ export const bakes = pgTable(
     startedAt: bigint("started_at", { mode: "number" }),
     finishedAt: bigint("finished_at", { mode: "number" }),
     sizeBytes: bigint("size_bytes", { mode: "number" }),
+    // Image runtime contract (spec 5). `contractVersion` is the OCI label
+    // value read from the registry after push, or the backfilled lineage
+    // guess; null until read. `contractSource` says which.
+    contractVersion: integer("contract_version"),
+    contractSource: text("contract_source", { enum: ["label", "missing", "override"] }),
+    // Lineage (spec 5.2): the parent base bake this bake FROMed, and the
+    // exact FROM ref. Null on rows from before this column.
+    parentBakeId: text("parent_bake_id"),
+    baseImageRef: text("base_image_ref"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },
   (t) => [index("bakes_source_status_created").on(t.sourceId, t.status, t.createdAt)],
@@ -1870,6 +2178,11 @@ export const events = pgTable(
     payload: jsonb("payload").notNull(),
     occurredAt: bigint("occurred_at", { mode: "number" }).notNull(),
     receivedAt: bigint("received_at", { mode: "number" }).notNull(),
+    /** Normalized subjects (spec 2026-10-15: event wakeups, Part A1), coarse
+     * to fine. Null on a row stored before this column existed; delivery-time
+     * matching treats that as no subjects, so a `subject` filter fails closed
+     * for it rather than matching. */
+    subjects: text("subjects").array(),
   },
   (t) => [
     uniqueIndex("events_service_dedupe").on(t.service, t.dedupeKey),
@@ -1890,9 +2203,16 @@ export const eventSubscriptions = pgTable(
     eventKeys: jsonb("event_keys").notNull(),
     /** `{ field, op: "eq"|"in"|"prefix"|"contains", value }[]` over catalog-declared fields. */
     filters: jsonb("filters").notNull().default([]),
-    /** `{ kind: "workflow", workflowId } | { kind: "orchestrator" } | { kind: "signal" }`. */
+    /** `{ kind: "workflow", workflowId } | { kind: "assistant" } | { kind: "signal" }`.
+     * Rows written before the rename may say `orchestrator`, `presence`,
+     * and an `orchestrator` scope field; read them through
+     * `events/target-names.ts#readStoredTarget`. */
     target: jsonb("target").notNull(),
     enabled: boolean("enabled").notNull().default(true),
+    /** Who may invoke a team assistant by mention. Null reads as `team` —
+     * the meaning every row written before this column carries. Only a team
+     * assistant target may set it (`events/mention-scope.ts`). */
+    audience: text("audience", { enum: ["team", "organization"] }),
     /** `repo` rows are armed from a mirrored workflow file. The sync updates
      * and deletes only these, so a subscription a person armed on the same
      * workflow is never touched. */
@@ -1927,11 +2247,18 @@ export const followedThreads = pgTable(
      * overheard line after downtime arrives with the missed context. Null on
      * rows from before the column: the first delivery starts tracking. */
     lastSeenTs: text("last_seen_ts"),
-    /** The assistant that answered the mention this follow was bound from, so
-     * later messages in the thread reach the SAME assistant rather than the
-     * owner's default. Null on rows from before the column, and on any follow
-     * whose rule named no assistant — both read as "the owner's default". */
-    assistantId: text("assistant_id"),
+    /** The mention rule this thread was bound from. The follow router reads
+     * that row's CURRENT invocation audience, because the audience is the
+     * rule's state, not the conversation's: narrowing a rule back to the team
+     * must narrow every thread it opened. Null on a follow bound before the
+     * column, and on one no mention rule bound; both read as team-only. */
+    subscriptionId: text("subscription_id"),
+    /** The assistant thread the binding delivery landed in (spec
+     * 2026-10-16: delivery threads, Part B step 5). Later messages in the
+     * Slack thread go there. Null on a follow bound before the columns; the
+     * router then keeps the Slack thread key (`slack:{channel}:{threadTs}`). */
+    sessionId: text("session_id"),
+    threadId: text("thread_id"),
   },
   (t) => [uniqueIndex("followed_threads_key").on(t.orgId, t.channelType, t.channelId, t.threadTs)],
 );
@@ -1950,32 +2277,42 @@ export const workflowSchedules = pgTable(
     orgId: text("org_id").notNull(),
     ownerType: text("owner_type", { enum: ["user", "team", "org"] }).notNull().default("user"),
     ownerId: text("owner_id").notNull(),
-    /** Fire target: start a workflow run, or prompt the orchestrator
-     * (V1's `schedule_target=orchestrator`). `workflow_id`/`prompt` are
-     * each required only for their own kind. */
-    targetKind: text("target_kind", { enum: ["workflow", "orchestrator"] })
+    /** Fire target: start a workflow run, or prompt the assistant.
+     * `workflow_id`/`prompt` are each required only for their own kind.
+     * New rows store `assistant`. Rows written before the rename store
+     * `orchestrator`, which reads as `assistant` through
+     * `readScheduleTargetKind` (spec 2026-10-16: presence hub, Part H). */
+    targetKind: text("target_kind", { enum: ["workflow", "assistant", "orchestrator"] })
       .notNull()
       .default("workflow"),
     workflowId: text("workflow_id"),
-    /** Prompt submitted to the orchestrator's "schedules" thread when
-     * `target_kind = 'orchestrator'`. */
+    /** Prompt submitted to the assistant when `target_kind` is `assistant`
+     * (or the old `orchestrator`). */
     prompt: text("prompt"),
-    /** Which of the owner's assistants the prompt goes to, when
-     * `target_kind = 'orchestrator'`. Null on rows from before the column, and
-     * on any schedule that named none — both read as "the owner's default".
-     * Ignored for a `workflow` target, which has no assistant. */
-    assistantId: text("assistant_id"),
+    /** Where an assistant-prompt schedule's prompts land: an
+     * `AssistantThreadPolicy` (spec 2026-10-16: delivery threads, Part A).
+     * Null reads as `{ mode: "own" }`. Always null for a `workflow` target. */
+    threadPolicy: jsonb("thread_policy"),
     name: text("name").notNull(),
     cron: text("cron").notNull(),
     timezone: text("timezone").notNull().default("UTC"),
-    /** Optional static payload delivered as `trigger.data.input`. */
+    /** Optional static input: copied to `trigger.data.<field>` and kept at `trigger.data.input` (`scheduledTriggerData`). */
     input: jsonb("input"),
     enabled: boolean("enabled").notNull().default(true),
+    /** Why the scheduler disabled this schedule: the pin text when its
+     * `existing` thread cannot receive deliveries (spec 2026-10-16: presence
+     * hub, Part D). Enabling the schedule or changing its pin clears it. */
+    disabledReason: text("disabled_reason"),
     /** `repo` rows are armed from a mirrored workflow file. The sync updates
      * and deletes only these, so a schedule a person armed on the same
      * workflow is never touched. */
     origin: text("origin", { enum: ["local", "repo"] }).notNull().default("local"),
     lastFiredAt: bigint("last_fired_at", { mode: "number" }),
+    /** The assistant thread the latest assistant-prompt firing landed on
+     * (spec 2026-10-16: presence hub, Part E). Both null for a `workflow`
+     * target, whose firings are runs, and before the first firing. */
+    lastFiredSessionId: text("last_fired_session_id"),
+    lastFiredThreadId: text("last_fired_thread_id"),
     nextFireAt: bigint("next_fire_at", { mode: "number" }).notNull(),
     createdBy: text("created_by").notNull(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
@@ -2010,7 +2347,7 @@ export const eventDeliveries = pgTable(
     id: text("id").primaryKey(),
     eventId: text("event_id").notNull(),
     subscriptionId: text("subscription_id").notNull(),
-    status: text("status", { enum: ["pending", "delivered", "failed", "dead"] })
+    status: text("status", { enum: ["pending", "delivered", "failed", "dead", "skipped"] })
       .notNull()
       .default("pending"),
     attempts: integer("attempts").notNull().default(0),
@@ -2018,10 +2355,20 @@ export const eventDeliveries = pgTable(
     lastError: text("last_error"),
     deliveredAt: bigint("delivered_at", { mode: "number" }),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    /** The Destination resolved at ingest (spec 2026-10-16: delivery threads
+     * and claims, Part C step 6). NULL means resolve at dispatch from the
+     * binding and the policy only (no waiter consult, Part C step 7). */
+    destination: jsonb("destination"),
+    /** The engine queue item an assistant delivery admitted. Its turn's
+     * outcome decides whether the delivery stays delivered. */
+    queueItemId: text("queue_item_id"),
   },
   (t) => [
     index("event_deliveries_due").on(t.status, t.nextAttemptAt),
     index("event_deliveries_event").on(t.eventId),
+    index("event_deliveries_subscription").on(t.subscriptionId, t.createdAt),
+    // The failed-turn sweep reads recent delivered rows (`events/delivery-turn.ts`).
+    index("event_deliveries_delivered").on(t.deliveredAt).where(sql`"status" = 'delivered'`),
   ],
 );
 
@@ -2071,6 +2418,7 @@ export type UserIdentityLinkRow = typeof userIdentityLinks.$inferSelect;
 export type IdentityLinkCodeRow = typeof identityLinkCodes.$inferSelect;
 export type ChannelActiveStreamRow = typeof channelActiveStreams.$inferSelect;
 export type MemoryFileRow = typeof memoryFiles.$inferSelect;
+export type MemoryFileUsageRow = typeof memoryFileUsage.$inferSelect;
 export type SkillRow = typeof skills.$inferSelect;
 /** One tracked repository. Not the engine's `SkillSource`. */
 export type ContentSourceRow = typeof contentSources.$inferSelect;
@@ -2167,6 +2515,13 @@ export const securityEngagements = pgTable(
     reportGeneratedAt: bigint("report_generated_at", { mode: "number" }),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+    // Declared credential references (Part 12, credentials via 1Password):
+    // the engagement's `SecurityConfig.credentials[]`, each
+    // `{label, kind, env, reference, refShape?, meta?}`. Null when the
+    // config declares no credentials. Ephemeral, it dies with the engagement;
+    // Postgres never carries a resolved value, only `op://` references
+    // (INV-37).
+    credentialsJson: jsonb("credentials_json"),
   },
   (t) => [
     uniqueIndex("security_engagements_session_unique").on(t.sessionId),
@@ -2309,6 +2664,8 @@ export const securityHandoffs = pgTable(
   (t) => [
     index("security_handoffs_engagement").on(t.engagementId),
     index("security_handoffs_finding").on(t.findingId),
+    // The broker looks a sandbox caller up by its fix session.
+    index("security_handoffs_child_session").on(t.childSessionId),
   ],
 );
 
@@ -2399,10 +2756,20 @@ export const securityNeeds = pgTable(
     resolution: text("resolution"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     resolvedAt: bigint("resolved_at", { mode: "number" }),
+    // The label of a credential declared in the owning engagement's
+    // `credentials_json` (Part 12), stamped when a cred-typed need is
+    // answered. A label only: never the `op://` reference and never the
+    // resolved value (INV-39). `resolution` stays NULL for a cred-typed need,
+    // and the CHECK constraint below enforces that.
+    credentialLabel: text("credential_label"),
   },
   (t) => [
     index("security_needs_engagement").on(t.engagementId),
     index("security_needs_cell").on(t.cellId),
+    check(
+      "security_needs_credential_resolution_null",
+      sql`${t.kind} <> 'credential' OR ${t.resolution} IS NULL`,
+    ),
   ],
 );
 
@@ -2460,3 +2827,597 @@ export const teamDeletionRequests = pgTable("team_deletion_requests", {
   uniqueIndex("team_deletion_requests_pending").on(t.teamId, t.resourceType, t.resourceId).where(sql`${t.status} = 'pending'`),
   index("team_deletion_requests_team_status").on(t.teamId, t.status),
 ]);
+
+/**
+ * Image-source changes that wait for a second org admin
+ * (`bakes/source-change-requests.ts`). `payload` holds the validated row to
+ * insert (`create`) or the field patch to apply (`update`). `target_key` is
+ * the source id, or `new:<name>` for a create, so one target has at most one
+ * pending request. `base_updated_at` is the source's `updated_at` when the
+ * request was made; approval refuses a request whose source moved since.
+ */
+export const imageSourceChangeRequests = pgTable("image_source_change_requests", {
+  id: text("id").primaryKey(), orgId: text("org_id").notNull(), targetKey: text("target_key").notNull(),
+  sourceId: text("source_id"), sourceName: text("source_name").notNull(),
+  action: text("action").$type<"create" | "update">().notNull(),
+  payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
+  baseUpdatedAt: bigint("base_updated_at", { mode: "number" }),
+  requestedBy: text("requested_by").notNull(),
+  requestedAt: bigint("requested_at", { mode: "number" }).notNull(),
+  expiresAt: bigint("expires_at", { mode: "number" }).notNull(),
+  status: text("status").$type<"pending" | "approved" | "rejected" | "withdrawn">().notNull().default("pending"),
+  decidedBy: text("decided_by"), decidedAt: bigint("decided_at", { mode: "number" }),
+  decisionNote: text("decision_note"),
+}, (t) => [
+  uniqueIndex("image_source_change_requests_pending").on(t.orgId, t.targetKey).where(sql`${t.status} = 'pending'`),
+  index("image_source_change_requests_org_status").on(t.orgId, t.status, t.requestedAt),
+]);
+
+/**
+ * `valet login` device sign-in (`routes/cli-device.ts`). A request waits
+ * here until the person enters its user code on `/cli/device` and allows
+ * it. Only a hash of the device code is stored.
+ */
+export const cliDeviceRequests = pgTable("cli_device_requests", {
+  deviceCodeHash: text("device_code_hash").primaryKey(),
+  userCode: text("user_code").notNull(),
+  device: text("device").notNull(),
+  status: text("status").$type<"pending" | "approved" | "denied">().notNull().default("pending"),
+  userId: text("user_id").references(() => users.id, { onDelete: "cascade" }),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  expiresAt: bigint("expires_at", { mode: "number" }).notNull(),
+  lastPollAt: bigint("last_poll_at", { mode: "number" }),
+  /** `login` (`valet login`) or `proxy-key` (`valet proxy setup`). */
+  purpose: text("purpose").$type<"login" | "proxy-key">().notNull().default("login"),
+  /** The API key name a `proxy-key` request creates. */
+  keyName: text("key_name"),
+  /** The CLI's user on a `proxy-key` request. Only this user can approve it. */
+  requestedBy: text("requested_by").references(() => users.id, { onDelete: "cascade" }),
+}, (t) => [
+  uniqueIndex("cli_device_requests_user_code").on(t.userCode),
+  index("cli_device_requests_expires").on(t.expiresAt),
+]);
+
+/**
+ * A signed-in CLI (`vltc_` access token). The access token lasts a day, the
+ * refresh token 30 days from its last use, and each refresh replaces both.
+ * Only hashes are stored. The person disconnects a CLI in Settings >
+ * Agent access.
+ */
+export const cliTokens = pgTable("cli_tokens", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  device: text("device").notNull(),
+  accessHash: text("access_hash").notNull(),
+  refreshHash: text("refresh_hash").notNull(),
+  accessExpiresAt: bigint("access_expires_at", { mode: "number" }).notNull(),
+  refreshExpiresAt: bigint("refresh_expires_at", { mode: "number" }).notNull(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  lastUsedAt: bigint("last_used_at", { mode: "number" }),
+  /** The pair a refresh replaced, kept for a short grace (`auth/cli-tokens.ts`). */
+  prevAccessHash: text("prev_access_hash"),
+  prevRefreshHash: text("prev_refresh_hash"),
+  rotatedAt: bigint("rotated_at", { mode: "number" }),
+}, (t) => [
+  uniqueIndex("cli_tokens_access").on(t.accessHash),
+  uniqueIndex("cli_tokens_refresh").on(t.refreshHash),
+  index("cli_tokens_user").on(t.userId),
+]);
+
+/** Database-maintained projection. The migration owns its source FK and trigger. */
+export const usageEntryFacts = pgTable("usage_entry_facts", {
+  entryId: text("entry_id").primaryKey(),
+  sessionId: text("session_id").notNull(),
+  workflowRunId: text("workflow_run_id"),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  model: text("model"),
+  usage: jsonb("usage"),
+  cost: jsonb("cost"),
+  hourlyAccounted: boolean("hourly_accounted").notNull().default(false),
+  toolCalls: bigint("tool_calls", { mode: "number" }).notNull(),
+  pullRequests: bigint("pull_requests", { mode: "number" }).notNull(),
+  reviews: bigint("reviews", { mode: "number" }).notNull(),
+}, (t) => [
+  index("usage_entry_facts_window").on(t.createdAt, t.sessionId),
+  index("usage_entry_facts_cost_window").on(t.createdAt, t.sessionId).where(sql`${t.usage} IS NOT NULL`),
+  index("usage_entry_facts_tools_window").on(t.createdAt, t.sessionId).where(sql`${t.toolCalls} > 0`),
+  index("usage_entry_facts_outcomes_window").on(t.createdAt, t.sessionId).where(sql`${t.pullRequests} > 0 OR ${t.reviews} > 0`),
+  index("usage_entry_facts_session_window").on(t.sessionId, t.createdAt),
+  index("usage_entry_facts_workflow_window").on(t.workflowRunId, t.createdAt).where(sql`${t.workflowRunId} IS NOT NULL`),
+]);
+
+/** Exact hourly source totals. Ownership is resolved through the summary view. */
+export const usageHourly = pgTable("usage_hourly", {
+ dimensions: jsonb("dimensions").notNull(), sourceKind: text("source_kind").notNull(),
+ sessionId:text("session_id"),orgId:text("org_id"),userId:text("user_id"),teamId:text("team_id"),
+ model:text("model"),provider:text("provider"),createdAt:bigint("created_at",{mode:"number"}).notNull(),
+ turns:bigint("turns",{mode:"number"}).notNull(),
+ unpricedTurns:bigint("unpriced_turns",{mode:"number"}).notNull(),
+ positiveTurns:bigint("positive_turns",{mode:"number"}).notNull(),
+ inputTokens:bigint("input_tokens",{mode:"number"}).notNull(),
+ outputTokens:bigint("output_tokens",{mode:"number"}).notNull(),
+ cacheReadTokens:bigint("cache_read_tokens",{mode:"number"}).notNull(),
+ cacheWriteTokens:bigint("cache_write_tokens",{mode:"number"}).notNull(),
+ totalTokens:bigint("total_tokens",{mode:"number"}).notNull(),
+ toolCalls:bigint("tool_calls",{mode:"number"}).notNull(),
+ pullRequests:bigint("pull_requests",{mode:"number"}).notNull(),
+ reviews:bigint("reviews",{mode:"number"}).notNull(),
+ costTotal:numeric("cost_total").notNull(),
+},t=>[primaryKey({columns:[t.dimensions,t.createdAt]}),
+ index("usage_hourly_window").on(t.createdAt,t.sessionId),
+ index("usage_hourly_session_window").on(t.sessionId,t.createdAt),
+ index("usage_hourly_org_window").on(t.orgId,t.createdAt),
+ index("usage_hourly_outcomes").on(t.createdAt,t.sessionId).where(sql`${t.pullRequests}>0 OR ${t.reviews}>0`),
+ index("usage_hourly_empty").on(t.createdAt).where(sql`${t.turns}=0 AND ${t.toolCalls}=0 AND ${t.pullRequests}=0 AND ${t.reviews}=0`)]);
+
+export const usageActionFacts = pgTable("usage_action_facts", {
+  invocationId: text("invocation_id").primaryKey().references(() => actionInvocations.invocationId, { onDelete: "cascade" }),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  orgId: text("org_id"),
+  sessionId: text("session_id"),
+  workflowExecutionId: text("workflow_execution_id"),
+  toolCalls: bigint("tool_calls", { mode: "number" }).notNull(),
+  outcomeKind: text("outcome_kind"),
+}, t => [
+  index("usage_action_facts_window").on(t.orgId, t.createdAt)
+]);
+
+export const usageActionHourly = pgTable("usage_action_hourly", {
+  dimensionKey: text("dimension_key").notNull(),
+  hourMs: bigint("hour_ms", { mode: "number" }).notNull(),
+  orgId: text("org_id"),
+  sessionId: text("session_id"),
+  workflowExecutionId: text("workflow_execution_id"),
+  outcomeKind: text("outcome_kind"),
+  toolCalls: bigint("tool_calls", { mode: "number" }).notNull(),
+  outcomes: bigint("outcomes", { mode: "number" }).notNull(),
+  facts: bigint("facts", { mode: "number" }).notNull(),
+}, t => [
+  primaryKey({ columns: [t.dimensionKey, t.hourMs] }),
+  index("usage_action_hourly_window").on(t.orgId, t.hourMs)
+]);
+
+export const usageSkillFacts = pgTable("usage_skill_facts", {
+  factKey: text("fact_key").primaryKey(),
+  invocationId: text("invocation_id").notNull().references(() => skillInvocations.id, { onDelete: "cascade" }),
+  requestId: text("request_id"),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  sessionId: text("session_id").notNull(),
+  skillKey: text("skill_key").notNull(),
+  skillName: text("skill_name").notNull(),
+  origin: text("origin").notNull(),
+  pluginName: text("plugin_name"),
+  invokerUserId: text("invoker_user_id"),
+  tokens: bigint("tokens", { mode: "number" }).notNull(),
+  invoked: bigint("invoked", { mode: "number" }).notNull(),
+}, t => [
+  index("usage_skill_facts_window").on(t.createdAt),
+  index("usage_skill_facts_session_window").on(t.sessionId, t.createdAt),
+  index("usage_skill_facts_invocation").on(t.invocationId)
+]);
+
+export const usageSkillHourly = pgTable("usage_skill_hourly", {
+  dimensionKey: text("dimension_key").notNull(),
+  hourMs: bigint("hour_ms", { mode: "number" }).notNull(),
+  sessionId: text("session_id").notNull(),
+  skillKey: text("skill_key").notNull(),
+  skillName: text("skill_name").notNull(),
+  origin: text("origin").notNull(),
+  pluginName: text("plugin_name"),
+  invokerUserId: text("invoker_user_id"),
+  tokens: bigint("tokens", { mode: "number" }).notNull(),
+  invocations: bigint("invocations", { mode: "number" }).notNull(),
+  carryingCalls: bigint("carrying_calls", { mode: "number" }).notNull(),
+  facts: bigint("facts", { mode: "number" }).notNull(),
+}, t => [
+  primaryKey({ columns: [t.dimensionKey, t.hourMs] }),
+  index("usage_skill_hourly_window").on(t.hourMs, t.sessionId),
+  index("usage_skill_hourly_session_window").on(t.sessionId, t.hourMs)
+]);
+
+export const usageSkillRequestMemberships = pgTable("usage_skill_request_memberships", {
+  dimensionKey: text("dimension_key").notNull(),
+  hourMs: bigint("hour_ms", { mode: "number" }).notNull(),
+  requestKey: text("request_key").notNull(),
+  requestId: text("request_id").notNull(),
+  refs: bigint("refs", { mode: "number" }).notNull(),
+}, t => [
+  primaryKey({ columns: [t.dimensionKey, t.hourMs, t.requestKey] }),
+  index("usage_skill_membership_request").on(t.requestKey)
+]);
+
+export const usageSkillRequests = pgTable("usage_skill_requests", {
+  requestKey: text("request_key").primaryKey(),
+  memberships: bigint("memberships", { mode: "number" }).notNull(),
+}, t => [
+  index("usage_skill_requests_duplicates").on(t.requestKey).where(sql`memberships > 1`)
+]);
+
+/** Positive usage entry attribution for exact partial-hour member activity. */
+export const usageMemberFacts = pgTable('usage_member_facts', {
+  entryId: text('entry_id').primaryKey(),
+  sessionId: text('session_id').notNull(),
+  queueItemId: text('queue_item_id'),
+  createdAt: bigint('created_at', { mode: 'number' }).notNull(),
+  actorId: text('actor_id').notNull(),
+}, (t) => [
+  index('usage_member_facts_queue').on(t.queueItemId, t.sessionId),
+  index('usage_member_facts_window').on(t.createdAt, t.sessionId),
+  index('usage_member_facts_session_window').on(t.sessionId, t.createdAt),
+]);
+
+/** Per-session and queue-actor hourly positive usage counts. */
+export const usageMemberHourly = pgTable('usage_member_hourly', {
+  sessionId: text('session_id').notNull(),
+  actorId: text('actor_id').notNull(),
+  createdAt: bigint('created_at', { mode: 'number' }).notNull(),
+  positiveTurns: bigint('positive_turns', { mode: 'number' }).notNull(),
+}, (t) => [
+  primaryKey({ columns: [t.sessionId, t.actorId, t.createdAt] }),
+  index('usage_member_hourly_window').on(t.createdAt, t.sessionId),
+  index('usage_member_hourly_empty').on(t.createdAt).where(sql`${t.positiveTurns}=0`),
+]);
+
+export const usageHourlyProgress=pgTable("usage_hourly_progress", {
+ sourceKind:text("source_kind").primaryKey(),watermark:text("watermark").notNull(),
+});
+
+export const usageDaily = pgTable("usage_daily", {
+ dimensions: jsonb("dimensions").notNull(), sourceKind: text("source_kind").notNull(),
+ sessionId:text("session_id"),orgId:text("org_id"),userId:text("user_id"),teamId:text("team_id"),
+ model:text("model"),provider:text("provider"),createdAt:bigint("created_at",{mode:"number"}).notNull(),
+ turns:bigint("turns",{mode:"number"}).notNull(),
+ unpricedTurns:bigint("unpriced_turns",{mode:"number"}).notNull(),
+ positiveTurns:bigint("positive_turns",{mode:"number"}).notNull(),
+ inputTokens:bigint("input_tokens",{mode:"number"}).notNull(),
+ outputTokens:bigint("output_tokens",{mode:"number"}).notNull(),
+ cacheReadTokens:bigint("cache_read_tokens",{mode:"number"}).notNull(),
+ cacheWriteTokens:bigint("cache_write_tokens",{mode:"number"}).notNull(),
+ totalTokens:bigint("total_tokens",{mode:"number"}).notNull(),
+ toolCalls:bigint("tool_calls",{mode:"number"}).notNull(),
+ pullRequests:bigint("pull_requests",{mode:"number"}).notNull(),
+ reviews:bigint("reviews",{mode:"number"}).notNull(),
+ costTotal:numeric("cost_total").notNull(),
+},t=>[primaryKey({columns:[t.dimensions,t.createdAt]}),
+ index("usage_daily_window").on(t.createdAt,t.sessionId),
+ index("usage_daily_session_window").on(t.sessionId,t.createdAt),
+ index("usage_daily_org_window").on(t.orgId,t.createdAt),
+ index("usage_daily_outcomes").on(t.createdAt,t.sessionId).where(sql`${t.pullRequests}>0 OR ${t.reviews}>0`),
+ index("usage_daily_empty").on(t.createdAt).where(sql`${t.turns}=0 AND ${t.toolCalls}=0 AND ${t.pullRequests}=0 AND ${t.reviews}=0`)]);
+
+/** Retained snapshots from the removed workspace briefing feature. No runtime reads or writes. */
+export const workspaceBriefingCache = pgTable("workspace_briefing_cache", {
+  orgId: text("org_id").notNull(),
+  ownerType: text("owner_type").notNull(),
+  ownerId: text("owner_id").notNull(),
+  version: text("version").notNull(),
+  evidenceHash: text("evidence_hash"),
+  response: jsonb("response"),
+  checkedAt: bigint("checked_at", { mode: "number" }),
+  nextCheckAt: bigint("next_check_at", { mode: "number" }).notNull().default(0),
+  leaseToken: text("lease_token"),
+  leaseUntil: bigint("lease_until", { mode: "number" }).notNull().default(0),
+}, t => [primaryKey({ columns: [t.orgId,t.ownerType,t.ownerId] })]);
+
+/** Failed workflow run dismissals and retained legacy briefing dismissals. */
+export const briefingDismissals = pgTable("briefing_dismissals", {
+  userId: text("user_id").notNull(),
+  orgId: text("org_id").notNull(),
+  ownerType: text("owner_type").notNull(),
+  ownerId: text("owner_id").notNull(),
+  briefingId: text("briefing_id").notNull(),
+  dismissedAt: bigint("dismissed_at", { mode: "number" }).notNull(),
+}, t => [primaryKey({ columns: [t.userId, t.ownerType, t.ownerId, t.briefingId] })]);
+
+/** When each person last read each thread. A thread with a later agent message shows as unread. */
+export const threadReads = pgTable("thread_reads", {
+  userId: text("user_id").notNull(),
+  sessionId: text("session_id").notNull(),
+  threadId: text("thread_id").notNull(),
+  readAt: bigint("read_at", { mode: "number" }).notNull(),
+}, t => [primaryKey({ columns: [t.userId, t.threadId] })]);
+
+/** Messages Valet sent to, or received from, a channel (a Slack channel or a
+ * pull request), with the engine thread each belongs to. A view aid: a write
+ * failure never fails the delivery it describes. */
+export const channelMessages = pgTable("channel_messages", {
+  id: text("id").primaryKey(),
+  orgId: text("org_id").notNull(),
+  sessionId: text("session_id").notNull(),
+  threadId: text("thread_id").notNull(),
+  channelKey: text("channel_key").notNull(),
+  conversationKey: text("conversation_key").notNull(),
+  providerMessageId: text("provider_message_id").notNull(),
+  direction: text("direction", { enum: ["in", "out"] }).notNull(),
+  author: text("author"),
+  text: text("text"),
+  url: text("url"),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+}, t => [
+  uniqueIndex("channel_messages_session_message").on(t.orgId, t.sessionId, t.channelKey, t.providerMessageId, t.direction),
+  index("channel_messages_channel").on(t.orgId, t.channelKey, t.createdAt),
+  index("channel_messages_thread").on(t.sessionId, t.threadId, t.createdAt),
+]);
+
+/** Whether a Slack channel is private, as the bot last saw it
+ * (`services/thread-access.ts`). */
+export const slackChannelPrivacy = pgTable("slack_channel_privacy", {
+  orgId: text("org_id").notNull(),
+  channelId: text("channel_id").notNull(),
+  isPrivate: boolean("is_private").notNull(),
+  checkedAt: bigint("checked_at", { mode: "number" }).notNull(),
+}, t => [primaryKey({ columns: [t.orgId, t.channelId] })]);
+
+/** Pull requests a thread created, with their last known GitHub state. */
+export const threadPullRequests = pgTable("thread_pull_requests", {
+  sessionId: text("session_id").notNull(),
+  threadId: text("thread_id").notNull(),
+  url: text("url").notNull(),
+  repo: text("repo").notNull(),
+  number: bigint("number", { mode: "number" }).notNull(),
+  state: text("state", { enum: ["open", "merged", "closed"] }).notNull(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  checkedAt: bigint("checked_at", { mode: "number" }).notNull(),
+  /** The thread that opened the pull request. On a delegating thread's copy
+   * it names the child; null on rows recorded before it was kept. */
+  openedSessionId: text("opened_session_id"),
+  openedThreadId: text("opened_thread_id"),
+}, t => [
+  primaryKey({ columns: [t.sessionId, t.threadId, t.url] }),
+  index("thread_pull_requests_url").on(t.url),
+]);
+
+/** Durable permissions confined to a workflow and its current owner. */
+export const workflowActionGrants = pgTable("workflow_action_grants", {
+  id: text("id").primaryKey(),
+  orgId: text("org_id").notNull(),
+  workflowId: text("workflow_id").notNull(),
+  ownerType: text("owner_type").notNull(),
+  ownerId: text("owner_id").notNull(),
+  actionId: text("action_id").notNull(),
+  grantedBy: text("granted_by").notNull(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+}, (t) => [index("workflow_action_grants_workflow").on(t.orgId, t.workflowId)]);
+
+/** A member's account consent for one workflow and the current share. */
+export const workflowAccountGrants = pgTable("workflow_account_grants", {
+  orgId: text("org_id").notNull(),
+  workflowId: text("workflow_id").notNull(),
+  teamId: text("team_id").notNull(),
+  service: text("service").notNull(),
+  memberId: text("member_id").notNull(),
+  shareGeneration: text("share_generation").notNull(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+}, (t) => [
+  primaryKey({ columns: [t.orgId, t.workflowId, t.teamId, t.service, t.memberId] }),
+  index("workflow_account_grants_share").on(t.teamId, t.service, t.memberId),
+]);
+
+/** Verified Slack requests waiting for durable consumer delivery. Payloads are encrypted. */
+export const slackWebhookInbox = pgTable("slack_webhook_inbox", {
+  id: text("id").primaryKey(),
+  orgId: text("org_id").notNull(),
+  payload: text("payload").notNull(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  nextAttemptAt: bigint("next_attempt_at", { mode: "number" }).notNull(),
+  attempts: integer("attempts").notNull().default(0),
+  failedAt: bigint("failed_at", { mode: "number" }),
+}, t => [index("slack_webhook_inbox_due").on(t.nextAttemptAt)]);
+
+/** Upgrade snapshots. Only the one-time continuity migration inserts these rows. */
+export const legacyAssistantRuntimes = pgTable("legacy_assistant_runtimes", {
+  assistantId: text("assistant_id"),
+  ownerType: text("owner_type", { enum: ["user", "team", "org"] }),
+  ownerId: text("owner_id"),
+  sessionId: text("session_id").primaryKey(),
+  orgId: text("org_id").notNull(),
+});
+export const legacyAssistantConversations = pgTable("legacy_assistant_conversations", {
+  threadId: text("thread_id").primaryKey(),
+  sessionId: text("session_id").notNull(),
+  conversationKey: text("conversation_key").notNull(),
+});
+export const legacyWorkflowRuntimes = pgTable("legacy_workflow_runtimes", {
+  workflowId: text("workflow_id").primaryKey(),
+  sessionId: text("session_id").notNull(),
+  orgId: text("org_id").notNull(),
+});
+
+export const legacyWorkflowAdmissions = pgTable("legacy_workflow_admissions", {
+  queueItemId: text("queue_item_id").primaryKey(),
+  sessionId: text("session_id").notNull(),
+  threadId: text("thread_id").notNull(),
+  dispatchId: text("dispatch_id").notNull(),
+  orgId: text("org_id").notNull(),
+});
+
+export const legacyWorkflowRunRuntimes = pgTable("legacy_workflow_run_runtimes", {
+  runId: text("run_id").primaryKey(),
+  sessionId: text("session_id").notNull(),
+  orgId: text("org_id").notNull(),
+});
+
+export const legacyArtifactPublications = pgTable("legacy_artifact_publications", {
+  artifactId: text("artifact_id").primaryKey(),
+  orgId: text("org_id").notNull(),
+  ownerType: text("owner_type").notNull(),
+  ownerId: text("owner_id").notNull(),
+  sourceSessionId: text("source_session_id").notNull(),
+});
+
+/**
+ * One row per user who started, finished, or skipped the in-app tour. The
+ * tour shows again when `seen_version` is below the instance version or
+ * `seen_org_version` is below `orgs.tutorial_version`. `outcome` null means
+ * the tour is in progress at `step`, and the seen versions then name the tour
+ * that step belongs to.
+ */
+export const userTutorial = pgTable("user_tutorial", {
+  userId: text("user_id").primaryKey().references(() => users.id, { onDelete: "cascade" }),
+  seenVersion: integer("seen_version").notNull().default(0),
+  seenOrgVersion: integer("seen_org_version").notNull().default(0),
+  outcome: text("outcome", { enum: ["completed", "skipped"] }),
+  step: text("step"),
+  updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+});
+
+/** Charged before BlobStore writes; pending rows also consume retention capacity. */
+export const generatedFiles = pgTable("generated_files", {
+  id: text("id").primaryKey(),
+  orgId: text("org_id").notNull(),
+  sessionId: text("session_id").notNull(),
+  threadId: text("thread_id").notNull(),
+  digest: text("digest").notNull(),
+  name: text("name").notNull(),
+  mimeType: text("mime_type").notNull(),
+  bytes: bigint("bytes", { mode: "number" }).notNull(),
+  ready: boolean("ready").notNull().default(false),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+}, t => [uniqueIndex("generated_files_scope_digest").on(t.orgId, t.sessionId, t.threadId, t.digest)]);
+
+export const childReplyDeliveries = pgTable("child_reply_deliveries", {
+  id: text("id").primaryKey(),
+  orgId: text("org_id").notNull(),
+  sessionId: text("session_id").notNull(),
+  threadId: text("thread_id").notNull(),
+  queueItemId: text("queue_item_id"),
+  nextAttemptAt: bigint("next_attempt_at", { mode: "number" }).notNull(),
+  completedAt: bigint("completed_at", { mode: "number" }),
+  attempts: integer("attempts").notNull().default(0),
+  lastError: text("last_error"),
+  /** Set when retries stop. `last_error` and an `event_drop_log` row say why. */
+  failedAt: bigint("failed_at", { mode: "number" }),
+  /** When the intent was written. Reports how long a reply has waited. */
+  createdAt: bigint("created_at", { mode: "number" }),
+  /** The child submission this reply reports. Its child watch decides whether admission can still happen. */
+  childSessionId: text("child_session_id"),
+  childQueueItemId: text("child_queue_item_id"),
+}, (t) => [index("child_reply_deliveries_due").on(t.orgId, t.completedAt, t.nextAttemptAt)]);
+
+/** Work a person started from their home conversation: one thread in one of
+ * their workspaces. Home lists it under Tasks and reports back once when the
+ * starting submission settles. Done hides it from Tasks; the thread stays. */
+export const homeTasks = pgTable("home_tasks", {
+  id: text("id").primaryKey(),
+  orgId: text("org_id").notNull(),
+  userId: text("user_id").notNull(),
+  ownerType: text("owner_type").notNull(),
+  ownerId: text("owner_id").notNull(),
+  sessionId: text("session_id").notNull(),
+  threadId: text("thread_id").notNull(),
+  title: text("title").notNull(),
+  /** The submission that started the task. Its settlement reports back home. */
+  queueItemId: text("queue_item_id"),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  reportedAt: bigint("reported_at", { mode: "number" }),
+  doneAt: bigint("done_at", { mode: "number" }),
+}, (t) => [index("home_tasks_user").on(t.userId, t.createdAt), index("home_tasks_thread").on(t.sessionId, t.threadId)]);
+
+/** Durable progress intent; create_started survives an uncertain provider outcome. */
+export const channelProgressDeliveries = pgTable("channel_progress_deliveries", {
+  id: text("id").primaryKey(),
+  orgId: text("org_id").notNull(),
+  sessionId: text("session_id").notNull(),
+  threadId: text("thread_id").notNull(),
+  turnId: text("turn_id").notNull(),
+  channelType: text("channel_type").notNull(),
+  conversationKey: text("conversation_key").notNull(),
+  threadTs: text("thread_ts"),
+  messageId: text("message_id"),
+  lastRevision: text("last_revision"),
+  createStarted: boolean("create_started").notNull().default(false),
+  attempts: integer("attempts").notNull().default(0),
+  nextAttemptAt: bigint("next_attempt_at", { mode: "number" }).notNull().default(0),
+  leaseToken: text("lease_token"),
+  leaseUntil: bigint("lease_until", { mode: "number" }).notNull().default(0),
+  completedAt: bigint("completed_at", { mode: "number" }),
+  failedAt: bigint("failed_at", { mode: "number" }),
+  lastError: text("last_error"),
+}, t => [
+  uniqueIndex("channel_progress_scope").on(t.orgId, t.sessionId, t.threadId, t.turnId, t.channelType, t.conversationKey),
+  index("channel_progress_pending_due").on(t.orgId, t.nextAttemptAt)
+    .where(sql`${t.completedAt} IS NULL AND ${t.failedAt} IS NULL`),
+]);
+export type ChannelProgressDeliveryRow = typeof channelProgressDeliveries.$inferSelect;
+// Hosted, MCP, and CLI usage facts. Never add arguments or results.
+export const externalCalls = pgTable("external_calls", {
+  id: text("id").primaryKey(),
+  orgId: text("org_id").notNull(),
+  userId: text("user_id"),
+  surface: text("surface", { enum: ["hosted", "mcp", "cli"] }).notNull(),
+  name: text("name").notNull(),
+  clientName: text("client_name"),
+  clientVersion: text("client_version"),
+  sessionId: text("session_id"),
+  persona: text("persona"),
+  threadId: text("thread_id"),
+  ownerType: text("owner_type", { enum: ["user", "team"] }).notNull(),
+  ownerId: text("owner_id").notNull(),
+  outcome: text("outcome", { enum: ["ok", "error", "denied", "pending-approval"] }).notNull(),
+  errorCode: text("error_code"),
+  durationMs: integer("duration_ms").notNull(),
+  intent: text("intent"),
+  intentClearedAt: bigint("intent_cleared_at", { mode: "number" }),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+}, (t) => [
+  index("external_calls_intent_retention").on(t.createdAt).where(sql`${t.intent} IS NOT NULL`),
+  index("external_calls_org_created").on(t.orgId, t.createdAt, t.id),
+  index("external_calls_owner_created").on(t.orgId, t.ownerType, t.ownerId, t.createdAt),
+  index("external_calls_user_created").on(t.orgId, t.userId, t.createdAt),
+  check("external_calls_intent_length", sql`length(${t.intent}) <= 500`),
+]);
+
+// Stateless MCP requests recover initialize metadata without retaining a bearer token.
+export const mcpClientInfo = pgTable("mcp_client_info", {
+  orgId: text("org_id").notNull(),
+  userId: text("user_id").notNull(),
+  clientId: text("client_id").notNull(),
+  name: text("name").notNull(),
+  version: text("version").notNull(),
+}, (t) => [primaryKey({ columns: [t.orgId, t.userId, t.clientId] })]);
+
+// Tag registries are organization-local. Subject text is supplied by callers.
+export const tagKeys = pgTable("tag_keys", {
+  orgId: text("org_id").notNull(), dimension: text("dimension").notNull(), key: text("key").notNull(),
+  label: text("label").notNull(), definition: text("definition").notNull(),
+  examples: jsonb("examples").$type<string[]>().notNull().default([]),
+  origin: text("origin", { enum: ["seed", "classifier", "admin"] }).notNull(),
+  status: text("status", { enum: ["provisional", "active", "merged"] }).notNull(),
+  editedAt: bigint("edited_at", { mode: "number" }), mergedInto: text("merged_into"), createdAt: bigint("created_at", { mode: "number" }).notNull(), updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+}, t => [primaryKey({ columns: [t.orgId, t.dimension, t.key] }), check("tag_key_format", sql`${t.key} ~ '^[a-z][a-z0-9_]{0,31}$'`)]);
+
+export const tagLabels = pgTable("tag_labels", {
+  orgId: text("org_id").notNull(), subjectType: text("subject_type").notNull(), subjectId: text("subject_id").notNull(),
+  dimension: text("dimension").notNull(), key: text("key").notNull(),
+  mode: text("mode", { enum: ["single", "multi"] }).notNull(), confidence: doublePrecision("confidence").notNull(),
+  model: text("model").notNull(), inputHash: text("input_hash").notNull(), classifiedAt: bigint("classified_at", { mode: "number" }).notNull(),
+}, t => [primaryKey({ columns: [t.orgId, t.subjectType, t.subjectId, t.dimension, t.key] }),
+  uniqueIndex("tag_labels_single").on(t.orgId, t.subjectType, t.subjectId, t.dimension).where(sql`${t.mode} = 'single'`),
+  index("tag_labels_aggregate").on(t.orgId, t.dimension, t.key, t.classifiedAt),
+  check("tag_label_confidence", sql`${t.confidence} >= 0 AND ${t.confidence} <= 1`)]);
+
+// A successful multi classification with no labels still has an input hash.
+export const tagSubjects = pgTable("tag_subjects", {
+  sessionId: text("session_id"), threadId: text("thread_id"),
+  orgId: text("org_id").notNull(), dimension: text("dimension").notNull(), subjectType: text("subject_type").notNull(), subjectId: text("subject_id").notNull(),
+  ownerType: text("owner_type"), ownerId: text("owner_id"),
+  retagDay: bigint("retag_day", { mode: "number" }).notNull().default(0), retagCount: integer("retag_count").notNull().default(0),
+  userId: text("user_id"), inputHash: text("input_hash").notNull(), otherRetried: boolean("other_retried").notNull().default(false),
+}, t => [primaryKey({ columns: [t.orgId, t.dimension, t.subjectType, t.subjectId] })]);
+
+export const tagJobs = pgTable("tag_jobs", {
+  sessionId: text("session_id"), threadId: text("thread_id"),
+  orgId: text("org_id").notNull(), dimension: text("dimension").notNull(), subjectType: text("subject_type").notNull(), subjectId: text("subject_id").notNull(),
+  version: integer("version").notNull().default(1), attempts: integer("attempts").notNull().default(0),
+  force: boolean("force").notNull().default(false), nextAttemptAt: bigint("next_attempt_at", { mode: "number" }).notNull(),
+}, t => [primaryKey({ columns: [t.orgId, t.dimension, t.subjectType, t.subjectId] }), index("tag_jobs_retry_due").on(t.nextAttemptAt).where(sql`${t.attempts} < 5`)]);
+
+// One serial classifier per org/dimension across API replicas.
+export const tagDimensionState = pgTable("tag_dimension_state", {
+  orgId: text("org_id").notNull(), dimension: text("dimension").notNull(), leaseToken: text("lease_token"),
+  leaseUntil: bigint("lease_until", { mode: "number" }).notNull().default(0),
+  retryOther: boolean("retry_other").notNull().default(false),
+  keyLimit: integer("key_limit").notNull().default(100),
+  consolidationDue: boolean("consolidation_due").notNull().default(false),
+}, t => [primaryKey({ columns: [t.orgId, t.dimension] })]);

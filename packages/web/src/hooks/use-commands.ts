@@ -6,11 +6,11 @@ import { useQuery } from "@tanstack/react-query";
 import type { ListCommandsResponse } from "@valet/api/wire";
 import { api } from "~/api/client";
 
-export function useCommands(sessionId: string) {
+export function useCommands(sessionId: string, enabled = true) {
   return useQuery<ListCommandsResponse>({
     queryKey: ["commands", sessionId],
     queryFn: () => api.listCommands(sessionId),
-    enabled: !!sessionId,
+    enabled: enabled && !!sessionId,
     staleTime: 30_000,
   });
 }

@@ -83,6 +83,8 @@ vi.mock("@tanstack/react-router", () => ({
   // The page keeps its filters and both cursor stacks in the search params.
   useSearch: () => ({}),
   useNavigate: () => vi.fn(),
+  // The header's space control reads the path to decide where a switch goes.
+  useRouterState: ({ select }: { select: (state: { location: { pathname: string } }) => unknown }) => select({ location: { pathname: "/skills" } }),
 }));
 
 vi.mock("~/api/skills", () => ({
@@ -112,27 +114,6 @@ vi.mock("~/api/settings", () => ({
 
 // The badge links by assistant id, so it reads the assistants list to find
 // the team's default one.
-vi.mock("~/api/assistants", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("~/api/assistants")>();
-  return {
-    ...actual,
-    useAssistants: () => ({
-      data: {
-        assistants: [
-          {
-            id: "asst_team_1",
-            owner: { type: "team" as const, id: "team_1" },
-            sessionId: "assistant:asst_team_1",
-            isDefault: true,
-            createdAt: 1,
-          },
-        ],
-      },
-      isLoading: false,
-      error: null,
-    }),
-  };
-});
 
 // The repositories panel has its own suite; here it only has to render.
 vi.mock("~/api/skill-sources", () => ({
@@ -143,6 +124,9 @@ vi.mock("~/api/skill-sources", () => ({
 }));
 
 import { SkillsIndexPage } from "./skills.index";
+vi.mock("~/components/layout/workspace-assistant", () => ({ useWorkspaceAssistant: () => ({ open: vi.fn() }) }));
+vi.mock("~/components/home/use-ask-valet", () => ({ useAskValet: () => vi.fn() }));
+
 import { SkillDoc } from "~/components/skills/skill-doc";
 
 describe("SkillsIndexPage with stored skills", () => {
@@ -156,7 +140,7 @@ describe("SkillsIndexPage with stored skills", () => {
     const { container } = render(<SkillsIndexPage />);
     // Query inside the grid so the scope-filter dropdown's <option>s do not
     // count. One plugin skill, two personal stored skills.
-    const grid = container.querySelector(".grid");
+    const grid = container.querySelector(`ul[aria-label="Skills"]`);
     const badgeText = (label: string) =>
       Array.from(grid?.querySelectorAll("span") ?? []).filter((el) => el.textContent === label);
     expect(badgeText("Plugin").length).toBe(1);
@@ -219,7 +203,7 @@ describe("SkillsIndexPage with stored skills", () => {
     // Counted inside the grid, as in the scope-badge test above: the scope
     // filter over the grid carries a "Team" option, which is a filter value
     // and not a badge on a card.
-    const grid = container.querySelector(".grid");
+    const grid = container.querySelector(`ul[aria-label="Skills"]`);
     const teamBadges = Array.from(grid?.querySelectorAll("span") ?? []).filter(
       (el) => el.textContent === "Team",
     );

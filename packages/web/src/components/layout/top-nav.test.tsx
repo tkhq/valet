@@ -1,14 +1,6 @@
 // @vitest-environment jsdom
-/**
- * Product-first nav: the logo is always "Valet" (the orchestrator's chosen
- * name lives in its own title card, not the logo), the presence dot still
- * reflects the orchestrator's state, "Sessions" links to /sessions, and
- * the old "New session" button is gone from the nav (it moved to the
- * /sessions stub page — see routes/sessions.tsx).
- */
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
+/** Threads leads primary navigation. Session and artifact routes remain
+ * available to existing links without separate navigation entries. */
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   RouterProvider,
@@ -16,15 +8,20 @@ import {
   createRootRoute,
   createRoute,
   createRouter,
+  useBlocker,
 } from "@tanstack/react-router";
-import type { OrgPluginWire } from "@valet/api/wire";
-import { TopNav } from "./top-nav";
-import { AppShell } from "./app-shell";
+import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import type { OrgPluginWire, TeamSummary } from "@valet/api/wire";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceScopeProvider } from "~/lib/workspace-scope";
+import { AppShell } from "./app-shell";
+import { TopNav } from "./top-nav";
 
 // The nav gates the Security link on the `security` plugin's entitlement,
 // read from `useOrg().data.plugins`. Mock the settings reads so the gate is
 // deterministic; `securityPlugins` is mutable per test.
+let navTeams: TeamSummary[] = [];
 let securityPlugins: OrgPluginWire[] = [
   {
     name: "security",
@@ -36,6 +33,10 @@ let securityPlugins: OrgPluginWire[] = [
   },
 ];
 
+vi.mock("~/api/integrations", async (importOriginal) => ({
+  ...await importOriginal<typeof import("~/api/integrations")>(),
+  usePlugins: () => ({ data: { plugins: [] }, isLoading: false, error: null }),
+}));
 vi.mock("~/api/settings", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/settings")>();
   return {
@@ -45,21 +46,9 @@ vi.mock("~/api/settings", async (importOriginal) => {
       isLoading: false,
       error: null,
     }),
-    useTeams: () => ({ data: { teams: [] }, isLoading: false, error: null }),
+    useTeams: () => ({ data: { teams: navTeams }, isLoading: false, error: null }),
   };
 });
-
-vi.mock("~/api/orchestrator", () => ({
-  useOrchestratorInfo: () => ({
-    data: {
-      sessionId: "orchestrator:user-1",
-      name: "Echo",
-      personality: null,
-      presence: "idle",
-      activeChildren: 0,
-    },
-  }),
-}));
 
 // The bell owns its own network calls (useNotifications) and is covered by
 // its own test — stub it here so this test stays focused on nav layout.
@@ -67,7 +56,7 @@ vi.mock("./notifications-bell", () => ({
   NotificationsBell: () => <div data-testid="bell-stub" />,
 }));
 
-function renderNav(opts: { withSidebar?: boolean } = {}) {
+function renderNav(opts: { withSidebar?: boolean; workspace?: string; path?: string; blockNavigation?: boolean } = {}) {
   // The nav reads the workspace scope, which throws outside its provider —
   // deliberately, so a surface can never silently render another workspace's
   // data under this one's name. The provider must sit INSIDE the router: it
@@ -76,8 +65,9 @@ function renderNav(opts: { withSidebar?: boolean } = {}) {
     <WorkspaceScopeProvider>{node}</WorkspaceScopeProvider>
   );
   const rootRoute = createRootRoute({
-    component: () =>
-      opts.withSidebar === undefined ? (
+    component: () => {
+      useBlocker({ shouldBlockFn: () => opts.blockNavigation === true });
+      return opts.withSidebar === undefined ? (
         withScope(<TopNav />)
       ) : (
         // The real shell, so the toggle is driven by the state it actually
@@ -88,12 +78,13 @@ function renderNav(opts: { withSidebar?: boolean } = {}) {
             <div />
           </AppShell>,
         )
-      ),
+      );
+    },
   });
   const indexRoute = createRoute({ getParentRoute: () => rootRoute, path: "/", component: () => null });
-  const sessionsRoute = createRoute({
+  const threadsRoute = createRoute({
     getParentRoute: () => rootRoute,
-    path: "/sessions",
+    path: "/chat",
     component: () => null,
   });
   const skillsRoute = createRoute({
@@ -101,21 +92,37 @@ function renderNav(opts: { withSidebar?: boolean } = {}) {
     path: "/skills",
     component: () => null,
   });
+  const artifactsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/artifacts", component: () => null });
+  const memoryRoute = createRoute({ getParentRoute: () => rootRoute, path: "/memory", component: () => null });
+  const presenceRoutes = [
+    "/presence",
+    "/presence/places/$subject",
+    "/presence/rules/$id",
+    "/presence/routines/$id",
+    "/presence/activity",
+    "/presence/events/$eventId",
+    "/workflows",
+    "/workflows/$workflowId",
+    "/workflows/runs",
+    "/workflows/runs/$runId",
+  ].map(path => createRoute({ getParentRoute: () => rootRoute, path, component: () => null }));
   const router = createRouter({
-    routeTree: rootRoute.addChildren([indexRoute, sessionsRoute, skillsRoute]),
-    history: createMemoryHistory({ initialEntries: ["/"] }),
+    routeTree: rootRoute.addChildren([indexRoute, threadsRoute, skillsRoute, artifactsRoute, memoryRoute, ...presenceRoutes]),
+    history: createMemoryHistory({ initialEntries: [opts.path ?? (opts.workspace ? `/?workspace=${opts.workspace}` : "/")] }),
   });
   const queryClient = new QueryClient();
 
-  return render(
+  return { router, ...render(
     <QueryClientProvider client={queryClient}>
       <RouterProvider router={router} />
     </QueryClientProvider>,
-  );
+  ) };
 }
 
 describe("TopNav", () => {
   beforeEach(() => {
+    navTeams = [];
+    window.sessionStorage.clear();
     securityPlugins = [
       {
         name: "security",
@@ -128,12 +135,19 @@ describe("TopNav", () => {
     ];
   });
 
+  it("has no space control: Spaces live in the thread sidebar and page headers", async () => {
+    navTeams = [{ id: "t1", name: "Platform", orgId: "org", createdAt: 1, memberCount: 1, callerRole: "member", origin: "local", externalId: null, defaultModel: null }];
+    renderNav({ path: "/workflows?workspace=t1" });
+    await screen.findByText("Valet");
+    expect(screen.queryByRole("button", { name: /Change space/ })).toBeNull();
+  });
+
   it("opens a mobile navigation menu and closes after selecting a destination", async () => {
     renderNav();
     await userEvent.click(await screen.findByRole("button", { name: "Open navigation" }));
     const menu = screen.getByRole("menu");
-    expect(within(menu).getByRole("menuitem", { name: "Security" })).toBeTruthy();
-    await userEvent.click(within(menu).getByRole("menuitem", { name: "Sessions" }));
+    expect(within(menu).getByRole("menuitem", { name: "Valet Security" })).toBeTruthy();
+    await userEvent.click(within(menu).getByRole("menuitem", { name: "Skills" }));
     expect(screen.queryByRole("menu")).toBeNull();
   });
 
@@ -141,7 +155,7 @@ describe("TopNav", () => {
     securityPlugins = [];
     renderNav();
     await userEvent.click(await screen.findByRole("button", { name: "Open navigation" }));
-    expect(within(screen.getByRole("menu")).queryByRole("menuitem", { name: "Security" })).toBeNull();
+    expect(within(screen.getByRole("menu")).queryByRole("menuitem", { name: "Valet Security" })).toBeNull();
   });
 
   it("renders the Valet logo, not the orchestrator's name", async () => {
@@ -150,61 +164,54 @@ describe("TopNav", () => {
     expect(screen.queryByText("Echo")).toBeNull();
   });
 
-  it("renders a Sessions link", async () => {
-    renderNav();
-    const link = await screen.findByRole("link", { name: "Sessions" });
-    expect(link.getAttribute("href")).toBe("/sessions");
-  });
-
-  it("renders an Artifacts link", async () => {
-    renderNav();
-    const link = await screen.findByRole("link", { name: "Artifacts" });
-    expect(link.getAttribute("href")).toBe("/artifacts");
-  });
-
-  it("renders a Skills link between Workflows and Integrations", async () => {
-    renderNav();
-    const link = await screen.findByRole("link", { name: "Skills" });
-    expect(link.getAttribute("href")).toBe("/skills");
-
-    const labels = screen.getAllByRole("link").map((el) => el.textContent);
-    expect(labels.indexOf("Skills")).toBeGreaterThan(labels.indexOf("Workflows"));
-    expect(labels.indexOf("Skills")).toBeLessThan(labels.indexOf("Integrations"));
-  });
-
   // The labelled links do not fit beside the logo and the icons on a
   // phone. They live in one scrollable landmark so the row can slide
   // sideways instead of pushing the settings icon off-screen; jsdom has no
   // layout, so this guards the STRUCTURE that makes the CSS fix possible.
-  it("keeps every destination inside one scrollable primary nav", async () => {
+  it("keeps only global items: the space pages live in the sidebar", async () => {
     renderNav();
     await screen.findByText("Valet");
-    const nav = screen.getByRole("navigation", { name: "Primary" });
-    const labels = within(nav)
-      .getAllByRole("link")
-      .map((el) => el.textContent);
-    expect(labels).toEqual([
-      "Chat",
-      "Memory",
-      "Artifacts",
-      "Sessions",
-      "Workflows",
-      "Security",
-      "Events",
-      "Usage",
-      "Skills",
-      "Integrations",
-      "Changelog",
+    expect(screen.queryByRole("navigation", { name: "Primary" })).toBeNull();
+    for (const name of ["Threads", "Artifacts", "Presence", "Workflows"]) expect(screen.queryByRole("link", { name })).toBeNull();
+    expect(screen.getByRole("button", { name: "More" })).toBeTruthy();
+    expect(screen.getByLabelText("Settings")).toBeTruthy();
+  });
+
+  it("keeps only pages no space owns in the More menu", async () => {
+    renderNav();
+    await userEvent.click(await screen.findByRole("button", { name: "More" }));
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getAllByRole("menuitem").map((item) => [item.textContent, item.getAttribute("href")])).toEqual([
+      ["Changelog", "/changelog"], ["Model comparison", "/settings/model-comparison"],
     ]);
   });
 
-  it("renders a Security link beside Workflows", async () => {
+  it("keeps artifacts and enabled plugins reachable in mobile navigation", async () => {
     renderNav();
-    const link = await screen.findByRole("link", { name: "Security" });
-    expect(link.getAttribute("href")).toBe("/security");
+    await userEvent.click(await screen.findByRole("button", { name: "Open navigation" }));
+    const menu = screen.getByRole("menu", { name: "Open navigation" });
+    expect(within(menu).getByRole("menuitem", { name: "Artifacts" }).getAttribute("href")).toBe("/artifacts");
+    expect(within(menu).getByRole("menuitem", { name: "Valet Security" }).getAttribute("href")).toBe("/security");
+    expect(within(menu).getByRole("menuitem", { name: "Memory" }).getAttribute("href")).toBe("/memory");
+  });
 
-    const labels = screen.getAllByRole("link").map((el) => el.textContent);
-    expect(labels.indexOf("Security")).toBe(labels.indexOf("Workflows") + 1);
+  it("moves Settings into mobile navigation and keeps the desktop shortcut", async () => {
+    renderNav();
+    const shortcut = await screen.findByRole("link", { name: "Settings" });
+    expect(shortcut.classList.contains("hidden")).toBe(true);
+    expect(shortcut.classList.contains("md:inline-flex")).toBe(true);
+    await userEvent.click(screen.getByRole("button", { name: "Open navigation" }));
+    const menu = screen.getByRole("menu", { name: "Open navigation" });
+    expect(within(menu).getByRole("menuitem", { name: "Settings" }).getAttribute("href")).toBe("/settings");
+    await userEvent.click(within(menu).getByRole("menuitem", { name: "Settings" }));
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("opens Valet Security from the Plugins dropdown", async () => {
+    renderNav();
+    expect(screen.queryByRole("link", { name: "Security" })).toBeNull();
+    await userEvent.click(await screen.findByRole("button", { name: "Plugins" }));
+    expect(screen.getByRole("menuitem", { name: "Valet Security" }).getAttribute("href")).toBe("/security");
   });
 
   it("hides the Security link when the plugin is not enabled for the caller", async () => {
@@ -220,32 +227,25 @@ describe("TopNav", () => {
     ];
     renderNav();
     await screen.findByText("Valet");
-    expect(screen.queryByRole("link", { name: "Security" })).toBeNull();
+    await userEvent.click(await screen.findByRole("button", { name: "Plugins" }));
+    expect(screen.queryByRole("menuitem", { name: "Valet Security" })).toBeNull();
   });
 
   it("hides the Security link when no security plugin is loaded", async () => {
     securityPlugins = [];
     renderNav();
     await screen.findByText("Valet");
-    expect(screen.queryByRole("link", { name: "Security" })).toBeNull();
+    await userEvent.click(await screen.findByRole("button", { name: "Plugins" }));
+    expect(screen.queryByRole("menuitem", { name: "Valet Security" })).toBeNull();
   });
 
   // The logo and the two icons sit OUTSIDE that scroller, so they stay put
   // while the links scroll. Regression guard: moving either inside the nav
   // would scroll them out of reach on a phone.
-  it("keeps the logo and the settings icon outside the scrolling nav", async () => {
+  it("does not render a New runtime button", async () => {
     renderNav();
     await screen.findByText("Valet");
-    const nav = screen.getByRole("navigation", { name: "Primary" });
-    expect(within(nav).queryByLabelText("Valet — dashboard")).toBeNull();
-    expect(within(nav).queryByLabelText("Settings")).toBeNull();
-    expect(screen.getByLabelText("Settings")).toBeTruthy();
-  });
-
-  it("does not render a New session button", async () => {
-    renderNav();
-    await screen.findByText("Valet");
-    expect(screen.queryByText("New session")).toBeNull();
+    expect(screen.queryByText("New runtime")).toBeNull();
   });
 });
 
@@ -280,18 +280,29 @@ describe("TopNav — sidebar toggle", () => {
     expect(screen.queryByRole("button", { name: /sidebar/i })).toBeNull();
   });
 
-  it("offers to collapse an open sidebar, and to expand it once collapsed", async () => {
+  it("links a page without the thread sidebar to the open phone thread list", async () => {
+    renderNav({ withSidebar: false });
+    await screen.findByText("Valet");
+    const link = screen.getByRole("link", { name: "Open threads" });
+    expect(link.getAttribute("href")).toBe("/chat?threads=open");
+    // Phone only: the desktop nav has a Threads link of its own.
+    expect(link.className).toContain("md:hidden");
+    expect(link.className).toContain("max-md:min-h-11");
+  });
+
+  it("hides the logo on a phone, where the menu carries Home", async () => {
     renderNav({ withSidebar: true });
     await screen.findByText("Valet");
+    const logo = screen.getByRole("link", { name: "Valet — Home" });
+    expect(logo.className.split(" ")).toEqual(expect.arrayContaining(["hidden", "md:inline-flex"]));
+    await userEvent.click(screen.getByRole("button", { name: "Open navigation" }));
+    expect((await screen.findByRole("menuitem", { name: "Home" })).getAttribute("href")).toBe("/");
+  });
 
-    const collapse = screen.getByRole("button", { name: "Collapse sidebar" });
-    expect(collapse.getAttribute("aria-expanded")).toBe("true");
-
-    await userEvent.click(collapse);
-
-    const expand = screen.getByRole("button", { name: "Expand sidebar" });
-    expect(expand.getAttribute("aria-expanded")).toBe("false");
-    expect(screen.queryByRole("button", { name: "Collapse sidebar" })).toBeNull();
+  it("leaves the desktop collapse toggle to the sidebar's own top row", async () => {
+    renderNav({ withSidebar: true });
+    await screen.findByText("Valet");
+    expect(screen.queryByRole("button", { name: /(Collapse|Expand) sidebar/ })).toBeNull();
   });
 
   it("keeps the mobile drawer control labelled for its own action", async () => {
@@ -302,12 +313,40 @@ describe("TopNav — sidebar toggle", () => {
     expect(screen.getByRole("button", { name: "Open threads" })).toBeTruthy();
   });
 
-  it("puts the toggle ahead of the logo, at the row's left edge", async () => {
+  // The phone layout (drawer toggle and menu button) runs until `md`, so its
+  // controls keep 44px targets through `md`, not only below `sm`. jsdom has no
+  // media queries, so this guards the classes.
+  it("keeps 44px targets on the phone layout's controls until md", async () => {
     renderNav({ withSidebar: true });
-    const logo = await screen.findByText("Valet");
-    const toggle = screen.getByRole("button", { name: "Collapse sidebar" });
-    // `compareDocumentPosition` is the only order check jsdom can make; the
-    // flex row does the rest.
-    expect(toggle.compareDocumentPosition(logo) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await screen.findByText("Valet");
+    for (const control of [
+      screen.getByRole("button", { name: "Open threads" }),
+      screen.getByRole("button", { name: "Open navigation" }),
+    ]) {
+      expect(control.className).toContain("max-md:min-h-11");
+    }
   });
+});
+
+const openAssistant = vi.fn();
+vi.mock("~/components/layout/workspace-assistant", () => ({ useWorkspaceAssistant: () => ({ open: openAssistant }) }));
+
+
+
+it("opens Ask Valet from the bar", async () => {
+  openAssistant.mockClear();
+  const user = userEvent.setup();
+  renderNav();
+  await user.click(await screen.findByRole("button", { name: "Ask Valet" }));
+  expect(openAssistant).toHaveBeenCalledOnce();
+});
+
+it("opens Ask Valet from the mobile menu", async () => {
+  openAssistant.mockClear();
+  const user = userEvent.setup();
+  renderNav();
+  await user.click(await screen.findByRole("button", { name: "Open navigation" }));
+  await user.click(screen.getByRole("menuitem", { name: "Ask Valet" }));
+  expect(openAssistant).toHaveBeenCalledOnce();
+  expect(screen.queryByRole("menu", { name: "Navigation" })).toBeNull();
 });

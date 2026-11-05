@@ -25,11 +25,13 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { toFlow, type WorkflowDefinition } from "./editor-model";
+import { FlowEdge, edgeLabelOffsets, type FlowEdgeData } from "./editor/flow-edge";
 import { FlowNode, type NodeRunStatus } from "./editor/flow-node";
 
 export type { NodeRunStatus };
 
 const nodeTypes = { workflow: FlowNode };
+const edgeTypes = { workflow: FlowEdge };
 
 /** The same arrowhead the editor canvas draws (`editor/canvas.tsx`), so a
  * workflow reads the same way in chat, on a run, and under the cursor. */
@@ -68,6 +70,20 @@ export function summarizeDefinition(definition: WorkflowDefinition): string {
   return `${n} nodes · ${path}`;
 }
 
+export function toPreviewEdges(state: ReturnType<typeof toFlow>, statusByNodeId?: Record<string, NodeRunStatus>): Edge<FlowEdgeData, "workflow">[] {
+  const offsets = edgeLabelOffsets(state.edges);
+  return state.edges.map((edge) => ({
+    ...edge,
+    type: "workflow",
+    data: {
+      ...edge.data,
+      ...(offsets.has(edge.id) ? { labelOffsetY: offsets.get(edge.id) } : {}),
+    },
+    animated: statusByNodeId?.[edge.target] === "running",
+    markerEnd: ARROW_END,
+  }));
+}
+
 export interface WorkflowPreviewProps {
   definition: WorkflowDefinition;
   statusByNodeId?: Record<string, NodeRunStatus>;
@@ -100,12 +116,7 @@ export function WorkflowPreview({
         ...(badgeByNodeId?.[n.id] ? { runBadge: badgeByNodeId[n.id] } : {}),
       },
     }));
-    const edges: Edge[] = state.edges.map((e) => ({
-      ...e,
-      ...(e.data.when ? { label: e.data.when } : {}),
-      animated: statusByNodeId?.[e.target] === "running",
-      markerEnd: ARROW_END,
-    }));
+    const edges = toPreviewEdges(state, statusByNodeId);
     return { nodes, edges };
   }, [definition, mode, statusByNodeId, badgeByNodeId]);
 
@@ -143,6 +154,7 @@ export function WorkflowPreview({
         nodes={flow.nodes}
         edges={flow.edges}
         nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
         fitView
         fitViewOptions={{ padding: 0.08, minZoom: 0.4, maxZoom: 0.95 }}
         nodesDraggable={false}

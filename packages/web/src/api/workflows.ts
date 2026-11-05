@@ -1,16 +1,18 @@
 /**
  * Workflows queries (engine v2 Phase 5 decision 19 — deliberately spartan
  * web surface). House pattern: a query-key factory per resource file,
- * mirroring `~/api/memory` / `~/api/orchestrator`.
+ * mirroring `~/api/memory` / `~/api/workspace-runtime`.
  */
 import {
   useMutation,
   useQuery,
   useQueryClient,
+  type QueryClient,
   type UseMutationResult,
   type UseQueryOptions,
 } from "@tanstack/react-query";
 import type {
+  AllowWorkflowPermissionsRequest,
   AllowWorkflowPermissionsResponse,
   CreateWorkflowEventTriggerRequest,
   CreateWorkflowRequest,
@@ -20,11 +22,13 @@ import type {
   WorkflowWebhookResponse,
   GetWorkflowRunResponse,
   GetWorkflowTriggerCatalogResponse,
+  ListWorkflowActionRequiredResponse,
   ListAllWorkflowRunsResponse,
   ListWorkflowRunsResponse,
   ListWorkflowsResponse,
   ListWorkflowTriggersResponse,
   ResolveWorkflowApprovalRequest,
+  RetryWorkflowRunRequest,
   RetryWorkflowRunResponse,
   StartWorkflowRunResponse,
   UpdateWorkflowEventTriggerRequest,
@@ -35,9 +39,9 @@ import type {
   ListWorkflowVersionsResponse,
   WorkflowEventTriggerResponse,
   WorkflowScheduleResponse,
+  WorkflowTriggerItem,
 } from "@valet/api/wire";
-import { api, ApiError, type OwnerFilter, type WorkflowRunFilter, type WorkflowRunPage } from "./client";
-import { qkPolicies } from "./policies";
+import { api, type OwnerFilter, type WorkflowRunPage } from "./client";
 
 export const qkWorkflows = {
   /** The owner is a trailing element, so `["workflows"]` stays the prefix
@@ -51,8 +55,6 @@ export const qkWorkflows = {
   // invalidates all of them.
   runs: (id: string, page?: WorkflowRunPage) =>
     ["workflows", id, "runs", ...(page ? [page] : [])] as const,
-  runList: (filter?: WorkflowRunFilter) =>
-    ["workflows", "run-list", ...(filter ? [filter] : [])] as const,
   run: (runId: string) => ["workflows", "runs", runId] as const,
   versions: (id: string) => ["workflows", id, "versions"] as const,
   version: (id: string, version: number) => ["workflows", id, "versions", version] as const,
@@ -64,6 +66,7 @@ export const qkWorkflows = {
   allRuns: (owner?: OwnerFilter, page?: WorkflowRunPage) =>
     ["workflows", "all-runs", ...(owner ? [owner.ownerType, owner.ownerId] : []), ...(page ? [page] : [])] as const,
   triggerCatalog: () => ["workflows", "trigger-catalog"] as const,
+  actionRequired: () => ["workflows", "action-required"] as const,
   // Sits under the `detail(id)` prefix on purpose: saving the definition
   // invalidates the detail, and the predictions must follow the definition.
   permissions: (id: string) => ["workflows", id, "permissions"] as const,
@@ -163,23 +166,31 @@ export function useWorkflowRuns(
   });
 }
 
-/** Runs across every workflow the caller can reach. Pass `parentRunId` to
- * list one batch parent's child runs. */
-export function useRuns(
-  filter?: WorkflowRunFilter,
+/** Every run in one workspace, newest first: the Presence Runs tab. Polls,
+ * because runs move; the same cadence as run detail. */
+export function useAllWorkflowRuns(
+  owner: OwnerFilter | undefined,
+  page?: WorkflowRunPage,
   opts?: Partial<UseQueryOptions<ListAllWorkflowRunsResponse>>,
 ) {
   return useQuery<ListAllWorkflowRunsResponse>({
-    queryKey: qkWorkflows.runList(filter),
-    queryFn: () => api.listRuns(filter),
+    queryKey: qkWorkflows.allRuns(owner, page),
+    queryFn: () => api.listAllWorkflowRuns(owner, page),
+    refetchInterval: 5000,
     ...opts,
   });
 }
 
-export function useWorkflowVersions(
-  id: string,
-  opts?: Partial<UseQueryOptions<ListWorkflowVersionsResponse>>,
-) {
+/** Every active workflow gate the calling principal can resolve. */
+export function useWorkflowActionRequired() {
+  return useQuery<ListWorkflowActionRequiredResponse>({
+    queryKey: qkWorkflows.actionRequired(),
+    queryFn: () => api.listWorkflowActionRequired(),
+    refetchInterval: 5000,
+  });
+}
+
+export function useWorkflowVersions(id: string, opts?: Partial<UseQueryOptions<ListWorkflowVersionsResponse>>) {
   return useQuery<ListWorkflowVersionsResponse>({
     queryKey: qkWorkflows.versions(id),
     queryFn: () => api.listWorkflowVersions(id),
@@ -213,7 +224,14 @@ export function useRunDetail(
     queryKey: qkWorkflows.run(runId),
     queryFn: () => api.getWorkflowRun(runId),
     enabled: !!runId,
-    refetchInterval: (query) => (query.state.data?.run.status === "settled" ? false : 5000),
+    // A typical run settles in seconds: poll fast while it is young, then
+    // back off for a long run.
+    refetchInterval: (query) => {
+      const run = query.state.data?.run;
+      if (run?.status === "settled") return false;
+      const age = run ? Date.now() - run.createdAt : 0;
+      return age < 30_000 ? 1000 : age < 120_000 ? 2000 : 5000;
+    },
     ...opts,
   });
 }
@@ -237,20 +255,6 @@ export function useTriggerCatalog() {
     queryKey: qkWorkflows.triggerCatalog(),
     queryFn: () => api.getWorkflowTriggerCatalog(),
     staleTime: 5 * 60_000, // plugin catalog changes only on deploy
-  });
-}
-
-/** `owner` scopes the hub Runs tab to one workspace. */
-export function useAllWorkflowRuns(
-  owner?: OwnerFilter,
-  page?: WorkflowRunPage,
-  opts?: Partial<UseQueryOptions<ListAllWorkflowRunsResponse>>,
-) {
-  return useQuery<ListAllWorkflowRunsResponse>({
-    queryKey: qkWorkflows.allRuns(owner, page),
-    queryFn: () => api.listAllWorkflowRuns(owner, page),
-    refetchInterval: 5000, // runs move; same cadence as run detail
-    ...opts,
   });
 }
 
@@ -321,18 +325,29 @@ export function useWorkflowPermissions(
   });
 }
 
-/** Pre-approves every gating action of the workflow: the server derives the
- * set from the stored definition and writes one per-user allow override per
- * action. Refreshes the predictions and the settings overrides list. */
+/** Persist permissions for this workflow only. */
 export function useAllowWorkflowPermissions(id: string) {
   const qc = useQueryClient();
-  return useMutation<AllowWorkflowPermissionsResponse, Error, void>({
-    mutationFn: () => api.allowWorkflowPermissions(id),
+  return useMutation<AllowWorkflowPermissionsResponse, Error, AllowWorkflowPermissionsRequest>({
+    mutationFn: (body) => api.allowWorkflowPermissions(id, body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkWorkflows.permissions(id) });
-      qc.invalidateQueries({ queryKey: qkPolicies.myOverrides() });
     },
   });
+}
+
+export function useRevokeWorkflowPermissions(id: string) {
+  const qc = useQueryClient();
+  return useMutation({ mutationFn: () => api.revokeWorkflowPermissions(id), onSuccess: () => {
+    qc.invalidateQueries({ queryKey: qkWorkflows.permissions(id) });
+  } });
+}
+
+export function useRevokeOwnWorkflowAccounts(id: string) {
+  const qc = useQueryClient();
+  return useMutation({ mutationFn: () => api.revokeOwnWorkflowAccounts(id), onSuccess: () => {
+    qc.invalidateQueries({ queryKey: qkWorkflows.permissions(id) });
+  } });
 }
 
 export function useStartRun(id: string) {
@@ -345,6 +360,34 @@ export function useStartRun(id: string) {
   });
 }
 
+export function removeResolvedWorkflowAction(
+  qc: Pick<QueryClient, "setQueryData" | "invalidateQueries">,
+  runId: string,
+  nodeId: string,
+  iteration: number | undefined,
+  gateId?: string,
+) {
+  qc.setQueryData<ListWorkflowActionRequiredResponse>(qkWorkflows.actionRequired(), (current) => {
+    if (current === undefined) return current;
+    const items = current.items.filter(
+      (item) => item.runId !== runId || item.gate.nodeId !== nodeId || (item.gate.iteration ?? 0) !== (iteration ?? 0) || item.gate.gateId !== gateId,
+    );
+    return { items, count: items.length };
+  });
+  qc.invalidateQueries({
+    queryKey: qkWorkflows.actionRequired(),
+    refetchType: "none",
+  });
+  qc.invalidateQueries({ queryKey: qkWorkflows.run(runId) });
+  qc.invalidateQueries({ queryKey: qkWorkflows.allRuns() });
+}
+
+export function invalidateWorkflowApprovalState(qc: Pick<QueryClient, "invalidateQueries">, runId: string) {
+  qc.invalidateQueries({ queryKey: qkWorkflows.run(runId) });
+  qc.invalidateQueries({ queryKey: qkWorkflows.actionRequired() });
+  qc.invalidateQueries({ queryKey: qkWorkflows.allRuns() });
+}
+
 export function useResolveApproval(runId: string) {
   const qc = useQueryClient();
   return useMutation<
@@ -353,15 +396,30 @@ export function useResolveApproval(runId: string) {
     { nodeId: string; body: ResolveWorkflowApprovalRequest }
   >({
     mutationFn: ({ nodeId, body }) => api.resolveWorkflowApproval(runId, nodeId, body),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkWorkflows.run(runId) });
+    onSuccess: (_data, variables) => {
+      removeResolvedWorkflowAction(qc, runId, variables.nodeId, variables.body.iteration, variables.body.gateId);
     },
     onError: () => {
       // Invalidate on error too: a 409 "already resolved" means the run has
       // moved on, and the 5-s poll would leave the stale card visible until
       // the next tick. Invalidating here collapses the wait.
-      qc.invalidateQueries({ queryKey: qkWorkflows.run(runId) });
+      invalidateWorkflowApprovalState(qc, runId);
     },
+  });
+}
+
+/** `useResolveApproval` for gates in many runs: the bell's bulk answer
+ * resolves each gate through the same endpoint, with the same cache updates. */
+export function useResolveWorkflowApprovals() {
+  const qc = useQueryClient();
+  return useMutation<
+    { ok: true },
+    Error,
+    { runId: string; nodeId: string; body: ResolveWorkflowApprovalRequest }
+  >({
+    mutationFn: ({ runId, nodeId, body }) => api.resolveWorkflowApproval(runId, nodeId, body),
+    onSuccess: (_data, { runId, nodeId, body }) => removeResolvedWorkflowAction(qc, runId, nodeId, body.iteration, body.gateId),
+    onError: (_error, { runId }) => invalidateWorkflowApprovalState(qc, runId),
   });
 }
 
@@ -375,12 +433,14 @@ export function useResolveApproval(runId: string) {
  */
 export function useRetryRun(runId: string) {
   const qc = useQueryClient();
-  return useMutation<RetryWorkflowRunResponse, Error, void>({
-    mutationFn: () => api.retryWorkflowRun(runId),
+  return useMutation<RetryWorkflowRunResponse, Error, RetryWorkflowRunRequest | void>({
+    mutationFn: (body) => api.retryWorkflowRun(runId, body ?? undefined),
     onSuccess: () => {
       const detail = qc.getQueryData<GetWorkflowRunResponse>(qkWorkflows.run(runId));
       if (detail) {
-        qc.invalidateQueries({ queryKey: qkWorkflows.runs(detail.run.workflowId) });
+        qc.invalidateQueries({
+          queryKey: qkWorkflows.runs(detail.run.workflowId),
+        });
       }
     },
   });
@@ -398,19 +458,13 @@ export function useCancelRun(runId: string) {
 
 // ── Triggers: webhook, schedules, event triggers ─────────────────────────
 
-/** The webhook status read treats "no webhook configured" (404) as `null`
- * rather than an error — absence is the normal starting state. */
+/** The workflow's webhook, or `null` when it has none yet. The server answers
+ * a missing webhook with 200 `{ webhook: null }`, since absence is the normal
+ * starting state; a 404 means the workflow itself is gone. */
 export function useWorkflowWebhook(id: string) {
   return useQuery<WorkflowWebhookResponse | null>({
     queryKey: qkWorkflows.webhook(id),
-    queryFn: async () => {
-      try {
-        return await api.getWorkflowWebhook(id);
-      } catch (err) {
-        if (err instanceof ApiError && err.status === 404) return null;
-        throw err;
-      }
-    },
+    queryFn: async () => (await api.getWorkflowWebhook(id)).webhook,
   });
 }
 
@@ -445,6 +499,26 @@ function useInvalidateTriggers() {
   return () => qc.invalidateQueries({ queryKey: ["workflows", "triggers"] });
 }
 
+/** Turns a workflow on or off: every schedule and event trigger it has.
+ * Turning it on leaves a proposal (a trigger Valet suggested, id
+ * `proposal-…`) off, because a person must still review it. Each trigger
+ * saves on its own, so a failure is reported, and the trigger list is read
+ * again either way to show what actually saved. */
+export function useSetWorkflowEnabled() {
+  const invalidate = useInvalidateTriggers();
+  return useMutation<void, Error, { triggers: WorkflowTriggerItem[]; enabled: boolean }>({
+    mutationFn: async ({ triggers, enabled }) => {
+      const targets = enabled ? triggers.filter((trigger) => trigger.enabled || !trigger.id.startsWith("proposal-")) : triggers;
+      const results = await Promise.allSettled(targets.map((trigger) => trigger.kind === "schedule"
+        ? api.updateWorkflowSchedule(trigger.id, { enabled })
+        : api.updateWorkflowEventTrigger(trigger.id, { enabled })));
+      const failed = results.filter((result) => result.status === "rejected").length;
+      if (failed > 0) throw new Error(`${failed} of ${targets.length} triggers did not save.`);
+    },
+    onSettled: invalidate,
+  });
+}
+
 export function useCreateSchedule() {
   const invalidate = useInvalidateTriggers();
   return useMutation<WorkflowScheduleResponse, Error, CreateWorkflowScheduleRequest>({
@@ -469,6 +543,14 @@ export function useDeleteSchedule() {
   });
 }
 
+/** True for a `qkWorkflows.runs(id)` key of any workflow. */
+export function isWorkflowRunsKey(key: readonly unknown[]): boolean {
+  return key[0] === "workflows" && key[2] === "runs";
+}
+
+/** Fires a schedule now. The mutation knows only the schedule id, so it
+ * refreshes every workflow's runs: a workflow routine's page reads its
+ * Activity, count, and pulse from its workflow's runs. */
 export function useRunScheduleNow() {
   const qc = useQueryClient();
   return useMutation<{ ok: true }, Error, string>({
@@ -476,6 +558,7 @@ export function useRunScheduleNow() {
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["workflows", "triggers"] });
       void qc.invalidateQueries({ queryKey: qkWorkflows.allRuns() });
+      void qc.invalidateQueries({ predicate: (query) => isWorkflowRunsKey(query.queryKey) });
     },
   });
 }

@@ -6,9 +6,8 @@
  * a service this deployment does not have is refused by the server with the
  * validator's own wording.
  *
- * `useNavigate` needs router context — mocked the way `template-gallery.
- * test.tsx` does, since these tests care that navigation was requested, not
- * that a router resolved it. `ApiError` stays real: reading its payload is
+ * `useNavigate` needs router context. It is mocked, since these tests care
+ * that navigation was requested, not that a router resolved it. `ApiError` stays real: reading its payload is
  * exactly what is under test.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";

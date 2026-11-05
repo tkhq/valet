@@ -7,6 +7,10 @@
  *
  * Team assistant rules replace creator scope with live membership checks in
  * `team-slack-gate.ts`. Their stored user filters are removed on match edits.
+ * They alone carry an invocation audience (`readMentionAudience` below): the
+ * owning team's members, or every member of the organization. Ownership and
+ * administration stay with the team either way. `isTeamAssistantRule` decides
+ * which rows those are, for this gate and for the runtime gate alike.
  * The following creator rules apply to personal, org, and workflow targets.
  *
  * 1. **User scope.** The filters must carry a `user` filter equal to the
@@ -16,7 +20,9 @@
  * 2. **Channel scope.** The filters must carry at least one `channel` filter
  *    (`eq` or `in`), unless the request sets the explicit `anyChannel` flag.
  *    `anyChannel` is not persisted: after this gate, a stored mention
- *    subscription with no channel filter IS the any-channel state.
+ *    subscription with no channel filter IS the any-channel state. A
+ *    `channel_name` filter is not a channel scope: a prefix or pattern also
+ *    matches channels created later, so it needs `anyChannel` too.
  *
  * Every writer reaches this through `validateSubscriptionWrite`
  * (`events/subscription-write.ts`), the one gate in front of every
@@ -29,25 +35,10 @@ import type { AppDb } from "../lib/drizzle.js";
 import { identityForUser } from "../channels/identity-links.js";
 import { allCatalogEntries } from "./ingest.js";
 import { eventKeyMatches, type SubscriptionFilter } from "./match.js";
+import { isTeamAssistantRule, type MentionAudience } from "./team-slack-gate.js";
 
-export const SLACK_MENTION_KEY = "slack.app_mention";
-
-/** Whether the eventKeys patterns select `slack.app_mention` — exact key or a
- * trailing wildcard ("slack.*"), so the raw API cannot widen around the gate. */
-export function selectsSlackMention(eventKeys: string[]): boolean {
-  return eventKeyMatches(SLACK_MENTION_KEY, eventKeys);
-}
-
-/** True when the filter constrains the channel to a non-empty fixed set.
- * `prefix`, `contains` and `regex` do not count: "starts with C" is the whole
- * Slack workspace. An empty `in` list does not count either — it matches
- * nothing,
- * which is not a channel selection. */
-function isChannelScopeFilter(f: SubscriptionFilter): boolean {
-  if (f.field !== "channel") return false;
-  if (f.op === "eq") return true;
-  return f.op === "in" && Array.isArray(f.value) && f.value.length > 0;
-}
+import { SLACK_APP_MENTION as SLACK_MENTION_KEY, hasChannelScopeFilter, selectsSlackMention } from "@valet/shared";
+export { SLACK_APP_MENTION as SLACK_MENTION_KEY, selectsSlackMention, storedAnyChannel as storedAnyChannelState } from "@valet/shared";
 
 function isCreatorUserFilter(f: SubscriptionFilter, slackUserId: string): boolean {
   if (f.field !== "user") return false;
@@ -61,16 +52,45 @@ function selectedEntries(plugins: ValetPlugin[], eventKeys: string[]) {
   return allCatalogEntries(plugins).filter((e) => eventKeyMatches(e.key, eventKeys));
 }
 
+export type MentionAudienceResult =
+  | { ok: true; audience: MentionAudience | undefined }
+  | { ok: false; error: string };
+
 /**
- * Whether a STORED mention subscription is in the any-channel state: it
- * selects `slack.app_mention` and carries no channel-scope filter. The
- * `anyChannel` request flag is deliberately not persisted, so this derivation
- * is the stored state. The PATCH paths feed it back as `storedAnyChannel` so
- * an edit that does not touch channel scope is not refused for lacking a flag
- * the server never stored.
+ * Reads the requested invocation audience. Absent means `team`, so the column
+ * stays null and the row keeps today's behavior. Only a team assistant rule
+ * (`isTeamAssistantRule`, the same predicate the runtime gate uses) may carry
+ * one: on any other target the write would store a choice no gate reads.
+ *
+ * `current` is the stored value on a patch. A value that matches what the row
+ * already means passes as a no-op, whatever the target: a client that reads a
+ * rule and writes the object back must not be refused for echoing a field.
+ * Only a CHANGE to an audience the target cannot carry is refused.
  */
-export function storedAnyChannelState(eventKeys: string[], filters: SubscriptionFilter[]): boolean {
-  return selectsSlackMention(eventKeys) && !filters.some(isChannelScopeFilter);
+export function readMentionAudience(
+  audience: unknown,
+  scope: { ownerType?: string; target: unknown; current?: string | null },
+): MentionAudienceResult {
+  if (audience === undefined || audience === null) return { ok: true, audience: undefined };
+  if (audience !== "team" && audience !== "organization") {
+    return {
+      ok: false,
+      error:
+        'audience must be "team" or "organization". ' +
+        "Choose one of those two values, or remove the audience.",
+    };
+  }
+  if (isTeamAssistantRule(scope.ownerType, scope.target)) return { ok: true, audience };
+  // Null and every other stored value read as `team`, the same way the gate
+  // reads them.
+  const stored: MentionAudience = scope.current === "organization" ? "organization" : "team";
+  if (audience === stored) return { ok: true, audience: scope.current === "organization" ? "organization" : undefined };
+  return {
+    ok: false,
+    error:
+      "Only a mention line for a team assistant has an invocation audience. " +
+      "Point the line at a team assistant, or remove the audience.",
+  };
 }
 
 export type MentionScopeResult =
@@ -119,8 +139,8 @@ export async function enforceMentionScope(
     return {
       ok: false,
       error:
-        `A mention subscription cannot also subscribe ` +
-        `to ${entry.key}. Create a separate subscription for ${entry.key}.`,
+        `A mention line cannot also listen for ${entry.key}. ` +
+        `Add a separate line for ${entry.key}.`,
     };
   }
 
@@ -137,7 +157,7 @@ export async function enforceMentionScope(
     };
   }
 
-  const hasChannelScope = args.filters.some(isChannelScopeFilter);
+  const hasChannelScope = hasChannelScopeFilter(args.filters);
   if (args.anyChannel && hasChannelScope) {
     return {
       ok: false,
@@ -145,10 +165,18 @@ export async function enforceMentionScope(
     };
   }
   if (!args.anyChannel && !hasChannelScope && args.storedAnyChannel !== true) {
+    if (args.filters.some((f) => f.field === "channel_name")) {
+      return {
+        ok: false,
+        error:
+          "A channel name condition also matches channels created later, so it is not a fixed channel list. " +
+          'Choose "Any channel" to keep the name condition, or select channels.',
+      };
+    }
     return {
       ok: false,
       error:
-        "A mention subscription needs at least one channel filter (equals, or is one of). " +
+        "A mention line needs at least one channel filter (equals, or is one of). " +
         'Select channels, or choose "Any channel" to listen in every channel the app can see.',
     };
   }
@@ -164,8 +192,8 @@ export async function enforceMentionScope(
     return {
       ok: false,
       error:
-        "A mention subscription fires only for its creator's own @-mentions, so the creator must link " +
-        "their Slack account in Settings → Connected accounts first.",
+        "A mention line fires only for its creator's own @-mentions, so the creator must link " +
+        "their Slack account in Integrations → Slack first.",
     };
   }
 
@@ -182,7 +210,7 @@ export async function enforceMentionScope(
   return {
     ok: false,
     error:
-      "A mention subscription fires only for the creator's own @-mentions. " +
+      "A mention line fires only for the creator's own @-mentions. " +
       "Remove the user filter, or set it to the creator's linked Slack user.",
   };
 }

@@ -116,6 +116,42 @@ describe("slackTriggerDefs verify", () => {
     expect(verified).toBeNull();
   });
 
+  it("accepts only third-party bot_message events", async () => {
+    const trigger = findTrigger("slack.bot_message");
+    const secrets = { webhookSecret: SECRET, botId: "BVALET", botUserId: "UVALET" };
+    const bot = { type: "message", subtype: "bot_message", bot_id: "BOTHER", app_id: "AOTHER", channel: "C1", text: "ready" };
+    expect(await trigger.verify(signedRequest(envelope(bot, "Ev-bot-ok")), secrets)).not.toBeNull();
+    expect(await trigger.verify(signedRequest(envelope({ ...bot, bot_id: "" }, "Ev-bot-empty")), secrets)).toBeNull();
+    expect(await trigger.verify(signedRequest(envelope({ ...bot, subtype: "file_share" }, "Ev-bot-subtype")), secrets)).toBeNull();
+    expect(await trigger.verify(signedRequest(envelope({ ...bot, bot_id: "BVALET" }, "Ev-bot-own")), secrets)).toBeNull();
+    expect(await trigger.verify(signedRequest(envelope({ ...bot, user: "UVALET" }, "Ev-bot-user")), secrets)).toBeNull();
+    expect(await trigger.verify(signedRequest(envelope(bot, "Ev-bot-legacy")), { webhookSecret: SECRET })).toBeNull();
+  });
+
+  it.each([{ bot_id: "BOTHER" }, { bot_profile: { id: "BOTHER" } }])("normalizes modern bot posts without a subtype: %j", async (identity) => {
+    const trigger = findTrigger("slack.bot_message");
+    const secrets = { webhookSecret: SECRET, botId: "BVALET", botUserId: "UVALET" };
+    const event = { type: "message", channel: "C1", text: "ready", ...identity };
+    const request = signedRequest(envelope(event, "Ev-modern"));
+    const verified = await trigger.verify(request, secrets);
+    expect(verified).not.toBeNull();
+    if (!verified) throw new Error("Expected a verified bot event");
+    expect(trigger.toEvent(verified)).toMatchObject({ key: "slack.bot_message", payload: { bot_id: "BOTHER" } });
+    expect(await findTrigger("slack.message").verify(request, secrets)).toBeNull();
+    expect(await trigger.verify(signedRequest(envelope({ ...event, bot_id: "BVALET" })), secrets)).toBeNull();
+    expect(await trigger.verify(signedRequest(envelope({ ...event, user: "UVALET" })), secrets)).toBeNull();
+    for (const subtype of ["message_changed", "message_deleted", "channel_join"]) {
+      expect(await trigger.verify(signedRequest(envelope({ ...event, subtype })), secrets)).toBeNull();
+    }
+  });
+
+  it("canonicalizes bot_profile.id", async () => {
+    const trigger = findTrigger("slack.bot_message");
+    const event = { type: "message", subtype: "bot_message", bot_profile: { id: "BOTHER", name: "not an identity" } };
+    const verified = await trigger.verify(signedRequest(envelope(event, "Ev-profile")), { webhookSecret: SECRET, botId: "BVALET" });
+    expect(verified?.payload).toMatchObject({ bot_id: "BOTHER" });
+  });
+
   it("drops non-post message subtypes (edits/deletes) but keeps file_share", async () => {
     const trigger = findTrigger("slack.message");
     const edited = { type: "message", subtype: "message_changed", channel: "C1", message: { user: "U1", text: "new" } };
@@ -156,7 +192,7 @@ describe("slackTriggerDefs toEvent", () => {
     expect(normalized.key).toBe("slack.reaction_added");
     expect(normalized.dedupeKey).toBe("Ev-r2");
     expect(normalized.occurredAt).toBe(new Date(1700000005.0002 * 1000).toISOString());
-    expect(normalized.actor).toEqual({ externalId: "U0456" });
+    expect(normalized.actor).toEqual({ externalId: "U0456", bot: false });
     expect(normalized.refs).toMatchObject({ channel: "C0123", user: "U0456", reaction: "tada", item_user: "U0789" });
     expect(normalized.summary).toBe("reaction :tada: added in C0123 by U0456");
     expect(normalized.payload).toEqual(REACTION_EVENT);
@@ -167,7 +203,7 @@ describe("slackTriggerDefs toEvent", () => {
     const event = { type: "app_mention", user: "U1", channel: "C9", text: "<@UBOT> hi", ts: "1700.5" };
     const normalized = trigger.toEvent({ eventType: "app_mention", deliveryId: "Ev-am1", payload: event });
     expect(normalized.key).toBe("slack.app_mention");
-    expect(normalized.actor).toEqual({ externalId: "U1" });
+    expect(normalized.actor).toEqual({ externalId: "U1", bot: false });
     expect(normalized.refs).toMatchObject({ channel: "C9", user: "U1" });
     expect(normalized.summary).toBe("app mentioned in C9 by U1");
   });
@@ -180,6 +216,13 @@ describe("slackTriggerDefs toEvent", () => {
     expect(normalized.occurredAt).toBe(new Date(1700.5 * 1000).toISOString());
     expect(normalized.refs).toMatchObject({ channel: "C9", user: "U1" });
     expect(normalized.summary).toBe("message in C9 by U1");
+  });
+
+  it("carries a message event's channel name into refs", () => {
+    const trigger = findTrigger("slack.message");
+    const event = { type: "message", channel: "C9", channel_name: "alerts-prod", user: "U1", text: "hi", ts: "1700.5" };
+    const normalized = trigger.toEvent({ eventType: "message", deliveryId: "Ev-m2", payload: event });
+    expect(normalized.refs).toMatchObject({ channel: "C9", channel_name: "alerts-prod" });
   });
 
   it("normalizes channel_created with nested channel object refs", () => {
@@ -199,7 +242,7 @@ describe("slackTriggerDefs toEvent", () => {
     const event = { type: "team_join", user: { id: "U-new", team_id: "T1", name: "newbie" } };
     const normalized = trigger.toEvent({ eventType: "team_join", deliveryId: "Ev-t1", payload: event });
     expect(normalized.key).toBe("slack.team_join");
-    expect(normalized.actor).toEqual({ externalId: "U-new" });
+    expect(normalized.actor).toEqual({ externalId: "U-new", bot: false });
     expect(normalized.summary).toBe("U-new joined the workspace");
   });
 
@@ -233,6 +276,7 @@ describe("slackTriggerDefs catalog", () => {
     expect(keys).toEqual(
       [
         "slack.app_mention",
+        "slack.bot_message",
         "slack.message",
         "slack.reaction_added",
         "slack.reaction_removed",
@@ -271,9 +315,31 @@ describe("slackTriggerDefs catalog", () => {
     const entry = findTrigger("slack.message").catalog[0];
     expect(entry.filters.map((f) => `${f.field}:${f.path}`)).toEqual([
       "channel:channel",
+      "channel_name:channel_name",
       "channel_type:channel_type",
+      "thread_ts:thread_ts",
       "user:user",
       "text:text",
+    ]);
+  });
+
+  it.each(["slack.message", "slack.bot_message", "slack.app_mention"])(
+    "lets a %s rule match channels by name with a prefix or regex",
+    (key) => {
+      const entry = slackTriggerDefs.flatMap((t) => t.catalog).find((e) => e.key === key);
+      const filter = entry?.filters.find((f) => f.field === "channel_name");
+      // The host adds the name at the payload root (`event-channel-name.ts`).
+      expect(filter?.path).toBe("channel_name");
+      expect(filter?.description).toMatch(/prefix \(alerts-\) or regex/);
+    },
+  );
+
+  it("lets a slack.channel_created rule filter on the channel name", () => {
+    const entry = findTrigger("slack.channel").catalog.find((e) => e.key === "slack.channel_created");
+    expect(entry?.filters.map((f) => `${f.field}:${f.path}`)).toEqual([
+      "channel:channel.id",
+      "channel_name:channel.name",
+      "creator:channel.creator",
     ]);
   });
 

@@ -1,47 +1,34 @@
 // @vitest-environment jsdom
 /**
  * A workspace-scoped events query that cannot name its owner yet is HELD —
- * `EventFeed` and `SubscriptionsPanel` both do it, because an owner-less
+ * `EventLog` and the All listeners table both do it, because an owner-less
  * REQUEST is the org-wide one. A query that is unscoped on purpose sends no
- * owner either: the feed's "All" state, and the redeliver dialog's org-wide
+ * owner either: the Log's "All" state, and the redeliver dialog's org-wide
  * subscription count. These cases pin that the two do not share a cache
  * entry, because a held query would otherwise show the org's rows under a
  * label reading "This workspace".
  */
 import { describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
-import { renderHook } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { ListEventsResponse, ListEventSubscriptionsResponse } from "@valet/api/wire";
+import type { ListEventSubscriptionsResponse } from "@valet/api/wire";
 
 // Every case here holds its query, so no request should be made. The mock
 // keeps a missed hold from reaching the network instead of failing loudly.
-const listEvents = vi.fn();
+const listEventReceipts = vi.fn().mockResolvedValue({ receipts: [], nextCursor: null, lastReceiptAt: null, retentionDays: 7 });
 const listEventSubscriptions = vi.fn();
 vi.mock("./client", () => ({
   api: {
-    listEvents: () => listEvents(),
+    listEventReceipts: () => listEventReceipts(),
     listEventSubscriptions: () => listEventSubscriptions(),
+    patchEventSubscription: () => Promise.resolve({ subscription: ORG_SUBSCRIPTIONS.subscriptions[0] }),
+    redeliverEvent: () => Promise.resolve({ deliveries: [] }),
   },
 }));
 
-import { qkEvents, useEvents, useEventSubscriptions } from "./events";
-
-/** What a warm org-wide entry holds — the rows a held query must not show. */
-const ORG_FEED: ListEventsResponse = {
-  events: [
-    {
-      id: "ev_1",
-      service: "github",
-      eventKey: "github.push",
-      summary: "a colleague's push",
-      refs: {},
-      actor: null,
-      occurredAt: 1,
-      receivedAt: 1,
-    },
-  ],
-};
+import { qkEvents, useEventReceipts, useEventSubscriptions, usePatchEventSubscription, useRedeliverEvent } from "./events";
+import { qkLineActivity } from "./line-activity";
 
 const ORG_SUBSCRIPTIONS: ListEventSubscriptionsResponse = {
   subscriptions: [
@@ -52,7 +39,7 @@ const ORG_SUBSCRIPTIONS: ListEventSubscriptionsResponse = {
       ownerId: "someone",
       eventKeys: ["github.push"],
       filters: [],
-      target: { kind: "orchestrator" },
+      target: { kind: "assistant" },
       enabled: true,
       createdBy: "someone",
       createdAt: 1,
@@ -72,19 +59,6 @@ function newClient(): QueryClient {
 }
 
 describe("held events queries", () => {
-  it("does not read the All entry while the feed's owner is unresolved", () => {
-    const client = newClient();
-    client.setQueryData(qkEvents.feed(), ORG_FEED);
-
-    const { result } = renderHook(() => useEvents({}, undefined, { enabled: false }), {
-      wrapper: makeWrapper(client),
-    });
-
-    expect(result.current.data).toBeUndefined();
-    expect(result.current.isPending).toBe(true);
-    expect(listEvents).not.toHaveBeenCalled();
-  });
-
   // `redeliver-button.tsx` reads this entry on purpose: redelivery fans out
   // to every matching subscription in the org, so its count is the org's.
   it("does not read the org-wide entry while the list's owner is unresolved", () => {
@@ -109,14 +83,13 @@ describe("qkEvents", () => {
       "team",
       "t_eng",
     ]);
-    expect(qkEvents.feed("github", "github.push", { ownerType: "user", ownerId: "u1" })).toEqual([
-      "events",
-      "feed",
-      "github",
-      "github.push",
-      "user",
-      "u1",
+    expect(qkEvents.log({ ownerType: "user", ownerId: "u1" }, true, "slack", true)).not.toEqual(qkEvents.log({ ownerType: "user", ownerId: "u1" }, true, "slack", false));
+    expect(qkEvents.log({ ownerType: "user", ownerId: "u1" }, true, "slack")).toEqual([
+      "events", "log", "user", "u1", "problems", "slack", false, "",
     ]);
+    // The place filter keys its own pages.
+    expect(qkEvents.log({ ownerType: "user", ownerId: "u1" }, false, undefined, false, "github:acme/api"))
+      .not.toEqual(qkEvents.log({ ownerType: "user", ownerId: "u1" }, false));
   });
 
   // The three subscription mutations invalidate the bare prefix (small-fixes
@@ -127,5 +100,57 @@ describe("qkEvents", () => {
 
     expect(held).not.toEqual(bare);
     expect(held.slice(0, bare.length)).toEqual(bare);
+  });
+});
+
+it("does not request receipts without admin permission or a resolved org", () => {
+  listEventReceipts.mockClear();
+  const wrapper = makeWrapper(newClient());
+  renderHook(() => useEventReceipts("org", {}, false), { wrapper });
+  renderHook(() => useEventReceipts(undefined, {}, true), { wrapper });
+  expect(listEventReceipts).not.toHaveBeenCalled();
+});
+
+describe("a line edit", () => {
+  it("stays pending until the line list is read again", async () => {
+    const client = newClient();
+    let release: (value: ListEventSubscriptionsResponse) => void = () => {};
+    listEventSubscriptions
+      .mockResolvedValueOnce(ORG_SUBSCRIPTIONS)
+      .mockImplementationOnce(() => new Promise<ListEventSubscriptionsResponse>((resolve) => { release = resolve; }));
+    const { result } = renderHook(() => ({ list: useEventSubscriptions(), patch: usePatchEventSubscription() }), {
+      wrapper: makeWrapper(client),
+    });
+    await waitFor(() => expect(result.current.list.isSuccess).toBe(true));
+
+    let saved = false;
+    act(() => { void result.current.patch.mutateAsync({ id: "sub_1", body: { enabled: false } }).then(() => { saved = true; }); });
+    await waitFor(() => expect(listEventSubscriptions).toHaveBeenCalledTimes(2));
+    expect(saved).toBe(false);
+    expect(result.current.patch.isPending).toBe(true);
+
+    await act(async () => { release(ORG_SUBSCRIPTIONS); });
+    await waitFor(() => expect(saved).toBe(true));
+    expect(result.current.patch.isPending).toBe(false);
+  });
+});
+
+describe("a line's Activity refresh", () => {
+  // The line page's Activity and health strip read the line, so an edit and a redeliver must refetch them.
+  it.each([
+    ["an edit", (client: QueryClient) => {
+      const { result } = renderHook(() => usePatchEventSubscription(), { wrapper: makeWrapper(client) });
+      return () => result.current.mutateAsync({ id: "sub_1", body: { enabled: false } });
+    }],
+    ["a redeliver", (client: QueryClient) => {
+      const { result } = renderHook(() => useRedeliverEvent("ev_1"), { wrapper: makeWrapper(client) });
+      return () => result.current.mutateAsync();
+    }],
+  ])("marks the line's Activity stale after %s", async (_name, start) => {
+    const client = newClient();
+    client.setQueryData(qkLineActivity.line("sub_1"), { pages: [], pageParams: [] });
+    const run = start(client);
+    await act(async () => { await run(); });
+    expect(client.getQueryState(qkLineActivity.line("sub_1"))?.isInvalidated).toBe(true);
   });
 });

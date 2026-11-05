@@ -1,3 +1,4 @@
+import type { OnlineStatusWatcher } from "../services/online-status-watch.js";
 import type {
   ActionPlugin,
   BlobStore,
@@ -8,10 +9,11 @@ import type {
   SessionStore,
   ValetPlugin,
 } from "@valet/engine";
+import type { ScratchCaps } from "@valet/shared";
 import type { RunHost, WorkflowStore } from "@valet/workflow";
 import type { ImageBuilder } from "../prebuilds/builder.js";
 import type { SourceService } from "../bakes/source-service.js";
-import type { DynamicToolCounts } from "../plugins/dynamic-tool-count.js";
+import type { ServiceProbes } from "../plugins/service-probe.js";
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
 import type { ChildWatcher } from "../orchestrator/children.js";
@@ -19,6 +21,7 @@ import type { HibernationReaper } from "../engine/hibernation-reaper.js";
 import type { WorkflowSandboxReclaimer } from "../workflows/sandbox-reclaim.js";
 import type { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
 import type { IdleHibernationSweep } from "../engine/idle-hibernation-sweep.js";
+import type { WakeWatcher } from "../engine/wake-watcher.js";
 import type { SecurityRunnerDriver } from "../orchestrator/security-runner-driver.js";
 import type { ChannelHost } from "../channels/host.js";
 import type { EventDispatcher } from "../events/dispatcher.js";
@@ -27,6 +30,7 @@ import type { ContentSyncService } from "../services/content-sync/service.js";
 import type { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 import type { AutoTitleHost } from "../sessions/auto-title-host.js";
+import type { McpServerDecl } from "../config/instance-config.js";
 
 /**
  * The full set of capabilities the API needs at runtime. Built once at boot,
@@ -82,6 +86,8 @@ export interface Providers {
   sandboxReconcileSweep: SandboxReconcileSweep;
   /** Hibernates idle active sessions evicted from the host cache; `start()`/`stop()` called from main.ts. */
   idleHibernationSweep: IdleHibernationSweep;
+  /** Owns wakeups and leases (spec 2026-10-08, B5); `start()`/`stop()` called from main.ts. */
+  wakeWatcher: WakeWatcher;
   /** Autonomy nudge sweep — re-drives an idle security runner with work
    * remaining, capped by a stall budget; `start()`/`stop()` called from
    * main.ts (valet-security spec §Autonomy). */
@@ -102,6 +108,9 @@ export interface Providers {
   eventDispatcher: EventDispatcher;
   /** Cron-driven workflow run starts. `start()`/`stop()` from main.ts. */
   workflowScheduler: WorkflowScheduler;
+  /** Polls Slack online status for `slack.user_online` lines
+   * (`services/online-status-watch.ts`). `start()`/`stop()` from main.ts. */
+  onlineStatusWatcher: OnlineStatusWatcher;
   /** Repository content sync (`services/content-sync/service.ts`) —
    * `start()`/`stop()` from main.ts. `routes/skills.ts` calls the same
    * `syncOnce` for its create and "sync now" routes. */
@@ -114,9 +123,22 @@ export interface Providers {
   // Assembled plugin set (plugin-system-v2 plan Task 4) — bundled registry +
   // node_modules scan (or a test override), deduped and service-indexed.
   plugins: ValetPlugin[];
+  /** The instance config's `mcpServers` entries as declared, disabled ones
+   * included. `GET /api/org/mcp-servers` lists them read-only. */
+  configMcpServers: readonly McpServerDecl[];
+  /** The in-app tour version from `org.tutorialVersion` or
+   * `VALET_TUTORIAL_VERSION` (`resolveTutorialVersion`). Absent → 1. */
+  tutorialVersion?: number;
   actionPluginByService: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>;
 
-  /** TTL-cached resolved tool counts for connected dynamic services
-   * (`/api/plugins`'s `toolCount` field — see `plugins/dynamic-tool-count.ts`). */
-  dynamicToolCounts: DynamicToolCounts;
+  /** TTL-cached tool listings for connected dynamic services: the
+   * `toolCount` and probe health fields of `/api/plugins` (see
+   * `plugins/service-probe.ts`). */
+  serviceProbes: ServiceProbes;
+
+  /** Deploy and agent caps for the node-local `/scratch` volume
+   * (`resolveScratchCaps(process.env)` at boot). Threaded into
+   * `ChildrenDeps.scratchCaps` and read directly by the sources route's
+   * saved-default PATCH validation. */
+  scratchCaps: ScratchCaps;
 }

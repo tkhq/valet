@@ -142,6 +142,12 @@ describe("loadSessionMeta: target_dir persistence (spec decision 15)", () => {
     expect(userMeta.ownerTeamId).toBeUndefined();
   });
 
+  it("copies the persisted nested Kubernetes flag into session meta", async () => {
+    await insertSession(db, "s8");
+    const meta = await loadSessionMeta(db, { ...src("s8"), kubernetes: true });
+    expect(meta.kubernetes).toBe(true);
+  });
+
   it("copies persisted sandbox resource overrides into session meta", async () => {
     await insertSession(db, "s8");
 

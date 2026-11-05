@@ -13,6 +13,7 @@
  * (e.g. "channel", "item.channel").
  */
 import type { EventCatalogEntry, NormalizedEvent, TriggerDef, VerifiedEvent } from "@valet/engine";
+import { slackEventSubjects } from "./subjects.js";
 import { verifySlackSignature } from "./transport/verify.js";
 import { SKIP_SUBTYPES } from "./subtypes.js";
 
@@ -26,7 +27,16 @@ function rec(v: unknown): Record<string, unknown> | undefined {
 
 /** "slack.message" for plain message events; "slack.{type}" otherwise. */
 function keyFor(eventType: string): string {
-  return eventType === "message" ? "slack.message" : `slack.${eventType}`;
+  if (eventType === "message") return "slack.message";
+  if (eventType === "bot_message") return "slack.bot_message";
+  return `slack.${eventType}`;
+}
+
+/** Slack can put a bot identity in either field. Do not use display names. */
+export function canonicalBotId(event: Record<string, unknown>): string | undefined {
+  const direct = str(event.bot_id);
+  if (direct) return direct;
+  return str(rec(event.bot_profile)?.id);
 }
 
 /** Slack seconds.decimal ("1773177297.231269") → ISO; wall clock fallback. */
@@ -38,56 +48,49 @@ function tsToIso(ts: string | undefined): string {
   return new Date().toISOString();
 }
 
-function makeVerify(eventTypes: readonly string[]): TriggerDef["verify"] {
+function makeVerify(eventTypes: readonly string[], botMessages = false): TriggerDef["verify"] {
   return async (req, secrets) => {
     const secret = secrets.webhookSecret;
     if (!secret) return null;
-
     const headers: Record<string, string> = {};
     for (const [key, value] of Object.entries(req.headers)) headers[key.toLowerCase()] = value;
     const bodyText = new TextDecoder().decode(req.rawBody);
-    if (!(await verifySlackSignature(headers, bodyText, secret))) return null;
-
+    if (!(await verifySlackSignature(headers, bodyText, secret, secrets.verifiedReceivedAt === undefined ? undefined : Number(secrets.verifiedReceivedAt)))) return null;
     let body: Record<string, unknown> | undefined;
-    try {
-      body = rec(JSON.parse(bodyText));
-    } catch {
-      return null;
-    }
+    try { body = rec(JSON.parse(bodyText)); } catch { return null; }
     if (!body || body.type !== "event_callback") return null;
-
-    const event = rec(body.event);
-    const eventType = str(event?.type);
-    if (!event || eventType === undefined || !eventTypes.includes(eventType)) return null;
-
-    // Suppress the app's own posts (bot_id) for both message and app_mention.
-    // Without this drop, a workflow subscribed to slack.message or
-    // slack.app_mention that also posts to Slack self-triggers into an
-    // unbounded loop: its own channel post re-fires slack.message, and a post
-    // whose text @-mentions the bot re-fires slack.app_mention. A Slack bot
-    // post carries bot_id on both event types, so the one guard closes both
-    // loops.
-    if (eventType === "message" || eventType === "app_mention") {
-      if (str(event.bot_id) !== undefined) return null;
+    const rawEvent = rec(body.event);
+    const rawType = str(rawEvent?.type);
+    if (!rawEvent || rawType === undefined || !eventTypes.includes(rawType)) return null;
+    const subtype = str(rawEvent.subtype);
+    const botId = canonicalBotId(rawEvent);
+    if (botMessages) {
+      // A missing installation identity fails closed. Reconnect Slack to refresh it.
+      if (rawType !== "message" || (subtype !== undefined && subtype !== "bot_message") || !botId || !secrets.botId) return null;
+      if (botId === secrets.botId) return null;
+      if (secrets.botUserId && str(rawEvent.user) === secrets.botUserId) return null;
+    } else {
+      // `slack.message` is human-only. This explicit subtype check keeps classifiers disjoint.
+      if (rawType === "message" && (subtype === "bot_message" || botId)) return null;
+      if (rawType === "app_mention" && botId) return null;
+      if (rawType === "message" && subtype !== undefined && SKIP_SUBTYPES.has(subtype)) return null;
     }
-
-    // Message events also drop the noise subtypes the channel transport drops
-    // (edits, deletes, join/leave/topic system messages). Using the shared
-    // SKIP_SUBTYPES — rather than "everything except file_share" — keeps
-    // fully-populated human events like thread_broadcast and me_message, which
-    // carry a real user/text/channel.
-    if (eventType === "message") {
-      const subtype = str(event.subtype);
-      if (subtype !== undefined && SKIP_SUBTYPES.has(subtype)) return null;
-    }
-
     const deliveryId = str(body.event_id);
     if (!deliveryId) return null;
-
-    return { eventType, deliveryId, payload: event };
+    // Make the canonical identity available to the catalog filter when Slack uses bot_profile.
+    const payload = botMessages && rawEvent.bot_id !== botId ? { ...rawEvent, bot_id: botId } : rawEvent;
+    // The Events API envelope carries `team_id` alongside the inner event,
+    // which some event types (e.g. reaction_added) do not repeat on
+    // themselves. Thread it through so toEvent can fall back to it (spec A3).
+    const envelopeTeamId = str(body.team_id);
+    return {
+      eventType: botMessages ? "bot_message" : rawType,
+      deliveryId,
+      payload,
+      ...(envelopeTeamId ? { context: { teamId: envelopeTeamId } } : {}),
+    };
   };
 }
-
 function toEvent(event: VerifiedEvent): NormalizedEvent {
   const p = rec(event.payload) ?? {};
   const type = event.eventType;
@@ -99,7 +102,9 @@ function toEvent(event: VerifiedEvent): NormalizedEvent {
   const channel =
     str(p.channel) ?? str(channelRec?.id) ?? str(p.channel_id) ?? str(item?.channel);
   if (channel) refs.channel = channel;
-  const channelName = str(channelRec?.name);
+  // Lifecycle events carry `channel.name`. The host adds `channel_name` to a
+  // message event (`event-channel-name.ts`).
+  const channelName = str(channelRec?.name) ?? str(p.channel_name);
   if (channelName) refs.channel_name = channelName;
 
   const userRec = rec(p.user);
@@ -160,14 +165,19 @@ function toEvent(event: VerifiedEvent): NormalizedEvent {
       summary = `slack ${type}${channel ? ` in ${channel}` : ""}${user ? ` by ${user}` : ""}`;
   }
 
+  const { subjects, bot } = slackEventSubjects(type, p, event.context?.teamId);
+  const botId = canonicalBotId(p);
+  const actorId = user ?? botId;
+
   return {
     key: keyFor(type),
     dedupeKey: event.deliveryId,
     occurredAt: tsToIso(str(p.ts) ?? str(p.event_ts)),
-    actor: user ? { externalId: user } : undefined,
+    actor: actorId ? { externalId: actorId, bot } : undefined,
     refs,
     summary,
     payload: event.payload,
+    subjects,
   };
 }
 
@@ -202,6 +212,11 @@ const triggerSpecs: TriggerSpec[] = [
             options: { source: "slack.channels" },
           },
           {
+            field: "channel_name",
+            path: "channel_name",
+            description: "Channel name without #, such as alerts-prod. Use prefix (alerts-) or regex to match every such channel, including new ones. A name condition is not a fixed channel list, so a mention line with one also needs any_channel",
+          },
+          {
             field: "user",
             path: "user",
             description: "Slack user id of the mentioner",
@@ -227,7 +242,13 @@ const triggerSpecs: TriggerSpec[] = [
             description: "Slack channel id (C…/D…)",
             options: { source: "slack.channels" },
           },
+          {
+            field: "channel_name",
+            path: "channel_name",
+            description: "Channel name without #, such as alerts-prod. Use prefix (alerts-) or regex to match every such channel, including new ones. Absent in a direct message",
+          },
           { field: "channel_type", path: "channel_type", description: "Conversation type (channel, group, im, mpim)" },
+          { field: "thread_ts", path: "thread_ts", description: "Parent message timestamp, to match replies in one thread" },
           {
             field: "user",
             path: "user",
@@ -238,6 +259,20 @@ const triggerSpecs: TriggerSpec[] = [
         ],
       },
     ],
+  },
+  {
+    id: "slack.bot_message",
+    eventTypes: ["message"],
+    description: "Third-party Slack bot or app message posted in a conversation the app can see",
+    catalog: [{ key: "slack.bot_message", description: "When a third-party Slack bot or app posts a message", filters: [
+      { field: "channel", path: "channel", description: "Slack channel id", options: { source: "slack.channels" } },
+      { field: "channel_name", path: "channel_name", description: "Channel name without #, such as alerts-prod. Use prefix (alerts-) or regex to match every such channel, including new ones. Absent in a direct message" },
+      { field: "channel_type", path: "channel_type", description: "Conversation type" },
+      { field: "bot_id", path: "bot_id", description: "Slack bot id" },
+      { field: "app_id", path: "app_id", description: "Slack app id" },
+      { field: "user", path: "user", description: "Slack user id when Slack supplies it", options: { source: "slack.users" } },
+      { field: "text", path: "text", description: "Message text" },
+    ] }],
   },
   {
     id: "slack.reaction",
@@ -319,6 +354,7 @@ const triggerSpecs: TriggerSpec[] = [
         description: "When a channel is created",
         filters: [
           { field: "channel", path: "channel.id", description: "New channel id" },
+          { field: "channel_name", path: "channel.name", description: "New channel name, for a prefix such as inc-" },
           { field: "creator", path: "channel.creator", description: "Slack user id of the creator" },
         ],
       },
@@ -372,14 +408,14 @@ export const slackTriggerDefs: TriggerDef[] = triggerSpecs.map((spec) => ({
   id: spec.id,
   service: "slack",
   description: spec.description,
-  verify: makeVerify(spec.eventTypes),
+  verify: makeVerify(spec.eventTypes, spec.id === "slack.bot_message"),
   toEvent,
   catalog: spec.catalog,
 }));
 
 /**
  * Every Slack Events API `event.type` the trigger defs above match. The Slack
- * app manifest (`SLACK_BOT_EVENTS`, packages/api/src/services/slack-app.ts)
+ * app manifest (`SLACK_BOT_EVENTS`, packages/plugin-slack/src/app-manifest.ts)
  * MUST subscribe to each of these, or Slack never delivers the event and the
  * trigger silently never fires. One caveat: the `message` type is delivered
  * as one bot event per channel type (`message.channels`, `message.im`, …), so

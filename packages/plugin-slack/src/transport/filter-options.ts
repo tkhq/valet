@@ -69,6 +69,19 @@ async function resolveChannels(ctx: FilterOptionContext, apiBaseUrl?: string): P
   return channels.map((channel) => ({ id: channel.id, label: `#${channel.name}` }));
 }
 
+/**
+ * Every live channel the bot has joined, with its name and privacy, from the
+ * same cached scan the channel picker reads but with no picker limit. Empty
+ * without a bot token. A Slack failure propagates.
+ */
+export async function joinedChannelDirectory(
+  credential: StoredCredential | null,
+  apiBaseUrl?: string,
+): Promise<Array<{ id: string; name: string; isPrivate: boolean }>> {
+  if (!hasToken(credential)) return [];
+  return directoryTransport(credential, apiBaseUrl).listJoinedChannelDirectory();
+}
+
 /** Source name → resolver, as registered on the Slack plugin manifest. */
 export const slackFilterOptionResolvers: Record<string, FilterOptionResolver> = {
   "slack.users": (ctx) => resolveUsers(ctx),

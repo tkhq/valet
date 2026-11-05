@@ -94,6 +94,10 @@ Rules:
 
 When no node is runnable, the interpreter parks by persisting the run's wake conditions and returning:
 
+A node that parks in a drive is not run again in that drive, and its wait conditions accumulate. The other nodes keep going, so an approval or a session on one branch does not hold a ready step on another branch. The run parks with every accumulated wait once nothing else is runnable. Tradeoff: a parked node is not rechecked for the rest of the drive, so a wait that becomes ready while a long sibling branch runs resumes only after the drive parks, through its wake. Until 2026-10-18 the interpreter parked right after the first wave in which any node parked, even when another node in that wave had unblocked more work; in production a step with 1.5 seconds of work waited 14 to 19 hours behind an unrelated approval.
+
+Because a drive now runs past a parked node, a cancel or a `stop` can arrive before the run saves its waits. Cancel and stop therefore abort every submission and child run in flight: the run's saved waits, the waits parked in the current drive, and what each unfinished node's intent checkpoint records (`effects.sessionId` with `effects.receipt`, or `effects.childRunId`). The checkpoints also cover a host crash in that window. A saved wait whose node has since finished is skipped, and so is a child run that an intent names but that was never created. A foreach item checkpoint counts only while its foreach checkpoint is `intent`: an item that a finished foreach left in `intent` is not live. An intent checkpoint that records its dispatched work (a receipt or a child run id) names that work exactly, so a saved wait on its node is used only when the node records no receipt: the foreach items share one node id, and a saved wait for an item that finished is dropped. A `stop` on a short branch can now end the run while an agent on another branch is still working; a stop ends the run, so the agent is aborted. If an abort of live work fails, the run does not settle: the drive fails after it tries every abort, and a later claim retries the stop. After `maxConsecutiveDriveFailures` failed drives (default 5), `LocalRunHost` settles the run `failed`. Before that settle it aborts, best-effort, the work that the run's intent checkpoints name (`abortPoisonedRun`): a drive keeps going after a node parks, so a later throw in that drive leaves the parked work live with no saved wait. A `stop` that the stop executor ran in an earlier drive ends the run at the start of the next drive, because its terminate signal lived only in that drive's memory. The executor's `StopResult` on the checkpoint marks such a stop. A stop that failed before it ran, such as an unresolved template under `onUnresolvedPath: "fail"`, is an ordinary failed node.
+
 ```typescript
 interface RunParkState {
   runId: string;
@@ -168,8 +172,14 @@ interface RunParams {
   definitionVersionId: string;
   triggerId?: string;
   input?: unknown;            // JSON-serializable trigger/manual input
+  origin?: {
+    assistantSessionId: string;
+    threadId: string;          // scoped to assistantSessionId
+  };
 }
 ```
+
+An assistant action stores an `origin` only when the action runs in the caller's active assistant session. The start service accepts an active origin owned by the caller or run principal. This permits a personal assistant to start an authorized team workflow. Delegated child sessions do not qualify. Workflow-call child runs copy the origin and actor. Retries keep a valid origin and omit an inactive origin. An orchestrator node uses the exact origin session and thread. If that durable thread is missing, the node fails instead of creating a replacement. For a team run with a personal origin, each dispatch checks that the origin owner is still a team member. Scheduled, webhook, event, and HTTP starts omit the origin and report on the run's own thread, `signal:workflow:{runId}`. The run host archives that thread when the run settles.
 
 The port is deliberately this small. Everything correctness-critical (checkpoints, signals, leases, idempotent dispatch) lives in the interpreter + store, where it is testable in-memory and identical across platforms.
 
@@ -268,3 +278,28 @@ claim of a healthy long-lived run too. `WorkflowFenceError` never counts
 clears the count, so transient failures keep the original posture. The
 counter is process-local by design; a run that keeps failing across
 restarts re-earns its strikes in minutes.
+
+**Run origin resolution (2026-09-14).** A run can record the assistant
+conversation that started it: `params.origin` holds the assistant session
+id and the thread id. `promptOrchestrator` resolved that session id with a
+prefix parse, which accepts `assistant:*` only. Assistants migrated from
+`orchestrator_identities` keep an `orchestrator:*` session id, so every
+orchestrator node of a run started from such a thread threw before it
+dispatched. The throw poisoned the drive, and the run failed after the
+strike cap with no node diagnostic; a retry and every child run inherited
+the same origin and failed the same way. The origin now resolves through
+the assistants table (`loadAssistantBySessionId`), which is the authority
+on which session ids belong to an assistant. The org, owner, and archived
+checks are unchanged.
+
+**Origin admission checks (2026-09-14).** An origin was admitted on the
+assistant row alone. Archiving a thread stamps `session_threads.archived_at`
+in the app mirror and leaves the engine thread in place, so a run started
+from an archived thread delivered its report into a conversation the person
+had put away. A retry re-passes the failed run's stored origin unchanged, so
+a run whose origin thread no longer exists failed again at its first
+orchestrator node. Admission now also drops an origin whose mirror row is
+archived, and one whose thread the engine store no longer holds. A dropped
+origin is not an error: the run reports on its own thread. Delivery keeps
+its own check for a thread that disappears after admission, and that error
+names the corrective action.

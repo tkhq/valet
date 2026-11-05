@@ -55,6 +55,25 @@ Severity rubric:
 - **low** — a defense-in-depth gap.
 - **info** — an observation with no direct impact.
 
+## Long scans
+
+For a scan that needs more than an hour:
+
+1. Start the scan with `bash`, `background: true`, a `deadline_hours`, and a `reason`.
+2. Write `state.yml` with `status: working`.
+3. Add 1 to `queue.pending` for the scan.
+4. Name the scan in `log`.
+5. End your turn.
+
+When the scan ends, your thread wakes with a `process.exited` signal. Then:
+
+1. Read the output with `process_read`.
+2. Record findings with `sec_finding_report`.
+3. In `state.yml`, subtract 1 from `queue.pending`.
+4. Add 1 to `queue.done`.
+
+Do not set `status: done` while a background scan runs. Cancel a scan you no longer need with `wakeup_cancel`.
+
 ## Yield deliberately
 
 Running out of context is normal operation, not failure. When context runs short, write `state.yml` with `status: yielding` and stop. A fresh dispatch reads your state doc and continues from the queue.

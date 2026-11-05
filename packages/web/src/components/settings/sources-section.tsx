@@ -1,8 +1,9 @@
 import { Fragment, useState } from "react";
 import { ArrowDownUp, ChevronDown, ChevronRight, Search, Trash2 } from "lucide-react";
 import type { BakeSummary, SourceSummary } from "~/api/sources";
-import { Badge, Button, Dialog, DialogContent, DialogFooter, Input, Label, SelectMenu, Spinner, Switch } from "~/components/primitives";
+import { Badge, Button, Dialog, DialogContent, DialogFooter, Input, Label, SelectMenu, Spinner, Switch, StatusDot } from "~/components/primitives";
 import { BakeQueuePanel } from "~/components/settings/bake-queue-panel";
+import { SourceChangesPanel } from "~/components/settings/source-changes-panel";
 import { Section } from "~/components/settings/section";
 import { RepoSandboxResourcesForm } from "~/components/settings/repo-sandbox-resources-form";
 import { ApiError } from "~/api/client";
@@ -33,7 +34,9 @@ export function SourcesSection() {
   const sources = sourcesQ.data?.sources ?? [];
   const builderAvailable = sourcesQ.data?.builderAvailable ?? false;
 
-  const baseSource = sources.find((s) => s.kind === "base");
+  // The org's full base, never a repository base layer (`repo-base:*`,
+  // also kind='base'): the list response has no fixed order.
+  const baseSource = sources.find((s) => s.kind === "base" && s.profile === "full");
   const repoSources = sources.filter((s) => s.kind === "repo");
   const query = search.trim().toLowerCase();
   const sortedRepos = repoSources.sort((a, b) => {
@@ -51,11 +54,12 @@ export function SourcesSection() {
 
   return (
     <div className="space-y-10">
+      <SourceChangesPanel />
       <BakeQueuePanel />
       {/* ── Base image ─────────────────────────────────────────────────── */}
       <Section
         title="Base image"
-        description="Commands that install tools every sandbox needs. The base image is built once and shared across sessions."
+        description="Commands that install tools every sandbox needs. The base image is built once and shared across runtimes."
       >
         {sourcesQ.isLoading && (
           <div className="flex items-center gap-2 py-4 text-sm text-muted">
@@ -73,7 +77,7 @@ export function SourcesSection() {
       {/* ── Repository images ───────────────────────────────────────────── */}
       <Section
         title="Repository images"
-        description="Per-repo images pre-built from a repo's dependencies. Sessions boot without a cold install."
+        description="Per-repo images pre-built from a repo's dependencies. Runtimes boot without a cold install."
       >
         {sourcesQ.data && (
           <div className="space-y-3">
@@ -105,7 +109,7 @@ export function SourcesSection() {
             )}
             {repoSources.length === 0 ? (
               <p className="py-4 text-sm text-muted">
-                Repository images appear automatically when a session binds a repo.
+                Repository images appear automatically when a runtime binds a repo.
               </p>
             ) : (
               <>
@@ -159,6 +163,10 @@ export function SourcesSection() {
 
 // ── Base image ────────────────────────────────────────────────────────────────
 
+/** Shown on a source the API marks `builtIn`: code owns it, so the page
+ * offers no edit or delete. */
+const BUILT_IN_NOTE = "Built-in. Managed in code.";
+
 function BaseImageCard({
   source,
   builderAvailable,
@@ -166,9 +174,10 @@ function BaseImageCard({
   source: SourceSummary | undefined;
   builderAvailable: boolean;
 }) {
-  const createSource = useCreateSource();
   const patchSource = usePatchSource();
   const bakeSource = useBakeSource();
+  // Code owns a built-in base; the API refuses edits to it.
+  const builtIn = source?.builtIn === true;
 
   // Textarea: one command per line. API stores string[].
   const [commands, setCommands] = useState<string>(
@@ -181,10 +190,11 @@ function BaseImageCard({
   const bakesQ = useSourceBakes(source?.id ?? "", { enabled: Boolean(source?.id) });
   const latestBake: BakeSummary | undefined = bakesQ.data?.bakes[0];
 
-  const isSaving = createSource.isPending || patchSource.isPending;
+  const isSaving = patchSource.isPending;
   const isBaking = bakeSource.isPending;
 
   function handleSave() {
+    if (!source || builtIn) return;
     setSaveError(null);
     // Split on newlines; filter blank lines.
     const setupCommands = commands
@@ -192,27 +202,15 @@ function BaseImageCard({
       .map((l) => l.trim())
       .filter(Boolean);
 
-    if (source) {
-      patchSource.mutate(
-        { id: source.id, body: { setupCommands } },
-        {
-          onError: (err) => {
-            const msg = extractApiError(err);
-            setSaveError(msg ?? "Failed to save. Check your commands and try again.");
-          },
+    patchSource.mutate(
+      { id: source.id, body: { setupCommands } },
+      {
+        onError: (err) => {
+          const msg = extractApiError(err);
+          setSaveError(msg ?? "Failed to save. Check your commands and try again.");
         },
-      );
-    } else {
-      createSource.mutate(
-        { kind: "base", name: "Base", setupCommands },
-        {
-          onError: (err) => {
-            const msg = extractApiError(err);
-            setSaveError(msg ?? "Failed to save. Check your commands and try again.");
-          },
-        },
-      );
-    }
+      },
+    );
   }
 
   function handleBake() {
@@ -226,6 +224,10 @@ function BaseImageCard({
     });
   }
 
+  if (!source) {
+    return <p className="py-4 text-sm text-muted">No base image yet. The server creates it at startup.</p>;
+  }
+
   return (
     <div className="space-y-4 py-4">
       <div className="space-y-1.5">
@@ -233,6 +235,7 @@ function BaseImageCard({
         <textarea
           id="base-setup-commands"
           value={commands}
+          readOnly={builtIn}
           onChange={(e) => setCommands(e.target.value)}
           rows={6}
           placeholder={
@@ -240,25 +243,27 @@ function BaseImageCard({
           }
           className="w-full rounded-md border border-line bg-paper px-3 py-2 font-mono text-sm text-ink placeholder:text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss"
         />
-        <p className="text-xs text-muted">One command per line. Multi-line commands are not allowed.</p>
+        <p className="text-xs text-muted">
+          {builtIn ? BUILT_IN_NOTE : "One command per line. Multi-line commands are not allowed."}
+        </p>
       </div>
 
       {saveError && <p className="text-sm text-danger-500">{saveError}</p>}
 
       <div className="flex flex-wrap items-center gap-3">
-        <Button type="button" onClick={handleSave} disabled={isSaving}>
-          {isSaving ? "Saving…" : "Save"}
-        </Button>
-        {source && (
-          <Button
-            type="button"
-            variant="secondary"
-            onClick={handleBake}
-            disabled={isBaking || !builderAvailable}
-          >
-            {isBaking ? "Starting…" : "Bake now"}
+        {!builtIn && (
+          <Button type="button" onClick={handleSave} disabled={isSaving}>
+            {isSaving ? "Saving…" : "Save"}
           </Button>
         )}
+        <Button
+          type="button"
+          variant="secondary"
+          onClick={handleBake}
+          disabled={isBaking || !builderAvailable}
+        >
+          {isBaking ? "Starting…" : "Bake now"}
+        </Button>
       </div>
 
       {bakeError && <p className="text-sm text-danger-500">{bakeError}</p>}
@@ -351,7 +356,7 @@ function RepoSourceRow({
               {source.repoFullName ?? source.name}
             </span>
             <Badge variant={status.variant} className="shrink-0 gap-1.5 rounded-full px-2" role="status">
-              <span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden />
+              <StatusDot tone="current" size="sm" />
               {status.label}
             </Badge>
           </div>
@@ -523,22 +528,25 @@ function ExternalSourceRow({ source }: { source: SourceSummary }) {
           )}
         </div>
         <span className="block truncate text-xs text-muted">{source.externalRef}</span>
+        {source.builtIn && <span className="block text-xs text-muted">{BUILT_IN_NOTE}</span>}
       </div>
 
-      <Button
-        type="button"
-        variant="ghost"
-        size="sm"
-        aria-label={`Delete ${source.name}`}
-        onClick={() => setConfirmDelete(true)}
-      >
-        <Trash2 className="h-4 w-4" aria-hidden />
-      </Button>
+      {!source.builtIn && (
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          aria-label={`Delete ${source.name}`}
+          onClick={() => setConfirmDelete(true)}
+        >
+          <Trash2 className="h-4 w-4" aria-hidden />
+        </Button>
+      )}
 
       <Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>
         <DialogContent
           title={`Delete ${source.name}?`}
-          description="Sessions using this image will fall back to the stock sandbox image on their next start."
+          description="Runtimes using this image will fall back to the stock sandbox image on their next start."
         >
           <DialogFooter>
             <Button type="button" variant="secondary" onClick={() => setConfirmDelete(false)}>

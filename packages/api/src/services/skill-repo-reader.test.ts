@@ -176,8 +176,15 @@ describe("GitHubSkillRepoReader", () => {
     // here and the same file's tree entry produce one manifest key.
     expect(await reader.readFile("tkhq/skills", "deploy/SKILL.md", "commit-1")).toEqual({
       text: "# Deploy\n",
+      bytes: Buffer.from("# Deploy\n"),
       blobSha: "blob-1",
     });
+  });
+
+  it("keeps shared missing-inline-body behavior for oversized entries", async () => {
+    fixture = startGithubFixture({ getContents: () => ({ body: { type: "file", encoding: "none", content: "", sha: "big", size: 2_000_000 } }) });
+    const result = await new GitHubSkillRepoReader({ apiUrl: fixture.url }).readFile("tkhq/skills", "big.json", "main");
+    expect(result).toEqual({ text: "", blobSha: "big" });
   });
 
   it("refuses a file response with no blob sha", async () => {
@@ -329,7 +336,7 @@ describe("GitHubSkillRepoReader", () => {
 
       expect(message).toContain("tkhq/tk-brain");
       expect(message).toContain("no GitHub credential");
-      expect(message).toContain("Connected accounts");
+      expect(message).toContain("Integrations → GitHub");
       expect(message).toContain("spelling mistake");
       // The advice this change exists to remove.
       expect(message).not.toContain("make the repository public");
@@ -348,7 +355,7 @@ describe("GitHubSkillRepoReader", () => {
 
       expect(message).toContain("the GitHub account octocat");
       expect(message).toContain("Get access to the repository on GitHub");
-      expect(message).not.toContain("Connected accounts");
+      expect(message).not.toContain("Integrations → GitHub");
     });
 
     it("gives a team reader an action they can take, and names no login", async () => {
@@ -383,7 +390,7 @@ describe("GitHubSkillRepoReader", () => {
 
       expect(message).toContain("cannot read it");
       expect(message).toContain("Connect GitHub again");
-      expect(message).toContain("Connected accounts");
+      expect(message).toContain("Integrations → GitHub");
     });
 
     it("falls back to a nameless account when the login is unknown", async () => {
@@ -410,7 +417,7 @@ describe("GitHubSkillRepoReader", () => {
       );
 
       expect(message).toContain("Install the GitHub App for this organization");
-      expect(message).not.toContain("Connected accounts");
+      expect(message).not.toContain("Integrations → GitHub");
     });
 
     it("tells an org source to widen the App installation", async () => {

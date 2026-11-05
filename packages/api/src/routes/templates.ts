@@ -16,7 +16,7 @@ import {
   listWorkflowTemplateSummaries,
   type TemplateServiceDeps,
 } from "../workflows/templates.js";
-import type { WorkflowOwner } from "../workflows/service.js";
+import { workflowRequestContext } from "../workflows/request-context.js";
 import { isTeamMember } from "../services/teams.js";
 import type { Providers } from "../providers/types.js";
 import type {
@@ -38,10 +38,6 @@ function templateDeps(providers: Providers): TemplateServiceDeps {
     credentials: providers.engineCredentials,
     onePassword: providers.onePassword,
   };
-}
-
-function callerOwner(user: { id: string; orgId: string }): WorkflowOwner {
-  return { userId: user.id, orgId: user.orgId };
 }
 
 /**
@@ -77,7 +73,7 @@ templatesRouter.get("/", async (c) => {
 
 templatesRouter.post("/:id/install", async (c) => {
   const deps = templateDeps(c.var.providers);
-  const owner = callerOwner(c.var.user);
+  const { owner } = workflowRequestContext(c);
 
   // The body is optional — a template with no inputs installs from a POST
   // with no payload, which is what the gallery's one-click path sends.

@@ -19,8 +19,13 @@
  * Under `agent_view` the thread root is the user's own message and carries no
  * `assistant_app_thread` subtype. Nothing here keys off that subtype.
  */
+import { createHash } from "node:crypto";
+import type { TurnProgress } from "@valet/engine";
+import { progressBlocks } from "./progress-blocks.js";
 import {
   ChannelLookupError,
+  ChannelDeliveryRejectedError,
+  ChannelProgressRejectedError,
   ChannelStreamError,
   type ChannelGatePrompt,
   type ChannelGateResolution,
@@ -39,9 +44,14 @@ import {
   type SuggestedPrompt,
   type TransportContext,
   credentialSecret,
+  sniffImageMediaType,
+  reportError,
 } from "@valet/engine";
 import {
   buildContentBlocks,
+  hasTableBlock,
+  needsContentBlocks,
+  SLACK_BUTTON_LABEL_LIMIT,
   SLACK_HEADER_LIMIT,
   SLACK_MAX_BLOCKS,
   SLACK_SECTION_FIELD_LIMIT,
@@ -54,7 +64,12 @@ import { DirectoryCache } from "./directory-cache.js";
 import { fetchThreadTranscript } from "./thread-context.js";
 import { enrichSlackText } from "./text-enrich.js";
 import { escapeMrkdwn, markdownToSlackMrkdwn, neutralizeSlackMentions } from "./format.js";
-import { verifySlackSignatureSync } from "./verify.js";
+import { verifySlackDelivery } from "./verify.js";
+
+const PROGRESS_CREATE_REJECTIONS = new Set([
+  "invalid_blocks", "invalid_arguments", "missing_scope", "not_in_channel", "channel_not_found", "not_authed",
+  "token_revoked", "account_inactive", "rate_limited", "ratelimited", "msg_blocks_too_long", "msg_blocks_too_many", "no_permission",
+]);
 
 const MAX_IMAGE_DOWNLOAD_BYTES = 10 * 1024 * 1024; // 10 MB (images prefer thumbnails anyway)
 const MAX_FILE_DOWNLOAD_BYTES = 25 * 1024 * 1024; // 25 MB (PDFs, documents)
@@ -75,7 +90,7 @@ const PICKER_RESULT_LIMIT = 100;
  * a whole directory at all.
  */
 const memberDirectory = new DirectoryCache<Array<{ id: string; name: string; realName?: string }>>();
-const channelDirectory = new DirectoryCache<Array<{ id: string; name: string }>>();
+const channelDirectory = new DirectoryCache<Array<{ id: string; name: string; isPrivate: boolean }>>();
 
 /** Drop both directory caches. For tests, which reuse one fake Slack server
  * across cases and would otherwise see the previous case's members. */
@@ -97,8 +112,8 @@ function slackDateToken(epochMs: number): string {
 }
 
 /** Matches a `link <code>` DM that starts the identity-link flow. Exported
- * so the plugin's `deliveryDm` copy can be tested against the same parser —
- * the DM tells the user to send exactly what this regex accepts. */
+ * so the plugin's `deliveryDm` copy is tested NOT to read as a command: a
+ * code the bot DMs is entered in Valet, never sent back to the bot. */
 export const LINK_COMMAND_RE = /^\s*link\s+(\S+)\s*$/i;
 
 // ─── Conversation-key codec ─────────────────────────────────────────────────
@@ -134,6 +149,10 @@ export function parseConversationKey(key: string): SlackConversationRef | null {
   const parts = key.slice("slack:".length).split(":");
   if (parts.length !== 3 || parts.some((p) => p === "")) return null;
   return { teamId: parts[0], channelId: parts[1], threadTs: parts[2] };
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
 function str(v: unknown): string | undefined {
@@ -265,6 +284,20 @@ export class SlackTransport implements ChannelTransport {
    * approved, and the edit must not erase it from the thread. */
   private readonly gateRetainedTexts = new Map<string, string>();
   /**
+   * `trigger_id` of a parsed button click → how to answer that click.
+   *
+   * Slack acks an interaction with an empty body, so a refusal ("this
+   * approval expired") needs a second call. The click carries a
+   * `response_url` that accepts one for about 30 minutes without a token;
+   * the channel and the clicker are the fallback address when it does not.
+   * Capped like every other per-turn map, so a busy workspace cannot grow it
+   * without bound.
+   */
+  private readonly gateCallbackAnswers = new Map<
+    string,
+    { responseUrl?: string; channelId: string; userId: string }
+  >();
+  /**
    * conversationKey → `thread_ts` of the most recent inbound turn.
    *
    * Two host calls carry no per-turn handle: `sendTyping(conversationKey)`
@@ -274,6 +307,11 @@ export class SlackTransport implements ChannelTransport {
    * inbound turn is the right thread for both.
    */
   private readonly lastTurn = new Map<string, string>();
+  /**
+   * conversationKey → the person who last mentioned the app in a group DM.
+   * Slack streams into a conversation with more than one person only when the
+   * call names a recipient, so `startStream` reads it from here.
+   */
   /**
    * conversationKeys minted for a fresh DM (`openDirectConversation`), whose
    * threadTs is synthetic and names no real message. A reply on such a key must
@@ -290,6 +328,7 @@ export class SlackTransport implements ChannelTransport {
     private readonly signingSecret?: string,
     private readonly botUserId?: string,
     appToken?: string,
+    private readonly botId?: string,
   ) {
     if (appToken !== undefined) {
       this.poll = (signal) => this.socketModePoll(appToken, signal);
@@ -304,7 +343,7 @@ export class SlackTransport implements ChannelTransport {
    * whose webhook the host registers with a secret it minted.
    *
    * `webhookSecret` is the key the rest of Valet uses for a provider-issued
-   * webhook secret: `routes/slack-webhook.ts` passes it, the Slack
+   * webhook secret: the host reads it for the `events` route, the Slack
    * `TriggerDef`s read it, and `routes/credentials.ts` stores it under that
    * name. `signingSecret` is accepted as well so a credential saved under
    * the older key still verifies.
@@ -317,19 +356,7 @@ export class SlackTransport implements ChannelTransport {
     if (secret === undefined || secret === "") return null;
     const headers: Record<string, string> = {};
     for (const [key, value] of Object.entries(req.headers)) headers[key.toLowerCase()] = value;
-    const bodyText = new TextDecoder().decode(req.rawBody);
-    if (!verifySlackSignatureSync(headers, bodyText, secret)) return null;
-    try {
-      if (bodyText.startsWith("payload=")) {
-        // Interactivity posts form-encoded with a single `payload` JSON param.
-        const payload = new URLSearchParams(bodyText).get("payload");
-        if (payload === null) return null;
-        return [JSON.parse(payload) as unknown];
-      }
-      return [JSON.parse(bodyText) as unknown];
-    } catch {
-      return null;
-    }
+    return verifySlackDelivery(headers, req.rawBody, secret);
   }
 
   parseUpdate(update: RawChannelUpdate): InboundChannelEvent | null {
@@ -360,6 +387,42 @@ export class SlackTransport implements ChannelTransport {
     }
   }
 
+  /**
+   * A person's edit of their own DM message (`message_changed`). The host
+   * records it for the model and starts no reply. An edit that keeps the text
+   * (Slack also sends one when a link preview loads) is not an edit.
+   */
+  private parseEdit(
+    event: Record<string, unknown>,
+    eventId: string,
+    teamId: string,
+    update: RawChannelUpdate,
+  ): InboundChannelEvent | null {
+    if (str(event.channel_type) !== "im") return null;
+    const message = isRecord(event.message) ? event.message : undefined;
+    const previous = isRecord(event.previous_message) ? event.previous_message : undefined;
+    if (!message || message.bot_id !== undefined) return null;
+    const channel = str(event.channel);
+    const user = str(message.user);
+    const ts = str(message.ts);
+    if (!channel || !user || !ts) return null;
+    if (this.botUserId !== undefined && user === this.botUserId) return null;
+    const text = cleanSlackText(str(message.text) ?? "", this.botUserId);
+    const previousText = cleanSlackText(str(previous?.text) ?? "", this.botUserId);
+    if (text === previousText) return null;
+    const threadTs = str(message.thread_ts) ?? ts;
+    return {
+      dispatchId: `slack:${eventId}`,
+      conversationKey: conversationKeyFor(teamId, channel, threadTs),
+      sender: { externalId: user },
+      kind: "edit",
+      text,
+      previousText,
+      threadTs,
+      raw: update,
+    };
+  }
+
   private parseMessage(
     event: Record<string, unknown>,
     eventId: string,
@@ -370,15 +433,23 @@ export class SlackTransport implements ChannelTransport {
     // on the same DM; without this the agent answers itself forever.
     if (event.bot_id !== undefined && event.bot_id !== null) return null;
     const subtype = str(event.subtype);
+    if (subtype === "message_changed") return this.parseEdit(event, eventId, teamId, update);
     if (subtype !== undefined && SKIP_SUBTYPES.has(subtype)) return null;
     if (subtype !== undefined && subtype !== "file_share") return null;
 
-    // The agent surface is the DM. Channel traffic is the event pipeline's.
-    if (str(event.channel_type) !== "im") return null;
+    // The agent surface is the DM, plus a group DM message that mentions the
+    // app or replies in a thread without a mention. The host delivers such a
+    // reply only to a chat the sender's own mention opened in that thread.
+    // Other channel traffic is the event pipeline's.
+    const channelType = str(event.channel_type);
+    const group = channelType === "mpim";
+    const mentioned = group && this.mentionsSelf(event);
+    const ts = str(event.ts) ?? str(event.event_ts);
+    const threadReply = str(event.thread_ts) !== undefined && str(event.thread_ts) !== ts;
+    if (channelType !== "im" && !mentioned && !(group && threadReply)) return null;
 
     const channel = str(event.channel);
     const user = str(event.user);
-    const ts = str(event.ts) ?? str(event.event_ts);
     if (!channel || !user || !ts) return null;
     if (this.botUserId !== undefined && user === this.botUserId) return null;
 
@@ -402,7 +473,9 @@ export class SlackTransport implements ChannelTransport {
 
     // Match the command against the user's own text: a forward riding along
     // (its unfurl text is appended above) must not defeat the $ anchor.
-    const linkCmd = ownText !== "" ? LINK_COMMAND_RE.exec(ownText) : null;
+    // A group reply without a mention is not addressed to the app, so it is
+    // never a link command.
+    const linkCmd = ownText !== "" && (!group || mentioned) ? LINK_COMMAND_RE.exec(ownText) : null;
     if (linkCmd) {
       const inbound: InboundChannelEvent = {
         dispatchId: `slack:${eventId}`,
@@ -426,6 +499,11 @@ export class SlackTransport implements ChannelTransport {
       threadTs,
       raw: update,
     };
+    if (group) {
+      // The envelope marks a conversation shared with another organization.
+      const external = rec(update)?.is_ext_shared_channel === true;
+      inbound.group = { channelId: channel, messageTs: ts, ...(external ? { external } : {}), ...(mentioned ? {} : { followUp: true as const }) };
+    }
     const context = this.contextOf(event);
     if (context) inbound.context = context;
     return inbound;
@@ -473,6 +551,14 @@ export class SlackTransport implements ChannelTransport {
     const teamId = str(rec(u.team)?.id) ?? this.teamId;
     const threadTs = str(container?.thread_ts) ?? messageTs;
     const conversationKey = conversationKeyFor(teamId, channelId, threadTs);
+
+    // Remember how to answer this click before the host decides whether to
+    // refuse it. `answerCallback` receives the trigger id alone.
+    this.remember(this.gateCallbackAnswers, triggerId, {
+      ...(str(u.response_url) !== undefined ? { responseUrl: str(u.response_url) } : {}),
+      channelId,
+      userId,
+    });
 
     return {
       dispatchId: `slack:ia:${triggerId}`,
@@ -567,6 +653,12 @@ export class SlackTransport implements ChannelTransport {
       });
     }
     return media.length > 0 ? media : undefined;
+  }
+
+  /** True when the message text mentions this app. Without the app's user id, nothing does. */
+  private mentionsSelf(event: Record<string, unknown>): boolean {
+    if (this.botUserId === undefined) return false;
+    return (str(event.text) ?? "").includes(`<@${this.botUserId}>`);
   }
 
   private remember<V>(map: Map<string, V>, key: string, value: V): void {
@@ -692,13 +784,17 @@ export class SlackTransport implements ChannelTransport {
 
   // ─── Streaming egress ─────────────────────────────────────────────────
 
-  async startStream(conversationKey: string, ctx: { threadTs: string }): Promise<StreamRef> {
+  async startStream(conversationKey: string, ctx: { threadTs: string; recipient?: { userId: string; teamId: string } }): Promise<StreamRef> {
     const target = this.mustParse(conversationKey);
     try {
-      // No recipient_user_id: Slack requires it only when streaming into a
-      // channel, and this surface is a DM. Add it if `missing_recipient_user_id`
-      // ever comes back.
-      const res = await this.api.startStream({ channel: target.channelId, threadTs: ctx.threadTs });
+      // Slack requires a recipient only outside a DM. A group DM turn names
+      // the person whose mention started it.
+      const recipient = ctx.recipient;
+      const res = await this.api.startStream({
+        channel: target.channelId,
+        threadTs: ctx.threadTs,
+        ...(recipient ? { recipientUserId: recipient.userId, recipientTeamId: recipient.teamId } : {}),
+      });
       return { conversationKey, messageId: res.ts, threadTs: ctx.threadTs };
     } catch (err) {
       asStreamError(err);
@@ -754,6 +850,38 @@ export class SlackTransport implements ChannelTransport {
 
   // ─── Assistant thread controls ────────────────────────────────────────
 
+  async publishProgress(
+    conversationKey: string, progress: TurnProgress,
+    options: { threadTs: string; idempotencyKey: string; messageId?: string; recoverOnly?: boolean },
+  ): Promise<{ messageId: string } | null> {
+    const target = this.mustParse(conversationKey);
+    if (target.threadTs !== options.threadTs) throw new Error("The progress destination does not match the conversation. Check the thread mapping.");
+    const key = createHash("sha256").update(options.idempotencyKey).digest("hex");
+    const rendered = progressBlocks(progress, key);
+    let messageId = options.messageId;
+    if (!messageId && options.recoverOnly) {
+      const identity = this.botUserId || this.botId ? { userId: this.botUserId, botId: this.botId } : await this.api.authTest();
+      const found = await this.api.findProgressMessage(target.channelId, options.threadTs, key, identity);
+      if (!found) return null;
+      return { messageId: found };
+    }
+    if (messageId) {
+      await this.api.updateMessage({ channel: target.channelId, ts: messageId, text: rendered.text, blocks: rendered.blocks, parse: "none", attention: true });
+      return { messageId };
+    }
+    try {
+      const created = await this.api.postMessage({ channel: target.channelId, threadTs: options.threadTs, text: rendered.text, blocks: rendered.blocks, progressDeliveryId: key });
+      return { messageId: created.ts };
+    } catch (error) {
+      // Only documented no-write rejections permit another creation attempt.
+      // Internal, fatal, network, and unknown failures can have side effects.
+      const rejected = error instanceof ChannelDeliveryRejectedError ||
+        (error instanceof SlackApiError && error.providerRejected && PROGRESS_CREATE_REJECTIONS.has(error.detail));
+      if (rejected) throw new ChannelProgressRejectedError("Slack rejected task progress. Check the app's access and block configuration.");
+      throw error;
+    }
+  }
+
   async setStatus(conversationKey: string, threadTs: string, status: string): Promise<void> {
     const target = this.mustParse(conversationKey);
     await this.api.setThreadStatus(target.channelId, threadTs, status);
@@ -789,28 +917,43 @@ export class SlackTransport implements ChannelTransport {
    * chat.postMessage, retried once without a rejected identity override.
    * Provider error responses are safe to retry because Slack rejected them.
    * Network errors and malformed success responses remain single-attempt.
+   *
+   * If Slack rejects a generated table block, `fallbackBlocks` (its Markdown
+   * rendering) is posted instead. Each attempt applies both retries, so the
+   * fallback also follows a retry without the identity, which can be the
+   * first request that reaches block validation.
    */
   private async postMessageAs(
     opts: Parameters<SlackApi["postMessage"]>[0],
+    fallbackBlocks?: Record<string, unknown>[],
   ): Promise<{ ts: string }> {
     try {
       return await this.api.postMessage(opts);
     } catch (err) {
+      if (!(err instanceof SlackApiError) || err.method !== "chat.postMessage") throw err;
+      if (fallbackBlocks && err.detail === "invalid_blocks") {
+        return this.postMessageAs({ ...opts, blocks: fallbackBlocks });
+      }
       const hadOverride = opts.username !== undefined || opts.iconUrl !== undefined;
       if (
         hadOverride &&
-        err instanceof SlackApiError &&
-        err.method === "chat.postMessage" &&
         err.providerRejected &&
         err.status !== undefined &&
         err.status >= 200 &&
         err.status < 300
       ) {
         const { username: _u, iconUrl: _i, ...rest } = opts;
-        return this.api.postMessage(rest);
+        return this.postMessageAs(rest, fallbackBlocks);
       }
       throw err;
     }
+  }
+
+  async sendToChannel(channelId: string, message: OutboundChannelMessage): Promise<SendRef> {
+    if (!/^[CG][A-Z0-9]{2,}$/.test(channelId)) throw new Error("Choose a Slack channel ID starting with C or G.");
+    const key = conversationKeyFor(this.teamId, channelId, `${Math.floor(Date.now() / 1000)}.${String(this.syntheticTsCounter++ % 1_000_000).padStart(6, "0")}`);
+    this.remember(this.syntheticKeys, key, true);
+    return this.send(key, message);
   }
 
   async send(conversationKey: string, message: OutboundChannelMessage): Promise<SendRef> {
@@ -819,20 +962,33 @@ export class SlackTransport implements ChannelTransport {
     const formatted = markdownToSlackMrkdwn(message.markdown);
     let text = formatted;
     let blocks: Record<string, unknown>[] | undefined;
-    if (message.markdown.length > SLACK_TEXT_LIMIT) {
+    let fallbackBlocks: Record<string, unknown>[] | undefined;
+    if (needsContentBlocks(message.markdown)) {
       // One API call with blocks — never several messages (chat.postMessage is
       // limited to 1/sec/channel; see message-chunking.ts).
       blocks = buildContentBlocks(message.markdown, formatted, SLACK_MAX_BLOCKS);
       text = formatted.slice(0, SLACK_TEXT_LIMIT); // notification fallback
+      if (hasTableBlock(blocks)) {
+        fallbackBlocks = buildContentBlocks(message.markdown, formatted, SLACK_MAX_BLOCKS, { nativeTables: false });
+      }
     }
     const res = await this.postMessageAs({
       channel: target.channelId,
       text,
       threadTs,
       blocks,
+      attentionDeliveryId: message.attentionDeliveryId,
+      signal: message.signal,
       ...slackIdentityOverride(message.sender),
-    });
-    return { conversationKey, messageId: res.ts };
+    }, fallbackBlocks);
+    return { conversationKey, channelId: target.channelId, messageId: res.ts };
+  }
+
+  async reconcileAttention(conversationKey: string, deliveryId: string, sendingAt: number, signal?: AbortSignal): Promise<(SendRef & { gateCard?: boolean }) | null> {
+    const target = this.mustParse(conversationKey);
+    const found = await this.api.findAttentionMessage(target.channelId, deliveryId, sendingAt, signal);
+    return found ? { conversationKey: conversationKeyFor(target.teamId, target.channelId, found.ts), channelId: target.channelId,
+      messageId: found.ts, ...(found.gateCard ? { gateCard: true } : {}) } : null;
   }
 
   async sendMedia(conversationKey: string, attachment: OutboundChannelAttachment): Promise<SendRef> {
@@ -892,17 +1048,19 @@ export class SlackTransport implements ChannelTransport {
     for (let i = 0; i < fieldTexts.length; i += SLACK_SECTION_FIELD_LIMIT) {
       blocks.push({ type: "section", fields: fieldTexts.slice(i, i + SLACK_SECTION_FIELD_LIMIT) });
     }
-    blocks.push({
+    // An open question has no buttons, and Slack rejects an actions block
+    // with no elements. The host's body tells the reader where to answer.
+    if (gate.actions.length > 0) blocks.push({
       type: "actions",
       elements: gate.actions.map((action) => ({
         type: "button",
-        text: { type: "plain_text", text: action.label },
+        text: { type: "plain_text", text: truncatePlain(action.label, SLACK_BUTTON_LABEL_LIMIT) },
         action_id: action.id,
         // Slack allows 2,000-char values, so the real gate id rides along
         // instead of being looked up by message reference (Telegram's
-        // 64-byte callback_data cannot carry it). The host uses it as a
-        // fallback when its in-memory ref map misses, but the map's
-        // sessionId is still required to resolve — an api restart still
+        // 64-byte callback_data cannot carry it). The id is advisory: the
+        // host resolves a click through its own recorded prompt reference
+        // and never trusts an id from the payload, so an api restart still
         // loses a pending gate.
         value: `g|${gate.gateId}|${action.id}`,
         ...(action.style !== undefined ? { style: action.style } : {}),
@@ -914,6 +1072,9 @@ export class SlackTransport implements ChannelTransport {
       text,
       threadTs,
       blocks,
+      attentionDeliveryId: gate.attentionDeliveryId,
+      signal: gate.signal,
+      attentionGateCard: true,
       ...slackIdentityOverride(gate.sender),
     });
     // The returned ref must round-trip through the inbound click:
@@ -924,7 +1085,7 @@ export class SlackTransport implements ChannelTransport {
     // thread we posted into, or the message's own ts for a root post.
     const refKey = conversationKeyFor(target.teamId, target.channelId, threadTs ?? res.ts);
     this.remember(this.gateRetainedTexts, `${refKey}#${res.ts}`, gate.fields?.length ? titleMrkdwn : text);
-    return { conversationKey: refKey, messageId: res.ts };
+    return { conversationKey: refKey, channelId: target.channelId, messageId: res.ts };
   }
 
   async updateGatePrompt(ref: GatePromptRef, resolution: ChannelGateResolution): Promise<void> {
@@ -946,6 +1107,8 @@ export class SlackTransport implements ChannelTransport {
     // parse: "none" — chat.update defaults parse to "client" and would
     // re-render link markup.
     await this.api.updateMessage({
+      attention: resolution.attention,
+      signal: resolution.signal,
       channel: target.channelId,
       ts: ref.messageId,
       text,
@@ -953,6 +1116,73 @@ export class SlackTransport implements ChannelTransport {
       parse: "none",
     });
     this.gateRetainedTexts.delete(key);
+  }
+
+  async sendPrivateNotice(channelId: string, userId: string, text: string): Promise<void> {
+    await this.api.postEphemeral({ channel: channelId, user: userId, text });
+  }
+
+  /**
+   * Tell the clicker why their approval click did nothing.
+   *
+   * Slack's interaction ack carries no body, so a refused click is silent
+   * unless a second message says otherwise. Without `text` there is nothing
+   * to say and the ack already stands, so this sends nothing. Every failure
+   * is logged and swallowed: the gate outcome is already decided, and a lost
+   * notice must not fail the callback.
+   */
+  async answerCallback(callbackId: string, text?: string): Promise<void> {
+    if (text === undefined) return;
+    const answer = this.gateCallbackAnswers.get(callbackId);
+    if (!answer) {
+      reportError({ area: "channels", reason: "approval_answer_address", provider: "slack", level: "warn" }, `[slack] no recorded answer address for callback ${callbackId}`);
+      return;
+    }
+    let responseUrl: string | undefined;
+    if (answer.responseUrl !== undefined) {
+      if (this.isSlackResponseUrl(answer.responseUrl)) responseUrl = answer.responseUrl;
+      else reportError({ area: "channels", reason: "approval_answer_refused", provider: "slack", level: "warn" }, `[slack] refused an approval answer to a non-Slack response_url for callback ${callbackId}`);
+    }
+    if (responseUrl !== undefined && (await this.postToResponseUrl(responseUrl, text))) return;
+    try {
+      await this.api.postEphemeral({ channel: answer.channelId, user: answer.userId, text });
+    } catch (err) {
+      reportError({ area: "channels", reason: "approval_answer", provider: "slack" }, "[slack] could not answer an approval click", err);
+    }
+  }
+
+  /**
+   * Only Slack may receive a click answer. `response_url` arrives in the
+   * interaction payload, so a payload that reached this far without Slack's
+   * signature must not be able to point the api at an arbitrary address. The
+   * configured API base is allowed too, for a dev or test Slack.
+   */
+  private isSlackResponseUrl(url: string): boolean {
+    try {
+      const parsed = new URL(url);
+      const host = parsed.hostname;
+      if (host === "slack.com" || host.endsWith(".slack.com")) return parsed.protocol === "https:";
+      return parsed.origin === new URL(this.api.baseUrl).origin;
+    } catch {
+      return false;
+    }
+  }
+
+  /** `true` when Slack accepted the reply. A response_url expires after
+   * about 30 minutes, and an expired one must fall back, not throw. */
+  private async postToResponseUrl(responseUrl: string, text: string): Promise<boolean> {
+    try {
+      const res = await fetch(responseUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ response_type: "ephemeral", replace_original: false, text }),
+      });
+      if (res.ok) return true;
+      reportError({ area: "channels", reason: "approval_answer_rejected", provider: "slack", level: "warn" }, `[slack] response_url rejected an approval answer: http ${res.status}`);
+    } catch (err) {
+      reportError({ area: "channels", reason: "approval_answer_send", provider: "slack" }, "[slack] response_url answer failed", err);
+    }
+    return false;
   }
 
   /**
@@ -976,13 +1206,19 @@ export class SlackTransport implements ChannelTransport {
   /** Prior thread messages as an attributed transcript — see `ChannelTransport`.
    *  `selfUserId` strips the bot's own mention from the seeded trigger line. */
   async fetchThreadContext(channelId: string, threadTs: string): Promise<string | null> {
-    return fetchThreadTranscript(this.api, { channelId, threadTs, selfUserId: this.botUserId });
+    return fetchThreadTranscript(this.api, { channelId, threadTs, selfUserId: this.botUserId, selfBotId: this.botId });
   }
 
   /** The thread's messages strictly between two ts values, minus the bot's own
    *  posts — the follow-router's gap re-hydration. See `ChannelTransport`. */
-  async fetchThreadWindow(channelId: string, threadTs: string, afterTs: string, beforeTs: string): Promise<string | null> {
-    return fetchThreadTranscript(this.api, { channelId, threadTs, selfUserId: this.botUserId, afterTs, beforeTs });
+  async fetchThreadWindow(
+    channelId: string, threadTs: string, afterTs: string, beforeTs: string,
+    opts?: { keepAppPostsExcept?: readonly string[] },
+  ): Promise<string | null> {
+    return fetchThreadTranscript(this.api, {
+      channelId, threadTs, selfUserId: this.botUserId, selfBotId: this.botId, afterTs, beforeTs,
+      ...(opts?.keepAppPostsExcept ? { keepAppPostsExcept: opts.keepAppPostsExcept } : {}),
+    });
   }
 
   /** Normalize an inbound message for an agent — see `ChannelTransport`. Resolves
@@ -1035,12 +1271,9 @@ export class SlackTransport implements ChannelTransport {
       return null;
     }
     if (data === null) return null;
-    // When we served a Slack-generated thumbnail (images), the bytes are a
-    // JPEG/PNG derivative, not the original encoding — report a matching
-    // mimeType so a downstream decoder/vision API isn't handed e.g. image/heic
-    // bytes that are actually JPEG. Full-file downloads keep the real mime.
-    const servedThumb = isImage && ref.thumb !== undefined && url === ref.thumb;
-    const mimeType = servedThumb ? "image/jpeg" : ref.mimeType;
+    // Slack serves thumbnails in the original's format (PNG for a PNG
+    // screenshot), so a declared type is unreliable. The bytes win.
+    const mimeType = (isImage ? sniffImageMediaType(data) : undefined) ?? ref.mimeType;
     return { data, mimeType, name: ref.name };
   }
 
@@ -1158,10 +1391,18 @@ export class SlackTransport implements ChannelTransport {
     return matched.slice(0, PICKER_RESULT_LIMIT);
   }
 
+  /**
+   * Every live channel the bot has joined, with no picker limit, cached for
+   * the directory TTL. Valet names a channel from this list.
+   */
+  async listJoinedChannelDirectory(): Promise<Array<{ id: string; name: string; isPrivate: boolean }>> {
+    return [...await this.allJoinedChannels()];
+  }
+
   /** Every live channel the bot has joined, cached for the directory TTL. */
-  private allJoinedChannels(): Promise<Array<{ id: string; name: string }>> {
+  private allJoinedChannels(): Promise<Array<{ id: string; name: string; isPrivate: boolean }>> {
     return channelDirectory.get(this.api.directoryKey, async () => {
-      const out: Array<{ id: string; name: string }> = [];
+      const out: Array<{ id: string; name: string; isPrivate: boolean }> = [];
       let cursor: string | undefined;
       // A bot in more than 2000 channels is not a workspace this picker can
       // serve well anyway; bound the scan so one runaway install cannot hang it.
@@ -1172,7 +1413,7 @@ export class SlackTransport implements ChannelTransport {
         pages += 1;
         for (const channel of page.channels) {
           if (channel.isArchived) continue;
-          out.push({ id: channel.id, name: channel.name });
+          out.push({ id: channel.id, name: channel.name, isPrivate: channel.isPrivate });
         }
         cursor = page.nextCursor;
         if (pages >= MAX_PAGES) break;
@@ -1225,8 +1466,8 @@ export class SlackTransport implements ChannelTransport {
    * `Date.now()` and the string build is atomic within an event-loop turn.
    * The function performs no `await` between those two points.
    */
-  async openDirectConversation(slackUserId: string): Promise<string> {
-    const channelId = await this.api.openConversation(slackUserId);
+  async openDirectConversation(slackUserId: string, attention = false, signal?: AbortSignal): Promise<string> {
+    const channelId = await this.api.openConversation(slackUserId, attention, signal);
     // Slack ts format is "seconds.microseconds" (6 fractional digits).
     // The seconds come from wall clock; the microseconds come from a local
     // counter so distinct calls always mint distinct keys within a 10^6
@@ -1341,6 +1582,7 @@ export const slackTransportFactory: ChannelTransportFactory = {
       signingSecret,
       botUserId,
       appToken,
+      typeof metadata.botId === "string" ? metadata.botId : undefined,
     );
   },
 };

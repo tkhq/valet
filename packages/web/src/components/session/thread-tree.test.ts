@@ -6,17 +6,19 @@
  * precisely so they're testable without mounting all of that.
  */
 import { describe, expect, it } from "vitest";
-import type { DecisionGate, OrchestratorChildSummary, ThreadSummary } from "@valet/api/wire";
+import type { DecisionGate, ChildWorkSummary, ThreadSummary } from "@valet/api/wire";
+import { defaultThreadId } from "~/lib/thread-default";
 import {
   childStatusDotClassName,
   groupChildrenByThread,
   hasGateOutsideList,
+  sortThreads,
+  splitNeedsYou,
   threadIdsWithPendingGates,
   untitledThreadLabel,
-  visibleThreads,
 } from "./thread-tree";
 
-function child(overrides: Partial<OrchestratorChildSummary> = {}): OrchestratorChildSummary {
+function child(overrides: Partial<ChildWorkSummary> = {}): ChildWorkSummary {
   return {
     sessionId: "child-1",
     title: "fix-auth",
@@ -102,42 +104,8 @@ describe("threadIdsWithPendingGates", () => {
   });
 });
 
-/**
- * A gated thread is exempt from the origin-bucket and search filters:
- * hiding its row would hide the only in-session surface for the gate,
- * which is the gap TKAI-258 closes.
- */
-describe("visibleThreads", () => {
-  const t = (id: string, key: string, title: string): ThreadSummary => ({
-    id,
-    sessionId: "s1",
-    title,
-    createdAt: 1_000,
-    key,
-  });
-  const threads = [
-    t("t-web", "web:1", "Plan the launch"),
-    t("t-auto", "signal:workflow:r1", "Nightly digest"),
-  ];
-
-  it("applies bucket and search filters when no gates are pending", () => {
-    expect(visibleThreads(threads, "chat", "", new Set()).map((x) => x.id)).toEqual(["t-web"]);
-    expect(visibleThreads(threads, "all", "digest", new Set()).map((x) => x.id)).toEqual(["t-auto"]);
-  });
-
-  it("keeps a gated thread the bucket filter would hide", () => {
-    const ids = visibleThreads(threads, "chat", "", new Set(["t-auto"])).map((x) => x.id);
-    expect(ids).toEqual(["t-web", "t-auto"]);
-  });
-
-  it("keeps a gated thread the search query would hide, in original order", () => {
-    const ids = visibleThreads(threads, "all", "digest", new Set(["t-web"])).map((x) => x.id);
-    expect(ids).toEqual(["t-web", "t-auto"]);
-  });
-});
-
 describe("hasGateOutsideList", () => {
-  const t = (id: string): ThreadSummary => ({ id, sessionId: "s1", createdAt: 1_000, key: "web:1" });
+  const t = (id: string): ThreadSummary => ({ id, sessionId: "s1", createdAt: 1_000, lastUserActivityAt: 1_000, key: "web:1" });
 
   it("true when a gate's thread is missing from the active list (archived)", () => {
     expect(hasGateOutsideList([t("a")], new Set(["archived-thread"]))).toBe(true);
@@ -160,24 +128,83 @@ describe("untitledThreadLabel", () => {
     id,
     sessionId: "s1",
     createdAt,
+    lastUserActivityAt: createdAt,
     key: "web:1",
   });
 
-  it("names the newest thread for what it is", () => {
-    expect(untitledThreadLabel(t("a", 1_000), 0)).toBe("New thread");
+  it("names the newest created thread for what it is", () => {
+    expect(untitledThreadLabel(t("a", 1_000), true)).toBe("New thread");
   });
 
   it("uses a deterministic nonblank label while automatic naming is pending", () => {
     const older = t("b", 1_700_000_000_000);
-    const before = untitledThreadLabel(older, 3);
-    // Same thread, two different positions after another thread is created.
-    expect(before).toBe(untitledThreadLabel(older, 7));
-    expect(before.trim()).not.toBe("");
+    expect(untitledThreadLabel(older, false).trim()).not.toBe("");
   });
 
   it("distinguishes two untitled threads created at different times", () => {
     const a = t("a", 1_700_000_000_000);
     const b = t("b", 1_700_086_400_000);
-    expect(untitledThreadLabel(a, 2)).not.toBe(untitledThreadLabel(b, 3));
+    expect(untitledThreadLabel(a, false)).not.toBe(untitledThreadLabel(b, false));
   });
+});
+describe("sortThreads", () => {
+  const thread = (id: string, createdAt: number, lastUserActivityAt: number): ThreadSummary => ({
+    id,
+    sessionId: "s1",
+    createdAt,
+    lastUserActivityAt,
+    key: "web:1",
+  });
+
+  it("moves a user-updated older thread ahead without moving an agent-only thread", () => {
+    const agentThread = thread("agent", 2_000, 2_000);
+    const userThread = thread("user", 1_000, 3_000);
+    expect(sortThreads([agentThread, userThread], "last-user-activity").map((t) => t.id)).toEqual([
+      "user",
+      "agent",
+    ]);
+  });
+
+  it("preserves newest-first creation order when Created is selected", () => {
+    const older = thread("older", 1_000, 5_000);
+    const newer = thread("newer", 2_000, 2_000);
+    expect(sortThreads([older, newer], "created").map((t) => t.id)).toEqual(["newer", "older"]);
+  });
+
+  it("keeps the newest created thread as the implicit selection in either sort order", () => {
+    const olderActive = thread("older", 1_000, 5_000);
+    const newer = thread("newer", 2_000, 2_000);
+    expect(defaultThreadId(sortThreads([olderActive, newer], "last-user-activity"))).toBe("newer");
+    expect(defaultThreadId(sortThreads([olderActive, newer], "created"))).toBe("newer");
+  });
+});
+
+describe("splitNeedsYou", () => {
+  const thread = (id: string, activity: { createdAt: number; lastUserActivityAt: number; lastAgentActivityAt?: number }): ThreadSummary => ({
+    id, sessionId: "s1", key: "web:1", ...activity,
+  });
+
+  it("puts waiting threads first by newest activity and keeps the rest in list order", () => {
+    const listed = [
+      thread("quiet-a", { createdAt: 5, lastUserActivityAt: 5 }),
+      thread("asked-old", { createdAt: 1, lastUserActivityAt: 2, lastAgentActivityAt: 3 }),
+      thread("quiet-b", { createdAt: 4, lastUserActivityAt: 4 }),
+      thread("asked-new", { createdAt: 1, lastUserActivityAt: 2, lastAgentActivityAt: 9 }),
+    ];
+    const split = splitNeedsYou(listed, (t) => t.id.startsWith("asked"));
+    expect(split.needsYou.map((t) => t.id)).toEqual(["asked-new", "asked-old"]);
+    expect(split.rest.map((t) => t.id)).toEqual(["quiet-a", "quiet-b"]);
+  });
+
+  it("returns the list unchanged when nothing waits", () => {
+    const listed = [thread("a", { createdAt: 1, lastUserActivityAt: 1 })];
+    expect(splitNeedsYou(listed, () => false)).toEqual({ needsYou: [], rest: listed });
+  });
+});
+
+it("uses the same implicit thread for tied timestamps in every activity order", () => {
+  const a = { id: "a", sessionId: "s", createdAt: 1000, lastUserActivityAt: 1000 };
+  const b = { ...a, id: "b", lastUserActivityAt: 2000 };
+  expect(defaultThreadId([b, a])).toBe("a");
+  expect(defaultThreadId([a, b])).toBe("a");
 });

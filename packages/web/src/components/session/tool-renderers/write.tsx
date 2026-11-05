@@ -42,7 +42,7 @@ export const writeRenderer: ToolRenderer = {
     return (
       <ToolBody className="px-0 py-0">
         {path && (
-          <div className="px-3 py-1.5 border-b border-[--border]/60 bg-neutral-50 dark:bg-neutral-900/60 text-[11px] flex items-center justify-between gap-2">
+          <div className="px-3 py-1.5 border-b border-line/60 bg-neutral-50 dark:bg-neutral-900/60 text-[11px] flex items-center justify-between gap-2">
             <PathLabel path={path} />
             {error && (
               <span className="text-danger-600 dark:text-danger-500 text-[10px] uppercase tracking-wider">
@@ -139,7 +139,7 @@ export function DiffLine({
           "min-w-0",
           kind === "add" && "text-emerald-900 dark:text-emerald-100",
           kind === "remove" && "text-danger-900 dark:text-danger-100",
-          kind === "context" && "text-[--fg]/85",
+          kind === "context" && "text-ink/85",
         )}
       >
         {line || " "}

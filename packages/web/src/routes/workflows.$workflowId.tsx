@@ -1,18 +1,21 @@
-import type { WorkflowDefinitionSummary } from "@valet/api/wire";
-import { blobUrl } from "~/lib/blob-url";
-import { useMemo, useState } from "react";
 import { createFileRoute, Link, useBlocker, useNavigate } from "@tanstack/react-router";
-import { MoreHorizontal, ShieldAlert } from "lucide-react";
-import { triggerDataSchema, visibleTriggerFields, type WorkflowDefinition } from "@valet/workflow";
+import { WorkspaceClause } from "~/components/workspace-clause";
+import { formatRunDuration, runLabel } from "~/components/workflows/run-detail-helpers";
+import { RunStatusChip } from "~/components/workflows/run-status-chip";
 import type {
   GetWorkflowPermissionsResponse,
-  ListWorkflowRunsResponse,
-  WorkflowNodePermissionWire,
+  ListWorkflowRunsResponse, WorkflowDefinitionSummary, WorkflowNodePermissionWire
 } from "@valet/api/wire";
+import { triggerDataSchema, visibleTriggerFields, type WorkflowDefinition } from "@valet/workflow";
+import { MoreHorizontal } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   downloadWorkflowFile,
   useAllowWorkflowPermissions,
+  useRevokeWorkflowPermissions,
+  useRevokeOwnWorkflowAccounts,
   useCopyWorkflow,
+  useRunDetail,
   useStartRun,
   useUpdateWorkflow,
   useWorkflow,
@@ -22,17 +25,6 @@ import {
   useWorkflowVersions,
   type UpdateWorkflowMutation,
 } from "~/api/workflows";
-import { isWorkflowDefinitionShape } from "~/components/workflows/editor-model";
-import { ChangeOrchestratorDialog } from "~/components/workflows/change-orchestrator-dialog";
-import { useWorkspaceScope } from "~/lib/workspace-scope";
-import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
-import { Editor } from "~/components/workflows/editor/editor";
-import { WorkflowAssistantPanel } from "~/components/workflows/editor/assistant-panel";
-import { TriggersPanel } from "~/components/workflows/triggers-drawer";
-import { WorkflowPreview } from "~/components/workflows/preview";
-import { RiskBadge } from "~/components/workflows/risk-badge";
-import { useWorkflowAssistant } from "~/hooks/use-workflow-assistant";
-import { useWorkflowPatchWatch } from "~/hooks/use-workflow-patch-watch";
 import {
   Button,
   ConfirmDialog,
@@ -43,35 +35,81 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
+  ErrorRow,
+  LoadingRow,
   Spinner,
+  pageClass,
 } from "~/components/primitives";
+import { DeleteWorkflowDialog } from "~/components/workflows/delete-workflow-dialog";
+import { isWorkflowDefinitionShape } from "~/components/workflows/editor-model";
+import { WorkflowAssistantPanel } from "~/components/workflows/editor/assistant-panel";
+import { Editor, type EditorHandle } from "~/components/workflows/editor/editor";
+import { WorkflowPreview } from "~/components/workflows/preview";
+import { RiskBadge } from "~/components/workflows/risk-badge";
+import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
+import { TriggersPanel } from "~/components/workflows/triggers-drawer";
+import type { TriggerKind } from "~/components/workflows/triggers-drawer";
+import { useSendPrompt } from "~/api/queries";
+import { useWorkflowAssistant } from "~/hooks/use-workflow-assistant";
+import { useWorkflowPatchWatch } from "~/hooks/use-workflow-patch-watch";
+import { blobUrl } from "~/lib/blob-url";
+import { cn } from "~/lib/cn";
 import { errorText, validationMessages } from "~/lib/error-text";
 import { relativeTime } from "~/lib/relative-time";
 import { runCountLabel } from "~/lib/run-count";
-import { cn } from "~/lib/cn";
+import { useAdoptWorkspaceScope } from "~/lib/workspace-scope";
+import { prefillComposerDraft } from "~/stores/composer-drafts";
 
 /**
- * `/workflows/$workflowId` — the visual editor page (plan decision 11):
- * canvas + inspector + Save (Task 8-10's `Editor`) plus a Run button and a
- * collapsible runs section. Replaces the old index-page JSON create/edit
- * form as the place definitions are actually edited; `workflows.index.tsx`
- * now only links here.
+ * `/workflows/$workflowId`: the visual editor page (spec Part G step 1). The
+ * page has the canvas, the inspector, Save, Run, and side drawers for runs,
+ * history, and the listeners and routines that start the workflow.
  */
 export const Route = createFileRoute("/workflows/$workflowId")({
   component: WorkflowEditorRoute,
+  // `newTrigger` comes from the new-workflow dialog: the workflow was just
+  // created to run on a schedule or an event, so the editor opens next.
+  // `explainRun` + `explainStep` come from a failed run's "Explain this
+  // failure": the editor's assistant gets the question once.
+  validateSearch: (search: Record<string, unknown>): { newTrigger?: TriggerKind; explainRun?: string; explainStep?: string; explainIteration?: number } => ({
+    newTrigger: search.newTrigger === "schedule" || search.newTrigger === "event" ? search.newTrigger : undefined,
+    explainRun: typeof search.explainRun === "string" && search.explainRun ? search.explainRun : undefined,
+    explainStep: typeof search.explainStep === "string" && search.explainStep ? search.explainStep : undefined,
+    explainIteration: typeof search.explainIteration === "number" && search.explainIteration > 0 ? search.explainIteration : undefined,
+  }),
 });
 
-function WorkflowEditorRoute() {
+export function WorkflowEditorRoute() {
   const { workflowId } = Route.useParams();
-  return <WorkflowEditorPage workflowId={workflowId} />;
+  const { newTrigger, explainRun, explainStep, explainIteration } = Route.useSearch();
+  const explain = explainRun && explainStep ? { runId: explainRun, nodeId: explainStep, iteration: explainIteration } : undefined;
+  return <WorkflowEditorPage workflowId={workflowId} newTrigger={newTrigger} explain={explain} />;
 }
 
-export function WorkflowEditorPage({ workflowId }: { workflowId: string }) {
+/** A failed step the person asked the assistant to explain. */
+export interface ExplainFailureRequest {
+  runId: string;
+  nodeId: string;
+  /** A foreach item, counted from 0. */
+  iteration?: number;
+}
+
+/** What "Explain this failure" asks. The editor conversation's guidance
+ * (`editor-thread-context.ts`) says how to investigate a failed run. */
+export function explainFailurePrompt({ runId, nodeId, iteration }: ExplainFailureRequest): string {
+  const step = iteration !== undefined ? `"${nodeId}" (item ${iteration + 1})` : `"${nodeId}"`;
+  return `Explain why run ${runId} failed at step ${step}. Say what went wrong in plain words, ` +
+    "whether a Valet update or a workflow edit since the run changes the answer, and the smallest fix. " +
+    "Do not change the workflow or start a run until I agree.";
+}
+
+export function WorkflowEditorPage({ workflowId, newTrigger, explain }: { workflowId: string; newTrigger?: TriggerKind; explain?: ExplainFailureRequest }) {
   const { data, isLoading, error } = useWorkflow(workflowId);
+  useAdoptWorkspaceScope(data ? { type: data.ownerType, id: data.ownerId } : undefined);
   const update = useUpdateWorkflow(workflowId);
   const startRun = useStartRun(workflowId);
   const runsQ = useWorkflowRuns(workflowId);
-  const permissionsQ = useWorkflowPermissions(workflowId);
+  const permissionsQ = useWorkflowPermissions(workflowId, { refetchInterval: 3000 });
   const allowPermissions = useAllowWorkflowPermissions(workflowId);
   const navigate = useNavigate();
 
@@ -81,14 +119,10 @@ export function WorkflowEditorPage({ workflowId }: { workflowId: string }) {
   }, [data]);
 
   if (isLoading) {
-    return (
-      <div className="flex-1 flex items-center gap-2 p-6 text-sm text-muted">
-        <Spinner size={14} /> Loading workflow…
-      </div>
-    );
+    return <div className={pageClass}><LoadingRow label="Loading workflow…" /></div>;
   }
   if (error || !data || !definition) {
-    return <div className="flex-1 p-6 text-sm text-danger-500">Failed to load workflow.</div>;
+    return <div className={pageClass}><ErrorRow>Could not load this workflow. Reload the page to try again.</ErrorRow></div>;
   }
 
   return (
@@ -111,11 +145,22 @@ export function WorkflowEditorPage({ workflowId }: { workflowId: string }) {
       startRun={startRun}
       runsQuery={runsQ}
       permissions={permissionsQ.data}
+      permissionsError={permissionsQ.error}
       allowPermissions={allowPermissions}
       navigate={navigate}
+      newTrigger={newTrigger}
+      explain={explain}
     />
   );
 }
+
+/** What Test puts in the assistant's composer. The editor conversation's
+ * own guidance (`editor-thread-context.ts`) says how to carry it out. */
+const TEST_REQUEST = "Test this workflow: state the checks, dry-run it, then ask me before a real run.";
+
+/** Why Test is off while the definition has unsaved edits: the assistant
+ * reads the saved workflow, so it would test something the canvas does not show. */
+const TEST_NEEDS_SAVE = "Save your changes first. Test checks the saved workflow.";
 
 /** Module scope so the blocker's effect does not re-register on each render.
  * `disabled` decides whether the blocker runs at all; when it runs, every
@@ -134,9 +179,17 @@ function WorkflowEditorPane({
   startRun,
   runsQuery,
   permissions,
+  permissionsError,
   allowPermissions,
   navigate,
+  newTrigger,
+  explain,
 }: {
+  /** Open the listeners and routines drawer, and its wizard on this kind
+   * (from the create dialog). */
+  newTrigger?: TriggerKind;
+  /** Ask the assistant to explain this failed step, once. */
+  explain?: ExplainFailureRequest;
   workflowId: string;
   initialName: string;
   initialDefinition: WorkflowDefinition;
@@ -152,25 +205,43 @@ function WorkflowEditorPane({
     error: unknown;
   };
   permissions?: GetWorkflowPermissionsResponse;
+  permissionsError?: unknown;
   allowPermissions: ReturnType<typeof useAllowWorkflowPermissions>;
   navigate: ReturnType<typeof useNavigate>;
 }) {
-  // Right-side drawer: runs list / version history / triggers. Header
+  // Right-side drawer: runs list / version history / listeners and routines. Header
   // buttons toggle it — the old bottom collapsible was invisible under a
   // full-height canvas ("no way to view the list of runs").
-  const [drawer, setDrawer] = useState<"runs" | "history" | "triggers" | null>(null);
+  // copy-lint: allow trigger
+  const [drawer, setDrawer] = useState<"runs" | "history" | "triggers" | null>(newTrigger ? "triggers" : null);
   // The assistant is the editor's right-hand column, not one of the overlay
   // drawers — see `WorkflowAssistantPanel`. It has no open/closed state of
   // its own: describing a change is the primary way to edit a workflow, so
   // the conversation is on screen from the moment the editor is.
-  const scope = useWorkspaceScope();
-  const [changeOrchestrator, setChangeOrchestrator] = useState(false);
+  const revokePermissions = useRevokeWorkflowPermissions(workflowId);
+  const revokeAccounts = useRevokeOwnWorkflowAccounts(workflowId);
   const copy = useCopyWorkflow();
   const mirrored = origin === "repo";
-  const assistant = useWorkflowAssistant(workflowId, initialName, { assistantId: initialDefinition.assistantId, ownerType, ownerId });
+  const assistant = useWorkflowAssistant(workflowId, { ownerType, ownerId });
+  const editorRef = useRef<EditorHandle>(null);
   // The one thing that makes a live edit visible: a completed patch in the
   // panel's conversation refetches the workflow, and `Editor` adopts it.
   useWorkflowPatchWatch(assistant.sessionId, assistant.threadId, workflowId);
+
+  // "Explain this failure" is one click: send the question as soon as the
+  // conversation opens, then drop the request from the URL so a reload does
+  // not ask again. Queued behind a running turn, never in place of it.
+  const sendPrompt = useSendPrompt(assistant.sessionId ?? "");
+  const explainSent = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!explain || !assistant.sessionId || !assistant.threadId) return;
+    const key = `${explain.runId}:${explain.nodeId}:${explain.iteration ?? 0}`;
+    if (explainSent.current === key) return;
+    explainSent.current = key;
+    sendPrompt.mutate({ text: explainFailurePrompt(explain), threadId: assistant.threadId, queueMode: "followup" });
+    editorRef.current?.showAssistant();
+    void navigate({ to: "/workflows/$workflowId", params: { workflowId }, search: {}, replace: true });
+  }, [explain, assistant.sessionId, assistant.threadId, sendPrompt, navigate, workflowId]);
 
   // The rename control (review fix 1): name state lives here, at the page
   // level, rather than in `Editor` — `Editor` only needs to know whether
@@ -183,7 +254,11 @@ function WorkflowEditorPane({
   const [committedName, setCommittedName] = useState(initialName);
   const nameDirty = name !== committedName;
   const [runOpen, setRunOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const [preapproveOpen, setPreapproveOpen] = useState(false);
+  const [reviewedAccountConsent, setReviewedAccountConsent] = useState<GetWorkflowPermissionsResponse["accountConsent"]>();
+  const [reviewedDefinitionToken, setReviewedDefinitionToken] = useState<string | undefined>();
+  const [reviewedActions, setReviewedActions] = useState<WorkflowNodePermissionWire[]>([]);
   // The last pre-approval's leftovers: gating actions an org policy keeps
   // gated, which only an org admin can change. Shown until the next attempt.
   const [blockedActions, setBlockedActions] = useState<{ actionId: string; reason: string }[]>([]);
@@ -197,18 +272,30 @@ function WorkflowEditorPane({
     return map;
   }, [permissions]);
 
+  // The models each step called in the newest settled run, for the step
+  // forms. Run detail carries them per step and iteration.
+  const lastRun = useRunDetail(runsQuery.data?.runs.find((run) => run.status === "settled")?.runId ?? "");
+  const lastRunModels = useMemo(() => {
+    const models = new Map<string, string[]>();
+    for (const cost of lastRun.data?.stepCosts ?? []) {
+      models.set(cost.nodeId, [...new Set([...(models.get(cost.nodeId) ?? []), ...cost.models])].sort());
+    }
+    return models;
+  }, [lastRun.data]);
+
   // The header badge counts ACTIONS, not nodes — pre-approving writes one
   // override per action, and two nodes calling the same action are one
   // approval. First node wins as the display row for an action.
   const gatingActions = useMemo(() => {
     const seen = new Map<string, WorkflowNodePermissionWire>();
     for (const node of permissions?.nodes ?? []) {
-      if (node.mode === "require_approval" && node.actionId !== null && !seen.has(node.actionId)) {
+      if ((node.mode === "require_approval" || (node.agentStep && node.mode === "unknown" && !node.granted)) && node.actionId !== null && !seen.has(node.actionId)) {
         seen.set(node.actionId, node);
       }
     }
     return [...seen.values()];
   }, [permissions]);
+  const pendingAccounts = permissions?.accountConsent?.pending ?? [];
 
   // Unsaved work is only in memory: the rename lives here and the definition
   // draft lives in `Editor`, so any navigation away drops both. `useBlocker`
@@ -254,6 +341,14 @@ function WorkflowEditorPane({
     goToRun(result.runId);
   }
 
+  /** Test stays in the editor: it asks the assistant, which reports the
+   * result in this conversation. Run goes to the run page instead. */
+  function handleTest() {
+    if (!assistant.sessionId || !assistant.threadId) return;
+    prefillComposerDraft(assistant.sessionId, assistant.threadId, TEST_REQUEST);
+    editorRef.current?.showAssistant();
+  }
+
   function setPreapproveDialog(open: boolean) {
     setPreapproveOpen(open);
     // A closed dialog must not reopen showing the previous attempt's error.
@@ -261,13 +356,22 @@ function WorkflowEditorPane({
     // Reopening starts a fresh attempt: drop the previous attempt's blocked
     // notice, or it reads as this attempt's result. Clearing on CLOSE would
     // never show the notice at all — a confirm sets it and then closes.
-    if (open) setBlockedActions([]);
+    if (open) {
+      setBlockedActions([]);
+      setReviewedActions(gatingActions);
+      setReviewedDefinitionToken(permissions?.definitionToken);
+      setReviewedAccountConsent(permissions?.accountConsent ? { ...permissions.accountConsent, services: [...permissions.accountConsent.services] } : undefined);
+    }
   }
 
-  async function handlePreapprove() {
+  async function handlePreapprove(accountsOnly = false) {
+    if (!reviewedDefinitionToken) return;
     let result;
     try {
-      result = await allowPermissions.mutateAsync();
+      result = await allowPermissions.mutateAsync({
+        actionIds: accountsOnly ? [] : reviewedActions.flatMap((action) => action.actionId ? [action.actionId] : []),
+        definitionToken: reviewedDefinitionToken,
+      });
     } catch {
       // `allowPermissions.error` renders the message inside the dialog.
       return;
@@ -280,16 +384,19 @@ function WorkflowEditorPane({
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       <div className="flex shrink-0 flex-col gap-2 border-b border-line px-3 py-3 lg:flex-row lg:items-center lg:justify-between lg:px-6 lg:py-4">
         <div className="flex min-w-0 flex-1 flex-col gap-1 lg:flex-row lg:items-center lg:gap-3">
-          <Link to="/workflows" className="inline-flex min-h-11 shrink-0 items-center text-xs text-muted hover:text-ink sm:min-h-0">
-            ← Workflows
-          </Link>
+          {/* Breadcrumb: Space / Workflows / the name field. */}
+          <span className="flex shrink-0 items-center gap-1.5 text-xs text-muted">
+            <WorkspaceClause size="crumb" />
+            <Link to="/workflows" className="inline-flex min-h-11 items-center hover:text-ink sm:min-h-0">Workflows</Link>
+            <span aria-hidden>/</span>
+          </span>
           <input
             value={name}
             onChange={(e) => setName(e.target.value)}
             aria-label="Workflow name"
             placeholder="Untitled workflow"
             readOnly={mirrored}
-            className="min-h-11 sm:min-h-0 w-full min-w-0 flex-1 rounded border border-transparent bg-transparent px-1 -mx-1 text-lg font-semibold tracking-tight text-ink font-display hover:border-line focus:border-line focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40 read-only:hover:border-transparent"
+            className="min-h-11 sm:min-h-0 w-full min-w-0 flex-1 rounded border border-transparent bg-transparent px-1 -mx-1 text-lg font-semibold tracking-tight text-ink font-display hover:border-line focus:border-line focus:outline-none focus-visible:ring-2 focus-visible:ring-moss/40 read-only:hover:border-transparent"
           />
         </div>
         <div className="flex min-w-0 shrink-0 flex-wrap items-center gap-2">
@@ -303,37 +410,14 @@ function WorkflowEditorPane({
           <Button
             size="sm"
             variant={drawer === "triggers" ? "secondary" : "ghost"}
+            // copy-lint: allow trigger
             onClick={() => setDrawer((d) => (d === "triggers" ? null : "triggers"))}
           >
-            Triggers
+            What starts it
           </Button>
-          {gatingActions.length > 0 && (ownerType === "team" ? (
-            <Link to="/settings/policies" onClick={() => scope.setKey(ownerId)} className="text-xs underline" title="A team admin can change approval rules in Team Policies.">Team Policies · {gatingActions.length} actions need approval (team admin manages rules)</Link>
-          ) : (
-            <button
-              type="button"
-              data-testid="workflow-gate-badge"
-              onClick={() => setPreapproveDialog(true)}
-              title="Some actions pause a run for approval. Pre-approve them to run this workflow unattended."
-              className="inline-flex min-h-11 shrink-0 items-center gap-1 rounded-full sm:min-h-0 bg-warning-wash px-2.5 py-1 text-xs font-medium text-warning-fg hover:opacity-80 focus-visible:ring-2 focus-visible:ring-accent-500/40"
-            >
-              <ShieldAlert className="h-3.5 w-3.5" aria-hidden />
-              {gatingActions.length === 1
-                ? "1 action needs approval"
-                : `${gatingActions.length} actions need approval`}
-            </button>
-          ))}
-          {changeOrchestrator && (
-            <ChangeOrchestratorDialog
-              key={`${workflowId}:${ownerType}:${ownerId}`}
-              definition={initialDefinition}
-              ownerType={ownerType}
-              ownerId={ownerId}
-              save={async (definition) => { await update.mutateAsync({ definition }); }}
-              close={() => setChangeOrchestrator(false)}
-            />
-          )}
-          {mirrored && (
+
+
+      {mirrored && (
             <Button
               size="sm"
               variant="secondary"
@@ -347,6 +431,12 @@ function WorkflowEditorPane({
               {copy.isPending ? "Copying…" : "Copy"}
             </Button>
           )}
+          {/* A disabled Button takes no pointer events, so the wrapper shows the reason. */}
+          <span className="inline-flex" title={definitionDirty ? TEST_NEEDS_SAVE : undefined}>
+            <Button size="sm" variant="secondary" onClick={handleTest} disabled={!assistant.sessionId || !assistant.threadId || definitionDirty}>
+              Test
+            </Button>
+          </span>
           <Button size="sm" onClick={() => void handleRun()} disabled={startRun.isPending}>
             {startRun.isPending ? "Starting…" : "Run"}
           </Button>
@@ -361,7 +451,6 @@ function WorkflowEditorPane({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              {!mirrored && <DropdownMenuItem disabled={unsaved || update.isPending} onSelect={() => setChangeOrchestrator(true)}>Change orchestrator{unsaved ? " (save or cancel edits first)" : ""}</DropdownMenuItem>}
               <DropdownMenuItem onSelect={() => setDrawer((d) => (d === "history" ? null : "history"))}>
                 Version history
               </DropdownMenuItem>
@@ -374,10 +463,59 @@ function WorkflowEditorPane({
               >
                 Download
               </DropdownMenuItem>
+              {/* A mirrored workflow lives in a repository, so the list offers no Delete for it either. */}
+              {!mirrored && (
+                <DropdownMenuItem className="text-danger-500" onSelect={() => setDeleteOpen(true)}>
+                  Delete
+                </DropdownMenuItem>
+              )}
             </DropdownMenuContent>
           </DropdownMenu>
+          <DeleteWorkflowDialog
+            workflow={{ id: workflowId, name: committedName }}
+            open={deleteOpen}
+            onOpenChange={setDeleteOpen}
+            // The workflow is gone, so an unsaved draft has nothing to save into.
+            onDeleted={() => void navigate({ to: "/workflows", ignoreBlocker: true })}
+          />
         </div>
       </div>
+
+      <details className="shrink-0 border-b border-line px-3 py-2 lg:px-6">
+        <summary className="cursor-pointer text-sm text-muted">
+          Permissions · {permissionsError ? "Unable to check" : !permissions ? "Checking…" : `${gatingActions.length} need approval · ${permissions.nodes.filter((node) => node.mode === "deny").length} blocked · ${permissions.nodes.filter((node) => node.mode === "unknown").length} checked at runtime`}
+        </summary>
+        <div className="mt-2 space-y-2 text-xs">
+          {permissionsError ? <p role="alert">Could not check permissions. Refresh before running.</p> : !permissions ? <p>Checking workflow actions…</p> : <>
+            {permissions.nodes.length === 0 && <p>No tool or agent step permissions detected. Nested workflow actions are checked when they run.</p>}
+            <ul className="max-h-48 overflow-auto divide-y divide-line">{permissions.nodes.map((node) => <li key={`${node.nodeId}:${node.actionId ?? node.action}`} className="flex flex-col gap-1 py-2 sm:flex-row sm:justify-between sm:gap-3">
+              <span className="break-all font-mono">{node.actionId ?? `${node.service}.${node.action}`}{node.agentStep && <span className="font-sans text-muted"> · agent step</span>}</span>
+              <span className="shrink-0">{node.mode === "deny" ? "Blocked by policy" : node.mode === "unknown" ? (node.agentStep ? "Risk unknown before a run" : "Checked at runtime") : node.mode === "require_approval" ? "Needs approval" : node.provenance === "workflow_grant" ? "Allowed for this workflow" : "Allowed"}</span>
+            </li>)}</ul>
+            <p>A save allows nothing. Allow these steps once here, or approve the assistant's card. Any step change asks again. Other members approve their own accounts.</p>
+            <p>An agent step uses only the exact actions it lists. The agent chooses when to use them and which values to send.</p>
+            <p>New or dynamic actions may still request permission. Human review steps always wait for a decision.</p>
+            <div className="flex flex-wrap gap-2">
+              {permissions.nodes.length > 0 && <Button size="sm" data-testid="workflow-gate-badge" onClick={() => setPreapproveDialog(true)}>Review permissions</Button>}
+              {ownerType === "team" && <Button size="sm" variant="ghost" disabled={revokeAccounts.isPending} onClick={() => revokeAccounts.mutate()}>Remove my account permission</Button>}
+              <Button size="sm" variant="ghost" disabled={revokePermissions.isPending} onClick={() => revokePermissions.mutate()}>Reset saved permissions</Button>
+            </div>
+            {revokeAccounts.isSuccess && <p role="status">Your saved workflow account permission was removed. Existing run and team permissions still apply.</p>}
+            {revokeAccounts.error && <p role="alert">{revokeAccounts.error.message}</p>}
+            {revokePermissions.error && <p role="alert">{revokePermissions.error.message}</p>}
+          </>}
+        </div>
+      </details>
+
+      {/* The build-time confirmation: until a person allows them, runs stop
+          at these steps. Shown open, not inside the Permissions row. */}
+      {!mirrored && !definitionDirty && (gatingActions.length > 0 || pendingAccounts.length > 0) && (
+        <div role="status" data-testid="approval-needed-banner"
+          className="flex flex-wrap items-center justify-between gap-2 border-b border-line bg-warning-wash px-3 py-2 text-sm text-ink lg:px-6">
+          <span>{approvalNeededText(gatingActions.length, pendingAccounts)} Runs stop at these steps until you allow them.</span>
+          <Button size="sm" onClick={() => setPreapproveDialog(true)}>Review and allow</Button>
+        </div>
+      )}
 
       {mirrored && (
         <div
@@ -423,43 +561,55 @@ function WorkflowEditorPane({
         />
       )}
 
-      <Dialog open={ownerType !== "team" && preapproveOpen} onOpenChange={setPreapproveDialog}>
+      <Dialog open={preapproveOpen} onOpenChange={setPreapproveDialog}>
         <DialogContent
           title="Pre-approve actions"
           description={
-            "Each action below pauses a run until someone approves it. " +
-            "Pre-approving writes an allow override for your user. The override applies to " +
-            "every workflow and session you run, not only this workflow. Remove it any time " +
-            "under Settings → Policy overrides."
+            "Allow these actions for every run of the current steps. A change to the steps asks again. Other workflows and chats keep their permissions. " +
+            (reviewedAccountConsent ? "Also allow tool and agent steps to use your accounts already shared with this team, excluding GitHub. Other members approve their own accounts. " : "") +
+            (reviewedActions.some((action) => action.agentStep) ? "In an agent step, the agent chooses when to use an action and which values to send. " : "") +
+            "Explicit organization, team, and personal policy restrictions still apply. You can reset saved permissions here."
           }
         >
           <ul className="flex flex-col gap-1.5 py-1" data-testid="preapprove-actions">
-            {gatingActions.map((action) => (
+            {reviewedActions.map((action) => (
               <li key={action.actionId} className="flex items-center gap-2 text-sm text-ink">
                 <span className="truncate font-mono text-xs">{action.actionId}</span>
                 {action.riskLevel && <RiskBadge level={action.riskLevel} />}
               </li>
             ))}
           </ul>
+          {reviewedAccountConsent && <section className="space-y-1 py-2">
+            <p className="text-sm font-medium">Accounts shared with {reviewedAccountConsent.teamName}</p>
+            <p className="text-xs text-muted">This workflow may use your shared accounts for these services in tool steps and agent steps.</p>
+            <ul data-testid="preapprove-account-services" className="space-y-1 text-xs">
+              {reviewedAccountConsent.services.map(service => <li key={service} className="font-mono">{service}</li>)}
+            </ul>
+          </section>}
           <DialogFooter>
             <Button type="button" variant="secondary" onClick={() => setPreapproveDialog(false)}>
               Cancel
             </Button>
+            {reviewedAccountConsent && reviewedActions.length > 0 && <Button type="button" variant="secondary" disabled={allowPermissions.isPending || !reviewedDefinitionToken} onClick={() => void handlePreapprove(true)}>
+              Allow my shared accounts
+            </Button>}
             <Button
               type="button"
               data-testid="preapprove-confirm"
-              disabled={allowPermissions.isPending}
+              disabled={allowPermissions.isPending || !reviewedDefinitionToken}
               onClick={() => void handlePreapprove()}
             >
               {allowPermissions.isPending
                 ? "Pre-approving…"
-                : gatingActions.length === 1
+                : reviewedActions.length === 0
+                  ? "Save workflow permissions"
+                : reviewedActions.length === 1
                   ? "Pre-approve 1 action"
-                  : `Pre-approve ${gatingActions.length} actions`}
+                  : `Pre-approve ${reviewedActions.length} actions`}
             </Button>
           </DialogFooter>
           {allowPermissions.error != null && (
-            <p className="text-xs text-danger-500">{allowPermissions.error.message}</p>
+            <p className="text-xs text-danger-500">{errorText(allowPermissions.error)}</p>
           )}
         </DialogContent>
       </Dialog>
@@ -472,11 +622,13 @@ function WorkflowEditorPane({
       <div className="relative flex min-h-0 min-w-0 flex-1">
         <div className="flex min-w-0 flex-1 flex-col">
           <Editor
+            ref={editorRef}
             initialDefinition={initialDefinition}
             onSave={handleSave}
             saving={update.isPending}
             readOnly={mirrored}
             gateByNodeId={gateByNodeId}
+            lastRunModels={lastRunModels}
             assistant={
               <WorkflowAssistantPanel
                 assistant={assistant}
@@ -491,8 +643,8 @@ function WorkflowEditorPane({
         </div>
         {drawer === "runs" && <RunsDrawer runsQuery={runsQuery} onClose={() => setDrawer(null)} />}
         {drawer === "triggers" && (
-          <DrawerShell title="Triggers" onClose={() => setDrawer(null)}>
-            <TriggersPanel workflowId={workflowId} />
+          <DrawerShell title="What starts it" onClose={() => setDrawer(null)}>
+            <TriggersPanel workflowId={workflowId} startNew={newTrigger} />
           </DrawerShell>
         )}
         {drawer === "history" && (
@@ -567,32 +719,25 @@ function RunsDrawer({
         <div className="px-4 py-3 text-xs text-danger-500">Failed to load runs.</div>
       )}
       {!runsQuery.isLoading && runsQuery.error == null && runs.length === 0 && (
-        <div className="px-4 py-3 text-xs text-muted">No runs yet — press Run to start one.</div>
+        <div className="px-4 py-3 text-xs text-muted">No runs yet. Press Run to start one.</div>
       )}
-      <ul className="divide-y divide-line/60">
+      <ul className="divide-y divide-line">
         {runs.map((r) => (
           <li key={r.runId}>
             <Link
               to="/workflows/runs/$runId"
               params={{ runId: r.runId }}
-              className="flex items-center gap-2 px-4 py-2 hover:bg-ink-wash/60 transition-colors"
+              className="flex items-center gap-2 px-4 py-2 hover:bg-ink-wash transition-colors"
             >
-              <span
-                className={cn(
-                  "inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-[10px] font-medium",
-                  r.needsApproval
-                    ? "bg-amber-500/15 text-amber-700 dark:text-amber-300"
-                    : r.outcome === "completed"
-                      ? "bg-moss-wash text-moss"
-                      : r.outcome === "failed"
-                        ? "bg-rose-50 text-danger-500 dark:bg-rose-950/40"
-                        : "bg-neutral-500/10 text-muted",
-                )}
-              >
-                {r.needsApproval ? "needs approval" : (r.outcome ?? r.status)}
+              {/* A fixed column keeps every run's label at the same x. */}
+              <span className="w-[6.75rem] shrink-0">
+                <RunStatusChip status={r.status} outcome={r.outcome} needsApproval={Boolean(r.needsApproval)} />
               </span>
-              <span className="min-w-0 flex-1 truncate font-mono text-xs text-ink">{r.runId}</span>
-              <span className="shrink-0 text-[10px] text-muted">{relativeTime(r.createdAt)}</span>
+              <span className="min-w-0 flex-1 truncate text-xs text-ink" title={r.runId}>{runLabel(r)}</span>
+              {r.status === "settled" && (
+                <span className="shrink-0 text-[11px] tabular-nums text-muted" title="How long the run took">{formatRunDuration(r.createdAt, r.updatedAt)}</span>
+              )}
+              <span className="w-14 shrink-0 text-right text-[11px] text-muted" title={new Date(r.createdAt).toLocaleString()}>{relativeTime(r.createdAt)}</span>
             </Link>
           </li>
         ))}
@@ -619,7 +764,8 @@ export function restoreErrorMessage(err: unknown): string {
   const invalid = validationMessages(err);
   if (!invalid) return errorText(err, "The restore failed. Try again.");
   return (
-    "This version was not restored — it does not pass the current validation rules. " +
+    // copy-lint: allow rule
+    "This version was not restored. It does not pass the current validation rules. " +
     `Correct these in the editor, then save: ${invalid.join("; ")}`
   );
 }
@@ -668,7 +814,7 @@ function HistoryDrawer({
       )}
       {!versionsQ.isLoading && versions.length === 0 && (
         <div className="px-4 py-3 text-xs text-muted">
-          No versions yet — saved before version history existed. The next save creates v1.
+          No versions yet. This workflow was saved before version history existed. The next save creates v1.
         </div>
       )}
       <ul className="divide-y divide-line/60">
@@ -740,4 +886,14 @@ function HistoryDrawer({
       )}
     </DrawerShell>
   );
+}
+
+/** What the approval banner names: the actions, then the viewer's own shared accounts. */
+export function approvalNeededText(actions: number, accounts: readonly string[]): string {
+  const parts = [
+    ...(actions > 0 ? [`${actions} ${actions === 1 ? "action needs" : "actions need"} your approval`] : []),
+    ...(accounts.length > 0 ? [`${actions > 0 ? "your" : "Your"} shared ${accounts.join(", ")} ${accounts.length === 1 ? "account needs" : "accounts need"} your permission`] : []),
+  ];
+  const text = parts.join(", and ");
+  return `${text.charAt(0).toUpperCase()}${text.slice(1)}.`;
 }

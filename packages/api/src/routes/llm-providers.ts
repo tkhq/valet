@@ -23,6 +23,9 @@ import { completeSimple, getEnvApiKey } from "@earendil-works/pi-ai/compat";
 import type { CredentialOwner } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { isOrgAdmin } from "../services/org.js";
+import { checkOutboundUrl, guardedFetch, modelFetchFor, OutboundUrlError, recordOutboundRefusal } from "../lib/outbound-url.js";
+import { auditRequest } from "./_admin-audit.js";
+import { diffFields, displayUrl } from "../services/admin-audit.js";
 import {
   createLlmProvider,
   deleteLlmProvider,
@@ -34,10 +37,10 @@ import {
   updateLlmProvider,
   LlmProviderSingletonError,
   type LlmProviderKind,
-  type UpdateLlmProviderOptions,
-} from "../services/llm-providers.js";
-import { resolveModelSpec } from "../services/model-resolution.js";
+  type UpdateLlmProviderOptions, KNOWN_PROVIDER_KINDS } from "../services/llm-providers.js";
+import { envCredentialFor, resolveModelSpec } from "../services/model-resolution.js";
 import { curatedOpenrouterModels, mergedOpenrouterModels } from "../services/openrouter.js";
+import { curatedBedrockModels, discoverBedrockModels } from "../services/bedrock-discovery.js";
 import type { LlmProviderModel, LlmProviderRow } from "../schema/index.js";
 import type {
   CreateLlmProviderRequest,
@@ -45,6 +48,7 @@ import type {
   ListLlmProvidersResponse,
   LlmProviderSummary,
   OpenrouterRegistryResponse,
+  ProviderModelCatalogResponse,
   PatchLlmProviderRequest,
   PatchLlmProviderResponse,
   ProbeLlmProviderResponse,
@@ -96,14 +100,31 @@ function isLlmProviderModelArray(v: unknown): v is LlmProviderModel[] {
  * declared list) and openrouter (the curated selection from pi-ai's
  * registry — see `services/openrouter.ts`). */
 function kindAcceptsModels(kind: LlmProviderKind): boolean {
-  return kind === "openai_compatible" || kind === "openrouter";
+  return kind === "openai_compatible" || kind === "openrouter" || kind === "amazon-bedrock";
 }
 
-/** `baseUrl` is required for `openai_compatible` and refused for known kinds. */
-function validateBaseUrl(kind: LlmProviderKind, baseUrl: unknown): { error: string } | { value: string | undefined } {
+/** The seeded selection for a curated known kind created without `models`. */
+function defaultModelsFor(kind: LlmProviderKind): LlmProviderModel[] | undefined {
+  if (kind === "openrouter") return curatedOpenrouterModels();
+  if (kind === "amazon-bedrock") return curatedBedrockModels();
+  return undefined;
+}
+
+const MODELS_KINDS_ERROR = "models is only accepted for openai_compatible, openrouter, or amazon-bedrock providers";
+
+/** `baseUrl` is required for `openai_compatible` and refused for known kinds.
+ * A custom base URL must also pass the SSRF guard (`lib/outbound-url.ts`):
+ * no link-local, loopback, private, cluster, or instance-internal target. */
+async function validateBaseUrl(kind: LlmProviderKind, baseUrl: unknown): Promise<{ error: string } | { value: string | undefined }> {
   if (kind === "openai_compatible") {
     if (typeof baseUrl !== "string" || baseUrl.length === 0) {
       return { error: "baseUrl is required for openai_compatible providers" };
+    }
+    const check = await checkOutboundUrl(baseUrl);
+    if (!check.ok) {
+      recordOutboundRefusal("save");
+      console.warn(`[security] refused LLM provider baseUrl ${JSON.stringify(baseUrl)}: ${check.reason}`);
+      return { error: `baseUrl is refused. ${check.reason}` };
     }
     return { value: baseUrl };
   }
@@ -153,6 +174,18 @@ llmProvidersRouter.get("/openrouter/models", async (c) => {
   return c.json(resp);
 });
 
+// Amazon Bedrock: what THIS AWS account can invoke (services/bedrock-discovery.ts),
+// registry-enriched. live:false means the account lookup failed and the list
+// is the bundled registry. Registered before `/:id` like the OpenRouter route.
+llmProvidersRouter.get("/amazon-bedrock/models", async (c) => {
+  const forbidden = await requireOrgAdmin(c);
+  if (forbidden) return forbidden;
+
+  const { models, live } = await discoverBedrockModels();
+  const resp: ProviderModelCatalogResponse = { models, live };
+  return c.json(resp);
+});
+
 // ── GET / — list ──────────────────────────────────────────────────────────
 
 llmProvidersRouter.get("/", async (c) => {
@@ -163,7 +196,10 @@ llmProvidersRouter.get("/", async (c) => {
   const user = c.var.user;
   const rows = await listLlmProviders(db, user.orgId);
   const providers = await Promise.all(rows.map((row) => toSummary(c, row)));
-  const resp: ListLlmProvidersResponse = { providers };
+  const envFallbackKinds = KNOWN_PROVIDER_KINDS.filter(
+    (kind) => !rows.some((row) => row.kind === kind) && envCredentialFor(kind).present,
+  );
+  const resp: ListLlmProvidersResponse = { providers, envFallbackKinds };
   return c.json(resp);
 });
 
@@ -184,12 +220,12 @@ llmProvidersRouter.post("/", async (c) => {
   }
 
   if (!isLlmProviderKind(body.kind)) {
-    return c.json({ error: "kind must be one of anthropic|openai|google|openrouter|openai_compatible" }, 400);
+    return c.json({ error: "kind must be one of anthropic|openai|google|openrouter|amazon-bedrock|openai_compatible" }, 400);
   }
   if (typeof body.name !== "string" || body.name.length === 0) {
     return c.json({ error: "name is required" }, 400);
   }
-  const baseUrlCheck = validateBaseUrl(body.kind, body.baseUrl);
+  const baseUrlCheck = await validateBaseUrl(body.kind, body.baseUrl);
   if ("error" in baseUrlCheck) {
     return c.json({ error: baseUrlCheck.error }, 400);
   }
@@ -197,7 +233,7 @@ llmProvidersRouter.post("/", async (c) => {
     return c.json({ error: "models must be an array of {id, name}" }, 400);
   }
   if (body.models !== undefined && !kindAcceptsModels(body.kind)) {
-    return c.json({ error: "models is only accepted for openai_compatible or openrouter providers" }, 400);
+    return c.json({ error: MODELS_KINDS_ERROR }, 400);
   }
 
   try {
@@ -209,8 +245,16 @@ llmProvidersRouter.post("/", async (c) => {
       // OpenRouter rows seed the curated default selection unless the
       // caller supplied an explicit list (services/openrouter.ts).
       models: kindAcceptsModels(body.kind)
-        ? body.models ?? (body.kind === "openrouter" ? curatedOpenrouterModels() : undefined)
+        ? body.models ?? defaultModelsFor(body.kind)
         : undefined,
+    });
+    await auditRequest(c, {
+      action: "llm_provider.create",
+      targetType: "llm_provider",
+      targetId: row.id,
+      targetName: row.name,
+      changes: { kind: row.kind, baseUrl: row.baseUrl ? displayUrl(row.baseUrl) : null, enabled: row.enabled, modelCount: row.models?.length ?? 0 },
+      alert: "llm_provider_created",
     });
     const resp: CreateLlmProviderResponse = await toSummary(c, row);
     return c.json(resp, 201);
@@ -250,7 +294,7 @@ llmProvidersRouter.patch("/:id", async (c) => {
     patch.name = body.name;
   }
   if (body.baseUrl !== undefined) {
-    const baseUrlCheck = validateBaseUrl(existing.kind, body.baseUrl);
+    const baseUrlCheck = await validateBaseUrl(existing.kind, body.baseUrl);
     if ("error" in baseUrlCheck) {
       return c.json({ error: baseUrlCheck.error }, 400);
     }
@@ -267,13 +311,31 @@ llmProvidersRouter.patch("/:id", async (c) => {
       return c.json({ error: "models must be an array of {id, name}" }, 400);
     }
     if (!kindAcceptsModels(existing.kind)) {
-      return c.json({ error: "models is only accepted for openai_compatible or openrouter providers" }, 400);
+      return c.json({ error: MODELS_KINDS_ERROR }, 400);
     }
     patch.models = body.models;
   }
 
   const updated = await updateLlmProvider(db, user.orgId, id, patch);
   if (!updated) return c.json(PROVIDER_NOT_FOUND, 404);
+  const changes: Record<string, unknown> = diffFields(
+    { name: existing.name, enabled: existing.enabled, baseUrl: existing.baseUrl ? displayUrl(existing.baseUrl) : null },
+    { name: updated.name, enabled: updated.enabled, baseUrl: updated.baseUrl ? displayUrl(updated.baseUrl) : null },
+    ["name", "enabled", "baseUrl"],
+  );
+  if (patch.models !== undefined && JSON.stringify(existing.models) !== JSON.stringify(updated.models)) {
+    changes.models = { from: (existing.models ?? []).map((m) => m.id), to: (updated.models ?? []).map((m) => m.id) };
+  }
+  // Compare the stored values, not the display form: a changed query string is a changed target too.
+  const baseUrlChanged = (existing.baseUrl ?? null) !== (updated.baseUrl ?? null);
+  await auditRequest(c, {
+    action: "llm_provider.update",
+    targetType: "llm_provider",
+    targetId: id,
+    targetName: updated.name,
+    changes,
+    alert: baseUrlChanged ? "llm_provider_base_url_changed" : null,
+  });
   const resp: PatchLlmProviderResponse = await toSummary(c, updated);
   return c.json(resp);
 });
@@ -297,7 +359,10 @@ llmProvidersRouter.put("/:id/key", async (c) => {
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
-  if (typeof body.apiKey !== "string" || body.apiKey.length === 0) {
+  // Whitespace-only is rejected here, not merely trimmed later: a stored
+  // blank would count as "has key" for catalog activation while the resolver
+  // treats it as absent, leaving a selectable row whose turns all fail.
+  if (typeof body.apiKey !== "string" || body.apiKey.trim().length === 0) {
     return c.json({ error: "apiKey is required" }, 400);
   }
 
@@ -307,6 +372,15 @@ llmProvidersRouter.put("/:id/key", async (c) => {
     type: "api_key",
     apiKey: body.apiKey,
     metadata: { last4 },
+  });
+
+  // Only the fact that the key changed, and its last four characters.
+  await auditRequest(c, {
+    action: "llm_provider.key_set",
+    targetType: "llm_provider",
+    targetId: id,
+    targetName: existing.name,
+    changes: { keyLast4: last4 },
   });
 
   const resp: PutLlmProviderKeyResponse = { hasKey: true, keyLast4: last4 };
@@ -326,6 +400,7 @@ llmProvidersRouter.delete("/:id/key", async (c) => {
 
   const owner: CredentialOwner = { type: "org", id: user.orgId };
   await engineCredentials.delete(owner, `llm:${id}`);
+  await auditRequest(c, { action: "llm_provider.key_clear", targetType: "llm_provider", targetId: id, targetName: existing.name });
 
   return c.body(null, 204);
 });
@@ -346,6 +421,13 @@ llmProvidersRouter.delete("/:id", async (c) => {
   const owner: CredentialOwner = { type: "org", id: user.orgId };
   await engineCredentials.delete(owner, `llm:${id}`);
   await deleteLlmProvider(db, user.orgId, id);
+  await auditRequest(c, {
+    action: "llm_provider.delete",
+    targetType: "llm_provider",
+    targetId: id,
+    targetName: existing.name,
+    changes: { kind: existing.kind, baseUrl: existing.baseUrl ? displayUrl(existing.baseUrl) : null },
+  });
 
   return c.body(null, 204);
 });
@@ -390,19 +472,22 @@ llmProvidersRouter.post("/:id/probe", async (c) => {
     return c.json({ error: "provider has no API key" }, 400);
   }
 
-  // `baseUrl` is admin-supplied and treated as trusted (same trust model as
-  // the turn-time resolution path in services/model-resolution.ts). Bearer
-  // stripping on cross-origin redirects is the fetch/undici runtime's
-  // spec-mandated behavior; we do not re-implement it here. Strip a trailing
-  // slash before joining so `https://x/v1` and `https://x/v1/` both probe
-  // `https://x/v1/models`, not `https://x/v1//models`.
+  // `baseUrl` is admin-supplied, so the probe goes through the SSRF guard:
+  // `guardedFetch` checks every hop's shape and DNS answers and strips the
+  // bearer on a cross-origin redirect. Strip a trailing slash before joining
+  // so `https://x.example/v1` and `https://x.example/v1/` both probe
+  // `https://x.example/v1/models`, not `https://x.example/v1//models`.
   const probeBaseUrl = existing.baseUrl.replace(/\/+$/, "");
   let upstream: Response;
   try {
-    upstream = await fetch(`${probeBaseUrl}/models`, {
+    upstream = await guardedFetch(`${probeBaseUrl}/models`, {
       headers: { Authorization: `Bearer ${apiKey}` },
     });
   } catch (err) {
+    if (err instanceof OutboundUrlError) {
+      console.warn(`[security] refused LLM provider probe for ${existing.id}: ${err.reason}`);
+      return c.json({ error: `baseUrl is refused. ${err.reason}` }, 400);
+    }
     const message = err instanceof Error ? err.message : String(err);
     return c.json({ error: redact(message, apiKey) }, 502);
   }
@@ -469,7 +554,7 @@ llmProvidersRouter.post("/:id/test", async (c) => {
       {
         messages: [{ role: "user", content: [{ type: "text", text: "hi" }], timestamp: Date.now() }],
       },
-      { apiKey, maxTokens: 1 },
+      { apiKey, maxTokens: 1, fetch: modelFetchFor(resolved.model) },
     );
     if (result.stopReason === "error" || result.stopReason === "aborted") {
       const resp: TestLlmProviderResponse = {

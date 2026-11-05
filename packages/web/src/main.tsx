@@ -1,11 +1,15 @@
 import "./styles/globals.css";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createRouter } from "@tanstack/react-router";
 import { routeTree } from "./routeTree.gen";
 import { applyStoredPalette, applyStoredTheme } from "./lib/theme";
 import { registerServiceWorker } from "./pwa/register";
+import { api } from "./api/client";
+import { createQueryClient } from "./api/query-client";
+import { loadPublicOrigin } from "./lib/public-origin";
+import { perfMode } from "./lib/perf/flag";
 
 // Apply the persisted appearance choices (Settings → Appearance) before the
 // first React paint. The inline script in `index.html` has normally done
@@ -19,21 +23,22 @@ applyStoredPalette();
 // PWA install support. Production-only; see src/pwa/register.ts.
 registerServiceWorker();
 
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      // Sessions list, etc. — moderate freshness; WS will push live updates.
-      staleTime: 5_000,
-      retry: 1,
-    },
-  },
-});
+// Generated file links name the deployment's public origin. Markdown opens
+// them on this hostname once the origin is known (lib/public-origin.ts).
+void loadPublicOrigin(() => api.getAuthConfig());
+
+const queryClient = createQueryClient();
 
 const router = createRouter({
   routeTree,
   defaultPreload: "intent",
   context: { queryClient },
 });
+
+// Latency measurement, off unless `?perf=1` (lib/perf/flag.ts). The module
+// loads as its own chunk, so the app does not carry it otherwise.
+const perf = perfMode();
+if (perf !== "off") void import("./lib/perf/install").then(({ installPerf }) => installPerf(router, queryClient, perf));
 
 declare module "@tanstack/react-router" {
   interface Register {

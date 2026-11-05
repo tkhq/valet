@@ -54,60 +54,8 @@ if [ "${VALET_DOCKER_USERNS:-0}" = "1" ]; then
   if [ -S "$ROOT_SOCK" ] && su -s /bin/sh dockerd -c 'docker version' >/dev/null 2>&1; then
     exit 0
   fi
-  # ── cgroup v2 bootstrap (the docker:dind entrypoint dance) ────────────
-  # Kubelet mounts /sys/fs/cgroup read-only, so runc cannot create
-  # per-container groups: every `docker run` fails with
-  # "mkdir /sys/fs/cgroup/docker: read-only file system". The pod owns a
-  # private cgroup namespace inside its user namespace, so in-container
-  # root may remount the delegated cgroup2 subtree writable. Then satisfy
-  # the v2 "no internal processes" rule: controllers cannot be delegated
-  # to child groups while the root group has member processes, so move
-  # every process into an /init leaf before writing subtree_control.
-  if [ -f /sys/fs/cgroup/cgroup.controllers ]; then
-    # Bind remount first: it clears the per-mount read-only flag, which is
-    # all kubelet sets (the cgroup2 superblock itself is rw on the host),
-    # and it is the only variant in-userns root may perform — a plain
-    # remount acts on the superblock and fails with EPERM from a user
-    # namespace. `remount,bind` is the documented util-linux spelling for
-    # MS_REMOUNT|MS_BIND (mount(8), "Bind mount operation": the classic
-    # way to change VFS entry flags is `mount -o remount,bind,ro ...`);
-    # verified live on an EKS 1.33 userns pod — /proc/self/mountinfo
-    # flips ro -> rw. Plain remount kept as the fallback for non-userns
-    # environments. NOTE: rw mount flags are necessary, not sufficient —
-    # the pod cgroup dir is owned by unmapped host root unless the node
-    # runtime delegates it (containerd `cgroup_writable = true` via the
-    # sandbox RuntimeClass; see K8sProviderConfig.dockerRuntimeClassName).
-    mount -o remount,bind,rw /sys/fs/cgroup 2>>"$LOG" \
-      || mount -o remount,rw /sys/fs/cgroup 2>>"$LOG" \
-      || echo "valet: cgroup2 rw remount failed — docker run will fail on read-only cgroupfs" >>"$LOG"
-    if mkdir -p /sys/fs/cgroup/init 2>>"$LOG"; then
-      # The xargs form is verbatim moby hack/dind. The single > redirect is
-      # safe on cgroupfs: cgroup.procs is not a regular file — O_TRUNC is a
-      # no-op and each write(2) is an independent one-pid migration, so
-      # every echo that xargs -n1 spawns moves one pid. Retry the pair:
-      # a process spawned into the root group between the move and the
-      # subtree_control write makes the write fail with EBUSY.
-      for _ in $(seq 1 10); do
-        xargs -rn1 < /sys/fs/cgroup/cgroup.procs > /sys/fs/cgroup/init/cgroup.procs 2>>"$LOG" || true
-        sed -e 's/ / +/g' -e 's/^/+/' < /sys/fs/cgroup/cgroup.controllers > /sys/fs/cgroup/cgroup.subtree_control 2>>"$LOG" && break
-        sleep 0.1
-      done
-      grep -q . /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null \
-        || echo "valet: cgroup2 controller delegation failed — docker run may lack resource controllers" >>"$LOG"
-      # Keep persistent services in a mapped-root-owned leaf. The delegated
-      # /init manager stays empty so nested runtimes can enable controllers
-      # without moving PID 1, dockerd, or later exec processes.
-      if ! /cgroup-delegation.sh /sys/fs/cgroup dockerd 2>>"$LOG"; then
-        echo "valet: cgroup delegation failed; Docker and nested rootless runtimes will not start. Recreate the sandbox after correcting the valet-docker RuntimeClass." >>"$LOG"
-        exit 1
-      fi
-    else
-      echo "valet: pod cgroup is not writable. Configure the cgroup_writable valet-docker RuntimeClass, then recreate the sandbox." >>"$LOG"
-      exit 1
-    fi
-  else
-    echo "valet: cgroup v2 is unavailable. Configure the valet-docker RuntimeClass to mount cgroup v2, then recreate the sandbox." >>"$LOG"
-    exit 1
+  if [ "${VALET_CGROUP_BOOTSTRAPPED:-0}" != "1" ]; then
+    /cgroup-bootstrap.sh || exit $?
   fi
   # overlay2 on the emptyDir data-root; vfs only if the probe fails
   # (nothing in a 6.3+ userns kernel should make it fail — belt and
@@ -144,15 +92,21 @@ fi
 #    (kernel >= 5.11). Needs the data-root on a non-overlay filesystem —
 #    true on kubernetes (emptyDir volume), false on the docker backend
 #    (container rootfs IS overlay, mount returns EINVAL).
-#  - fuse-overlayfs: needs /dev/fuse to be OPENABLE, not just present. On
-#    kubernetes a hostPath char device carries no device-cgroup grant, so
-#    open() fails with EPERM; the docker backend's `--device /dev/fuse`
-#    grants it.
+#  - fuse-overlayfs: must mount and execute a binary in the rootless user
+#    namespace. Some Docker Desktop kernels permit the mount but reject
+#    execution with EINVAL. Opening /dev/fuse alone does not prove support.
 #  - vfs: always works; slow, no layer sharing. Last resort.
 DRIVER=vfs
 if su -s /bin/sh dockerd -c "unshare --user --map-root-user --mount /bin/sh -c 'cd $DATA_ROOT && rm -rf .ovlprobe && mkdir -p .ovlprobe/l .ovlprobe/u .ovlprobe/w .ovlprobe/m && mount -t overlay overlay -olowerdir=.ovlprobe/l,upperdir=.ovlprobe/u,workdir=.ovlprobe/w .ovlprobe/m'" >>"$LOG" 2>&1; then
   DRIVER=overlay2
-elif su -s /bin/sh dockerd -c 'exec 3<>/dev/fuse' 2>>"$LOG"; then
+elif su -s /bin/sh dockerd -c "unshare --user --map-root-user --mount /bin/sh -c '
+  cd $DATA_ROOT || exit 1
+  rm -rf .ovlprobe && mkdir -p .ovlprobe/l .ovlprobe/u .ovlprobe/w .ovlprobe/m || exit 1
+  cp /bin/true .ovlprobe/l/probe || exit 1
+  fuse-overlayfs -o lowerdir=.ovlprobe/l,upperdir=.ovlprobe/u,workdir=.ovlprobe/w .ovlprobe/m || exit 1
+  trap \"umount .ovlprobe/m\" EXIT
+  .ovlprobe/m/probe
+'" >>"$LOG" 2>&1; then
   DRIVER=fuse-overlayfs
 fi
 su -s /bin/sh dockerd -c "rm -rf '$DATA_ROOT/.ovlprobe'" 2>/dev/null || true

@@ -1,38 +1,31 @@
-import { Navigate, Outlet, createFileRoute, useRouterState } from "@tanstack/react-router";
-import { useWorkspaceScope } from "~/lib/workspace-scope";
-import { SettingsRail, TEAM_SETTINGS_PATH, isTeamSettingsPath } from "~/components/settings/settings-rail";
+import { Outlet, createFileRoute, useRouterState } from "@tanstack/react-router";
+import { SettingsRail, normalizeSettingsPath } from "~/components/settings/settings-rail";
+import { PageHeader, pageClass } from "~/components/primitives";
 
 /**
- * `/settings` layout shell (split-settings design, decision 1): left rail +
- * routed section content via `<Outlet/>`. Reached via the gear icon in the
- * top nav. `/settings` itself has no content of its own — it redirects to
- * `/settings/profile` in personal scope and `/settings/team` in team scope.
+ * `/settings` layout shell: left rail + routed section content via
+ * `<Outlet/>`. Reached via the gear icon in the top nav. Settings does not
+ * follow the workspace switcher: each page names its scope in the URL and
+ * pins it (settings-redesign spec, decision 1).
  */
 export const Route = createFileRoute("/settings")({
   component: SettingsLayout,
 });
 
-export function SettingsLayout() {
-  const { teamId, key } = useWorkspaceScope();
-  const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const settings = pathname === "/settings" || pathname.startsWith("/settings/");
-  const organization = pathname === "/settings/organization" || pathname.startsWith("/settings/organization/");
-  // Do not mount a personal form under a team label, even for one render.
-  // The layout can still render while navigation leaves settings.
-  const redirectTo = settings && teamId !== undefined && !organization && !isTeamSettingsPath(pathname)
-    ? TEAM_SETTINGS_PATH
-    : teamId === undefined && pathname === TEAM_SETTINGS_PATH
-      ? "/settings/profile"
-      : undefined;
+/** Routes whose content is a wide table rather than a settings form. */
+const WIDE_SETTINGS_ROUTES = ["/settings/model-comparison", "/settings/organization/model-comparison"];
 
+export function SettingsLayout() {
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const wide = WIDE_SETTINGS_ROUTES.includes(normalizeSettingsPath(pathname));
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-5xl px-4 py-5 sm:px-6 sm:py-10">
-        <h1 className="mb-4 sm:mb-8 font-display text-2xl text-ink">Settings</h1>
-        <div className="flex flex-col gap-4 sm:flex-row sm:gap-12">
+      <div className={pageClass}>
+        <PageHeader title="Settings" className="mb-4 sm:mb-8" />
+        <div className="flex flex-col gap-4 sm:flex-row sm:gap-10">
           <SettingsRail />
-          <div className="min-w-0 max-w-2xl flex-1">
-            {redirectTo ? <Navigate to={redirectTo} replace /> : <Outlet key={key} />}
+          <div className={wide ? "min-w-0 flex-1" : "min-w-0 max-w-3xl flex-1"}>
+            <Outlet />
           </div>
         </div>
       </div>

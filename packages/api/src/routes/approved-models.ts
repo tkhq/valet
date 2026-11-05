@@ -8,6 +8,7 @@
 import { Hono } from "hono";
 import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
+import { auditRequest } from "./_admin-audit.js";
 import {
   getApprovedModels,
   lockOrgModelPolicy,
@@ -55,19 +56,34 @@ approvedModelsRouter.put("/", async (c) => {
 
   const catalog = await buildOrgCatalog(db, engineCredentials, user.orgId);
   const validIds = catalogValidIds(catalog);
-  const error = validateApprovedModelsList(approved, validIds);
-  if (error) return c.json({ error }, 400);
+  let previousApproved: string[] | null = null;
   const tierError = await db.transaction(async (tx) => {
     await lockOrgModelPolicy(tx, user.orgId);
+    // The settings UI sends the saved list plus or minus one id, so an id
+    // approved while it was in the catalog (a retired model, or a Bedrock
+    // default the admin later dropped from the row's selection) may be
+    // RETAINED; only ids new to the policy must be in today's catalog.
+    const previous = await getApprovedModels(tx, user.orgId);
+    previousApproved = previous;
+    for (const id of previous ?? []) validIds.add(id);
+    const error = validateApprovedModelsList(approved, validIds);
+    if (error) return error;
     const validationError = validateTierTargetsRemainApproved(
       approved,
-      await getOrgTierMap(tx, user.orgId),
+      await getOrgTierMap(tx, user.orgId, approved),
     );
     if (validationError) return validationError;
     await setApprovedModels(tx, user.orgId, approved);
     return null;
   });
   if (tierError) return c.json({ error: tierError }, 400);
+  await auditRequest(c, {
+    action: "model_policy.approved_models_update",
+    targetType: "model_policy",
+    targetId: "approved_models",
+    targetName: "Approved models",
+    changes: { approved: { from: previousApproved, to: approved } },
+  });
   const body: PutApprovedModelsResponse = { approved };
   return c.json(body);
 });

@@ -1,0 +1,168 @@
+name: CI Checks
+
+# All publishing workflows call these checks for their own source commit.
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+# Typecheck once; run current v2 tests across four independent shards.
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # pnpm version comes from package.json "packageManager".
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Test application release workflow
+        run: node --test scripts/release/*.test.mjs
+
+      - name: Generate release metadata for typecheck
+        run: |
+          node packages/api/scripts/generate-changelog.mjs \
+            --unreleased-sha HEAD \
+            --built-at "$(git show -s --format=%cI HEAD)" \
+            --artifact-version Unreleased \
+            --artifact-sha HEAD \
+            --metadata packages/api/src/changelog/release.json
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      # The root project references omit the web app. Check the same build
+      # that Docker Images and Release CLI run before a change can merge.
+      - name: Build web SPA
+        run: pnpm --filter @valet/web build
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      # One red shard must not cancel the others. A single run should report
+      # every failure it found, so a second push does not discover the next
+      # one.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Tests import emitted workspace packages. Emit them without repeating
+      # semantic checks in all four shards. The required typecheck job still
+      # checks the whole workspace and builds/typechecks the web app.
+      - name: Emit workspace packages
+        run: pnpm exec tsc --build --noCheck
+
+      # No `--` before the flag. pnpm drops what follows it here, and vitest
+      # would then run the WHOLE suite in every shard — four times the work,
+      # all green, with nothing to show that sharding never happened.
+      - name: Test (shard ${{ matrix.shard }}/4)
+        run: pnpm test --shard=${{ matrix.shard }}/4
+
+  cgroup_test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test cgroup delegation and user namespace preflight
+        run: |
+          bash docker/cgroup-delegation_test.sh
+          bash docker/userns-preflight_test.sh
+          id dockerd >/dev/null 2>&1 || sudo useradd -m -u 1500 dockerd
+          sudo install -d -o dockerd -g dockerd /tmp/valet-kubernetes-test
+          sudo install -o dockerd -g dockerd -m 755 docker/valet-kubernetes.mjs docker/valet-kubernetes_test.sh /tmp/valet-kubernetes-test/
+          sudo -u dockerd bash /tmp/valet-kubernetes-test/valet-kubernetes_test.sh
+
+  # Click and loading-state latency of the built web app against mocked api
+  # fixtures, under calibrated CPU slowdown (packages/web/perf/run.mjs).
+  # Fails when a flow's median is over its budget
+  # (packages/web/src/lib/perf/budgets.ts). Not yet part of the aggregate
+  # check below, so a noisy runner cannot block a merge while it beds in.
+  web-perf:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      # Node 24 imports budgets.ts with type stripping on by default.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Emit workspace packages
+        run: pnpm exec tsc --build --noCheck
+
+      - name: Build web SPA
+        run: pnpm --filter @valet/web exec vite build
+
+      - name: Install Chromium
+        run: pnpm --filter @valet/web exec playwright-core install --with-deps --only-shell chromium
+
+      - name: Latency check
+        run: pnpm --filter @valet/web perf --json perf-results.json
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-perf
+          path: |
+            packages/web/perf-results.json
+            packages/web/perf/failure-*.png
+          if-no-files-found: ignore
+
+  # The same thresholded STE lint the e2e "docs-lint" suite runs, promoted to
+  # a blocking check. The runner's system python3 is enough; no setup step.
+  docs-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: STE prose lint (maintained docs)
+        run: python3 scripts/docs/docs_lint.py
+
+      - name: Nested Kubernetes specification vectors
+        run: node scripts/docs/validate_nested_kubernetes_spec.mjs
+
+  # One required check to point branch protection at, so the shard count can
+  # change without editing the protection rule. `needs` alone is not enough:
+  # a skipped or cancelled dependency still satisfies it, so the result is
+  # asserted explicitly.
+  ci:
+    runs-on: ubuntu-latest
+    needs: [typecheck, test, cgroup_test, docs-lint]
+    if: always()
+    steps:
+      - name: Report
+        run: |
+          echo "typecheck:         ${{ needs.typecheck.result }}"
+          echo "test:              ${{ needs.test.result }}"
+          echo "cgroup-delegation: ${{ needs.cgroup_test.result }}"
+          echo "docs-lint:         ${{ needs.docs-lint.result }}"
+          test "${{ needs.typecheck.result }}" = "success" \
+            && test "${{ needs.test.result }}" = "success" \
+            && test "${{ needs.cgroup_test.result }}" = "success" \
+            && test "${{ needs.docs-lint.result }}" = "success"

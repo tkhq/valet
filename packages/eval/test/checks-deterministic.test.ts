@@ -186,6 +186,13 @@ describe("budget checks", () => {
     expect(run({ type: "max_turns", value: 1 }, makeTrajectory({})).pass).toBe(false);
   });
 
+  it("min_compactions fails a run that never compacted", () => {
+    expect(run({ type: "min_compactions", value: 1 }, makeTrajectory({ compactions: 2 })).pass).toBe(true);
+    const none = run({ type: "min_compactions", value: 1 }, makeTrajectory({}));
+    expect(none.pass).toBe(false);
+    expect(none.detail).toMatch(/got 0/);
+  });
+
   it("max_tokens", () => {
     expect(run({ type: "max_tokens", value: 150 }, makeTrajectory({})).pass).toBe(true);
     expect(run({ type: "max_tokens", value: 149 }, makeTrajectory({})).pass).toBe(false);

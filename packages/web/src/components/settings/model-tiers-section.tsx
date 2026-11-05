@@ -1,12 +1,17 @@
 import { ArrowDown, ArrowUp, X } from "lucide-react";
 import { useState } from "react";
-import { Button, Spinner } from "~/components/primitives";
+import { Button, SelectMenu, Spinner } from "~/components/primitives";
+import { FieldRow } from "~/components/settings/field-row";
 import { Section } from "~/components/settings/section";
 import { AddModelTypeahead } from "~/components/settings/add-model-typeahead";
 import { useModelTiers, useModels, usePatchModelTiers } from "~/api/settings";
 import { apiErrorMessage } from "~/api/policies";
-import { SIZE_TIERS, TIER_LABELS, type SizeTier } from "~/lib/model-tiers";
+import { SIZE_TIERS, TIER_LABELS, tierSubtitle, type SizeTier } from "~/lib/model-tiers";
 import type { PatchModelTiersRequest } from "@valet/api/wire";
+
+/** Select value for "no organization default"; it saves `defaultTier: null`. */
+const NO_DEFAULT_TIER = "none";
+type DefaultTierChoice = SizeTier | typeof NO_DEFAULT_TIER;
 
 /** One-tier `PatchModelTiersRequest` — a computed `{ [tier]: next }` object
  * literal widens to a string index signature, so this switch keeps the
@@ -32,7 +37,8 @@ function tierPatch(tier: SizeTier, next: string[]): PatchModelTiersRequest {
  * engine resolves at run time (`GET`/`PATCH /api/org/model-tiers`, always
  * five tiers). Uses the up/down/remove row pattern and `AddModelTypeahead`
  * per tier; these targets are the org's fallback chain now that org model
- * preferences are gone.
+ * preferences are gone. A select above the tiers sets or clears the org
+ * default tier for new threads that no personal or team default covers.
  */
 export function ModelTiersSection() {
   const modelsQ = useModels();
@@ -51,6 +57,24 @@ export function ModelTiersSection() {
     });
   }
 
+  const defaultChoice: DefaultTierChoice = tiers?.defaultTier ?? NO_DEFAULT_TIER;
+
+  function saveDefaultTier(choice: DefaultTierChoice) {
+    if (choice === defaultChoice) return;
+    setSaveError(null);
+    patchTiers.mutate({ defaultTier: choice === NO_DEFAULT_TIER ? null : choice }, {
+      onError: (err) => setSaveError(apiErrorMessage(err)),
+    });
+  }
+
+  function tierOptionLabel(choice: DefaultTierChoice): string {
+    if (choice === NO_DEFAULT_TIER) return "No organization default";
+    const model = tierSubtitle(choice, tiers, catalog);
+    return model ? `${TIER_LABELS[choice]} · ${model}` : TIER_LABELS[choice];
+  }
+
+  const defaultChoices: DefaultTierChoice[] = [NO_DEFAULT_TIER, ...SIZE_TIERS];
+
   return (
     <Section
       title="Model tiers"
@@ -65,6 +89,25 @@ export function ModelTiersSection() {
         <p className="py-4 text-sm text-danger-500">Failed to load model tiers.</p>
       )}
       {saveError && <p className="text-xs text-danger-500">{saveError}</p>}
+
+      {modelsQ.data && tiers && (
+        <FieldRow
+          label="Default tier for new threads"
+          hint="New threads and workflow steps without their own model use this tier when no personal or team default applies. With no organization default, they use Small. Delegated work stays on Small."
+          error={
+            tiers.defaultTier && !tiers.defaultTierResolvable
+              ? "No provider with a key serves this tier, so new threads use Small. Put a target whose provider has a key first in the tier, or choose another default."
+              : undefined
+          }
+        >
+          <SelectMenu
+            value={defaultChoice}
+            options={defaultChoices.map((choice) => ({ value: choice, label: tierOptionLabel(choice) }))}
+            onChange={saveDefaultTier}
+            ariaLabel={`Default tier for new threads: ${tierOptionLabel(defaultChoice)}`}
+          />
+        </FieldRow>
+      )}
 
       {modelsQ.data && tiers && (
         <div className="divide-y divide-line">

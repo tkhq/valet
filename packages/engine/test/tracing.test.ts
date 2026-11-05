@@ -6,7 +6,8 @@
  * With no SDK registered (every other engine test), all of this is a no-op.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import {

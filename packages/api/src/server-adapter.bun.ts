@@ -26,6 +26,8 @@ interface BunServeOptions {
   fetch: Hono<AppEnv>["fetch"];
   port: number;
   websocket: BunWebSocketHandler;
+  /** Seconds a connection may stay idle before Bun closes it (default 10, maximum 255). */
+  idleTimeout?: number;
 }
 
 interface BunGlobal {
@@ -57,6 +59,12 @@ export const bunServerAdapter: ServerAdapter = {
           fetch: app.fetch,
           port: opts.port,
           websocket,
+          // Bun closes a connection after 10 idle seconds by default. An MCP
+          // tool waits up to 55 seconds before it writes its one response
+          // (`auth/mcp-tools.ts`), so the default would cut it off after the
+          // work was queued. 255 is Bun's maximum; the ingress limits stay
+          // in front of it.
+          idleTimeout: 255,
         });
         opts.onListen?.(server.port);
         return {

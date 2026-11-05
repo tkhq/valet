@@ -2,7 +2,7 @@
 import type { CredentialOwner } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import type { ContentSyncService } from "./content-sync/service.js";
-import { listDelegationsFrom } from "./credential-delegations.js";
+import { listShareTeamsFrom } from "./credential-shares.js";
 
 export async function refreshCredentialReadiness(
   deps: { db: AppDb; contentSync: ContentSyncService },
@@ -14,7 +14,7 @@ export async function refreshCredentialReadiness(
   } else if (owner.type === "team") {
     await deps.contentSync.resyncTeamWorkflowSources(owner.id);
   } else if (owner.type === "user") {
-    for (const teamId of new Set(await listDelegationsFrom(deps.db, { userId: owner.id, service }))) {
+    for (const teamId of new Set(await listShareTeamsFrom(deps.db, { userId: owner.id, service }))) {
       await deps.contentSync.resyncTeamWorkflowSources(teamId);
     }
   }

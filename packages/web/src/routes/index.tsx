@@ -1,115 +1,24 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
-import type { GetOrchestratorInfoResponse } from "@valet/api/wire";
-import { useOrchestratorChildren, useOrchestratorInfo } from "~/api/orchestrator";
-import { useNotifications } from "~/api/queries";
-import { ActivityStrip, mergeActivity } from "~/components/assistant/activity-strip";
-import { ThreadsCard } from "~/components/assistant/threads-card";
-import { IdentityHeader } from "~/components/assistant/identity-header";
-import { IdentityFields } from "~/components/assistant/identity-fields";
-import { MemoryCard } from "~/components/assistant/memory-card";
-import { UsageCard } from "~/components/assistant/usage-card";
-import { TeamsCard } from "~/components/assistant/teams-card";
-import { TeamDashboard } from "~/components/dashboard/team-dashboard";
-import { Spinner } from "~/components/primitives";
-import { useWorkspaceScope } from "~/lib/workspace-scope";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { HomeScreen, type HomeView } from "~/components/home/home-screen";
+import { useMobileLayout } from "~/hooks/use-mobile-layout";
+import { usePageTitle } from "~/lib/page-title";
 
-/**
- * `/` — the dashboard. Follows the workspace switcher, exactly like every
- * list page (team dashboard design, 2026-08-27): the personal workspace
- * renders the assistant dashboard (assistant-centered web UI, decision 1);
- * a team workspace renders the team's activity dashboard.
- *
- * The personal branch works as before: `GET /api/orchestrator/info` with
- * `name === null` means first visit — an inline, full-page-centered
- * identity step (decision 11); once named, the identity header + card grid
- * + activity strip.
- */
+/** Home is the person's one conversation with Valet across every workspace,
+ * with Tasks and Make: `?view=tasks` or `?view=make` opens that tab. A phone
+ * switches between them; a wider screen keeps the conversation in view with
+ * Tasks or Make beside it. */
 export const Route = createFileRoute("/")({
+  validateSearch: (raw: Record<string, unknown>): { view?: "tasks" | "make" } =>
+    (raw.view === "tasks" || raw.view === "make" ? { view: raw.view } : {}),
   component: Home,
 });
 
 export function Home() {
-  const scope = useWorkspaceScope();
-  if (scope.teamId !== undefined) {
-    return <TeamDashboard teamId={scope.teamId} />;
-  }
-  return <Dashboard />;
-}
-
-export function Dashboard() {
-  const info = useOrchestratorInfo();
-
-  if (info.isLoading) {
-    return (
-      <div className="flex-1 grid place-items-center text-sm text-muted">
-        <Spinner /> Loading…
-      </div>
-    );
-  }
-
-  if (info.error || !info.data) {
-    return (
-      <div className="flex-1 grid place-items-center p-8 text-center text-sm text-danger-500">
-        <div>
-          Couldn’t load your assistant.
-          <div className="mt-2">
-            <button type="button" className="min-h-11 px-3 underline sm:min-h-0" onClick={() => info.refetch()}>
-              Retry
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  if (info.data.name === null) {
-    return (
-      <div className="flex-1 grid place-items-center p-8">
-        <IdentityFields className="w-full max-w-md" variant="onboarding" />
-      </div>
-    );
-  }
-
-  return <DashboardBody info={info.data} />;
-}
-
-function DashboardBody({ info }: { info: GetOrchestratorInfoResponse }) {
-  const childrenQ = useOrchestratorChildren();
-  const notificationsQ = useNotifications();
-
-  const events = mergeActivity(notificationsQ.data?.notifications ?? [], childrenQ.data?.children ?? []);
-
-  return (
-    <div className="min-w-0 flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-5xl space-y-8 px-4 py-6 sm:px-6 sm:py-8">
-        <div className="space-y-2">
-          <IdentityHeader info={info} />
-          {/* The one path to an assistant's editor used to be the chat
-              rail's menu; the dashboard links the list page directly. */}
-          <Link to="/assistants" className="inline-flex min-h-11 items-center text-xs text-moss underline-offset-2 hover:underline sm:min-h-0">
-            Manage assistants →
-          </Link>
-        </div>
-
-        <div className="grid gap-4 md:grid-cols-2">
-          <div className="md:col-span-2">
-            <ThreadsCard />
-          </div>
-          <MemoryCard />
-          <UsageCard />
-          <TeamsCard />
-        </div>
-
-        <ActivityStrip
-          events={events}
-          loading={notificationsQ.isLoading || childrenQ.isLoading}
-          error={!!notificationsQ.error || !!childrenQ.error}
-          onRetry={() => {
-            notificationsQ.refetch();
-            childrenQ.refetch();
-          }}
-        />
-      </div>
-    </div>
-  );
+  const wide = !useMobileLayout();
+  const { view } = Route.useSearch();
+  const navigate = useNavigate({ from: Route.fullPath });
+  usePageTitle("Valet");
+  return <HomeScreen view={view ?? "chat"} wide={wide}
+    // Keep the other params: `?workspace=` names the space the sidebar shows.
+    onViewChange={(next: HomeView) => void navigate({ search: (prev) => ({ ...prev, view: next === "chat" ? undefined : next }), replace: true })} />;
 }

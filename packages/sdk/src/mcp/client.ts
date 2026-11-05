@@ -2,6 +2,28 @@ import { createHash } from 'node:crypto';
 import type { McpTool, McpToolResult, JsonRpcRequest, JsonRpcResponse } from './types.js';
 
 /**
+ * Thrown by `McpClient` for a non-OK HTTP response from the MCP server. The
+ * `status` field lets a caller (`authRejectionMessage` in `action-plugin.ts`)
+ * detect a credential rejection (401/403) without re-parsing the message
+ * text — a server-controlled response body can otherwise contain a string
+ * like "upstream returned HTTP 401" and get misclassified by a text match.
+ * `message` keeps the exact text callers and tests already depend on.
+ */
+export class McpHttpError extends Error {
+  readonly status: number;
+  /** The response's `WWW-Authenticate` header, when present. A 403 with
+   * `error="insufficient_scope"` names the scopes the call needs. */
+  readonly wwwAuthenticate?: string;
+
+  constructor(message: string, status: number, wwwAuthenticate?: string) {
+    super(message);
+    this.name = 'McpHttpError';
+    this.status = status;
+    this.wwwAuthenticate = wwwAuthenticate;
+  }
+}
+
+/**
  * Lightweight MCP client using JSON-RPC over HTTP (streamable HTTP transport).
  *
  * Handles the required initialization handshake per the MCP spec:
@@ -80,7 +102,11 @@ export class McpClient {
 
     if (!res.ok) {
       const body = await res.text().catch(() => '');
-      throw new Error(`MCP ${this.serviceName} ${method} failed: HTTP ${res.status}${body ? ` — ${body.slice(0, 200)}` : ''}`);
+      throw new McpHttpError(
+        `MCP ${this.serviceName} ${method} failed: HTTP ${res.status}${body ? ` — ${body.slice(0, 200)}` : ''}`,
+        res.status,
+        res.headers.get('www-authenticate') ?? undefined,
+      );
     }
 
     // Capture session ID from response header

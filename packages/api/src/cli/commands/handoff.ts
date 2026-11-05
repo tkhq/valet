@@ -1,5 +1,5 @@
 /**
- * `valet handoff <file> [--session <id> | --new-session] [--repo <o/n>]
+ * `valet handoff <file> [--thread <id> | --session <id> | --new-session] [--repo <o/n>]
  *                [--title <t>] [--wait] [--json]`
  *
  * Hands work off from a local coding agent to Valet. The agent writes a
@@ -20,22 +20,27 @@ import { ExitCode } from "../exit.js";
 import { parseGlobalFlags, printErr, printJson, printLine, type ParsedFlags } from "../output.js";
 import { resolveInstance } from "../resolve.js";
 import { streamSession } from "../stream.js";
-import { consumeSend, type StreamFn } from "./send.js";
+import { consumeSend, readGatesOf, submitSubscribed, type StreamFn } from "./send.js";
 import type { CliContext } from "../types.js";
 import type {
   CreateSessionRequest,
   CreateSessionResponse,
-  EnsureOrchestratorResponse,
+  EnsureWorkspaceRuntimeResponse,
+  ListDecisionsResponse,
   RepoBinding,
   SendPromptRequest,
   SendPromptResponse,
+  WireEvent,
 } from "../../wire/types.js";
 
 /** The subset of `InstanceClient` the `handoff` command needs. */
 export interface HandoffClient {
-  ensureOrchestrator(): Promise<EnsureOrchestratorResponse>;
+  getThread(id: string): Promise<{ sessionId: string }>;
+  ensureOrchestrator(): Promise<EnsureWorkspaceRuntimeResponse>;
   createSession(body: CreateSessionRequest): Promise<CreateSessionResponse>;
   sendPrompt(id: string, body: SendPromptRequest): Promise<SendPromptResponse>;
+  /** Reads a gate the stream names only by id (`queue.state.blockedGateId`). */
+  listThreadDecisions?(id: string): Promise<ListDecisionsResponse>;
 }
 
 export interface HandoffDeps {
@@ -118,7 +123,7 @@ function printReceipt(receipt: Receipt, json: boolean): void {
   if (json) {
     printJson(receipt);
   } else {
-    printLine(`handed off to ${receipt.sessionId}`);
+    printLine(`handed off to thread ${receipt.threadId}`);
     printLine(receipt.url);
   }
 }
@@ -129,6 +134,15 @@ export async function runHandoff(deps: HandoffDeps, flags: ParsedFlags): Promise
   const wait = takeBooleanFlag(flags, "wait");
   const sessionFlag = typeof flags.flags.session === "string" ? flags.flags.session : undefined;
 
+  const threadFlag = typeof flags.flags.thread === "string" ? flags.flags.thread : undefined;
+  if (flags.flags.thread === true || flags.flags.session === true || threadFlag === "" || sessionFlag === "") {
+    printErr("valet handoff: provide an id after --thread or --session.");
+    return ExitCode.Usage;
+  }
+  if (threadFlag !== undefined && newSession) {
+    printErr("valet handoff: use --thread or --new-session, not both.");
+    return ExitCode.Usage;
+  }
   if (sessionFlag !== undefined && newSession) {
     printErr("valet handoff: --session and --new-session are mutually exclusive");
     return ExitCode.Usage;
@@ -151,7 +165,13 @@ export async function runHandoff(deps: HandoffDeps, flags: ParsedFlags): Promise
   }
 
   let sessionId: string;
-  if (sessionFlag !== undefined) {
+  if (threadFlag !== undefined) {
+    sessionId = (await deps.client.getThread(threadFlag)).sessionId;
+    if (sessionFlag !== undefined && sessionFlag !== sessionId) {
+      printErr("The thread does not belong to the specified runtime. Use its runtime or omit --session.");
+      return ExitCode.Usage;
+    }
+  } else if (sessionFlag !== undefined) {
     sessionId = sessionFlag;
   } else if (newSession) {
     const repoFlag = typeof flags.flags.repo === "string" ? flags.flags.repo : undefined;
@@ -178,9 +198,13 @@ export async function runHandoff(deps: HandoffDeps, flags: ParsedFlags): Promise
   }
 
   const text = `${provenanceHeader(deps.env)}\n\n${doc}`;
+  const submit = () => deps.client.sendPrompt(sessionId, { text, queueMode: "inject", ...(threadFlag ? { threadId: threadFlag } : {}) });
   let sent: SendPromptResponse;
+  let events: AsyncIterable<WireEvent> | undefined;
   try {
-    sent = await deps.client.sendPrompt(sessionId, { text });
+    // A follower subscribes before sending (`submitSubscribed`).
+    if (wait) ({ sent, events } = await submitSubscribed(deps.stream, { url: deps.url, apiKey: deps.apiKey, sessionId }, submit));
+    else sent = await submit();
   } catch (err) {
     if (newSession) {
       printErr(`session ${sessionId} was created but the handoff was not delivered.`);
@@ -193,15 +217,16 @@ export async function runHandoff(deps: HandoffDeps, flags: ParsedFlags): Promise
     sessionId,
     threadId: sent.threadId,
     messageId: sent.messageId ?? "",
-    url: `${deps.url}/sessions/${sessionId}`,
+    url: `${deps.url}/threads/${encodeURIComponent(sent.threadId)}`,
   };
   printReceipt(receipt, flags.json);
 
-  if (!wait) return ExitCode.OK;
+  if (!wait || !events) return ExitCode.OK;
   // A null messageId means the text ran as a slash command — it executed
   // immediately and took no queue item, so there is no turn to follow.
   const sentMessageId = sent.messageId;
   if (sentMessageId === null) return ExitCode.OK;
+  const followed = events;
 
   // Follow the turn like `send` does, but bounded: the handoff is already
   // delivered, so a quiet target should not hang the calling agent.
@@ -213,7 +238,7 @@ export async function runHandoff(deps: HandoffDeps, flags: ParsedFlags): Promise
     t.unref();
   });
   const follow = consumeSend(
-    { stream: deps.stream, url: deps.url, apiKey: deps.apiKey },
+    { stream: () => followed, url: deps.url, apiKey: deps.apiKey, readGates: readGatesOf(deps.client) },
     { sessionId, messageId: sentMessageId, threadId: sent.threadId, json: flags.json },
   );
   return Promise.race([follow, timeout]);

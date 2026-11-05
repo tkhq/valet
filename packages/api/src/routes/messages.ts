@@ -1,3 +1,5 @@
+import { HOME_THREAD_KEY, HOME_THREAD_TITLE } from "../home/context.js";
+import { readAppPageHint, type AppPageHint } from "@valet/shared";
 /**
  * Messages + threads routes — the agent loop entry points.
  *
@@ -11,46 +13,76 @@
  *   GET  /api/sessions/:id/messages  → list messages (?threadId=…)
  *   POST /api/sessions/:id/messages  → send prompt (body.threadId optional)
  */
+import { SLACK_CHANNELS_METADATA_KEY, threadAudience, threadRef, visibleThreadIds } from "../services/thread-access.js";
+import { threadPage } from "../services/thread-page.js";
+import { ensureDefaultThreadWhereOwned } from "../services/default-thread.js";
+import { isLegacyAssistantRuntime } from "../services/legacy-runtime.js";
+import { isWorkflowRunConversation } from "../workflows/run-conversations.js";
+import { isPluginThreadKey } from "../plugins/plugin-thread-key.js";
+import { ensureAssistantExecution, ensureDefaultAssistantSession, findDefaultAssistant, loadAssistantBySessionId } from "../assistants/service.js";
+import { FORK_OF_METADATA_KEY, MOVED_TO_METADATA_KEY, threadOwner, workspaceName } from "../services/thread-links.js";
+import { randomUUID } from "node:crypto";
 import { Hono, type Context } from "hono";
-import { eq, inArray } from "drizzle-orm";
+import { INHERIT_TOOL_SCOPE_KEY, TOOL_SCOPE_KEY, type ToolScope } from "@valet/shared";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import {
+  ConflictError,
   dispatchCommand,
+  MESSAGE_TURN_ERROR_KEY,
   NotFoundError,
   parseReasoningLevel,
   ValidationError,
 } from "@valet/engine";
-import type { PromptAuthor, SessionEntry, Session as EngineSession } from "@valet/engine";
+import { exportSeedBundle, planForkSeed, readBranchNote, readThreadEdit, walkTranscriptDag, WORKSPACE_FILES, type ForkSeedRecord, type PromptAuthor, type QueueItem, type SessionEntry, type Session as EngineSession, type Thread } from "@valet/engine";
+import { isAgentCaller, type AuthVia, type RequestPrincipal } from "../lib/request-principal.js";
 import type { AppEnv } from "../env.js";
 import { ensureWorkflowSession, parseWorkflowSessionId } from "../workflows/engine-deps.js";
-import { agentSessions, sessionThreads, users, workflowDefinitions } from "../schema/index.js";
+import { agentSessions, assistants, assistantExecutions, legacyAssistantRuntimes, sessionThreads, users, workflowDefinitions } from "../schema/index.js";
 import { makeCommandContext } from "../engine/command-providers.js";
 import type {
   CreateThreadRequest,
   CreateThreadResponse,
+  EditPreviewResponse,
+  ForkThreadResponse,
   ListCommandsResponse,
   WireCommandInfo,
   ListDecisionsResponse,
   ListMessagesResponse,
   ListThreadsResponse,
+  ThreadChannelActivity,
+  ThreadContextResponse,
+  ThreadRecapResponse,
+  MarkThreadsReadRequest,
   Message,
   MessagePart,
   MessageAuthor,
   MessageRole,
+  MessageReplyReference,
   MessageSkillInvocation,
   PatchThreadRequest,
+  PatchThreadResponse,
   PromptFileAttachment,
   PromptImageAttachment,
   ResolveDecisionRequest,
+  ReturnToBranchResponse,
+  AbortThreadRequest,
   SendPromptRequest,
   SendPromptResponse,
+  ThreadShareMode,
   ThreadSummary,
   WithdrawDecisionRequest,
 } from "../wire/types.js";
 import { commandResultEntryToMessage, engineGateToWire, engineSignalToWire, engineToWireParts } from "../engine/bridge.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
-import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
+import { workflowRequestContext } from "../workflows/request-context.js";
+import { canReadWorkflowRun } from "../workflows/service.js";
+import { cancelAllWorkAsHuman, endChildSubscriptions } from "../engine/wakeups-admin.js";
+import { gateBackgroundWork } from "./wakeups.js";
+import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW, GATE_ACTION_ALWAYS_ALLOW_OWNER, gatePolicyFacts, ownerAlwaysAllowRefusal } from "../policies/service.js";
 import type { Providers } from "../providers/types.js";
-import { canResolveSessionGate, canViewSession, type SessionOwnerLike } from "../services/session-access.js";
+import { answersGate, isSharedAccountGate, canResolveSessionGate, canViewSession, gateApprover, type SessionOwnerLike } from "../services/session-access.js";
+import { publicUrlFromEnv } from "../channels/host.js";
+import { runVisible, spawnedFromVisibleThread, threadEntry, threadsVisibleTo, viewerOf } from "./_thread-access.js";
 import {
   getAttachmentRefStore,
   UnknownAttachmentError,
@@ -59,6 +91,17 @@ import {
 import { isOrgAdminUser } from "./_org-admin.js";
 import { assertModelSelectable } from "../services/approved-models.js";
 import { assertReasoningSelectable } from "../services/reasoning.js";
+import { recordSessionActivity, recordThreadActivityBestEffort, recordThreadUserActivity } from "../services/thread-activity.js";
+import { readOptionalJsonObject } from "../lib/optional-json-body.js";
+import { trimToolResults } from "../services/transcript-trim.js";
+import { isThreadShareMode, setThreadShare } from "../services/thread-share.js";
+import { setThreadApprovalBypass } from "../services/thread-approval-bypass.js";
+import { canAdministerTeam, isTeamMember } from "../services/teams.js";
+import { isAssistantConversationOf } from "../services/thread-access.js";
+import { listThreadActivity, markThreadsRead } from "../services/thread-read-state.js";
+import { threadRecap } from "../services/thread-recap.js";
+import { threadChannel } from "../services/channels.js";
+import { threadChannelActivity } from "../services/channel-messages.js";
 
 export const messagesRouter = new Hono<AppEnv>();
 
@@ -70,13 +113,29 @@ export const messagesRouter = new Hono<AppEnv>();
  * model change — in `routes/sessions.ts`) are NOT widened by this; talking
  * to a team's orchestrator is not the same decision as reconfiguring it.
  */
-export async function loadOwnedSession(c: Context<AppEnv>) {
-  const { db } = c.var.providers;
-  const id = c.req.param("id");
+export async function loadOwnedSession(
+  c: Context<AppEnv>, id = c.req.param("id"), decisionAccess?: { threadId?: string },
+) {
+  const { db, engineStore } = c.var.providers;
   const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
   const row = rows[0];
-  if (!row || !(await canViewSession(db, row, c.var.principal))) return null;
-  return row;
+  if (!row || row.orgId !== c.var.user.orgId) return null;
+  if (!(await canViewSession(db, row, c.var.principal))) {
+    // A shared thread's guest, admitted by `routes/threads.ts` for this one
+    // session and thread. Every operation it reaches is bound to that thread.
+    const guest = c.var.threadShareGuest;
+    const sameThread = !decisionAccess?.threadId || decisionAccess.threadId === guest?.threadId;
+    return guest?.sessionId === row.id && sameThread ? row : null;
+  }
+  const thread = decisionAccess?.threadId ? await engineStore.getThread(id, decisionAccess.threadId) : undefined;
+  if (decisionAccess?.threadId && !thread) return null;
+  if (await spawnedFromVisibleThread(c, row) && (!thread || await threadsVisibleTo(c, row)(thread))) return row;
+  // Named approval grants decision access only, never private child content.
+  if (decisionAccess && c.var.principal.type === "user") {
+    const gates = await engineStore.listDecisionGates(id, decisionAccess.threadId, "pending");
+    if (gates.some(gate => gateApprover(gate)?.userId === c.var.principal.id)) return row;
+  }
+  return null;
 }
 
 /**
@@ -105,6 +164,7 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
       content: e.summary,
       parts: [],
       createdAt: wireCreatedAt(e.createdAt),
+      sequence: e.sequence,
       compaction: {
         summary: e.summary,
         tokensBefore: e.tokenCountBefore,
@@ -113,6 +173,7 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
       },
     };
   }
+  if (e.type === "branch_summary") return branchNoteToMessage(e, sessionId, threadId);
   if (e.type !== "message") return null;
   // Engine has 4 roles: user/assistant/tool/system. We forward as-is.
   const role: MessageRole = e.role;
@@ -123,6 +184,8 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
   const wireAttachments = projectAttachments(e.attachments);
   const skill = skillInvocationFromMetadata(e.metadata, role);
   const author = authorFromEntry(e.author, role);
+  const errorMessage = turnErrorFromMetadata(e.metadata, role);
+  const editOf = role === "user" ? readThreadEdit(e.metadata)?.entryId : undefined;
   return {
     id: e.id,
     sessionId,
@@ -131,13 +194,93 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
     content: e.content,
     parts,
     createdAt: wireCreatedAt(e.createdAt),
+    sequence: e.sequence,
     queueItemId: e.queueItemId,
+    ...(role === "assistant" ? { completed: e.stopReason === "end_turn", stopReason: e.stopReason } : {}),
+    replyTo: replyReferenceFromMetadata(e.metadata, role),
     signal: engineSignalToWire(e.signal),
     model: e.model,
     ...(skill ? { skill } : {}),
     ...(author ? { author } : {}),
+    ...(editOf ? { editOf } : {}),
+    ...(role === "user" && e.channel ? { channelType: e.channel.channelType } : {}),
+    ...(errorMessage ? { errorMessage } : {}),
     ...(wireAttachments.length > 0 ? { attachments: wireAttachments } : {}),
   };
+}
+
+/**
+ * Wire projection of a branch note (docs/specs/2026-10-22-thread-edit-fork-design.md).
+ * `content` carries the note text, so a client without a divider renderer
+ * still shows readable text. A fork copies notes with an empty
+ * `branchLeafId` when the version they left was not copied.
+ */
+function branchNoteToMessage(
+  e: Extract<SessionEntry, { type: "branch_summary" }>,
+  sessionId: string,
+  threadId: string,
+): Message {
+  const note = readBranchNote(e.metadata);
+  const kind = note?.kind ?? "edit";
+  return {
+    id: e.id,
+    sessionId,
+    threadId,
+    role: "system",
+    content: e.summary,
+    parts: [],
+    createdAt: wireCreatedAt(e.createdAt),
+    sequence: e.sequence,
+    branch: {
+      kind,
+      ...(note?.version ? { version: note.version } : {}),
+      actions: (note?.actions ?? []).map(({ label, count, urls }) => ({ label, count, urls })),
+      moreActions: note?.moreActions ?? 0,
+      filesChanged: note?.filesChanged ?? false,
+      canReturn: kind !== "fork" && e.branchLeafId !== "",
+      grants: note?.grants ?? [],
+      ...(note?.files ? {
+        files: {
+          changed: note.files.flatMap((repo) => [...repo.restored, ...repo.removed].map((path) => repoPath(repo.repo, path))),
+          skipped: note.files.flatMap((repo) => repo.skipped.map((path) => repoPath(repo.repo, path))),
+          failed: note.files.flatMap((repo) => (repo.failed ? [checkpointLabel(repo.repo)] : [])),
+          canBringBack: note.files.some((repo) => repo.restorePoint !== undefined && Object.keys(repo.bases ?? {}).length > 0),
+        },
+      } : {}),
+      ...(note?.source ? { source: { threadId: note.source.threadId, sameWorkingDirectory: note.source.sameWorkingDirectory } } : {}),
+      ...(note?.seed || note?.seedSkipped ? {
+        seed: {
+          repos: (note.seedResult ?? note.seed ?? []).filter((repo) => !("failed" in repo) || !repo.failed).map((repo) => checkpointLabel(repo.repo)),
+          pending: note.seedResult === undefined && (note.seed?.length ?? 0) > 0,
+          failed: (note.seedResult ?? []).flatMap((repo) => (repo.failed ? [checkpointLabel(repo.repo)] : [])),
+          ...(note.seedSkipped ? { skipped: note.seedSkipped } : {}),
+        },
+      } : {}),
+    },
+  };
+}
+
+/** A file path for people, relative to the working directory. */
+function repoPath(repo: string, path: string): string {
+  return repo === "." || repo === WORKSPACE_FILES ? path : `${repo.replace(/\/+$/, "")}/${path}`;
+}
+
+function checkpointLabel(repo: string): string {
+  return repo === WORKSPACE_FILES ? "the working directory" : repo;
+}
+
+/**
+ * Wire projection of the provider error that the engine keeps on the
+ * assistant entry of a failed turn. Without it, a reload shows an empty
+ * reply that does not say why the turn failed.
+ */
+function turnErrorFromMetadata(
+  metadata: Record<string, unknown> | undefined,
+  role: MessageRole,
+): string | undefined {
+  if (role !== "assistant") return undefined;
+  const value = metadata?.[MESSAGE_TURN_ERROR_KEY];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 /**
@@ -151,8 +294,10 @@ export function promptAuthorFromUser(user: {
   id: string;
   email: string;
   name?: string;
-}): PromptAuthor {
-  return { id: user.id, email: user.email, ...(user.name ? { name: user.name } : {}) };
+}, principal?: RequestPrincipal, authVia?: AuthVia): PromptAuthor {
+  if (principal?.type === "team") return { id: `team:${principal.id}`, name: "Team API key" };
+  return { id: user.id, email: user.email, ...(user.name ? { name: user.name } : {}),
+    ...(authVia === "session" || authVia === "stub" ? { interactive: true } : {}) };
 }
 
 /**
@@ -170,6 +315,8 @@ function authorFromEntry(
     ...(author.name ? { name: author.name } : {}),
     ...(author.email ? { email: author.email } : {}),
     ...(author.avatarUrl ? { avatarUrl: author.avatarUrl } : {}),
+    ...(author.externalSender ? { externalSender: true } : {}),
+    ...(author.interactive ? { interactive: true } : {}),
   };
 }
 
@@ -180,6 +327,66 @@ function authorFromEntry(
  * invocation. Only user entries qualify — the stamp rides the queue item
  * onto the user entry, never onto assistant output.
  */
+const REPLY_METADATA_KEY = "replyTo";
+/** `SendPromptRequest.clientMessageId`: a client-minted key, short enough to sit inside a dispatch id. */
+const CLIENT_MESSAGE_ID = /^[A-Za-z0-9_-]{8,64}$/;
+
+/**
+ * Whether a keyed resend carries the message its key first admitted. The
+ * engine refuses a reused dispatch id with different content, but the route
+ * answers a resend before it reaches the engine. So the route makes the same
+ * check here: the text, each image, and the file count. A skill expansion
+ * queues the expanded text, so for a resend that expands, the route compares
+ * the skill name and arguments that the first try stamped. Other slash text,
+ * such as an unknown "/word", queues unchanged and compares as text. The
+ * resend's file refs cannot be compared without spending them.
+ */
+export function resendMatches(
+  admitted: Pick<QueueItem, "content" | "metadata">,
+  body: Pick<SendPromptRequest, "text" | "attachments" | "fileRefs">,
+  expansion?: { skill: string; args: string },
+): boolean {
+  const content = admitted.content;
+  if (typeof content !== "string" && "kind" in content) return false;
+  const text = typeof content === "string" ? content : content.text ?? "";
+  const parts = typeof content === "string" ? [] : content.attachments ?? [];
+  if (expansion) {
+    if (admitted.metadata?.skill !== expansion.skill || admitted.metadata?.skillArgs !== expansion.args) return false;
+  } else if (text !== (body.text ?? "")) {
+    return false;
+  }
+  const images = parts.flatMap((part) => (part.type === "image" ? [part.url] : []));
+  const sentImages = (body.attachments ?? []).map((att) => att.url);
+  if (images.length !== sentImages.length || images.some((url, i) => url !== sentImages[i])) return false;
+  return parts.length - images.length === (body.fileRefs?.length ?? 0);
+}
+const REPLY_EXCERPT_CHARS = 280;
+
+function replyReferenceFromMetadata(
+  metadata: Record<string, unknown> | undefined,
+  role: MessageRole,
+): MessageReplyReference | undefined {
+  if (role !== "user") return undefined;
+  const value = metadata?.[REPLY_METADATA_KEY];
+  if (!value || typeof value !== "object") return undefined;
+  const ref = value as Record<string, unknown>;
+  if (typeof ref.messageId !== "string" || typeof ref.excerpt !== "string") return undefined;
+  return { messageId: ref.messageId, excerpt: ref.excerpt };
+}
+
+function assistantReplyExcerpt(entry: Extract<SessionEntry, { type: "message" }>): string {
+  const partText = (entry.parts ?? [])
+    .filter((part) => part.type === "text")
+    .map((part) => part.type === "text" ? part.text.trim() : "")
+    .filter(Boolean)
+    .join(" ");
+  const text = (partText || entry.content).replace(/\s+/g, " ").trim();
+  const codepoints = Array.from(text);
+  return codepoints.length <= REPLY_EXCERPT_CHARS
+    ? text
+    : codepoints.slice(0, REPLY_EXCERPT_CHARS - 1).join("").trimEnd() + "…";
+}
+
 function skillInvocationFromMetadata(
   metadata: Record<string, unknown> | undefined,
   role: MessageRole,
@@ -248,17 +455,22 @@ function threadToSummary(
   threadId: string,
   createdAt: number,
   sessionId: string,
+  lastUserActivityAt: number,
   title?: string,
   model?: string,
   key?: string,
   archivedAt?: number,
   reasoning?: string | null,
 ): ThreadSummary {
-  return { id: threadId, sessionId, title, createdAt, model, key, archivedAt, reasoning };
+  return { id: threadId, sessionId, title, createdAt, lastUserActivityAt, model, key, archivedAt, reasoning };
 }
 
 async function loadEngineSession(
   c: Context<AppEnv>,
+  id = c.req.param("id"),
+  decisionAccess?: { threadId?: string },
+  /** The key of the thread the request targets. A startup warning of this build goes there (fix wave 2, M13). */
+  warningThreadKey?: string,
 ): Promise<
   | {
       session: typeof agentSessions.$inferSelect;
@@ -267,7 +479,7 @@ async function loadEngineSession(
     }
   | { error: Response }
 > {
-  const session = await loadOwnedSession(c);
+  const session = await loadOwnedSession(c, id, decisionAccess);
   if (!session) return { error: c.json({ error: "session not found" }, 404) };
   const { engineHost, db } = c.var.providers;
 
@@ -276,19 +488,86 @@ async function loadEngineSession(
   // carries them. The first call to actually build the session (create or
   // restore) wires `prepareSandbox`; later calls are no-op reads once cached
   // (`sessionFor` returns early without touching `meta`).
-  const meta = await loadSessionMeta(db, session);
+  const loaded = await loadSessionMeta(db, session);
+  const meta = warningThreadKey !== undefined ? { ...loaded, warningThreadKey } : loaded;
   const engineSession = await engineHost.sessionFor(session.id, meta);
   return { session, engineSession, meta };
 }
 
-messagesRouter.get("/:id/threads", async (c) => {
-  const result = await loadEngineSession(c);
+messagesRouter.get("/:id/threads", (c) => listThreads(c, c.req.param("id")));
+
+/** Enumerate execution histories without waking their sandboxes. */
+async function workspaceThreadGroups(c: Context<AppEnv>, session: typeof agentSessions.$inferSelect, archived?: boolean) {
+  const { db, engineStore } = c.var.providers;
+  const executions = session.ownerType === "team" || session.ownerType === "user"
+    ? await db.select({ session: agentSessions, governingThreadId: assistantExecutions.governingThreadId, governingKey: assistantExecutions.conversationKey,
+        matchesArchive: archived === undefined ? sql<boolean>`true` : sql<boolean>`EXISTS (
+          SELECT 1 FROM engine_threads t LEFT JOIN session_threads m ON m.id = t.id AND m.session_id = t.session_id
+          WHERE t.session_id = ${agentSessions.id} AND (m.archived_at IS NOT NULL) = ${archived}
+        )` }).from(assistantExecutions)
+      .innerJoin(assistants, eq(assistants.id, assistantExecutions.assistantId))
+      .innerJoin(agentSessions, eq(agentSessions.id, assistantExecutions.sessionId))
+      .where(and(eq(assistants.sessionId, session.id), eq(agentSessions.orgId, session.orgId),
+        eq(agentSessions.ownerType, session.ownerType), eq(agentSessions.ownerId, session.ownerId),
+        sql`${agentSessions.status} <> 'deleted'`))
+    : [];
+  // The singleton cutover retained older assistant runtimes under their original
+  // workspace ownership. Include their history without moving threads or files.
+  const legacy = (session.ownerType === "user" || session.ownerType === "team" || session.ownerType === "org") && session.ownerId
+    ? await db.select({ session: agentSessions }).from(legacyAssistantRuntimes)
+      .innerJoin(agentSessions, eq(agentSessions.id, legacyAssistantRuntimes.sessionId))
+      .where(and(eq(legacyAssistantRuntimes.orgId, session.orgId),
+        eq(legacyAssistantRuntimes.ownerType, session.ownerType), eq(legacyAssistantRuntimes.ownerId, session.ownerId),
+        eq(agentSessions.orgId, session.orgId), eq(agentSessions.ownerType, session.ownerType), eq(agentSessions.ownerId, session.ownerId),
+        sql`${agentSessions.status} <> 'deleted'`,
+        sql`EXISTS (SELECT 1 FROM assistants a WHERE a.session_id = ${session.id}
+          AND a.org_id = ${session.orgId} AND a.owner_type = ${session.ownerType}
+          AND a.owner_id = ${session.ownerId} AND a.archived_at IS NULL)`))
+    : [];
+  const retained = [];
+  for (const row of legacy) {
+    if (row.session.id !== session.id && await isLegacyAssistantRuntime(db, row.session.id, session.orgId)) retained.push(row.session);
+  }
+  const anchors = new Set(executions.map(e => e.governingThreadId));
+  const keys = new Map(executions.map(e => [e.session.id, e.governingKey]));
+  if (session.id.startsWith("execution:")) {
+    const [self] = await db.select({ key: assistantExecutions.conversationKey }).from(assistantExecutions)
+      .where(eq(assistantExecutions.sessionId, session.id)).limit(1);
+    if (self) keys.set(session.id, self.key);
+  }
+  const rows = [session, ...retained, ...executions.filter(e => e.matchesArchive).map(e => e.session)];
+  // Each team conversation is its own session, so a workspace's history is
+  // one session per conversation. Read every thread, and decide who may see
+  // each one, in a fixed number of queries rather than several per session.
+  // `visibleThreadIds` gives each thread the answer `threadsVisibleTo` gives,
+  // including the audience of the thread that started a child session.
+  const stored = await engineStore.listThreadsForSessions(rows.map(row => row.id));
+  const shown = await visibleThreadIds(c.var.providers, { ownerType: session.ownerType }, viewerOf(c),
+    stored.map(thread => ({ sessionId: thread.sessionId, threadId: thread.id })));
+  // Root anchors carry authorization; keep old history when an anchor already held entries.
+  const rootAnchors = stored.filter(thread => thread.sessionId === session.id && anchors.has(thread.id)).map(thread => thread.id);
+  const anchorsWithHistory = new Set(rootAnchors.length === 0 ? [] : (await db.execute(sql`SELECT a.id FROM unnest(ARRAY[${sql.join(rootAnchors.map(id => sql`${id}`), sql`, `)}]::text[]) AS a(id)
+    WHERE EXISTS (SELECT 1 FROM engine_entries e WHERE e.session_id = ${session.id} AND e.thread_id = a.id)`) as { rows: Array<{ id: string }> }).rows.map(row => row.id));
+  return rows.map(row => ({ session: row, threads: stored
+    .filter(thread => thread.sessionId === row.id && shown.has(`${thread.sessionId}:${thread.id}`)
+      && !(row.id === session.id && anchors.has(thread.id) && !anchorsWithHistory.has(thread.id)))
+    .map(thread => ({ ...thread, key: keys.get(row.id) ?? thread.key })) }));
+}
+
+export async function listThreads(c: Context<AppEnv>, sessionId: string) {
+  const result = await loadEngineSession(c, sessionId);
   if ("error" in result) return result.error;
   const { session, engineSession } = result;
   const { db } = c.var.providers;
 
-  await engineSession.ensureDefaultThread();
-  const threads = engineSession.listThreads();
+  await ensureDefaultThreadWhereOwned(session.id, engineSession);
+  const wantArchived = c.req.query("archived") === "1";
+  const selectedThreadId = c.req.query("threadId");
+  const groups = await workspaceThreadGroups(c, session, selectedThreadId ? undefined : wantArchived);
+  // Parse stored tokens: a legacy "off" row has no pin and shows the session
+  // default, which is filled in for the returned page below.
+  const threads = groups.flatMap(group => group.threads.filter(t => t.id === selectedThreadId || (!isWorkflowRunConversation(group.session.id, t.key) && !isPluginThreadKey(t.key)))
+    .map(t => ({ ...t, reasoning: parseReasoningLevel(t.reasoning) })));
 
   // Titles + archive state live in the app-side `session_threads` mirror
   // (titles populated by auto-title). One lookup by id set — small, since a
@@ -300,33 +579,162 @@ messagesRouter.get("/:id/threads", async (c) => {
           id: sessionThreads.id,
           title: sessionThreads.title,
           archivedAt: sessionThreads.archivedAt,
+          lastUserActivityAt: sessionThreads.lastUserActivityAt,
+          shareMode: sessionThreads.shareMode,
+          approvalBypassBy: sessionThreads.approvalBypassBy,
         })
         .from(sessionThreads)
         .where(inArray(sessionThreads.id, ids))
     : [];
   const metaById = new Map(
-    metaRows.map((r) => [r.id, { title: r.title ?? undefined, archivedAt: r.archivedAt ?? undefined }] as const),
+    metaRows.map(
+      (r) =>
+        [
+          r.id,
+          {
+            title: r.title ?? undefined,
+            archivedAt: r.archivedAt ?? undefined,
+            lastUserActivityAt: r.lastUserActivityAt ?? undefined,
+            share: r.shareMode ?? undefined,
+            approvalBypass: r.approvalBypassBy !== null,
+          },
+        ] as const,
+    ),
   );
 
   // Default list excludes archived threads; `?archived=1` lists only them.
-  const wantArchived = c.req.query("archived") === "1";
+  // A team runtime's private threads show only to the people they belong to
+  // (`services/thread-access.ts`).
+  const query = c.req.query("q")?.trim().toLowerCase() ?? "";
+  if (query.includes("\0")) return c.json({ error: "Search contains an unsupported NUL character. Remove it and try again." }, 400);
+  if (query.length > 500) return c.json({ error: "Search is too long. Use at most 500 characters." }, 400);
+  // Search persisted chat text without downloading histories. The session was
+  // authorized above; the visibility filter below also excludes private threads.
+  const contentMatches = query
+    ? await db.selectDistinct({ threadId: sql<string>`thread_id` })
+        .from(sql`engine_entries`)
+        .where(sql`session_id in (${sql.join(groups.map(g => sql`${g.session.id}`), sql`, `)}) and entry_type = 'message'
+          and role in ('user', 'assistant')
+          and strpos(lower(content), ${query}) > 0`)
+    : [];
+  const matchingIds = new Set([...contentMatches.map((row) => row.threadId), ...(c.req.queries("fixedId") ?? [])]);
   const summaries = threads
-    .filter((t) => (metaById.get(t.id)?.archivedAt !== undefined) === wantArchived)
-    .map((t) =>
-      threadToSummary(
-        t.id,
-        t.toThreadData().createdAt,
-        session.id,
-        metaById.get(t.id)?.title,
-        t.modelId(),
-        t.key,
-        metaById.get(t.id)?.archivedAt,
-        t.reasoning() ?? null,
-      ),
-    );
-  const body: ListThreadsResponse = { threads: summaries };
+    .filter(t => !query || matchingIds.has(t.id) || metaById.get(t.id)?.title?.toLowerCase().includes(query))
+    .filter(t => t.id === selectedThreadId || (metaById.get(t.id)?.archivedAt !== undefined) === wantArchived)
+    .map(t => {
+      const meta = metaById.get(t.id);
+      const summary = threadToSummary(t.id, t.createdAt, t.sessionId, meta?.lastUserActivityAt ?? t.createdAt, t.key === HOME_THREAD_KEY ? HOME_THREAD_TITLE : meta?.title,
+        t.model, t.key, meta?.archivedAt, t.reasoning ?? null);
+      return { ...summary, ...(meta?.share ? { share: meta.share } : {}), ...(meta?.approvalBypass ? { approvalBypass: true as const } : {}) };
+    });
+  let body: ListThreadsResponse;
+  try { body = threadPage(summaries, new URL(c.req.url).searchParams); }
+  catch (error) { return c.json({ error: error instanceof Error ? error.message : "Refresh the thread list." }, 400); }
+  // A thread without its own model or reasoning shows its session's defaults.
+  const unpinned = [...new Set(body.threads.filter(t => !t.model || !t.reasoning).map(t => t.sessionId))];
+  const defaults = new Map(await Promise.all(unpinned.map(async id => [id, await c.var.providers.engineStore.getSession(id)] as const)));
+  for (const summary of body.threads) {
+    const session = defaults.get(summary.sessionId);
+    summary.model ??= session?.model;
+    summary.reasoning ??= parseReasoningLevel(session?.reasoning) ?? null;
+  }
+  for (const group of groups) {
+    const groupSummaries = body.threads.filter(t => t.sessionId === group.session.id);
+    if (!groupSummaries.length) continue;
+    const activity = await listThreadActivity(db, c.var.user.id, group.session.id, groupSummaries.map(t => t.id), c.var.principal,
+      group.session.ownerType === "team");
+    for (const summary of groupSummaries) {
+      Object.assign(summary, activity.get(summary.id));
+      const channel = threadChannel(summary.key, summary.pullRequests);
+      if (channel) summary.channel = channel;
+    }
+  }
   return c.json(body);
-});
+}
+
+/** How much one thread has talked in its channel: a count and the newest message. */
+messagesRouter.get("/:id/threads/:threadId/channel-activity", (c) => getThreadChannelActivity(c, c.req.param("id"), c.req.param("threadId")));
+
+export async function getThreadChannelActivity(c: Context<AppEnv>, sessionId: string, threadId: string) {
+  const result = await loadEngineSession(c, sessionId);
+  if ("error" in result) return result.error;
+  const { session, engineSession } = result;
+  if (!await visibleThread(c, session, engineSession, threadId)) {
+    return c.json({ error: "Thread not found. Refresh the thread list." }, 404);
+  }
+  const body: ThreadChannelActivity = await threadChannelActivity(c.var.providers.db, session.id, threadId);
+  return c.json(body);
+}
+
+/** How full one thread's model context is. Reading it never loads the transcript or wakes the sandbox. */
+messagesRouter.get("/:id/threads/:threadId/context", (c) => getThreadContext(c, c.req.param("id"), c.req.param("threadId")));
+
+export async function getThreadContext(c: Context<AppEnv>, sessionId: string, threadId: string) {
+  const result = await loadEngineSession(c, sessionId);
+  if ("error" in result) return result.error;
+  const thread = await visibleThread(c, result.session, result.engineSession, threadId);
+  if (!thread) return c.json({ error: "Thread not found. Refresh the thread list." }, 404);
+  const body: ThreadContextResponse = { context: (await thread.contextUsage()) ?? null };
+  return c.json(body);
+}
+
+/** Entries read for a recap. Tool entries count too, so this covers a few dozen messages. */
+const RECAP_ENTRY_LIMIT = 600;
+
+/** What other people did in a thread since the reader last saw it. `since` is the reader's last read time. */
+export async function getThreadRecap(c: Context<AppEnv>, sessionId: string, threadId: string) {
+  const result = await loadEngineSession(c, sessionId);
+  if ("error" in result) return result.error;
+  const thread = await visibleThread(c, result.session, result.engineSession, threadId);
+  if (!thread) return c.json({ error: "Thread not found. Refresh the thread list." }, 404);
+  const since = c.req.query("since");
+  const readAt = since === undefined ? undefined : Number(since);
+  if (readAt !== undefined && (!Number.isFinite(readAt) || readAt < 0)) {
+    return c.json({ error: "since must be a time in milliseconds. Omit it for a thread the reader never opened." }, 400);
+  }
+  const messages = (await thread.readEntries({ limit: RECAP_ENTRY_LIMIT }))
+    .map((entry) => entryToMessage(entry, sessionId, thread.id))
+    .filter((message): message is Message => message !== null);
+  const user = c.var.user;
+  try {
+    const body: ThreadRecapResponse = await threadRecap({
+      threadId: thread.id, messages, readerId: user.id, readerName: user.name || user.email, readAt,
+    });
+    return c.json(body);
+  } catch (err) {
+    console.error(`GET /threads/${thread.id}/recap: the recap failed:`, err);
+    return c.json({ error: "Valet could not write the recap. Open the thread again to retry." }, 502);
+  }
+}
+
+/** Marks threads read for the caller. With no ids, marks every thread in the session. */
+messagesRouter.post("/:id/threads/read", (c) => readThreads(c, c.req.param("id")));
+
+export async function readThreads(c: Context<AppEnv>, sessionId: string) {
+  const result = await loadEngineSession(c, sessionId);
+  if ("error" in result) return result.error;
+  const { session } = result;
+  // An empty body marks every thread. A malformed one is refused rather than
+  // read as that default.
+  const body: MarkThreadsReadRequest | null = await readOptionalJsonObject(c);
+  if (!body) {
+    return c.json({ error: "Send a JSON object, such as {\"threadIds\": [\"<thread id>\"]}, or an empty body to mark every thread read." }, 400);
+  }
+  // Another pod may have made a thread this one has not loaded, so the
+  // stored threads decide which ids exist.
+  const groups = await workspaceThreadGroups(c, session);
+  const known = new Set(groups.flatMap(g => g.threads.map(t => t.id)));
+  if (body.threadIds !== undefined && !Array.isArray(body.threadIds)) {
+    return c.json({ error: "threadIds must be an array of thread ids." }, 400);
+  }
+  const ids = body.threadIds === undefined ? [...known]
+    : body.threadIds.filter((id): id is string => typeof id === "string" && known.has(id));
+  const selected = new Set(ids);
+  for (const group of groups) {
+    await markThreadsRead(c.var.providers.db, c.var.user.id, group.session.id, group.threads.filter(t => selected.has(t.id)).map(t => t.id));
+  }
+  return c.body(null, 204);
+}
 
 // ── Commands ────────────────────────────────────────────────────────────────
 //
@@ -373,14 +781,15 @@ messagesRouter.get("/:id/commands", async (c) => {
 /** Maximum length for a thread title. This matches the session title limit. */
 const MAX_THREAD_TITLE_CHARS = 200;
 
-messagesRouter.patch("/:id/threads/:threadId", async (c) => {
-  const result = await loadEngineSession(c);
+messagesRouter.patch("/:id/threads/:threadId", (c) => patchThread(c, c.req.param("id"), c.req.param("threadId")));
+
+export async function patchThread(c: Context<AppEnv>, sessionId: string, threadId: string) {
+  const result = await loadEngineSession(c, sessionId);
   if ("error" in result) return result.error;
   const { session, engineSession } = result;
   const { db } = c.var.providers;
 
-  const threadId = c.req.param("threadId");
-  const thread = engineSession.threadById(threadId);
+  const thread = await visibleThread(c, session, engineSession, threadId);
   if (!thread) return c.json({ error: "thread not found" }, 404);
 
   let body: PatchThreadRequest;
@@ -393,12 +802,57 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
     body.model === undefined &&
     body.archived === undefined &&
     body.title === undefined &&
-    body.reasoning === undefined
+    body.reasoning === undefined &&
+    body.share === undefined &&
+    body.approvalBypass === undefined
   ) {
     return c.json(
-      { error: "nothing to patch: send model (null to clear), archived, title, and/or reasoning" },
+      { error: "nothing to patch: send model (null to clear), archived, title, reasoning, share, and/or approvalBypass" },
       400,
     );
+  }
+
+  // Home is a place: one name, never archived, never shared. Model and
+  // reasoning still change, and clearing a share or an archive is allowed.
+  if (thread.key === HOME_THREAD_KEY) {
+    if (body.title !== undefined) return c.json({ error: "Home keeps its name. Rename another thread instead." }, 400);
+    if (body.archived === true) return c.json({ error: "Home cannot be archived. Archive another thread instead." }, 400);
+    if (body.share !== undefined && body.share !== "off") return c.json({ error: "Home is private to you and cannot be shared. Share another thread instead." }, 400);
+  }
+
+  // Only the owner shares a personal thread. A team thread is already open to
+  // its team, so it has no share (`services/thread-share.ts`).
+  let nextShare: ThreadShareMode | null | undefined;
+  if (body.share !== undefined) {
+    if (body.share !== "off" && !isThreadShareMode(body.share)) {
+      return c.json({ error: "Set share to \"off\", \"view\", or \"reply\"." }, 400);
+    }
+    if (session.ownerType !== "user") {
+      return c.json({ error: "Only a personal thread can be shared. Everyone on the team can already open team threads." }, 400);
+    }
+    nextShare = body.share === "off" ? null : body.share;
+  }
+
+  // "Run without asking" (`services/thread-approval-bypass.ts`). Anyone who
+  // may open the thread may turn it off. Only a person who could stop each
+  // approval for good may turn it on, and only from a signed-in browser, so
+  // an agent that holds the person's API key cannot turn it on for itself.
+  if (body.approvalBypass !== undefined) {
+    if (typeof body.approvalBypass !== "boolean") {
+      return c.json({ error: "Set approvalBypass to true or false." }, 400);
+    }
+    if (body.approvalBypass) {
+      if (c.var.authVia !== "session" && c.var.authVia !== "stub") {
+        return c.json({ error: "Turn on Run without asking in Valet, signed in to your browser." }, 403);
+      }
+      if (session.ownerType === "team") {
+        if (!session.ownerId || !(await canAdministerTeam(db, session.ownerId, c.var.user.id))) {
+          return c.json({ error: "Only a team admin can turn on Run without asking for a team thread. Ask a team admin." }, 403);
+        }
+      } else if (session.ownerType !== "user" || (session.ownerId || session.userId) !== c.var.user.id) {
+        return c.json({ error: "Only the thread's owner can turn on Run without asking." }, 403);
+      }
+    }
   }
 
   // Validate the title before changing any thread settings.
@@ -447,6 +901,26 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
     if (reasoningErr) return c.json({ error: reasoningErr }, 400);
   }
 
+  // An archive waits for the thread's turn, forced or not (fix wave 4, P4).
+  // A turn that starts background work after the gate below would leave
+  // work running on a hidden thread, and nobody would see the 409 for it.
+  // A turn blocked on an approval does not count: the archive withdraws
+  // its gate below (TKAI-260), and the turn then settles.
+  const threadBusy = async (): Promise<boolean> =>
+    (await c.var.providers.engineStore.listUnsettledSubmissions(sessionId))
+      .some((item) => item.threadId === thread.id && item.status !== "blocked_on_decision_gate");
+  if (body.archived === true && (await threadBusy())) {
+    return c.json({ error: "A turn is running in this thread. Wait for it to finish, then archive." }, 409);
+  }
+
+  // Archiving a thread with background work stops that work, so it needs
+  // `force: true` (fix wave 3, H1). The check runs before any write; the
+  // forced stop runs below, next to the approval withdrawal.
+  const archiveGate = body.archived === true
+    ? await gateBackgroundWork(c, session, "archive", { threadId: thread.id }, body.force === true)
+    : undefined;
+  if (archiveGate?.kind === "refused") return archiveGate.response;
+
   if (body.model !== undefined) {
     try {
       await thread.setModel(
@@ -466,6 +940,62 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
       return c.json({ error: (err as Error).message }, 400);
     }
   }
+
+  // Archiving hides the thread, so an approval pending on it would suspend
+  // the agent with nobody left to answer (TKAI-260). Archive withdraws those
+  // approvals as cancelled, which only someone who may answer them can do.
+  if (body.archived === true) {
+    const pending = (await engineSession.pendingDecisionGates())
+      .filter((gate) => gate.threadId === thread.id && gate.status === "pending");
+    if (pending.length > 0) {
+      if (!(await canAnswerDecision(c, session, sessionId))) {
+        return c.json(
+          { error: "This thread is waiting on an approval. Ask someone who can answer it to approve or deny it, then archive the thread." },
+          409,
+        );
+      }
+      for (const gate of pending) await engineSession.withdrawDecision(gate.id, "cancel");
+    }
+  }
+
+  // A forced archive stops the thread's wakeups and holds as a human cancel
+  // (fix wave 3, H1). The signal goes to the session's main thread, because
+  // the work's own thread is about to be hidden. It tells the agent that a
+  // person stopped the work, so it does not wait for a signal that never
+  // comes after an unarchive. The main thread can have a wider audience,
+  // so the signal carries the reason but no log tail and no channel origin
+  // (fix wave 4, N3). The archived thread keeps a note of the stop.
+  let cancelledWork: string[] | undefined;
+  if (archiveGate?.kind === "force") {
+    const stopped = await cancelAllWorkAsHuman(
+      c.var.providers.engineStore,
+      engineSession,
+      sessionId,
+      { threadId: thread.id, ids: archiveGate.ids },
+      {
+        actorUserId: c.var.user.id,
+        signal: "deliver",
+        deliverTo: "main",
+        note: "They archived the thread it ran in. Do not start it again unless someone asks.",
+      },
+    );
+    if (stopped.cancelled.length > 0) {
+      cancelledWork = stopped.cancelled.map((w) => w.id);
+      const items = stopped.cancelled.map((w) => `"${w.reason}" (${w.kind})`).join(", ");
+      await thread.appendEntry({
+        id: `e-${randomUUID()}`,
+        sessionId,
+        threadId: thread.id,
+        parentId: null,
+        type: "message",
+        role: "system",
+        content: `A person archived this thread, which stopped its background work: ${items}. The agent got a message about it on the main thread.`,
+        createdAt: Date.now(),
+      });
+    }
+  }
+
+  if (body.archived === true) await endChildSubscriptions(c.var.providers.engineStore, sessionId, thread.id, db);
 
   // The mirror row can be missing before auto-title runs.
   const wantsArchived = body.archived !== undefined;
@@ -492,9 +1022,24 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
       });
   }
 
+  if (nextShare !== undefined) {
+    await setThreadShare(db, { id: thread.id, sessionId: session.id, createdAt: thread.toThreadData().createdAt }, nextShare);
+  }
+
+  if (body.approvalBypass !== undefined) {
+    await setThreadApprovalBypass(db, { id: thread.id, sessionId: session.id, createdAt: thread.toThreadData().createdAt },
+      body.approvalBypass ? c.var.user.id : null);
+  }
+
   // Return the same title and archive state as a subsequent GET.
   const rows = await db
-    .select({ archivedAt: sessionThreads.archivedAt, title: sessionThreads.title })
+    .select({
+      archivedAt: sessionThreads.archivedAt,
+      title: sessionThreads.title,
+      lastUserActivityAt: sessionThreads.lastUserActivityAt,
+      shareMode: sessionThreads.shareMode,
+      approvalBypassBy: sessionThreads.approvalBypassBy,
+    })
     .from(sessionThreads)
     .where(eq(sessionThreads.id, thread.id))
     .limit(1);
@@ -505,20 +1050,29 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
     thread.id,
     thread.toThreadData().createdAt,
     session.id,
+    rows[0]?.lastUserActivityAt ?? thread.toThreadData().createdAt,
     title,
     thread.modelId(),
     thread.key,
     archivedAt,
     thread.reasoning() ?? null,
   );
-  return c.json(summary);
-});
+  const response: PatchThreadResponse = {
+    ...summary,
+    ...(rows[0]?.shareMode ? { share: rows[0].shareMode } : {}),
+    ...(rows[0]?.approvalBypassBy ? { approvalBypass: true as const } : {}),
+    ...(cancelledWork ? { cancelledWork } : {}),
+  };
+  return c.json(response);
+}
 
-messagesRouter.post("/:id/threads", async (c) => {
-  const result = await loadEngineSession(c);
+messagesRouter.post("/:id/threads", (c) => createThread(c, c.req.param("id")));
+
+export async function createThread(c: Context<AppEnv>, sessionId: string) {
+  const result = await loadEngineSession(c, sessionId);
   if ("error" in result) return result.error;
-  const { session, engineSession, meta } = result;
-  const { db, engineHost } = c.var.providers;
+  const { session, engineSession } = result;
+  const { db } = c.var.providers;
 
   let parsed: unknown = {};
   try {
@@ -535,19 +1089,68 @@ messagesRouter.post("/:id/threads", async (c) => {
     return c.json({ error: "sourceThreadId must be a string. Select a thread from this session." }, 400);
   }
 
+  if (body.title !== undefined && typeof body.title !== "string") {
+    return c.json({ error: "Set title to a string." }, 400);
+  }
+  const title = body.title?.trim() || undefined;
+  if (title && title.length > MAX_THREAD_TITLE_CHARS) {
+    return c.json({ error: `title is too long. Use ${MAX_THREAD_TITLE_CHARS} characters or fewer.` }, 400);
+  }
+
   const sourceThreadId = body.sourceThreadId;
-  const source = sourceThreadId === undefined ? null : engineSession.threadById(sourceThreadId);
+  // An empty id names no thread; `visibleThread` would read it as the default.
+  let source = sourceThreadId ? await visibleThread(c, session, engineSession, sourceThreadId) : null;
+  if (sourceThreadId && !source && engineSession.options.readOnlyReason) {
+    const [mapped] = await db.select({ sessionId: assistantExecutions.sessionId }).from(assistantExecutions)
+      .innerJoin(assistants, eq(assistants.id, assistantExecutions.assistantId))
+      .where(and(eq(assistants.sessionId, session.id), sql`exists (select 1 from engine_threads t
+        where t.session_id = ${assistantExecutions.sessionId} and t.id = ${sourceThreadId})`)).limit(1);
+    if (mapped) {
+      const loaded = await loadEngineSession(c, mapped.sessionId);
+      if (!("error" in loaded)) source = await visibleThread(c, loaded.session, loaded.engineSession, sourceThreadId);
+    }
+  }
   if (sourceThreadId !== undefined && !source) {
     return c.json({ error: "thread not found. Select a thread from this session." }, 404);
   }
 
+  const { summary } = await openThread(c, result, { source, title });
+  return c.json(summary, 201);
+}
+
+/**
+ * Create a thread in a loaded session: the body of `POST .../threads`, and
+ * the destination of a fork. Forks and new team conversations get their own
+ * execution sessions. `source` lends its model and
+ * reasoning level when the person keeps current settings for new threads.
+ */
+export async function openThread(
+  c: Context<AppEnv>,
+  loaded: { session: typeof agentSessions.$inferSelect; engineSession: EngineSession; meta: Awaited<ReturnType<typeof loadSessionMeta>> },
+  opts: { source?: Thread | null; title?: string; isolated?: boolean; channels?: string[] },
+): Promise<{ thread: Thread; summary: CreateThreadResponse }> {
+  const { session, engineSession, meta } = loaded;
+  const { db, engineHost } = c.var.providers;
+  const { source, title } = opts;
+  const assistant = opts.isolated ? await loadAssistantBySessionId(db, session.id) : undefined;
+  if (opts.isolated && (!assistant || assistant.orgId !== session.orgId
+    || assistant.ownerType !== session.ownerType || assistant.ownerId !== (session.ownerId || session.userId)
+    || (assistant.ownerType !== "user" && assistant.ownerType !== "team"))) {
+    throw new ValidationError("This session cannot be forked into an isolated working directory while preserving its tools and persona. Start a new session instead.");
+  }
+  if (opts.isolated && assistant) {
+    const current = await findDefaultAssistant(db, session.orgId, { type: assistant.ownerType, id: assistant.ownerId });
+    if (current?.id !== assistant.id) {
+      throw new ValidationError("This retained assistant cannot be forked without changing its persona and sender. Start a new conversation in your current workspace instead.");
+    }
+  }
   const behaviorRows = await db
     .select({ newThreadBehavior: users.newThreadBehavior })
     .from(users)
     .where(eq(users.id, c.var.user.id))
     .limit(1);
   const keepCurrent = behaviorRows[0]?.newThreadBehavior !== "use_defaults";
-  const settings = keepCurrent && source
+  const settings = (opts.isolated || keepCurrent) && source
     ? {
         model: source.modelId() ?? engineSession.options.modelSpec ?? engineSession.options.model.id,
         reasoning: parseReasoningLevel(
@@ -560,19 +1163,33 @@ messagesRouter.post("/:id/threads", async (c) => {
   // POST creates a new thread (calling thread() with an existing key
   // returns the cached one).
   const key = `web:${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-  const thread = await engineSession.createThread(key, settings);
+  const target = opts.isolated && assistant
+    ? (await ensureAssistantExecution(c.var.providers, { type: assistant.ownerType, id: assistant.ownerId },
+      { orgId: session.orgId, actorUserId: c.var.user.id }, key, { isolated: true, metadata: { [SLACK_CHANNELS_METADATA_KEY]: opts.channels ?? [] } })).session
+    : engineSession.options.readOnlyReason && session.ownerType === "team"
+    ? (await ensureAssistantExecution(c.var.providers, { type: "team", id: session.ownerId },
+      { orgId: session.orgId, actorUserId: c.var.user.id }, key)).session
+    : engineSession;
+  const thread = await target.createThread(key, settings);
+  if (title) {
+    await db.insert(sessionThreads).values({
+      id: thread.id, sessionId: target.id,
+      createdAt: thread.toThreadData().createdAt, title,
+    }).onConflictDoUpdate({ target: sessionThreads.id, set: { title } });
+  }
   const summary: CreateThreadResponse = threadToSummary(
     thread.id,
     thread.toThreadData().createdAt,
-    session.id,
-    body.title,
+    target.id,
+    thread.toThreadData().createdAt,
+    title,
     thread.modelId(),
     thread.key,
     undefined,
     thread.reasoning() ?? null,
   );
-  return c.json(summary, 201);
-});
+  return { thread, summary };
+}
 
 /**
  * Resolve the target thread from a `?threadId=` query param or body field.
@@ -588,30 +1205,85 @@ function resolveThread(
   return engineSession.threadById(threadId);
 }
 
+/** `resolveThread`, but only a thread this request may see
+ * (`services/thread-access.ts`): a team runtime's private thread reads as
+ * missing to anyone else. */
+async function visibleThread(
+  c: Context<AppEnv>,
+  session: { ownerType: string },
+  engineSession: EngineSession,
+  threadId: string | undefined,
+) {
+  const thread = resolveThread(engineSession, threadId);
+  return thread && await threadsVisibleTo(c, session)(threadRef(thread)) ? thread : undefined;
+}
+
 // ── Messages: list ────────────────────────────────────────────────────────
 
-messagesRouter.get("/:id/messages", async (c) => {
-  const result = await loadEngineSession(c);
+messagesRouter.get("/:id/messages", (c) => listMessages(c, c.req.param("id")));
+
+/** Read an earlier path without moving the active leaf or restoring files. */
+export async function branchPreview(c: Context<AppEnv>, sessionId: string, threadId: string) {
+  const loaded = await loadEngineSession(c, sessionId);
+  if ("error" in loaded) return loaded.error;
+  const thread = await visibleThread(c, loaded.session, loaded.engineSession, threadId);
+  if (!thread) return c.json({ error: "Thread not found." }, 404);
+  const noteId = c.req.query("noteEntryId");
+  if (!noteId) return c.json({ error: "Choose an earlier version to view." }, 400);
+  const snapshot = await c.var.providers.engineStore.getThreadSnapshot(sessionId, threadId);
+  const note = snapshot?.entries.find((entry) => entry.id === noteId);
+  if (!snapshot || note?.type !== "branch_summary" || !note.branchLeafId
+    || !snapshot.entries.some((entry) => entry.id === note.branchLeafId)) {
+    return c.json({ error: "This version is not here. Reload the thread and choose another version." }, 404);
+  }
+  let path = walkTranscriptDag(snapshot.entries, note.branchLeafId);
+  const cursor = c.req.query("cursor");
+  if (cursor) {
+    const index = path.findIndex((entry) => entry.id === cursor);
+    if (index < 0) return c.json({ error: "This preview changed. Open the version again." }, 400);
+    path = path.slice(0, index);
+  }
+  const parsedLimit = Number.parseInt(c.req.query("limit") ?? "50", 10);
+  const limit = Number.isFinite(parsedLimit) ? Math.min(100, Math.max(1, parsedLimit)) : 50;
+  const hasMore = path.length > limit;
+  const tail = path.slice(-limit);
+  const response: ListMessagesResponse = {
+    messages: tail.map((entry) => entryToMessage(entry, sessionId, threadId)).filter((message): message is Message => message !== null),
+    hasMore,
+    ...(hasMore && tail[0] ? { nextCursor: tail[0].id } : {}),
+  };
+  return c.json(response);
+}
+
+export async function listMessages(c: Context<AppEnv>, sessionId: string, threadId?: string) {
+  if (sessionId.startsWith("wf:")) return listWorkflowStepMessages(c, sessionId, threadId);
+  const result = await loadEngineSession(c, sessionId);
   if ("error" in result) return result.error;
   const { session, engineSession } = result;
 
-  await engineSession.ensureDefaultThread();
-  const requested = c.req.query("threadId") || undefined;
-  const thread = resolveThread(engineSession, requested);
-  if (!thread) return c.json({ error: "thread not found" }, 404);
+  await ensureDefaultThreadWhereOwned(session.id, engineSession);
+  const requested = threadId ?? (c.req.query("threadId") || undefined);
+  const thread = await visibleThread(c, session, engineSession, requested);
+  if (!thread) {
+    return c.json({ error: "thread not found" }, 404);
+  }
 
   const parsedLimit = Number.parseInt(c.req.query("limit") ?? "100", 10);
-  const limit = Number.isNaN(parsedLimit) ? 100 : Math.max(1, parsedLimit);
+  const queueItemId = c.req.query("queueItemId") || undefined;
+  const requestedLimit = Number.isNaN(parsedLimit) ? 100 : Math.max(1, parsedLimit);
+  const limit = queueItemId ? Math.min(2000, requestedLimit) : requestedLimit;
   const cursor = c.req.query("cursor") ?? undefined;
   // Read one extra row so the bounded tail can report whether older rows
   // exist. The response still contains at most the requested limit.
-  const entries = await thread.readEntries({ limit: limit + 1, cursor });
+  const entries = await thread.readEntries({ limit: limit + 1, cursor, queueItemId });
   const hasMore = entries.length > limit;
   const tail = hasMore ? entries.slice(1) : entries;
 
+  // Large tool results ship trimmed; a step loads its full output when it opens.
   const messages = tail
     .map((e) => entryToMessage(e, session.id, thread.id))
-    .filter((m): m is Message => m !== null);
+    .filter((m): m is Message => m !== null)
+    .map((m) => m.parts.length ? { ...m, parts: trimToolResults(m.parts, { entryId: m.id, threadId: thread.id }) } : m);
 
   const body: ListMessagesResponse = {
     messages,
@@ -619,7 +1291,38 @@ messagesRouter.get("/:id/messages", async (c) => {
     nextCursor: undefined, // engine cursor pagination is opaque; revisit if needed
   };
   return c.json(body);
-});
+}
+
+/**
+ * A workflow step session's messages, for the run page's step logs. The
+ * session has no app row, so `loadEngineSession` cannot reach it. Whoever may
+ * read the run reads its steps, by the same check as `get_run`, and the read
+ * is bounded like the live path. Nothing builds the session.
+ */
+async function listWorkflowStepMessages(c: Context<AppEnv>, sessionId: string, threadId?: string) {
+  const missing = () => c.json({ error: "session not found" }, 404);
+  let runId: string;
+  try { ({ runId } = parseWorkflowSessionId(sessionId)); } catch { return missing(); }
+  const { deps, owner } = workflowRequestContext(c);
+  if (!(await canReadWorkflowRun(deps, owner, runId))) return missing();
+  const store = c.var.providers.engineStore;
+  const requested = threadId ?? (c.req.query("threadId") || undefined);
+  const thread = requested ? await store.getThread(sessionId, requested) : (await store.listThreads(sessionId))[0];
+  if (!thread) return c.json({ error: "thread not found" }, 404);
+  const parsedLimit = Number.parseInt(c.req.query("limit") ?? "100", 10);
+  const limit = Math.min(2000, Number.isNaN(parsedLimit) ? 100 : Math.max(1, parsedLimit));
+  const queueItemId = c.req.query("queueItemId") || undefined;
+  const entries = await store.getEntries(sessionId, thread.id, { limit: limit + 1, cursor: c.req.query("cursor") ?? undefined, queueItemId });
+  const hasMore = entries.length > limit;
+  const body: ListMessagesResponse = {
+    messages: (hasMore ? entries.slice(1) : entries)
+      .map((e) => entryToMessage(e, sessionId, thread.id))
+      .filter((m): m is Message => m !== null),
+    hasMore,
+    nextCursor: undefined,
+  };
+  return c.json(body);
+}
 
 // ── Messages: send prompt ─────────────────────────────────────────────────
 
@@ -640,15 +1343,32 @@ export async function submitSessionPrompt(
   text: string,
   opts?: {
     threadId?: string;
+    appPageHint?: AppPageHint;
     attachments?: SendPromptRequest["attachments"];
     fileRefs?: SendPromptRequest["fileRefs"];
-    queueMode?: "followup" | "steer";
+    queueMode?: "followup" | "inject" | "steer";
     promoteItemId?: string;
     /** The authenticated sender, persisted on the user entry as `MessageEntry.author`. */
     author?: PromptAuthor;
+    /** False for agent-driven submissions, which must not reorder the sidebar. */
+    recordUserActivity?: boolean;
+    /** Internal continuation ceiling. Never read from the public message body. */
+    toolScope?: ToolScope;
+    /** Resolve the preceding task's ceiling again when the turn starts. */
+    inheritToolScope?: boolean;
+    /** Server-validated assistant entry reference. */
+    replyTo?: MessageReplyReference;
+    /** Authorized, request-scoped fork command operation. */
+    forkThread?: (threadId: string, prompt: string) => Promise<string>;
+    /** The sender's earlier user message that this text replaces (`Thread.editMessage`). */
+    editEntryId?: string;
+    /** With `editEntryId`: also undo the files the replaced turns changed. */
+    undoFiles?: boolean;
+    /** Admission key. Two submits with the same key queue one prompt (`QueueItem.dispatchId`). */
+    dispatchId?: string;
   },
 ): Promise<SendPromptResponse | null> {
-  const { threadId, attachments, fileRefs, author } = opts ?? {};
+  const { threadId, attachments, fileRefs, author, recordUserActivity = true, replyTo, editEntryId, undoFiles } = opts ?? {};
   const admission = { queueMode: opts?.queueMode, promoteItemId: opts?.promoteItemId };
   const { db, engineHost } = providers;
   const engineSession = await engineHost.sessionFor(row.id, await loadSessionMeta(db, row));
@@ -657,21 +1377,43 @@ export async function submitSessionPrompt(
   // ever fires the attachment-side hooks).
   await engineHost.markSessionUsed(row.id);
 
-  await engineSession.ensureDefaultThread();
+  await ensureDefaultThreadWhereOwned(row.id, engineSession);
   const thread = resolveThread(engineSession, threadId);
   if (!thread) return null;
+  const recordActivity = (activityAt: number) => recordUserActivity
+    ? recordThreadUserActivity(db, {
+        sessionId: row.id,
+        threadId: thread.id,
+        threadCreatedAt: thread.toThreadData().createdAt,
+        activityAt,
+        emit: (event) => engineSession.emit(event),
+      })
+    : Promise.resolve();
 
   if (admission.promoteItemId) {
     const receipt = await thread.promoteQueuedItem(admission.promoteItemId);
-    const now = Date.now();
-    await db
-      .update(agentSessions)
-      .set({ updatedAt: now, lastActivityAt: now })
-      .where(eq(agentSessions.id, row.id));
+    const activityAt = Date.now();
+    await recordSessionActivity(db, row.id, activityAt);
+    await recordThreadActivityBestEffort(() => recordActivity(activityAt));
     return {
       messageId: receipt.queueItemId || null,
       threadId: receipt.threadId,
+      activityAt,
     };
+  }
+
+  // Reject reply-plus-command before consuming single-use attachment refs.
+  const outcome = text.startsWith("/") ? dispatchCommand(text, engineSession.commandRegistry()) : null;
+  if (replyTo && outcome?.kind === "execute") {
+    throw new ValidationError("A reply must include a message. Cancel the reply before you run a slash command.");
+  }
+  if (editEntryId !== undefined && outcome && outcome.kind !== "pass") {
+    throw new ValidationError("An edited message cannot run a slash command. Send the command as a new message.");
+  }
+
+  if (outcome?.kind === "execute" && outcome.resolved.source === "builtin" && outcome.resolved.name === "fork"
+    && (attachments?.length || fileRefs?.length)) {
+    throw new ValidationError("Send /fork with an optional text prompt only. Attach files in the new thread.");
   }
 
   // Resolve file attachment refs. Consumption is atomic for the whole
@@ -702,7 +1444,6 @@ export async function submitSessionPrompt(
   //   text to the requested thread like any prompt.
   // - pass-kind (unknown "/word", e.g. "/etc/passwd is the file") → the
   //   requested thread, text unchanged.
-  const outcome = text.startsWith("/") ? dispatchCommand(text, engineSession.commandRegistry()) : null;
 
   // Build the prompt content once per text variant: plain text, or text +
   // attachments. The expand path swaps only the text; the attachment
@@ -756,19 +1497,36 @@ export async function submitSessionPrompt(
     outcome?.kind === "expand" && outcome.skill
       ? { skill: outcome.skill.source.name, skillArgs: outcome.skill.args }
       : undefined;
+  const appPageHint = author && !author.externalSender && isAssistantConversationOf(thread.key, author.id)
+    ? readAppPageHint(opts?.appPageHint) : undefined;
+  const continuationMetadata = {
+    ...(appPageHint ? { appPageHint } : {}),
+    ...(opts?.toolScope ? { [TOOL_SCOPE_KEY]: opts.toolScope } : {}),
+    ...(opts?.inheritToolScope ? { [INHERIT_TOOL_SCOPE_KEY]: true } : {}),
+  };
 
+  // This is the user action time. Persist it only after the engine accepts
+  // the prompt, so a slow command cannot overtake a later user submission.
+  const activityAt = Date.now();
   let receipt;
   try {
-    receipt =
-      outcome && outcome.kind === "execute"
+    receipt = editEntryId !== undefined
+      ? await thread.editMessage(editEntryId, withAttachments(promptText), {
+          metadata: continuationMetadata,
+          ...(author ? { author } : {}),
+        }, { undoFiles: undoFiles === true })
+      : outcome && outcome.kind === "execute"
         ? await engineSession.prompt(withAttachments(promptText), {
             threadId: thread.id,
+            ...(opts?.forkThread ? { forkThread: opts.forkThread } : {}),
             ...(admission.queueMode ? { queueMode: admission.queueMode } : {}),
             ...(author ? { author } : {}),
+            metadata: { ...(replyTo ? { [REPLY_METADATA_KEY]: replyTo } : {}), ...continuationMetadata },
           })
         : await thread.submitPrompt(withAttachments(promptText), {
             ...(admission.queueMode ? { queueMode: admission.queueMode } : {}),
-            ...(skillMetadata ? { metadata: skillMetadata } : {}),
+            ...(opts?.dispatchId ? { dispatchId: opts.dispatchId } : {}),
+            metadata: { ...(skillMetadata ?? {}), ...(replyTo ? { [REPLY_METADATA_KEY]: replyTo } : {}), ...continuationMetadata },
             ...(outcome?.kind === "expand" && outcome.skill
               ? { skillInvocation: { skill: outcome.skill.source, path: outcome.skill.path } }
               : {}),
@@ -779,22 +1537,45 @@ export async function submitSessionPrompt(
     throw err;
   }
 
-  const submitNow = Date.now();
-  await db
-    .update(agentSessions)
-    .set({ updatedAt: submitNow, lastActivityAt: submitNow })
-    .where(eq(agentSessions.id, row.id));
+  // Session recency is completion time. `activityAt` marks request start and
+  // can be older than a later submission that already finished.
+  const sessionTouchedAt = Date.now();
+  await recordSessionActivity(db, row.id, sessionTouchedAt);
+  await recordThreadActivityBestEffort(() => recordActivity(activityAt));
 
   return {
     // Commands take no queue item; "" would read as a real (broken) id.
     messageId: receipt.queueItemId || null,
     threadId: receipt.threadId,
+    activityAt,
   };
 }
 
-messagesRouter.post("/:id/messages", async (c) => {
-  const row = await loadOwnedSession(c);
+messagesRouter.post("/:id/messages", (c) => sendPrompt(c, c.req.param("id")));
+
+/**
+ * The key of the thread a prompt targets: the route's thread, else the
+ * body's `threadId`. Undefined for the default thread, an unknown thread,
+ * or an unreadable body; `sendPrompt` reports a bad body itself. Hono
+ * caches the parsed body, so the second read in `sendPrompt` is free.
+ */
+async function promptThreadKey(c: Context<AppEnv>, sessionId: string, threadId: string | undefined): Promise<string | undefined> {
+  let id = threadId;
+  if (id === undefined) {
+    const parsed: unknown = await c.req.json().catch(() => undefined);
+    if (typeof parsed === "object" && parsed !== null && "threadId" in parsed && typeof parsed.threadId === "string") {
+      id = parsed.threadId;
+    }
+  }
+  if (!id) return undefined;
+  return (await c.var.providers.engineStore.getThread(sessionId, id))?.key;
+}
+
+export async function sendPrompt(c: Context<AppEnv>, sessionId: string, threadId?: string) {
+  const row = await loadOwnedSession(c, sessionId);
   if (!row) return c.json({ error: "session not found" }, 404);
+  const loadedPrompt = await loadEngineSession(c, sessionId, undefined, await promptThreadKey(c, sessionId, threadId));
+  if ("error" in loadedPrompt) return loadedPrompt.error;
 
   let body: SendPromptRequest;
   try {
@@ -802,16 +1583,17 @@ messagesRouter.post("/:id/messages", async (c) => {
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
+  body = { ...body, threadId: threadId ?? body.threadId };
   const promoteItemId =
     typeof body.promoteItemId === "string" && body.promoteItemId.length > 0
       ? body.promoteItemId
       : undefined;
-  if (!promoteItemId && (!body.text || typeof body.text !== "string")) {
-    return c.json({ error: "text is required" }, 400);
+  if (!promoteItemId && typeof body.text !== "string") {
+    return c.json({ error: "text must be a string (it may be empty with attachments)" }, 400);
   }
-  if (body.queueMode !== undefined && body.queueMode !== "followup" && body.queueMode !== "steer") {
+  if (body.queueMode !== undefined && body.queueMode !== "followup" && body.queueMode !== "inject" && body.queueMode !== "steer") {
     return c.json(
-      { error: "queueMode must be 'followup' or 'steer'. Omit it to use the thread default." },
+      { error: "queueMode must be 'followup', 'inject' or 'steer'. Omit it to use the thread default." },
       400,
     );
   }
@@ -828,6 +1610,9 @@ messagesRouter.post("/:id/messages", async (c) => {
       );
     }
   }
+  if (Array.isArray(body.attachments) && body.attachments.length > 20) {
+    return c.json({ error: "At most 20 images are allowed per message." }, 400);
+  }
   if (body.fileRefs !== undefined) {
     const valid =
       Array.isArray(body.fileRefs) &&
@@ -840,21 +1625,118 @@ messagesRouter.post("/:id/messages", async (c) => {
     }
   }
 
+  if (!promoteItemId && !body.text.trim() && !body.attachments?.length && !body.fileRefs?.length) {
+    return c.json({ error: "Add a message or an attachment." }, 400);
+  }
+  if (body.editEntryId !== undefined) {
+    if (typeof body.editEntryId !== "string" || body.editEntryId.length === 0) {
+      return c.json({ error: "editEntryId must name one of your messages in this thread." }, 400);
+    }
+    if (promoteItemId || body.replyToMessageId !== undefined || body.queueMode !== undefined) {
+      return c.json({ error: "An edit cannot also reply, promote, or set a queue mode. Send the edit alone." }, 400);
+    }
+  }
+  if (body.undoFiles !== undefined && (typeof body.undoFiles !== "boolean" || body.editEntryId === undefined)) {
+    return c.json({ error: "undoFiles must be true or false, and only with editEntryId." }, 400);
+  }
+  if (body.clientMessageId !== undefined && (typeof body.clientMessageId !== "string" || !CLIENT_MESSAGE_ID.test(body.clientMessageId))) {
+    return c.json({ error: "clientMessageId must be 8 to 64 letters, digits, '-' or '_'. Omit it to send without a key." }, 400);
+  }
+  if (row.ownerType === "team" && body.threadId !== undefined) {
+    const loaded = await loadEngineSession(c, sessionId);
+    if ("error" in loaded) return loaded.error;
+    if (!await visibleThread(c, row, loaded.engineSession, body.threadId)) return c.json({ error: "thread not found" }, 404);
+  }
+
+  if (loadedPrompt.engineSession.options.readOnlyReason) return c.json({ error: loadedPrompt.engineSession.options.readOnlyReason }, 409);
+  // A shared thread's guest sends prompts only. A command such as /model
+  // changes the owner's thread, and a file reference names an upload into
+  // the owner's working directory.
+  if (c.var.threadShareGuest) {
+    if (body.fileRefs?.length) return c.json({ error: "Files cannot be attached in a shared thread. Paste the content into the message." }, 403);
+    const text = body.text ?? "";
+    if (text.startsWith("/") && dispatchCommand(text, loadedPrompt.engineSession.commandRegistry()).kind === "execute") {
+      return c.json({ error: "Only the thread owner can run commands in a shared thread. Send the request as a message." }, 403);
+    }
+  }
+
   try {
+    let replyTo: MessageReplyReference | undefined;
+    if (body.replyToMessageId !== undefined) {
+      if (typeof body.replyToMessageId !== "string" || body.replyToMessageId.length === 0) {
+        return c.json({ error: "replyToMessageId must name an assistant message in this thread." }, 400);
+      }
+      const loaded = await loadEngineSession(c, sessionId);
+      if ("error" in loaded) return loaded.error;
+      const targetThread = await visibleThread(c, loaded.session, loaded.engineSession, body.threadId);
+      if (!targetThread) return c.json({ error: "thread not found" }, 404);
+      const entries = await targetThread.readEntries();
+      const target = entries.find(
+        (entry): entry is Extract<SessionEntry, { type: "message" }> =>
+          entry.type === "message" && entry.id === body.replyToMessageId,
+      );
+      const excerpt =
+        target?.role === "assistant" && target.stopReason === "end_turn"
+          ? assistantReplyExcerpt(target)
+          : "";
+      if (!target || target.role !== "assistant" || target.stopReason !== "end_turn" || !excerpt) {
+        return c.json(
+          { error: "Reply target not found in this thread. Reply to a completed assistant message." },
+          400,
+        );
+      }
+      replyTo = { messageId: target.id, excerpt };
+    }
+
     // Stamp the sender on the submission. The engine persists it on the
     // user entry (`MessageEntry.author`); on team-owned sessions several
     // members share one thread, and both the UI and the model need to tell
     // their messages apart.
+    let fork: ForkThreadResponse | undefined;
+    const author = promptAuthorFromUser(c.var.user, c.var.principal, c.var.authVia);
+    // A resend after a lost answer (an api restart, a gateway error) carries
+    // the first try's key. Answer with that admission before any single-use
+    // attachment ref is spent, so the message is never posted twice. The
+    // sender's id scopes the key, because a team thread has several senders.
+    const dispatchId = body.clientMessageId && !promoteItemId && body.editEntryId === undefined
+      ? `web:${author.id}:${body.clientMessageId}`
+      : undefined;
+    if (dispatchId) {
+      const admitted = await c.var.providers.engineStore.getQueueItemByDispatchId(row.id, dispatchId);
+      const sent = admitted && body.text?.startsWith("/") ? dispatchCommand(body.text, loadedPrompt.engineSession.commandRegistry()) : undefined;
+      const expansion = sent?.kind === "expand" && sent.skill ? { skill: sent.skill.source.name, args: sent.skill.args } : undefined;
+      if (admitted && !resendMatches(admitted, body, expansion)) {
+        return c.json({ error: "This message key already sent a different message. Send the message without clientMessageId, or with a new key." }, 409);
+      }
+      if (admitted) {
+        const replay: SendPromptResponse = { messageId: admitted.id, threadId: admitted.threadId, activityAt: admitted.createdAt };
+        return c.json(replay, 202);
+      }
+    }
     const resp = await submitSessionPrompt(c.var.providers, row, body.text ?? "", {
+      forkThread: async (sourceThreadId, prompt) => {
+        const result = await forkThreadAt(c, sessionId, sourceThreadId, { latest: true, prompt });
+        if (result instanceof Response) {
+          const failure: unknown = await result.json();
+          throw new ValidationError(typeof failure === "object" && failure !== null && "error" in failure && typeof failure.error === "string"
+            ? failure.error : "Cannot branch this thread. Reload the thread and try again.");
+        }
+        fork = result;
+        return `Branched the conversation. [Open the new thread](${(publicUrlFromEnv(process.env) ?? new URL(c.req.url).origin).replace(/\/+$/, "")}/threads/${encodeURIComponent(fork.thread.id)}).`;
+      },
       threadId: body.threadId,
+      appPageHint: readAppPageHint(body.appPageHint),
       attachments: body.attachments,
       fileRefs: body.fileRefs,
       ...(body.queueMode ? { queueMode: body.queueMode } : {}),
       ...(promoteItemId ? { promoteItemId } : {}),
-      author: promptAuthorFromUser(c.var.user),
+      author,
+      ...(replyTo ? { replyTo } : {}),
+      ...(body.editEntryId !== undefined ? { editEntryId: body.editEntryId, undoFiles: body.undoFiles === true } : {}),
+      ...(dispatchId ? { dispatchId } : {}),
     });
     if (!resp) return c.json({ error: "thread not found" }, 404);
-    return c.json(resp, 202);
+    return c.json({ ...resp, ...(fork ? { fork: fork.thread } : {}) }, 202);
   } catch (err) {
     if (err instanceof UnknownAttachmentError) {
       return c.json(
@@ -878,29 +1760,420 @@ messagesRouter.post("/:id/messages", async (c) => {
     }
     throw err;
   }
-});
+}
 
 // ── Thread abort ──────────────────────────────────────────────────────────
 //
 // Mirrors the engine-spec route table: `POST .../threads/:threadId/abort`
-// aborts the current turn on this thread and clears its queue. Delegates to
-// `Session.abort({ threadId })`, which stamps `abortRequestedAt` durably and
-// lets the claim/reconcile settlement path record the terminal outcome —
-// see `packages/engine/src/session.ts` `abort()`. A thread with nothing
-// running/queued is a no-op: `Thread.abort()` withdraws no gates, aborts a
-// non-streaming agent (a safe no-op), and settles zero unclaimed items.
-messagesRouter.post("/:id/threads/:threadId/abort", async (c) => {
-  const result = await loadEngineSession(c);
-  if ("error" in result) return result.error;
-  const { engineSession } = result;
+// interrupts only the turn named by the gesture target. `Thread.interrupt()`
+// stamps abort intent only if that item is still active, withdraws its gates,
+// and starts the next queued submission. A delayed retry cannot abort it.
+messagesRouter.post("/:id/threads/:threadId/abort", (c) => abortThread(c, c.req.param("id"), c.req.param("threadId")));
 
-  const threadId = c.req.param("threadId");
-  const thread = engineSession.threadById(threadId);
+export async function abortThread(c: Context<AppEnv>, sessionId: string, threadId: string) {
+  const result = await loadEngineSession(c, sessionId);
+  if ("error" in result) return result.error;
+  const { session, engineSession } = result;
+
+  const thread = await visibleThread(c, session, engineSession, threadId);
   if (!thread) return c.json({ error: "thread not found" }, 404);
 
-  await engineSession.abort({ threadId });
+  const rawBody = await c.req.text();
+  if (rawBody.trim().length === 0) {
+    // Clients loaded before target-bound Stop cannot identify the turn that
+    // the gesture saw. Never guess: a delayed bodyless retry could otherwise
+    // abort the queued successor. The durable error event gives those tabs a
+    // visible reload instruction instead of only a rejected fetch in console.
+    await engineSession.emit({
+      type: "error",
+      threadId,
+      code: "client_update_required",
+      error: "Valet was updated. Reload this page, then select Stop again.",
+      recoverable: true,
+    });
+    return c.json(
+      {
+        error: "This Stop request came from an older client.",
+        corrective: "Reload this page, then select Stop again.",
+      },
+      409,
+    );
+  }
+
+  let body: AbortThreadRequest;
+  try {
+    body = JSON.parse(rawBody) as AbortThreadRequest;
+  } catch {
+    return c.json({ error: "invalid JSON body" }, 400);
+  }
+  if (
+    body === null ||
+    typeof body !== "object" ||
+    Array.isArray(body) ||
+    typeof body.targetItemId !== "string" ||
+    body.targetItemId.length === 0
+  ) {
+    return c.json({ error: "targetItemId is required. Send the active queue item as targetItemId." }, 400);
+  }
+
+  await thread.interrupt(body.targetItemId);
   return c.json({ ok: true });
-});
+}
+
+// One queued message the person no longer wants. Only a message that has not
+// started is canceled here; a started turn ends with Stop (`abortThread`).
+// ── Thread branches (docs/specs/2026-10-22-thread-edit-fork-design.md) ──
+//
+// An edit is a send with `editEntryId` (`sendPrompt`). A return moves the
+// leaf back to the version a branch note left. A fork copies the active path
+// into a new thread in the same workspace.
+
+export async function editPreview(c: Context<AppEnv>, sessionId: string, threadId: string) {
+  const entryId = c.req.query("entryId");
+  if (!entryId) return c.json({ error: "entryId must name one of your messages in this thread." }, 400);
+  const loaded = await loadEngineSession(c, sessionId);
+  if ("error" in loaded) return loaded.error;
+  const thread = await visibleThread(c, loaded.session, loaded.engineSession, threadId);
+  if (!thread) return c.json({ error: "thread not found" }, 404);
+  const preview = await thread.previewEdit(entryId, promptAuthorFromUser(c.var.user, c.var.principal, c.var.authVia).id);
+  const body: EditPreviewResponse = {
+    ...(preview.refusal ? { refusal: preview.refusal } : {}),
+    turns: preview.turns,
+    actions: preview.actions.map(({ label, count, urls }) => ({ label, count, urls })),
+    moreActions: preview.moreActions,
+    grants: preview.grants,
+    files: preview.files.map((file) => repoPath(file.repo, file.path)),
+    pushed: preview.pushed,
+  };
+  return c.json(body);
+}
+
+export async function returnToBranch(c: Context<AppEnv>, sessionId: string, threadId: string) {
+  const body = await readOptionalJsonObject(c);
+  const noteEntryId = body?.noteEntryId;
+  if (typeof noteEntryId !== "string" || noteEntryId.length === 0) {
+    return c.json({ error: "noteEntryId must name a version note in this thread." }, 400);
+  }
+  const restoreFiles = body?.restoreFiles;
+  if (restoreFiles !== undefined && typeof restoreFiles !== "boolean") {
+    return c.json({ error: "restoreFiles must be true or false." }, 400);
+  }
+  const loaded = await loadEngineSession(c, sessionId);
+  if ("error" in loaded) return loaded.error;
+  const thread = await visibleThread(c, loaded.session, loaded.engineSession, threadId);
+  if (!thread) return c.json({ error: "thread not found" }, 404);
+  try {
+    const result: ReturnToBranchResponse = await thread.returnToBranch(noteEntryId, { id: c.var.user.id }, { restoreFiles: restoreFiles === true });
+    return c.json(result);
+  } catch (err) {
+    if (err instanceof ValidationError) return c.json({ error: err.message }, 400);
+    if (err instanceof ConflictError) return c.json({ error: err.message }, 409);
+    throw err;
+  }
+}
+
+export async function forkThread(c: Context<AppEnv>, sessionId: string, threadId: string) {
+  const body = await readOptionalJsonObject(c);
+  const entryId = body?.entryId;
+  if (typeof entryId !== "string" || entryId.length === 0) {
+    return c.json({ error: "entryId must name a message in this thread." }, 400);
+  }
+  if (body?.destination !== undefined && body.destination !== "here" && body.destination !== "private") {
+    return c.json({ error: "destination must be \"here\" or \"private\"." }, 400);
+  }
+  const result = await forkThreadAt(c, sessionId, threadId, { entryId }, { destination: body?.destination === "private" ? "private" : "here" });
+  return result instanceof Response ? result : c.json(result, 201);
+}
+
+/**
+ * Moves a thread to another workspace (docs/specs/2026-10-22-thread-edit-fork-design.md):
+ * the whole conversation and its files are copied there, as a fork is, and
+ * the source is archived with a pointer to the copy. A thread moves to the
+ * mover's private threads or to any team the mover is on. When a team thread
+ * leaves its team, teammates lose it, so only a person who wrote every
+ * message in it, or a team admin, may move it. A move into a team shows the
+ * thread to that team, so the request must confirm. A thread with a running
+ * turn, an open approval, or background work does not move, and nor does one
+ * bound to Slack, a workflow, or Home.
+ */
+export async function moveThread(c: Context<AppEnv>, sessionId: string, threadId: string) {
+  const body = await readOptionalJsonObject(c);
+  const to = body?.to;
+  const destination: "private" | { teamId: string } | undefined = to === "private" ? "private"
+    : to && typeof to === "object" && typeof (to as { teamId?: unknown }).teamId === "string" ? { teamId: (to as { teamId: string }).teamId } : undefined;
+  if (!destination) return c.json({ error: "to must be \"private\" or { \"teamId\": \"...\" }." }, 400);
+  const loaded = await loadEngineSession(c, sessionId);
+  if ("error" in loaded) return loaded.error;
+  const access = await threadEntry(c, loaded.session, threadId);
+  if (!access || access.as === "guest") return c.json({ error: "Only the thread owner or a team member can move this thread." }, 403);
+  const thread = await visibleThread(c, loaded.session, loaded.engineSession, threadId);
+  if (!thread) return c.json({ error: "thread not found" }, 404);
+  if (!thread.key.startsWith("web:")) {
+    return c.json({ error: "Only a thread started in Valet can move. A Slack, workflow, or Home thread keeps its connection, so branch it instead." }, 400);
+  }
+  const { db, engineStore } = c.var.providers;
+  const sourceTeam = loaded.session.ownerType === "team";
+  if (destination === "private" && !sourceTeam) return c.json({ error: "This thread is already private to you." }, 400);
+  if (typeof destination === "object") {
+    if (sourceTeam && destination.teamId === loaded.session.ownerId) return c.json({ error: "This thread is already in that team." }, 400);
+    if (body?.confirm !== true) {
+      return c.json({ error: "Moving shows this thread's messages and files to everyone on the team. Send confirm: true to move it.", code: "confirm_required" }, 409);
+    }
+  }
+  if (sourceTeam && !await canAdministerTeam(db, loaded.session.ownerId, c.var.user.id)) {
+    const others = (await thread.readEntries()).some((entry) => entry.type === "message" && entry.role === "user" && !entry.signal
+      && entry.author?.id !== undefined && entry.author.id !== c.var.user.id);
+    if (others) {
+      return c.json({ error: "Teammates wrote in this thread, so moving it would take it away from them. Branch it privately instead, or ask a team admin to move it." }, 403);
+    }
+  }
+  if ((await engineStore.listUnsettledSubmissions(sessionId)).some((item) => item.threadId === threadId)) {
+    return c.json({ error: "A turn is running or waiting on an approval in this thread. Let it finish, then move it." }, 409);
+  }
+  const work = await gateBackgroundWork(c, loaded.session, "archive", { threadId }, false);
+  if (work.kind === "refused") return work.response;
+
+  const [titled] = await db.select({ title: sessionThreads.title }).from(sessionThreads)
+    .where(and(eq(sessionThreads.sessionId, sessionId), eq(sessionThreads.id, threadId))).limit(1);
+  const result = await forkThreadAt(c, sessionId, threadId, { whole: true }, { destination, ...(titled?.title ? { title: titled.title } : {}) });
+  if (result instanceof Response) return result;
+  await thread.setMetadataValue(MOVED_TO_METADATA_KEY, { sessionId: result.thread.sessionId, threadId: result.thread.id });
+  // The note links the copy only when everyone who reads this thread can
+  // open it: a private thread moved to a team. Teammates who lose a team
+  // thread are told where it went, not given a link they cannot open.
+  const owner = await threadOwner(db, result.thread.sessionId);
+  const where = destination === "private" ? "their private threads" : owner ? await workspaceName(db, owner) : "another workspace";
+  const link = sourceTeam ? "" : ` [Open it](/chat?workspace=${encodeURIComponent(result.workspace)}&thread=${encodeURIComponent(result.thread.id)}).`;
+  await thread.appendEntry({
+    id: `e-${randomUUID()}`, sessionId, threadId, parentId: null, type: "message", role: "system",
+    content: `${c.var.user.name || c.var.user.email || "A person"} moved this thread to ${where}. The conversation continues there.${link}`,
+    createdAt: Date.now(),
+  });
+  const createdAt = thread.toThreadData().createdAt;
+  await db.insert(sessionThreads).values({ id: threadId, sessionId, createdAt, archivedAt: Date.now() })
+    .onConflictDoUpdate({ target: sessionThreads.id, set: { archivedAt: Date.now() } });
+  return c.json(result, 201);
+}
+
+/**
+ * Copies a whole thread into a new thread in the same workspace, with its
+ * files, as a branch from the latest message does. The source stays as it
+ * is. The copy keeps the source's audience, and a thread with a running
+ * turn or an open approval does not duplicate until it settles.
+ */
+export async function duplicateThread(c: Context<AppEnv>, sessionId: string, threadId: string) {
+  const loaded = await loadEngineSession(c, sessionId);
+  if ("error" in loaded) return loaded.error;
+  const access = await threadEntry(c, loaded.session, threadId);
+  if (!access || access.as === "guest") return c.json({ error: "Only the thread owner or a team member can duplicate this thread." }, 403);
+  const { db, engineStore } = c.var.providers;
+  if ((await engineStore.listUnsettledSubmissions(sessionId)).some((item) => item.threadId === threadId)) {
+    return c.json({ error: "A turn is running or waiting on an approval in this thread. Let it finish, then duplicate it." }, 409);
+  }
+  const [titled] = await db.select({ title: sessionThreads.title }).from(sessionThreads)
+    .where(and(eq(sessionThreads.sessionId, sessionId), eq(sessionThreads.id, threadId))).limit(1);
+  // A copy of a copy keeps one suffix: "Plan (copy)", not "Plan (copy) (copy)".
+  // A long title gives up its end, never the suffix, and an untitled source
+  // gets a name, so the copy's title always differs from the source's.
+  const suffix = " (copy)";
+  const base = (titled?.title?.replace(/(?: \(copy\))+$/, "") || "Untitled thread").slice(0, MAX_THREAD_TITLE_CHARS - suffix.length).trimEnd();
+  const result = await forkThreadAt(c, sessionId, threadId, { whole: true }, { destination: "here", title: `${base}${suffix}` });
+  return result instanceof Response ? result : c.json(result, 201);
+}
+
+/** Where a fork lands: the source's workspace, the person's private threads, or a team (a move only). */
+type ForkDestination = "here" | "private" | { teamId: string };
+
+/** Both the message command and the fork endpoint use this authorized operation. */
+async function forkThreadAt(
+  c: Context<AppEnv>, sessionId: string, threadId: string,
+  selection: { entryId: string } | { latest: true; prompt: string } | { whole: true },
+  opts: { destination?: ForkDestination; title?: string } = {},
+): Promise<ForkThreadResponse | Response> {
+  const destination = opts.destination ?? "here";
+  const loaded = await loadEngineSession(c, sessionId);
+  if ("error" in loaded) return loaded.error;
+  const access = await threadEntry(c, loaded.session, threadId);
+  if (!access || access.as === "guest") {
+    return c.json({ error: "Only the thread owner or a team member can branch this thread. Ask the owner to make a branch." }, 403);
+  }
+  const command = "latest" in selection ? selection : undefined;
+  const entryId = "entryId" in selection ? selection.entryId : undefined;
+  const source = await visibleThread(c, loaded.session, loaded.engineSession, threadId);
+  if (!source) return c.json({ error: "thread not found" }, 404);
+
+  // A user message branches from just before it, and its text goes to the
+  // new thread's composer. Any other entry branches through itself. A move
+  // copies the whole conversation.
+  const active = await source.readEntries();
+  const selectedId = command
+    ? [...active].reverse().find((entry) => entry.type === "message" && entry.role === "assistant" && entry.stopReason === "end_turn")?.id
+    : "whole" in selection ? active[active.length - 1]?.id : entryId;
+  let index = active.findIndex((entry) => entry.id === selectedId);
+  if (command && index >= 0) {
+    // These notes remain part of the completed context. Stop before a new
+    // turn or the command echo, so unfinished work stays in the source.
+    while (active[index + 1]?.type === "branch_summary" || active[index + 1]?.type === "compaction") index++;
+  }
+  const entry = active[index];
+  if (!entry && !command) {
+    return c.json({ error: "That message is not in this version of the conversation. Reload the thread and try again." }, 404);
+  }
+  const typed = !!entryId && entry?.type === "message" && entry.role === "user" && !entry.signal;
+  let path: SessionEntry[];
+  try {
+    path = await source.forkPath(typed ? active[index - 1]?.id ?? null : entry?.id ?? null);
+  } catch (err) {
+    if (err instanceof ValidationError) return c.json({ error: err.message }, 400);
+    throw err;
+  }
+
+  // A fork may narrow its audience, never widen it
+  // (docs/specs/2026-10-22-thread-edit-fork-design.md). A team fork
+  // here keeps the source's audience: a thread private to one person is
+  // refused, and Slack channel gates are copied. A private fork has one
+  // reader, the person, who reads the source. A fork into a team (a move)
+  // keeps the source's Slack channel gates; the caller confirmed the rest.
+  const { db } = c.var.providers;
+  const sourceTeam = loaded.session.ownerType === "team";
+  const audience = sourceTeam || typeof destination === "object" ? await threadAudience(db, sessionId, threadId) : undefined;
+  if (destination === "here" && sourceTeam && audience?.privateTo !== undefined) {
+    return c.json({ error: "This thread is private to you, and a copy here would show its history to your team. Branch it privately instead." }, 400);
+  }
+  if (destination === "private" && !sourceTeam) {
+    return c.json({ error: "This thread is already private to you. Use Branch to copy it here." }, 400);
+  }
+  if (destination !== "here" && c.var.principal.type !== "user") {
+    return c.json({ error: "Only a person can branch or move a thread into another workspace." }, 403);
+  }
+  const channels = destination === "private" ? [] : audience?.channels ?? [];
+
+  // A team conversation runs in its own execution session. Its fork starts
+  // from the team runtime, as a new team thread does. A private fork starts
+  // from the person's own runtime, and a move to a team from that team's.
+  let home: Exclude<Awaited<ReturnType<typeof loadEngineSession>>, { error: Response }>;
+  if (destination === "here") {
+    const [execution] = await db.select({ runtimeId: assistants.sessionId }).from(assistantExecutions)
+      .innerJoin(assistants, eq(assistants.id, assistantExecutions.assistantId))
+      .where(eq(assistantExecutions.sessionId, sessionId)).limit(1);
+    const here = execution && execution.runtimeId !== sessionId ? await loadEngineSession(c, execution.runtimeId) : loaded;
+    if ("error" in here) return here.error;
+    home = here;
+  } else {
+    const owner = destination === "private" ? { type: "user" as const, id: c.var.user.id } : { type: "team" as const, id: destination.teamId };
+    if (owner.type === "team" && !await isTeamMember(db, owner.id, c.var.user.id)) {
+      return c.json({ error: "You are not on that team. Pick one of your teams." }, 403);
+    }
+    const runtime = await ensureDefaultAssistantSession(c.var.providers, owner, { orgId: loaded.session.orgId, actorUserId: c.var.user.id });
+    const there = await loadEngineSession(c, runtime.sessionId);
+    if ("error" in there) return there.error;
+    home = there;
+  }
+  const [titled] = await db.select({ title: sessionThreads.title }).from(sessionThreads)
+    .where(and(eq(sessionThreads.sessionId, sessionId), eq(sessionThreads.id, threadId))).limit(1);
+  // A branch of a branch keeps one suffix: "Plan (branch)", not "Plan (branch) (branch)".
+  const suffix = destination === "private" ? " (private branch)" : " (branch)";
+  const base = titled?.title?.replace(/(?: \((?:private )?branch\))+$/, "");
+  const title = opts.title ?? (base ? `${base}${suffix}`.slice(0, MAX_THREAD_TITLE_CHARS) : undefined);
+
+  let opened: Awaited<ReturnType<typeof openThread>>;
+  try {
+    opened = await openThread(c, home, { source, title, isolated: true, channels });
+  } catch (err) {
+    if (err instanceof ValidationError) return c.json({ error: err.message }, 400);
+    throw err;
+  }
+  const { thread, summary } = opened;
+  // The governing thread receives these gates at execution creation. Keep
+  // them on the visible thread too, before any history or files are copied.
+  for (const channel of channels) await thread.addToMetadataList(SLACK_CHANNELS_METADATA_KEY, channel);
+  // Two threads a fork links may message each other (`services/thread-links.ts`).
+  await thread.setMetadataValue(FORK_OF_METADATA_KEY, { sessionId, threadId });
+  // A fork in its own working directory (a team conversation) takes the
+  // source's files at the fork point along, as git bundles in the blob store.
+  const seed = summary.sessionId !== sessionId ? await exportForkSeed(c, loaded.engineSession, path, thread.id) : undefined;
+  await thread.copyPath(path, { source: { sessionId, threadId }, actorId: c.var.user.id, ...(seed ? { seed } : {}) });
+  const response: ForkThreadResponse = {
+    thread: summary,
+    workspace: destination === "here" ? (loaded.session.ownerType === "team" ? loaded.session.ownerId : "user") : destination === "private" ? "user" : destination.teamId,
+    ...(typed && entry?.type === "message" ? { draft: entry.content } : {}),
+  };
+  if (command?.prompt) {
+    const destinationSession = await loadOwnedSession(c, summary.sessionId);
+    if (!destinationSession) return c.json({ error: "New thread not found. Open the thread list and try again." }, 404);
+    await submitSessionPrompt(c.var.providers, destinationSession, command.prompt, {
+      threadId: thread.id,
+      author: promptAuthorFromUser(c.var.user, c.var.principal, c.var.authVia),
+    });
+  }
+  return response;
+}
+
+/**
+ * The source thread's files at a fork point, one git bundle per repository
+ * that the copied turns changed, saved under the fork's id. Undefined when no
+ * copied turn changed files; a reason when the files cannot come along.
+ */
+async function exportForkSeed(
+  c: Context<AppEnv>,
+  source: EngineSession,
+  path: readonly SessionEntry[],
+  forkThreadId: string,
+): Promise<{ repos: ForkSeedRecord[] } | { skipped: string } | undefined> {
+  const plan = planForkSeed(path);
+  if (plan.length === 0) return undefined;
+  try {
+    // A fork reads live compute outside a model turn. Reserve ownership before the first sandbox await.
+    const seed = await source.claimExecution(async () => {
+      const repos: ForkSeedRecord[] = [];
+      for (const [index, repo] of plan.entries()) {
+        const bundle = await exportSeedBundle(source.sandbox, source.options.workspace, repo);
+        const blobKey = `fork-seed/${forkThreadId}/${index}`;
+        await c.var.providers.blobs.put(blobKey, bundle, { contentType: "application/x-git-bundle" });
+        repos.push({ repo: repo.repo, snapshot: repo.snapshot, blobKey, ...(repo.branch ? { branch: repo.branch } : {}) });
+      }
+      return { repos };
+    }, path[0]?.threadId);
+    return seed ?? { skipped: "the source configuration or sandbox is changing; retry the branch to copy its files" };
+  } catch (err) {
+    return { skipped: `the files could not be read from the original thread: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+messagesRouter.post("/:id/threads/:threadId/queue/:itemId/cancel", (c) => cancelQueuedItem(c, c.req.param("id"), c.req.param("threadId")));
+
+export async function cancelQueuedItem(c: Context<AppEnv>, sessionId: string, threadId: string) {
+  const result = await loadEngineSession(c, sessionId);
+  if ("error" in result) return result.error;
+  const { session, engineSession } = result;
+
+  const thread = await visibleThread(c, session, engineSession, threadId);
+  if (!thread) return c.json({ error: "thread not found" }, 404);
+
+  // One store CAS decides: a claim or a Send now that lands first wins, and
+  // the person is told the message is no longer queued.
+  const itemId = c.req.param("itemId");
+  if (!itemId || !await thread.cancelQueuedItem(itemId)) {
+    return c.json({ error: "This message is no longer queued. If it started, select Stop to end it." }, 409);
+  }
+  return c.json({ ok: true });
+}
+
+// A queue can be busy without an active Stop target while paused or between
+// durable claims. This control resumes a paused queue and kicks an unpaused
+// queue without stamping abort intent on any submission.
+messagesRouter.post("/:id/threads/:threadId/resume", (c) => resumeThread(c, c.req.param("id"), c.req.param("threadId")));
+
+export async function resumeThread(c: Context<AppEnv>, sessionId: string, threadId: string) {
+  const result = await loadEngineSession(c, sessionId);
+  if ("error" in result) return result.error;
+  const { session, engineSession } = result;
+
+  if (!await visibleThread(c, session, engineSession, threadId)) return c.json({ error: "thread not found" }, 404);
+
+  await engineSession.resume({ threadId });
+  return c.json({ ok: true });
+}
 
 // ── Decision gates ────────────────────────────────────────────────────────
 //
@@ -911,20 +2184,28 @@ messagesRouter.post("/:id/threads/:threadId/abort", async (c) => {
 // / `Session.withdrawDecision` — which finds the thread that owns the gate
 // and unblocks it.
 
-async function canAnswerDecision(c: Context<AppEnv>, session: SessionOwnerLike): Promise<boolean> {
-  if (session.ownerType === "org" && c.req.param("id").startsWith("wf:")) {
+async function canAnswerDecision(c: Context<AppEnv>, session: SessionOwnerLike, sessionId: string): Promise<boolean> {
+  if (session.ownerType === "org" && sessionId.startsWith("wf:")) {
     return c.var.principal.type === "user" && session.ownerId === c.var.user.orgId
       && await isOrgAdminUser(c);
   }
   return canResolveSessionGate(c.var.providers.db, session, c.var.principal);
 }
 
+/** The 403 for a caller who may see a gate but not answer it. A shared
+ * thread's guest never answers: approvals stay with the thread's owner. */
+function decisionDenied(c: Context<AppEnv>) {
+  const error = c.var.threadShareGuest
+    ? "Only the thread owner can answer approvals in a shared thread. Ask the owner to answer it."
+    : "Only the session owner or a member of its team can resolve this approval. Ask one of them.";
+  return c.json({ error }, 403);
+}
+
 /** Workflow agent gates have a run owner, but no app session row. Only
  * decision endpoints use this fallback; it grants no sandbox or prompt access.
  */
-async function loadDecisionSession(c: Context<AppEnv>) {
-  const id = c.req.param("id");
-  if (!id.startsWith("wf:")) return loadEngineSession(c);
+export async function loadDecisionSession(c: Context<AppEnv>, id: string, threadId?: string) {
+  if (!id.startsWith("wf:")) return loadEngineSession(c, id, { threadId });
   const missing = () => ({ error: c.json({ error: "session not found" }, 404) });
   let parts;
   try { parts = parseWorkflowSessionId(id); } catch { return missing(); }
@@ -939,7 +2220,12 @@ async function loadDecisionSession(c: Context<AppEnv>) {
     userId: run.owner.ownerType === "user" ? run.owner.ownerId : "",
     orgId: definition.orgId,
   };
-  if (!(await canAnswerDecision(c, session))) return missing();
+  if (!(await canAnswerDecision(c, session, id))) return missing();
+  const decisionApproverOnly = !await runVisible(c, { ownerType: run.owner.ownerType, origin: run.params.origin, actorUserId: run.actorUserId, params: run.params });
+  if (decisionApproverOnly) {
+    const gates = await p.engineStore.listDecisionGates(id, threadId, "pending");
+    if (c.var.principal.type !== "user" || !gates.some(gate => gateApprover(gate)?.userId === c.var.principal.id)) return missing();
+  }
   // A guessed node ID must not materialize a new agent on a read request.
   if (!(await p.engineStore.getSession(id))) return missing();
   const engineSession = await ensureWorkflowSession({
@@ -947,21 +2233,44 @@ async function loadDecisionSession(c: Context<AppEnv>) {
     host: p.engineHost, actionPluginByService: p.actionPluginByService,
     credentials: p.engineCredentials,
   }, id);
-  return { session, engineSession };
+  return { session: { ...session, decisionApproverOnly }, engineSession };
 }
 
-messagesRouter.get("/:id/decisions", async (c) => {
-  const result = await loadDecisionSession(c);
-  if ("error" in result) return result.error;
-  const { engineSession } = result;
-
+/** Pending gates on threads this request may see. Another pod may have made
+ * the thread after this one loaded the session, so a thread missing here is
+ * read from the store. A gate whose thread is gone stays hidden. */
+async function visibleGates(c: Context<AppEnv>, session: { ownerType: string; decisionApproverOnly?: boolean }, engineSession: EngineSession) {
+  const visible = threadsVisibleTo(c, session);
   const pending = await engineSession.pendingDecisionGates();
-  const body: ListDecisionsResponse = { gates: pending.map(engineGateToWire) };
-  return c.json(body);
-});
+  const shown = await Promise.all(pending.map(async (gate) => {
+    // The member asked to lend their account answers the gate even when the
+    // requester's thread is private to the requester.
+    const approver = gateApprover(gate)?.userId;
+    if (approver !== undefined && approver === viewerOf(c).userId) return true;
+    if (session.decisionApproverOnly) return false;
+    const thread = engineSession.threadById(gate.threadId)
+      ?? await c.var.providers.engineStore.getThread(engineSession.id, gate.threadId);
+    return !!thread && visible(threadRef(thread));
+  }));
+  return pending.filter((_, i) => shown[i]);
+}
 
-messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
-  const result = await loadDecisionSession(c);
+messagesRouter.get("/:id/decisions", (c) => listDecisions(c, c.req.param("id")));
+
+export async function listDecisions(c: Context<AppEnv>, sessionId: string, threadId?: string) {
+  const result = await loadDecisionSession(c, sessionId, threadId);
+  if ("error" in result) return result.error;
+  const { session, engineSession } = result;
+
+  const pending = await visibleGates(c, session, engineSession);
+  const body: ListDecisionsResponse = { gates: pending.filter(gate => !threadId || gate.threadId === threadId).map(engineGateToWire) };
+  return c.json(body);
+}
+
+messagesRouter.post("/:id/decisions/:gateId/resolve", (c) => resolveDecision(c, c.req.param("id")));
+
+export async function resolveDecision(c: Context<AppEnv>, sessionId: string, threadId?: string) {
+  const result = await loadDecisionSession(c, sessionId, threadId);
   if ("error" in result) return result.error;
   const { session, engineSession } = result;
   const gateId = c.req.param("gateId");
@@ -969,11 +2278,8 @@ messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
   // Explicit resolve authorization, distinct from `loadEngineSession`'s
   // view check: answering a gate acts on the session's behalf. The same
   // named check gates the channel gate-callback path.
-  if (!(await canAnswerDecision(c, session))) {
-    return c.json(
-      { error: "Only the session owner or a member of its team can resolve this approval. Ask one of them." },
-      403,
-    );
+  if (!(await canAnswerDecision(c, session, sessionId))) {
+    return decisionDenied(c);
   }
 
   let body: ResolveDecisionRequest;
@@ -982,8 +2288,27 @@ messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
-  if (body.actionId === undefined && body.value === undefined) {
+  // Accept only bounded inline images, never URLs that would require a server fetch.
+  if (body.attachments !== undefined) {
+    let totalBytes = 0;
+    const valid = Array.isArray(body.attachments) && body.attachments.length <= 20 && body.attachments.every((image) => {
+      if (!image || typeof image.url !== "string" || typeof image.mimeType !== "string"
+        || (image.name !== undefined && typeof image.name !== "string") || image.url.length > 7 * 1024 * 1024) return false;
+      const match = /^data:(image\/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/]+=*)$/.exec(image.url);
+      if (!match || match[1] !== image.mimeType) return false;
+      const bytes = Buffer.byteLength(match[2]!, "base64");
+      totalBytes += bytes;
+      return bytes > 0 && bytes <= 5 * 1024 * 1024 && totalBytes <= 15 * 1024 * 1024;
+    });
+    if (!valid) return c.json({ error: "Attach up to 20 PNG, JPEG, GIF, or WebP images, at most 5 MB each and 15 MB total." }, 400);
+  }
+  if (body.actionId === undefined && body.value === undefined && !body.attachments?.length) {
     return c.json({ error: "actionId or value is required" }, 400);
+  }
+  // A typed answer is text. Refuse anything else before it resolves the gate:
+  // a resolved gate cannot be answered again.
+  if ((body.value !== undefined && typeof body.value !== "string") || (body.actionId !== undefined && typeof body.actionId !== "string")) {
+    return c.json({ error: "Send actionId and value as text, such as {\"value\": \"staging\"}." }, 400);
   }
 
   // Route-level 403 for `always_allow` (action-policies plan, Task 4):
@@ -1009,36 +2334,84 @@ messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
       return c.json({ error: "org admin required for always_allow" }, 403);
     }
   }
+  if (body.actionId === GATE_ACTION_ALWAYS_ALLOW_OWNER && c.var.principal.type === "team") {
+    return c.json({ error: "A team API key cannot always allow an action. Sign in to apply it." }, 403);
+  }
 
   // Confirm the gate is actually pending in this session before resolving.
   // Without this check, a stale gateId from the client would silently no-op.
-  const pending = await engineSession.pendingDecisionGates();
-  const gate = pending.find((g) => g.id === gateId);
+  const pending = await visibleGates(c, session, engineSession);
+  const gate = pending.find((g) => g.id === gateId && (!threadId || g.threadId === threadId));
   if (!gate) return c.json({ error: "gate not pending" }, 404);
+  // The owner's lasting allow follows the same rule: refuse it here, before
+  // the engine consumes the gate, when the caller may not set it. A critical
+  // action or a team rule needs a team admin, so the check reads what the
+  // gate recorded about both.
+  if (body.actionId === GATE_ACTION_ALWAYS_ALLOW_OWNER) {
+    const refusal = await ownerAlwaysAllowRefusal(c.var.providers.db, {
+      orgId: session.orgId, sessionId, ...gatePolicyFacts(gate),
+      ...(session.ownerType === "team" ? { teamId: session.ownerId } : { userId: session.ownerId }),
+    }, c.var.user.id);
+    if (refusal) return c.json({ error: refusal }, 403);
+  }
+  // An MCP client or a `valet login` key is an agent. It may answer a
+  // question, but an approval or a credential request needs a person, or
+  // require_approval policy would let one agent approve another's actions.
+  if (isAgentCaller(c.var.authVia) && gate.type !== "question") {
+    return c.json({ error: "A person must approve this request. Open the thread in Valet to approve or deny it." }, 403);
+  }
+  if (body.attachments?.length && gate.type !== "question") {
+    return c.json({ error: "Images can only answer questions. Use the approval buttons for this request." }, 400);
+  }
+  if (!answersGate(gate, c.var.principal)) {
+    return c.json({ error: isSharedAccountGate(gate)
+      ? `Only ${gateApprover(gate)?.name ?? "the account's owner"} can allow use of their account.`
+      : `Only ${gateApprover(gate)?.name ?? "the person who asked"} can answer this request. Ask them in the thread.` }, 403);
+  }
+
+  if (body.actionId === "always_allow_account" && (
+    c.var.principal.type !== "user" || !["session", "stub"].includes(c.var.authVia)
+    || !gateApprover(gate) || !gate.actions.some(action => action.id === "always_allow_account")
+  )) {
+    return c.json({ error: "Open this account approval in Valet as the account owner to allow it for the team." }, 403);
+  }
+
+  if (gate.context?.browser) {
+    const policy = c.var.providers.engineHost.browserPolicy();
+    if (c.var.principal.type !== 'user' || !policy) {
+      return c.json({ error: 'A browser approval requires an authorized user. Sign in to Valet.' }, 403);
+    }
+    try {
+      await policy.authorize({ protocolVersion: '1.0', sessionId,
+        threadId: gate.threadId, actorId: c.var.user.id, ownerId: session.ownerId });
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : 'Browser access changed. Reopen the session.' }, 403);
+    }
+  }
 
   await engineSession.resolveDecision(gateId, {
     actionId: body.actionId,
     value: body.value,
+    ...(body.attachments?.length ? { attachments: body.attachments } : {}),
     resolvedBy: c.var.user.id,
     resolvedAt: Date.now(),
     source: { channelType: "web" },
   });
   return c.json({ ok: true });
-});
+}
 
-messagesRouter.post("/:id/decisions/:gateId/withdraw", async (c) => {
-  const result = await loadDecisionSession(c);
+messagesRouter.post("/:id/decisions/:gateId/withdraw", (c) => withdrawDecision(c, c.req.param("id")));
+
+export async function withdrawDecision(c: Context<AppEnv>, sessionId: string, threadId?: string) {
+  const result = await loadDecisionSession(c, sessionId, threadId);
   if ("error" in result) return result.error;
   const { session, engineSession } = result;
   const gateId = c.req.param("gateId");
 
   // Same explicit resolve authorization as the resolve route above —
   // withdrawing settles the gate too.
-  if (!(await canAnswerDecision(c, session))) {
-    return c.json(
-      { error: "Only the session owner or a member of its team can resolve this approval. Ask one of them." },
-      403,
-    );
+  if (!(await canAnswerDecision(c, session, sessionId))) {
+    return decisionDenied(c);
   }
 
   let body: WithdrawDecisionRequest = {};
@@ -1057,10 +2430,10 @@ messagesRouter.post("/:id/decisions/:gateId/withdraw", async (c) => {
     return c.json({ error: "only reason='cancel' is allowed from clients" }, 400);
   }
 
-  const pending = await engineSession.pendingDecisionGates();
-  const gate = pending.find((g) => g.id === gateId);
+  const pending = await visibleGates(c, session, engineSession);
+  const gate = pending.find((g) => g.id === gateId && (!threadId || g.threadId === threadId));
   if (!gate) return c.json({ error: "gate not pending" }, 404);
 
   await engineSession.withdrawDecision(gateId, reason);
   return c.json({ ok: true });
-});
+}

@@ -12,6 +12,7 @@ describe.skipIf(!bundleExists)("built bundle guards", () => {
     const src = readFileSync(bundlePath, "utf8");
     // A directory scan of migrations would defeat the inlining strategy.
     expect(src).not.toMatch(/readdirSync\([^)]*migrations/);
+    expect(src).not.toMatch(/new URL\(\s*["'][^"']*migrations\/pg\//);
   });
 
   it("does not import or spawn tsx at runtime", () => {

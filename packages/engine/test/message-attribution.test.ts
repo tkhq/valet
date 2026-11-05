@@ -5,8 +5,8 @@
  * thread, and the model cannot tell their messages apart from the text
  * alone. `entriesToAgentMessages` therefore renders each user entry's
  * `author` as a `[from: …]` line — but only when the caller opts in
- * (`attributeAuthors`), because on a personal session every prompt has the
- * same author and the line would be noise.
+ * (`attributeAuthors`). On a personal session only a prompt from someone
+ * other than the owner gets the line, such as a reply in a shared thread.
  *
  * One render function (`formatSenderLine`) serves three call sites — the
  * hot path (`Thread.runAgent`), rehydrate (`entriesToAgentMessages`), and
@@ -18,6 +18,7 @@ import type { MessageEntry } from "../src/types.js";
 import { entriesToAgentMessages, userContentBlocks } from "../src/thread.js";
 import { formatSenderLine } from "../src/submission.js";
 import { entriesToSummaryMessages } from "../src/compaction.js";
+import { withoutSentLine } from "../src/test-helpers/sent-line.js";
 
 const MODEL = { api: "anthropic", provider: "anthropic", id: "claude-opus-4" };
 
@@ -35,7 +36,7 @@ function userEntry(overrides: Partial<MessageEntry> = {}): MessageEntry {
   };
 }
 
-/** Concatenated text of a user AgentMessage's blocks, via narrowing (no casts). */
+/** Concatenated text of a user AgentMessage's blocks without the `[sent: …]` line, via narrowing (no casts). */
 function textOf(content: unknown): string {
   if (!Array.isArray(content)) return "";
   const texts: string[] = [];
@@ -44,7 +45,7 @@ function textOf(content: unknown): string {
     if (!("text" in b) || typeof b.text !== "string") continue;
     texts.push(b.text);
   }
-  return texts.join("");
+  return withoutSentLine(texts.join(""));
 }
 
 describe("formatSenderLine", () => {
@@ -97,6 +98,14 @@ describe("userContentBlocks — sender line", () => {
     const blocks = userContentBlocks("ship the release", undefined);
     expect(blocks[0]).toEqual({ type: "text", text: "ship the release" });
   });
+
+  it("puts the sent time line above the sender line", () => {
+    const blocks = userContentBlocks("ship the release", undefined, { id: "u1", name: "Alice" }, { at: 1 });
+    expect(blocks[0]).toEqual({
+      type: "text",
+      text: "[sent: Thursday 1970-01-01 00:00 UTC]\n\n[from: Alice]\n\nship the release",
+    });
+  });
 });
 
 describe("entriesToAgentMessages — attributeAuthors", () => {
@@ -106,21 +115,21 @@ describe("entriesToAgentMessages — attributeAuthors", () => {
       userEntry({ id: "e2", author: { id: "u2", name: "Bob" }, content: "no, do Y" }),
     ];
     const msgs = entriesToAgentMessages(entries, MODEL, { attributeAuthors: true });
-    expect(msgs.map((m) => m.content)).toEqual([
-      [{ type: "text", text: "[from: Alice]\n\ndo X" }],
-      [{ type: "text", text: "[from: Bob]\n\nno, do Y" }],
+    expect(msgs.map((m) => textOf(m.content))).toEqual([
+      "[from: Alice]\n\ndo X",
+      "[from: Bob]\n\nno, do Y",
     ]);
   });
 
   it("leaves user text untouched when not opted in (personal sessions)", () => {
     const entries = [userEntry({ author: { id: "u1", name: "Alice" } })];
     const msgs = entriesToAgentMessages(entries, MODEL);
-    expect(msgs[0].content).toEqual([{ type: "text", text: "ship the release" }]);
+    expect(textOf(msgs[0].content)).toBe("ship the release");
   });
 
   it("leaves authorless entries untouched even when opted in", () => {
     const msgs = entriesToAgentMessages([userEntry()], MODEL, { attributeAuthors: true });
-    expect(msgs[0].content).toEqual([{ type: "text", text: "ship the release" }]);
+    expect(textOf(msgs[0].content)).toBe("ship the release");
   });
 
   it("exempts signal entries — their envelope already names the sender", () => {
@@ -133,6 +142,31 @@ describe("entriesToAgentMessages — attributeAuthors", () => {
     ];
     const msgs = entriesToAgentMessages(entries, MODEL, { attributeAuthors: true });
     expect(textOf(msgs[0].content)).not.toContain("[from:");
+  });
+});
+
+describe("attributeAuthors — personal session with a shared thread", () => {
+  // The owner's prompts stay bare. A member who replies in the owner's
+  // shared thread is named, so the model knows who is speaking.
+  const entries = [
+    userEntry({ id: "e1", author: { id: "owner", name: "Ops Lead" }, content: "look at checkout" }),
+    userEntry({ id: "e2", author: { id: "guest", name: "Guest Member" }, content: "check payments too" }),
+  ];
+
+  it("names only authors other than the owner in the live transcript", () => {
+    const msgs = entriesToAgentMessages(entries, MODEL, { attributeAuthors: { ownerId: "owner" } });
+    expect(msgs.map((m) => textOf(m.content))).toEqual([
+      "look at checkout",
+      "[from: Guest Member]\n\ncheck payments too",
+    ]);
+  });
+
+  it("names only authors other than the owner in the summarizer input", () => {
+    const msgs = entriesToSummaryMessages(entries, { toolOutputMaxChars: 2000, attributeAuthors: { ownerId: "owner" } });
+    expect(msgs.map((m) => textOf(m.content))).toEqual([
+      "look at checkout",
+      "[from: Guest Member]\n\ncheck payments too",
+    ]);
   });
 });
 
@@ -156,5 +190,31 @@ describe("entriesToSummaryMessages — attributeAuthors", () => {
     const entries = [userEntry({ author: { id: "u1", name: "Alice" } })];
     const msgs = entriesToSummaryMessages(entries, { toolOutputMaxChars: 2000 });
     expect(textOf(msgs[0].content)).toBe("ship the release");
+  });
+});
+
+describe("entriesToAgentMessages — reply context", () => {
+  it("adds the stable assistant reference without rewinding the transcript", () => {
+    const entries = [
+      userEntry({
+        content: "What about staging?",
+        metadata: {
+          replyTo: {
+            messageId: "assistant-7",
+            excerpt: "Use the blue deployment for the API.",
+          },
+        },
+      }),
+    ];
+
+    const messages = entriesToAgentMessages(entries, MODEL);
+    expect(messages).toHaveLength(1);
+    expect(textOf(messages[0].content)).toBe(
+      "<reply-context>\n" +
+        "The user is replying to assistant message assistant-7.\n" +
+        "Immutable excerpt: Use the blue deployment for the API.\n" +
+        "</reply-context>\n\n" +
+        "What about staging?",
+    );
   });
 });

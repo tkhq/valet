@@ -11,9 +11,10 @@
  *     JSON-RPC round trip over the Streamable HTTP transport, and `whoami`
  *     returns the seeded user's own identity — never a caller-supplied id.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { users, oauthAccessToken, agentSessions } from "../schema/index.js";
+import { users, oauthAccessToken, agentSessions, externalCalls } from "../schema/index.js";
+import { seedMcpConsent } from "../integration/_mcp-consent.js";
 
 let api: TestApi | undefined;
 
@@ -88,13 +89,14 @@ describe("MCP endpoint", () => {
     });
 
     const accessToken = "mcp-test-access-token";
+    await seedMcpConsent(db, "mcp-user-1", "mcp-client");
     await db.insert(oauthAccessToken).values({
       id: "mcp-token-1",
       accessToken,
       refreshToken: "mcp-refresh-token-1",
       accessTokenExpiresAt: new Date(now + 60_000),
       refreshTokenExpiresAt: new Date(now + 3_600_000),
-      clientId: null,
+      clientId: "mcp-client",
       userId: "mcp-user-1",
       scopes: "mcp",
       createdAt: new Date(now),
@@ -141,7 +143,7 @@ describe("MCP endpoint", () => {
       jsonrpc: "2.0",
       id: 3,
       method: "tools/call",
-      params: { name: "whoami", arguments: {} },
+      params: { name: "whoami", arguments: { intent: "Inspect the test account." } },
     });
     expect(whoamiRes.status).toBe(200);
     const whoamiBody = (await whoamiRes.json()) as JsonRpcResponse & {
@@ -156,7 +158,7 @@ describe("MCP endpoint", () => {
       jsonrpc: "2.0",
       id: 4,
       method: "tools/call",
-      params: { name: "list_sessions", arguments: {} },
+      params: { name: "list_sessions", arguments: { intent: "Inspect the test account." } },
     });
     expect(listSessionsRes.status).toBe(200);
     const listSessionsBody = (await listSessionsRes.json()) as JsonRpcResponse & {
@@ -165,6 +167,20 @@ describe("MCP endpoint", () => {
     const listSessionsText = listSessionsBody.result?.content[0]?.text ?? "[]";
     const sessions = JSON.parse(listSessionsText) as Array<{ id: string; title: string | null; status: string }>;
     expect(sessions).toEqual([{ id: "mcp-session-1", title: "My session", status: "active" }]);
+    const missing = await mcpRequest(api.baseUrl, accessToken, {
+      jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "whoami", arguments: {} },
+    });
+    const rejected = await missing.json() as { result: { isError: boolean; content: { text: string }[] } };
+    expect(rejected.result.isError).toBe(true);
+    expect(rejected.result.content[0]?.text).toContain("intent");
+    await vi.waitFor(async () => {
+      const rows = await db.select().from(externalCalls);
+      expect(rows).toHaveLength(3);
+      expect(rows.filter(row => row.outcome === "ok")).toHaveLength(2);
+      expect(rows.filter(row => row.outcome === "error")).toHaveLength(1);
+      expect(rows.every(row => row.clientName === "test" && row.clientVersion === "1.0" && row.userId === "mcp-user-1" && row.durationMs >= 0)).toBe(true);
+      expect(rows.find(row => row.outcome === "error")?.intent).toBeNull();
+    });
   });
 
   it("an expired oauth_access_token row is rejected with 401", async () => {

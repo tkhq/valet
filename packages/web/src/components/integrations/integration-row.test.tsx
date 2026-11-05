@@ -6,7 +6,12 @@
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import type { PluginServiceSummary, PluginSummary } from "@valet/api/wire";
+import type {
+  CredentialSummary,
+  PluginServiceSummary,
+  PluginSummary,
+  ToolPermissionWire,
+} from "@valet/api/wire";
 
 const disconnectMutate = vi.fn();
 let disconnectPending = false;
@@ -17,6 +22,8 @@ const disconnectReset = vi.fn(() => {
   disconnectError = null;
 });
 
+let credentials: CredentialSummary[] = [];
+
 vi.mock("~/api/integrations", () => ({
   useDisconnectCredential: () => ({
     mutate: disconnectMutate,
@@ -25,7 +32,7 @@ vi.mock("~/api/integrations", () => ({
     reset: disconnectReset,
   }),
   useConnectCredential: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
-  useCredentials: () => ({ data: { credentials: [] }, isLoading: false, error: null }),
+  useCredentials: () => ({ data: { credentials }, isLoading: false, error: null }),
   useDelegateCredential: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
   useRevokeDelegation: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
 }));
@@ -49,7 +56,19 @@ vi.mock("~/api/queries", () => ({
   useLinkMembers: () => ({ data: undefined, isLoading: false }),
 }));
 
-import { IntegrationRow } from "./integration-row";
+vi.mock("~/api/workflows", () => ({ useTriggerCatalog: () => ({ data: { catalog: [] } }) }));
+
+// The rows' summaries and the panel's tool controls read these.
+let toolPermissions: ToolPermissionWire[] = [];
+let setToolModesError: Error | null = null;
+const setToolModes = vi.fn();
+vi.mock("~/api/policies", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("~/api/policies")>()),
+  useMyToolPermissions: () => ({ data: { tools: toolPermissions }, isLoading: false, error: null }),
+  useSetMyToolModes: () => ({ mutate: setToolModes, error: setToolModesError }),
+}));
+
+import { IntegrationDetail } from "./integration-row";
 
 const SERVICE: PluginServiceSummary = {
   service: "linear",
@@ -77,28 +96,86 @@ function nativeConfirm() {
 
 describe("IntegrationRow disconnect", () => {
   beforeEach(() => {
+    credentials = [];
     disconnectMutate.mockReset();
     disconnectReset.mockClear();
     disconnectPending = false;
     disconnectError = null;
   });
 
+  it("shows the provider's answer under a failed refresh", () => {
+    credentials = [{ service: "linear", type: "oauth2", connectedAt: "2026-01-01T00:00:00Z", refreshFailedAt: 1, refreshError: "400 invalid_grant" }];
+    render(<IntegrationDetail plugin={{ ...PLUGIN, services: [{ ...SERVICE, health: { refreshFailed: true } }] }} />);
+    expect(screen.getByText("The last token refresh failed. Select Reconnect to sign in again.")).toBeTruthy();
+    expect(screen.getByText("Linear replied: 400 invalid_grant")).toBeTruthy();
+  });
+
+  it("names the missing scope the tool-list probe found and offers Reconnect", () => {
+    render(
+      <IntegrationDetail
+        plugin={{ ...PLUGIN, services: [{ ...SERVICE, health: { missingScopes: ["read"], blockedTools: 1 } }] }}
+      />,
+    );
+    expect(screen.getByText("Missing scopes")).toBeTruthy();
+    expect(
+      screen.getByText(
+        "This connection does not hold the read scope, which 1 tool needs. Ask an admin to add read to this integration's scopes. Then select Reconnect.",
+      ),
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Reconnect Linear" })).toBeTruthy();
+  });
+
+  it("marks a connection the service refused as rejected", () => {
+    render(<IntegrationDetail plugin={{ ...PLUGIN, services: [{ ...SERVICE, health: { rejected: true } }] }} />);
+    expect(screen.getByText("Rejected")).toBeTruthy();
+    expect(
+      screen.getByText("The service refused this connection when Valet listed its tools. Select Reconnect to sign in again."),
+    ).toBeTruthy();
+  });
+
+  it("does not offer Disconnect for an organization-provided Slack bot", () => {
+    const orgSlack: PluginSummary = {
+      ...PLUGIN,
+      name: "slack",
+      services: [{
+        service: "slack",
+        type: "bot_token",
+        configKeys: ["accessToken"],
+        connected: false,
+        connect: "org",
+        actions: [],
+      }],
+    };
+
+    render(<IntegrationDetail plugin={orgSlack} />);
+
+    expect(screen.queryByRole("button", { name: /Disconnect Slack/ })).toBeNull();
+  });
+
   it("asks in a dialog, naming the cost and the way back, and deletes nothing yet", () => {
     const confirmSpy = nativeConfirm();
-    render(<IntegrationRow plugin={PLUGIN} />);
+    render(<IntegrationDetail plugin={PLUGIN} />);
 
     fireEvent.click(screen.getByRole("button", { name: "Disconnect Linear" }));
 
     const dialog = screen.getByRole("dialog");
     expect(screen.getByText("Disconnect Linear?")).toBeTruthy();
     expect(dialog.textContent).toContain("deletes the saved Linear credential");
-    expect(dialog.textContent).toContain("until you connect it again");
     expect(disconnectMutate).not.toHaveBeenCalled();
     expect(confirmSpy).not.toHaveBeenCalled();
   });
 
+  it("says a 1Password reference leaves the 1Password item in place", () => {
+    credentials = [{ service: "linear", type: "oauth2", connectedAt: "2026-01-01T00:00:00Z", onepasswordRef: "op://Work/Linear/token" }];
+    render(<IntegrationDetail plugin={PLUGIN} />);
+    fireEvent.click(screen.getByRole("button", { name: "Disconnect Linear" }));
+    const text = screen.getByRole("dialog").textContent ?? "";
+    expect(text).toContain("deletes the stored Linear reference");
+    expect(text).toContain("The item in 1Password is not deleted.");
+  });
+
   it("deletes the credential when the dialog is confirmed", async () => {
-    render(<IntegrationRow plugin={PLUGIN} />);
+    render(<IntegrationDetail plugin={PLUGIN} />);
     fireEvent.click(screen.getByRole("button", { name: "Disconnect Linear" }));
     fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
 
@@ -109,7 +186,7 @@ describe("IntegrationRow disconnect", () => {
   });
 
   it("deletes nothing when the dialog is cancelled", async () => {
-    render(<IntegrationRow plugin={PLUGIN} />);
+    render(<IntegrationDetail plugin={PLUGIN} />);
     fireEvent.click(screen.getByRole("button", { name: "Disconnect Linear" }));
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
 
@@ -118,14 +195,14 @@ describe("IntegrationRow disconnect", () => {
   });
 
   it("shows the server's error instead of swallowing it", async () => {
-    const { rerender } = render(<IntegrationRow plugin={PLUGIN} />);
+    const { rerender } = render(<IntegrationDetail plugin={PLUGIN} />);
     fireEvent.click(screen.getByRole("button", { name: "Disconnect Linear" }));
     fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
     await waitFor(() => expect(disconnectMutate).toHaveBeenCalledTimes(1));
 
     // Production order: the refusal answers the request the open dialog sent.
     disconnectError = new Error("Linear rejected the request");
-    rerender(<IntegrationRow plugin={PLUGIN} />);
+    rerender(<IntegrationDetail plugin={PLUGIN} />);
 
     expect(screen.getByRole("dialog").textContent).toContain("Linear rejected the request");
   });
@@ -135,7 +212,7 @@ describe("IntegrationRow disconnect", () => {
     // still on the mutation. Reopening must not read as a fresh failure of a
     // request the person has not made yet.
     disconnectError = new Error("Linear rejected the request");
-    render(<IntegrationRow plugin={PLUGIN} />);
+    render(<IntegrationDetail plugin={PLUGIN} />);
 
     fireEvent.click(screen.getByRole("button", { name: "Disconnect Linear" }));
 
@@ -144,18 +221,18 @@ describe("IntegrationRow disconnect", () => {
   });
 
   it("reports the request in flight inside the dialog", () => {
-    const { rerender } = render(<IntegrationRow plugin={PLUGIN} />);
+    const { rerender } = render(<IntegrationDetail plugin={PLUGIN} />);
     fireEvent.click(screen.getByRole("button", { name: "Disconnect Linear" }));
 
     disconnectPending = true;
-    rerender(<IntegrationRow plugin={PLUGIN} />);
+    rerender(<IntegrationDetail plugin={PLUGIN} />);
 
     expect(screen.getByRole("dialog").textContent).toContain("Disconnecting…");
   });
 
   it("keeps the tile's control disabled while the delete runs", () => {
     disconnectPending = true;
-    render(<IntegrationRow plugin={PLUGIN} />);
+    render(<IntegrationDetail plugin={PLUGIN} />);
 
     const control = screen.getByRole("button", { name: "Disconnect Linear" });
     expect(control.hasAttribute("disabled")).toBe(true);

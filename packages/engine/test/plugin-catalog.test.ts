@@ -1,10 +1,17 @@
+import { toAgentTool } from "../src/tool-bridge.js";
 import { decode } from "@toon-format/toon";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { ObjectOptions, Type } from "typebox";
 import type { TObject } from "typebox";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import {
   pluginCatalogTools,
+  buildPluginCatalog,
+  actionRunsUngated,
+  resolveUngatedAction,
+  recordHostedActionInvocation,
+  invokeAction,
   pinnedToolName,
   prepareActionArgs,
   MAX_PINNED_ACTIONS,
@@ -18,6 +25,7 @@ import {
   type BusEvent,
   type Credential,
   type CredentialProvider,
+  type CredentialRead,
   DecisionGateExpiredError,
   type DecisionGateRequest,
   type DecisionResolution,
@@ -34,6 +42,270 @@ import {
   type SessionEntry,
   type ToolContext,
 } from "../src/index.js";
+
+describe("actor-scoped action consent", () => {
+  const plugin: ActionPlugin = { service: "settings", defaultApprovalMode: "allow", actions: [{
+    id: "settings.change", name: "Change settings", description: "Change settings", riskLevel: "low", approvalScope: "actor",
+    parameters: Type.Object({}), execute: async () => ({ success: true, data: { changed: true } }),
+  }] };
+
+  it.each([false, true])("requires one-shot consent despite an allow decision (resolver: %s)", async (withResolver) => {
+    const catalog = buildPluginCatalog([plugin]);
+    const requests: DecisionGateRequest[] = [];
+    const resolutions: DecisionResolution[] = [];
+    const records: PolicyInvocationRecord[] = [];
+    const policyResolver: PolicyResolver = {
+      resolve: async () => ({ mode: "allow", provenance: { baseMode: "allow", source: "org_policy" } }),
+      onResolution: async (_input, _decision, resolution) => { resolutions.push(resolution); },
+      onInvocation: async (record) => { records.push(record); },
+    };
+    const ctx = makeCtx({ userId: "author", interactiveActor: { id: "author" }, ...(withResolver ? { policyResolver } : {}),
+      requestDecision: async (request) => {
+        requests.push(request);
+        return { actionId: "approve", resolvedBy: "author", resolvedAt: 1 };
+      },
+    });
+
+    expect(await actionRunsUngated(catalog, "settings.change", ctx)).toBe(false);
+    expect(await invokeAction(catalog, "settings.change", {}, ctx, "Change settings"))
+      .toMatchObject({ kind: "ok", result: { success: true, data: { changed: true } } });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.context).toMatchObject({ approver: { userId: "author" }, oneShot: true });
+    expect(resolutions).toHaveLength(withResolver ? 1 : 0);
+    expect(records).toEqual(withResolver ? [expect.objectContaining({ status: "completed", resolvedMode: "require_approval" })] : []);
+  });
+
+  it("refuses a mismatched interactive author before requesting consent", async () => {
+    let gates = 0;
+    const result = await invokeAction(buildPluginCatalog([plugin]), "settings.change", {}, makeCtx({
+      userId: "author", interactiveActor: { id: "different-author" },
+      requestDecision: async () => { gates++; return { actionId: "approve", resolvedBy: "different-author", resolvedAt: 1 }; },
+    }), "Change settings");
+    expect(result).toMatchObject({ kind: "error", message: expect.stringMatching(/verified.*author/i) });
+    expect(gates).toBe(0);
+  });
+
+  it.each([false, true])("refuses another member's legacy approval for an explicitly actor-scoped action (resolver: %s)", async (withResolver) => {
+    const result = await invokeAction(buildPluginCatalog([plugin]), "settings.change", {}, makeCtx({
+      userId: "author", interactiveActor: { id: "author" },
+      ...(withResolver ? { policyResolver: {
+        resolve: async (): Promise<PolicyDecision> => ({ mode: "require_approval", provenance: { baseMode: "require_approval", source: "org_policy" } }),
+      } } : {}),
+      requestDecision: async () => ({ actionId: "approve", resolvedBy: "teammate", resolvedAt: 1, gateContext: {} }),
+    }), "Change settings");
+    expect(result.kind).toBe("denied-approval");
+  });
+});
+
+describe("team approvals wait on the person who asked", () => {
+  const plugin: ActionPlugin = { service: "chat", defaultApprovalMode: "require_approval", actions: [{
+    id: "chat.post", name: "Post", description: "Post", riskLevel: "medium",
+    parameters: Type.Object({}), execute: async () => ({ success: true }),
+  }] };
+
+  it("names the asker on a team session's approval, and keeps personal approvals open", async () => {
+    const requests: DecisionGateRequest[] = [];
+    const requestDecision = async (request: DecisionGateRequest) => { requests.push(request); return { actionId: "approve", resolvedBy: "asker", resolvedAt: 1 }; };
+    await invokeAction(buildPluginCatalog([plugin]), "chat.post", {}, makeCtx({
+      userId: "runtime", owner: { type: "team", id: "team-1" }, interactiveActor: { id: "asker" }, actor: { id: "asker", name: "Asker Name" }, requestDecision,
+    }), "Post");
+    await invokeAction(buildPluginCatalog([plugin]), "chat.post", {}, makeCtx({
+      userId: "me", owner: { type: "user", id: "me" }, interactiveActor: { id: "me" }, requestDecision,
+    }), "Post");
+    await invokeAction(buildPluginCatalog([plugin]), "chat.post", {}, makeCtx({
+      userId: "runtime", owner: { type: "team", id: "team-1" }, requestDecision,
+    }), "Post");
+    expect(requests.map((request) => request.context?.approver)).toEqual([{ userId: "asker", name: "Asker Name" }, undefined, undefined]);
+  });
+
+  it.each([false, true])("honors a teammate's approval of an unmarked legacy team gate (resolver: %s)", async (withResolver) => {
+    const records: PolicyInvocationRecord[] = [];
+    let resolutions = 0;
+    let executions = 0;
+    const catalog = buildPluginCatalog([{ ...plugin, actions: [{ ...plugin.actions[0], execute: async () => {
+      executions++;
+      return { success: true };
+    } }] }]);
+    const result = await invokeAction(catalog, "chat.post", {}, makeCtx({
+      userId: "runtime", owner: { type: "team", id: "team-1" }, interactiveActor: { id: "asker" },
+      ...(withResolver ? { policyResolver: {
+        resolve: async (): Promise<PolicyDecision> => ({ mode: "require_approval", provenance: { baseMode: "require_approval", source: "team_policy" } }),
+        onResolution: async () => { resolutions++; },
+        onInvocation: async (record: PolicyInvocationRecord) => { records.push(record); },
+      } } : {}),
+      // requestDecision returns the stored gate context when joining or replaying it.
+      requestDecision: async () => ({ actionId: "approve", resolvedBy: "teammate", resolvedAt: 1,
+        gateContext: { tool_id: "chat.post", oneShot: true } }),
+    }), "Post");
+    expect(result.kind).toBe("ok");
+    expect(executions).toBe(1);
+    expect(resolutions).toBe(withResolver ? 1 : 0);
+    expect(records.map(record => record.status)).toEqual(withResolver ? ["completed"] : []);
+  });
+
+  it.each([false, true])("refuses another member's answer to a new requester gate (resolver: %s)", async (withResolver) => {
+    let resolutions = 0;
+    let executions = 0;
+    const catalog = buildPluginCatalog([{ ...plugin, actions: [{ ...plugin.actions[0], execute: async () => {
+      executions++;
+      return { success: true };
+    } }] }]);
+    const result = await invokeAction(catalog, "chat.post", {}, makeCtx({
+      userId: "runtime", owner: { type: "team", id: "team-1" }, interactiveActor: { id: "asker" },
+      ...(withResolver ? { policyResolver: {
+        resolve: async (): Promise<PolicyDecision> => ({ mode: "require_approval", provenance: { baseMode: "require_approval", source: "team_policy" } }),
+        onResolution: async () => { resolutions++; },
+      } } : {}),
+      requestDecision: async request => ({ actionId: "approve", resolvedBy: "teammate", resolvedAt: 1, gateContext: request.context }),
+    }), "Post");
+    expect(result.kind).toBe("denied-approval");
+    expect(executions).toBe(0);
+    expect(resolutions).toBe(0);
+  });
+
+  it.each(["lender", "asker", "another-member"])("requires the account lender's consent when %s answers", async (resolvedBy) => {
+    const onResolution = vi.fn(async () => {});
+    const execute = vi.fn(async () => ({ success: true }));
+    const catalog = buildPluginCatalog([{ ...plugin, actions: [{ ...plugin.actions[0], execute }] }]);
+    const result = await invokeAction(catalog, "chat.post", {}, makeCtx({
+      userId: "runtime", owner: { type: "team", id: "team-1" }, interactiveActor: { id: "asker" },
+      policyResolver: {
+        resolve: async () => ({ mode: "require_approval", provenance: { baseMode: "allow", source: "shared_account" }, approver: { userId: "lender" } }),
+        onResolution,
+      },
+      requestDecision: async (request) => {
+        expect(request.context?.approver).toEqual({ userId: "lender" });
+        return { actionId: "approve", resolvedBy, resolvedAt: 1 };
+      },
+    }), "Post");
+    expect(result.kind).toBe(resolvedBy === "lender" ? "ok" : "denied-approval");
+    expect(onResolution).toHaveBeenCalledTimes(resolvedBy === "lender" ? 1 : 0);
+    expect(execute).toHaveBeenCalledTimes(resolvedBy === "lender" ? 1 : 0);
+  });
+});
+
+it("scopes live availability reads for actions and filtered discovery", async () => {
+  const plugin: ActionPlugin = {
+    service: "one",
+    actions: [{ id: "one.run", name: "Run", description: "Run", riskLevel: "low",
+      parameters: Type.Object({}), execute: async () => ({ success: true }) }],
+  };
+  const resolveServiceAvailability = vi.fn(() => []);
+  const [listTool] = pluginCatalogTools({ plugins: [plugin], resolveServiceAvailability });
+  await listTool.execute({ service: "one" }, makeCtx());
+  expect(resolveServiceAvailability).toHaveBeenLastCalledWith("one");
+  await listTool.execute({}, makeCtx());
+  expect(resolveServiceAvailability).toHaveBeenLastCalledWith(undefined);
+  await listTool.execute({ service: "" }, makeCtx());
+  expect(resolveServiceAvailability).toHaveBeenLastCalledWith(undefined);
+  const result = await invokeAction(buildPluginCatalog([plugin], undefined, { resolveServiceAvailability }),
+    "one.run", {}, makeCtx(), "run");
+  expect(result.kind).toBe("ok");
+  expect(resolveServiceAvailability).toHaveBeenLastCalledWith("one");
+});
+
+it("hides duplicate generation for native models but keeps sandbox-file editing", async () => {
+  const plugin: ActionPlugin = { service: "openai", actions: ["generate_image", "edit_image"].map((name) => ({
+    id: `openai.${name}`, name, description: name, riskLevel: "low", parameters: Type.Object({}),
+    execute: async () => ({ success: true }),
+  })) };
+  const [list] = pluginCatalogTools({ plugins: [plugin] });
+  const native = await list.execute({ service: "openai" }, makeCtx({ nativeImageGeneration: true }));
+  expect(native.text).not.toContain("openai.generate_image");
+  expect(native.text).toContain("openai.edit_image");
+  expect((await list.execute({ service: "openai" }, makeCtx())).text).toContain("openai.generate_image");
+  expect((await invokeAction(buildPluginCatalog([plugin]), "openai.generate_image", {}, makeCtx({ nativeImageGeneration: true }), "generate")).kind).toBe("unknown");
+});
+
+it("resolves policy on defaulted parameters, so an omitted field cannot bypass a matcher", async () => {
+  let executed = 0;
+  const plugin: ActionPlugin = { service: "openai", actions: [{
+    id: "openai.generate_image", name: "Generate Image", description: "Generate", riskLevel: "low",
+    parameters: Type.Object({ prompt: Type.String(), model: Type.Optional(Type.String({ default: "gpt-image-2.5-sunburst" })) }),
+    execute: async () => { executed++; return { success: true }; },
+  }] };
+  const records: PolicyInvocationRecord[] = [];
+  const resolver: PolicyResolver = {
+    resolve: async (input) => input.params?.model === "gpt-image-2.5-sunburst"
+      ? { mode: "deny", provenance: { baseMode: "deny", source: "org_policy" } }
+      : { mode: "allow", provenance: { baseMode: "allow", source: "risk_default" } },
+    onInvocation: async (record) => { records.push(record); },
+  };
+  const catalog = buildPluginCatalog([plugin]);
+  expect((await invokeAction(catalog, "openai.generate_image", { prompt: "fox" }, makeCtx({ policyResolver: resolver }), "generate")).kind).toBe("denied-policy");
+  expect(executed).toBe(0);
+  expect((await invokeAction(catalog, "openai.generate_image", { prompt: "fox", model: "gpt-image-2.5-flare" }, makeCtx({ policyResolver: resolver }), "generate")).kind).toBe("ok");
+  expect(executed).toBe(1);
+  await new Promise((r) => setTimeout(r, 0));
+  expect(records[0]?.params).toEqual({ prompt: "fox", model: "gpt-image-2.5-sunburst" });
+});
+
+describe("actionRunsUngated", () => {
+  const plugin: ActionPlugin = { service: "openai", actions: [{
+    id: "openai.generate_image", name: "Generate Image", description: "Generate", riskLevel: "low", parameters: Type.Object({}),
+    execute: async () => ({ success: true }),
+  }, {
+    id: "openai.delete_everything", name: "Delete", description: "Delete", riskLevel: "critical", parameters: Type.Object({}),
+    execute: async () => ({ success: true }),
+  }] };
+  const decision = (mode: "allow" | "deny" | "require_approval"): PolicyResolver => ({
+    resolve: async () => ({ mode, provenance: { baseMode: mode, source: "team_policy" } }),
+  });
+
+  it("answers from risk level when no resolver is configured", async () => {
+    const catalog = buildPluginCatalog([plugin]);
+    expect(await actionRunsUngated(catalog, "openai.generate_image", makeCtx())).toBe(true);
+    expect(await actionRunsUngated(catalog, "openai.delete_everything", makeCtx())).toBe(false);
+    expect(await actionRunsUngated(catalog, "openai.missing", makeCtx())).toBe(false);
+    expect(await actionRunsUngated(buildPluginCatalog([]), "openai.generate_image", makeCtx())).toBe(false);
+  });
+
+  it("follows the resolver decision and fails closed on resolver errors", async () => {
+    const catalog = buildPluginCatalog([plugin]);
+    expect(await actionRunsUngated(catalog, "openai.generate_image", makeCtx({ policyResolver: decision("allow") }))).toBe(true);
+    expect(await actionRunsUngated(catalog, "openai.generate_image", makeCtx({ policyResolver: decision("deny") }))).toBe(false);
+    expect(await actionRunsUngated(catalog, "openai.generate_image", makeCtx({ policyResolver: decision("require_approval") }))).toBe(false);
+    const failing: PolicyResolver = { resolve: async () => { throw new Error("policy store unavailable"); } };
+    expect(await actionRunsUngated(catalog, "openai.generate_image", makeCtx({ policyResolver: failing }))).toBe(false);
+    const resolve = vi.fn(async () => ({ mode: "allow" as const, provenance: { baseMode: "allow" as const, source: "risk_default" as const } }));
+    await actionRunsUngated(catalog, "openai.generate_image", makeCtx({ policyResolver: { resolve }, owner: { type: "team", id: "team-a" } }), { model: "sunburst" });
+    expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ teamId: "team-a", service: "openai", actionId: "openai.generate_image", riskLevel: "low", appliesIn: "session", params: { model: "sunburst" }, partialParams: true }));
+  });
+
+  it("audits a hosted execution as the plugin action with the grant's provenance", async () => {
+    const catalog = buildPluginCatalog([plugin]);
+    const records: PolicyInvocationRecord[] = [];
+    const resolver: PolicyResolver = {
+      resolve: async () => ({ mode: "allow", provenance: { baseMode: "allow", source: "org_policy", matchedPolicyId: "pol-1" } }),
+      onInvocation: async (record) => { records.push(record); },
+    };
+    const ctx = makeCtx({ policyResolver: resolver, queueItemId: "q-1" });
+    const grant = await resolveUngatedAction(catalog, "openai.generate_image", ctx, { model: "sunburst" });
+    if (!grant) throw new Error("expected a grant");
+    expect(records).toHaveLength(0);
+    recordHostedActionInvocation(ctx, grant, { path: "generated-images/a.png" }, "Generated an image");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(records).toEqual([expect.objectContaining({
+      service: "openai", actionId: "openai.generate_image", toolId: "openai.generate_image", riskLevel: "low", status: "completed", resolvedMode: "allow",
+      provenance: { baseMode: "allow", source: "org_policy", matchedPolicyId: "pol-1" }, params: { model: "sunburst", path: "generated-images/a.png" },
+      queueItemId: "q-1", summary: "Generated an image", resumeKey: expect.stringMatching(/^openai\.generate_image:/),
+    })]);
+    // Without a resolver there is no audit port, and no grant is denied by that absence.
+    recordHostedActionInvocation(makeCtx(), grant, {}, "none");
+    expect(await resolveUngatedAction(catalog, "openai.generate_image", makeCtx(), {})).toMatchObject({ decision: { mode: "allow", provenance: { source: "risk_default" } } });
+  });
+
+  it("refuses external senders and unavailable services", async () => {
+    const catalog = buildPluginCatalog([plugin]);
+    expect(await actionRunsUngated(catalog, "openai.generate_image", makeCtx({ externalSender: true, policyResolver: decision("allow") }))).toBe(false);
+    const unavailable = buildPluginCatalog([plugin], undefined, { serviceAvailability: [{
+      service: "openai", state: "disabled_by_org", reason: "the organization disabled this service", fix: "Ask an organization administrator to enable openai.",
+    }] });
+    expect(await actionRunsUngated(unavailable, "openai.generate_image", makeCtx({ policyResolver: decision("allow") }))).toBe(false);
+    const failing = buildPluginCatalog([{ ...plugin, requiresCredential: true }], undefined, { resolveServiceAvailability: async () => { throw new Error("availability store down"); } });
+    expect(await actionRunsUngated(failing, "openai.generate_image", makeCtx({ policyResolver: decision("allow") }))).toBe(false);
+  });
+});
 
 function makeMockPlugin(): {
   plugin: ActionPlugin;
@@ -147,13 +419,14 @@ describe("pluginCatalogTools: registration", () => {
       plugins: [{ ...a.plugin, service: "github" }, dynamic],
     });
     const listTool = tools.find((t) => t.name === "list_tools");
-    expect(listTool?.description).toContain("Available services: github, linear.");
+    expect(listTool?.description).toContain("Installed services: github, linear.");
+    expect(listTool?.description).toContain("call list_tools before you say a service is connected");
   });
 
   it("omits the service line when the catalog is empty", () => {
     const tools = pluginCatalogTools({ plugins: [] });
     const listTool = tools.find((t) => t.name === "list_tools");
-    expect(listTool?.description).not.toContain("Available services:");
+    expect(listTool?.description).not.toContain("Installed services:");
   });
 });
 
@@ -367,13 +640,16 @@ describe("pluginCatalogTools: list_tools", () => {
     if (!toolEnd || toolEnd.event.type !== "tool_end") throw new Error("no tool_end");
     const payload = decode(toolEnd.event.result) as {
       tools: Array<{ tool_id: string }>;
-      warnings?: Array<{ service: string; reason: string }>;
+      warnings?: Array<{ service: string; reason: string; fix: string }>;
     };
     expect(payload.warnings?.[0]?.service).toBe("github");
     // requiresCredential + no credential → tools hidden from the
     // unfiltered listing, and the warning names the fix.
     expect(payload.tools).toEqual([]);
     expect(payload.warnings?.[0]?.reason).toMatch(/tools hidden/);
+    expect(payload.warnings?.[0]?.fix).toBe(
+      "Connect github on the Integrations page (/integrations). After connecting, call list_tools (service: \"github\") to confirm — actions appear when the connection worked; otherwise this warning returns with the reason.",
+    );
 
     faux.unregister();
   });
@@ -388,7 +664,12 @@ describe("pluginCatalogTools: list_tools", () => {
       warnings?: Array<{ service: string; reason: string }>;
     };
     expect(payload.tools.length).toBeGreaterThan(0);
-    expect(payload.warnings?.[0]).toEqual({ service: "github", reason: "no credential connected" });
+    expect(payload.warnings?.[0]).toEqual({
+      service: "github",
+      state: "not_connected",
+      reason: "not connected",
+      fix: "Connect github on the Integrations page (/integrations). After connecting, call list_tools (service: \"github\") to confirm — actions appear when the connection worked; otherwise this warning returns with the reason.",
+    });
   });
 
   it("credential-less plugins are never probed or warned about", async () => {
@@ -458,9 +739,321 @@ describe("pluginCatalogTools: list_tools", () => {
     const gmailWarning = payload.warnings?.find((w) => w.service === "gmail");
     expect(gmailWarning).toBeUndefined();
   });
+
+  describe("native app credential fallback", () => {
+    const linearAction: PluginAction = {
+      id: "linear.list_issues",
+      name: "List Issues",
+      description: "List Linear issues.",
+      riskLevel: "low",
+      parameters: Type.Object({}),
+      execute: async () => ({ success: true, data: {} }),
+    };
+    const linearPlugin: ActionPlugin = {
+      service: "linear",
+      actions: [linearAction],
+      requiresCredential: true,
+      appCredentialService: "linear:app",
+    };
+    const ctxAnswering = (answers: Record<string, string>) =>
+      makeCtx({
+        credentials: {
+          get: async (service?: string): Promise<Credential | null> => {
+            const token = service === undefined ? undefined : answers[service];
+            return token ? { accessToken: token } : null;
+          },
+          request: async (): Promise<Credential> => {
+            throw new Error("not implemented in test stub");
+          },
+        },
+      });
+
+    it("lists linear tools without a warning when only the app service answers", async () => {
+      const [listTool] = pluginCatalogTools({ plugins: [linearPlugin] });
+      const result = await listTool.execute({}, ctxAnswering({ "linear:app": "app-token" }));
+      const payload = decode(result.text) as {
+        tools: Array<{ tool_id: string }>;
+        warnings?: Array<{ service: string; reason: string }>;
+      };
+      expect(payload.tools.map((t) => t.tool_id)).toEqual(["linear.list_issues"]);
+      expect(payload.warnings).toBeUndefined();
+    });
+
+    // The host counts an app-token fallback once per action, so only the
+    // action's own reads say they are for an action.
+    it("marks the action's reads forAction, and leaves the list_tools probe and discovery unmarked", async () => {
+      const reads: Array<[string | undefined, CredentialRead | undefined]> = [];
+      const credentials: CredentialProvider = {
+        get: async (service?: string, read?: CredentialRead): Promise<Credential | null> => {
+          reads.push([service, read]);
+          return service === "linear:app" ? { accessToken: "app-token" } : null;
+        },
+        request: async (): Promise<Credential> => {
+          throw new Error("not implemented in test stub");
+        },
+      };
+      const reading: PluginAction = {
+        ...linearAction,
+        execute: async (_args, ctx) => {
+          const cred = (await ctx.credentials.get()) ?? (await ctx.credentials.get("linear:app"));
+          return { success: true, data: { token: cred?.accessToken ?? null } };
+        },
+      };
+      const dynamic: ActionPlugin = {
+        ...linearPlugin,
+        actions: [],
+        resolveActions: async ({ credentials: discovery }) => {
+          await discovery.get();
+          return [reading];
+        },
+      };
+      const [listTool, callTool] = pluginCatalogTools({ plugins: [dynamic] });
+      await listTool.execute({}, makeCtx({ credentials }));
+      expect(reads.length).toBeGreaterThan(0);
+      expect(reads.every(([, read]) => read === undefined)).toBe(true);
+
+      reads.length = 0;
+      await callTool.execute({ tool_id: "linear.list_issues", params: {}, summary: "List issues" }, makeCtx({ credentials }));
+      const marked = reads.filter(([, read]) => read?.forAction === true);
+      expect(marked).toEqual([["linear", { forAction: true }], ["linear:app", { forAction: true }]]);
+    });
+
+    it("still hides linear tools with a warning when neither service answers", async () => {
+      const [listTool] = pluginCatalogTools({ plugins: [linearPlugin] });
+      const result = await listTool.execute({}, ctxAnswering({}));
+      const payload = decode(result.text) as {
+        tools: Array<{ tool_id: string }>;
+        warnings?: Array<{ service: string; reason: string }>;
+      };
+      expect(payload.tools).toEqual([]);
+      expect(payload.warnings?.[0]?.service).toBe("linear");
+      expect(payload.warnings?.[0]?.reason).toMatch(/tools hidden/);
+    });
+  });
+});
+
+describe("pluginCatalogTools: capability boundaries", () => {
+  it("warns on an empty catalog and names matching native tools", async () => {
+    const [listTool] = pluginCatalogTools({
+      plugins: [],
+      nativeToolNames: ["thread_read", "list_threads", "bash"],
+    });
+
+    const result = await listTool.execute({ query: "thread" }, makeCtx());
+    const payload = decode(result.text) as {
+      tools: unknown[];
+      warnings: Array<{ reason: string }>;
+    };
+
+    expect(payload.tools).toEqual([]);
+    expect(payload.warnings.at(-1)?.reason).toContain("native tools are not listed here");
+    expect(payload.warnings.at(-1)?.reason).toContain("list_threads, thread_read");
+  });
+
+  it("does not claim no integration match when a query also matches a native tool", async () => {
+    const action: PluginAction = {
+      id: "gmail.read_message",
+      name: "Read message",
+      description: "Read a Gmail message.",
+      riskLevel: "low",
+      parameters: Type.Object({}),
+      execute: async () => ({ success: true }),
+    };
+    const [listTool] = pluginCatalogTools({
+      plugins: [{ service: "gmail", actions: [action] }],
+      nativeToolNames: ["thread_read", "read"],
+    });
+
+    const result = await listTool.execute({ query: "read message" }, makeCtx());
+    const payload = decode(result.text) as {
+      tools: Array<{ tool_id: string }>;
+      warnings?: Array<{ reason: string }>;
+    };
+    expect(payload.tools.map((tool) => tool.tool_id)).toEqual(["gmail.read_message"]);
+    expect(payload.warnings?.map((warning) => warning.reason).join(" ") ?? "").not.toContain(
+      "no integration action matched",
+    );
+  });
+
+  it("does not treat a wildcard as a match for every native tool", async () => {
+    const [listTool] = pluginCatalogTools({
+      plugins: [],
+      nativeToolNames: ["thread_read", "list_threads", "bash"],
+    });
+
+    const result = await listTool.execute({ query: "*" }, makeCtx());
+    expect(result.text).toContain("no integration action matched");
+    expect(result.text).not.toContain("thread_read");
+    expect(result.text).not.toContain("list_threads");
+    expect(result.text).not.toContain("bash");
+  });
+
+  it("hides unavailable services without exposing action ids", async () => {
+    const { plugin } = makeMockPlugin();
+    const unavailable = [{
+      service: "github",
+      state: "disabled_by_org" as const,
+      reason: "the organization disabled this service",
+      fix: "Ask an organization administrator to enable github.",
+    }];
+    const [listTool] = pluginCatalogTools({
+      plugins: [plugin],
+      serviceAvailability: unavailable,
+      resolveServiceAvailability: () => unavailable,
+    });
+
+    const result = await listTool.execute({ service: "github" }, makeCtx());
+    const payload = decode(result.text) as {
+      tools: unknown[];
+      warnings: Array<{ service: string; state?: string }>;
+    };
+    expect(payload.tools).toEqual([]);
+    expect(payload.warnings).toContainEqual(expect.objectContaining({
+      service: "github",
+      state: "disabled_by_org",
+    }));
+    expect(result.text).not.toContain("github.create_issue");
+  });
 });
 
 describe("pluginCatalogTools: call_tool", () => {
+  it("blocks unavailable static and dynamic services before execution or resolution", async () => {
+    let executed = 0;
+    let resolved = 0;
+    const unavailable = [{
+      service: "github",
+      state: "deployment_unconfigured" as const,
+      reason: "the deployment credential is not configured",
+      fix: "An org admin must configure github (org settings → /settings/organization). After configuration, call list_tools (service: \"github\") to confirm — actions appear when the configuration worked; otherwise this warning returns with the reason.",
+    }];
+    const staticPlugin: ActionPlugin = {
+      service: "github",
+      actions: [{
+        id: "github.read",
+        name: "Read",
+        description: "Read data.",
+        riskLevel: "low",
+        parameters: Type.Object({}),
+        execute: async () => {
+          executed += 1;
+          return { success: true };
+        },
+      }],
+    };
+    const dynamicPlugin = makeDynamicPlugin("github", async () => {
+      resolved += 1;
+      return [];
+    });
+
+    for (const plugin of [staticPlugin, dynamicPlugin]) {
+      const [, callTool] = pluginCatalogTools({
+        plugins: [plugin],
+        resolveServiceAvailability: () => unavailable,
+      });
+      const result = await callTool.execute(
+        { tool_id: "github.read", params: {}, summary: "Read data" },
+        makeCtx(),
+      );
+      expect(result.text).toContain("the deployment credential is not configured");
+      expect(result.text).toContain("An org admin must configure github (org settings → /settings/organization).");
+    }
+    expect(executed).toBe(0);
+    expect(resolved).toBe(0);
+
+    const catalog = buildPluginCatalog([staticPlugin], undefined, {
+      resolveServiceAvailability: () => unavailable,
+    });
+    await expect(invokeAction(catalog, "github.read", {}, makeCtx(), "Read data")).resolves.toEqual({
+      kind: "service-unavailable",
+      service: "github",
+      state: "deployment_unconfigured",
+      reason: "the deployment credential is not configured",
+      fix: "An org admin must configure github (org settings → /settings/organization). After configuration, call list_tools (service: \"github\") to confirm — actions appear when the configuration worked; otherwise this warning returns with the reason.",
+    });
+    expect(executed).toBe(0);
+
+    const filteredCatalog = buildPluginCatalog([], undefined, {
+      resolveServiceAvailability: () => unavailable,
+    });
+    await expect(
+      invokeAction(filteredCatalog, "github.read", {}, makeCtx(), "Read data"),
+    ).resolves.toMatchObject({
+      kind: "service-unavailable",
+      service: "github",
+      state: "deployment_unconfigured",
+    });
+  });
+
+  it("adds the Integrations-page fix and verification step to missing-credential errors", async () => {
+    const plugin: ActionPlugin = {
+      service: "github",
+      requiresCredential: true,
+      actions: [{
+        id: "github.read",
+        name: "Read",
+        description: "Read data.",
+        riskLevel: "low",
+        parameters: Type.Object({}),
+        execute: async (_args, ctx) => {
+          await ctx.credentials.request("Read GitHub data");
+          return { success: true };
+        },
+      }],
+    };
+    const [, callTool] = pluginCatalogTools({ plugins: [plugin] });
+    const credentials: CredentialProvider = {
+      get: async () => null,
+      request: async () => {
+        throw new Error("credential github not connected");
+      },
+    };
+
+    const result = await callTool.execute(
+      { tool_id: "github.read", params: {}, summary: "Read data" },
+      makeCtx({ credentials }),
+    );
+    expect(result.text).toContain(
+      "credential github not connected — Connect github on the Integrations page (/integrations). After connecting, call list_tools (service: \"github\") to confirm — actions appear when the connection worked; otherwise this warning returns with the reason.",
+    );
+  });
+
+  it("names a connected MCP tool in usage and treats its missing account as a missing credential", async () => {
+    const meetings: PluginAction = {
+      id: "get_meetings", name: "Get meetings", description: "Read meeting notes", riskLevel: "low",
+      parameters: Type.Object({}),
+      execute: async () => { throw new Error("granola: no credential connected"); },
+    };
+    const mcp: ActionPlugin = { service: "granola", actions: [], resolveActions: async () => [meetings] };
+    const [, callTool] = pluginCatalogTools({ plugins: [mcp] });
+    const result = await callTool.execute({ tool_id: "granola.get_meetings", params: {}, summary: "Read this week's meeting notes" }, makeCtx());
+    expect(result.text).toContain("Connect granola on the Integrations page");
+    expect(result.usageOutcome).toMatchObject({ name: "granola.get_meetings", outcome: "error", errorCode: "missing_credential" });
+  });
+
+  it("records the tool id an agent asked for when no such tool exists", async () => {
+    const [, callTool] = pluginCatalogTools({ plugins: [makeMockPlugin().plugin] });
+    const result = await callTool.execute({ tool_id: "github.get_everything", params: {}, summary: "Read the repository" }, makeCtx());
+    expect(result.usageOutcome).toMatchObject({ name: "github.get_everything", outcome: "error", errorCode: "unknown" });
+  });
+
+  it("runs a tool written with the service name list_tools reports, under its catalog id and scope", async () => {
+    const listEvents: PluginAction = {
+      id: "calendar.list_events", name: "List events", description: "List events", riskLevel: "low",
+      parameters: Type.Object({}), execute: async () => ({ success: true, data: { events: [] } }),
+    };
+    const calendar: ActionPlugin = { service: "google_calendar", actions: [listEvents] };
+    const [, callTool] = pluginCatalogTools({ plugins: [calendar] });
+    for (const written of ["google_calendar.list_events", "google-calendar.list_events", "google_calendar.calendar.list_events"]) {
+      const result = await callTool.execute({ tool_id: written, params: {}, summary: "Read today's calendar" }, makeCtx());
+      expect(result.usageOutcome).toMatchObject({ name: "calendar.list_events", outcome: "ok" });
+    }
+    const outOfScope = await callTool.execute({ tool_id: "google_calendar.list_events", params: {}, summary: "Read today's calendar" },
+      makeCtx({ toolScope: { actions: ["github.get_issue"] } }));
+    expect(outOfScope.usageOutcome).toMatchObject({ name: "calendar.list_events", outcome: "denied", errorCode: "policy_denied" });
+    const unknown = await callTool.execute({ tool_id: "outlook.list_events", params: {}, summary: "Read today's calendar" }, makeCtx());
+    expect(unknown.text).toContain('Did you mean "calendar.list_events"?');
+  });
+
   it("dispatches by tool_id and returns rendered data with credentials available", async () => {
     const { plugin, calls } = makeMockPlugin();
     const tools = pluginCatalogTools({ plugins: [plugin] });
@@ -771,6 +1364,110 @@ const stubCredentials: CredentialProvider = {
   },
 };
 
+it("keeps scoped discovery and direct pinned calls inside the same action ceiling", async () => {
+  let writes = 0;
+  const plugin: ActionPlugin = { service: "demo", actions: [
+    { id: "demo.read", name: "Read", description: "Read", riskLevel: "low", parameters: Type.Object({}), execute: async () => ({ success: true, data: "evidence" }) },
+    { id: "demo.write", name: "Write", description: "Write", riskLevel: "low", parameters: Type.Object({}), execute: async () => { writes++; return { success: true }; } },
+  ] };
+  const tools = pluginCatalogTools({ plugins: [plugin], pins: [{ actionId: "demo.write" }] });
+  const ctx = makeCtx({ toolScope: { actions: ["demo.read"] } });
+  const list = tools.find((tool) => tool.name === "list_tools");
+  const pinned = tools.find((tool) => tool.name !== "list_tools" && tool.name !== "call_tool");
+  if (!list || !pinned) throw new Error("catalog tools missing");
+  const found = await list.execute({}, ctx);
+  expect(found.text).toContain("demo.read");
+  expect(found.text).not.toContain("demo.write");
+  expect(found.text).not.toContain("params:");
+  const described = await list.execute({ detail: "schema", query: "demo.read" }, ctx);
+  expect(described.text).toContain("params");
+  const outside = await list.execute({ outside_focus: true, query: "demo.write" }, ctx);
+  expect(outside.text).toContain("demo.write");
+  expect(outside.text).not.toContain("params:");
+  expect((await pinned.execute({}, ctx)).text).toContain("outside this task");
+  expect(writes).toBe(0);
+});
+
+it("shows integrations outside a focused thread's focus instead of reporting none", async () => {
+  // A workflow editor thread starts focused on workflows.* actions. A
+  // dynamic integration such as Granola is allowed by the ceiling but not
+  // by the focus, so a focused search used to report "no integration action".
+  const granola: ActionPlugin = { service: "granola", actions: [], resolveActions: async () => [
+    { id: "granola.list_notes", name: "List notes", description: "List recent meeting notes", riskLevel: "low", parameters: Type.Object({}), execute: async () => ({ success: true }) },
+  ] };
+  const tools = pluginCatalogTools({ plugins: [granola] });
+  const list = tools.find((tool) => tool.name === "list_tools");
+  if (!list) throw new Error("list_tools missing");
+  const ctx = makeCtx({ toolScope: { actions: ["workflows.get_workflow"] } });
+  const found = await list.execute({ service: "granola" }, ctx);
+  expect(found.text).toContain("outside_focus");
+  expect(found.text).toContain("granola.list_notes");
+  expect(found.text).toContain("call focus_tools");
+  expect(found.text).not.toContain("no integration action matched");
+  // Without focus, the same search lists the action normally.
+  const unfocused = await list.execute({ service: "granola" }, makeCtx({}));
+  expect(unfocused.text).toContain("granola.list_notes");
+  expect(unfocused.text).not.toContain("outside_focus");
+});
+
+it("names a hidden action when a focused search also matches a focused one", async () => {
+  // A diagnose focus holds list_schedules but not update_schedule. A search
+  // for "update schedule" matched list_schedules, so the hidden action was
+  // never named and the agent reported that no edit action exists.
+  const workflows: ActionPlugin = { service: "workflows", actions: [
+    { id: "workflows.list_schedules", name: "List schedules", description: "List cron schedules", riskLevel: "low", parameters: Type.Object({}), execute: async () => ({ success: true }) },
+    { id: "workflows.update_schedule", name: "Update schedule", description: "Update a cron schedule by id", riskLevel: "high", parameters: Type.Object({}), execute: async () => ({ success: true }) },
+  ] };
+  const list = pluginCatalogTools({ plugins: [workflows] }).find((tool) => tool.name === "list_tools");
+  if (!list) throw new Error("list_tools missing");
+  const ctx = makeCtx({ toolScope: { actions: ["workflows.list_schedules"] } });
+  const found = await list.execute({ service: "workflows", query: "update schedule" }, ctx);
+  expect(found.text).toContain("workflows.list_schedules");
+  expect(found.text).toContain("call focus_tools");
+  expect(found.text).toContain("outside_focus[1]{tool_id,name,description}:\n  workflows.update_schedule");
+  const outside = await list.execute({ outside_focus: true, query: "update schedule" }, ctx);
+  expect(outside.text).toContain("workflows.update_schedule");
+  expect(outside.text).toContain("call focus_tools");
+  // An unfiltered listing stays inside the focus.
+  expect((await list.execute({}, ctx)).text).not.toContain("update_schedule");
+});
+
+it("names a hidden action when focused matches fill the default limit", async () => {
+  const reads = Array.from({ length: 8 }, (_, i) => ({ id: `workflows.list_schedules_${i}`, name: `List schedules ${i}`, description: "List cron schedules", riskLevel: "low" as const, parameters: Type.Object({}), execute: async () => ({ success: true }) }));
+  const workflows: ActionPlugin = { service: "workflows", actions: [
+    ...reads,
+    { id: "workflows.update_schedule", name: "Update schedule", description: "Update a cron schedule by id", riskLevel: "high", parameters: Type.Object({}), execute: async () => ({ success: true }) },
+  ] };
+  const list = pluginCatalogTools({ plugins: [workflows] }).find((tool) => tool.name === "list_tools");
+  if (!list) throw new Error("list_tools missing");
+  const ctx = makeCtx({ toolScope: { actions: reads.map((r) => r.id) } });
+  const found = await list.execute({ service: "workflows", query: "schedule" }, ctx);
+  expect(found.text).toContain("outside_focus[1]{tool_id,name,description}:\n  workflows.update_schedule");
+});
+
+it("refuses a guessed dynamic action before discovering or executing it", async () => {
+  let discoveries = 0;
+  const plugin: ActionPlugin = { service: "remote", actions: [], resolveActions: async () => { discoveries++; return []; } };
+  const result = await invokeAction(buildPluginCatalog([plugin]), "remote.write", {}, makeCtx({ toolScope: { actions: [] } }), "write");
+  expect(result).toMatchObject({ kind: "denied-policy", scope: "tool" });
+  expect(discoveries).toBe(0);
+});
+
+it("allows exact scoped team dynamic discovery without permitting sibling actions", async () => {
+  let writes = 0;
+  const plugin: ActionPlugin = { service: "remote", actions: [], resolveActions: async () => [
+    { id: "remote.read", name: "Read", description: "Read", riskLevel: "low", parameters: Type.Object({}), execute: async () => ({ success: true, data: "evidence" }) },
+    { id: "remote.write", name: "Write", description: "Write", riskLevel: "low", parameters: Type.Object({}), execute: async () => { writes++; return { success: true }; } },
+  ] };
+  const ctx = makeCtx({ owner: { type: "team", id: "team" }, toolScope: { actions: ["remote.read"] },
+    policyResolver: { resolve: async () => ({ mode: "allow", provenance: { baseMode: "allow", source: "risk_default" } }) },
+  });
+  const catalog = buildPluginCatalog([plugin]);
+  expect(await invokeAction(catalog, "remote.read", {}, ctx, "read")).toMatchObject({ kind: "ok", result: { data: "evidence" } });
+  expect(await invokeAction(catalog, "remote.write", {}, ctx, "write")).toMatchObject({ kind: "denied-policy", scope: "tool" });
+  expect(writes).toBe(0);
+});
+
 function makeCtx(overrides: Partial<ToolContext> = {}): ToolContext {
   const sandbox: FakeSandbox = { id: "sb-1" };
   return {
@@ -799,6 +1496,157 @@ function makeDynamicPlugin(
 }
 
 describe("pluginCatalogTools: dynamic actions (resolveActions)", () => {
+  it("bounds discovery cache growth across long-lived thread histories", async () => {
+    const resolveActions = vi.fn(async () => []);
+    const [list] = pluginCatalogTools({ plugins: [makeDynamicPlugin("remote", resolveActions)] });
+    for (let i = 0; i < 201; i++) await list.execute({ service: "remote" }, makeCtx({ threadId: `thread-${i}` }));
+    await list.execute({ service: "remote" }, makeCtx({ threadId: "thread-200" }));
+    expect(resolveActions).toHaveBeenCalledTimes(201);
+    await list.execute({ service: "remote" }, makeCtx({ threadId: "thread-0" }));
+    expect(resolveActions).toHaveBeenCalledTimes(202);
+  });
+
+  it("separates discovery approval from a remote discover_tools action", async () => {
+    const requests: DecisionGateRequest[] = [];
+    const execute = vi.fn(async () => ({ success: true }));
+    const plugin = makeDynamicPlugin("remote", async () => [{ id: "discover_tools", name: "Remote discovery action",
+      description: "Remote action", riskLevel: "high", parameters: Type.Object({}), execute }]);
+    const context = makeCtx({ owner: { type: "team", id: "team" }, policyResolver: {
+      resolve: async () => ({ mode: "require_approval", provenance: { baseMode: "require_approval", source: "plugin_default" } }),
+    }, requestDecision: async (request) => {
+      requests.push(request);
+      return { actionId: "approve", resolvedBy: "u1", resolvedAt: 1 };
+    } });
+    const outcome = await invokeAction(buildPluginCatalog([plugin]), "remote.discover_tools", {}, context, "Run remote action");
+    expect(outcome.kind).toBe("ok");
+    expect(execute).toHaveBeenCalledOnce();
+    expect(requests).toHaveLength(2);
+    expect(requests[0].resumeKey).not.toBe(requests[1].resumeKey);
+    expect(requests[0].dedupeKey).not.toBe(requests[1].dedupeKey);
+    expect(requests[0].context?.tool_id).not.toBe(requests[1].context?.tool_id);
+  });
+
+  it("does not reuse an approved gate after a credential share changes", async () => {
+    let generation = "old";
+    const requests: DecisionGateRequest[] = [];
+    const records: PolicyInvocationRecord[] = [];
+    const plugin: ActionPlugin = { service: "test", actions: [{ id: "test.run", name: "Run", description: "Run",
+      riskLevel: "low", parameters: Type.Object({}), execute: async () => ({ success: true }) }] };
+    const policyResolver: PolicyResolver = { resolve: async () => ({ mode: "require_approval",
+      provenance: { baseMode: "allow", source: "shared_account" }, approver: { userId: "lender", shareGeneration: generation } }), onInvocation: async record => { records.push(record); } };
+    const context = makeCtx({ policyResolver, requestDecision: async request => {
+      requests.push(request);
+      return { actionId: "approve", resolvedBy: "lender", resolvedAt: 1 };
+    } });
+    const catalog = buildPluginCatalog([plugin]);
+    await invokeAction(catalog, "test.run", {}, context, "Run");
+    generation = "new";
+    await invokeAction(catalog, "test.run", {}, context, "Run");
+    expect(requests).toHaveLength(2);
+    for (const request of requests) expect(request.resumeKey?.startsWith(`${request.dedupeKey}:`)).toBe(true);
+    expect(records.map(record => record.resumeKey)).toEqual(requests.map(request => request.resumeKey));
+    expect(requests[0].resumeKey).not.toBe(requests[1].resumeKey);
+    expect(requests[0].dedupeKey).not.toBe(requests[1].dedupeKey);
+    expect(requests[0].context?.approver).toMatchObject({ shareGeneration: "old" });
+    expect(requests[1].context?.approver).toMatchObject({ shareGeneration: "new" });
+  });
+
+  it.each(["external", "denied", "grant-failed"])("does not contact discovery when %s", async (failure) => {
+    const resolveActions = vi.fn(async () => []);
+    const requestDecision = vi.fn(async (): Promise<DecisionResolution> =>
+      ({ actionId: "approve", resolvedBy: "lender", resolvedAt: 1 }));
+    const policyResolver: PolicyResolver = {
+      resolve: async () => ({ mode: failure === "denied" ? "deny" : "require_approval",
+        provenance: { baseMode: "allow", source: "shared_account" }, approver: { userId: "lender" } }),
+      onResolution: async () => { throw new Error("could not persist grant"); },
+    };
+    const [list] = pluginCatalogTools({ plugins: [makeDynamicPlugin("remote", resolveActions)] });
+    await list.execute({ service: "remote" }, makeCtx({ owner: { type: "team", id: "team" },
+      externalSender: failure === "external", policyResolver, requestDecision }));
+    expect(resolveActions).not.toHaveBeenCalled();
+    expect(requestDecision).toHaveBeenCalledTimes(failure === "grant-failed" ? 1 : 0);
+  });
+
+  it("does not reuse another actor or thread's dynamic catalog", async () => {
+    const resolveActions = vi.fn(async () => []);
+    const [list] = pluginCatalogTools({ plugins: [makeDynamicPlugin("remote", resolveActions)] });
+    for (const context of [{ userId: "alice", threadId: "a" }, { userId: "bob", threadId: "a" },
+      { userId: "bob", threadId: "b" }, { userId: "bob", threadId: "b", externalSender: true }]) {
+      await list.execute({ service: "remote" }, makeCtx(context));
+    }
+    expect(resolveActions).toHaveBeenCalledTimes(4);
+  });
+
+  it.each(["approve", "deny", "pending"])("checks account approval before remote discovery: %s", async (answer) => {
+    let approved = false;
+    const resolveActions = vi.fn(async () => {
+      if (!approved) throw new Error("credential unavailable before lender approval");
+      return [];
+    });
+    const resolver: PolicyResolver = {
+      resolve: async () => ({ mode: "require_approval", provenance: { baseMode: "allow", source: "shared_account" },
+        approver: { userId: "lender" } }),
+      onResolution: async (_input, _decision, resolution) => { approved = resolution.actionId === "approve"; },
+    };
+    const requestDecision = vi.fn(async (request: DecisionGateRequest): Promise<DecisionResolution> => {
+      expect(resolveActions).not.toHaveBeenCalled();
+      expect(request.context?.approver).toEqual({ userId: "lender" });
+      return { actionId: answer, resolvedBy: "lender", resolvedAt: 1 };
+    });
+    const [list] = pluginCatalogTools({ plugins: [makeDynamicPlugin("remote", resolveActions)] });
+    await list.execute({ service: "remote" }, makeCtx({ owner: { type: "team", id: "team" }, policyResolver: resolver, requestDecision }));
+    expect(requestDecision).toHaveBeenCalledOnce();
+    expect(resolveActions).toHaveBeenCalledTimes(answer === "approve" ? 1 : 0);
+  });
+
+  it("team discovery reports a pending approval as waiting, not denied", async () => {
+    const [list] = pluginCatalogTools({ plugins: [makeDynamicPlugin("remote", vi.fn(async () => []))] });
+    const result = await list.execute({ service: "remote" }, makeCtx({ owner: { type: "team", id: "team" },
+      policyResolver: { resolve: async () => ({ mode: "require_approval", provenance: { baseMode: "allow", source: "shared_account" }, approver: { userId: "lender" } }) },
+      requestDecision: async () => ({ actionId: "pending", resolvedBy: "", resolvedAt: 1 }) }));
+    const payload = decode(result.text) as { warnings?: Array<{ service: string; reason: string }> };
+    const reason = payload.warnings?.find((w) => w.service === "remote")?.reason;
+    expect(reason).toContain("remote tool discovery failed: pending-approval: waiting for the account owner");
+    expect(reason).not.toContain("did not approve");
+  });
+
+  // Team discovery runs through the policy pipeline. Its failure must keep
+  // the cause: a connector error is not an account-access problem, and a
+  // shared-account denial is not an org policy.
+  it.each([
+    ["connector error", { mode: "allow", provenance: { baseMode: "allow", source: "plugin_default" } }, "remote tool discovery failed: error: upstream 401 Unauthorized"],
+    ["shared-account denial", { mode: "deny", provenance: { baseMode: "allow", source: "shared_account" } }, "remote tool discovery failed: denied: remote tool discovery would use a teammate's shared account"],
+    ["team policy denial", { mode: "deny", provenance: { baseMode: "deny", source: "team_policy" } }, "remote tool discovery failed: denied: remote tool discovery is blocked by team policy"],
+  ] as const)("team discovery reports the %s", async (_label, decision, expected) => {
+    const resolveActions = vi.fn(async () => {
+      throw new Error("upstream 401 Unauthorized");
+    });
+    const [list] = pluginCatalogTools({ plugins: [makeDynamicPlugin("remote", resolveActions)] });
+    const result = await list.execute({ service: "remote" }, makeCtx({ owner: { type: "team", id: "team" },
+      policyResolver: { resolve: async () => decision } }));
+    const payload = decode(result.text) as { warnings?: Array<{ service: string; reason: string }> };
+    const reason = payload.warnings?.find((w) => w.service === "remote")?.reason;
+    expect(reason).toContain(expected);
+    expect(reason).not.toContain("requires permitted account access");
+  });
+
+  // A team's policy check that throws failed every service with a bare
+  // "error" and no log, so the cause stayed invisible.
+  it("team discovery names the innermost cause when the policy check throws", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const [list] = pluginCatalogTools({ plugins: [makeDynamicPlugin("remote", vi.fn(async () => []))] });
+    const result = await list.execute({ service: "remote" }, makeCtx({ owner: { type: "team", id: "team" },
+      policyResolver: { resolve: async () => {
+        throw new Error("Failed query: select * from action_policies", { cause: new Error('relation "action_policies" does not exist') });
+      } } }));
+    const payload = decode(result.text) as { warnings?: Array<{ service: string; reason: string }> };
+    const reason = payload.warnings?.find((w) => w.service === "remote")?.reason;
+    expect(reason).toContain(`Could not check this team's action policies (relation "action_policies" does not exist)`);
+    expect(reason).not.toContain("Failed query");
+    expect(error).toHaveBeenCalled();
+    error.mockRestore();
+  });
+
   it("list_tools merges resolveActions results with static actions", async () => {
     const { plugin: staticPlugin } = makeMockPlugin();
     const dynamicAction: PluginAction = {
@@ -965,6 +1813,7 @@ describe("pluginCatalogTools: call_tool param validation", () => {
       makeCtx(),
     );
     expect(result.text).toContain("invalid params for test.needs_num");
+    expect(result.text).toContain('Call list_tools (service: "test", query: "test.needs_num", detail: "schema") to read its parameter schema');
     expect(executeCalled).toBe(false);
   });
 
@@ -1023,6 +1872,7 @@ describe("pluginCatalogTools: approval gate terminal outcomes", () => {
       }),
     );
     expect(result.text).toContain("expired");
+    expect(result.usageOutcome).toMatchObject({ outcome: "denied", errorCode: "expired_approval" });
     expect(result.text).toContain("do not call test.dangerous again");
   });
 
@@ -1055,6 +1905,26 @@ describe("pluginCatalogTools: approval gate terminal outcomes", () => {
       }),
     );
     expect(result.text).toContain("final for the current turn");
+  });
+});
+
+describe("call_tool pull request outcome", () => {
+  function githubPlugin(): ActionPlugin {
+    const action = (id: string, data: unknown) => ({
+      id, name: id, description: id, riskLevel: "low" as const, parameters: Type.Object({}),
+      execute: async () => ({ success: true, data }),
+    });
+    return { service: "github", actions: [
+      action("github.create_pull_request", { number: 7, url: "https://github.com/acme/app/pull/7", state: "open" }),
+      action("github.get_pull_request", { number: 7, url: "https://github.com/acme/app/pull/7", state: "open" }),
+    ] };
+  }
+  it("reports a created pull request, but not one the action only read", async () => {
+    const [, callTool] = pluginCatalogTools({ plugins: [githubPlugin()] });
+    const created = await callTool.execute({ tool_id: "github.create_pull_request", params: {}, summary: "open it" }, makeCtx({}));
+    expect(created.outcome).toEqual({ kind: "pull_request_created", url: "https://github.com/acme/app/pull/7" });
+    const read = await callTool.execute({ tool_id: "github.get_pull_request", params: {}, summary: "read it" }, makeCtx({}));
+    expect(read.outcome).toBeUndefined();
   });
 });
 
@@ -1184,7 +2054,7 @@ describe("pluginCatalogTools: pinning", () => {
     // The model needs a place to write the sentence the approval gate and
     // the audit record show. `call_tool` takes one; so does this route.
     expect(published.properties.summary).toBeDefined();
-    expect(published.required ?? []).not.toContain("summary");
+    expect(published.required ?? []).toContain("summary");
     expect(pinned?.riskLevel).toBe("medium");
   });
 
@@ -1241,7 +2111,7 @@ describe("pluginCatalogTools: pinning", () => {
     const options = ObjectOptions(published);
     expect(options.additionalProperties).toBe(false);
     expect(options.description).toBe("Patch arguments.");
-    expect(published.required).toEqual(["workflow_id"]);
+    expect(published.required).toEqual(["workflow_id", "summary"]);
   });
 
   it("does not set requiresApproval — the gate belongs to the policy path", () => {
@@ -1596,7 +2466,7 @@ describe("pinned tool: the model's summary", () => {
     expect(records[0]?.summary).toBe("Remove the approval node from the release workflow");
   });
 
-  it("shows the model's own sentence in the approval gate body", async () => {
+  it("labels the model's sentence separately from the approval body", async () => {
     // A person asked to approve an action needs a statement of intent, not
     // a constant that repeats the tool name.
     const { plugin } = makePinnablePlugin();
@@ -1613,12 +2483,13 @@ describe("pinned tool: the model's summary", () => {
       makeCtx({
         policyResolver: resolver,
         requestDecision: async (req): Promise<DecisionResolution> => {
-          bodies.push(req.body ?? "");
+          bodies.push(req.agentReason ?? "");
+          expect(req.body).not.toContain("Delete the nightly backup step");
           return { actionId: "deny", resolvedBy: "tester", resolvedAt: 0 };
         },
       }),
     );
-    expect(bodies[0]?.startsWith("Delete the nightly backup step\n")).toBe(true);
+    expect(bodies[0]).toBe("Delete the nightly backup step");
   });
 
   it("keeps the summary out of the action's arguments and out of the audit params", async () => {
@@ -1633,16 +2504,15 @@ describe("pinned tool: the model's summary", () => {
     // The action receives schema defaults: `name` was not sent, so
     // `prepareActionArgs` supplied it.
     expect(calls).toEqual([{ workflow_id: "wf-1", name: "untitled" }]);
-    // The audit record does NOT carry those defaults. `invokeAction` builds
-    // the record from the arguments as received, and `prepareActionArgs` runs
-    // afterwards inside `executeAction`, so the record answers "what was
-    // asked for" rather than "what ran". That is the shared behaviour of
-    // every path — `call_tool` and the slash-command path record the same
-    // way — so the pinned tool matching it is the point.
+    // The audit record carries the same defaults: `invokeAction` resolves
+    // policy on the effective arguments (defaults applied), so the record
+    // answers "what ran" and a matcher on a default value applies to an
+    // omitted field. `call_tool`, the slash-command path, and the pinned
+    // tool all record the same way.
     //
     // What this test actually guards is the summary: it must reach neither
     // the action's arguments nor the audit params.
-    expect(records[0]?.params).toEqual({ workflow_id: "wf-1" });
+    expect(records[0]?.params).toEqual({ workflow_id: "wf-1", name: "untitled" });
   });
 
   it("falls back to the derived summary when the model sends a blank one", async () => {
@@ -1672,4 +2542,96 @@ describe("pinned tool: the model's summary", () => {
       "Drop the approval gate",
     ]);
   });
+});
+
+describe("pluginCatalogTools: availability failure containment", () => {
+  it("re-checks availability after approval before executing", async () => {
+    let available = true;
+    let executed = false;
+    const plugin: ActionPlugin = {
+      service: "test",
+      requiresCredential: true,
+      actions: [{
+        id: "test.dangerous",
+        name: "Dangerous",
+        description: "requires approval",
+        riskLevel: "critical",
+        parameters: Type.Object({}),
+        execute: async () => { executed = true; return { success: true }; },
+      }],
+    };
+    const catalog = buildPluginCatalog([plugin], undefined, {
+      resolveServiceAvailability: () => available ? [] : [{
+        service: "test", state: "deployment_unconfigured", reason: "removed",
+      }],
+    });
+    const result = await invokeAction(catalog, "test.dangerous", {}, makeCtx({
+      requestDecision: async () => {
+        available = false;
+        return { actionId: "approve", resolvedBy: "admin", resolvedAt: Date.now() };
+      },
+    }), "run it");
+    expect(result).toMatchObject({ kind: "service-unavailable", service: "test" });
+    expect(executed).toBe(false);
+  });
+
+  it("contains failed availability checks and permits credential-free actions", async () => {
+    let executed = false;
+    const free: ActionPlugin = {
+      service: "free",
+      actions: [{
+        id: "free.run", name: "Run", description: "runs", riskLevel: "low",
+        parameters: Type.Object({}), execute: async () => { executed = true; return { success: true }; },
+      }],
+    };
+    const required: ActionPlugin = { ...free, service: "required", requiresCredential: true,
+      actions: [{ ...free.actions[0], id: "required.run" }] };
+    const failing = () => { throw new Error("store unavailable"); };
+    const [listTool] = pluginCatalogTools({ plugins: [free, required], resolveServiceAvailability: failing });
+    const listed = await listTool.execute({}, makeCtx());
+    expect(listed.text).toContain("availability check failed: store unavailable");
+    await expect(invokeAction(buildPluginCatalog([free], undefined, { resolveServiceAvailability: failing }), "free.run", {}, makeCtx(), "run")).resolves.toMatchObject({ kind: "ok" });
+    expect(executed).toBe(true);
+    await expect(invokeAction(buildPluginCatalog([required], undefined, { resolveServiceAvailability: failing }), "required.run", {}, makeCtx(), "run")).resolves.toEqual({ kind: "error", message: "could not verify service availability: store unavailable; retry" });
+  });
+
+  it("filters availability warnings by service", async () => {
+    const { plugin } = makeMockPlugin();
+    const other: ActionPlugin = { ...plugin, service: "linear", actions: plugin.actions.map((action) => ({ ...action, id: action.id.replace("github", "linear") })) };
+    const [listTool] = pluginCatalogTools({ plugins: [plugin, other], serviceAvailability: [
+      { service: "github", state: "disabled_by_org", reason: "excluded" },
+      { service: "linear", state: "load_failed", reason: "failed" },
+    ] });
+    const payload = decode((await listTool.execute({ service: "github" }, makeCtx())).text) as { warnings: Array<{ service: string }> };
+    expect(payload.warnings.map((warning) => warning.service)).toContain("github");
+    expect(payload.warnings.map((warning) => warning.service)).not.toContain("linear");
+  });
+});
+
+it("preserves a plugin action's own intent argument through the pinned bridge", async () => {
+  const received: unknown[] = [];
+  const plugin: ActionPlugin = { service: "demo", defaultApprovalMode: "allow", actions: [{
+    id: "demo.intent", name: "Intent value", description: "Has a real intent parameter", riskLevel: "low", parameters: Type.Object({ intent: Type.Number() }),
+    execute: async args => { received.push(args); return { success: true, data: {} }; },
+  }] };
+  const def = pluginCatalogTools({ plugins: [plugin], pins: [{ actionId: "demo.intent" }] }).find(tool => tool.scopeAction === "demo.intent");
+  if (!def) throw new Error("Missing pinned action");
+  const tool = toAgentTool(def, () => makeCtx());
+  expect(tool.parameters.properties.intent).toEqual(Type.Number());
+  expect(tool.parameters.required).toEqual(["intent", "summary"]);
+  await tool.execute("own-intent", { intent: 42, summary: "Send the action's numeric intent to check its contract." });
+  expect(received).toEqual([{ intent: 42 }]);
+});
+
+it("keeps account-sharing summary model-authored when invokeAction has no thread runtime", async () => {
+  const { plugin } = makeMockPlugin();
+  let request: DecisionGateRequest | undefined;
+  const ctx = makeCtx({ threadId: undefined, policyResolver: {
+    resolve: async () => ({ mode: "require_approval", provenance: { baseMode: "allow", source: "shared_account" }, approver: { userId: "lender" } }),
+  }, requestDecision: async req => {
+    request = req;
+    return { actionId: "deny", resolvedBy: "lender", resolvedAt: 1 };
+  } });
+  await invokeAction(buildPluginCatalog([plugin]), "github.create_issue", {}, ctx, "Create an issue for the reported failure.");
+  expect(request).toMatchObject({ agentReason: "Create an issue for the reported failure.", context: { summary: "Create an issue for the reported failure." } });
 });

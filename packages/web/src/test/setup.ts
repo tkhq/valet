@@ -4,7 +4,16 @@
  * `// @vitest-environment jsdom` for component tests) — the `document`
  * guard keeps this a no-op for the former.
  */
-import { afterEach } from "vitest";
+import { afterEach, vi } from "vitest";
+
+// Tests run without an api, so an unmocked request fails as if the api were
+// down. Reporting that would start the health probe and take TanStack Query
+// offline for the rest of the file, pausing unrelated queries and mutations.
+// The tests of the outage path opt back in with `vi.unmock`.
+vi.mock("~/api/connection", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("~/api/connection")>()),
+  reportServerUnavailable: () => {},
+}));
 
 afterEach(async () => {
   if (typeof document === "undefined") return;

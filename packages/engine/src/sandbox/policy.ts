@@ -4,19 +4,25 @@ import type {
   ExecResult,
   GatewayEndpoint,
   JobPoll,
+  JobPollOpts,
   Sandbox,
+  SandboxCommandChannel,
+  SandboxCommandChannelOptions,
   WorkspaceGrowth,
 } from "../types.js";
-import { SandboxEvictedError, SandboxSupersededError, SandboxUnavailableError } from "../errors.js";
+import { SandboxConnectionError, SandboxEvictedError, SandboxSupersededError, SandboxUnavailableError } from "../errors.js";
 import { attrTruncate, withSpan } from "../tracing.js";
 import { recordSandboxExec, recordSandboxWorkspaceGrow } from "../metrics.js";
 import type { SandboxAttachment } from "./attachment.js";
+import { reportError } from "../error-report.js";
 
 /** Default `CreateSessionOptions.sandboxReadyTimeoutMs` (spec decision 6). */
 export const SANDBOX_READY_TIMEOUT_MS = 60_000;
 
 /** Default `exec`/`execJob` output cap when the caller passes none (decision 3). */
 const DEFAULT_MAX_OUTPUT_BYTES = 262_144;
+/** A detached job's log cap when the caller sets none: 2 GiB (`VALET_JOB_LOG_MAX_BYTES` default). */
+const DEFAULT_DETACHED_MAX_OUTPUT_BYTES = 2 * 1024 ** 3;
 
 /**
  * Transport-level failure signatures (decision 3). A rejection whose message
@@ -26,8 +32,37 @@ const DEFAULT_MAX_OUTPUT_BYTES = 262_144;
  */
 export const CONTAINER_DEATH_PATTERN = /No such container|is not running|Connection refused|socket hang up/i;
 
-function isTransportError(err: unknown): boolean {
-  return err instanceof Error && CONTAINER_DEATH_PATTERN.test(err.message);
+/** Inspect original causes only for failures identified at a connection boundary. */
+export function isSandboxTransportError(err: unknown): boolean {
+  try {
+    if (!(err instanceof SandboxConnectionError)) {
+      // Preserve existing classification for ordinary provider errors.
+      return err instanceof Error && CONTAINER_DEATH_PATTERN.test(err.message);
+    }
+  } catch {
+    return false;
+  }
+  const pending: unknown[] = [err];
+  const seen = new Set<object>();
+  for (let visited = 0; pending.length && visited < 16; visited++) {
+    const current = pending.shift();
+    if (typeof current === "string" && CONTAINER_DEATH_PATTERN.test(current)) return true;
+    if (current === null || (typeof current !== "object" && typeof current !== "function") || seen.has(current)) continue;
+    seen.add(current);
+    for (const key of ["message", "cause", "error"]) {
+      try {
+        const value: unknown = Reflect.get(current, key);
+        if (key === "message" || typeof value === "string") {
+          if (typeof value === "string" && CONTAINER_DEATH_PATTERN.test(value)) return true;
+        } else if (value !== null && (typeof value === "object" || typeof value === "function")) {
+          pending.push(value);
+        }
+      } catch {
+        // A throwing getter must not hide another readable cause.
+      }
+    }
+  }
+  return false;
 }
 
 /** posix-style dirname; used only to compute the parent for the wrapper's
@@ -192,6 +227,68 @@ export class PolicySandbox implements Sandbox {
     });
   }
 
+  async openCommandChannel(command: string, options: SandboxCommandChannelOptions): Promise<SandboxCommandChannel | null> {
+    if (options.signal?.aborted) throw this.abortError(options.signal);
+    // Agent work waits for compute; passive viewers must never wake it.
+    const { sandbox, epoch } = options.waitForReady === false
+      ? { sandbox: this.attachment.current(), epoch: this.attachment.currentEpoch() }
+      : await this.attachment.ensureReady({ timeoutMs: this.readyTimeoutMs, signal: options.signal });
+    if (!sandbox) throw new SandboxUnavailableError(new Error('The sandbox is not ready. Start it before opening a command channel.'));
+    if (!sandbox.openCommandChannel) return null;
+    const controller = new AbortController();
+    let raw: SandboxCommandChannel | null = null;
+    let closed = false;
+    let failure: Error | undefined;
+    const stale = () => this.attachment.currentEpoch() !== epoch || this.attachment.current() !== sandbox;
+    const staleError = () => this.attachment.currentEpoch() !== epoch
+      ? new SandboxSupersededError(epoch)
+      : new SandboxUnavailableError(new Error('The command channel attachment stopped. Open a new channel when the sandbox is ready.'));
+    let unsubscribe = () => {};
+    const finish = (error?: Error) => {
+      if (closed) return;
+      closed = true; failure = error;
+      unsubscribe(); options.signal?.removeEventListener('abort', onAbort);
+      controller.abort(error); raw?.close();
+      options.onClose(error);
+    };
+    const onAbort = () => { if (options.signal) finish(this.abortError(options.signal)); };
+    unsubscribe = this.attachment.onStatus(() => { if (stale()) finish(staleError()); });
+    options.signal?.addEventListener('abort', onAbort, { once: true });
+    try {
+      if (options.signal?.aborted) throw this.abortError(options.signal);
+      if (stale()) throw staleError();
+      const opened = await sandbox.openCommandChannel(command, {
+        target: options.target, privileged: options.privileged, signal: controller.signal,
+        onData: (data) => {
+          if (closed) return;
+          if (stale()) { finish(staleError()); return; }
+          options.onData(data);
+        },
+        onClose: (error) => finish(stale() ? staleError() : error),
+      });
+      if (closed || stale()) {
+        opened?.close();
+        throw failure ?? staleError();
+      }
+      raw = opened;
+      if (!raw) { unsubscribe(); options.signal?.removeEventListener('abort', onAbort); return null; }
+      const channel = raw;
+      return {
+        write: async (data) => {
+          if (!closed && stale()) finish(staleError());
+          if (closed) throw failure ?? new Error('The command channel is closed. Open a new channel before writing.');
+          await channel.write(data);
+          if (!closed && stale()) finish(staleError());
+          if (closed) throw failure ?? new Error('The command channel closed during the write. Inspect the command outcome before continuing.');
+        },
+        close: () => finish(),
+      };
+    } catch (error) {
+      finish(error instanceof Error ? error : new Error(String(error)));
+      throw error;
+    }
+  }
+
   async tunnels(): Promise<Record<string, string>> {
     return this.dispatch(async (sb) => (sb.tunnels ? sb.tunnels() : {}));
   }
@@ -202,7 +299,12 @@ export class PolicySandbox implements Sandbox {
 
   async execJob(command: string, opts?: ExecOpts): Promise<ExecJobHandle> {
     if (opts?.signal?.aborted) throw this.abortError(opts.signal);
-    const effectiveOpts: ExecOpts = { ...opts, maxOutputBytes: opts?.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES };
+    const effectiveOpts: ExecOpts = opts?.detached
+      // A detached sandbox process (wakeups spec B4): a large cap, so a
+      // chatty job cannot fill the node disk or the api heap (fix wave 2,
+      // M6, H2), and no pending-job entry because a lease owns its lifetime.
+      ? { ...opts, maxOutputBytes: opts.maxOutputBytes ?? DEFAULT_DETACHED_MAX_OUTPUT_BYTES }
+      : { ...opts, maxOutputBytes: opts?.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES };
     // Job-mode kickoff only — the job's own runtime is polled, not awaited,
     // so this span measures dispatch latency, not the command's duration.
     return withSpan(
@@ -220,18 +322,20 @@ export class PolicySandbox implements Sandbox {
         }, { signal: opts?.signal });
         recordSandboxExec(Date.now() - startedAt, true);
         // Track as pending until a terminal poll or cancelJob clears it.
-        this.pendingJobs.add(handle.execId);
+        // A detached process is not tracked: its lifetime belongs to a
+        // lease, not the run-start reconcile window.
+        if (!opts?.detached) this.pendingJobs.add(handle.execId);
         return handle;
       },
     );
   }
 
-  async pollJob(execId: string, offset: number): Promise<JobPoll> {
+  async pollJob(execId: string, offset: number, opts?: JobPollOpts): Promise<JobPoll> {
     let poll: JobPoll;
     try {
       poll = await this.dispatch((sb) => {
         if (!sb.pollJob) throw jobUnsupportedError();
-        return sb.pollJob(execId, offset);
+        return opts === undefined ? sb.pollJob(execId, offset) : sb.pollJob(execId, offset, opts);
       });
     } catch (err) {
       // A transport failure (SandboxUnavailableError) or epoch bump
@@ -340,7 +444,7 @@ export class PolicySandbox implements Sandbox {
     } catch (err) {
       // ensureReady/dispatch-level failure (sandbox died mid-check) — the
       // original command result must still flow back untouched.
-      console.error(`sandbox ${this.id}: in-run workspace-full check failed:`, err);
+      reportError({ area: "sandbox", reason: "workspace_full_check" }, `sandbox ${this.id}: in-run workspace-full check failed`, err);
       return null;
     }
   }
@@ -376,7 +480,7 @@ export class PolicySandbox implements Sandbox {
     try {
       result = await op(sandbox);
     } catch (err) {
-      if (err instanceof SandboxEvictedError || isTransportError(err)) {
+      if (err instanceof SandboxEvictedError || isSandboxTransportError(err)) {
         this.attachment.reportFailure(epoch, err);
         if (err instanceof SandboxEvictedError) throw err;
         throw new SandboxUnavailableError(err);

@@ -11,6 +11,7 @@
  * another collector's reconcile; binding the two makes that unrepresentable.
  */
 import { createHash } from "node:crypto";
+import { SKILL_CAPS } from "./skill-files.js";
 import type { AppDb } from "../../lib/drizzle.js";
 import type { ContentKind, ContentSourceRow } from "../../schema/index.js";
 import type { SkillRepoReader, SkillTreeEntry } from "../skill-repo-reader.js";
@@ -22,12 +23,10 @@ import type { SkillRepoReader, SkillTreeEntry } from "../skill-repo-reader.js";
  * set: a new directory, extension, exclusion rule or kind. Raising it makes
  * every source re-scan once — see compare 1 in `content-sync/service.ts`.
  *
- * It does NOT reach a change to what a collector WRITES from a file it
- * already found. `contentManifestHash` covers name, path and blob sha only,
- * so compare 2 still short-circuits while the files are unchanged. Nothing
- * re-renders mirrored rows today.
+ * Both comparison fingerprints also include companion cap values. Raising
+ * those caps reprocesses an unchanged tree instead of retaining cap skips.
  */
-export const DISCOVERY_RULES_VERSION = 1;
+export const DISCOVERY_RULES_VERSION = 2;
 
 /**
  * What a complete sync records in `skill_sources.discovery_scan`: the rules
@@ -48,7 +47,7 @@ export function discoveryScanMark(commitSha: string, kinds: readonly ContentKind
   // leaves its stored mark matching, compare 1 short-circuits, and the newly
   // claimed content is never mirrored until an unrelated commit lands.
   // Sorted, so two equivalent orders produce one mark.
-  return `${DISCOVERY_RULES_VERSION}:${[...kinds].sort().join(",")}:${commitSha}`;
+  return `${DISCOVERY_RULES_VERSION}:${SKILL_CAPS}:${[...kinds].sort().join(",")}:${commitSha}`;
 }
 
 /** One tracked file as the repository holds it. `name` comes from the PATH,
@@ -76,6 +75,9 @@ export interface CollectorDiscoverContext {
 /** The narrower fallback, for a commit whose tree GitHub cut. The reader is
  * passed in so every read of one sync carries that sync's credential. */
 export interface CollectorWalkContext {
+  db: AppDb;
+  /** Legacy body reads do not consume the companion budget or deadline. */
+  bodyReader: SkillRepoReader;
   source: ContentSourceRow;
   headSha: string;
   reader: SkillRepoReader;
@@ -83,6 +85,7 @@ export interface CollectorWalkContext {
 
 export interface CollectorReconcileContext {
   db: AppDb;
+  reader?: SkillRepoReader;
   source: ContentSourceRow;
   /** The commit every body in `text` was read at. A collector that records
    * provenance writes this and never the ref, which moves. */
@@ -133,8 +136,8 @@ export interface CollectorPass {
   readonly kind: ContentKind;
   /** Files whose bodies reconcile needs, in the order reconcile wants them. */
   readonly readEntries: ContentManifestEntry[];
-  /** The same files in canonical order — the manifest-hash input. Canonical
-   * means independent of how GitHub listed the tree. */
+  /** All tracked files in canonical order, including companion files.
+   * This manifest-hash input does not depend on GitHub listing order. */
   readonly manifestEntries: ContentManifestEntry[];
   /** Bodies discovery already read, keyed by PATH. Empty after a tree read;
    * the directory walk fills it, because it reads a file to learn its blob
@@ -149,6 +152,7 @@ export interface CollectorPass {
   readonly excluded: number;
   /** Brings this source's mirrored rows of this kind in line with the pass. */
   reconcile(ctx: CollectorReconcileContext): Promise<CollectorReconcileResult>;
+  hydrateBodies?(ctx: CollectorReconcileContext): Promise<void>;
   /** Resolve external prerequisites before the rail opens its write transaction.
    * The returned writer must use only the supplied transaction handle. */
   prepareReconcile?(ctx: CollectorReconcileContext): Promise<(db: AppDb) => Promise<CollectorReconcileResult>>;
@@ -171,11 +175,11 @@ export interface ContentCollector {
 
 /**
  * Hash over the canonical manifest of a whole sync — every collector's
- * entries, in collector order. Only the three manifest fields go in, so the
+ * entries, in collector order, plus companion cap values. The
  * hash follows the commit and not the listing order. The per-file key is the
  * git blob sha the tree read supplies, so the hash needs no file read.
  */
 export function contentManifestHash(entries: ContentManifestEntry[]): string {
   const canonical = entries.map((e) => ({ name: e.name, path: e.path, blobSha: e.blobSha }));
-  return createHash("sha256").update(JSON.stringify(canonical), "utf8").digest("hex");
+  return createHash("sha256").update(JSON.stringify([SKILL_CAPS, canonical]), "utf8").digest("hex");
 }

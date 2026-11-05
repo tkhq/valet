@@ -33,7 +33,7 @@ One sentence: **a sandbox is a cache materialization of a pure spec over a durab
 | Verb | Definition |
 |---|---|
 | **reconcile** | Observe (applied state + running image) → diff against the spec → converge, within policy. The only sandbox lifecycle verb above the provider port. Single-flight per attachment. |
-| **rotate** | A periodic host sweep (hourly): re-mint the sandbox token for every live sandbox whose token passed ~12h and push it through the creds mount. Sweep-driven, NOT run-start-triggered — rotating at the prompt would race Secret propagation (~1 min) against an already-expired token on long-idle sandboxes. Needs no idle window and no replacement. |
+| **adopt token** | Recover the session bearer from its persisted row and the stable instance encryption key. API restarts do not rotate it. |
 | **bake / skip** | The nightly job per source: recompute identity + head SHA; bake when either moved, skip when both match the current bake. |
 | **prune** | Retention, unchanged from sandbox-images-v2 (keep last 2 per source). |
 
@@ -48,15 +48,11 @@ One sentence: **a sandbox is a cache materialization of a pure spec over a durab
    - only some step hashes differ → re-run exactly those steps in place. A shim fix converges in seconds with zero state loss and no pod replacement.
    - applied file missing/empty/corrupt (pod restarted, fresh container fs) → re-apply all steps.
    - hibernated and stale → skip resume, provision fresh. Wake is not a separate path; it is reconcile.
-   - There is NO age-based divergence. Token freshness is `rotate`'s job (decision 5); container state lives until a real diff appears.
+   - There is NO age-based divergence. Sandbox tokens remain valid until teardown (decision 5); container state lives until a real diff appears.
 
 4. **All convergence happens at the run-start window; mid-run `ensureReady` is a pure fast-path.** The first acquisition of a run grants the window; reconcile (single-flight) may replace the pod or run steps there. Every later acquisition in the run does neither — no step convergence mid-run (the clone step's fetch+checkout under a live command would corrupt the working tree; distinguishing "safe" steps buys nothing). Busy = active runs across **all** threads + pending exec jobs. Gateway terminal/VS Code connections are NOT consulted this pass (documented limitation: a replacement drops an open terminal into a fresh pod).
 
-5. **Credentials ride the creds mount, not env and not prep.** Shims read `/etc/valet/creds/token` first, `$VALET_SANDBOX_TOKEN` env as fallback (back-compat with pre-mount sandboxes). The port gains `SandboxProvider.updateCreds(sandboxId, files: Record<string, string>)` and `capabilities().credsMount: boolean`:
-   - kubernetes: per-sandbox Secret, mounted as a **whole-directory volume** (env-from-Secret is frozen at process start; subPath mounts never update — both are traps, both prohibited here). Rotation = PATCH the Secret; kubelet propagates within ~1 min, which is fine against a 24h TTL rotated at 12h.
-   - docker/local: a second small host-dir bind mount; rotation = write the host file (instant). Docker mounts are immutable after create — existing containers gain the mount on their next replacement; env fallback covers the gap.
-   - virtual: in-memory.
-   The `rotate` sweep (verbs table) drives updates hourly, so tokens are always fresh regardless of run activity. A restarted pod mounts the CURRENT secret at boot, so credentials are fresh before any prep runs. This closes the 24h token-strand gap properly and removes the motivation for age-based recycling. Providers without `credsMount` keep today's env-only behavior and its documented TTL limitation. Gateway processes (ttyd/code-server auth) still read env; migrating them to the mount is future work.
+5. **Credentials survive API restarts (TKAI-498).** Shims read `/etc/valet/creds/token` first and use `$VALET_SANDBOX_TOKEN` as fallback. Kubernetes uses a whole-directory Secret mount; Docker uses a host-directory bind mount. The host adopts the same durable bearer on rebuild. Teardown revokes all session bearers. No rotation sweep or Secret propagation window controls validity. The `updateCreds` provider port remains available. See [Durable sandbox tokens](2026-09-16-durable-sandbox-tokens-design.md).
 
 6. **Observation is cached and throttled.** The attachment caches observed state (applied hashes, running image) in memory; the applied file is re-read via exec only (a) after a provisioning/ready transition and (b) on a ~5 min throttle. The throttle bounds pod-restart detection latency — a restarted pod may run up to ~5 min with missing prep artifacts before the next run-start window catches it. Explicit trade: per-prompt exec cost vs restart-detection latency.
 
@@ -110,12 +106,12 @@ Phases 1–3 are the sandbox path and land independently of phase 4; the current
 
 1. **Spec extraction.** `ResolveSnapshot` + `computeSpec` + `specHash` goldens. Pure refactor; no behavior change.
 2. **PrepPlan in the engine.** `SpecProvider` seam, step model, applied.json, in-place step convergence at run start. Conformance suites updated. Ships standalone value: shim deploys stop requiring pod deletion.
-3. **Replacement + creds mount.** Verify the two named risks first. Then: run-start windows, release+create preserving workspace, wake folding, backoff memo, divergence-age metric, `updateCreds` port + Secret/bind-mount implementations + shim file-first read + rotate loop.
+3. **Replacement + creds mount.** Verify the two named risks first. Then: run-start windows, release+create preserving workspace, wake folding, backoff memo, divergence-age metric, `updateCreds` port + Secret/bind-mount implementations + shim file-first read. TKAI-498 replaces the rotate loop with durable credentials.
 4. **Generation unification.** `image_sources`/`bakes` tables, org base source + settings editor, zero-config auto-create with decay, parent-first nightly bake-or-skip, retention ported, UI relabel.
 
 ## Exit criteria (the dogfood)
 
-On the local k8s deploy: edit a shim script, deploy — next prompt on a running session converges in place (no pod replacement, applied.json updated, new shim present). Push a new stock image tag — next prompt replaces the pod; a file written in `/workspace` beforehand survives, a file written in `/root` does not. Kill a sandbox pod manually — the divergence is OBSERVED within one throttle window, all steps re-apply at the next prompt (convergence only happens in the run-start window, decision 4), and the restarted pod booted with the CURRENT token from the Secret mount. A sandbox older than 12h has a rotated token file and its credential helper still mints — with no pod replacement having occurred. Edit the org base commands — the next nightly pass bakes the base AND rebakes dependent repo sources the same night; sessions pick both up lazily. Bind a fresh repo — source auto-created, first bake runs in background, second session on that repo boots prebuilt. Two consecutive nightly passes with no upstream commits — second pass skips every source. A repo unbound for 30 days stops baking; re-binding resumes it.
+On the local k8s deploy: edit a shim script, deploy — next prompt on a running session converges in place (no pod replacement, applied.json updated, new shim present). Push a new stock image tag — next prompt replaces the pod; a file written in `/workspace` beforehand survives, a file written in `/root` does not. Kill a sandbox pod manually — the divergence is OBSERVED within one throttle window, all steps re-apply at the next prompt (convergence only happens in the run-start window, decision 4), and the restarted pod booted with the CURRENT token from the Secret mount. A sandbox older than 24 hours retains its original token and its credential helper still works after an API restart. Edit the org base commands — the next nightly pass bakes the base AND rebakes dependent repo sources the same night; sessions pick both up lazily. Bind a fresh repo — source auto-created, first bake runs in background, second session on that repo boots prebuilt. Two consecutive nightly passes with no upstream commits — second pass skips every source. A repo unbound for 30 days stops baking; re-binding resumes it.
 
 ## Testing
 
@@ -196,6 +192,18 @@ Disabling the setting preserves existing sources, images, and session bindings. 
 Enabling the setting permits new anonymous bakes. A new binding can create a missing source.
 
 
+### Preparation failure details
+
+`SandboxPreparationError` retains the original rejection in `cause`. Its message includes the cause's string `message` and string or numeric `code`, when available. Other objects first use scalar `reason`, `status`, `statusCode`, `exitCode`, `signal`, `errno`, and `syscall` fields as JSON. Each field read has its own guard, so a throwing getter does not hide other diagnostic fields.
+
+If those fields are absent, the formatter reads only own enumerable data properties named `failure`, `retryable`, and `attempts`. It never enumerates unknown fields, which can hold credentials or request payloads. It skips accessors and functions and never calls provider serialization methods. Nested diagnostic objects and arrays report `[object]` and `[array]`, including circular references. The formatter does not copy nested payload contents. Objects without readable diagnostic fields report `unserializable cause`. Formatted details have a 2,048-character limit. The formatter bounds strings before JSON serialization and marks shortened output with `[truncated]`. Error codes come before messages so nested truncation preserves them.
+
+Kubernetes exec failures are normalized at the transport boundary before preparation catches them. `PodExecTransportError.cause` retains the original client rejection. This prevents provider classification from discarding a WebSocket error event through `String(event)`. Reconcile logs include bounded diagnostic text, error names, and stack traces. Stack strings remain intact so long messages cannot remove call frames. Logs do not inspect retained causes, which can contain socket request URLs.
+
+Only `SandboxConnectionError` subclasses permit recovery classification through original `cause` and `error` links. `PodExecTransportError` extends this class at the Kubernetes connection boundary. Ordinary provider errors keep the existing top-level `Error.message` classification. Nested application diagnostics and untyped string rejections do not trigger sandbox recovery.
+
+The agent loop uses this message as tool-result text. Regression tests assert the actual text in the next model request and persisted tool-call parts. Provider codes remain visible in that text. The original cause stays on the error and is not serialized into tool-result metadata.
+
 ### Resume restoration (TKAI-427)
 
 `PrepStep.afterResume(sandbox)` restores container state before the attachment becomes ready. The attachment awaits callbacks in prep-step order after provider resume and credential-secret refresh. Each callback runs on every wake, even when the provider retained `applied.json`. `critical` applies to both cold preparation and resume restoration. Required initialization cannot become optional across container epochs.
@@ -259,3 +267,45 @@ Configure an operator alert when `valet.bake.cache.over_budget_all_protected` or
 Alert on `valet.registry.capacity_unknown` for configured production registries. Alert when `valet.bake.push_failures.recent` is greater than zero.
 OTel export requires the deployment's telemetry provider. Structured error logs remain available without it.
 Physical byte gauges retain their last sample during unknown capacity. Use the capacity-unknown gauge to exclude stale samples.
+
+### Built-in image sources (2026-11-03)
+
+Code owns three kinds of `image_sources` rows. `builtInSourceKind` in `bakes/source-service.ts` identifies them with the keys that seeding uses:
+
+- `stock-full`: the `kind='external'` row named `stock-full`. Its ref follows the deploy pin.
+- `default-full`: the `kind='base'`, `profile='full'` row. Its setup commands are empty, and its parent is `stock-full`.
+- `repo-base`: a `kind='base'` row named `repo-base:<fullName>`. Its commands come from the repository's `.valet/prebuild.yaml`.
+
+Their setup commands and image refs run in every later bake and sandbox. An org admin account is not enough to change them. The admin API refuses these writes:
+
+- `PATCH /api/org/sources/:id` with any field on a built-in row returns 403. This includes content fields, `enabled`, and `schedule`. Disabling `default-full` or `stock-full` breaks sandbox starts. `schedule: "off"` stops the nightly rebake that carries a pin change into the base image.
+- `DELETE /api/org/sources/:id` on a built-in row returns 403.
+- `POST /api/org/sources` with `kind='base'` returns 403. The one base an org has is the seeded full base.
+- `POST /api/org/sources` with a reserved name returns 409. The reserved names are `stock-full`, `default-full`, and any name that starts with `repo-base:`. The check ignores case and outer spaces.
+
+The 403 message is "`<name>` is a built-in image source. Change it in code or the deploy configuration, not through the API." The status is 403, not 409, because no change of state makes a retry succeed.
+
+`GET /api/org/sources` sets `builtIn: true` on these rows. Settings > Organization > Sandbox images shows a built-in base read-only, without Save. It shows built-in external images without Delete. Both show "Built-in. Managed in code."
+
+At boot, `seedDefaultBasesIfMissing` compares each built-in row with the code values. On `default-full` it checks `setupCommands`, `parentId`, `enabled`, and `schedule`. On `stock-full` it checks `pullSecretName`, `enabled`, and `schedule`. If a field drifted, the service writes the code value back. It logs the old and new values at error level and adds 1 to the counter `valet.image_source.builtin_repaired` for each field. A repair of `default-full` fails the queued, building, and pushed bakes of that base and of every source built from it, because each may carry the drifted commands. Sessions then fall back to the stock image. The repair starts a clean base bake, and the push cascade rebuilds the children. Drift means tampering or an edit made before the API refused it, so alert on any non-zero counter value. This repair is an exception to "alert, don't auto-repair": code owns this content, and keeping the drift runs unreviewed commands in every sandbox.
+
+A `stock-full` ref change still logs at info level, because a deploy pin change is normal operation. Bakes built from drifted commands stay in the registry until retention removes them.
+
+### Build pod isolation and cluster-side requirements (2026-11-03)
+
+A bake runs setup commands that an org admin or a repository controls. Treat every builder pod as untrusted code.
+
+The kubernetes builder labels every BuildKit Job and pod with `valet.dev/workload: untrusted-build`. A NetworkPolicy or admission policy can select build pods by this label. Two settings place build pods on an isolated node pool:
+
+- `VALET_PREBUILD_BUILD_NODE_SELECTOR`: a JSON object, or `key=value` pairs separated by commas. The chart sets it from `build.nodeSelector`.
+- `VALET_PREBUILD_BUILD_TOLERATIONS`: a JSON array of Kubernetes tolerations. The chart sets it from `build.tolerations`.
+
+If a setting is unset, the scheduler picks the node, as before. If a value does not parse, the api fails at boot and names the expected format.
+
+The api cannot isolate a build by itself. The cluster operator must also provide these items:
+
+1. A separate node pool for builds, with a taint that only build pods tolerate.
+2. Instance metadata (IMDS) blocked for that pool, or an IMDSv2 hop limit of 1.
+3. A NetworkPolicy that denies build pod egress to 169.254.169.254, the Kubernetes API, and the pod and service CIDRs.
+4. An egress allowlist for build pods: the image registry, the Git host, and the package mirrors the recipes use.
+5. A rootless builder (the default `moby/buildkit:rootless`) or a gVisor runtime class. Do not run builds privileged.

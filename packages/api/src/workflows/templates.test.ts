@@ -1,3 +1,4 @@
+import linearEventPlugin from "@valet/plugin-linear/plugin";
 import { generateKeyPairSync } from "node:crypto";
 /**
  * Workflow template aggregation and install.
@@ -10,7 +11,7 @@ import { generateKeyPairSync } from "node:crypto";
  * failure with a database constraint and asserts the first two rows are
  * gone too.
  */
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Type } from "typebox";
 import { and, eq } from "drizzle-orm";
 import type {
@@ -27,13 +28,15 @@ import { bundledPlugins } from "../plugins/registry.gen.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import type { AppDb } from "../lib/drizzle.js";
 import type { PgDb } from "@valet/store-postgres";
-import { githubInstallations, eventSubscriptions, teamMembers, teams, workflowDefinitions, workflowSchedules, workflowVersions } from "../schema/index.js";
+import { linearInstallations, githubInstallations, eventSubscriptions, orgs, teamMembers, teams, workflowDefinitions, workflowSchedules, workflowVersions } from "../schema/index.js";
+import { setApprovedModels } from "../services/approved-models.js";
 import { assemblePlugins } from "../plugins/assemble.js";
 import {
   bakeInputs,
   installWorkflowTemplate,
   listPluginTemplates,
   listWorkflowTemplateSummaries,
+  installNumber,
   templateInputs,
   type TemplateServiceDeps,
 } from "./templates.js";
@@ -181,8 +184,8 @@ const notesTemplate: WorkflowTemplate = {
 
 /**
  * Scheduled AND parameterised — the combination the baking rule exists for.
- * A scheduled run applies no `dataSchema` defaults, so install has to
- * resolve every field before it writes: the declared default for one, and a
+ * A scheduled run fills a field only from the schedule's input or its
+ * `dataSchema` default, so install has to resolve every field before it writes: the declared default for one, and a
  * refusal for the required field nobody supplied.
  */
 const notesNightly: WorkflowTemplate = {
@@ -491,8 +494,17 @@ async function seedTeam(teamId: string, memberIds: string[]): Promise<void> {
 }
 
 beforeEach(async () => {
+  // Install validates the baked definition against the org's model
+  // environment, exactly as `POST /api/workflows` does. The bundled
+  // templates name Anthropic models, so the org needs a key it can reach or
+  // every install is refused for a reason none of these tests is about.
+  vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
   await boot();
   credentials = new InMemoryCredentialStore();
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
 });
 
 afterAll(async () => {
@@ -864,6 +876,21 @@ describe("bakeInputs", () => {
 // ─── Install ─────────────────────────────────────────────────────────────
 
 describe("installWorkflowTemplate", () => {
+  it("requires organization ingress before arming a Linear template", async () => {
+    const template: WorkflowTemplate = {
+      id: "linear-event-test", name: "Linear event", description: "Responds to Linear.", category: "Work", apps: [], steps: ["Stop"],
+      definition: definition([{ id: "start", type: "trigger" }, { id: "stop", type: "stop" }], [{ from: "start", to: "stop" }]),
+      events: [{ name: "On issue", description: "When an issue changes", eventKeys: ["linear.issue.update"] }],
+    };
+    const scopedDeps = deps([{ ...linearEventPlugin, templates: [template] }]);
+    expect(await installWorkflowTemplate(scopedDeps,OWNER,template.id)).toMatchObject({ ok: false, code: "not_connected", error: expect.stringContaining("Organization settings > Linear") });
+    expect(await db.select().from(workflowDefinitions)).toHaveLength(0);
+    await db.insert(linearInstallations).values({ id: "template-install", orgId: OWNER.orgId, workspaceId: "linear-org", workspaceName: "Linear", webhookId: "webhook", connectedBy: OWNER.userId, createdAt: 1, updatedAt: 1 });
+    await credentials.save({ type: "org", id: OWNER.orgId },"linear",{ type: "oauth2", accessToken: "token", metadata: { webhookSecret: "secret" } });
+    expect(await installWorkflowTemplate(scopedDeps,OWNER,template.id)).toMatchObject({ ok: true });
+    expect(await db.select().from(eventSubscriptions)).toHaveLength(1);
+  });
+
   it("writes the definition, its first version, and the schedule", async () => {
     await connect("gmail");
     const result = await installWorkflowTemplate(deps(), OWNER, "gmail-sweep");
@@ -886,8 +913,8 @@ describe("installWorkflowTemplate", () => {
     expect(schedules[0]!.workflowId).toBe(result.workflowId);
     expect(schedules[0]!.enabled).toBe(true);
     expect(schedules[0]!.nextFireAt).toBeGreaterThan(Date.now());
-    // The suffix comes from the workflow id minted in the same transaction.
-    expect(schedules[0]!.name).toBe(`Inbox sweeper (${result.workflowId.slice(-6)})`);
+    // The schedule reads with the workflow's name, so a routine names it once.
+    expect(schedules[0]!.name).toBe("Inbox sweeper");
     expect(result.scheduleId).toBe(schedules[0]!.id);
   });
 
@@ -897,6 +924,75 @@ describe("installWorkflowTemplate", () => {
     if (!result.ok) throw new Error(result.error);
     expect(result.scheduleId).toBeUndefined();
     expect(await db.select().from(workflowSchedules)).toHaveLength(0);
+  });
+
+  it("refuses an install whose model this organization cannot use", async () => {
+    // The gallery lists the template — it is a valid template. The org just
+    // cannot run its model, and an install writes the definition row
+    // directly, so the gate has to be here or the workflow lands in the
+    // editor and refuses its own first save.
+    vi.stubEnv("ANTHROPIC_API_KEY", "");
+    vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
+    await connect("gmail");
+    const result = await installWorkflowTemplate(deps(), OWNER, "gmail-sweep");
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a refusal");
+    expect(result.code).toBe("invalid_input");
+    expect(result.error).toContain("Settings > Models");
+    expect(await db.select().from(workflowDefinitions)).toHaveLength(0);
+    expect(await db.select().from(workflowVersions)).toHaveLength(0);
+  });
+
+  it("refuses an install whose model the organization removed from its approved list", async () => {
+    await db.insert(orgs).values({ id: OWNER.orgId, name: "Org", createdAt: Date.now() });
+    await setApprovedModels(db, OWNER.orgId, ["anthropic/claude-opus-4-7"]);
+    await connect("gmail");
+    const result = await installWorkflowTemplate(deps(), OWNER, "gmail-sweep");
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a refusal");
+    if (result.code !== "invalid_input") throw new Error(`expected invalid_input, got ${result.code}`);
+    expect(result.errors.join(" ")).toContain("Settings > Models");
+    expect(await db.select().from(workflowDefinitions)).toHaveLength(0);
+  });
+
+  it("still lists a template this organization cannot install", async () => {
+    // The org's model policy belongs to the org, not to the template, so it
+    // must not empty the gallery or brand a shipped template invalid.
+    vi.stubEnv("ANTHROPIC_API_KEY", "");
+    vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
+    await connect("gmail");
+    const list = await listWorkflowTemplateSummaries(deps(), OWNER);
+    expect(list.map((t) => t.id)).toContain("gmail-sweep");
+  });
+
+  it("marks a template this organization cannot install, with both remedies", async () => {
+    // The card stays, and it says why the Install button is off. Without
+    // this the button is live and every press answers 400.
+    vi.stubEnv("ANTHROPIC_API_KEY", "");
+    vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
+    await connect("gmail");
+    const card = (await listWorkflowTemplateSummaries(deps(), OWNER)).find((t) => t.id === "gmail-sweep");
+    expect(card?.installable).toBe(false);
+    const reason = card?.installBlockedReason ?? "";
+    expect(reason).toContain("gmail-sweep");
+    expect(reason).toContain("Settings > Models");
+    expect(reason).toContain("add a key for the provider");
+    // The bundled templates name model ids, never a size tier, so the tier
+    // remedy would send the reader to look for something that is not there.
+    expect(reason).not.toContain("size tier");
+    // The install gate refuses with the same sentence, so the card and the
+    // install can never disagree.
+    const refusal = await installWorkflowTemplate(deps(), OWNER, "gmail-sweep");
+    expect(refusal.ok).toBe(false);
+    if (refusal.ok) throw new Error("expected a refusal");
+    expect(refusal.error).toBe(reason);
+  });
+
+  it("marks a template this organization can install", async () => {
+    await connect("gmail");
+    const card = (await listWorkflowTemplateSummaries(deps(), OWNER)).find((t) => t.id === "gmail-sweep");
+    expect(card?.installable).toBe(true);
+    expect(card?.installBlockedReason).toBeUndefined();
   });
 
   it("refuses a template whose service the caller has not connected", async () => {
@@ -1053,10 +1149,50 @@ describe("installWorkflowTemplate", () => {
     const schedules = await db.select().from(workflowSchedules);
     expect(schedules).toHaveLength(2);
     expect(new Set(schedules.map((s) => s.id)).size).toBe(2);
-    // Distinct names are the whole point of the suffix: two rows called
-    // "Inbox sweeper" cannot be told apart in the schedules list.
-    expect(new Set(schedules.map((s) => s.name)).size).toBe(2);
+    // Each schedule carries its workflow's install count, so the two rows
+    // stay apart in the schedules list.
+    expect(new Map(schedules.map((s) => [s.workflowId, s.name]))).toEqual(new Map([
+      [first.workflowId, "Inbox sweeper"],
+      [second.workflowId, "Inbox sweeper (2)"],
+    ]));
     expect(new Set(schedules.map((s) => s.workflowId))).toEqual(new Set([first.workflowId, second.workflowId]));
+  });
+
+  it("gives a later install a routine name that a renamed install's routine does not use", async () => {
+    await connect("gmail");
+    const first = await installWorkflowTemplate(deps(), OWNER, "gmail-sweep");
+    const second = await installWorkflowTemplate(deps(), OWNER, "gmail-sweep");
+    if (!first.ok || !second.ok) throw new Error("expected both installs to succeed");
+    // A rename changes the workflow's name; its routine keeps `Inbox sweeper (2)`.
+    await db.update(workflowDefinitions).set({ name: "My triage" }).where(eq(workflowDefinitions.id, second.workflowId));
+
+    const third = await installWorkflowTemplate(deps(), OWNER, "gmail-sweep");
+    if (!third.ok) throw new Error("expected the install to succeed");
+    expect(third.workflowName).toBe("Inbox sweeper (3)");
+    const names = (await db.select().from(workflowSchedules)).map((s) => s.name).sort();
+    expect(names).toEqual(["Inbox sweeper", "Inbox sweeper (2)", "Inbox sweeper (3)"]);
+  });
+
+  it("never repeats a number that a remaining install still shows after an earlier one is deleted", async () => {
+    await connect("gmail");
+    const installs = [];
+    for (let i = 0; i < 3; i++) {
+      const result = await installWorkflowTemplate(deps(), OWNER, "gmail-sweep");
+      if (!result.ok) throw new Error("expected the install to succeed");
+      installs.push(result);
+    }
+    expect(installs.map((install) => install.workflowName)).toEqual(["Inbox sweeper", "Inbox sweeper (2)", "Inbox sweeper (3)"]);
+
+    // Delete the second install with its schedule, as deleting a workflow does.
+    await db.delete(workflowSchedules).where(eq(workflowSchedules.workflowId, installs[1].workflowId));
+    await db.delete(workflowVersions).where(eq(workflowVersions.workflowId, installs[1].workflowId));
+    await db.delete(workflowDefinitions).where(eq(workflowDefinitions.id, installs[1].workflowId));
+
+    const again = await installWorkflowTemplate(deps(), OWNER, "gmail-sweep");
+    if (!again.ok) throw new Error("expected the install to succeed");
+    expect(again.workflowName).toBe("Inbox sweeper (4)");
+    const names = (await db.select().from(workflowSchedules)).map((schedule) => schedule.name).sort();
+    expect(names).toEqual(["Inbox sweeper", "Inbox sweeper (3)", "Inbox sweeper (4)"]);
   });
 
   it("bakes a supplied input into the installed definition", async () => {
@@ -1342,6 +1478,54 @@ describe("github.assign-reviewers — install bakes its roster location", () => 
 });
 
 
+/**
+ * Slack is org-managed (`requires.orgCredential`), so a node pinned to
+ * `"user"` has no personal account to connect. The install API cannot edit
+ * a node, so the install does not block on that pin: the card carries a
+ * note, and the run refuses the node with the credential-setting fix.
+ */
+describe("a template that pins org-managed Slack to the user", () => {
+  const pinnedSlack: WorkflowTemplate = {
+    id: "pinned-slack-dm",
+    name: "Pinned Slack DM",
+    description: "Sends one DM as the user.",
+    category: "Chat",
+    apps: ["slack"],
+    steps: ["DM"],
+    definition: definition(
+      [
+        { id: "start", type: "trigger" },
+        { id: "dm", type: "tool", service: "slack", action: "dm_user", params: { user: "U1", text: "hi" }, credential: "user" },
+      ],
+      [{ from: "start", to: "dm" }],
+    ),
+  };
+  const pinnedPlugin: ValetPlugin = { name: "pinned-slack", version: "0.0.1", templates: [pinnedSlack] };
+  const plugins = (): ValetPlugin[] => [...bundledPlugins, pinnedPlugin];
+
+  it("installs when the organization Slack row exists, and the card shows a note", async () => {
+    await credentials.save({ type: "org", id: OWNER.orgId }, "slack", { type: "bot_token", accessToken: "xoxb-test" });
+    const summaries = await listWorkflowTemplateSummaries(deps(plugins()), OWNER);
+    const card = summaries.find((t) => t.id === pinnedSlack.id);
+    expect(card?.requires.find((r) => r.service === "slack")).toEqual({ service: "slack", connected: true, organizationManagedPin: true });
+    expect(card?.caveats).toContain(
+      "Pinned to your own account, but slack connects for the whole organization. After install, change the node's credential setting to the app.",
+    );
+    const result = await installWorkflowTemplate(deps(plugins()), OWNER, pinnedSlack.id);
+    if (!result.ok) throw new Error(result.error);
+    expect(await db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, result.workflowId))).toHaveLength(1);
+  });
+
+  it("sends the install to organization setup when no organization Slack row exists", async () => {
+    const result = await installWorkflowTemplate(deps(plugins()), OWNER, pinnedSlack.id);
+    if (result.ok) throw new Error("expected a refusal");
+    expect(result.code).toBe("not_connected");
+    expect(result.error).toContain("not configured for this organization");
+    expect(result.error).not.toContain("credential setting");
+    expect(await db.select().from(workflowDefinitions)).toHaveLength(0);
+  });
+});
+
 describe("team GitHub template repository prerequisites", () => {
   async function setup() {
     await seedTeam("review-team", [OWNER.userId]);
@@ -1389,5 +1573,18 @@ describe("team GitHub template repository prerequisites", () => {
     expect(await db.select().from(workflowDefinitions)).toHaveLength(ok ? 1 : 0);
     expect(await db.select().from(eventSubscriptions)).toHaveLength(ok ? 1 : 0);
     expect(await db.select().from(workflowVersions)).toHaveLength(ok ? 1 : 0);
+  });
+});
+
+describe("installNumber", () => {
+  it("reads the highest install number in use", () => {
+    expect(installNumber("Inbox sweeper", [])).toBe(0);
+    expect(installNumber("Inbox sweeper", ["Inbox sweeper"])).toBe(1);
+    expect(installNumber("Inbox sweeper", ["Inbox sweeper", "Inbox sweeper (3)"])).toBe(3);
+    expect(installNumber("Inbox sweeper", ["Inbox sweeper (2)"])).toBe(2);
+  });
+
+  it("ignores a name that only starts like the template's", () => {
+    expect(installNumber("Inbox sweeper", ["Inbox sweeper (draft)", "Inbox sweeper (0)", "Inbox sweeper (2.5)", "Inbox sweeper (1e9)"])).toBe(0);
   });
 });

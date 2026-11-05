@@ -1,34 +1,34 @@
+import { ArrowLeft, Info } from "lucide-react";
+import { Popover, PopoverContent, PopoverTrigger } from "~/components/primitives/popover";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { SandboxProfile } from "@valet/api/wire";
 import { useSandboxJwt } from "~/api/queries";
-import { Button, Spinner } from "~/components/primitives";
+import { Button, Spinner, TabBar, type TabDef } from "~/components/primitives";
 import { SandboxChip } from "~/components/session/session-header";
+import { BrowserPane } from "~/components/session/browser/browser-pane";
 import { cn } from "~/lib/cn";
 
-export type SandboxTabId = "chat" | "terminal" | "vscode";
+export type SandboxTabId = "chat" | "browser" | "terminal" | "vscode";
+type GatewayTabId = "terminal" | "vscode";
 
-const TABS: { id: SandboxTabId; label: string }[] = [
+const TABS: TabDef<SandboxTabId>[] = [
   { id: "chat", label: "Chat" },
+  { id: "browser", label: "Browser" },
   { id: "terminal", label: "Terminal" },
   { id: "vscode", label: "VS Code" },
 ];
 
 /** `terminal`/`vscode` -> the gateway path segment those tabs proxy to
  * (`/api/sessions/:id/gateway/{ttyd|vscode}/…`, Task 6). */
-const GATEWAY_PATH: Record<Exclude<SandboxTabId, "chat">, string> = {
+const GATEWAY_PATH: Record<GatewayTabId, string> = {
   terminal: "ttyd",
   vscode: "vscode",
 };
 
 /**
- * Chat / Terminal / VS Code tab switch for "full"-profile sessions (sandbox
- * auth gateway plan, Task 7). Renders nothing for "headless" sessions — no
- * empty tab bar. The chat tab renders no body of its own (the caller keeps
- * showing `MessageList`/`Composer` for it); non-chat tabs render the
- * gateway iframe pane below the tab bar, gated on `sandbox.state ===
- * "ready"` — that's the only state under which `Session.attachment.current()`
- * (and therefore `gatewayEndpoint()`) is non-null on the server, see
- * `packages/engine/src/sandbox/attachment.ts`.
+ * Browser access is independent of terminal services. The Browser pane
+ * checks provider support and starts the runtime only on explicit request.
+ * Full sessions also expose the Terminal and VS Code gateway panes.
  */
 export interface SandboxTabsProps {
   sessionId: string;
@@ -36,6 +36,14 @@ export interface SandboxTabsProps {
   activeTab: SandboxTabId;
   onTabChange: (tab: SandboxTabId) => void;
   sandbox?: { state: string; epoch: number };
+  notice?: string;
+  /**
+   * True when the header's thread menu lists the sandbox views. Only then
+   * may a phone hide the strip on Chat; a panel header has no such menu.
+   */
+  viewsInMenu?: boolean;
+  /** Main phone conversations use their shared navigation, not a sandbox tab bar. */
+  compact?: boolean;
 }
 
 export function SandboxTabs({
@@ -44,37 +52,39 @@ export function SandboxTabs({
   activeTab,
   onTabChange,
   sandbox,
+  notice,
+  viewsInMenu = false,
+  compact = false,
 }: SandboxTabsProps) {
-  if (profile !== "full") return null;
-
-  // Grow to fill the pane ONLY when a gateway pane (Terminal/VS Code) renders
-  // below the tab strip. On the Chat tab the body is empty — the chat message
-  // list is a sibling in `session-view` — so a growing wrapper here would claim
-  // half the pane as dead space and squash the messages. `shrink-0` keeps it at
-  // the tab strip's natural height and lets the sibling MessageList fill the rest.
-  const showsGatewayPane = activeTab !== "chat";
+  // Chat renders its body in a sibling. Keep this wrapper at the tab strip's
+  // height so MessageList can use the remaining space.
+  const showsPane = activeTab !== "chat";
+  const tabs = profile === "full" ? TABS : TABS.filter((tab) => tab.id === "chat" || tab.id === "browser");
+  if (compact && !showsPane) return null;
   return (
-    <div className={cn("flex min-h-0 flex-col", showsGatewayPane ? "flex-1" : "shrink-0")}>
-      <div role="tablist" aria-label="Session view" className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-line px-3 sm:px-4">
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            role="tab"
-            aria-selected={activeTab === t.id}
-            onClick={() => onTabChange(t.id)}
-            className={cn(
-              "shrink-0 min-h-11 sm:min-h-0 px-2.5 py-2 text-xs font-medium border-b-2 -mb-px transition-colors",
-              activeTab === t.id
-                ? "border-moss text-ink"
-                : "border-transparent text-muted hover:text-ink",
-            )}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
-      {showsGatewayPane && (
+    <div className={cn("flex min-h-0 flex-col", showsPane ? "flex-1" : "shrink-0")}>
+      {/* When the header's thread menu lists the views, a phone shows no
+          view tabs on Chat; the strip returns to Chat from another view.
+          A team thread keeps the strip for its sharing notice. */}
+      {compact ? <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-1">
+        <Button variant="ghost" size="sm" onClick={() => onTabChange("chat")}><ArrowLeft aria-hidden className="h-4 w-4" />Back to chat</Button>
+        <span className="text-xs text-muted">{tabs.find((tab) => tab.id === activeTab)?.label}</span>
+      </div> : <div className={cn("flex shrink-0 items-center border-b border-line px-3 sm:px-4", viewsInMenu && activeTab === "chat" && !notice && "max-sm:hidden")}>
+        <TabBar label="Thread view" size="sm" className="flex-1 shadow-none" tabs={tabs} active={activeTab} onSelect={onTabChange} />
+        {notice && <>
+          <span role="status" title={notice} className="hidden lg:block max-w-[50%] truncate pl-3 text-xs text-muted">{notice}</span>
+          <Popover>
+            <PopoverTrigger asChild><button type="button" aria-label="Conversation sharing details"
+              className="ml-2 flex h-11 w-11 shrink-0 items-center justify-center rounded text-muted hover:bg-ink-wash focus-visible:outline focus-visible:outline-moss lg:hidden">
+              <Info className="h-4 w-4" aria-hidden />
+            </button></PopoverTrigger>
+            <PopoverContent align="end" className="w-72 max-w-[calc(100vw-2rem)] text-sm">{notice}</PopoverContent>
+          </Popover>
+        </>}
+
+      </div>}
+      {activeTab === "browser" && <BrowserPane key={sessionId} sessionId={sessionId} compact={compact} />}
+      {(activeTab === "terminal" || activeTab === "vscode") && (
         <GatewayPane sessionId={sessionId} tab={activeTab} sandbox={sandbox} />
       )}
     </div>
@@ -95,7 +105,7 @@ function GatewayPane({
   sandbox,
 }: {
   sessionId: string;
-  tab: Exclude<SandboxTabId, "chat">;
+  tab: GatewayTabId;
   sandbox?: { state: string; epoch: number };
 }) {
   const jwt = useSandboxJwt(sessionId);

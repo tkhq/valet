@@ -1,29 +1,40 @@
-import { Hono } from "hono";
-import { and, count, desc, eq, inArray, or, sql } from "drizzle-orm";
+import { cancelChildDelivery } from "../orchestrator/child-delivery.js";
+import { isLegacyAssistantRuntime } from "../services/legacy-runtime.js";
+import { visibleWorkOrigin } from "../services/work-origin.js";
+import { Hono, type Context } from "hono";
+import { and, count, desc, eq, inArray, notExists, or, sql } from "drizzle-orm";
 import { mkdir, stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
-import { parseAssistantSessionId, type Principal } from "@valet/engine";
+import { parseAssistantSessionId, type Principal, type SessionStore } from "@valet/engine";
+import { validateCredentialDecls } from "@valet/shared";
 import { writeHibernated } from "../engine/hibernation-hooks.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
+import { cancelAllWorkAsHuman, endChildSubscriptions, listBackgroundWork, selectWork, type CancelAllResult } from "../engine/wakeups-admin.js";
+import { gateBackgroundWork, type BackgroundWorkGate } from "./wakeups.js";
 import { computeTargetDirs } from "../engine/workspace-prep.js";
 import { promptAuthorFromUser, submitSessionPrompt } from "./messages.js";
-import { autoTitle } from "../sessions/auto-title.js";
 import {
   deriveRunFields,
   groupSubmissionsBySession,
   type RunStateRow,
   type SessionRunFields,
 } from "../sessions/run-state.js";
-import { canAdministerSession, canViewSession, isSessionDirectOwner } from "../services/session-access.js";
+import { canAdministerSession, canViewSession, canAccessSessionResources } from "../services/session-access.js";
 import { isOrgAdminUser } from "./_org-admin.js";
 import { assertModelSelectable } from "../services/approved-models.js";
 import { assertReasoningSelectable } from "../services/reasoning.js";
-import { loadAssistantBySessionId, retireAssistant } from "../assistants/service.js";
+import { loadAssistantBySessionId } from "../assistants/service.js";
 import {
   createSecurityEngagementService,
   type SecurityConfigContext,
 } from "../services/security-engagements.js";
-import { seedSecurityReview, seededConfigContext } from "../services/security-seed.js";
+import {
+  seedSecurityReview,
+  seededConfigContext,
+  SecurityCredentialPreflightError,
+  type SecurityConfigCredentialDecl,
+} from "../services/security-seed.js";
+import { reservedToolServices } from "../services/security-persona-scope.js";
 import { planCellInputToCell, PlanCellInputError } from "./security.js";
 import { resolveApiTokenOrNull, resolveRefSha } from "../bakes/source-service.js";
 import { checkRepoExistence } from "../services/repo-existence.js";
@@ -47,7 +58,7 @@ import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import {
   agentSessions,
-  assistants,
+  assistants, assistantExecutions,
   childWatches,
   messages as messagesTable,
   sessionRepos,
@@ -59,13 +70,17 @@ import type {
   GetSessionResponse,
   ListSessionsResponse,
   PatchSessionRequest,
+  PatchSessionResponse,
   PauseSessionResponse,
+  ReplaceSandboxResponse,
   RepoBinding,
   SandboxJwtResponse,
   SandboxProfile,
   SessionStatus,
   SessionSummary,
 } from "../wire/types.js";
+import { spawnedFromVisibleThread } from "./_thread-access.js";
+
 
 export const sessionsRouter = new Hono<AppEnv>();
 
@@ -160,17 +175,8 @@ function runStateRow(row: typeof agentSessions.$inferSelect): RunStateRow {
 
 // ── List ──────────────────────────────────────────────────────────────────
 
-// Standalone-only (assistant-centered web UI decision 8): excludes
-// ASSISTANT ids and child ids, server-side, so the client just renders what
-// it gets. Every assistant is excluded, not only a principal's default —
-// assistants are listed by `GET /api/assistants`, and a principal that owns
-// several would otherwise fill this list with them. Assistant-derived
-// children nest inline in the assistant's chat page (via
-// GET /api/orchestrator/children) instead.
-//
-// Exported so other mounts needing the same "this user's standalone
-// sessions" view (e.g. the MCP `list_sessions` tool, Task 9) reuse the exact
-// query instead of re-deriving it.
+// Standalone work excludes workspace runtimes and spawned children. Threads
+// discovers child work through the parent-scoped children endpoint.
 export async function listStandaloneSessions(db: AppDb, userId: string, owner?: Principal) {
   // Own rows plus every team you are on — the same union `listWorkflowDefinitions`
   // and `listSkills` use, so one workspace's sessions read like its workflows.
@@ -188,28 +194,22 @@ export async function listStandaloneSessions(db: AppDb, userId: string, owner?: 
       ? or(mine, teamRows)
       : mine;
 
-  const [rows, childRows, assistantRows] = await Promise.all([
-    db
+  const rows = await db
       .select()
       .from(agentSessions)
-      .where(and(scope, inArray(agentSessions.status, ["active", "hibernated"])))
-      .orderBy(desc(sql`COALESCE(${agentSessions.lastActivityAt}, ${agentSessions.updatedAt})`)),
-    db.select({ childSessionId: childWatches.childSessionId }).from(childWatches),
-    // The assistants table, not the id prefix, decides which sessions are
-    // assistant sessions: migrated rows keep legacy `orchestrator:*` ids
-    // the prefix parse cannot recognize. The prefix check below stays as a
-    // belt for `assistant:` ids whose row is gone.
-    db.select({ sessionId: assistants.sessionId }).from(assistants),
-  ]);
-
-  const childIds = new Set(childRows.map((r) => r.childSessionId));
-  const assistantSessionIds = new Set(assistantRows.map((r) => r.sessionId));
-  return rows.filter(
-    (r) =>
-      !assistantSessionIds.has(r.id) &&
-      parseAssistantSessionId(r.id) === null &&
-      !childIds.has(r.id),
-  );
+      .where(and(
+        scope,
+        inArray(agentSessions.status, ["active", "hibernated"]),
+        notExists(db.select({ id: childWatches.childSessionId }).from(childWatches)
+          .where(eq(childWatches.childSessionId, agentSessions.id))),
+        notExists(db.select({ id: assistantExecutions.sessionId }).from(assistantExecutions)
+          .where(eq(assistantExecutions.sessionId, agentSessions.id))),
+        notExists(db.select({ id: assistants.sessionId }).from(assistants)
+          .where(eq(assistants.sessionId, agentSessions.id))),
+      ))
+      .orderBy(desc(sql`COALESCE(${agentSessions.lastActivityAt}, ${agentSessions.updatedAt})`));
+  // Retain the prefix fallback for assistant rows whose metadata is gone.
+  return rows.filter((r) => parseAssistantSessionId(r.id) === null && !r.id.startsWith("execution:"));
 }
 
 sessionsRouter.get("/", async (c) => {
@@ -250,21 +250,15 @@ sessionsRouter.get("/", async (c) => {
     return c.json({ error: "kind must be 'code' or 'security'." }, 400);
   }
 
-  // Three round trips, whatever the number of sessions: the two
-  // `listStandaloneSessions` makes, plus ONE cross-session read of every
-  // unsettled submission (the same call the admin submissions route uses).
-  // `groupSubmissionsBySession` then indexes it by session id. A per-row
-  // query here would make an ordinary list cost one query per session.
-  const [standalone, unsettled] = await Promise.all([
-    listStandaloneSessions(db, userId, owner),
-    engineStore.listAllUnsettledSubmissions(),
-  ]);
-  const bySession = groupSubmissionsBySession(unsettled);
-
+  const standalone = await listStandaloneSessions(db, userId, owner);
   const filtered =
     kindFilter === undefined
       ? standalone
       : standalone.filter((row) => (row.kind === "security" ? "security" : "code") === kindFilter);
+
+  // Fetch queue state only for authorized sessions that enter this response.
+  const unsettled = await engineStore.listAllUnsettledSubmissions(filtered.map((row) => row.id));
+  const bySession = groupSubmissionsBySession(unsettled);
 
   const body: ListSessionsResponse = {
     sessions: filtered.map((row) =>
@@ -432,6 +426,16 @@ sessionsRouter.post("/", async (c) => {
           }
         }
       }
+      if (sc.credentials !== undefined) {
+        // One vocabulary for a declared credential, shared with the repo
+        // config parser and the setup form, so a declaration the form accepts
+        // is a declaration this route accepts. The `op://` reference is
+        // resolved later, by the seed preflight.
+        const checked = validateCredentialDecls(sc.credentials);
+        if (!checked.ok) {
+          return c.json({ error: `securityConfig.credentials: ${checked.message}` }, 400);
+        }
+      }
     }
     if (body.planCells !== undefined && (!Array.isArray(body.planCells) || body.planCells.length === 0)) {
       return c.json({ error: "planCells must be a non-empty list of plan steps, or omit the field." }, 400);
@@ -491,6 +495,9 @@ sessionsRouter.post("/", async (c) => {
   // (repo, preset, paths, model). Validated here, before anything is written.
   let rescanParentEngagementId: string | undefined;
   let rescanPlanYaml: string | undefined;
+  // The prior engagement's declared credentials: the list the user confirmed
+  // at its create. A re-scan request with no list reuses it.
+  let rescanCredentials: SecurityConfigCredentialDecl[] | undefined;
   if (body.rescanOf !== undefined) {
     if (kind !== "security") {
       return c.json({ error: "rescanOf only applies to a security session. Send kind 'security'." }, 400);
@@ -515,6 +522,20 @@ sessionsRouter.post("/", async (c) => {
       return c.json({ error: "The prior session has no security engagement to re-scan." }, 404);
     }
     rescanParentEngagementId = priorEngagement.engagement.id;
+    // The stored list passed the rules of its day. Validate it again, because
+    // a rule may have tightened since (a newly reserved label, a derived env).
+    // A request list replaces it, so then it is not read at all.
+    const storedCredentials = priorEngagement.engagement.credentialsJson;
+    if (body.securityConfig?.credentials === undefined && storedCredentials !== null) {
+      const checked = validateCredentialDecls(storedCredentials);
+      if (!checked.ok) {
+        return c.json(
+          { error: `${checked.message} Open the review's setup page and declare the credentials again.` },
+          400,
+        );
+      }
+      rescanCredentials = checked.decls;
+    }
     // Re-scan v2: seed the plan from `rescanPlan(presetId)` — recon → reconcile
     // → the diff-scoped sweeps → verify → report. The reconcile pass re-checks
     // the carried findings; the sweeps find what the changed code introduced.
@@ -592,20 +613,40 @@ sessionsRouter.post("/", async (c) => {
       : "";
   let engagementConfig: SecurityConfigContext | undefined;
   let engagementHasRepoConfig = false;
+  // Declared 1Password credential references (Part 12, INV-33): preflight-
+  // validated below through `seedSecurityReview`, then stored verbatim
+  // (references only, never a resolved value) on the engagement row.
+  let engagementCredentialsJson: SecurityConfigCredentialDecl[] | null = null;
   if (kind === "security") {
-    const [owner, repo] = repos[0].fullName.split("/");
-    if (owner && repo) {
+    const [repoOwner, repoName] = repos[0].fullName.split("/");
+    if (repoOwner && repoName) {
       const tokenDeps = { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) };
-      const seeded = await seedSecurityReview({
-        owner,
-        repo,
-        ...(repos[0].ref ? { ref: repos[0].ref } : {}),
-        presetId,
-        ...(body.paths ? { paths: body.paths } : {}),
-        ...(body.includeReport !== undefined ? { includeReport: body.includeReport } : {}),
-        tokenDeps,
-        orgId: user.orgId,
-      });
+      const declaredCredentials = body.securityConfig?.credentials ?? rescanCredentials;
+      let seeded;
+      try {
+        seeded = await seedSecurityReview({
+          owner: repoOwner,
+          repo: repoName,
+          ...(repos[0].ref ? { ref: repos[0].ref } : {}),
+          presetId,
+          ...(body.paths ? { paths: body.paths } : {}),
+          ...(body.includeReport !== undefined ? { includeReport: body.includeReport } : {}),
+          tokenDeps,
+          orgId: user.orgId,
+          onePassword: c.var.providers.onePassword,
+          userId: user.id,
+          ownerType: owner.type,
+          ...(owner.type === "team" ? { teamId: owner.id } : {}),
+          ...(declaredCredentials !== undefined ? { credentials: declaredCredentials } : {}),
+          reservedServices: reservedToolServices(c.var.providers.actionPluginByService),
+        });
+      } catch (err) {
+        if (err instanceof SecurityCredentialPreflightError) {
+          return c.json({ error: err.remedy }, 400);
+        }
+        throw err;
+      }
+      engagementCredentialsJson = seeded.credentialsJson;
       engagementHasRepoConfig = seeded.hasRepoConfig;
 
       // The plan: the re-scan v2 plan (recon → reconcile → sweeps → verify →
@@ -746,6 +787,9 @@ sessionsRouter.post("/", async (c) => {
           // exist": a preset review with a user-edited focus carries a config
           // context but no repo config seeded it.
           hasRepoConfig: engagementHasRepoConfig,
+          // Declared 1Password credential references (Part 12, INV-33),
+          // preflight-validated above.
+          credentialsJson: engagementCredentialsJson,
         },
         tx,
       );
@@ -855,7 +899,7 @@ sessionsRouter.post("/", async (c) => {
     try {
       queuedPrompt =
         (await submitSessionPrompt(c.var.providers, created, firstPrompt, {
-          author: promptAuthorFromUser(c.var.user),
+          author: promptAuthorFromUser(c.var.user, c.var.principal, c.var.authVia),
         })) !== null;
     } catch (err) {
       console.error(`session ${id}: initialPrompt enqueue failed:`, err);
@@ -896,7 +940,7 @@ sessionsRouter.get("/:id", async (c) => {
   // other session route in this file stays direct-owner-only.
   const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
   const row = rows[0];
-  if (!row || !(await canViewSession(db, row, c.var.principal))) {
+  if (!row || !(await canViewSession(db, row, c.var.principal)) || !(await spawnedFromVisibleThread(c, row))) {
     return c.json({ error: "session not found" }, 404);
   }
 
@@ -923,8 +967,15 @@ sessionsRouter.get("/:id", async (c) => {
   // One session, so one submission read — the same derivation the list uses.
   const unsettled = await engineStore.listUnsettledSubmissions(id);
 
+  const runtime = await loadAssistantBySessionId(db, id);
+  const readOnlyReason = runtime?.ownerType === "team" && !id.startsWith("execution:")
+    && !await isLegacyAssistantRuntime(db, id, row.orgId)
+    ? "This legacy conversation is read-only. Start a new thread to continue." : undefined;
   const detail: GetSessionResponse = {
+    readOnlyReason,
+    isWorkspaceRuntime: runtime !== undefined,
     ...rowToSummary(row, deriveRunFields(runStateRow(row), unsettled)),
+    parentWork: await visibleWorkOrigin(db, row),
     messageCount: Number(n ?? 0),
     model,
     reasoning,
@@ -962,7 +1013,7 @@ sessionsRouter.patch("/:id", async (c) => {
   // an unauthorized caller still gets the same 404 a missing id gets.
   const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
   const row = rows[0];
-  if (!row || !(await canAdministerSession(db, row, c.var.principal))) {
+  if (!row || !(await canAdministerSession(db, row, c.var.principal)) || !(await spawnedFromVisibleThread(c, row))) {
     return c.json({ error: "session not found" }, 404);
   }
 
@@ -992,7 +1043,7 @@ sessionsRouter.patch("/:id", async (c) => {
     const err = await assertModelSelectable(db, row.orgId, isAdmin, body.model as string);
     if (err) return c.json({ error: err }, 400);
   }
-  // `reasoning: null` clears the override and always passes.
+  // `reasoning: null` resets to the current default and always passes.
   if (wantsReasoning && body.reasoning !== null) {
     if (typeof body.reasoning !== "string") {
       return c.json(
@@ -1112,13 +1163,42 @@ sessionsRouter.patch("/:id", async (c) => {
     }
   }
 
+  // A live session froze its profile into `SandboxCreateOpts` when it was
+  // built, and the attachment reuses that object on every re-provision. So
+  // read whether a sandbox exists BEFORE the cache entry goes away: that
+  // answers whether a running container has to be replaced, or whether the
+  // next provision picks the new profile up on its own.
+  let hadSandbox = false;
+  if (nextProfile !== undefined && engineHost.isLive(id)) {
+    const live = await engineHost.sessionFor(id, await loadSessionMeta(db, row));
+    hadSandbox = live.attachment.current() !== null;
+  }
+
+  // Background work blocks a change that would stop it, before any write
+  // (fix wave 3, H2 and M3). An owner move ends all of it: a timer or a
+  // process signal would otherwise start a turn billed to, and credentialed
+  // as, the new owner. A profile change replaces the sandbox, now or at the
+  // next build, which ends process, watch, and hold work; timers keep their
+  // schedule. The profile gate reads the durable leases, not `hadSandbox`:
+  // after an api restart a sandbox with leased work is not live, but it
+  // still runs (fix wave 4, R1). `force: true` stops the work first, as a
+  // human cancel by the caller.
+  let gate: BackgroundWorkGate = { kind: "clear" };
+  if (nextOwner !== undefined) {
+    gate = await gateBackgroundWork(c, row, "move", {}, body.force === true);
+  } else if (nextProfile !== undefined) {
+    gate = await gateBackgroundWork(c, row, "profile", { leasedOnly: true }, body.force === true);
+  }
+  if (gate.kind === "refused") return gate.response;
+
   // Materialize the engine session only when the model or reasoning
   // changes. A rename must not start a sandbox — the header renames
   // hibernated sessions too.
   let model: string | undefined;
   let reasoning: string | null | undefined;
   if ((wantsModel && typeof body.model === "string") || wantsReasoning) {
-    const engineSession = await engineHost.sessionFor(id, await loadSessionMeta(db, row));
+    const meta = await loadSessionMeta(db, row);
+    const engineSession = await engineHost.sessionFor(id, meta);
     if (wantsModel && typeof body.model === "string") {
       try {
         await engineSession.setModel(body.model);
@@ -1128,8 +1208,13 @@ sessionsRouter.patch("/:id", async (c) => {
     }
     if (wantsReasoning) {
       try {
+        // Clearing sets the level a new thread gets now, so the session
+        // never runs at the provider default. The session's own user
+        // resolves it, not the member who clicks reset.
         await engineSession.setReasoning(
-          typeof body.reasoning === "string" ? body.reasoning.trim().toLowerCase() : null,
+          typeof body.reasoning === "string"
+            ? body.reasoning.trim().toLowerCase()
+            : await engineHost.resolveFreshThreadReasoning(id, meta),
         );
       } catch (err) {
         return c.json({ error: (err as Error).message }, 400);
@@ -1145,15 +1230,53 @@ sessionsRouter.patch("/:id", async (c) => {
     reasoning = engineSession.options.sampling?.reasoning ?? null;
   }
 
-  // A live session froze its profile into `SandboxCreateOpts` when it was
-  // built, and the attachment reuses that object on every re-provision. So
-  // read whether a sandbox exists BEFORE the cache entry goes away: that
-  // answers whether a running container has to be replaced, or whether the
-  // next provision picks the new profile up on its own.
-  let hadSandbox = false;
-  if (nextProfile !== undefined && engineHost.isLive(id)) {
+  // The forced stop runs before the owner write, while the cached session
+  // still binds the old owner. The signals wait until the change landed:
+  // they then start their turns in the rebuilt session, so the agent learns
+  // that a person stopped the work, and why.
+  let stopped: CancelAllResult | undefined;
+  if (gate.kind === "force") {
     const live = await engineHost.sessionFor(id, await loadSessionMeta(db, row));
-    hadSandbox = live.attachment.current() !== null;
+    stopped = await cancelAllWorkAsHuman(
+      engineStore,
+      live,
+      id,
+      { ...(nextOwner === undefined ? { leasedOnly: true } : {}), ids: gate.ids },
+      {
+        actorUserId: userId,
+        signal: "defer",
+        note: nextOwner !== undefined
+          ? "They moved the session to another workspace. Do not start it again unless someone asks."
+          : "They changed the sandbox profile, which replaced the sandbox. Do not start it again unless someone asks.",
+      },
+    );
+    // A turn admitted while the work stopped would run under the change.
+    if ((await engineStore.listUnsettledSubmissions(id)).length > 0) {
+      await stopped.sendSignals();
+      return c.json(
+        { error: turnStartedError(nextOwner !== undefined ? "move the session" : "change the profile", true) },
+        409,
+      );
+    }
+    // Work set while the cancel ran (a timer from a turn that already
+    // settled) would survive into the new owner's session. Re-read with the
+    // gate's own filter (PR review 2, item 2).
+    const filter = nextOwner === undefined ? { leasedOnly: true } : {};
+    if (selectWork(await listBackgroundWork(engineStore, id), filter).length > 0) {
+      await stopped.sendSignals();
+      return c.json(
+        { error: workStartedError(nextOwner !== undefined ? "move the session" : "change the profile", true) },
+        409,
+      );
+    }
+  }
+
+  // The browser profile moves with the session, including the old owner's
+  // sign-ins. Turn the browser off before the new owner is written, so no
+  // request can authorize as the new owner against the old profile. If this
+  // write fails, the move fails and the owner stays.
+  if (nextOwner !== undefined) {
+    await engineHost.browserPolicy()?.disableForOwnerChange(id);
   }
 
   // The writes land after every validation, so a rejected model never
@@ -1192,12 +1315,19 @@ sessionsRouter.patch("/:id", async (c) => {
     };
   }
 
+  if (nextOwner !== undefined) await endChildSubscriptions(engineStore, id, undefined, db);
+
   // Drop the cached session so the next build reads the new row: the
   // profile is frozen into the sandbox opts, and the owner binds the skills
   // provider and credential context.
   if (nextOwner !== undefined || nextProfile !== undefined) {
-    engineHost.evictCache(id);
+    await engineHost.invalidateSession(id);
   }
+
+  // Sends the forced stop's signals into the session as it now is.
+  const sendStopped = async () => {
+    if (stopped) await stopped.sendSignals(await engineHost.sessionFor(id, await loadSessionMeta(db, effectiveRow)));
+  };
 
   if (nextProfile !== undefined) {
     if (hadSandbox) {
@@ -1209,95 +1339,56 @@ sessionsRouter.patch("/:id", async (c) => {
       // the rebuild ran wins, the same TOCTOU rule `POST /:id/sandbox/replace`
       // applies. The row already carries the new profile, so say so.
       const recheck = await engineStore.listUnsettledSubmissions(id);
-      if (recheck.length > 0) {
-        return c.json({ error: profileSavedButSandboxFailed("a turn started") }, 409);
+      // The web's confirm dialog reads this sentence to mark the list stopped.
+      const alreadyStopped = stopped ? " The background work already stopped." : "";
+      if (recheck.length > 0 || rebuilt.isExecutionFenced) {
+        await sendStopped();
+        return c.json({ error: profileSavedButSandboxFailed("a turn started") + alreadyStopped }, 409);
+      }
+      // Leased work that started after the gate would die with the old
+      // sandbox (fix wave 4, N5); the same rule as pause and replace.
+      if (await leasedWorkStarted(engineStore, id)) {
+        await sendStopped();
+        return c.json({ error: profileSavedButSandboxFailed("background work started") + alreadyStopped }, 409);
       }
       try {
         await rebuilt.attachment.replace();
       } catch (err) {
+        await sendStopped();
         return c.json({ error: profileSavedButSandboxFailed((err as Error).message) }, 502);
       }
       if (rebuilt.attachment.state !== "ready") {
+        await sendStopped();
         return c.json({ error: profileSavedButSandboxFailed("the new sandbox never became ready") }, 502);
       }
     }
   }
+  await sendStopped();
 
   const [{ n }] = await db
     .select({ n: count() })
     .from(messagesTable)
     .where(eq(messagesTable.sessionId, id));
   const unsettled = await engineStore.listUnsettledSubmissions(id);
-  const detail: GetSessionResponse = {
+  const runtime = await loadAssistantBySessionId(db, id);
+  const readOnlyReason = runtime?.ownerType === "team" && !id.startsWith("execution:")
+    && !await isLegacyAssistantRuntime(db, id, effectiveRow.orgId)
+    ? "This legacy conversation is read-only. Start a new thread to continue." : undefined;
+  const detail: PatchSessionResponse = {
+    readOnlyReason,
+    isWorkspaceRuntime: runtime !== undefined,
     ...rowToSummary(effectiveRow, deriveRunFields(runStateRow(effectiveRow), unsettled)),
+    parentWork: await visibleWorkOrigin(db, effectiveRow),
     messageCount: Number(n ?? 0),
     model,
     reasoning,
     profile: effectiveRow.profile,
     docker: effectiveRow.docker,
+    ...(stopped
+      ? { cancelledWorkCount: stopped.cancelled.length, cancelledWork: stopped.cancelled.map((w) => w.id) }
+      : {}),
   };
   return c.json(detail);
-});
-
-// ── Auto-title ────────────────────────────────────────────────────────────
-
-/**
- * Generate + persist a title for this session (and optionally a thread)
- * from the opening messages. The server normally starts naming from the
- * completed-submission event; this route remains an idempotent retry seam.
- * Returns 200 with `{ sessionTitle, threadTitle }` even in the "nothing to
- * do" cases (`already_titled`, `no_messages`) — the client just treats
- * null title fields as "leave the row alone".
- */
-sessionsRouter.post("/:id/auto-title", async (c) => {
-  const { db, engineHost } = c.var.providers;
-  const id = c.req.param("id");
-  const userId = c.var.user.id;
-
-  const url = new URL(c.req.url);
-  const threadId = url.searchParams.get("threadId") ?? undefined;
-
-  // The persistent `messages` table isn't the source of truth today — the
-  // engine owns entries. Route the loader through the same engine session
-  // the messages GET endpoint uses so we see what the UI sees.
-  const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
-  const sessionRow = rows[0];
-  // Session-not-found is handled inside `autoTitle` too, but bail early
-  // here so we don't pay the cost of a sessionFor call on a bad id.
-  if (!sessionRow) return c.json({ error: "session not found" }, 404);
-  // Titling a thread is part of prompting, not administering — anyone who
-  // can read and reply may title what they said. Gating this on ownership
-  // left a team member's threads permanently untitled.
-  if (!(await canViewSession(db, sessionRow, c.var.principal))) {
-    return c.json({ error: "session not found" }, 404);
-  }
-
-  const engineSession = await engineHost.sessionFor(id, await loadSessionMeta(db, sessionRow));
-  const defaultThread = await engineSession.ensureDefaultThread();
-
-  const result = await autoTitle(
-    {
-      db,
-      loadMessages: async (_sid, tid) => {
-        const thread = tid ? engineSession.threadById(tid) ?? defaultThread : defaultThread;
-        const entries = await thread.readEntries({ limit: 4 });
-        const out: { role: string; content: string }[] = [];
-        for (const e of entries) {
-          if (e.type !== "message") continue;
-          if (e.role !== "user" && e.role !== "assistant") continue;
-          out.push({ role: e.role, content: e.content ?? "" });
-        }
-        return out;
-      },
-    },
-    { sessionId: id, threadId },
-  );
-  if (!result.ok) {
-    if (result.reason === "session_not_found") return c.json({ error: "session not found" }, 404);
-    // already_titled / no_messages → 200 with nulls; client no-ops.
-    return c.json({ sessionTitle: null, threadTitle: null });
-  }
-  return c.json({ sessionTitle: result.sessionTitle, threadTitle: result.threadTitle });
 });
 
 // ── Sandbox JWT ───────────────────────────────────────────────────────────
@@ -1314,7 +1405,7 @@ sessionsRouter.post("/:id/sandbox-jwt", async (c) => {
 
   const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
   const row = rows[0];
-  if (!row || !(await isSessionDirectOwner(db, row, caller))) return c.json({ error: "session not found" }, 404);
+  if (!row || row.orgId !== c.var.user.orgId || !(await canAccessSessionResources(c.var.providers, row, caller))) return c.json({ error: "session not found" }, 404);
   if (caller.type === "team") {
     return c.json(
       { error: "A team API key cannot mint a sandbox credential. Use a personal API key or the web app." },
@@ -1357,7 +1448,7 @@ sessionsRouter.post("/:id/pause", async (c) => {
     .where(and(eq(agentSessions.id, id), eq(agentSessions.status, "active")))
     .limit(1);
   const row = rows[0];
-  if (!row || !(await canAdministerSession(db, row, c.var.principal))) {
+  if (!row || !(await canAdministerSession(db, row, c.var.principal)) || !(await spawnedFromVisibleThread(c, row))) {
     return c.json({ error: "session not found" }, 404);
   }
 
@@ -1376,13 +1467,49 @@ sessionsRouter.post("/:id/pause", async (c) => {
   }
 
   const session = await engineHost.sessionFor(id, await loadSessionMeta(db, row));
+  // `suspend()` silently no-ops unless the attachment is `ready`. Check
+  // before the background-work gate and any cancel: after an api restart
+  // the attachment stays `detached` until a turn uses the sandbox. A forced
+  // pause would otherwise stop the work and then fail to pause (fix wave 3,
+  // M1), and a plain one would ask to stop work it cannot pause past (fix
+  // wave 4, N7).
+  if (session.attachment.current() === null) {
+    return c.json({ error: SANDBOX_NOT_ATTACHED }, 409);
+  }
+
+  // Active leases block a pause, as they block the idle sweeps (spec C3,
+  // fix wave 2 B8): suspending deletes the running process and /scratch.
+  // `force=true` stops that work first, as a human cancel. The 409 names
+  // only work the caller can see (`gateBackgroundWork`).
+  const gate = await gateBackgroundWork(c, row, "pause", { leasedOnly: true }, await wantsForce(c));
+  if (gate.kind === "refused") return gate.response;
+
+  const stopped = gate.kind === "force"
+    ? await cancelAllWorkAsHuman(engineStore, session, id, { leasedOnly: true, ids: gate.ids }, {
+        actorUserId: userId,
+        signal: "defer",
+        note: "They paused the session. Do not start it again unless someone asks.",
+      })
+    : undefined;
+  // A turn admitted while the work stopped (a watcher signal, a due timer)
+  // would run under the suspend. Re-check right before it.
+  if ((await engineStore.listUnsettledSubmissions(id)).length > 0) {
+    await stopped?.sendSignals();
+    return c.json({ error: turnStartedError("pause the session", stopped !== undefined) }, 409);
+  }
+  // Work that started after the gate, such as a turn that ran inside the
+  // session build or the cancel, would die with the sandbox (fix wave 4, N5).
+  if (await leasedWorkStarted(engineStore, id)) {
+    await stopped?.sendSignals();
+    return c.json({ error: workStartedError("pause the session", stopped !== undefined) }, 409);
+  }
   await session.attachment.suspend();
 
-  // `suspend()` silently no-ops unless the attachment was `ready` — only
-  // stamp the row `hibernated` when it actually transitioned, so a pause hit
-  // mid-provision doesn't lie about having suspended anything.
+  // Only stamp the row `hibernated` when the suspend actually transitioned,
+  // so a pause hit mid-provision doesn't lie about having suspended anything.
   if (session.attachment.state !== "suspended") {
-    return c.json({ error: "sandbox is not ready to pause" }, 409);
+    await stopped?.sendSignals();
+    return c.json({ error: "The sandbox did not suspend. Send a message in the session, then pause again." }, 409);
   }
 
   // Status guard #2: conditioned `WHERE status='active'` (shared with the
@@ -1391,9 +1518,62 @@ sessionsRouter.post("/:id/pause", async (c) => {
   // resurrected. The sandbox handle rides along for the reaper.
   await writeHibernated(db, id, session.attachment.sandboxId);
 
-  const body: PauseSessionResponse = { status: "hibernated" };
+  // The signal turns start only after the sandbox stopped, so none of them
+  // races the suspend.
+  await stopped?.sendSignals();
+  const body: PauseSessionResponse = {
+    status: "hibernated",
+    ...(stopped && stopped.cancelled.length > 0 ? { cancelledWork: stopped.cancelled.map((w) => w.id) } : {}),
+  };
   return c.json(body, 200);
 });
+
+/**
+ * The 409 text when a turn started between the first busy check and the
+ * stop. `stoppedWork` says the forced cancel already ran.
+ */
+function turnStartedError(action: string, stoppedWork: boolean): string {
+  const already = stoppedWork ? " The background work already stopped." : "";
+  return `a turn started, so the request did not ${action}.${already} Wait for the turn to finish, then retry.`;
+}
+
+/** The 409 text of pause when the attachment has no sandbox yet (fix wave 4, N7). */
+const SANDBOX_NOT_ATTACHED = "The sandbox is not attached yet. Send a message in the session, then pause again.";
+
+/**
+ * The 409 text when new background work started between the gate and the
+ * stop (fix wave 4, N5). `stoppedWork` says the forced cancel already ran.
+ */
+function workStartedError(action: string, stoppedWork: boolean): string {
+  const already = stoppedWork ? " The background work already stopped." : "";
+  return `background work started, so the request did not ${action}.${already} Retry to see the new work.`;
+}
+
+/**
+ * True when the session holds work that a sandbox stop would end: a
+ * process, watch, or hold. A forced stop already cancelled the work it
+ * selected, so whatever this finds started after the gate.
+ */
+async function leasedWorkStarted(engineStore: SessionStore, sessionId: string): Promise<boolean> {
+  return selectWork(await listBackgroundWork(engineStore, sessionId), { leasedOnly: true }).length > 0;
+}
+
+/**
+ * True when the request asks to stop active background work: the query
+ * `force=true`, or a JSON body `{ "force": true }`. A missing or non-JSON
+ * body reads as no.
+ */
+async function wantsForce(c: Context<AppEnv>): Promise<boolean> {
+  if (c.req.query("force") === "true") return true;
+  try {
+    const text = await c.req.text();
+    if (!text) return false;
+    const parsed: unknown = JSON.parse(text);
+    return typeof parsed === "object" && parsed !== null && "force" in parsed && parsed.force === true;
+  } catch {
+    return false;
+  }
+}
 
 // ── Replace sandbox ───────────────────────────────────────────────────────
 
@@ -1415,7 +1595,7 @@ sessionsRouter.post("/:id/sandbox/replace", async (c) => {
     .where(and(eq(agentSessions.id, id), eq(agentSessions.status, "active")))
     .limit(1);
   const row = rows[0];
-  if (!row || !(await isSessionDirectOwner(db, row, caller))) return c.json({ error: "session not found" }, 404);
+  if (!row || row.orgId !== c.var.user.orgId || !(await canAccessSessionResources(c.var.providers, row, caller))) return c.json({ error: "session not found" }, 404);
   if (caller.type === "team") {
     return c.json(
       { error: "A team API key cannot replace a sandbox. Use a personal API key or the web app." },
@@ -1428,6 +1608,12 @@ sessionsRouter.post("/:id/sandbox/replace", async (c) => {
     return c.json({ error: "a turn is running. Wait for it to finish, then retry." }, 409);
   }
 
+  // Active leases block a replace, as they block a pause (fix wave 2, B8):
+  // the old sandbox goes away with every process in it. `force=true` stops
+  // that work first, as a human cancel.
+  const gate = await gateBackgroundWork(c, row, "replace", { leasedOnly: true }, await wantsForce(c));
+  if (gate.kind === "refused") return gate.response;
+
   const session = await engineHost.sessionFor(id, await loadSessionMeta(db, row));
 
   // Re-check immediately before replacing — a submission admitted while
@@ -1438,11 +1624,33 @@ sessionsRouter.post("/:id/sandbox/replace", async (c) => {
     return c.json({ error: "a turn is running. Wait for it to finish, then retry." }, 409);
   }
 
+  const stopped = gate.kind === "force"
+    ? await cancelAllWorkAsHuman(engineStore, session, id, { leasedOnly: true, ids: gate.ids }, {
+        actorUserId: c.var.user.id,
+        signal: "defer",
+        note: "They replaced the sandbox. Do not start it again unless someone asks.",
+      })
+    : undefined;
+  // A turn admitted while the work stopped would lose its sandbox mid-run.
+  if (stopped && (await engineStore.listUnsettledSubmissions(id)).length > 0) {
+    await stopped.sendSignals();
+    return c.json({ error: turnStartedError("replace the sandbox", true) }, 409);
+  }
+  // Work that started after the gate, such as one created while the
+  // session built, would die with the old sandbox (fix wave 4, N5).
+  if (await leasedWorkStarted(engineStore, id)) {
+    await stopped?.sendSignals();
+    return c.json({ error: workStartedError("replace the sandbox", stopped !== undefined) }, 409);
+  }
+
   try {
     await session.attachment.replace();
   } catch (err) {
+    await stopped?.sendSignals();
     return c.json({ error: (err as Error).message }, 409);
   }
+  // The signal turns start only after the old sandbox is gone.
+  await stopped?.sendSignals();
 
   // `replace()` resolves once the re-provision settles, but a provision
   // that fails lands in `error` state without throwing — don't report ok
@@ -1454,7 +1662,11 @@ sessionsRouter.post("/:id/sandbox/replace", async (c) => {
     );
   }
 
-  return c.json({ ok: true }, 200);
+  const replaced: ReplaceSandboxResponse = {
+    ok: true,
+    ...(stopped && stopped.cancelled.length > 0 ? { cancelledWork: stopped.cancelled.map((w) => w.id) } : {}),
+  };
+  return c.json(replaced, 200);
 });
 
 // ── Delete ────────────────────────────────────────────────────────────────
@@ -1469,69 +1681,39 @@ sessionsRouter.delete("/:id", async (c) => {
 
   const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
   const row = rows[0];
-  if (!row || !(await canAdministerSession(db, row, c.var.principal))) {
+  if (!row || !(await canAdministerSession(db, row, c.var.principal)) || !(await spawnedFromVisibleThread(c, row))) {
     return c.json({ error: "session not found" }, 404);
   }
 
-  // A user's own assistant session is not deletable (TKAI-253): deleting
-  // it destroyed the orchestrator and every thread it held, and sandbox
-  // replace covers the reset. The web UI hides the action; the API is the
-  // contract, so it refuses too — the same rule as the move refusal above.
-  // A TEAM's assistant stays deletable: the session header menu is a team
-  // admin's only surface for that.
-  // Looked up by the `session_id` COLUMN, not `parseAssistantSessionId`:
-  // rows migrated from orchestrator_identities keep legacy `orchestrator:*`
-  // ids the prefix parse cannot recognize, and those must get the same
-  // refusal and the same retire.
+  // The workspace runtime is permanent; users archive conversations instead.
   const assistant = await loadAssistantBySessionId(db, id);
-  if (assistant && assistant.ownerType !== "team") {
-    return c.json(
-      {
-        error:
-          "your assistant's session cannot be deleted. Use Replace sandbox to reset its workspace.",
-      },
-      400,
-    );
-  }
+  if (assistant && !id.startsWith("execution:")) return c.json({ error: "The workspace assistant cannot be deleted. Archive individual threads instead." }, 409);
 
-  // Explicit operator cleanup only. The actor stamp identifies pre-update
-  // team assistants; a child with the same stamp is not an assistant.
-  if (c.req.query("retireLegacyTeam") === "true") {
-    if (
-      row.ownerType !== "team" || row.credentialOwnerMode !== "actor" ||
-      assistant?.ownerType !== "team" || assistant.ownerId !== row.ownerId
-    ) {
-      return c.json({ error: "not a legacy team assistant. Choose a session from the cleanup inventory." }, 400);
-    }
-    if ((await c.var.providers.engineStore.listUnsettledSubmissions(id)).length > 0) {
-      return c.json({ error: "a turn is running. Pause the assistant and wait for it to finish, then retry." }, 409);
-    }
-  }
-
-  // Tear down engine + sandbox first; even if it fails we still want to soft-delete.
-  await engineHost.destroy(id).catch((err) => {
+  // Keep the owning session visible until required teardown succeeds.
+  try {
+    await engineHost.destroy(id);
+  } catch (err) {
     console.error(`engineHost.destroy(${id}) failed:`, err);
-  });
+    return c.json({ error: err instanceof Error ? err.message : "Session teardown failed. Restore the sandbox connection, then retry deletion." }, 503);
+  }
 
-  // Deleting a team assistant's session IS removing the assistant — the
-  // header item is labeled "Delete this team's assistant". Retire the row
-  // in the same transaction as the soft-delete (TKAI-296): a live row kept
-  // the assistant in every teammate's rail, pointing at a dead session.
+  // Mark standalone execution deleted only after resource teardown succeeds.
   await db.transaction(async (tx) => {
     await tx
       .update(agentSessions)
       .set({ status: "deleted", updatedAt: Date.now() })
       .where(eq(agentSessions.id, id));
-    if (assistant) await retireAssistant(tx, assistant.id);
   });
 
-  // Destroy again after the commit: a wake racing the window between the
-  // destroy above and this transaction rebuilds from the not-yet-retired
-  // row and re-caches — and cache hits bypass the archived-wake guard.
-  // Now the row is retired, so a torn-down ghost cannot rebuild.
-  await engineHost.destroy(id).catch((err) => {
+  await cancelChildDelivery(db, c.var.providers.engineStore, id, "The child session was deleted.");
+
+  // Clear any runtime that was reopened between teardown and the row update.
+  try {
+    await engineHost.destroy(id);
+  } catch (err) {
     console.error(`engineHost.destroy(${id}) failed:`, err);
-  });
+    return c.json({ error: err instanceof Error ? err.message : "Session teardown failed. Restore the sandbox connection, then retry deletion." }, 503);
+  }
 
   return c.json({ ok: true });
 });

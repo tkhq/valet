@@ -11,7 +11,6 @@
 import {
   safeLocalStorage,
   type StorageReader,
-  type StorageRemover,
   type StorageWriter,
 } from "./safe-storage";
 
@@ -38,15 +37,21 @@ function collapsedSubconversationKey(parentThreadId: string): string {
   return `${COLLAPSED_SUBCONVERSATION_PREFIX}${parentThreadId}`;
 }
 
-/** Read one parent thread's collapsed state. Parent groups start expanded. */
+/**
+ * Read one parent thread's collapsed state: "1" is collapsed and "0" is open.
+ * With nothing saved, a group starts collapsed on a phone and open on a
+ * wider screen (`collapsedByDefault`).
+ */
 export function getSubconversationsCollapsed(
   parentThreadId: string,
+  collapsedByDefault = false,
   storage: StorageReader = safeLocalStorage(),
 ): boolean {
   try {
-    return storage.getItem(collapsedSubconversationKey(parentThreadId)) === "1";
+    const saved = storage.getItem(collapsedSubconversationKey(parentThreadId));
+    return saved === "1" ? true : saved === "0" ? false : collapsedByDefault;
   } catch {
-    return false;
+    return collapsedByDefault;
   }
 }
 
@@ -54,12 +59,10 @@ export function getSubconversationsCollapsed(
 export function setSubconversationsCollapsed(
   parentThreadId: string,
   collapsed: boolean,
-  storage: StorageWriter & StorageRemover = safeLocalStorage(),
+  storage: StorageWriter = safeLocalStorage(),
 ): void {
   try {
-    const key = collapsedSubconversationKey(parentThreadId);
-    if (collapsed) storage.setItem(key, "1");
-    else storage.removeItem(key);
+    storage.setItem(collapsedSubconversationKey(parentThreadId), collapsed ? "1" : "0");
   } catch {
     /* Best-effort persistence; the caller's UI state stands. */
   }

@@ -113,3 +113,7 @@ Specific ID renames:
 - `sheets.format_cells` -> `sheets.format_cells` (same, but params change -- drops per-cell formats grid, uses reference repo's format schema)
 
 The `formatting.ts` module's `cellFormatSchema`, `mergeSchema`, and related helpers are replaced by the reference repo's formatting approach. The `@valet/sdk` Zod schema types remain unchanged.
+
+## API errors
+
+All Sheets helpers preserve Google error details. A 403 with `SERVICE_DISABLED` for `sheets.googleapis.com` includes the affected project and its enable-API URL. Legacy disabled-API messages receive the same guidance. Permission errors remain distinct. An authorized Drive export is a read-only fallback; it cannot replace Sheets writes.

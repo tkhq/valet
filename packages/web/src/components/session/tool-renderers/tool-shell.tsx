@@ -17,6 +17,7 @@ const TOOL_LABELS: Record<string, string> = {
   mem_patch: "memory patch",
   mem_read: "memory read",
   thread_read: "thread read",
+  update_plan: "plan",
 };
 
 export function prettyToolName(toolName: string): string {
@@ -188,7 +189,7 @@ export function ToolShell({
             "relative w-full flex items-center gap-2 px-2.5 py-1.5",
             "text-left text-xs font-mono leading-none",
             "hover:bg-ink-wash",
-            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40",
+            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss/40",
             "transition-colors",
           )}
           aria-expanded={expanded}
@@ -217,7 +218,7 @@ export function ToolShell({
             {prettyToolName(toolName)}
           </span>
           {target && (
-            <span className="truncate text-[--fg]/85 min-w-0 flex-1">
+            <span className="truncate text-ink/85 min-w-0 flex-1">
               {target}
             </span>
           )}
@@ -336,7 +337,7 @@ export function CopyButton({
       className={cn(
         "rounded p-1 text-muted/70 hover:text-[--fg] hover:bg-ink-wash",
         "opacity-0 group-hover/tool:opacity-100 focus-visible:opacity-100 transition-opacity",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss/40",
         copied && "text-success-600 dark:text-success-500 opacity-100",
         className,
       )}
@@ -409,7 +410,7 @@ export function TruncatedText({
                 {i + 1}
               </span>
             )}
-            <span className="text-[--fg]/90 min-w-0">{line || " "}</span>
+            <span className="text-ink/90 min-w-0">{line || " "}</span>
           </div>
         ))}
       </pre>
@@ -437,7 +438,7 @@ export function PathLabel({ path, className }: { path: string; className?: strin
   return (
     <span className={cn("font-mono", className)}>
       {dir && <span className="text-muted/80">{dir}</span>}
-      <span className="text-[--fg]/95">{name}</span>
+      <span className="text-ink/95">{name}</span>
     </span>
   );
 }

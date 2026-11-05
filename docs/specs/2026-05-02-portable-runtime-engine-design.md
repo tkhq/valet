@@ -323,12 +323,15 @@ interface ThreadHandle {
   skill(name: string, opts?: SkillInvokeOptions): Promise<PromptReceipt>;
   shell(command: string, opts?: ExecOpts): Promise<ExecResult>;
   readThread(key: string, opts?: MessageQuery): Promise<SessionEntry[]>;
+  /** Stop the active turn and preserve queued submissions. */
+  interrupt(targetItemId: string): Promise<void>;
+  /** Tear down the thread and settle all unsettled submissions aborted. */
   abort(): Promise<void>;
   pause(): Promise<void>;
   resume(): Promise<void>;
 }
 
-type QueueMode = 'followup' | 'steer' | 'collect';
+type QueueMode = 'followup' | 'inject' | 'steer' | 'collect';
 
 type PromptContent =
   | string
@@ -421,6 +424,30 @@ interface SubmissionResult {
 
 **Result ownership:** every turn — including compaction auto-continue turns and post-gate-replay continuation turns — belongs to the submission whose queue item was active when the turn started, and every entry that turn produces carries that submission's `queueItemId` (see `BaseEntry.queueItemId`). `SubmissionResult.text` is the content of the last persisted assistant entry carrying this submission's `queueItemId` with `stopReason: 'end_turn'` — the transcript linkage is the mechanism, not a heuristic. Outcome `superseded` returns whatever partial assistant output persisted under the submission's `queueItemId` together with the outcome, so callers can distinguish a replaced turn from a completed one. Outcome `merged` delegates: `awaitResult` on a constituent of a collect-window merge resolves with the merged item's result (see Collect semantics).
 
+**Terminal result integrity (2026-10-15):** Transport completion requires a complete stop, not visible text. A clean-stop empty response can represent intentional silence. Callers without an output schema do not require text. Structured consumers validate the selected terminal text against their schema. Empty text produces a validation error and no validated output, while its transport outcome remains completed.
+
+Normal settlement, crash settlement, and `awaitResult` reject length, error, and abort stops as successful structured results, even when partial JSON matches the schema. The engine preserves the legacy transcript stop mapping and stores the adapted stop reason in `metadata.modelResponse`. Historical rows without adapted metadata cannot distinguish a length stop from a normal stop.
+
+The engine does not substitute an earlier answer, recover streamed text, or replay the submission. A clean-stop schema failure retains the workflow's existing exactly-one repair opportunity. If the repair also fails validation, the workflow fails with separate original and repair receipts. Incomplete or failed transport does not trigger schema repair. Intentional silence does not require a channel-specific exception.
+
+Workflow prompts retain their original rendered user entry through compaction using `metadata.preserveTask`.
+Workflow prompts also carry `metadata.unattendedWorkflow`. `requestDecision` refuses their new decision requests before a gate opens, and their compaction continuation uses the workflow prompt.
+Session and orchestrator repairs carry `taskSourceQueueItemId` from the first submission receipt, including after checkpoint resume.
+The host persists that reference in prompt metadata. The engine restores the original task only for an active submission on its transcript branch.
+Restart and gate replay retain this scope. An unrelated submission removes a previously injected contract.
+Completed task markers do not restore old requests.
+Compaction reserves the rendered active task and fixed context before selecting the recent tail.
+It rejects a checkpoint when the required task, summary, and recent tail cannot fit with that fixed context.
+It does not rerender the task from edited inputs, reread the whole thread through a tool, add a workflow node, or change schema validation.
+The existing single repair limit and side-effect reuse instructions still apply.
+Repair context preserves failed-tool diagnostics and operation receipts across transcript reconstruction and restart.
+One text reader serves live tool persistence and context reconstruction. Summarization retains explicit interruption errors as well as stored failure results.
+
+
+Each assistant entry records bounded response metadata: adapted stop reason, raw stop reason when exposed, model, provider, API, response ID, end-turn flag, block types, text length, thinking presence, tool-call count, and streamed text length. Thinking text, prompts, and full responses are excluded. Requested output limits are separate from effective output limits because adapters can transform them. Unexposed effective limits, request IDs, provider terminal status, and incomplete reasons are null. Workflow node diagnostics return only these allowed fields. Missing metadata is null.
+
+Workflow skills distinguish adapted stops from exposed raw stop labels. They report null fields as unknown and matching UTF-16 lengths as consistency between recorded layers. Replies separate observations, inferences, and unknowns. Full provider-response capture remains unverified without the raw response.
+
 **Signal rendering:** signals are persisted as `MessageEntry` rows with `signal` metadata and rendered into LLM context as an XML envelope — `signalType` and each `attributes` entry become XML attributes, `body` is XML-escaped text content, `tagName` is the element name. `tagName` is regex-validated because it renders unescaped; `body` and attribute values are always escaped. Direct user prompts render as ordinary user messages.
 
 **Internal signal admission (engine-stamped identity):** when a signal is admitted on behalf of another session (child settlement, cross-orchestrator messaging, workflow dispatch) rather than a verified channel webhook, the engine stamps the envelope with the sender's verified identity — `senderSessionId` and the sender's owner `Principal` — from the authenticated call context. Attributes may carry display context but can never override the stamped identity. The engine also maintains a `hopCount` on the envelope, incremented at each cross-orchestrator admission; admission is rejected when it exceeds the configured budget (the application layer sets the budget and the allowed sender→recipient edges — see the orchestrator spec's signal-authorization contract). Internal-signal `dispatchId`s are namespaced by the stamped sender session ID so senders cannot collide with or replay one another's ids.
@@ -495,8 +522,9 @@ The reachability graph is closed and authorized at call time: a thread may read 
 
 **Thread controls:**
 - `thread.prompt(text, opts)` — submit a prompt
-- `thread.abort()` — abort current prompt, clear this thread's queue
-- `thread.pause()` / `thread.resume()` — freeze/unfreeze this thread's queue
+- `thread.interrupt(targetItemId)` — abort the active prompt and immediately start the next queued prompt unless the thread is paused
+- `thread.abort()` — abort the active prompt and clear this thread's queue during teardown
+- `thread.pause()` / `thread.resume()` — freeze/unfreeze this thread's queue; `resume()` also retries an unpaused queue with no local claim
 - `thread.skill(name, opts)` — invoke a named skill
 - `thread.shell(command)` — execute a shell command (recorded in history)
 - `thread.readThread(key)` — read messages from a sibling thread
@@ -590,6 +618,11 @@ The active conversation path is reconstructed by following `parentId` pointers f
 `MessageEntry.content` is the human-readable text rendering; `MessageEntry.parts` is the structured source of truth used during rehydration.
 
 **Suspension history rules:** Decision-gated turns are represented in the DAG by a first-class `DecisionGateEntry`, not by synthetic system messages. The entry is created when the gate is opened and then updated in place as it moves through `pending`, `resolved`, `expired`, or `withdrawn` states. This keeps the history model explicit and replayable: gates are decision artifacts, not conversation utterances.
+
+**User cancellation:** Dismissing a thread decision cancels its submission. Persist abort intent before withdrawing the gate.
+The cancellation does not trigger another model call. Other threads and queued submissions are preserved.
+Approval denial remains a decision response; dismissal is not approval denial.
+An explicit user instruction to wait should end the agent turn without opening a question.
 
 **One gate cycle at a time per thread (TKAI-238):** pi-agent-core runs a block's tool calls in parallel, but the gate machinery holds two single-slot resources: the strict `running↔blocked_on_decision_gate` queue toggle and the per-thread suspended-turn checkpoint. `Thread` therefore serializes gate open/wait cycles — a second gated tool call waits until the previous gate resolves and releases the blocked toggle, then opens its own gate. A queued cycle re-checks the turn before it opens: if the thread aborted or the agent run's signal aborted (steer supersession) while it waited, it unwinds with a withdrawal error and persists nothing. Supporting rules keep pending rows honest:
 
@@ -727,6 +760,7 @@ Three categories of tools, merged at prompt time:
 - `glob` — file pattern matching via SandboxProvider
 - `thread_read` — read messages from a sibling, parent, or child thread
 - `task` — spawn a child session for delegated work (depth-limited)
+- `update_plan` — replace the thread's checklist, stored in thread metadata under `plan`. Each turn shows the open plan to the model as a system section, so the plan survives compaction.
 
 **Plugin tools** (`ToolDef[]`, registered at session creation):
 - Custom tools from plugin packages (GitHub, Slack, Linear, memory, browser, etc.)
@@ -994,7 +1028,7 @@ Token-aware context compression with two complementary techniques. When a thread
   usable = contextWindow − reserved
   reserved = cfg.reserveTokens ?? min(20_000, model.maxOutputTokens)
   ```
-  the engine queues a compaction pass to run before the next user turn would otherwise execute. The measure is a hybrid (TKAI-306, transplanted from Claude Code): anchor on the newest assistant message with real provider usage — its total is the exact context of that request, system prompt and tool definitions included — and add the char-based estimate (`estimateTokens`, ~4 chars/token) only for messages appended since. The anchor re-bases per response, so nothing double counts. Rehydrated transcripts carry zeroed usage and fall back to the pure estimate until the first live response. Never compare a cumulative usage sum against the window (TKAI-305).
+  the engine queues a compaction pass to run before the next user turn would otherwise execute. The measure is a hybrid (TKAI-306, transplanted from Claude Code): anchor on the newest assistant message with real provider usage — its total is the exact context of that request, system prompt and tool definitions included — and add the char-based estimate (`estimateTokens`, ~4 chars/token) only for messages appended since. The anchor re-bases per response, so nothing double counts. Rehydrated transcripts carry zeroed usage and fall back to the pure estimate until the first live response. A prune pass clears the live usage of every assistant message after the first elided result, for the same reason: that usage counted output that is now elided, and the provider adapter sizes the next output budget from the newest usage. Never compare a cumulative usage sum against the window (TKAI-305).
 - **Failure circuit breaker (TKAI-306)** — after 3 consecutive proactive passes that failed (`compaction_failed`) or reclaimed nothing (`compaction_noop`: the trigger fired but the recent turns already fit the tail budget, so the context is dominated by system overhead), the thread stops attempting proactive compaction and emits `compaction_circuit_open`. A compaction that persists a summary (manual `/compact` included) closes the breaker; prune-only passes count as progress and do not trip it. Reactive and manual paths are never gated. A failed reactive compaction emits `compaction_failed` and skips the retry; the turn keeps its recorded overflow error.
 - **Reactive (overflow)** — if a turn's assistant message returns `stopReason === 'error'` and pi-ai's `isContextOverflow(message)` matches the error, the engine compacts and retries the same turn. Reactive compaction strips media attachments from history before summarizing (some overflow is media-bytes, not token-count, so dropping images can be enough on its own).
 
@@ -1052,6 +1086,8 @@ The engine's `convertToLlm` pipeline (the function fed to pi-agent-core's `Agent
 5. Apply pruning's elision: any kept entry's tool-call parts with `elided === true` get a placeholder `[output elided to save context]` in the LLM-visible content; the stored result stays in the DAG.
 6. Yield the resulting `Message[]` to the agent loop.
 
+Image blocks get one more correction in `convertToLlm` (TKAI-661). `correctImageBlocks` reads the first bytes of each image block and sets `mimeType` to the type the bytes show: PNG (full 8-byte signature), JPEG, GIF (`GIF87a` or `GIF89a`) or WebP. The bytes win over the stored type, so a thread that holds a mislabelled image recovers with no data migration. If the bytes match no supported type, the block becomes a text placeholder, `[image omitted: ... data is not a supported image]`, and the turn continues. The check reads the signature only. It identifies the format. It does not prove that the file is valid or complete, so a corrupt image with a good signature still reaches the provider. Slack and Telegram `fetchMedia` use the same helper (`sniffImageMediaType`) for the type they report.
+
 Restored threads use the same transcript conversion as compaction. `restoreSession` restores thread metadata without reading idle thread entries.
 
 A restored thread loads its transcript before its first prompt, gate recovery, or compaction. Gate recovery loads before acquiring the retained claim. Concurrent loads share one promise. Failed loads remain retryable.
@@ -1060,6 +1096,7 @@ Metadata requests, including `/threads` and `/commands`, do not load idle transc
 The `thread.hydrate` span records `valet.thread.entries_loaded` with session and thread identifiers.
 PostgreSQL entry reads emit `store.entries.read` with `valet.entries.loaded` and `valet.entries.parts_bytes` before parsing returned parts. Byte counts use stored UTF-8 JSON without serializing hydrated objects.
 Active threads still load full history and retain their transcript. This change does not establish a per-thread byte ceiling or a cache memory budget.
+A transcript load reads `SessionStore.getTranscriptSnapshot` when the store has it (2026-10-28). It returns the same entries as `getThreadSnapshot`, but a message or compaction covered by the newest compaction on the active branch comes back as a stub without its payload. The transcript and skill-invocation rebuilds never read a covered entry's payload. The one exception is the task-source prompt, which the caller keeps whole through `keepQueueItemId`. A branch that left before that compaction stubs nothing. On agents-dev, a Slack channel thread held 205.7 MB of entries with 1.1 MB of live context, and every load parsed all of it. The PostgreSQL store reads stubs first, walks the active branch with `walkTranscriptDag`, and then reads full rows for uncovered entries only. `store.transcript_snapshot` records `valet.entries.loaded` and `valet.entries.stubbed`.
 
 #### Auto-continue after compaction
 
@@ -1113,10 +1150,11 @@ Hooks are registered via `CreateSessionOptions` (`compactionHooks?: CompactionHo
 
 ### Provider-call resilience (TKAI-319)
 
-Two retry layers, both bounded and visible:
+Three recovery layers, all bounded and visible:
 
 - **Transport** — every turn LLM call passes an explicit retry policy to pi-ai (`maxRetries: 2`, `maxRetryDelayMs: 30s`, `timeoutMs: 10min`), as defaults that upstream-supplied options override, never as pins. Kept at SDK-default parity deliberately: the turn-level layer multiplies with it. Side calls (the compaction summarizer) fail fast instead: `maxRetries: 1`, 15s delay cap — nobody waits on a summarizer during a capacity event, and the compaction failure paths own recovery.
-- **Turn-level** — when a turn settles with a transient provider error (pi-ai's `isRetryableAssistantError` taxonomy — the engine deliberately does not fork it), unattended sessions (purpose orchestrator, workflow, or child; `purpose` survives restarts via `Session.rehydrate`) drop the failed assistant message and call `agent.continue()` — never a re-prompt, which would duplicate the user content in live context. Backoff is [10s, 30s], 2 attempts by default (`CreateSessionOptions.turnRetry` overrides), chunked: `this.aborted` is checked every second and the durable queue item every 5s plus once at the end, so an abort or steer during the wait stands the retry down instead of racing its successor. Each retry emits `turn_transient_retry`. Interactive sessions never auto-retry: a human is present to decide.
+- **Turn-level**: a turn that ends on a transient provider error retries with `agent.continue()`. The retry removes only the failed assistant message. It preserves the user message and completed tool results. An unattended turn (orchestrator, workflow, or child work that is not a person's prompt) retries six times with 10s, 30s, 60s, 120s, 240s and 300s backoff, about 13 minutes in all (amended 2026-10-28 from about 100s; nobody waits on an unattended turn, and peers such as Claude Code wait much longer). A person's prompt retries four times with 2s, 4s, 8s and 16s backoff (amended 2026-10-27 from two tries, which ended a passing outage in about 10s; Claude Code allows 10 tries and Codex 4 request and 5 stream retries). A provider hint such as "try again in 2s", or pi-ai's "Server requested 45s retry delay" from a `retry-after` header, raises the wait, up to 300s for an unattended turn and 30s for a person's prompt. Each wait then moves by up to ±25% (`turnRetryWaitMs`), and never below the hint. Threads that share one provider key fail together, and equal waits made them retry together and fail again. `turn_retry.waitMs` is the wait after jitter, so the countdown matches the real wait. A longer hint ends the retries, and the failed turn keeps the provider text that says when to try again. `CreateSessionOptions.turnRetry` can override the attempts, the backoff, and the hint limit (`maxHintMs`). Abort and supersession checks stop retries during backoff. Each retry emits a `turn_retry` event (`action: "retry"`, attempt, maximum, wait, and a `ProviderFailureKind` reason from `classifyProviderFailure` in `@valet/shared`). It is progress, not an `error` event: the web shows it on the working line ("Retrying in 4s · attempt 2/4") and the thread does not read as failed. The failed call itself still emits an `error` event with code `error` before the retry decision. Clients do not treat that event as a failed turn: the web shows no banner and no failed status for it. The Slack stream bridge (`ChannelStreamBridge`) holds the reply open when the failed call's `message_end` (reason `error`) comes before any text reached the reader. The retry's `message_start` then continues the same reply. If the submission settles first, the bridge closes the reply with the failure note. A failure after visible text still closes the reply, because a stream cannot take text back. A turn fails only when the retries run out. Its failed assistant message then shows one sentence from `providerFailureSummary` (for example "OpenAI had a server error and did not recover after several tries"), with the raw provider text under Details. A usage, quota or spend limit gets its own sentence. A `failed` `submission_settled` marks the thread failed.
+- **Provider fallback**: the optional host `resolveFallbackModel` seam enables recovery for interactive and unattended turns. The host selects an approved, configured, credentialed provider. The engine passes the original selection, failed model, and attempted provider IDs. Transient capacity, rate-limit, server, and network failures permit fallback. Provider billing and quota failures also permit fallback, but never same-provider retries. Authentication, invalid input, policy, application budget, and cancellation failures stop recovery. Each recovery loop tries at most three distinct providers, then uses the remaining same-provider retry allowance. A fallback continues the same queue item and transcript. The engine publishes the active model and emits `turn_retry` with `action: "fallback"` and `toProvider` as recovery progress. The fallback model and key apply only to the current turn. The next turn resolves the user's selection again. Consumers use `submission_settled` to decide terminal delivery; intermediate provider errors and `turn_end` events can precede recovery.
 
 ### Prompt-cache discipline (TKAI-320)
 
@@ -1136,6 +1174,7 @@ Each thread owns its own prompt queue. Threads execute independently and concurr
 **Queue modes** (per-thread, switchable at runtime):
 
 - **Followup** (default) — prompts queue in FIFO order. When the current prompt completes, the next one starts. If the thread is idle, the prompt executes immediately.
+- **Inject** (added 2026-10-21) — the prompt joins the running turn at its next step, the way a coding agent takes a message typed while it works. It is stored as a followup with the `MID_TURN_DELIVERY_KEY` metadata flag. When a tool batch finishes, `finishTurn` takes the leading run of queued items that may join (`canDeliverMidTurn`), in admission order. For each, it writes the user entry, settles the item `merged` with `mergedIntoItemId` set to the running item (so `awaitResult` follows it), and steers it into pi-agent-core, which adds it before the next model request. A failure on a later item still delivers the earlier ones. A Stop, an abort or a successor attempt that lands while an item is written leaves the item queued, and it runs next. An entry that an earlier process wrote before a crash is settled but not steered again, because the recovered turn's context already holds it. Only a `toolUse` stop is a delivery boundary. A boundary after a final answer, or after a `length` stop, delivers nothing: a crash before the next response would leave that answer as the turn's last entry, and recovery would read the turn as complete. Those items run as the next turn. An item joins only when it adds no authority and needs no other routing: same actor (an item with no author, such as a wake-up, stands for the session's default actor), no channel sender with no Valet account, a token-sent message never joins a signed-in person's turn, the same channel, reply target, model pin and role, and the same tool scope, model-call limit, unattended flags and presence. Another agent's signal (an item with a `signalStamp`) joins only a running item that also has a `signalStamp` with the same sender owner. It never joins a person's own turn or a wake-up's turn, so its text never acts with a person's authority. A signal with a channel origin, an unattended turn, and a workflow session take none. An item that cannot join, or that is still queued when the turn ends, runs as a followup. A cancel and the admission half of a Send now run on the same chain as delivery, so either they win or the item is already settled. The `submission_settled` event of a merged item carries the same `mergedIntoItemId`, so a live follower such as the CLI waits on the turn that answers it. The web composer (while a turn runs), wake-ups, event deliveries to an assistant, the MCP `send_message` and `start_thread` tools, and the CLI send with `inject`. Amended 2026-10-26: `admitSignal` admits a child's result (`child.*`) with `inject`, so results that arrive close together are read in one turn. Other internal signals stay `followup`. A personal assistant thread keeps `steer` as its default, so a REST caller that omits the mode still stops the running turn. Amended 2026-10-29: when a person types a message that joins a turn that waits on their `ask_question`, the engine withdraws the question with reason `message` (`withdrawQuestionForMessage`). The tool tells the model to reply to the message first and ask again if it still needs the answer, and the message joins the turn after the tool batch. The message must be in the leading run that delivery takes (`midTurnRun`), so a message queued behind an item that cannot join leaves the question open. An event, a token caller, a signal or a plain `followup` leaves the question open. The gate cycle saves and announces a question before it registers the waiter. After it registers the waiter, it checks the queue, so a message admitted in that interval still withdraws the question.
 - **Steer** — the new prompt supersedes the in-flight prompt *and every queued item admitted before it* (all settle `superseded`), becoming the thread's new head. Superseded partial work remains in the thread history. See "Steer supersession is transactional" under Durable Execution.
 - **Collect** — prompts buffer for a configurable window (default 5 seconds). Buffered prompts are **durably admitted immediately** with status `collecting` (their `dispatchId` dedup applies at admission, so webhook retries are absorbed even mid-window). When the window closes, the engine creates one merged submission referencing the constituent ids and CAS-settles each constituent with outcome `merged` pointing at it; `awaitResult` on a constituent resolves with the merged item's result. `collecting` items are not claimable and do not block FIFO head-claim. A collect window whose deadline passed while the engine was down is flushed by reconciliation.
 
@@ -1150,6 +1189,7 @@ Each thread owns its own prompt queue. Threads execute independently and concurr
 **Pending decision semantics:** When a thread is blocked on a pending decision gate, it is considered busy but interruptible. Behavior by mode:
 
 - `followup` — new prompts queue behind the blocked turn.
+- `inject` — new prompts wait; they join the turn after the gate resolves and its tool call finishes.
 - `collect` — new prompts continue buffering and later queue behind the blocked turn.
 - `steer` — new prompt cancels the blocked turn and expires or withdraws the outstanding decision gate before starting immediately.
 
@@ -1171,8 +1211,9 @@ On restore, the engine reloads the blocked thread, reloads the decision gate, an
 **Persistence:** Every queue item is a durable submission (see Durable Execution below). Admission, claim, progress markers, and settlement are all persisted through SessionStore, so queue state survives process restarts, host replacement, and crashes mid-turn. On engine startup, reconciliation (not blind re-dispatch) decides what happens to each unsettled submission.
 
 **Controls:**
-- `thread.abort()` — abort current prompt on this thread, clear this thread's queue
-- `thread.pause()` / `thread.resume()` — freeze/unfreeze this thread's queue
+- `thread.interrupt(targetItemId)` — abort only the active prompt and preserve this thread's queue; start its next prompt unless paused
+- `thread.abort()` — abort all unsettled work on this thread during teardown
+- `thread.pause()` / `thread.resume()` — freeze/unfreeze this thread's queue; `resume()` also retries an unpaused queue with no local claim
 - `session.abort()` — abort all threads
 - `session.pause()` / `session.resume()` — freeze/unfreeze all thread queues
 - Session-wide idle = all threads idle
@@ -1196,9 +1237,9 @@ queued → running → terminalizing → settled
 - **running** — claimed by exactly one engine instance via a compare-and-set transition, recording an `attemptId`, `ownerId`, and lease. Two concurrent claims for the same submission must never both succeed. Only the oldest non-superseded unsettled submission of a thread is claimable (per-thread FIFO gating); `steer` supersedes the items ahead of it rather than jumping the queue.
 - **blocked_on_decision_gate** — the claimed turn is suspended on a pending gate. The claim is retained; the lease continues to renew while the process holding it is alive.
 - **terminalizing** — the terminal outcome has been decided and durably reserved, but post-settlement repairs (transcript rest-state, gate withdrawal, event emission) may still be in flight.
-- **settled** — terminal, with an outcome: `completed`, `failed`, `aborted`, `superseded` (replaced by a `steer` prompt), or `merged` (absorbed into a collect-window merge). The first terminal write wins; later attempts to settle differently are conflicts.
+- **settled** — terminal, with an outcome: `completed`, `failed`, `aborted`, `superseded` (replaced by a `steer` prompt), or `merged` (absorbed into a collect-window merge, or delivered into a running turn by `inject`). The first terminal write wins; later attempts to settle differently are conflicts.
 
-Durability parameters are per-submission with engine defaults: `maxAttempts` (default 10), `timeoutAt` (default admission + 1 hour), lease duration 30 seconds with heartbeat renewal.
+Durability parameters are per-submission with engine defaults: `maxAttempts` (default 10), `timeoutAt` (claim time + 1 hour, set by a claim with `attemptCount` 0, so time spent queued does not count), lease duration 30 seconds with heartbeat renewal.
 
 #### Ownership and leases
 
@@ -1215,12 +1256,12 @@ On engine startup, and whenever an expired lease is reclaimed, each unsettled su
 
 **Startup is an ownership assertion, not a probe.** `restoreSession` establishes this instance as the session's single live owner (the platform guarantees exclusivity — DO single-writer, or pod lease affinity). So on the *startup* pass an unexpired prior lease is **not** treated as evidence of a live attempt: the previous owner is gone by contract, and the reconciler reclaims eagerly rather than waiting out the 30s lease. Correctness does not rest on that assumption being perfectly timed — the fresh attempt's fence makes any late write from a slow zombie predecessor fail (see Effect fencing), so eager takeover is always safe. On the periodic sweep (a live owner reclaiming its own expired-lease items) only already-expired-lease items reach the tree, so the same reclaim applies.
 
-1. **Finished work settles first.** If a persisted assistant entry carries this submission's `queueItemId` with `stopReason: 'end_turn'`, settle `completed` unconditionally — retry budgets and timeouts never discard finished work. The transcript linkage is the test; there is no heuristic "looks finished" fallback.
+1. **Terminal work settles first.** If a persisted assistant entry carries this submission's `queueItemId` with `stopReason: 'end_turn'`, settle without resuming. Apply the transport-stop check above before accepting completion. Incomplete transport settles failed, not retried. Empty text requires validation only when a caller requests a schema. Retry budgets and timeouts do not discard valid finished work.
 2. **Abort wins next.** If `abortRequestedAt` is set, settle `aborted`. A crash-interrupted abort is never resurrected as a retry.
 3. **Supersession.** If `supersededByItemId` is set (stamped transactionally by a `steer` admission — see below), settle `superseded`. In particular, a gate resolution arriving for a superseded submission's gate is acknowledged but never resumes it, regardless of when the crash landed.
 4. **Blocked on a gate.** If the submission was `blocked_on_decision_gate` and a `SuspendedTurnState` checkpoint exists, re-arm the gate wait (or replay immediately if the gate resolved while the engine was down) per the restart-safe gate contract. **Gate-blocked submissions are exempt from `timeoutAt`** — the human-wait bound is the gate's own `expiresAt`, not the execution timeout; a submission must never fail by timeout while legitimately parked on a pending gate.
 5. **Retry budget.** If `attemptCount >= maxAttempts`, settle `failed` with a retry-exhausted error.
-6. **Timeout.** If now ≥ `timeoutAt`, settle `failed` with a timeout error.
+6. **Timeout.** If `attemptCount > 0` and now ≥ `timeoutAt`, settle `failed` with a timeout error. A submission with `attemptCount` 0 has not run (never claimed, or released before it ran), so it is exempt. It waits behind its thread's head, which its own timeout or its gate's `expiresAt` bounds. A restart must not drop prompts that waited behind a parked turn.
 7. **Otherwise, resume.** Atomically replace the attempt (CAS: new `attemptId`, incremented `attemptCount`, fresh lease) *before* appending any recovery output. Then apply the same rest-state repair as terminalization: any trailing assistant `tool_call` part with no persisted result is updated in place to `status: 'error'` with an interrupted marker — never re-executed — because LLM providers reject a context containing an unanswered tool call. Only then continue the turn from persisted history.
 
 **Reconciliation never waits for the resumed turn.** The reconcile pass resolves once each unsettled item is claimed (fresh attempt, marker, fence) and its resume drive is kicked; the turn itself runs and settles in the background. This bound is load-bearing: `restoreSession` awaits reconciliation, and the host's single-flight `sessionFor` hands that same promise to every API route that needs the engine session. When reconciliation awaited the full drive, a resumed turn that parked on a decision gate held the session's entire API surface pending — including the decisions route — so the human who had to resolve the gate could never load it (2026-09-05 dev incident, session `child_a3eb6e52`). A resumed turn that needs a decision therefore surfaces its gate through the normal event/route path while `restoreSession` has long since returned.
@@ -1230,6 +1271,10 @@ Background drives are still owned: each kicked drive is registered in an in-proc
 `abort()` stamps `abortRequestedAt` on unsettled submissions durably but is **not** itself a terminal transition — settlement always flows through the claim/reconcile path so a canonical terminal record exists even when abort races a crash.
 
 **Steer supersession is transactional.** A `steer` admission durably, in one step: admits the steer item, stamps `supersededByItemId` on the running item *and every queued item admitted before it* on that thread, and withdraws their pending gates (reason `steer`). The steer item is thereby the oldest non-superseded unsettled item and claims under the normal FIFO rule — steer never bypasses head-claim, it *redefines the head*. Superseded items settle `superseded` through the normal settlement path.
+
+Amended 2026-10-27: the steer emits `submission_settled` only for a queued item it settled. The running item emits it when its turn ends. An earlier emit told clients the turn was over while it still ran.
+
+**A stopped turn does not wait on its tool for ever.** Stop, steer and thread abort call `agent.abort()` and then wait for the agent loop to go idle. The loop waits for the running tool. Each tool call goes through `toAgentTool` (`tool-bridge.ts`), which gives the tool `TOOL_STOP_GRACE_MS` (5 s, session option `toolStopGraceMs`) after the abort. If the tool has not returned by then, the call fails, the turn settles, and the queue continues. The call keeps running detached. Each timeout increments `valet.tool.stop_timeouts` and logs the tool name, because that tool ignores its signal and needs a fix. Found 2026-10-27: a `github.*` call slept through a GitHub rate-limit reset and held a thread for over 30 minutes. Stop and steer could not end it.
 
 #### Effect fencing
 
@@ -1248,7 +1293,7 @@ interface WriteFence {
 
 A zombie owner — alive but slow past lease expiry, reclaimed by a successor — therefore cannot fork the transcript, double-emit events, or land stale side effects into session state: its first fenced write fails, which is its signal to stop. On Cloudflare the DO's single-writer execution makes stale writes rare in practice, but the fence is still recorded and checked so the store contract and its conformance suite are identical on every platform.
 
-**Stuck-head alarm:** because FIFO head-claim means a crash-looping head submission blocks every queued item behind it, the engine emits an escalation-grade attention event when a submission's `attemptCount` crosses a threshold (default 3) or it remains unsettled past a wall-clock bound (default 15 minutes, gate-blocked time excluded) — routed through the application's attention router and visible on the operator submissions surface. A wedged thread must page someone before the 1-hour timeout silently fails it.
+**Stuck-head alarm:** because FIFO head-claim means a crash-looping head submission blocks every queued item behind it, the engine emits an escalation-grade attention event when a submission's `attemptCount` crosses a threshold (default 3) or it remains unsettled past a wall-clock bound (default 15 minutes, gate-blocked time excluded) — routed through the application's attention router and visible on the operator submissions surface. A wedged thread must page someone before the 1-hour timeout silently fails it. The startup reconciliation pass checks only the attempt threshold. A restart interrupts every running turn, and the startup pass resumes them by design, so a turn's age at startup is not evidence of a wedge. A crash loop still pages, because each resume adds an attempt.
 
 #### Terminalization
 
@@ -1477,7 +1522,7 @@ type EngineEvent =
   | { type: 'decision_gate'; threadId: string; gate: DecisionGate }
   | { type: 'decision_gate_resolved'; threadId: string; gateId: string; resolution: DecisionResolution }
   | { type: 'decision_gate_expired'; threadId: string; gateId: string }
-  | { type: 'decision_gate_withdrawn'; threadId: string; gateId: string; reason: 'steer' | 'abort' | 'cancel' }
+  | { type: 'decision_gate_withdrawn'; threadId: string; gateId: string; reason: 'steer' | 'abort' | 'cancel' | 'message' }
   | { type: 'model_switched'; threadId: string; fromModel: string; toModel: string; reason: string }
 ```
 
@@ -1565,7 +1610,7 @@ The session and the sandbox are **two independent state machines with different 
 - **Session lifecycle** is cheap. State lives entirely in SessionStore; restoring a hibernated session is one load. A prompt to a cold session is durably admitted and the turn starts immediately — there is no user-visible "agent waking up" state.
 - **Sandbox lifecycle** is expensive and asynchronous: `detached → provisioning → ready → idle → snapshotting/released`. A session owns a **sandbox attachment** that may be cold. When a prompt arrives against a cold attachment, the engine starts the turn and kicks the provider's warm path in parallel.
 
-The joint is the lazy handle: `ToolContext.sandbox` is not guaranteed ready. The first sandbox-requiring operation awaits attachment readiness, subject to a configurable timeout, after which it fails with a structured `workspace_provisioning` tool error. Tools with no sandbox dependency (memory, plugin API calls, `thread_read`, decision gates) never wait. Orchestrator turns that touch no files respond instantly regardless of sandbox state.
+The joint is the lazy handle: `ToolContext.sandbox` is not guaranteed ready. The first sandbox-requiring operation awaits attachment readiness, subject to a configurable timeout, after which it fails with a structured `workspace_provisioning` tool error. When the most recent start or resume attempt failed and no newer attempt has begun, that error names the failure and still tells the caller to retry; the attachment logs each failed start or resume with its cause (2026-10-18; before, a start that kept failing looked like a slow start and nothing recorded why). Tools with no sandbox dependency (memory, plugin API calls, `thread_read`, decision gates) never wait. Orchestrator turns that touch no files respond instantly regardless of sandbox state.
 
 Two required behaviors around cold attachments:
 
@@ -1777,6 +1822,8 @@ interface SessionStore {
   getQueueItem(sessionId: string, itemId: string): Promise<QueueItem | null>;
   /** Stamp abortRequestedAt on all unsettled submissions in scope. First write wins; not terminal. */
   requestAbort(sessionId: string, threadId?: string): Promise<void>;
+  /** Atomically stamp abort intent on the specified item only if it is currently running or blocked on a decision gate in this session and thread. Otherwise, return null. */
+  requestAbortActiveSubmission(sessionId: string, threadId: string, queueItemId: string): Promise<QueueItem | null>;
   /** Two-phase settlement: reserve records the exact terminal outcome (running|blocked→terminalizing). Fenced. */
   reserveSettlement(sessionId: string, threadId: string, itemId: string, outcome: SubmissionOutcome, fence: WriteFence): Promise<void>;
   /** Finalize terminalizing→settled. Idempotent; safe to re-run after a crash. Fenced. */
@@ -1887,8 +1934,11 @@ interface ThreadData {
 /**
  * QueueState is a DERIVED view, not a stored entity: computed from durable
  * queue items plus ThreadData.paused. `collectBuffer` is the items with
- * status 'collecting'; `blockedGateId` derives from the suspended turn.
- * This is the shape used in `queue_state` events and API payloads.
+ * status 'collecting'; `collectDeadline` is the earliest durable deadline in
+ * that buffer. The web composer uses it to show how long a collection-only
+ * buffer waits. It does not expose Stop for that buffer because it has no
+ * active submission to abort. `blockedGateId` derives from the suspended
+ * turn. This is the shape used in `queue_state` events and API payloads.
  */
 interface QueueState {
   threadId: string;
@@ -1897,6 +1947,7 @@ interface QueueState {
   activeItemId?: string;
   pending: QueueItem[];
   collectBuffer?: QueueItem[];
+  collectDeadline?: number;
   blockedGateId?: string;
 }
 
@@ -1922,7 +1973,7 @@ interface QueueItem {
   attemptId?: string;
   attemptCount: number;
   maxAttempts: number;        // default 10
-  timeoutAt: number;          // default createdAt + 1h; not enforced while blocked_on_decision_gate
+  timeoutAt: number;          // claim time + 1h, set by a claim with attemptCount 0; not enforced at attemptCount 0 or while blocked_on_decision_gate
   abortRequestedAt?: number;
   ownerId?: string;
   leaseExpiresAt?: number;
@@ -2312,9 +2363,9 @@ The shared API package owns route behavior. Adapters own authentication middlewa
 | `POST` | `/api/sessions/:sessionId/threads` | Create a thread |
 | `GET` | `/api/sessions/:sessionId/threads/:threadId` | Read thread metadata and entries |
 | `POST` | `/api/sessions/:sessionId/threads/:threadId/prompt` | Prompt a specific thread |
-| `POST` | `/api/sessions/:sessionId/threads/:threadId/abort` | Abort current turn and clear this thread queue |
+| `POST` | `/api/sessions/:sessionId/threads/:threadId/abort` | Interrupt the active turn named by `targetItemId` and preserve queued submissions |
 | `POST` | `/api/sessions/:sessionId/threads/:threadId/pause` | Pause this thread |
-| `POST` | `/api/sessions/:sessionId/threads/:threadId/resume` | Resume this thread |
+| `POST` | `/api/sessions/:sessionId/threads/:threadId/resume` | Resume this thread and retry its durable queue |
 | `GET` | `/api/sessions/:sessionId/decision-gates` | List pending and recent terminal gates |
 | `POST` | `/api/sessions/:sessionId/decision-gates/:gateId/resolve` | Resolve a pending gate |
 | `POST` | `/api/sessions/:sessionId/decision-gates/:gateId/withdraw` | Withdraw a pending gate |
@@ -2326,6 +2377,10 @@ The shared API package owns route behavior. Adapters own authentication middlewa
 | `GET`/`POST` | `/api/admin/submissions...` | Operator surface (required for V1): list submissions with lifecycle state, force-settle a wedged submission, inspect leases |
 
 Prompt routes accept the same `PromptOptions` shape as the engine API. WebSocket prompt/control messages are optional conveniences over the same route semantics; they must not define separate behavior.
+
+The thread abort request contains the `targetItemId` that was active when the user selected Stop. The engine stamps abort intent only when that item is still `running` or `blocked_on_decision_gate`. A delayed retry cannot target a successor. During a rolling deploy, a bodyless request from an older client returns `409` and emits `client_update_required`. The client must reload before it selects Stop again. The server must not infer a target for a bodyless request.
+
+The thread resume route clears a paused state and starts the durable queue. It also retries an unpaused queue that has no local claim. This recovery action does not stamp abort intent on queued or collecting items.
 
 ### Cloudflare Adapter (`packages/adapter-cloudflare/`)
 
@@ -2555,6 +2610,22 @@ Required behavior:
 
 ## Conformance
 
+### Background database work
+
+Result waiters issue at most one durable read at a time. After a read completes, the fallback waits one second before another read.
+Settlement events request an immediate recheck. An event received during a read requests one recheck after that read completes.
+Failed reads retry through the fallback. Cancellation and timeout stop future checks without changing the submission.
+
+Each resident session permits one sweep and one lease-renewal pass at a time. Concurrent calls join the existing pass.
+Sweeps group unsettled submissions and pending gates by thread. Idle historical threads cause no per-thread database reads.
+Reconciliation refreshes submissions after repairing expired leases. Startup digest repair also uses one grouped snapshot.
+Starting a thread drive does not block completion of a sweep. Durable gate expiry, collect deadlines, and submission recovery remain required.
+
+Store gate lists accept an optional status filter. Cross-session submission lists accept optional session IDs, with an empty list returning no rows.
+Postgres splits session ID filters into batches of at most 1,000. Unfiltered submission lists remain available to operator surfaces.
+
+### Contract suites
+
 The prose in this spec defines intent; executable contract suites define conformance. The engine ships reusable test suites that any provider implementation must pass:
 
 - **SessionStore contract** — entity round-trips, `updateEntry` in-place transitions, entry/queue/gate persistence.
@@ -2563,3 +2634,14 @@ The prose in this spec defines intent; executable contract suites define conform
 - **EventStream contract** — monotonic offsets, replay-from-offset, live subscription ordering, eventKey-idempotent append, gap-refetch on lossy fan-out.
 
 A backend (SQLite, D1, PostgreSQL) is supported when its store passes these suites, not when it has been manually verified. New invariants added to this spec must land with a corresponding contract test in the same change.
+
+## Terminal outcome evidence (2026-09-25)
+
+The built-in `bash` tool records a small outcome marker in result `details` for a recognized, successful GitHub CLI write. The marker is not model-visible text. PR creation requires a zero exit code and a returned PR URL. Review submission requires a zero exit code and a submission flag. The command must be direct, with an optional `cd ... &&` prefix; compound scripts are not classified. The usage dashboard reads these persisted markers. Calls made before this change have no marker and are not backfilled from command text.
+
+### Workflow continuation and request evidence (2026-10-15)
+
+Workflow-purpose sessions use unattended completion instructions after compaction; other session purposes
+retain interactive clarification guidance. Persisted response metadata also includes the output-cap field
+observed in the transformed request and an allowlisted HTTP request ID, when the provider hooks expose them.
+Only numeric limits and bounded IDs are retained; request and response bodies are not captured.

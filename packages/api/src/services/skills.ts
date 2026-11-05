@@ -24,7 +24,7 @@ import { NotFoundError, parseSearchQuery } from "@valet/shared";
 import { isPgUniqueViolation } from "@valet/store-postgres";
 import type { AppDb } from "../lib/drizzle.js";
 import { decodePageCursor, encodePageCursor } from "../lib/page-cursor.js";
-import { skills, teamMembers, type SkillRow } from "../schema/index.js";
+import { skills, skillFiles, teamMembers, type SkillRow } from "../schema/index.js";
 import { isTeamMember, listTeamsForUser, lockTeamForOwnership } from "./teams.js";
 
 export type SkillOrigin = "local" | "repo";
@@ -504,6 +504,7 @@ export async function createSkill(
     frontmatter: fm,
     contentSha: skillContentSha(input.content),
     upstreamPath: input.upstreamPath ?? null,
+    upstreamBlobSha: null,
     createdAt: now,
     updatedAt: now,
   };
@@ -685,8 +686,8 @@ export async function deleteSkill(
  *   - `user` — that person's own skills, then the skills of every team they
  *     belong to, then the org-library skills. The same union `listSkills`
  *     returns, deduped user > team > org (first name wins).
- *   - `team` — that team's skills only. A team-owned session is shared, so
- *     one member's personal skills must not appear in it.
+ *   - `team` — that team's skills, then the org-library skills. A team-owned
+ *     session is shared, so one member's personal skills must not appear in it.
  *   - `org`  — that org's own skills only.
  *
  * A repeated name keeps the FIRST row and drops the rest. It never throws:
@@ -700,32 +701,68 @@ export async function listSkillSourcesFor(
   principal: Principal,
   orgId: string,
 ): Promise<SkillSource[]> {
-  const rows = await rowsForPrincipal(db, principal, orgId);
-  const seen = new Set<string>();
-  const sources: SkillSource[] = [];
-  for (const row of rows) {
-    if (seen.has(row.name)) continue;
-    seen.add(row.name);
-    sources.push(rowToSkillSource(row));
-  }
-  return sources;
+  const rows = await listSkillRowsFor(db, principal, orgId);
+  if (rows.length === 0) return [];
+  const files = await db.select({ skillId: skillFiles.skillId, path: skillFiles.path,
+    size: skillFiles.size, mode: skillFiles.mode, blobSha: skillFiles.blobSha })
+    .from(skillFiles).where(inArray(skillFiles.skillId, rows.map((row) => row.id)));
+  return rows.map((row) => ({
+    ...rowToSkillSource(row),
+    files: files.filter((file) => file.skillId === row.id),
+    readFile: async (file) => {
+      const [stored] = await db.select({ bytes: skillFiles.bytes }).from(skillFiles).where(and(
+        eq(skillFiles.skillId, row.id), eq(skillFiles.path, file.path), eq(skillFiles.blobSha, file.blobSha),
+      ));
+      return stored?.bytes;
+    },
+  }));
 }
 
-async function rowsForPrincipal(db: AppDb, principal: Principal, orgId: string): Promise<SkillRow[]> {
+/** Stored rows available to one session principal, in registry precedence. */
+export async function listSkillRowsFor(
+  db: AppDb,
+  principal: Principal,
+  orgId: string,
+): Promise<SkillRow[]> {
+  const rows = await rowsForPrincipal(db, principal, orgId);
+  const seen = new Set<string>();
+  return rows.filter((row) => {
+    if (seen.has(row.name)) return false;
+    seen.add(row.name);
+    return true;
+  });
+}
+
+async function rowsForPrincipal(
+  db: AppDb,
+  principal: Principal,
+  orgId: string,
+): Promise<SkillRow[]> {
   if (principal.type === "user") {
     return listSkills(db, { userId: principal.id, orgId });
   }
-  return db
+  const rows = await db
     .select()
     .from(skills)
     .where(
       and(
         eq(skills.orgId, orgId),
-        eq(skills.ownerType, principal.type),
-        eq(skills.ownerId, principal.id),
+        principal.type === "team"
+          ? or(
+              and(eq(skills.ownerType, "team"), eq(skills.ownerId, principal.id)),
+              and(eq(skills.ownerType, "org"), eq(skills.ownerId, orgId)),
+            )
+          : and(eq(skills.ownerType, "org"), eq(skills.ownerId, principal.id)),
       ),
     )
     .orderBy(asc(skills.name));
+
+  if (principal.type === "org") return rows;
+  // A team copy shadows an org-library skill with the same name.
+  return [
+    ...rows.filter((row) => row.ownerType === "team"),
+    ...rows.filter((row) => row.ownerType === "org"),
+  ];
 }
 
 /** A row as the engine sees it. `source` records where the markdown came
@@ -741,6 +778,7 @@ export function rowToSkillSource(row: SkillRow): SkillSource {
   const fm = asRecord(row.frontmatter);
   const invocation = fm.invocation === "context" || fm.invocation === "prompt" ? fm.invocation : undefined;
   const argHint = typeof fm.argHint === "string" ? fm.argHint : undefined;
+  const metadata = stringMap(fm.metadata);
   return {
     name: row.name,
     description: row.description,
@@ -752,7 +790,20 @@ export function rowToSkillSource(row: SkillRow): SkillSource {
     origin: row.origin,
     ...(invocation ? { invocation } : {}),
     ...(argHint ? { argHint } : {}),
+    // The spec's `metadata` map. A playbook marks itself here (`kind: playbook`).
+    ...(metadata ? { metadata } : {}),
   };
+}
+
+/** `value` as a map of text to text, or undefined when it is not one. */
+function stringMap(value: unknown): Record<string, string> | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const out: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (typeof entry !== "string") return undefined;
+    out[key] = entry;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 /** `frontmatter` is a jsonb column, so drizzle types it as `unknown`. */

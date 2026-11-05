@@ -412,3 +412,21 @@ Browser verification uses synthetic accounts and an isolated test database:
 2. Sign in as an ordinary team member. Confirm the rendered page, Team-only label, download, and comments.
 3. Open the team gallery. Confirm its membership explanation and the absence of public-share controls.
 4. Sign in as a nonmember. Open the same link. Confirm the access explanation and absence of content and controls.
+
+## Workspace artifact list (2026-10-07)
+
+The primary navigation links to `/artifacts` instead of Memory on desktop and mobile.
+Memory remains available from the artifact list and the dashboard memory card.
+The artifact list requests the active personal or team owner and waits for the caller identity before fetching.
+The existing list API applies membership and source-thread visibility checks.
+
+The list shows 50 artifacts per page, newest update first, with title, format, version, path, and audience.
+Team ownership takes precedence over stored public visibility in the audience label.
+Active titles open the in-app token route. Revoked artifacts have no active link.
+Loading, retry, and empty states explain the next action.
+Pagination uses URL cursor stacks. A workspace change starts at its first page and never reuses another owner's cursor.
+
+On mobile, Settings and enabled plugins appear in the navigation menu to leave room for workspace and assistant controls.
+Artifact titles and paths wrap within the page width.
+
+Artifacts remains a direct primary-navigation link. Its adjacent dropdown exposes Memory; both destinations also appear in mobile navigation.

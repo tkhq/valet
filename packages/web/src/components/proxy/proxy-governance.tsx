@@ -4,11 +4,11 @@
  * `/settings/organization/proxy` page. Renders as a set of `FieldRow` entries
  * to be placed inside a `Section` component.
  *
- * `editable={true}`  — interactive Switch + mode buttons (org admin / single-user)
+ * `editable={true}`  — interactive Switch + mode chips (org admin / single-user)
  * `editable={false}` — read-only status line + "Managed by your organization admins."
  */
 import { useProxySettings, useSetProxyEnabled, useSetProxyMode } from "~/api/proxy-usage";
-import { Switch } from "~/components/primitives";
+import { FilterChips, Switch } from "~/components/primitives";
 import { FieldRow } from "~/components/settings/field-row";
 
 const MODES = [
@@ -78,27 +78,13 @@ export function ProxyGovernance({ editable }: ProxyGovernanceProps) {
         hint={currentMode?.desc}
         error={setMode.isError ? setMode.error?.message : undefined}
       >
-        <div
-          className="flex items-center gap-1"
-          role="group"
-          aria-label="Credential mode"
-        >
-          {MODES.map((m) => (
-            <button
-              key={m.id}
-              type="button"
-              onClick={() => setMode.mutate(m.id)}
-              disabled={setMode.isPending || !enabled}
-              title={!enabled ? "Enable the gateway first" : undefined}
-              className={`rounded px-3 py-1 text-sm border transition-colors ${
-                mode === m.id
-                  ? "border-moss text-moss bg-moss/10 font-medium"
-                  : "border-line text-muted hover:text-ink hover:border-ink disabled:opacity-40 disabled:cursor-not-allowed"
-              }`}
-            >
-              {m.label}
-            </button>
-          ))}
+        <div title={!enabled ? "Enable the gateway first" : undefined}>
+          <FilterChips
+            label="Credential mode"
+            value={mode}
+            onChange={(next) => setMode.mutate(next)}
+            options={MODES.map((m) => ({ value: m.id, label: m.label, disabled: setMode.isPending || !enabled }))}
+          />
         </div>
       </FieldRow>
     </>

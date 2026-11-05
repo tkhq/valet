@@ -2,6 +2,7 @@ import type {
   DesiredSandboxSpec,
   Sandbox,
   SandboxCreateOpts,
+  SandboxLifecycle,
   SandboxProvider,
   SandboxResourceField,
   SpecProvider,
@@ -11,6 +12,7 @@ import {
   recordSandboxCreated,
   recordSandboxDestroyed,
   recordSandboxProvision,
+  recordSandboxStartupFailure,
   type SandboxDestroyReason,
 } from "../metrics.js";
 import {
@@ -18,8 +20,19 @@ import {
   SandboxStartupError,
   SandboxUnavailableError,
   WorkspaceProvisioningError,
+  formatSandboxErrorCause,
+  formatSandboxErrorLog,
 } from "../errors.js";
-import { type AppliedState, applyPlan, diffSteps, readAppliedState, writeAppliedState } from "./applied-state.js";
+import {
+  type AppliedState,
+  applyPlan,
+  diffSteps,
+  DRIFT_FIELDS,
+  readAppliedState,
+  writeAppliedState,
+} from "./applied-state.js";
+import { nestedKubernetesDecision, NESTED_KUBERNETES_UNSUPPORTED } from "./nested-kubernetes.js";
+import { reportError } from "../error-report.js";
 
 /**
  * Max age of a cached observation before `reconcile` re-reads the applied-state
@@ -30,15 +43,23 @@ export const OBSERVE_TTL_MS = 5 * 60_000;
 
 /** Max backoff between failed replacement retries (spec decision 6). */
 const REPLACE_BACKOFF_CAP_MS = 30 * 60_000;
+/** First wait after a terminal startup failure; doubles per attempt. */
+export const STARTUP_BACKOFF_BASE_MS = 15_000;
+/** Longest wait between terminal-failure retries. */
+export const STARTUP_BACKOFF_CAP_MS = 120_000;
 
-/** Missing applied resources and an empty opinion both mean no overrides. */
-function resourceDrift(
+/**
+ * Missing applied resources and an empty opinion both mean no overrides.
+ * Exported for a direct unit test of the scratch-only drift case. No other
+ * consumer should import this from outside the sandbox package.
+ */
+export function resourceDrift(
   desired: DesiredSandboxSpec["resources"],
   applied: AppliedState["resources"],
   preserved: readonly SandboxResourceField[] = [],
 ): boolean {
   if (desired === undefined && preserved.length === 0) return false;
-  return (["cpu", "memory"] as const).some((field) =>
+  return DRIFT_FIELDS.some((field) =>
     !preserved.includes(field) && desired?.[field] !== applied?.[field]);
 }
 
@@ -47,16 +68,37 @@ function effectiveResources(
   fallback: AppliedState["resources"],
 ): AppliedState["resources"] {
   const preserved = desired.preserveResourceFields ??
-    (desired.resources === undefined ? (["cpu", "memory"] as const) : []);
+    (desired.resources === undefined ? DRIFT_FIELDS : []);
   const result: NonNullable<AppliedState["resources"]> = {};
   const cpu = preserved.includes("cpu") ? fallback?.cpu : desired.resources?.cpu;
   const memory = preserved.includes("memory") ? fallback?.memory : desired.resources?.memory;
+  const scratch = preserved.includes("scratch") ? fallback?.scratch : desired.resources?.scratch;
   if (cpu !== undefined) result.cpu = cpu;
   if (memory !== undefined) result.memory = memory;
+  if (scratch !== undefined) result.scratch = scratch;
   if (Object.keys(result).length === 0 && desired.resources === undefined && fallback === undefined) {
     return undefined;
   }
   return result;
+}
+
+/** True when the preserve mask names every drift field, in any order. */
+function preservesEveryField(fields: readonly SandboxResourceField[] | undefined): boolean {
+  return fields !== undefined && DRIFT_FIELDS.every((field) => fields.includes(field));
+}
+
+/**
+ * The applied file's resources without `scratch`. The file lives in the
+ * sandbox, where the agent can write it, and a scratch value from it would
+ * reach the next pod spec with no cap check. The live pod and the
+ * provider's record are the only sources for scratch (fix wave 4,
+ * security N2). Undefined when nothing else is in the file.
+ */
+function fileResourcesWithoutScratch(applied: AppliedState | null): AppliedState["resources"] {
+  const resources = applied?.resources;
+  if (resources === undefined) return undefined;
+  const { scratch: _scratch, ...rest } = resources;
+  return Object.keys(rest).length > 0 ? rest : undefined;
 }
 
 function createResourceOpinion(resources: SandboxCreateOpts["resources"]): AppliedState["resources"] {
@@ -64,6 +106,7 @@ function createResourceOpinion(resources: SandboxCreateOpts["resources"]): Appli
   const result: NonNullable<AppliedState["resources"]> = {};
   if (resources.cpu !== undefined) result.cpu = resources.cpu;
   if (resources.memory !== undefined) result.memory = resources.memory;
+  if (resources.scratch !== undefined) result.scratch = resources.scratch;
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
@@ -142,6 +185,8 @@ export class SandboxAttachment {
   private pendingResumeEpoch: number | null = null;
   private _sandbox: Sandbox | null = null;
   private destroyed = false;
+  private destroying = false;
+  private destroyInFlight: Promise<boolean> | undefined;
   private inFlight: Promise<void> | null = null;
   private readonly waiters = new Set<Waiter>();
   private readonly listeners = new Set<StatusListener>();
@@ -154,8 +199,27 @@ export class SandboxAttachment {
   private convergeFailure: ConvergeFailure | null = null;
   /** Last ignored non-isolated resource drift, for change-aware warnings. */
   private ignoredResourceDriftKey: string | null = null;
+  private pendingRelease: { sandbox: Sandbox; provider: SandboxProvider } | null = null;
+  private releaseInFlight: Promise<void> | null = null;
+  private pendingReadyEpoch: number | null = null;
+  /** Why the most recent start attempt failed; cleared once a sandbox is ready. */
+  private lastStartError: string | undefined;
+  /** Armed by a terminal startup failure (spec 8.1). `kickProvision` stays
+   * quiet until `at + window`; `ensureReady` inside the window rejects at
+   * once with `error` so callers get the cause instead of a timeout.
+   * Caller-driven (spec 8.1): nothing wakes the attachment when the window
+   * ends; the next `ensureReady` after it re-provisions. An unattended timer
+   * would re-create pods every window for a session nobody is using. */
+  private terminalFailure: { at: number; attempts: number; error: SandboxStartupError | SandboxPreparationError } | null = null;
 
-  constructor(provider: SandboxProvider, createOpts: SandboxCreateOpts, specProvider?: SpecProvider) {
+  constructor(
+    provider: SandboxProvider,
+    createOpts: SandboxCreateOpts,
+    specProvider?: SpecProvider,
+    private readonly lifecycle?: SandboxLifecycle,
+    /** True while a lease holds the sandbox (spec INV-8). Defers pod-replacing changes. */
+    private readonly isLeased?: () => Promise<boolean>,
+  ) {
     this.provider = provider;
     this.createOpts = createOpts;
     this.specProvider = specProvider;
@@ -169,7 +233,7 @@ export class SandboxAttachment {
    * transitions it to `error` permanently since there is nothing to
    * re-provision with.
    */
-  static forSandbox(sandbox: Sandbox): SandboxAttachment {
+  static forSandbox(sandbox: Sandbox, lifecycle?: SandboxLifecycle): SandboxAttachment {
     const stubProvider: SandboxProvider = {
       backend: "none",
       capabilities: () => ({
@@ -193,7 +257,7 @@ export class SandboxAttachment {
         throw new Error("SandboxAttachment.forSandbox: no provider available");
       },
     };
-    const attachment = new SandboxAttachment(stubProvider, {});
+    const attachment = new SandboxAttachment(stubProvider, {}, undefined, lifecycle);
     attachment.provider = null;
     attachment.noProvider = true;
     attachment._sandbox = sandbox;
@@ -201,6 +265,9 @@ export class SandboxAttachment {
     attachment._state = "ready";
     return attachment;
   }
+
+  /** A release status is provisional until the destroy caller receives its result. */
+  get isDestroying(): boolean { return this.destroying; }
 
   get state(): AttachmentState {
     return this._state;
@@ -281,6 +348,7 @@ export class SandboxAttachment {
     }
     const startEpoch = this._epoch;
     // On rejection: state is untouched (still `ready`) and the error propagates.
+    await this.lifecycle?.beforeStop(sandbox, 'suspend');
     await provider.suspend(sandbox.id);
     // A concurrent destroy() during the await wins — do not resurrect it.
     if (this.destroyed) return;
@@ -321,16 +389,16 @@ export class SandboxAttachment {
 
     const oldSandbox = this._sandbox;
     const provider = this.provider;
+    if (oldSandbox) await this.lifecycle?.beforeStop(oldSandbox, 'replace');
+    if (this.destroyed) throw new Error("Sandbox teardown is in progress. Wait for deletion to finish.");
     this._epoch += 1;
     this._sandbox = null;
     this.observation = null;
     this._state = "provisioning";
     if (oldSandbox) {
-      void (provider.release
-        ? provider.release(oldSandbox.id)
-        : provider.destroy(oldSandbox.id)
-      ).catch(() => {});
+      await this.releaseExecution(oldSandbox, provider);
     }
+    this.terminalFailure = null;
     this.kickProvision();
     // Re-widen: the guard above narrowed `this.inFlight` to null and TS
     // keeps that narrowing across the kickProvision() call that re-set it
@@ -345,6 +413,9 @@ export class SandboxAttachment {
    * it does not change attachment state (a timeout is not degradation).
    */
   ensureReady(opts: { timeoutMs: number; signal?: AbortSignal }): Promise<{ sandbox: Sandbox; epoch: number }> {
+    if (this.createOpts.nestedKubernetes && this.provider && nestedKubernetesDecision(true, this.provider.capabilities().nestedKubernetes) !== "allow") {
+      return Promise.reject(new SandboxStartupError(this.createOpts.sessionId ?? "sandbox", NESTED_KUBERNETES_UNSUPPORTED));
+    }
     if (this.destroyed) {
       return Promise.reject(new SandboxUnavailableError(new Error("sandbox attachment destroyed")));
     }
@@ -358,6 +429,16 @@ export class SandboxAttachment {
     }
     if (opts.signal?.aborted) {
       return Promise.reject(this.abortError(opts.signal));
+    }
+
+    const remainingMs = this.startupBackoffRemainingMs();
+    if (remainingMs > 0 && this.terminalFailure) {
+      const prior = this.terminalFailure.error;
+      const seconds = Math.ceil(remainingMs / 1000);
+      if (prior instanceof SandboxStartupError) {
+        return Promise.reject(new SandboxStartupError(prior.sandboxId, `${prior.reason} (retry in ${seconds}s)`, prior.kind));
+      }
+      return Promise.reject(prior);
     }
 
     this.kickProvision();
@@ -381,7 +462,7 @@ export class SandboxAttachment {
 
       const timer = setTimeout(() => {
         this.waiters.delete(waiter);
-        waiter.reject(new WorkspaceProvisioningError(opts.timeoutMs));
+        waiter.reject(new WorkspaceProvisioningError(opts.timeoutMs, this.lastStartError));
       }, opts.timeoutMs);
       timer.unref?.();
 
@@ -433,7 +514,7 @@ export class SandboxAttachment {
       // workspace on every liveness-triggered re-provision. Providers that
       // don't implement `release` (docker/local/virtual) fall back to
       // `destroy` — byte-identical to prior behavior.
-      void (provider.release ? provider.release(oldSandbox.id) : provider.destroy(oldSandbox.id)).catch(() => {});
+      void this.releaseExecution(oldSandbox, provider).then(() => this.kickProvision()).catch(() => {});
     }
 
     this.kickProvision();
@@ -446,6 +527,17 @@ export class SandboxAttachment {
    */
   observedImage(): string | null {
     return this.observation?.applied.image ?? null;
+  }
+
+  /**
+   * The resource overrides the live sandbox has applied, per the most recent
+   * cached observation. `null` when nothing has been observed yet, or when
+   * the applied file carried no resources. The wakeups seam reads `scratch`
+   * from it to cap a detached job log at a quarter of `/scratch`. Does not
+   * trigger an observation.
+   */
+  observedResources(): NonNullable<AppliedState["resources"]> | null {
+    return this.observation?.applied.resources ?? null;
   }
 
   /**
@@ -512,7 +604,12 @@ export class SandboxAttachment {
       } else {
         this.ignoredResourceDriftKey = null;
       }
-      if (this.replacementNeeded(desired, observed)) {
+      const wantsReplace = this.replacementNeeded(desired, observed);
+      if (wantsReplace && await this.isLeased?.()) {
+        // A multi-hour leased process must keep its pod (spec INV-8). Prep
+        // steps that do not replace the pod still run below.
+        console.warn(`sandbox ${sandbox.id}: deferring image/resource change while a lease is active`);
+      } else if (wantsReplace) {
         // Backoff: skip the replace when the SAME desired spec already failed
         // to replace within its exponential window (spec decision 6). A
         // repeatedly-failing spec must not re-provision on every idle sweep.
@@ -524,6 +621,8 @@ export class SandboxAttachment {
 
         const oldSandbox = this._sandbox;
         const provider = this.provider;
+        if (oldSandbox) await this.lifecycle?.beforeStop(oldSandbox, 'replace');
+        if (this.destroyed) return;
         // Persist before clearing the observation. A transient repository read
         // has no resource opinion, so replacement keeps the observed overrides.
         this.persistReplacementSpec(desired, observed);
@@ -534,10 +633,7 @@ export class SandboxAttachment {
         this.observation = null;
         this._state = "provisioning";
         if (oldSandbox && provider) {
-          void (provider.release
-            ? provider.release(oldSandbox.id)
-            : provider.destroy(oldSandbox.id)
-          ).catch(() => {});
+          await this.releaseExecution(oldSandbox, provider);
         }
         this.kickProvision();
         // Await the re-provision so the backoff memo reflects the real outcome.
@@ -582,7 +678,7 @@ export class SandboxAttachment {
       this.observation = this.observationFromApplied(landed, epoch);
     } catch (err) {
       // reconcile never throws — the existing failure paths own degradation.
-      console.error("SandboxAttachment.reconcile failed", err);
+      reportError({ area: "sandbox", reason: "reconcile" }, "SandboxAttachment.reconcile failed", formatSandboxErrorLog(err));
     }
   }
 
@@ -619,7 +715,7 @@ export class SandboxAttachment {
     );
   }
 
-  /** Replace only the repository CPU/memory opinion; keep other resources. */
+  /** Replace only the repository resource opinion (DRIFT_FIELDS); keep other resources. */
   private persistResources(
     resources: DesiredSandboxSpec["resources"],
     preserved: readonly SandboxResourceField[] = [],
@@ -634,6 +730,17 @@ export class SandboxAttachment {
       delete next.memory;
       if (resources.memory !== undefined) next.memory = resources.memory;
     }
+    if (!preserved.includes("scratch")) {
+      delete next.scratch;
+      if (resources.scratch !== undefined) next.scratch = resources.scratch;
+    }
+    this.createOpts = { ...this.createOpts, resources: next };
+  }
+
+  private persistScratch(scratch: string | undefined): void {
+    const next = { ...this.createOpts.resources };
+    delete next.scratch;
+    if (scratch !== undefined) next.scratch = scratch;
     this.createOpts = { ...this.createOpts, resources: next };
   }
 
@@ -651,6 +758,19 @@ export class SandboxAttachment {
       return cache.applied;
     }
     const read = await readAppliedState(sandbox);
+    // A container restart (an OOM kill, for one) deletes the rootfs file
+    // but keeps the pod and its /scratch. The epoch is unchanged, so the
+    // pod still runs the resources this attachment recorded. Keep them, so
+    // the restart does not read as resource drift and replace the pod.
+    // Steps are not kept: the rootfs lost them, so they run again. This
+    // carry is expected in normal operation, hence a log, not an alert.
+    const carried = read === null && cache?.epoch === epoch ? cache.applied.resources : undefined;
+    if (carried !== undefined) {
+      console.warn(
+        `SandboxAttachment: sandbox ${sandbox.id} lost its applied-state file within one epoch (container restart?); ` +
+          "keeping the recorded resources and re-running preparation steps",
+      );
+    }
     // Use the file's image when non-empty (it may know better than createOpts
     // after an api restart, which rebuilds createOpts from the host default).
     // Fall back to createOpts.image when the file is absent or has an empty
@@ -658,7 +778,7 @@ export class SandboxAttachment {
     const resolvedImage = (read?.image || undefined) ?? this.createOpts.image ?? "";
     const applied: AppliedState = read
       ? { ...read, image: resolvedImage }
-      : { image: resolvedImage, specHash: "", steps: {} };
+      : { image: resolvedImage, specHash: "", steps: {}, ...(carried !== undefined ? { resources: carried } : {}) };
     this.observation = { applied, at: Date.now(), epoch };
     return applied;
   }
@@ -682,9 +802,22 @@ export class SandboxAttachment {
    * The destroyed metric is recorded only on a real successful destroy,
    * so the created−destroyed leak alarm never counts a destroy that left
    * the sandbox standing. */
-  async destroy(reason: SandboxDestroyReason = "session_destroy"): Promise<boolean> {
+  destroy(reason: SandboxDestroyReason = "session_destroy"): Promise<boolean> {
+    if (this.destroyInFlight) return this.destroyInFlight;
+    this.destroying = true;
+    const operation = this.destroyOnce(reason).finally(() => {
+      this.destroying = false;
+      this.destroyInFlight = undefined;
+    });
+    this.destroyInFlight = operation;
+    return operation;
+  }
+
+  private async destroyOnce(reason: SandboxDestroyReason): Promise<boolean> {
     if (this.destroyed) return true;
+    if (this._sandbox) await this.lifecycle?.beforeStop(this._sandbox, 'destroy', { suspended: this._state === 'suspended' });
     this.destroyed = true;
+    this.terminalFailure = null;
 
     const sandbox = this._sandbox;
     this._sandbox = null;
@@ -695,6 +828,20 @@ export class SandboxAttachment {
     this.waiters.clear();
     for (const w of waiters) {
       w.reject(new SandboxUnavailableError(new Error("sandbox attachment destroyed")));
+    }
+
+    // A replacement can have dropped its handle while still releasing compute.
+    // Keep final host cleanup behind that release so retained state cannot reappear.
+    if (this.pendingRelease) {
+      const { sandbox: releasing, provider } = this.pendingRelease;
+      try {
+        await this.releaseExecution(releasing, provider);
+      } catch (error) {
+        this.destroyed = false;
+        this._state = "error";
+        this.emitStatus();
+        throw error;
+      }
     }
 
     if (!sandbox) return true;
@@ -722,10 +869,25 @@ export class SandboxAttachment {
     return new Error("aborted");
   }
 
+  /** Milliseconds left in the terminal-failure window, or 0 when none. */
+  private startupBackoffRemainingMs(): number {
+    const failure = this.terminalFailure;
+    if (!failure) return 0;
+    const window = Math.min(STARTUP_BACKOFF_CAP_MS, STARTUP_BACKOFF_BASE_MS * 2 ** (failure.attempts - 1));
+    return Math.max(0, failure.at + window - Date.now());
+  }
+
   private kickProvision(): void {
     if (this.destroyed || this.noProvider) return;
     if (this._state === "ready") return;
     if (this.inFlight) return;
+    if (this.startupBackoffRemainingMs() > 0) return;
+    if (this.releaseInFlight) return;
+    if (this.pendingRelease) {
+      const { sandbox, provider } = this.pendingRelease;
+      void this.releaseExecution(sandbox, provider).then(() => this.kickProvision()).catch(() => {});
+      return;
+    }
     // A `suspended` attachment already holds a live handle and epoch — wake it
     // via `resume` rather than a fresh `create` (no epoch mint, id stable). All
     // A failed restoration retains this handle and retries its resume hooks.
@@ -739,8 +901,23 @@ export class SandboxAttachment {
     this.inFlight = this.doProvision();
   }
 
+  private releaseExecution(sandbox: Sandbox, provider: SandboxProvider): Promise<void> {
+    if (this.releaseInFlight) return this.releaseInFlight;
+    this.pendingRelease = { sandbox, provider };
+    const release = provider.release ? provider.release(sandbox.id) : provider.destroy(sandbox.id);
+    const operation = release.then(() => { this.pendingRelease = null; }, (error: unknown) => {
+      this._state = "error";
+      this.emitStatus();
+      throw error;
+    }).finally(() => { this.releaseInFlight = null; });
+    this.releaseInFlight = operation;
+    return operation;
+  }
+
   private async doResume(): Promise<void> {
     const startEpoch = this._epoch;
+    // A new attempt: an earlier failure no longer explains a wait on this one.
+    this.lastStartError = undefined;
     const sandbox = this._sandbox;
     const provider = this.provider;
     // Wake folding (spec decision 3, wake-when-stale). Before waking the
@@ -753,7 +930,7 @@ export class SandboxAttachment {
     // reroutes through a fresh provision IS a re-provision, so we bump the epoch
     // exactly like reportFailure — otherwise the fresh boot would re-emit the
     // suspended epoch's `provisioning`/`ready` and collide on the durable
-    // eventKey. The old handle is released (or destroyed) best-effort.
+    // eventKey. Release must complete before the replacement can adopt state.
     //
     // Cache-empty guard: with no observation we cannot compare (observation
     // needs a live sandbox), so we allow the resume — a subsequent `reconcile`
@@ -770,7 +947,7 @@ export class SandboxAttachment {
       } catch (err) {
         // A failed pre-check must not strand the wake — fall through to the
         // normal resume path, which has its own error handling.
-        console.error("SandboxAttachment: wake-folding pre-check failed", err);
+        reportError({ area: "sandbox", reason: "wake_fold_check" }, "SandboxAttachment: wake-folding pre-check failed", err);
         staleWake = false;
       }
       if (this.destroyed) {
@@ -792,10 +969,13 @@ export class SandboxAttachment {
         this.observation = null;
         this._state = "provisioning";
         if (oldSandbox && provider) {
-          void (provider.release
-            ? provider.release(oldSandbox.id)
-            : provider.destroy(oldSandbox.id)
-          ).catch(() => {});
+          try {
+            await this.releaseExecution(oldSandbox, provider);
+          } catch {
+            // The retained release is retried by the next acquisition.
+            this.inFlight = null;
+            return;
+          }
         }
         // Hand off to a fresh cold provision for the new epoch. Clear inFlight
         // first so kickProvision's guard does not no-op on this doResume.
@@ -820,6 +1000,9 @@ export class SandboxAttachment {
     let superseded = false;
     try {
       if (!provider) throw new Error("no provider");
+      if (nestedKubernetesDecision(this.createOpts.nestedKubernetes === true, provider.capabilities().nestedKubernetes) !== "allow" && this.createOpts.nestedKubernetes) {
+        throw new SandboxStartupError(this.createOpts.sessionId ?? "sandbox", NESTED_KUBERNETES_UNSUPPORTED);
+      }
       if (!provider.resume) throw new Error("provider does not support hibernation");
       if (!sandbox) throw new Error("suspended attachment has no sandbox handle");
       if (this.pendingResumeEpoch !== startEpoch) {
@@ -885,16 +1068,16 @@ export class SandboxAttachment {
         superseded = true;
         return;
       }
-      this.pendingResumeEpoch = null;
-      this._state = "ready";
-      this.emitStatus();
-      this.flushWaiters();
+      if (await this.finishReady(sandbox, startEpoch)) this.publishReady();
+      if (this._epoch !== startEpoch || this._sandbox !== sandbox) superseded = true;
+      else this.pendingResumeEpoch = null;
     } catch (err) {
       if (this.destroyed) return;
       if (this._epoch !== startEpoch || this._sandbox !== sandbox) {
         superseded = true;
         return;
       }
+      this.recordStartFailure(err, startEpoch, "resume");
       this._state = "error";
       this.emitStatus();
       // Same fast-fail rule as doProvision: a terminal SandboxStartupError
@@ -941,12 +1124,15 @@ export class SandboxAttachment {
         if (ok) recordSandboxCreated();
         span.setAttribute("valet.sandbox.result_state", this._state);
         if (this._sandbox) span.setAttribute("valet.sandbox.id", this._sandbox.id);
-        if (!ok) markSpanError(span, `provision ended in state ${this._state}`);
+        if (!ok) markSpanError(span, this.lastStartError ?? `provision ended in state ${this._state}`);
       },
     );
   }
 
   private async doProvisionInner(): Promise<void> {
+    const startEpoch = this._epoch;
+    // A new attempt: an earlier failure no longer explains a wait on this one.
+    this.lastStartError = undefined;
     // Set BEFORE any await, including provider.create. The api's per-org
     // capacity gate (gated-sandbox-provider.ts) depends on this ordering:
     // it counts `provisioning|ready` attachments and subtracts its own
@@ -958,6 +1144,13 @@ export class SandboxAttachment {
     const provider = this.provider;
     try {
       if (!provider) throw new Error("no provider");
+      if (this._sandbox && this.pendingReadyEpoch === startEpoch) {
+        if (await this.finishReady(this._sandbox, startEpoch)) this.publishReady();
+        return;
+      }
+      if (this.createOpts.nestedKubernetes && nestedKubernetesDecision(true, provider.capabilities().nestedKubernetes) !== "allow") {
+        throw new SandboxStartupError(this.createOpts.sessionId ?? "sandbox", NESTED_KUBERNETES_UNSUPPORTED);
+      }
       // Post-provision prep (specProvider seam). Runs once per (sandbox, epoch)
       // AFTER the sandbox reports ready and BEFORE we mark `ready`/flush
       // waiters — no waiter may ever observe an unprepped sandbox (`_sandbox`
@@ -979,11 +1172,24 @@ export class SandboxAttachment {
       if (desired?.image !== undefined && desired.image !== this.createOpts.image) {
         this.createOpts = { ...this.createOpts, image: desired.image };
       }
+      // Workspace claim size travels with the image in one desired snapshot so
+      // the two never diverge (TKAI-538). A fresh claim is created at this size;
+      // an existing claim only grows toward it (a provider with a sized
+      // workspace never shrinks). Persisted so a later recovery keeps it.
+      if (desired?.workspaceStorage !== undefined && desired.workspaceStorage !== this.createOpts.workspaceStorage) {
+        this.createOpts = { ...this.createOpts, workspaceStorage: desired.workspaceStorage };
+      }
       this.persistResources(desired?.resources, desired?.preserveResourceFields);
       const preserveResourceFieldsOnAdopt = desired?.preserveResourceFields ??
-        (desired !== undefined && desired.resources === undefined ? (["cpu", "memory"] as const) : undefined);
+        (desired !== undefined && desired.resources === undefined ? DRIFT_FIELDS : undefined);
+      // A cold attachment (api restart, cache eviction) adopts the live pod
+      // here, not in reconcile. While a lease is active the provider keeps
+      // that pod as is. The change waits for a run-start window after the
+      // last lease releases (spec INV-8).
+      const leased = this.isLeased ? await this.isLeased() : false;
       const sandbox = await provider.create({
         ...this.createOpts,
+        ...(leased ? { preserveLivePod: true } : {}),
         image: bootImage,
         preserveResourcesOnAdopt: desired !== undefined && desired.resources === undefined,
         preserveResourceFieldsOnAdopt,
@@ -1009,7 +1215,7 @@ export class SandboxAttachment {
           // restart. Null forbids a fallback to stale rebuilt create options.
           const fallbackResources = sandbox.resourceOverrides === null
             ? undefined
-            : sandbox.resourceOverrides ?? applied?.resources ??
+            : sandbox.resourceOverrides ?? fileResourcesWithoutScratch(applied) ??
               (sandbox.adopted ? undefined : createResourceOpinion(this.createOpts.resources));
           let resources = effectiveResources(desired, fallbackResources);
           if (resources === undefined && applied === null && sandbox.resourceOverrides !== null) {
@@ -1018,10 +1224,20 @@ export class SandboxAttachment {
               resources = { ...(cpu !== undefined ? { cpu } : {}), ...(memory !== undefined ? { memory } : {}) };
             }
           }
-          if (sandbox.resourceOverrides === null && preserveResourceFieldsOnAdopt?.length === 2) {
+          if (sandbox.resourceOverrides === null && preservesEveryField(preserveResourceFieldsOnAdopt)) {
             // Discard rejected options now so a later no-opinion replacement
             // cannot revive them. Keep any recovered applied opinion instead.
             this.persistResources(resources ?? {});
+          }
+          if (preserveResourceFieldsOnAdopt?.includes("scratch")) {
+            // Keep the live scratch for a later re-create, so a recovery
+            // does not drop /scratch and then replace again to restore it.
+            this.persistScratch(resources?.scratch);
+          }
+          if (leased && sandbox.adopted) {
+            // The kept pod runs its live resources. Record those, not the
+            // desired ones, so the deferred change still reads as drift.
+            resources = applied?.resources;
           }
           const landed = await applyPlan(sandbox, { ...desired, resources }, appliedImage, applied);
           // Cache what the returned sandbox ACTUALLY has applied (spec decision
@@ -1033,7 +1249,12 @@ export class SandboxAttachment {
         } catch (prepErr) {
           // Failed prep does not own adopted storage. Retain it, or release
           // compute non-terminally. An explicit session destroy still wins.
-          if (sandbox.adopted && !this.destroyed) {
+          // A leased pod keeps running: a release would stop its background
+          // process and drop node-local scratch (PR review, finding 5). The
+          // next attach retries the steps on the same pod.
+          if (leased && sandbox.adopted && !this.destroyed) {
+            console.warn(`sandbox ${sandbox.id}: prep failed while leased; the pod is kept for its background work`);
+          } else if (sandbox.adopted && !this.destroyed) {
             await provider.release?.(sandbox.id).catch(() => {});
           } else {
             await provider.destroy(sandbox.id).catch(() => {});
@@ -1049,11 +1270,10 @@ export class SandboxAttachment {
         return;
       }
       this._sandbox = sandbox;
-      this._state = "ready";
-      this.emitStatus();
-      this.flushWaiters();
+      if (await this.finishReady(sandbox, startEpoch)) this.publishReady();
     } catch (err) {
       if (this.destroyed) return;
+      this.recordStartFailure(err, startEpoch, "create");
       this._state = "error";
       this.emitStatus();
       // Waiters are not force-failed here — a slow/failed provision still
@@ -1064,13 +1284,43 @@ export class SandboxAttachment {
       // a `SandboxPreparationError` (the host prep hook rejected) — waiters
       // get the real cause now instead of a generic timeout later.
       if (err instanceof SandboxStartupError || err instanceof SandboxPreparationError) {
+        const attempts = (this.terminalFailure?.attempts ?? 0) + 1;
+        this.terminalFailure = { at: Date.now(), attempts, error: err };
         const waiters = [...this.waiters];
         this.waiters.clear();
         for (const w of waiters) w.reject(err);
       }
     } finally {
       this.inFlight = null;
+      if (this._epoch !== startEpoch) this.kickProvision();
     }
+  }
+
+  private async finishReady(sandbox: Sandbox, epoch: number): Promise<boolean> {
+    this.pendingReadyEpoch = epoch;
+    await this.lifecycle?.afterReady?.(sandbox);
+    if (this.destroyed || this._epoch !== epoch || this._sandbox !== sandbox) return false;
+    this.pendingReadyEpoch = null;
+    return true;
+  }
+
+  /**
+   * The cause was dropped before: waiters timed out with a generic "retry
+   * shortly" and nothing recorded why the start failed. Keep it for the
+   * timeout message and the provision span, and log it once.
+   */
+  private recordStartFailure(err: unknown, epoch: number, phase: "create" | "resume"): void {
+    this.lastStartError = formatSandboxErrorCause(err);
+    if (err instanceof SandboxStartupError) recordSandboxStartupFailure(err.kind);
+    console.error("SandboxAttachment: sandbox start failed", { phase, epoch, ...formatSandboxErrorLog(err) });
+  }
+
+  private publishReady(): void {
+    this.lastStartError = undefined;
+    this.terminalFailure = null;
+    this._state = "ready";
+    this.emitStatus();
+    this.flushWaiters();
   }
 
   /**
@@ -1091,7 +1341,7 @@ export class SandboxAttachment {
       return;
     }
     await provider.updateCreds(sandbox.id, this.createOpts.credsFiles).catch((err) => {
-      console.error(`SandboxAttachment: updateCreds after ${context} failed (non-fatal)`, err);
+      reportError({ area: "sandbox", reason: "update_creds" }, `SandboxAttachment: updateCreds after ${context} failed (non-fatal)`, err);
     });
   }
 
@@ -1117,7 +1367,7 @@ export class SandboxAttachment {
       try {
         cb(status);
       } catch (err) {
-        console.error("SandboxAttachment: onStatus listener threw", err);
+        reportError({ area: "sandbox", reason: "status_listener" }, "SandboxAttachment: onStatus listener threw", err);
       }
     }
   }

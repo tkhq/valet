@@ -50,6 +50,7 @@ const APP_TABLES = [
   "oauth_consent",
   "invites",
   "sandbox_tokens",
+  "admin_audit_events",
   "org_members",
   "agent_sessions",
   "session_threads",
@@ -58,6 +59,7 @@ const APP_TABLES = [
   "team_members",
   "assistants",
   "child_watches",
+  "session_config_invalidations",
   "notifications",
   "user_notification_preferences",
   "event_drop_log",
@@ -441,6 +443,50 @@ describe("pg app schema + migrations", () => {
     await db.query("DELETE FROM security_needs WHERE id = 'need3'");
   });
 
+  it("round-trips security_engagements.credentials_json as JSONB, defaulting null (Part 12)", async () => {
+    const now = Date.now();
+    const credentials = [
+      { label: "adminLogin", kind: "password", env: "ADMIN_PASSWORD", reference: "op://vault/item/password" },
+    ];
+    await db.query(
+      "INSERT INTO security_engagements (id, session_id, status, repo_full_name, plan, credentials_json, created_at, updated_at) VALUES ('eng_cred', 's_cred', 'planning', 'acme/api', '', $2, $1, $1)",
+      [now, JSON.stringify(credentials)],
+    );
+    await db.query(
+      "INSERT INTO security_engagements (id, session_id, status, repo_full_name, plan, created_at, updated_at) VALUES ('eng_nocred', 's_nocred', 'planning', 'acme/api', '', $1, $1)",
+      [now],
+    );
+    const rows = await db.query(
+      "SELECT id, credentials_json FROM security_engagements WHERE id IN ('eng_cred', 'eng_nocred') ORDER BY id",
+    );
+    expect(rows.rows).toEqual([
+      { id: "eng_cred", credentials_json: credentials },
+      { id: "eng_nocred", credentials_json: null },
+    ]);
+    await db.query("DELETE FROM security_engagements WHERE id IN ('eng_cred', 'eng_nocred')");
+  });
+
+  it("stamps security_needs.credential_label on a resolved cred-typed need, defaulting null", async () => {
+    const now = Date.now();
+    await db.query(
+      "INSERT INTO security_needs (id, engagement_id, cell_id, kind, description, status, credential_label, created_at, resolved_at) VALUES ('need_cred', 'eng1', 'cell1', 'credential', 'A staging API token.', 'answered', 'adminLogin', $1, $1)",
+      [now],
+    );
+    const rows = await db.query("SELECT credential_label, resolution FROM security_needs WHERE id = 'need_cred'");
+    expect(rows.rows).toEqual([{ credential_label: "adminLogin", resolution: null }]);
+    await db.query("DELETE FROM security_needs WHERE id = 'need_cred'");
+  });
+
+  it("refuses a resolution on a cred-typed need (CHECK security_needs_credential_resolution_null)", async () => {
+    const now = Date.now();
+    await expect(
+      db.query(
+        "INSERT INTO security_needs (id, engagement_id, cell_id, kind, description, status, resolution, created_at) VALUES ('need_bad', 'eng1', 'cell1', 'credential', 'A staging API token.', 'answered', 'plaintext value leaked here', $1)",
+        [now],
+      ),
+    ).rejects.toThrow(/security_needs_credential_resolution_null|violates check constraint/);
+  });
+
   it("tracks the applied migration in __valet_app_migrations", async () => {
     const result = await db.query("SELECT filename FROM __valet_app_migrations WHERE filename = $1", [
       "0000_app.sql",
@@ -686,6 +732,7 @@ describe("pg app schema + migrations", () => {
         fullName: "acme/widgets",
         cloneUrl: "https://github.com/acme/widgets.git",
         ref: "main",
+        resolvedRef: null,
         auth: "auto",
         position: 0,
         targetDir: null,
@@ -895,6 +942,7 @@ describe("pg app schema + migrations", () => {
   // that database by dropping the columns, then re-run the migrations.
   describe("column repair for in-place 0000 edits", () => {
     const REPAIRED_COLUMNS: Array<{ table: string; column: string }> = [
+      { table: "session_repos", column: "resolved_ref" },
       { table: "image_sources", column: "sandbox_resources" },
       { table: "skill_sources", column: "created_by" },
       { table: "skill_sources", column: "kinds" },
@@ -927,6 +975,8 @@ describe("pg app schema + migrations", () => {
       { table: "security_engagements", column: "config_tools" },
       { table: "security_engagements", column: "authorized_scope" },
       { table: "security_engagements", column: "has_repo_config" },
+      { table: "event_deliveries", column: "destination" },
+      { table: "security_engagements", column: "credentials_json" },
     ];
 
     async function columnExists(table: string, column: string): Promise<boolean> {
@@ -975,6 +1025,52 @@ describe("pg app schema + migrations", () => {
         );
       await mirrored("wf_c");
       await expect(mirrored("wf_d")).rejects.toThrow();
+    });
+
+    it("re-adds the broker's index on a handoff's child session", async () => {
+      const indexExists = async (): Promise<boolean> => {
+        const result = await db.query(
+          "SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND indexname = $1",
+          ["security_handoffs_child_session"],
+        );
+        return result.rows.length > 0;
+      };
+      expect(await indexExists()).toBe(true);
+      await db.query('DROP INDEX "security_handoffs_child_session"');
+      await applyAppMigrations(db);
+      expect(await indexExists()).toBe(true);
+    });
+
+    it("repairs durable session config invalidations on an already-migrated database", async () => {
+      await db.query('DROP TABLE "session_config_invalidations"');
+      expect((await missingSchemaRepairs(db)).map(repair => repair.describe)).toContain("durable session config invalidations");
+      await applyAppMigrations(db);
+      await db.query("INSERT INTO session_config_invalidations (session_id, token) VALUES ($1, $2)", ["stale-session", "token"]);
+      await applyAppMigrations(db);
+      expect((await db.query("SELECT token FROM session_config_invalidations WHERE session_id = $1", ["stale-session"])).rows).toEqual([{ token: "token" }]);
+      expect(await missingSchemaRepairs(db)).toEqual([]);
+    });
+
+    it("repairs the memory usage table on an already-migrated database", async () => {
+      await db.query('DROP TABLE "memory_file_usage"');
+      expect((await missingSchemaRepairs(db)).map(repair => repair.describe)).toContain("memory_file_usage table");
+      await applyAppMigrations(db);
+      await db.query("INSERT INTO memory_file_usage (owner_type, owner_id, path, read_count) VALUES ($1, $2, $3, $4)", ["user", "u1", "notes/a.md", 2]);
+      expect((await db.query("SELECT namespace, read_count, last_read_at FROM memory_file_usage")).rows)
+        .toEqual([{ namespace: "", read_count: 2, last_read_at: null }]);
+      expect(await missingSchemaRepairs(db)).toEqual([]);
+    });
+
+    it("repairs the memory usage start time, set once to the repair time", async () => {
+      await db.query('DROP TABLE "memory_usage_tracking"');
+      expect((await missingSchemaRepairs(db)).map(repair => repair.describe)).toContain("memory_usage_tracking table");
+      const before = Date.now();
+      await applyAppMigrations(db);
+      await applyAppMigrations(db);
+      // One row, however often the repair runs, and set when it first ran.
+      expect((await db.query("SELECT started_at >= $1 AS fresh FROM memory_usage_tracking", [before - 1_000])).rows)
+        .toEqual([{ fresh: true }]);
+      expect(await missingSchemaRepairs(db)).toEqual([]);
     });
 
     it("re-adds columns that predate an already-applied 0000_app.sql", async () => {
@@ -1082,6 +1178,103 @@ describe("pg app schema + migrations", () => {
       expect(await missingSchemaRepairs(db)).toEqual([]);
     });
 
+    it("restores security_needs.credential_label and its CHECK constraint together", async () => {
+      const constraintExists = async (): Promise<boolean> => {
+        const result = await db.query(
+          "SELECT 1 FROM pg_constraint WHERE conname = 'security_needs_credential_resolution_null'",
+        );
+        return result.rows.length > 0;
+      };
+      await db.query('ALTER TABLE "security_needs" DROP CONSTRAINT "security_needs_credential_resolution_null"');
+      await db.query('ALTER TABLE "security_needs" DROP COLUMN "credential_label"');
+      expect(await columnExists("security_needs", "credential_label")).toBe(false);
+      expect(await constraintExists()).toBe(false);
+
+      await applyAppMigrations(db);
+      expect(await columnExists("security_needs", "credential_label")).toBe(true);
+      expect(await constraintExists()).toBe(true);
+      expect(await missingSchemaRepairs(db)).toEqual([]);
+
+      // The restored CHECK enforces on a fresh write.
+      const now = Date.now();
+      await expect(
+        db.query(
+          "INSERT INTO security_needs (id, engagement_id, cell_id, kind, description, status, resolution, created_at) VALUES ('need_repair_check', 'eng1', 'cell1', 'credential', 'A staging API token.', 'answered', 'plaintext value leaked here', $1)",
+          [now],
+        ),
+      ).rejects.toThrow(/security_needs_credential_resolution_null|violates check constraint/);
+    });
+
+    it("nulls a legacy plaintext credential resolution and validates the restored CHECK", async () => {
+      await db.query('ALTER TABLE "security_needs" DROP CONSTRAINT "security_needs_credential_resolution_null"');
+      await db.query(
+        "INSERT INTO security_needs (id, engagement_id, cell_id, kind, description, status, resolution, created_at) VALUES ('need_legacy_plain', 'eng1', 'cell1', 'credential', 'A staging API token.', 'answered', 'plaintext', $1)",
+        [Date.now()],
+      );
+
+      await applyAppMigrations(db);
+
+      const row = await db.query("SELECT resolution FROM security_needs WHERE id = 'need_legacy_plain'");
+      expect(row.rows).toEqual([{ resolution: null }]);
+      const constraint = await db.query(
+        "SELECT convalidated FROM pg_constraint WHERE conname = 'security_needs_credential_resolution_null'",
+      );
+      expect(constraint.rows).toEqual([{ convalidated: true }]);
+      await db.query("UPDATE security_needs SET status = 'open' WHERE id = 'need_legacy_plain'");
+      const updated = await db.query("SELECT status FROM security_needs WHERE id = 'need_legacy_plain'");
+      expect(updated.rows).toEqual([{ status: "open" }]);
+    });
+
+    it("restores the credential CHECK alone when only the constraint is gone", async () => {
+      const constraintExists = async (): Promise<boolean> => {
+        const result = await db.query(
+          "SELECT 1 FROM pg_constraint WHERE conname = 'security_needs_credential_resolution_null'",
+        );
+        return result.rows.length > 0;
+      };
+      await db.query(
+        'ALTER TABLE "security_needs" DROP CONSTRAINT "security_needs_credential_resolution_null"',
+      );
+      expect(await constraintExists()).toBe(false);
+      // The column is still there, so a column probe alone sees nothing wrong.
+      expect(await columnExists("security_needs", "credential_label")).toBe(true);
+
+      const missing = (await missingSchemaRepairs(db)).map((r) => r.describe);
+      expect(missing).toContain("security_needs_credential_resolution_null constraint");
+
+      await applyAppMigrations(db);
+      expect(await constraintExists()).toBe(true);
+      expect(await missingSchemaRepairs(db)).toEqual([]);
+
+      // The restored CHECK enforces on a fresh write.
+      const now = Date.now();
+      await expect(
+        db.query(
+          "INSERT INTO security_needs (id, engagement_id, cell_id, kind, description, status, resolution, created_at) VALUES ('need_check_only', 'eng1', 'cell1', 'credential', 'A staging API token.', 'answered', 'plaintext value leaked here', $1)",
+          [now],
+        ),
+      ).rejects.toThrow(/security_needs_credential_resolution_null|violates check constraint/);
+    });
+
+    it("recreates security_needs whole, then skips the duplicate CHECK", async () => {
+      await db.query('DROP TABLE "security_needs"');
+      const missing = (await missingSchemaRepairs(db)).map((r) => r.describe);
+      // The table create must lead: the column and the constraint both ALTER it.
+      expect(missing.indexOf("security_needs table")).toBeGreaterThanOrEqual(0);
+      expect(missing.indexOf("security_needs table")).toBeLessThan(
+        missing.indexOf("security_needs.credential_label column"),
+      );
+      expect(missing.indexOf("security_needs table")).toBeLessThan(
+        missing.indexOf("security_needs_credential_resolution_null constraint"),
+      );
+
+      // The CREATE TABLE adds the CHECK inline, so the constraint repair that
+      // follows it hits a duplicate and must not fail the boot.
+      await applyAppMigrations(db);
+      expect(await missingSchemaRepairs(db)).toEqual([]);
+      expect(await columnExists("security_needs", "credential_label")).toBe(true);
+    });
+
     it("repairs team proxy attribution on an already migrated database", async () => {
       const current = await db.query("SELECT pg_get_viewdef('cost_entries'::regclass, true) AS def");
       const definition = current.rows[0].def;
@@ -1154,7 +1347,7 @@ describe("pg app schema + migrations", () => {
       // and llm_proxy_requests is ABSENT. The old view does not reference the
       // table, so drop the new view, drop the table, then seed the old view.
       await db.query('DROP VIEW "cost_entries"'); // the new view references the table
-      await db.query('DROP TABLE "llm_proxy_requests"'); // drops its indexes too
+      await db.query('DROP TABLE "llm_proxy_requests" CASCADE'); // drops its indexes too
       await db.query(PRE_432_COST_ENTRIES);
       expect(await columnExists("cost_entries", "use_case")).toBe(false); // old shape
 
@@ -1262,6 +1455,81 @@ describe("pg app schema + migrations", () => {
       expect(row[0]?.role).toBe("member");
       expect(row[0]?.name).toBe("Pg Test User");
       expect(row[0]?.newThreadBehavior).toBe("keep_current");
+    });
+  });
+
+  describe("image pipeline health repairs", () => {
+    const TINI_EPOCH = 1789763460000;
+
+    async function oldShapedDb(): Promise<{ raw: PGlite; db: PgDb }> {
+      const raw = new PGlite();
+      const db = pgDbFromPglite(raw);
+      await applyAppMigrations(db);
+      // Drop the new columns so the repairs have something to do.
+      await raw.query(`ALTER TABLE bakes DROP COLUMN contract_version, DROP COLUMN contract_source, DROP COLUMN parent_bake_id, DROP COLUMN base_image_ref`);
+      await raw.query(`ALTER TABLE image_sources DROP COLUMN health, DROP COLUMN health_reason, DROP COLUMN health_detail, DROP COLUMN health_checked_at`);
+      await raw.query(`ALTER TABLE agent_sessions DROP COLUMN image_fallback`);
+      return { raw, db };
+    }
+
+    async function seedLineage(raw: PGlite): Promise<void> {
+      const src = (id: string, kind: string, parent: string | null) =>
+        raw.query(`INSERT INTO image_sources (id, org_id, kind, parent_id, name, created_at, updated_at) VALUES ($1, 'org', $2, $3, $1, 1, 1)`, [id, kind, parent]);
+      const bake = (id: string, source: string, createdAt: number, status = "pushed") =>
+        raw.query(`INSERT INTO bakes (id, source_id, identity_hash, image_ref, status, created_at) VALUES ($1, $2, '', $1, $3, $4)`, [id, source, status, createdAt]);
+      await src("ext", "external", null);
+      await src("base", "base", "ext");
+      await src("repo", "repo", "base");
+      await src("repo-ext", "repo", "ext");
+      await src("repo-orphan", "repo", "base");
+      await bake("base-old", "base", TINI_EPOCH - 1000);
+      await bake("base-new", "base", TINI_EPOCH + 1000);
+      await bake("base-failed-new", "base", TINI_EPOCH + 5000, "failed");
+      await bake("repo-before", "repo", TINI_EPOCH - 500);   // newest earlier base bake: base-old -> 0
+      await bake("repo-after", "repo", TINI_EPOCH + 2000);   // newest earlier base bake: base-new -> 3
+      await bake("repo-ext-1", "repo-ext", TINI_EPOCH + 9000); // external parent -> 0
+      await bake("repo-orphan-1", "repo-orphan", TINI_EPOCH - 9000); // no base bake at or before -> 0
+      // D7: an override image keeps the lineage version but is tagged override.
+      await raw.query(`INSERT INTO bakes (id, source_id, identity_hash, image_ref, status, created_at, recipe) VALUES ('repo-override', 'repo', '', 'repo-override', 'pushed', $1, '{"recipe":[],"setup":[],"image":"ghcr.io/acme/custom:1"}'::jsonb)`, [TINI_EPOCH - 400]);
+    }
+
+    it("adds the columns and backfills contracts by lineage on an old-shaped database", async () => {
+      const { raw, db } = await oldShapedDb();
+      await seedLineage(raw);
+      expect((await missingSchemaRepairs(db)).map((r) => r.describe)).toEqual(
+        expect.arrayContaining(["bakes contract and lineage columns", "image_sources health columns", "agent_sessions.image_fallback column"]),
+      );
+      await applyAppMigrations(db);
+      expect(await missingSchemaRepairs(db)).toEqual([]);
+      const rows = await raw.query<{ id: string; contract_version: number | null; contract_source: string | null }>(
+        `SELECT id, contract_version, contract_source FROM bakes ORDER BY id`,
+      );
+      expect(Object.fromEntries(rows.rows.map((r) => [r.id, [r.contract_version, r.contract_source]]))).toEqual({
+        "base-old": [0, "missing"],
+        "base-new": [3, "missing"],
+        "base-failed-new": [3, "missing"],
+        "repo-before": [0, "missing"],
+        "repo-after": [3, "missing"],
+        "repo-ext-1": [0, "missing"],
+        "repo-orphan-1": [0, "missing"],
+        "repo-override": [0, "override"],
+      });
+      const health = await raw.query<{ health: string; health_reason: string }>(`SELECT health, health_reason FROM image_sources LIMIT 1`);
+      expect(health.rows[0]).toEqual({ health: "healthy", health_reason: "ok" });
+      await raw.close();
+    });
+
+    it("a fresh database has the same columns and nothing to repair", async () => {
+      const raw = new PGlite();
+      const db = pgDbFromPglite(raw);
+      await applyAppMigrations(db);
+      const pending = (await missingSchemaRepairs(db)).map((r) => r.describe);
+      expect(pending).not.toContain("bakes contract and lineage columns");
+      const cols = await raw.query<{ column_name: string }>(
+        `SELECT column_name FROM information_schema.columns WHERE table_name = 'bakes' AND column_name IN ('contract_version','contract_source','parent_bake_id','base_image_ref')`,
+      );
+      expect(cols.rows.map((c) => c.column_name).sort()).toEqual(["base_image_ref", "contract_source", "contract_version", "parent_bake_id"]);
+      await raw.close();
     });
   });
 });

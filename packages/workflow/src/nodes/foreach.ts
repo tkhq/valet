@@ -109,16 +109,16 @@
 
 import { renderTemplate } from '../dag/expression.js';
 import type { ForeachBodyNode, ForeachNode } from '../dag/nodes.js';
+import { FOREACH_DEFAULT_MAX_ITEMS } from '../dag/validate.js';
 import type { NodeCheckpoint, RunWaitCondition } from '../store.js';
 import { executeLlm } from './llm.js';
-import { executeOrchestrator } from './orchestrator.js';
+import { executeThread } from './thread.js';
 import { executeWorkflowCall } from './workflow-call.js';
 import { executeSession } from './session.js';
 import { executeSet } from './set.js';
 import { executeTool } from './tool.js';
 import { resolveTemplateContext, type NodeExecuteResult, type NodeExecutorArgs } from './index.js';
 
-const DEFAULT_MAX_ITEMS = 100;
 const DEFAULT_CONCURRENCY = 1;
 
 export interface ForeachItemResult {
@@ -160,7 +160,7 @@ export async function executeForeach(args: NodeExecutorArgs<ForeachNode>): Promi
   }
 
   const inputItems: unknown[] = rendered;
-  const maxItems = node.maxItems ?? DEFAULT_MAX_ITEMS;
+  const maxItems = node.maxItems ?? FOREACH_DEFAULT_MAX_ITEMS;
 
   // An unbounded foreach over an oversized array is the silent-data-loss
   // case: the node has no author-chosen bound, so the built-in ceiling is
@@ -303,9 +303,9 @@ export async function executeForeach(args: NodeExecutorArgs<ForeachNode>): Promi
     // fail-mode halt never revisited. Must run BEFORE the placeholder-fill
     // below, which would otherwise erase the "never resolved this pass"
     // signal `results[i] === undefined` relies on. Deduped by
-    // sessionId+threadId; a throw from any single abort must not mask the
+    // sessionId+queueItemId; a throw from any single abort must not mask the
     // failure this executor is about to return.
-    const abortTargets = new Map<string, { sessionId: string; threadId: string }>();
+    const abortTargets = new Map<string, { sessionId: string; threadId: string; queueItemId?: string }>();
     const cancelRunIds = new Set<string>();
     for (const wait of waitingOn) {
       if (wait.kind === 'run') {
@@ -313,7 +313,7 @@ export async function executeForeach(args: NodeExecutorArgs<ForeachNode>): Promi
         continue;
       }
       if (wait.kind !== 'submission') continue;
-      abortTargets.set(`${wait.sessionId}:${wait.threadId}`, { sessionId: wait.sessionId, threadId: wait.threadId });
+      abortTargets.set(`${wait.sessionId}:${wait.queueItemId}`, { sessionId: wait.sessionId, threadId: wait.threadId, queueItemId: wait.queueItemId });
     }
     for (let i = 0; i < items.length; i++) {
       if (results[i] !== undefined) continue; // resolved this pass, or already terminal from an earlier pass
@@ -321,11 +321,11 @@ export async function executeForeach(args: NodeExecutorArgs<ForeachNode>): Promi
       if (cp === undefined || cp.status !== 'intent') continue;
       const target = extractSubmissionTarget(cp);
       if (target === undefined) continue; // no receipt persisted yet (or a non-submission body type)
-      abortTargets.set(`${target.sessionId}:${target.threadId}`, target);
+      abortTargets.set(`${target.sessionId}:${target.queueItemId ?? target.threadId}`, target);
     }
     for (const target of abortTargets.values()) {
       try {
-        await args.engine.abort(target.sessionId, target.threadId);
+        await args.engine.abort(target.sessionId, target.threadId, target.queueItemId);
       } catch {
         // Best-effort: the failure outcome below is authoritative regardless.
       }
@@ -486,7 +486,7 @@ async function invokeBody(body: ForeachBodyNode, argsBase: Omit<NodeExecutorArgs
     case 'session':
       return executeSession({ ...argsBase, node: body });
     case 'orchestrator':
-      return executeOrchestrator({ ...argsBase, node: body });
+      return executeThread({ ...argsBase, node: body });
     case 'workflow':
       return executeWorkflowCall({ ...argsBase, node: body });
   }
@@ -513,14 +513,15 @@ async function loadBodyCheckpoints(
  * receipt persisted this attempt) or belongs to a non-submission body type
  * (`set`/`llm`/`tool`), neither of which has anything to abort.
  */
-function extractSubmissionTarget(cp: NodeCheckpoint): { sessionId: string; threadId: string } | undefined {
+function extractSubmissionTarget(cp: NodeCheckpoint): { sessionId: string; threadId: string; queueItemId?: string } | undefined {
   const effects = cp.effects;
   if (!effects || typeof effects.sessionId !== 'string') return undefined;
   const receipt = effects.receipt;
   if (!receipt || typeof receipt !== 'object') return undefined;
-  const threadId = (receipt as Record<string, unknown>).threadId;
+  const threadId = 'threadId' in receipt ? receipt.threadId : undefined;
   if (typeof threadId !== 'string') return undefined;
-  return { sessionId: effects.sessionId, threadId };
+  const queueItemId = "queueItemId" in receipt && typeof receipt.queueItemId === "string" ? receipt.queueItemId : undefined;
+  return { sessionId: effects.sessionId, threadId, queueItemId };
 }
 
 function itemResultFromTerminalCheckpoint(cp: NodeCheckpoint, onItemError: 'fail' | 'skip' | 'collect'): ForeachItemResult {

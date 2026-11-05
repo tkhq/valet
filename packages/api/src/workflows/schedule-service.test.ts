@@ -1,6 +1,6 @@
 import { PGlite } from "@electric-sql/pglite";
 import { eq } from "drizzle-orm";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildAppDb, buildAppQueryable, applyAppMigrations, type AppDb } from "../lib/drizzle.js";
 import {
   orgMembers,
@@ -11,9 +11,14 @@ import {
   workflowDefinitions,
   workflowSchedules,
 } from "../schema/index.js";
-import { createWorkflowSchedule, deleteWorkflowSchedule, listWorkflowSchedules, nextFireAt } from "./schedule-service.js";
+import { createWorkflowSchedule, deleteWorkflowSchedule, listWorkflowSchedules } from "./schedule-service.js";
+import { nextFireAt } from "./next-fire.js";
 import { scheduledRunId } from "./scheduler.js";
 import { InMemoryCredentialStore } from "@valet/engine";
+import { deleteTeam, lockTeamForOwnership } from "../services/teams.js";
+
+import * as readiness from "./team-service-readiness.js";
+import { reapTeamWorkflows } from "./service.js";
 
 describe("nextFireAt", () => {
   const base = Date.UTC(2026, 0, 15, 12, 30, 0); // 2026-01-15T12:30:00Z (Thursday)
@@ -59,7 +64,15 @@ describe("scheduledRunId", () => {
     const a = scheduledRunId("0a1b2c3d-4e5f-6789-abcd-ef0123456789", 1000);
     expect(a).toBe(scheduledRunId("0a1b2c3d-4e5f-6789-abcd-ef0123456789", 1000));
     expect(a).not.toBe(scheduledRunId("0a1b2c3d-4e5f-6789-abcd-ef0123456789", 2000));
-    expect(a).toMatch(/^wfrun_sch_[a-z0-9]{8}_1000$/);
+    expect(a).toMatch(/^wfrun_sch_[0-9a-f]{14}_1000$/);
+  });
+
+  // Review S5: the run id hashes the whole schedule id, so two proposal
+  // routines never share a run id for one slot.
+  it("gives two proposal routines distinct run ids, as the web prefix reads them", () => {
+    expect(scheduledRunId("proposal-aaa", 1000)).not.toBe(scheduledRunId("proposal-bbb", 1000));
+    // The same example routine-page.test.tsx asserts for scheduleRunPrefix.
+    expect(scheduledRunId("proposal-aaa", 1000)).toBe("wfrun_sch_1a2834f7313832_1000");
   });
 });
 
@@ -98,6 +111,11 @@ describe("createWorkflowSchedule authorization", () => {
       updatedAt: 1_000,
     });
   }
+
+  it("names the fix when a routine has neither a prompt nor a workflow", async () => {
+    const result = await createWorkflowSchedule(armDeps(), { userId: "u-1", orgId: "org-1" }, { name: "empty", cron: "0 * * * *" });
+    expect(result).toEqual({ ok: false, error: "Give the routine a prompt, or pick a workflow for it to run." });
+  });
 
   it("rejects scheduling a workflow owned by a different user in the SAME org", async () => {
     await seedWorkflow("wf_1", "owner-user", "org-1");
@@ -164,6 +182,36 @@ describe("createWorkflowSchedule authorization", () => {
     expect(rows[0]?.ownerType).toBe("team");
     expect(rows[0]?.ownerId).toBe("team_1");
     expect(rows[0]?.ownerId).not.toBe("member-user");
+  });
+
+  it.each([false, true])("rejects schedule creation after readiness when its target is deleted (whole team: %s)", async (wholeTeam) => {
+    await db.insert(teams).values({ id: "team_race", orgId: "org-1", name: "Race team", createdAt: 1_000 });
+    await db.insert(teamMembers).values({ teamId: "team_race", userId: "member-user", role: "member" });
+    await seedWorkflow("wf_race", "team_race");
+    await db.update(workflowDefinitions).set({ ownerType: "team" }).where(eq(workflowDefinitions.id, "wf_race"));
+    const original = readiness.teamArmBlock;
+    const gate = vi.spyOn(readiness, "teamArmBlock").mockImplementationOnce(async (...args) => {
+      const result = await original(...args);
+      if (wholeTeam) {
+        await deleteTeam(db, { teamId: "team_race", reapOwnedWorkflows: (tx) => reapTeamWorkflows(tx, "team_race") });
+      } else {
+        await db.transaction(async (tx) => {
+          await lockTeamForOwnership(tx, "team_race");
+          await reapTeamWorkflows(tx, "team_race");
+        });
+      }
+      return result;
+    });
+    try {
+      const result = await createWorkflowSchedule(
+        armDeps(), { userId: "member-user", orgId: "org-1" },
+        { workflowId: "wf_race", name: "sched", cron: "0 * * * *" },
+      );
+      expect(result.ok).toBe(false);
+      expect(await db.select().from(workflowSchedules)).toHaveLength(0);
+    } finally {
+      gate.mockRestore();
+    }
   });
 
   // An org member READS an org-owned workflow, because an org content source
@@ -234,6 +282,63 @@ describe("createWorkflowSchedule authorization", () => {
     // `scheduler.ts`'s `fire()` bills the definition's owner.
     expect(rows[0]?.ownerType).toBe("user");
     expect(rows[0]?.ownerId).toBe("org-admin");
+  });
+
+  it("creates a team orchestrator schedule only for a current same-org member", async () => {
+    await db.insert(teams).values({ id: "team_prompt", orgId: "org-1", name: "Prompt team", createdAt: 1_000 });
+    await db.insert(teamMembers).values({ teamId: "team_prompt", userId: "member-user", role: "member" });
+
+    const created = await createWorkflowSchedule(
+      armDeps(),
+      { userId: "member-user", orgId: "org-1", principal: { type: "team", id: "team_prompt" }, requireTeamMembership: true },
+      { prompt: "Review work", teamId: "team_prompt", name: "sched", cron: "0 * * * *" },
+    );
+
+    expect(created.ok).toBe(true);
+    expect(await db.select().from(workflowSchedules)).toEqual([
+      expect.objectContaining({ ownerType: "team", ownerId: "team_prompt", targetKind: "assistant" }),
+    ]);
+  });
+
+  it("rejects team orchestrator schedules for nonmembers, deleted teams, cross-org teams, and another team principal", async () => {
+    await db.insert(teams).values([
+      { id: "team_prompt", orgId: "org-1", name: "Prompt team", createdAt: 1_000 },
+      { id: "team_other_org", orgId: "org-2", name: "Other org team", createdAt: 1_000 },
+    ]);
+    await db.insert(teamMembers).values({ teamId: "team_prompt", userId: "former-member", role: "member" });
+    await db.delete(teamMembers).where(eq(teamMembers.userId, "former-member"));
+
+    for (const [teamId, principal] of [
+      ["team_prompt", { type: "team", id: "team_prompt" }],
+      ["deleted_team", { type: "team", id: "deleted_team" }],
+      ["team_other_org", { type: "team", id: "team_other_org" }],
+      ["team_prompt", { type: "team", id: "different_team" }],
+    ] as const) {
+      const result = await createWorkflowSchedule(
+        armDeps(),
+        { userId: "former-member", orgId: "org-1", principal, requireTeamMembership: true },
+        { prompt: "Review work", teamId, name: "sched", cron: "0 * * * *" },
+      );
+      expect(result.ok).toBe(false);
+    }
+    expect(await db.select().from(workflowSchedules)).toHaveLength(0);
+  });
+
+  it("does not leave a team schedule behind when creation races team deletion", async () => {
+    await db.insert(teams).values({ id: "team_race", orgId: "org-1", name: "Race team", createdAt: 1_000 });
+    await db.insert(teamMembers).values({ teamId: "team_race", userId: "member-user", role: "member" });
+
+    await Promise.all([
+      createWorkflowSchedule(
+        armDeps(),
+        { userId: "member-user", orgId: "org-1", principal: { type: "team", id: "team_race" }, requireTeamMembership: true },
+        { prompt: "Review work", teamId: "team_race", name: "sched", cron: "0 * * * *" },
+      ),
+      deleteTeam(db, { teamId: "team_race" }),
+    ]);
+
+    expect(await db.select().from(teams).where(eq(teams.id, "team_race"))).toHaveLength(0);
+    expect(await db.select().from(workflowSchedules).where(eq(workflowSchedules.ownerId, "team_race"))).toHaveLength(0);
   });
 
   it("rejects scheduling a team-owned workflow for a non-member", async () => {

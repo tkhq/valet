@@ -6,6 +6,8 @@
  *   GET   /api/org/directory         → org member + gate on: display identity of every
  *                                      member (no role, no join date) — the teams UI's
  *                                      roster names and add-member picker
+ *   PATCH /api/org/tag-keys/:dimension/:key → org admin: edit a key
+ *   POST  /api/org/tag-keys/:dimension/:key/merge → org admin: merge keys
  *   GET   /api/org/members           → org admin + gate on: member roster
  *   PATCH /api/org/members/:userId   → org admin + gate on: set a member's role
  *
@@ -14,11 +16,13 @@
  * `{error:"organizations not enabled"}` when the gate is off, admin or not
  * (spec: "the gate toggle must always be reachable by admins").
  */
+import { z } from "zod";
+import { RegistryConflict, TagRegistry } from "../tagging/registry.js";
 import { Hono, type Context } from "hono";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
-import { orgs } from "../schema/index.js";
+import { orgMembers, orgs, users } from "../schema/index.js";
 import { ValidationError } from "@valet/shared";
 import {
   getOrgFeatures,
@@ -41,9 +45,23 @@ import {
   setPluginEntitlement,
 } from "../services/plugin-entitlements.js";
 import type { EngineHost } from "../engine/host.js";
+import { requireOrgAdmin as requireSharedOrgAdmin } from "./_org-admin.js";
+import { configMcpDisplayName, configMcpDisplayUrl } from "../plugins/config-mcp.js";
 import type { PluginEntitlementMode } from "@valet/shared";
+import { auditRequest } from "./_admin-audit.js";
+import {
+  ADMIN_AUDIT_PAGE_DEFAULT,
+  ADMIN_AUDIT_PAGE_MAX,
+  diffFields,
+  isAdminAuditTargetType,
+  listAdminAudit,
+  type AdminAuditCursor,
+} from "../services/admin-audit.js";
+import { decodePageCursor, encodePageCursor, readLimit } from "../lib/page-cursor.js";
 import type {
+  ListAdminAuditResponse,
   OrgDirectoryResponse,
+  OrgMcpServersResponse,
   OrgMembersResponse,
   OrgPluginsResponse,
   OrgPluginWire,
@@ -118,6 +136,7 @@ async function loadOrgResponse(
     allowPublicArtifacts: row.allowPublicArtifacts,
     allowAnonymousImageBakes: row.allowAnonymousImageBakes,
     allowPersonalInstallations: row.allowPersonalInstallations,
+    compactionWindowTokens: row.compactionWindowTokens,
     plugins,
     callerRole,
   };
@@ -159,6 +178,14 @@ orgRouter.patch("/", async (c) => {
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
+
+  // Captured for the audit row (services/admin-audit.ts).
+  const beforeRow = (await db.select({ name: orgs.name }).from(orgs).where(eq(orgs.id, user.orgId)).limit(1))[0];
+  const before = {
+    name: beforeRow?.name ?? null,
+    features: await getOrgFeatures(db, user.orgId),
+    ssoTeamGroups: (await getSsoTeamGroups(db, user.orgId)) ?? [],
+  };
 
   const allowed = new Set(["name", "features", "ssoTeamGroups"]);
   const unknownFields = Object.keys(raw).filter((k) => !allowed.has(k));
@@ -229,9 +256,28 @@ orgRouter.patch("/", async (c) => {
 
   const body = await loadOrgResponse(db, engineHost, user.orgId, user.id, "admin");
   if (!body) return c.json({ error: "org not found" }, 404);
+  const changes: Record<string, unknown> = {
+    ...diffFields(before, { name: body.name, ssoTeamGroups: body.ssoTeamGroups }, ["name", "ssoTeamGroups"]),
+    ...prefixed("features.", diffFields(before.features, body.features, ["organizations", "ssoTeamSync"])),
+  };
+  // Single sign-on team sync decides who joins which team at login, so it
+  // audits and alerts as a sign-in policy change.
+  const signInPolicy = "features.ssoTeamSync" in changes || "ssoTeamGroups" in changes;
+  await auditRequest(c, {
+    action: signInPolicy ? "auth_policy.update" : "org.update",
+    targetType: signInPolicy ? "auth_policy" : "org",
+    targetId: user.orgId,
+    targetName: body.name,
+    changes,
+    alert: signInPolicy ? "sign_in_policy_changed" : null,
+  });
   const resp: PatchOrgResponse = body;
   return c.json(resp);
 });
+
+function prefixed(prefix: string, record: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(record).map(([key, value]) => [`${prefix}${key}`, value]));
+}
 
 // ── Directory: gate on, any org member ──────────────────────────────────
 
@@ -312,10 +358,25 @@ orgRouter.patch("/members/:userId", async (c) => {
     return c.json({ error: "role must be 'admin' or 'member'" }, 400);
   }
 
+  const [previous] = await db
+    .select({ role: orgMembers.role, email: users.email })
+    .from(orgMembers)
+    .innerJoin(users, eq(orgMembers.userId, users.id))
+    .where(and(eq(orgMembers.orgId, user.orgId), eq(orgMembers.userId, targetUserId)))
+    .limit(1);
   const result = await setOrgMemberRole(db, user.orgId, targetUserId, body.role);
   if (!result.ok) {
     return c.json({ error: result.error }, result.reason === "not_found" ? 404 : 400);
   }
+  const promoted = body.role === "admin" && previous?.role !== "admin";
+  await auditRequest(c, {
+    action: promoted ? "org_member.grant_admin" : previous?.role === "admin" && body.role !== "admin" ? "org_member.revoke_admin" : "org_member.role_change",
+    targetType: "org_member",
+    targetId: targetUserId,
+    targetName: previous?.email ?? null,
+    changes: { role: { from: previous?.role ?? null, to: body.role } },
+    alert: promoted ? "new_admin" : null,
+  });
 
   const resp: PatchOrgMemberResponse = { ok: true };
   return c.json(resp);
@@ -374,12 +435,20 @@ orgRouter.patch("/plugins/:name", async (c) => {
     return c.json({ error: "teamIds must be a list of team ids, or omit the field." }, 400);
   }
 
+  const previousEntitlement = await getPluginEntitlement(db, user.orgId, name);
   try {
     await setPluginEntitlement(db, user.orgId, name, { mode: body.mode, teamIds });
   } catch (err) {
     if (err instanceof ValidationError) return c.json({ error: err.message }, 400);
     throw err;
   }
+  await auditRequest(c, {
+    action: "plugin.entitlement_update",
+    targetType: "plugin",
+    targetId: name,
+    targetName: plugin.label,
+    changes: { entitlement: { from: previousEntitlement, to: { mode: body.mode, teamIds } } },
+  });
 
   // Return the updated entry in the same shape the visibility block uses.
   const instanceEnabled = engineHost.isPluginLoaded(name);
@@ -395,4 +464,143 @@ orgRouter.patch("/plugins/:name", async (c) => {
     enabledForCaller,
   };
   return c.json(resp);
+});
+
+// ── Config-declared MCP servers ──────────────────────────────────────────
+//
+// `GET /api/org/mcp-servers` → an org admin reads the instance config's
+// `mcpServers` list. Read-only: the operator changes servers in the config
+// file. Not tied to the `organizations` gate, for the same reason as
+// `/plugins`: a single-org deployment still runs these servers, and its
+// first admin joins through an admin invite.
+//
+// Admin only, with the `isOrgAdmin` check that `requireOrgAdmin` uses: the
+// entries are deployment configuration, and the settings UI shows the page
+// to admins only. A user with no `org_members` row keeps its own 403 (as on
+// `/directory`, a session resolves `orgId` without one). The URL goes out
+// as scheme, host, and path only (`configMcpDisplayUrl`), because an
+// operator can put a token in its userinfo or query.
+
+const MCP_SERVERS_ADMIN_ERROR =
+  "Only an organization admin can view MCP servers. To see them, ask an organization admin.";
+
+orgRouter.get("/mcp-servers", async (c) => {
+  const { db, configMcpServers, engineCredentials } = c.var.providers;
+  const user = c.var.user;
+  if (!(await isOrgAdmin(db, user.orgId, user.id))) {
+    const member = await isOrgMember(db, user.orgId, user.id);
+    return c.json({ error: member ? MCP_SERVERS_ADMIN_ERROR : "org membership required" }, 403);
+  }
+  const connected = new Set(
+    (await engineCredentials.list({ type: "user", id: user.id })).map((cred) => cred.service),
+  );
+  const body: OrgMcpServersResponse = {
+    servers: configMcpServers.map((entry) => ({
+      name: entry.name,
+      displayName: configMcpDisplayName(entry),
+      url: configMcpDisplayUrl(entry.url),
+      auth: entry.auth,
+      scopes: entry.scopes ?? [],
+      description: entry.description ?? null,
+      riskLevel: entry.riskLevel ?? "medium",
+      enabled: entry.enabled !== false,
+      connected: entry.auth === "oauth" || entry.auth === "api_key" ? connected.has(entry.name) : null,
+    })),
+  };
+  return c.json(body);
+});
+
+// ── Admin audit log ──────────────────────────────────────────────────────
+//
+// `GET /api/org/audit-log` → an org admin reads the admin configuration
+// changes for the org, newest first (services/admin-audit.ts). Keyset
+// pagination on (createdAt, id); `limit` defaults to 50 and is capped at
+// 200. Optional filters: `targetType`, `actorUserId`. Not tied to the
+// `organizations` gate: a single-org deployment needs the log too. Uses the
+// shared `requireOrgAdmin` (routes/_org-admin.ts), so a team API key gets
+// the same 403 as a member.
+
+function readAuditCursor(raw: string): AdminAuditCursor | undefined {
+  const fields = decodePageCursor(raw);
+  if (!fields || typeof fields.createdAt !== "number" || typeof fields.id !== "string") return undefined;
+  return { createdAt: fields.createdAt, id: fields.id };
+}
+
+orgRouter.get("/audit-log", async (c) => {
+  const forbidden = await requireSharedOrgAdmin(c);
+  if (forbidden) return forbidden;
+  const { db } = c.var.providers;
+
+  const limit = readLimit(c.req.query("limit"), ADMIN_AUDIT_PAGE_DEFAULT, ADMIN_AUDIT_PAGE_MAX);
+  if (limit === undefined) {
+    return c.json({ error: `limit must be a whole number from 1 to ${ADMIN_AUDIT_PAGE_MAX}. Remove it to use ${ADMIN_AUDIT_PAGE_DEFAULT}.` }, 400);
+  }
+  const rawCursor = c.req.query("cursor");
+  const cursor = rawCursor ? readAuditCursor(rawCursor) : undefined;
+  if (rawCursor && !cursor) {
+    return c.json({ error: "The cursor is not valid. Load the audit log again from the first page." }, 400);
+  }
+  const targetType = c.req.query("targetType") || undefined;
+  if (targetType !== undefined && !isAdminAuditTargetType(targetType)) {
+    return c.json({ error: `Unknown targetType '${targetType}'. Remove the filter or use a listed target type.` }, 400);
+  }
+  const actorUserId = c.req.query("actorUserId") || undefined;
+
+  const page = await listAdminAudit(db, {
+    orgId: c.var.user.orgId,
+    limit,
+    ...(cursor ? { cursor } : {}),
+    ...(targetType ? { targetType } : {}),
+    ...(actorUserId ? { actorUserId } : {}),
+  });
+  const body: ListAdminAuditResponse = {
+    events: page.rows.map((row) => ({
+      id: row.id,
+      createdAt: row.createdAt,
+      actorUserId: row.actorUserId,
+      actorEmail: row.actorEmail,
+      action: row.action,
+      targetType: row.targetType,
+      targetId: row.targetId,
+      targetName: row.targetName,
+      changes: row.changes ?? null,
+      ip: row.ip,
+      userAgent: row.userAgent,
+    })),
+    nextCursor: page.next ? encodePageCursor({ createdAt: page.next.createdAt, id: page.next.id }) : null,
+  };
+  c.header("Cache-Control", "no-store");
+  return c.json(body);
+});
+
+const tagKeyEdit = z.object({ label: z.string().trim().min(1).max(60), definition: z.string().trim().min(1).max(200) });
+const tagKeyMerge = z.object({ into: z.string().regex(/^[a-z][a-z0-9_]{0,31}$/) });
+
+// Uses the same org-settings gate as provider and entitlement changes.
+orgRouter.patch("/tag-keys/:dimension/:key", async c => {
+  const forbidden = await requireOrgAdmin(c);
+  if (forbidden) return forbidden;
+  const parsed = tagKeyEdit.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success || c.req.param("dimension") !== "tool_intent") return c.json({ error: "Choose the tool_intent dimension and provide a label and definition." }, 400);
+  try {
+    await new TagRegistry(c.var.providers.db, c.var.user.orgId).edit(c.req.param("dimension"), c.req.param("key"), parsed.data);
+    return c.json({ ok: true });
+  } catch (error) {
+    if (error instanceof RegistryConflict) return c.json({ error: error.message }, 409);
+    throw error;
+  }
+});
+
+orgRouter.post("/tag-keys/:dimension/:key/merge", async c => {
+  const forbidden = await requireOrgAdmin(c);
+  if (forbidden) return forbidden;
+  const parsed = tagKeyMerge.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success || c.req.param("dimension") !== "tool_intent") return c.json({ error: "Choose the tool_intent dimension and provide a destination key." }, 400);
+  try {
+    await new TagRegistry(c.var.providers.db, c.var.user.orgId).merge(c.req.param("dimension"), c.req.param("key"), parsed.data.into);
+    return c.json({ ok: true });
+  } catch (error) {
+    if (error instanceof RegistryConflict) return c.json({ error: error.message }, 409);
+    throw error;
+  }
 });

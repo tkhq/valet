@@ -22,7 +22,7 @@
  * further changes needed here.
  */
 import { spawnSync } from "node:child_process";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import * as k8s from "@kubernetes/client-node";
 import { RANCHER_DESKTOP_CONTEXT, batchJobsApiAdapter, loadRancherDesktopKubeConfig } from "@valet/sandbox-kubernetes";
 import { KubernetesImageBuilder } from "./k8s-builder.js";
@@ -45,14 +45,18 @@ function registryPresent(): boolean {
 // Also skip in CI: this needs a live rancher-desktop k8s cluster + kubectl
 // context, which the GitHub runner does not have (`CI` = GitHub Actions).
 describe.skipIf(!registryPresent() || !!process.env.CI)("KubernetesImageBuilder (live rancher-desktop, bundled registry)", () => {
-  const kc = loadRancherDesktopKubeConfig(k8s.KubeConfig);
-  const jobsApi = batchJobsApiAdapter(kc.makeApiClient(k8s.BatchV1Api), kc.makeApiClient(k8s.CoreV1Api));
-  const builder = new KubernetesImageBuilder({
-    jobsApi,
-    namespace: NAMESPACE,
-    registryInsecure: true,
-  });
+  let builder: KubernetesImageBuilder;
   let buildId: string | undefined;
+
+  beforeAll(() => {
+    const kc = loadRancherDesktopKubeConfig(k8s.KubeConfig);
+    const jobsApi = batchJobsApiAdapter(kc.makeApiClient(k8s.BatchV1Api), kc.makeApiClient(k8s.CoreV1Api));
+    builder = new KubernetesImageBuilder({
+      jobsApi,
+      namespace: NAMESPACE,
+      registryInsecure: true,
+    });
+  });
 
   afterAll(async () => {
     if (buildId) await builder.cancel(buildId).catch(() => {});
@@ -63,10 +67,10 @@ describe.skipIf(!registryPresent() || !!process.env.CI)("KubernetesImageBuilder 
     async () => {
       const spec: PrebuildSpec = {
         configId: "cluster-smoke",
-        prebuildId: "pb-cluster-smoke",
+        prebuildId: `pb-cluster-smoke-${Date.now()}`,
         cloneUrl: "https://github.com/octocat/Hello-World.git",
         commitSha: "7fd1a60b01f91b314f59955a4e4d4e80d8edf11",
-        baseImage: "alpine:3",
+        baseImage: "alpine/git:2.47.2",
         recipe: [],
         imageRef: "valet-registry:5000/octocat-hello-world:cluster-smoke",
       };
@@ -83,9 +87,9 @@ describe.skipIf(!registryPresent() || !!process.env.CI)("KubernetesImageBuilder 
         status = await builder.status(buildId);
       }
 
-      expect(["pushed", "failed"]).toContain(status.state);
-      // Whichever terminal state, the secret/configmap cleanup must have
-      // run — verified indirectly: a second status() call still resolves
+      expect(status.state, JSON.stringify(status)).toBe("pushed");
+      // Successful completion runs secret/configmap cleanup. A second
+      // status() call must still resolve
       // without throwing (the Job itself is left standing until cancel()).
       await expect(builder.status(buildId)).resolves.toBeDefined();
     },

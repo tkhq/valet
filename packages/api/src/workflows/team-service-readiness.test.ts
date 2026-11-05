@@ -9,6 +9,7 @@ import type { WorkflowDefinition } from "@valet/workflow";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { githubInstallations, teamMembers, workflowDefinitions } from "../schema/index.js";
+import { shareCredential } from "../services/credential-shares.js";
 import { saveAppConfig, type GithubAppConfig } from "../services/github-app.js";
 import { OnePasswordAuthError, type OnePasswordCtx, type OnePasswordScope, type OnePasswordService } from "../services/onepassword.js";
 import { teamArmRefusals, teamServiceReadiness } from "./team-service-readiness.js";
@@ -122,7 +123,7 @@ describe("teamServiceReadiness", () => {
   });
 
   function deps(plugins: ValetPlugin[] = [gmailPlugin, slackOrgPlugin, githubPlugin]) {
-    return { db, credentials, plugins, env: {} as NodeJS.ProcessEnv };
+    return { db, credentials, plugins, env: {} };
   }
 
   it("treats a direct team credential as ready", async () => {
@@ -152,10 +153,7 @@ describe("teamServiceReadiness", () => {
         accessToken: "mine",
       });
     }
-    await credentials.save({ type: "team", id: TEAM }, "gmail", {
-      type: "oauth2",
-      metadata: { delegatedFrom: "u-1" },
-    });
+    await shareCredential(db, { teamId: TEAM, service: "gmail", userId: "u-1", createdAt: 1 });
   }
 
   const BROKEN_REASON =
@@ -175,10 +173,8 @@ describe("teamServiceReadiness", () => {
     expect(result.blocked).toEqual([]);
   });
 
-  // The team's list still shows the row after the delegator leaves, but a
-  // run following it throws `CredentialReferenceBrokenError`. Readiness
-  // must give the answer the run gets.
-  it("blocks a delegated reference whose delegator left the team", async () => {
+  // A run never uses the account of someone who left the team.
+  it("blocks a share whose member left the team", async () => {
     await delegateGmail({ member: false, source: true });
 
     const result = await teamServiceReadiness(deps(), {
@@ -188,7 +184,38 @@ describe("teamServiceReadiness", () => {
     });
 
     expect(result.ready).toEqual([]);
-    expect(result.blocked).toEqual([{ service: "gmail", reason: BROKEN_REASON }]);
+    expect(result.blocked.map((b) => b.service)).toEqual(["gmail"]);
+  });
+
+  // The run no longer stops at a broken team row when the organization
+  // provides the service: `resolveTeamCredentialRead` falls through to the
+  // org row. Readiness has to give the run's answer, or the team's
+  // workflows stay disarmed while every run of them succeeds.
+  it("stays ready on a broken delegation the organization credential covers", async () => {
+    await credentials.save({ type: "org", id: ORG }, "slack", {
+      type: "bot_token",
+      accessToken: "org-slack",
+    });
+    await db.insert(teamMembers).values({ teamId: TEAM, userId: "u-1", role: "member" });
+    await shareCredential(db, { teamId: TEAM, service: "slack", userId: "u-1", createdAt: 1 });
+
+    const result = await teamServiceReadiness(deps(), {
+      orgId: ORG,
+      teamId: TEAM,
+      definition: toolDefinition("slack"),
+    });
+
+    expect(result.ready).toEqual(["slack"]);
+    expect(result.blocked).toEqual([]);
+    expect(teamArmRefusals(result)).toEqual([]);
+    expect(result.warnings).toEqual([
+      {
+        service: "slack",
+        reason:
+          "slack was shared by a member who is no longer on the team, or whose connection is gone. " +
+          "Runs use the organization credential instead. Remove the team credential, or share it again.",
+      },
+    ]);
   });
 
   it("blocks a delegated reference whose source credential is gone", async () => {
@@ -766,5 +793,98 @@ describe("teamServiceReadiness", () => {
 
     expect(teamArmRefusals(result).map((r) => r.service)).toEqual(["linear", undefined]);
     expect(teamArmRefusals(result)).toHaveLength(2);
+  });
+});
+
+// Native credential policy, Part E item 2: an `app` node of a native
+// service is checked through that service's app credential.
+describe("teamServiceReadiness: native app identities", () => {
+  let db: AppDb;
+  let credentials: InMemoryCredentialStore;
+
+  const nativeLinear: ValetPlugin = { ...linearPlugin, native: true, appCredentialService: "linear:app" };
+  const nativeSlack: ValetPlugin = { ...slackOrgPlugin, native: true, appCredentialService: "slack" };
+  const linearAppRow = {
+    type: "oauth2" as const,
+    accessToken: "lin-app-token",
+    metadata: { grant: "client_credentials", webhookSecret: "hook" },
+  };
+
+  beforeEach(async () => {
+    ({ appDb: db } = await freshTestPgDb());
+    credentials = new InMemoryCredentialStore();
+  });
+
+  function deps(plugins: ValetPlugin[] = [nativeLinear, nativeSlack, gmailPlugin, githubPlugin]) {
+    return { db, credentials, plugins, env: {} };
+  }
+
+  it("an app node of Linear is ready when the Linear app is connected", async () => {
+    await credentials.save({ type: "org", id: ORG }, "linear", linearAppRow);
+    const result = await teamServiceReadiness(deps(), { orgId: ORG, teamId: TEAM, definition: toolDefinition("linear", "app") });
+    expect(result.ready).toEqual(["linear"]);
+    expect(result.organizationProvided).toEqual(["linear"]);
+    expect(result.blocked).toEqual([]);
+  });
+
+  it("an app node of Linear is blocked with the fix when the Linear app is not connected", async () => {
+    const result = await teamServiceReadiness(deps(), { orgId: ORG, teamId: TEAM, definition: toolDefinition("linear", "app") });
+    expect(result.ready).toEqual([]);
+    expect(result.blocked).toEqual([{ service: "linear", reason: expect.stringContaining("Settings → Organization") }]);
+    expect(result.blocked[0]?.reason).not.toContain("GitHub");
+  });
+
+  it("an app node of Slack is ready on the org bot row", async () => {
+    await credentials.save({ type: "org", id: ORG }, "slack", { type: "bot_token", accessToken: "xoxb-org" });
+    const result = await teamServiceReadiness(deps(), { orgId: ORG, teamId: TEAM, definition: toolDefinition("slack", "app") });
+    expect(result.ready).toEqual(["slack"]);
+    expect(result.blocked).toEqual([]);
+  });
+
+  it("an auto Linear node is ready on the app token when the team holds no Linear credential", async () => {
+    await credentials.save({ type: "org", id: ORG }, "linear", linearAppRow);
+    const result = await teamServiceReadiness(deps(), { orgId: ORG, teamId: TEAM, definition: toolDefinition("linear") });
+    expect(result.ready).toEqual(["linear"]);
+    expect(result.blocked).toEqual([]);
+  });
+
+  it("a user Linear node stays blocked on the app token alone", async () => {
+    await credentials.save({ type: "org", id: ORG }, "linear", linearAppRow);
+    const result = await teamServiceReadiness(deps(), { orgId: ORG, teamId: TEAM, definition: toolDefinition("linear", "user") });
+    expect(result.ready).toEqual([]);
+    expect(result.blocked.map((b) => b.service)).toEqual(["linear"]);
+  });
+
+  it("a user Slack node is blocked on the org bot row alone, naming the fix", async () => {
+    await credentials.save({ type: "org", id: ORG }, "slack", { type: "bot_token", accessToken: "xoxb-org" });
+    const result = await teamServiceReadiness(deps(), { orgId: ORG, teamId: TEAM, definition: toolDefinition("slack", "user") });
+    expect(result.ready).toEqual([]);
+    expect(result.organizationProvided).toBeUndefined();
+    expect(result.blocked).toEqual([{
+      service: "slack",
+      reason:
+        'This workflow has slack nodes that use the "user" credential, and this team has no slack credential of a person. ' +
+        "The organization slack connection is the app identity, so it does not count. " +
+        "Connect a slack credential for the team, or remove the credential field from those nodes.",
+    }]);
+
+    await credentials.save({ type: "team", id: TEAM }, "slack", { type: "bot_token", accessToken: "xoxb-team" });
+    const withTeamRow = await teamServiceReadiness(deps(), { orgId: ORG, teamId: TEAM, definition: toolDefinition("slack", "user") });
+    expect(withTeamRow.ready).toEqual(["slack"]);
+  });
+
+  it("a broken Linear share is ready on the app token, with a warning to repair it", async () => {
+    await credentials.save({ type: "org", id: ORG }, "linear", linearAppRow);
+    await db.insert(teamMembers).values({ teamId: TEAM, userId: "u-1", role: "member" });
+    await credentials.save({ type: "user", id: "u-1" }, "linear", { type: "oauth2", accessToken: "expired", expiresAt: 1 });
+    await shareCredential(db, { teamId: TEAM, service: "linear", userId: "u-1", createdAt: 1 });
+    const result = await teamServiceReadiness(deps(), { orgId: ORG, teamId: TEAM, definition: toolDefinition("linear") });
+    expect(result.ready).toEqual(["linear"]);
+    expect(result.warnings).toEqual([{ service: "linear", reason: expect.stringContaining("Share it again") }]);
+  });
+
+  it("an app node of a non-native service is blocked with the invoker's refusal", async () => {
+    const result = await teamServiceReadiness(deps(), { orgId: ORG, teamId: TEAM, definition: toolDefinition("gmail", "app") });
+    expect(result.blocked).toEqual([{ service: "gmail", reason: expect.stringContaining("Remove the credential field") }]);
   });
 });

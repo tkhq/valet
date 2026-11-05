@@ -136,6 +136,25 @@ describe("parseEvalCase", () => {
     ).toThrow(/exactly one/);
   });
 
+  it("reads context_budget_tokens and min_compactions", () => {
+    const c = parseEvalCase(
+      { ...minimal, context_budget_tokens: 9000, checks: [{ type: "min_compactions", value: 1 }] },
+      "t.yaml",
+    );
+    expect(c.context_budget_tokens).toBe(9000);
+    expect(c.checks).toEqual([{ type: "min_compactions", value: 1 }]);
+  });
+
+  it("rejects a context_budget_tokens that is not a positive integer, or a product-driven one", () => {
+    expect(() => parseEvalCase({ ...minimal, context_budget_tokens: 0 }, "t.yaml")).toThrow(/positive integer/);
+    expect(() =>
+      parseEvalCase(
+        { ...minimal, session_type: "orchestrator", drive: "product", context_budget_tokens: 9000 },
+        "t.yaml",
+      ),
+    ).toThrow(/drive: engine/);
+  });
+
   it("rejects max_turns without a numeric value", () => {
     expect(() =>
       parseEvalCase({ ...minimal, checks: [{ type: "max_turns", value: "three" }] }, "t.yaml"),

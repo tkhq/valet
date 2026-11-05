@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { V1Pod } from "@kubernetes/client-node";
-import { SANDBOX_CONTAINER_NAME, SANDBOX_CR_API_VERSION, buildSandboxManifest } from "../src/index.js";
+import { SANDBOX_CONTAINER_NAME, SANDBOX_CR_API_VERSION, buildSandboxManifest, startupKindOf } from "../src/index.js";
 import type { K8sProviderConfig, SandboxCondition, SandboxCR, SandboxCRRead } from "../src/index.js";
 import {
   SANDBOX_KIND,
@@ -16,8 +16,10 @@ import {
   mapConditionsToStatus,
   parseSandboxCRRead,
   podStatusApiAdapter,
+  podTemplateResourceFingerprint,
   resolvePodName,
   resourceFingerprint,
+  sandboxCpuMemoryResources,
   sandboxStatus,
   setOperatingMode,
   resumeWithPersistentHomes,
@@ -171,7 +173,7 @@ class FakeCustomObjectsApi implements SandboxCustomObjectsApi {
 
 interface FakePod {
   name: string;
-  ownerReferences?: { kind: string; name: string; controller?: boolean }[];
+  ownerReferences?: { kind: string; name: string; uid?: string; controller?: boolean }[];
 }
 
 class FakePodsApi implements SandboxPodsApi {
@@ -179,6 +181,10 @@ class FakePodsApi implements SandboxPodsApi {
 
   async listNamespacedPod(_params: ListPodsParams): Promise<{ items: FakePod[] }> {
     return { items: this.pods };
+  }
+
+  async patchNamespacedPod(_params: { name: string; namespace: string; body: unknown }): Promise<unknown> {
+    throw new Error("FakePodsApi.patchNamespacedPod not implemented for this test");
   }
 }
 
@@ -293,6 +299,47 @@ describe("init container startup classification", () => {
 });
 
 describe("classifyPodFailure (pure)", () => {
+  it("treats the controller's ownership condition as still provisioning, not terminal", () => {
+    const pod: PodStatusInfo = { phase: "Pending", containerStatuses: [] };
+    const ready: SandboxCondition = {
+      type: "Ready", status: "False", reason: "PodFailed",
+      message: 'Error seen: PVC "workspace-a" is owned by Sandbox/a (UID: 8f3311cf), not by sandbox "a"',
+    };
+    expect(classifyPodFailure(pod, ready)).toBeNull();
+  });
+
+  it("still reports other PodFailed conditions as terminal", () => {
+    const pod: PodStatusInfo = { phase: "Pending", containerStatuses: [] };
+    const ready: SandboxCondition = { type: "Ready", status: "False", reason: "PodFailed", message: "node lost" };
+    expect(classifyPodFailure(pod, ready)).toBe("pod failed: node lost");
+  });
+
+  it("appends the last termination exit code and message to a crash loop", () => {
+    const pod: PodStatusInfo = {
+      phase: "Running",
+      containerStatuses: [{
+        name: "sandbox", image: "img", waitingReason: "CrashLoopBackOff",
+        lastTerminated: { exitCode: 127, reason: "Error", message: "valet-home-start: 14: exec: /usr/bin/tini: not found\n" },
+      }],
+    };
+    expect(classifyPodFailure(pod)).toBe(
+      "container crash-looping (CrashLoopBackOff): exit 127: valet-home-start: 14: exec: /usr/bin/tini: not found",
+    );
+  });
+
+  it("falls back to the termination reason when the message is empty", () => {
+    const pod: PodStatusInfo = {
+      phase: "Running",
+      containerStatuses: [{ name: "sandbox", waitingReason: "CrashLoopBackOff", lastTerminated: { exitCode: 1, reason: "Error" } }],
+    };
+    expect(classifyPodFailure(pod)).toBe("container crash-looping (CrashLoopBackOff): exit 1: Error");
+  });
+
+  it("keeps the bare crash-loop text when there is no termination record", () => {
+    const pod: PodStatusInfo = { phase: "Running", containerStatuses: [{ name: "sandbox", waitingReason: "CrashLoopBackOff" }] };
+    expect(classifyPodFailure(pod)).toBe("container crash-looping (CrashLoopBackOff)");
+  });
+
   it("returns null when the pod is absent (still provisioning, not error)", () => {
     expect(classifyPodFailure(null)).toBeNull();
   });
@@ -369,6 +416,17 @@ describe("classifyPodFailure (pure)", () => {
       expect(classifyPodFailure(pod)).toBeNull();
     },
   );
+
+  it.each([
+    '0/1 nodes are available: persistentvolumeclaim "workspace-contract" not found.',
+    "0/1 nodes are available: pod has unbound immediate PersistentVolumeClaims.",
+  ])("keeps transient workspace PVC scheduling on the Pending path: %s", (message) => {
+    const pod: PodStatusInfo = {
+      phase: "Pending",
+      conditions: [{ type: "PodScheduled", status: "False", reason: "Unschedulable", message }],
+    };
+    expect(classifyPodFailure(pod)).toBeNull();
+  });
 
   it.each([
     "0/3 nodes had untolerated taint {dedicated: platform}",
@@ -749,6 +807,239 @@ describe("applySandbox", () => {
   });
 });
 
+describe("podStatusApiAdapter pod age and events (fix wave 2, B5)", () => {
+  it("carries lastState.terminated through the pod adapter", async () => {
+    const adapter = podStatusApiAdapter({
+      readNamespacedPod: async (): Promise<V1Pod> => ({
+        spec: { containers: [{ name: "sandbox", image: "sandbox:v1" }] },
+        status: {
+          phase: "Running",
+          containerStatuses: [{ name: "sandbox", image: "sandbox:v1", imageID: "", ready: false, restartCount: 3,
+            state: { waiting: { reason: "CrashLoopBackOff" } },
+            lastState: { terminated: { exitCode: 127, reason: "Error", message: "boom\n" } } }],
+        },
+      }),
+    });
+    const pod = await adapter.getPodStatus("ns", "pod");
+    expect(pod?.containerStatuses?.[0]?.lastTerminated).toEqual({ exitCode: 127, reason: "Error", message: "boom\n" });
+  });
+
+  it("reports the pod's creation time, ephemeral request, and events", async () => {
+    let selector: string | undefined;
+    const adapter = podStatusApiAdapter({
+      readNamespacedPod: async (): Promise<V1Pod> => ({
+        metadata: { creationTimestamp: new Date("2026-09-07T12:00:00.000Z") },
+        spec: { containers: [{ name: "sandbox", image: "image:v1", resources: { requests: { "ephemeral-storage": "802Gi" } } }] },
+        status: { phase: "Pending" },
+      }),
+      listNamespacedEvent: async (params) => {
+        selector = params.fieldSelector;
+        return { items: [{
+          metadata: {}, involvedObject: {}, reason: "TriggeredScaleUp", message: "scale-up",
+          lastTimestamp: new Date("2026-09-07T12:01:00.000Z"),
+        }] };
+      },
+    });
+
+    const status = await adapter.getPodStatus("ns", "pod-1");
+    expect(status?.createdAt).toBe("2026-09-07T12:00:00.000Z");
+    expect(status?.ephemeralStorageRequest).toBe("802Gi");
+    expect(await adapter.listPodEvents?.("ns", "pod-1")).toEqual([
+      { reason: "TriggeredScaleUp", message: "scale-up", timestamp: Date.parse("2026-09-07T12:01:00.000Z") },
+    ]);
+    expect(selector).toBe("involvedObject.kind=Pod,involvedObject.name=pod-1");
+  });
+
+  it("has no event reader without listNamespacedEvent", () => {
+    const adapter = podStatusApiAdapter({ readNamespacedPod: async (): Promise<V1Pod> => ({}) });
+    expect(adapter.listPodEvents).toBeUndefined();
+  });
+});
+
+describe("resourceFingerprint back-compat (fix wave 2, B4)", () => {
+  // Pinned from the pre-scratch logic at af3863503. A CR without scratch
+  // must keep its hash byte for byte, or every pod rolls on upgrade.
+  it("keeps the pre-scratch hash when scratch is absent", () => {
+    expect(resourceFingerprint({})).toBe("6cd8cec706fa11110d83fb46f97df1f9be43b4c570f3390e7c7f6a5173f595e6");
+    expect(resourceFingerprint({ requests: { cpu: "2", memory: "4Gi" }, limits: { cpu: "4", memory: "8Gi" } }))
+      .toBe("a1603f93418807f47e8b2740d242a5ed92ccf32b184384b6514de99117f23e3a");
+  });
+
+  it("changes the hash when scratch is set or resized", () => {
+    expect(resourceFingerprint({ scratch: "100Gi" })).not.toBe(resourceFingerprint({}));
+    expect(resourceFingerprint({ scratch: "100Gi" })).not.toBe(resourceFingerprint({ scratch: "200Gi" }));
+    expect(resourceFingerprint({ scratch: "1Ti" })).toBe(resourceFingerprint({ scratch: "1024Gi" }));
+  });
+});
+
+describe("applySandbox scratch preservation (fix wave 2, B3)", () => {
+  const ALL_FIELDS = ["cpu", "memory", "scratch"] as const;
+  const scratchCfg: K8sProviderConfig = {
+    ...cfg, defaultResources: { ephemeralStorage: "2Gi", ephemeralStorageLimit: "30Gi" },
+  };
+
+  it.each([{ fields: ALL_FIELDS }, { fields: ["scratch", "memory", "cpu"] as const }])("a no-opinion adopt $fields keeps the old fingerprint", async ({ fields }) => {
+    const api = new FakeCustomObjectsApi();
+    const live = buildSandboxManifest(cfg, "sess-adopt", { resources: { cpu: 2, memory: "4Gi" } });
+    const seeded = toCRRead(live);
+    const liveTemplate = structuredClone(live.spec.podTemplate);
+    liveTemplate.metadata = { ...liveTemplate.metadata, annotations: { "valet.dev/resource-fingerprint": "live-generation" } };
+    seeded.spec = { ...seeded.spec, podTemplate: liveTemplate };
+    api.seed(seeded);
+    const incoming = buildSandboxManifest(cfg, "sess-adopt", { resources: { cpu: 4, memory: "8Gi" } });
+
+    const result = await applySandbox(api, cfg, incoming, { preserveResourceFieldsOnAdopt: fields });
+
+    const template = api.get("sess-adopt")?.spec.podTemplate;
+    expect(podTemplateResourceFingerprint(template)).toBe("live-generation");
+    const container = sandboxCpuMemoryResources(template);
+    expect(container.requests).toEqual({ cpu: "2", memory: "4Gi" });
+    expect(result.adopted).toBe(true);
+  });
+
+  it("a legacy no-opinion adopt stays fingerprint-free (no migration roll)", async () => {
+    const api = new FakeCustomObjectsApi();
+    api.seed(toCRRead(buildSandboxManifest(cfg, "sess-legacy", {})));
+    const incoming = buildSandboxManifest(cfg, "sess-legacy", { resources: { cpu: 4 } });
+
+    await applySandbox(api, cfg, incoming, { preserveResourceFieldsOnAdopt: ALL_FIELDS });
+
+    expect(podTemplateResourceFingerprint(api.get("sess-legacy")?.spec.podTemplate)).toBeUndefined();
+  });
+
+  it("an adopt after a YAML read failure keeps the live scratch volume, mount, TMPDIR, and sums", async () => {
+    const api = new FakeCustomObjectsApi();
+    const live = buildSandboxManifest(scratchCfg, "sess-scratch", { resources: { scratch: "800Gi" } });
+    api.seed(toCRRead(live));
+    // The repository read failed: the incoming manifest has no scratch.
+    const incoming = buildSandboxManifest(scratchCfg, "sess-scratch", {});
+
+    await applySandbox(api, scratchCfg, incoming, { preserveResourceFieldsOnAdopt: ALL_FIELDS });
+
+    const stored = api.get("sess-scratch")?.spec.podTemplate;
+    expect(sandboxCpuMemoryResources(stored).scratch).toBe("800Gi");
+    const liveSpec = live.spec.podTemplate.spec;
+    expect(JSON.stringify(stored)).toContain('{"name":"scratch","emptyDir":{"sizeLimit":"800Gi"}}');
+    const storedContainer = parseContainer(stored);
+    const liveContainer = liveSpec.containers.find((c) => c.name === SANDBOX_CONTAINER_NAME);
+    expect(storedContainer.volumeMounts).toEqual(liveContainer?.volumeMounts);
+    expect(storedContainer.env).toContainEqual({ name: "TMPDIR", value: "/scratch/tmp" });
+    expect(storedContainer.resources).toEqual(liveContainer?.resources);
+    expect(storedContainer.command).toEqual(liveContainer?.command);
+    expect(parseInitNames(stored)).toEqual(liveSpec.initContainers?.map((c) => c.name));
+  });
+
+  it("a no-opinion adopt does not add scratch the live pod lacks", async () => {
+    const api = new FakeCustomObjectsApi();
+    const live = buildSandboxManifest(scratchCfg, "sess-none", {});
+    api.seed(toCRRead(live));
+    const incoming = buildSandboxManifest(scratchCfg, "sess-none", { resources: { scratch: "100Gi" } });
+
+    await applySandbox(api, scratchCfg, incoming, { preserveResourceFieldsOnAdopt: ALL_FIELDS });
+
+    const stored = api.get("sess-none")?.spec.podTemplate;
+    expect(JSON.stringify(stored)).not.toContain("scratch");
+    expect(parseContainer(stored).resources).toEqual(
+      live.spec.podTemplate.spec.containers.find((c) => c.name === SANDBOX_CONTAINER_NAME)?.resources,
+    );
+  });
+
+  it("an authoritative scratch with preserved cpu/memory applies the incoming scratch and a new fingerprint", async () => {
+    const api = new FakeCustomObjectsApi();
+    api.seed(toCRRead(buildSandboxManifest(scratchCfg, "sess-auth", { resources: { cpu: 2 } })));
+    const incoming = buildSandboxManifest(scratchCfg, "sess-auth", { resources: { cpu: 4, scratch: "200Gi" } });
+
+    await applySandbox(api, scratchCfg, incoming, { preserveResourceFieldsOnAdopt: ["cpu", "memory"] });
+
+    const stored = api.get("sess-auth")?.spec.podTemplate;
+    expect(sandboxCpuMemoryResources(stored)).toEqual({ requests: { cpu: "2" }, limits: { cpu: "2" }, scratch: "200Gi" });
+    expect(podTemplateResourceFingerprint(stored)).toBe(resourceFingerprint({ requests: { cpu: "2" }, limits: { cpu: "2" }, scratch: "200Gi" }));
+  });
+});
+
+describe("applySandbox records preserved scratch (fix wave 3, H-A)", () => {
+  const ALL_FIELDS = ["cpu", "memory", "scratch"] as const;
+  const scratchCfg: K8sProviderConfig = {
+    ...cfg, defaultResources: { ephemeralStorage: "2Gi", ephemeralStorageLimit: "30Gi" },
+  };
+
+  function seedWithOverrides(api: FakeCustomObjectsApi, name: string, overrides: string, scratch?: string): void {
+    const live = toCRRead(buildSandboxManifest(scratchCfg, name, scratch ? { resources: { scratch } } : {}));
+    live.metadata = { ...live.metadata, annotations: { ...live.metadata.annotations, "valet.dev/resource-overrides": overrides } };
+    api.seed(live);
+  }
+
+  it.each(['{"cpu":2}', "{}"])("a preserve-all adopt reports the live scratch when the annotation %s lacks it", async (overrides) => {
+    const api = new FakeCustomObjectsApi();
+    seedWithOverrides(api, "sess-ha", overrides, "800Gi");
+    const incoming = buildSandboxManifest(scratchCfg, "sess-ha", {});
+
+    const result = await applySandbox(api, scratchCfg, incoming, {
+      preserveResourceFieldsOnAdopt: ALL_FIELDS, resourceOverrides: {},
+    });
+
+    expect(result.resourceOverrides?.scratch).toBe("800Gi");
+    const stored = api.get("sess-ha");
+    expect(JSON.parse(stored?.metadata.annotations?.["valet.dev/resource-overrides"] ?? "{}")).toMatchObject({ scratch: "800Gi" });
+  });
+
+  it("an authoritative scratch replaces the recorded one", async () => {
+    const api = new FakeCustomObjectsApi();
+    seedWithOverrides(api, "sess-ha2", '{"scratch":"800Gi"}', "800Gi");
+    const incoming = buildSandboxManifest(scratchCfg, "sess-ha2", { resources: { scratch: "200Gi" } });
+
+    const result = await applySandbox(api, scratchCfg, incoming, {
+      preserveResourceFieldsOnAdopt: ["cpu", "memory"], resourceOverrides: { scratch: "200Gi" },
+    });
+
+    expect(result.resourceOverrides?.scratch).toBe("200Gi");
+  });
+
+  it("an authoritative removal drops the recorded scratch", async () => {
+    const api = new FakeCustomObjectsApi();
+    seedWithOverrides(api, "sess-ha3", '{"scratch":"800Gi"}', "800Gi");
+    const incoming = buildSandboxManifest(scratchCfg, "sess-ha3", {});
+
+    const result = await applySandbox(api, scratchCfg, incoming, {
+      preserveResourceFieldsOnAdopt: ["cpu", "memory"], resourceOverrides: {},
+    });
+
+    expect(result.resourceOverrides?.scratch).toBeUndefined();
+  });
+
+  it("the annotation reader parses scratch and rejects a non-string one", async () => {
+    const { readResourceOverridesAnnotation } = await import("../src/lifecycle.js");
+    const cr = toCRRead(buildSandboxManifest(scratchCfg, "sess-read", {}));
+    cr.metadata = { ...cr.metadata, annotations: { "valet.dev/resource-overrides": '{"cpu":2,"scratch":"100Gi"}' } };
+    expect(readResourceOverridesAnnotation(cr)).toEqual({ cpu: 2, scratch: "100Gi" });
+    cr.metadata = { ...cr.metadata, annotations: { "valet.dev/resource-overrides": '{"scratch":5}' } };
+    expect(readResourceOverridesAnnotation(cr)).toBeUndefined();
+  });
+});
+
+/** The sandbox container of a stored template, narrowed for assertions. */
+function parseContainer(template: unknown): { volumeMounts?: unknown; env?: unknown[]; resources?: unknown; command?: unknown } {
+  if (typeof template !== "object" || template === null || !("spec" in template)) throw new Error("no spec");
+  const spec = template.spec;
+  if (typeof spec !== "object" || spec === null || !("containers" in spec) || !Array.isArray(spec.containers)) throw new Error("no containers");
+  const found: unknown = spec.containers.find((c: unknown) => typeof c === "object" && c !== null && "name" in c && c.name === SANDBOX_CONTAINER_NAME);
+  if (typeof found !== "object" || found === null) throw new Error("no sandbox container");
+  return {
+    volumeMounts: "volumeMounts" in found ? found.volumeMounts : undefined,
+    env: "env" in found && Array.isArray(found.env) ? found.env : undefined,
+    resources: "resources" in found ? found.resources : undefined,
+    command: "command" in found ? found.command : undefined,
+  };
+}
+
+/** Init container names of a stored template, in order. */
+function parseInitNames(template: unknown): string[] | undefined {
+  if (typeof template !== "object" || template === null || !("spec" in template)) return undefined;
+  const spec = template.spec;
+  if (typeof spec !== "object" || spec === null || !("initContainers" in spec) || !Array.isArray(spec.initContainers)) return undefined;
+  return spec.initContainers.map((c: unknown) => (typeof c === "object" && c !== null && "name" in c ? String(c.name) : ""));
+}
+
 describe("getSandbox", () => {
   it("returns null for an absent CR (never throws for the 404 case)", async () => {
     const api = new FakeCustomObjectsApi();
@@ -844,7 +1135,7 @@ describe("sandboxStatus", () => {
     cr.status = { conditions: [{ type: "Ready", status: "False", reason: "PodPending" }] };
     api.seed(cr);
     const podsApi = new FakePodsApi([
-      { name: "sess-1", ownerReferences: [{ kind: SANDBOX_KIND, name: "sess-1", controller: true }] },
+      { name: "sess-1", ownerReferences: [{ kind: SANDBOX_KIND, name: "sess-1", uid: "uid-1", controller: true }] },
     ]);
     const podStatusApi = new FakePodStatusApi(
       new Map([
@@ -885,7 +1176,7 @@ describe("sandboxStatus", () => {
     cr.status = { conditions: [{ type: "Ready", status: "True", reason: "DependenciesReady" }] };
     api.seed(cr);
     const podsApi = new FakePodsApi([
-      { name: "sess-1", ownerReferences: [{ kind: SANDBOX_KIND, name: "sess-1", controller: true }] },
+      { name: "sess-1", ownerReferences: [{ kind: SANDBOX_KIND, name: "sess-1", uid: "uid-1", controller: true }] },
     ]);
     const podStatusApi = new FakePodStatusApi(
       new Map([["sess-1", { phase: "Running", containerStatuses: [{ name: "sandbox" }] }]]),
@@ -908,6 +1199,9 @@ describe("sandboxStatus", () => {
     const podsApi: SandboxPodsApi = {
       listNamespacedPod: async () => {
         throw new Error("must not resolve a pod for a Suspended CR");
+      },
+      patchNamespacedPod: async () => {
+        throw new Error("must not patch a pod for a Suspended CR");
       },
     };
     const podStatusApi: SandboxPodStatusApi = {
@@ -995,7 +1289,7 @@ describe("resolvePodName", () => {
     objectsApi.seed(toCRRead(manifest));
     const podsApi = new FakePodsApi([
       { name: "unrelated-pod", ownerReferences: [{ kind: "ReplicaSet", name: "sess-1", controller: true }] },
-      { name: "sess-1", ownerReferences: [{ kind: SANDBOX_KIND, name: "sess-1", controller: true }] },
+      { name: "sess-1", ownerReferences: [{ kind: SANDBOX_KIND, name: "sess-1", uid: "uid-1", controller: true }] },
     ]);
     await expect(resolvePodName(objectsApi, podsApi, cfg, "sess-1")).resolves.toBe("sess-1");
   });
@@ -1013,9 +1307,35 @@ describe("resolvePodName", () => {
     const manifest = buildSandboxManifest(cfg, "sess-1", {});
     objectsApi.seed(toCRRead(manifest));
     const podsApi = new FakePodsApi([
-      { name: "sess-1", ownerReferences: [{ kind: SANDBOX_KIND, name: "sess-1", controller: false }] },
+      { name: "sess-1", ownerReferences: [{ kind: SANDBOX_KIND, name: "sess-1", uid: "uid-1", controller: false }] },
     ]);
     await expect(resolvePodName(objectsApi, podsApi, cfg, "sess-1")).resolves.toBeNull();
+  });
+});
+
+describe("resolvePodName owner matching", () => {
+  it("prefers the pod whose ownerReference uid matches the live CR over a same-name predecessor", async () => {
+    const objectsApi = new FakeCustomObjectsApi();
+    const manifest = buildSandboxManifest(cfg, "sb", {});
+    objectsApi.seed(toCRRead(manifest, { uid: "uid-new" }));
+    const podsApi = new FakePodsApi([
+      { name: "sb", ownerReferences: [{ kind: SANDBOX_KIND, name: "sb", uid: "uid-old", controller: true }] },
+      { name: "sb-recovered", ownerReferences: [{ kind: SANDBOX_KIND, name: "sb", uid: "uid-new", controller: true }] },
+    ]);
+    await expect(resolvePodName(objectsApi, podsApi, cfg, "sb")).resolves.toBe("sb-recovered");
+  });
+
+  it("falls back to name matching when the CR has no uid", async () => {
+    const objectsApi = new FakeCustomObjectsApi();
+    const manifest = buildSandboxManifest(cfg, "sb", {});
+    const cr = toCRRead(manifest);
+    delete cr.metadata.uid;
+    objectsApi.seed(cr);
+    const podsApi = new FakePodsApi([
+      { name: "sb", ownerReferences: [{ kind: SANDBOX_KIND, name: "sb", uid: "uid-old", controller: true }] },
+      { name: "sb-2", ownerReferences: [{ kind: SANDBOX_KIND, name: "sb", uid: "uid-new", controller: true }] },
+    ]);
+    await expect(resolvePodName(objectsApi, podsApi, cfg, "sb")).resolves.toBe("sb");
   });
 });
 
@@ -1305,4 +1625,19 @@ it.each([[409, 3], [503, 1]])("bounds resume retries for HTTP %s to %s attempts"
   await expect(resumeWithPersistentHomes(api, cfg, "conflict")).rejects.toBe(failure);
   expect(api.attempts).toBe(expectedAttempts);
   expect(api.reads).toBe(expectedAttempts);
+});
+
+describe("startupKindOf", () => {
+  it.each([
+    ["container crash-looping (CrashLoopBackOff)", "crash_loop"],
+    ["container crash-looping (CrashLoopBackOff): exit 127: valet-home-start: exec: /usr/bin/tini: not found", "crash_loop"],
+    ["image pull failed (ImagePullBackOff): ghcr.io/x/y:z", "image_pull"],
+    ["pod failed: Error seen: PVC \"workspace-a\" is owned by Sandbox/a (UID: 1), not by sandbox \"a\"", "ownership"],
+    ["pod failed: pod entered phase Failed", "pod_failed"],
+    ["pod unschedulable: 0/3 nodes are available", "unschedulable"],
+    ["unschedulable: 0/3 nodes are available", "unschedulable"],
+    ["something else entirely", "other"],
+  ])("maps %j to %s", (reason, expected) => {
+    expect(startupKindOf(reason)).toBe(expected);
+  });
 });

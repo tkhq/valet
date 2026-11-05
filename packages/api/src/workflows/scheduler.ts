@@ -5,7 +5,8 @@
  *
  * Semantics:
  *   - Idempotent fires: the runId is DERIVED from (scheduleId, slot) —
- *     `wfrun_sch_{id8}_{nextFireAt}` — so a crash between run-start and the
+ *     `wfrun_sch_{hash}_{nextFireAt}` (`scheduledRunId` in @valet/shared) —
+ *     so a crash between run-start and the
  *     next_fire_at advance can't double-start on the next tick.
  *   - Catch-up collapses: next_fire_at advances from `now`, not from the
  *     missed slot, so downtime produces at most ONE catch-up run rather
@@ -16,14 +17,36 @@
  * Same lifecycle shape as `EventDispatcher`: constructed in providers,
  * `start()`/`stop()` from main.ts.
  */
-import { and, eq, lte } from "drizzle-orm";
-import type { RunHost, RunParams, WorkflowStore, WorkflowTriggerPayload } from "@valet/workflow";
+import { scheduledTriggerData, type RunHost, type RunParams, type WorkflowStore, type WorkflowTriggerPayload } from "@valet/workflow";
+import { scheduleRunPrefix, scheduledRunId } from "@valet/shared";
+import { and, desc, eq, lte, sql, type SQL } from "drizzle-orm";
+import { readThreadPolicy } from "@valet/shared";
+import { PinUnavailableError, type DeliveredThread } from "../events/assistant-delivery.js";
+import type { AssistantDeliverFn } from "../events/dispatcher.js";
+import { resolveDestination } from "../events/destination.js";
+import {
+  destinationMetricReason,
+  recordDeliveryDestination,
+  type DeliveryDestinationMetricReason,
+  type DestinationRecorder,
+} from "../observability/delivery-metrics.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
 import { definitionVersionId } from "./definition-version.js";
-import { accessibleScheduleRow, nextFireAt } from "./schedule-service.js";
+import {
+  accessibleScheduleRow, BAD_CRON_REASON, EMPTY_PROMPT_REASON, WORKFLOW_DELETED_REASON,
+} from "./schedule-service.js";
+import { nextFireAt } from "./next-fire.js";
+
+/** Reasons the poll loop records when it turns a schedule off. Each one
+ * names the fix, because the routine page shows it as written. A manual
+ * fire answers with the same text. They live beside the PATCH that clears
+ * them (`patchAnswersReason`). */
+export { BAD_CRON_REASON, EMPTY_PROMPT_REASON, WORKFLOW_DELETED_REASON };
 import type { WorkflowOwner } from "./service.js";
-import type { OrchestratorDeliverFn } from "../events/dispatcher.js";
+import { readScheduleTargetKind } from "../events/target-names.js";
+import { reportError } from "@valet/engine";
+
 
 const POLL_MS = 30_000;
 
@@ -31,17 +54,62 @@ export interface WorkflowSchedulerDeps {
   db: AppDb;
   workflowStore: WorkflowStore;
   workflowRunHost: RunHost;
-  /** Orchestrator-target fires submit the schedule's prompt through the
-   * same delivery seam event subscriptions use (idempotent by dispatchId,
-   * org-asserted, lands on a dedicated orchestrator thread). */
-  deliverToOrchestrator: OrchestratorDeliverFn;
+  /** Assistant-prompt fires submit the schedule's prompt through the same
+   * delivery seam event subscriptions use (idempotent by dispatchId,
+   * org-asserted, lands on the thread the schedule's policy names). */
+  deliverToAssistant: AssistantDeliverFn;
   /** Injectable clock for tests. */
   now?: () => number;
+  /** Counts a dead pin (spec Part E step 3). Absent → the
+   * `valet_event_delivery_destination` counter. Tests pass a recorder. */
+  recordDestination?: DestinationRecorder;
 }
 
-/** Pure: the derived, idempotent run id for one (schedule, slot) fire. */
-export function scheduledRunId(scheduleId: string, slotMs: number): string {
-  return `wfrun_sch_${scheduleId.replace(/-/g, "").slice(0, 8)}_${slotMs}`;
+/** Pure: the derived, idempotent run id for one (schedule, slot) fire. The
+ * routine page finds a routine's runs by the same prefix, so both read it
+ * from @valet/shared. */
+export { scheduledRunId };
+
+/** A dispatch that went through. `landed` is the thread an assistant-prompt
+ * firing landed on; a workflow firing starts a run and lands on no thread. */
+type Dispatched = { ok: true; landed: DeliveredThread | null };
+type DispatchFailed = { ok: false; error: string; pinUnavailable?: true };
+
+/** The columns that record where a firing landed (spec 2026-10-16: presence
+ * hub, Part E step 2). A workflow firing records nothing, so the columns
+ * keep their value. */
+function landedColumns(landed: DeliveredThread): { lastFiredSessionId: string; lastFiredThreadId: string } {
+  return { lastFiredSessionId: landed.sessionId, lastFiredThreadId: landed.threadId };
+}
+
+/**
+ * True while the row's thread policy is the one the firing read. A policy
+ * edit during the firing clears the recorded landing (`updateWorkflowSchedule`);
+ * a landing chosen under the old policy must not restore it afterwards, so
+ * the landing columns are written only under this guard. `jsonb` equality
+ * ignores key order.
+ */
+function policyUnchanged(policy: unknown): SQL {
+  return policy === null || policy === undefined
+    ? sql`${workflowSchedules.threadPolicy} IS NULL`
+    : sql`${workflowSchedules.threadPolicy} = ${JSON.stringify(policy)}::jsonb`;
+}
+
+/** A previous fire time, for "since the last run" polling. Empty when there is none. */
+function previousFire(firedAt: number | null): { previousFiredAt?: string } {
+  return firedAt === null ? {} : { previousFiredAt: new Date(firedAt).toISOString() };
+}
+
+/** The slot of this schedule's newest workflow run that completed, read from its run id. */
+async function lastCompletedSlot(db: AppDb, workflowId: string, scheduleId: string): Promise<number | null> {
+  const prefix = scheduleRunPrefix(scheduleId);
+  const [row] = await db.select({ id: workflowRuns.id }).from(workflowRuns)
+    .where(and(eq(workflowRuns.workflowId, workflowId), eq(workflowRuns.outcome, "completed"),
+      sql`left(${workflowRuns.id}, ${prefix.length}) = ${prefix}`))
+    .orderBy(desc(workflowRuns.createdAt))
+    .limit(1);
+  const slot = row ? Number(row.id.slice(prefix.length)) : NaN;
+  return Number.isFinite(slot) ? slot : null;
 }
 
 export class WorkflowScheduler {
@@ -49,6 +117,10 @@ export class WorkflowScheduler {
   private ticking = false;
 
   constructor(private readonly deps: WorkflowSchedulerDeps) {}
+
+  private recordDestination(reason: DeliveryDestinationMetricReason): void {
+    (this.deps.recordDestination ?? recordDeliveryDestination)(reason);
+  }
 
   start(): void {
     if (this.timer) return;
@@ -76,11 +148,11 @@ export class WorkflowScheduler {
         try {
           await this.fire(schedule, now);
         } catch (err) {
-          console.error(`workflow scheduler: fire failed for ${schedule.id} (will retry next tick):`, err);
+          reportError({ area: "workflows", reason: "schedule_fire" }, `workflow scheduler: fire failed for ${schedule.id} (will retry next tick)`, err);
         }
       }
     } catch (err) {
-      console.error("workflow scheduler: tick failed:", err);
+      reportError({ area: "workflows", reason: "scheduler_tick" }, "workflow scheduler: tick failed", err);
     } finally {
       this.ticking = false;
     }
@@ -93,41 +165,60 @@ export class WorkflowScheduler {
   private async dispatch(
     schedule: typeof workflowSchedules.$inferSelect,
     slotMs: number,
-  ): Promise<"ok" | { error: string }> {
+  ): Promise<Dispatched | DispatchFailed> {
     const { db, workflowRunHost } = this.deps;
 
-    if (schedule.targetKind === "orchestrator") {
+    if (readScheduleTargetKind(schedule.targetKind) === "assistant") {
       if (!schedule.prompt || schedule.prompt.trim() === "") {
-        return { error: "orchestrator target without a prompt. Edit the schedule and set a prompt." };
+        return { ok: false, error: EMPTY_PROMPT_REASON };
       }
-      await this.deps.deliverToOrchestrator({
-        orgId: schedule.orgId,
-        ownerType: schedule.ownerType,
-        ownerId: schedule.ownerId,
-        // The schedule's author, not its owner: on a team or org schedule
-        // the owner is not a user, and nobody is present when cron fires.
-        actorUserId: schedule.createdBy,
-        signal: {
-          kind: "signal",
-          signalType: "schedule",
-          body: schedule.prompt,
-          attributes: {
-            scheduleId: schedule.id,
-            scheduleName: schedule.name,
-            cron: schedule.cron,
-            firedAt: new Date(slotMs).toISOString(),
-          },
-        },
-        dispatchId: `schedule:${schedule.id}:${slotMs}`,
-        // Null on a schedule from before the column and on one that named no
-        // assistant; both fall back to the owner's default at delivery.
-        assistantId: schedule.assistantId ?? undefined,
+      // A schedule has no event, binding, or claim: its policy decides
+      // (spec 2026-10-16: delivery threads, Part B). `new` keys on the slot,
+      // so a retried fire reuses its thread.
+      const destination = resolveDestination({
+        rule: { id: schedule.id, kind: "schedule", name: schedule.name, policy: readThreadPolicy(schedule.threadPolicy) },
+        fireAt: slotMs,
+        binding: null,
+        claim: null,
       });
-      return "ok";
+      if (destination.kind === "skip") throw new Error("A schedule resolved to a skip. Report this schedule to Valet support.");
+      let landed: DeliveredThread;
+      try {
+        landed = await this.deps.deliverToAssistant({
+          orgId: schedule.orgId,
+          ownerType: schedule.ownerType,
+          ownerId: schedule.ownerId,
+          // Shared schedules never inherit their creator's personal authority.
+          actorUserId: schedule.ownerType === "user" ? schedule.createdBy : `${schedule.ownerType}:${schedule.ownerId}`,
+          signal: {
+            kind: "signal",
+            signalType: "schedule",
+            body: schedule.prompt,
+            attributes: {
+              scheduleId: schedule.id,
+              scheduleName: schedule.name,
+              cron: schedule.cron,
+              firedAt: new Date(slotMs).toISOString(),
+              ...previousFire(schedule.lastFiredAt),
+            },
+          },
+          dispatchId: `schedule:${schedule.id}:${slotMs}`,
+          destination,
+          unattended: true,
+        });
+      } catch (err) {
+        // A pin that cannot receive deliveries never falls back to another
+        // mode (spec Part B step 4). The poll loop disables the schedule,
+        // logs this text, and counts it (`fire`).
+        if (!(err instanceof PinUnavailableError)) throw err;
+        return { ok: false, error: err.message, pinUnavailable: true };
+      }
+      this.recordDestination(destinationMetricReason(destination));
+      return { ok: true, landed: { sessionId: landed.sessionId, threadId: landed.threadId } };
     }
 
     if (!schedule.workflowId) {
-      return { error: "workflow target without a workflow_id. Delete this schedule and recreate it against a workflow." };
+      return { ok: false, error: WORKFLOW_DELETED_REASON };
     }
     const defRows = await db
       .select()
@@ -136,7 +227,7 @@ export class WorkflowScheduler {
       .limit(1);
     const def = defRows[0];
     if (!def) {
-      return { error: `workflow ${schedule.workflowId} is gone. Delete this schedule or recreate the workflow.` };
+      return { ok: false, error: WORKFLOW_DELETED_REASON };
     }
 
     const runId = scheduledRunId(schedule.id, slotMs);
@@ -150,8 +241,12 @@ export class WorkflowScheduler {
         type: "schedule",
         triggerId: schedule.id,
         timestamp: new Date(slotMs).toISOString(),
-        data: { scheduleName: schedule.name, cron: schedule.cron, input: schedule.input ?? {} },
-        metadata: { scheduleId: schedule.id, timezone: schedule.timezone },
+        data: scheduledTriggerData(def.definition, { scheduleName: schedule.name, cron: schedule.cron, input: schedule.input ?? {} }),
+        // The slot of the last run that completed lets a polling step ask a
+        // source for "items since the last run". A failed or cancelled run
+        // does not move it, so its items are polled again. Absent until a
+        // run completes.
+        metadata: { scheduleId: schedule.id, timezone: schedule.timezone, ...previousFire(await lastCompletedSlot(db, schedule.workflowId, schedule.id)) },
       };
       const params: RunParams = {
         workflowId: schedule.workflowId,
@@ -165,36 +260,55 @@ export class WorkflowScheduler {
       // `def` (the workflow definition row) is already fetched above.
       // Matches `events/dispatcher.ts`'s workflow-target fire, which
       // never had this bug.
+      // A shared workflow uses a machine actor even when manually fired.
+      // Editing or firing its schedule grants no personal account authority.
       await workflowRunHost.start(runId, params, def.definition, {
         ownerType: def.ownerType,
         ownerId: def.ownerId,
+        actorUserId: def.ownerType === "user" ? schedule.createdBy : `${def.ownerType}:${def.ownerId}`,
       });
     }
-    return "ok";
+    return { ok: true, landed: null };
   }
 
   private async fire(schedule: typeof workflowSchedules.$inferSelect, now: number): Promise<void> {
     const { db } = this.deps;
     const next = nextFireAt(schedule.cron, schedule.timezone, now);
     if (!next.ok) {
-      console.error(`workflow scheduler: disabling ${schedule.id} — ${next.error}`);
-      await db.update(workflowSchedules).set({ enabled: false, updatedAt: now }).where(eq(workflowSchedules.id, schedule.id));
+      reportError({ area: "workflows", reason: "schedule_disabled" }, `workflow scheduler: disabling ${schedule.id} — ${next.error}`);
+      await db.update(workflowSchedules)
+        .set({ enabled: false, updatedAt: now, disabledReason: BAD_CRON_REASON })
+        .where(eq(workflowSchedules.id, schedule.id));
       return;
     }
     const result = await this.dispatch(schedule, schedule.nextFireAt);
-    if (result !== "ok") {
-      console.error(`workflow scheduler: disabling ${schedule.id} — ${result.error}`);
-      await db.update(workflowSchedules).set({ enabled: false, updatedAt: now }).where(eq(workflowSchedules.id, schedule.id));
+    if (!result.ok) {
+      reportError({ area: "workflows", reason: "schedule_disabled" }, `workflow scheduler: disabling ${schedule.id}: ${result.error}`);
+      // Every disable records its reason, so the routine page can name the fix.
+      const disabled = await db.update(workflowSchedules)
+        .set({ enabled: false, updatedAt: now, disabledReason: result.error })
+        .where(and(eq(workflowSchedules.id, schedule.id), eq(workflowSchedules.enabled, true)))
+        .returning({ id: workflowSchedules.id });
+      // The counter pages a person once per dead pin: only the fire that
+      // disables the schedule counts, not a replica that re-fired the slot.
+      if (result.pinUnavailable && disabled.length > 0) this.recordDestination("pin_unavailable");
       return;
     }
     await db
       .update(workflowSchedules)
       .set({ lastFiredAt: now, nextFireAt: next.at, updatedAt: now })
       .where(eq(workflowSchedules.id, schedule.id));
+    if (result.landed !== null) {
+      await db
+        .update(workflowSchedules)
+        .set(landedColumns(result.landed))
+        .where(and(eq(workflowSchedules.id, schedule.id), policyUnchanged(schedule.threadPolicy)));
+    }
   }
 
   /** Manual fire from the API. Uses `now` as the slot (distinct idempotent
-   * runId per press), updates lastFiredAt, never moves nextFireAt, and
+   * runId per press), updates lastFiredAt and the thread the firing landed
+   * on, never moves nextFireAt, and
    * works on disabled schedules (firing by hand is how you test one).
    * Owner-scoped like every schedule read: a schedule the caller cannot
    * access answers `not_found`, so an org member cannot fire a colleague's
@@ -205,11 +319,18 @@ export class WorkflowScheduler {
     const schedule = await accessibleScheduleRow(db, owner, scheduleId);
     if (!schedule) return "not_found";
     const result = await this.dispatch(schedule, now);
-    if (result !== "ok") return result;
+    // A manual fire changes no state, so a dead pin is not counted here.
+    if (!result.ok) return { error: result.error };
     await db
       .update(workflowSchedules)
       .set({ lastFiredAt: now, updatedAt: now })
       .where(and(eq(workflowSchedules.id, scheduleId), eq(workflowSchedules.orgId, owner.orgId)));
+    if (result.landed !== null) {
+      await db
+        .update(workflowSchedules)
+        .set(landedColumns(result.landed))
+        .where(and(eq(workflowSchedules.id, scheduleId), eq(workflowSchedules.orgId, owner.orgId), policyUnchanged(schedule.threadPolicy)));
+    }
     return "ok";
   }
 }

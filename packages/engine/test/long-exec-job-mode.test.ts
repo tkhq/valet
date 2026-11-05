@@ -19,7 +19,8 @@ import { describe, it, expect } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import { LocalSandboxProvider } from "@valet/sandbox-local";
 import {
   Engine,
@@ -39,7 +40,8 @@ import {
 class SpyingLocalProvider implements SandboxProvider {
   readonly backend: string;
   execJobCalls = 0;
-  execCalls = 0;
+  /** Commands run through plain exec. The turn's file checkpoint scans for repositories this way. */
+  execCommands: string[] = [];
   private inner = new LocalSandboxProvider();
 
   constructor() {
@@ -61,7 +63,7 @@ class SpyingLocalProvider implements SandboxProvider {
       };
     }
     sb.exec = async (...args: Parameters<Sandbox["exec"]>) => {
-      this.execCalls++;
+      this.execCommands.push(args[0]);
       return origExec(...args);
     };
     return sb;
@@ -144,7 +146,7 @@ describe("long exec via job mode (exit criterion, local provider E2E)", () => {
       if (toolCallPart?.type !== "tool_call") throw new Error("unreachable");
 
       expect(provider.execJobCalls).toBe(1);
-      expect(provider.execCalls).toBe(0);
+      expect(provider.execCommands.filter((command) => command.includes("all-done-here"))).toEqual([]);
       expect(toolCallPart.status).toBe("completed");
       const resultObj = toolCallPart.result as { text?: unknown };
       expect(String(resultObj.text ?? "")).toContain("all-done-here");

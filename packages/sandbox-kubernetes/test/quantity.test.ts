@@ -4,7 +4,12 @@
  * functions through their re-export.
  */
 import { describe, expect, it } from "vitest";
-import { clampStorageRequest, parseStorageQuantity } from "../src/quantity.js";
+import {
+  clampStorageRequest,
+  imageAwareWorkspaceFloor,
+  liftWorkspaceStorageToImageFloor,
+  parseStorageQuantity,
+} from "../src/quantity.js";
 
 describe("parseStorageQuantity", () => {
   it.each([
@@ -102,5 +107,62 @@ describe("clampStorageRequest", () => {
     expect(clampStorageRequest("lots", "20Gi")).toBeNull();
     expect(clampStorageRequest("4Gi", "unlimited")).toBeNull();
     expect(clampStorageRequest("0", "20Gi")).toBeNull();
+  });
+});
+
+describe("imageAwareWorkspaceFloor", () => {
+  it("rounds twice the compressed image size up to whole Gi", () => {
+    // valet image: 1,545,723,949 bytes compressed -> x2 = 2.88 Gi -> 3Gi.
+    expect(imageAwareWorkspaceFloor(1_545_723_949)).toBe("3Gi");
+  });
+
+  it("stays at 1Gi for images whose doubled size fits one Gi", () => {
+    // A small 200 MB image doubles to ~0.37 Gi, rounding up to the 1Gi floor.
+    expect(imageAwareWorkspaceFloor(200_000_000)).toBe("1Gi");
+  });
+
+  it("doubles exactly at a Gi boundary without adding a spurious Gi", () => {
+    const gi = 2 ** 30;
+    expect(imageAwareWorkspaceFloor(gi)).toBe("2Gi");
+    expect(imageAwareWorkspaceFloor(5 * gi)).toBe("10Gi");
+  });
+
+  it("does not cap — the caller clamps to the configured max", () => {
+    expect(imageAwareWorkspaceFloor(11 * 2 ** 30)).toBe("22Gi");
+  });
+
+  it("returns null for an absent, zero, negative, or non-finite size", () => {
+    expect(imageAwareWorkspaceFloor(0)).toBeNull();
+    expect(imageAwareWorkspaceFloor(-1)).toBeNull();
+    expect(imageAwareWorkspaceFloor(Number.NaN)).toBeNull();
+    expect(imageAwareWorkspaceFloor(Number.POSITIVE_INFINITY)).toBeNull();
+  });
+});
+
+describe("liftWorkspaceStorageToImageFloor", () => {
+  it("lifts an undeclared size to the image floor", () => {
+    expect(liftWorkspaceStorageToImageFloor(undefined, "3Gi")).toBe("3Gi");
+  });
+
+  it("lifts a declared size that is smaller than the image needs", () => {
+    // A repo asking for 1Gi cannot fit a 3Gi image seed; the floor wins.
+    expect(liftWorkspaceStorageToImageFloor("1Gi", "3Gi")).toBe("3Gi");
+  });
+
+  it("keeps a declared size that already fits the image", () => {
+    expect(liftWorkspaceStorageToImageFloor("4Gi", "3Gi")).toBe("4Gi");
+  });
+
+  it("keeps the declared size when it exactly equals the floor", () => {
+    expect(liftWorkspaceStorageToImageFloor("3Gi", "3Gi")).toBe("3Gi");
+  });
+
+  it("keeps the declared value when there is no image floor", () => {
+    expect(liftWorkspaceStorageToImageFloor("4Gi", null)).toBe("4Gi");
+    expect(liftWorkspaceStorageToImageFloor(undefined, null)).toBeUndefined();
+  });
+
+  it("applies the floor when the declared value is unparseable", () => {
+    expect(liftWorkspaceStorageToImageFloor("lots", "3Gi")).toBe("3Gi");
   });
 });

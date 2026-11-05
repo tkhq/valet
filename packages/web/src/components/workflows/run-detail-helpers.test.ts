@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { WorkflowPendingGate } from "@valet/api/wire";
 import {
+  runLabel,
   deriveRunResult,
   findApprovalPrompt,
   findPendingApproval,
   formatRunDuration,
   formatRunOutput,
-  jsonPreview,
   readTemplateDiagnostics,
   runNeedsApproval,
   statusByNodeId,
@@ -115,23 +115,6 @@ describe("runNeedsApproval", () => {
   it("returns false when status is not parked even with gates", () => {
     expect(runNeedsApproval({ status: "running" }, [gate])).toBe(false);
     expect(runNeedsApproval({ status: "settled" }, [gate])).toBe(false);
-  });
-});
-
-describe("jsonPreview", () => {
-  it("returns empty string for undefined", () => {
-    expect(jsonPreview(undefined)).toBe("");
-  });
-
-  it("pretty-prints small values in full", () => {
-    expect(jsonPreview({ a: 1 })).toBe('{\n  "a": 1\n}');
-  });
-
-  it("truncates long values with an ellipsis", () => {
-    const big = { text: "a".repeat(1000) };
-    const preview = jsonPreview(big, 50);
-    expect(preview.length).toBeLessThanOrEqual(51);
-    expect(preview.endsWith("…")).toBe(true);
   });
 });
 
@@ -382,5 +365,15 @@ describe("formatRunDuration", () => {
   it("returns undefined when the timestamps cannot give an answer", () => {
     expect(formatRunDuration(100, 50)).toBeUndefined();
     expect(formatRunDuration(Number.NaN, 50)).toBeUndefined();
+  });
+});
+
+describe("runLabel", () => {
+  const at = new Date(2026, 8, 30, 14, 2).getTime();
+  it("names what started the run instead of the raw id", () => {
+    expect(runLabel({ createdAt: at, actorUserId: "u1" })).toMatch(/^Manual run · /);
+    expect(runLabel({ createdAt: at })).toMatch(/^Automatic run · /);
+    expect(runLabel({ createdAt: at, parentRunId: "wfrun_parent", parentIteration: 2 })).toMatch(/^Batch run 3 · /);
+    expect(runLabel({ createdAt: at })).not.toContain("wfrun");
   });
 });

@@ -11,8 +11,8 @@
 #
 # ── RWO PVC / live-registry caveat ──────────────────────────────────────
 # This CronJob mounts the same RWO PVC as the live registry StatefulSet.
-# On a single-node cluster (Rancher Desktop, k3s) the kubelet allows a
-# second pod to bind a RWO volume on the same node, so the mount succeeds.
+# Required pod affinity places GC on the registry node so both pods can
+# mount the RWO volume. This fixes scheduling, not the GC/write race below.
 # GC walks the storage directory while the registry Pod serves read/write
 # traffic. A push landing mid-GC-run can race a blob deletion. This race
 # is low-risk given the low write volume (infrequent scheduled rebuilds and
@@ -38,6 +38,8 @@ spec:
   jobTemplate:
     spec:
       backoffLimit: 0
+      # Bound scheduling and attachment stalls so Forbid permits later runs.
+      activeDeadlineSeconds: 3600
       # Same one-hour TTL as the BuildKit Jobs (k8s-builder.ts).
       ttlSecondsAfterFinished: 3600
       template:
@@ -47,6 +49,17 @@ spec:
             app.kubernetes.io/component: registry-gc
         spec:
           restartPolicy: Never
+          # The registry's RWO PVC attaches to one node. Keep GC on that node
+          # to prevent ContainerCreating from a failed cross-node attachment.
+          # Observed on agents-dev, 2026-09-16.
+          affinity:
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels:
+                      {{- include "valet.selectorLabels" . | nindent 22 }}
+                      app.kubernetes.io/component: registry
+                  topologyKey: kubernetes.io/hostname
           containers:
             - name: registry-gc
               image: "{{ .Values.registry.image.repository }}:{{ .Values.registry.image.tag }}"

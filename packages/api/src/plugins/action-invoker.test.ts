@@ -1,3 +1,4 @@
+import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
 /**
  * Unit tests for `buildActionInvoker` (plugin-system-v2 plan Task 6) — the
  * headless dispatch primitive behind the workflow `tool` node's
@@ -9,28 +10,35 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { readFileSync } from "node:fs";
+import { eq, like } from "drizzle-orm";
 import { Type } from "typebox";
 import type {
   ActionPlugin,
   CredentialOwner,
   CredentialStore,
   PluginAction,
+  PluginActionContext,
   StoredCredential,
   ValetPlugin,
 } from "@valet/engine";
+import { InMemorySessionStore } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { actionInvocations, actionPolicies, assistants, runtimeGrants, sessionRepos, githubInstallations, orgs } from "../schema/index.js";
+import { actionInvocations, actionPolicies, assistants, runtimeGrants, sessionRepos, githubInstallations, orgs, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
+import { shareCredential } from "../services/credential-shares.js";
+import { shareGeneration, writeBorrowGrant } from "../services/credential-borrow.js";
 import { grantPolicyKey } from "../policies/resolution.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { linkIdentity } from "../channels/identity-links.js";
 import { PgCredentialStore } from "./credential-store.js";
 import { saveAppConfig, type GithubAppConfig } from "../services/github-app.js";
 import type { OnePasswordCtx, OnePasswordService } from "../services/onepassword.js";
-import { buildActionInvoker, type ActionInvocationContext } from "./action-invoker.js";
-import { createAssistant } from "../assistants/service.js";
+import { buildActionInvoker, type ActionInvocationContext, externalActionMode } from "./action-invoker.js";
+import { workflowsActionPlugin } from "../workflows/actions.js";
+import { InMemoryWorkflowStore } from "@valet/workflow";
+
 import { slackPlugin } from "@valet/plugin-slack/actions";
 
 /** Fake `OnePasswordService` — only `resolveCredential` is exercised by the invoker's credential providers. */
@@ -75,6 +83,11 @@ class FakeCredentialStore implements CredentialStore {
     this.rows.set(this.key(owner, service), credential);
   }
 
+  async compareAndSwap(owner: CredentialOwner, service: string, expected: StoredCredential, next: StoredCredential): Promise<boolean> {
+    if (this.rows.get(this.key(owner, service)) !== expected) return false;
+    this.rows.set(this.key(owner, service), next);
+    return true;
+  }
   async delete(owner: CredentialOwner, service: string): Promise<void> {
     this.rows.delete(this.key(owner, service));
   }
@@ -137,6 +150,70 @@ describe("buildActionInvoker", () => {
 
     expect(result).toEqual({ ok: true, result: { echoed: "hi", hasCredential: false } });
     expect(fixture.calls()).toBe(1);
+  });
+
+  it("merges invocation presence over the workspace identity without changing later invocations", async () => {
+    const db = await makeDb();
+    await db.insert(orgs).values({ id: "org1", name: "Workspace", createdAt: 1 });
+    const fixture = countingAction({ execute: async (_args, ctx) => ({ success: true, data: await ctx.resolveOutboundSender?.() }) });
+    const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService: actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] }) });
+    const owner: ActionInvocationContext = { userId: "u1", orgId: "org1", owner: { type: "org", id: "org1" } };
+    const request = { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "presence" };
+    expect(await invoke(request, { ...owner, presence: { avatarUrl: "https://example.com/run.png" } }))
+      .toEqual({ ok: true, result: { displayName: "Workspace", avatarUrl: "https://example.com/run.png" } });
+    expect(await invoke({ ...request, invocationId: "presence-name" }, { ...owner, presence: { displayName: "Automation" } }))
+      .toEqual({ ok: true, result: { displayName: "Automation" } });
+    expect(await invoke({ ...request, invocationId: "presence-unset" }, owner))
+      .toEqual({ ok: true, result: { displayName: "Workspace" } });
+  });
+
+  it("a workflow tool action can extract a document, the same as a session action", async () => {
+    // Document extraction needs no session, thread or sandbox: it is a pure
+    // call over bytes, and the native extractor lives in this process. A
+    // workflow node that reads a PDF must not be told extraction is
+    // unavailable on the deployment when the deployment can do it.
+    let seen: PluginActionContext["extractDocument"];
+    const probe = countingAction({
+      execute: async (_args, ctx) => {
+        seen = ctx.extractDocument;
+        return { success: true, data: {} };
+      },
+    });
+    const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [probe.action] });
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: new FakeCredentialStore(), actionPluginByService });
+
+    await invoke(
+      { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:extract" },
+      userOwner,
+    );
+
+    expect(typeof seen).toBe("function");
+  });
+
+  it("the workflow extractor reads a real PDF and declines a non-PDF", async () => {
+    let extract: NonNullable<PluginActionContext["extractDocument"]> | undefined;
+    const probe = countingAction({
+      execute: async (_args, ctx) => {
+        extract = ctx.extractDocument;
+        return { success: true, data: {} };
+      },
+    });
+    const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [probe.action] });
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: new FakeCredentialStore(), actionPluginByService });
+    await invoke(
+      { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:extract2" },
+      userOwner,
+    );
+
+    const pdf = new Uint8Array(readFileSync(new URL("../services/__fixtures__/sample.pdf", import.meta.url)));
+    // Wired to the real extractor, not a stub that resolves to null.
+    await expect(
+      extract?.({ data: pdf, mimeType: "application/pdf", name: "sample.pdf" }),
+    ).resolves.toMatchObject({ markdown: expect.stringContaining("Quarterly Revenue Report") });
+    // Anything the api cannot extract answers null, so the caller says why.
+    await expect(
+      extract?.({ data: new Uint8Array([1, 2, 3]), mimeType: "application/zip", name: "x.zip" }),
+    ).resolves.toBeNull();
   });
 
   it("dedup: a duplicate invocationId returns the ORIGINAL result without re-invoking execute", async () => {
@@ -283,6 +360,123 @@ describe("buildActionInvoker", () => {
     expect(sawCtx).toEqual({ orgId: "org1", userId: "u1", scopes: ["org"] });
   });
 
+  // TKAI-487 / R3. The personal 1Password scope belongs to exactly one owner
+  // type. A team- or org-owned run is prompted and read by people other than
+  // the actor frozen onto it, so its reads must never reach that actor's own
+  // vault — the run's OWNER picks the scopes, never the actor.
+  describe("the personal 1Password scope follows the run owner, not the actor", () => {
+    /** Records every scope the vault lookup is asked for. */
+    function scopeRecordingOnePassword(): { onePassword: OnePasswordService; scopes: () => string[] } {
+      const seen: string[] = [];
+      const unused = () => {
+        throw new Error("not exercised by this suite");
+      };
+      return {
+        scopes: () => seen,
+        onePassword: {
+          tokenConnected: unused,
+          listVaults: unused,
+          resolveReference: unused,
+          findCandidates: async () => [],
+          resolveCredential: unused,
+          findCredentialForService: async (scope) => {
+            seen.push(scope);
+            return null;
+          },
+        },
+      };
+    }
+
+    async function invokeWith(owner: ActionInvocationContext, onePassword: OnePasswordService) {
+      const db = await makeDb();
+      await db.insert(orgs).values({ id: "org1", name: "Org", createdAt: 1 });
+      if (owner.owner.type === "team") {
+        await db.insert(teams).values({ id: owner.owner.id, orgId: "org1", name: "Team", createdAt: 1 });
+      }
+      const fixture = countingAction();
+      const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] });
+      const invoke = buildActionInvoker({
+        db,
+        credentials: new FakeCredentialStore(),
+        actionPluginByService,
+        onePassword,
+      });
+      return invoke(
+        { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:n1" },
+        owner,
+      );
+    }
+
+    it("a user-owned run consults the personal vault", async () => {
+      const { onePassword, scopes } = scopeRecordingOnePassword();
+      await invokeWith(userOwner, onePassword);
+      expect(scopes()).toContain("personal");
+    });
+
+    // The acting member here is a real person with a real user id, which is
+    // the whole hazard: it is inert only because the owner picks the scopes.
+    it("a team-owned run reads the team vault and never the acting member's personal one", async () => {
+      const { onePassword, scopes } = scopeRecordingOnePassword();
+      await invokeWith(
+        { userId: "member-who-clicked", orgId: "org1", owner: { type: "team", id: "t1" } },
+        onePassword,
+      );
+      expect(scopes()).toContain("team");
+      expect(scopes()).not.toContain("personal");
+    });
+
+    it("an org-owned run never reads the acting member's personal vault", async () => {
+      const { onePassword, scopes } = scopeRecordingOnePassword();
+      await invokeWith(
+        { userId: "member-who-clicked", orgId: "org1", owner: { type: "org", id: "org1" } },
+        onePassword,
+      );
+      expect(scopes()).not.toContain("personal");
+    });
+  });
+
+  it("team-owned run propagates its principal into a workflows tool action", async () => {
+    const db = await makeDb();
+    await db.insert(orgs).values({ id: "org1", name: "Org", createdAt: 1 });
+    await db.insert(teams).values({ id: "t1", orgId: "org1", name: "Team", createdAt: 1 });
+    const workflowStore = new InMemoryWorkflowStore();
+    const workflows = workflowsActionPlugin(() => ({
+      db,
+      workflowStore,
+      // save_workflow does not start or resume runs, and records no origin.
+      workflowRunHost: null as never,
+      engineStore: new InMemorySessionStore(),
+      credentials: new FakeCredentialStore(),
+    }));
+    const invoke = buildActionInvoker({
+      db,
+      credentials: new FakeCredentialStore(),
+      actionPluginByService: actionPluginByServiceOf("workflows", workflows),
+    });
+
+    const result = await invoke(
+      {
+        service: "workflows",
+        action: "save_workflow",
+        params: {
+          name: "Created by tool node",
+          definition: {
+            version: "dag/v1",
+            nodes: [{ id: "start", type: "trigger" }, { id: "done", type: "stop" }],
+            edges: [{ from: "start", to: "done" }],
+          },
+        },
+        invocationId: "workflow:r1:workflows-save",
+      },
+      { userId: "former-member", orgId: "org1", owner: { type: "team", id: "t1" } },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(await db.select().from(workflowDefinitions)).toEqual([
+      expect.objectContaining({ ownerType: "team", ownerId: "t1", name: "Created by tool node" }),
+    ]);
+  });
+
   it("team-owned run: resolves a direct team credential", async () => {
     const store = new FakeCredentialStore();
     store.seed({ type: "team", id: "t1" }, "demo", { type: "api_key", apiKey: "team-tok" });
@@ -338,13 +532,125 @@ describe("buildActionInvoker", () => {
     expect(seenOwnerId).toBeUndefined();
   });
 
-  it("workflow slack.send_message posts as the owner's configured assistant", async () => {
+  it("team workflow posts with the organization bot without a personal Slack identity", async () => {
     const db = await makeDb();
-    const assistant = await createAssistant(db, "org1", { type: "user", id: "u1" }, "Release bot");
-    await db
-      .update(assistants)
-      .set({ avatarUrl: "https://cdn.example.com/release-bot.png" })
-      .where(eq(assistants.id, assistant.id));
+    const store = new FakeCredentialStore();
+    store.seed({ type: "org", id: "org1" }, "slack", { type: "bot_token", accessToken: "org-bot" });
+    const plugin: ValetPlugin = {
+      name: "slack",
+      version: "0.0.1",
+      actions: [slackPlugin],
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    };
+    const invoke = buildActionInvoker({
+      db,
+      credentials: store,
+      actionPluginByService: new Map([["slack", { plugin, actionPlugin: slackPlugin }]]),
+    });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, channel: { id: "C1", is_private: false, is_im: false, is_mpim: false } })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, ts: "1.2", channel: "C1" })));
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const result = await invoke(
+        { service: "slack", action: "send_message", params: { channel: "C1", text: "Deploy complete" }, invocationId: "workflow:r1:team-slack-send" },
+        { userId: "team:t1", orgId: "org1", owner: { type: "team", id: "t1" } },
+      );
+
+      expect(result).toEqual({ ok: true, result: { ts: "1.2", channel: "C1" } });
+      expect((fetchMock.mock.calls[1] as [string, RequestInit])[1].headers).toMatchObject({
+        Authorization: "Bearer org-bot",
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each([
+    { userId: "u1", senderName: undefined, expectedName: "Hestia" },
+    { userId: "team:t1", senderName: undefined, expectedName: "Hestia" },
+    { userId: "team:t1", senderName: "Hestia · People", expectedName: "Hestia · People" },
+  ])("team workflow DM uses $expectedName when actor is $userId", async ({ userId, senderName, expectedName }) => {
+    const db = await makeDb();
+    await db.insert(orgs).values({ id: "org1", name: "Organization", createdAt: 1 });
+    await db.insert(teams).values({ id: "t1", orgId: "org1", name: "Hestia", createdAt: 1 });
+    await linkIdentity(db, { provider: "slack", externalId: "UMEMBER", userId: "u1" });
+    const store = new FakeCredentialStore();
+    store.seed({ type: "org", id: "org1" }, "slack", { type: "bot_token", accessToken: "org-bot" });
+    const plugin: ValetPlugin = {
+      name: "slack", version: "0.0.1", actions: [slackPlugin],
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    };
+    const invoke = buildActionInvoker({ db, credentials: store, actionPluginByService: new Map([["slack", { plugin, actionPlugin: slackPlugin }]]) });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, channel: { id: "DRECIPIENT" } })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, ts: "1.2", channel: "DRECIPIENT" })));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const result = await invoke(
+        { service: "slack", action: "dm_user", params: { user: "URECIPIENT", text: "Hello", ...(senderName ? { sender_name: senderName, sender_avatar_url: "https://example.com/hestia.png" } : {}) }, invocationId: "team-explicit-dm" },
+        { userId, orgId: "org1", owner: { type: "team", id: "t1" } },
+      );
+      expect(result).toEqual({ ok: true, result: { ts: "1.2", channel: "DRECIPIENT" } });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(fetchMock.mock.calls[0][0]).toContain("conversations.open");
+      expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ users: "URECIPIENT" });
+      expect(fetchMock.mock.calls[1][0]).toContain("chat.postMessage");
+      expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toMatchObject({ channel: "DRECIPIENT", text: "Hello", username: expectedName });
+      expect(JSON.parse(fetchMock.mock.calls[1][1].body).icon_url).toBe(senderName ? "https://example.com/hestia.png" : undefined);
+      for (const [, init] of fetchMock.mock.calls) {
+        expect(init.headers).toMatchObject({ Authorization: "Bearer org-bot" });
+      }
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each((["team", "org"] as const).flatMap((ownerType) =>
+    (["read_history", "read_thread"] as const).flatMap((action) => [
+      { channel: "CPUBLIC", isPrivate: false, isIm: false, isMpim: false, allowed: true },
+      { channel: "DDIRECT", isPrivate: true, isIm: true, isMpim: false, allowed: false },
+      { channel: "GMPIM", isPrivate: true, isIm: false, isMpim: true, allowed: false },
+      { channel: "CPRIVATE", isPrivate: true, isIm: false, isMpim: false, allowed: true },
+      { channel: "CUNJOINED", isPrivate: true, isIm: false, isMpim: false, allowed: false },
+    ].map((conversation) => ({ ...conversation, ownerType, action }))
+  )))("$ownerType workflow $action enforces access for $channel without a personal identity", async ({ channel, isPrivate, isIm, isMpim, allowed, ownerType, action }) => {
+    const db = await makeDb();
+    const store = new FakeCredentialStore();
+    store.seed({ type: "org", id: "org1" }, "slack", { type: "bot_token", accessToken: "org-bot" });
+    const plugin: ValetPlugin = {
+      name: "slack", version: "0.0.1", actions: [slackPlugin],
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    };
+    const invoke = buildActionInvoker({ db, credentials: store, actionPluginByService: new Map([["slack", { plugin, actionPlugin: slackPlugin }]]) });
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, channel: { id: channel, is_private: isPrivate, is_im: isIm, is_mpim: isMpim, is_member: channel === "CPRIVATE" } })));
+    if (allowed) fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, messages: [{ text: "Visible message", ts: "1.2" }], has_more: false })));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const result = await invoke(
+        { service: "slack", action, params: { channel, ...(action === "read_thread" ? { thread_ts: "1.2" } : {}) }, invocationId: `${ownerType}-${action}-${channel}` },
+        { userId: "team:t1", orgId: "org1", owner: { type: ownerType, id: ownerType === "org" ? "org1" : "t1" } },
+      );
+      if (allowed) {
+        expect(result).toMatchObject({ ok: true, result: { channel, messages: [{ text: "Visible message", ts: "1.2" }] } });
+        expect(fetchMock.mock.calls[1][0]).toContain(action === "read_thread" ? "conversations.replies" : "conversations.history");
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+      } else {
+        expect(result).toEqual({ ok: false, error: isIm || isMpim
+          ? "Shared runs cannot read direct messages. Use a personal run owned by a linked conversation member."
+          : "Valet is not a verified member of this private channel. Invite Valet to the channel, then retry." });
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      }
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("workflow slack.send_message uses org credentials and the bot identity for a personal owner", async () => {
+    const db = await makeDb();
+    const assistant = await seedWorkspaceAssistant(db, "org1", { type: "user", id: "u1" });
+
 
     const store = new FakeCredentialStore();
     store.seed({ type: "org", id: "org1" }, "slack", { type: "bot_token", accessToken: "org-bot" });
@@ -374,9 +680,10 @@ describe("buildActionInvoker", () => {
       expect(JSON.parse((fetchMock.mock.calls[1] as [string, RequestInit])[1].body as string)).toMatchObject({
         channel: "C1",
         text: "Deploy complete",
-        username: "Release bot",
-        icon_url: "https://cdn.example.com/release-bot.png",
       });
+      const sent = JSON.parse((fetchMock.mock.calls[1] as [string, RequestInit])[1].body as string) as Record<string, unknown>;
+      expect(sent.username).toBeUndefined();
+      expect(sent.icon_url).toBeUndefined();
     } finally {
       vi.unstubAllGlobals();
     }
@@ -468,19 +775,14 @@ describe("buildActionInvoker", () => {
     expect(fixture.calls()).toBe(1);
   });
 
-  it("team-owned run: a broken delegated reference returns the typed error", async () => {
-    const { TeamCredentialStore, CredentialReferenceBrokenError } = await import(
-      "./team-credential-store.js"
-    );
-    const inner = new FakeCredentialStore();
-    inner.seed({ type: "team", id: "t1" }, "demo", {
-      type: "oauth2",
-      metadata: { delegatedFrom: "u1" },
-    });
-    const store = new TeamCredentialStore(inner, { isMember: async () => true });
+  it("team-owned run: a share whose account is gone returns the typed error", async () => {
+    const { CredentialReferenceBrokenError } = await import("./team-credential-store.js");
+    const db = await makeDb();
+    await db.insert(teamMembers).values({ teamId: "t1", userId: "u1", role: "member" });
+    await shareCredential(db, { teamId: "t1", service: "demo", userId: "u1", createdAt: 1 });
     const fixture = countingAction();
     const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] });
-    const invoke = buildActionInvoker({ db: await makeDb(), credentials: store, actionPluginByService });
+    const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService });
 
     const result = await invoke(
       { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:team-broken" },
@@ -488,12 +790,91 @@ describe("buildActionInvoker", () => {
     );
 
     expect(result.ok).toBe(false);
-    expect(result.ok === false && "error" in result ? result.error : "").toMatch(
-      /Reconnect demo|share it with the team again/,
-    );
+    expect(result.ok === false && "error" in result ? result.error : "").toMatch(/should reconnect demo/);
     expect(result.ok === false && "error" in result ? result.error : "").toBe(
       new CredentialReferenceBrokenError("demo").message,
     );
+  });
+
+  it("team-owned run: asks the member whose shared account a step would use, then uses it once they allow it", async () => {
+    const db = await makeDb();
+    // A borrow needs the actor to be a current member of a team in the run's organization.
+    await db.insert(teams).values({ id: "t1", orgId: "org1", name: "Team", createdAt: 1 });
+    await db.insert(teamMembers).values([{ teamId: "t1", userId: "bea", role: "member" }, { teamId: "t1", userId: "al", role: "member" }]);
+    await shareCredential(db, { teamId: "t1", service: "demo", userId: "bea", createdAt: 1 });
+    const store = new FakeCredentialStore();
+    store.seed({ type: "user", id: "bea" }, "demo", { type: "api_key", apiKey: "bea-key" });
+    const fixture = countingAction();
+    const invoke = buildActionInvoker({ db, credentials: store, actionPluginByService: actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] }) });
+    const ctx = { userId: "al", orgId: "org1", owner: { type: "team" as const, id: "t1" }, workflowExecutionId: "run1" };
+    const req = { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:run1:step" };
+
+    expect(await invoke(req, ctx)).toMatchObject({ ok: false, requiresApproval: true, provenance: "shared_account", approver: { userId: "bea" } });
+    expect(fixture.calls()).toBe(0);
+
+    await writeBorrowGrant(db, "org1", { teamId: "t1", shareGeneration: (await shareGeneration(db, "t1", "demo", "bea"))!, sessionId: "wf:run1", service: "demo", memberId: "bea" });
+    expect((await invoke({ ...req, invocationId: "workflow:run1:step:again" }, ctx)).ok).toBe(true);
+    expect(fixture.calls()).toBe(1);
+    const outsider = await invoke({ ...req, invocationId: "workflow:run1:outsider" }, { ...ctx, userId: "outsider" });
+    expect(outsider.ok).toBe(false);
+    expect(fixture.calls()).toBe(1);
+  });
+
+  it("refuses an external call to a service that changes Valet itself", async () => {
+    const fixture = countingAction();
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: new FakeCredentialStore(), actionPluginByService: actionPluginByServiceOf("workflows", { service: "workflows", actions: [fixture.action] }) });
+    const result = await invoke(
+      { service: "workflows", action: "ping", params: {}, invocationId: "ext:u:user:u:workflows.ping:d:k" },
+      { userId: "u", orgId: "org1", owner: { type: "user", id: "u" }, external: { client: "cli", attempt: "a1" } },
+    );
+    expect(result).toMatchObject({ ok: false, error: expect.stringContaining("change Valet itself") });
+    expect(fixture.calls()).toBe(0);
+  });
+
+  it("external call for a team: names the member whose shared account it needs, and never borrows it", async () => {
+    const db = await makeDb();
+    await db.insert(teams).values({ id: "t1", orgId: "org1", name: "Team", createdAt: 1 });
+    await db.insert(teamMembers).values([{ teamId: "t1", userId: "bea", role: "member" }, { teamId: "t1", userId: "al", role: "member" }]);
+    await shareCredential(db, { teamId: "t1", service: "demo", userId: "bea", createdAt: 1 });
+    const store = new FakeCredentialStore();
+    store.seed({ type: "user", id: "bea" }, "demo", { type: "api_key", apiKey: "bea-key" });
+    const fixture = countingAction();
+    const invoke = buildActionInvoker({ db, credentials: store, actionPluginByService: actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] }) });
+    const ctx = { userId: "al", orgId: "org1", owner: { type: "team" as const, id: "t1" }, external: { client: "mcp:c1", attempt: "a1" } };
+    const req = { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "ext:al:team:t1:demo.ping:d:k" };
+
+    expect(await invoke(req, ctx)).toMatchObject({ ok: false, requiresApproval: true, provenance: "shared_account", approver: { userId: "bea" } });
+    // A grant for some run does not let an external call borrow the account.
+    await writeBorrowGrant(db, "org1", { teamId: "t1", shareGeneration: (await shareGeneration(db, "t1", "demo", "bea"))!, sessionId: "wf:run1", service: "demo", memberId: "bea" });
+    expect(await invoke({ ...req, invocationId: `${req.invocationId}:2` }, { ...ctx, external: { client: "mcp:c1", attempt: "a2" } }))
+      .toMatchObject({ ok: false, requiresApproval: true, provenance: "shared_account" });
+    expect(fixture.calls()).toBe(0);
+  });
+
+  it("does not borrow a second service's member account during dynamic discovery", async () => {
+    const db = await makeDb();
+    await db.insert(teams).values({ id: "t1", orgId: "org1", name: "Team", createdAt: 1 });
+    await db.insert(teamMembers).values([{ teamId: "t1", userId: "bea", role: "member" }, { teamId: "t1", userId: "al", role: "member" }]);
+    await shareCredential(db, { teamId: "t1", service: "linear", userId: "bea", createdAt: 1 });
+    const store = new FakeCredentialStore();
+    store.seed({ type: "user", id: "bea" }, "linear", { type: "api_key", apiKey: "bea-key" });
+    const discovered = vi.fn();
+    const fixture = countingAction({ id: "demo.dyn" });
+    const plugin: ActionPlugin = {
+      service: "demo", actions: [],
+      resolveActions: async ({ credentials }) => {
+        discovered(await credentials.get("linear"));
+        return [fixture.action];
+      },
+    };
+    const invoke = buildActionInvoker({ db, credentials: store, actionPluginByService: actionPluginByServiceOf("demo", plugin) });
+    const ctx = { userId: "al", orgId: "org1", owner: { type: "team" as const, id: "t1" }, workflowExecutionId: "discovery-run" };
+    const request = { service: "demo", action: "dyn", params: { msg: "hello" }, invocationId: "workflow:discovery-run:step" };
+    await invoke(request, ctx);
+    expect(discovered).toHaveBeenLastCalledWith(null);
+    await writeBorrowGrant(db, "org1", { teamId: "t1", shareGeneration: (await shareGeneration(db, "t1", "linear", "bea"))!, sessionId: "wf:discovery-run", service: "linear", memberId: "bea" });
+    await invoke({ ...request, invocationId: "workflow:discovery-run:approved" }, ctx);
+    expect(discovered).toHaveBeenLastCalledWith(expect.objectContaining({ accessToken: "bea-key" }));
   });
 
   // Discovery reads the credential before any try/catch the invoker has. A
@@ -955,6 +1336,40 @@ describe("buildActionInvoker", () => {
     expect(seenOwnerId).toBeUndefined();
   });
 
+  it("keeps slack.dm_owner fail-closed for a team owner with no identity", async () => {
+    const store = new FakeCredentialStore();
+    store.seed({ type: "org", id: "org1" }, "slack", { type: "bot_token", accessToken: "org-tok" });
+    const db = await makeDb();
+    // A member's identity link must not be stamped onto a team-owned run.
+    await linkIdentity(db, { provider: "slack", externalId: "U123LINKED", userId: "u1" });
+    const plugin: ValetPlugin = {
+      name: "slack", version: "0.0.1", actions: [slackPlugin],
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    };
+    const invoke = buildActionInvoker({
+      db,
+      credentials: store,
+      actionPluginByService: new Map([["slack", { plugin, actionPlugin: slackPlugin }]]),
+    });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const result = await invoke(
+        { service: "slack", action: "dm_owner", params: { text: "Hello" }, invocationId: "workflow:r1:team-dm-owner" },
+        { userId: "team:t1", orgId: "org1", owner: { type: "team", id: "t1" } },
+      );
+
+      expect(result).toEqual({
+        ok: false,
+        error: "This run has no personal Slack recipient. Use slack.dm_user with the intended recipient’s Slack user ID.",
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("prefers the run owner's OWN credential over the org one", async () => {
     // Escalation is a fallback, never an override: a personal credential for
     // the same service still wins, the same precedence `engine/host.ts` gives
@@ -1251,14 +1666,14 @@ describe("buildActionInvoker: github service resolution", () => {
     expect(result).toEqual({ ok: true, result: { token: "team-tok" } });
   });
 
-  // A delegated row follows to the member's live github row. When that row
-  // is one the member's own runs would refuse (identity-only scopes here),
-  // the team run must not act on it either: it falls to the App path the
-  // same way a team with no row does.
-  it("team-owned: an unhealthy delegated github row falls through to the installation token", async () => {
+  // A share follows to the member's live github row. When that row is one
+  // the member's own runs would refuse (identity-only scopes here), the team
+  // run must not act on it either: it falls to the App path the same way a
+  // team with no row does.
+  it("team-owned: an unhealthy shared github row falls through to the installation token", async () => {
     const { TeamCredentialStore } = await import("./team-credential-store.js");
     const { appDb, credentials: inner } = await harness();
-    const credentials = new TeamCredentialStore(inner, { isMember: async () => true });
+    const credentials = new TeamCredentialStore(inner);
     await saveAppConfig({ credentials }, orgId, appConfig);
     await appDb.insert(githubInstallations).values({
       id: "ghi_team_2",
@@ -1278,10 +1693,8 @@ describe("buildActionInvoker: github service resolution", () => {
       accessToken: "identity-tok",
       metadata: { login: "octocat", identityOnly: true },
     });
-    await credentials.save({ type: "team", id: "gh-team" }, "github", {
-      type: "oauth2",
-      metadata: { delegatedFrom: userId, sourceType: "oauth2" },
-    });
+    await appDb.insert(teamMembers).values({ teamId: "gh-team", userId, role: "member" });
+    await shareCredential(appDb, { teamId: "gh-team", service: "github", userId, createdAt: 1 });
     fixture = startGithubFixture({
       createInstallationToken: (id) => ({
         body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() },
@@ -1504,6 +1917,152 @@ describe("buildActionInvoker: github service resolution", () => {
     expect(result).toMatchObject({
       error: expect.stringContaining("connect your GitHub account"),
     });
+  });
+
+  // ── org-owned `auto`: the installation before the org PAT ─────────────
+  //
+  // Native credential policy Part C: an org-owned run has no person, so its
+  // `auto` read uses the App installation, as an org session does. The org
+  // PAT row stays the tier behind it.
+
+  async function seedTwoInstallationsAndOrgPat(appDb: AppDb, credentials: PgCredentialStore): Promise<void> {
+    await saveAppConfig({ credentials }, orgId, appConfig);
+    for (const [id, installationId, accountLogin] of [["ghi_acme", 501, "acme"], ["ghi_other", 502, "other"]] as const) {
+      await appDb.insert(githubInstallations).values({
+        id,
+        orgId,
+        installationId,
+        accountLogin,
+        accountType: "Organization",
+        repositorySelection: "all",
+        suspended: false,
+        cachedToken: null,
+        cachedTokenExpiresAt: null,
+        createdAt: NOW,
+        updatedAt: NOW,
+      });
+    }
+    await credentials.save({ type: "org", id: orgId }, "github", { type: "oauth2", accessToken: "org-pat" });
+  }
+
+  it("org-owned auto: the action's repository owner picks the installation over the org PAT", async () => {
+    const { appDb, credentials } = await harness();
+    await seedTwoInstallationsAndOrgPat(appDb, credentials);
+    fixture = startGithubFixture({
+      createInstallationToken: (id) => ({
+        body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() },
+      }),
+    });
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: githubActionPluginByService(),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      { service: "github", action: "create_comment", params: { owner: "acme", repo: "app" }, invocationId: "workflow:r1:org-auto" },
+      { userId: `org:${orgId}`, orgId, owner: { type: "org", id: orgId } },
+    );
+
+    expect(result).toEqual({ ok: true, result: { token: "inst-501" } });
+  });
+
+  it("org-owned auto: an installation mint error surfaces and never falls back to the org PAT", async () => {
+    const { appDb, credentials } = await harness();
+    await seedTwoInstallationsAndOrgPat(appDb, credentials);
+    fixture = startGithubFixture({
+      createInstallationToken: () => ({ status: 500, body: { message: "boom" } }),
+    });
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: githubActionPluginByService(),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      { service: "github", action: "create_comment", params: { owner: "acme", repo: "app" }, invocationId: "workflow:r1:org-mint-error" },
+      { userId: `org:${orgId}`, orgId, owner: { type: "org", id: orgId } },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(JSON.stringify(result)).not.toContain("org-pat");
+  });
+
+  it("org-owned auto: with no installation to use, the org PAT still answers", async () => {
+    const { appDb, credentials } = await harness();
+    await credentials.save({ type: "org", id: orgId }, "github", { type: "oauth2", accessToken: "org-pat" });
+    fixture = startGithubFixture();
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: githubActionPluginByService(),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      { service: "github", action: "whoami", params: {}, invocationId: "workflow:r1:org-pat" },
+      { userId: `org:${orgId}`, orgId, owner: { type: "org", id: orgId } },
+    );
+
+    expect(result).toEqual({ ok: true, result: { token: "org-pat" } });
+  });
+
+  it("org-owned auto: a session binding that names its own auth still wins", async () => {
+    const { appDb, credentials } = await harness();
+    await seedTwoInstallationsAndOrgPat(appDb, credentials);
+    const sessionId = "sess-org-bound";
+    await appDb.insert(sessionRepos).values({
+      sessionId,
+      host: "github",
+      fullName: "other/repo",
+      cloneUrl: "https://github.com/other/repo.git",
+      auth: "app",
+      position: 0,
+    });
+    fixture = startGithubFixture({
+      createInstallationToken: (id) => ({
+        body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() },
+      }),
+    });
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: githubActionPluginByService(),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      { service: "github", action: "create_comment", params: { owner: "acme", repo: "app" }, invocationId: "workflow:r1:org-bound" },
+      { userId: `org:${orgId}`, orgId, owner: { type: "org", id: orgId }, sessionId },
+    );
+
+    // The binding's repository owner, not the params owner.
+    expect(result).toEqual({ ok: true, result: { token: "inst-502" } });
+  });
+
+  it("org-owned explicit credential \"user\" never takes the installation", async () => {
+    const { appDb, credentials } = await harness();
+    await seedTwoInstallationsAndOrgPat(appDb, credentials);
+    fixture = startGithubFixture({
+      createInstallationToken: (id) => ({
+        body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() },
+      }),
+    });
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: githubActionPluginByService(),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      { service: "github", action: "create_comment", params: { owner: "acme", repo: "app" }, invocationId: "workflow:r1:org-user", credential: "user" },
+      { userId: `org:${orgId}`, orgId, owner: { type: "org", id: orgId } },
+    );
+
+    expect(JSON.stringify(result)).not.toContain("inst-");
   });
 
   // ── credential: "app" — the bot identity, or a loud failure ───────────
@@ -1785,6 +2344,58 @@ describe("buildActionInvoker: workflow policy enforcement (action-policies T3)",
     expect(fixture.calls()).toBe(0);
   });
 
+  it.each(["workflow", "external"])("resolves policy on defaulted params for a %s caller, so an omitted model cannot bypass a default-model deny", async (route) => {
+    const db = await makeDb();
+    let ran: Record<string, unknown> | undefined;
+    const action: PluginAction = {
+      id: "demo.render", name: "render", description: "render", riskLevel: "low",
+      parameters: Type.Object({ prompt: Type.String(), model: Type.Optional(Type.String({ default: "sunburst" })) }),
+      execute: async (args) => { ran = args as Record<string, unknown>; return { success: true, data: {} }; },
+    };
+    await db.insert(actionPolicies).values({
+      id: "pm", orgId: ORG, principalType: "org", principalId: ORG,
+      service: null, actionId: "demo.render", riskLevel: null, mode: "deny",
+      paramMatchers: [{ path: "model", op: "eq", value: "sunburst" }], appliesIn: "any", origin: "settings", managedBy: null,
+      expiresAt: null, revokedAt: null, createdAt: 1, updatedAt: 1,
+    });
+    const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService: actionPluginByServiceOf("demo", { service: "demo", actions: [action] }) });
+    const ctx: ActionInvocationContext = route === "workflow"
+      ? wfCtx
+      : { userId: "u1", orgId: ORG, owner: { type: "user", id: "u1" }, external: { client: "cli", attempt: "a1" } };
+    const denied = await invoke({ service: "demo", action: "render", params: { prompt: "x" }, invocationId: `${route}:render:1` }, ctx);
+    expect(denied.ok).toBe(false);
+    expect((denied as { error: string }).error).toContain("blocked by org policy");
+    expect(ran).toBeUndefined();
+    const allowed = await invoke({ service: "demo", action: "render", params: { prompt: "x", model: "flare" }, invocationId: `${route}:render:2` }, ctx);
+    expect(allowed.ok).toBe(true);
+    expect(ran).toEqual({ prompt: "x", model: "flare" });
+    // The audit row records the effective arguments, defaults included.
+    const audit = await db.select().from(actionInvocations).where(eq(actionInvocations.orgId, ORG));
+    const deniedRow = audit.find((row) => row.status === "denied");
+    expect(deniedRow?.params).toEqual({ prompt: "x", model: "sunburst" });
+  });
+
+  it("describe_tool's policy preview applies schema defaults, so it matches what call_tool decides", async () => {
+    const db = await makeDb();
+    const action: PluginAction = {
+      id: "demo.publish", name: "publish", description: "publish", riskLevel: "low",
+      parameters: Type.Object({ title: Type.String(), visibility: Type.Optional(Type.String({ default: "public" })) }),
+      execute: async () => ({ success: true, data: {} }),
+    };
+    await db.insert(actionPolicies).values({
+      id: "pv", orgId: ORG, principalType: "org", principalId: ORG,
+      service: null, actionId: "demo.publish", riskLevel: null, mode: "deny",
+      paramMatchers: [{ path: "visibility", op: "eq", value: "public" }], appliesIn: "any", origin: "settings", managedBy: null,
+      expiresAt: null, revokedAt: null, createdAt: 1, updatedAt: 1,
+    });
+    const opts = { db, credentials: new FakeCredentialStore(), actionPluginByService: actionPluginByServiceOf("demo", { service: "demo", actions: [action] }) };
+    const ctx: ActionInvocationContext = { userId: "u1", orgId: ORG, owner: { type: "user", id: "u1" }, external: { client: "cli", attempt: "a1" } };
+    expect(await externalActionMode(opts, ctx, "demo", action, { title: "x" })).toBe("deny");
+    expect(await externalActionMode(opts, ctx, "demo", action, { title: "x", visibility: "private" })).toBe("allow");
+    // No params means any params: nothing is defaulted, and the base mode answers.
+    expect(await externalActionMode(opts, ctx, "demo", action)).toBe("allow");
+  });
+
   it("an exec-scoped grant covers the action → it runs", async () => {
     const db = await makeDb();
     const fixture = highRiskAction();
@@ -1800,6 +2411,7 @@ describe("buildActionInvoker: workflow policy enforcement (action-policies T3)",
     // The decision row is stamped with the execution outcome + full
     // PluginActionResult after execute (spec T6 #6, fixed).
     expect(audit[0].status).toBe("completed");
+    expect(audit[0].startedAt).toBeGreaterThanOrEqual(audit[0].createdAt);
     expect(audit[0].result).toEqual({ success: true, data: { deployed: true } });
     expect(audit[0].matchedGrantId).toBe("gr");
   });
@@ -1896,7 +2508,7 @@ describe("buildActionInvoker: workflow policy enforcement (action-policies T3)",
     await db.insert(actionPolicies).values({ id: "team-block", orgId: ORG, principalType: "team", principalId: "team-a", service: "demo", mode: "deny", origin: "admin", createdAt: 1, updatedAt: 1 });
     const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService: highRiskPlugin(fixture.action) });
     const result = await invoke({ service: "demo", action: "deploy", params: { msg: "x" }, invocationId: "team-deny", approval: { resolvedBy: "u1" } }, { ...wfCtx, owner: { type: "team", id: "team-a" } });
-    expect(result).toEqual({ ok: false, error: "demo.deploy is blocked by team policy" });
+    expect(result).toEqual({ ok: false, error: "demo.deploy is blocked by team policy", errorCode: "policy_denied" });
     expect(fixture.calls()).toBe(0);
   });
 
@@ -1982,5 +2594,95 @@ describe("buildActionInvoker: workflow policy enforcement (action-policies T3)",
     await expect(
       invoke({ service: "demo", action: "deploy", params: { msg: "x" }, invocationId: "corrupt:n9" }, wfCtx),
     ).rejects.toThrow("stored requiresApproval outcome should never exist for");
+  });
+});
+
+describe.each([
+  { kind: "workflow", extra: { workflowExecutionId: "run_audit" }, key: (id: string) => `pol:wf:${id}`, caller: null },
+  { kind: "external", extra: { external: { client: "mcp:c1", attempt: "a1" } }, key: (id: string) => `pol:ext:${id}:a1`, caller: "mcp:c1" },
+])("buildActionInvoker: one audit row per $kind attempt", ({ extra, key, caller }) => {
+  const declaredDemo = (actionPlugin: ActionPlugin) => {
+    const plugin: ValetPlugin = { name: "demo", version: "0.0.1", actions: [actionPlugin], credentials: [{ type: "api_key", configKeys: ["apiKey"] }] };
+    return new Map([["demo", { plugin, actionPlugin }]]);
+  };
+  const auditRows = (db: AppDb) => db.select().from(actionInvocations).where(like(actionInvocations.invocationId, "pol:%"));
+  const userCtx: ActionInvocationContext = { userId: "u1", orgId: "org1", owner: { type: "user", id: "u1" }, ...extra };
+  const teamCtx: ActionInvocationContext = { userId: "al", orgId: "org1", owner: { type: "team", id: "t1" }, ...extra };
+
+  it("an unknown action writes an error row", async () => {
+    const db = await makeDb();
+    const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService: actionPluginByServiceOf("demo", { service: "demo", actions: [countingAction().action] }) });
+    const res = await invoke({ service: "demo", action: "nope", params: { msg: "x" }, invocationId: "inv-unknown" }, userCtx);
+    expect(res).toEqual({ ok: false, error: "unknown action: demo.nope" });
+    const rows = await auditRows(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      invocationId: key("inv-unknown"), service: "demo", actionId: "demo.nope", status: "error",
+      error: "unknown action: demo.nope", userId: "u1", orgId: "org1", caller, params: { msg: "x" },
+    });
+  });
+
+  it("a dynamic discovery error writes an error row", async () => {
+    const db = await makeDb();
+    const plugin: ActionPlugin = { service: "demo", actions: [], resolveActions: async () => { throw new Error("upstream is down"); } };
+    const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService: actionPluginByServiceOf("demo", plugin) });
+    const res = await invoke({ service: "demo", action: "dyn", params: {}, invocationId: "inv-discovery" }, userCtx);
+    expect(res).toEqual({ ok: false, error: "upstream is down" });
+    const rows = await auditRows(db);
+    expect(rows.map((r) => [r.invocationId, r.status, r.error, r.caller])).toEqual([[key("inv-discovery"), "error", "upstream is down", caller]]);
+  });
+
+  it("a team run without a credential writes an error row", async () => {
+    const db = await makeDb();
+    const fixture = countingAction();
+    const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService: declaredDemo({ service: "demo", actions: [fixture.action] }) });
+    const res = await invoke({ service: "demo", action: "ping", params: { msg: "x" }, invocationId: "inv-team" }, teamCtx);
+    expect(res.ok).toBe(false);
+    expect(fixture.calls()).toBe(0);
+    const rows = await auditRows(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ invocationId: key("inv-team"), actionId: "demo.ping", status: "error", userId: "al", caller });
+    expect(rows[0].error).toContain("This team has no demo credential");
+  });
+
+  it("a credential read refusal writes an error row with the typed message", async () => {
+    const db = await makeDb();
+    await db.insert(teamMembers).values({ teamId: "t1", userId: "al", role: "member" });
+    // The share points at an account that no longer exists.
+    await shareCredential(db, { teamId: "t1", service: "demo", userId: "al", createdAt: 1 });
+    const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService: declaredDemo({ service: "demo", actions: [countingAction().action] }) });
+    const res = await invoke({ service: "demo", action: "ping", params: { msg: "x" }, invocationId: "inv-broken" }, teamCtx);
+    expect(res.ok).toBe(false);
+    const rows = await auditRows(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ invocationId: key("inv-broken"), status: "error", caller });
+    expect(rows[0].error).toMatch(/should reconnect demo/);
+  });
+
+  it("a shared-account park writes a pending require_approval row", async () => {
+    const db = await makeDb();
+    await db.insert(teams).values({ id: "t1", orgId: "org1", name: "Team", createdAt: 1 });
+    await db.insert(teamMembers).values([{ teamId: "t1", userId: "bea", role: "member" }, { teamId: "t1", userId: "al", role: "member" }]);
+    await shareCredential(db, { teamId: "t1", service: "demo", userId: "bea", createdAt: 1 });
+    const store = new FakeCredentialStore();
+    store.seed({ type: "user", id: "bea" }, "demo", { type: "api_key", apiKey: "bea-key" });
+    const invoke = buildActionInvoker({ db, credentials: store, actionPluginByService: actionPluginByServiceOf("demo", { service: "demo", actions: [countingAction().action] }) });
+    const res = await invoke({ service: "demo", action: "ping", params: { msg: "x" }, invocationId: "inv-shared" }, teamCtx);
+    expect(res).toMatchObject({ ok: false, requiresApproval: true, provenance: "shared_account" });
+    const rows = await auditRows(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      invocationId: key("inv-shared"), service: "demo", actionId: "demo.ping", status: "pending",
+      resolvedMode: "require_approval", userId: "al", orgId: "org1", caller, error: null,
+    });
+  });
+
+  it("an enforced call writes only the policy row", async () => {
+    const db = await makeDb();
+    const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService: actionPluginByServiceOf("demo", { service: "demo", actions: [countingAction().action] }) });
+    const res = await invoke({ service: "demo", action: "ping", params: { msg: "x" }, invocationId: "inv-allowed" }, userCtx);
+    expect(res.ok).toBe(true);
+    const rows = await auditRows(db);
+    expect(rows.map((r) => [r.invocationId, r.resolvedMode, r.status])).toEqual([[key("inv-allowed"), "allow", "completed"]]);
   });
 });

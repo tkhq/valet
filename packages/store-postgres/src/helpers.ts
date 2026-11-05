@@ -1,12 +1,25 @@
 import type {
   BranchSummaryEntry,
+  ChannelOrigin,
   CommandResultEntry,
   CompactionEntry,
   DecisionGate,
   DecisionGateEntry,
+  EventClause,
+  EventMatchDigest,
+  EventMatchSpec,
+  Lease,
+  LeaseOwnerKind,
+  LeaseReleaseCause,
   MessageEntry,
+  PromptContent,
+  QueueItem,
   SessionEntry,
   SettlePatchRef,
+  Wakeup,
+  WakeupCause,
+  WakeupKind,
+  WakeupStatus,
 } from "@valet/engine";
 
 export function jsonOrNull<T>(value: T | undefined | null): string | null {
@@ -22,6 +35,23 @@ export function parseJson<T>(value: string | null | undefined): T | undefined {
 /** Like parseJson, but for NOT NULL columns where the value is guaranteed present. */
 export function parseJsonRequired<T>(value: string): T {
   return JSON.parse(value) as T;
+}
+
+/** Restore byte-backed queued media after Uint8Array JSON serialization. Invalid shapes remain rejectable at admission. */
+export function restorePromptBytes(content: PromptContent): PromptContent {
+  if (typeof content === "string" || !content.attachments) return content;
+  return { ...content, attachments: content.attachments.map(attachment => {
+    const encoded: unknown = attachment.data;
+    if (!encoded || typeof encoded !== "object" || encoded instanceof Uint8Array || Array.isArray(encoded)) return attachment;
+    const entries = Object.entries(encoded);
+    const bytes: number[] = [];
+    for (let i = 0; i < entries.length; i++) {
+      const [key, value] = entries[i];
+      if (key !== String(i) || typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 255) return attachment;
+      bytes.push(value);
+    }
+    return { ...attachment, data: new Uint8Array(bytes) };
+  }) };
 }
 
 /**
@@ -101,6 +131,14 @@ export function asCommandSource(value: unknown): CommandResultEntry["source"] {
   return "builtin";
 }
 
+/**
+ * `entry_type` of a usage-only row: one model call's usage and cost with no
+ * engine entry shape. The API writes it for a workflow LLM step, which
+ * calls the model outside any engine session, so the usage projection
+ * counts the call (api `workflows/step-usage.ts`). Entry readers skip it.
+ */
+export const USAGE_ENTRY_TYPE = "usage";
+
 /** Raw column shape of a `SELECT * FROM engine_entries` row. */
 export interface EntryRow {
   id: string;
@@ -133,6 +171,7 @@ export interface EntryRow {
   cost: string | null;
   attachments: string | null;
   createdAt: number;
+  sequence: number;
 }
 
 /** Narrows a raw `engine_entries` row (as returned by pg's query()) into an EntryRow. */
@@ -168,6 +207,7 @@ export function rawToEntryRow(raw: Record<string, unknown>): EntryRow {
     cost: asStringOrNull(raw.cost, "cost"),
     attachments: asStringOrNull(raw.attachments, "attachments"),
     createdAt: toNum(raw.created_at, "created_at"),
+    sequence: toNum(raw.seq, "seq"),
   };
 }
 
@@ -343,6 +383,7 @@ export function rowToEntry(row: EntryRow): SessionEntry {
         attachments: parseJson(row.attachments),
         metadata: parseJson(row.metadata),
         createdAt: row.createdAt,
+        sequence: row.sequence,
         queueItemId: row.queueItemId ?? undefined,
       };
       return e;
@@ -361,6 +402,7 @@ export function rowToEntry(row: EntryRow): SessionEntry {
         fileContext: parseJson(row.fileContext),
         metadata: parseJson(row.metadata),
         createdAt: row.createdAt,
+        sequence: row.sequence,
         queueItemId: row.queueItemId ?? undefined,
       };
       return e;
@@ -377,6 +419,7 @@ export function rowToEntry(row: EntryRow): SessionEntry {
         summary: row.summary ?? "",
         metadata: parseJson(row.metadata),
         createdAt: row.createdAt,
+        sequence: row.sequence,
         queueItemId: row.queueItemId ?? undefined,
       };
       return e;
@@ -399,6 +442,7 @@ export function rowToEntry(row: EntryRow): SessionEntry {
         withdrawnReason: (row.withdrawnReason as DecisionGateEntry["withdrawnReason"]) ?? undefined,
         metadata: Object.keys(userMeta).length > 0 ? (userMeta as Record<string, unknown>) : undefined,
         createdAt: row.createdAt,
+        sequence: row.sequence,
         queueItemId: row.queueItemId ?? undefined,
       };
       return e;
@@ -419,6 +463,7 @@ export function rowToEntry(row: EntryRow): SessionEntry {
         channel: parseJson(row.channel),
         metadata: Object.keys(userMeta).length > 0 ? (userMeta as Record<string, unknown>) : undefined,
         createdAt: row.createdAt,
+        sequence: row.sequence,
         queueItemId: row.queueItemId ?? undefined,
       };
       return e;
@@ -430,6 +475,7 @@ export function rowToEntry(row: EntryRow): SessionEntry {
 
 /** Raw column shape of a `SELECT * FROM engine_queue_items` row. */
 export interface QueueItemRow {
+  childResultDelivery: QueueItem["childResultDelivery"];
   id: string;
   sessionId: string;
   threadId: string;
@@ -461,7 +507,12 @@ export interface QueueItemRow {
 }
 
 export function rawToQueueItemRow(raw: Record<string, unknown>): QueueItemRow {
+  const delivery = raw.child_result_delivery;
+  if (delivery != null && delivery !== "pending" && delivery !== "delivered" && delivery !== "denied") {
+    throw new Error(`invalid child result delivery state: ${String(delivery)}`);
+  }
   return {
+    childResultDelivery: delivery ?? undefined,
     id: asString(raw.id, "id"),
     sessionId: asString(raw.session_id, "session_id"),
     threadId: asString(raw.thread_id, "thread_id"),
@@ -607,6 +658,7 @@ export interface GateRow {
   status: string;
   title: string;
   body: string | null;
+  agentReason: string | null;
   actions: string;
   origin: string | null;
   context: string | null;
@@ -628,6 +680,7 @@ export function rawToGateRow(raw: Record<string, unknown>): GateRow {
     status: asString(raw.status, "status"),
     title: asString(raw.title, "title"),
     body: asStringOrNull(raw.body, "body"),
+    agentReason: asStringOrNull(raw.agent_reason, "agent_reason"),
     actions: asString(raw.actions, "actions"),
     origin: asStringOrNull(raw.origin, "origin"),
     context: asStringOrNull(raw.context, "context"),
@@ -650,6 +703,7 @@ export function rowToGate(row: GateRow): DecisionGate {
     status: row.status as DecisionGate["status"],
     title: row.title,
     body: row.body ?? undefined,
+    agentReason: row.agentReason ?? undefined,
     actions: parseJson(row.actions) ?? [],
     origin: parseJson(row.origin),
     context: parseJson(row.context),
@@ -692,5 +746,370 @@ export function rawToSuspendedTurnRow(raw: Record<string, unknown>): SuspendedTu
     ordinal: toNum(raw.ordinal, "ordinal"),
     attempt: toNum(raw.attempt, "attempt"),
     createdAt: toNum(raw.created_at, "created_at"),
+  };
+}
+
+/** Raw column shape of a `SELECT * FROM engine_wakeups` row. */
+export interface WakeupRow {
+  id: string;
+  session_id: string;
+  thread_id: string;
+  kind: string;
+  status: string;
+  reason: string;
+  command: string | null;
+  prompt: string | null;
+  exec_id: string | null;
+  lease_id: string | null;
+  fire_at: number | null;
+  deadline_at: number | null;
+  exit_code: number | null;
+  cause: string | null;
+  log_offset: number;
+  log_tail: string;
+  event_count: number;
+  created_at: number;
+  updated_at: number;
+  ended_at: number | null;
+  terminal_signal_expected: boolean;
+  terminal_signal_started_at: number | null;
+  source_queue_item_id: string | null;
+  terminal_signal_loss_reported_at: number | null;
+  origin_json: string | null;
+  window_start_at: number | null;
+  window_count: number | null;
+  watch_buffer: string | null;
+  last_emit_at: number | null;
+  /** `event`: the `EventMatchSpec` as JSON. */
+  match_json: string | null;
+  subjects: string[] | null;
+  /** `event`: a JSON array of `EventMatchDigest`. */
+  event_buffer: string | null;
+  /** `event`: a JSON array of delivered dedupe keys, oldest first. */
+  event_seen: string | null;
+  /** `event`: a bounded JSON array of consumed derivation source keys. */
+  event_source_seen: string | null;
+}
+
+/**
+ * Narrows a stored `origin_json` to a `ChannelOrigin`. Null or unreadable
+ * JSON reads as no origin: a signal then goes out without one, never a throw.
+ */
+export function parseOriginJson(raw: string | null): ChannelOrigin | undefined {
+  if (raw === null) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (parsed === null || typeof parsed !== "object") return undefined;
+  const o: Record<string, unknown> = { ...parsed };
+  if (typeof o.channelType !== "string" || typeof o.threadKey !== "string") return undefined;
+  return {
+    channelType: o.channelType,
+    threadKey: o.threadKey,
+    ...(o.reply === "auto" || o.reply === "manual" ? { reply: o.reply } : {}),
+    ...(typeof o.messageTs === "string" ? { messageTs: o.messageTs } : {}),
+  };
+}
+
+export function rawToWakeupRow(raw: Record<string, unknown>): WakeupRow {
+  return {
+    id: asString(raw.id, "id"),
+    session_id: asString(raw.session_id, "session_id"),
+    thread_id: asString(raw.thread_id, "thread_id"),
+    kind: asString(raw.kind, "kind"),
+    status: asString(raw.status, "status"),
+    reason: asString(raw.reason, "reason"),
+    command: asStringOrNull(raw.command, "command"),
+    prompt: asStringOrNull(raw.prompt, "prompt"),
+    exec_id: asStringOrNull(raw.exec_id, "exec_id"),
+    lease_id: asStringOrNull(raw.lease_id, "lease_id"),
+    fire_at: toNumOrNull(raw.fire_at, "fire_at"),
+    deadline_at: toNumOrNull(raw.deadline_at, "deadline_at"),
+    exit_code: toNumOrNull(raw.exit_code, "exit_code"),
+    cause: asStringOrNull(raw.cause, "cause"),
+    log_offset: toNum(raw.log_offset, "log_offset"),
+    log_tail: asString(raw.log_tail, "log_tail"),
+    event_count: toNum(raw.event_count, "event_count"),
+    created_at: toNum(raw.created_at, "created_at"),
+    updated_at: toNum(raw.updated_at, "updated_at"),
+    ended_at: toNumOrNull(raw.ended_at, "ended_at"),
+    terminal_signal_expected: raw.terminal_signal_expected === true,
+    terminal_signal_started_at: toNumOrNull(raw.terminal_signal_started_at, "terminal_signal_started_at"),
+    source_queue_item_id: asStringOrNull(raw.source_queue_item_id, "source_queue_item_id"),
+    terminal_signal_loss_reported_at: toNumOrNull(raw.terminal_signal_loss_reported_at, "terminal_signal_loss_reported_at"),
+    origin_json: asStringOrNull(raw.origin_json, "origin_json"),
+    window_start_at: toNumOrNull(raw.window_start_at, "window_start_at"),
+    window_count: toNumOrNull(raw.window_count, "window_count"),
+    watch_buffer: asStringOrNull(raw.watch_buffer, "watch_buffer"),
+    last_emit_at: toNumOrNull(raw.last_emit_at, "last_emit_at"),
+    match_json: asStringOrNull(raw.match_json, "match_json"),
+    subjects: asStringArrayOrNull(raw.subjects, "subjects"),
+    event_buffer: asStringOrNull(raw.event_buffer, "event_buffer"),
+    event_seen: asStringOrNull(raw.event_seen, "event_seen"),
+    event_source_seen: asStringOrNull(raw.event_source_seen, "event_source_seen"),
+  };
+}
+
+function asStringArrayOrNull(value: unknown, field: string): string[] | null {
+  if (value === null || value === undefined) return null;
+  if (!Array.isArray(value) || !value.every((v) => typeof v === "string")) {
+    throw new Error(`expected a string array for ${field}`);
+  }
+  return value;
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+
+function isStringArray(v: unknown): v is string[] {
+  return Array.isArray(v) && v.every((x) => typeof x === "string");
+}
+
+function optString(o: Record<string, unknown>, key: string, field: string): string | undefined {
+  const v = o[key];
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== "string") throw new Error(`${field}.${key} is not a string`);
+  return v;
+}
+
+function optStringArray(o: Record<string, unknown>, key: string, field: string): string[] | undefined {
+  const v = o[key];
+  if (v === undefined || v === null) return undefined;
+  if (!isStringArray(v)) throw new Error(`${field}.${key} is not a string array`);
+  return v;
+}
+
+function optBoolean(o: Record<string, unknown>, key: string, field: string): boolean | undefined {
+  const v = o[key];
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== "boolean") throw new Error(`${field}.${key} is not a boolean`);
+  return v;
+}
+
+function reqString(o: Record<string, unknown>, key: string, field: string): string {
+  const v = o[key];
+  if (typeof v !== "string") throw new Error(`${field}.${key} is not a string`);
+  return v;
+}
+
+/** Throws on a value that is not an `EventClause`, so the row reads as unreadable. */
+function toEventClause(v: unknown, field: string): EventClause {
+  if (!isRecord(v)) throw new Error(`${field} is not an object`);
+  const status = optStringArray(v, "status", field);
+  const fromStatus = optStringArray(v, "from_status", field);
+  const actor = optString(v, "actor", field);
+  const bots = optBoolean(v, "bots", field);
+  const includeSelf = optBoolean(v, "include_self", field);
+  return {
+    key: reqString(v, "key", field),
+    ...(status !== undefined ? { status } : {}),
+    ...(fromStatus !== undefined ? { from_status: fromStatus } : {}),
+    ...(actor !== undefined ? { actor } : {}),
+    ...(bots !== undefined ? { bots } : {}),
+    ...(includeSelf !== undefined ? { include_self: includeSelf } : {}),
+  };
+}
+
+/** Narrows a stored `match_json`. Throws on unreadable JSON or a wrong shape. */
+export function parseEventMatchJson(raw: string): EventMatchSpec {
+  const parsed: unknown = JSON.parse(raw);
+  const field = "engine_wakeups.match_json";
+  if (!isRecord(parsed)) throw new Error(`${field} is not an object`);
+  if (!Array.isArray(parsed.clauses)) throw new Error(`${field}.clauses is not an array`);
+  if (typeof parsed.once !== "boolean") throw new Error(`${field}.once is not a boolean`);
+  if (!isStringArray(parsed.self)) throw new Error(`${field}.self is not a string array`);
+  const minIntervalMs = parsed.minIntervalMs;
+  if (minIntervalMs !== undefined && (typeof minIntervalMs !== "number" || !Number.isFinite(minIntervalMs) || minIntervalMs < 0)) {
+    throw new Error(`${field}.minIntervalMs is not a non-negative number`);
+  }
+  const primarySubject = parsed.primarySubject;
+  if (primarySubject !== undefined && typeof primarySubject !== "string") {
+    throw new Error(`${field}.primarySubject is not a string`);
+  }
+  return {
+    ...(typeof parsed.childSessionId === "string" ? { childSessionId: parsed.childSessionId } : {}),
+    clauses: parsed.clauses.map((c, i) => toEventClause(c, `${field}.clauses[${i}]`)),
+    once: parsed.once,
+    self: parsed.self,
+    ...(minIntervalMs !== undefined ? { minIntervalMs } : {}),
+    ...(primarySubject !== undefined ? { primarySubject } : {}),
+  };
+}
+
+/** Throws on a value that is not an `EventMatchDigest`. */
+function toEventMatchDigest(v: unknown, field: string): EventMatchDigest {
+  if (!isRecord(v)) throw new Error(`${field} is not an object`);
+  if (!isStringArray(v.subjects)) throw new Error(`${field}.subjects is not a string array`);
+  const optional = ["status", "previousStatus", "url", "actor", "text", "derive", "head_sha"] as const;
+  const out: EventMatchDigest = {
+    key: reqString(v, "key", field),
+    subjects: v.subjects,
+    summary: reqString(v, "summary", field),
+    occurredAt: reqString(v, "occurredAt", field),
+    dedupeKey: reqString(v, "dedupeKey", field),
+  };
+  if (isRecord(v.refs) && Object.values(v.refs).every((value) => typeof value === "string")) {
+    out.refs = Object.fromEntries(Object.entries(v.refs).map(([key, value]) => [key, String(value)]));
+  }
+  for (const key of optional) {
+    const value = optString(v, key, field);
+    if (value !== undefined) out[key] = value;
+  }
+  return out;
+}
+
+/** Narrows a stored `event_seen`. Throws on unreadable JSON or a wrong shape. */
+export function parseEventSeenJson(raw: string): string[] {
+  const parsed: unknown = JSON.parse(raw);
+  if (!isStringArray(parsed)) throw new Error("engine_wakeups.event_seen is not a string array");
+  return parsed;
+}
+
+/** Narrows a stored `event_buffer`. Throws on unreadable JSON or a wrong shape. */
+export function parseEventBufferJson(raw: string): EventMatchDigest[] {
+  const parsed: unknown = JSON.parse(raw);
+  const field = "engine_wakeups.event_buffer";
+  if (!Array.isArray(parsed)) throw new Error(`${field} is not an array`);
+  return parsed.map((d, i) => toEventMatchDigest(d, `${field}[${i}]`));
+}
+
+function isWakeupKind(v: string): v is WakeupKind {
+  return v === "process" || v === "watch" || v === "timer" || v === "event";
+}
+
+function isWakeupStatus(v: string): v is WakeupStatus {
+  return ["pending", "running", "done", "cancelled", "expired", "lost"].includes(v);
+}
+
+function isWakeupCause(v: string): v is WakeupCause {
+  return ["exit", "deadline", "cancelled", "pid_missing", "sandbox_unavailable", "rate", "fired"].includes(v);
+}
+
+export function rowToWakeup(row: WakeupRow): Wakeup {
+  if (!isWakeupKind(row.kind)) throw new Error(`engine_wakeups.kind "${row.kind}" is not a known kind`);
+  if (!isWakeupStatus(row.status)) throw new Error(`engine_wakeups.status "${row.status}" is not a known status`);
+  if (row.cause !== null && !isWakeupCause(row.cause)) {
+    throw new Error(`engine_wakeups.cause "${row.cause}" is not a known cause`);
+  }
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    threadId: row.thread_id,
+    kind: row.kind,
+    status: row.status,
+    reason: row.reason,
+    ...(row.command !== null ? { command: row.command } : {}),
+    ...(row.prompt !== null ? { prompt: row.prompt } : {}),
+    ...(row.exec_id !== null ? { execId: row.exec_id } : {}),
+    ...(row.lease_id !== null ? { leaseId: row.lease_id } : {}),
+    ...(row.fire_at !== null ? { fireAt: row.fire_at } : {}),
+    ...(row.deadline_at !== null ? { deadlineAt: row.deadline_at } : {}),
+    ...(row.exit_code !== null ? { exitCode: row.exit_code } : {}),
+    ...(row.cause !== null ? { cause: row.cause } : {}),
+    logOffset: row.log_offset,
+    logTail: row.log_tail,
+    eventCount: row.event_count,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    ...(row.ended_at !== null ? { endedAt: row.ended_at } : {}),
+    ...(row.terminal_signal_expected ? { terminalSignalExpected: true } : {}),
+    ...(row.terminal_signal_started_at !== null ? { terminalSignalStartedAt: row.terminal_signal_started_at } : {}),
+    ...(row.source_queue_item_id !== null ? { sourceQueueItemId: row.source_queue_item_id } : {}),
+    ...(row.terminal_signal_loss_reported_at !== null ? { terminalSignalLossReportedAt: row.terminal_signal_loss_reported_at } : {}),
+    ...withOrigin(row.origin_json),
+    ...(row.window_start_at !== null ? { windowStartAt: row.window_start_at } : {}),
+    ...(row.window_count !== null ? { windowCount: row.window_count } : {}),
+    ...(row.watch_buffer !== null ? { watchBuffer: row.watch_buffer } : {}),
+    ...(row.last_emit_at !== null ? { lastEmitAt: row.last_emit_at } : {}),
+    ...(row.subjects !== null ? { subjects: row.subjects } : {}),
+    ...(row.match_json !== null ? { eventMatch: parseEventMatchJson(row.match_json) } : {}),
+    ...(row.event_buffer !== null ? { eventBuffer: parseEventBufferJson(row.event_buffer) } : {}),
+    ...(row.event_source_seen !== null ? { eventSourceSeen: parseEventSeenJson(row.event_source_seen) } : {}),
+    ...(row.event_seen !== null ? { eventSeen: parseEventSeenJson(row.event_seen) } : {}),
+  };
+}
+
+function withOrigin(raw: string | null): { origin?: ChannelOrigin } {
+  const origin = parseOriginJson(raw);
+  return origin ? { origin } : {};
+}
+
+/** Raw column shape of a `SELECT * FROM engine_leases` row. */
+export interface LeaseRow {
+  id: string;
+  session_id: string;
+  sandbox_id: string | null;
+  owner_kind: string;
+  owner_id: string | null;
+  reason: string;
+  created_at: number;
+  deadline_at: number;
+  released_at: number | null;
+  release_cause: string | null;
+  terminal_signal_expected: boolean;
+  terminal_signal_started_at: number | null;
+  source_queue_item_id: string | null;
+  terminal_signal_loss_reported_at: number | null;
+  thread_id: string | null;
+  origin_json: string | null;
+}
+
+export function rawToLeaseRow(raw: Record<string, unknown>): LeaseRow {
+  return {
+    id: asString(raw.id, "id"),
+    session_id: asString(raw.session_id, "session_id"),
+    sandbox_id: asStringOrNull(raw.sandbox_id, "sandbox_id"),
+    owner_kind: asString(raw.owner_kind, "owner_kind"),
+    owner_id: asStringOrNull(raw.owner_id, "owner_id"),
+    reason: asString(raw.reason, "reason"),
+    created_at: toNum(raw.created_at, "created_at"),
+    deadline_at: toNum(raw.deadline_at, "deadline_at"),
+    released_at: toNumOrNull(raw.released_at, "released_at"),
+    release_cause: asStringOrNull(raw.release_cause, "release_cause"),
+    terminal_signal_expected: raw.terminal_signal_expected === true,
+    terminal_signal_started_at: toNumOrNull(raw.terminal_signal_started_at, "terminal_signal_started_at"),
+    source_queue_item_id: asStringOrNull(raw.source_queue_item_id, "source_queue_item_id"),
+    terminal_signal_loss_reported_at: toNumOrNull(raw.terminal_signal_loss_reported_at, "terminal_signal_loss_reported_at"),
+    thread_id: asStringOrNull(raw.thread_id, "thread_id"),
+    origin_json: asStringOrNull(raw.origin_json, "origin_json"),
+  };
+}
+
+function isLeaseOwnerKind(v: string): v is LeaseOwnerKind {
+  return v === "process" || v === "watch" || v === "hold";
+}
+
+function isLeaseReleaseCause(v: string): v is LeaseReleaseCause {
+  return v === "owner_ended" || v === "cancelled" || v === "deadline";
+}
+
+export function rowToLease(row: LeaseRow): Lease {
+  if (!isLeaseOwnerKind(row.owner_kind)) {
+    throw new Error(`engine_leases.owner_kind "${row.owner_kind}" is not a known owner kind`);
+  }
+  if (row.release_cause !== null && !isLeaseReleaseCause(row.release_cause)) {
+    throw new Error(`engine_leases.release_cause "${row.release_cause}" is not a known release cause`);
+  }
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    ...(row.sandbox_id !== null ? { sandboxId: row.sandbox_id } : {}),
+    ownerKind: row.owner_kind,
+    ...(row.owner_id !== null ? { ownerId: row.owner_id } : {}),
+    ...(row.thread_id !== null ? { threadId: row.thread_id } : {}),
+    ...withOrigin(row.origin_json),
+    reason: row.reason,
+    createdAt: row.created_at,
+    deadlineAt: row.deadline_at,
+    ...(row.released_at !== null ? { releasedAt: row.released_at } : {}),
+    ...(row.release_cause !== null ? { releaseCause: row.release_cause } : {}),
+    ...(row.terminal_signal_expected ? { terminalSignalExpected: true } : {}),
+    ...(row.terminal_signal_started_at !== null ? { terminalSignalStartedAt: row.terminal_signal_started_at } : {}),
+    ...(row.source_queue_item_id !== null ? { sourceQueueItemId: row.source_queue_item_id } : {}),
+    ...(row.terminal_signal_loss_reported_at !== null ? { terminalSignalLossReportedAt: row.terminal_signal_loss_reported_at } : {}),
   };
 }

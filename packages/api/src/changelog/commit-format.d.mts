@@ -16,7 +16,10 @@ export type ParsedCommitMessage =
       breaking: boolean;
       summary: string;
       explicit: boolean;
+      /** The trailer's impact text. Null when absent or an opt-out value. */
       changelog: string | null;
+      /** The trailer named an opt-out value ("none", "n/a", "skip", ...). */
+      changelogOptOut: boolean;
       userFacing: boolean;
       metadataValid: boolean;
     };

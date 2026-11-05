@@ -16,6 +16,7 @@ import {
   JOB_POLL_INTERVAL_MS,
   JOB_POLL_WARMUP_MS,
   BASH_DEFAULT_TIMEOUT_S,
+  BASH_TRUNCATION_NOTE,
 } from "../src/builtin-tools/index.js";
 import { SandboxSupersededError, SandboxUnavailableError } from "../src/errors.js";
 import type {
@@ -98,6 +99,7 @@ describe("bash tool: mode selection", () => {
     };
     const ctx = makeCtx(sandbox);
     const result = await execute({ command: "long-thing", timeout: 61 }, ctx);
+    expect(sandbox.execJob).toHaveBeenCalledWith("long-thing", { signal: ctx.signal });
     expect(sandbox.execJob).toHaveBeenCalledTimes(1);
     expect(sandbox.exec).not.toHaveBeenCalled();
     expect((result as { text: string }).text).toBe("job-out\n");
@@ -140,6 +142,22 @@ describe("bash tool: mode selection", () => {
 });
 
 describe("bash tool: job-mode poll loop", () => {
+  it.each(["gh pr create", "gh pr review 1031 --approve"])("does not infer success or an outcome without an exit code for %s", async command => {
+    const sandbox: FakeSandbox = { id: "unknown-exit", execJob: async () => ({ execId: "job" }), cancelJob: async () => {},
+      pollJob: async () => ({ status: "done", output: "https://github.com/tkhq/valet/pull/1031", nextOffset: 47 }) };
+    const result = await execute({ command, timeout: 61 }, makeCtx(sandbox));
+    expect(result.text).toBe("https://github.com/tkhq/valet/pull/1031");
+    expect(result.outcome).toBeUndefined();
+  });
+
+  it.each(["done", "failed"] as const)("preserves output, truncation, and exit-note ordering for a %s job", async status => {
+    const sandbox: FakeSandbox = { id: "exit-order", execJob: async () => ({ execId: "job" }), cancelJob: async () => {},
+      pollJob: async () => ({ status, exitCode: 3, output: "output", nextOffset: 6, truncated: true }) };
+    const result = await execute({ command: "gh pr review 1031 --approve", timeout: 61 }, makeCtx(sandbox));
+    expect(result.text).toBe(`output${BASH_TRUNCATION_NOTE}\n${status === "done" ? "[exit 3]" : "[job failed]"}`);
+    expect(result.outcome).toBeUndefined();
+  });
+
   it("accumulates output across multiple polls into the final text; appends [exit N] on nonzero", async () => {
     vi.useFakeTimers();
     try {
@@ -205,7 +223,7 @@ describe("bash tool: job-mode poll loop", () => {
         cancelJob: vi.fn(async () => {}),
       };
       const ctx = makeCtx(sandbox);
-      const resultPromise = execute({ command: "sleep 999", timeout: 61 }, ctx);
+      const resultPromise = execute({ command: "long-running-task", timeout: 61 }, ctx);
       await vi.advanceTimersByTimeAsync(61_000 + JOB_POLL_INTERVAL_MS * 2);
       const result = await resultPromise;
       expect(sandbox.cancelJob).toHaveBeenCalledWith("job-3");
@@ -213,6 +231,56 @@ describe("bash tool: job-mode poll loop", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it.each(["short", "no-job-support", "unsupported-job"])("records comment outcomes on foreground timeouts (%s)", async mode => {
+    const url = "https://github.com/tkhq/valet/pull/1031#issuecomment-123";
+    const sandbox: FakeSandbox = {
+      id: "foreground-timeout",
+      exec: vi.fn(async (): Promise<ExecResult> => ({ stdout: url, stderr: "", exitCode: 124, timedOut: true })),
+      ...(mode !== "no-job-support" ? {
+        execJob: vi.fn(async (): Promise<ExecJobHandle> => { throw new Error("[job_unsupported]"); }),
+        pollJob: vi.fn(), cancelJob: vi.fn(),
+      } : {}),
+    };
+    const result = await execute({ command: "gh pr comment 1031 --body test", timeout: mode === "short" ? 60 : 61 }, makeCtx(sandbox));
+    expect(result.text).toContain(url);
+    expect(result.text).toContain("timed out");
+    expect(result.text).not.toContain("[exit 124]");
+    expect(result.outcome).toEqual({ kind: "pull_request_comment", url });
+    expect(sandbox.exec).toHaveBeenCalledTimes(1);
+    if (mode === "short") expect(sandbox.execJob).not.toHaveBeenCalled();
+  });
+
+  it("records a completed job's comment outcome even without an exit code, as on dev-v2", async () => {
+    const url = "https://github.com/tkhq/valet/pull/1031#issuecomment-123";
+    const sandbox: FakeSandbox = {
+      id: "comment-unknown-exit", execJob: async () => ({ execId: "comment-job" }),
+      pollJob: async () => ({ status: "done", output: url, nextOffset: url.length }), cancelJob: async () => {},
+    };
+    const result = await execute({ command: "gh pr comment 1031 --body test", timeout: 61 }, makeCtx(sandbox));
+    expect(result.text).toBe(url);
+    expect(result.outcome).toEqual({ kind: "pull_request_comment", url });
+  });
+
+  it("does not record a comment outcome from job output on timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const url = "https://github.com/tkhq/valet/pull/1031#issuecomment-123";
+      const sandbox: FakeSandbox = {
+        id: "comment-timeout",
+        execJob: async () => ({ execId: "comment-job" }),
+        pollJob: vi.fn(async (_execId, offset): Promise<JobPoll> => ({ status: "running", output: offset === 0 ? url : "", nextOffset: url.length })),
+        cancelJob: vi.fn(async () => {}),
+      };
+      const pending = execute({ command: "gh pr comment 1031 --body test", timeout: 61 }, makeCtx(sandbox));
+      await vi.advanceTimersByTimeAsync(65_000);
+      const result = await pending;
+      expect(result.text).toContain(url);
+      expect(result.text).toContain("timed out");
+      expect(result.outcome).toBeUndefined();
+      expect(sandbox.cancelJob).toHaveBeenCalledWith("comment-job");
+    } finally { vi.useRealTimers(); }
   });
 
   it("ctx.signal abort mid-poll cancels the job then throws the abort error", async () => {
@@ -229,7 +297,7 @@ describe("bash tool: job-mode poll loop", () => {
       cancelJob: vi.fn(async () => {}),
     };
     const ctx = makeCtx(sandbox, controller.signal);
-    await expect(execute({ command: "sleep 999", timeout: 61 }, ctx)).rejects.toThrow("cancelled by user");
+    await expect(execute({ command: "long-running-task", timeout: 61 }, ctx)).rejects.toThrow("cancelled by user");
     expect(sandbox.cancelJob).toHaveBeenCalledWith("job-4");
     expect(sandbox.pollJob).toHaveBeenCalledTimes(1);
   });
@@ -266,7 +334,7 @@ describe("bash tool: job-mode poll loop", () => {
       }),
     };
     const ctx = makeCtx(sandbox, controller.signal);
-    await expect(execute({ command: "sleep 999", timeout: 61 }, ctx)).rejects.toThrow("cancelled by user");
+    await expect(execute({ command: "long-running-task", timeout: 61 }, ctx)).rejects.toThrow("cancelled by user");
     expect(sandbox.cancelJob).toHaveBeenCalledWith("job-6");
   });
 
@@ -282,7 +350,7 @@ describe("bash tool: job-mode poll loop", () => {
         }),
       };
       const ctx = makeCtx(sandbox);
-      const resultPromise = execute({ command: "sleep 999", timeout: 61 }, ctx);
+      const resultPromise = execute({ command: "long-running-task", timeout: 61 }, ctx);
       await vi.advanceTimersByTimeAsync(61_000 + JOB_POLL_INTERVAL_MS * 2);
       const result = await resultPromise;
       expect(sandbox.cancelJob).toHaveBeenCalledWith("job-7");

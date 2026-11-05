@@ -1,0 +1,788 @@
+import { useEffect, useRef, useState } from "react";
+import {
+  ArrowLeft,
+  ArrowRight,
+  Camera,
+  Globe,
+  LockKeyhole,
+  MoreHorizontal,
+  Plus,
+  RotateCw,
+  X,
+} from "lucide-react";
+import type {
+  BrowserArtifact,
+  BrowserHumanInput,
+  BrowserPointerCursor,
+  BrowserRuntimeStatus,
+} from "@valet/shared";
+import {
+  browserApi,
+  useBrowserActions,
+  useBrowserFrame,
+  useBrowserStatus,
+} from "~/api/browser";
+import { Button, Input, Select, Spinner, TabBar } from "~/components/primitives";
+import { cn } from "~/lib/cn";
+import { BrowserViewport, type BrowserReaderState } from "./browser-viewport";
+import { EvidenceAnnotations } from "./evidence-annotations";
+import { normalizeBrowserAddress } from "./input";
+
+const STATE_LABEL: Record<BrowserRuntimeStatus["state"], string> = {
+  installed: "Ready to start",
+  starting: "Starting browser",
+  ready: "Browser ready",
+  sleeping: "Browser sleeping",
+  crashed: "Browser stopped",
+  incompatible: "Browser update required",
+  disabled: "Browser disabled",
+};
+
+export function BrowserPane({ sessionId, compact = false }: { sessionId: string; compact?: boolean }) {
+  const query = useBrowserStatus(sessionId);
+  const actions = useBrowserActions(sessionId);
+  const data = query.data;
+  const runtime = data?.status;
+  const [chosenTab, setChosenTab] = useState<string | null>(null);
+  const selected =
+    runtime?.tabs.find((tab) => tab.id === chosenTab) ??
+    runtime?.tabs.find((tab) => tab.id === runtime.selectedTabId) ??
+    runtime?.tabs[0];
+  const readerTarget = `${sessionId}:${runtime?.runtimeId}:${selected?.id}`;
+  // Keep reader state while document changes dispose the input surface.
+  const readerState = useRef<{ target: string; value: BrowserReaderState } | null>(null);
+  const [address, setAddress] = useState("");
+  const touchedAddress = useRef(false);
+  const addressTab = useRef<string | undefined>(undefined);
+  const [error, setError] = useState<string | null>(null);
+  const [capture, setCapture] = useState<BrowserArtifact | null>(null);
+  const [annotating, setAnnotating] = useState(false);
+  const lease = runtime?.control;
+  const ownsLease = Boolean(
+    lease &&
+    lease.actorId === data?.actorId &&
+    lease.runtimeId === runtime?.runtimeId,
+  );
+  const leaseExpired = Boolean(lease && lease.expiresAt <= Date.now());
+  const canControl = Boolean(
+    data?.settings.enabled &&
+    runtime?.state === "ready" &&
+    (!lease || (ownsLease && !leaseExpired && lease.state === "active")),
+  );
+  const changing =
+    actions.control.isPending ||
+    actions.tab.isPending ||
+    actions.start.isPending ||
+    actions.settings.isPending;
+  const hasDialog = Boolean(
+    runtime?.dialogs?.some((dialog) => dialog.tabId === selected?.id),
+  );
+  const viewing = useBrowserFrame(
+    sessionId,
+    runtime?.runtimeId,
+    selected?.id,
+    Boolean(
+      data?.settings.enabled &&
+      runtime?.state === "ready" &&
+      runtime.capabilities.viewer?.available &&
+      !hasDialog,
+    ),
+    selected?.documentId,
+  );
+
+  useEffect(() => {
+    if (addressTab.current !== selected?.id || !touchedAddress.current) {
+      setAddress(selected?.url ?? "");
+      touchedAddress.current = false;
+    }
+    addressTab.current = selected?.id;
+  }, [selected?.id, selected?.url]);
+  useEffect(() => {
+    setChosenTab(null);
+    setError(null);
+  }, [sessionId, runtime?.runtimeId]);
+  useEffect(() => {
+    setError(null);
+  }, [selected?.id, selected?.documentId, viewing.frame?.documentId]);
+  useEffect(() => {
+    setCapture(null);
+    setAnnotating(false);
+  }, [sessionId]);
+
+  async function run(operation: () => Promise<unknown>) {
+    setError(null);
+    try {
+      await operation();
+    } catch (failure) {
+      setError(
+        failure instanceof Error
+          ? failure.message
+          : "The browser action failed. Refresh browser status before continuing.",
+      );
+    }
+  }
+  async function send(
+    input: BrowserHumanInput,
+    documentId = selected?.documentId,
+  ): Promise<BrowserPointerCursor | void> {
+    if (!canControl || !runtime || !selected || !documentId)
+      throw new Error(
+        "Browser input is unavailable. Refresh browser status or resume shared use.",
+      );
+    const response = await (
+      input.type === "dialog" ? actions.dialog : actions.input
+    ).mutateAsync({
+      ...(lease ? { leaseId: lease.id } : {}),
+      runtimeId: runtime.runtimeId,
+      tabId: selected.id,
+      documentId,
+      input,
+    });
+    if (
+      ["navigate", "back", "forward", "reload", "dialog"].includes(input.type)
+    )
+      await query.refetch();
+    return response.pointerCursor;
+  }
+  function selectTab(tabId: string) {
+    setChosenTab(tabId);
+    if (canControl && runtime)
+      void run(() =>
+        actions.tab.mutateAsync({
+          action: "select",
+          ...(lease ? { leaseId: lease.id } : {}),
+          runtimeId: runtime.runtimeId,
+          tabId,
+        }),
+      );
+  }
+
+  if (query.isPending)
+    return (
+      <div className="grid flex-1 place-items-center p-6">
+        <Spinner />
+        <span className="text-sm text-muted">Checking browser status…</span>
+      </div>
+    );
+  if (query.isError)
+    return (
+      <div role="alert" className="space-y-3 p-6 text-sm text-danger-600">
+        <p>{query.error.message}</p>
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={() => void query.refetch()}
+        >
+          Retry browser status
+        </Button>
+      </div>
+    );
+  if (!data) return null;
+  if (!data.enabled)
+    return (
+      <div className="grid flex-1 place-content-center gap-3 p-6 text-center text-sm text-muted">
+        <Globe className="mx-auto h-6 w-6" />
+        <p>This sandbox provider does not support the browser.</p>
+        <p>Use a sandbox with browser support.</p>
+      </div>
+    );
+
+  return (
+    <section
+      aria-label="Sandbox browser"
+      className="flex min-h-0 flex-1 flex-col"
+    >
+      <details open={compact ? undefined : true} className="shrink-0 border-b border-line">
+        <summary className={compact ? "flex h-11 cursor-pointer list-none items-center gap-2 px-3 text-sm [&::-webkit-details-marker]:hidden" : "hidden"}>
+          <Globe aria-hidden className="h-4 w-4 text-moss" />
+          <span className="min-w-0 flex-1 truncate">{lease ? (ownsLease ? "You have control" : "Another person has control") : "Shared control"}</span>
+          <span className="sr-only">Browser actions</span><MoreHorizontal aria-hidden className="h-5 w-5" />
+        </summary>
+        <div className="flex shrink-0 flex-wrap items-center gap-2 px-3 py-2 text-xs">
+        <Globe aria-hidden className="h-4 w-4 text-moss" />
+        <span role="status" className="mr-auto text-muted">
+          {runtime ? STATE_LABEL[runtime.state] : "Browser has not started"}
+        </span>
+        {runtime?.state === "ready" && (
+          <>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={
+                !data.settings.enabled ||
+                !selected ||
+                !runtime.capabilities.viewer?.available ||
+                Boolean(lease?.privateMode) ||
+                hasDialog ||
+                actions.capture.isPending
+              }
+              onClick={() =>
+                void run(async () => {
+                  if (!selected) return;
+                  const evidence = await actions.capture.mutateAsync({
+                    runtimeId: runtime.runtimeId,
+                    tabId: selected.id,
+                  });
+                  setCapture(evidence);
+                  setAnnotating(false);
+                })
+              }
+            >
+              <Camera aria-hidden className="h-3.5 w-3.5" />
+              {actions.capture.isPending
+                ? "Saving screenshot…"
+                : "Save screenshot"}
+            </Button>
+            {ownsLease ? (
+              <>
+                {leaseExpired ? (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={changing}
+                    onClick={() =>
+                      void run(() =>
+                        actions.control.mutateAsync({
+                          action: "take",
+                          privateMode: lease?.privateMode,
+                        }),
+                      )
+                    }
+                  >
+                    Renew control
+                  </Button>
+                ) : lease?.state === "paused" ? (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={changing}
+                    onClick={() =>
+                      void run(() =>
+                        actions.control.mutateAsync({
+                          action: "resume",
+                          ...(lease ? { leaseId: lease.id } : {}),
+                        }),
+                      )
+                    }
+                  >
+                    Resume control
+                  </Button>
+                ) : null}
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={changing}
+                  onClick={() =>
+                    void run(() =>
+                      actions.control.mutateAsync({
+                        action: "release",
+                        leaseId: lease?.id,
+                      }),
+                    )
+                  }
+                >
+                  {lease?.privateMode ? "End private sign-in" : "Resume agent"}
+                </Button>
+              </>
+            ) : (
+              <>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={changing || Boolean(lease)}
+                  onClick={() =>
+                    void run(() =>
+                      actions.control.mutateAsync({ action: "take" }),
+                    )
+                  }
+                >
+                  Pause agent
+                </Button>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={changing || Boolean(lease)}
+                  onClick={() =>
+                    void run(() =>
+                      actions.control.mutateAsync({
+                        action: "take",
+                        privateMode: true,
+                      }),
+                    )
+                  }
+                >
+                  <LockKeyhole aria-hidden className="h-3.5 w-3.5" />
+                  Private sign-in
+                </Button>
+              </>
+            )}
+          </>
+        )}
+        <Button
+          size="sm"
+          variant="ghost"
+          aria-label="Refresh browser status"
+          onClick={() => void query.refetch()}
+        >
+          <RotateCw aria-hidden className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+
+        {compact && runtime?.state === "ready" && <div className="flex gap-2 px-3 pb-2">
+          <Button variant="ghost" disabled={!canControl || !selected} onClick={() => void run(() => send({ type: "forward" }))}>Forward</Button>
+          <Button variant="ghost" disabled={!canControl || !selected} onClick={() => void run(() => send({ type: "reload" }))}>Reload page</Button>
+        </div>}
+        {compact && <p className="px-3 pb-3 text-xs text-muted">You and the agent can use the page. Pause the agent for exclusive control. Everyone with thread access can use this browser and its sign-ins.</p>}
+        {compact && runtime?.state === "ready" && <div className="flex items-center gap-2 px-3 pb-3">
+          <Select aria-label="Browser pages" value={selected?.id ?? ""} onChange={(event) => selectTab(event.target.value)} className="min-w-0 flex-1">
+            {runtime.tabs.map((tab) => <option key={tab.id} value={tab.id}>{tab.title || tab.url || "New page"}</option>)}
+          </Select>
+          <Button variant="ghost" disabled={!canControl || changing} aria-label="New browser page" onClick={() => void run(async () => {
+            const response = await actions.tab.mutateAsync({ action: "new", runtimeId: runtime.runtimeId, ...(lease ? { leaseId: lease.id } : {}), url: "about:blank" });
+            setChosenTab(response.status?.selectedTabId ?? null);
+          })}><Plus aria-hidden className="h-4 w-4" /></Button>
+          <Button variant="ghost" disabled={!canControl || !selected} aria-label="Close browser page" onClick={() => void run(() => actions.tab.mutateAsync({ action: "close", runtimeId: runtime.runtimeId, ...(lease ? { leaseId: lease.id } : {}), tabId: selected?.id }))}><X aria-hidden className="h-4 w-4" /></Button>
+        </div>}
+      </details>
+      {error || data.error ? (
+        <div
+          role="alert"
+          className="shrink-0 border-b border-line bg-danger-wash px-3 py-2 text-sm text-danger-600"
+        >
+          {error ?? data.error}
+          {error && runtime && (
+            <Button
+              size="sm"
+              variant="secondary"
+              className="ml-2"
+              onClick={() => {
+                setError(null);
+                viewing.retry();
+                void query.refetch();
+              }}
+            >
+              Retry browser input
+            </Button>
+          )}
+        </div>
+      ) : null}
+      {lease ? (
+        <div
+          className={cn(
+            "shrink-0 border-b border-line px-3 py-2 text-xs",
+            lease.privateMode
+              ? "bg-warning-wash text-warning-fg"
+              : "bg-moss-wash text-ink",
+          )}
+        >
+          {ownsLease
+            ? leaseExpired
+              ? "Your exclusive control expired. Renew control to continue, or end it to resume shared use."
+              : lease.privateMode
+                ? "Private sign-in is active. The agent cannot observe the page. End private sign-in when you finish. The sign-in stays in this browser for everyone who can use this thread."
+                : lease.state === "paused"
+                  ? "Browser input is paused. Resume control to interact, or resume the agent for shared use."
+                  : "Agent browser actions are paused. You can still use the page. Resume the agent when ready."
+            : "Another user paused shared interaction. Wait for them to resume shared use."}
+        </div>
+      ) : runtime?.state === "ready" && !compact ? (
+        <p className="shrink-0 border-b border-line px-3 py-2 text-xs text-muted">
+          You and the agent can use this browser. Pause the agent when you need
+          exclusive control. Everyone who can use this thread can use this
+          browser and its sign-ins.
+        </p>
+      ) : null}
+
+      {!data.settings.enabled ? (
+        <div className="grid flex-1 place-content-center gap-3 p-6 text-center text-sm text-muted">
+          <p>Browser access is disabled for this runtime.</p>
+          {data.canAdminister ? (
+            <Button
+              onClick={() =>
+                void run(() => actions.settings.mutateAsync({ enabled: true }))
+              }
+              disabled={changing}
+            >
+              Enable browser
+            </Button>
+          ) : (
+            <p>Ask the runtime owner to enable browser access.</p>
+          )}
+        </div>
+      ) : runtime?.state !== "ready" ? (
+        <div className="grid flex-1 place-content-center justify-items-center gap-3 p-6 text-center text-sm text-muted">
+          {runtime?.state === "starting" ? (
+            <Spinner />
+          ) : (
+            <Globe className="h-8 w-8" />
+          )}
+          <p>
+            {runtime?.correctiveAction ??
+              "Start the browser when you need it. Your thread stays open."}
+          </p>
+          <Button
+            disabled={
+              changing ||
+              runtime?.state === "starting" ||
+              runtime?.state === "incompatible"
+            }
+            onClick={() =>
+              void run(async () => {
+                const response = await actions.start.mutateAsync();
+                if (response.error) throw new Error(response.error);
+              })
+            }
+          >
+            {runtime?.state === "sleeping" ? "Wake browser" : "Start browser"}
+          </Button>
+        </div>
+      ) : (
+        <>
+          {!compact && <div className="flex shrink-0 items-center gap-1 border-b border-line px-2">
+            <TabBar
+              label="Browser pages"
+              size="sm"
+              className="shadow-none"
+              active={selected?.id ?? ""}
+              onSelect={selectTab}
+              tabs={runtime.tabs.map((tab) => ({
+                id: tab.id,
+                label: tab.title || tab.url || "New page",
+                title: tab.url,
+                action: canControl && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    aria-label={`Close ${tab.title || "page"}`}
+                    disabled={changing}
+                    onClick={() =>
+                      void run(() =>
+                        actions.tab.mutateAsync({
+                          action: "close",
+                          runtimeId: runtime.runtimeId,
+                          ...(lease ? { leaseId: lease.id } : {}),
+                          tabId: tab.id,
+                        }),
+                      )
+                    }
+                  >
+                    <X aria-hidden className="h-3 w-3" />
+                  </Button>
+                ),
+              }))}
+            />
+            <Button
+              size="sm"
+              variant="ghost"
+              aria-label="New browser page"
+              disabled={!canControl || changing}
+              onClick={() => {
+                void run(async () => {
+                  const response = await actions.tab.mutateAsync({
+                    action: "new",
+                    runtimeId: runtime.runtimeId,
+                    ...(lease ? { leaseId: lease.id } : {}),
+                    url: "about:blank",
+                  });
+                  setChosenTab(response.status?.selectedTabId ?? null);
+                });
+              }}
+            >
+              <Plus aria-hidden className="h-4 w-4" />
+            </Button>
+          </div>}
+          <form
+            className="flex shrink-0 items-center gap-1 border-b border-line p-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void run(async () => {
+                const url = normalizeBrowserAddress(address);
+                touchedAddress.current = false;
+                await send({ type: "navigate", url });
+              });
+            }}
+          >
+            <Button
+              variant="ghost"
+              size="sm"
+              aria-label="Back"
+              disabled={!canControl || !selected}
+              onClick={() => void run(() => send({ type: "back" }))}
+            >
+              <ArrowLeft aria-hidden className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className={compact ? "hidden" : undefined}
+              aria-label="Forward"
+              disabled={!canControl || !selected}
+              onClick={() => void run(() => send({ type: "forward" }))}
+            >
+              <ArrowRight aria-hidden className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className={compact ? "hidden" : undefined}
+              aria-label="Reload page"
+              disabled={!canControl || !selected}
+              onClick={() => void run(() => send({ type: "reload" }))}
+            >
+              <RotateCw aria-hidden className="h-4 w-4" />
+            </Button>
+            <Input
+              size="sm"
+              aria-label="Browser address"
+              value={address}
+              readOnly={!canControl}
+              onChange={(event) => {
+                touchedAddress.current = true;
+                setAddress(event.target.value);
+              }}
+              className={compact ? "min-w-0 flex-1" : "min-w-0 flex-1 font-mono"}
+              onFocus={(event) => { if (compact) event.currentTarget.select(); }}
+              placeholder="https://example.com"
+            />
+            <Button
+              type="submit"
+              className={compact ? "hidden" : undefined}
+              size="sm"
+              disabled={!canControl || !selected || !address.trim()}
+            >
+              Go
+            </Button>
+          </form>
+          {runtime.dialogs
+            ?.filter((dialog) => dialog.tabId === selected?.id)
+            .map((dialog) => (
+              <BrowserDialog
+                key={dialog.dialogId}
+                dialog={dialog}
+                disabled={!canControl}
+                send={(input) => run(() => send(input))}
+              />
+            ))}
+          {hasDialog ? (
+            <div className="grid flex-1 place-content-center p-6 text-sm text-muted">
+              Respond to the browser dialog to resume viewing.
+            </div>
+          ) : viewing.error ? (
+            <div role="alert" className="space-y-2 p-4 text-sm text-danger-600">
+              <p>{viewing.error}</p>
+              <Button size="sm" variant="secondary" onClick={viewing.retry}>
+                Retry browser view
+              </Button>
+            </div>
+          ) : !viewing.visible ? (
+            <div className="grid flex-1 place-content-center p-6 text-sm text-muted">
+              Browser viewing is paused while this page is hidden.
+            </div>
+          ) : viewing.frame ? (
+            <BrowserViewport
+              key={`${readerTarget}:${viewing.frame.documentId}`}
+              frame={viewing.frame}
+              mobile={compact}
+              initialReaderState={readerState.current?.target === readerTarget ? readerState.current.value : undefined}
+              onReaderStateChange={(value) => { readerState.current = { target: readerTarget, value }; }}
+              controlEpoch={`${lease?.id}:${lease?.state}`}
+              showAgentCursor={!lease?.privateMode}
+              canControl={canControl && !error}
+              send={(input) => send(input, viewing.frame?.documentId)}
+              onError={setError}
+            />
+          ) : (
+            <div className="grid flex-1 place-content-center justify-items-center gap-2 p-6 text-sm text-muted">
+              {selected && runtime.capabilities.viewer?.available ? (
+                <>
+                  <Spinner />
+                  <p>Waiting for the browser image…</p>
+                </>
+              ) : (
+                <p>
+                  {selected
+                    ? (runtime.capabilities.viewer?.reason ??
+                      "This browser image does not support viewing. Use a supported browser image.")
+                    : "No browser pages are open. Open a new page to continue."}
+                </p>
+              )}
+            </div>
+          )}
+        </>
+      )}
+
+      {capture?.sessionId === sessionId ? (
+        <div className="max-h-96 shrink-0 space-y-3 overflow-auto border-t border-line p-3 text-xs">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-muted">Screenshot saved:</span>
+            <a
+              className="text-moss underline"
+              href={browserApi.evidence(sessionId, capture.id)}
+              download={capture.filename}
+            >
+              {capture.filename}
+            </a>
+            <Button
+              size="sm"
+              variant="ghost"
+              aria-expanded={annotating}
+              onClick={() => setAnnotating((value) => !value)}
+            >
+              {annotating ? "Close annotations" : "Annotate screenshot"}
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              aria-label="Dismiss saved screenshot"
+              onClick={() => setCapture(null)}
+            >
+              <X aria-hidden className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+          {annotating ? (
+            <EvidenceAnnotations key={capture.id} evidence={capture} />
+          ) : null}
+        </div>
+      ) : null}
+
+      <details className={cn(compact && "hidden", "max-h-48 shrink-0 overflow-auto border-t border-line px-3 py-2 text-xs text-muted")}>
+        <summary className="cursor-pointer">
+          Browser access and capabilities
+        </summary>
+        <div className="space-y-3 py-3">
+          {data.canAdminister && data.settings.enabled ? (
+            <div>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={changing}
+                onClick={() =>
+                  void run(() =>
+                    actions.settings.mutateAsync({ enabled: false }),
+                  )
+                }
+              >
+                Disable browser access
+              </Button>
+            </div>
+          ) : null}
+          {data.settings.grants.map((grant) => (
+            <div key={grant.id} className="flex items-center gap-2">
+              <span className="min-w-0 flex-1 break-all">
+                {grant.origin}: {grant.operations.join(", ")}
+              </span>
+              {data.canAdminister ? (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={changing}
+                  onClick={() =>
+                    void run(() =>
+                      actions.settings.mutateAsync({
+                        grants: data.settings.grants.filter(
+                          (entry) => entry.id !== grant.id,
+                        ),
+                      }),
+                    )
+                  }
+                >
+                  Revoke
+                </Button>
+              ) : null}
+            </div>
+          ))}
+          {runtime ? (
+            <ul className="space-y-1">
+              {Object.entries(runtime.capabilities).map(
+                ([name, capability]) => (
+                  <li key={name}>
+                    <span className="font-medium text-ink">{name}</span>:{" "}
+                    {capability.available
+                      ? "Available"
+                      : (capability.reason ??
+                        "Unsupported in this browser image")}
+                  </li>
+                ),
+              )}
+            </ul>
+          ) : null}
+          {runtime?.downloads?.length ? (
+            <div className="space-y-1">
+              <p className="font-medium text-ink">Downloads</p>
+              {runtime.downloads.map((artifact) => (
+                <div key={artifact.id}>
+                  <a
+                    className="text-moss underline"
+                    href={browserApi.download(sessionId, artifact.id)}
+                    download
+                  >
+                    {artifact.filename}
+                  </a>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      </details>
+    </section>
+  );
+}
+
+function BrowserDialog({
+  dialog,
+  disabled,
+  send,
+}: {
+  dialog: NonNullable<BrowserRuntimeStatus["dialogs"]>[number];
+  disabled: boolean;
+  send: (input: BrowserHumanInput) => Promise<void>;
+}) {
+  const [text, setText] = useState("");
+  return (
+    <div
+      role="alertdialog"
+      aria-label={`Browser ${dialog.kind}`}
+      className="shrink-0 space-y-2 border-b border-line bg-warning-wash p-3 text-sm text-ink"
+    >
+      <p className="whitespace-pre-wrap break-words">{dialog.message}</p>
+      {dialog.kind === "prompt" ? (
+        <Input
+          aria-label="Browser dialog response"
+          value={text}
+          disabled={disabled}
+          onChange={(event) => setText(event.target.value)}
+        />
+      ) : null}
+      <div className="flex gap-2">
+        <Button
+          size="sm"
+          disabled={disabled}
+          onClick={() =>
+            void send({
+              type: "dialog",
+              dialogId: dialog.dialogId,
+              accept: true,
+              text,
+            })
+          }
+        >
+          Accept
+        </Button>
+        <Button
+          size="sm"
+          variant="secondary"
+          disabled={disabled}
+          onClick={() =>
+            void send({
+              type: "dialog",
+              dialogId: dialog.dialogId,
+              accept: false,
+            })
+          }
+        >
+          Dismiss
+        </Button>
+      </div>
+    </div>
+  );
+}

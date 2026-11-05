@@ -1,3 +1,4 @@
+import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
 /**
  * Team-owned sessions resolve credentials from the team principal, not the
  * prompting member. GitHub uses the App installation. Slack uses the org
@@ -18,9 +19,11 @@ import slackPlugin from "@valet/plugin-slack/plugin";
 import { linkIdentity } from "../channels/identity-links.js";
 import { EngineHost, sessionPrincipal } from "./host.js";
 import { githubTokenArgsForOwner, isUsableGithubRow } from "../services/session-github-token.js";
-import { agentSessions, orgs } from "../schema/index.js";
+import { agentSessions, orgs, teamMembers, teams, workflowDefinitions, workflowRuns } from "../schema/index.js";
+import { shareCredential } from "../services/credential-shares.js";
+import { saveWorkflowAccountConsent } from "../services/workflow-account-consent.js";
 import { createLlmProvider } from "../services/llm-providers.js";
-import { createAssistant } from "../assistants/service.js";
+
 import { OnePasswordAuthError, type OnePasswordService } from "../services/onepassword.js";
 
 const orgId = "team-cred-org";
@@ -56,11 +59,17 @@ describe("EngineHost team-owned session credentials", () => {
 
   async function harness(): Promise<{ appDb: AppDb; credentials: PgCredentialStore }> {
     const { appDb, pgdb } = await freshTestPgDb();
+    // Actor mode holds only while the actor is on the owning team, so the
+    // roster is part of the world every case here runs in.
+    await appDb.insert(teams).values({ id: teamId, orgId, name: "Team", createdAt: NOW });
+    await appDb.insert(teamMembers).values({ teamId, userId, role: "member" });
     return { appDb, credentials: new PgCredentialStore(pgdb, deriveSecretKey("test-key")) };
   }
 
   function makeHost(appDb: AppDb, credentials: PgCredentialStore, fixtureUrl: string): EngineHost {
     const h = new EngineHost({
+      scratchCaps: {},
+      wakeupLimits: { leaseMaxHours: 72, timerMaxHours: 720, perSession: 20, watchMaxEventsPerHour: 120 },
       engineStore: new InMemorySessionStore(),
       sandboxProvider: new VirtualSandboxProvider(),
       eventStream: new InMemoryEventStream(),
@@ -298,6 +307,8 @@ describe("EngineHost team-owned session credentials", () => {
     };
     fixture = startGithubFixture();
     const h = new EngineHost({
+      scratchCaps: {},
+      wakeupLimits: { leaseMaxHours: 72, timerMaxHours: 720, perSession: 20, watchMaxEventsPerHour: 120 },
       engineStore: new InMemorySessionStore(),
       sandboxProvider: new VirtualSandboxProvider(),
       eventStream: new InMemoryEventStream(),
@@ -337,7 +348,49 @@ describe("EngineHost team-owned session credentials", () => {
     expect(cred?.accessToken).not.toBe("sk-member-must-not-win");
   });
 
+  it("team OpenAI in a workflow agent step borrows the lender's account the lender allowed for that workflow", async () => {
+    const { appDb, credentials } = await harness();
+    const lender = "team-cred-lender";
+    const definition = { version: "dag/v1", nodes: [{ id: "trigger", type: "trigger" },
+      { id: "agent", type: "session", mode: "start", prompt: "Draw.", toolScope: { actions: ["openai.generate_image"] } }], edges: [] };
+    await appDb.insert(teamMembers).values({ teamId, userId: lender, role: "member" });
+    await credentials.save({ type: "user", id: lender }, "openai", { type: "api_key", apiKey: "sk-lender" });
+    await shareCredential(appDb, { teamId, service: "openai", userId: lender, createdAt: NOW });
+    await appDb.insert(workflowDefinitions).values({ id: "wf-openai", orgId, ownerType: "team", ownerId: teamId, name: "Draw", definition, createdAt: NOW, updatedAt: NOW });
+    await appDb.insert(workflowRuns).values({ id: "run-openai", workflowId: "wf-openai", definitionVersionId: "v1", definition, params: {},
+      status: "running", ownerType: "team", ownerId: teamId, actorUserId: userId, orgId, createdAt: NOW, updatedAt: NOW });
+    fixture = startGithubFixture();
+    const h = makeHost(appDb, credentials, fixture.url);
+    const envKey = process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    try {
+      const session = await h.sessionFor("wf:run-openai:agent", teamMeta);
+      expect((await session.credentialProvider({ actorId: userId }).get("openai"))?.accessToken).not.toBe("sk-lender");
+      await saveWorkflowAccountConsent(appDb, { orgId, workflowId: "wf-openai", teamId, userId: lender, services: ["openai"] });
+      expect((await session.credentialProvider({ actorId: userId }).get("openai"))?.accessToken).toBe("sk-lender");
+    } finally {
+      if (envKey !== undefined) process.env.OPENAI_API_KEY = envKey;
+    }
+  });
+
   describe("credential_owner_mode", () => {
+    it("requires an explicit matching actor before reading a legacy member credential", async () => {
+      const { appDb, credentials } = await harness();
+      await credentials.save({ type: "user", id: userId }, "linear", {
+        type: "api_key", apiKey: "member-linear",
+      });
+      await credentials.save({ type: "team", id: teamId }, "linear", {
+        type: "api_key", apiKey: "team-linear",
+      });
+      fixture = startGithubFixture();
+      const h = makeHost(appDb, credentials, fixture.url);
+      const session = await h.sessionFor("legacy-authorless", legacyTeamMeta);
+      expect((await session.credentialProvider().get("linear"))?.accessToken).toBe("team-linear");
+      expect((await session.credentialProvider({ actorId: "someone-else" }).get("linear"))?.accessToken).toBe("team-linear");
+      expect((await session.credentialProvider({ actorId: userId, externalSender: true }).get("linear"))?.accessToken).toBe("team-linear");
+      expect((await session.credentialProvider({ actorId: userId }).get("linear"))?.accessToken).toBe("member-linear");
+    });
+
     it("actor mode resolves the acting member's row with org fallback, as before team ownership", async () => {
       const { appDb, credentials } = await harness();
       await credentials.save({ type: "user", id: userId }, "linear", {
@@ -348,9 +401,32 @@ describe("EngineHost team-owned session credentials", () => {
       const h = makeHost(appDb, credentials, fixture.url);
 
       const session = await h.sessionFor("sess-legacy-team-linear", legacyTeamMeta);
-      const cred = await session.credentialProvider().get("linear");
+      const cred = await session.credentialProvider({ actorId: userId }).get("linear");
 
       expect(cred?.accessToken).toBe("member-linear");
+    });
+
+    // An organization-audience Slack mention can make a nonmember the actor
+    // of a team assistant turn. A legacy actor-mode session must not then
+    // read that person's personal vault on the team's behalf.
+    it("an actor who is not on the owning team resolves the team's credential, not their own", async () => {
+      const { appDb, credentials } = await harness();
+      const outsider = "org-only-user";
+      await credentials.save({ type: "user", id: outsider }, "linear", {
+        type: "api_key",
+        apiKey: "outsider-linear-must-not-win",
+      });
+      await credentials.save({ type: "team", id: teamId }, "linear", {
+        type: "api_key",
+        apiKey: "team-linear",
+      });
+      fixture = startGithubFixture();
+      const h = makeHost(appDb, credentials, fixture.url);
+
+      const session = await h.sessionFor("sess-legacy-team-outsider", { ...legacyTeamMeta, userId: outsider });
+      const cred = await session.credentialProvider({ actorId: outsider }).get("linear");
+
+      expect(cred?.accessToken).toBe("team-linear");
     });
 
     it("actor mode resolves GitHub through the acting member's row, not the App", async () => {
@@ -364,7 +440,7 @@ describe("EngineHost team-owned session credentials", () => {
       const h = makeHost(appDb, credentials, fixture.url);
 
       const session = await h.sessionFor("sess-legacy-team-gh", legacyTeamMeta);
-      const cred = await session.credentialProvider().get("github");
+      const cred = await session.credentialProvider({ actorId: userId }).get("github");
 
       expect(cred?.accessToken).toBe("member-tok");
     });
@@ -381,7 +457,7 @@ describe("EngineHost team-owned session credentials", () => {
       const h = makeHost(appDb, credentials, fixture.url);
 
       const session = await h.sessionFor("sess-legacy-team-slack", legacyTeamMeta);
-      const cred = await session.credentialProvider().get("slack");
+      const cred = await session.credentialProvider({ actorId: userId }).get("slack");
 
       expect(cred?.accessToken).toBe("xoxb-org-bot");
       expect(cred?.metadata?.["owner_slack_user_id"]).toBe("U42");
@@ -398,7 +474,7 @@ describe("EngineHost team-owned session credentials", () => {
       const h = makeHost(appDb, credentials, fixture.url);
 
       const session = await h.sessionFor("sess-legacy-team-openai", legacyTeamMeta);
-      const cred = await session.credentialProvider().get("openai");
+      const cred = await session.credentialProvider({ actorId: userId }).get("openai");
 
       expect(cred?.accessToken).toBe("sk-member");
     });
@@ -424,7 +500,7 @@ describe("EngineHost team-owned session credentials", () => {
         workspace: "/tmp",
         credentialOwnerMode: "actor",
       });
-      const cred = await child.credentialProvider().get("linear");
+      const cred = await child.credentialProvider({ actorId: userId }).get("linear");
       expect(cred?.accessToken).toBe("member-linear");
     });
 
@@ -476,7 +552,7 @@ describe("EngineHost team-owned session credentials", () => {
         type: "api_key",
         apiKey: "member-linear",
       });
-      const assistant = await createAssistant(appDb, orgId, { type: "team", id: teamId }, "Team bot");
+      const assistant = await seedWorkspaceAssistant(appDb, orgId, { type: "team", id: teamId });
       await appDb.insert(agentSessions).values({
         id: assistant.sessionId,
         userId,
@@ -491,6 +567,8 @@ describe("EngineHost team-owned session credentials", () => {
       });
       fixture = startGithubFixture();
       const h = new EngineHost({
+        scratchCaps: {},
+        wakeupLimits: { leaseMaxHours: 72, timerMaxHours: 720, perSession: 20, watchMaxEventsPerHour: 120 },
         engineStore: new InMemorySessionStore(),
         sandboxProvider: new VirtualSandboxProvider(),
         eventStream: new InMemoryEventStream(),
@@ -510,7 +588,7 @@ describe("EngineHost team-owned session credentials", () => {
       const session = await h.assistantSessionFor(assistant.id, { actorUserId: userId, orgId }, {
         sessionId: assistant.sessionId,
       });
-      const cred = await session.credentialProvider().get("linear");
+      const cred = await session.credentialProvider({ actorId: userId }).get("linear");
 
       expect(cred?.accessToken).toBe("member-linear");
     });

@@ -139,6 +139,11 @@ test, so an event a subscription excludes by filter is dropped the same as one
 no subscription names at all: the filter is a privacy boundary, not only a
 delivery boundary.
 
+One record is kept for every verified delivery: the diagnostic receipt. It holds
+routing metadata, such as the channel, actor, and message ids, and the stage
+outcomes. It never holds the message text. Receipts are kept for 7 days, and
+only organization admins can read them.
+
 This changed the prior behavior, where only the `ephemeral` `slack.message` key
 was gated and every other event (GitHub, Linear, and the rest of Slack)
 persisted on arrival. The rule now holds across all services. The `ephemeral`
@@ -170,13 +175,82 @@ Ingest also drop-logs one match-gated miss: an event whose key a subscription
 **names** but whose filter excluded this occurrence (`filter_excluded`). That is
 the high-signal "my trigger didn't fire" case, and it is bounded by user intent
 (a subscription must exist). It is throttled per (org, event key) at one row a
-minute, and records only the event key — never the payload or refs, so the
-privacy rule holds.
+minute. A diagnostic retains the normalized event key and only these fields
+when the source supplies them: Slack channel ID, bot ID, raw event type and
+subtype, and message text truncated to 1,000 characters. It retains no raw
+payload object, refs, headers, signing secret, token, form values, dedupe key,
+or user ID. The bounded text exists solely so an administrator can identify the
+specific filter miss through `events.list_problems`; it is not copied into the
+event feed or a workflow run. A team sender authorization denial is not a
+filter miss. Valet writes only its metadata-free authorization diagnostic and
+never writes `filter_excluded` metadata for that sender.
 
-An event that **no** subscription names is deliberately NOT drop-logged. For a
-high-volume key like `slack.message` that is every message in the workspace, so
-logging it would re-flood the drop-log the privacy design keeps small. The "last
-event received" signal covers that case instead.
+A key that **no** subscription names is deliberately NOT drop-logged. For a
+high-volume key like `slack.message` that is every message in the workspace,
+logging it would re-flood the drop-log the privacy design keeps small. The one
+exception is the classifier near-miss: if an enabled subscription explicitly
+names `slack.message` and a third-party bot form message normalizes to
+`slack.bot_message`, Valet writes the same bounded, throttled diagnostic under
+`slack.message` and tells the administrator to subscribe to `slack.bot_message`.
+The near-miss uses a throttle key separate from ordinary `slack.message` filter
+misses, so either diagnostic cannot suppress the other. Bot traffic does not use
+the human team-sender authorization gate, even when Slack supplies a `user` ID.
+For every subscription owner type, Valet retains metadata only when a named
+subscription's filters match. Otherwise, it records the guidance without message
+metadata.
+These diagnostics do not change event delivery. Unrelated bot messages remain
+silent. The "last event received" signal covers the ordinary no-subscription case
+instead.
+
+### Slack form diagnostics
+
+The Problems tab continues to use `GET /api/events/drops`. It shows the existing
+categories and the last-event-received signal to every organization member.
+Matched Slack events continue to use the normal event feed, detail, and
+redelivery rules. A member can inspect a Slack event that their subscription
+received.
+
+For an unmatched `block_actions` or `view_submission` interaction, Slack writes
+one `slack_interaction_unmatched` drop row per organization and interaction type
+per minute. Only organization admins receive these rows from the drops API. The
+row contains the interaction type and a corrective action. It contains no raw
+payload, form values, headers, token, signing secret, or dedupe material.
+
+The diagnostic is not an event row. It cannot enter the activity feed, create a
+delivery, or be redelivered. Slack retries can run the normal channel consumer,
+but the one-minute diagnostic limit prevents retry traffic from growing the log.
+No Slack event is retained only for diagnostics.
+
+### Agent diagnostics
+
+The agent can call `events.list_problems` to inspect the same
+`event_drop_log` records as the Problems tab. It does not use a second event
+store. For a filter-excluded event, the record includes the normalized event
+key and small payload metadata: channel, text (limited to 1,000 characters),
+bot ID, raw event type, and raw subtype when present. It never stores the
+source payload.
+
+The action filters by normalized event key, channel, exact text, bot ID, and a
+receipt time window. Metadata predicates run before the result limit, so a
+matching older record is not hidden by newer unrelated rows. It returns newest
+records first and caps one call at 100 records. Every organization member can
+read ordinary Problems records, but their results expose only the allowlisted
+channel, raw event type, and raw subtype metadata. A team's unattended run
+(a schedule, event, or webhook) acts as the team's principal id, `team:{id}`,
+and reads Problems with the same member view. An organization admin can
+use text and bot ID filters and read those fields only from a private
+user-owned turn with no channel origin. Team-owned and organization-owned
+sessions have shared transcripts. A channel-originated turn also has a shared
+transcript, even when its session is user-owned. A child spawned by such a turn
+inherits the shared-transcript marker. Valet restores that marker from the
+child's stored channel origin after a cache eviction. Valet treats these results
+as member-visible, omits text and bot ID, and rejects those filters even when
+the acting member is an admin. If the action context has no owner, Valet also
+fails closed and applies the shared-transcript rules. The existing admin-only
+`slack_interaction_unmatched` rule follows this private-session boundary. These
+fields have no separate retention clock: they follow the existing
+`event_drop_log` lifecycle; this feature adds neither a second store nor an
+event-payload retention path.
 
 ## Mention scoping (TKAI-299, added 2026-09-01)
 
@@ -202,6 +276,10 @@ select `slack.app_mention` — the exact key or a trailing wildcard — is a
    from that. On PATCH the server derives the row's stored any-channel state
    itself, so an edit that leaves channel scope alone needs no flag; only a
    patch that strips an existing channel filter must assert `anyChannel`.
+   A `channel_name` filter (see "Channel names" below) is not a channel scope
+   either: a name pattern also matches channels created later. A mention line
+   with only a name condition needs `anyChannel`, and it reads back as an
+   any-channel row.
 
 Every subscription writer goes through ONE gate:
 `validateSubscriptionWrite` (`events/subscription-write.ts`), which runs the
@@ -253,6 +331,55 @@ mention rules remain creator-scoped. Redelivery uses the same membership gate.
 The dispatcher uses the mentioner as actor and preserves that actor on the follow row.
 The wizard offers the team's assistant and explains member-only routing.
 See `2026-09-04-team-slack-mention-subscriptions-design.md` for the full contract.
+
+## Channel names (added 2026-10-21)
+
+Slack message events name their channel by ID only. A line that must cover
+every `alerts-` channel, including channels created later, cannot list IDs.
+`slack.message`, `slack.bot_message`, and `slack.app_mention` therefore
+declare a `channel_name` filter at payload path `channel_name`. It takes the
+usual ops; `prefix` and `regex` are the intended ones. The name has no `#`.
+
+Intake adds the name. After a trigger def verifies a message event and before
+`toEvent`, the Slack inbox calls `withEventChannelName`
+(`packages/plugin-slack/src/event-channel-name.ts`) with the org's bot token:
+
+1. A name that the payload already carries stays.
+2. A direct message (`channel_type: im`) gets no name, because Slack gives it
+   none. A `channel_name` condition never matches a direct message.
+3. Otherwise the name comes from the per-token channel name cache
+   (`actions/channel-names.ts`), which the action guards also fill. On a miss,
+   intake sends one `conversations.info` request with no retry and a
+   3-second timeout. Concurrent intake misses for one channel share that
+   request. Intake never joins an action's lookup, which retries after a 429.
+   A name written while a request waits, such as a rename, wins over its
+   response.
+4. A lookup that fails leaves the payload without a name. The filter then
+   fails closed: the line does not match, and Activity shows the
+   `channel_name` condition as the failed one. Intake does not guess a name.
+
+The name lands in the stored payload and in `refs.channel_name`, so a prompt
+template can use `{{payload.channel_name}}`, and redelivery matches on the
+name that intake saw.
+
+Renames. A cache entry answers for five minutes, then the next event reads
+Slack again. A `channel_rename` or `channel_created` event writes the new name
+into the cache at once, so on the api process that receives it the old name
+stops matching immediately. Slack sends `channel_rename` for public channels
+only. A private channel rename, or a rename that another api process
+received, shows within the five-minute window.
+
+Scope and consent. A name condition does not name places. Presence lists such
+a line under the Slack workspace row, and `lineNamedPlaces` gives it no
+channel, the same as a `channel prefix` filter. For mention lines see
+"Mention scoping" above: a name condition needs `anyChannel`. `slack.message`
+and `slack.bot_message` lines have no channel consent requirement, with or
+without a name condition.
+
+Cost. Intake reads the name for every message event in a channel the bot is
+in, whether or not a line uses `channel_name`. With the cache, that is at most
+one `conversations.info` request per active channel every five minutes. It is
+a Tier 3 method.
 
 ## Custom slash commands that route to triggers or assistants
 
@@ -334,3 +461,49 @@ a separate one for System A if in-app command routing is wanted.
 - Multi-org workspace resolution (the deployment resolves one org, per
   `lib/org.ts`; the webhook route notes the single lookup a multi-org deployment
   would add).
+
+## Third-party bot messages
+
+Valet keeps `slack.message` for human messages. It adds `slack.bot_message` for signed Slack `message` events with subtype `bot_message` or no subtype. Slack uses the latter shape for modern bot posts. The trigger requires a nonempty canonical bot ID. It uses `bot_id`, or `bot_profile.id` when Slack omits `bot_id`. It does not use a display name.
+
+The connect check stores the installed bot ID as credential metadata. The bot trigger rejects that ID and the installed bot user ID. This rule is independent of subscription filters. For a legacy credential without the bot ID, the webhook resolves identity through Slack `auth.test` with the saved token. This lookup runs only for eligible bot messages, after signature and workspace verification and outside the acknowledgement path. A valid response must match the stored workspace and any stored bot user ID. The existing subscription then works without a reconnect. Human messages do not require this lookup.
+
+The resolver shares concurrent lookups and caches successful results for ten minutes. Failed lookups have a one-minute retry delay. The cache belongs to the credential-store instance and includes the org, token, workspace, and stored bot user ID in its fingerprint. A credential change invalidates the cached identity. The resolver does not rewrite stored credentials, so it cannot overwrite a concurrent reconnect. If identity remains unknown, bot messages still fail closed. Subscription filters alone do not prove that the sender is a different bot.
+
+For an enabled bot-message subscription, the webhook records `slack_bot_identity_missing` when the installed bot ID is missing and automatic resolution fails. It retains bounded metadata and applies the existing throttle. Team-owned bot subscriptions do not require a linked human sender for this diagnostic, matching bot-event delivery. For all owner types, an event excluded by every named subscription produces a diagnostic without message metadata. When a filter matches, the Problems record includes the channel and bot ID so channel-scoped queries can find it.
+
+Before the catalog exposes this key, startup expands existing `slack.*` subscription rows to the prior explicit Slack keys. Those rows do not begin to match bot messages. The Slack manifest stays unchanged because both classifiers use the existing raw `message` subscription.
+
+
+Accepting subtype-less posts intentionally expands the events delivered to existing `slack.bot_message` subscriptions. An unfiltered subscription receives every eligible third-party bot post. Before rollout, inspect enabled bot subscriptions and add channel or bot ID filters where that broader behavior is unwanted. No subtype compatibility guard is applied: both Slack payload forms represent bot posts. Production subscription rows have not been inspected as part of this change.
+
+### Receipt diagnostics and legacy bot identity
+
+Resolve the saved bot identity before classifying a bot message. Keep classification stages in the event receipt. If identity resolution fails, emit only the subscription-scoped identity diagnostic. Do not add a duplicate generic rejection to the drop log.
+
+## Online status (added 2026-11-03)
+
+"Online status" is the Slack `users.getPresence` value: `active` or `away`. The name avoids "Presence", which in Valet names the places Valet watches.
+
+### The tool
+
+`slack.get_user_status` reads `users.info` and then `users.getPresence` with the org bot token. Both methods need `users:read`, which the manifest already requests, so no new scope is added. The tool returns `presence`, `online`, the status text, emoji and expiry, the time zone, and optionally the local time. It refuses a user outside the connected workspace (`team_id` differs and no Enterprise Grid team matches, or `is_stranger`). Each Slack error maps to a message that names the fix (`plugin-slack/src/online-status.ts`).
+
+### The `slack.user_online` trigger
+
+The Events API does not deliver `presence_change`; that needs RTM or Socket Mode presence subscriptions. The trigger therefore polls:
+
+1. `OnlineStatusWatcher` (`api/src/services/online-status-watch.ts`) ticks every 15 s. It reads the enabled lines whose event keys include `slack.user_online` exactly, and collects the people their `user` conditions name (`eq` or `in`). A wildcard such as `slack.*` does not start polling.
+2. It reads each person at most once a minute, at most 25 people per org and 40 reads per tick. A failed read backs off from 1 to 15 minutes, or for Slack's `Retry-After`. A missing scope, a bad token or a user outside the workspace waits 15 minutes.
+3. The first read is the baseline. An `active` read fires only after the person was seen `away` for at least 5 minutes, so a short blip does not fire.
+4. A change ingests one `slack.user_online` event through `ingestEvent`, so receipts, matching and delivery are unchanged. The dedupe key is the start of the away period.
+
+The write validator refuses a `slack.user_online` line with no `user` condition. The catalog entry lives on a polled `TriggerDef` whose `verify` accepts nothing, and it is not part of `slackTriggerEventTypes`, so the manifest subscribes to no extra bot event.
+
+Privacy: the watcher keeps only the last presence and the current away start for each watched person, in memory. It drops a person when no enabled line names them. A restart loses the state, so a change across a restart is missed, not replayed.
+
+### Once every N hours
+
+Any line's target may carry `oncePerHours` (1 to 168). Ingest skips a matching line that made a non-skipped delivery inside the window, and the receipt records `rate_limited` (`api/src/events/once-per.ts`). The check reads the line's own `event_deliveries` rows and stores nothing new. The Presence editor offers the field for `slack.user_online`; the workflow trigger tools and `events.propose_subscription` accept `once_per_hours`.
+
+"Only run if X is online" for a schedule or another trigger needs no new trigger: a workflow `tool` step calls `slack.get_user_status` and an `if` step reads `online`.

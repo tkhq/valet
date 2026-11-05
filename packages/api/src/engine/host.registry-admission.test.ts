@@ -41,6 +41,7 @@ describe("EngineHost registry admission image resolution", () => {
         commitSha: kind === "repo" ? "abc123" : null,
         imageRef: kind === "repo" ? REPO_IMAGE : BASE_IMAGE,
         status: "pushed", builderBackend: "kubernetes", createdAt: now,
+        contractVersion: 3, contractSource: "label",
       });
     }
   }

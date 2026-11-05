@@ -4,44 +4,59 @@
  * historical-state side of the picture (initial fetch + cache-invalidation
  * on mutations).
  */
+import { useEffect } from "react";
+import { threadOriginBucket } from "~/lib/thread-origin";
+import { isAppAssistantThread } from "~/lib/thread-default";
 import {
+  useInfiniteQuery,
+  isCancelledError,
+  skipToken,
+  type InfiniteData,
   useMutation,
   useQuery,
   useQueryClient,
-  type QueryClient,
   type UseQueryOptions,
+  type Query,
+  type QueryClient,
 } from "@tanstack/react-query";
 import type {
   CreateSessionRequest,
   CreateSessionResponse,
   CreateThreadRequest,
   CreateThreadResponse,
+  EditPreviewResponse,
+  ForkThreadResponse,
+  MoveThreadRequest,
+  ReturnToBranchResponse,
+  DeliverIdentityLinkFallback,
+  DeliverIdentityLinkRequest,
+  DeliverIdentityLinkResponse,
+  VerifyIdentityLinkResponse,
   GetSessionResponse,
   ListDecisionsResponse,
   ListIdentityLinksResponse,
+  ListLinkMembersResponse,
   ListMessagesResponse,
   ListNotificationPreferencesResponse,
   ListNotificationsResponse,
-  ListSessionsResponse,
   ListThreadsResponse,
+  ThreadSummary,
   PatchIdentityLinkRequest,
   PatchSessionResponse,
   PatchThreadResponse,
+  ThreadShareMode,
   PauseSessionResponse,
+  ReplaceSandboxResponse,
+  ListSessionWakeupsResponse,
+  CancelSessionWakeupResponse,
   PutRatingResponse,
   RatingValue,
   ResolveDecisionRequest,
   SandboxJwtResponse,
   SandboxProfile,
-  SessionRunState,
   SetNotificationPreferenceRequest,
-  DeliverIdentityLinkFallback,
-  DeliverIdentityLinkRequest,
-  DeliverIdentityLinkResponse,
-  ListLinkMembersResponse,
   StartIdentityLinkResponse,
 } from "@valet/api/wire";
-import { useLiveQuery } from "~/lib/use-live-query";
 import { api, type OwnerFilter } from "./client";
 
 // ── Query key factory ────────────────────────────────────────────────────
@@ -52,7 +67,11 @@ export const qk = {
   sessions: (owner?: OwnerFilter) =>
     ["sessions", ...(owner ? [owner.ownerType, owner.ownerId] : [])] as const,
   session: (id: string) => ["sessions", id] as const,
+  /** The viewer's Ask Valet conversations in one workspace. */
+  workspaceConversations: (workspace: string) => ["workspace-conversations", workspace] as const,
   threads: (id: string) => ["sessions", id, "threads"] as const,
+  threadPages: (id: string, options?: object) => ["sessions", id, "threads", "pages", ...(options ? [options] : [])] as const,
+  threadSearch: (id: string, query: string) => ["sessions", id, "threads", "search", query] as const,
   threadsArchived: (id: string) => ["sessions", id, "threads", "archived"] as const,
   messages: (id: string, threadId?: string) =>
     threadId
@@ -60,77 +79,39 @@ export const qk = {
       : (["sessions", id, "messages"] as const),
   decisions: (id: string) => ["sessions", id, "decisions"] as const,
   ratings: (id: string) => ["sessions", id, "ratings"] as const,
-  /** Spelled here (not in assistants.ts's `qkAssistants`) so useDeleteSession
-   * below can invalidate it without an import cycle — assistants.ts already
-   * imports this factory and derives `qkAssistants.list` from it. */
-  assistants: () => ["assistants"] as const,
+  wakeups: (id: string) => ["sessions", id, "wakeups"] as const,
   notifications: () => ["notifications"] as const,
   notificationPreferences: () => ["notifications", "preferences"] as const,
   identityLinks: () => ["identityLinks"] as const,
   linkMembers: (provider: string, query: string) => ["linkMembers", provider, query] as const,
 };
 
+/** Execution updates also refresh workspace aggregates containing that execution. */
+export function threadListFilters(sessionId: string) {
+  return { predicate: ({ queryKey, state }: Query) => {
+    if (queryKey[0] !== "sessions" || queryKey[2] !== "threads") return false;
+    if (queryKey[1] === sessionId) return true;
+    const data = state.data;
+    if (data && typeof data === "object" && "pages" in data && Array.isArray(data.pages)) {
+      return data.pages.some(page => page && typeof page === "object" && "threads" in page && Array.isArray(page.threads)
+        && page.threads.some((thread: unknown) => thread && typeof thread === "object" && "sessionId" in thread && thread.sessionId === sessionId));
+    }
+    return Boolean(data && typeof data === "object" && "threads" in data && Array.isArray(data.threads)
+      && data.threads.some(thread => thread && typeof thread === "object" && "sessionId" in thread && thread.sessionId === sessionId));
+  } };
+}
+
 // ── Reads ────────────────────────────────────────────────────────────────
 
-/**
- * The run states that keep the sessions list polling.
- *
- * `working` changes on its own — that is the whole reason the page is open.
- * `needs_you` changes when a person answers the gate, and the person can
- * answer from a chat channel or a second tab, so this page has to follow
- * that too. The rest are quiet: `failed`, `sleeping` and `idle` only move
- * when someone sends new work, and every path that sends work already
- * invalidates this query.
- */
-const LIVE_SESSION_STATES: ReadonlySet<SessionRunState> = new Set<SessionRunState>([
-  "working",
-  "needs_you",
-]);
-
-/** The "is anything moving?" rule for the sessions list. Exported because
- * the poll cost of the page depends on it, so it gets its own test. */
-export function sessionsAreLive(data: ListSessionsResponse): boolean {
-  return data.sessions.some((s) => LIVE_SESSION_STATES.has(s.runState));
+/** Starts loading a session's detail, which the thread view needs before it can show the thread. */
+export function prefetchSession(qc: QueryClient, id: string) {
+  void qc.prefetchQuery({ queryKey: qk.session(id), queryFn: () => api.getSession(id), staleTime: 15_000 });
 }
 
-/**
- * Polls while any session is working or blocked on a person, and stops when
- * none are. See `lib/use-live-query.ts` for the policy.
- */
-/** The sessions of one workspace, or of everything the caller can reach.
- * `owner` MUST reach the query key, or switching answers from the previous
- * workspace's cache. */
-export function useSessions(
-  owner?: OwnerFilter,
-  opts?: UseQueryOptions<ListSessionsResponse>,
-) {
-  return useLiveQuery<ListSessionsResponse>({
-    queryKey: qk.sessions(owner),
-    queryFn: () => api.listSessions(owner),
-    isLive: sessionsAreLive,
-    ...opts,
-  });
-}
-
-/**
- * Re-reads a session whose row the caller has just created.
- *
- * `invalidateQueries` alone does not do it. A read that started before the
- * row existed may still be in flight, and a query with no data yet keeps
- * its running attempt when asked to refetch (query-core only cancels a
- * refetch over existing data), so that attempt's 404 lands after the
- * invalidation and stays. Cancelling first discards the stale attempt; the
- * invalidation then starts a fresh one. `qk.session(id)` prefixes every read
- * under the session — `qk.threads(id)`, messages and decisions included —
- * so one call covers them all.
- *
- * Resolves once the active reads have answered again, so a caller that
- * awaits it mounts on fresh data rather than on the error the reads held.
- */
-export async function refetchSessionReads(qc: QueryClient, sessionId: string): Promise<void> {
-  const queryKey = qk.session(sessionId);
-  await qc.cancelQueries({ queryKey });
-  await qc.invalidateQueries({ queryKey });
+/** Starts a session's detail as soon as its id is known. */
+export function usePrefetchSession(id: string | undefined) {
+  const qc = useQueryClient();
+  useEffect(() => { if (id) prefetchSession(qc, id); }, [qc, id]);
 }
 
 export function useSession(id: string, opts?: Partial<UseQueryOptions<GetSessionResponse>>) {
@@ -142,12 +123,84 @@ export function useSession(id: string, opts?: Partial<UseQueryOptions<GetSession
   });
 }
 
-export function useThreads(id: string, opts?: UseQueryOptions<ListThreadsResponse>) {
+export function useThreads(id: string, opts?: UseQueryOptions<ListThreadsResponse>, selectedThreadId?: string) {
   return useQuery<ListThreadsResponse>({
-    queryKey: qk.threads(id),
-    queryFn: () => api.listThreads(id),
+    queryKey: selectedThreadId ? [...qk.threads(id), "selected", selectedThreadId] : qk.threads(id),
+    queryFn: () => api.listThreads(id, { threadId: selectedThreadId, limit: 10 }),
     enabled: !!id,
     ...opts,
+  });
+}
+
+/** Keep each fixed-row request below common proxy URL limits, including encoded IDs. */
+export function fixedThreadBatches(ids: string[]): string[][] {
+  const batches: string[][] = [];
+  let bytes = 0;
+  for (const id of [...new Set(ids)].sort()) {
+    const size = encodeURIComponent(id).length + 9;
+    if (size > 2048) throw new Error("A saved thread ID is too long. Remove the invalid pin or project assignment.");
+    if (!batches.length || batches[batches.length - 1].length >= 50 || bytes + size > 3000) {
+      batches.push([]);
+      bytes = 0;
+    }
+    batches[batches.length - 1].push(id);
+    bytes += size;
+  }
+  return batches;
+}
+
+async function readFixedThreads(id: string, fixedIds: string[], threadId?: string): Promise<ListThreadsResponse> {
+  const batches = fixedThreadBatches(fixedIds);
+  if (!batches.length && threadId) batches.push([]);
+  const threads: ThreadSummary[] = [];
+  // Serial batches bound concurrent workspace metadata reads for large projects.
+  for (const fixedIds of batches) {
+    const page = await api.listThreads(id, { fixedIds, fixedOnly: true, threadId });
+    threads.push(...page.threads);
+  }
+  return { threads: [...new Map(threads.map(thread => [thread.id, thread])).values()] };
+}
+
+export function useSidebarThreads(id: string, options: { sort: string; origin: string; fixedIds: string[]; threadId?: string }) {
+  const { sort, origin, threadId } = options;
+  const fixedIds = [...new Set(options.fixedIds)].sort();
+  const query = useInfiniteQuery({
+    queryKey: qk.threadPages(id, { sort, origin }),
+    initialPageParam: undefined as string | undefined,
+    queryFn: ({ pageParam }) => api.listThreads(id, { sort, origin, limit: 10, cursor: pageParam }),
+    getNextPageParam: page => page.nextCursor,
+    enabled: !!id,
+  });
+  const fixed = useQuery({
+    queryKey: [...qk.threads(id), "fixed", fixedIds, threadId],
+    queryFn: () => readFixedThreads(id, fixedIds, threadId),
+    placeholderData: (previous, previousQuery) => previousQuery?.queryKey[1] === id ? previous : undefined,
+    enabled: !!id && (fixedIds.length > 0 || !!threadId),
+  });
+  const pages = query.data?.pages;
+  return { ...query, fixedReady: !fixed.isFetching && !fixed.isError,
+    fixedError: fixed.error, refetchFixed: fixed.refetch,
+    data: pages ? {
+      ...pages[0], threads: [...new Map([...pages.flatMap(page => page.threads), ...(fixed.data?.threads.filter(thread => fixedIds.includes(thread.id) || thread.id === threadId) ?? [])].map(thread => [thread.id, thread])).values()],
+    } : undefined };
+}
+
+export function mapThreadData(current: ListThreadsResponse | InfiniteData<ListThreadsResponse> | undefined, change: (thread: ThreadSummary) => ThreadSummary) {
+  if (!current) return current;
+  if ("pages" in current) return { ...current, pages: current.pages.map(page => ({ ...page, threads: page.threads.map(change) })) };
+  return { ...current, threads: current.threads.map(change) };
+}
+
+export function useThreadSearch(id: string, query: string, enabled: boolean, fixedIds: string[] = []) {
+  return useQuery<ListThreadsResponse>({
+    queryKey: [...qk.threadSearch(id, query), fixedIds],
+    queryFn: async () => {
+      const matches = await api.listThreads(id, { q: query });
+      const fixed = await readFixedThreads(id, fixedIds);
+      return { ...matches, threads: [...new Map([...matches.threads, ...fixed.threads].map(thread => [thread.id, thread])).values()] };
+    },
+    enabled: enabled && !!id && !!query,
+    staleTime: 0,
   });
 }
 
@@ -163,14 +216,49 @@ export function useArchivedThreads(id: string, opts?: Partial<UseQueryOptions<Li
   });
 }
 
+/** A thread opens with its newest entries; older ones load when the reader scrolls up. */
+export const TRANSCRIPT_TAIL = 50;
+export const TRANSCRIPT_FULL = 200;
+
+/** Keyed by thread alone, so a request can start before the thread's
+ * session is known: from the chat route's URL, or from a sidebar hover. */
+const qkTranscript = (threadId: string, limit: number) => ["thread-transcript", threadId, limit] as const;
+const transcriptQuery = (threadId: string, limit: number) => ({
+  queryKey: qkTranscript(threadId, limit),
+  queryFn: () => api.listMessages("", { limit, threadId }),
+});
+
+/** Starts loading a thread's newest page; a later `useMessages` shares the request or its answer. */
+export function prefetchTranscript(qc: QueryClient, threadId: string) {
+  void qc.prefetchQuery({ ...transcriptQuery(threadId, TRANSCRIPT_TAIL), staleTime: 15_000 });
+}
+
+/** Starts a thread's transcript as soon as its id is known, such as from the URL. */
+export function usePrefetchTranscript(threadId: string | undefined) {
+  const qc = useQueryClient();
+  useEffect(() => { if (threadId) prefetchTranscript(qc, threadId); }, [qc, threadId]);
+}
+
 export function useMessages(
   id: string,
   threadId?: string,
   opts?: Partial<UseQueryOptions<ListMessagesResponse>>,
+  limit: number = TRANSCRIPT_TAIL,
 ) {
+  const qc = useQueryClient();
+  // A workflow step's transcript has no thread route, so it has no early request.
+  const early = threadId && !id.startsWith("wf:") ? transcriptQuery(threadId, limit) : undefined;
   return useQuery<ListMessagesResponse>({
-    queryKey: qk.messages(id, threadId),
-    queryFn: () => api.listMessages(id, { limit: 200, threadId }),
+    queryKey: [...qk.messages(id, threadId), limit],
+    // Joins a prefetch still in flight; every later fetch reads the server.
+    queryFn: () => early ? qc.fetchQuery({ ...early, staleTime: 0 }) : api.listMessages(id, { limit, threadId }),
+    // A finished prefetch shows at once, with its own age.
+    initialData: early ? () => qc.getQueryData<ListMessagesResponse>(early.queryKey) : undefined,
+    initialDataUpdatedAt: early ? () => qc.getQueryState(early.queryKey)?.dataUpdatedAt : undefined,
+    // The newest page stays on screen while the full history loads. Another
+    // thread's data never stands in for this one.
+    placeholderData: (previous, previousQuery) =>
+      previousQuery?.queryKey[1] === id && previousQuery?.queryKey[3] === threadId ? previous : undefined,
     enabled: !!id,
     // Background refetches (window focus, network reconnect) would call
     // setThreadMessages and risk wiping in-flight optimistic / live state.
@@ -200,12 +288,6 @@ export function useDeleteSession() {
     mutationFn: (id) => api.deleteSession(id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.sessions() });
-      // Deleting a team assistant's session retires the assistant row
-      // server-side (TKAI-296) — refresh the rail so it drops right away
-      // instead of on the next focus refetch. Unconditional on purpose:
-      // migrated assistants keep legacy non-`assistant:`-prefixed session
-      // ids, so the id alone cannot say whether a retire happened.
-      qc.invalidateQueries({ queryKey: qk.assistants() });
     },
   });
 }
@@ -216,13 +298,21 @@ export function useDeleteSession() {
  * session detail query still needs an explicit invalidation. */
 export function usePauseSession(sessionId: string) {
   const qc = useQueryClient();
-  return useMutation<PauseSessionResponse, Error, void>({
-    mutationFn: () => api.pauseSession(sessionId),
+  return useMutation<PauseSessionResponse, Error, ForceOption | void>({
+    mutationFn: (opts) => api.pauseSession(sessionId, opts ?? undefined),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.session(sessionId) });
       qc.invalidateQueries({ queryKey: qk.sessions() });
     },
+    // A forced pause can stop background work and still fail (a turn
+    // started), so the background work list refreshes on every outcome.
+    onSettled: () => qc.invalidateQueries({ queryKey: qk.wakeups(sessionId) }),
   });
+}
+
+/** `force: true` stops the background work that blocks an action (409 `background_work`). */
+export interface ForceOption {
+  force?: boolean;
 }
 
 /** POST /:id/sandbox/replace — re-provision the session's sandbox in
@@ -231,10 +321,57 @@ export function usePauseSession(sessionId: string) {
  * needed beyond the session row. */
 export function useReplaceSandbox(sessionId: string) {
   const qc = useQueryClient();
-  return useMutation<{ ok: true }, Error, void>({
-    mutationFn: () => api.replaceSandbox(sessionId),
+  return useMutation<ReplaceSandboxResponse, Error, ForceOption | void>({
+    mutationFn: (opts) => api.replaceSandbox(sessionId, opts ?? undefined),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.session(sessionId) });
+    },
+    // A forced replace can stop background work and still fail.
+    onSettled: () => qc.invalidateQueries({ queryKey: qk.wakeups(sessionId) }),
+  });
+}
+
+/** GET /:id/wakeups: the session's open background work (wakeups and
+ * leases). Nothing pushes changes over the stream. A `queue.state` frame
+ * invalidates the key (`useInvalidateMessagesOnQueueState`), and the query
+ * polls once a minute while the composer status line, the thread card, or
+ * the thread list reads it. */
+export function useSessionWakeups(sessionId: string | undefined) {
+  return useQuery<ListSessionWakeupsResponse>({
+    queryKey: qk.wakeups(sessionId ?? ""),
+    queryFn: sessionId ? () => api.listSessionWakeups(sessionId) : skipToken,
+    refetchInterval: 60_000,
+  });
+}
+
+/** POST /:id/wakeups/:wakeupId/cancel: a person stops one wakeup or hold.
+ * Optimistic: the row leaves the list at once and comes back on error. */
+export function useCancelSessionWakeup(sessionId: string) {
+  const qc = useQueryClient();
+  const key = qk.wakeups(sessionId);
+  return useMutation<
+    CancelSessionWakeupResponse,
+    Error,
+    string,
+    { previous?: ListSessionWakeupsResponse }
+  >({
+    mutationFn: (wakeupId) => api.cancelSessionWakeup(sessionId, wakeupId),
+    onMutate: async (wakeupId) => {
+      await qc.cancelQueries({ queryKey: key });
+      const previous = qc.getQueryData<ListSessionWakeupsResponse>(key);
+      if (previous) {
+        qc.setQueryData<ListSessionWakeupsResponse>(key, {
+          wakeups: previous.wakeups.filter((w) => w.id !== wakeupId),
+          leases: previous.leases.filter((l) => l.id !== wakeupId && l.ownerId !== wakeupId),
+        });
+      }
+      return { previous };
+    },
+    onError: (_err, _wakeupId, context) => {
+      if (context?.previous) qc.setQueryData(key, context.previous);
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: key });
     },
   });
 }
@@ -244,7 +381,7 @@ export function useCreateThread(sessionId: string) {
   return useMutation<CreateThreadResponse, Error, CreateThreadRequest | void>({
     mutationFn: (body) => api.createThread(sessionId, body ?? {}),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.threads(sessionId) });
+      qc.invalidateQueries(threadListFilters(sessionId));
     },
   });
 }
@@ -285,16 +422,6 @@ export function useSessionRatings(sessionId: string) {
   });
 }
 
-/** Session-level 👍/👎. `null` clears the rating. */
-export function useRateSession(sessionId: string) {
-  const qc = useQueryClient();
-  return useMutation<PutRatingResponse, Error, RatingValue | null>({
-    mutationFn: (rating) => api.rateSession(sessionId, { rating }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.ratings(sessionId) });
-    },
-  });
-}
 
 /** Message-level 👍/👎 on one assistant entry. `null` clears the rating. */
 export function useRateMessage(sessionId: string) {
@@ -325,12 +452,14 @@ export function useRenameSession(sessionId: string) {
  * it joined. */
 export function useMoveSession(sessionId: string) {
   const qc = useQueryClient();
-  return useMutation<PatchSessionResponse, Error, string | null>({
-    mutationFn: (teamId) => api.patchSession(sessionId, { teamId }),
+  return useMutation<PatchSessionResponse, Error, { teamId: string | null } & ForceOption>({
+    mutationFn: ({ teamId, force }) => api.patchSession(sessionId, { teamId, ...(force ? { force: true } : {}) }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.session(sessionId) });
       qc.invalidateQueries({ queryKey: qk.sessions() });
     },
+    // A forced change can stop background work and still fail.
+    onSettled: () => qc.invalidateQueries({ queryKey: qk.wakeups(sessionId) }),
   });
 }
 
@@ -339,12 +468,14 @@ export function useMoveSession(sessionId: string) {
  * row and the live `sandbox.status` both change. */
 export function useSetSessionProfile(sessionId: string) {
   const qc = useQueryClient();
-  return useMutation<PatchSessionResponse, Error, SandboxProfile>({
-    mutationFn: (profile) => api.patchSession(sessionId, { profile }),
+  return useMutation<PatchSessionResponse, Error, { profile: SandboxProfile } & ForceOption>({
+    mutationFn: ({ profile, force }) => api.patchSession(sessionId, { profile, ...(force ? { force: true } : {}) }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.session(sessionId) });
       qc.invalidateQueries({ queryKey: qk.sessions() });
     },
+    // A forced change can stop background work and still fail.
+    onSettled: () => qc.invalidateQueries({ queryKey: qk.wakeups(sessionId) }),
   });
 }
 
@@ -355,11 +486,16 @@ export function useSetSessionProfile(sessionId: string) {
 export function useSetThreadModel(sessionId: string) {
   const qc = useQueryClient();
   return useMutation<PatchThreadResponse, Error, { threadId: string; model: string | null }>({
-    mutationFn: ({ threadId, model }) => api.patchThread(sessionId, threadId, { model }),
-    onSuccess: () => {
-      // Thread PATCH touches only the thread row; the session detail (and
-      // its default model) is unchanged — no session invalidation.
-      qc.invalidateQueries({ queryKey: qk.threads(sessionId) });
+    mutationFn: ({ threadId, model }) => api.patchThread(threadId, { model }),
+    onSuccess: async (saved) => {
+      // A GET started before the save must not overwrite its confirmed pin.
+      await qc.cancelQueries(threadListFilters(sessionId));
+      // PATCH confirms the pin. Update only that field so newer activity
+      // and title updates survive a slower model save.
+      qc.setQueriesData<ListThreadsResponse | InfiniteData<ListThreadsResponse>>(
+        threadListFilters(sessionId),
+        (current) => mapThreadData(current, thread => thread.id === saved.id ? { ...thread, model: saved.model } : thread),
+      );
     },
   });
 }
@@ -370,34 +506,215 @@ export function useSetThreadModel(sessionId: string) {
 export function useSetThreadReasoning(sessionId: string) {
   const qc = useQueryClient();
   return useMutation<PatchThreadResponse, Error, { threadId: string; reasoning: string | null }>({
-    mutationFn: ({ threadId, reasoning }) => api.patchThread(sessionId, threadId, { reasoning }),
+    mutationFn: ({ threadId, reasoning }) => api.patchThread(threadId, { reasoning }),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.threads(sessionId) });
+      qc.invalidateQueries(threadListFilters(sessionId));
     },
   });
+}
+
+/** Marks threads read for the viewer; with no ids, every thread in the session.
+ * The list shows them read at once; the server keeps the later timestamp. */
+export function useMarkThreadsRead(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<void, Error, { threadIds?: string[] }>({
+    mutationFn: ({ threadIds }) => api.markThreadsRead(sessionId, threadIds),
+    onMutate: ({ threadIds }) => {
+      const at = Date.now();
+      const ids = new Set(threadIds ?? qc.getQueriesData<ListThreadsResponse | InfiniteData<ListThreadsResponse>>({ queryKey: qk.threads(sessionId) })
+        .flatMap(([, data]) => !data ? [] : "pages" in data ? data.pages.flatMap(page => page.threads) : data.threads)
+        .map(thread => thread.id));
+      qc.setQueriesData<ListThreadsResponse | InfiniteData<ListThreadsResponse>>(threadListFilters(sessionId), (current) => mapThreadData(current, thread =>
+        (ids.has(thread.id) || (!threadIds && thread.sessionId === sessionId)) ? { ...thread, readAt: Math.max(thread.readAt ?? 0, at) } : thread));
+    },
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: ["workspace-waiting"] });
+    },
+  });
+}
+
+type ThreadListData = ListThreadsResponse | InfiniteData<ListThreadsResponse>;
+
+function threadsIn(data: ThreadListData | undefined): ThreadSummary[] {
+  return !data ? [] : "pages" in data ? data.pages.flatMap(page => page.threads) : data.threads;
+}
+
+/** Moves one row between the default and archived lists in the cache. A
+ * row goes to the top of the first page; the next read puts it in order. */
+function moveArchivedRow(qc: QueryClient, sessionId: string, thread: ThreadSummary, archived: boolean) {
+  const { archivedAt: _previous, ...rest } = thread;
+  const row: ThreadSummary = archived ? { ...rest, archivedAt: Date.now() } : rest;
+  for (const [key, data] of qc.getQueriesData<ThreadListData>(threadListFilters(sessionId))) {
+    if (!data) continue;
+    const archivedList = key[1] === sessionId && key[3] === "archived";
+    const without = (threads: ThreadSummary[]) => threads.filter(item => item.id !== thread.id);
+    // Only the paged default list and the archived list take a new row:
+    // search and fixed lists hold rows that match their own reads.
+    const takesRow = archivedList === archived && (archivedList || (key[1] === sessionId && key[3] === "pages"));
+    if (archivedList !== archived) {
+      qc.setQueryData<ThreadListData>(key, "pages" in data
+        ? { ...data, pages: data.pages.map(page => ({ ...page, threads: without(page.threads) })) }
+        : { ...data, threads: without(data.threads) });
+    } else if (takesRow && !threadsIn(data).some(item => item.id === thread.id)) {
+      qc.setQueryData<ThreadListData>(key, "pages" in data
+        ? { ...data, pages: data.pages.map((page, index) => index === 0 ? { ...page, threads: [row, ...page.threads] } : page) }
+        : { ...data, threads: [row, ...data.threads] });
+    }
+  }
+}
+
+const threadArchiveKey = (sessionId: string) => ["thread-archive", sessionId] as const;
+
+/** Archive or restore a thread. The row moves at once; a refused save, such
+ * as a thread with background work, moves it back. */
+/**
+ * Each thread's last state the server confirmed, while optimistic changes
+ * to it are pending. When the last pending change settles, the row shows
+ * that state: saves can fail in any order, and each one's own snapshot may
+ * be another pending change's guess.
+ */
+type ConfirmedThread = { archived: boolean; title: string | undefined; pending: number };
+/** Per query client: the records describe that client's cache. */
+const confirmedByClient = new WeakMap<QueryClient, Map<string, ConfirmedThread>>();
+function confirmedThreadsFor(qc: QueryClient): Map<string, ConfirmedThread> {
+  let map = confirmedByClient.get(qc);
+  if (!map) confirmedByClient.set(qc, map = new Map());
+  return map;
+}
+function beginThreadChange(qc: QueryClient, sessionId: string, threadId: string, current: { archived: boolean; title: string | undefined }): string {
+  const confirmedThreads = confirmedThreadsFor(qc);
+  const key = `${sessionId} ${threadId}`;
+  const record = confirmedThreads.get(key) ?? { ...current, pending: 0 };
+  record.pending += 1;
+  confirmedThreads.set(key, record);
+  return key;
+}
+/** Shows a thread's confirmed list and title. */
+function showConfirmedThread(qc: QueryClient, sessionId: string, thread: ThreadSummary, confirmed: { archived: boolean; title: string | undefined }) {
+  moveArchivedRow(qc, sessionId, thread, confirmed.archived);
+  qc.setQueriesData<ThreadListData>(threadListFilters(sessionId), (current) => mapThreadData(current, item => {
+    if (item.id !== thread.id) return item;
+    const { title: _previous, ...rest } = item;
+    return confirmed.title === undefined ? rest : { ...rest, title: confirmed.title };
+  }));
+}
+
+/** The confirmed state once no change is pending, else undefined. */
+function settleThreadChange(qc: QueryClient, key: string): { archived: boolean; title: string | undefined } | undefined {
+  const confirmedThreads = confirmedThreadsFor(qc);
+  const record = confirmedThreads.get(key);
+  if (!record) return undefined;
+  record.pending -= 1;
+  if (record.pending > 0) return undefined;
+  confirmedThreads.delete(key);
+  return record;
 }
 
 export function useSetThreadArchived(sessionId: string) {
   const qc = useQueryClient();
-  return useMutation<PatchThreadResponse, Error, { threadId: string; archived: boolean }>({
-    mutationFn: ({ threadId, archived }) =>
-      api.patchThread(sessionId, threadId, { archived }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.threads(sessionId) });
-      qc.invalidateQueries({ queryKey: qk.threadsArchived(sessionId) });
+  return useMutation<PatchThreadResponse, Error, { threadId: string; archived: boolean } & ForceOption, { thread: ThreadSummary | undefined; change: string }>({
+    mutationKey: threadArchiveKey(sessionId),
+    mutationFn: ({ threadId, archived, force }) =>
+      api.patchThread(threadId, { archived, ...(force ? { force: true } : {}) }),
+    onMutate: async ({ threadId, archived }) => {
+      // An older read must not put the row back while the save runs.
+      await qc.cancelQueries(threadListFilters(sessionId));
+      const thread = qc.getQueriesData<ThreadListData>(threadListFilters(sessionId))
+        .flatMap(([, data]) => threadsIn(data)).find(item => item.id === threadId);
+      // The row's list before this change, unless an earlier one is pending.
+      const change = beginThreadChange(qc, sessionId, threadId, { archived: thread?.archivedAt !== undefined, title: thread?.title });
+      if (thread) moveArchivedRow(qc, sessionId, thread, archived);
+      return { thread, change };
+    },
+    onSuccess: async (saved, { threadId, archived }, context) => {
+      const record = context && confirmedThreadsFor(qc).get(context.change);
+      if (record) record.archived = archived;
+      // A forced archive stopped the thread's background work.
+      if (saved.cancelledWork) qc.invalidateQueries({ queryKey: qk.wakeups(sessionId) });
+      // An older supplemental activity read must not reinsert the archived row.
+      await qc.cancelQueries({ predicate: query => query.queryKey[0] === "sessions"
+        && query.queryKey[2] === "threads" && query.queryKey[3] === "activity" && query.queryKey[4] === threadId });
+    },
+    onSettled: (_data, _error, _variables, context) => {
+      const confirmed = context && settleThreadChange(qc, context.change);
+      if (confirmed && context.thread) showConfirmedThread(qc, sessionId, context.thread, confirmed);
+      // Read the lists once, after the last of several quick archives: an
+      // earlier read would show rows whose saves are still running. A read
+      // already on its way stays: cancelling it would put back the data it
+      // started from, over the confirmed state above.
+      if (qc.isMutating({ mutationKey: threadArchiveKey(sessionId) }) > 1) return;
+      qc.invalidateQueries(threadListFilters(sessionId), { cancelRefetch: false });
     },
   });
 }
 
-/** Rename a thread. Use `null` to clear its stored title. */
+/** Rename a thread. Use `null` to clear its stored title. The list shows the
+ * new title at once and restores the old one if the save fails. */
 export function useRenameThread(sessionId: string) {
   const qc = useQueryClient();
-  return useMutation<PatchThreadResponse, Error, { threadId: string; title: string | null }>({
+  const retitle = (threadId: string, title: string | undefined) => qc.setQueriesData<ThreadListData>(threadListFilters(sessionId),
+    (current) => mapThreadData(current, thread => {
+      if (thread.id !== threadId) return thread;
+      const { title: _previous, ...rest } = thread;
+      return title === undefined ? rest : { ...rest, title };
+    }));
+  return useMutation<PatchThreadResponse, Error, { threadId: string; title: string | null }, { change: string; thread: ThreadSummary | undefined }>({
     mutationFn: ({ threadId, title }) =>
-      api.patchThread(sessionId, threadId, { title }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.threads(sessionId) });
-      qc.invalidateQueries({ queryKey: qk.threadsArchived(sessionId) });
+      api.patchThread(threadId, { title }),
+    onMutate: async ({ threadId, title }) => {
+      await qc.cancelQueries(threadListFilters(sessionId));
+      const thread = qc.getQueriesData<ThreadListData>(threadListFilters(sessionId))
+        .flatMap(([, data]) => threadsIn(data)).find(item => item.id === threadId);
+      const change = beginThreadChange(qc, sessionId, threadId, { archived: thread?.archivedAt !== undefined, title: thread?.title });
+      retitle(threadId, title ?? undefined);
+      return { change, thread };
+    },
+    onSuccess: (_saved, { title }, context) => {
+      const record = context && confirmedThreadsFor(qc).get(context.change);
+      if (record) record.title = title ?? undefined;
+    },
+    onSettled: (_data, _error, _variables, context) => {
+      const confirmed = context && settleThreadChange(qc, context.change);
+      if (confirmed && context.thread) showConfirmedThread(qc, sessionId, context.thread, confirmed);
+      qc.invalidateQueries(threadListFilters(sessionId), { cancelRefetch: false });
+    },
+  });
+}
+
+/** PATCH /threads/:id with `approvalBypass`: turn "Run without asking" on or
+ * off. The header shows the change at once and restores it if the save fails. */
+export function useSetThreadApprovalBypass(sessionId: string) {
+  const qc = useQueryClient();
+  const mark = (threadId: string, on: boolean) => qc.setQueriesData<ListThreadsResponse | InfiniteData<ListThreadsResponse>>(
+    threadListFilters(sessionId),
+    (current) => mapThreadData(current, thread => {
+      if (thread.id !== threadId) return thread;
+      const { approvalBypass: _previous, ...rest } = thread;
+      return on ? { ...rest, approvalBypass: true as const } : rest;
+    }),
+  );
+  return useMutation<PatchThreadResponse, Error, { threadId: string; on: boolean }>({
+    mutationFn: ({ threadId, on }) => api.patchThread(threadId, { approvalBypass: on }),
+    onMutate: async ({ threadId, on }) => {
+      await qc.cancelQueries(threadListFilters(sessionId));
+      mark(threadId, on);
+    },
+    onError: (_error, { threadId, on }) => mark(threadId, !on),
+    onSettled: () => qc.invalidateQueries(threadListFilters(sessionId)),
+  });
+}
+
+/** PATCH /threads/:id with a `share` — the owner shares a personal thread
+ * with the organization, or stops sharing it. */
+export function useShareThread(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<PatchThreadResponse, Error, { threadId: string; share: ThreadShareMode | "off" }>({
+    mutationFn: ({ threadId, share }) => api.patchThread(threadId, { share }),
+    onSuccess: (saved) => {
+      qc.setQueriesData<ListThreadsResponse | InfiniteData<ListThreadsResponse>>(
+        threadListFilters(sessionId),
+        (current) => mapThreadData(current, thread => thread.id === saved.id ? { ...thread, share: saved.share } : thread),
+      );
     },
   });
 }
@@ -414,6 +731,16 @@ export function useDecisions(
   });
 }
 
+export function useNotificationDecisions(cursor?: string, enabled = true) {
+  return useQuery({ queryKey: ["notification-decisions", cursor], queryFn: () => api.listNotificationDecisions(cursor), enabled, refetchInterval: 5000 });
+}
+
+// Approval-only views poll the notification inbox without a session stream.
+function invalidateDecisionState(qc: QueryClient, sessionId: string) {
+  void qc.invalidateQueries({ queryKey: qk.decisions(sessionId) });
+  void qc.invalidateQueries({ queryKey: ["notification-decisions"] });
+}
+
 export function useResolveDecision(sessionId: string) {
   const qc = useQueryClient();
   return useMutation<
@@ -422,8 +749,23 @@ export function useResolveDecision(sessionId: string) {
     { gateId: string; body: ResolveDecisionRequest }
   >({
     mutationFn: ({ gateId, body }) => api.resolveDecision(sessionId, gateId, body),
-    // Approval-only views poll this query without a session stream.
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.decisions(sessionId) }),
+    onSuccess: () => invalidateDecisionState(qc, sessionId),
+  });
+}
+
+/** `useResolveDecision` for gates in many sessions: the bell's bulk answer
+ * resolves each gate through the same endpoint. It invalidates only the
+ * session's gates. The inbox scan is expensive, so the bulk run refetches it
+ * once after its last answer instead of once per answer. */
+export function useResolveDecisions() {
+  const qc = useQueryClient();
+  return useMutation<
+    { ok: true },
+    Error,
+    { sessionId: string; gateId: string; body: ResolveDecisionRequest }
+  >({
+    mutationFn: ({ sessionId, gateId, body }) => api.resolveDecision(sessionId, gateId, body),
+    onSuccess: (_data, { sessionId }) => { void qc.invalidateQueries({ queryKey: qk.decisions(sessionId) }); },
   });
 }
 
@@ -432,7 +774,7 @@ export function useWithdrawDecision(sessionId: string) {
   return useMutation<{ ok: true }, Error, { gateId: string }>({
     mutationFn: ({ gateId }) =>
       api.withdrawDecision(sessionId, gateId, { reason: "cancel" }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.decisions(sessionId) }),
+    onSuccess: () => invalidateDecisionState(qc, sessionId),
   });
 }
 
@@ -446,6 +788,10 @@ export function useNotifications(opts?: UseQueryOptions<ListNotificationsRespons
     queryKey: qk.notifications(),
     queryFn: () => api.listNotifications(),
     refetchInterval: 30_000,
+    // The attention sound (`use-attention-ping.ts`) fires when this poll
+    // finds something new. TanStack pauses the interval in a hidden tab, so
+    // without this the sound waits until the person comes back to the tab.
+    refetchIntervalInBackground: true,
     ...opts,
   });
 }
@@ -473,19 +819,23 @@ export function useMarkAllNotificationsRead() {
 export function useSendPrompt(sessionId: string) {
   const qc = useQueryClient();
   return useMutation<
-    { messageId: string | null; threadId: string },
+    import("@valet/api/wire").SendPromptResponse,
     Error,
     import("@valet/api/wire").SendPromptRequest
   >({
     mutationFn: (body) =>
       api.sendPrompt(sessionId, body),
-    // Invalidation is not needed for prompts — live updates flow through the
-    // WS store. Slash commands are the exception: the command_result entry
-    // persists before the POST returns, so a WS subscription still in its
-    // handshake can miss the live event. A refetch closes that race.
-    onSuccess: (_data, { text }) => {
-      if (!text.startsWith("/")) return;
-      void qc.invalidateQueries({ queryKey: qk.messages(sessionId) });
+    // Update the sender now with the timestamp that the server persisted.
+    // Socket events update other viewers; a later thread-list fetch reconciles
+    // this cache with the persisted value.
+    onSuccess: (data, { text }) => {
+      qc.setQueriesData<ListThreadsResponse | InfiniteData<ListThreadsResponse>>(threadListFilters(sessionId), (current) => mapThreadData(current, thread => thread.id === data.threadId
+        ? { ...thread, lastUserActivityAt: Math.max(thread.lastUserActivityAt, data.activityAt) } : thread));
+      if (text.startsWith("/")) void qc.invalidateQueries({ queryKey: qk.messages(sessionId) });
+      if (data.fork) {
+        void qc.invalidateQueries(threadListFilters(sessionId));
+        if (data.fork.sessionId !== sessionId) void qc.invalidateQueries(threadListFilters(data.fork.sessionId));
+      }
     },
   });
 }
@@ -503,11 +853,95 @@ export function useSandboxJwt(sessionId: string) {
 }
 
 export function useAbortThread(sessionId: string) {
-  return useMutation<{ ok: true }, Error, { threadId: string }>({
-    mutationFn: ({ threadId }) => api.abortThread(sessionId, threadId),
+  return useMutation<{ ok: true }, Error, { threadId: string; targetItemId: string }>({
+    mutationFn: ({ threadId, targetItemId }) =>
+      api.abortThread(threadId, { targetItemId }),
     // No invalidation — the abort's terminal state (submission settled
     // `aborted`, thread status back to idle) arrives via the WS stream,
     // same as every other engine-driven state transition.
+  });
+}
+
+/** Cancels one queued message that has not started. The queue change and
+ * the settled `aborted` outcome arrive on the WS stream, like Stop. */
+export function useCancelQueuedItem() {
+  return useMutation<{ ok: true }, Error, { threadId: string; itemId: string }>({
+    mutationFn: ({ threadId, itemId }) => api.cancelQueuedItem(threadId, itemId),
+  });
+}
+
+/** Copies the conversation up to a message into a new thread
+ * (docs/specs/2026-10-22-thread-edit-fork-design.md). The new thread joins
+ * the thread list; the caller opens it. */
+export function useForkThread(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<ForkThreadResponse, Error, { threadId: string; entryId: string; destination?: "here" | "private" }>({
+    mutationFn: ({ threadId, entryId, destination }) => api.forkThread(threadId, { entryId, ...(destination ? { destination } : {}) }),
+    onSuccess: (result) => {
+      void qc.invalidateQueries(threadListFilters(sessionId));
+      if (result.thread.sessionId !== sessionId) void qc.invalidateQueries(threadListFilters(result.thread.sessionId));
+    },
+  });
+}
+
+/** Moves a thread into another workspace (docs/specs/2026-10-22-thread-edit-fork-design.md).
+ * The source is archived; the caller opens the copy. */
+export function useMoveThread() {
+  const qc = useQueryClient();
+  return useMutation<ForkThreadResponse, Error, { threadId: string } & MoveThreadRequest>({
+    mutationFn: ({ threadId, ...body }) => api.moveThread(threadId, body),
+    // The copy joins another workspace's list, so every thread list refetches.
+    onSuccess: () => void qc.invalidateQueries({ predicate: ({ queryKey }) => queryKey[0] === "sessions" && queryKey[2] === "threads" }),
+  });
+}
+
+/** Copies a whole thread into a new thread in the same workspace. The source
+ * stays as it is; the caller opens the copy. */
+export function useDuplicateThread() {
+  const qc = useQueryClient();
+  return useMutation<ForkThreadResponse, Error, { threadId: string }>({
+    mutationFn: ({ threadId }) => api.duplicateThread(threadId),
+    // A team copy runs in its own execution session, so every thread list refetches.
+    onSuccess: () => void qc.invalidateQueries({ predicate: ({ queryKey }) => queryKey[0] === "sessions" && queryKey[2] === "threads" }),
+  });
+}
+
+/** Which workspace holds a thread, for a link to a thread outside the open one. */
+export function useThreadWorkspace(threadId: string | undefined) {
+  return useQuery({
+    queryKey: ["thread-address", threadId],
+    queryFn: () => api.getThreadAddress(threadId!),
+    enabled: !!threadId,
+    staleTime: 60_000,
+    select: (address) => address.workspace,
+  });
+}
+
+/** What an edit of `entryId` would replace, for the edit bar before Send. */
+export function useEditPreview(threadId: string | undefined, entryId: string | undefined) {
+  return useQuery<EditPreviewResponse>({
+    queryKey: ["thread-edit-preview", threadId, entryId],
+    queryFn: () => api.editPreview(threadId!, entryId!),
+    enabled: !!threadId && !!entryId,
+    staleTime: 0,
+  });
+}
+
+/** Goes back to the version a branch note left. The `branch_switched` wire
+ * event refetches the messages for every viewer. */
+export function useReturnToBranch(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<ReturnToBranchResponse, Error, { threadId: string; noteEntryId: string; restoreFiles?: boolean }>({
+    mutationFn: ({ threadId, noteEntryId, restoreFiles }) => api.returnToBranch(threadId, { noteEntryId, ...(restoreFiles ? { restoreFiles } : {}) }),
+    onSuccess: (_result, { threadId }) => {
+      void qc.invalidateQueries({ queryKey: qk.messages(sessionId, threadId) });
+    },
+  });
+}
+
+export function useResumeThread(sessionId: string) {
+  return useMutation<{ ok: true }, Error, { threadId: string }>({
+    mutationFn: ({ threadId }) => api.resumeThread(threadId),
   });
 }
 
@@ -571,6 +1005,18 @@ export function useDeliverIdentityLink() {
   });
 }
 
+/** Enters the code the bot DMed. Success links the account, so the link
+ * list refetches and the card flips to "Linked". */
+export function useVerifyIdentityLink() {
+  const qc = useQueryClient();
+  return useMutation<VerifyIdentityLinkResponse, Error, { provider: string; code: string }>({
+    mutationFn: ({ provider, code }) => api.verifyIdentityLink(provider, code),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.identityLinks() });
+    },
+  });
+}
+
 /** Workspace-member typeahead for the find-me-by-name link fallback. */
 export function useLinkMembers(provider: string, query: string, enabled: boolean) {
   return useQuery<ListLinkMembersResponse>({
@@ -599,4 +1045,44 @@ export function useUnlinkIdentity(provider: string) {
       qc.invalidateQueries({ queryKey: qk.identityLinks() });
     },
   });
+}
+
+/** Read only the promoted row; keep loaded pages and their cursor chain. */
+export async function refreshMissingActivityThread(client: QueryClient, threadId: string) {
+  // An execution socket may name a row absent from its root workspace cache.
+  // Let each active runtime's authorized fixed-row endpoint resolve membership.
+  const queries = client.getQueryCache().findAll({ type: "active", predicate: query =>
+    query.queryKey[0] === "sessions" && query.queryKey[2] === "threads" && query.queryKey[3] === "pages",
+  });
+  await Promise.all(queries.map(async query => {
+    const options = query.queryKey[4] as { sort?: string; origin?: string } | undefined;
+    const data = query.state.data as InfiniteData<ListThreadsResponse> | undefined;
+    if (!data || options?.sort === "created" || data.pages.some(page => page.threads.some(thread => thread.id === threadId))) return;
+    const runtimeId = query.queryKey[1] as string;
+    let response: ListThreadsResponse;
+    try {
+      response = await client.fetchQuery({
+        queryKey: [...qk.threads(runtimeId), "activity", threadId],
+        queryFn: () => api.listThreads(runtimeId, { fixedOnly: true, fixedIds: [threadId] }),
+        staleTime: 0,
+      });
+    } catch (error) {
+      if (!isCancelledError(error) && query.isActive()) {
+        // The list owns retry/error UI; do not refresh other cached workspaces.
+        await client.invalidateQueries({ queryKey: query.queryKey, exact: true });
+      }
+      return;
+    }
+    if (!query.isActive()) return;
+    const rows = response.threads.filter(thread => thread.archivedAt === undefined && !isAppAssistantThread(thread)
+      && (!options?.origin || options.origin === "all" || threadOriginBucket(thread) === options.origin));
+    if (!rows.length) return;
+    // A pending next-page response must not overwrite the inserted row.
+    await client.cancelQueries({ queryKey: query.queryKey, exact: true });
+    client.setQueryData<InfiniteData<ListThreadsResponse>>(query.queryKey, current => current && ({
+      ...current, pages: current.pages.map((page, index) => index ? page : ({
+        ...page, threads: [...new Map([...rows, ...page.threads].map(thread => [thread.id, thread])).values()],
+      })),
+    }));
+  }));
 }

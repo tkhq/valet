@@ -52,7 +52,7 @@ describe("slack bot events", () => {
 
 describe("slack bot scopes", () => {
   /**
-   * Every Slack Web API method the transport calls, and the scope it needs.
+   * Every Slack Web API method Valet calls, and the scope it needs.
    * A method whose scope is absent from the manifest fails at runtime with
    * `missing_scope`, weeks after the operator installed the app, so the two
    * lists are pinned here rather than left to review.
@@ -72,6 +72,7 @@ describe("slack bot scopes", () => {
     "assistant.threads.setTitle": "assistant:write",
     "conversations.open": "im:write",
     "users.list": "users:read",
+    "users.lookupByEmail": "users:read.email",
     "files.info": "files:read",
     "files.getUploadURLExternal": "files:write",
     "files.completeUploadExternal": "files:write",

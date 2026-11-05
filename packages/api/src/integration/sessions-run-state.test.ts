@@ -66,6 +66,7 @@ describe("GET /api/sessions: run state", () => {
           sessionRow("many-1", "active", now),
           sessionRow("many-2", "active", now),
           sessionRow("many-3", "active", now),
+          { ...sessionRow("unrelated-user", "active", now), userId: "other", ownerId: "other" },
         ]);
 
       const all = vi.spyOn(engineStore, "listAllUnsettledSubmissions");
@@ -78,6 +79,8 @@ describe("GET /api/sessions: run state", () => {
 
         // Asserted before `mockRestore`, which clears the call record.
         expect(all).toHaveBeenCalledTimes(1);
+        expect(all).toHaveBeenCalledWith(expect.arrayContaining(["many-1", "many-2", "many-3"]));
+        expect(all.mock.calls[0]?.[0]).not.toContain("unrelated-user");
         expect(perSession).not.toHaveBeenCalled();
       } finally {
         all.mockRestore();

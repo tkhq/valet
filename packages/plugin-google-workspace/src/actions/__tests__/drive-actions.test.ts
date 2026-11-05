@@ -7,15 +7,17 @@ import type {
   MessageQuery,
   Sandbox,
   SessionEntry,
+  ThreadFile,
+  ThreadFileStore,
   ToolContext,
 } from '@valet/engine';
-import { driveActions } from '../drive-actions.js';
+import { driveActions, exportFileName } from '../drive-actions.js';
 
 type FakeSandbox = Partial<Sandbox> & { id: string };
 
-function makeCredentials(token: string | null): CredentialProvider {
+function makeCredentials(token: string | null, refreshToken = "stable-refresh"): CredentialProvider {
   return {
-    get: async (): Promise<Credential | null> => (token === null ? null : { accessToken: token }),
+    get: async (): Promise<Credential | null> => (token === null ? null : { accessToken: token, refreshToken }),
     request: async (): Promise<Credential> => {
       throw new Error('not implemented in test stub');
     },
@@ -166,6 +168,148 @@ describe('drive actions', () => {
       success: true,
       data: { files: [], total: 0, nextPageToken: 'np2', hasMore: true },
     });
+  });
+
+  async function searchPage(pageToken?: string, overrides: Record<string, unknown> = {}) {
+    const result = await action('drive.search_files').execute({ query: 'budget', folderId: 'root', pageToken, ...overrides }, pluginCtx());
+    return result as { success: boolean; error?: string; data?: { files: Array<{ id: string }>; nextPageToken?: string; hasMore: boolean } };
+  }
+
+  it('uses single-parent queries and continues without rediscovering folders', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { files: [{ id: 'child' }] }))
+      .mockResolvedValueOnce(jsonResponse(200, { files: [{ id: 'root-match' }], nextPageToken: 'native-next' }))
+      .mockResolvedValueOnce(jsonResponse(200, { files: [{ id: 'root-match-2' }] }))
+      .mockResolvedValueOnce(jsonResponse(200, { files: [{ id: 'root' }] }))
+      .mockResolvedValueOnce(jsonResponse(200, { files: [{ id: 'child-match' }] }));
+    const first = await searchPage();
+    const second = await searchPage(first.data?.nextPageToken);
+    const third = await searchPage(second.data?.nextPageToken);
+    expect(first.data?.files[0].id).toBe('root-match');
+    expect(second.data?.files[0].id).toBe('root-match-2');
+    expect(third.data).toMatchObject({ files: [{ id: 'child-match' }], hasMore: false });
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    const queries = fetchMock.mock.calls.map(([url]) => new URL(String(url)).searchParams);
+    expect(queries[2].get('pageToken')).toBe('native-next');
+    for (const query of queries) expect(query.get('q')?.match(/in parents/g)).toHaveLength(1);
+    expect(queries[4].get('q')).toContain("'child' in parents");
+  });
+
+  it('preserves search filters, label scope, escaping, and per-folder ordering', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { files: [] }))
+      .mockResolvedValueOnce(jsonResponse(200, { files: [] }));
+    await searchPage(undefined, { folderId: "a'b", searchIn: 'name', mimeType: 'document',
+      modifiedAfter: '2026-01-01', orderBy: 'name', sortDirection: 'asc', maxResults: 3,
+      __labelFilter: "'labels/required' in labels" });
+    const query = new URL(String(fetchMock.mock.calls[1][0])).searchParams;
+    expect(query.get('q')).toContain("name contains 'budget'");
+    expect(query.get('q')).toContain("mimeType='application/vnd.google-apps.document'");
+    expect(query.get('q')).toContain("'labels/required' in labels");
+    expect(query.get('q')).toContain("2026-01-01T00:00:00.000Z");
+    expect(query.get('q')).toContain("'a" + String.fromCharCode(92) + "'b' in parents");
+    expect(query.get('orderBy')).toBe('name');
+    expect(query.get('pageSize')).toBe('3');
+  });
+
+  it('bounds requests on empty discovery pages and resumes at the native cursor', async () => {
+    let calls = 0;
+    fetchMock.mockImplementation(async () => jsonResponse(200, { files: [], nextPageToken: `page-${++calls}` }));
+    const first = await searchPage();
+    expect(first.data).toMatchObject({ files: [], hasMore: true });
+    expect(fetchMock).toHaveBeenCalledTimes(10);
+    await searchPage(first.data?.nextPageToken);
+    expect(fetchMock).toHaveBeenCalledTimes(20);
+    expect(new URL(String(fetchMock.mock.calls[10][0])).searchParams.get('pageToken')).toBe('page-10');
+  });
+
+  it('does not rescan a 99-child subtree across five result pages', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { files: Array.from({length: 99}, (_, i) => ({id: `child-${i}`})) }))
+      .mockImplementation(async () => jsonResponse(200, { files: [], nextPageToken: 'more-results' }));
+    let cursor: string | undefined;
+    for (let i = 0; i < 5; i++) cursor = (await searchPage(cursor)).data?.nextPageToken;
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+  });
+
+  it('skips empty folders within the request budget to reach late matches', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, {files:Array.from({length:9}, (_,i) => ({id:`child-${i}`}))}));
+    fetchMock.mockImplementation(async (url: string) => {
+      const q = new URL(url).searchParams.get('q') ?? '';
+      return jsonResponse(200, {files: !q.includes('mimeType=') && q.includes("'child-8'") ? [{id:'late-match'}] : []});
+    });
+    const first = await searchPage();
+    expect(first.data).toMatchObject({files:[],hasMore:true});
+    expect(fetchMock).toHaveBeenCalledTimes(10);
+    const last = await searchPage(first.data?.nextPageToken);
+    expect(last.data).toMatchObject({files:[{id:'late-match'}],hasMore:false});
+    expect(fetchMock).toHaveBeenCalledTimes(20);
+  });
+
+  it('rejects changed criteria, tampering, and another account before HTTP', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { files: [{ id: 'child' }] }))
+      .mockResolvedValueOnce(jsonResponse(200, { files: [{id: 'first'}] }));
+    const first = await searchPage();
+    const cursor = first.data!.nextPageToken!;
+    expect(await searchPage(cursor, { query: 'different' })).toMatchObject({success: false, error: expect.stringContaining('Restart')});
+    expect(await searchPage(cursor + 'tampered')).toMatchObject({success: false});
+    const foreign = await action('drive.search_files').execute({query:'budget', folderId:'root', pageToken:cursor}, pluginCtx({userId:'other'}));
+    expect(foreign).toMatchObject({success: false});
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([403, 404, 429, 500])('propagates discovery HTTP %s without a partial success', async (status) => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(status, {error:{message:'Discovery failed'}}));
+    expect(await searchPage()).toMatchObject({success:false, error:expect.stringContaining(`Drive API ${status}`)});
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('survives OAuth refresh but rejects a different credential and expiry', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, {files:[{id:'child'}]}))
+      .mockResolvedValueOnce(jsonResponse(200, {files:[{id:'first'}]}));
+    const cursor = (await searchPage()).data!.nextPageToken!;
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, {files:[]})).mockResolvedValueOnce(jsonResponse(200, {files:[{id:'match'}]}));
+    const refreshed = await action('drive.search_files').execute({query:'budget',folderId:'root',pageToken:cursor}, pluginCtx({credentials:makeCredentials('new-access-token')}));
+    expect(refreshed).toMatchObject({success:true,data:{files:[{id:'match'}],hasMore:false}});
+    const rotated = await action('drive.search_files').execute({query:'budget',folderId:'root',pageToken:cursor}, pluginCtx({credentials:makeCredentials('rotated', 'different-account-refresh')}));
+    expect(rotated).toMatchObject({success:false,error:expect.stringContaining('Restart')});
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 3_600_001);
+    try { expect(await searchPage(cursor)).toMatchObject({success:false,error:expect.stringContaining('expired')}); }
+    finally { clock.mockRestore(); }
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it.each([429, 500])('keeps a result cursor retryable after HTTP %s', async (status) => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, {files:[]}))
+      .mockResolvedValueOnce(jsonResponse(200, {files:[],nextPageToken:'results-next'}));
+    const cursor = (await searchPage()).data!.nextPageToken!;
+    fetchMock.mockResolvedValueOnce(jsonResponse(status, {error:{message:'Retry later'}}))
+      .mockResolvedValueOnce(jsonResponse(200, {files:[{id:'match'}]}));
+    expect(await searchPage(cursor)).toMatchObject({success:false});
+    expect(await searchPage(cursor)).toMatchObject({success:true,data:{files:[{id:'match'}],hasMore:false}});
+    for (const [url] of fetchMock.mock.calls.slice(2)) expect(new URL(String(url)).searchParams.get('pageToken')).toBe('results-next');
+  });
+
+  it('rejects incomplete result pages after successful discovery', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, {files:[]}))
+      .mockResolvedValueOnce(jsonResponse(200, {files:[{id:'partial'}],incompleteSearch:true}));
+    expect(await searchPage()).toMatchObject({success:false,error:expect.stringContaining('incomplete')});
+  });
+
+  it('rejects excessive folder counts', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, {files:Array.from({length:100}, (_,i) => ({id:`child-${i}`}))}));
+    expect(await searchPage()).toMatchObject({success:false, error:expect.stringContaining('100 folders')});
+  });
+
+  it('enforces the total discovery bound across continuation calls', async () => {
+    fetchMock.mockImplementation(async () => jsonResponse(200, {files:[], nextPageToken:'more'}));
+    let cursor: string | undefined;
+    for (let i=0;i<10;i++) cursor = (await searchPage(cursor)).data?.nextPageToken;
+    expect(await searchPage(cursor)).toMatchObject({success:false,error:expect.stringContaining('100 discovery pages')});
+    expect(fetchMock).toHaveBeenCalledTimes(100);
+  });
+
+  it.each([true, false])('reports incomplete results with corrective guidance for folder=%s', async (folder) => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, {files:[], incompleteSearch:true}));
+    const result = await searchPage(undefined, {folderId:folder ? 'root' : undefined});
+    expect(result).toMatchObject({success:false,error:expect.stringContaining(folder ? 'smaller folder subtree' : 'Add a folderId')});
   });
 
   it('list_documents filters to Google Docs mimeType', async () => {
@@ -396,7 +540,7 @@ describe('drive actions', () => {
     const result = await action('drive.download_file').execute({ fileId: 'f1' }, pluginCtx());
 
     const [exportUrl] = fetchMock.mock.calls[1] as [string];
-    expect(exportUrl).toContain('/files/f1/export?mimeType=text%2Fmarkdown');
+    expect(exportUrl).toContain('/files/f1/export?mimeType=text%2Fmarkdown&supportsAllDrives=true');
     expect(result).toEqual({
       success: true,
       data: {
@@ -408,18 +552,297 @@ describe('drive actions', () => {
     });
   });
 
+  it('download_file bounds a text media response before decoding it', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'f1', name: 'note.txt', mimeType: 'text/plain' }),
+    );
+    fetchMock.mockResolvedValueOnce(
+      new Response('', { status: 200, headers: { 'Content-Type': 'text/plain', 'Content-Length': '4' } }),
+    );
+
+    const result = await action('drive.download_file').execute({ fileId: 'f1', maxSizeBytes: 3 }, pluginCtx());
+
+    expect(result).toEqual({
+      success: false,
+      error: 'File is 4 bytes, exceeds max 3 bytes. Increase maxSizeBytes.',
+    });
+  });
+
+  it('download_file bounds a Workspace export before decoding it', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'f1', name: 'Doc', mimeType: 'application/vnd.google-apps.document' }),
+    );
+    fetchMock.mockResolvedValueOnce(
+      new Response('', { status: 200, headers: { 'Content-Length': '4' } }),
+    );
+
+    const result = await action('drive.download_file').execute({ fileId: 'f1', maxSizeBytes: 3 }, pluginCtx());
+
+    expect(result).toEqual({
+      success: false,
+      error: 'Exported content is 4 bytes, exceeds max 3 bytes. Increase maxSizeBytes.',
+    });
+  });
+
+  it('download_file rejects a zero byte limit before it fetches metadata', async () => {
+    const result = await action('drive.download_file').execute({ fileId: 'f1', maxSizeBytes: 0 }, pluginCtx());
+
+    expect(result).toEqual({ success: false, error: 'maxSizeBytes must be at least 1.' });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('download_file rejects binary files', async () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse(200, { id: 'f1', name: 'image.png', mimeType: 'image/png', size: '100' }),
     );
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new Uint8Array([1])); },
+      cancel() { cancelled = true; return Promise.reject(new Error('reset')); },
+    });
+    fetchMock.mockResolvedValueOnce(new Response(body, { status: 200, headers: { 'Content-Type': 'image/png' } }));
 
     const result = await action('drive.download_file').execute({ fileId: 'f1' }, pluginCtx());
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(cancelled).toBe(true);
+    expect(body.locked).toBe(false);
     expect(result).toEqual({
       success: false,
-      error: 'Cannot download binary file (image/png). Only text-based and Google Workspace files are supported.',
+      error: 'Cannot download binary file (image/png). Only text, PDF, DOCX, and Google Workspace files are supported.',
     });
+  });
+
+  it('download_file reads a PDF through the shared extractor', async () => {
+    const bytes = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34]);
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'f1', name: 'NDA.pdf', mimeType: 'application/pdf', size: '2000000' }),
+    );
+    fetchMock.mockResolvedValueOnce(new Response(bytes, { status: 200 }));
+
+    const result = await action('drive.download_file').execute(
+      { fileId: 'f1' },
+      pluginCtx({ extractDocument: async () => ({ markdown: '# Mutual NDA' }) }),
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [mediaUrl] = fetchMock.mock.calls[1] as [string];
+    expect(mediaUrl).toContain('/files/f1?');
+    expect(mediaUrl).toContain('alt=media');
+    expect(result).toEqual({
+      success: true,
+      data: { name: 'NDA.pdf', mimeType: 'application/pdf', content: '# Mutual NDA' },
+    });
+  });
+
+  it('download_file ignores stale PDF metadata size when media is small', async () => {
+    const bytes = new TextEncoder().encode('%PDF-1.4');
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'f1', name: 'NDA.pdf', mimeType: 'application/pdf', size: String(26 * 1024 * 1024) }),
+    );
+    fetchMock.mockResolvedValueOnce(new Response(bytes, { status: 200, headers: { 'Content-Type': 'application/pdf' } }));
+
+    const result = await action('drive.download_file').execute(
+      { fileId: 'f1' },
+      pluginCtx({ extractDocument: async () => ({ markdown: '# Mutual NDA' }) }),
+    );
+
+    expect(result).toMatchObject({ success: true, data: { content: '# Mutual NDA' } });
+  });
+
+  it('download_file uses media PDF MIME when metadata says text', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'f1', name: 'changed', mimeType: 'text/plain' }),
+    );
+    fetchMock.mockResolvedValueOnce(
+      new Response('%PDF-1.4', { status: 200, headers: { 'Content-Type': 'application/pdf' } }),
+    );
+
+    const result = await action('drive.download_file').execute(
+      { fileId: 'f1' },
+      pluginCtx({ extractDocument: async () => ({ markdown: '# PDF' }) }),
+    );
+
+    expect(result).toMatchObject({ success: true, data: { mimeType: 'application/pdf', content: '# PDF' } });
+  });
+
+  it('download_file uses media text MIME when metadata says PDF', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'f1', name: 'changed', mimeType: 'application/pdf' }),
+    );
+    fetchMock.mockResolvedValueOnce(
+      new Response('hello', { status: 200, headers: { 'Content-Type': 'text/plain' } }),
+    );
+
+    const result = await action('drive.download_file').execute({ fileId: 'f1' }, pluginCtx());
+
+    expect(result).toEqual({ success: true, data: { name: 'changed', mimeType: 'text/plain', content: 'hello' } });
+  });
+
+  it('download_file uses media MIME when metadata omits MIME', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { id: 'f1', name: 'NDA.pdf' }));
+    fetchMock.mockResolvedValueOnce(
+      new Response('%PDF-1.4', { status: 200, headers: { 'Content-Type': 'application/pdf' } }),
+    );
+
+    const result = await action('drive.download_file').execute(
+      { fileId: 'f1' },
+      pluginCtx({ extractDocument: async () => ({ markdown: '# PDF' }) }),
+    );
+
+    expect(result).toMatchObject({ success: true, data: { content: '# PDF' } });
+  });
+
+  it('download_file rejects declared PDF media without a PDF signature', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'f1', name: 'login.pdf', mimeType: 'application/pdf' }),
+    );
+    fetchMock.mockResolvedValueOnce(
+      new Response('<html>sign in</html>', { status: 200, headers: { 'Content-Type': 'application/pdf' } }),
+    );
+    let extracted = false;
+
+    const result = await action('drive.download_file').execute(
+      { fileId: 'f1' },
+      pluginCtx({ extractDocument: async () => { extracted = true; return { markdown: 'must not extract' }; } }),
+    );
+
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toContain('Cannot download binary file');
+    expect(extracted).toBe(false);
+  });
+
+  it('download_file sniffs a generic PDF after its bounded download', async () => {
+    const bytes = new TextEncoder().encode('%PDF-1.4');
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'f1', name: 'NDA.pdf', mimeType: 'application/octet-stream', size: '100' }),
+    );
+    fetchMock.mockResolvedValueOnce(new Response(bytes, { status: 200 }));
+
+    const result = await action('drive.download_file').execute(
+      { fileId: 'f1' },
+      pluginCtx({ extractDocument: async () => ({ markdown: '# Mutual NDA' }) }),
+    );
+
+    expect(result).toEqual({
+      success: true,
+      data: { name: 'NDA.pdf', mimeType: 'application/octet-stream', content: '# Mutual NDA' },
+    });
+  });
+
+  it('download_file rejects a generic non-PDF without extracting it', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'f1', name: 'archive.bin', mimeType: 'application/octet-stream', size: '100' }),
+    );
+    fetchMock.mockResolvedValueOnce(new Response(new Uint8Array([0x50, 0x4b]), { status: 200 }));
+    let extracted = false;
+
+    const result = await action('drive.download_file').execute(
+      { fileId: 'f1' },
+      pluginCtx({
+        extractDocument: async () => {
+          extracted = true;
+          return { markdown: 'must not extract' };
+        },
+      }),
+    );
+
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toContain('Cannot download binary file');
+    expect(extracted).toBe(false);
+  });
+
+  it('download_file keeps PDFs within the document cap when a caller raises maxSizeBytes', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'f1', name: 'NDA.pdf', mimeType: 'application/pdf' }),
+    );
+    fetchMock.mockResolvedValueOnce(
+      new Response('%PDF-', { status: 200, headers: { 'Content-Type': 'application/pdf', 'Content-Length': String(26 * 1024 * 1024) } }),
+    );
+
+    const result = await action('drive.download_file').execute(
+      { fileId: 'f1', maxSizeBytes: 2_000_000_000 },
+      pluginCtx(),
+    );
+
+    expect(result).toEqual({
+      success: false,
+      error: 'File is 27262976 bytes, exceeds max 26214400 bytes. Increase maxSizeBytes.',
+    });
+  });
+
+  it('download_file reports an oversized generic PDF candidate', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'f1', name: 'NDA.pdf', mimeType: 'application/octet-stream', size: String(26 * 1024 * 1024) }),
+    );
+    fetchMock.mockResolvedValueOnce(new Response('%PDF-', { status: 200, headers: { 'Content-Length': String(26 * 1024 * 1024) } }));
+
+    const result = await action('drive.download_file').execute({ fileId: 'f1' }, pluginCtx());
+
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toContain('exceeds max');
+  });
+
+  it('download_file rejects an oversized generic non-PDF as binary', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'f1', name: 'archive.bin', mimeType: 'application/octet-stream', size: String(26 * 1024 * 1024) }),
+    );
+    fetchMock.mockResolvedValueOnce(new Response('PK\x03\x04', { status: 200, headers: { 'Content-Type': 'application/octet-stream' } }));
+
+    const result = await action('drive.download_file').execute({ fileId: 'f1' }, pluginCtx());
+
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toContain('Cannot download binary file');
+  });
+
+  it('download_file bounds media when metadata is stale', async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(20 * 1024 * 1024));
+        controller.enqueue(new Uint8Array(6 * 1024 * 1024));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'f1', name: 'NDA.pdf', mimeType: 'application/pdf', size: '100' }),
+    );
+    fetchMock.mockResolvedValueOnce(new Response(body, { status: 200, headers: { 'Content-Type': 'application/pdf' } }));
+
+    const result = await action('drive.download_file').execute({ fileId: 'f1' }, pluginCtx());
+
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toContain('exceeds max');
+    expect(cancelled).toBe(true);
+  });
+
+  it('download_file says when a PDF has no text layer', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'f1', name: 'scan.pdf', mimeType: 'application/pdf', size: '100' }),
+    );
+    fetchMock.mockResolvedValueOnce(new Response(new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]), { status: 200 }));
+
+    const result = await action('drive.download_file').execute(
+      { fileId: 'f1' },
+      pluginCtx({ extractDocument: async () => null }),
+    );
+
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toContain('no text layer');
+  });
+
+  it('download_file names a missing extractor instead of rejecting the PDF as binary', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'f1', name: 'NDA.pdf', mimeType: 'application/pdf', size: '100' }),
+    );
+    fetchMock.mockResolvedValueOnce(new Response(new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]), { status: 200 }));
+
+    const result = await action('drive.download_file').execute({ fileId: 'f1' }, pluginCtx());
+
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toContain('PDF text extraction is not available');
   });
 
   it('create_from_template copies the template and applies replacements', async () => {
@@ -449,5 +872,162 @@ describe('drive actions', () => {
       success: true,
       data: { id: 'new1', name: 'Contract', url: 'url1' },
     });
+  });
+});
+
+
+describe('DOCX downloads', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  beforeEach(() => { fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock); });
+  afterEach(() => { vi.unstubAllGlobals(); });
+  it.each([
+    ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'contract.docx'],
+    ['application/octet-stream', 'contract.DOCX'],
+    ['application/zip', 'contract.docx'],
+  ])('extracts %s Word downloads', async (mime, name) => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ id: 'f1', name, mimeType: mime }), { status: 200 }));
+    fetchMock.mockResolvedValueOnce(new Response(new Uint8Array([80, 75, 3, 4, 0]), { status: 200, headers: { 'Content-Type': mime } }));
+    const extractDocument = vi.fn(async () => ({ markdown: 'Contract text' }));
+    const result = await action('drive.download_file').execute({ fileId: 'f1' }, pluginCtx({ extractDocument }));
+    expect(result).toMatchObject({ success: true, data: { content: 'Contract text' } });
+    expect(extractDocument).toHaveBeenCalledWith(expect.objectContaining({ mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }));
+  });
+  it('rejects a binary Google Drawing export before downloading bytes', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ id: 'f1', name: 'drawing', mimeType: 'application/vnd.google-apps.drawing' }), { status: 200 }));
+    const result = await action('drive.download_file').execute({ fileId: 'f1' }, pluginCtx());
+    expect(result.success).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('drive.export_file', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  beforeEach(() => { fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock); });
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  const pdfBytes = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x37]);
+
+  function fileStore() {
+    const saved: Array<{ name: string; mimeType: string; data: Uint8Array }> = [];
+    const store: ThreadFileStore = {
+      save: async (file) => {
+        saved.push(file);
+        const id = '6f1c2d3e-4a5b-4c6d-8e7f-001122334455';
+        const webUrl = `/api/sessions/s1/threads/t1/files/${id}`;
+        const result: ThreadFile = { id, name: file.name, mimeType: file.mimeType, bytes: file.data.byteLength, url: webUrl, webUrl };
+        return result;
+      },
+      read: async () => null,
+    };
+    return { store, saved };
+  }
+
+  function metadata(body: Record<string, unknown>): Response {
+    return jsonResponse(200, { id: 'doc1', webViewLink: 'https://docs.google.com/document/d/doc1', ...body });
+  }
+
+  it('exports a Google Doc to PDF with files.export and saves it as a thread file', async () => {
+    const { store, saved } = fileStore();
+    fetchMock.mockResolvedValueOnce(metadata({ name: 'Master Services Agreement', mimeType: 'application/vnd.google-apps.document' }));
+    fetchMock.mockResolvedValueOnce(new Response(pdfBytes, { status: 200, headers: { 'Content-Type': 'application/pdf' } }));
+
+    const result = await action('drive.export_file').execute({ fileId: 'doc1' }, pluginCtx({ threadFiles: store }));
+
+    expect(result).toMatchObject({
+      success: true,
+      data: {
+        threadFileId: '6f1c2d3e-4a5b-4c6d-8e7f-001122334455',
+        name: 'Master Services Agreement.pdf',
+        mimeType: 'application/pdf',
+        bytes: pdfBytes.byteLength,
+        exportedAs: 'pdf',
+        webUrl: '/api/sessions/s1/threads/t1/files/6f1c2d3e-4a5b-4c6d-8e7f-001122334455',
+      },
+    });
+    const exportUrl = new URL(String(fetchMock.mock.calls[1][0]));
+    expect(exportUrl.pathname).toBe('/drive/v3/files/doc1/export');
+    expect(exportUrl.searchParams.get('mimeType')).toBe('application/pdf');
+    // Shared-drive files fail without this flag on files.export.
+    expect(exportUrl.searchParams.get('supportsAllDrives')).toBe('true');
+    expect(fetchMock.mock.calls[1][1].headers.Authorization).toBe('Bearer test-token');
+    expect(saved).toHaveLength(1);
+    expect(saved[0].data).toEqual(pdfBytes);
+  });
+
+  it.each([
+    ['application/vnd.google-apps.document', 'docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+    ['application/vnd.google-apps.spreadsheet', 'xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
+    ['application/vnd.google-apps.spreadsheet', 'csv', 'text/csv'],
+    ['application/vnd.google-apps.presentation', 'pptx', 'application/vnd.openxmlformats-officedocument.presentationml.presentation'],
+  ] as const)('exports %s as %s', async (sourceMime, format, exportMime) => {
+    const { store, saved } = fileStore();
+    fetchMock.mockResolvedValueOnce(metadata({ name: 'Plan', mimeType: sourceMime }));
+    fetchMock.mockResolvedValueOnce(new Response(new Uint8Array([1, 2, 3]), { status: 200 }));
+    const result = await action('drive.export_file').execute({ fileId: 'doc1', format }, pluginCtx({ threadFiles: store }));
+    expect(result.success).toBe(true);
+    expect(new URL(String(fetchMock.mock.calls[1][0])).searchParams.get('mimeType')).toBe(exportMime);
+    expect(saved[0]).toMatchObject({ name: `Plan.${format}`, mimeType: exportMime });
+  });
+
+  it('rejects a format the source type cannot export to before downloading', async () => {
+    const { store } = fileStore();
+    fetchMock.mockResolvedValueOnce(metadata({ name: 'Plan', mimeType: 'application/vnd.google-apps.presentation' }));
+    const result = await action('drive.export_file').execute({ fileId: 'doc1', format: 'xlsx' }, pluginCtx({ threadFiles: store }));
+    expect(result).toEqual({ success: false, error: 'Cannot export Plan as xlsx. Use one of: pdf, pptx.' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('saves a non-Google file unchanged with alt=media', async () => {
+    const { store, saved } = fileStore();
+    fetchMock.mockResolvedValueOnce(metadata({ name: 'Signed SOW.pdf', mimeType: 'application/pdf', size: String(pdfBytes.byteLength) }));
+    fetchMock.mockResolvedValueOnce(new Response(pdfBytes, { status: 200, headers: { 'Content-Type': 'application/pdf' } }));
+    const result = await action('drive.export_file').execute({ fileId: 'doc1' }, pluginCtx({ threadFiles: store }));
+    expect(result).toMatchObject({ success: true, data: { name: 'Signed SOW.pdf', exportedAs: null } });
+    expect(new URL(String(fetchMock.mock.calls[1][0])).searchParams.get('alt')).toBe('media');
+    expect(saved[0]).toMatchObject({ name: 'Signed SOW.pdf', mimeType: 'application/pdf' });
+  });
+
+  it('refuses to convert a non-Google file', async () => {
+    const { store } = fileStore();
+    fetchMock.mockResolvedValueOnce(metadata({ name: 'photo.png', mimeType: 'image/png' }));
+    const result = await action('drive.export_file').execute({ fileId: 'doc1', format: 'pdf' }, pluginCtx({ threadFiles: store }));
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Omit format to save it unchanged');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses a file over the thread file limit before downloading it', async () => {
+    const { store, saved } = fileStore();
+    fetchMock.mockResolvedValueOnce(metadata({ name: 'video.mp4', mimeType: 'video/mp4', size: String(60 * 1024 * 1024) }));
+    const result = await action('drive.export_file').execute({ fileId: 'doc1' }, pluginCtx({ threadFiles: store }));
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Share the Drive link instead');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(saved).toEqual([]);
+  });
+
+  it("names the fix when Drive's 10 MB export limit refuses the file", async () => {
+    const { store } = fileStore();
+    fetchMock.mockResolvedValueOnce(metadata({ name: 'Handbook', mimeType: 'application/vnd.google-apps.document' }));
+    fetchMock.mockResolvedValueOnce(jsonResponse(403, { error: { code: 403, message: 'This file is too large to be exported.' } }));
+    const result = await action('drive.export_file').execute({ fileId: 'doc1' }, pluginCtx({ threadFiles: store }));
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('over its 10 MB limit. Share the Drive link instead');
+  });
+
+  it('names the limit when the host has no thread file store', async () => {
+    const result = await action('drive.export_file').execute({ fileId: 'doc1' }, pluginCtx());
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('cannot save files to the thread');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('builds safe file names', () => {
+    expect(exportFileName('Q3 / Q4 plan', 'pdf')).toBe('Q3 - Q4 plan.pdf');
+    expect(exportFileName('Agreement.PDF', 'pdf')).toBe('Agreement.pdf');
+    expect(exportFileName('Signed.pdf', null)).toBe('Signed.pdf');
+    expect(exportFileName('Résumé — 履歴書', 'docx')).toBe('Résumé — 履歴書.docx');
+    expect(exportFileName('\x00\n', 'pdf')).toBe('export.pdf');
+    expect(Array.from(exportFileName('é'.repeat(300), 'pdf'))).toHaveLength(255);
   });
 });

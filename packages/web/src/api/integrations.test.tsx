@@ -40,7 +40,7 @@ describe("credential scope and mutation completion", () => {
 
   it("invalidates the deleted team's key after unmount, without invalidating another workspace", async () => {
     const { wrapper, client } = harness();
-    for (const key of [qkIntegrations.credentials(), qkIntegrations.credentials("team", "a"), qkIntegrations.credentials("team", "b"), qkIntegrations.plugins()]) {
+    for (const key of [qkIntegrations.credentials(), qkIntegrations.credentials("team", "a"), qkIntegrations.credentials("team", "b"), qkIntegrations.plugins("a")]) {
       client.setQueryData(key, { credentials: [] });
     }
     let finish: (value: { ok: true }) => void = () => {};
@@ -53,7 +53,7 @@ describe("credential scope and mutation completion", () => {
     await waitFor(() => expect(client.getQueryState(qkIntegrations.credentials("team", "a"))?.isInvalidated).toBe(true));
     expect(client.getQueryState(qkIntegrations.credentials("team", "b"))?.isInvalidated).toBe(false);
     expect(client.getQueryState(qkIntegrations.credentials())?.isInvalidated).toBe(false);
-    expect(client.getQueryState(qkIntegrations.plugins())?.isInvalidated).toBe(false);
+    expect(client.getQueryState(qkIntegrations.plugins("a"))?.isInvalidated).toBe(true);
   });
 
   it("keeps personal disconnect invalidation broad because team shares follow the source", async () => {

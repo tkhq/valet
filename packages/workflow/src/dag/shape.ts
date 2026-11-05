@@ -9,14 +9,15 @@
  * structurally without interpreting its contents.
  */
 
+import type { Appearance } from '@valet/shared';
+
 import type { WorkflowNode } from './nodes.js';
 
 export interface WorkflowDefinition {
   version: 'dag/v1';
+  presence?: Appearance;
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
-  /** Explicit orchestrator routing. Omitted definitions use the owner's default assistant. */
-  assistantId?: string;
   policy?: WorkflowPolicy;
   ui?: WorkflowEditorState;
 }
@@ -29,6 +30,8 @@ export interface WorkflowEditorState {
     }
   >;
   viewport?: { x: number; y: number; zoom: number };
+  /** Model to use when the editor adds a new llm or session node. */
+  defaultModel?: string;
 }
 
 /**

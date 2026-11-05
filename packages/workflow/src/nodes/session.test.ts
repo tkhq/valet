@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
 import type { SubmissionResult } from '@valet/engine';
-import { ValidationError } from '@valet/engine';
+import { Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider, extractStructuredOutput, ValidationError } from '@valet/engine';
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from '@valet/engine/test-helpers';
+import { Type } from 'typebox';
 
 import type { SessionNode } from '../dag/nodes.js';
 import type { WorkflowDefinition } from '../dag/shape.js';
@@ -10,6 +12,7 @@ import { driveUntilPark } from '../interpreter.js';
 import { InMemoryWorkflowStore } from '../memory-store.js';
 import type { RunParams } from '../store.js';
 import { executeSession } from './session.js';
+import { DEFAULT_STEP_MODEL_CALLS } from '../dag/step-budget.js';
 
 // ─── Test helpers ────────────────────────────────────────────────────────────
 
@@ -85,7 +88,7 @@ function makeEngine(
       return { id: opts.id };
     },
     prompt: async (sessionId, text, opts) => {
-      calls.push({ kind: 'prompt', sessionId, text, dispatchId: opts.dispatchId, model: opts.model, queueMode: opts.queueMode });
+      calls.push({ kind: 'prompt', sessionId, text, dispatchId: opts.dispatchId, model: opts.model, queueMode: opts.queueMode, taskSourceQueueItemId: opts.taskSourceQueueItemId, modelCallLimit: opts.modelCallLimit });
       let receipt = receiptsByDispatch.get(opts.dispatchId);
       if (!receipt) {
         receiptCounter += 1;
@@ -173,6 +176,8 @@ describe('executeSession: deterministic ids', () => {
     expect(createCall?.id).toBe('wf:run-2:s');
     expect(promptCall?.sessionId).toBe('wf:run-2:s');
     expect(promptCall?.dispatchId).toBe('workflow:run-2:s');
+    // No maxModelCalls on the step: the default budget travels with the submission.
+    expect(promptCall?.modelCallLimit).toBe(DEFAULT_STEP_MODEL_CALLS);
   });
 });
 
@@ -286,6 +291,50 @@ describe('executeSession: settled completed with valid output', () => {
   });
 });
 
+// ─── 5b. A schema step keeps its prose response ──────────────────────────────
+
+describe('executeSession: schema step keeps its prose response', () => {
+  const outputSchema = { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] };
+
+  it('asks for the normal response plus a trailing json block, not JSON only', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const { engine, calls } = makeEngine();
+
+    await store.createRun('run-5b', runParams(), sessionDefinition({ outputSchema }), 'v1');
+    const attempt = await claimAttempt(store, 'run-5b');
+    await driveUntilPark('run-5b', attempt, { store, engine, clock: clock.now });
+
+    const primary = String(calls.find((c) => c.kind === 'prompt')?.text);
+    expect(primary).toContain(JSON.stringify(outputSchema));
+    expect(primary).not.toMatch(/ONLY JSON/i);
+    expect(primary).toContain('End it with one fenced ```json block');
+  });
+
+  it('keeps the prose in response and the parsed block in output', async () => {
+    const prose = '| PR | Status |\n| --- | --- |\n| #1 | merged |\n\nOne pull request merged today.';
+    const reply = `${prose}\n\n\`\`\`json\n{"answer":"42"}\n\`\`\``;
+    const extracted = extractStructuredOutput(reply, outputSchema);
+    expect(extracted.output).toEqual({ answer: '42' });
+    expect(extractStructuredOutput('{"answer":"42"}', outputSchema).output).toEqual({ answer: '42' });
+
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const { engine } = makeEngine({
+      isSettledQueue: [true],
+      awaitResultQueue: [{ outcome: 'completed', text: reply, output: extracted.output }],
+    });
+
+    await store.createRun('run-5c', runParams(), sessionDefinition({ outputSchema }), 'v1');
+    await driveUntilPark('run-5c', await claimAttempt(store, 'run-5c'), { store, engine, clock: clock.now });
+    await driveUntilPark('run-5c', await claimAttempt(store, 'run-5c', 'owner-2'), { store, engine, clock: clock.now });
+
+    const result = (await store.getCheckpoints('run-5c')).find((cp) => cp.nodeId === 's')?.result;
+    expect(result).toMatchObject({ output: { answer: '42' } });
+    expect(String((result as { response?: string }).response)).toContain(prose);
+  });
+});
+
 // ─── 6. isSettled false on re-entry: re-parks without calling awaitResult ────
 
 describe('executeSession: isSettled false on re-entry', () => {
@@ -332,13 +381,36 @@ describe('executeSession: schema validation failure triggers exactly one repair'
     const repairCalls = calls.filter((c) => c.kind === 'prompt' && c.dispatchId === 'workflow:run-7:s:repair');
     expect(repairCalls).toHaveLength(1);
     expect(repairCalls[0]?.queueMode).toBe('followup');
+    expect(repairCalls[0]?.taskSourceQueueItemId).toBe('queue-1');
     const repairText = String(repairCalls[0]?.text);
     expect(repairText).toContain(JSON.stringify(outputSchema));
     expect(repairText).toContain('missing value');
+    expect(repairText).toContain('Reuse prior successful tool results');
+    expect(repairText).toContain('Do not repeat actions with side effects');
+    expect(repairText).toContain('Do not invent empty arrays');
+    expect(repairText).toContain('If work remains incomplete but actionable');
+    expect(repairText).toContain('using available read tools');
+    expect(repairText).toContain('before returning the result');
+    expect(repairText).toContain('remaining authorized work');
+    expect(repairText).toContain('Reuse completed work and do not repeat side effects');
+    expect(repairText).toContain('If a genuine blocker prevents completion');
+    expect(repairText).toContain('report it truthfully');
+    expect(repairText).toContain('JSON-only applies to your final reply, not to intervening tool use');
+    const primary = calls.find((call) => call.kind === 'prompt' && call.dispatchId === 'workflow:run-7:s');
+    expect(String(primary?.text)).toContain(JSON.stringify(outputSchema));
+    expect(String(primary?.text)).toContain('End it with one fenced ```json block');
 
     const byNode = new Map((await store.getCheckpoints('run-7')).map((cp) => [cp.nodeId, cp]));
     expect(byNode.get('s')?.status).toBe('intent'); // still parked on the repair submission, not terminal
     expect(byNode.get('s')?.effects?.repairAttempted).toBe(true);
+    expect(byNode.get('s')?.effects?.firstError).toContain('missing value');
+    // The repair replaces the receipt; the first submission stays findable.
+    const effects = byNode.get('s')?.effects;
+    const receipt = effects?.receipt;
+    const repairQueueItemId = receipt && typeof receipt === 'object' && 'queueItemId' in receipt ? receipt.queueItemId : undefined;
+    expect(typeof effects?.firstQueueItemId).toBe('string');
+    expect(typeof repairQueueItemId).toBe('string');
+    expect(effects?.firstQueueItemId).not.toBe(repairQueueItemId);
   });
 });
 
@@ -373,6 +445,10 @@ describe('executeSession: second validation failure fails the node', () => {
     const byNode = new Map((await store.getCheckpoints('run-8')).map((cp) => [cp.nodeId, cp]));
     expect(byNode.get('s')?.status).toBe('failed');
     expect(byNode.get('s')?.error).toMatch(/second validation error/);
+    expect(byNode.get('s')?.effects?.firstError).toBe('first validation error');
+    // The settled checkpoint keeps the first submission after the repair failed too.
+    expect(typeof byNode.get('s')?.effects?.firstQueueItemId).toBe('string');
+    expect(byNode.get('s')?.result).toBeUndefined();
 
     const repairCalls = calls.filter((c) => c.kind === 'prompt' && c.dispatchId === 'workflow:run-8:s:repair');
     expect(repairCalls).toHaveLength(1); // exactly one repair attempt, ever
@@ -511,4 +587,189 @@ describe('executeSession: aliases', () => {
     const promptCall = calls.find((c) => c.kind === 'prompt');
     expect(promptCall?.text).toBe('process widget-7 at index 1');
   });
+});
+
+// Schema validity cannot prove whether an empty inventory reflects successful inspection.
+describe('sessionDefinition: structured inventory results', () => {
+  it.each(['completed', 'failed'] as const)('preserves the %s outcome when repair returns a schema-valid empty array', async (outcome) => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const outputSchema = { type: 'object', properties: { candidates: { type: 'array', items: { type: 'string' } } }, required: ['candidates'] };
+    const { engine, calls } = makeEngine({
+      isSettledQueue: [true],
+      awaitResultQueue: [
+        { outcome: 'completed', text: 'The inspection needs more time.', error: 'no JSON content found in result text' },
+        { outcome, text: '{"candidates":[]}', output: { candidates: [] }, ...(outcome === 'failed' ? { error: 'inspection tool failed' } : {}) },
+      ],
+    });
+    await store.createRun('inventory', runParams(), sessionDefinition({ outputSchema }), 'v1');
+    for (let i = 0; i < 3; i++) {
+      const attempt = await claimAttempt(store, 'inventory', `owner-${i}`);
+      await driveUntilPark('inventory', attempt, { store, engine, clock: clock.now });
+    }
+    const checkpoint = (await store.getCheckpoints('inventory')).find((cp) => cp.nodeId === 's');
+    expect(checkpoint?.status).toBe(outcome);
+    expect(checkpoint?.effects).toMatchObject({ repairAttempted: true, firstError: 'no JSON content found in result text' });
+    if (outcome === 'failed') {
+      expect(checkpoint?.error).toBe('inspection tool failed');
+      expect(checkpoint?.result).toBeUndefined();
+    } else {
+      expect(checkpoint?.result).toMatchObject({ output: { candidates: [] } });
+    }
+    expect(calls.filter((call) => call.kind === 'prompt')).toHaveLength(2);
+  });
+});
+
+// Scripted compliance verifies runtime wiring, not live model task completion.
+describe('executeSession: actionable repair through the real engine', () => {
+  it.each([false, true])('finishes inspection or fails truthfully when blocked=%s', async (blocked) => {
+    const faux = registerFauxProvider({ provider: `workflow-actionable-repair-${blocked}` });
+    const sessionStore = new InMemorySessionStore();
+    const runtime = new Engine({ providers: {
+      store: sessionStore, stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider(),
+    } });
+    const store = new InMemoryWorkflowStore();
+    const reads: string[] = [];
+    let completedActions = 0;
+    const posts: Record<string, unknown>[] = [];
+    const dispatches: WorkflowPromptReceipt[] = [];
+    const { engine } = makeEngine();
+    engine.createSession = async (opts) => runtime.createSession({
+      ...opts, userId: 'u', orgId: 'o', workspace: '/', sandbox: {}, model: faux.getModel(),
+      tools: [
+        {
+          name: 'inspect_repo', description: 'Read repository evidence.',
+          parameters: Type.Object({ repo: Type.String() }),
+          execute: async (args) => {
+            if (!args || typeof args !== 'object' || !('repo' in args) || typeof args.repo !== 'string') {
+              throw new Error('repo is required');
+            }
+            reads.push(args.repo);
+            if (blocked && args.repo === 'beta') {
+              throw new Error('Repository access denied. Request access from the repository owner.');
+            }
+            return { text: `${args.repo}: inspected` };
+          },
+        },
+        {
+          name: 'save_marker', description: 'Record the authorized inspection start once.', parameters: Type.Object({}),
+          execute: async () => { completedActions++; return { text: 'marker saved' }; },
+        },
+      ],
+    });
+    engine.prompt = async (id, text, opts) => {
+      const session = runtime.getSession(id);
+      if (!session) throw new Error('session missing');
+      const receipt = await session.prompt(text, opts);
+      dispatches.push(receipt);
+      return receipt;
+    };
+    engine.isSettled = async (id, queueItemId) => (await sessionStore.getQueueItem(id, queueItemId))?.status === 'settled';
+    engine.awaitResult = async (id, threadId, queueItemId, opts) => {
+      const thread = runtime.getSession(id)?.threadById(threadId);
+      if (!thread) throw new Error('thread missing');
+      return thread.awaitResult(queueItemId, opts);
+    };
+    engine.invokeAction = async (req) => { posts.push(req.params); return { ok: true, result: { posted: true } }; };
+    const output = { repos: ['alpha: inspected', 'beta: inspected'] };
+    const outputSchema = { type: 'object', properties: { repos: { type: 'array', items: { type: 'string' }, minItems: 2 } }, required: ['repos'] };
+    const definition = sessionDefinition({
+      prompt: 'Save the start marker once. Inspect alpha and beta. Return both repository findings.', outputSchema,
+    });
+    definition.nodes.splice(2, 0, {
+      id: 'post', type: 'tool', service: 'test', action: 'post', params: { report: '{{nodes.s.output.output}}' },
+    });
+    definition.edges = [{ from: 't', to: 's' }, { from: 's', to: 'post' }, { from: 'post', to: 'e' }];
+    faux.setResponses([
+      fauxAssistantMessage([
+        fauxToolCall('save_marker', {}, { id: 'marker' }),
+        fauxToolCall('inspect_repo', { repo: 'alpha' }, { id: 'alpha' }),
+      ], { stopReason: 'toolUse' }),
+      fauxAssistantMessage('Alpha evidence recovered. Beta inspection is unfinished.'),
+      (context) => {
+        const last = context.messages.at(-1);
+        const prompt = typeof last?.content === 'string' ? last.content : JSON.stringify(last?.content);
+        expect(prompt).toContain('before returning the result');
+        expect(prompt).toContain('JSON-only applies to your final reply, not to intervening tool use');
+        expect(JSON.stringify(context.messages)).toContain('alpha: inspected');
+        return fauxAssistantMessage([fauxToolCall('inspect_repo', { repo: 'beta' }, { id: 'beta' })], { stopReason: 'toolUse' });
+      },
+      (context) => {
+        expect(JSON.stringify(context.messages)).toContain(blocked ? 'Repository access denied' : 'beta: inspected');
+        return fauxAssistantMessage(blocked
+          ? 'Blocked: beta repository access denied. Request access from the repository owner.'
+          : JSON.stringify(output));
+      },
+    ]);
+    const runId = `actionable-${blocked}`;
+    try {
+      await store.createRun(runId, runParams(), definition, 'v1');
+      for (let i = 0; i < 3; i++) {
+        const result = await driveUntilPark(runId, await claimAttempt(store, runId, `owner-${i}`), {
+          store, engine, clock: Date.now,
+        });
+        if (i < 2) {
+          expect(result.status).toBe('parked');
+          const receipt = dispatches[i];
+          const thread = runtime.getSession(`wf:${runId}:s`)?.threadById(receipt.threadId);
+          if (!thread) throw new Error('thread missing');
+          await thread.awaitResult(receipt.queueItemId, { timeoutMs: 2000 });
+        } else {
+          expect(result).toMatchObject({ status: 'settled', outcome: blocked ? 'failed' : 'completed' });
+        }
+      }
+      const checkpoints = await store.getCheckpoints(runId);
+      const research = checkpoints.find((cp) => cp.nodeId === 's');
+      expect(research?.status).toBe(blocked ? 'failed' : 'completed');
+      expect(research?.effects).toMatchObject({ repairAttempted: true, firstQueueItemId: dispatches[0].queueItemId });
+      expect(dispatches).toHaveLength(2);
+      const items = await Promise.all(dispatches.map((receipt) => sessionStore.getQueueItem(`wf:${runId}:s`, receipt.queueItemId)));
+      expect(items.map((item) => item?.dispatchId)).toEqual([`workflow:${runId}:s`, `workflow:${runId}:s:repair`]);
+      expect(items.every((item) => item?.attemptCount === 1 && item.status === 'settled')).toBe(true);
+      const entries = await sessionStore.getEntries(`wf:${runId}:s`, dispatches[0].threadId);
+      const betaCall = entries.find((entry) => entry.type === 'message' && entry.parts?.some((part) => part.type === 'tool_call' && part.callId === 'beta'));
+      expect(betaCall?.queueItemId).toBe(dispatches[1].queueItemId);
+      expect(new Set(dispatches.map((receipt) => receipt.threadId)).size).toBe(1);
+      expect(new Set(dispatches.map((receipt) => receipt.queueItemId)).size).toBe(2);
+      expect(reads).toEqual(['alpha', 'beta']);
+      expect(completedActions).toBe(1);
+      expect(faux.getPendingResponseCount()).toBe(0);
+      if (blocked) {
+        expect(research?.result).toBeUndefined();
+        expect(research?.error).toContain('JSON');
+        expect(entries.at(-1)).toMatchObject({ content: 'Blocked: beta repository access denied. Request access from the repository owner.' });
+        expect(checkpoints.find((cp) => cp.nodeId === 'post')?.status).not.toBe('completed');
+        expect(posts).toEqual([]);
+      } else {
+        expect(research?.result).toMatchObject({ output });
+        expect(posts).toEqual([{ report: output }]);
+      }
+    } finally {
+      await runtime.deleteSession(`wf:${runId}:s`);
+      faux.unregister();
+    }
+  });
+});
+
+
+it('repairs a resumed loop iteration using its own first receipt rather than another iteration', async () => {
+  const store = new InMemoryWorkflowStore();
+  const clock = makeClock();
+  const { engine, calls } = makeEngine({ isSettledQueue: [true], awaitResultQueue: [{ outcome: 'completed', text: 'not JSON', error: 'missing report' }] });
+  const definition = sessionDefinition({ outputSchema: { type: 'object', properties: { report: { type: 'string' } }, required: ['report'] } });
+  await store.createRun('iteration-contract', runParams(), definition, 'v1');
+  const attempt = await claimAttempt(store, 'iteration-contract');
+  const run = await store.getRun('iteration-contract');
+  const node = definition.nodes.find((candidate): candidate is SessionNode => candidate.id === 's');
+  if (!run || !node) throw new Error('Missing workflow fixture');
+  const args = { run, node, attempt, store, clock: clock.now, engine, templateContext: { trigger: undefined, nodes: {} } };
+  await executeSession({ ...args, iteration: 0 });
+  await executeSession({ ...args, iteration: 2 });
+  const checkpoint = (await store.getCheckpoints(run.runId)).find(cp => cp.nodeId === node.id && cp.iteration === 2);
+  if (!checkpoint) throw new Error('Missing iteration receipt');
+  expect(checkpoint.effects?.receipt).toMatchObject({ queueItemId: 'queue-2' });
+  await executeSession({ ...args, iteration: 2, existingCheckpoint: checkpoint });
+  const repair = calls.find(call => call.kind === 'prompt' && call.dispatchId === 'workflow:iteration-contract:s:2:repair');
+  expect(repair?.taskSourceQueueItemId).toBe('queue-2');
+  expect(calls.filter(call => call.dispatchId === 'workflow:iteration-contract:s:2:repair')).toHaveLength(1);
 });

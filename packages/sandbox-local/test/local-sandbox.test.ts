@@ -63,6 +63,16 @@ describe("LocalSandbox: filesystem", () => {
 });
 
 describe("LocalSandbox: exec", () => {
+  it("a timeout kills the shell's children too, so exec returns", async () => {
+    const sb = new LocalSandbox("test", tmp);
+    const started = Date.now();
+    // sh forks `sleep` (not the last command), which inherits stdout. Killing
+    // only the shell would leave the pipe open until sleep exits.
+    const result = await sb.exec("sleep 30; echo done", { timeout: 300 });
+    expect(result.timedOut).toBe(true);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
   it("runs a simple command and captures stdout", async () => {
     const sb = new LocalSandbox("test", tmp);
     const res = await sb.exec("echo hi");
@@ -195,6 +205,7 @@ describe("LocalSandboxProvider", () => {
       warmPool: false,
       hibernation: false,
       customImage: false,
+      nestedKubernetes: false,
       coldStartEstimateMs: 0,
     });
   });

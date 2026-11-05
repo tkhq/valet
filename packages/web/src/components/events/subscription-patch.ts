@@ -1,16 +1,23 @@
+import type { AssistantThreadPolicy, Appearance } from "@valet/shared";
+import { sameSettings } from "~/components/plugins/handler-settings";
+import { displayThreadPolicy, sameThreadPolicy } from "~/components/presence/thread-policy-copy";
 /**
- * The pure diff behind the edit-subscription dialog: compare the form state
- * against the stored row and build the PATCH body of only the changed
- * fields. Kept apart from the dialog so the rules are testable without a
- * render — the same split the trigger dialog's edit branch encodes inline.
+ * The pure diff behind the editor's Save: compare the draft against the
+ * stored line and build the PATCH body of only the changed fields. Kept
+ * apart from the editor so the rules are testable without a render.
  */
 import type {
+  EventDeliveryPolicy,
   EventSubscriptionFilterWire,
   EventSubscriptionWire,
   PatchEventSubscriptionRequest,
 } from "@valet/api/wire";
 import { selectsSlackMention, storedAnyChannel } from "~/lib/slack-mention";
 import { sameWireFilters } from "./filter-editor";
+import type { PromptFieldsValue } from "./prompt-fields";
+
+/** A personal line's choice when a team line also matches the event. */
+export type DeliveryPreferencesValue = { deliveryPolicy: EventDeliveryPolicy; pauseOnOverlap: boolean };
 
 function sameKeySet(a: string[], b: string[]): boolean {
   if (a.length !== b.length) return false;
@@ -29,6 +36,14 @@ function sameKeySet(a: string[], b: string[]): boolean {
  *    the server re-runs the mention gate against the new flag.
  *  - When the patch changes the match of a mention rule and "Any channel"
  *    is set, the `anyChannel` opt-out rides along.
+ *
+ * A prompt template is read only for an assistant target, the one kind that
+ * renders one. An emptied field sends `null`, which clears it on the row and
+ * returns the rule to the default event message.
+ *
+ * A thread policy is read only for an assistant target. It is compared with
+ * the policy the row runs with today (`displayThreadPolicy`), so an
+ * unchanged default is not written as an explicit policy.
  */
 export function buildSubscriptionPatch(
   sub: EventSubscriptionWire,
@@ -37,6 +52,14 @@ export function buildSubscriptionPatch(
     eventKeys: string[];
     filters: EventSubscriptionFilterWire[];
     anyChannel: boolean;
+    appearance?: Appearance;
+    prompts?: PromptFieldsValue;
+    deliveryPreferences?: DeliveryPreferencesValue;
+    thread?: AssistantThreadPolicy;
+    /** "Only once every N hours". Null for no limit. */
+    oncePerHours?: number | null;
+    /** A plugin handler's settings. Empty clears them. Read only for a plugin target. */
+    config?: Record<string, unknown>;
   },
 ): PatchEventSubscriptionRequest | null {
   const body: PatchEventSubscriptionRequest = {};
@@ -56,6 +79,42 @@ export function buildSubscriptionPatch(
   }
   if ((body.filters !== undefined || body.eventKeys !== undefined) && mention && form.anyChannel) {
     body.anyChannel = true;
+  }
+
+  if (form.prompts && sub.target.kind === "assistant") {
+    const target = sub.target;
+    for (const field of ["systemPrompt", "userPromptTemplate"] as const) {
+      const next = form.prompts[field].trim();
+      const stored = target[field] ?? "";
+      if (next === stored) continue;
+      body[field] = next.length > 0 ? next : null;
+    }
+  }
+
+  if (form.thread !== undefined && sub.target.kind === "assistant" &&
+    !sameThreadPolicy(form.thread, displayThreadPolicy(sub.target, sub.eventKeys))) {
+    body.thread = form.thread;
+  }
+
+  if (form.deliveryPreferences && sub.ownerType === "user" && sub.target.kind === "assistant") {
+    const next = form.deliveryPreferences;
+    if (next.deliveryPolicy !== (sub.target.deliveryPolicy ?? "always")) body.deliveryPolicy = next.deliveryPolicy;
+    if (next.deliveryPolicy !== "always" && next.pauseOnOverlap !== (sub.target.pauseOnOverlap ?? false)) body.pauseOnOverlap = next.pauseOnOverlap;
+  }
+
+  if (form.appearance !== undefined) {
+    const stored = sub.target.appearance ?? {};
+    if (form.appearance.displayName !== stored.displayName || form.appearance.avatarUrl !== stored.avatarUrl) {
+      body.appearance = Object.keys(form.appearance).length > 0 ? form.appearance : null;
+    }
+  }
+
+  if (form.oncePerHours !== undefined && form.oncePerHours !== (sub.target.oncePerHours ?? null)) {
+    body.oncePerHours = form.oncePerHours;
+  }
+
+  if (form.config !== undefined && sub.target.kind === "plugin" && !sameSettings(form.config, sub.target.config ?? {})) {
+    body.config = Object.keys(form.config).length > 0 ? form.config : null;
   }
 
   return Object.keys(body).length === 0 ? null : body;

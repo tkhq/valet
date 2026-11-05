@@ -77,6 +77,8 @@ Recorded across the implementation plan's six tasks (`docs/plans/2026-07-17-acti
 
 - **Deny dominates grants** (decision 2 vs decision 3 conflict): resolution order is (0) org/user-principal `deny` at the most-specific matching scope → absolute short-circuit; (1) live runtime grant; (2) per-user override; (3) org policy allow/require_approval; (4) plugin default; (5) risk default. Legacy's `userGrantBehavior: "blocked"` knob was not ported (YAGNI — the spec's text never asked for it).
 - **Grants are exact-scope only** (this sessionId / this workflowExecutionId) — legacy's parent-lineage walk was not ported; child sessions re-gate. Conservative default, revisit on demand.
+- **Policy resolves on effective parameters (2026-10-09).** `invokeAction` and the workflow and external-caller invoker (`enforceWorkflowPolicy`) apply the action schema's defaults (`prepareActionArgs`) before they build the policy input, the resume key, and the audit record, so every route decides the same way. The policy previews (`describe_tool`, the workflow node permission summary, and the org admin preview) apply the same defaults when params are given, so a preview never answers more permissively than execution. A matcher on a default value therefore applies when the caller omits the field, and `action_invocations.params` records what ran. Invalid params keep their raw shape and fail validation in `executeAction` as before.
+- **Partial parameters for hosted provider tools (2026-10-09).** A hosted tool that stands in for a plugin action, such as native OpenAI image generation, is offered before the model writes its parameters. The engine resolves with `partialParams: true` and only the parameters it knows. A matcher is unresolved when its path is absent or resolves to an object, because the root object and nested objects can still gain fields when the action runs. An unresolved matcher counts as matching for a deny or approval row and never for an allow row, so a prompt-scoped or whole-object deny withholds the hosted tool and an allow cannot widen access. Scalar paths that are present evaluate exactly. Full invocations are unchanged.
 - **Param matchers ported verbatim from legacy** (11-op typed matcher: `eq/neq/regex/in/not_in/gt/gte/lt/lte/exists/not_exists`, dot+bracket paths, AND semantics, fail-closed stored-JSON parsing) — not the spec text's narrower equals/prefix/contains sketch. Porting the proven engine was strictly better than re-deriving a smaller one.
 - **`policyKey` is the legacy composed string shape** (`{service}.{actionId}` via `grantPolicyKey`, T2/T3's adjudication that this is equivalent to the legacy's fuller composed key for this schema's purposes), not a hash.
 
@@ -90,13 +92,14 @@ Recorded across the implementation plan's six tasks (`docs/plans/2026-07-17-acti
 
 1. **`always_allow` admin enforcement is deliberately double-checked**: the resolve route 403s a non-admin up front (T4, clean UX — the button shouldn't even "work" only to fail late), and `onResolution` independently verifies admin-ness and throws `AlwaysAllowNotAdminError` if not (defense in depth — fails the approval closed even if the route check is ever bypassed or stale).
 2. **`policyKey = {service}.{actionId}` plus separate `sessionId`/`workflowExecutionId` scope columns is equivalent to the legacy composed key** for every purpose this schema needs (exact-match lookup, partial-unique-index dedup) — no information the legacy key encoded is lost.
+2a. **Owner-scoped always allow (2026-10-13).** The org option is admin-only, so a member had no lasting choice on a prompt: "Approve for this session" ends with the session, and each workflow run or event starts a new one. The gate now also offers `always_allow_owner` when the owner's own setting could allow the action (`validateOverrideBounds`, the rule Integrations applies) and the write would take effect for this call: `ownerAllowTakesEffect` applies the write to the loaded rows and resolves again, so a conditional team rule that still asks hides the option. In a personal session it reads "Always allow for me" and writes the owner's `action_policy_overrides` row through `upsertOverride`. In a team session it reads "Always allow for this team" and writes the team's simple policy through `upsertSimpleTeamPolicy`. Since 2026-10-22 any team member may choose it, so one approval stops the asking for the whole team. A team admin still decides a critical action and an action that any live team rule names by action, service, or risk level (`teamRuleNamesAction`), so a member cannot write over or beside a rule a team admin set. The check reads the team's current rules, again under the team lock at write time, so a rule added after the card opened still wins. A member refused the team allow keeps "Approve for this session". An org rule still wins over the team row. The one-shot approve reads "Approve once". When anyone who may answer can use the owner option, the gate leaves out "Approve for this session": the session-long choice remains where an org rule hides the owner option, the action is critical, or a team rule names it. The resolve route and the channel callback refuse it up front through `ownerAlwaysAllowRefusal`, and `onResolution` checks again. A workflow step session with no app row takes its owner from the run.
 3. **The `always_allow` deterministic-PK upsert firing twice (e.g. two gates racing) is benign and idempotent** — `onConflictDoUpdate` sets the same target values either time.
 4. **Replay-after-revoke grant resurrection is intended and pinned** (`service.test.ts`): a workflow-execution or session-run's crash-restart replay of an already-resolved "approve for session/run" resolution re-inserts a live grant even if an admin revoked the original in between — the replay is re-asserting the SAME human decision that was already made, not a new one, so resurrection is the correct direction (revoking a specific grant is a targeted action; it doesn't retroactively invalidate the approval event that created it).
 5. **Run-scoped grants land exec-scoped** via `providers/node.ts`'s `onApprovalGrant` (mirrored by `_setup.ts`'s test-harness twin, added at T6 — see below).
 
 ### T4 — routes (two fix rounds, both closed)
 
-- **Critical (round 1, fixed):** an `actionId`-scope `allow` override could bypass an org policy that only gated at `service` or `riskLevel` scope, because the write-time bounds check only compared same-dimension rows. Fixed with a full-resolution bounds check (resolves the override's actual effective mode via the real precedence core, using a catalog lookup) plus a conservative disjointness rule for cross-dimension service/riskLevel overrides (the only provable-safe disjointness is "different service" for an actionId-scope policy). Unknown or dynamically-resolved-only actions fail CLOSED (the override write is rejected) rather than being allowed through on a catalog miss.
+- **Critical (round 1, fixed):** an `actionId`-scope `allow` override could bypass an org policy that only gated at `service` or `riskLevel` scope, because the write-time bounds check only compared same-dimension rows. Fixed with a full-resolution bounds check (resolves the override's actual effective mode via the real precedence core, using a catalog lookup) plus a conservative disjointness rule for cross-dimension service/riskLevel overrides (the only provable-safe disjointness is "different service" for an actionId-scope policy). Unknown actions fail CLOSED (the override write is rejected) rather than being allowed through on a catalog miss. Since 2026-10-26 a dynamically-resolved action is in the catalog once its service's listing for the owner names it ("Dynamic tools in the policy catalog", below). Before that date the check refused it the same way.
 - **Important (round 2, fixed):** the bounds check above resolved `appliesIn: "session"` only, so a workflow-only org `require_approval` policy was bypassable via a session-scope-looking `actionId` allow override. Fixed to resolve both `appliesIn` contexts before accepting the write.
 - **Disclosed, accepted (not a defect):** the bounds check has a TOCTOU window — an org policy edited between an override's write-time bounds check and its later use at resolution time isn't re-validated. The accepted direction is safe: resolution order puts org policy above overrides at every non-grant rung, so a newly-tightened org policy still wins at read time regardless of what an override's bounds check saw at write time.
 
@@ -223,3 +226,77 @@ Policy edits apply on the next action; no session restart is required.
 
 If a team policy read fails, chat and workflow actions remain blocked until
 a successful check. A prior approval cannot bypass an unread team deny.
+
+### Workflow action execution time (2026-09-25)
+
+The workflow action invoker writes `started_at` when it records an action outcome. An approval gate can create an audit row days before execution. Usage queries use `started_at` to place the action in a time window and fall back to `created_at` for old rows. A denied or pending action has no execution duration and does not count as an executed tool action.
+
+### One-shot tool approval gates (2026-10-09)
+
+The engine stamps `oneShot: true` on the context of every tool approval gate that `approvalGateRequest` opens, on both the resolver path and the risk-derived path. Its "approve" allows that one call and writes no grant, because approvals are not sticky: a later call opens a new gate. A shared-account gate drops the flag, because allowing a borrow also covers later calls in the thread or run. `toolApprovalGateContext` exposes it as a boolean.
+
+`engineGateToWire` sets the wire `DecisionGate.oneShot: true` only for an approval gate with that flag and no approver. Other approval gates use the same `approve` and `deny` ids but do not carry the flag. Two examples are `ask_approval` and `sec_start`, whose approval covers every later cell dispatch. The bell's bulk answer covers only gates with `oneShot` (`docs/specs/2026-08-14-workflow-approval-ux-design.md`, "Bulk answers in the bell"). The wire also carries `riskLevel` from the same tool approval context, when it is one of `low`, `medium`, `high`, or `critical`. Pinned by `policy-resolver-seam.test.ts` and `bridge.test.ts`.
+
+### Actor consent (2026-10-15)
+
+An action with `approvalScope: "actor"` requires the current verified
+interactive author's one-shot consent on every call. Organization and team
+denies still block the call. Policy allows, overrides, and stored grants
+cannot replace that consent, including grants created before this rule.
+Without a verified author, the catalog refuses the call before opening a
+gate. This rule applies with and without a host policy resolver.
+
+Actor gates offer only approve and deny. The catalog rejects lasting-grant
+answers before the resolver can write grants or policies. Valid one-shot
+answers retain the normal resolution callback and audit path. Ordinary
+actions, including settings reads, retain their existing grant behavior.
+Hosted tools cannot obtain ungated access to an actor-scoped action.
+
+### Effective tool permissions read (2026-10-13)
+
+`GET /api/me/tool-permissions[?service=][&teamId=]` lists each static catalog action with the caller's effective mode. The Integrations detail panel shows this value per tool, in place of the risk-derived "Approval required" label, which ignored policy rows. `listToolPermissions` (`policies/admin.ts`) loads the rows once with `loadPolicyRows` and runs `resolvePolicyDecision` for each action. It uses `appliesIn: "session"`, no params, and no session, so a matcher-scoped rule and a live grant do not show. The `source` field maps provenance to `default`, `plugin`, `org`, `team`, `personal`, or `grant`. `overridden` is true only for an override on that exact action, which is the row a Reset deletes.
+
+`settable` applies the write rules. `orgBlocksAllow`, the pure core of the actionId bounds check, removes `allow`. An effective org or team deny leaves only `deny`, because rung 0 outranks every override. `lockedBy` names the rule that removed a mode. With `teamId`, the rows are the team's and `settable` is empty, because team runs load no personal override. The web writes through `PUT` and `DELETE /api/me/policy-overrides`. No table changed. Pinned by `me-policies.test.ts`, which also resolves an Off override through `buildPolicyResolver` to `deny`.
+
+### Run without asking (2026-10-26)
+
+A person can let one thread run without approval cards: the thread menu item "Run without asking". It is stored on `session_threads` as `approval_bypass_by` (the person who turned it on) and `approval_bypass_at`. `PATCH /api/threads/:id` with `approvalBypass` turns it on or off, and thread summaries carry `approvalBypass: true` while it is on. The header shows a "Runs without asking" badge.
+
+What it approves is the same set that the owner option above could stop for good. In `buildPolicyResolver.resolve`, after `anyoneMayAllow` is computed, a covered call resolves `allow` with provenance `thread_bypass` and opens no gate. So these still ask:
+
+- a critical action;
+- an action that an org rule bounds, or that a live team rule names (`teamRuleNamesAction`);
+- an action that would use another member's shared account (that path returns before this check);
+- an action with `approvalScope: "actor"`, which `call_tool` turns back into a one-shot gate;
+- any call from a sender with no Valet account.
+
+Coverage (`threadBypassCovers`):
+
+- On a personal thread, the setting covers only the turns of the person who turned it on, and only when that person owns the session. A member who replies in a shared thread does not borrow it.
+- On a team thread, it covers team members and the team's own unattended turns (`team:{id}`).
+- A child agent inherits it. `threadApprovalBypass` follows `child_watches` from the child session to the thread that started it, up to eight hops. Turning it off on the parent stops it for the children at once.
+
+Who may turn it on: the owner of a personal thread, or a team admin (`canAdministerTeam`) for a team thread, from a signed-in browser (`authVia` session or the local stub). A plain API key gets 403 from the route. Agent credentials (MCP, `valet login`) never reach it, because `refuseAgentAuthority` refuses every thread PATCH. Anyone who may change the thread may turn it off. The web asks for a confirm before turning it on.
+
+A covered call returns `approval: "automatic"` on its `ToolResult`. The tool bridge keeps it in the persisted part's `details`, and the work line shows "Approved automatically" on the step and a count on the group. Audit records carry the `thread_bypass` provenance. It writes no policy, override, or grant. `listToolPermissions` maps the source to `default`, since it is a thread setting and not a standing permission.
+
+### Dynamic tools in the policy catalog (2026-10-26)
+
+A dynamic service (an MCP server, bundled or config-declared) declares no static actions. A session discovers its tools through `resolveActions`. Every policy surface read the static manifest only, so no surface could see a dynamic tool:
+
+- The Policies combobox offered none of its tools. Typing `gra` for Grafana matched `paragraph` and `telegram` and nothing else.
+- The override bounds check refused an `allow` override on one as "not in the plugin catalog", also when the id was typed in full.
+- The approval gate hid the owner's "always allow" option on it, because `ownerMayAllow` runs the same bounds check.
+- `GET /api/me/tool-permissions` listed none of its tools.
+
+The catalog now has two sources. `PolicyCatalog` (`policies/admin.ts`) carries the static index plus `dynamicActions`, a `DynamicActionSource` (`plugins/action-id.ts`): the tools a service listed for the policy's owner. `ServiceProbes.listedActionsFor(owner)` provides it from the cached tool listing the Integrations page already runs (integration OAuth design, "MCP health probe"), so every surface reads the same tools a session of that owner would call. `findCatalogAction` asks the static index first, then the dynamic source of each `resolveActions` service whose name prefixes the id. The owner is the caller for a personal override, the team for a team override, and whoever "always allow" writes for on the gate.
+
+The rule stays fail-closed. An id neither source names is refused with the same error, now with the fix: connect the service and open its tool list. An unknown listing (no credential, a refusal, a failure, a timeout) answers no tools and refuses the same way. A tool the listing names is bounded like a static one, by its service and risk level, so a service- or risk-level org rule still blocks a member's `allow`.
+
+The risk level of an MCP tool is the server's own claim, read from its annotations (`deriveRiskLevel`), not a value a plugin author declared. The bounds check and the invocation path read the same claim, so the check matches what a run does. A server that changes its annotations later changes the risk a standing override was bounded against; that is the drift static plugins also accept. An org that must not depend on a server's claim writes its rule at `service` scope, which no listing can move.
+
+The gate path lists nothing. When "always allow" is offered or written from a live call, the engine has just resolved that tool, so `invocationCatalog` answers for that one id from the call's own `service` and `riskLevel`. A gate on a dynamic tool opens with no network wait, also while the server is down. Only a call that carries no risk level falls back to the listing.
+
+Costs. A policy write from the Policies page runs with a warm cache: the page lists the plugins first, with the team's own catalog on a team page. A write with a cold cache lists live under the probe's limits: a 2.5-second timeout, with failures and timeouts retried on the next write. A team listing uses the team's own credential. When a team reaches a service only through a member's shared account, a team write cannot verify that service's tools. The team route checks bounds inside a transaction, so it reads the team's listings before the transaction opens (`ServiceProbes.listedActionsSnapshot`): PGlite serves one connection, and a credential read inside the lock would wait on the transaction itself.
+
+`GET /api/plugins` emits the listed tools in `services[].actions` and `actionServices[].actions` for a connected dynamic service, so the combobox needs no change. `actionCount` stays the static count, as its wire doc promises.

@@ -1,8 +1,9 @@
-import { isValidElement, type MouseEvent, type ReactNode } from "react";
+import { isValidElement, memo, type MouseEvent, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { resolveLinkTarget } from "@valet/api/memory-links";
 import { cn } from "~/lib/cn";
+import { usePublicOrigin } from "~/lib/public-origin";
 import { CodeBlock } from "./code-block";
 import { MermaidDiagram } from "./mermaid-diagram";
 
@@ -16,6 +17,30 @@ function codeText(children: ReactNode): string {
   if (Array.isArray(children)) return children.map(codeText).join("");
   if (isValidElement<{ children?: ReactNode }>(children)) return codeText(children.props.children);
   return "";
+}
+
+/** A cell with this much text or less holds a value: a name, a date, a
+ * status. More than `PROSE_CELL_CHARS` is a sentence. */
+const VALUE_CELL_CHARS = 12;
+const PROSE_CELL_CHARS = 24;
+
+/** Width rules for one table cell. A value stays on one line, so a name
+ * like `member-1` does not break at its hyphen. A sentence keeps at least
+ * 10rem, or 35% of a phone screen: without the floor, a table too wide to
+ * fit squeezes each column to its longest word, and the sentence stacks one
+ * word per line.
+ *
+ * Above the floor, a word or URL in a sentence cell breaks at any
+ * character. Auto table layout never makes a column narrower than its
+ * min-content width. `overflow-wrap: anywhere` lowers that width to the
+ * floor; `break-word` does not, so one long URL keeps the table wider than
+ * a phone. Inline code keeps `normal`, so a hash does not break and the
+ * table scrolls instead. Exported for tests. */
+export function tableCellClass(children: ReactNode): string | undefined {
+  const length = codeText(children).length;
+  if (length <= VALUE_CELL_CHARS) return "whitespace-nowrap";
+  if (length > PROSE_CELL_CHARS) return "min-w-[min(10rem,35vw)] [overflow-wrap:anywhere] [&_code]:[overflow-wrap:normal]";
+  return undefined;
 }
 
 function languageFromClassName(className: unknown): string | undefined {
@@ -56,6 +81,26 @@ export function memoryHref(path: string): string {
   return `/memory/${path.split("/").map(encodeURIComponent).join("/")}`;
 }
 
+/** A download that `file_attach` created (`services/generated-files.ts`). */
+const GENERATED_FILE_PATH = /^\/api\/sessions\/[^/]+\/threads\/[^/]+\/files\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** A generated download on this deployment's public origin, moved to the
+ * hostname of this page. A deployment can serve the app on more than one
+ * hostname, and `file_attach` links the public one. A sign-in belongs to one
+ * hostname, so a person signed in on another one got a 401 from the link.
+ * A link on any other origin keeps its href. Exported for tests. */
+export function localDownloadHref(href: string | undefined, publicOrigin: string | null, origin = window.location.origin): string | undefined {
+  if (!href || !publicOrigin || publicOrigin === origin) return href;
+  let url: URL;
+  try {
+    url = new URL(href);
+  } catch {
+    return href;
+  }
+  if (url.origin !== publicOrigin || url.search || url.hash) return href;
+  return GENERATED_FILE_PATH.test(url.pathname) ? url.pathname : href;
+}
+
 /** True for a click the browser would handle as a plain same-tab
  * navigation. A modified click (new tab, new window, download) keeps the
  * browser's own behavior, which the real `href` on the anchor supports. */
@@ -74,22 +119,32 @@ function isPlainLeftClick(e: MouseEvent<HTMLAnchorElement>): boolean {
  *
  * Pass `memoryLinks` to make cross-references between memory documents
  * navigate in place — see `MemoryLinkHandling`.
+ *
+ * Memoized: parsing is the costly part of a transcript render, and a parent
+ * render with the same text has nothing new to parse.
  */
-export function Markdown({
+export const Markdown = memo(function Markdown({
   children,
   className,
   memoryLinks,
+  wideTables = false,
 }: {
   children: string;
   className?: string;
   memoryLinks?: MemoryLinkHandling;
+  /** Let a table that needs more room grow past the text column, centered
+   * on it, up to the width of the nearest `@container` box or 64rem. The
+   * caller must give that container room on both sides of a centered
+   * column; without a container, `cqw` falls back to the viewport. */
+  wideTables?: boolean;
 }) {
+  const publicOrigin = usePublicOrigin();
   return (
     <div
       className={cn(
         // Base prose styles + dark mode invert. `max-w-none` so chat text
         // can use the full message column.
-        "prose prose-sm prose-neutral dark:prose-invert max-w-none",
+        "prose prose-sm prose-neutral dark:prose-invert min-w-0 max-w-none [overflow-wrap:anywhere] max-sm:text-base",
         // First/last whitespace tidy.
         "prose-p:leading-relaxed prose-p:my-2 first:prose-p:mt-0 last:prose-p:mb-0",
         // Headings — small bumps; chat shouldn't have giant h1s.
@@ -99,7 +154,8 @@ export function Markdown({
         // the pill styles don't also apply to `<code>` inside fenced blocks
         // (the inner code element there should be transparent + inherit).
         "[&_:not(pre)>code]:bg-neutral-100 dark:[&_:not(pre)>code]:bg-neutral-800",
-        "[&_:not(pre)>code]:text-ink",
+        // Code inside a table cell keeps whole tokens (see the table below).
+        "[&_:not(pre)>code]:text-ink [&_:not(pre)>code]:whitespace-pre-wrap [&_:not(pre):not(td):not(th)>code]:[overflow-wrap:anywhere]",
         "[&_:not(pre)>code]:rounded [&_:not(pre)>code]:px-1 [&_:not(pre)>code]:py-0.5",
         "[&_:not(pre)>code]:text-[0.85em] [&_:not(pre)>code]:font-normal",
         "prose-code:before:content-none prose-code:after:content-none",
@@ -128,6 +184,34 @@ export function Markdown({
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
+          // Columns size to their content and wrap at spaces. A sentence
+          // column can shrink to its floor, and a longer word or URL in it
+          // breaks (see `tableCellClass`). Other columns keep their longest
+          // word or code. The box is as wide as the table wants, from the
+          // text column up to its limit. A centering flex parent spreads
+          // extra width equally to both sides. The box scrolls only when
+          // the code, short values, and floors of all columns do not fit.
+          table: ({ children }) => (
+            <div className="flex justify-center">
+              <div
+                className={cn(
+                  "w-max min-w-full max-w-full shrink-0 overflow-x-auto overscroll-x-contain",
+                  wideTables && "max-w-[min(100cqw,64rem)]",
+                )}
+                tabIndex={0}
+                role="region"
+                aria-label="Table"
+              >
+                <table className="w-full [overflow-wrap:break-word]">{children}</table>
+              </div>
+            </div>
+          ),
+          th: ({ node: _node, children, className, ...rest }) => (
+            <th className={cn(className, tableCellClass(children))} {...rest}>{children}</th>
+          ),
+          td: ({ node: _node, children, className, ...rest }) => (
+            <td className={cn(className, tableCellClass(children))} {...rest}>{children}</td>
+          ),
           // External links open in a new tab and do not leak referrer.
           // Inside a memory document, a cross-reference to another memory
           // file navigates in place instead, and an in-page anchor stays in
@@ -159,7 +243,7 @@ export function Markdown({
               );
             }
             return (
-              <a href={href} target="_blank" rel="noopener noreferrer" {...rest}>
+              <a href={localDownloadHref(href, publicOrigin)} target="_blank" rel="noopener noreferrer" {...rest}>
                 {children}
               </a>
             );
@@ -185,4 +269,4 @@ export function Markdown({
       </ReactMarkdown>
     </div>
   );
-}
+});

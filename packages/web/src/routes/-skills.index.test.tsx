@@ -67,8 +67,10 @@ let sourcesData: ListSkillSourcesResponse = { sources: [], nextCursor: null };
 let searchParams: Record<string, string> = {};
 const navigate = vi.fn();
 const skillsQuery = vi.fn();
+const sourcesQuery = vi.fn();
 const addSource = vi.fn();
 
+vi.mock("~/components/memory/memory-principles", () => ({ MemoryPrinciplesPanel: () => <div>principles panel</div> }));
 vi.mock("@tanstack/react-router", () => ({
   Link: ({ children, ...rest }: { children: ReactNode; [key: string]: unknown }) => (
     <a {...rest}>{children}</a>
@@ -86,7 +88,7 @@ vi.mock("~/api/skills", () => ({
 }));
 
 vi.mock("~/api/skill-sources", () => ({
-  useSkillSources: () => ({ data: sourcesData, isLoading: false, error: null }),
+  useSkillSources: (query: unknown) => { sourcesQuery(query); return { data: sourcesData, isLoading: false, error: null }; },
   useAddSkillSource: () => ({ mutate: addSource, isPending: false, error: null }),
   useSyncSkillSource: () => ({ mutate: vi.fn(), isPending: false }),
   useRemoveSkillSource: () => ({ mutate: vi.fn(), isPending: false }),
@@ -145,7 +147,7 @@ describe("SkillsIndexPage", () => {
     addSource.mockReset();
   });
 
-  it("lists every skill in one grid, with no per-plugin sections", () => {
+  it("lists every skill in one list, with no per-plugin sections", () => {
     const { container } = render(<SkillsIndexPage />);
 
     // Most plugins ship exactly one skill, so a section per plugin left a
@@ -153,7 +155,14 @@ describe("SkillsIndexPage", () => {
     expect(screen.queryByRole("heading", { name: "Google Workspace" })).toBeNull();
     // Router `Link`s render `to`, not `href`, so they carry no link role.
     // Counted inside the grid: the header carries links of its own.
-    expect(container.querySelectorAll(".grid a").length).toBe(5);
+    expect(container.querySelectorAll(`ul[aria-label="Skills"] a`).length).toBe(5);
+  });
+
+  it("lists the repositories of the workspace in view, as the skills below do", () => {
+    searchParams = { view: "sources" };
+    sourcesQuery.mockClear();
+    render(<SkillsIndexPage />);
+    expect(sourcesQuery).toHaveBeenLastCalledWith(expect.objectContaining({ ownerType: "user", ownerId: "u-1" }));
   });
 
   it("offers a New skill action", () => {
@@ -227,7 +236,7 @@ describe("SkillsIndexPage", () => {
     const { container } = render(<SkillsIndexPage />);
     // Query inside the grid so the scope-filter dropdown's <option>s do not
     // count. Four plugin skills → four Plugin badges; one personal stored.
-    const grid = container.querySelector(".grid");
+    const grid = container.querySelector(`ul[aria-label="Skills"]`);
     const badges = (label: string) =>
       Array.from(grid?.querySelectorAll("span") ?? []).filter((el) => el.textContent === label);
     expect(badges("Plugin").length).toBe(4);
@@ -265,24 +274,25 @@ describe("SkillsIndexPage — the filters go to the URL and to the server", () =
     expect(lastSkillsOwner()).toEqual({ ownerType: undefined, ownerId: undefined });
   });
 
-  it("writes the Prompts chip to the URL as the kind it means", () => {
+  it("writes the Principles chip to the URL", () => {
     render(<SkillsIndexPage />);
-    fireEvent.click(screen.getByRole("tab", { name: "Prompts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Principles" }));
 
-    expect(lastNavigationSearch()).toMatchObject({ filter: "prompts" });
+    expect(lastNavigationSearch()).toMatchObject({ filter: "principles" });
   });
 
-  it("sends the chip on to the server as a kind", () => {
-    searchParams = { filter: "prompts" };
+  it("shows the principles in place of the skill list", () => {
+    searchParams = { filter: "principles" };
     render(<SkillsIndexPage />);
 
-    expect(lastSkillsQuery()).toEqual({ kind: "prompt" });
-    expect(screen.getByRole("tab", { name: "Prompts" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByText("principles panel")).toBeTruthy();
+    expect(screen.queryByLabelText("Search skills")).toBeNull();
+    expect(screen.getByRole("button", { name: "Principles" }).getAttribute("aria-pressed")).toBe("true");
   });
 
   it("sends the search box on as a catalog-wide query, once typing settles", async () => {
-    // Fake timers drive the debounce by hand; see use-live-query.test.tsx for
-    // why waitFor and vitest's clock do not mix.
+    // Fake timers drive the debounce by hand. Testing Library's waitFor polls
+    // on a clock that only vi.advanceTimersByTimeAsync moves, so it is not used.
     vi.useFakeTimers();
     try {
       render(<SkillsIndexPage />);
@@ -315,7 +325,7 @@ describe("SkillsIndexPage — the filters go to the URL and to the server", () =
   it("returns to the first page when a filter changes", () => {
     searchParams = { page: "cursor_1" };
     render(<SkillsIndexPage />);
-    fireEvent.click(screen.getByRole("tab", { name: "Prompts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Principles" }));
 
     // A different question has a different first page, so the old cursor
     // names a row that the new question may not even list.
@@ -408,7 +418,7 @@ describe("SkillsIndexPage — the repositories panel", () => {
     currentData = skillsData;
     currentState = { isLoading: false, error: null };
     sourcesData = { sources: [], nextCursor: null };
-    searchParams = {};
+    searchParams = { view: "sources" };
     navigate.mockReset();
     addSource.mockReset();
   });
@@ -443,3 +453,18 @@ describe("SkillsIndexPage — the repositories panel", () => {
     expect(lastNavigationSearch()).toMatchObject({ sourcePage: "src_2", page: undefined });
   });
 });
+
+ it("keeps catalog filters and both pages when opening Sources", () => {
+    searchParams = { q: "drive", scope: "team", filter: "prompts", page: "skill_2", sourcePage: "source_2" };
+    render(<SkillsIndexPage />);
+    expect(screen.queryByRole("button", { name: /import from github/i })).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: "Sources" }));
+    expect(lastNavigationSearch()).toEqual({ ...searchParams, view: "sources" });
+  });
+  it("returns from Sources without losing catalog state", () => {
+    searchParams = { view: "sources", q: "drive", page: "skill_2", sourcePage: "source_2" };
+    render(<SkillsIndexPage />);
+    expect(screen.queryByLabelText("Search skills")).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: "Catalog" }));
+    expect(lastNavigationSearch()).toEqual({ ...searchParams, view: undefined });
+  });

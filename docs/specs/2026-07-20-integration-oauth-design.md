@@ -67,10 +67,10 @@ The `serverUrl` is declared on the credential rather than derived from the plugi
 
 Authenticated. Finds the service's `CredentialDeclaration` across loaded plugin manifests; 404 if no oauth-capable declaration.
 
-- **mcp mode**: `ensureMcpOAuthClient(service, serverUrl)` (below), `generatePkceChallenge()`, then 302 to `buildAuthorizationUrl({...})` with the declaration's scopes.
+- **mcp mode**: `ensureMcpOAuthClient(service, serverUrl, redirectUri, scopes)` (below), `generatePkceChallenge()`, then 302 to `buildAuthorizationUrl({...})` with the declaration's scopes.
 - **authorization_code mode**: resolve `process.env[clientIdEnv]`/`[clientSecretEnv]`; 503 `{ error: "oauth not configured", missing: [...] }` if absent. Build authorize URL with `client_id`, `redirect_uri`, `response_type=code`, `scope`, `state`, plus `extraAuthParams`.
 
-`state` is HMAC-signed via `lib/oauth-state.ts` (same key derivation as every other flow), payload `{ u: userId, s: service, v?: codeVerifier, exp }` with the standard 15-minute TTL. The PKCE verifier rides inside the signed state — fully stateless between start and callback, nothing persisted. (The verifier is not secret from the user it belongs to; the HMAC prevents tampering and the code exchange happens server-side.)
+`state` is HMAC-signed via `lib/oauth-state.ts` with the `integration-connect` purpose key, so a GitHub setup or connect state never verifies here (2026-10-09). Payload `{ u: userId, s: service, v?: codeVerifier, exp }` with the standard 15-minute TTL. The PKCE verifier rides inside the signed state — fully stateless between start and callback, nothing persisted. (The verifier is not secret from the user it belongs to; the HMAC prevents tampering and the code exchange happens server-side.)
 
 Redirect URI is a single shared callback for all services: `${baseUrl}/api/credentials/oauth/callback`, where `baseUrl` is the same origin resolution the GitHub flows use (`BETTER_AUTH_URL` / `VALET_PUBLIC_URL` fallback chain — reuse the existing helper).
 
@@ -79,7 +79,7 @@ Redirect URI is a single shared callback for all services: `${baseUrl}/api/crede
 Mounted behind the normal `/api/*` auth gate, same as the GitHub connect callback: the user just came from an in-app click, so their session cookie is present. Verifies signed state (signature, `exp`, and `u` === session user — a mismatch redirects with an error rather than writing another user's credential).
 
 - Provider `error` query param (user denied consent, etc.) → redirect to `/integrations?error=<code>`.
-- **mcp mode**: load registered client, `exchangeCodePkce({ tokenEndpoint, clientId, code, redirectUri, codeVerifier })`.
+- **mcp mode**: load the stored client with `getMcpOAuthClient` (no discovery, no registration: the code belongs to the client the connect used), then `exchangeCodePkce({ tokenEndpoint, clientId, code, redirectUri, codeVerifier })`. The connect signs the client id into the state. If another connect re-registered the client in between, the stored id differs, and the callback redirects with `error=oauth_client_changed` so the user connects again. A completed exchange records the client on the credential (`metadata.oauthClientId`, `metadata.oauthTokenEndpoint`) for later refreshes. A state signed before this check carries no id and skips it.
 - **authorization_code mode**: form-POST `tokenUrl` with `grant_type=authorization_code`, `client_id`, `client_secret`, `code`, `redirect_uri`.
 
 On success, persist directly (no browser round-trip):
@@ -129,7 +129,11 @@ CREATE TABLE mcp_oauth_clients (
 
 One row per service, shared across all users (as in v1's D1 table). `ensureMcpOAuthClient` reads the row; on miss, runs `discoverAuthServer(serverUrl)` → `registerClient(registration_endpoint, { clientName: "Valet", redirectUris: [callbackUrl], scope })` → `INSERT ... ON CONFLICT (service) DO NOTHING` then re-reads (concurrent starts converge on one client). Discovery without a `registration_endpoint` is a hard error surfaced as `?error=oauth_failed`. Rows are never deleted on disconnect — client registration is reusable. If the deployment's public URL changes, the registered redirect URI goes stale; recovery is deleting the row (documented, not automated — same posture as v1).
 
-Scopes ride the registration as well as the authorize request (TKAI-243): the declaration's scope set becomes the RFC 7591 `scope` string, and the row stores it (sorted) in `registered_scopes`. When the declared set changes, `ensureMcpOAuthClient` registers a replacement client and updates the row in place — refresh tokens issued to the old client stop refreshing, and the user reconnects. A `NULL` `registered_scopes` (row from before scopes support) compares as "no scopes", so existing rows re-register only when a declaration actually names scopes.
+Scopes ride the registration as well as the authorize request (TKAI-243): the declaration's scope set becomes the RFC 7591 `scope` string, and the row stores it (sorted) in `registered_scopes`. When the declared set changes, `ensureMcpOAuthClient` registers a replacement client and updates the row in place. The replacement serves new connections only. A refresh token belongs to the client it was issued to, so the callback records the issuing client on the credential (`metadata.oauthClientId` and `metadata.oauthTokenEndpoint`), and a refresh uses that client, not the row. An existing connection keeps working with its old scopes after a scope change; the member reconnects (or steps up) only to get the new scopes. A credential connected before the record existed refreshes with the row's client and records it on its first good refresh. Only the OAuth callback and the refresh write the two keys: `PUT /api/credentials/:service` refuses them, because a refresh posts the refresh token to the recorded endpoint. Credentials whose refresh tokens belong to a client that a re-registration already overwrote, with no record, cannot refresh; those members reconnect once.
+
+RFC 7592 client update (`PUT` to the `registration_client_uri` with the `registration_access_token`) would keep one client_id across scope changes. Valet does not use it: the registration response's management credentials are not stored, many MCP authorization servers do not offer the management endpoint, and with the issuing client on each credential a re-registration no longer breaks existing connections. A `NULL` `registered_scopes` (row from before scopes support) compares as "no scopes", so existing rows re-register only when a declaration actually names scopes.
+
+Valet requests only the declared scopes, never a scope the server only advertises: `scopes_supported` lists what a server can grant, not what this instance needs. For a declaration that names scopes, each client registration (a first connect, or a scope change) reads the MCP server's protected resource metadata (RFC 9728) and logs a warning that names each advertised scope the declaration lacks. `discoverAuthServer` returns that list as `resource_scopes_supported`, taken only from a document whose `resource` is the server URL (a trailing slash counts). A connect that reuses the stored client makes no network call, so a slow discovery endpoint cannot stall it. At call time, a 403 with `error=insufficient_scope` (RFC 6750, parsed as RFC 7235 auth-params) returns an error that names the scopes the credential lacks (`mcpActionPlugin`). It names them only when the credential records its grant: a pasted or 1Password token gives no scope claim. A missing scope that an `auth: oauth` mcpServers entry does not declare (`configScopes`) tells the reader to have an admin add it and then reconnect, because reconnecting alone requests the same scopes again. A declared scope the server did not grant, or any other service, keeps the fix for whoever holds the account. Precedent (2026-10-20): Metabase 1.64 moved every read tool to `agent:content:read`. The deployed scope list was a copy of the 1.63 scopes, so each reconnect minted a token that got 403 on `search`, `browse_data`, and `get_content`, and the error said to reconnect. The fix was a config change: add the scope to the entry.
 
 The row also captures discovery's `scopes_supported` (at registration, or lazily backfilled on the first connect of a pre-column row; the backfill fails soft so a dead discovery endpoint never blocks a connect). When a declaration names no scopes but the server advertises `scopes_supported`, EVERY connect logs a warning naming the entry and the fix — not just the first registration — because a scope-gated server grants a token with no scopes and lists zero tools with no other signal.
 
@@ -138,15 +142,16 @@ The row also captures discovery's `scopes_supported` (at registration, or lazily
 A `RefreshingCredentialStore` decorator in `packages/api/src/plugins/` wraps the `PgCredentialStore` instance built in `providers/node.ts`, so every consumer (session `credentialProvider`, workflow `action-invoker`, channel host) gets refresh for free:
 
 - On `get()`: if the stored credential is `oauth2`, has a `refreshToken`, and `expiresAt` is present and within a 60-second buffer → refresh, persist the new tokens (preserving the old `refreshToken` if the response omits one), return the fresh credential.
-- Refresh dispatch mirrors the connect branches, resolved from the same manifest declarations: **mcp** → `refreshTokenPkce({ tokenEndpoint, clientId, refreshToken })` using the stored registered client; **authorization_code** → form-POST `tokenUrl` with `grant_type=refresh_token` + env client id/secret.
-- On refresh failure: stamp `metadata.refreshFailedAt` (the field the credential-summary health surface already whitelists) and return the stored (likely expired) credential — the action fails with the provider's own 401 and the UI shows the unhealthy badge. No credential deletion (v1 deleted on GitHub refresh failure; GitHub keeps that behavior in its own service, untouched).
+- Refresh dispatch mirrors the connect branches, resolved from the same manifest declarations: **mcp** → `refreshTokenPkce({ tokenEndpoint, clientId, refreshToken })` using the client recorded on the credential (the stored registered client when the credential has no record); **authorization_code** → form-POST `tokenUrl` with `grant_type=refresh_token` + env client id/secret.
+- On refresh failure: stamp `metadata.refreshFailedAt` (the field the credential-summary health surface already whitelists) and return the stored (likely expired) credential — the action fails with the provider's own 401 and the UI shows the unhealthy badge.
+- When the token endpoint answers with an error (`OAuthTokenError`), the failure also stores `metadata.refreshError`: the provider's answer, at most 300 characters. Any other error (DNS, TLS, missing config) goes to the server log whole and stores no reply. `refreshErrorText` masks the credential's own tokens, the app's client secret for an `authorization_code` refresh, and every `refresh_token`, `access_token`, `id_token`, `client_secret`, and form `code` value first, because a provider can echo the request (Greenhouse returns a malformed refresh token in its error). Each known secret is masked in its raw, JSON-escaped, and URL-encoded forms. The upstream error keeps only the first 200 characters of the body, so the masking also covers a value with no closing quote and a cut-off start of a known secret at the end of the text. `PUT /api/credentials/:service` refuses a client-written `metadata.refreshError`, so only the server sets it. The server log gets the same masked text. The credential summary returns it as `refreshError`, and the Integrations page shows it under the repair note. The next good refresh clears it with the other failure stamps. No credential deletion (v1 deleted on GitHub refresh failure; GitHub keeps that behavior in its own service, untouched).
 - `github` service is excluded from the decorator (its refresh lives in `services/github-tokens.ts`).
 - No proactive cron sweep this phase (v1 had one); lazy refresh covers actual use. Sweep is a follow-up if idle-credential freshness ever matters.
 
 ## Web UI (`packages/web`)
 
 - `integration-row.tsx`: **Connect** is a button that opens the pre-connect screen. It is no longer an anchor to `/api/credentials/:service/connect` — a bare anchor left no moment between the click and the redirect in which to tell the user what the credential gives away. The tile runs no connect path itself.
-- `connect-dialog.tsx`: the pre-connect screen. A split pane — the decision on the left, the tools this credential unlocks on the right — that resumes one of three paths behind **Continue**: the org's GitHub App OAuth, the generic `/api/credentials/:service/connect` redirect, or token entry in a second step. Manual token entry stays available on OAuth services, behind the same disclosure rather than beside it.
+- `connect-dialog.tsx`: the pre-connect screen. A split pane — the decision on the left, the tools this credential unlocks on the right — that resumes one of three paths behind **Continue**: the org's GitHub App OAuth, the generic `/api/credentials/:service/connect` redirect, or token entry in a second step. Manual token entry stays available on OAuth services, behind the same disclosure rather than beside it. A service whose declaration sets `oauthOnly` gets no token entry (see "OAuth-only services" below).
 - `connect-disclosure.ts`: derives every sentence on that screen from `PluginServiceSummary`. It has an explicit "cannot say" arm, and the screen renders it instead of filler. A service whose declared credential key no `ActionPlugin` reads (the google-calendar skew, below) resolves to that arm, and **Continue** is disabled.
 - `integrations.tsx`: read `?connected=` / `?error=` search params on mount, surface a success/error toast, and strip the params from the URL.
 - Disconnect is unchanged (`DELETE /api/credentials/:service`).
@@ -167,7 +172,8 @@ To make the choice real, both of these must land: add `"team"` to `CredentialOwn
 | State invalid/expired/user mismatch | redirect `/integrations?error=oauth_state` |
 | Provider consent denied | redirect `/integrations?error=<provider code>` |
 | Token exchange failure | redirect `/integrations?error=oauth_failed`, server log |
-| Refresh failure at use time | stored credential returned; `metadata.refreshFailedAt` stamped |
+| Refresh failure at use time | stored credential returned; `metadata.refreshFailedAt` and the masked `metadata.refreshError` stamped |
+| Pasted token for an `oauthOnly` service | 400 JSON on `PUT /api/credentials/:service`; nothing stored |
 
 ## Testing
 
@@ -221,4 +227,75 @@ Provider fixtures test protocol handling only. Live provider authorization, secr
 resolution, and inbound delivery require configured accounts in the local demo.
 
 
-Team credential saves recheck authority inside the write transaction after provider validation. The transaction holds the team ownership lock and shared locks on the team and membership rows. Role changes and member removal cannot commit between that check and the credential write. This applies to OAuth callbacks and direct token writes. Personal credential storage keeps its existing behavior.
+Team credential saves recheck authority inside the write transaction after provider validation. The transaction holds the team ownership lock and shared locks on the team and membership rows. Role changes and member removal cannot commit between that check and the credential write. This applies to OAuth callbacks, direct token writes, and 1Password reference writes. Personal credential storage keeps its existing behavior.
+
+
+### Refresh write ordering (2026-10-15)
+
+`CredentialStore.compareAndSwap` replaces an existing credential only when its value still matches the expected snapshot. It never inserts a missing row.
+The OAuth decorator uses this operation for both refreshed tokens and refresh failure metadata. If it loses the comparison, it reads the current row.
+A reconnect keeps its new tokens and metadata. A disconnect remains deleted.
+Postgres compares the persisted ciphertext and all credential fields in the conditional update. Random encryption nonces distinguish reconnects even when timestamps match.
+The in-memory store and each credential decorator implement the same contract. No schema change is required.
+
+Regression tests pause between the final credential read and the update. Both successful refreshes and refused refreshes preserve reconnects and deletions.
+Real Postgres tests also hold a competing row mutation open until the conditional update blocks, then commit it.
+
+
+### OAuth-only services (2026-10-20)
+
+"Enter a token instead" sends a pasted token to the provider unchanged. Some MCP servers accept a provider token, such as a Linear API key. Others accept only tokens from their own authorization server. Pylon's support article ([Connecting to the Pylon MCP Server](https://support.usepylon.com/articles/2407390554-connecting-to-the-pylon-mcp-server), "Authentication Flow") says the MCP server supports only OAuth, and that API keys work only on the REST API. On dev, a Pylon API token saved, and each run then failed at tool discovery with "pylon rejected your connected account. Reconnect pylon on the Integrations page". The reconnect offered the same token entry again.
+
+`CredentialDeclaration.oauthOnly: true` marks such a provider. It is valid only with `oauth`, and `validateValetPlugin` rejects it elsewhere. A config-declared MCP server sets it with `oauthOnly: true` on an `auth: oauth` entry (instance config design).
+
+- `/api/plugins` carries `oauthOnly` on the service summary. The connect dialog then shows no "Enter a token instead".
+- `PUT /api/credentials/:service` refuses the save for every scope, and for a 1Password reference too, with 400: "Pylon accepts only its own sign-in, not a pasted token. To connect, select Connect for Pylon on the Integrations page, then select Continue." The sign-in callback stores its token through `routes/credential-connect.ts`, so sign-in is unchanged.
+- `mcpActionPlugin` takes `oauthOnly` too. A rejected personal account then reads: "Pylon rejected your connected account. Disconnect Pylon on the Integrations page, then select Connect to sign in with Pylon." A row that a pasted token created before this change gets this message. Other account sources keep their reconnect messages, because a reconnect for this service goes through sign-in.
+- Config-declared MCP plugins pass their display name to `mcpActionPlugin`, so the message names "Pylon", not "pylon".
+
+The token form in `connect-dialog.tsx` shows a refused save's sentence through `errorText`. It showed `Error.message` before, which is only the request line ("PUT /credentials/gmail → 400").
+
+
+### MCP health probe (2026-10-20)
+
+Two provider-side changes reached users first through failed runs. Metabase 1.64 moved its read tools behind `agent:content:read`, which the configured entry did not request. Pylon's MCP server accepts only tokens from its own OAuth server, so a pasted token got 401 at tool discovery. In both cases the Integrations page showed Connected, because the credential row recorded nothing wrong. `oauthOnly` (above) now stops a new pasted Pylon token at save. The probe also finds a row saved before that change, and the next provider that changes what it accepts.
+
+`GET /api/plugins` already lists the tools of each connected MCP service, for `toolCount`. The probe reads the answer to that same `tools/list` call and adds no network call. `ServiceProbes` (`plugins/service-probe.ts`) replaces `DynamicToolCounts` and keeps its limits: one probe per owner, service, and token in 5 minutes, one probe in flight per key, and a 2.5-second timeout. The cache key includes a hash of the access token, so a reconnect probes again at once. A timeout, a network error, or any other failure caches nothing and changes no health field.
+
+Since 2026-10-26 the cache holds the listing itself, not only its count: the tools mapped to `PluginAction`s the way `resolveActions` maps them (service-qualified id, risk level from annotations, the input schema as `parameters`). This is the tool schema the policy surfaces build on. `GET /api/plugins` emits those actions in `services[].actions` and `actionServices[].actions` for a connected dynamic service, in the same shape as static actions, so the Policies combobox offers them. `ServiceProbes.listedActionsFor(owner)` serves the same listing to the override bounds check and the tool-permissions read (`docs/specs/2026-07-16-action-policies-audit-design.md`, "Dynamic tools in the policy catalog"). A policy write with a cold cache lists live under the same limits; an unknown listing answers no tools.
+
+`mcpActionPlugin` exposes the probe as `McpActionPlugin.probe`. It sends the same token with the same app-identity fallback as `resolveActions`. It returns one of three results:
+
+| Server answer | Result | `health` fields |
+|---|---|---|
+| 403 with `error="insufficient_scope"` whose `scope` names a scope the grant lacks | `insufficient_scope` | `missingScopes`: the challenge `scope` minus the granted scopes |
+| 401, or any other 403 | `rejected` | `rejected: true` |
+| Tool list | `listed`, with the tools as `actions` | `missingScopes` and `blockedTools`, from the tools' `securitySchemes` |
+
+A listing alone does not find the Metabase case: Metabase lists every tool whatever the token holds, and it refuses the call. Each tool also declares its scope in `securitySchemes` (draft SEP-1488). A tool is blocked when it declares schemes and the grant satisfies none of them. A `noauth` scheme is satisfied. An `oauth2` scheme is satisfied when the grant holds all of its scopes. The probe compares only against a known grant: `StoredCredential.scopes` when it is set. A pasted token stores no scopes, so the probe skips this check for it. An empty array is a known grant with no scopes.
+
+The web client maps the fields to two states in `service-health.ts`, after `refresh-failed` and `expired`:
+
+- `rejected` (danger, "Rejected"): the service refused the connection. The note tells the user to reconnect.
+- `missing-scope` (warning, "Missing scopes"): the note names the scopes and tells the user to ask an admin to add them, then reconnect. A reconnect alone requests the same declared scopes, so it cannot fix this state.
+
+Both states offer Reconnect. `missing-scope` is a warning, not a failure: an admin can leave a scope out on purpose, and the remaining tools still work. The state still says which tools cannot work, because the agent sees every listed tool.
+
+Limits:
+
+- The probe runs only when somebody loads a page that reads `/api/plugins`. No periodic sweep runs, because it would hold every user's and team's tokens in a background job.
+- Results stay in process memory. Each api replica probes on its own, and a restart forgets them.
+- A run that gets a 401 or 403 does not update the probe. The run's own error names the fix (`authRejectionMessage`).
+- A server that publishes no `securitySchemes` and gates scopes only at call time is not detected before a call.
+
+### Step-up for insufficient scope (2026-10-20)
+
+An MCP server answers a call that needs a scope the token lacks with HTTP 403 and `WWW-Authenticate: Bearer error="insufficient_scope", scope="..."`. The MCP authorization specification ("Scope Challenge Handling") says a client that acts for a person should re-authorize with the added scopes and retry. Valet does this for the person's own connection through the existing connect route:
+
+- `rejectionMessage` in the MCP action plugin handles a missing scope that the integration's config does not declare. Reconnecting cannot fix that, because a reconnect requests only the declared scopes. For the caller's own connection on an `auth: oauth` config entry, the message links to `/api/credentials/:service/connect?addScopes=<held and missing>`. It says to approve the request on the provider's screen and then ask for a retry. Every other connection (team, app, organization, vault, or another member's shared account) keeps the admin fix: add the scope to the integration's config. A declared scope that the server did not grant keeps the account's reconnect message.
+- The connect route accepts `addScopes` for an MCP sign-in to the caller's own connection only. It refuses a malformed list (RFC 6749 scope tokens, at most 32) and any `addScopes` with `teamId`. The authorize request asks for the declared scopes plus the added ones, and the signed state carries that set, so a token response that names no `scope` stores it. The callback keeps the existing connection unless the new grant holds every scope it holds plus every added one, and it swaps with `compareAndSwap`, so a narrower grant or an older sign-in finishing after a newer one never replaces a wider grant. The kept case redirects with `step_up_not_granted`.
+- The shared registered client keeps its declared scope set. A provider that refuses scopes beyond the client's registration returns an error to `/integrations`; the fix is then the integration's config.
+
+No team step-up. A team connection is shared, so a member who signs in with added scopes replaces it with their own account, and the whole team then acts as that member. Review found that a link alone could make that swap happen without a Valet warning, because the provider may skip its consent screen. A team step-up needs a Valet confirmation page that shows who the team will act as before the sign-in starts. Until then, a team connection's missing scope is an admin fix, which also covers every member at once.
+
+Limits: the person retries by asking again; the turn does not wait for the grant. An unattended run gets the same message. The link is relative, so it opens in the web app, not in Slack. The health probe's missing-scope note is unchanged and still says to ask an admin.

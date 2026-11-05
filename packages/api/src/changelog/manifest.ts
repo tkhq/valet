@@ -52,6 +52,7 @@ function entry(value: unknown): ChangelogEntry {
     title: row.title,
     description: row.description,
     category: row.category as ChangelogCategory,
+    ...(typeof row.authoredAt === "string" ? { authoredAt: row.authoredAt } : {}),
     sources: {
       commitSha: sources.commitSha,
       ...(typeof sources.pullRequest === "number" ? { pullRequest: sources.pullRequest } : {}),

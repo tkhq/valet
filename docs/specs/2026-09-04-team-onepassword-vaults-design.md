@@ -38,7 +38,7 @@ Writes take `lockTeamForOwnership`, the same transaction lock used by `deleteTea
 
 `GET /api/onepassword/team-status?teamId=…` returns only `tokenConnected`, based on encrypted-column presence. It does not decrypt a token or contact 1Password. Team members and org admins can read status. A connected status means a token is stored, not that the provider has accepted it.
 
-The existing vault probe accepts team scope for team administrators. Its result contains vault identifiers and titles, never secret values. The team settings surface provides connect, replace, and disconnect controls; no reference editor exists.
+The existing vault probe accepts team scope for team administrators. Its result contains vault identifiers and titles, never secret values. The team settings surface provides connect, replace, and disconnect controls; no reference editor exists. The connect dialog shows the shared 1Password setup steps (`OnePasswordInstructions`), including what to ask a 1Password administrator for when 1Password refuses to create a service account. A team admin in Valet can lack that 1Password permission.
 
 ## Retired reference preferences
 
@@ -69,4 +69,4 @@ Focused tests use synthetic credentials, fake SDK clients, and ephemeral databas
 - `routes/sandbox-secrets.test.ts`: trusted team identity, no-grant discovery/resolution, inaccessible reference refusal, empty results, explicit scope, and no broader fallback.
 - `services/credential-resolution.test.ts`, `plugins/action-invoker.test.ts`, and `workflows/team-service-readiness.test.ts`: consistent runtime/readiness behavior and ignored legacy preferences.
 - `engine/secrets-cli-script.test.ts`: unique selection, ambiguous selection refusal, and scope retention.
-- Team connection and settings UI tests: loading/error states, role controls, cleared drafts, disconnect confirmation, and absence of reference preferences.
+- Team connection and settings UI tests: loading/error states, role controls, cleared drafts, disconnect confirmation, setup steps and refusal guidance in the connect dialog, and absence of reference preferences.

@@ -1,44 +1,34 @@
 /**
  * Panel for minting a proxy key and showing copy-paste setup snippets for
- * Claude Code and Codex. The key is shown ONCE after creation (better-auth
- * does not return it again on list). Uses `useCreateApiKey` from
- * `~/api/api-keys` — no new backend endpoint needed.
+ * Claude Code, Codex, OpenCode, and the OpenAI SDK. The key is shown ONCE
+ * after creation (better-auth does not return it again on list). Uses
+ * `useCreateApiKey` from `~/api/api-keys` — no new backend endpoint needed.
  *
  * Numbered steps:
  *   1. Gateway status
  *   2. Create your key
  *   3. Configure your tool
  *   4. Run it
+ *
+ * Before a key exists, steps 3 and 4 sit in a collapsed setup guide with a
+ * key placeholder, so a reader can see the setup without creating a key.
  */
-import { useState } from "react";
+import { useId, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { errorText } from "~/lib/error-text";
+import { useCopyToClipboard } from "~/lib/use-copy";
 import { useCreateApiKey, type CreatedApiKey } from "~/api/api-keys";
-
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
-  async function handleCopy() {
-    await navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  }
-  return (
-    <button
-      type="button"
-      onClick={handleCopy}
-      className="ml-auto shrink-0 text-xs text-muted hover:text-ink border border-line rounded px-2 py-0.5"
-    >
-      {copied ? "Copied" : "Copy"}
-    </button>
-  );
-}
+import { Button } from "~/components/primitives";
 
 function CodeBlock({ label, code }: { label: string; code: string }) {
+  const { copied, copy } = useCopyToClipboard();
   return (
     <div className="mb-4 min-w-0 max-w-full">
       <div className="flex items-center gap-2 mb-1">
         <span className="min-w-0 break-words text-xs font-semibold uppercase tracking-wide text-muted">{label}</span>
-        <CopyButton text={code} />
+        <Button size="sm" variant="secondary" className="ml-auto shrink-0" onClick={() => void copy(code)}>
+          {copied ? "Copied" : "Copy"}
+        </Button>
       </div>
       <pre tabIndex={0} aria-label={`${label} setup snippet`} className="w-full min-w-0 max-w-full whitespace-pre text-xs font-mono bg-paper-muted border border-line rounded p-3 overflow-x-auto">
         {code}
@@ -105,23 +95,36 @@ export function ModeSnippets({ apiKey, mode, team = false }: ModeSnippetsProps) 
   const origin = typeof window !== "undefined" ? window.location.origin : "";
   const key = apiKey.key ?? "";
 
-  // Claude Code snippets differ by mode.
+  // Every tool reads the proxy key from one variable, VALET_PROXY_KEY, so the
+  // key is set once. Pass-through mode adds the provider keys that the
+  // gateway forwards upstream.
+  const keyEnvSnippet =
+    mode === "centralized"
+      ? `export VALET_PROXY_KEY=${key}`
+      : [
+          `export VALET_PROXY_KEY=${key}`,
+          `# Pass-through mode: your own key is forwarded and billed; the Valet key only identifies you.`,
+          `export ANTHROPIC_API_KEY=<your-own-anthropic-key>  # Claude Code, OpenCode`,
+          `export OPENAI_API_KEY=<your-own-openai-key>        # Codex, OpenAI SDK`,
+        ].join("\n");
+
+  // Claude Code sends ANTHROPIC_AUTH_TOKEN as the Bearer header and, when set,
+  // ANTHROPIC_API_KEY as x-api-key. The gateway picks the `vlt_` one.
   const claudeCodeSnippet =
     mode === "centralized"
       ? [
           `export ANTHROPIC_BASE_URL=${origin}/proxy/anthropic`,
-          `export ANTHROPIC_AUTH_TOKEN=${key}`,
+          `export ANTHROPIC_AUTH_TOKEN="$VALET_PROXY_KEY"`,
           `# If ANTHROPIC_API_KEY is set, unset it — in centralized mode Valet uses its own key.`,
           `# unset ANTHROPIC_API_KEY`,
         ].join("\n")
       : [
           `export ANTHROPIC_BASE_URL=${origin}/proxy/anthropic`,
-          `export ANTHROPIC_AUTH_TOKEN=${key}`,
-          `export ANTHROPIC_API_KEY=<your-own-anthropic-key>`,
-          `# Pass-through mode: your own key is forwarded and billed; the Valet key only identifies you.`,
+          `export ANTHROPIC_AUTH_TOKEN="$VALET_PROXY_KEY"`,
         ].join("\n");
 
-  // Codex snippets differ by mode.
+  // Passthrough: Codex sends env_key as the Bearer header (forwarded
+  // upstream) and env_http_headers adds the proxy key as x-api-key.
   const codexTomlSnippet =
     mode === "centralized"
       ? [
@@ -131,7 +134,7 @@ export function ModeSnippets({ apiKey, mode, team = false }: ModeSnippetsProps) 
           `[model_providers.valet]`,
           `name = "valet"`,
           `base_url = "${origin}/proxy/openai/v1"`,
-          `env_key = "VALET_KEY"`,
+          `env_key = "VALET_PROXY_KEY"`,
           `wire_api = "responses"`,
         ].join("\n")
       : [
@@ -142,50 +145,56 @@ export function ModeSnippets({ apiKey, mode, team = false }: ModeSnippetsProps) 
           `name = "valet"`,
           `base_url = "${origin}/proxy/openai/v1"`,
           `env_key = "OPENAI_API_KEY"`,
+          `env_http_headers = { "x-api-key" = "VALET_PROXY_KEY" }`,
           `wire_api = "responses"`,
-          `http_headers = { "x-api-key" = "${key}" }`,
         ].join("\n");
 
-  const codexEnvSnippet =
-    mode === "centralized"
-      ? `export VALET_KEY=${key}`
+  // OpenCode's Anthropic client appends `/messages` to `baseURL` directly, so
+  // the URL ends in `/v1`. The gateway also adds a missing `/v1`
+  // (`proxySubpath`), so a copied Claude Code base URL still works.
+  // Passthrough: OpenCode sends `apiKey` as x-api-key (forwarded upstream)
+  // and the Bearer header carries the proxy key that identifies you.
+  const opencodeConfigSnippet = [
+    `{`,
+    `  "$schema": "https://opencode.ai/config.json",`,
+    `  "provider": {`,
+    `    "anthropic": {`,
+    `      "options": {`,
+    `        "baseURL": "${origin}/proxy/anthropic/v1",`,
+    ...(mode === "centralized"
+      ? [`        "apiKey": "{env:VALET_PROXY_KEY}"`]
       : [
-          `export OPENAI_API_KEY=<your-own-openai-key>`,
-          `# Your Valet identity goes in http_headers above (already in the config).`,
-        ].join("\n");
+          `        "apiKey": "{env:ANTHROPIC_API_KEY}",`,
+          `        "headers": { "Authorization": "Bearer {env:VALET_PROXY_KEY}" }`,
+        ]),
+    `      }`,
+    `    }`,
+    `  }`,
+    `}`,
+  ].join("\n");
 
   // OpenAI SDK snippet for self-service scripts. Centralized: the proxy key is
   // the api_key (sent as Bearer). Passthrough: your own key is forwarded and
   // bills your account, and the proxy key identifies you via x-api-key.
-  const openaiSdkSnippet =
-    mode === "centralized"
-      ? [
-          `from openai import OpenAI`,
-          ``,
-          `client = OpenAI(`,
-          `    base_url="${origin}/proxy/openai/v1",`,
-          `    api_key="${key}",  # your Valet proxy key`,
-          `)`,
-          `resp = client.chat.completions.create(`,
-          `    model="gpt-4o-mini",`,
-          `    messages=[{"role": "user", "content": "hello"}],`,
-          `)`,
-          `print(resp.choices[0].message.content)`,
-        ].join("\n")
+  const openaiSdkSnippet = [
+    `import os`,
+    `from openai import OpenAI`,
+    ``,
+    `client = OpenAI(`,
+    `    base_url="${origin}/proxy/openai/v1",`,
+    ...(mode === "centralized"
+      ? [`    api_key=os.environ["VALET_PROXY_KEY"],`]
       : [
-          `from openai import OpenAI`,
-          ``,
-          `client = OpenAI(`,
-          `    base_url="${origin}/proxy/openai/v1",`,
-          `    api_key="<your-own-openai-key>",       # forwarded upstream, bills you`,
-          `    default_headers={"x-api-key": "${key}"},  # your Valet identity`,
-          `)`,
-          `resp = client.chat.completions.create(`,
-          `    model="gpt-4o-mini",`,
-          `    messages=[{"role": "user", "content": "hello"}],`,
-          `)`,
-          `print(resp.choices[0].message.content)`,
-        ].join("\n");
+          `    api_key=os.environ["OPENAI_API_KEY"],  # forwarded upstream, bills you`,
+          `    default_headers={"x-api-key": os.environ["VALET_PROXY_KEY"]},  # your Valet identity`,
+        ]),
+    `)`,
+    `resp = client.chat.completions.create(`,
+    `    model="gpt-4o-mini",`,
+    `    messages=[{"role": "user", "content": "hello"}],`,
+    `)`,
+    `print(resp.choices[0].message.content)`,
+  ].join("\n");
 
   function setupCode(code: string): string {
     if (!team) return code;
@@ -203,14 +212,30 @@ export function ModeSnippets({ apiKey, mode, team = false }: ModeSnippetsProps) 
   return (
     <div className="min-w-0 max-w-full overflow-hidden">
       <p className="mb-4 break-all text-xs text-muted">{baseUrlNote}</p>
+
+      {/* The key, set once for every tool */}
+      <h4 className="text-sm font-medium text-ink mb-1">Proxy key</h4>
+      <p className="text-xs text-muted mb-2">
+        Set this in your shell profile. Every tool below reads <code>VALET_PROXY_KEY</code>.
+      </p>
+      <CodeBlock label="Shell env" code={setupCode(keyEnvSnippet)} />
+
       {/* Claude Code */}
-      <h4 className="text-sm font-medium text-ink mb-1">Claude Code</h4>
+      <h4 className="text-sm font-medium text-ink mb-1 mt-4">Claude Code</h4>
+      <p className="text-xs text-muted mb-2">Add these lines to your shell profile, after the proxy key.</p>
       <CodeBlock label="Shell env" code={setupCode(claudeCodeSnippet)} />
 
       {/* Codex */}
       <h4 className="text-sm font-medium text-ink mb-1 mt-4">Codex</h4>
+      <p className="text-xs text-muted mb-2">Add this to <code>~/.codex/config.toml</code>.</p>
       <CodeBlock label="~/.codex/config.toml" code={setupCode(codexTomlSnippet)} />
-      <CodeBlock label="Shell env" code={setupCode(codexEnvSnippet)} />
+
+      {/* OpenCode */}
+      <h4 className="text-sm font-medium text-ink mb-1 mt-4">OpenCode</h4>
+      <p className="text-xs text-muted mb-2">
+        Add this to <code>opencode.json</code> in your project, or to <code>~/.config/opencode/opencode.json</code>. Keep the <code>/v1</code> at the end of <code>baseURL</code>.
+      </p>
+      <CodeBlock label="opencode.json" code={setupCode(opencodeConfigSnippet)} />
 
       {/* Self-service SDK */}
       <h4 className="text-sm font-medium text-ink mb-1 mt-4">OpenAI SDK (scripts)</h4>
@@ -219,6 +244,51 @@ export function ModeSnippets({ apiKey, mode, team = false }: ModeSnippetsProps) 
       </p>
       <CodeBlock label="Python" code={setupCode(openaiSdkSnippet)} />
     </div>
+  );
+}
+
+function RunCommands() {
+  return (
+    <>
+      <p className="text-xs text-muted mb-2">Send a quick request to confirm the proxy is working:</p>
+      <div className="space-y-2">
+        <CodeBlock label="Claude Code" code={`claude -p "hello"`} />
+        <CodeBlock label="Codex" code={`codex exec "hello"`} />
+        <CodeBlock label="OpenCode" code={`opencode run "hello"`} />
+      </div>
+    </>
+  );
+}
+
+/** Shown in place of a real key before one exists. */
+const KEY_PLACEHOLDER = "<your-valet-proxy-key>";
+
+interface SetupGuideProps {
+  mode: "centralized" | "passthrough";
+  team: boolean;
+}
+
+/** Steps 3 and 4 before a key exists: collapsed, with a key placeholder. */
+function SetupGuide({ mode, team }: SetupGuideProps) {
+  return (
+    <details className="group min-w-0 max-w-full">
+      <summary className="cursor-pointer text-sm font-medium text-ink select-none">
+        Setup guide: Claude Code, Codex, OpenCode, and OpenAI SDK
+      </summary>
+      <div className="mt-4 min-w-0 max-w-full space-y-6">
+        <p className="text-xs text-muted">
+          Replace <code>{KEY_PLACEHOLDER}</code> with your proxy key. After you create a key, these snippets show it.
+        </p>
+        <div>
+          <StepHeading n={3} title="Configure your tool" />
+          <ModeSnippets apiKey={{ key: KEY_PLACEHOLDER }} mode={mode} team={team} />
+        </div>
+        <div>
+          <StepHeading n={4} title="Run it" />
+          <RunCommands />
+        </div>
+      </div>
+    </details>
   );
 }
 
@@ -232,6 +302,7 @@ interface KeyDisplayProps {
 function KeyDisplay({ apiKey, settingsQuery, onCreateAnother, team = false }: KeyDisplayProps) {
   const key = apiKey.key ?? "";
   const mode = settingsQuery.data?.mode;
+  const { copied, copy } = useCopyToClipboard();
 
   return (
     <div className="min-w-0 max-w-full space-y-6">
@@ -252,14 +323,14 @@ function KeyDisplay({ apiKey, settingsQuery, onCreateAnother, team = false }: Ke
           <code tabIndex={0} aria-label="New proxy key" className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-sm font-mono bg-paper-muted border border-line rounded px-2 py-1 text-ink select-all">
             {key}
           </code>
-          <CopyButton text={key} />
+          <Button size="sm" variant="secondary" className="shrink-0" onClick={() => void copy(key)}>
+            {copied ? "Copied" : "Copy"}
+          </Button>
         </div>
+        {/* The panel renders under the API keys section of the same page:
+            `/settings/api-keys`, or a team's API keys and proxy tab. */}
         <p className="text-xs text-muted">
-          You can revoke keys anytime in{" "}
-          <Link to="/settings/api-keys" className="text-moss underline-offset-2 hover:underline">
-            Settings → API keys
-          </Link>
-          .
+          You can revoke keys anytime in the API keys section on this {team ? "tab" : "page"}.
         </p>
       </div>
 
@@ -276,11 +347,7 @@ function KeyDisplay({ apiKey, settingsQuery, onCreateAnother, team = false }: Ke
       {/* Step 4 — Run it */}
       <div>
         <StepHeading n={4} title="Run it" />
-        <p className="text-xs text-muted mb-2">Send a quick request to confirm the proxy is working:</p>
-        <div className="space-y-2">
-          <CodeBlock label="Claude Code" code={`claude -p "hello"`} />
-          <CodeBlock label="Codex" code={`codex exec "hello"`} />
-        </div>
+        <RunCommands />
       </div>
 
       <button
@@ -333,6 +400,13 @@ function PersonalOnboardingFlow(props: OnboardingPanelProps) {
 
 function ProxyOnboardingFlow({ settingsQuery, showGatewayStatus = true, team = false, creation }: OnboardingPanelProps & { creation: NonNullable<OnboardingPanelProps["creation"]> }) {
   const [createdKey, setCreatedKey] = useState<Pick<CreatedApiKey, "key"> | null>(null);
+  // Ties the blocked create button to the paragraphs that name who can create
+  // the key and what the reader does next. Two panels on one page must not
+  // share the id, so it comes from the hook, not a module constant.
+  const blockedHelpId = useId();
+  // The blocked copy speaks only about a team. A caller that blocks creation
+  // in another scope gets no team instructions.
+  const blocked = team && !creation.canCreate;
 
   if (createdKey) {
     return (
@@ -367,26 +441,49 @@ function ProxyOnboardingFlow({ settingsQuery, showGatewayStatus = true, team = f
           <StepHeading n={2} title="Create your key" />
           <p className="text-sm text-muted mb-4">
             {team
-              ? "Create a shared team key for Claude Code or Codex. Requests and spend belong to this team."
-              : "Create a key to route your Claude Code or Codex requests through the recording proxy. Usage is tracked per key."}
+              ? "Create a shared team key for Claude Code, Codex, or OpenCode. Requests and spend belong to this team."
+              : "Create a key to route your Claude Code, Codex, or OpenCode requests through the recording proxy. Usage is tracked per key."}
           </p>
-          {!creation.canCreate && (
-            <p className="mb-4 text-sm text-muted">A team or organization admin must create a shared key for you. Manage key names in <Link to="/settings/api-keys" className="underline">Settings → API keys</Link>. Existing secrets cannot be retrieved.</p>
+          {blocked && (
+            <div id={blockedHelpId} className="mb-4 space-y-2 text-sm text-muted">
+              <p>Only a team admin or an organization admin can create a shared key for this team. Ask an admin of this team to create the key.</p>
+              {/* Team settings pin the team's scope, so the switcher cannot
+                  make this tab personal. The personal page can. */}
+              <p>
+                {settingsQuery.data?.mode === "passthrough" && "This gateway runs in pass-through mode. "}
+                To create your own key, open{" "}
+                <Link to="/settings/api-keys" className="underline">Personal workspace → API keys and proxy</Link>.
+                {settingsQuery.data?.mode === "passthrough"
+                  ? " That page makes a personal proxy key, and you must also supply your own provider key with it."
+                  : " That page makes a personal proxy key."}
+              </p>
+              <p>Team key names are in the API keys section on this tab. A stored secret cannot be read again.</p>
+            </div>
           )}
           {creation.error && (
             <p role="alert" className="mb-3 text-sm text-danger-600">{errorText(creation.error)}</p>
           )}
-          <button
-            type="button"
+          <Button
             onClick={() => {
               if (creation.canCreate && !creation.isPending) creation.create(setCreatedKey);
             }}
-            disabled={!creation.canCreate || creation.isPending}
-            className="rounded px-4 py-2 text-sm bg-moss text-white hover:bg-moss/90 disabled:opacity-50"
+            // A blocked member must still reach this control with the
+            // keyboard, or the explanation above it is never announced on
+            // focus. `disabled` removes a button from the tab order, so the
+            // permission refusal is inert, not disabled. The click guard
+            // above refuses the click. A pending create keeps the hard
+            // `disabled`: that state is short and it must not queue a second
+            // create.
+            aria-disabled={!creation.canCreate || undefined}
+            disabled={creation.isPending}
+            aria-describedby={blocked ? blockedHelpId : undefined}
+            className="aria-disabled:opacity-50"
           >
             {creation.isPending ? "Creating…" : "Create proxy key"}
-          </button>
+          </Button>
         </div>
+
+        {settingsQuery.data && <SetupGuide mode={settingsQuery.data.mode} team={team} />}
       </div>
     </div>
   );

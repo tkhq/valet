@@ -621,6 +621,43 @@ function collectAstValuePaths(node: ExprNode, out: string[][]): void {
   }
 }
 
+/** The paths inside `exists(...)` calls: the paths an expression probes rather than reads. */
+function collectAstProbePaths(node: ExprNode, out: string[][]): void {
+  switch (node.kind) {
+    case 'exists':
+      out.push(node.segments);
+      return;
+    case 'unary':
+      collectAstProbePaths(node.operand, out);
+      return;
+    case 'binary':
+      collectAstProbePaths(node.left, out);
+      collectAstProbePaths(node.right, out);
+      return;
+    case 'path':
+    case 'literal':
+      return;
+  }
+}
+
+/**
+ * The paths that `exists(...)` probes in `source`: a template's `{{ ... }}`
+ * expressions when `template` is true, else one bare expression. The parser
+ * normalizes `a.b`, `a["b"]` and `a[b]` to the same segments. Throws
+ * `TemplateParseError` on syntax errors, like {@link collectExpressionPaths}.
+ */
+export function collectProbePaths(source: string, template: boolean): string[][] {
+  const out: string[][] = [];
+  if (!template) {
+    collectAstProbePaths(parseExpression(source), out);
+    return out;
+  }
+  for (const seg of parseTemplate(source).segments) {
+    if (seg.kind === 'expr' && seg.ast) collectAstProbePaths(seg.ast, out);
+  }
+  return out;
+}
+
 /**
  * Dotted paths in `source`'s `{{ ... }}` expressions that evaluate to
  * `undefined` against `ctx`. Executors use this to name the template

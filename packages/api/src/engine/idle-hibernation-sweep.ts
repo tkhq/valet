@@ -42,6 +42,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions } from "../schema/index.js";
 import { startSweepTimer, type SweepTimer } from "../lib/sweep-timer.js";
 import { writeHibernated } from "./hibernation-hooks.js";
+import { reportError } from "@valet/engine";
 
 const DEFAULT_SWEEP_INTERVAL_MS = 5 * 60_000;
 /** Rows per pass — bounds a post-restart backlog; hibernated rows leave
@@ -62,6 +63,7 @@ export interface IdleHibernationSweepDeps {
   engineStore: {
     listUnsettledSubmissions(sessionId: string): Promise<unknown[]>;
     latestActivityAt(sessionId: string): Promise<number | null>;
+    countActiveLeases(sessionId: string): Promise<number>;
   };
   /** Same window the in-memory idle sweep uses (`resolveIdleMinutes`);
    * `<= 0` disables. */
@@ -96,7 +98,7 @@ export class IdleHibernationSweep {
       try {
         await this.maybeHibernate(row.id, row.workspace, row.createdAt, cutoff);
       } catch (err) {
-        console.error(`IdleHibernationSweep: hibernate failed for session ${row.id}:`, err);
+        reportError({ area: "sandbox", reason: "idle_hibernate" }, `IdleHibernationSweep: hibernate failed for session ${row.id}`, err);
       }
     }
   }
@@ -115,6 +117,8 @@ export class IdleHibernationSweep {
 
     const unsettled = await this.deps.engineStore.listUnsettledSubmissions(sessionId);
     if (unsettled.length > 0) return;
+    // A lease (wakeups spec C3) keeps the sandbox out of idle suspension.
+    if ((await this.deps.engineStore.countActiveLeases(sessionId)) > 0) return;
     // Missing activity data fails SAFE, like the cache sweep: a session
     // with no recorded activity is judged by its creation time, so a row
     // created moments before a restart is never hibernated as "idle".
@@ -126,9 +130,7 @@ export class IdleHibernationSweep {
       // Backend-assigned ids (docker/local) are unreachable without a live
       // attachment — and those backends are not hibernation-capable, so
       // the capability gate in sweep() normally prevents reaching here.
-      console.warn(
-        `IdleHibernationSweep: session ${sessionId} is idle but its sandbox id is not derivable; skipping`,
-      );
+      reportError({ area: "sandbox", reason: "idle_hibernate_no_sandbox_id", level: "warn" }, `IdleHibernationSweep: session ${sessionId} is idle but its sandbox id is not derivable; skipping`);
       return;
     }
 
@@ -168,6 +170,8 @@ export class IdleHibernationSweep {
     // the checks above, wins.
     const recheck = await this.deps.engineStore.listUnsettledSubmissions(sessionId);
     if (recheck.length > 0) return;
+    // A lease set since the first check keeps the sandbox up (PR review 2, item 1).
+    if ((await this.deps.engineStore.countActiveLeases(sessionId)) > 0) return;
     if (this.deps.engineHost.sessionLiveOrBuilding(sessionId)) return;
 
     await this.deps.engineHost.suspendSandbox(sandboxId);

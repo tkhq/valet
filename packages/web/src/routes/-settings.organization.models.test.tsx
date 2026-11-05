@@ -32,15 +32,14 @@ const deleteLlmProviderKeyMutate = vi.fn();
 const probeLlmProviderMutate = vi.fn();
 const testLlmProviderMutate = vi.fn();
 
-let providersData: { providers: LlmProviderSummary[] } = { providers: [] };
+let providersData: { providers: LlmProviderSummary[]; envFallbackKinds?: LlmProviderSummary["kind"][] } = { providers: [] };
 let modelsData: { models: ModelInfo[] } = { models: [] };
 
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
 }));
 
-// importOriginal: see -new-session-dialog.test.tsx (packages/web root) for
-// why a bare replacement here is unsafe under vitest.config.ts's isolate:false.
+// importOriginal keeps the module's other exports real (see vitest.config.ts).
 vi.mock("~/api/settings", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/settings")>();
   return {
@@ -78,10 +77,19 @@ vi.mock("~/api/settings", async (importOriginal) => {
     isLoading: false,
     error: null,
   }),
+  useProviderModelCatalog: (kind: string) => ({
+    data:
+      kind === "amazon-bedrock"
+        ? { models: [{ id: "qwen.qwen3-coder-next", name: "Qwen3 Coder Next", pricing: { input: 0.5, output: 1.2 } }, { id: "vendor.brand-new-model", name: "Brand New" }], live: true }
+        : { models: [{ id: "moonshotai/kimi-k3", name: "MoonshotAI: Kimi K3" }], live: true },
+    isLoading: false,
+    error: null,
+  }),
   };
 });
 
 import { LlmProvidersSection } from "~/components/settings/llm-providers-section";
+import { ApiError } from "~/api/api-error";
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -181,6 +189,36 @@ describe("LlmProvidersSection — known provider cards", () => {
     expect(screen.getByText("using deployment key")).toBeTruthy();
   });
 
+  it("renders an Amazon Bedrock card with AWS-credential copy", () => {
+    providersData = {
+      providers: [
+        {
+          id: "row_b",
+          kind: "amazon-bedrock",
+          name: "Amazon Bedrock",
+          enabled: true,
+          models: [],
+          hasKey: false,
+          envFallback: true,
+          createdAt: 0,
+        },
+      ],
+    };
+    renderWithTooltip(<LlmProvidersSection />);
+    expect(screen.getByText("Amazon Bedrock")).toBeTruthy();
+    expect(screen.getByText("using deployment AWS credentials")).toBeTruthy();
+    expect(screen.queryByText("using deployment key")).toBeNull();
+    expect(screen.getByPlaceholderText("Bedrock API key (bearer token)")).toBeTruthy();
+  });
+
+  it("shows the deployment badge on a known card with no row when the deployment env can authenticate", () => {
+    providersData = { providers: [], envFallbackKinds: ["amazon-bedrock"] };
+    renderWithTooltip(<LlmProvidersSection />);
+    expect(screen.getByText("using deployment AWS credentials")).toBeTruthy();
+    // Other no-row cards stay badge-less.
+    expect(screen.queryByText("using deployment key")).toBeNull();
+  });
+
   it("Escape dismisses the OpenRouter model picker", async () => {
     const user = userEvent.setup();
     providersData = {
@@ -205,6 +243,60 @@ describe("LlmProvidersSection — known provider cards", () => {
     await user.type(filter, "kimi");
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("textbox", { name: "Filter OpenRouter models" })).toBeNull();
+  });
+
+  it("Escape dismisses the Amazon Bedrock model picker, which lists the account's models", async () => {
+    const user = userEvent.setup();
+    providersData = {
+      providers: [
+        {
+          id: "row_br",
+          kind: "amazon-bedrock",
+          name: "Amazon Bedrock",
+          enabled: true,
+          models: [{ id: "qwen.qwen3-coder-next", name: "Qwen3 Coder Next" }],
+          hasKey: false,
+          envFallback: true,
+          createdAt: 0,
+        },
+      ],
+    };
+    renderWithTooltip(<LlmProvidersSection />);
+
+    await user.click(screen.getByRole("button", { name: "Add models" }));
+    const filter = screen.getByRole("textbox", { name: "Filter Amazon Bedrock models" });
+    expect(screen.getByText("Brand New")).toBeTruthy();
+    await user.type(filter, "brand");
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("textbox", { name: "Filter Amazon Bedrock models" })).toBeNull();
+  });
+
+  it("shows $/M pricing on picker rows and selected chips when the catalog knows it", async () => {
+    const user = userEvent.setup();
+    providersData = {
+      providers: [
+        {
+          id: "row_br",
+          kind: "amazon-bedrock",
+          name: "Amazon Bedrock",
+          enabled: true,
+          models: [{ id: "deepseek.v3.2", name: "DeepSeek V3.2", pricing: { input: 0.62, output: 1.85 } }, { id: "vendor.unpriced", name: "Unpriced" }],
+          hasKey: false,
+          envFallback: true,
+          createdAt: 0,
+        },
+      ],
+    };
+    renderWithTooltip(<LlmProvidersSection />);
+
+    // Selected chip: short form; an unpriced model shows no price.
+    expect(screen.getByText("$0.62 / $1.85")).toBeTruthy();
+    expect(screen.getByText("vendor.unpriced").closest("span")?.textContent).not.toContain("$");
+
+    await user.click(screen.getByRole("button", { name: "Add models" }));
+    // Picker row: full per-million form; the unpriced catalog entry shows none.
+    expect(screen.getByText("$0.50 in / $1.20 out per 1M tokens")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /vendor\.brand-new-model/ }).textContent).not.toContain("per 1M");
   });
 
   it("toggling enabled fires PATCH", async () => {
@@ -332,5 +424,22 @@ describe("LlmProvidersSection — custom provider", () => {
     await user.click(screen.getByRole("button", { name: "Delete provider" }));
 
     expect(await screen.findByText("failed to delete provider: request timed out")).toBeTruthy();
+  });
+});
+
+describe("LlmProvidersSection — custom provider refusals", () => {
+  it("shows the server's reason when the base URL is refused", async () => {
+    const user = userEvent.setup();
+    const reason =
+      "baseUrl is refused. The URL points at 169.254.169.254, a private, loopback, link-local, or internal address. Use a public endpoint, or ask the instance operator to add the host to VALET_OUTBOUND_URL_ALLOWLIST.";
+    createLlmProviderMutate.mockImplementation((_vars: unknown, opts: { onError: (err: Error) => void }) => {
+      opts.onError(new ApiError(400, "POST /org/llm-providers -> 400", { error: reason }));
+    });
+    renderWithTooltip(<LlmProvidersSection />);
+    await user.click(screen.getByRole("button", { name: "Add custom provider" }));
+    await user.type(screen.getByLabelText("Name"), "metadata");
+    await user.type(screen.getByLabelText("Base URL"), "http://169.254.169.254/latest/");
+    await user.click(screen.getByRole("button", { name: "Create" }));
+    expect(await screen.findByText(reason)).toBeTruthy();
   });
 });

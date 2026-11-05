@@ -1,21 +1,28 @@
 /**
  * `/api/proxy/usage/summary`, `/api/proxy/requests`, `/api/proxy/requests/:id`
  *
+ * Also `GET`/`DELETE /api/proxy/keys/:id`: proxy key status and revoke for
+ * `valet proxy` (`docs/specs/2026-10-27-cli-proxy-setup-design.md`).
+ *
  * Read surface for the LLM recording gateway. Ownership gating:
- *   - org members see only their own rows.
- *   - org admins see all rows in their org.
- * A row outside the caller's org 404s — never 403. This avoids leaking
- * cross-org existence, matching the `llm-providers` route convention.
+ *   - the personal usage surface sees only rows owned by the current user.
+ *   - team-owned rows are excluded from the personal usage surface.
+ * A row outside the caller's personal scope 404s. This avoids leaking
+ * record existence across personal, team, and organization scopes.
  *
  * Mount this router UNDER the `/api/*` auth ladder (after
  * `buildAuthMiddleware`) so `c.var.user` is always populated.
  */
 import { Hono } from "hono";
-import { and, desc, eq, gte, lt, lte, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, isNull, lt, lte, or, sql } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
-import { llmProxyRequests } from "../schema/index.js";
+import type { AppDb } from "../lib/drizzle.js";
+import { apikey, llmProxyRequests } from "../schema/index.js";
+import { requireActingUser } from "../middleware/auth.js";
+import { isProxyScopedKeyMetadata, parseApiKeyMetadata, teamIdFromApiKeyMetadata } from "../lib/request-principal.js";
 import { isOrgAdmin, getProxySettings, setProxySettings } from "../services/org.js";
 import type {
+  ProxyKeyStatusResponse,
   ProxyDayBucket,
   ProxyHarnessBucket,
   ProxyModelBucket,
@@ -29,6 +36,8 @@ import type {
 export const proxyUsageRouter = new Hono<AppEnv>();
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const MAX_WINDOW_MS = 30 * DAY_MS;
+const MAX_TIMESTAMP_MS = 8_640_000_000_000_000;
 
 /** GET `/api/proxy/settings` — the org's gateway governance (enabled + mode).
  * Any member may read it (the onboarding panel shows mode-specific setup and
@@ -65,18 +74,92 @@ proxyUsageRouter.put("/settings", async (c) => {
   return c.json(body);
 });
 
-/** Parse the `?window=` query parameter into milliseconds. */
-function parseWindowMs(window: string | undefined): number {
+const PROXY_KEY_PERSONAL = "Proxy keys are personal. Sign in as yourself, not with a team key.";
+const PROXY_KEY_NOT_FOUND = "Proxy key not found. It may already be revoked. Run `valet proxy setup <harness>` to get a new one.";
+
+/** The caller's own proxy-scoped key row, or undefined. Any other key reads
+ * as missing, so the routes never confirm a key exists to a caller who
+ * cannot manage it. */
+async function ownProxyKey(db: AppDb, id: string, userId: string) {
+  const [row] = await db
+    .select({
+      id: apikey.id, name: apikey.name, createdAt: apikey.createdAt, enabled: apikey.enabled, expiresAt: apikey.expiresAt,
+      referenceId: apikey.referenceId, teamId: apikey.teamId, metadata: apikey.metadata,
+    })
+    .from(apikey)
+    .where(eq(apikey.id, id))
+    .limit(1);
+  const metadata = parseApiKeyMetadata(row?.metadata);
+  const own = row
+    && row.referenceId === userId
+    && row.teamId === null
+    && teamIdFromApiKeyMetadata(metadata) === undefined
+    && isProxyScopedKeyMetadata(metadata);
+  return own ? row : undefined;
+}
+
+/** GET `/api/proxy/keys/:id` — whether a proxy key the caller owns still
+ * works. `valet proxy setup` checks its stored key with this before it
+ * reuses it, because the person can revoke the key in Settings. A read, so
+ * a CLI token may call it. */
+proxyUsageRouter.get("/keys/:id", async (c) => {
+  const user = requireActingUser(c);
+  if (!user) return c.json({ error: PROXY_KEY_PERSONAL }, 403);
+  const row = await ownProxyKey(c.var.providers.db, c.req.param("id"), user.id);
+  const usable = row && row.enabled !== false && (row.expiresAt === null || row.expiresAt.getTime() > Date.now());
+  if (!row || !usable) return c.json({ error: PROXY_KEY_NOT_FOUND }, 404);
+  const body: ProxyKeyStatusResponse = { id: row.id, name: row.name ?? "", created_at: row.createdAt.getTime() };
+  return c.json(body);
+});
+
+/** DELETE `/api/proxy/keys/:id` — revoke a proxy key the caller owns
+ * (`valet proxy remove`, `valet logout`). The key is minted on the device
+ * sign-in flow (`routes/cli-device.ts`, purpose `proxy-key`). A CLI token
+ * may call this route (`AGENT_WRITES`), so it deletes only proxy-scoped
+ * keys: an agent cannot revoke the person's other keys. */
+proxyUsageRouter.delete("/keys/:id", async (c) => {
+  const user = requireActingUser(c);
+  if (!user) return c.json({ error: PROXY_KEY_PERSONAL }, 403);
+  const db = c.var.providers.db;
+  const id = c.req.param("id");
+  if (!(await ownProxyKey(db, id, user.id))) return c.json({ error: PROXY_KEY_NOT_FOUND }, 404);
+  await db.delete(apikey).where(and(eq(apikey.id, id), eq(apikey.referenceId, user.id), isNull(apikey.teamId)));
+  return c.body(null, 204);
+});
+
+/** Parse the `?window=` query parameter into bounded milliseconds. */
+function parseWindowMs(window: string | undefined): number | null {
   if (!window) return 7 * DAY_MS;
   const m = /^(\d+)(d|h|m)$/.exec(window);
   if (!m) return 7 * DAY_MS;
-  const n = parseInt(m[1], 10);
-  switch (m[2]) {
-    case "d": return n * DAY_MS;
-    case "h": return n * 60 * 60 * 1000;
-    case "m": return n * 60 * 1000;
-    default: return 7 * DAY_MS;
-  }
+
+  const count = Number(m[1]);
+  if (!Number.isSafeInteger(count)) return null;
+  const unitMs = m[2] === "d" ? DAY_MS : m[2] === "h" ? 60 * 60 * 1000 : 60 * 1000;
+  if (count > Math.floor(MAX_WINDOW_MS / unitMs)) return null;
+  return count * unitMs;
+}
+
+function parseTimestamp(value: string): number | null {
+  if (!/^\d+$/.test(value)) return null;
+  const timestamp = Number(value);
+  if (!Number.isSafeInteger(timestamp) || timestamp > MAX_TIMESTAMP_MS) return null;
+  return timestamp;
+}
+
+interface RequestCursor {
+  createdAt: number;
+  id: string;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isRequestCursor(value: unknown): value is RequestCursor {
+  return isRecord(value) && typeof value.createdAt === "number" &&
+    Number.isSafeInteger(value.createdAt) && typeof value.id === "string" &&
+    value.id.length > 0;
 }
 
 interface AggRow {
@@ -122,13 +205,13 @@ proxyUsageRouter.get("/usage/summary", async (c) => {
   const user = c.var.user;
 
   const windowMs = parseWindowMs(c.req.query("window"));
+  if (windowMs === null) {
+    return c.json({ error: "Window must not exceed 30d. Choose 24h, 7d, or 30d." }, 400);
+  }
   const sinceMs = Date.now() - windowMs;
-  const admin = await isOrgAdmin(db, user.orgId, user.id);
-
-  // Members see only their own rows; admins see the whole org.
-  const scopeClause = admin
-    ? sql`org_id = ${user.orgId}`
-    : sql`org_id = ${user.orgId} AND user_id = ${user.id}`;
+  // This endpoint backs the personal usage page. It remains personal for
+  // admins too: organization and team records must not leak into this scope.
+  const scopeClause = sql`org_id = ${user.orgId} AND user_id = ${user.id} AND provider_kind <> 'tagging'`;
 
   // drizzle's execute() is typed `unknown` for raw SQL; narrow to the
   // node-postgres/PGlite result shape ({ rows }) by casting the awaited value,
@@ -263,8 +346,8 @@ type ListRow = Pick<
   | "providerKind" | "model" | "harness" | "endpoint"
   | "stream" | "statusCode"
   | "inputTokens" | "outputTokens" | "cacheReadTokens" | "cacheWriteTokens" | "totalTokens"
-  | "costUsd" | "latencyMs" | "error"
->;
+  | "costUsd" | "latencyMs"
+> & { hasError: boolean };
 
 /** Columns the list endpoint returns (all except request/response/parsed). */
 function rowToListItem(row: ListRow): ProxyRequestListItem {
@@ -288,13 +371,14 @@ function rowToListItem(row: ListRow): ProxyRequestListItem {
     totalTokens: row.totalTokens,
     costUsd: row.costUsd ?? null,
     latencyMs: row.latencyMs ?? null,
-    error: row.error ?? null,
+    hasError: row.hasError,
   };
 }
 
 function rowToDetail(row: typeof llmProxyRequests.$inferSelect): ProxyRequestDetail {
   return {
-    ...rowToListItem(row),
+    ...rowToListItem({ ...row, hasError: row.error !== null }),
+    error: row.error ?? null,
     requestBody: row.requestBody,
     responseBody: row.responseBody ?? null,
     parsed: row.parsed ?? null,
@@ -309,30 +393,25 @@ proxyUsageRouter.get("/requests", async (c) => {
   const { db } = c.var.providers;
   const user = c.var.user;
 
-  const admin = await isOrgAdmin(db, user.orgId, user.id);
-
   // Query filters
-  const filterUserId = c.req.query("user");
   const filterModel = c.req.query("model");
   const filterHarness = c.req.query("harness");
   const filterFrom = c.req.query("from");
   const filterTo = c.req.query("to");
   const cursor = c.req.query("cursor");
-  const limit = Math.min(parseInt(c.req.query("limit") ?? "50", 10) || 50, 200);
+  const parsedLimit = Number.parseInt(c.req.query("limit") ?? "50", 10);
+  const limit = Number.isFinite(parsedLimit)
+    ? Math.min(Math.max(parsedLimit, 1), 200)
+    : 50;
 
   // Build WHERE conditions
   const conditions = [];
 
-  // Ownership scope
-  if (admin) {
-    conditions.push(eq(llmProxyRequests.orgId, user.orgId));
-    if (filterUserId) {
-      conditions.push(eq(llmProxyRequests.userId, filterUserId));
-    }
-  } else {
-    conditions.push(eq(llmProxyRequests.orgId, user.orgId));
-    conditions.push(eq(llmProxyRequests.userId, user.id));
-  }
+  // This list is the personal request log. Do not widen it for admins or
+  // honor a supplied user filter: both would expose another owner's records.
+  conditions.push(eq(llmProxyRequests.orgId, user.orgId));
+  conditions.push(eq(llmProxyRequests.userId, user.id));
+  conditions.push(sql`${llmProxyRequests.providerKind} <> 'tagging'`);
 
   if (filterModel) {
     conditions.push(eq(llmProxyRequests.model, filterModel));
@@ -340,30 +419,40 @@ proxyUsageRouter.get("/requests", async (c) => {
   if (filterHarness) {
     conditions.push(eq(llmProxyRequests.harness, filterHarness));
   }
-  if (filterFrom) {
-    conditions.push(gte(llmProxyRequests.createdAt, parseInt(filterFrom, 10)));
+  if (filterFrom !== undefined) {
+    const from = parseTimestamp(filterFrom);
+    if (from === null) {
+      return c.json({ error: "Invalid from timestamp. Use milliseconds since Unix epoch." }, 400);
+    }
+    conditions.push(gte(llmProxyRequests.createdAt, from));
   }
-  if (filterTo) {
-    conditions.push(lte(llmProxyRequests.createdAt, parseInt(filterTo, 10)));
+  if (filterTo !== undefined) {
+    const to = parseTimestamp(filterTo);
+    if (to === null) {
+      return c.json({ error: "Invalid to timestamp. Use milliseconds since Unix epoch." }, 400);
+    }
+    conditions.push(lte(llmProxyRequests.createdAt, to));
   }
 
-  // Cursor pagination: cursor is base64-encoded JSON `{createdAt, id}`
+  // Cursor pagination: cursor is base64-encoded JSON `{createdAt, id}`.
+  // Reject malformed shapes before they reach a SQL bind parameter.
   if (cursor) {
     try {
-      const { createdAt: cursorCreatedAt, id: cursorId } = JSON.parse(
-        Buffer.from(cursor, "base64").toString("utf8"),
-      ) as { createdAt: number; id: string };
+      const decoded: unknown = JSON.parse(Buffer.from(cursor, "base64").toString("utf8"));
+      if (!isRequestCursor(decoded)) {
+        return c.json({ error: "Invalid cursor. Reload the request log." }, 400);
+      }
       conditions.push(
         or(
-          lt(llmProxyRequests.createdAt, cursorCreatedAt),
+          lt(llmProxyRequests.createdAt, decoded.createdAt),
           and(
-            eq(llmProxyRequests.createdAt, cursorCreatedAt),
-            lt(llmProxyRequests.id, cursorId),
+            eq(llmProxyRequests.createdAt, decoded.createdAt),
+            lt(llmProxyRequests.id, decoded.id),
           ),
         ),
       );
     } catch {
-      // Ignore malformed cursor — start from the beginning.
+      return c.json({ error: "Invalid cursor. Reload the request log." }, 400);
     }
   }
 
@@ -390,7 +479,7 @@ proxyUsageRouter.get("/requests", async (c) => {
       totalTokens: llmProxyRequests.totalTokens,
       costUsd: llmProxyRequests.costUsd,
       latencyMs: llmProxyRequests.latencyMs,
-      error: llmProxyRequests.error,
+      hasError: sql<boolean>`${llmProxyRequests.error} IS NOT NULL`,
     })
     .from(llmProxyRequests)
     .where(and(...conditions))
@@ -408,7 +497,12 @@ proxyUsageRouter.get("/requests", async (c) => {
     ).toString("base64");
   }
 
-  return c.json({ requests: page.map(rowToListItem), nextCursor });
+  return c.json({
+    requests: page.map(rowToListItem),
+    nextCursor,
+    pageSize: limit,
+    hasMore,
+  });
 });
 
 proxyUsageRouter.get("/requests/:id", async (c) => {
@@ -425,12 +519,11 @@ proxyUsageRouter.get("/requests/:id", async (c) => {
   const row = rows[0];
   if (!row) return c.json({ error: "not found" }, 404);
 
-  // A row in another org always 404s — never 403 (existence hiding).
-  if (row.orgId !== user.orgId) return c.json({ error: "not found" }, 404);
-
-  // A non-admin can only read their own rows.
-  const admin = await isOrgAdmin(db, user.orgId, user.id);
-  if (!admin && row.userId !== user.id) return c.json({ error: "not found" }, 404);
+  // Detail is reachable from the personal request log only. A row in another
+  // scope always 404s, including organization-admin callers.
+  if (row.orgId !== user.orgId || row.userId !== user.id) {
+    return c.json({ error: "not found" }, 404);
+  }
 
   return c.json(rowToDetail(row));
 });

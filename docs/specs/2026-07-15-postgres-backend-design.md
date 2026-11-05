@@ -56,7 +56,7 @@ packages/api/
 └── src/services/memory.ts        # tsvector search; manual FTS sync deleted
 ```
 
-Boot: `buildNodeProviders` constructs ONE connection source (Pool or PGlite), runs both migration sets against it (engine + app tables coexist in one database, same as the one-sqlite-file design), and hands the query interface + Drizzle instance to the four stores and all services. PGlite is single-connection: the api is a single process and the Pool path covers anything concurrent, so this is acceptable by design — but the spike must confirm the engine's concurrent-ish access patterns (event stream appends during store writes) behave on PGlite.
+Boot: `buildNodeProviders` constructs ONE connection source (Pool or PGlite), runs both migration sets against it (engine + app tables coexist in one database, same as the one-sqlite-file design), and hands the query interface + Drizzle instance to the four stores and all services. The Pool is sized by `VALET_PG_POOL_MAX` (default 30 — pg's own default of 10 saturated under the background pollers on agents-dev, 2026-09-21: a ~9,000-deep checkout queue turned every authenticated request into 15-40s of sequential ~5s pool waits) and bounded by `VALET_PG_POOL_CONNECT_TIMEOUT_MS` (default 30s; pg's default of 0 waits forever, so exhaustion presents as a silent hang instead of an error). PGlite is single-connection: the api is a single process and the Pool path covers anything concurrent, so this is acceptable by design — but the spike must confirm the engine's concurrent-ish access patterns (event stream appends during store writes) behave on PGlite.
 
 ## Error mapping
 
@@ -79,4 +79,21 @@ Boot: `buildNodeProviders` constructs ONE connection source (Pool or PGlite), ru
 - Multi-replica api / horizontal scaling (PG enables it later; the engine singleton is the constraint, not the db).
 - Data migration from existing sqlite dev DBs (pre-1.0: discard).
 - pgvector / semantic memory search (tsvector only this pass).
-- Connection-pool tuning, read replicas, PgBouncer.
+- Read replicas, PgBouncer. (Pool size and acquire timeout ARE tunable — `VALET_PG_POOL_MAX` / `VALET_PG_POOL_CONNECT_TIMEOUT_MS`, see Boot above — but no adaptive tuning beyond that.)
+
+### Workflow deletion concurrency regression
+
+The Remote Postgres CI job runs `service.delete-race.postgres.test.ts` against PostgreSQL.
+The suite checks both commit orders for run insertion versus definition deletion and repository stale-file cleanup.
+It pauses the leading transaction before commit and observes the other connection with `pg_blocking_pids`.
+A committed run prevents definition deletion; repository cleanup disarms its triggers and retains the definition.
+A committed deletion makes run insertion fail without creating an orphan.
+
+For a local run, set `TEST_DATABASE_URL` to a disposable PostgreSQL database and run:
+
+```sh
+pnpm --filter @valet/api test service.delete-race.postgres.test.ts
+```
+
+The suite creates and removes its own schema. Without `TEST_DATABASE_URL`, it skips.
+It never reads `DATABASE_URL`. PGlite cannot verify these locks because it serializes transactions.

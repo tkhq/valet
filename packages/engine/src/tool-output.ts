@@ -1,4 +1,4 @@
-import { encode } from "@toon-format/toon";
+import { decode, encode } from "@toon-format/toon";
 
 /** Encode structured tool output for the model, with JSON as the safe fallback. */
 export function encodeToolOutput(data: unknown): string {
@@ -11,4 +11,9 @@ export function encodeToolOutput(data: unknown): string {
       return String(data);
     }
   }
+}
+
+/** Decode text that `encodeToolOutput` wrote with TOON. */
+export function decodeToolOutput(text: string): unknown {
+  return decode(text);
 }

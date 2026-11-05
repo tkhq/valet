@@ -4,7 +4,18 @@
  * session and a personal key authenticate as the user. `user` stays on the
  * context for audit (the creating admin on a team key).
  */
-export type AuthVia = "session" | "apiKey" | "stub";
+/**
+ * How the caller authenticated. `mcp` and `cli` are agent credentials: an
+ * MCP OAuth token, or the CLI token `valet login` gets (`auth/cli-tokens.ts`).
+ * An agent may answer a question, but it cannot approve a gate or change
+ * policy (`isAgentCaller`).
+ */
+export type AuthVia = "session" | "apiKey" | "cli" | "stub" | "mcp";
+
+/** Whether the caller is an agent, which must leave approvals and policy to a person. */
+export function isAgentCaller(authVia: AuthVia): boolean {
+  return authVia === "mcp" || authVia === "cli";
+}
 
 export type RequestPrincipal = { type: "user"; id: string } | { type: "team"; id: string };
 
@@ -29,6 +40,14 @@ export function teamIdFromApiKeyMetadata(metadata: unknown): string | undefined 
   if (!parsed) return undefined;
   const teamId = parsed.teamId;
   return typeof teamId === "string" && teamId.length > 0 ? teamId : undefined;
+}
+
+/** `metadata.scope` on a key `valet proxy setup` creates. The key works only
+ * at the LLM proxy gateway, never on the Valet API. */
+export const PROXY_KEY_SCOPE = "proxy";
+
+export function isProxyScopedKeyMetadata(metadata: unknown): boolean {
+  return coerceApiKeyMetadata(metadata)?.scope === PROXY_KEY_SCOPE;
 }
 
 export function parseApiKeyMetadata(raw: string | null | undefined): Record<string, unknown> | null {
@@ -56,14 +75,19 @@ function underSegment(path: string, root: string): boolean {
 /**
  * Surfaces a team `vlt_` key may call. Everything else is personal, org, or
  * membership admin — a CI key must not inherit the creating user's rights.
- * `teamId` is the key's own team: the one orchestrator it may wake is that
- * team's default assistant, which is what `valet send` targets when no
- * session is named.
+ * `teamId` is the key's own team: runtime reads and ensures are limited
+ * to that workspace, including when the creating administrator leaves.
  */
 export function teamApiKeyPathAllowed(path: string, method: string, teamId: string): boolean {
   if (path === "/api/me" && method === "GET") return true;
   if (underSegment(path, "/api/sessions")) return true;
+  if (underSegment(path, "/api/threads")) return true;
   if (underSegment(path, "/api/workflows")) return true;
+  if (path === `/api/workspaces/${teamId}/runtime` && (method === "POST" || method === "GET")) return true;
+  if (path === `/api/workspaces/${teamId}/active-work` && method === "GET") return true;
+  if (path === `/api/workspaces/${teamId}/outcomes` && method === "GET") return true;
+  if (path === `/api/workspaces/${teamId}/runtime/info` && method === "GET") return true;
+  // Older CLI builds ensure their team runtime here; see legacyOrchestratorRouter.
   if (path === `/api/teams/${teamId}/orchestrator` && method === "POST") return true;
   return false;
 }
@@ -98,7 +122,7 @@ export async function resolveCreateOwner(opts: {
     return { ok: true, owner: { type: "team", id: principal.id } };
   }
 
-  if (authVia === "apiKey" && typeof bodyTeamId === "string") {
+  if ((authVia === "apiKey" || authVia === "cli") && typeof bodyTeamId === "string") {
     return {
       ok: false,
       status: 403,

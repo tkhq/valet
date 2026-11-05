@@ -6,6 +6,7 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { eq } from "drizzle-orm";
+import { MID_TURN_DELIVERY_KEY } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { admitSignal, SignalEdgeDeniedError, type AdmitSignalDeps } from "./signals.js";
 import { agentSessions, eventDropLog } from "../schema/index.js";
@@ -59,6 +60,8 @@ describe("admitSignal edge ACL", () => {
     expect(item).not.toBeNull();
     expect(item?.dispatchId).toBe("parent-1:d-parent-to-child");
     expect(item?.content).toMatchObject({ kind: "signal", signalType: "orchestrator.message" });
+    // Other internal signals wait for the running turn to end.
+    expect(item?.metadata?.[MID_TURN_DELIVERY_KEY]).toBeUndefined();
   });
 
   it("child -> parent is allowed", async () => {
@@ -95,6 +98,8 @@ describe("admitSignal edge ACL", () => {
     expect(item).not.toBeNull();
     expect(item?.dispatchId).toBe("child-2:d-child-to-parent");
     expect(item?.content).toMatchObject({ kind: "signal", signalType: "child.settled" });
+    // A child's result may join a running turn on another result.
+    expect(item?.metadata?.[MID_TURN_DELIVERY_KEY]).toBe(true);
   });
 
   it("org -> user orchestrator (same org) is allowed", async () => {

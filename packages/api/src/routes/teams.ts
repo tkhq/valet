@@ -1,3 +1,5 @@
+import { saveTeamSettings } from "../services/team-settings.js";
+import { validateModelDefaults } from "../services/account-settings.js";
 import { deleteTeamResources } from "../services/team-resource-deletion.js";
 /**
  * Teams — org membership structure (orchestrator spec, "Identity").
@@ -9,7 +11,6 @@ import { deleteTeamResources } from "../services/team-resource-deletion.js";
  *   POST   /api/teams/:id/members           → add/update a member
  *   PATCH  /api/teams/:id/members/:userId   → change a member's role
  *   DELETE /api/teams/:id/members/:userId   → remove a member
- *   POST   /api/teams/:id/orchestrator      → get-or-create the team's default assistant session
  *   GET/POST/DELETE /api/teams/:id/api-keys → team `vlt_` keys (TKAI-396; `routes/team-api-keys.ts`)
  *
  * Org-membership-gated: every route requires the team to belong to the
@@ -37,19 +38,21 @@ import { deleteTeamResources } from "../services/team-resource-deletion.js";
  * A delete is different: the next boot recreates the team empty, which reads
  * as data loss, so the route refuses it and names the file instead.
  *
- * There is no rename route today. Whoever adds one must refuse BOTH `idp`
- * and `config`: the reconciler identifies a declared team by name, so a
- * rename orphans the row and the next boot creates a second team beside it.
+ * A rename (`PATCH` with `name`) is refused for a `config` team: the
+ * reconciler identifies a declared team by name, so a rename orphans the
+ * row and the next boot creates a second team beside it. An `idp` team can
+ * be renamed: the team sync matches a mirror by its group path, not its name.
  */
 import { Hono, type Context } from "hono";
-import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, eq, inArray, ne, sql } from "drizzle-orm";
+import { isPgUniqueViolation } from "@valet/store-postgres";
 import { NotFoundError, ValetError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
+import { channelsVisibleTo } from "./_thread-access.js";
+import { loadInstanceConfig } from "../config/instance-config.js";
 import { requirePrincipal } from "../middleware/auth.js";
 import {
-  agentSessions,
   assistants,
-  childWatches,
   contentSources,
   teams,
   type ContentSourceRow,
@@ -59,14 +62,6 @@ import { listWorkflowSources } from "../services/content-sources.js";
 import { joinEligibleTeam, listSuggestedTeams } from "../services/team-join-eligibility.js";
 import { reapTeamWorkflows } from "../workflows/service.js";
 import { isOrgAdmin } from "../services/org.js";
-import { validateDefaultModelId } from "../services/model-catalog.js";
-import { assertModelSelectable } from "../services/approved-models.js";
-import { assertReasoningSelectable } from "../services/reasoning.js";
-import {
-  ensureDefaultAssistantSession,
-  listAssistantsForOwners,
-  toAssistantSummary,
-} from "../assistants/service.js";
 import {
   addMember,
   canAdministerTeam,
@@ -81,6 +76,7 @@ import {
   isLiveIdpMirror,
   LastAdminError,
   listTeamMembers,
+  teamMembershipSummaries,
   listTeamsForOrg,
   listTeamsForUser,
   NotTeamMemberError,
@@ -93,9 +89,6 @@ import type {
   AddTeamMemberRequest,
   CreateTeamRequest,
   CreateTeamResponse,
-  EnsureOrchestratorResponse,
-  GetTeamChildrenResponse,
-  TeamChildSummary,
   JoinSuggestedTeamResponse,
   ListSuggestedTeamsResponse,
   ListTeamMembersResponse,
@@ -113,9 +106,12 @@ async function rowToSummary(
   db: AppEnv["Variables"]["providers"]["db"],
   row: TeamRow,
   callerUserId: string,
+  membership?: Pick<TeamSummary, "memberCount" | "callerRole">,
 ): Promise<TeamSummary> {
-  const members = await listTeamMembers(db, row.id);
-  const mine = members.find((m) => m.userId === callerUserId);
+  if (!membership) {
+    const members = await listTeamMembers(db, row.id);
+    membership = { memberCount: members.length, callerRole: members.find((m) => m.userId === callerUserId)?.role ?? null };
+  }
   return {
     id: row.id,
     orgId: row.orgId,
@@ -123,11 +119,12 @@ async function rowToSummary(
     origin: row.origin,
     externalId: row.externalId,
     createdAt: row.createdAt,
-    memberCount: members.length,
+    memberCount: membership.memberCount,
     // null = the caller is not on this team (they see it as an org admin).
-    callerRole: mine?.role ?? null,
+    callerRole: membership.callerRole,
     defaultModel: row.defaultModel,
     defaultReasoning: row.defaultReasoning,
+    slackHomeChannelId: row.slackHomeChannelId,
   };
 }
 
@@ -230,8 +227,10 @@ teamsRouter.get("/", async (c) => {
     ? await listTeamsForOrg(db, user.orgId)
     : (await listTeamsForUser(db, user.id)).filter((r) => r.orgId === user.orgId);
 
+  const memberships = await teamMembershipSummaries(db, user.orgId, rows.map((row) => row.id), user.id);
   const body: ListTeamsResponse = {
-    teams: await Promise.all(rows.map((r) => rowToSummary(db, r, user.id))),
+    teams: await Promise.all(rows.map((r) => rowToSummary(db, r, user.id,
+      memberships.get(r.id) ?? { memberCount: 0, callerRole: null }))),
   };
   return c.json(body);
 });
@@ -259,135 +258,6 @@ teamsRouter.post("/:id/join", async (c) => {
   });
   if (!joined) return c.json({ error: "team not found" }, 404);
   return c.json({ joined: true } satisfies JoinSuggestedTeamResponse);
-});
-
-// ── Orchestrator (get-or-create) ────────────────────────────────────────────
-
-/**
- * The team's DEFAULT assistant session. Mirrors `POST /api/orchestrator`
- * (`routes/orchestrator.ts`), which explicitly documents team/org
- * assistants as "created via other paths" — this is that path. Any team
- * member can reach it, same gate as `GET /:id/members`; there's no
- * team-admin-only tier for talking to the team's own assistant.
- *
- * A team owns any number of assistants. This route resolves the default,
- * which is what a caller that names only the team can mean. Use
- * `GET /api/assistants?ownerType=team&ownerId={id}` to reach the others.
- *
- * `ensureDefaultAssistantSession` is idempotent and safe to call from every
- * member: the underlying engine session may already exist (a team-owned
- * workflow's `orchestrator` node can wake one before any human ever views
- * it — see `workflows/engine-deps.ts`'s `promptOrchestrator`), in which
- * case this only backfills the `agent_sessions` app row the viewing routes
- * (`GET /api/sessions/:id`, messages, the WS) need, rather than creating a
- * second session.
- *
- * A team `vlt_` key reaches this for its own team, with no membership
- * check on the creating admin: the key survives them leaving (decision 2
- * of the team-api-keys design). The scope gate already refuses every
- * other team's id; the principal comparison here is the route's own
- * guard, so it holds even if that gate changes.
- */
-teamsRouter.post("/:id/orchestrator", async (c) => {
-  const { db, engineHost } = c.var.providers;
-  const user = c.var.user;
-  const principal = c.var.principal;
-  const id = c.req.param("id");
-
-  const team = await loadTeamInOrg(db, id, user.orgId);
-  if (!team) return c.json({ error: "team not found" }, 404);
-  const admitted = principal.type === "team" ? principal.id === id : await canViewTeam(db, id, user.id);
-  if (!admitted) return c.json({ error: "team not found" }, 404);
-
-  const { sessionId } = await ensureDefaultAssistantSession(
-    { db, engineHost },
-    { type: "team", id },
-    { actorUserId: user.id, orgId: user.orgId },
-  );
-
-  const body: EnsureOrchestratorResponse = { sessionId };
-  return c.json(body);
-});
-
-// ── Children (team dashboard) ───────────────────────────────────────────
-
-/**
- * `GET /api/teams/:id/children` — the team mirror of
- * `GET /api/orchestrator/children`: child runs spawned by EVERY assistant
- * the team owns, newest first, capped at 20 (a dashboard feed, not a
- * history — /sessions is the history). Rows carry the spawning assistant
- * so the feed can attribute a run. Same member-or-org-admin gate as the
- * roster; non-members get 404 (existence-hiding).
- */
-teamsRouter.get("/:id/children", async (c) => {
-  const { db } = c.var.providers;
-  const user = c.var.user;
-  const id = c.req.param("id");
-
-  const team = await loadTeamInOrg(db, id, user.orgId);
-  if (!team) return c.json({ error: "team not found" }, 404);
-  if (!(await canViewTeam(db, id, user.id))) return c.json({ error: "team not found" }, 404);
-
-  const assistants = await listAssistantsForOwners(db, user.orgId, [{ type: "team", id }]);
-  const bySessionId = new Map(assistants.map((a) => [a.sessionId, a]));
-  if (bySessionId.size === 0) {
-    const empty: GetTeamChildrenResponse = { children: [] };
-    return c.json(empty);
-  }
-
-  const selection = {
-    sessionId: childWatches.childSessionId,
-    parentSessionId: childWatches.parentSessionId,
-    parentThreadId: childWatches.parentThreadId,
-    settled: childWatches.settled,
-    createdAt: childWatches.createdAt,
-    title: agentSessions.title,
-    lastActivityAt: agentSessions.lastActivityAt,
-  };
-  const parentFilter = and(
-    inArray(childWatches.parentSessionId, [...bySessionId.keys()]),
-    isNull(childWatches.dismissedAt),
-  );
-  // Two reads, merged: the newest window feeds the dashboard, and RUNNING
-  // rows ride along unconditionally — a still-running child older than the
-  // window must not read as idle just because 20 quick runs settled after
-  // it started. Both are bounded; running rows cap at the same 20.
-  const [newest, running] = await Promise.all([
-    db
-      .select(selection)
-      .from(childWatches)
-      .innerJoin(agentSessions, eq(agentSessions.id, childWatches.childSessionId))
-      .where(parentFilter)
-      .orderBy(desc(sql`COALESCE(${agentSessions.lastActivityAt}, ${childWatches.createdAt})`))
-      .limit(20),
-    db
-      .select(selection)
-      .from(childWatches)
-      .innerJoin(agentSessions, eq(agentSessions.id, childWatches.childSessionId))
-      .where(and(parentFilter, eq(childWatches.settled, false)))
-      .orderBy(desc(sql`COALESCE(${agentSessions.lastActivityAt}, ${childWatches.createdAt})`))
-      .limit(20),
-  ]);
-  const seen = new Set<string>();
-  const rows = [...newest, ...running]
-    .filter((r) => (seen.has(r.sessionId) ? false : (seen.add(r.sessionId), true)))
-    .sort((a, b) => (b.lastActivityAt ?? b.createdAt) - (a.lastActivityAt ?? a.createdAt));
-
-  const children: TeamChildSummary[] = rows.map((r) => {
-    const assistant = bySessionId.get(r.parentSessionId);
-    return {
-      sessionId: r.sessionId,
-      title: r.title ?? r.sessionId,
-      parentThreadId: r.parentThreadId,
-      status: r.settled ? "settled" : "running",
-      createdAt: r.createdAt,
-      assistantId: assistant?.id ?? "",
-      ...(assistant?.name != null ? { assistantName: assistant.name } : {}),
-    };
-  });
-
-  const body: GetTeamChildrenResponse = { children };
-  return c.json(body);
 });
 
 // ── Members: list ────────────────────────────────────────────────────────
@@ -451,7 +321,7 @@ teamsRouter.post("/", async (c) => {
     const resp: CreateTeamResponse = {
       team: await rowToSummary(db, team, user.id),
       adoptedSources,
-      defaultAssistant: toAssistantSummary(team.defaultAssistant),
+      runtime: { sessionId: team.defaultAssistant.sessionId },
     };
     return c.json(resp, 201);
   } catch (err) {
@@ -463,7 +333,16 @@ teamsRouter.post("/", async (c) => {
 
 // ── Update ────────────────────────────────────────────────────────────────
 
-const PATCH_TEAM_FIELDS = new Set(["defaultModel", "defaultReasoning"]);
+/** Lowercased team names the instance config file refers to. */
+function configTeamNames(): Set<string> {
+  const cfg = loadInstanceConfig(process.env);
+  return new Set([
+    ...(cfg?.teams ?? []).map((t) => t.name),
+    ...(cfg?.skillSources ?? []).flatMap((s) => (s.team ? [s.team] : [])),
+  ].map((n) => n.toLowerCase()));
+}
+
+const PATCH_TEAM_FIELDS = new Set(["name", "defaultModel", "defaultReasoning", "slackHomeChannelId"]);
 
 /**
  * Team settings (TKAI-255). Strict whitelist, same shape as `PATCH /api/me`:
@@ -497,7 +376,7 @@ teamsRouter.patch("/:id", async (c) => {
   const unknownFields = Object.keys(raw).filter((k) => !PATCH_TEAM_FIELDS.has(k));
   if (unknownFields.length > 0) {
     return c.json(
-      { error: `unknown field(s): ${unknownFields.join(", ")}. Send only defaultModel or defaultReasoning.` },
+      { error: `unknown field(s): ${unknownFields.join(", ")}. Send only name, defaultModel, defaultReasoning, or slackHomeChannelId.` },
       400,
     );
   }
@@ -505,43 +384,58 @@ teamsRouter.patch("/:id", async (c) => {
   // `team` from `loadTeamInOrg` above is fresh within this request; the
   // write branch swaps it for the UPDATE's own returned row, so no re-read.
   let fresh: TeamRow = team;
-  const update: { defaultModel?: string | null; defaultReasoning?: string | null } = {};
-  if ("defaultModel" in raw) {
-    const defaultModel = raw.defaultModel;
-    if (defaultModel !== null && typeof defaultModel !== "string") {
-      return c.json(
-        { error: "defaultModel must be a model id from the model list (GET /api/models), or null to clear the override." },
-        400,
-      );
+  const update: { name?: string; defaultModel?: string | null; defaultReasoning?: string | null; slackHomeChannelId?: string | null } = {};
+  if ("name" in raw) {
+    const name = typeof raw.name === "string" ? raw.name.trim() : "";
+    if (!name) return c.json({ error: "Send a team name that is not empty." }, 400);
+    // The next boot resolves `teams[].name` and `skillSources[].team` by
+    // name and refuses near-name collisions, so a rename must keep both intact.
+    const configNames = configTeamNames();
+    if (name !== team.name && (team.origin === "config" || configNames.has(team.name.toLowerCase()))) {
+      return c.json({ error: "The instance config file names this team. Rename it there, then restart.", code: "team_name_managed" }, 409);
     }
-    const invalid = await validateDefaultModelId(db, engineCredentials, user.orgId, defaultModel);
-    if (invalid) return c.json({ error: invalid }, 400);
-    if (defaultModel !== null) {
-      const isAdmin = await isOrgAdmin(db, user.orgId, user.id);
-      const err = await assertModelSelectable(db, user.orgId, isAdmin, defaultModel);
-      if (err) return c.json({ error: err }, 400);
+    const [taken] = await db.select({ id: teams.id }).from(teams)
+      .where(and(eq(teams.orgId, user.orgId), sql`lower(${teams.name}) = lower(${name})`, ne(teams.id, id))).limit(1);
+    if (taken || (name !== team.name && configNames.has(name.toLowerCase()))) {
+      return c.json({ error: `Another team already uses the name ${name}. Choose another name.`, code: "team_name_conflict" }, 409);
     }
-    update.defaultModel = defaultModel;
+    update.name = name;
   }
-  if ("defaultReasoning" in raw) {
-    const defaultReasoning = raw.defaultReasoning;
-    if (defaultReasoning !== null && typeof defaultReasoning !== "string") {
-      return c.json(
-        { error: "defaultReasoning must be a reasoning level string, or null to clear the override." },
-        400,
-      );
+  if ("slackHomeChannelId" in raw) {
+    const channel = raw.slackHomeChannelId;
+    if (channel !== null && (typeof channel !== "string" || !/^[CG][A-Z0-9]{2,}$/.test(channel))) {
+      return c.json({ error: "Use a Slack channel ID starting with C or G, or null to disable home-channel notifications." }, 400);
     }
-    if (defaultReasoning === null) {
-      update.defaultReasoning = null;
-    } else {
-      const normalizedReasoning = defaultReasoning.trim().toLowerCase();
-      const err = await assertReasoningSelectable(db, user.orgId, normalizedReasoning);
-      if (err) return c.json({ error: err }, 400);
-      update.defaultReasoning = normalizedReasoning;
+    if (channel !== null) {
+      // One home channel per team: another team's attention links must not land here.
+      const [taken] = await db.select({ name: teams.name }).from(teams)
+        .where(and(eq(teams.orgId, user.orgId), eq(teams.slackHomeChannelId, channel), ne(teams.id, id))).limit(1);
+      if (taken) return c.json({ error: `${taken.name} already uses this channel as its home channel. Choose another channel.` }, 409);
+      // Team notices post there, so an admin may choose only a channel they
+      // can see: a public one, or a private one they are a member of.
+      if (!(await channelsVisibleTo(c)(`slack:${channel}`))) {
+        return c.json({ error: "Choose a channel you can see. For a private channel, join it in Slack and link your Slack account in Settings." }, 403);
+      }
     }
+    update.slackHomeChannelId = channel;
   }
+  const defaults = await validateModelDefaults(db, engineCredentials, user, raw);
+  if ("error" in defaults) return c.json(defaults, 400);
+  Object.assign(update, defaults);
   if (Object.keys(update).length > 0) {
-    const updated = await db.update(teams).set(update).where(eq(teams.id, id)).returning();
+    let updated: (typeof teams.$inferSelect)[];
+    try {
+      updated = await saveTeamSettings(db, user.orgId, id, update);
+    } catch (err) {
+      // Another team saved this name or home channel after the checks above.
+      if (update.name !== undefined && isPgUniqueViolation(err)) {
+        return c.json({ error: "Another team saved this name or home channel first. Reload, then try again.", code: "team_name_conflict" }, 409);
+      }
+      if (update.slackHomeChannelId && isPgUniqueViolation(err)) {
+        return c.json({ error: "Another team already uses this channel as its home channel. Choose another channel." }, 409);
+      }
+      throw err;
+    }
     // Zero rows = the team was deleted between the gate and the write.
     if (!updated[0]) return c.json({ error: "team not found" }, 404);
     fresh = updated[0];

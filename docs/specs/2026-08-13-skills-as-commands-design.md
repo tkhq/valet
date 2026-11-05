@@ -183,6 +183,12 @@ Recorded at implementation time (2026-08-13):
   stored skills through the host's `skillsProviderFor` and replaces the
   session's skill map, so the registry and `skill`-tool lookups stay
   consistent with the database.
+- (2026-10-06) The claim above was true for the registry only. The
+  model-facing `skill` tool kept its own copy of the build-time skills: a
+  skill added after the build was never listed, and an edited or deleted
+  skill kept its old body. The tool now reads the session's skill map, and
+  each turn re-reads that map first (`Session.refreshSkills()`). See
+  `2026-08-05-agent-skills-design.md`, "How a skill reaches the model".
 - (2026-08-27) The web transcript renders a skill invocation as a
   collapsed skill card, not as raw message text. The `<skill>` block
   format lives in `@valet/shared` (`buildSkillBlock` /

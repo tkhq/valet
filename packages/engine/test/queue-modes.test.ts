@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { fauxAssistantMessage, registerFauxProvider, type FauxResponseStep } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider, Type, type FauxResponseStep } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import {
   Engine,
+  entriesToAgentMessages,
   InMemoryEventStream,
   InMemorySessionStore,
   VirtualSandboxProvider,
@@ -30,6 +32,171 @@ async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 
     await new Promise((r) => setTimeout(r, 5));
   }
 }
+
+describe("origin correction context", () => {
+  it("carries only the sender's queued inputs into a stop and leaves other senders queued", async () => {
+    const faux = registerFauxProvider({ provider: "origin-carry", tokensPerSecond: 30 });
+    faux.setResponses([fauxAssistantMessage(Array.from({ length: 80 }, () => "working").join(" ")), fauxAssistantMessage("stopped"), fauxAssistantMessage("other done")]);
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+    const thread = session.thread();
+    const content = (body: string) => ({ kind: "signal" as const, signalType: "slack.message", body, origin: { channelType: "slack", threadKey: "slack:C1:1", reply: "auto" as const } });
+    const sender = { id: "sender", name: "Sender" };
+    try {
+      const active = await thread.submitPrompt(content("start"), { author: sender });
+      await waitFor(() => events.some(e => e.event.type === "text_delta"));
+      const older = await thread.submitPrompt({ ...content("deploy now"), attachments: [{ type: "image", mimeType: "image/png", data: new Uint8Array([1, 2, 3]), name: "queued.png" }, { type: "file", path: "/workspace/uploads/queued.pdf", bytes: 12, sha256: "abc", name: "queued.pdf" }] }, { queueMode: "followup", author: sender });
+      const other = await thread.submitPrompt(content("also check the logs"), { queueMode: "followup", author: { id: "other", name: "Other" } });
+      const stop = await thread.submitPrompt(content("stop"), { queueMode: "steer", steerScope: "active-origin", author: sender });
+      await thread.awaitResult(stop.queueItemId);
+      expect((await thread.awaitResult(older.queueItemId)).outcome).toBe("superseded");
+      expect((await store.getQueueItem(session.id, active.queueItemId))?.outcome?.outcome).toBe("superseded");
+      expect((await thread.awaitResult(other.queueItemId)).outcome).toBe("completed");
+      const entries = await session.readEntries("web:default");
+      const userEntries = entries.filter((e): e is MessageEntry => e.type === "message" && e.role === "user");
+      expect(userEntries).toHaveLength(3);
+      const newest = userEntries[1];
+      expect(newest.author).toEqual(sender);
+      expect(newest.content).toMatch(/^Messages received while you worked, in order:/);
+      expect(newest.content).toContain("> Sender · sender\n> deploy now");
+      expect(newest.content).toContain("> Sender · sender\n> stop");
+      expect(newest.content.indexOf("deploy now")).toBeLessThan(newest.content.indexOf("> stop"));
+      expect(newest.content.match(/deploy now/g)).toHaveLength(1);
+      expect(newest.content).not.toContain("also check the logs");
+      expect(newest.content).not.toContain("correction");
+      expect(newest.content).not.toContain('"signalType"');
+      expect(newest.attachments).toMatchObject([{ type: "image", mimeType: "image/png", name: "queued.png" }, { type: "file", path: "/workspace/uploads/queued.pdf" }]);
+      const messages = entriesToAgentMessages([newest], faux.getModel());
+      expect(messages[0].content).toContainEqual({ type: "image", data: "AQID", mimeType: "image/png" });
+      expect(JSON.stringify(messages[0].content)).toContain("/workspace/uploads/queued.pdf");
+    } finally {
+      await session.destroy();
+      faux.unregister();
+    }
+  });
+
+  it("runs a stop that carries queued input in that input's place, before later work", async () => {
+    const faux = registerFauxProvider({ provider: "origin-carry-order", tokensPerSecond: 60 });
+    faux.setResponses([fauxAssistantMessage(Array.from({ length: 40 }, () => "working").join(" ")), fauxAssistantMessage("stopped"), fauxAssistantMessage("web done")]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+    const thread = session.thread();
+    const slack = (body: string) => ({ kind: "signal" as const, signalType: "slack.message", body, origin: { channelType: "slack", threadKey: "slack:C1:1", reply: "auto" as const } });
+    const sender = { id: "sender", name: "Sender" };
+    const pause = () => new Promise((r) => setTimeout(r, 5));
+    try {
+      // An unrelated web turn runs, so the stop has no matching turn to replace.
+      await thread.submitPrompt("unrelated web task", { author: { id: "owner" } });
+      await waitFor(() => events.some(e => e.event.type === "text_delta"));
+      await thread.submitPrompt(slack("deploy now"), { queueMode: "followup", author: sender });
+      await pause();
+      const web = await thread.submitPrompt("later web task", { queueMode: "followup", author: { id: "owner" } });
+      await pause();
+      const stop = await thread.submitPrompt(slack("stop"), { queueMode: "steer", steerScope: "active-origin", author: sender });
+      await thread.awaitResult(stop.queueItemId);
+      await thread.awaitResult(web.queueItemId);
+      const users = (await session.readEntries("web:default")).filter((e): e is MessageEntry => e.type === "message" && e.role === "user");
+      const carriedAt = users.findIndex(e => e.content.includes("deploy now"));
+      const webAt = users.findIndex(e => e.content.includes("later web task"));
+      expect(carriedAt).toBeGreaterThan(0);
+      expect(carriedAt).toBeLessThan(webAt);
+    } finally {
+      await session.destroy();
+      faux.unregister();
+    }
+  });
+
+  it("keeps another sender's active turn running", async () => {
+    const faux = registerFauxProvider({ provider: "origin-other-sender", tokensPerSecond: 60 });
+    faux.setResponses([fauxAssistantMessage(Array.from({ length: 40 }, () => "working").join(" ")), fauxAssistantMessage("later")]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+    const thread = session.thread();
+    const content = (body: string) => ({ kind: "signal" as const, signalType: "slack.message", body, origin: { channelType: "slack", threadKey: "slack:C1:1", reply: "auto" as const } });
+    try {
+      const active = await thread.submitPrompt(content("start"), { author: { id: "owner" } });
+      await waitFor(() => events.some(e => e.event.type === "text_delta"));
+      const stop = await thread.submitPrompt(content("stop"), { queueMode: "steer", steerScope: "active-origin", author: { id: "other" } });
+      expect((await thread.awaitResult(active.queueItemId)).outcome).toBe("completed");
+      expect((await thread.awaitResult(stop.queueItemId)).outcome).toBe("completed");
+    } finally {
+      await session.destroy();
+      faux.unregister();
+    }
+  });
+});
+
+describe("origin correction recovery", () => {
+  it("preserves an unrelated active approval when replacing queued Slack input", async () => {
+    const faux = registerFauxProvider({ provider: "origin-carry-gate" });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("ask", {}, { id: "ask1" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("approved"), fauxAssistantMessage("correction done"),
+    ]);
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(),
+      tools: [{ name: "ask", description: "Request approval", parameters: Type.Object({}), execute: async (_args, ctx) => {
+        await ctx.requestDecision({ type: "approval", title: "Approve", resumeKey: "ask" });
+        return { text: "approved" };
+      } }],
+    });
+    const thread = session.thread();
+    const content = (body: string, threadKey: string) => ({ kind: "signal" as const, signalType: "slack.message", body, origin: { channelType: "slack", threadKey, reply: "auto" as const } });
+    try {
+      const active = await thread.submitPrompt(content("needs approval", "slack:A:1"), {});
+      await waitFor(async () => (await store.getQueueItem(session.id, active.queueItemId))?.status === "blocked_on_decision_gate");
+      const gate = thread.pendingDecisionGates()[0];
+      if (!gate) throw new Error("Expected active approval");
+      const older = await thread.submitPrompt(content("deploy", "slack:B:1"), { queueMode: "followup" });
+      const correction = await thread.submitPrompt(content("stop", "slack:B:1"), { queueMode: "steer", steerScope: "active-origin" });
+      expect(thread.pendingDecisionGates().map(g => g.id)).toContain(gate.id);
+      expect(events.filter(e => e.event.type === "decision_gate_withdrawn")).toHaveLength(0);
+      expect(await store.getQueueItem(session.id, active.queueItemId)).toMatchObject({ status: "blocked_on_decision_gate" });
+      expect((await thread.awaitResult(older.queueItemId)).outcome).toBe("superseded");
+      await session.resolveDecision(gate.id, { actionId: "approve", resolvedBy: "u1", resolvedAt: Date.now() });
+      expect((await thread.awaitResult(active.queueItemId)).outcome).toBe("completed");
+      expect((await thread.awaitResult(correction.queueItemId)).outcome).toBe("completed");
+    } finally { await session.destroy(); faux.unregister(); }
+  });
+
+  it.each([false, true])("restores transitive context and image-only input after admission, promoted=%s", async (promote) => {
+    const faux = registerFauxProvider({ provider: "origin-carry-restore" });
+    faux.setResponses([fauxAssistantMessage("restored correction")]);
+    const { engine, store } = makeEngine();
+    const options = { userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() };
+    const session = await engine.createSession(options);
+    const thread = await session.ensureDefaultThread();
+    await thread.pause();
+    const content = (body: string) => ({ kind: "signal" as const, signalType: "slack.message", body, origin: { channelType: "slack", threadKey: "slack:C1:1", reply: "auto" as const } });
+    const original = await thread.submitPrompt({ ...content(""), attachments: [{ type: "image", mimeType: "image/png", data: new Uint8Array([1, 2, 3]) }] }, { author: { id: "sender" }, dispatchId: "restore-original" });
+    const originalItem = await store.getQueueItem(session.id, original.queueItemId);
+    if (!originalItem) throw new Error("Expected queued input");
+    const middle = { ...originalItem, id: "restore-middle", dispatchId: "restore-middle", content: content("review image") };
+    const latest = { ...middle, id: "restore-latest", dispatchId: "restore-latest", content: content("stop deployment") };
+    const opts = { steer: true, steerScope: "active-origin" as const };
+    await store.admitSubmission(session.id, thread.id, middle, opts);
+    await store.admitSubmission(session.id, thread.id, latest, opts);
+    const runnableId = promote ? (await thread.promoteQueuedItem(latest.id)).queueItemId : latest.id;
+    session.suspendTimers();
+    const restoredEngine = new Engine({ providers: { store, stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() } });
+    const restored = await restoredEngine.restoreSession({ sessionId: session.id, options });
+    try {
+      const restoredThread = restored.thread();
+      await restoredThread.resume();
+      expect((await restoredThread.awaitResult(runnableId)).outcome).toBe("completed");
+      expect((await restoredThread.awaitResult(original.queueItemId)).outcome).toBe("superseded");
+      const users = (await restored.readEntries("web:default")).filter((e): e is MessageEntry => e.type === "message" && e.role === "user");
+      expect(users).toHaveLength(1);
+      expect(users[0].content.match(/^> sender$/gm)).toHaveLength(3);
+      expect(users[0].content.indexOf("review image")).toBeLessThan(users[0].content.indexOf("stop deployment"));
+      expect(entriesToAgentMessages(users, faux.getModel())[0].content).toContainEqual({ type: "image", data: "AQID", mimeType: "image/png" });
+      expect(users[0].author).toEqual({ id: "sender" });
+      const replay = await store.admitSubmission(session.id, thread.id, latest, opts);
+      expect(replay.admitted).toBe(false);
+      expect(replay.item.metadata?.carriedInputIds).toEqual([original.queueItemId, middle.id]);
+    } finally { await restored.destroy(); faux.unregister(); }
+  });
+});
 
 describe("queue mode: followup (FIFO)", () => {
   it("processes prompts in order and settles each submission completed", async () => {
@@ -292,14 +459,20 @@ describe("queue mode: steer (abort + new)", () => {
         e.type === "message" && e.role === "assistant" && e.queueItemId === r2.queueItemId,
     );
     expect(sAssistant?.content).toBe("steer-done");
+    expect(events.filter((e) => e.event.type === "error")).toEqual([]);
 
     faux.unregister();
   });
 
-  it("promoteQueuedItem steers the running turn without a second user entry", async () => {
+  it("promoteQueuedItem runs next while preserving queued siblings", async () => {
     const faux = registerFauxProvider({ provider: "promote-steer", tokensPerSecond: 30 });
     const longText = Array.from({ length: 30 }, (_, i) => `word${i}`).join(" ");
-    faux.setResponses([fauxAssistantMessage(longText), fauxAssistantMessage("promoted-done")]);
+    faux.setResponses([
+      fauxAssistantMessage(longText),
+      fauxAssistantMessage("promoted-q2-done"),
+      fauxAssistantMessage("q1-done"),
+      fauxAssistantMessage("q3-done"),
+    ]);
 
     const { engine, store, events } = makeEngine();
     const session = await engine.createSession({
@@ -310,40 +483,81 @@ describe("queue mode: steer (abort + new)", () => {
       model: faux.getModel(),
     });
 
-    const r1 = await session.prompt("original");
+    const active = await session.prompt("original");
     await waitFor(() => events.some((e) => e.event.type === "text_delta"));
 
-    const r2 = await session.thread().submitPrompt("followup", { queueMode: "followup" });
-    const r3 = await session.thread().promoteQueuedItem(r2.queueItemId);
-    expect(r3.queueItemId).not.toBe(r2.queueItemId);
+    const q1 = await session.thread().submitPrompt("q1", { queueMode: "followup" });
+    const q2 = await session.thread().submitPrompt("q2", { queueMode: "followup" });
+    const q3 = await session.thread().submitPrompt("q3", { queueMode: "followup" });
+    const promotedQ2 = await session.thread().promoteQueuedItem(q2.queueItemId);
+    expect(promotedQ2.queueItemId).not.toBe(q2.queueItemId);
 
     await waitFor(async () => {
-      const items = await Promise.all([
-        store.getQueueItem(session.id, r1.queueItemId),
-        store.getQueueItem(session.id, r2.queueItemId),
-        store.getQueueItem(session.id, r3.queueItemId),
-      ]);
-      return items.every((i) => i?.status === "settled");
-    });
+      const items = await Promise.all(
+        [active, q1, q2, q3, promotedQ2].map((receipt) =>
+          store.getQueueItem(session.id, receipt.queueItemId),
+        ),
+      );
+      return items.every((item) => item?.status === "settled");
+    }, 10_000);
 
-    const a = await store.getQueueItem(session.id, r1.queueItemId);
-    expect(a?.outcome).toEqual({ outcome: "superseded" });
-    expect(a?.supersededByItemId).toBe(r3.queueItemId);
+    const activeItem = await store.getQueueItem(session.id, active.queueItemId);
+    expect(activeItem?.outcome).toEqual({ outcome: "superseded" });
+    expect(activeItem?.supersededByItemId).toBe(promotedQ2.queueItemId);
 
-    const queued = await store.getQueueItem(session.id, r2.queueItemId);
-    expect(queued?.outcome).toEqual({ outcome: "superseded" });
-    expect(queued?.supersededByItemId).toBe(r3.queueItemId);
+    const originalQ2 = await store.getQueueItem(session.id, q2.queueItemId);
+    expect(originalQ2?.outcome).toEqual({ outcome: "superseded" });
+    expect(originalQ2?.supersededByItemId).toBe(promotedQ2.queueItemId);
 
-    const promoted = await store.getQueueItem(session.id, r3.queueItemId);
+    const survivingQ1 = await store.getQueueItem(session.id, q1.queueItemId);
+    const survivingQ3 = await store.getQueueItem(session.id, q3.queueItemId);
+    expect(survivingQ1?.outcome).toEqual({ outcome: "completed" });
+    expect(survivingQ1?.supersededByItemId).toBeUndefined();
+    expect(survivingQ3?.outcome).toEqual({ outcome: "completed" });
+    expect(survivingQ3?.supersededByItemId).toBeUndefined();
+
+    const promoted = await store.getQueueItem(session.id, promotedQ2.queueItemId);
     expect(promoted?.outcome).toEqual({ outcome: "completed" });
 
     const entries = await session.readEntries("web:default");
     const userMessages = entries.filter(
-      (e): e is MessageEntry => e.type === "message" && e.role === "user",
+      (entry): entry is MessageEntry => entry.type === "message" && entry.role === "user",
     );
-    expect(userMessages.map((m) => m.content)).toEqual(["original", "followup"]);
-    expect(userMessages.map((m) => m.queueItemId)).toEqual([r1.queueItemId, r3.queueItemId]);
+    expect(userMessages.map((message) => message.content)).toEqual([
+      "original",
+      "q2",
+      "q1",
+      "q3",
+    ]);
+    expect(userMessages.filter((message) => message.content === "q2")).toHaveLength(1);
+    expect(userMessages.map((message) => message.queueItemId)).toEqual([
+      active.queueItemId,
+      promotedQ2.queueItemId,
+      q1.queueItemId,
+      q3.queueItemId,
+    ]);
 
+    faux.unregister();
+  });
+
+  it("promoteQueuedItem names its source item, which keeps its dispatch id", async () => {
+    const faux = registerFauxProvider({ provider: "promote-provenance", tokensPerSecond: 30 });
+    const longText = Array.from({ length: 30 }, (_, i) => `word${i}`).join(" ");
+    faux.setResponses([fauxAssistantMessage(longText), fauxAssistantMessage("step-done")]);
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+    const active = await session.prompt("original");
+    await waitFor(() => events.some((e) => e.event.type === "text_delta"));
+    // A workflow Thread step's prompt, queued behind the running turn. Usage
+    // bills its turn to the step through this dispatch id.
+    const step = await session.thread().submitPrompt("step", { queueMode: "followup", dispatchId: "workflow:run-1:think" });
+    const promoted = await session.thread().promoteQueuedItem(step.queueItemId);
+    await waitFor(async () => (await store.getQueueItem(session.id, promoted.queueItemId))?.status === "settled", 10_000);
+    // The dispatch id stays on the source: it is unique per session, so the
+    // promoted item cannot repeat it, and it names the source instead.
+    expect((await store.getQueueItem(session.id, step.queueItemId))?.dispatchId).toBe("workflow:run-1:think");
+    expect((await store.getQueueItem(session.id, promoted.queueItemId))?.metadata).toMatchObject({ promotedFromItemId: step.queueItemId });
+    await waitFor(async () => (await store.getQueueItem(session.id, active.queueItemId))?.status === "settled", 10_000);
     faux.unregister();
   });
 
@@ -442,6 +656,299 @@ describe("queue: pause + resume", () => {
 });
 
 describe("queue: abort", () => {
+  it("cancels only the selected queued submission on a shared thread", async () => {
+    const faux = registerFauxProvider({ provider: "abort-one-queued" });
+    faux.setResponses([fauxAssistantMessage("warm"), fauxAssistantMessage("kept")]);
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+    const thread = session.thread();
+    const warm = await thread.submitPrompt("warm", {});
+    await waitFor(async () => (await store.getQueueItem(session.id, warm.queueItemId))?.status === "settled");
+    await thread.pause();
+    const cancelled = await thread.submitPrompt("cancel", {});
+    const kept = await thread.submitPrompt("keep", {});
+    await thread.abortSubmission(cancelled.queueItemId);
+    expect((await store.getQueueItem(session.id, cancelled.queueItemId))?.outcome).toEqual({ outcome: "aborted" });
+    expect((await store.getQueueItem(session.id, kept.queueItemId))?.abortRequestedAt).toBeUndefined();
+    await thread.resume();
+    await waitFor(async () => (await store.getQueueItem(session.id, kept.queueItemId))?.status === "settled");
+    expect((await store.getQueueItem(session.id, kept.queueItemId))?.outcome).toEqual({ outcome: "completed" });
+    await session.destroy();
+    faux.unregister();
+  });
+
+  it("does not start a cancelled turn after async model resolution completes", async () => {
+    const faux = registerFauxProvider({ provider: "abort-during-model-resolution" });
+    faux.setResponses([fauxAssistantMessage("kept")]);
+    let release = () => {};
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    let resolving = false;
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(),
+      resolveModel: async () => {
+        resolving = true;
+        await pending;
+        return { model: faux.getModel() };
+      },
+    });
+    const thread = session.thread();
+    const cancelled = await thread.submitPrompt("cancel", {});
+    await waitFor(() => resolving);
+    const kept = await thread.submitPrompt("keep", {});
+    await thread.abortSubmission(cancelled.queueItemId);
+    release();
+    await waitFor(async () => (await store.getQueueItem(session.id, kept.queueItemId))?.status === "settled");
+    expect((await store.getQueueItem(session.id, cancelled.queueItemId))?.outcome).toEqual({ outcome: "aborted" });
+    expect((await store.getQueueItem(session.id, kept.queueItemId))?.outcome).toEqual({ outcome: "completed" });
+    await session.destroy();
+    faux.unregister();
+  });
+
+  it("interrupts a running submission while allowing its queued successor to finish", async () => {
+    const faux = registerFauxProvider({ provider: "abort-one-running", tokensPerSecond: 20 });
+    faux.setResponses([fauxAssistantMessage("first response is deliberately slow and long"), fauxAssistantMessage("kept")]);
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+    const thread = session.thread();
+    const cancelled = await thread.submitPrompt("cancel", {});
+    await waitFor(async () => (await store.getQueueItem(session.id, cancelled.queueItemId))?.status === "running");
+    const kept = await thread.submitPrompt("keep", {});
+    await thread.interrupt(cancelled.queueItemId);
+    await waitFor(async () => (await store.getQueueItem(session.id, kept.queueItemId))?.status === "settled", 10000);
+    expect((await store.getQueueItem(session.id, cancelled.queueItemId))?.outcome).toEqual({ outcome: "aborted" });
+    expect((await store.getQueueItem(session.id, kept.queueItemId))?.outcome).toEqual({ outcome: "completed" });
+    await session.destroy();
+    faux.unregister();
+  });
+
+  it("interrupts a durable claim before the local running item is installed", async () => {
+    let markInserted!: () => void;
+    const markerInserted = new Promise<void>((resolve) => { markInserted = resolve; });
+    let releaseMarker!: () => void;
+    const markerBarrier = new Promise<void>((resolve) => { releaseMarker = resolve; });
+    class ClaimWindowStore extends InMemorySessionStore {
+      override async insertAttemptMarker(itemId: string, attemptId: string): Promise<void> {
+        await super.insertAttemptMarker(itemId, attemptId);
+        markInserted();
+        await markerBarrier;
+      }
+    }
+
+    const faux = registerFauxProvider({ provider: "interrupt-claim-window" });
+    faux.setResponses([fauxAssistantMessage("kept")]);
+    const store = new ClaimWindowStore();
+    const engine = new Engine({
+      providers: {
+        store,
+        stream: new InMemoryEventStream(),
+        sandboxProvider: new VirtualSandboxProvider(),
+      },
+    });
+    const session = await engine.createSession({
+      userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(),
+    });
+    const thread = session.thread();
+    const cancelled = await thread.submitPrompt("cancel", {});
+    await markerInserted;
+    const kept = await thread.submitPrompt("keep", {});
+
+    await thread.interrupt(cancelled.queueItemId);
+
+    expect((await store.getQueueItem(session.id, cancelled.queueItemId))?.abortRequestedAt).toBeDefined();
+    expect((await store.getQueueItem(session.id, kept.queueItemId))?.abortRequestedAt).toBeUndefined();
+    releaseMarker();
+    await expect(thread.awaitResult(cancelled.queueItemId, { timeoutMs: 2_000 })).resolves.toMatchObject({
+      outcome: "aborted",
+    });
+    await expect(thread.awaitResult(kept.queueItemId, { timeoutMs: 2_000 })).resolves.toMatchObject({
+      outcome: "completed",
+      text: "kept",
+    });
+    expect((await store.getQueueItem(session.id, kept.queueItemId))?.abortRequestedAt).toBeUndefined();
+    await session.destroy();
+    faux.unregister();
+  });
+
+  it("does not let a repeated targeted interrupt abort a claimed successor", async () => {
+    class ClaimBarrierStore extends InMemorySessionStore {
+      readonly barriers = new Map<string, { inserted: () => void; release: Promise<void> }>();
+
+      override async insertAttemptMarker(itemId: string, attemptId: string): Promise<void> {
+        await super.insertAttemptMarker(itemId, attemptId);
+        const barrier = this.barriers.get(itemId);
+        if (!barrier) return;
+        barrier.inserted();
+        await barrier.release;
+      }
+    }
+
+    let markFirstClaimed!: () => void;
+    const firstClaimed = new Promise<void>((resolve) => { markFirstClaimed = resolve; });
+    let releaseFirst!: () => void;
+    const firstBarrier = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let markSuccessorClaimed!: () => void;
+    const successorClaimed = new Promise<void>((resolve) => { markSuccessorClaimed = resolve; });
+    let releaseSuccessor!: () => void;
+    const successorBarrier = new Promise<void>((resolve) => { releaseSuccessor = resolve; });
+    const faux = registerFauxProvider({ provider: "interrupt-target-retry" });
+    const store = new ClaimBarrierStore();
+    const engine = new Engine({
+      providers: {
+        store,
+        stream: new InMemoryEventStream(),
+        sandboxProvider: new VirtualSandboxProvider(),
+      },
+    });
+    const session = await engine.createSession({
+      userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(),
+    });
+    const thread = session.thread();
+    await thread.pause();
+    const first = await thread.submitPrompt("first", {});
+    const successor = await thread.submitPrompt("successor", {});
+    store.barriers.set(first.queueItemId, { inserted: markFirstClaimed, release: firstBarrier });
+    store.barriers.set(successor.queueItemId, { inserted: markSuccessorClaimed, release: successorBarrier });
+
+    await thread.resume();
+    await firstClaimed;
+    await thread.interrupt(first.queueItemId);
+    releaseFirst();
+    await expect(thread.awaitResult(first.queueItemId, { timeoutMs: 2_000 })).resolves.toMatchObject({
+      outcome: "aborted",
+    });
+
+    await successorClaimed;
+    await thread.interrupt(first.queueItemId);
+    expect((await store.getQueueItem(session.id, successor.queueItemId))?.abortRequestedAt).toBeUndefined();
+
+    await thread.interrupt(successor.queueItemId);
+    expect((await store.getQueueItem(session.id, successor.queueItemId))?.abortRequestedAt).toBeDefined();
+    releaseSuccessor();
+    await expect(thread.awaitResult(successor.queueItemId, { timeoutMs: 2_000 })).resolves.toMatchObject({
+      outcome: "aborted",
+    });
+    await session.destroy();
+    faux.unregister();
+  });
+
+  it("delivers every queued followup after interrupting the running submission", async () => {
+    const faux = registerFauxProvider({ provider: "interrupt-many", tokensPerSecond: 20 });
+    faux.setResponses([
+      fauxAssistantMessage("first response is deliberately slow and long"),
+      fauxAssistantMessage("second-done"),
+      fauxAssistantMessage("third-done"),
+    ]);
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(),
+    });
+    const thread = session.thread();
+    const first = await thread.submitPrompt("first", {});
+    await waitFor(async () =>
+      (await store.getQueueItem(session.id, first.queueItemId))?.status === "running"
+    );
+    const second = await thread.submitPrompt("second", {});
+    const third = await thread.submitPrompt("third", {});
+
+    await thread.interrupt(first.queueItemId);
+    await waitFor(async () => {
+      const queued = await Promise.all([
+        store.getQueueItem(session.id, second.queueItemId),
+        store.getQueueItem(session.id, third.queueItemId),
+      ]);
+      return queued.every((item) => item?.status === "settled");
+    }, 10000);
+
+    expect((await store.getQueueItem(session.id, first.queueItemId))?.outcome).toEqual({ outcome: "aborted" });
+    expect((await store.getQueueItem(session.id, second.queueItemId))?.outcome).toEqual({ outcome: "completed" });
+    expect((await store.getQueueItem(session.id, third.queueItemId))?.outcome).toEqual({ outcome: "completed" });
+    expect((await store.getQueueItem(session.id, second.queueItemId))?.abortRequestedAt).toBeUndefined();
+    expect((await store.getQueueItem(session.id, third.queueItemId))?.abortRequestedAt).toBeUndefined();
+    await session.destroy();
+    faux.unregister();
+  });
+
+  it("kicks a queued submission when no submission is running", async () => {
+    const faux = registerFauxProvider({ provider: "interrupt-idle" });
+    faux.setResponses([fauxAssistantMessage("queued-done")]);
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(),
+    });
+    const thread = session.thread();
+    await thread.pause();
+    const queued = await thread.submitPrompt("queued", {});
+
+    await thread.interrupt(queued.queueItemId);
+    const beforeResume = await store.getQueueItem(session.id, queued.queueItemId);
+    expect(beforeResume?.status).toBe("queued");
+    expect(beforeResume?.abortRequestedAt).toBeUndefined();
+
+    await thread.resume();
+    await waitFor(async () =>
+      (await store.getQueueItem(session.id, queued.queueItemId))?.status === "settled"
+    );
+    expect((await store.getQueueItem(session.id, queued.queueItemId))?.outcome).toEqual({ outcome: "completed" });
+    await session.destroy();
+    faux.unregister();
+  });
+
+  it("withdraws only the cancelled submission's gate and continues the shared thread", async () => {
+    const faux = registerFauxProvider({ provider: "abort-one-gate" });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("ask", {}, { id: "ask1" })], { stopReason: "toolUse" }),
+      // Gate withdrawal can consume a provider response while the turn unwinds.
+      fauxAssistantMessage("cancelled turn unwinding"),
+      fauxAssistantMessage("kept"),
+    ]);
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(),
+      tools: [{ name: "ask", description: "Request approval", parameters: Type.Object({}), execute: async (_args, ctx) => {
+        await ctx.requestDecision({ type: "approval", title: "Approve", resumeKey: "ask" });
+        return { text: "approved" };
+      } }],
+    });
+    const thread = session.thread();
+    const cancelled = await thread.submitPrompt("cancel", {});
+    await waitFor(async () => (await store.getQueueItem(session.id, cancelled.queueItemId))?.status === "blocked_on_decision_gate");
+    const kept = await thread.submitPrompt("keep", {});
+    await thread.abortSubmission(cancelled.queueItemId);
+    await waitFor(async () => (await store.getQueueItem(session.id, kept.queueItemId))?.status === "settled");
+    expect((await store.getQueueItem(session.id, cancelled.queueItemId))?.outcome).toEqual({ outcome: "aborted" });
+    expect((await store.getQueueItem(session.id, kept.queueItemId))?.outcome).toEqual({ outcome: "completed" });
+    expect(events.some(({ event }) => event.type === "decision_gate_withdrawn" && event.reason === "abort")).toBe(true);
+    await session.destroy();
+    faux.unregister();
+  });
+
+  it("session destroy still settles queued submissions aborted", async () => {
+    class InspectableDestroyStore extends InMemorySessionStore {
+      override async deleteSession(_id: string): Promise<void> {}
+    }
+    const faux = registerFauxProvider({ provider: "destroy-queued" });
+    const store = new InspectableDestroyStore();
+    const engine = new Engine({
+      providers: {
+        store,
+        stream: new InMemoryEventStream(),
+        sandboxProvider: new VirtualSandboxProvider(),
+      },
+    });
+    const session = await engine.createSession({
+      userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(),
+    });
+    const thread = session.thread();
+    await thread.pause();
+    const queued = await thread.submitPrompt("queued", {});
+
+    await session.destroy();
+
+    const item = await store.getQueueItem(session.id, queued.queueItemId);
+    expect(item?.status).toBe("settled");
+    expect(item?.outcome).toEqual({ outcome: "aborted" });
+    faux.unregister();
+  });
+
   it("aborts a queued (not-yet-claimed) submission via settleUnclaimed", async () => {
     const faux = registerFauxProvider({ provider: "abort-queued" });
     faux.setResponses([fauxAssistantMessage("first-done"), fauxAssistantMessage("second-done")]);
@@ -467,6 +974,82 @@ describe("queue: abort", () => {
     expect(aborted?.status).toBe("settled");
     expect(aborted?.outcome).toEqual({ outcome: "aborted" });
 
+    faux.unregister();
+  });
+});
+
+describe("queue: a tool that ignores its abort signal", () => {
+  // A tool that never returns, the way a GitHub call sleeping through a
+  // rate-limit reset did. Stop and steer must still end its turn.
+  function hangingSession(provider: string) {
+    const faux = registerFauxProvider({ provider });
+    let started = false;
+    const tools = [{
+      name: "hang", description: "Never returns", parameters: Type.Object({}),
+      execute: async () => {
+        started = true;
+        return new Promise<never>(() => {});
+      },
+    }];
+    return { faux, tools, started: () => started };
+  }
+
+  it("ends the turn on Stop and then runs the queued message", async () => {
+    const { faux, tools, started } = hangingSession("stop-hung-tool");
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("hang", {}, { id: "hang1" })], { stopReason: "toolUse" }),
+      // The stopped turn can use one response while it unwinds.
+      fauxAssistantMessage("stopped turn unwinding"),
+      fauxAssistantMessage("next-done"),
+    ]);
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(), tools, toolStopGraceMs: 20,
+    });
+    const thread = session.thread();
+    const first = await thread.submitPrompt("first", {});
+    await waitFor(started);
+    const next = await thread.submitPrompt("next", {});
+
+    await thread.interrupt(first.queueItemId);
+
+    await waitFor(async () => (await store.getQueueItem(session.id, next.queueItemId))?.status === "settled");
+    expect((await store.getQueueItem(session.id, first.queueItemId))?.outcome).toEqual({ outcome: "aborted" });
+    expect((await store.getQueueItem(session.id, next.queueItemId))?.outcome).toEqual({ outcome: "completed" });
+    await session.destroy();
+    faux.unregister();
+  });
+
+  it("reports the steered turn settled only after it has ended", async () => {
+    const { faux, tools, started } = hangingSession("steer-hung-tool");
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("hang", {}, { id: "hang1" })], { stopReason: "toolUse" }),
+      // The stopped turn can use one response while it unwinds.
+      fauxAssistantMessage("stopped turn unwinding"),
+      fauxAssistantMessage("steer-done"),
+    ]);
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(), tools, toolStopGraceMs: 20,
+    });
+    const thread = session.thread();
+    const first = await thread.submitPrompt("first", {});
+    await waitFor(started);
+
+    const steer = await thread.submitPrompt("steer-in", { queueMode: "steer" });
+
+    await waitFor(async () => (await store.getQueueItem(session.id, steer.queueItemId))?.status === "settled");
+    // The running item settles when its turn ends, after its tool call, not
+    // when the steer arrives. A settle event before that told clients the
+    // turn was over while it still ran.
+    const order = events.map(({ event }) => event);
+    const toolEnd = order.findIndex((event) => event.type === "tool_end" && event.callId === "hang1");
+    const firstSettled = order.findIndex((event) => event.type === "submission_settled" && event.queueItemId === first.queueItemId);
+    expect(toolEnd).toBeGreaterThanOrEqual(0);
+    expect(firstSettled).toBeGreaterThan(toolEnd);
+    expect((await store.getQueueItem(session.id, first.queueItemId))?.status).toBe("settled");
+    expect((await store.getQueueItem(session.id, steer.queueItemId))?.outcome).toEqual({ outcome: "completed" });
+    await session.destroy();
     faux.unregister();
   });
 });
@@ -588,7 +1171,7 @@ describe("queue: settlement resilience", () => {
 });
 
 describe("queue: length-terminated turns", () => {
-  it("stopReason 'length' persists as end_turn and settles completed", async () => {
+  it("stopReason 'length' keeps its transcript mapping but settles failed", async () => {
     const faux = registerFauxProvider({ provider: "max-tokens" });
     faux.setResponses([fauxAssistantMessage("truncated but usable", { stopReason: "length" })]);
 
@@ -608,16 +1191,18 @@ describe("queue: length-terminated turns", () => {
     });
 
     const item = await store.getQueueItem(session.id, r1.queueItemId);
-    expect(item?.outcome).toEqual({ outcome: "completed" });
+    expect(item?.outcome).toMatchObject({ outcome: "failed", error: expect.stringContaining("output limit") });
+    expect(item?.attemptCount).toBe(1);
+    expect(faux.state.callCount).toBe(1);
 
-    // Task 6 resolves result text from "last assistant entry with stopReason
-    // end_turn" — a max-tokens turn must still carry one.
+    // Partial text remains available, but it is not a completed result.
     const entries = await session.readEntries("web:default");
     const lastAssistant = entries
       .filter((e): e is MessageEntry => e.type === "message" && e.role === "assistant")
       .at(-1);
     expect(lastAssistant?.stopReason).toBe("end_turn");
     expect(lastAssistant?.queueItemId).toBe(r1.queueItemId);
+    expect(lastAssistant?.metadata?.modelResponse).toMatchObject({ stopReason: "length" });
 
     faux.unregister();
   });

@@ -88,6 +88,65 @@ describe("ensureMcpOAuthClient", () => {
     expect(fake.registrations).toHaveLength(1);
   });
 
+  it("requests only the declared scopes and warns naming the advertised ones it lacks", async () => {
+    // Metabase 1.64: read tools need agent:content:read, which a scope list
+    // copied from 1.63 does not name. Valet must not grant it on its own.
+    const mb = await startFakeOAuthServer({ resourceScopesSupported: ["agent:content:read", "agent:query:run"] });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const row = await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", mb.url, "https://valet.example/cb", [
+        "agent:query:run",
+      ]);
+      expect(row.scopes).toEqual(["agent:query:run"]);
+      expect(mb.registrations[0]?.scope).toBe("agent:query:run");
+      const named = (m: string) => m.includes('"metabase"') && m.includes("agent:content:read");
+      expect(warn.mock.calls.map((c) => String(c[0])).some(named)).toBe(true);
+
+      // A later connect reuses the stored client with no network call, so
+      // a hanging discovery endpoint cannot stall it.
+      const discoveries = mb.discoveryRequests.count;
+      const again = await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", mb.url, "https://valet.example/cb", [
+        "agent:query:run",
+      ]);
+      expect(again.clientId).toBe("client-1");
+      expect(mb.registrations).toHaveLength(1);
+      expect(mb.discoveryRequests.count).toBe(discoveries);
+    } finally {
+      warn.mockRestore();
+      await mb.close();
+    }
+  });
+
+  it("uses the stored client when discovery fails and it holds every declared scope", async () => {
+    await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", fake.url, "https://valet.example/cb", ["read"]);
+    await fake.close(); // discovery now fails
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const row = await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", fake.url, "https://valet.example/cb", [
+        "read",
+      ]);
+      expect(row.clientId).toBe("client-1");
+      // A new declared scope needs discovery, so the outage still fails it.
+      await expect(
+        ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", fake.url, "https://valet.example/cb", ["read", "write"]),
+      ).rejects.toThrow(/discovery failed/);
+    } finally {
+      warn.mockRestore();
+      fake = await startFakeOAuthServer(); // afterEach closes it
+    }
+  });
+
+  it("requests no scope for a scopeless entry, even when the resource advertises scopes", async () => {
+    const linear = await startFakeOAuthServer({ resourceScopesSupported: ["read", "write"] });
+    try {
+      const row = await ensureMcpOAuthClient({ db: testDb.appDb }, "linear", linear.url, "https://valet.example/cb");
+      expect(row.scopes).toEqual([]);
+      expect(linear.registrations[0]?.scope).toBeUndefined();
+    } finally {
+      await linear.close();
+    }
+  });
+
   it("warns when no scopes are declared but the server advertises scopes_supported", async () => {
     const scoped = await startFakeOAuthServer({ scopesSupported: ["agent:query", "mb:full"] });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});

@@ -193,7 +193,7 @@ Finally, delete the team. Confirm that the mirrored workflows, their schedules, 
 - Seeding config-declared teams (`packages/api/src/services/config-reconcile.ts`) and identity-provider mirrors. Both are membership structures asserted at boot and at login by writers that must never throw, and neither is created through `POST /api/teams`.
 - A delegated Slack identity for private-channel reads on team runs. Decision 8 locks fail-closed.
 - Personal workflow sync. The 2026-08-24 call put it out of scope unless a GitHub repository backs it.
-- Sandbox-facing route authorization on owner principals, a known limit tracked at `docs/specs/2026-08-17-team-workspace-ui-design.md:72-79`.
+- Sandbox-facing route authorization on owner principals, a known limit tracked in `docs/specs/2026-08-17-team-workspace-ui-design.md`, Known limits, item 1. Since 2026-09-22, workflow session sandboxes are the exception: the git credential route and the secrets broker read their owner from the workflow run (`workflows/session-owner.ts`).
 - New team-oriented template content. The workflows a template repository holds ship with `docs/specs/2026-08-24-business-workflows-design.md`.
 
 ## Open questions
@@ -261,6 +261,12 @@ Recorded 2026-09-06. The design shipped as the stacked series PRs #572 to #591. 
    Credential-store writes and their invalidation commit in one SQL statement. Explicit team insertion transactions also invalidate before commit. Token vault permissions define accessible references; this refresh mechanism does not depend on manual reference grants. Invalidation advances `skill_sources.sync_revision`, clears both comparison markers, and marks healthy sources due. Sources with transport errors retain their retry backoff. Every sync entry point advances the revision before reading. Workflow readiness checks finish before the write transaction starts. That transaction locks the source row and rejects a pass whose revision has changed. It commits collector writes and completion together. A stale failure cannot replace a newer report or pending refresh. A request during a write transaction runs after that transaction and remains due. The persisted request survives an API restart and another worker can consume it. Refresh remains asynchronous; repository access failures can delay disarming. Local triggers remain outside repository reconciliation.
 
    The schema adds a defaulted revision column and a matching boot repair for existing databases. Tests cover unchanged-commit arming and disarming, both concurrent completion orders, stale failures, rollback, tenant isolation, and PostgreSQL row contention. Recorded 2026-09-10.
+
+24. **A broken delegation falls back to the credential behind it.** Decision 3 says a broken reference fails with a typed error, and decision 5 lets an org-provided service reach the org row. The shipped read applied them in the wrong order: the team row was read first, and its error left the function before the org fallback was ever evaluated, so a team whose delegator had departed failed every Slack run while the catalog reported the service connected on the org bot. `resolveTeamCredentialRead` now holds the error and continues. An org-provided org row, or an org-scoped 1Password item under deviation 1, answers the read. When nothing else answers, the held error is raised again, so a team with no fallback still receives the message that names the corrective action, and readiness treats the row under deviation 25. The catalog reads in the same order: a usable team row reports `manual`, and a broken or absent one lets the org credential report `org`. Recorded 2026-09-14.
+
+25. **A broken delegation stays ready when the organization provides the service.** Decision 15 blocks a service whose team row is a delegation that no longer resolves. The run no longer stops there: `resolveTeamCredentialRead` falls through to the organization row when the team delegation is broken, so the run succeeds and readiness disarmed the team's workflows anyway. Readiness now takes the org row for a broken delegation of an org-provided service, and reports the broken row as a warning instead. A warning refuses no install and no arm; it names the repair, which is to remove the team credential or to share it again. A service with no org row keeps the blocker unchanged. `TeamServiceReadiness.warnings` carries them, and `teamArmRefusals` leaves them out by construction. No surface reads that field yet: the template gallery and the repository sync both read the refusal list alone, so the broken row is invisible until somebody opens the team's credentials. The intended surface is the team Integrations page, beside the stored connection the warning names, because that is where the repair is made. Recorded 2026-09-14.
+
+26. **A native service's app identity counts for readiness.** Decision 15 checked every `credential: "app"` node against the GitHub App, whatever its service. The native integration credential policy (`2026-10-15-native-integration-credential-policy-design.md`, Part E) lets an `app` or `user` pin name any native service. Readiness now checks an `app` node of Slack or Linear through that service's app credential: the org Slack bot row, or the Linear app token. If the app is not connected, the service is blocked with the admin fix. An `app` pin on a service that is not native is blocked with the invoker's refusal. An unpinned Linear node is ready on the Linear app token when no team credential answers, because the run reads that token last. A broken Linear share is then ready with a warning, as under deviation 25. A `"user"` pin never counts the app token. Recorded 2026-10-16.
 
 ## Team integrations setup (2026-09-10)
 
@@ -330,3 +336,49 @@ At narrow widths, the workflow header wraps and the node palette scrolls horizon
 On first load and in previews, partially positioned graphs place new nodes in a free column using the existing layout reconciliation. Saved node positions remain unchanged. The desktop workflow title grows into the space left by header actions.
 
 Mobile graph QA (2026-09-11): the editor permits zooming out to 10% so Fit View can show the whole graph on narrow screens. Saved viewport choices and zoom-in controls remain available.
+
+
+## Shared-account upgrade (2026-10-04)
+
+The upgrade moves each legacy `metadata.delegatedFrom` team row into `credential_shares`. It preserves the member's source credential and removes the secretless team reference. Direct team connections remain unchanged. Each member can share an account for the same service.
+
+A team with its own connection for a service takes no new share of it (2026-10-14). The share route returns 409. If the team connection works, the error says a team admin must remove it before a member shares their own. If the connection stopped working (`isDeadConnection`), the error says to reconnect it, which any member may do. A team `github` row that no run uses blocks nothing: `isUsableGithubUserRow` refuses it, so the invoker and readiness skip it, and it is never `isDeadConnection`. A team OAuth row past expiry with no refresh token blocks nothing either: the refreshing store skips it, so it is never renewed and never `isDeadConnection`. A dead row still blocks, because members can reconnect it. The team credential list marks both kinds of row `unusable`, so both share pickers allow the share too. Shares made before the team connected stay, and the acting member's own share still resolves first.
+
+Share admission holds the team ownership lock while it rechecks membership, reads the team connection, and inserts the share.
+Team token creation, replacement, OAuth callbacks, 1Password reference writes, and deletion use that same lock.
+If a team connection commits first, the share request sees it and returns 409. If a share commits first, it remains when the team connects.
+Postgres concurrency tests cover creation, replacement, reference writes, and deletion in both commit orders.
+
+Team runtime reads, share admission, and the team credential list use the same expired OAuth predicate.
+An expired OAuth row without a usable refresh token cannot shadow an approved member share. An encrypted empty refresh token counts as missing.
+Runtime reads skip that row even when no alternative exists. Another member's share still requires approval, and a valid acting member's share keeps its precedence.
+A temporary refresh failure retains the existing provider-error behavior. A refused refresh marks a dead connection, which remains the final fallback when no other account answers.
+Those failure-reporting rules differ from an expired row that has no refresh token. Members can reconnect a dead connection in Team Integrations.
+
+
+The acting member's own share resolves first. The team's connection and permitted organization sources follow. For other services, another member's share requires that member's approval. Scheduled workflows can therefore pause for approval after upgrade when their actor differs from the sharer. The account owner must approve the request before the run continues.
+
+GitHub has an exception. Its policy paths do not request permission to borrow another member's account. The sharer's own GitHub actions still resolve their migrated share. Other actors use a direct team connection or the organization GitHub App. If a team previously relied on one member's GitHub delegation, install the organization GitHub App or store a team GitHub connection. The migration alone does not preserve that delegation's access for other actors.
+
+A shared-account approval applies to later actions for that service in the same thread or workflow run. It can cover later requests from other teammates in that scope. The approval card states this scope before the owner answers. A workflow account owner sees Allow for this run and Deny, without action-level or persistent workflow permission choices. This approval does not change the service's other action policies. Grant scope and credential resolution remain unchanged by this copy update.
+
+Regression coverage migrates an encrypted GitHub credential reference. It verifies that the sharer still resolves the live source credential and that another actor receives no GitHub borrow gate.
+
+
+### Account approval during unattended workflow discovery
+
+An unattended team workflow can request the account owner's approval before authenticated tool discovery.
+The engine session ID must name a workflow run and node, with an optional valid iteration.
+An ordinary application session with the same ID does not qualify.
+The stored run must belong to the exact team, and its definition and team must belong to the current organization.
+The caller must be that team's synthetic actor. The stored run actor must be absent or match that actor.
+
+Approval eligibility and subsequent credential borrowing use the same durable ownership check.
+Only the account owner can approve. Existing team membership, share generation, and workflow grant scope checks still apply.
+Tool nodes retain their run-only approval scope. Workflow download, origin, and private-thread visibility rules remain unchanged.
+
+The approval card names the product, such as "Let a teammate use your Linear account?". The API sets `ActionPlugin.displayName` from `serviceDisplayName` (`withServiceDisplayName`), and the engine falls back to the service id. Discovery appears as "List Linear tools". The card shows no policy-source line for a shared account, because the title already names whose account it is (2026-10-15).
+
+A failed discovery keeps its cause. `resolveDynamic` (`packages/engine/src/plugin-catalog.ts`) reports `<service> tool discovery failed:` followed by the same text `call_tool` gives for that outcome.
+A connector error keeps the upstream message. A missing account names the Integrations page. A shared-account denial says that the caller cannot ask the account owner for approval, and does not call it an org policy.
+Before 2026-10-08, every failure read `Tool discovery requires permitted account access: <outcome kind>`. That text dropped the connector message, and it hid whether a policy or the connector was at fault.

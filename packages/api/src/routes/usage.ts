@@ -4,23 +4,28 @@
  * the `services/usage` library, which owns the SQL over the one `cost_entries`
  * definition (so the dashboard and Grafana cannot drift).
  */
+import { sessionOutcomeUsage } from "../tagging/usage.js";
+import { isOrgAdmin } from "../services/org.js";
+import { getExternalUsage } from "../services/external-usage.js";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import type { AppEnv } from "../env.js";
-import type { UsageDrillResponse, UsageSessionsResponse } from "../wire/types.js";
+import type { UsageDrillResponse, UsageExportGranularity, UsageSessionsResponse } from "../wire/types.js";
 import {
   getUsageBreakdown,
   getDailyAgentActivity,
   getUsageDrillItems,
-  getUsageExportCsv,
+  createUsageTurnExportStream,
+  getUsageAggregateExportCsv,
   getUsageSessions,
   getUsageSummary,
+  getUsageOutcomes,
+  getUsageToolEfficiency,
   isUsageUseCase,
   resolveUsageScope,
-  windowLabelFrom,
-  windowMsFrom,
   type UsageScope,
 } from "../services/usage.js";
+import { resolveUsagePeriod, type ResolvedUsagePeriod } from "../services/usage-period.js";
 
 export const usageRouter = new Hono<AppEnv>();
 
@@ -48,6 +53,17 @@ async function scopeOrError(c: Context<AppEnv>): Promise<UsageScope | Response> 
   return scope;
 }
 
+function periodOrError(c: Context<AppEnv>): ResolvedUsagePeriod | Response {
+  const result = resolveUsagePeriod({
+    window: c.req.query("window"),
+    month: c.req.query("month"),
+    start: c.req.query("start"),
+    end: c.req.query("end"),
+  });
+  if (!result.ok) return c.json({ error: result.error }, 400);
+  return result.period;
+}
+
 usageRouter.get("/summary", async (c) => {
   const body = await getUsageSummary(c.var.providers.db, {
     orgId: c.var.user.orgId,
@@ -60,23 +76,43 @@ usageRouter.get("/summary", async (c) => {
 usageRouter.get("/daily-agents", async (c) => {
   const scope = await scopeOrError(c);
   if (scope instanceof Response) return scope;
-  return c.json(await getDailyAgentActivity(c.var.providers.db, {
-    windowMs: windowMsFrom(c.req.query("window")), scope,
-  }));
+  const period = periodOrError(c);
+  if (period instanceof Response) return period;
+  return c.json(await getDailyAgentActivity(c.var.providers.db, { period, scope }));
 });
 
 usageRouter.get("/breakdown", async (c) => {
   const scope = await scopeOrError(c);
   if (scope instanceof Response) return scope;
-  const body = await getUsageBreakdown(c.var.providers.db, { windowMs: windowMsFrom(c.req.query("window")), scope });
+  const period = periodOrError(c);
+  if (period instanceof Response) return period;
+  const body = await getUsageBreakdown(c.var.providers.db, { period, scope });
   return c.json(body);
+});
+
+usageRouter.get("/tool-efficiency", async (c) => {
+  const scope = await scopeOrError(c);
+  if (scope instanceof Response) return scope;
+  const period = periodOrError(c);
+  if (period instanceof Response) return period;
+  return c.json(await getUsageToolEfficiency(c.var.providers.db, { period, scope }));
+});
+
+usageRouter.get("/outcomes", async (c) => {
+  const scope = await scopeOrError(c);
+  if (scope instanceof Response) return scope;
+  const period = periodOrError(c);
+  if (period instanceof Response) return period;
+  return c.json(await getUsageOutcomes(c.var.providers.db, { period, scope }));
 });
 
 /** Superseded by `/items`; kept while the dashboard migrates. */
 usageRouter.get("/sessions", async (c) => {
+  const period = periodOrError(c);
+  if (period instanceof Response) return period;
   const body: UsageSessionsResponse = {
     sessions: await getUsageSessions(c.var.providers.db, {
-      windowMs: windowMsFrom(c.req.query("window")),
+      period,
       orgId: c.var.user.orgId,
       userId: c.var.user.id,
       useCase: c.req.query("useCase"),
@@ -89,25 +125,74 @@ usageRouter.get("/items", async (c) => {
   const { db } = c.var.providers;
   const useCaseQ = c.req.query("useCase");
   if (!useCaseQ || !isUsageUseCase(useCaseQ)) {
-    return c.json({ error: "useCase must be one of orchestrator, session, workflow, proxy." }, 400);
+    return c.json({ error: "useCase must be one of orchestrator, session, workflow, proxy, tagging." }, 400);
   }
   const scope = await scopeOrError(c);
   if (scope instanceof Response) return scope;
+  const period = periodOrError(c);
+  if (period instanceof Response) return period;
   const body: UsageDrillResponse = {
-    items: await getUsageDrillItems(db, { windowMs: windowMsFrom(c.req.query("window")), scope, useCase: useCaseQ }),
+    items: await getUsageDrillItems(db, { period, scope, useCase: useCaseQ }),
   };
   return c.json(body);
 });
 
+function granularityOrError(c: Context<AppEnv>): UsageExportGranularity | Response {
+  const value = c.req.query("granularity") ?? "day";
+  if (value === "day" || value === "hour" || value === "turn") return value;
+  return c.json({
+    error: {
+      code: "invalid_granularity",
+      message: "Choose granularity day, hour, or turn.",
+    },
+  }, 400);
+}
+
 usageRouter.get("/export.csv", async (c) => {
   const scope = await scopeOrError(c);
   if (scope instanceof Response) return scope;
-  const windowLabel = windowLabelFrom(c.req.query("window"));
-  const csv = await getUsageExportCsv(c.var.providers.db, { windowMs: windowMsFrom(c.req.query("window")), scope });
+  const period = periodOrError(c);
+  if (period instanceof Response) return period;
+  const granularity = granularityOrError(c);
+  if (granularity instanceof Response) return granularity;
+  if (c.req.query("validate") === "1") return c.body(null, 204);
+
   // Name the team in a team export's filename, or a member of two teams
   // downloads two indistinguishable files.
   const scopeLabel = scope.scope === "team" ? `team-${scope.teamId}` : scope.scope;
   c.header("Content-Type", "text/csv; charset=utf-8");
-  c.header("Content-Disposition", `attachment; filename="valet-usage-${scopeLabel}-${windowLabel}.csv"`);
-  return c.body(csv);
+  c.header("Content-Disposition",
+    `attachment; filename="valet-usage-${scopeLabel}-${period.label}-${granularity}.csv"`);
+  if (granularity === "turn") {
+    return c.body(createUsageTurnExportStream(c.var.providers.db, { period, scope }));
+  }
+  return c.body(await getUsageAggregateExportCsv(c.var.providers.db, { period, scope, granularity }));
+});
+
+usageRouter.get("/external", async (c) => {
+  const scope = await scopeOrError(c);
+  if (scope instanceof Response) return scope;
+  const period = periodOrError(c);
+  if (period instanceof Response) return period;
+  const offset = Number(c.req.query("offset") ?? "0");
+  const limit = Number(c.req.query("limit") ?? "20");
+  const search = c.req.query("q") ?? "";
+  const surface = c.req.query("surface");
+  const key = c.req.query("key");
+  if (key && key !== "__emerging" && key !== "__unlabeled" && !/^[a-z][a-z0-9_]{0,31}$/.test(key)) return c.json({ error: "Invalid intent key. Choose a registry key or clear the key filter." }, 400);
+  if (surface !== undefined && surface !== "hosted" && surface !== "mcp" && surface !== "cli") {
+    return c.json({ error: "Choose surface hosted, mcp, or cli. Remove surface to see all calls." }, 400);
+  }
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset > 100000 || !Number.isInteger(limit) || limit < 1 || limit > 100 || search.length > 500) {
+    return c.json({ error: "Use offset 0 to 100000, limit 1 to 100, and search text of 500 characters or fewer." }, 400);
+  }
+  return c.json(await getExternalUsage(c.var.providers.db, { viewer: { deps: c.var.providers, userId: c.var.user.id }, scope, period, offset, limit, search, surface, key, canManage: await isOrgAdmin(c.var.providers.db, c.var.user.orgId, c.var.user.id) }));
+});
+
+usageRouter.get("/session-outcomes", async c => {
+  const scope = await scopeOrError(c);
+  if (scope instanceof Response) return scope;
+  const period = periodOrError(c);
+  if (period instanceof Response) return period;
+  return c.json(await sessionOutcomeUsage(c.var.providers.db, scope, period));
 });

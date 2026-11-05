@@ -80,6 +80,32 @@ describe("linear verify", () => {
   });
 });
 
+describe("linear explainRejection", () => {
+  const payload = { action: "create", type: "Issue", organizationId: "org-1", webhookId: "wh-9", data: { id: "i1" } };
+  const explain = (req: { headers: Record<string, string>; rawBody: Uint8Array }) => issueDef.explainRejection!(req, { webhookSecret: SECRET });
+
+  it("tells a bad signature apart from a signed delivery Valet does not handle", async () => {
+    expect((await explain(makeReq(payload, "wrong"))).reason).toBe("bad_signature");
+    expect(await explain(makeReq({ ...payload, type: "Document" }))).toEqual({
+      reason: "unsupported_event",
+      detail: expect.stringContaining("Linear sent Document create from webhook wh-9"),
+    });
+    expect((await explain(makeReq({ ...payload, action: "restore" }))).reason).toBe("unsupported_event");
+  });
+
+  it("reports a stale delivery and a missing delivery header", async () => {
+    expect((await explain(makeReq({ ...payload, webhookTimestamp: Date.now() - 600_000 }))).reason).toBe("stale_delivery");
+    const req = makeReq(payload);
+    expect((await explain({ ...req, headers: { "linear-signature": req.headers["linear-signature"] } })).reason).toBe("malformed_callback");
+  });
+
+  it("logs only a well-formed webhook ID from an unsigned body", async () => {
+    const rejection = await explain(makeReq({ ...payload, webhookId: "<script>alert(1)</script>" }, "wrong"));
+    expect(rejection.reason).toBe("bad_signature");
+    expect(rejection.detail).not.toContain("script");
+  });
+});
+
 describe("linear toEvent", () => {
   it("normalizes an issue create", async () => {
     const payload = { action: "create", type: "Issue", organizationId: "org-1", url: "https://linear.app/t/issue/TKAI-9", data: { id: "i1", identifier: "TKAI-9", title: "Fix bug", team: { key: "TKAI", id: "team-1" }, creatorId: "u-1" } };

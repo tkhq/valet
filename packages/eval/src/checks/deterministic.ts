@@ -8,6 +8,7 @@
  */
 import { aggregateUsage, toolResultText } from "../trajectory.js";
 import type { CheckResult, DeterministicCheck, Trajectory, TrajectoryToolCall } from "../types.js";
+import { runWorkflowDefinitionCheck } from "./workflow.js";
 
 function pass(check: DeterministicCheck, detail?: string): CheckResult {
   return { check, pass: true, ...(detail !== undefined ? { detail } : {}) };
@@ -231,6 +232,17 @@ export function runDeterministicCheck(check: DeterministicCheck, trajectory: Tra
       return pass(check);
     }
 
+    case "min_compactions": {
+      const n = trajectory.compactions ?? 0;
+      if (n < check.value) {
+        return fail(
+          check,
+          `expected at least ${check.value} compaction(s), got ${n}. Lower \`context_budget_tokens\` or lengthen the turns.`,
+        );
+      }
+      return pass(check, `${n} compaction(s)`);
+    }
+
     case "max_cost": {
       const totals = aggregateUsage(trajectory);
       if (totals.cost === undefined) {
@@ -279,6 +291,9 @@ export function runDeterministicCheck(check: DeterministicCheck, trajectory: Tra
       }
       return pass(check, `\`${check.command}\` exited ${verification.exitCode}`);
     }
+
+    case "workflow_definition":
+      return runWorkflowDefinitionCheck(check, trajectory);
   }
 }
 

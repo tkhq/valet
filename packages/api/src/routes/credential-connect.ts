@@ -1,7 +1,8 @@
 /**
  * Generic integration OAuth connect (docs/specs/2026-07-20-integration-oauth-design.md).
- * Server-side flow modeled on routes/github-connect.ts: HMAC-signed
- * stateless state (lib/oauth-state.ts) carrying the PKCE verifier, code
+ * Server-side flow modeled on the GitHub connect routes: HMAC-signed
+ * stateless state (lib/oauth-state.ts, purpose "integration-connect", so no
+ * other flow's state verifies here) carrying the PKCE verifier, code
  * exchange server-side, tokens straight into the credential store — never
  * through the browser. GitHub is excluded (dedicated App flow).
  *
@@ -20,21 +21,26 @@ import { invalidateWorkflowSources } from "../services/content-sync/invalidation
 import { refreshCredentialReadiness } from "../services/credential-readiness.js";
 import { randomBytes } from "node:crypto";
 import { Hono } from "hono";
-import { canAdministerTeam, getTeamInOrg } from "../services/teams.js";
-import { insertCredentialIfAbsent, lockTeamCredentialAuthority } from "../services/credential-insert.js";
+import { canAdministerTeam, getTeamInOrg, isTeamMember } from "../services/teams.js";
+import {
+  insertCredentialIfAbsent, lockTeamCredentialRole, replaceDeadTeamCredential, teamConnectionIsDead,
+} from "../services/credential-insert.js";
 import { buildAuthorizationUrl, exchangeCodePkce, generatePkceChallenge } from "@valet/sdk";
 import type { AppEnv } from "../env.js";
+import type { AppQueryable } from "../lib/drizzle.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { isRecord, signState, verifyState, STATE_TTL_MS } from "../lib/oauth-state.js";
 import { publicUrlFromEnv } from "../channels/host.js";
 import { loadAuthConfig } from "../auth/config.js";
-import { OAuthInterpretError, type OAuthIdentity, type TokenInterpretation } from "@valet/engine";
+import { OAuthInterpretError, type OAuthIdentity, type StoredCredential, type TokenInterpretation } from "@valet/engine";
 import {
   authCodeEnvReady,
   ensureMcpOAuthClient,
   exchangeAuthorizationCode,
   exchangeAuthorizationCodeRaw,
   findOAuthDeclaration,
+  getMcpOAuthClient,
+  issuingClientMetadata,
 } from "../services/integration-oauth.js";
 import { missingClientEnv } from "../services/integration-availability.js";
 import { isOrgAdmin } from "../services/org.js";
@@ -53,24 +59,51 @@ interface OAuthConnectState {
   orgId?: string;
   service: string;
   codeVerifier?: string;
+  /** mcp mode: the dynamic client the authorize request used. The code
+   * belongs to it, so the callback refuses a different stored client. */
+  clientId?: string;
   /** Validated web origin to land back on, e.g. "http://localhost:5173".
    * Empty/absent → relative redirect (prod same-origin serving). */
   returnTo?: string;
+  /** Replace the team's dead connection (see `isDeadConnection`). */
+  reconnect?: true;
+  /** Step-up: the scopes the authorize request asked for, stored when the
+   * token response names none. */
+  scopes?: string[];
+  /** Step-up: the scopes the link added. The callback keeps the caller's
+   * connection unless the new grant holds them and every scope it held. */
+  added?: string[];
   nonce: string;
   exp: number;
 }
 
+/** Every team member may connect a team account or reconnect a dead one. */
+async function mayConnectTeam(db: AppQueryable, teamId: string, userId: string): Promise<boolean> {
+  return (await canAdministerTeam(db, teamId, userId)) || (await isTeamMember(db, teamId, userId));
+}
+
 export function verifyOAuthConnectState(state: string, key: Buffer, nowMs: number): OAuthConnectState | null {
-  return verifyState<OAuthConnectState>(state, key, (payload) => {
+  return verifyState<OAuthConnectState>("integration-connect", state, key, (payload) => {
     if (!isRecord(payload)) return null;
-    const { userId, service, codeVerifier, returnTo, nonce, exp, teamId, orgId } = payload;
+    const { userId, service, codeVerifier, clientId, returnTo, nonce, exp, teamId, orgId, reconnect, scopes, added } = payload;
     if (teamId !== undefined && (typeof teamId !== "string" || !teamId || typeof orgId !== "string" || !orgId)) return null;
     if (typeof userId !== "string" || typeof service !== "string") return null;
     if (typeof nonce !== "string" || typeof exp !== "number") return null;
     if (codeVerifier !== undefined && typeof codeVerifier !== "string") return null;
+    if (clientId !== undefined && typeof clientId !== "string") return null;
     if (returnTo !== undefined && typeof returnTo !== "string") return null;
+    if (reconnect !== undefined && (reconnect !== true || typeof teamId !== "string")) return null;
+    if (scopes !== undefined && (!Array.isArray(scopes) || !scopes.every((s) => typeof s === "string"))) return null;
+    if (added !== undefined && (!Array.isArray(added) || !added.every((s) => typeof s === "string"))) return null;
     if (exp < nowMs) return null;
-    return { userId, service, codeVerifier, returnTo, nonce, exp, ...(typeof teamId === "string" && typeof orgId === "string" ? { teamId, orgId } : {}) };
+    return {
+      userId, service, codeVerifier, returnTo, nonce, exp,
+      ...(typeof clientId === "string" ? { clientId } : {}),
+      ...(typeof teamId === "string" && typeof orgId === "string" ? { teamId, orgId } : {}),
+      ...(reconnect === true ? { reconnect } : {}),
+      ...(Array.isArray(scopes) ? { scopes: scopes.filter((s): s is string => typeof s === "string") } : {}),
+      ...(Array.isArray(added) ? { added: added.filter((s): s is string => typeof s === "string") } : {}),
+    };
   });
 }
 
@@ -112,6 +145,20 @@ export function resolveReturnOrigin(reqUrl: string, referer: string | undefined,
   return allowed.has(refererOrigin) ? refererOrigin : "";
 }
 
+/** RFC 6749 §3.3 scope-token characters. */
+const SCOPE_TOKEN = /^[\x21\x23-\x5B\x5D-\x7E]{1,200}$/;
+
+/**
+ * The `addScopes` of a step-up link (space-separated): undefined when absent,
+ * null when malformed, else the sorted unique list.
+ */
+export function parseAddScopes(raw: string | undefined): string[] | undefined | null {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const scopes = raw.split(/\s+/).filter(Boolean);
+  if (scopes.length > 32 || !scopes.every((scope) => SCOPE_TOKEN.test(scope))) return null;
+  return [...new Set(scopes)].sort();
+}
+
 credentialConnectRouter.get("/:service/connect", async (c) => {
   const service = c.req.param("service");
   const user = c.var.user;
@@ -124,14 +171,37 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
   if (scope !== undefined && scope !== "team" && scope !== "user") {
     return c.json({ error: "Choose Personal or a team before connecting." }, 400);
   }
+  // Step-up (insufficient_scope): the scopes to add to the caller's own
+  // connection. A team connection is shared, so a member's sign-in would make
+  // the whole team act as that member; its missing scope stays an admin fix.
+  const addScopes = parseAddScopes(c.req.query("addScopes"));
+  if (addScopes === null) {
+    return c.json({ error: "The requested scopes are not valid. Open the link from the assistant's message again." }, 400);
+  }
+  if (addScopes && found.oauth.mode !== "mcp") {
+    return c.json({ error: "Only an MCP sign-in can add scopes. Reconnect this service on the Integrations page." }, 400);
+  }
   const teamId = c.req.query("teamId");
+  if (addScopes && teamId !== undefined) {
+    return c.json({ error: "Scopes can be added only to your own connection. Ask an admin to add them to the integration's scopes." }, 400);
+  }
+  // Every connect lands on /integrations. An old `?landing=` link is
+  // ignored, so the callback cannot be steered.
   if (scope === "user" && teamId !== undefined) {
     return c.json({ error: "Remove the team selection to connect a personal account." }, 400);
   }
   if (c.req.query("scope") === "team" && !teamId) return c.json({ error: "Choose a team before connecting." }, 400);
+  const reconnect = c.req.query("reconnect") === "1";
+  if (reconnect && teamId === undefined) return c.json({ error: "Choose the team whose connection to reconnect." }, 400);
   if (teamId !== undefined) {
-    if (!(await getTeamInOrg(db, user.orgId, teamId)) || !(await canAdministerTeam(db, teamId, user.id))) {
+    if (!(await getTeamInOrg(db, user.orgId, teamId)) || !(await mayConnectTeam(db, teamId, user.id))) {
       return c.json({ error: "Team not found. Ask a team admin to connect this service." }, 404);
+    }
+    if (reconnect && !(await teamConnectionIsDead(db, teamId, service, Date.now()))) {
+      // The dialog navigates here, so the answer is a page, not JSON: another
+      // member reconnected, or a read revived the row, since it opened.
+      const origin = resolveReturnOrigin(c.req.url, c.req.header("referer"), process.env);
+      return c.redirect(`${origin}/integrations?teamId=${encodeURIComponent(teamId)}&error=team_reconnect_unneeded`, 302);
     }
     if (service === "slack-user" || found.decl.requires?.orgCredential) {
       return c.json({ error: "This connection cannot be used for a team. Connect a dedicated team token instead." }, 400);
@@ -143,6 +213,7 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
   const base: Omit<OAuthConnectState, "codeVerifier"> = {
     userId: user.id,
     ...(teamId ? { teamId, orgId: user.orgId } : {}),
+    ...(reconnect ? { reconnect: true as const } : {}),
     service,
     ...(returnTo ? { returnTo } : {}),
     nonce: randomBytes(16).toString("hex"),
@@ -158,14 +229,21 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
       return c.redirect(`${returnTo}/integrations?${teamId ? `teamId=${encodeURIComponent(teamId)}&` : ""}error=oauth_failed`, 302);
     }
     const { codeVerifier, codeChallenge } = await generatePkceChallenge();
-    const state = signState<OAuthConnectState>({ ...base, codeVerifier }, key);
+    // A step-up asks for the declared scopes plus the ones the server
+    // challenged for; the person approves the set on the provider's screen.
+    const scopes = addScopes ? [...new Set([...clientRow.scopes, ...addScopes])].sort() : clientRow.scopes;
+    const state = signState<OAuthConnectState>(
+      "integration-connect",
+      { ...base, codeVerifier, clientId: clientRow.clientId, ...(addScopes ? { scopes, added: addScopes } : {}) },
+      key,
+    );
     const url = buildAuthorizationUrl({
       authorizationEndpoint: clientRow.authorizationEndpoint,
       clientId: clientRow.clientId,
       redirectUri,
       codeChallenge,
       state,
-      scopes: found.decl.scopes,
+      scopes,
     });
     return c.redirect(url, 302);
   }
@@ -189,7 +267,7 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
       503,
     );
   }
-  const state = signState<OAuthConnectState>(base, key);
+  const state = signState<OAuthConnectState>("integration-connect", base, key);
   const scopesKey = found.oauth.scopesParam ?? "scope";
   const query = new URLSearchParams({
     client_id: process.env[found.oauth.clientIdEnv] ?? "",
@@ -205,12 +283,12 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
 /**
  * Scopes to store on the saved credential: what the token response granted
  * (RFC 6749 §5.1 `scope`, possibly "" for a token with no scopes), falling
- * back to the declared list only when the response names none. Never store
- * the declared list over a narrower grant — it would mask a scope-gated
- * server's refusal (TKAI-242).
+ * back to the requested list only when the response names none (§5.1: the
+ * grant then equals the request). Never store the requested list over a
+ * narrower grant — it would mask a scope-gated server's refusal (TKAI-242).
  */
-function grantedScopes(scope: string | undefined, declared: string[] | undefined): string[] | undefined {
-  if (typeof scope !== "string") return declared;
+function grantedScopes(scope: string | undefined, requested: string[] | undefined): string[] | undefined {
+  if (typeof scope !== "string") return requested;
   return scope.split(" ").filter(Boolean);
 }
 
@@ -229,7 +307,8 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
   const teamId = verified.teamId;
   const landing = `${returnTo}/integrations?${teamId ? `teamId=${encodeURIComponent(teamId)}&` : ""}`;
   const teamFailure = (error: string) => c.redirect(`${landing}error=${error}`, 302);
-  if (teamId && (verified.orgId !== user.orgId || !(await getTeamInOrg(db, user.orgId, teamId)) || !(await canAdministerTeam(db, teamId, user.id)))) {
+  if (teamId && (verified.orgId !== user.orgId || !(await getTeamInOrg(db, user.orgId, teamId))
+    || !(await mayConnectTeam(db, teamId, user.id)))) {
     return teamFailure("team_access_changed");
   }
 
@@ -257,7 +336,14 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
   try {
     if (found.oauth.mode === "mcp") {
       if (!verified.codeVerifier) return c.redirect(`${landing}error=oauth_state`, 302);
-      const clientRow = await ensureMcpOAuthClient({ db }, verified.service, found.oauth.serverUrl, redirectUri, found.decl.scopes);
+      const clientRow = await getMcpOAuthClient({ db }, verified.service);
+      // A connect that re-registered the client after this authorize (a
+      // scope change) replaced it. The code belongs to the old client, whose
+      // token endpoint is no longer stored, so the user starts again. A state
+      // signed before client binding has no id and keeps the old behavior.
+      if (verified.clientId !== undefined && clientRow.clientId !== verified.clientId) {
+        return c.redirect(`${landing}error=oauth_client_changed`, 302);
+      }
       const tokens = await exchangeCodePkce({
         tokenEndpoint: clientRow.tokenEndpoint,
         clientId: clientRow.clientId,
@@ -269,8 +355,9 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
         accessToken: tokens.access_token,
         refreshToken: tokens.refresh_token,
         expiresAt: typeof tokens.expires_in === "number" ? now + tokens.expires_in * 1000 : undefined,
-        scopes: grantedScopes(tokens.scope, found.decl.scopes),
-        metadata: { connectedVia: "oauth" },
+        scopes: grantedScopes(tokens.scope, verified.scopes ?? (clientRow.scopes.length > 0 ? clientRow.scopes : undefined)),
+        // Refreshes use this client, not whichever one is stored later.
+        metadata: { connectedVia: "oauth", ...issuingClientMetadata(clientRow) },
       };
     } else if (found.oauth.interpretTokenResponse) {
       const raw = await exchangeAuthorizationCodeRaw({ oauth: found.oauth, env: process.env, code, redirectUri });
@@ -318,13 +405,20 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
     let outcome: string | null;
     try {
       outcome = await db.transaction(async (tx) => {
-        if (verified.orgId !== user.orgId || !(await lockTeamCredentialAuthority(tx, { orgId: user.orgId, userId: user.id, teamId }))) {
-          return "team_access_changed";
-        }
-        const inserted = await insertCredentialIfAbsent(tx, encryptionKey, { type: "team", id: teamId }, verified.service, {
+        const role = verified.orgId === user.orgId
+          ? await lockTeamCredentialRole(tx, { orgId: user.orgId, userId: user.id, teamId })
+          : null;
+        if (!role) return "team_access_changed";
+        const credential: StoredCredential = {
           type: "oauth2", accessToken: saved.accessToken, refreshToken: saved.refreshToken,
           expiresAt: saved.expiresAt, scopes: saved.scopes, metadata: saved.metadata,
-        });
+        };
+        if (verified.reconnect) {
+          const replaced = await replaceDeadTeamCredential(tx, encryptionKey, teamId, verified.service, credential, Date.now());
+          if (replaced) await invalidateWorkflowSources(tx, { teamId });
+          return replaced ? null : "team_reconnect_unneeded";
+        }
+        const inserted = await insertCredentialIfAbsent(tx, encryptionKey, { type: "team", id: teamId }, verified.service, credential);
         if (inserted) await invalidateWorkflowSources(tx, { teamId });
         return inserted ? null : "team_connection_exists";
       });
@@ -374,15 +468,37 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
       return c.redirect(`${landing}error=oauth_failed`, 302);
     }
   }
+  const owner = { type: "user" as const, id: user.id };
+  const next: StoredCredential = {
+    type: "oauth2",
+    accessToken: saved.accessToken,
+    refreshToken: saved.refreshToken,
+    expiresAt: saved.expiresAt,
+    scopes: saved.scopes,
+    metadata: saved.metadata,
+  };
   try {
-    await engineCredentials.save({ type: "user", id: user.id }, verified.service, {
-      type: "oauth2",
-      accessToken: saved.accessToken,
-      refreshToken: saved.refreshToken,
-      expiresAt: saved.expiresAt,
-      scopes: saved.scopes,
-      metadata: saved.metadata,
-    });
+    if (verified.added) {
+      // A step-up keeps the connection unless the new grant holds every scope
+      // it holds plus every added one. The swap fails if another sign-in or a
+      // refresh changed the connection since this read, so a narrower or
+      // older grant never replaces a wider one.
+      const current = await engineCredentials.get(owner, verified.service);
+      const granted = new Set(saved.scopes ?? []);
+      const keeps = [...(current?.scopes ?? []), ...verified.added].every((scope) => granted.has(scope));
+      let stored = false;
+      if (keeps && current) stored = await engineCredentials.compareAndSwap(owner, verified.service, current, next);
+      else if (keeps) {
+        await engineCredentials.save(owner, verified.service, next);
+        stored = true;
+      }
+      if (!stored) {
+        if (restoreLink) await restoreLink().catch(() => undefined);
+        return c.redirect(`${landing}error=step_up_not_granted`, 302);
+      }
+    } else {
+      await engineCredentials.save(owner, verified.service, next);
+    }
   } catch (err) {
     console.error(`oauth callback: credential save failed for ${verified.service}:`, err);
     if (restoreLink) await restoreLink().catch(() => undefined); // best-effort compensation

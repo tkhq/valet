@@ -108,7 +108,11 @@ it("lets current team members reach an existing workflow agent gate without an a
   const outsider = { "x-valet-test-user-id": "test-member", "Content-Type": "application/json" };
   expect((await fetch(base, { headers: outsider })).status).toBe(404);
   expect((await fetch(`${base}/join-channel/resolve`, { method: "POST", headers: outsider, body: JSON.stringify({ actionId: "approve" }) })).status).toBe(404);
-  const approved = await fetch(`${base}/join-channel/resolve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ actionId: "approve" }) });
+  const threadBase = `${api.baseUrl}/api/threads/${threadId}/decisions`;
+  expect((await fetch(threadBase)).status).toBe(200);
+  expect((await fetch(threadBase, { headers: outsider })).status).toBe(404);
+  expect((await fetch(`${api.baseUrl}/api/threads/${threadId}/messages`)).status).toBe(404);
+  const approved = await fetch(`${threadBase}/join-channel/resolve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ actionId: "approve" }) });
   expect(approved.status).toBe(200);
   expect(await p.engineStore.getDecisionGate(sessionId, "join-channel")).toMatchObject({ status: "resolved", resolution: { actionId: "approve", resolvedBy: "local-user" } });
   const guessed = "wf:approval-run:never-created";
@@ -125,4 +129,129 @@ it("lets current team members reach an existing workflow agent gate without an a
   expect(await orgResolve.json()).toEqual({ error: "gate not pending" });
   await p.db.delete(teamMembers).where(eq(teamMembers.teamId, "approval-team"));
   expect((await fetch(base)).status).toBe(404);
+});
+
+it("lets the run's members read a workflow step's messages for its logs, read-only", async () => {
+  api = await bootTestApi();
+  const p = api.providers;
+  const now = Date.now();
+  await p.db.insert(teams).values({ id: "logs-team", orgId: "local-org", name: "Logs team", createdAt: now });
+  await p.db.insert(teamMembers).values({ teamId: "logs-team", userId: "local-user", role: "member" });
+  await p.db.insert(workflowDefinitions).values({ id: "logs-workflow", orgId: "local-org", ownerType: "team", ownerId: "logs-team", name: "Logs workflow", definition: {}, createdAt: now, updatedAt: now });
+  await p.workflowStore.createRun("logs-run", { workflowId: "logs-workflow", definitionVersionId: "v1" },
+    { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: "logs-team" });
+  const sessionId = "wf:logs-run:verify";
+  await p.engineStore.saveSession({ id: sessionId, orgId: "local-org", userId: "team:logs-team", owner: { type: "team", id: "logs-team" }, workspace: "/tmp", purpose: "interactive", status: "running", createdAt: 1, updatedAt: 1 });
+  await p.engineStore.saveThread(sessionId, { id: "logs-thread", sessionId, key: "workflow", status: "active", queueMode: "followup", createdAt: 1, updatedAt: 1 });
+  const entry = { sessionId, threadId: "logs-thread", parentId: null, type: "message" as const, createdAt: 1 };
+  await p.engineStore.appendEntries(sessionId, "logs-thread", [
+    { ...entry, id: "m1", role: "user", content: "Verify the draft.", queueItemId: "q-first" },
+    { ...entry, id: "m2", role: "assistant", content: "Checked 16 PRs.", queueItemId: "q-first" },
+    { ...entry, id: "m3", role: "user", content: "Your previous response did not match the required JSON schema.", queueItemId: "q-repair" },
+  ]);
+  const url = `${api.baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/messages?threadId=logs-thread`;
+  const all = await fetch(url);
+  expect(all.status).toBe(200);
+  expect(((await all.json()) as { messages: Array<{ content: string }> }).messages.map((m) => m.content))
+    .toEqual(["Verify the draft.", "Checked 16 PRs.", "Your previous response did not match the required JSON schema."]);
+  const repair = await fetch(`${url}&queueItemId=q-repair`);
+  expect(((await repair.json()) as { messages: unknown[] }).messages).toHaveLength(1);
+  expect((await fetch(url, { headers: { "x-valet-test-user-id": "test-member" } })).status).toBe(404);
+
+  // An org-owned run: any org member who can read the run reads its step logs,
+  // the same rule as get_run, not the org-admin rule for answering gates.
+  await p.workflowStore.createRun("org-logs-run", { workflowId: "logs-workflow", definitionVersionId: "v1" },
+    { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "org", ownerId: "local-org" });
+  const orgSession = "wf:org-logs-run:verify";
+  await p.engineStore.saveSession({ id: orgSession, orgId: "local-org", userId: "org:local-org", owner: { type: "org", id: "local-org" }, workspace: "/tmp", purpose: "interactive", status: "running", createdAt: 1, updatedAt: 1 });
+  await p.engineStore.saveThread(orgSession, { id: "org-logs-thread", sessionId: orgSession, key: "workflow", status: "active", queueMode: "followup", createdAt: 1, updatedAt: 1 });
+  await p.engineStore.appendEntries(orgSession, "org-logs-thread", [{ ...entry, sessionId: orgSession, threadId: "org-logs-thread", id: "o1", role: "user", content: "Org step." }]);
+  const orgRes = await fetch(`${api.baseUrl}/api/sessions/${encodeURIComponent(orgSession)}/messages`, { headers: { "x-valet-test-user-id": "test-member" } });
+  expect(orgRes.status).toBe(200);
+  expect(((await orgRes.json()) as { messages: Array<{ content: string }> }).messages.map((m) => m.content)).toEqual(["Org step."]);
+});
+
+describe("POST /decisions/:gateId/resolve — always_allow_owner", () => {
+  it("lets a team member choose it for the team and keeps a critical action for a team admin", async () => {
+    api = await bootTestApi();
+    const p = api.providers;
+    const now = Date.now();
+    const body = JSON.stringify({ actionId: "always_allow_owner" });
+    const member = { "x-valet-test-user-id": "test-member", "Content-Type": "application/json" };
+    // The owner of a personal session passes the check and reaches the gate lookup.
+    const own = await createSession(api.baseUrl, { "x-valet-test-user-id": "test-member" });
+    const ownRes = await fetch(`${api.baseUrl}/api/sessions/${own}/decisions/nonexistent-gate/resolve`, { method: "POST", headers: member, body });
+    expect(ownRes.status).toBe(404);
+    expect(await ownRes.json()).toEqual({ error: "gate not pending" });
+
+    // A team workflow step has no app session row; the run's team owns it.
+    await p.db.insert(teams).values({ id: "owner-team", orgId: "local-org", name: "Owner team", createdAt: now });
+    await p.db.insert(teamMembers).values({ teamId: "owner-team", userId: "test-member", role: "member" });
+    await p.db.insert(workflowDefinitions).values({ id: "owner-workflow", orgId: "local-org", ownerType: "team", ownerId: "owner-team", name: "Owner workflow", definition: {}, createdAt: now, updatedAt: now });
+    await p.workflowStore.createRun("owner-run", { workflowId: "owner-workflow", definitionVersionId: "v1" },
+      { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: "owner-team" });
+    const sessionId = "wf:owner-run:notify";
+    const session = await ensureWorkflowSession({ db: p.db, store: p.workflowStore, engineStore: p.engineStore,
+      host: p.engineHost, actionPluginByService: p.actionPluginByService, credentials: p.engineCredentials }, sessionId);
+    const threadId = session.thread().id;
+    const gate = (id: string, riskLevel: string) => p.engineStore.saveDecisionGate(sessionId, threadId, {
+      id, sessionId, threadId, queueItemId: "q", resumeKey: id, ordinal: 0, type: "approval", title: `Approve ${id}?`,
+      actions: [{ id: "approve", label: "Approve once" }, { id: "always_allow_owner", label: "Always allow for this team", approves: true }],
+      context: { riskLevel, service: "slack", tool_id: "slack.send_message" }, status: "pending", createdAt: now, updatedAt: now,
+    });
+    await gate("send", "high");
+    await gate("drop", "critical");
+    const url = (gateId: string) => `${api!.baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/decisions/${gateId}/resolve`;
+
+    // A member who is not a team admin may stop the team's asks for a high-risk action.
+    const sent = await fetch(url("send"), { method: "POST", headers: member, body });
+    expect(sent.status).toBe(200);
+    expect(await p.engineStore.getDecisionGate(sessionId, "send")).toMatchObject({ status: "resolved", resolution: { actionId: "always_allow_owner", resolvedBy: "test-member" } });
+
+    // A critical action stays with a team admin.
+    const refused = await fetch(url("drop"), { method: "POST", headers: member, body });
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toEqual({ error: "Only a team admin can always allow a critical action for the team. Approve it once, or ask a team admin." });
+    expect(await p.engineStore.getDecisionGate(sessionId, "drop")).toMatchObject({ status: "pending" });
+    // A team admin may.
+    await p.db.insert(teamMembers).values({ teamId: "owner-team", userId: "local-user", role: "admin" });
+    const admin = await fetch(url("drop"), { method: "POST", headers: { "Content-Type": "application/json" }, body });
+    expect(admin.status).toBe(200);
+  });
+});
+
+describe("POST /decisions/:gateId/resolve — answer types", () => {
+  it("refuses a non-text answer before it can resolve a gate", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+    const res = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/decisions/nonexistent-gate/resolve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value: 123 }),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json() as { error: string }).error).toContain("as text");
+  });
+});
+
+it("persists question images, rejects remote images, and refuses images on approval gates", async () => {
+  api = await bootTestApi();
+  const sessionId = await createSession(api.baseUrl);
+  const store = api.providers.engineStore;
+  // Loading decisions materializes the session's default thread.
+  await fetch(`${api.baseUrl}/api/sessions/${sessionId}/decisions`);
+  const thread = { id: "question-thread", sessionId, key: "web:question", status: "active" as const, queueMode: "followup" as const, createdAt: 1, updatedAt: 1 };
+  await store.saveThread(sessionId, thread);
+  const headers = { "Content-Type": "application/json" };
+  const attachments = [{ kind: "image", url: "data:image/png;base64,cGhvdG8=", mimeType: "image/png", name: "avatar.png" }];
+  for (const type of ["question", "approval"] as const) {
+    await store.saveDecisionGate(sessionId, thread.id, { id: type, sessionId, threadId: thread.id, type, queueItemId: "q", resumeKey: "image", ordinal: 0, title: "Which image?", actions: [], status: "pending", createdAt: 1, updatedAt: 1 });
+    const url = `${api.baseUrl}/api/sessions/${sessionId}/decisions/${type}/resolve`;
+    const invalid = await fetch(url, { method: "POST", headers, body: JSON.stringify({ attachments: [{ ...attachments[0], url: "https://example.com/photo.png" }] }) });
+    expect(invalid.status).toBe(400);
+    expect((await store.getDecisionGate(sessionId, type))?.status).toBe("pending");
+    const response = await fetch(url, { method: "POST", headers, body: JSON.stringify({ attachments }) });
+    expect(response.status).toBe(type === "question" ? 200 : 400);
+    expect(await store.getDecisionGate(sessionId, type)).toMatchObject(type === "question" ? { status: "resolved", resolution: { attachments } } : { status: "pending" });
+  }
 });

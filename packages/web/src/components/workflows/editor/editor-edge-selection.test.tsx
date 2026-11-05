@@ -16,7 +16,7 @@
  * passes down — everything above that (the model mutation, the id
  * re-derivation, the inspector re-render) is the real production code.
  */
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import type { WorkflowDefinition } from "@valet/workflow";
 import type { CanvasProps } from "./canvas";
@@ -33,7 +33,7 @@ vi.mock("./canvas", () => ({
   ),
 }));
 
-import { Editor } from "./editor";
+import { Editor, WORKFLOW_VIEW_KEY } from "./editor";
 
 function baseDefinition(): WorkflowDefinition {
   return {
@@ -55,6 +55,9 @@ function baseDefinition(): WorkflowDefinition {
     ],
   };
 }
+
+// These suites drive the map (the canvas); the steps view has its own tests.
+beforeEach(() => localStorage.setItem(WORKFLOW_VIEW_KEY, "map"));
 
 describe("Editor — edge selection stays live across a fromOutput edit", () => {
   it("re-derives selectedEdgeId to the new edge id instead of going stale", () => {

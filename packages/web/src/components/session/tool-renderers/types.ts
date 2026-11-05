@@ -69,6 +69,18 @@ export interface ToolRenderer {
   ): string | undefined;
   /** Body view rendered when expanded. */
   Body: FC<ToolRendererProps>;
+  /** Output that stays visible outside the collapsible tool card. */
+  Preview?: FC<ToolRendererProps>;
+  /**
+   * Whether this call's `Preview` shows anything, so the call keeps its own
+   * card instead of folding into a work line. A renderer with a `Preview`
+   * and no answer here always keeps its card.
+   */
+  keepsInView?(args: unknown, toolName: string): boolean;
+  /** Once complete, show only `Preview`, without the tool card above it.
+   * For a tool whose result is itself the message, such as a started task
+   * or a brief. */
+  bare?: boolean;
   /**
    * Opt in to rendering the Body while args are still streaming
    * (`status === "streaming"`, args partial and possibly jagged — every

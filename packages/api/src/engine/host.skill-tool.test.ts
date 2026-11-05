@@ -26,6 +26,11 @@ import type {
   ToolDef,
 } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { ensureDefaultAssistantSession } from "../assistants/service.js";
+import { createSkill, deleteSkill, updateSkill } from "../services/skills.js";
+import { createTeam } from "../services/teams.js";
+import { skills } from "../schema/index.js";
+import { eq } from "drizzle-orm";
 
 const stubCredentials: CredentialProvider = {
   get: async (): Promise<Credential | null> => null,
@@ -137,7 +142,62 @@ describe("the `skill` tool on a real session", () => {
     expect(result.text).toContain("github");
   });
 
-  it("is absent from a session whose plugins ship no skills", async () => {
+  it("finds a team skill saved after the team's session was built", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Topology", creatorUserId: "local-user" });
+    const { session } = await ensureDefaultAssistantSession(api.providers, { type: "team", id: team.id }, { actorUserId: "local-user", orgId: "local-org" });
+    const tool = findSkillTool(session.options.tools);
+    // A repo sync stores team skills; it is the same row with a team owner.
+    await createSkill(api.providers.db, { userId: "local-user", orgId: "local-org" }, {
+      name: "generate-topology", description: "Draw the service topology.", content: "# Topology\nDraw it.",
+    });
+    await api.providers.db.update(skills).set({ ownerType: "team", ownerId: team.id }).where(eq(skills.name, "generate-topology"));
+    const result = await tool.execute({ name: "generate-topology" }, makeCtx());
+    expect(result.text).toContain("Draw it.");
+  });
+
+  // A cached session re-reads its skills at the start of each turn
+  // (`Session.refreshSkills`). These pin that the model-facing tool follows
+  // that read for a skill added, edited, or deleted after the build.
+  describe("after the session re-reads its skills", () => {
+    const owner = { userId: "local-user", orgId: "local-org" };
+
+    it("lists and serves a skill saved after the build", async () => {
+      api = await bootTestApi({ plugins: [githubPlugin] });
+      const session = await api.providers.engineHost.sessionFor("skill-tool-added", { ...owner, workspace: "/tmp" });
+      await createSkill(api.providers.db, owner, { name: "google-slides", description: "Edit a deck.", content: "# Slides v1" });
+      await session.refreshSkills();
+
+      const tool = findSkillTool(session.options.tools);
+      expect(tool.description).toContain("google-slides — Edit a deck.");
+      expect((await tool.execute({ name: "google-slides" }, makeCtx())).text).toBe("# Slides v1");
+    });
+
+    it("serves the edited body of a skill that existed at build", async () => {
+      api = await bootTestApi({ plugins: [githubPlugin] });
+      const row = await createSkill(api.providers.db, owner, { name: "google-slides", description: "Edit a deck.", content: "# Slides v1" });
+      const session = await api.providers.engineHost.sessionFor("skill-tool-edited", { ...owner, workspace: "/tmp" });
+      await updateSkill(api.providers.db, owner, row.id, { content: "# Slides v2" });
+      await session.refreshSkills();
+
+      const result = await findSkillTool(session.options.tools).execute({ name: "google-slides" }, makeCtx());
+      expect(result.text).toBe("# Slides v2");
+    });
+
+    it("drops a skill deleted after the build", async () => {
+      api = await bootTestApi({ plugins: [githubPlugin] });
+      const row = await createSkill(api.providers.db, owner, { name: "google-slides", description: "Edit a deck.", content: "# Slides v1" });
+      const session = await api.providers.engineHost.sessionFor("skill-tool-deleted", { ...owner, workspace: "/tmp" });
+      await deleteSkill(api.providers.db, owner, row.id);
+      await session.refreshSkills();
+
+      const tool = findSkillTool(session.options.tools);
+      expect(tool.description).not.toContain("google-slides");
+      expect((await tool.execute({ name: "google-slides" }, makeCtx())).text).toContain("[skill_not_found]");
+    });
+  });
+
+  it("discovers the first personal skill added to an initially empty runtime", async () => {
     api = await bootTestApi({ plugins: [] });
     const session = await api.providers.engineHost.sessionFor("skill-tool-none", {
       userId: "local-user",
@@ -145,6 +205,12 @@ describe("the `skill` tool on a real session", () => {
       workspace: "/tmp",
     });
 
-    expect((session.options.tools ?? []).map((t) => t.name)).not.toContain("skill");
+    await createSkill(api.providers.db, { userId: "local-user", orgId: "local-org" }, {
+      name: "custom-slides", description: "Edit presentations.", content: "Use the Slides API.",
+    });
+    await session.refreshSkills();
+    const tool = findSkillTool(session.options.tools);
+    expect(tool.description).toContain("custom-slides");
+    expect((await tool.execute({ name: "custom-slides" }, makeCtx())).text).toContain("Use the Slides API.");
   });
 });

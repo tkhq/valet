@@ -304,4 +304,32 @@ describe("EngineHost defaultImage → SandboxCreateOpts.image", () => {
     // No defaultImages → falls through to defaultImage.
     expect(provider.createCalls[0]!.image).toBe("ghcr.io/example/legacy:stock");
   });
+
+  it("workflow session boots defaultImages.full, same stock lineage as every other session", async () => {
+    const provider = new RecordingSandboxProvider();
+    api = await bootTestApi({
+      sandboxProvider: provider,
+      defaultImage: "ghcr.io/example/headless:fallback",
+      defaultImages: { full: "ghcr.io/example/full:stock" },
+    });
+
+    const session = await api.providers.engineHost.workflowSessionFor("wf:default-image-run:node1", {
+      actorUserId: "local-user",
+      orgId: "local-org",
+      owner: { type: "user", id: "local-user" },
+      workspace: "/tmp/default-images-workflow",
+    });
+    await session.attachment.ensureReady({ timeoutMs: 5_000 });
+
+    expect(provider.createCalls.length).toBeGreaterThan(0);
+    expect(provider.createCalls[0]!.image).toBe("ghcr.io/example/full:stock");
+    expect(provider.createCalls[0]!.image).not.toBe("ghcr.io/example/headless:fallback");
+  });
+
+  it("no create site pins defaultImage directly; all go through the single stock lineage", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(new URL("./host.ts", import.meta.url), "utf8");
+    expect(source.match(/image: this\.opts\.defaultImage,/g)).toBeNull();
+    expect(source.match(/this\.stockImage\(\)/g)?.length ?? 0).toBe(6);
+  });
 });

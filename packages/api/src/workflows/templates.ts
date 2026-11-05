@@ -1,3 +1,4 @@
+import { linearEventArmBlock } from "../services/linear-ingress.js";
 /**
  * Workflow templates — the gallery's server half.
  *
@@ -33,7 +34,7 @@
  */
 import { githubAppRepositoryAccess } from "../services/github-app.js";
 import { randomUUID } from "node:crypto";
-import { and, eq, inArray, like, or } from "drizzle-orm";
+import { and, eq, inArray, like, or, sql } from "drizzle-orm";
 import type { ActionPlugin, CredentialOwner, CredentialStore, ValetPlugin, WorkflowTemplate } from "@valet/engine";
 import {
   collectTemplatePaths,
@@ -41,6 +42,7 @@ import {
   normalizeInputType,
   triggerDataSchema,
   type ForeachNode,
+  type ValidateEnvironment,
   type WorkflowDefinition,
   type WorkflowInputDefinition,
 } from "@valet/workflow";
@@ -55,6 +57,7 @@ import {
 import { builtinWorkflowTemplates } from "./template-definitions.js";
 import { isTeamMember, listTeamsForUser, lockTeamForOwnership } from "../services/teams.js";
 import { orgProvidedServiceSet, unavailableServiceSet } from "../services/integration-availability.js";
+import { nativeAppCredentialServiceFor, orgManagedCredentialService } from "../services/credential-resolution.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 import {
   teamArmRefusals,
@@ -62,8 +65,9 @@ import {
   withNextStep,
   type TeamServiceReadiness,
 } from "./team-service-readiness.js";
-import { buildValidateEnvironment } from "./validation-env.js";
-import { nextFireAt } from "./schedule-service.js";
+import { buildOrgValidateEnvironment, buildValidateEnvironment } from "./validation-env.js";
+import { TIER_SET } from "../services/model-tiers.js";
+import { nextFireAt } from "./next-fire.js";
 import { toolNodesOf, workflowCallsOf } from "./tool-nodes.js";
 // Same validator the Triggers UI posts through (`routes/events.ts`), so a
 // template-declared subscription and a hand-made one are held to one rule.
@@ -76,6 +80,7 @@ import type {
   WorkflowTemplateRequirement,
   WorkflowTemplateSummary,
 } from "../wire/types.js";
+import { reportError } from "@valet/engine";
 
 /** Foreach's own default cap (`nodes/foreach.ts`), repeated here only to
  * word the caveat when a template leaves `maxItems` off. */
@@ -288,6 +293,67 @@ function foreachNodesOf(definition: WorkflowDefinition): ForeachNode[] {
 }
 
 /**
+ * The model specs a definition names, top level or in a foreach body. Only
+ * `llm` and `session` nodes carry one; every other node type inherits the
+ * run's own model.
+ */
+function modelSpecsOf(definition: WorkflowDefinition): string[] {
+  const specs: string[] = [];
+  const read = (node: WorkflowDefinition["nodes"][number] | ForeachNode["body"]): void => {
+    if (node.type !== "llm" && node.type !== "session") return;
+    if (typeof node.model === "string" && node.model.trim() !== "") specs.push(node.model);
+  };
+  for (const node of definition.nodes) {
+    read(node);
+    if (node.type === "foreach") read(node.body);
+  }
+  return [...new Set(specs)];
+}
+
+/**
+ * Why this organization cannot install the template, or null when it can.
+ *
+ * One function answers for the gallery card and for the install gate, so
+ * the card never disables a button the install would have accepted, and the
+ * install never refuses a card that read as ready. The message names both
+ * remedies the reader has: the organization approves and activates the
+ * model, or it adds a key for the model's provider. Both live on the same
+ * settings page.
+ *
+ * A size tier is named only when the template uses one. A tier the
+ * organization cannot serve has its own remedy — repoint the tier — and a
+ * template that names no tier must not send the reader to look for one.
+ */
+export function orgModelBlockReason(
+  templateId: string,
+  definition: WorkflowDefinition,
+  env: ValidateEnvironment,
+): string | null {
+  const isKnown = env.isKnownModel;
+  if (!isKnown) return null;
+  const blocked = modelSpecsOf(definition).filter((spec) => isKnown(spec) !== true);
+  if (blocked.length === 0) return null;
+  const tiers = blocked.filter((spec) => TIER_SET.has(spec.trim().toLowerCase()));
+  const models = blocked.filter((spec) => !TIER_SET.has(spec.trim().toLowerCase()));
+  const remedies: string[] = [];
+  if (models.length > 0) {
+    const named = models.map((spec) => `"${spec}"`).join(", ");
+    remedies.push(
+      `In Settings > Models, approve and activate ${named}, or add a key for the provider that serves ${models.length === 1 ? "it" : "them"}.`,
+    );
+  }
+  if (tiers.length > 0) {
+    const named = tiers.map((spec) => `"${spec}"`).join(", ");
+    remedies.push(
+      `In Settings > Models, point size ${tiers.length === 1 ? "tier" : "tiers"} ${named} at a provider this organization holds a key for.`,
+    );
+  }
+  return (
+    `Template "${templateId}" names a model this organization cannot use. ${remedies.join(" ")}`
+  );
+}
+
+/**
  * The credential-service key a tool node's service resolves to, and
  * whether that service needs a connection at all.
  *
@@ -321,13 +387,25 @@ function credentialServiceFor(
  * say who configures it rather than offer a connect path. An absent set
  * means the caller knows of no unconfigured service, which is the right
  * answer for a caller with no organization in hand.
+ *
+ * `personalServices` is the caller's own credential set without the
+ * org-provided services. A node of a native service pinned `"user"` never
+ * reads the org row, which is the app identity, so that service counts as
+ * connected only when the caller has their own credential. The run refuses
+ * the same node (`plugins/action-invoker.ts`,
+ * `userPinnedPersonalRefusalMessage`). An org-managed service has no
+ * personal account, so its pin reads `connectedServices` and carries
+ * `organizationManagedPin` instead. An absent set reads every pin as
+ * `connectedServices` does.
  */
 export function templateRequirements(
   definition: WorkflowDefinition,
   actionPluginByService: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>,
   connectedServices: ReadonlySet<string>,
   unavailableServices: ReadonlySet<string> = new Set(),
+  personalServices?: ReadonlySet<string>,
 ): WorkflowTemplateRequirement[] {
+  const plugins = [...new Set([...actionPluginByService.values()].map((entry) => entry.plugin))];
   const byService = new Map<string, WorkflowTemplateRequirement>();
   for (const node of toolNodesOf(definition)) {
     const entry = actionPluginByService.get(node.service);
@@ -336,10 +414,22 @@ export function templateRequirements(
     // validation before this runs.
     if (!entry) continue;
     const { service, required, dynamic } = credentialServiceFor(entry);
-    if (byService.has(service)) continue;
+    const userPinned = personalServices !== undefined && node.credential === "user"
+      && nativeAppCredentialServiceFor(plugins, service) !== undefined;
+    const orgManagedPin = userPinned && orgManagedCredentialService(plugins, service);
+    const prior = byService.get(service);
+    if (prior && !(userPinned && (prior.connected || orgManagedPin))) continue;
+    // An org-managed service (`requires.orgCredential`) has no personal
+    // account to connect, so its pin cannot be judged by the caller's own
+    // set. It reads as an unpinned node does: connected when the
+    // organization row exists, unconfigured when it does not. The flag
+    // tells the reader that the node's credential setting needs a change
+    // after install, and the run refuses with that fix until it does.
+    const personal = userPinned && !orgManagedPin;
     byService.set(service, {
       service,
-      connected: required ? connectedServices.has(service) : true,
+      connected: required ? (personal ? personalServices.has(service) : connectedServices.has(service)) : true,
+      ...(orgManagedPin ? { organizationManagedPin: true } : {}),
       ...(dynamic ? { dynamic: true } : {}),
       ...(unavailableServices.has(service) ? { unconfigured: true } : {}),
     });
@@ -472,17 +562,26 @@ export interface SummarizeResult {
 /**
  * Summarizes one template, or reports why it cannot be offered.
  *
- * The definition goes through `validateDefinitionInput` with the SAME
- * environment `POST /api/workflows` uses, so a template that names an
- * unknown model, an unknown action, or a wrong node-reference path is
- * caught here — at list time, with the validator's own message — instead
- * of on the first run.
+ * The definition goes through `validateDefinitionInput` with the ORG-LESS
+ * environment, so a template that names an unknown model, an unknown
+ * action, or a wrong node-reference path is caught here — at list time,
+ * with the validator's own message — instead of on the first run. A
+ * failure here means the SHIPPED template is broken, which is why the
+ * gallery logs it and the install route answers 500.
+ *
+ * The org's own model policy is deliberately not applied here. It belongs
+ * to the org, not to the template, and applying it would empty the gallery
+ * for an organization whose approved list omits the bundled models, under a
+ * log line that calls every shipped template invalid. `installWorkflowTemplate`
+ * applies it instead, on the baked definition, so an install can never
+ * write a workflow the organization could not have saved itself.
  */
 export function summarizeTemplate(
   owned: OwnedTemplate,
   actionPluginByService: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>,
   connectedServices: ReadonlySet<string>,
   unavailableServices: ReadonlySet<string> = new Set(),
+  personalServices?: ReadonlySet<string>,
 ): { ok: true; value: SummarizeResult } | { ok: false; errors: string[] } {
   const validation = validateDefinitionInput(
     owned.template.definition,
@@ -493,6 +592,13 @@ export function summarizeTemplate(
   const definition = validation.definition;
   const schedule = owned.template.schedule;
   const authored = owned.template.caveats ?? [];
+  const requires = templateRequirements(
+    definition,
+    actionPluginByService,
+    connectedServices,
+    unavailableServices,
+    personalServices,
+  );
   return {
     ok: true,
     value: {
@@ -504,12 +610,7 @@ export function summarizeTemplate(
         description: owned.template.description,
         steps: owned.template.steps,
         schedule: schedule ? { cron: schedule.cron, timezone: schedule.timezone ?? DEFAULT_TIMEZONE } : null,
-        requires: templateRequirements(
-          definition,
-          actionPluginByService,
-          connectedServices,
-          unavailableServices,
-        ),
+        requires,
         inputs: templateInputs(triggerDataSchema(definition)),
         // The author's own caveats come first: they carry knowledge the
         // definition cannot show. The derived ones follow, and cannot go
@@ -517,7 +618,12 @@ export function summarizeTemplate(
         caveats: [
           ...authored,
           ...templateCaveats(definition, actionPluginByService, schedule !== undefined, authored),
+          ...orgManagedPinCaveats(requires),
         ],
+        // The org's answer is stamped by `listWorkflowTemplateSummaries`,
+        // which holds the org environment. A summary taken without it is
+        // installable as far as this function can tell.
+        installable: true,
       },
     },
   };
@@ -540,6 +646,21 @@ export function summarizeTemplate(
  * (`WorkflowTemplateRequirement.unconfigured`): nobody but an admin can
  * connect it, and the card must say who can.
  */
+/**
+ * The note a card shows for each org-managed pin. Install succeeds, and
+ * the run refuses the node until its credential setting changes
+ * (`plugins/action-invoker.ts`, `userPinnedPersonalRefusalMessage`), so
+ * the card says that before install instead of offering a Connect control.
+ */
+export function orgManagedPinCaveats(requires: readonly WorkflowTemplateRequirement[]): string[] {
+  return requires
+    .filter((r) => r.organizationManagedPin === true)
+    .map((r) =>
+      `Pinned to your own account, but ${r.service} connects for the whole organization. ` +
+      `After install, change the node's credential setting to the app.`,
+    );
+}
+
 /**
  * Services a template may name but that a person cannot use yet.
  *
@@ -626,13 +747,35 @@ export async function listWorkflowTemplateSummaries(
   // every card for an org-provided-but-not-personally-connectable service
   // reads "Connect Slack" forever, for every member, including the one who
   // set it up.
-  const connected = new Set([...personal.map((cred) => cred.service), ...orgProvided]);
+  const own = new Set(personal.map((cred) => cred.service));
+  const connected = new Set([...own, ...orgProvided]);
+
+  // The org's model policy, read once for the whole listing. It decides the
+  // `installable` flag on each card: the install gate refuses a template
+  // whose model this org cannot run, and a card that hides that fact offers
+  // an Install button that always fails.
+  //
+  // Not fatal. A listing that cannot read the policy still lists every
+  // card, and each one stays installable — the install gate answers on the
+  // install itself, so the worst case is the behavior this flag replaced.
+  let orgEnv: ValidateEnvironment | undefined;
+  try {
+    orgEnv = await buildOrgValidateEnvironment(deps, caller.orgId);
+  } catch (err) {
+    reportError(
+      { area: "workflows", reason: "template_model_policy" },
+      `workflow templates: could not read the model policy of org ${caller.orgId}; ` +
+        "listing every template as installable",
+      err,
+    );
+  }
 
   const listed: SummarizeResult[] = [];
   for (const owned of await listCatalogTemplatesForOwner(deps, caller)) {
-    const result = summarizeTemplate(owned, deps.actionPluginByService, connected, unavailable);
+    const result = summarizeTemplate(owned, deps.actionPluginByService, connected, unavailable, own);
     if (!result.ok) {
-      console.error(
+      reportError(
+        { area: "workflows", reason: "template_invalid" },
         `workflow templates: hiding "${owned.template.id}" from "${owned.pluginName}" — ` +
           `its definition is invalid: ${result.errors.join("; ")}`,
       );
@@ -649,6 +792,13 @@ export async function listWorkflowTemplateSummaries(
           `${blocked.join(", ")}, which is not available yet.`,
       );
       continue;
+    }
+    const reason = orgEnv
+      ? orgModelBlockReason(owned.template.id, result.value.definition, orgEnv)
+      : null;
+    if (reason !== null) {
+      result.value.summary.installable = false;
+      result.value.summary.installBlockedReason = reason;
     }
     listed.push(result.value);
   }
@@ -732,11 +882,12 @@ export type InstallTemplateResult =
  * the definition, and drops the field from the trigger's `dataSchema` once
  * nothing references it.
  *
- * This exists because of one runtime fact: a scheduled run puts
- * `{ scheduleName, cron, input }` in `trigger.data` and applies NO
- * `dataSchema` defaults (`scheduler.ts`). A scheduled workflow therefore
- * cannot read a per-install parameter from its trigger — `{{ trigger.data.
- * channelId }}` renders null every night, forever, and nothing reports it.
+ * This exists because of one runtime fact: a scheduled run fills
+ * `trigger.data` only from the schedule's input and `dataSchema` defaults
+ * (`scheduledTriggerData`), and an installed template's schedule sends no
+ * input. A scheduled workflow therefore cannot read a per-install parameter
+ * with no default from its trigger — `{{ trigger.data.channelId }}` renders
+ * null every night, forever, and nothing reports it.
  * Baking the value into the definition at install time is the only form
  * that works on every entry point.
  *
@@ -899,6 +1050,24 @@ function withInstallStep(reason: string): string {
  * services must be connected, the inputs must type-check, and the cron
  * must parse. The transaction then only writes.
  */
+/**
+ * The highest install number that `names` use for a template named `base`:
+ * 0 when none does, 1 for the bare name, n for `base (n)`. The next install
+ * takes one more, so a deleted earlier install leaves its number unused and a
+ * later install never repeats a number that a remaining install still shows.
+ */
+export function installNumber(base: string, names: readonly string[]): number {
+  let highest = 0;
+  for (const name of names) {
+    if (name === base) highest = Math.max(highest, 1);
+    else if (name.startsWith(`${base} (`) && name.endsWith(")")) {
+      const digits = name.slice(base.length + 2, -1);
+      if (/^[1-9][0-9]*$/.test(digits)) highest = Math.max(highest, Number(digits));
+    }
+  }
+  return highest;
+}
+
 export async function installWorkflowTemplate(
   deps: TemplateServiceDeps,
   owner: WorkflowOwner,
@@ -929,8 +1098,9 @@ export async function installWorkflowTemplate(
     orgProvidedServiceSet(availability),
     unavailableServiceSet(availability),
   ]);
-  const connected = new Set([...personal.map((c) => c.service), ...orgProvided]);
-  const summarized = summarizeTemplate(owned, deps.actionPluginByService, connected, unavailable);
+  const own = new Set(personal.map((c) => c.service));
+  const connected = new Set([...own, ...orgProvided]);
+  const summarized = summarizeTemplate(owned, deps.actionPluginByService, connected, unavailable, own);
   if (!summarized.ok) {
     return {
       ok: false,
@@ -982,6 +1152,10 @@ export async function installWorkflowTemplate(
     // it — only an admin can act, in Settings → Organization.
     const unmet = summarized.value.summary.requires.filter((r) => !r.connected);
     const unconfigured = unmet.filter((r) => r.unconfigured === true).map((r) => r.service);
+    // An org-managed pin (`organizationManagedPin`) does not block install:
+    // the install API cannot edit a node, so a refusal here names a fix
+    // nobody can take. Its requirement reads as an unpinned node's, so a
+    // missing organization row still takes the unconfigured path below.
     const unconnected = unmet.filter((r) => r.unconfigured !== true).map((r) => r.service);
     if (unconfigured.length > 0) {
       return {
@@ -1069,6 +1243,30 @@ export async function installWorkflowTemplate(
     };
   }
 
+  // The organization's own model policy, on the SAME environment
+  // `POST /api/workflows` validates against. An install writes the row
+  // directly, so without this gate an organization whose approved list or
+  // provider settings exclude a template's model installs a workflow it can
+  // never save again — the editor refuses the first edit and says nothing
+  // about how the workflow got there.
+  const orgEnv = await buildOrgValidateEnvironment(deps, owner.orgId);
+  const orgChecked = validateDefinitionInput(definition, orgEnv);
+  if (!orgChecked.ok) {
+    // `orgModelBlockReason` names the blocked models and both remedies, and
+    // the gallery card shows the same sentence. It answers null when the
+    // refusal is not about a model, and the generic line covers that.
+    const reason = orgModelBlockReason(templateId, definition, orgEnv);
+    return {
+      ok: false,
+      code: "invalid_input",
+      error:
+        reason ??
+        `Template "${templateId}" produced a workflow this organization cannot save. ` +
+          "Read the errors, correct the template, then install again.",
+      errors: orgChecked.errors,
+    };
+  }
+
   // Cron parsing is pure and runs before the transaction, so an unparseable
   // expression can never leave a definition behind with no schedule.
   let fireAt: number | undefined;
@@ -1110,7 +1308,7 @@ export async function installWorkflowTemplate(
             error:
               `This template watches for events filtered by "${filter.fromInput}", and no value for it arrived. ` +
               `Supply "${filter.fromInput}" when you install it.`,
-            errors: [`Event trigger "${event.name}" needs input "${filter.fromInput}" for its ${filter.field} filter.`],
+            errors: [`Event "${event.name}" needs input "${filter.fromInput}" for its ${filter.field} filter.`],
           };
         }
         filters.push({ field: filter.field, op: filter.op, value: supplied });
@@ -1121,15 +1319,14 @@ export async function installWorkflowTemplate(
           ok: false,
           code: "broken_template",
           error: `Template "${templateId}" from "${owned.pluginName}" declares an event filter with no value, so it cannot be installed. Report the template id.`,
-          errors: [`Event trigger "${event.name}" has a ${filter.field} filter with neither "value" nor "fromInput".`],
+          errors: [`Event "${event.name}" has a ${filter.field} filter with neither "value" nor "fromInput".`],
         };
       }
       filters.push({ field: filter.field, op: filter.op, value: filter.value });
     }
 
     // The workflow id is minted above and unique by construction, so its
-    // tail keeps two installs of one template apart in the Triggers list —
-    // the same suffix rule the schedule name uses.
+    // tail keeps two installs of one template apart in the Triggers list.
     const name = `${event.name} (${workflowId.slice(-6)})`;
     // One gate for validation AND mention scoping (TKAI-299): this insert
     // path must hold the same rules the CRUD writers do, or a template
@@ -1149,10 +1346,12 @@ export async function installWorkflowTemplate(
       return {
         ok: false,
         code: "broken_template",
-        error: `Template "${templateId}" from "${owned.pluginName}" declares an event trigger that cannot be armed, so it cannot be installed. Report the template id.`,
+        error: `Template "${templateId}" from "${owned.pluginName}" declares an event that Valet cannot listen for, so it cannot be installed. Report the template id.`,
         errors: [write.error],
       };
     }
+    const ingressBlocked = await linearEventArmBlock(deps.db,deps.credentials,owner.orgId,event.eventKeys);
+    if (ingressBlocked) return { ok: false, code: "not_connected", error: ingressBlocked };
     subscriptions.push({ name, eventKeys: event.eventKeys, filters: write.filters });
   }
 
@@ -1164,7 +1363,7 @@ export async function installWorkflowTemplate(
       if (!subscription.eventKeys.some((key) => key.startsWith("github."))) continue;
       const repoFilter = subscription.filters.find((filter) => filter.field === "repo" && filter.op === "eq");
       if (!repoFilter || typeof repoFilter.value !== "string") {
-        return { ok: false, code: "invalid_input", error: "Choose an exact repository for this team's GitHub trigger.", errors: ["A repository equality filter is required."] };
+        return { ok: false, code: "invalid_input", error: "Choose an exact repository for this team's GitHub events.", errors: ["A repository equality filter is required."] };
       }
       repositories.add(repoFilter.value);
     }
@@ -1202,12 +1401,13 @@ export async function installWorkflowTemplate(
     const ownerId = teamId ?? owner.userId;
 
     // Repeat installs get a counted name. There is no template_id column
-    // to count by, so the count comes from the names already installed —
-    // exact match, or the same name with a "(n)" suffix. A race between
-    // two installs can produce two rows with one name, which is harmless:
-    // names are display text, and every id is unique.
+    // to count by, so the number comes from the names already installed:
+    // exact match, or the same name with a "(n)" suffix. One install at a
+    // time per owner and template reads those names, so two installs never
+    // pick one number.
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`workflow-install:${ownerType}:${ownerId}:${owned.template.name}`}))`);
     const siblings = await tx
-      .select({ id: workflowDefinitions.id })
+      .select({ name: workflowDefinitions.name })
       .from(workflowDefinitions)
       .where(
         and(
@@ -1216,7 +1416,28 @@ export async function installWorkflowTemplate(
           or(eq(workflowDefinitions.name, owned.template.name), like(workflowDefinitions.name, `${owned.template.name} (%`)),
         ),
       );
-    if (siblings.length > 0) workflowName = `${owned.template.name} (${siblings.length + 1})`;
+    // The schedule carries the same count, so a routine reads with the name
+    // of the workflow it runs, and two installs stay apart in the schedules
+    // list. A renamed workflow keeps its routine's name, so the routines'
+    // names count too.
+    const routines = schedule
+      ? await tx
+        .select({ name: workflowSchedules.name })
+        .from(workflowSchedules)
+        .where(
+          and(
+            eq(workflowSchedules.ownerType, ownerType),
+            eq(workflowSchedules.ownerId, ownerId),
+            or(eq(workflowSchedules.name, schedule.name), like(workflowSchedules.name, `${schedule.name} (%`)),
+          ),
+        )
+      : [];
+    const inUse = Math.max(
+      installNumber(owned.template.name, siblings.map((row) => row.name)),
+      schedule ? installNumber(schedule.name, routines.map((row) => row.name)) : 0,
+    );
+    const installCount = inUse === 0 ? "" : ` (${inUse + 1})`;
+    workflowName = `${owned.template.name}${installCount}`;
 
     await tx.insert(workflowDefinitions).values({
       id: workflowId,
@@ -1247,10 +1468,7 @@ export async function installWorkflowTemplate(
         ownerId,
         targetKind: "workflow",
         workflowId,
-        // The workflow id is minted in this transaction and unique by
-        // construction, so its tail is the suffix that keeps two installs
-        // of one template apart in the schedules list.
-        name: `${schedule.name} (${workflowId.slice(-6)})`,
+        name: `${schedule.name}${installCount}`,
         cron: schedule.cron,
         timezone,
         enabled: true,

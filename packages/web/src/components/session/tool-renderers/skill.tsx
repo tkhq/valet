@@ -84,7 +84,7 @@ export const skillRenderer: ToolRenderer = {
     return (
       <ToolBody className="px-0 py-0">
         {argEntries.length > 0 && (
-          <div className="px-3 py-2 border-b border-[--border]/60">
+          <div className="px-3 py-2 border-b border-line/60">
             <KeyValueTable entries={argEntries} />
           </div>
         )}

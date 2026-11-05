@@ -16,6 +16,7 @@
   "files": [],
   "references": [
     { "path": "./packages/shared" },
+    { "path": "./packages/browser-runtime" },
     { "path": "./packages/engine" },
     { "path": "./packages/workflow" },
     { "path": "./packages/store-postgres" },
@@ -38,6 +39,7 @@
     { "path": "./packages/plugin-figma" },
     { "path": "./packages/plugin-sentry" },
     { "path": "./packages/plugin-deepwiki" },
+    { "path": "./packages/plugin-pr-review" },
     { "path": "./packages/plugin-email-auth" },
     { "path": "./packages/plugin-google-auth" },
     { "path": "./packages/plugin-telegram" },
@@ -47,6 +49,7 @@
     { "path": "./packages/plugin-sandbox-tunnels" },
     { "path": "./packages/plugin-assistants" },
     { "path": "./packages/plugin-memory" },
+    { "path": "./packages/plugin-native-documents" },
     { "path": "./packages/plugin-security" },
     { "path": "./packages/plugin-turnkey" },
     { "path": "./packages/sandbox-gateway" },

@@ -34,9 +34,21 @@ const ALL_TRUE: Probes = {
 };
 
 describe("STEPS", () => {
-  it("has the spec's 35 unique rows", () => {
-    expect(STEPS).toHaveLength(35);
-    expect(new Set(STEPS.map((s) => s.id)).size).toBe(35);
+  it("keeps excluded Docker files assigned to another row with no stronger prerequisites", () => {
+    const docker = STEPS.find((s) => s.id === "sandbox-docker")!;
+    const exclusions = docker.command.flatMap((arg, i) => arg === "--exclude" ? [docker.command[i + 1]] : []);
+    expect(exclusions.length).toBeGreaterThan(0);
+    for (const file of exclusions) {
+      const owners = STEPS.filter((s) => s.id !== docker.id && s.command.includes("@valet/sandbox-docker")
+        && s.command.includes(file) && !s.command.includes("--exclude"));
+      expect(owners, file).toHaveLength(1);
+      expect(owners[0].needs.every((need) => docker.needs.includes(need)), file).toBe(true);
+    }
+  });
+
+  it("has the spec's 37 unique rows", () => {
+    expect(STEPS).toHaveLength(37);
+    expect(new Set(STEPS.map((s) => s.id)).size).toBe(37);
   });
 
   it("includes every spec row id", () => {
@@ -48,7 +60,7 @@ describe("STEPS", () => {
       "sandbox-docker-unit", "registry-drift",
       "integration-core",
       "orchestrator-smoke", "session-smoke", "integration-agent", "cli",
-      "sandbox-docker", "sandbox-dind", "sandbox-k8s", "store-postgres", "workspace-prep-docker",
+      "browser-runtime", "browser-docker", "sandbox-docker", "sandbox-dind", "sandbox-k8s", "store-postgres", "workspace-prep-docker",
       "prebuilds-docker", "k8s-builder-cluster", "keycloak-oidc",
       "fullstack-docker", "fullstack-k8s", "telegram", "github-live", "openai",
       "onepassword",
@@ -117,7 +129,7 @@ describe("partitionWaves", () => {
     // Steps that write files other steps read run alone, first: typecheck
     // (tsc --build re-emits shared/sdk dist) and registry-drift (temporarily
     // rewrites a tracked source file).
-    expect(waves.pre.map((s) => s.id)).toEqual(["typecheck", "registry-drift"]);
+    expect(waves.pre.map((s) => s.id)).toEqual(["typecheck", "web-build", "api-bundle", "registry-drift"]);
     // Every parallel step is static-group and flagged parallelSafe.
     for (const s of waves.parallel) {
       expect(s.group, s.id).toBe("static");
@@ -125,7 +137,8 @@ describe("partitionWaves", () => {
     }
     expect(waves.parallel.map((s) => s.id)).toContain("unit");
     expect(waves.parallel.map((s) => s.id)).toContain("plugins-unit");
-    expect(waves.parallel.map((s) => s.id)).toContain("web-build");
+    expect(waves.parallel.map((s) => s.id)).not.toContain("web-build");
+    expect(waves.parallel.map((s) => s.id)).not.toContain("api-bundle");
     // Everything with daemons, ports, keys, or clusters stays serial, in
     // table order.
     const serialIds = waves.serial.map((s) => s.id);
@@ -300,7 +313,7 @@ describe("selectSteps", () => {
   });
 
   it("returns all steps without --only", () => {
-    expect(selectSteps(STEPS)).toHaveLength(35);
+    expect(selectSteps(STEPS)).toHaveLength(37);
   });
 
   it("throws on unknown ids", () => {

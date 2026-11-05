@@ -1,15 +1,29 @@
-import { useEffect } from "react";
+import { useWebPresence } from "~/api/web-presence";
+import { AUTH_CHANGE_KEY } from "~/lib/auth-navigation";
+import { WorkspaceAssistantProvider, WorkspaceAssistantDock } from "~/components/layout/workspace-assistant";
+import { ApiError } from "~/api/client";
+import { Suspense, useEffect, useState, type ReactNode } from "react";
+import { useMe } from "~/api/settings";
+import { useReportTimezoneOnce } from "~/lib/report-timezone";
+import { useComposerDraftStore } from "~/stores/composer-drafts";
 import { Link, Outlet, createRootRouteWithContext, useRouterState } from "@tanstack/react-router";
 import type { QueryClient } from "@tanstack/react-query";
 import { TooltipProvider } from "~/components/primitives/tooltip";
+import { ErrorRow, LoadingRow } from "~/components/primitives/query-state";
+import { FeatureTourProvider } from "~/components/tour/feature-tour";
 import { AppShell } from "~/components/layout/app-shell";
+import { ReconnectingBanner } from "~/components/layout/reconnecting-banner";
 import { TopNav } from "~/components/layout/top-nav";
+import { MobileTopNav } from "~/components/layout/mobile-top-nav";
 import { WorkspaceScopeProvider } from "~/lib/workspace-scope";
-import { AssistantRail } from "~/components/session/assistant-rail";
+import { AppDrawer } from "~/components/layout/app-drawer";
+import { AssistantRail, AssistantRailCollapsed } from "~/components/session/assistant-rail";
+import { useMobileLayout } from "~/hooks/use-mobile-layout";
 import { KeyboardShortcutsDialog } from "~/components/session/keyboard-shortcuts-dialog";
 import { useChatKeybindings } from "~/hooks/use-chat-keybindings";
 import { useAttentionPing } from "~/lib/use-attention-ping";
 import { unlock } from "~/lib/notification-sound";
+import { UI_STRESS_PATH, UiStressShell, uiStressEnabled } from "~/dev/ui-stress/gate";
 
 interface RouterContext {
   queryClient: QueryClient;
@@ -31,12 +45,12 @@ function NotFound() {
     <div className="flex-1 grid place-items-center p-8 text-center">
       <div className="max-w-sm space-y-3">
         <h1 className="font-display text-2xl text-ink">This page doesn’t exist.</h1>
-        <p className="text-sm text-muted">The dashboard does.</p>
+        <p className="text-sm text-muted">Valet is on Home.</p>
         <Link
           to="/"
           className="inline-flex rounded px-3 py-1.5 text-sm text-moss hover:underline"
         >
-          Back to the dashboard
+          Back to Home
         </Link>
       </div>
     </div>
@@ -44,23 +58,29 @@ function NotFound() {
 }
 
 /**
- * Which sidebar (if any) the current route gets, per assistant-centered
- * web UI decisions 12/14. This is a root-layout concern rather than
- * something each route/`SessionView` renders itself, because the sidebar
- * lives in the app shell's `<aside>`, outside the routed `<main>` content.
- *
- * - `/chat` — the nested thread-tree (children grouped under their
- *   spawning thread), replacing the flat thread list.
- * - everything else (`/`, `/sessions`, `/sessions/$sessionId`,
- *   `/memory` and `/memory/*`, …) — no app sidebar. Standalone sessions
- *   have no thread UI (decision 14); the memory explorer renders its own
- *   tree pane inside the route (Task 6); the dashboard and session list
- *   have no thread concept at all. The old flat `ThreadList` sidebar that
- *   used to cover this "everything else" bucket is dead — deleted.
+ * Which sidebar a route gets on a wider screen. Every signed-in page shows
+ * the app-wide sidebar (New thread, Home, and Spaces with their pages); on
+ * `/` and `/chat` it also lists the open space's Projects and threads.
+ * Settings keeps its own rail and pinned scope, so it has none. This is a
+ * root-layout concern because the sidebar lives in the shell's `<aside>`,
+ * outside the routed `<main>` content. A phone gets the drawer
+ * (`AppDrawer`) on every page instead.
  */
 function sidebarForPath(pathname: string) {
-  if (pathname === "/chat") return <AssistantRail />;
-  return null;
+  if (pathname === "/settings" || pathname.startsWith("/settings/")) return null;
+  return <AssistantRail />;
+}
+
+/** The workflow editor has its own panes: it keeps its own collapsed state and starts collapsed. */
+function collapseScopeForPath(pathname: string): string | undefined {
+  return /^\/workflows\/(?!runs(\/|$))[^/]+$/.test(pathname) ? "workflow-editor" : undefined;
+}
+
+/** The development-only UI stress gallery, in any letter case, with or
+ * without a trailing slash. Always false in a production build, where `UiStressShell` is null. */
+function isUiStressPath(pathname: string): boolean {
+  // The router matches paths without regard to case, so this check does too.
+  return UiStressShell !== null && pathname.replace(/\/+$/, "").toLowerCase() === UI_STRESS_PATH && uiStressEnabled();
 }
 
 /** `/login`, `/signup`, and the shared-artifact reader `/a/$token` —
@@ -69,12 +89,25 @@ function sidebarForPath(pathname: string) {
  * never sees app nav before they can sign in. */
 const PUBLIC_ROUTES = new Set(["/login", "/signup"]);
 
+/** Approval pages for an app or the CLI. They need a session (their API
+ * calls send a signed-out visitor to `/login?next=`), but render without app
+ * chrome so the decision is the only thing on the page. */
+const APPROVAL_ROUTES = new Set(["/oauth/consent", "/cli/device"]);
+
 function isPublicPath(pathname: string): boolean {
-  return PUBLIC_ROUTES.has(pathname) || pathname.startsWith("/a/");
+  return PUBLIC_ROUTES.has(pathname) || APPROVAL_ROUTES.has(pathname) || pathname.startsWith("/a/");
 }
 
 function RootLayout() {
+  useEffect(() => {
+    const changed = (event: StorageEvent) => {
+      if (event.key === AUTH_CHANGE_KEY) window.location.reload();
+    };
+    window.addEventListener("storage", changed);
+    return () => window.removeEventListener("storage", changed);
+  }, []);
   const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const mobile = useMobileLayout();
   const isPublic = isPublicPath(pathname);
 
   if (isPublic) {
@@ -87,18 +120,38 @@ function RootLayout() {
 
   // Inside the signed-in branch only: the provider reads assistants and
   // teams, which a signed-out visitor cannot fetch.
-  return (
-    <TooltipProvider>
-      <WorkspaceScopeProvider>
+  const gallery = UiStressShell !== null && isUiStressPath(pathname);
+  // A phone gets the phone UI: its own top bar, and the drawer (Home and the
+  // threads) on every page. A wider screen keeps the web UI: the top bar with
+  // every page, the thread sidebar on /chat, and the Ask Valet panel.
+  const shell = mobile
+    ? <AppShell topNav={<MobileTopNav />} sidebar={<AppDrawer />}>
+      {/* Keybindings must sit under AppShell so sidebar controls resolve. */}
+      <ChatKeybindingsHost />
+      <Outlet />
+    </AppShell>
+    : <AppShell topNav={<TopNav />} sidebar={sidebarForPath(pathname)} rail={<AssistantRailCollapsed />}
+      collapseScope={collapseScopeForPath(pathname)} rightPanel={<WorkspaceAssistantDock />}>
+      <ChatKeybindingsHost />
+      <Outlet />
+    </AppShell>;
+  const app = (
+    <WorkspaceScopeProvider persist={!gallery}>
+      <WorkspaceAssistantProvider>
         <SignedInEffects />
-        <AppShell topNav={<TopNav />} sidebar={sidebarForPath(pathname)}>
-          {/* Keybindings must sit under AppShell so sidebar controls resolve. */}
-          <ChatKeybindingsHost />
-          <Outlet />
-        </AppShell>
-      </WorkspaceScopeProvider>
-    </TooltipProvider>
+        {/* The gallery's fixture account takes no tour. */}
+        <FeatureTourProvider enabled={!gallery}>{shell}</FeatureTourProvider>
+      </WorkspaceAssistantProvider>
+    </WorkspaceScopeProvider>
   );
+  // The gallery puts the whole shell on its frozen fixture client, so the
+  // nav, the bell, and the sidebar show stress data too. It skips
+  // DraftAccountBoundary: the fixture account must not replace the real
+  // account's drafts, which keep their attachments in memory only.
+  if (UiStressShell && gallery) {
+    return <Suspense fallback={null}><UiStressShell><TooltipProvider>{app}</TooltipProvider></UiStressShell></Suspense>;
+  }
+  return <TooltipProvider><ReconnectingBanner /><DraftAccountBoundary>{app}</DraftAccountBoundary></TooltipProvider>;
 }
 
 /**
@@ -108,6 +161,7 @@ function RootLayout() {
  * for a signed-out visitor and poll endpoints they cannot call.
  */
 function SignedInEffects() {
+  useWebPresence();
   useAttentionPing();
   useUnlockAudioOnFirstGesture();
   return null;
@@ -140,4 +194,25 @@ function useUnlockAudioOnFirstGesture() {
       for (const e of events) window.removeEventListener(e, onGesture);
     };
   }, []);
+}
+
+/** Mount composers only after their draft namespace matches the authenticated account. */
+export function DraftAccountBoundary({ children }: { children: ReactNode }) {
+  const me = useMe({ staleTime: 0, refetchOnMount: "always", refetchOnWindowFocus: "always" });
+  useReportTimezoneOnce(me.error ? undefined : me.data);
+  const owner = me.data ? JSON.stringify([me.data.orgId, me.data.id]) : "";
+  const activeOwner = useComposerDraftStore((s) => s.owner);
+  const [verifiedOwner, setVerifiedOwner] = useState("");
+  const unauthorized = me.error instanceof ApiError && (me.error.status === 401 || me.error.status === 403);
+  useEffect(() => {
+    if (unauthorized) setVerifiedOwner("");
+    else if (!me.isFetching && !me.error && owner) {
+      useComposerDraftStore.getState().activateOwner(owner);
+      setVerifiedOwner(owner);
+    }
+  }, [owner, me.isFetching, me.error, unauthorized]);
+  // Centered on the page background: these show for a moment on every load.
+  if (unauthorized || (me.error && verifiedOwner !== owner)) return <div className="grid min-h-dvh place-items-center bg-paper px-4"><ErrorRow>Could not load your account. Reload the page to try again.</ErrorRow></div>;
+  if (!owner || activeOwner !== owner || verifiedOwner !== owner) return <div role="status" className="grid min-h-dvh place-items-center bg-paper"><LoadingRow label="Loading your account…" /></div>;
+  return <div key={owner} className="contents">{children}</div>;
 }

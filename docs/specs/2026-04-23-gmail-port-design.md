@@ -22,6 +22,7 @@ Replace the 13 current `gmail.*` actions in `packages/plugin-gmail/` with 13 act
 | `gmail.list_drafts` | `maxResults?`, `pageToken?` | List all drafts | low |
 | `gmail.get_draft` | `draftId` | Get a single draft with full content | low |
 | `gmail.update_draft` | `draftId`, `to`, `cc?`, `bcc?`, `subject`, `body`, `bodyHtml?` | Update an existing draft | medium |
+| `gmail.add_draft_attachments` | `draftId`, `attachments` | Add files to an existing draft (added 2026-10-30) | medium |
 | `gmail.send_draft` | `draftId` | Send an existing draft | high |
 | `gmail.delete_draft` | `draftId` | Permanently delete a draft | medium |
 | `gmail.list_labels` | (none) | List all labels | low |
@@ -43,6 +44,8 @@ Same pattern as the Docs port (see `2026-04-23-google-workspace-docs-port-design
 
 - **Gmail API base URL:** `https://gmail.googleapis.com/gmail/v1`
 - **RFC 2822 email construction:** Both the reference repo and our current code build raw emails with base64url encoding. The reference repo uses the `googleapis` client but the email construction is pure string manipulation -- ports directly.
+- **Email body modes:** `gmail.send_email`, `gmail.create_draft`, and `gmail.update_draft` always send `multipart/alternative`. Without `bodyHtml`, Gmail sends the Markdown `body` source as `text/plain` and safe rendered Markdown as `text/html`. markdown-it 14.1.1 uses the Docs configuration: raw HTML is disabled, linkification is enabled, and typographer replacements are disabled. Gmail renders a Markdown soft break as `<br>`. With non-blank `bodyHtml`, Gmail sends `body` verbatim as `text/plain` and `bodyHtml` verbatim as `text/html`. This explicit field is the only raw HTML path. The schemas reject blank `bodyHtml`, and the builder falls back to safe Markdown rendering if validation is bypassed. Multipart bodies use CRLF. Header values (`to`, `cc`, `bcc`, `subject`) fold CR/LF runs to one space and remove other control characters. These controls prevent header injection.
+- **Attachments (2026-10-30):** `send_email`, `create_draft`, and `update_draft` take an optional `attachments` list of thread files or sandbox paths, sent as `multipart/mixed`. Messages over 3 MB use the resumable upload endpoint. See `2026-10-30-gmail-attachments-drive-export-design.md`.
 - **`triage_inbox` is the interesting new tool:** It fetches unread messages, applies heuristic categorization (newsletter detection via `List-Unsubscribe`/`List-Id` headers, meeting keyword matching, question detection, action-requested detection), and returns aggregate stats (total unread, top senders, category breakdown). This is a composite read-only tool designed for AI inbox triage workflows.
 - **`list_messages` response shape changes:** The reference repo fetches full message content for each listed message (N+1 pattern: list IDs then batch-get each). Our current implementation does the same. The reference repo uses `Promise.allSettled` for resilience; the port should adopt this.
 - **`update_draft` is new:** Allows modifying a draft's content before sending. Our current implementation only supports create and send.

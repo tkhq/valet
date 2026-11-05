@@ -20,11 +20,18 @@ import { llmProviders, type LlmProviderModel, type LlmProviderRow } from "../sch
 
 export type LlmProviderKind = LlmProviderRow["kind"];
 
-const KNOWN_KINDS: readonly LlmProviderKind[] = ["anthropic", "openai", "google", "openrouter"];
+/** Known kinds: pi-ai provider ids whose registry/env the api reads directly. */
+export const KNOWN_PROVIDER_KINDS = ["anthropic", "openai", "google", "openrouter", "amazon-bedrock"] as const satisfies readonly LlmProviderKind[];
+const KNOWN_KINDS: readonly LlmProviderKind[] = KNOWN_PROVIDER_KINDS;
 
 export function isLlmProviderKind(v: unknown): v is LlmProviderKind {
   return (
-    v === "anthropic" || v === "openai" || v === "google" || v === "openrouter" || v === "openai_compatible"
+    v === "anthropic" ||
+    v === "openai" ||
+    v === "google" ||
+    v === "openrouter" ||
+    v === "amazon-bedrock" ||
+    v === "openai_compatible"
   );
 }
 

@@ -35,16 +35,18 @@ export const qkArtifacts = {
   versions: (id: string) => ["artifacts", "versions", id] as const,
 };
 
+/** 404 (revoked or unknown) and 401 (sign-in required) are outcomes, not
+ * transient failures. Anything else retries twice. */
+function retryUnlessGoneOrSignedOut(failureCount: number, error: unknown): boolean {
+  if (error instanceof ApiError && (error.status === 404 || error.status === 401)) return false;
+  return failureCount < 2;
+}
+
 export function useArtifact(token: string, opts?: Partial<UseQueryOptions<GetArtifactResponse>>) {
   return useQuery<GetArtifactResponse>({
     queryKey: qkArtifacts.byToken(token),
     queryFn: () => api.getArtifact(token),
-    retry: (failureCount, error) => {
-      // 404 (revoked/unknown) and 401 (login required) are outcomes, not
-      // transient failures.
-      if (error instanceof ApiError && (error.status === 404 || error.status === 401)) return false;
-      return failureCount < 2;
-    },
+    retry: retryUnlessGoneOrSignedOut,
     ...opts,
   });
 }
@@ -96,10 +98,7 @@ export function useArtifactComments(token: string, opts?: { enabled?: boolean })
     queryKey: qkArtifacts.comments(token),
     queryFn: () => api.listArtifactComments(token),
     enabled: opts?.enabled ?? true,
-    retry: (failureCount, error) => {
-      if (error instanceof ApiError && (error.status === 404 || error.status === 401)) return false;
-      return failureCount < 2;
-    },
+    retry: retryUnlessGoneOrSignedOut,
   });
 }
 

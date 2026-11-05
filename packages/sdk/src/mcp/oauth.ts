@@ -7,6 +7,10 @@ export interface AuthServerMetadata {
   token_endpoint: string;
   registration_endpoint?: string;
   scopes_supported?: string[];
+  /** `scopes_supported` from the MCP server's protected resource metadata
+   * (RFC 9728), not the issuer's. These are the scopes the server checks
+   * on its tools; the issuer may also list scopes for other resources. */
+  resource_scopes_supported?: string[];
   code_challenge_methods_supported?: string[];
   grant_types_supported?: string[];
   token_endpoint_auth_methods_supported?: string[];
@@ -34,6 +38,7 @@ export interface TokenResponse {
 interface ProtectedResourceMetadata {
   resource?: string;
   authorization_servers?: string[];
+  scopes_supported?: unknown;
 }
 
 /** Well-known URL candidates for an issuer, most-specific first. RFC 8414
@@ -83,6 +88,16 @@ async function fetchWellKnown(url: string): Promise<Record<string, unknown> | nu
   }
 }
 
+/** URL equality after WHATWG parsing. A path's trailing slash still
+ * matters (`/api/mcp/` is not `/api/mcp`); an empty path reads as `/`. */
+function sameUrl(a: string, b: string): boolean {
+  try {
+    return new URL(a).href === new URL(b).href;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Discover authorization server metadata from an MCP server URL.
  *
@@ -95,12 +110,22 @@ async function fetchWellKnown(url: string): Promise<Record<string, unknown> | nu
  */
 export async function discoverAuthServer(mcpServerUrl: string): Promise<AuthServerMetadata> {
   const base = mcpServerUrl.replace(/\/+$/, '');
+  const optStr = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
+  const optStrArr = (v: unknown): string[] | undefined =>
+    Array.isArray(v) && v.every((x) => typeof x === 'string') ? v : undefined;
 
-  // Step 1: protected resource metadata names the issuer. Absent PRM,
-  // the MCP server URL itself is the issuer.
+  // Step 1: protected resource metadata names the issuer and the scopes
+  // the server checks. Absent PRM, the MCP server URL itself is the issuer.
   let issuer = base;
+  let resourceScopes: string[] | undefined;
   for (const url of wellKnownUrls(base, 'oauth-protected-resource')) {
     const prm = (await fetchWellKnown(url)) as ProtectedResourceMetadata | null;
+    // RFC 9728 makes authorization_servers optional, so the scopes count
+    // even when the document names no issuer. They count only when the
+    // document describes this server (§3.3): a root document for another
+    // resource must not add its scopes.
+    const describesServer = typeof prm?.resource === 'string' && sameUrl(prm.resource, mcpServerUrl);
+    if (describesServer) resourceScopes ??= optStrArr(prm?.scopes_supported);
     const advertised = prm?.authorization_servers?.[0];
     if (typeof advertised === 'string' && advertised.length > 0) {
       issuer = advertised;
@@ -115,9 +140,6 @@ export async function discoverAuthServer(mcpServerUrl: string): Promise<AuthServ
     ...wellKnownUrls(issuer, 'openid-configuration'),
     `${base}/.well-known/oauth-authorization-server`,
   ]);
-  const optStr = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
-  const optStrArr = (v: unknown): string[] | undefined =>
-    Array.isArray(v) && v.every((x) => typeof x === 'string') ? v : undefined;
   for (const url of candidates) {
     const meta = await fetchWellKnown(url);
     if (
@@ -130,6 +152,7 @@ export async function discoverAuthServer(mcpServerUrl: string): Promise<AuthServ
         token_endpoint: meta.token_endpoint,
         registration_endpoint: optStr(meta.registration_endpoint),
         scopes_supported: optStrArr(meta.scopes_supported),
+        resource_scopes_supported: resourceScopes,
         code_challenge_methods_supported: optStrArr(meta.code_challenge_methods_supported),
         grant_types_supported: optStrArr(meta.grant_types_supported),
         token_endpoint_auth_methods_supported: optStrArr(
@@ -239,6 +262,15 @@ export async function exchangeCodePkce(params: {
   return (await res.json()) as TokenResponse;
 }
 
+/** A token endpoint answered with an HTTP error. `status` tells a refusal
+ * (400 or 401: the grant is no longer valid) from a temporary failure. */
+export class OAuthTokenError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = 'OAuthTokenError';
+  }
+}
+
 /** Refresh a token for a public client. */
 export async function refreshTokenPkce(params: {
   tokenEndpoint: string;
@@ -256,7 +288,7 @@ export async function refreshTokenPkce(params: {
   });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    throw new Error(`MCP PKCE token refresh failed: ${res.status} ${body.slice(0, 200)}`);
+    throw new OAuthTokenError(`MCP PKCE token refresh failed: ${res.status} ${body.slice(0, 200)}`, res.status);
   }
   return (await res.json()) as TokenResponse;
 }

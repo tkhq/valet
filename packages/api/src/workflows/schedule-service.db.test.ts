@@ -6,12 +6,16 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { InMemoryCredentialStore } from "@valet/engine";
 import type { ValetPlugin } from "@valet/engine";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { teamMembers, workflowDefinitions } from "../schema/index.js";
+import { teams, teamMembers, workflowDefinitions, workflowSchedules } from "../schema/index.js";
+import { eq } from "drizzle-orm";
 import {
+  BAD_CRON_REASON,
   createWorkflowSchedule,
+  EMPTY_PROMPT_REASON,
   updateWorkflowSchedule,
-  nextFireAt,
+  WORKFLOW_DELETED_REASON,
 } from "./schedule-service.js";
+import { nextFireAt } from "./next-fire.js";
 import type { AppDb } from "../lib/drizzle.js";
 
 /** Arm-gate deps for the create calls. Every workflow in this file is
@@ -36,6 +40,35 @@ afterAll(async () => {
 });
 
 describe("updateWorkflowSchedule", () => {
+  // Review of PR #999: the recorded landing belongs to the old policy.
+  it("clears the recorded landing when the thread policy changes, and keeps it otherwise", async () => {
+    const created = await createWorkflowSchedule(
+      armDeps(),
+      OWNER,
+      { prompt: "daily digest", name: "digest", cron: "0 9 * * *", thread: { mode: "new" } },
+      NOW,
+    );
+    if (!created.ok) throw new Error(created.error);
+    const id = created.schedule.scheduleId;
+    const landing = async () => {
+      const [row] = await db.select().from(workflowSchedules).where(eq(workflowSchedules.id, id));
+      return { sessionId: row?.lastFiredSessionId ?? null, threadId: row?.lastFiredThreadId ?? null };
+    };
+    await db.update(workflowSchedules).set({ lastFiredSessionId: "sess-1", lastFiredThreadId: "thr-slot" }).where(eq(workflowSchedules.id, id));
+
+    const renamed = await updateWorkflowSchedule(armDeps(), OWNER, id, { name: "morning digest" }, NOW + 1000);
+    expect(renamed.ok).toBe(true);
+    expect(await landing()).toEqual({ sessionId: "sess-1", threadId: "thr-slot" });
+
+    const samePolicy = await updateWorkflowSchedule(armDeps(), OWNER, id, { thread: { mode: "new" } }, NOW + 2000);
+    expect(samePolicy.ok).toBe(true);
+    expect(await landing()).toEqual({ sessionId: "sess-1", threadId: "thr-slot" });
+
+    const changed = await updateWorkflowSchedule(armDeps(), OWNER, id, { thread: { mode: "own" } }, NOW + 3000);
+    expect(changed.ok).toBe(true);
+    expect(await landing()).toEqual({ sessionId: null, threadId: null });
+  });
+
   it("updates name and enabled without recomputing nextFireAt", async () => {
     const created = await createWorkflowSchedule(
       armDeps(),
@@ -47,7 +80,7 @@ describe("updateWorkflowSchedule", () => {
     const before = created.schedule.nextFireAt;
 
     const updated = await updateWorkflowSchedule(
-      db,
+      armDeps(),
       OWNER,
       created.schedule.scheduleId,
       { name: "morning digest", enabled: false },
@@ -70,7 +103,7 @@ describe("updateWorkflowSchedule", () => {
     if (!created.ok) throw new Error(created.error);
 
     const updated = await updateWorkflowSchedule(
-      db,
+      armDeps(),
       OWNER,
       created.schedule.scheduleId,
       { cron: "0 18 * * *" },
@@ -92,7 +125,7 @@ describe("updateWorkflowSchedule", () => {
     );
     if (!created.ok) throw new Error(created.error);
     await updateWorkflowSchedule(
-      db,
+      armDeps(),
       OWNER,
       created.schedule.scheduleId,
       { enabled: false },
@@ -101,7 +134,7 @@ describe("updateWorkflowSchedule", () => {
 
     const later = NOW + 7 * 24 * 3600 * 1000;
     const updated = await updateWorkflowSchedule(
-      db,
+      armDeps(),
       OWNER,
       created.schedule.scheduleId,
       { enabled: true },
@@ -110,6 +143,98 @@ describe("updateWorkflowSchedule", () => {
     expect(updated.ok).toBe(true);
     if (!updated.ok) return;
     expect(updated.schedule.nextFireAt).toBeGreaterThan(later);
+  });
+
+  // The scheduler stamps `disabled_reason` when it disables a schedule for a
+  // dead pin (spec 2026-10-16: presence hub, Part D). The person's fix, a new
+  // pin or a re-enable, clears it.
+  describe("disabledReason", () => {
+    const PIN_TEXT = "Pick another thread in Presence.";
+    async function disabledByPin(): Promise<string> {
+      const created = await createWorkflowSchedule(armDeps(), OWNER, { prompt: "p", name: "pin", cron: "0 9 * * *" }, NOW);
+      if (!created.ok) throw new Error(created.error);
+      await db.update(workflowSchedules).set({ enabled: false, disabledReason: PIN_TEXT })
+        .where(eq(workflowSchedules.id, created.schedule.scheduleId));
+      return created.schedule.scheduleId;
+    }
+
+    it("exposes the reason on a schedule the scheduler disabled", async () => {
+      const id = await disabledByPin();
+      const updated = await updateWorkflowSchedule(armDeps(), OWNER, id, { name: "renamed" }, NOW);
+      if (!updated.ok) throw new Error(updated.error);
+      expect(updated.schedule.disabledReason).toBe(PIN_TEXT);
+      expect(updated.schedule.enabled).toBe(false);
+    });
+
+    it("clears the reason when the schedule is enabled", async () => {
+      const id = await disabledByPin();
+      const updated = await updateWorkflowSchedule(armDeps(), OWNER, id, { enabled: true }, NOW);
+      if (!updated.ok) throw new Error(updated.error);
+      expect(updated.schedule.disabledReason).toBeUndefined();
+      const [row] = await db.select().from(workflowSchedules).where(eq(workflowSchedules.id, id));
+      expect(row?.disabledReason).toBeNull();
+    });
+
+    it.each([
+      "Its prompt is empty. Edit the routine and add a prompt.",
+      "Its workflow was deleted. Delete this routine and make a new one with another workflow.",
+      "Its schedule does not parse. Edit the routine and fix the schedule.",
+    ])("clears the scheduler reason %s when the schedule is enabled", async (reason) => {
+      const id = await disabledByPin();
+      await db.update(workflowSchedules).set({ disabledReason: reason }).where(eq(workflowSchedules.id, id));
+      const updated = await updateWorkflowSchedule(armDeps(), OWNER, id, { enabled: true }, NOW);
+      if (!updated.ok) throw new Error(updated.error);
+      expect(updated.schedule.disabledReason).toBeUndefined();
+      const [row] = await db.select().from(workflowSchedules).where(eq(workflowSchedules.id, id));
+      expect(row?.disabledReason).toBeNull();
+    });
+
+    it("clears the bad-schedule reason when the schedule changes, and not on a rename or a thread change", async () => {
+      const id = await disabledByPin();
+      await db.update(workflowSchedules).set({ disabledReason: BAD_CRON_REASON }).where(eq(workflowSchedules.id, id));
+      const renamed = await updateWorkflowSchedule(armDeps(), OWNER, id, { name: "renamed", thread: { mode: "new" } }, NOW);
+      if (!renamed.ok) throw new Error(renamed.error);
+      expect(renamed.schedule.disabledReason).toBe(BAD_CRON_REASON);
+      const fixed = await updateWorkflowSchedule(armDeps(), OWNER, id, { cron: "0 10 * * *" }, NOW);
+      if (!fixed.ok) throw new Error(fixed.error);
+      expect(fixed.schedule.disabledReason).toBeUndefined();
+      expect(fixed.schedule.enabled).toBe(false);
+    });
+
+    it("clears the empty-prompt reason when the prompt changes, and not on a schedule change", async () => {
+      const id = await disabledByPin();
+      await db.update(workflowSchedules).set({ disabledReason: EMPTY_PROMPT_REASON }).where(eq(workflowSchedules.id, id));
+      const moved = await updateWorkflowSchedule(armDeps(), OWNER, id, { cron: "0 10 * * *" }, NOW);
+      if (!moved.ok) throw new Error(moved.error);
+      expect(moved.schedule.disabledReason).toBe(EMPTY_PROMPT_REASON);
+      const fixed = await updateWorkflowSchedule(armDeps(), OWNER, id, { prompt: "Summarize the night." }, NOW);
+      if (!fixed.ok) throw new Error(fixed.error);
+      expect(fixed.schedule.disabledReason).toBeUndefined();
+    });
+
+    it("keeps the deleted-workflow reason through edits, because a PATCH cannot change the workflow", async () => {
+      const id = await disabledByPin();
+      await db.update(workflowSchedules).set({ disabledReason: WORKFLOW_DELETED_REASON }).where(eq(workflowSchedules.id, id));
+      const edited = await updateWorkflowSchedule(armDeps(), OWNER, id, { cron: "0 10 * * *", thread: { mode: "new" } }, NOW);
+      if (!edited.ok) throw new Error(edited.error);
+      expect(edited.schedule.disabledReason).toBe(WORKFLOW_DELETED_REASON);
+    });
+
+    it("keeps the pin reason through a schedule or prompt edit", async () => {
+      const id = await disabledByPin();
+      const edited = await updateWorkflowSchedule(armDeps(), OWNER, id, { cron: "0 10 * * *", prompt: "q" }, NOW);
+      if (!edited.ok) throw new Error(edited.error);
+      expect(edited.schedule.disabledReason).toBe(PIN_TEXT);
+    });
+
+    it("clears the reason when the pin changes", async () => {
+      const id = await disabledByPin();
+      const updated = await updateWorkflowSchedule(armDeps(), OWNER, id, { thread: { mode: "new" } }, NOW);
+      if (!updated.ok) throw new Error(updated.error);
+      expect(updated.schedule.disabledReason).toBeUndefined();
+      const [row] = await db.select().from(workflowSchedules).where(eq(workflowSchedules.id, id));
+      expect(row?.disabledReason).toBeNull();
+    });
   });
 
   it("rejects an invalid cron with a corrective error and 400", async () => {
@@ -121,7 +246,7 @@ describe("updateWorkflowSchedule", () => {
     );
     if (!created.ok) throw new Error(created.error);
     const updated = await updateWorkflowSchedule(
-      db,
+      armDeps(),
       OWNER,
       created.schedule.scheduleId,
       { cron: "not a cron" },
@@ -135,7 +260,7 @@ describe("updateWorkflowSchedule", () => {
 
   it("returns 404 for an unknown id or another org's schedule", async () => {
     const missing = await updateWorkflowSchedule(
-      db,
+      armDeps(),
       OWNER,
       "nope",
       { name: "x" },
@@ -152,7 +277,7 @@ describe("updateWorkflowSchedule", () => {
     );
     if (!created.ok) throw new Error(created.error);
     const crossOrg = await updateWorkflowSchedule(
-      db,
+      armDeps(),
       { userId: OWNER.userId, orgId: "org_other" },
       created.schedule.scheduleId,
       { name: "x" },
@@ -183,7 +308,7 @@ describe("updateWorkflowSchedule", () => {
     );
     if (!created.ok) throw new Error(created.error);
     const updated = await updateWorkflowSchedule(
-      db,
+      armDeps(),
       OWNER,
       created.schedule.scheduleId,
       { prompt: "nope" },
@@ -192,7 +317,7 @@ describe("updateWorkflowSchedule", () => {
     expect(updated.ok).toBe(false);
     if (updated.ok) return;
     expect(updated.status).toBe(400);
-    expect(updated.error).toContain("orchestrator");
+    expect(updated.error).toContain("assistant-prompt");
   });
 });
 
@@ -214,6 +339,7 @@ describe("createWorkflowSchedule team readiness", () => {
   const MEMBER = { userId: "member-sched", orgId: "org_1" };
 
   async function seedTeamWorkflow(id: string): Promise<void> {
+    await db.insert(teams).values({ id: TEAM, orgId: MEMBER.orgId, name: "Schedule team", createdAt: NOW }).onConflictDoNothing();
     await db.insert(teamMembers).values({ teamId: TEAM, userId: MEMBER.userId, role: "member" }).onConflictDoNothing();
     await db.insert(workflowDefinitions).values({
       id,

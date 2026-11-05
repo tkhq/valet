@@ -1,3 +1,4 @@
+import { linearEventArmBlock } from "../linear-ingress.js";
 /**
  * Workflow definitions mirrored from a repository, on the rail
  * `content-sync/collector.ts` defines. Read that file first: it states the
@@ -27,17 +28,10 @@
  * from the root whatever that setting holds. A source that sets a subpath and
  * expects it to hide `.valet/workflows` would be surprised, so say it here.
  */
-import type { WorkflowDefinition } from "@valet/workflow";
+import type { ValidateEnvironment, WorkflowDefinition, WorkflowFile } from "@valet/workflow";
 import { and, eq, inArray } from "drizzle-orm";
-import { parse as parseYaml } from "yaml";
-import {
-  parseWorkflowFileValue,
-  WORKFLOW_FILE_EXTENSIONS,
-  type ValidateEnvironment,
-  type WorkflowFile,
-} from "@valet/workflow";
 import type { CredentialStore, ValetPlugin } from "@valet/engine";
-import type { AppDb } from "../../lib/drizzle.js";
+import type { AppDb, AppQueryable } from "../../lib/drizzle.js";
 import { canonicalJson } from "../../lib/canonical-json.js";
 import {
   eventSubscriptions,
@@ -49,10 +43,13 @@ import {
 } from "../../schema/index.js";
 import {
   disarmWorkflowTriggers,
+  hasUnsettledWorkflowRun,
   newWorkflowId,
   purgeWorkflowRows,
+  revokeWorkflowGrants,
 } from "../../workflows/service.js";
-import { nextFireAt } from "../../workflows/schedule-service.js";
+import { BAD_CRON_REASON } from "../../workflows/schedule-service.js";
+import { nextFireAt } from "../../workflows/next-fire.js";
 import {
   teamArmRefusals,
   teamServiceReadiness,
@@ -62,7 +59,6 @@ import type { OnePasswordService } from "../onepassword.js";
 import { toolNodesOf, workflowCallsOf } from "../../workflows/tool-nodes.js";
 import { validateSubscriptionWrite } from "../../events/subscription-write.js";
 import type { SubscriptionFilter } from "../../events/match.js";
-import type { SkillTreeEntry } from "../skill-repo-reader.js";
 import type {
   CollectorDiscoverContext,
   CollectorNoticeContext,
@@ -72,14 +68,7 @@ import type {
   ContentCollector,
   ContentManifestEntry,
 } from "./collector.js";
-
-/** The two roots that hold definitions. */
-const WORKFLOW_ROOTS = [".valet/workflows", "workflows"] as const;
-
-/** A run in one of these has not settled, so the workflow that holds it is
- * disarmed rather than deleted. Mirrors the `has_active_runs` guard in
- * `workflows/service.ts`. */
-const UNSETTLED = ["pending", "running", "parked", "terminalizing"] as const;
+import { readWorkflowFile, workflowRootFor } from "./workflow-file.js";
 
 export interface WorkflowCollectorDeps {
   /**
@@ -123,8 +112,8 @@ export class WorkflowCollector implements ContentCollector {
       // A symlink's blob holds a path string and not a definition, so mode
       // 120000 is not a candidate.
       if (entry.type !== "blob" || entry.mode === "120000") continue;
-      const root = rootFor(entry.path);
-      if (root === null || !hasWorkflowExtension(entry.path)) continue;
+      const root = workflowRootFor(entry.path);
+      if (root === null) continue;
       candidates.push({
         name: nameFromPath(entry.path),
         path: entry.path,
@@ -151,20 +140,6 @@ interface WorkflowCandidate extends ContentManifestEntry {
    * key is a mistake worth naming, because that folder is unambiguous. Under
    * a top-level `workflows/` it is a file that belongs to something else. */
   root: string;
-}
-
-/** The root that claims `path`, or null. A file sitting directly in `.valet/`
- * is not under `.valet/workflows` and is never a candidate, which keeps this
- * away from `.valet/prebuild.yaml`. */
-function rootFor(path: string): string | null {
-  for (const root of WORKFLOW_ROOTS) {
-    if (path.startsWith(`${root}/`) && path.length > root.length + 1) return root;
-  }
-  return null;
-}
-
-function hasWorkflowExtension(path: string): boolean {
-  return WORKFLOW_FILE_EXTENSIONS.some((ext) => path.endsWith(ext));
 }
 
 /** The file's base name without its extension. The file's own `name` key wins
@@ -262,13 +237,14 @@ class WorkflowPass implements CollectorPass {
     /** Files whose readiness check failed. Left as they were, and reported
      * deferred so the next poll checks them again at this commit. */
     const unchecked: string[] = [];
+    const ingressPending: string[] = [];
 
     const incoming = new Map<string, { file: WorkflowFile; plan: TriggerPlan }>();
     for (const candidate of this.candidates) {
       const raw = text.get(candidate.path);
       if (raw === undefined) continue;
 
-      const parsed = this.readFile(raw, candidate);
+      const parsed = readWorkflowFile(raw, candidate.path, candidate.root, this.env);
       if (parsed.kind === "skip") continue;
       if (parsed.kind === "warn") {
         warnings.push(parsed.message);
@@ -307,6 +283,7 @@ class WorkflowPass implements CollectorPass {
       // it must not disarm a trigger that was armed: the file is left as it
       // was and deferred, so the next poll checks it again.
       let gated: string | null;
+      let ingressPlan = parsed.plan;
       try {
         gated = await teamTriggerGate(
           { db, credentials: this.credentials, plugins: this.plugins, onePassword: this.onePassword },
@@ -314,6 +291,16 @@ class WorkflowPass implements CollectorPass {
           parsed.file,
           definitions,
         );
+        if (gated === null) {
+          const ingressBlocked = await linearEventArmBlock(db,this.credentials,source.orgId,
+            parsed.plan.subscriptions.flatMap(subscription => subscription.eventKeys));
+          if (ingressBlocked) {
+            warnings.push(`${candidate.path}: Linear event triggers remain off. ${ingressBlocked} Valet checks again on the next sync.`);
+            ingressPending.push(candidate.path);
+            ingressPlan = { ...parsed.plan, subscriptions: parsed.plan.subscriptions.filter(subscription =>
+              !subscription.eventKeys.some(key => key.startsWith("linear."))) };
+          }
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         warnings.push(
@@ -324,7 +311,7 @@ class WorkflowPass implements CollectorPass {
       }
       if (gated !== null) warnings.push(`${candidate.path}: ${gated}`);
 
-      plans.set(candidate.path, gated === null ? parsed.plan : NO_TRIGGERS);
+      plans.set(candidate.path, gated === null ? ingressPlan : NO_TRIGGERS);
     }
 
     return async (db) => {
@@ -376,6 +363,11 @@ class WorkflowPass implements CollectorPass {
           );
         }
         if (row.contentSha === candidate.blobSha && row.name === name) continue;
+        const stepsChanged = canonicalJson(parsed.file.definition) !== canonicalJson(row.definition);
+        // A repository commit is not an approver's edit. Revoke before the
+        // write, as the product edit path does, so no run starts on the new
+        // steps under the old grant.
+        if (stepsChanged) await revokeWorkflowGrants(db, source.orgId, row.id);
         await db
           .update(workflowDefinitions)
           .set({
@@ -385,7 +377,10 @@ class WorkflowPass implements CollectorPass {
             updatedAt: now(),
           })
           .where(eq(workflowDefinitions.id, row.id));
-        if (canonicalJson(parsed.file.definition) !== canonicalJson(row.definition)) {
+        if (stepsChanged) {
+          // An approval can commit against the old definition after the first
+          // revocation. Clear it after the write, as product edits do.
+          await revokeWorkflowGrants(db, source.orgId, row.id);
           await snapshot(
             db,
             row.id,
@@ -410,42 +405,29 @@ class WorkflowPass implements CollectorPass {
           deleted: 0,
           keptStale: stale.map((row) => row.name),
           warnings,
-          deferred: unchecked,
+          deferred: [...unchecked, ...ingressPending],
         };
       }
 
       let deleted = 0;
       const disarmed: string[] = [];
-      const unsettled = await workflowsWithUnsettledRuns(
-        db,
-        stale.map((row) => row.id),
-      );
       for (const row of stale) {
-        if (unsettled.has(row.id)) {
-          // The run keeps its own snapshot of the definition, so it finishes
-          // either way. Deleting the row would orphan it from every list view,
-          // so disarm instead: nothing new starts, and the next sync after the
-          // run settles deletes the row.
-          await disarmWorkflowTriggers(db, source.orgId, row.id);
-          disarmed.push(row.name);
-          continue;
-        }
-        // Scoped by source and origin a second time, so this delete stays off a
-        // local workflow and off another source's rows even if the ids were
-        // wrong.
-        const confirmed = await db
-          .select({ id: workflowDefinitions.id })
-          .from(workflowDefinitions)
-          .where(
-            and(
-              eq(workflowDefinitions.id, row.id),
-              eq(workflowDefinitions.sourceId, source.id),
-              eq(workflowDefinitions.origin, "repo"),
-            ),
-          );
-        if (confirmed.length === 0) continue;
-        await purgeWorkflowRows(db, source.orgId, row.id);
-        deleted += 1;
+        const result = await db.transaction(async tx => {
+          // Run insertion holds this row until its snapshot is committed.
+          const [confirmed] = await tx.select({ id: workflowDefinitions.id }).from(workflowDefinitions).where(and(
+            eq(workflowDefinitions.id, row.id), eq(workflowDefinitions.orgId, source.orgId),
+            eq(workflowDefinitions.sourceId, source.id), eq(workflowDefinitions.origin, "repo"),
+          )).for("update");
+          if (!confirmed) return "missing";
+          if ((await workflowsWithUnsettledRuns(tx, [row.id])).size > 0) {
+            await disarmWorkflowTriggers(tx, source.orgId, row.id);
+            return "disarmed";
+          }
+          await purgeWorkflowRows(tx, source.orgId, row.id);
+          return "deleted";
+        });
+        if (result === "disarmed") disarmed.push(row.name);
+        if (result === "deleted") deleted += 1;
       }
       this.disarmed = disarmed;
       for (const name of disarmed) {
@@ -464,68 +446,9 @@ class WorkflowPass implements CollectorPass {
         deleted,
         keptStale: [],
         warnings,
-        deferred: [...disarmed, ...unchecked],
+        deferred: [...disarmed, ...unchecked, ...ingressPending],
       };
     };
-  }
-
-  /** One candidate's body to a workflow file, or to what to say about it. */
-  private readFile(
-    raw: string,
-    candidate: WorkflowCandidate,
-  ): { kind: "ok"; file: WorkflowFile } | { kind: "warn"; message: string } | { kind: "skip" } {
-    let value: unknown;
-    try {
-      // YAML 1.2 parses JSON, so one parser reads both accepted forms.
-      value = parseYaml(raw);
-    } catch (err) {
-      const detail = err instanceof Error ? `: ${err.message}` : "";
-      return {
-        kind: "warn",
-        message: `${candidate.path} is not valid YAML or JSON${detail}. Fix the file and push.`,
-      };
-    }
-
-    const parsed = parseWorkflowFileValue(value, candidate.path, this.env ?? {});
-    if (!parsed.ok) {
-      // A file with no `valet:` key under a repository's own `workflows/` is
-      // not a mistake: that folder belongs to the repository and may hold
-      // anything. Under `.valet/workflows` the folder is unambiguous, so the
-      // same file gets a warning naming the path.
-      if (parsed.code === "unlabeled" && candidate.root !== ".valet/workflows") {
-        return { kind: "skip" };
-      }
-      // The validator names the node and not the file, so the path goes in
-      // front of its messages. Without it, the most common failure of this
-      // feature reports a broken node and never says which file holds it.
-      return { kind: "warn", message: `${candidate.path}: ${parsed.errors.join(" ")}` };
-    }
-    // The two collectors partition the path space by FOLDER, so a template
-    // that sits in a workflow folder is mirrored by neither. Say so: silence
-    // here reads as "Valet took it" to the person who wrote it. The message
-    // names both halves of the fix, because moving the file is not enough on
-    // a source that does not collect templates.
-    if (parsed.file.kind !== "workflow") {
-      return {
-        kind: "warn",
-        message: `${candidate.path} is a workflow template and it sits in a workflow folder, so Valet did not mirror it. Move it to .valet/templates/ and push, and check that this repository is set to collect templates.`,
-      };
-    }
-
-    // A YAML anchor that refers to itself survives the validator, which only
-    // walks `version`, `policy`, `nodes` and `edges`. It then throws out of
-    // `JSON.stringify` in drizzle's jsonb encoder and in
-    // `definitionVersionId`, which would abort the sync for every OTHER file
-    // in the same pass. One file's mistake must cost that file only.
-    try {
-      JSON.stringify(parsed.file.definition);
-    } catch {
-      return {
-        kind: "warn",
-        message: `${candidate.path}: this workflow refers to itself, so Valet cannot store it. Look for a YAML anchor that includes the node holding it, and write the value out in full.`,
-      };
-    }
-    return { kind: "ok", file: parsed.file };
   }
 
   notice(ctx: CollectorNoticeContext): string | null {
@@ -733,6 +656,10 @@ async function armTriggers(
           timezone: wanted.timezone,
           updatedAt: now,
           ...(reschedule ? { nextFireAt: wanted.nextFireAt } : {}),
+          // A new schedule from the repo answers the bad-schedule reason, as
+          // an edit of the schedule does (`patchAnswersReason`). The routine
+          // stays off until someone turns it on.
+          ...(reschedule && current.disabledReason === BAD_CRON_REASON ? { disabledReason: null } : {}),
         })
         .where(eq(workflowSchedules.id, current.id));
     }
@@ -842,12 +769,12 @@ async function teamTriggerGate(
 
 /** Which of `ids` hold a run that has not settled. One query, and none at all
  * when nothing is stale. */
-async function workflowsWithUnsettledRuns(db: AppDb, ids: string[]): Promise<Set<string>> {
+async function workflowsWithUnsettledRuns(db: AppQueryable, ids: string[]): Promise<Set<string>> {
   if (ids.length === 0) return new Set();
   const rows = await db
     .select({ workflowId: workflowRuns.workflowId })
     .from(workflowRuns)
-    .where(and(inArray(workflowRuns.workflowId, ids), inArray(workflowRuns.status, [...UNSETTLED])));
+    .where(and(inArray(workflowRuns.workflowId, ids), hasUnsettledWorkflowRun()));
   return new Set(rows.map((row) => row.workflowId));
 }
 

@@ -6,9 +6,9 @@
  * `queue.state` slice population, `submission.settled` message badges,
  * and gate replay idempotence.
  */
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import type { Message, WireEvent, WireQueueState } from "@valet/api/wire";
-import { queueBusy, useStreamStore } from "./stream";
+import { queueBusy, type StreamMessage, useStreamStore } from "./stream";
 
 const SESSION = "sess-1";
 const THREAD = "thread-1";
@@ -70,6 +70,56 @@ function idleModelState(threadId: string): WireEvent {
 describe("stream store reducer", () => {
   beforeEach(reset);
 
+  it("keeps separate reasoning intervals through live updates and canonical history", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, messageStart("m1", 1));
+    const update = (index: number, text: string, startedAt: number, durationMs?: number) => ingest(SESSION, {
+      type: "thinking_update", seq: 0, ts: 1000, threadId: THREAD, messageId: "m1", index,
+      part: { kind: "thinking", text, startedAt, durationMs },
+    });
+    update(0, "first", 1000);
+    update(0, "first done", 1000, 2400);
+    ingest(SESSION, { type: "text_delta", seq: 0, ts: 4000, threadId: THREAD, messageId: "m1", delta: "answer" });
+    update(2, "second", 9000, 500);
+    update(0, "stale", 1000);
+    const parts = useStreamStore.getState().bySession[SESSION].messages[0].parts;
+    expect(parts).toEqual([
+      { kind: "thinking", text: "first done", startedAt: 1000, durationMs: 2400 },
+      { kind: "text", text: "answer" },
+      { kind: "thinking", text: "second", startedAt: 9000, durationMs: 500 },
+    ]);
+    ingest(SESSION, { type: "message_update", seq: 2, offset: offset(2), ts: 10000, threadId: THREAD, messageId: "m1", parts });
+    ingest(SESSION, { type: "message_end", seq: 3, offset: offset(3), ts: 20000, threadId: THREAD, messageId: "m1", reason: "end_turn" });
+    expect(useStreamStore.getState().bySession[SESSION].messages[0].parts).toEqual(parts);
+  });
+
+  it("keeps a reasoning summary when a later timing-only update arrives", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, messageStart("m1", 1));
+    const update = (part: { kind: "thinking"; text: string; summary?: string; startedAt?: number; durationMs?: number }) => ingest(SESSION, {
+      type: "thinking_update", seq: 0, ts: 1000, threadId: THREAD, messageId: "m1", index: 0, part,
+    });
+    update({ kind: "thinking", text: "", startedAt: 1000 });
+    update({ kind: "thinking", text: "", summary: "plan", startedAt: 1000, durationMs: 2400 });
+    update({ kind: "thinking", text: "", startedAt: 1000, durationMs: 2400 });
+    expect(useStreamStore.getState().bySession[SESSION].messages[0].parts).toEqual([
+      { kind: "thinking", text: "", summary: "plan", startedAt: 1000, durationMs: 2400 },
+    ]);
+  });
+
+  it("drops the rows still streaming on a thread when its branch switches", () => {
+    const { ingest, addUserMessage } = useStreamStore.getState();
+    ingest(SESSION, messageStart("old-reply", 1));
+    ingest(SESSION, { seq: 2, ts: Date.now(), offset: offset(2), type: "message_start", threadId: "thread-2", messageId: "other-thread-reply", role: "assistant" });
+    addUserMessage(SESSION, "edited text", THREAD);
+    ingest(SESSION, { seq: 3, ts: Date.now(), offset: offset(3), type: "branch_switched", threadId: THREAD, noteEntryId: "note-1" });
+
+    const rows = useStreamStore.getState().bySession[SESSION]!.messages;
+    expect(rows.map((m) => m.id)).not.toContain("old-reply");
+    expect(rows.map((m) => m.id)).toContain("other-thread-reply");
+    expect(rows.some((m) => m.content === "edited text" && m.persistence === "optimistic")).toBe(true);
+  });
+
   it("preserves store identity for an offset-free ping", () => {
     const { ingest } = useStreamStore.getState();
     ingest(SESSION, messageStart("m1", 1));
@@ -129,6 +179,75 @@ describe("stream store reducer", () => {
     expect(m3?.content).toBe("hello");
   });
 
+  it("marks an assistant message complete only after message_end", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, messageStart("m1", 1));
+    expect(useStreamStore.getState().bySession[SESSION].messages[0].completed).toBe(false);
+
+    ingest(SESSION, {
+      seq: 2,
+      ts: Date.now(),
+      offset: offset(2),
+      type: "message_end",
+      threadId: THREAD,
+      messageId: "m1",
+      reason: "end_turn",
+    });
+
+    expect(useStreamStore.getState().bySession[SESSION].messages[0].completed).toBe(true);
+  });
+
+  it("keeps a tool-use message incomplete so it cannot be a reply target", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, messageStart("m1", 1));
+
+    ingest(SESSION, {
+      seq: 2,
+      ts: Date.now(),
+      offset: offset(2),
+      type: "message_end",
+      threadId: THREAD,
+      messageId: "m1",
+      reason: "tool_use",
+    });
+
+    expect(useStreamStore.getState().bySession[SESSION].messages[0].completed).toBe(false);
+  });
+
+  it("keeps an errored or aborted message incomplete so it cannot be a reply target", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, messageStart("m1", 1));
+
+    ingest(SESSION, {
+      seq: 2,
+      ts: Date.now(),
+      offset: offset(2),
+      type: "message_end",
+      threadId: THREAD,
+      messageId: "m1",
+      reason: "error",
+    });
+
+    expect(useStreamStore.getState().bySession[SESSION].messages[0].completed).toBe(false);
+
+    ingest(SESSION, messageStart("m2", 3));
+    ingest(SESSION, {
+      seq: 4,
+      ts: Date.now(),
+      offset: offset(4),
+      type: "message_end",
+      threadId: THREAD,
+      messageId: "m2",
+      reason: "abort",
+    });
+
+    const m2 = useStreamStore
+      .getState()
+      .bySession[SESSION].messages.find((m) => m.id === "m2");
+    expect(m2?.completed).toBe(false);
+    expect(m2?.stopReason).toBe("abort");
+  });
+
   it("populates the queue.state slice for the thread", () => {
     const { ingest } = useStreamStore.getState();
     const ev: WireEvent = {
@@ -157,8 +276,9 @@ describe("stream store reducer", () => {
   });
 
   it("marks a matching user message as superseded on submission.settled", () => {
-    const { ingest, addUserMessage } = useStreamStore.getState();
+    const { ingest, addUserMessage, setMessageQueueItemId } = useStreamStore.getState();
     const msgId = addUserMessage(SESSION, "do the thing", THREAD);
+    setMessageQueueItemId(SESSION, msgId, "q-1");
 
     const ev: WireEvent = {
       seq: 1,
@@ -167,7 +287,7 @@ describe("stream store reducer", () => {
       type: "submission.settled",
       sessionId: SESSION,
       threadId: THREAD,
-      queueItemId: msgId,
+      queueItemId: "q-1",
       outcome: "superseded",
     };
     ingest(SESSION, ev);
@@ -177,9 +297,81 @@ describe("stream store reducer", () => {
     expect(msg?.settledOutcome).toBe("superseded");
   });
 
+  it("does not badge a message that belongs to another submission", () => {
+    const { ingest, addUserMessage, setMessageQueueItemId } = useStreamStore.getState();
+    const running = addUserMessage(SESSION, "running prompt", THREAD);
+    setMessageQueueItemId(SESSION, running, "q-first");
+
+    // A queued item this window never hydrated (queued before a reload) is canceled.
+    ingest(SESSION, {
+      seq: 1,
+      ts: Date.now(),
+      offset: offset(1),
+      type: "submission.settled",
+      sessionId: SESSION,
+      threadId: THREAD,
+      queueItemId: "q-second",
+      outcome: "aborted",
+    });
+
+    const msg = useStreamStore.getState().bySession[SESSION].messages.find((m) => m.id === running);
+    expect(msg?.settledOutcome).toBeUndefined();
+  });
+
+  it("applies a settlement that arrives before the message is linked", () => {
+    const { ingest, addUserMessage, setMessageQueueItemId } = useStreamStore.getState();
+    const msgId = addUserMessage(SESSION, "fails at once", THREAD);
+
+    // The settle reaches the socket before POST /messages resolves.
+    ingest(SESSION, {
+      seq: 1,
+      ts: Date.now(),
+      offset: offset(1),
+      type: "submission.settled",
+      sessionId: SESSION,
+      threadId: THREAD,
+      queueItemId: "q-fast",
+      outcome: "failed",
+      error: "no credits",
+    });
+    expect(useStreamStore.getState().bySession[SESSION].messages.find((m) => m.id === msgId)?.settledOutcome).toBeUndefined();
+
+    setMessageQueueItemId(SESSION, msgId, "q-fast");
+
+    const slice = useStreamStore.getState().bySession[SESSION];
+    expect(slice.messages.find((m) => m.id === msgId)).toMatchObject({ settledOutcome: "failed", settledError: "no credits" });
+    expect(slice.unmatchedSettlements?.["q-fast"]).toBeUndefined();
+  });
+
+  it("does not badge an unacknowledged message with another item's cancel", () => {
+    const { ingest, addUserMessage, setMessageQueueItemId } = useStreamStore.getState();
+    // A new message whose POST has not resolved yet.
+    const pending = addUserMessage(SESSION, "new message", THREAD);
+
+    // Cancel of an older queued item this window never hydrated.
+    ingest(SESSION, {
+      seq: 1,
+      ts: Date.now(),
+      offset: offset(1),
+      type: "submission.settled",
+      sessionId: SESSION,
+      threadId: THREAD,
+      queueItemId: "q-old",
+      outcome: "aborted",
+    });
+    expect(useStreamStore.getState().bySession[SESSION].messages.find((m) => m.id === pending)?.settledOutcome).toBeUndefined();
+
+    setMessageQueueItemId(SESSION, pending, "q-new");
+
+    const msg = useStreamStore.getState().bySession[SESSION].messages.find((m) => m.id === pending);
+    expect(msg?.queueItemId).toBe("q-new");
+    expect(msg?.settledOutcome).toBeUndefined();
+  });
+
   it("marks a matching user message as failed on submission.settled outcome=failed", () => {
-    const { ingest, addUserMessage } = useStreamStore.getState();
+    const { ingest, addUserMessage, setMessageQueueItemId } = useStreamStore.getState();
     const msgId = addUserMessage(SESSION, "do another thing", THREAD);
+    setMessageQueueItemId(SESSION, msgId, "q-1");
 
     const ev: WireEvent = {
       seq: 1,
@@ -188,7 +380,7 @@ describe("stream store reducer", () => {
       type: "submission.settled",
       sessionId: SESSION,
       threadId: THREAD,
-      queueItemId: msgId,
+      queueItemId: "q-1",
       outcome: "failed",
       error: "boom",
     };
@@ -200,8 +392,9 @@ describe("stream store reducer", () => {
   });
 
   it("keeps the engine's error text next to a failed settled outcome", () => {
-    const { ingest, addUserMessage } = useStreamStore.getState();
+    const { ingest, addUserMessage, setMessageQueueItemId } = useStreamStore.getState();
     const msgId = addUserMessage(SESSION, "deploy the thing", THREAD);
+    setMessageQueueItemId(SESSION, msgId, "q-1");
 
     ingest(SESSION, {
       seq: 1,
@@ -210,7 +403,7 @@ describe("stream store reducer", () => {
       type: "submission.settled",
       sessionId: SESSION,
       threadId: THREAD,
-      queueItemId: msgId,
+      queueItemId: "q-1",
       outcome: "failed",
       error: "credit balance is too low",
     });
@@ -222,8 +415,9 @@ describe("stream store reducer", () => {
   });
 
   it("leaves settledError undefined when a non-clean outcome carries no reason", () => {
-    const { ingest, addUserMessage } = useStreamStore.getState();
+    const { ingest, addUserMessage, setMessageQueueItemId } = useStreamStore.getState();
     const msgId = addUserMessage(SESSION, "stop that", THREAD);
+    setMessageQueueItemId(SESSION, msgId, "q-1");
 
     ingest(SESSION, {
       seq: 1,
@@ -232,7 +426,7 @@ describe("stream store reducer", () => {
       type: "submission.settled",
       sessionId: SESSION,
       threadId: THREAD,
-      queueItemId: msgId,
+      queueItemId: "q-1",
       outcome: "aborted",
     });
 
@@ -363,8 +557,8 @@ describe("stream store reducer", () => {
     setMessageQueueItemId(SESSION, idB, "q-b");
 
     // Settled event references a queueItemId that doesn't match any known
-    // message (e.g. linkage never landed). With two candidates unsettled,
-    // the recency heuristic is ambiguous — neither should be badged.
+    // message (e.g. linkage never landed). It waits for a link and badges
+    // neither message.
     ingest(SESSION, {
       seq: 1,
       ts: Date.now(),
@@ -427,6 +621,32 @@ describe("stream store reducer", () => {
     expect(slice.lastOffset).toBe(offset(6));
   });
 
+  it("removes a Slack-resolved gate so its web approval card does not remain", () => {
+    const { ingest } = useStreamStore.getState();
+    const gate = {
+      id: "gate-slack-approval",
+      sessionId: SESSION,
+      threadId: THREAD,
+      type: "approval" as const,
+      title: "Approve?",
+      actions: [{ id: "approve", label: "Approve", style: "primary" as const }],
+      status: "pending" as const,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    ingest(SESSION, { seq: 1, ts: Date.now(), offset: offset(1), type: "decision_gate", threadId: THREAD, gate });
+    ingest(SESSION, {
+      seq: 2,
+      ts: Date.now(),
+      offset: offset(2),
+      type: "decision_gate_resolved",
+      threadId: THREAD,
+      gateId: gate.id,
+      resolution: { actionId: "approve", resolvedBy: "local-user", resolvedAt: Date.now() },
+    });
+    expect(useStreamStore.getState().bySession[SESSION].pendingGates).toEqual({});
+  });
+
   it("setPendingGates keeps the record identity for equal content (idempotent seeding)", () => {
     // More than one surface seeds (SessionView and ThreadTree via
     // usePendingGatesSeed); an equal-content re-seed must not rebuild the
@@ -452,6 +672,38 @@ describe("stream store reducer", () => {
     // A content change (here: the gate resolved away) still lands.
     setPendingGates(SESSION, []);
     expect(useStreamStore.getState().bySession[SESSION].pendingGates).toEqual({});
+  });
+
+  it("keeps a gate that arrived after the REST snapshot, and drops one closed after it", () => {
+    const { ingest, setPendingGates } = useStreamStore.getState();
+    const gate = (id: string) => ({
+      id, sessionId: SESSION, threadId: THREAD, type: "approval" as const, title: "Approve?",
+      actions: [], status: "pending" as const, createdAt: 1_700_000_000_000, updatedAt: 1_700_000_000_000,
+    });
+    const snapshotAt = Date.now() - 1_000;
+    ingest(SESSION, { seq: 1, ts: Date.now(), offset: offset(1), type: "decision_gate", threadId: THREAD, gate: gate("live") });
+    ingest(SESSION, { seq: 2, ts: Date.now(), offset: offset(2), type: "decision_gate_resolved", threadId: THREAD, gateId: "answered",
+      resolution: { actionId: "approve", resolvedBy: "local-user", resolvedAt: Date.now() } });
+    // A cached snapshot from before both frames: it lacks the new gate and
+    // still lists the one answered since.
+    setPendingGates(SESSION, [gate("answered"), gate("older")], snapshotAt);
+    expect(Object.keys(useStreamStore.getState().bySession[SESSION].pendingGates).sort()).toEqual(["live", "older"]);
+    // A snapshot fetched after the frames is the truth.
+    setPendingGates(SESSION, [gate("older")], Date.now() + 1_000);
+    expect(Object.keys(useStreamStore.getState().bySession[SESSION].pendingGates)).toEqual(["older"]);
+  });
+
+  it("keeps a pending gate when a newer frame and the snapshot both list it", () => {
+    const { ingest, setPendingGates } = useStreamStore.getState();
+    const gate = {
+      id: "g1", sessionId: SESSION, threadId: THREAD, type: "approval" as const, title: "Approve?",
+      actions: [], status: "pending" as const, createdAt: 1_700_000_000_000, updatedAt: 1_700_000_000_000,
+    };
+    const snapshotAt = Date.now() - 1_000;
+    // A replayed frame for a gate that the snapshot already lists.
+    ingest(SESSION, { seq: 1, ts: Date.now(), offset: offset(1), type: "decision_gate", threadId: THREAD, gate });
+    setPendingGates(SESSION, [gate], snapshotAt);
+    expect(Object.keys(useStreamStore.getState().bySession[SESSION].pendingGates)).toEqual(["g1"]);
   });
 
   it("applies sandbox.status updates", () => {
@@ -616,9 +868,10 @@ describe("active model state", () => {
     });
   });
 
-  it("clears a matching submission and still applies fallback message badge logic", () => {
-    const { addUserMessage, ingest } = useStreamStore.getState();
+  it("clears a matching submission and badges its message", () => {
+    const { addUserMessage, ingest, setMessageQueueItemId } = useStreamStore.getState();
     const messageId = addUserMessage(SESSION, "run this", THREAD);
+    setMessageQueueItemId(SESSION, messageId, "q-active");
     ingest(SESSION, activeModelState(THREAD, "q-active", "openai/gpt-5.2"));
 
     ingest(SESSION, {
@@ -740,7 +993,7 @@ describe("active model state", () => {
 describe("setThreadMessages", () => {
   beforeEach(reset);
 
-  function restMessage(id: string): Message {
+  function restMessage(id: string, createdAt = 1, sequence?: number): Message {
     return {
       id,
       sessionId: SESSION,
@@ -748,8 +1001,18 @@ describe("setThreadMessages", () => {
       role: "assistant",
       content: id,
       parts: [{ kind: "text", text: id }],
-      createdAt: 1,
+      createdAt,
+      sequence,
     };
+  }
+
+  function setCurrentMessages(messages: StreamMessage[]): void {
+    useStreamStore.setState((state) => ({
+      bySession: {
+        ...state.bySession,
+        [SESSION]: { ...state.bySession[SESSION], messages },
+      },
+    }));
   }
 
   it("keeps the prefix when a bounded tail advances by one row", () => {
@@ -837,6 +1100,197 @@ describe("setThreadMessages", () => {
     });
     const afterDelta = useStreamStore.getState().bySession[SESSION].messages;
     expect(afterDelta.find((m) => m.id === "asst-1")?.content).toBe("hello");
+  });
+
+  it("keeps a superseded streaming message before the prompt that replaced it", () => {
+    const { addUserMessage, ingest, setMessageQueueItemId, setThreadMessages } =
+      useStreamStore.getState();
+    setThreadMessages(SESSION, THREAD, [restMessage("m1")]);
+    ingest(SESSION, messageStart("superseded-assistant", 2));
+    const successorId = addUserMessage(SESSION, "replace that", THREAD);
+    setMessageQueueItemId(SESSION, successorId, "q-successor");
+
+    setThreadMessages(SESSION, THREAD, [
+      restMessage("m1"),
+      {
+        id: "successor-user",
+        sessionId: SESSION,
+        threadId: THREAD,
+        role: "user",
+        content: "replace that",
+        parts: [{ kind: "text", text: "replace that" }],
+        createdAt: 3,
+        queueItemId: "q-successor",
+      },
+    ]);
+
+    expect(useStreamStore.getState().bySession[SESSION].messages.map((message) => message.id)).toEqual(
+      ["m1", "superseded-assistant", "successor-user"],
+    );
+  });
+
+  it("keeps an anchored transient before an advanced tail with no overlap", () => {
+    const { ingest, setThreadMessages } = useStreamStore.getState();
+    setThreadMessages(SESSION, THREAD, [restMessage("a", 1), restMessage("anchor", 3)]);
+    ingest(SESSION, messageStart("transient", 2));
+    useStreamStore.setState((state) => ({
+      bySession: {
+        ...state.bySession,
+        [SESSION]: {
+          ...state.bySession[SESSION],
+          messages: [
+            state.bySession[SESSION].messages[0],
+            state.bySession[SESSION].messages[2],
+            state.bySession[SESSION].messages[1],
+          ],
+        },
+      },
+    }));
+
+    setThreadMessages(SESSION, THREAD, [restMessage("c", 4), restMessage("d", 5)], true);
+
+    expect(useStreamStore.getState().bySession[SESSION].messages.map(({ id }) => id)).toEqual([
+      "transient",
+      "c",
+      "d",
+    ]);
+  });
+
+  it("keeps an anchored transient before an equal-time advanced tail", () => {
+    const { ingest, setThreadMessages } = useStreamStore.getState();
+    setThreadMessages(SESSION, THREAD, [
+      restMessage("a", 1, 1),
+      restMessage("anchor", 3, 2),
+    ]);
+    ingest(SESSION, messageStart("transient", 3));
+    const [a, anchor, transient] = useStreamStore.getState().bySession[SESSION].messages;
+    setCurrentMessages([a, transient, anchor]);
+
+    setThreadMessages(SESSION, THREAD, [
+      restMessage("c", 3, 3),
+      restMessage("d", 3, 4),
+    ], true);
+
+    expect(useStreamStore.getState().bySession[SESSION].messages.map(({ id }) => id)).toEqual([
+      "transient",
+      "c",
+      "d",
+    ]);
+  });
+
+  it("keeps equal-time transients conservative when sequence metadata is absent", () => {
+    const { setThreadMessages } = useStreamStore.getState();
+    const a = restMessage("a", 1);
+    const anchor = restMessage("anchor", 3);
+    const transientOne: StreamMessage = {
+      ...restMessage("transient-1", 3),
+      persistence: "streaming",
+    };
+    const transientTwo: StreamMessage = {
+      ...restMessage("transient-2", 3),
+      persistence: "streaming",
+    };
+    setThreadMessages(SESSION, THREAD, [a, anchor]);
+    setCurrentMessages([a, transientOne, transientTwo, anchor]);
+
+    setThreadMessages(SESSION, THREAD, [restMessage("c", 3), restMessage("d", 3)], true);
+
+    expect(useStreamStore.getState().bySession[SESSION].messages.map(({ id }) => id)).toEqual([
+      "transient-1",
+      "transient-2",
+      "c",
+      "d",
+    ]);
+  });
+
+  it("restores a transient before an anchor omitted by a stale snapshot", () => {
+    const { ingest, setThreadMessages } = useStreamStore.getState();
+    setThreadMessages(SESSION, THREAD, [restMessage("a", 1), restMessage("anchor", 3)]);
+    ingest(SESSION, messageStart("transient", 2));
+    useStreamStore.setState((state) => ({
+      bySession: {
+        ...state.bySession,
+        [SESSION]: {
+          ...state.bySession[SESSION],
+          messages: [
+            state.bySession[SESSION].messages[0],
+            state.bySession[SESSION].messages[2],
+            state.bySession[SESSION].messages[1],
+          ],
+        },
+      },
+    }));
+
+    setThreadMessages(SESSION, THREAD, [restMessage("a", 1)], true);
+    expect(useStreamStore.getState().bySession[SESSION].messages.map(({ id }) => id)).toEqual([
+      "a",
+      "transient",
+    ]);
+
+    setThreadMessages(SESSION, THREAD, [
+      restMessage("a", 1),
+      restMessage("anchor", 3),
+      restMessage("new", 4),
+    ]);
+    expect(useStreamStore.getState().bySession[SESSION].messages.map(({ id }) => id)).toEqual([
+      "a",
+      "transient",
+      "anchor",
+      "new",
+    ]);
+  });
+
+  it("removes a confirmed optimistic row from a bounded-tail prefix", () => {
+    const { addUserMessage, setMessageQueueItemId, setThreadMessages } =
+      useStreamStore.getState();
+    setThreadMessages(SESSION, THREAD, [restMessage("later", 2)]);
+    const optimisticId = addUserMessage(SESSION, "persist me", THREAD);
+    setMessageQueueItemId(SESSION, optimisticId, "q-1");
+    const [later, optimistic] = useStreamStore.getState().bySession[SESSION].messages;
+    setCurrentMessages([optimistic, later]);
+
+    setThreadMessages(SESSION, THREAD, [
+      restMessage("later", 2),
+      {
+        id: "persisted-user",
+        sessionId: SESSION,
+        threadId: THREAD,
+        role: "user",
+        content: "persist me",
+        parts: [{ kind: "text", text: "persist me" }],
+        createdAt: 3,
+        queueItemId: "q-1",
+      },
+    ], true);
+
+    expect(useStreamStore.getState().bySession[SESSION].messages.map(({ id }) => id)).toEqual([
+      "later",
+      "persisted-user",
+    ]);
+  });
+
+  it("keeps multiple transients after an equal-time overlapping predecessor", () => {
+    const { setThreadMessages } = useStreamStore.getState();
+    const x = restMessage("x", 3);
+    const anchor = restMessage("anchor", 3);
+    const transientOne: StreamMessage = {
+      ...restMessage("transient-1", 3),
+      persistence: "streaming",
+    };
+    const transientTwo: StreamMessage = {
+      ...restMessage("transient-2", 3),
+      persistence: "streaming",
+    };
+    setThreadMessages(SESSION, THREAD, [x, anchor]);
+    setCurrentMessages([x, transientOne, transientTwo, anchor]);
+
+    setThreadMessages(SESSION, THREAD, [restMessage("x", 3)], true);
+
+    expect(useStreamStore.getState().bySession[SESSION].messages.map(({ id }) => id)).toEqual([
+      "x",
+      "transient-1",
+      "transient-2",
+    ]);
   });
 
   it("does not reorder the prefix when a stale tail follows message_start", () => {
@@ -933,6 +1387,25 @@ describe("setThreadMessages", () => {
     const after = useStreamStore.getState().bySession[SESSION].messages;
     expect(after.filter((m) => m.role === "user")).toHaveLength(1);
     expect(after.map((m) => m.id)).toEqual(["server-user-1"]);
+  });
+
+  it.each([false, true])("does not let content matching consume an authoritative match (queued: %s)", (queued) => {
+    const { addUserMessage, setMessageQueueItemId, setThreadMessages } = useStreamStore.getState();
+    const fresh = { ...restMessage("canonical-user", 1), role: "user" as const, content: "repeat", queueItemId: "known-queue" };
+    if (queued) {
+      const known = addUserMessage(SESSION, "repeat", THREAD);
+      setMessageQueueItemId(SESSION, known, "known-queue");
+    } else {
+      setThreadMessages(SESSION, THREAD, [fresh]);
+    }
+    const pendingId = addUserMessage(SESSION, "repeat", THREAD);
+    const [known, pending] = useStreamStore.getState().bySession[SESSION].messages;
+    setCurrentMessages([pending, known]);
+    setThreadMessages(SESSION, THREAD, [fresh]);
+    const messages = useStreamStore.getState().bySession[SESSION].messages;
+    expect(messages.map((message) => message.id)).toContain(pendingId);
+    expect(messages.filter((message) => message.id === fresh.id)).toHaveLength(1);
+    expect(messages).toHaveLength(2);
   });
 
   it("drops an unstamped optimistic user message by content match when its REST twin appears before the 202 settles", () => {
@@ -1072,6 +1545,26 @@ describe("streaming tool calls", () => {
     expect(byCall).toEqual({ tc1: "completed", tc2: "running" });
   });
 
+  it("retains structured image evidence from live tool results", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, messageStart("m1", 1));
+    ingest(SESSION, {
+      seq: 2, ts: Date.now(), type: "tool_start", threadId: THREAD,
+      toolName: "browser_execute", callId: "screenshot", args: {},
+    });
+    const resultData = { content: [
+      { type: "text", text: "Screenshot" },
+      { type: "image", data: "cGl4ZWxz", mimeType: "image/png" },
+    ] };
+    ingest(SESSION, {
+      seq: 3, ts: Date.now(), type: "tool_end", threadId: THREAD,
+      toolName: "browser_execute", callId: "screenshot", result: "Screenshot",
+      resultData, isError: false,
+    });
+    expect(useStreamStore.getState().bySession[SESSION].messages[0].parts[0])
+      .toMatchObject({ status: "completed", result: resultData });
+  });
+
   it("message_end abort removes parts still streaming (they were never persisted)", () => {
     const { ingest } = useStreamStore.getState();
     ingest(SESSION, messageStart("m1", 1));
@@ -1159,10 +1652,51 @@ describe("streaming tool calls", () => {
   });
 });
 
+describe("provider retries", () => {
+  beforeEach(reset);
+
+  const attemptError = (off: number): WireEvent => ({
+    seq: off, ts: Date.now(), offset: offset(off), type: "error", threadId: THREAD,
+    code: "error", message: "overloaded_error: Overloaded", recoverable: false,
+  });
+  const retry = (off: number): WireEvent => ({
+    seq: off, ts: Date.now(), offset: offset(off), type: "turn_retry", threadId: THREAD,
+    action: "retry", provider: "anthropic", reason: "overloaded", attempt: 1, maxAttempts: 4, waitMs: 2_000,
+  });
+
+  it("does not flag the thread when an attempt fails and a retry follows", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, statusEvent(THREAD, "thinking", 1));
+    ingest(SESSION, attemptError(2));
+    ingest(SESSION, retry(3));
+    const slice = useStreamStore.getState().bySession[SESSION];
+    expect(slice.errorByThread[THREAD]).toBeUndefined();
+    expect(slice.statusByThread[THREAD]?.status).toBe("thinking");
+    expect(slice.retryByThread[THREAD]).toMatchObject({ action: "retry", attempt: 1, maxAttempts: 4, waitMs: 2_000 });
+  });
+
+  it("clears the retry when the next attempt streams", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, retry(1));
+    ingest(SESSION, messageStart("m-2", 2));
+    expect(useStreamStore.getState().bySession[SESSION].retryByThread[THREAD]).toBeUndefined();
+  });
+
+  it("marks the thread failed when the turn settles failed after its retries", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, activeModelState(THREAD, "q-1", "anthropic/claude"));
+    ingest(SESSION, retry(2));
+    ingest(SESSION, { seq: 3, ts: Date.now(), offset: offset(3), type: "submission.settled", sessionId: SESSION, threadId: THREAD, queueItemId: "q-1", outcome: "failed", error: "overloaded_error: Overloaded" });
+    const slice = useStreamStore.getState().bySession[SESSION];
+    expect(slice.statusByThread[THREAD]?.status).toBe("error");
+    expect(slice.retryByThread[THREAD]).toBeUndefined();
+  });
+});
+
 describe("turn error visibility", () => {
   beforeEach(reset);
 
-  function errorEvent(off: number): WireEvent {
+  function errorEvent(off: number): Extract<WireEvent, { type: "error" }> {
     return {
       seq: off,
       ts: Date.now(),
@@ -1174,6 +1708,12 @@ describe("turn error visibility", () => {
       recoverable: true,
     };
   }
+
+  it("does not display legacy intentional-abort events as errors", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, { ...errorEvent(1), code: "aborted", message: "Request was aborted" });
+    expect(useStreamStore.getState().bySession[SESSION].errorByThread[THREAD]).toBeUndefined();
+  });
 
   it("keeps the error through turn_end so a failed turn stays visible", () => {
     const { ingest } = useStreamStore.getState();
@@ -1252,7 +1792,17 @@ describe("turn error visibility", () => {
 });
 
 describe("turnStartedAt", () => {
-  beforeEach(reset);
+  // Browser and API clocks agree unless a test says otherwise.
+  const NOW = 50_000;
+  function connect(apiNow: number) {
+    useStreamStore.getState().ingest(SESSION, { seq: 0, ts: apiNow, type: "init", session: { id: SESSION } } as WireEvent);
+  }
+  beforeEach(() => {
+    reset();
+    vi.useFakeTimers({ now: NOW });
+    connect(NOW);
+  });
+  afterEach(() => { vi.useRealTimers(); });
 
   function threadStatus(threadId = THREAD) {
     return useStreamStore.getState().bySession[SESSION].statusByThread[threadId];
@@ -1284,6 +1834,43 @@ describe("turnStartedAt", () => {
     ingest(SESSION, { seq: 2, ts: 2000, type: "turn_end", threadId: THREAD, reason: "end_turn" } as WireEvent);
     ingest(SESSION, statusEvent(THREAD, "queued", 3000));
     expect(threadStatus().turnStartedAt).toBe(3000);
+  });
+
+  it("keeps the turn start in browser time when the API clock runs ahead", () => {
+    const ahead = 120_000;
+    connect(NOW + ahead);
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, { ...statusEvent(THREAD, "thinking", NOW + ahead), turnStartedAt: NOW + ahead - 60_000 } as WireEvent);
+    // One minute into the turn by the API, one minute by the browser.
+    expect(NOW - (threadStatus().turnStartedAt ?? 0)).toBe(60_000);
+    reset();
+    connect(NOW - ahead);
+    ingest(SESSION, statusEvent(THREAD, "queued", NOW - ahead));
+    expect(threadStatus().turnStartedAt).toBe(NOW);
+  });
+
+  it("uses the turn start a connect frame names, before or after a replayed frame", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, { ...statusEvent(THREAD, "thinking", 9000), turnStartedAt: 4000 } as WireEvent);
+    expect(threadStatus().turnStartedAt).toBe(4000);
+    reset();
+    connect(NOW);
+    ingest(SESSION, statusEvent(THREAD, "thinking", 9000));
+    ingest(SESSION, { ...statusEvent(THREAD, "queued", 9100), turnStartedAt: 4000 } as WireEvent);
+    expect(threadStatus().turnStartedAt).toBe(4000);
+  });
+
+  it("keeps the submission start across a replayed idle and a step boundary", () => {
+    const { ingest } = useStreamStore.getState();
+    // Connect seed, then a replay that starts before the previous turn ended.
+    ingest(SESSION, { ...statusEvent(THREAD, "thinking", 9000), turnStartedAt: 4000 } as WireEvent);
+    ingest(SESSION, statusEvent(THREAD, "idle", 9001));
+    ingest(SESSION, { ...statusEvent(THREAD, "thinking", 9002), turnStartedAt: 4000 } as WireEvent);
+    expect(threadStatus().turnStartedAt).toBe(4000);
+    // One submission can go idle between model steps.
+    ingest(SESSION, { ...statusEvent(THREAD, "idle", 9500), turnStartedAt: 4000 } as WireEvent);
+    ingest(SESSION, { ...statusEvent(THREAD, "thinking", 9600), turnStartedAt: 4000 } as WireEvent);
+    expect(threadStatus().turnStartedAt).toBe(4000);
   });
 });
 

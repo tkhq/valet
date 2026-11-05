@@ -2,6 +2,11 @@ import { describe, expect, it } from "vitest";
 import { stripMarkdown } from "./strip-markdown";
 
 describe("stripMarkdown", () => {
+  it("reads a table as its cells, without pipes or the delimiter row", () => {
+    const table = "| Step | Owner |\n|------|:-----:|\n| **Setup** | IT |\n| Review | Lead |";
+    expect(stripMarkdown(table)).toBe("Step · Owner — Setup · IT — Review · Lead");
+  });
+
   it("drops heading markers", () => {
     expect(stripMarkdown("## Demo Triage Workflow")).toBe("Demo Triage Workflow");
     expect(stripMarkdown("# 2026-08-01")).toBe("2026-08-01");

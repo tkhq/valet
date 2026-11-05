@@ -1,6 +1,7 @@
 # Team workspace UI
 
-Status: Implemented 2026-08-17.
+Status: Implemented 2026-08-17. The top-bar switcher is replaced by Spaces
+on 2026-11-03; see [Spaces replace the top-bar switcher](#spaces-replace-the-top-bar-switcher-2026-11-03).
 
 ## Problem
 
@@ -21,6 +22,19 @@ A workspace is a place, not a filter. One rule, applied everywhere:
 
 The design adds no new controls. It makes the one existing control —
 the switcher — legible and trustworthy.
+
+## Browser tabs
+
+Each browser tab keeps its workspace choice in `sessionStorage`. Reloading a tab
+restores its own choice. Workspace choices in other tabs do not replace it.
+An explicit workspace link still takes precedence. A new tab without a stored
+choice or an explicit workspace starts in Personal.
+
+Browser titles show the active chat thread or session title, the workspace name,
+and Valet. Renames update the title through the existing query data. Other pages
+show the workspace name and Valet. Child panels and assistant docks do not replace
+the page title. Notification counts prefix the current title without replacing it.
+Public pages keep their own titles.
 
 ## Decisions
 
@@ -109,10 +123,35 @@ the switcher — legible and trustworthy.
     personal catalog, token forms, or identity controls.
 
     Integrations and Team Settings share `TeamCredentials`. Each row identifies
-    a direct team credential or its delegating member. Team and organization
-    admins can confirm a disconnect or stop sharing. Other members can read
-    the list. The existing server member and admin gates remain authoritative.
+    a direct team credential or its delegating member. Every team member can
+    connect a team account (OAuth or a create-only token) and reconnect a dead
+    one. Team and organization admins can confirm a disconnect or stop
+    sharing, and can replace a working connection. A member's Request removal
+    files a team resource deletion request for the team's own connection.
+    The server member and admin gates remain authoritative.
     Users switch to Personal to connect and share their own credentials.
+
+    A row whose token refresh failed, or whose grant gives sign-in only, shows
+    the same badge as a personal card and names its repair. A past expiry
+    alone is not shown, because an OAuth row renews when it is used. A team
+    connection is dead when the provider refused its refresh token (a 400 or
+    401 from the token endpoint, `metadata.refreshRefused`) and its token is
+    past expiry (`isDeadConnection`, reported as `CredentialSummary.dead`). A
+    temporary failure (5xx, 429, network) is not a refusal. A dead team
+    connection offers Reconnect to every team member. The callback replaces
+    the row only while it is still dead, under the team and row locks, and
+    saves the reconnecting member's sign-in as the team's account. A refresh
+    in flight saves its result only if the row still holds the tokens it
+    refreshed, so it cannot undo a reconnect. Only its member can repair a
+    shared account, and a member's share does not fill the team's own slot
+    under Available.
+
+    A team read passes over a dead team connection to the org row and to
+    members' shares, and it still asks a share's member first. With nothing
+    else, the dead row stays the answer, so the caller sees the provider's
+    refusal.
+    "Share a personal connection" sits beside the Connected heading, outside
+    the list, because it applies to the team and not to one integration.
 
     Credential cache keys include scope and team ID. A workspace change
     unmounts open forms and dialogs. A completed team disconnect invalidates
@@ -206,6 +245,8 @@ The team credential list and its removal dialog use the shared integration displ
 
 ### Selected team settings (TKAI-397)
 
+> **Superseded 2026-10-08** by `2026-10-08-settings-redesign-design.md`: the rail lists every scope at once and no longer follows the workspace switcher. Team settings live at `/settings/teams/$teamId`.
+
 In a team workspace, Settings replaces the You group with Team. General opens the selected team's existing controls.
 The Team rail also keeps API keys at `/settings/api-keys`, using its existing workspace-aware controls.
 Profile, appearance, and other personal-only settings are omitted in team scope. Direct personal settings URLs redirect before their forms mount.
@@ -220,19 +261,123 @@ Unavailable teams show a recovery message instead of another team's controls.
 ### Team integration empty state
 
 An empty team credential list does not mean the team has no integrations.
-The empty state describes stored team connections. The separate Organization access section reports organization-provided integrations.
+The empty state describes stored team connections. Organization-provided integrations are managed in Organization settings, not on this page.
 Personal sharing is optional and grants access through that member's account.
 The copy does not claim that an organization integration is currently connected.
 
 
 ### Team integration identity presentation (2026-09-10)
 
-Team Integrations separates direct connections from connections shared by members. Shared rows name the account owner and explain revocation on departure. Personal sharing stays on Personal Integrations and requires explicit consent. One service has one team connection; connecting never silently replaces it.
+Team Integrations separates direct connections from connections shared by members. Shared rows name the account owner and explain revocation on departure. Personal sharing stays on Personal Integrations and requires explicit consent. One service has one team connection; connecting never silently replaces it. The team page's share list disables a service the team has its own connection for, and says why. A team row that no run uses (`CredentialSummary.unusable`) does not count: a GitHub row that runs skip, or an OAuth row past expiry with no refresh token. When an admin stops a member's share, the confirmation promises a new share only if the team has no own connection for that service.
 
 Slack and the GitHub App stay organization-managed. Team Integrations shows compact access status and links admins to Organization settings. It does not offer a separate team connection for either service. Existing stored connections remain visible for explicit removal. OAuth connects the selected provider account; it does not create a service identity.
 
 Slack status uses the catalog's organization-derived `connect` mode, never the personal `connected` flag. GitHub status uses the member-readable organization status query. Save, delete, and refresh mutations invalidate the affected status queries using their existing keys. During refetch, the strip hides the previous status and shows loading. Failed reads show an error, not a setup or availability claim. Suspended GitHub installations are labeled suspended.
 
-Manual token entry asks for the intended account's token without assuming bot or service-account support. If the team credential read fails, the open connection form closes and discards its token and consent. Recovery does not reopen the form. Legacy Slack and GitHub removal dialogs explain that team setup cannot recreate those connections. Organization access is managed separately and can have different permissions.
+Manual token entry asks for the intended account's token without assuming bot or service-account support. If the team credential read fails, the open connection form closes and discards its token and consent. Recovery does not reopen the form. Legacy Slack and GitHub removal dialogs explain that team setup cannot recreate those connections. Organization connections are managed in Organization settings and can have different permissions.
 
 Workflow template setup links point to integration access. Their copy does not require sharing a personal account, because access can come from organization apps or direct team connections.
+
+### Rows badge the assistant that owns them (2026-09-15)
+
+Decision 2 put a badge where ownership varies inside one view, and `OwnerBadge` named the owning team. A team owns many assistants now, so on a row that names one, the team is no longer the useful answer.
+
+Workflow rows and event subscription rows badge the assistant that owns the work. The badge links to `/assistants/$assistantId`, the editor for the assistant's model, persona, and tools. A named assistant, a persona or a renamed default, reads by its own name. An unnamed default reads by its owner, the team name or "Org", because "Default Orchestrator" on every row of a cross-workspace list names nothing. The tooltip names the assistant, and adds the team name for a team row.
+
+The client resolves the assistant from lists these pages already load. A workflow row uses the assistant its definition pins, or the owner's default. A subscription row uses the assistant its target pins, or the target owner's default. An approvals row is the exception: the API reports the assistant from the run's own definition snapshot, because that row sits beside a permission decision. If the assistants list holds no match, a team row keeps the unlinked team-name badge, so a failed lookup does not remove the ownership signal.
+
+A personal row stays quiet while the reader's own default assistant owns it. It gets a badge when a persona owns it instead.
+
+Skills and skill repositories keep `OwnerBadge`. A skill has no owning assistant, so the team name remains the complete answer for those rows.
+
+## Automation detail workspace changes (2026-10-08)
+
+Switching workspace from a channel, workflow, run, or Automation list returns to `/workflows`.
+The destination carries the selected workspace and clears the previous detail parameters.
+An old URL workspace must not override the new selection during navigation.
+Selecting the current workspace leaves the page unchanged. Other list pages retain their existing behavior.
+
+## Spaces replace the top-bar switcher (2026-11-03)
+
+UI copy calls a workspace a **space**: Personal, and one space for each team.
+The data model does not change. A space is the same owner (`user` or a team
+id), and the server checks team membership as before.
+
+- **One app-wide sidebar.** Every signed-in page except Settings shows it:
+  New thread (with its create menu), Search, Home, and Spaces. Settings keeps
+  its own rail and pinned scope.
+- **Spaces.** Each space is a row. Personal has a person icon, and each team
+  has a 16px square with its initial in a muted tint. An open space
+  lists its pages: Threads, Workflows, Presence, and Artifacts, then a
+  Settings row with a gear icon. Settings holds the space's Integrations,
+  Skills, Memory, and Usage, indented one more level with a faint guide line
+  so they read as its contents. Each page row opens that page with `?workspace=`
+  naming the space. Only the active space opens on load. A space the person
+  opens or closes stays that way until they go to another space. Settings
+  starts closed, opens by itself when one of its pages is current, and the
+  browser remembers it per space. A closed space shows all its pages in a
+  menu on hover or from its chevron.
+- **Security.** Security is an admin setting, so the Settings page lists
+  Valet Security under Plugins for a caller with the plugin. The top bar's
+  Plugins menu also opens it.
+- **No workspace overview.** Home is the landing page. The `/overview`
+  dashboard is deleted, and `/overview` redirects to `/`.
+- **New thread** is one button that starts a thread. It has no create menu:
+  Workflows and Artifacts have their own space rows, Projects has its "+"
+  button, and tasks start from a message to Home.
+- **Same-page switching.** On a space page, a space's name opens the same
+  page in that space: Engineering / Integrations goes to Sales /
+  Integrations. A detail page goes to its list page. From Home or a thread,
+  the name opens the space's Threads.
+- **Threads.** The open space's Projects and threads show below Spaces only
+  on Home and Threads. A phone's drawer always shows them.
+- **A space that cannot open.** If the space's assistant session fails to
+  start, the sidebar still lists Spaces. The error and Retry show where the
+  threads would be, so the person can switch to another space.
+- **One divider.** The sidebar's only horizontal divider is under its top
+  row, level with the thread header and the Tasks panel header. Rows below it
+  (Home, Spaces) draw none, so no sidebar line can sit off a thread's tab row.
+- **Headers.** A page's header is a breadcrumb: "Space / Page". A Presence
+  detail page puts the space above its breadcrumb, and the workflow editor
+  reads "Space / Workflows / name". A caller with one space sees no space
+  step. The workflow editor and run pages follow their resource's space.
+- **Top bar.** Only global items: the logo, More (Changelog and Model
+  comparison), Plugins, Ask Valet, notifications, and Settings. Pages that a
+  space owns are in the sidebar only. The phone menu keeps them.
+- **Icon rail.** The sidebar's top row collapses it to a 44px rail with
+  Expand, Home, and one icon per space whose pages open in a menu. The browser
+  remembers the choice. The workflow editor keeps its own choice and starts
+  collapsed.
+- **Phones.** The drawer shows the same Spaces tree. The phone Chat, Tasks,
+  and Make tabs do not change.
+- **One source of truth.** The scope provider reads `?workspace=` from the
+  URL first, then the tab's stored choice. Every space switch is a link that
+  names the space in the URL, and the provider stores the key for the tab. A
+  navigation that unsaved edits block leaves the space unchanged. Deep links
+  and reloads keep the space.
+- **Projects** in the sidebar are still each person's folders, stored per
+  space. Shared Projects with a repository binding are a later change.
+
+### Sidebar hierarchy
+
+The sidebar uses three type tiers, Linear style. `sidebar-rows.ts` holds the
+shared classes.
+
+- **Section labels** (Spaces, Projects, Pinned, Recents): 11px, medium
+  weight, muted, with space above and no divider line.
+- **Top-level rows** (Home, each space, each project): 13px primary text,
+  16px icons, 28px tall.
+- **Nested rows** (a space's pages, a project's threads, Recents): 13px
+  secondary text, 14px icons, 26px tall, indented 24px with no guide line.
+- **Rows** sit 2px apart. A phone keeps 44px touch targets.
+- **One selected row.** The open thread, Home, or the open page takes a
+  neutral fill with primary, medium-weight text. On Home and Threads the open
+  conversation holds the fill, so the Threads page row shows primary text
+  only. Unread stays a small dot.
+- **Row chrome.** Chevrons, "+" and "…" show when the row has hover or focus.
+  A screen that cannot hover always shows them. Chevrons sit at the right.
+- **Recents** shows five threads, plus the open one, then "Show more". The
+  next page loads only once every loaded row shows. The phone drawer lists
+  every thread.
+- The top row keeps its height, so the one divider stays level with the
+  main and Tasks headers.

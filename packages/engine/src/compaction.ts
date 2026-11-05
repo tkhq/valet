@@ -1,7 +1,9 @@
+import { failedToolResultText } from "./tool-result-text.js";
 import { completeSimple, isContextOverflow } from "@earendil-works/pi-ai/compat";
 import type { Message, Model } from "@earendil-works/pi-ai/compat";
-import { formatSenderLine } from "./submission.js";
-import type { CompactionConfig, SessionEntry } from "./types.js";
+import { attributedAuthor, formatSenderLine, type AuthorAttribution } from "./submission.js";
+import { entryMessageTime, messageTimeLine } from "./model-context.js";
+import type { CompactionConfig, CreateSessionOptions, SessionEntry } from "./types.js";
 
 /**
  * Compaction primitives — all pure functions. Orchestration that calls an
@@ -22,6 +24,7 @@ const DEFAULTS = {
   pruneProtectTokens: 40_000,
   pruneMinimumTokens: 20_000,
   toolOutputMaxChars: 2_000,
+  contextBudgetCap: 200_000,
 } as const;
 
 /** Fraction of the usable context kept verbatim as the tail at a compaction. */
@@ -54,6 +57,29 @@ export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
 
+/** Live-context placeholder for a pruned tool result. The stored result text stays in the entry. */
+export const ELIDED_TOOL_OUTPUT = "[output elided to save context]";
+
+/**
+ * Estimate a persisted tool result. Image blocks carry base64 data that a
+ * provider bills per image, not per character; counting their text would put
+ * one 2 MB preview at ~500k tokens and force a prune or compaction every turn.
+ */
+export function estimateToolResultTokens(result: unknown): number {
+  if (result === undefined) return 0;
+  if (typeof result === "string") return estimateTokens(result);
+  if (result && typeof result === "object" && "content" in result && Array.isArray(result.content)) {
+    let total = 0;
+    for (const block of result.content) {
+      if (block && typeof block === "object" && "type" in block && block.type === "image") total += IMAGE_TOKEN_ESTIMATE;
+      else if (block && typeof block === "object" && "text" in block && typeof block.text === "string") total += estimateTokens(block.text);
+      else total += estimateTokens(JSON.stringify(block));
+    }
+    return total;
+  }
+  return estimateTokens(JSON.stringify(result));
+}
+
 export function estimateEntryTokens(entry: SessionEntry): number {
   if (entry.type === "message") {
     let total = estimateTokens(entry.content);
@@ -63,7 +89,7 @@ export function estimateEntryTokens(entry: SessionEntry): number {
       else if (part.type === "tool_call") {
         if (part.args) total += estimateTokens(JSON.stringify(part.args));
         if (part.result !== undefined && !part.elided) {
-          total += estimateTokens(typeof part.result === "string" ? part.result : JSON.stringify(part.result));
+          total += estimateToolResultTokens(part.result);
         }
         if (part.error) total += estimateTokens(part.error);
       }
@@ -181,6 +207,44 @@ export function usableTokens(model: Model<any>, cfg?: CompactionConfig): number 
   return Math.max(0, context - reserve);
 }
 
+/**
+ * Context size that compaction keeps a thread under between turns, and the
+ * base of the tail budget. It is the usable context, capped at
+ * `cfg.contextBudgetTokens` (default 200k; `0` removes the cap).
+ *
+ * Without the cap, a 1M-token model compacted only near 980k. Every request
+ * then re-sent the whole thread, and each reply after the prompt cache
+ * expired re-wrote it at the cache-write rate. Production usage showed $4 to
+ * $7 for a short reply at 800k. Hard overflow still uses `usableTokens`.
+ */
+export function compactionBudget(model: Model<any>, cfg?: CompactionConfig): number {
+  const usable = usableTokens(model, cfg);
+  const cap = cfg?.contextBudgetTokens ?? DEFAULTS.contextBudgetCap;
+  return cap > 0 ? Math.min(usable, cap) : usable;
+}
+
+/** Idle delays that beat each prompt-cache retention to its expiry (1h and 5m). */
+const IDLE_COMPACTION_LONG_MS = 55 * 60_000;
+const IDLE_COMPACTION_SHORT_MS = 4 * 60_000;
+
+/**
+ * How long an interactive thread over its compaction budget waits idle
+ * before it compacts. `cfg.idleCompactionMs` overrides it, and `0` means
+ * "compact at turn end". By default the delay ends shortly before the
+ * thread's prompt cache expires, so the person keeps a warm cache while
+ * they work and the next reply after a break re-writes only the compacted
+ * context. A session without a prompt cache compacts at turn end.
+ */
+export function idleCompactionDelayMs(
+  options: Pick<CreateSessionOptions, "compaction" | "cacheRetention" | "purpose">,
+): number {
+  const configured = options.compaction?.idleCompactionMs;
+  if (configured !== undefined) return Math.max(0, configured);
+  const retention = options.cacheRetention ?? (options.purpose === "orchestrator" ? "long" : "short");
+  if (retention === "none") return 0;
+  return retention === "long" ? IDLE_COMPACTION_LONG_MS : IDLE_COMPACTION_SHORT_MS;
+}
+
 /** Fraction of usable context above which one inbound message spills to a file. */
 const DEFAULT_SPILL_FRACTION = 0.6;
 
@@ -216,6 +280,164 @@ export function tailBudget(usable: number, cfg?: CompactionConfig): number {
       ? Math.min(target, cfg.maxPreserveRecentTokens)
       : target;
   return Math.max(min, capped);
+}
+
+// ── Transcript DAG traversal ───────────────────────────────────────
+
+/** A branch note as the model reads it, in live context and in summaries. */
+export function renderBranchNote(summary: string): string {
+  return `<branch-note>\n${summary}\n</branch-note>`;
+}
+
+/**
+ * Return the active transcript path in root-to-leaf order. Entries on other
+ * branches stay durable but do not enter compaction or model context.
+ */
+export function walkTranscriptDag(
+  entries: readonly SessionEntry[],
+  activeLeafEntryId: string | undefined,
+): SessionEntry[] {
+  if (activeLeafEntryId === undefined) return [...entries];
+
+  const byId = new Map(entries.map((entry) => [entry.id, entry]));
+  const path: SessionEntry[] = [];
+  const visited = new Set<string>();
+  let entryId: string | null = activeLeafEntryId;
+  while (entryId !== null) {
+    if (visited.has(entryId)) {
+      throw new Error(`Transcript DAG contains a cycle at entry ${entryId}.`);
+    }
+    visited.add(entryId);
+    const entry = byId.get(entryId);
+    if (!entry) {
+      throw new Error(`Transcript DAG is missing entry ${entryId}.`);
+    }
+    path.push(entry);
+    entryId = entry.parentId;
+  }
+  path.reverse();
+
+  // Only edits, returns, and forks write branch notes, and each is newer
+  // than TKAI-211. So a path that starts at a note has no legacy prefix: an
+  // edit of a thread's first message starts a second root, and the old root
+  // before it belongs to the branch the edit left.
+  if (path[0]?.type === "branch_summary") return path;
+
+  // Before TKAI-211, normal entries had null parents but compaction entries
+  // pointed at the covered head. Keep the latest legacy checkpoint and the
+  // chronological null-parent suffix that leads to this path's root. Linked
+  // entries in that range belong to inactive branches and stay excluded.
+  const rootIndex = entries.findIndex((entry) => entry.id === path[0]?.id);
+  const prefix = entries.slice(0, rootIndex);
+  let checkpointIndex = -1;
+  for (let index = prefix.length - 1; index >= 0; index--) {
+    if (prefix[index].type === "compaction") {
+      checkpointIndex = index;
+      break;
+    }
+  }
+  const legacyPrefix = prefix
+    .slice(checkpointIndex < 0 ? 0 : checkpointIndex)
+    .filter((entry, index) =>
+      entry.parentId === null || (checkpointIndex >= 0 && index === 0),
+    );
+  return [...legacyPrefix, ...path];
+}
+
+/**
+ * Size one entry the way the summarizer payload will carry it.
+ *
+ * `estimateEntryTokens` counts raw content. The conversion to summarizer
+ * messages caps prose at SUMMARY_PROSE_MAX_CHARS, caps tool args and results
+ * at `toolOutputMaxChars`, drops thinking, and skips every non-message
+ * entry. A 300,000-char assistant run therefore costs about 5,000 tokens of
+ * summarizer input, not 75,000. The summarizer window budgets with this
+ * ruler, so a window cannot reject entries whose real payload would have fit
+ * many times over (TKAI-461). It returns 0 for an entry the summarizer reads
+ * as nothing.
+ */
+export function estimateSummaryEntryTokens(
+  entry: SessionEntry,
+  opts?: { toolOutputMaxChars?: number; attributeAuthors?: AuthorAttribution },
+): number {
+  const messages = entriesToSummaryMessages([entry], {
+    toolOutputMaxChars: opts?.toolOutputMaxChars ?? DEFAULTS.toolOutputMaxChars,
+    attributeAuthors: opts?.attributeAuthors ?? false,
+  });
+  let total = 0;
+  for (const message of messages) {
+    const content = message.content;
+    if (typeof content === "string") {
+      total += estimateTokens(content);
+      continue;
+    }
+    for (const block of content) {
+      if (block.type === "text") total += estimateTokens(block.text);
+    }
+  }
+  return total;
+}
+
+export interface SummaryWindowOptions {
+  /**
+   * Size one entry for the budget walk. The default counts raw content;
+   * callers that feed the result to the summarizer pass
+   * `estimateSummaryEntryTokens`, so the window and the payload measure
+   * with one ruler.
+   */
+  sizeOf?: (entry: SessionEntry) => number;
+  /**
+   * Keep the newest entry even when it alone exceeds `maxTokens`. Set for a
+   * window that must not come back empty (the head). Clear it for optional
+   * evidence, which is trimmed to what the budget holds.
+   */
+  keepNewest?: boolean;
+}
+
+/**
+ * Select the newest entries that fit a token budget, for the summarizer.
+ *
+ * The window is a budgeted suffix, and it carries no user-first constraint:
+ * `summarize` prepends its own preface, so a window that opens in the middle
+ * of a turn is a legal provider payload. An earlier version aligned the
+ * window forward to the next user entry and dropped the entries in front of
+ * it, and it returned NOTHING when the window held no later user entry. The
+ * caller then summarized an empty transcript while its checkpoint still
+ * recorded the whole head as covered, and that head left the model context
+ * for good (TKAI-461).
+ *
+ * With `keepNewest`, the result is never empty for a non-empty input. Pass
+ * the payload ruler as `sizeOf` for the second guarantee: the window then
+ * never converts to an empty summarizer transcript.
+ */
+export function selectSummaryCheckpointTail(
+  entries: readonly SessionEntry[],
+  maxTokens: number,
+  opts?: SummaryWindowOptions,
+): SessionEntry[] {
+  const sizeOf = opts?.sizeOf ?? estimateEntryTokens;
+  const keepNewest = opts?.keepNewest ?? true;
+  let start = entries.length;
+  let tokens = 0;
+  while (start > 0) {
+    const next = sizeOf(entries[start - 1]);
+    if ((start < entries.length || !keepNewest) && tokens + next > maxTokens) break;
+    start--;
+    tokens += next;
+  }
+  const window = entries.slice(start);
+  // Some entries render into no summarizer message at all: a command result,
+  // a decision gate, a prior checkpoint, an assistant step that held only
+  // thinking. They cost nothing, so the budget walk can stop with a window
+  // made only of them. That window converts to an empty transcript, and the
+  // summary is then written from the prompt template alone. Step back to the
+  // nearest entry the summarizer can read.
+  if (window.length > 0 && window.every((entry) => sizeOf(entry) === 0)) {
+    for (let index = start - 1; index >= 0; index--) {
+      if (sizeOf(entries[index]) > 0) return entries.slice(index);
+    }
+  }
+  return window;
 }
 
 // ── Turn segmentation ──────────────────────────────────────────────
@@ -264,6 +486,8 @@ export interface SelectCutPointOptions {
   entries: readonly SessionEntry[];
   model: Model<any>;
   cfg?: CompactionConfig;
+  /** Context retained outside the tail, such as an active task and fixed model instructions. */
+  reservedTokens?: number;
   /** Override token estimator for tests. Defaults to estimateEntryTokens. */
   tokenize?: (entry: SessionEntry) => number;
 }
@@ -272,7 +496,7 @@ export interface SelectCutPointOptions {
  * Pick a cut point so the tail (kept verbatim) fits within the tail budget
  * derived from the model's usable context. Mirrors OpenCode's select():
  *
- * - Compute tail budget from `usable * 0.25` clamped to [min, max].
+ * - Compute tail budget from `compactionBudget * 0.25` clamped to [min, max].
  * - Take the last `tailTurns` turns and walk them oldest → newest from the end,
  *   accumulating size. Keep adding whole turns until the next one would
  *   overflow. If the very next (older) turn alone is too large to fit, split
@@ -291,7 +515,10 @@ export function selectCutPoint(opts: SelectCutPointOptions): CutPoint {
   }
 
   const usable = usableTokens(model, cfg);
-  const budget = tailBudget(usable, cfg);
+  const tail = tailBudget(compactionBudget(model, cfg), cfg);
+  const budget = opts.reservedTokens
+    ? Math.max(0, Math.min(tail, usable - opts.reservedTokens))
+    : tail;
   const allTurns = turns(entries);
   if (allTurns.length === 0) {
     return { cutIndex: entries.length, tailStartId: undefined, fallbackToFloor: false };
@@ -419,14 +646,11 @@ export function planPrune(opts: PruneOptions): PruneResult {
       if (part.type !== "tool_call") continue;
       if (part.status !== "completed") continue;
       if (part.elided) continue;
-      if (protectedTools.has(part.toolName)) continue;
-      const resultText =
-        part.result === undefined
-          ? ""
-          : typeof part.result === "string"
-          ? part.result
-          : JSON.stringify(part.result);
-      const size = estimateTokens(resultText);
+      // Skill bodies are instructions. Companion reads are ordinary file output.
+      const skillFileRead = part.toolName === "skill" && part.args !== null && typeof part.args === "object" &&
+        "path" in part.args && typeof part.args.path === "string";
+      if (protectedTools.has(part.toolName) && !skillFileRead) continue;
+      const size = estimateToolResultTokens(part.result);
       cumulative += size;
       if (cumulative <= protectTokens) continue;
       // Past the protection window — mark this tool result for elision.
@@ -556,6 +780,16 @@ After the analysis, output exactly the Markdown structure shown inside <template
 ## Active Tools & Skills
 - [tools, skills, or integrations in active use — name each and what it is being used for, or "(none)"]
 
+## Continuation Checkpoint
+- Branch: [current branch, or "(unknown)"]
+- Commit: [current commit, or "(unknown)"]
+- Changed Files: [changed paths, or "(none)"]
+- Worktree Status: [clean/dirty plus relevant status, or "(unknown)"]
+- Last Command: [exact command, or "(none)"]
+- Failure Output: [exact unresolved failure, or "(none)"]
+- Next Action: [one concrete action]
+- Acceptance Checklist: [remaining acceptance checks, or "(none)"]
+
 ## Next Steps
 - [ordered next actions or "(none)"; for the immediate next step, include a verbatim quote from the most recent messages showing exactly where work left off, so there is no drift in task interpretation]
 
@@ -572,6 +806,43 @@ Rules:
 - Preserve exact file paths, commands, error strings, and identifiers when known.
 - Next Steps must follow the user's most recent explicit requests — do not resurrect tangential or already-completed work.
 - Do not mention the summary process or that context was compacted.`;
+
+/** Reject a partial handoff before it can replace usable context. */
+function validateSummaryStructure(summary: string): void {
+  const normalize = (level: string, title: string): string =>
+    `${level} ${title.trim().replace(/:$/, "").trim().replace(/\s+/g, " ").toLowerCase()}`;
+  const required = [...SUMMARY_TEMPLATE.matchAll(/^(#{2,3}) (.+)$/gm)].map(match => normalize(match[1], match[2]));
+  const requiredNames = new Set(required);
+  const headings: Array<{ name: string; level: number; body: string[] }> = [];
+  let current: (typeof headings)[number] | undefined;
+  let fence: { marker: string; length: number } | undefined;
+  for (const line of summary.split(/\r?\n/)) {
+    const boundary = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (boundary) {
+      const marker = boundary[1][0];
+      if (!fence) fence = { marker, length: boundary[1].length };
+      else if (marker === fence.marker && boundary[1].length >= fence.length && !boundary[2].trim()) fence = undefined;
+      continue;
+    }
+    const heading = !fence && /^ {0,3}(#{1,6})[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$/.exec(line);
+    if (heading) {
+      const name = normalize(heading[1], heading[2]);
+      if (requiredNames.has(name)) {
+        current = { name, level: heading[1].length, body: [] };
+        headings.push(current);
+      } else if (current && heading[1].length <= current.level) {
+        // A separate optional section cannot supply a required section's body.
+        current = undefined;
+      }
+      // Optional subsections can organize content within a required section.
+    } else current?.body.push(line);
+  }
+  const valid = !fence && headings.length === required.length && headings.every((heading, index) =>
+    heading.name === required[index] && (heading.name === "## progress" || heading.body.some(line => line.replace(/^\s*[-*+]\s*/, "").trim().length > 0)));
+  if (!valid) throw new Error(
+    "The summarizer returned an incomplete or malformed summary. Keep every required section in order with its content. Run /compact to retry.",
+  );
+}
 
 export interface SummarizeOptions {
   /** Entries to summarize (the head — everything before the cut point). */
@@ -592,16 +863,18 @@ export interface SummarizeOptions {
   instructions?: string;
   /** Optional API key override (forwarded to pi-ai). */
   apiKey?: string;
+  /** Optional fetch for the summarizer request (forwarded to pi-ai). */
+  fetch?: typeof fetch;
   /** Optional abort signal. */
   signal?: AbortSignal;
   /**
-   * Render each user entry's `author` as a `[from: …]` line for the
-   * summarizer (shared team/org sessions). Covered entries survive only
+   * Render user entries' `author` as a `[from: …]` line for the summarizer
+   * (`AuthorAttribution`). Covered entries survive only
    * through the summary, so an anonymous summarizer input loses
    * who-said-what permanently. Same gate the live transcript uses
    * (`Thread.attributeAuthors`).
    */
-  attributeAuthors?: boolean;
+  attributeAuthors?: AuthorAttribution;
 }
 
 export interface SummarizeResult {
@@ -637,11 +910,40 @@ export function stripAnalysisScratchpad(text: string): string {
     .trim();
 }
 
+/**
+ * Prepended when the summarizer input opens on an assistant message. Several
+ * providers reject a transcript whose first message is not from the user, and
+ * that rejection is a plain 400, not an overflow, so it aborts the overflow
+ * retry loop. The preface makes any budgeted window a legal payload and
+ * frees the selection from a user-first constraint (TKAI-461).
+ */
+const SUMMARY_MIDTURN_PREFACE =
+  "The conversation history below starts in the middle of a turn. The user message that started that turn is not included.";
+
 export async function summarize(opts: SummarizeOptions): Promise<SummarizeResult> {
   const messages = entriesToSummaryMessages(opts.headEntries, {
     toolOutputMaxChars: opts.toolOutputMaxChars ?? DEFAULTS.toolOutputMaxChars,
     attributeAuthors: opts.attributeAuthors ?? false,
   });
+  if (messages.length === 0) {
+    // Non-message entries (command results, decision gates, checkpoints) and
+    // assistant entries that held only thinking render into nothing. An
+    // input made only of those leaves the model filling the template from
+    // the prompt alone, and the caller stores that as a summary of history
+    // nothing ever read (TKAI-461).
+    throw new Error(
+      "The summarizer input holds no conversation history, so the summary would be written from nothing. " +
+        "Run /compact again, or start a new thread.",
+    );
+  }
+  const firstMessage = messages[0];
+  if (firstMessage?.role === "assistant") {
+    messages.unshift({
+      role: "user",
+      content: [{ type: "text", text: SUMMARY_MIDTURN_PREFACE }],
+      timestamp: firstMessage.timestamp,
+    });
+  }
   const anchor = opts.previousSummary
     ? [
         "Update the anchored summary below using the conversation history above.",
@@ -666,6 +968,7 @@ export async function summarize(opts: SummarizeOptions): Promise<SummarizeResult
   }, {
     apiKey: opts.apiKey,
     signal: opts.signal,
+    ...(opts.fetch ? { fetch: opts.fetch } : {}),
     // Side calls fail fast (TKAI-319): one transport retry, short delay
     // cap. Nobody waits on a summarizer during a capacity event — the
     // compaction failure paths (breaker, overflow retry) own recovery.
@@ -680,9 +983,7 @@ export async function summarize(opts: SummarizeOptions): Promise<SummarizeResult
   // unclosed <analysis> block), and the caller can retry with less input.
   // The contextWindow argument matches the reactive path's overflow check.
   if (
-    result.stopReason === "error" ||
-    result.stopReason === "aborted" ||
-    result.stopReason === "length"
+    result.stopReason !== "stop" || result.content.some(block => block.type === "toolCall")
   ) {
     if (isContextOverflow(result, opts.model.contextWindow)) {
       throw new SummarizeOverflowError(result.errorMessage);
@@ -706,6 +1007,8 @@ export async function summarize(opts: SummarizeOptions): Promise<SummarizeResult
     );
   }
 
+  validateSummaryStructure(summary);
+
   return {
     summary,
     inputTokens: result.usage.input + result.usage.cacheRead,
@@ -720,7 +1023,7 @@ export async function summarize(opts: SummarizeOptions): Promise<SummarizeResult
  */
 export function entriesToSummaryMessages(
   entries: readonly SessionEntry[],
-  opts: { toolOutputMaxChars: number; attributeAuthors?: boolean },
+  opts: { toolOutputMaxChars: number; attributeAuthors?: AuthorAttribution },
 ): Message[] {
   const out: Message[] = [];
   // Every text field fed to the summarizer is capped. Tool results and args
@@ -737,17 +1040,26 @@ export function entriesToSummaryMessages(
       ? raw.slice(0, SUMMARY_PROSE_MAX_CHARS) + `…(truncated, ${raw.length - SUMMARY_PROSE_MAX_CHARS} more chars)`
       : raw;
   for (const e of entries) {
-    if (e.type !== "message") continue; // skip CompactionEntry, DecisionGateEntry, BranchSummary
+    // A branch note on the path is context the summary must keep: what still
+    // stands from a branch the thread left.
+    if (e.type === "branch_summary") {
+      out.push({ role: "user", content: [{ type: "text", text: renderBranchNote(e.summary) }], timestamp: e.createdAt });
+      continue;
+    }
+    if (e.type !== "message") continue; // skip CompactionEntry, DecisionGateEntry
     if (e.role === "user") {
       // Same sender-line rule as `entriesToAgentMessages`: shared sessions
       // only, and signal entries are exempt (their envelope names the
       // sender). Without it the summary loses who asked for what.
-      const senderLine =
-        opts.attributeAuthors && !e.signal ? formatSenderLine(e.author) : undefined;
+      const senderLine = e.signal ? undefined : formatSenderLine(attributedAuthor(opts.attributeAuthors, e.author));
       const content = capProse(e.content);
+      const body = senderLine ? `${senderLine}\n\n${content}` : content;
+      // The `[sent: …]` line lets the summary keep when each request was made.
+      // An entry with no text gets none, so it still adds nothing to the
+      // summarizer input (the coverage check counts on that).
       out.push({
         role: "user",
-        content: [{ type: "text", text: senderLine ? `${senderLine}\n\n${content}` : content }],
+        content: [{ type: "text", text: body ? `${messageTimeLine(entryMessageTime(e))}\n\n${body}` : body }],
         timestamp: e.createdAt,
       });
       continue;
@@ -766,12 +1078,12 @@ export function entriesToSummaryMessages(
           // the live context) — feed it to the summarizer so a pruned output
           // still contributes facts to the summary. Rows pruned before the
           // text was preserved fall back to the elision marker.
-          const raw = storedToolResultText(p);
+          const raw = p.status === "error" ? failedToolResultText(p) : storedToolResultText(p);
           let resultStr = "";
           if (raw !== undefined) {
             resultStr = capTool(raw);
           } else if (p.elided) {
-            resultStr = "[output elided to save context]";
+            resultStr = ELIDED_TOOL_OUTPUT;
           }
           blocks.push({
             type: "text",

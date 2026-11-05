@@ -1,4 +1,5 @@
 import type { EventCatalogEntry, NormalizedEvent, TriggerDef, VerifiedEvent } from "@valet/engine";
+import { githubEventSubjects } from "./subjects.js";
 
 const GITHUB_EVENT_TYPES = [
   "push",
@@ -288,14 +289,17 @@ function toEvent(event: VerifiedEvent): NormalizedEvent {
   const senderLogin = str(sender?.login);
 
   const summaryParts = [repo, `${event.eventType}${action ? ` ${action}` : ""}`, senderLogin ? `by ${senderLogin}` : undefined];
+  const { subjects, status, bot } = githubEventSubjects(event.eventType, payload);
   return {
     key: action ? `github.${event.eventType}.${action}` : `github.${event.eventType}`,
     dedupeKey: event.deliveryId,
     occurredAt: extractOccurredAt(payload),
-    actor: senderId ? { externalId: senderId, login: senderLogin } : undefined,
+    actor: senderId ? { externalId: senderId, login: senderLogin, bot } : undefined,
     refs,
     summary: summaryParts.filter(Boolean).join(" — "),
     payload: event.payload,
+    subjects,
+    status,
   };
 }
 

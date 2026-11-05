@@ -115,6 +115,16 @@ export function describeSignalContract(makeStore: () => Promise<WorkflowStore> |
       expect(checkpoints[0].result).toEqual({ approved: true });
     });
 
+    it('a signal that completes a step keeps the step start from its intent', async () => {
+      const store = await setup();
+      await store.putIntent({ runId: RUN_ID, nodeId: 'node-a', iteration: 0, status: 'intent', attempt: 1, createdAt: 100 });
+      await store.insertSignal(signal());
+      await store.consumeSignalAndCheckpoint('sig-1', { nodeId: 'node-a', iteration: 0, attempt: 1 }, terminal({ attempt: 1, createdAt: 900 }));
+      const [cp] = await store.getCheckpoints(RUN_ID);
+      expect(cp.startedAt).toBe(100);
+      expect(cp.createdAt).toBe(900);
+    });
+
     it('at-most-once consumption: a second consume attempt against an already-consumed signal is rejected, and the recorded consumedBy is stable', async () => {
       const store = await setup();
       await store.insertSignal(signal());

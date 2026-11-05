@@ -34,20 +34,35 @@ export {
   DOCKER_STATE_VOLUME_NAME,
   DOCKER_WORKLOAD_FS_GROUP,
   IMAGE_FINGERPRINT_ENV,
+  NESTED_KUBERNETES_ANNOTATION_KEY,
+  NESTED_KUBERNETES_IDENTITY,
+  NESTED_KUBERNETES_LABEL_KEY,
   imageFingerprint,
   SANDBOX_CONTAINER_NAME,
   SANDBOX_POD_LABEL_KEY,
+  SCRATCH_MOUNT_PATH,
+  SCRATCH_INIT_NAME,
+  SCRATCH_PLACEHOLDER_COMMAND,
+  SANDBOX_IMAGE_CONTRACT,
+  MIN_IMAGE_CONTRACT,
+  SCRATCH_VOLUME_NAME,
   SESSION_ANNOTATION_KEY,
   SESSION_LABEL_KEY,
   WORKSPACE_MOUNT_PATH,
   WORKSPACE_VOLUME_NAME,
   buildSandboxManifest,
   credsSecretName,
+  ephemeralStorageSums,
   resolveWorkspaceStorageRequest,
   sandboxCrName,
 } from "./manifest.js";
 
-export { clampStorageRequest } from "./quantity.js";
+export {
+  clampStorageRequest,
+  imageAwareWorkspaceFloor,
+  liftWorkspaceStorageToImageFloor,
+  IMAGE_WORKSPACE_FLOOR_FACTOR,
+} from "./quantity.js";
 
 export {
   RANCHER_DESKTOP_CONTEXT,
@@ -55,6 +70,8 @@ export {
   SANDBOX_PLURAL,
   applySandbox,
   classifyPodFailure,
+  OWNERSHIP_CONDITION_PATTERN,
+  startupKindOf,
   classifyPodPending,
   customObjectsApiAdapter,
   deleteSandbox,
@@ -79,6 +96,7 @@ export {
   type PatchSandboxParams,
   type PodContainerStatus,
   type PodStatusCondition,
+  type PodEventSummary,
   type PodStatusInfo,
   type ReplaceSandboxParams,
   type SandboxCustomObjectsApi,
@@ -94,6 +112,7 @@ export {
   execInPod,
   exitCodeFromStatus,
   podExecApiAdapter,
+  PodExecTransportError,
   shQuote,
   wrapAsWorkloadUser,
   type ExecDeps,
@@ -138,6 +157,8 @@ export {
   assertSafeExecId,
   looksSignalKilled,
   podLivenessApiAdapter,
+  RESOURCE_GONE_POLL_MS,
+  RESOURCE_GONE_TIMEOUT_MS,
   sandboxSecretsApiAdapter,
   type KubernetesSandboxDeps,
   type KubernetesSandboxProviderDeps,
@@ -176,3 +197,13 @@ export {
 } from "./buildkit-job.js";
 
 export { sandboxEvictionApiAdapter, type SandboxEvictionApi } from "./eviction.js";
+
+export {
+  deleteRuntimeState,
+  ensureRuntimeState,
+  runtimeStateClaimName,
+  sandboxRuntimeStateApiAdapter,
+  RUNTIME_STATE_ANNOTATION,
+  type RuntimeStateApi,
+  type RuntimeStateClaim,
+} from "./runtime-state.js";

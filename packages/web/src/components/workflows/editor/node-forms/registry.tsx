@@ -9,7 +9,7 @@ import { ApprovalForm } from "./approval-form";
 import { ForeachForm } from "./foreach-form";
 import { IfForm } from "./if-form";
 import { LlmForm } from "./llm-form";
-import { OrchestratorForm } from "./orchestrator-form";
+import { ThreadForm } from "./thread-form";
 import { SessionForm } from "./session-form";
 import { SetForm } from "./set-form";
 import { StopForm } from "./stop-form";
@@ -24,9 +24,12 @@ import { WorkflowCallForm } from "./workflow-call-form";
 export function NodeForm({
   node,
   onChange,
+  lastRunModels,
 }: {
   node: WorkflowNode;
   onChange: (patch: Record<string, unknown>) => void;
+  /** The models this step called in the workflow's last run. */
+  lastRunModels?: string[];
 }) {
   switch (node.type) {
     case "trigger":
@@ -40,15 +43,15 @@ export function NodeForm({
     case "approval":
       return <ApprovalForm node={node} onChange={onChange} />;
     case "session":
-      return <SessionForm node={node} onChange={onChange} />;
+      return <SessionForm node={node} onChange={onChange} lastRunModels={lastRunModels} />;
     case "stop":
       return <StopForm node={node} onChange={onChange} />;
     case "foreach":
       return <ForeachForm node={node} onChange={onChange} />;
     case "llm":
-      return <LlmForm node={node} onChange={onChange} />;
+      return <LlmForm node={node} onChange={onChange} lastRunModels={lastRunModels} />;
     case "orchestrator":
-      return <OrchestratorForm node={node} onChange={onChange} />;
+      return <ThreadForm node={node} onChange={onChange} />;
     case "tool":
       return <ToolForm node={node} onChange={onChange} />;
     case "workflow":

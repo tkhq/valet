@@ -40,18 +40,22 @@
  *     detects this at turn start and releases the claim back to `queued` for a
  *     bounded number of attempts; setModel-style validation accepts the spec
  *     via the attached model.
- *   - throw (plain Error) — the spec names a real provider that can't
- *     currently run it (disabled provider, deleted/unknown custom provider,
- *     model not active on a custom provider). These fail the turn the way
- *     model-resolution errors do today, with a clear message.
+ *   - throw `ModelUnavailableError` — the spec names a real provider that
+ *     can't currently run it (disabled provider, deleted/unknown custom
+ *     provider, model not active on a custom provider). These fail the turn
+ *     the way model-resolution errors do today, with a clear message.
+ *
+ * `canRunSpec` asks the same question without the throw: does this resolver
+ * return a model and a key for the spec today?
  */
 import { getEnvApiKey, type Api, type Model } from "@earendil-works/pi-ai/compat";
-import { registryModelById } from "./model-registry.js";
+import { registryModelById, registryModels } from "./model-registry.js";
 import { NoCredentialsError, type CredentialOwner, type CredentialStore, type ResolvedModel } from "@valet/engine";
 import type { AppQueryable } from "../lib/drizzle.js";
 import type { LlmProviderRow } from "../schema/index.js";
 import { isKnownProviderKind, listLlmProviders, parseModelId, providerNamespace } from "./llm-providers.js";
 import { TIER_SET, resolveTier } from "./model-tiers.js";
+import { checkOutboundUrlShape, recordOutboundRefusal } from "../lib/outbound-url.js";
 
 /** The registry-backed kinds (narrower than `LlmProviderKind`). Note
  * `openrouter` model ids themselves contain slashes
@@ -61,10 +65,29 @@ import { TIER_SET, resolveTier } from "./model-tiers.js";
  * lookup + canonical-id round-trip both hold. Resolution deliberately
  * accepts ANY registry model — the curated selection on openrouter rows
  * (`services/openrouter.ts`) governs catalog/picker visibility only. */
-type KnownKind = "anthropic" | "openai" | "google" | "openrouter";
+export type KnownKind = "anthropic" | "openai" | "google" | "openrouter" | "amazon-bedrock";
 
 function isKnownKindNamespace(ns: string): ns is KnownKind {
-  return ns === "anthropic" || ns === "openai" || ns === "google" || ns === "openrouter";
+  return ns === "anthropic" || ns === "openai" || ns === "google" || ns === "openrouter" || ns === "amazon-bedrock";
+}
+
+/** pi-ai reports a provider whose credentials live outside pi (today: Amazon
+ * Bedrock on the AWS credential chain) with this marker instead of a key. */
+const ENV_AUTHENTICATED_MARKER = "<authenticated>";
+
+/**
+ * The deployment-env credential for a known kind, as the resolver needs it.
+ * `present` says whether the env can authenticate at all; `apiKey` is what to
+ * hand pi-ai. For key-based providers both derive from the env var. For
+ * Amazon Bedrock pi-ai returns the `<authenticated>` marker when ANY AWS
+ * credential source exists (profile, static keys, IRSA token, bearer token);
+ * that marker must never be sent as a key — `apiKey: undefined` lets pi-ai
+ * fall through to the AWS SDK default chain.
+ */
+export function envCredentialFor(kind: KnownKind): { present: boolean; apiKey: string | undefined } {
+  const value = getEnvApiKey(kind);
+  if (value === ENV_AUTHENTICATED_MARKER) return { present: true, apiKey: undefined };
+  return { present: value !== undefined && value !== "", apiKey: value || undefined };
 }
 
 /** Shared no-key message for the two registry-model credential-throw sites. */
@@ -72,7 +95,15 @@ function noKeyMessage(canonicalId: string): string {
   return `no usable API key for model "${canonicalId}" — configure an org LLM key or set the provider's API key env var`;
 }
 
-async function orgKey(credentials: CredentialStore, orgId: string, rowId: string): Promise<string | undefined> {
+/** The provider behind a spec exists but cannot run it today: the provider
+ * is disabled or deleted, or a custom provider no longer lists the model. */
+class ModelUnavailableError extends Error {}
+
+/** The credential read this resolver makes. A caller that cannot read the
+ * credential store at check time passes a copy (`orgKeySnapshot`). */
+export type CredentialReader = Pick<CredentialStore, "get">;
+
+async function orgKey(credentials: CredentialReader, orgId: string, rowId: string): Promise<string | undefined> {
   const owner: CredentialOwner = { type: "org", id: orgId };
   const stored = await credentials.get(owner, `llm:${rowId}`);
   // Normalize empty/whitespace-only stored keys to "missing" so both the
@@ -119,23 +150,36 @@ function registryModelWithCanonicalId(kind: KnownKind, modelId: string, canonica
  * from the stored row entry. Null when the id isn't in the row's selection
  * either — an arbitrary un-selected non-registry id stays unresolvable.
  */
-function synthesizeOpenrouterModel(row: LlmProviderRow, modelId: string): Model<"openai-completions"> | null {
+type CuratedKind = "openrouter" | "amazon-bedrock";
+
+/**
+ * Builds a pi-ai model for a curated-kind row selection the registry does
+ * not know (an OpenRouter live-catalog pick, or a Bedrock model the AWS
+ * account offers but pi-ai has not catalogued). Only ids in `row.models`
+ * synthesize — an arbitrary un-selected non-registry id stays unresolvable.
+ * Bedrock entries carry no baseUrl: pi-ai derives the endpoint from
+ * AWS_REGION, and only consults a model baseUrl when no region is set.
+ */
+function synthesizeCuratedModel(kind: CuratedKind, row: LlmProviderRow, modelId: string): Model<Api> | null {
   const entry = row.models.find((m) => m.id === modelId);
   if (!entry) return null;
-  return {
+  const cost = entry.pricing
+    ? { input: entry.pricing.input, output: entry.pricing.output, cacheRead: 0, cacheWrite: 0 }
+    : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  const common = {
     id: entry.id,
     name: entry.name,
-    api: "openai-completions",
-    provider: "openrouter",
-    baseUrl: "https://openrouter.ai/api/v1",
     reasoning: false,
-    input: ["text"],
-    cost: entry.pricing
-      ? { input: entry.pricing.input, output: entry.pricing.output, cacheRead: 0, cacheWrite: 0 }
-      : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    input: ["text"] as ["text"],
+    cost,
     contextWindow: entry.contextWindow ?? 128_000,
     maxTokens: 8192,
   };
+  if (kind === "openrouter") {
+    return { ...common, api: "openai-completions", provider: "openrouter", baseUrl: "https://openrouter.ai/api/v1" };
+  }
+  const bundled = registryModels("amazon-bedrock")[0];
+  return { ...common, api: "bedrock-converse-stream", provider: "amazon-bedrock", baseUrl: bundled?.baseUrl ?? "" };
 }
 
 /** Synthesize a `Model<"openai-completions">` for a custom provider's model
@@ -180,7 +224,8 @@ export async function resolveModelSpec(
   // Tier tokens (xs, s, m, l, xl) resolve through the org's tier map to a
   // concrete model spec, then recurse. canonicalId stays the tier token so
   // the engine persists the tier, not the resolved spec — re-pointing a
-  // tier reaches existing threads (TKAI-285).
+  // tier reaches existing threads (TKAI-285). `resolveTier` never returns a
+  // tier token (its walk cuts tier cycles), so this recursion is one level.
   const normalized = spec.trim().toLowerCase();
   if (db && TIER_SET.has(normalized)) {
     const resolved = await resolveTier(db, credentials, orgId, normalized);
@@ -189,16 +234,45 @@ export async function resolveModelSpec(
     if (result) return { ...result, canonicalId: normalized };
     return null;
   }
+  return resolveConcreteSpec(db ? await listLlmProviders(db, orgId) : [], credentials, orgId, spec);
+}
 
+/**
+ * True when `resolveModelSpec` returns a model and a key for the concrete
+ * (non-tier) `spec` today. `resolvableTiers` asks this, so a tier that the
+ * save checks and the session cascade accept is a tier that session
+ * creation can resolve: the model still exists on its provider, and the
+ * key is not blank. Other errors, such as a failed credential read, throw.
+ */
+export async function canRunSpec(
+  rows: LlmProviderRow[],
+  credentials: CredentialReader,
+  orgId: string,
+  spec: string,
+): Promise<boolean> {
+  try {
+    return (await resolveConcreteSpec(rows, credentials, orgId, spec)) !== null;
+  } catch (err) {
+    if (err instanceof NoCredentialsError || err instanceof ModelUnavailableError) return false;
+    throw err;
+  }
+}
+
+/** `resolveModelSpec` for a concrete spec, over provider rows already read. */
+async function resolveConcreteSpec(
+  rows: LlmProviderRow[],
+  credentials: CredentialReader,
+  orgId: string,
+  spec: string,
+): Promise<ResolvedModel | null> {
   const { namespace, modelId } = parseModelId(spec);
   // Echo the caller's canonical form (bare stays bare, namespaced stays
   // namespaced) so the persisted id is idempotent under re-resolution.
   const canonicalId = spec.includes("/") ? `${namespace}/${modelId}` : modelId;
-  const rows = db ? await listLlmProviders(db, orgId) : [];
   const row = rows.find((r) => providerNamespace(r) === namespace);
 
   if (row) {
-    if (!row.enabled) throw new Error(`provider ${row.name} is disabled`);
+    if (!row.enabled) throw new ModelUnavailableError(`provider ${row.name} is disabled`);
     if (isKnownProviderKind(row.kind)) {
       // Guaranteed by isKnownProviderKind; narrow for the registry lookup.
       const kind = row.kind as KnownKind;
@@ -209,20 +283,29 @@ export async function resolveModelSpec(
       // model IS known.
       const model =
         registryModel(kind, modelId) ??
-        (kind === "openrouter" ? synthesizeOpenrouterModel(row, modelId) : null);
+        (kind === "openrouter" || kind === "amazon-bedrock" ? synthesizeCuratedModel(kind, row, modelId) : null);
       if (!model) return null;
-      const apiKey = (await orgKey(credentials, orgId, row.id)) ?? getEnvApiKey(kind);
-      if (apiKey === undefined) {
+      const org = await orgKey(credentials, orgId, row.id);
+      const env = envCredentialFor(kind);
+      if (org === undefined && !env.present) {
         throw new NoCredentialsError(
           noKeyMessage(canonicalId),
           registryModelWithCanonicalId(kind, modelId, canonicalId) ?? model,
         );
       }
-      return { model, apiKey, canonicalId };
+      return { model, apiKey: org ?? env.apiKey, canonicalId };
     }
     // Custom (openai_compatible): org key only, no env fallback.
     const model = synthesizeCustomModel(row, modelId);
-    if (!model) throw new Error(`model ${modelId} is not active on provider ${row.name}`);
+    if (!model) throw new ModelUnavailableError(`model ${modelId} is not active on provider ${row.name}`);
+    // Request-time half of the SSRF guard: a row saved before the save-time
+    // check existed, or written by config, still cannot reach an internal
+    // address. `guardedFetch` re-checks DNS answers at connect time.
+    const urlCheck = checkOutboundUrlShape(model.baseUrl);
+    if (!urlCheck.ok) {
+      recordOutboundRefusal("request");
+      throw new ModelUnavailableError(`provider ${row.name} has a refused base URL. ${urlCheck.reason}`);
+    }
     const apiKey = await orgKey(credentials, orgId, row.id);
     if (!apiKey) throw new NoCredentialsError(`provider ${row.name} has no API key`, { ...model, id: canonicalId });
     return { model, apiKey, canonicalId };
@@ -236,17 +319,17 @@ export async function resolveModelSpec(
     // it instead of burning the turn on a keyless model call.
     const model = registryModel(namespace, modelId);
     if (!model) return null;
-    const apiKey = getEnvApiKey(namespace);
-    if (apiKey === undefined) {
+    const env = envCredentialFor(namespace);
+    if (!env.present) {
       throw new NoCredentialsError(
         noKeyMessage(canonicalId),
         registryModelWithCanonicalId(namespace, modelId, canonicalId) ?? model,
       );
     }
-    return { model, apiKey, canonicalId };
+    return { model, apiKey: env.apiKey, canonicalId };
   }
 
   // A non-known namespace with no matching row is a deleted/unknown custom
   // provider — fail with a clear message rather than silently mis-resolving.
-  throw new Error(`unknown or deleted provider: ${namespace}`);
+  throw new ModelUnavailableError(`unknown or deleted provider: ${namespace}`);
 }

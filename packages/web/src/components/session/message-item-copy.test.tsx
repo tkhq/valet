@@ -10,7 +10,7 @@
  * the suite would stay green.
  */
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import type { StreamMessage } from "~/stores/stream";
 
 const markdownRender = vi.hoisted(() => vi.fn());
@@ -36,14 +36,20 @@ vi.mock("~/api/queries", async (importOriginal) => {
 import { TooltipProvider } from "~/components/primitives";
 import { MessageItem } from "./message-item";
 
-function renderItem(message: StreamMessage) {
-  return render(itemTree(message));
+function renderItem(
+  message: StreamMessage,
+  onReply?: (target: { messageId: string; excerpt: string }) => void,
+) {
+  return render(itemTree(message, onReply));
 }
 
-function itemTree(message: StreamMessage) {
+function itemTree(
+  message: StreamMessage,
+  onReply?: (target: { messageId: string; excerpt: string }) => void,
+) {
   return (
     <TooltipProvider>
-      <MessageItem message={message} />
+      <MessageItem message={message} onReply={onReply} />
     </TooltipProvider>
   );
 }
@@ -112,5 +118,184 @@ describe("MessageItem render isolation", () => {
     view.rerender(itemTree(message));
 
     expect(markdownRender).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("MessageItem replies", () => {
+  it("offers Reply only for assistant text and returns a concise snapshot", () => {
+    const onReply = vi.fn();
+    renderItem(
+      msg({
+        id: "assistant-7",
+        completed: true,
+        parts: [{ kind: "text", text: "Use  the\nblue deployment." }],
+      }),
+      onReply,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Reply to message" }));
+    expect(onReply).toHaveBeenCalledWith({
+      messageId: "assistant-7",
+      excerpt: "Use the blue deployment.",
+    });
+  });
+
+  it("does not offer Reply until the assistant message is complete", () => {
+    renderItem(
+      msg({ parts: [{ kind: "text", text: "Still streaming" }], completed: false }),
+      vi.fn(),
+    );
+
+    expect(screen.queryByRole("button", { name: "Reply to message" })).toBeNull();
+  });
+
+  it("renders persisted quoted context on a user message", () => {
+    renderItem(
+      msg({
+        role: "user",
+        content: "What about staging?",
+        replyTo: { messageId: "assistant-7", excerpt: "Use the blue deployment." },
+      }),
+    );
+
+    expect(screen.getByText("Replying to Assistant")).toBeTruthy();
+    expect(screen.getByText("Use the blue deployment.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Reply to message" })).toBeNull();
+  });
+});
+
+describe("empty assistant reply", () => {
+  it("names the provider error of a failed turn after a reload", () => {
+    renderItem(
+      msg({
+        stopReason: "error",
+        completed: false,
+        errorMessage: "429 Rate limit reached for m on tokens per min (TPM). Please try again in 2.5s.",
+      }),
+    );
+    expect(
+      screen.getByText(
+        "The model provider is limiting requests and did not recover after several tries. Try again in a minute, or choose another model.",
+      ),
+    ).toBeTruthy();
+    // The raw provider text stays one click away, under Details.
+    expect(screen.getByText("Details")).toBeTruthy();
+    expect(screen.getByText("429 Rate limit reached for m on tokens per min (TPM). Please try again in 2.5s.")).toBeTruthy();
+    expect(screen.queryByText(/No response/)).toBeNull();
+  });
+
+  it("names the provider and a usage limit apart from an outage", () => {
+    renderItem(
+      msg({
+        stopReason: "error",
+        completed: false,
+        model: "openai/gpt-5.6-luna",
+        errorMessage: "You exceeded your current quota, please check your plan and billing details. (insufficient_quota)",
+      }),
+    );
+    expect(screen.getByText("OpenAI usage limit is reached. Choose another model, or try again after the limit resets.")).toBeTruthy();
+  });
+
+  it("words the OpenAI server error a person saw without the raw help-center text", () => {
+    renderItem(
+      msg({
+        stopReason: "error",
+        completed: false,
+        model: "openai/gpt-5.6-luna",
+        errorMessage: "An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists. Please include the request ID req_1 in your message.",
+      }),
+    );
+    expect(screen.getByText("OpenAI had a server error and did not recover after several tries. Try again, or choose another model.")).toBeTruthy();
+  });
+
+  it("keeps the generic text when the turn has no error text", () => {
+    renderItem(msg({ stopReason: "error", completed: false }));
+    expect(screen.getByText("No response. Try again or choose another model.")).toBeTruthy();
+  });
+});
+
+describe("structured assistant results", () => {
+  const raw = JSON.stringify({ summary: "Found four cleanup candidates. No memory was changed.", candidates: [{ path: "notes.md", evidence: "Preserve unique history. ".repeat(100) }] });
+
+  it("collapses a completed JSON result and preserves exact message copying", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    renderItem(msg({ completed: true, parts: [{ kind: "text", text: raw }] }));
+    expect(screen.getByText(/Structured result/)).toBeTruthy();
+    expect(screen.getByText("Found four cleanup candidates. No memory was changed.")).toBeTruthy();
+    expect(screen.queryByText(raw)).toBeNull();
+    const disclosure = screen.getByText(/Structured result/).closest("details");
+    expect(disclosure).not.toBeNull();
+    disclosure?.setAttribute("open", "");
+    if (disclosure) fireEvent(disclosure, new Event("toggle"));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Copy code" })).toBeTruthy());
+    expect(disclosure?.querySelector("code")?.textContent).toBe(raw);
+    fireEvent.click(screen.getByRole("button", { name: "Copy message" }));
+    await Promise.resolve();
+    expect(writeText).toHaveBeenCalledWith(raw);
+  });
+
+  it.each([
+    { role: "user" as const, completed: true },
+    { role: "assistant" as const, completed: false },
+    { role: "assistant" as const, completed: true, stopReason: "error" as const },
+  ])("keeps user, streaming and failed messages visible: %j", (state) => {
+    renderItem(msg({ ...state, parts: [{ kind: "text", text: raw }] }));
+    expect(screen.getByText(raw)).toBeTruthy();
+    expect(screen.queryByText(/Structured result/)).toBeNull();
+  });
+
+  it.each([
+    "Here is the result: " + raw,
+    raw.slice(0, -1),
+    JSON.stringify({ error: "Choose another model.", details: "x".repeat(1600) }),
+    JSON.stringify({ status: "failed", details: "x".repeat(1600) }),
+    JSON.stringify([{ error: "Choose another model.", details: "x".repeat(1600) }]),
+  ])("does not hide prose, malformed JSON, or errors", (text) => {
+    renderItem(msg({ completed: true, parts: [{ kind: "text", text }] }));
+    expect(screen.getByText(text)).toBeTruthy();
+    expect(screen.queryByText(/Structured result/)).toBeNull();
+  });
+});
+
+it("preserves JSON integer precision in expanded results", async () => {
+  const raw = '{"id":9007199254740993,"details":"' + "x".repeat(1600) + '"}';
+  renderItem(msg({ completed: true, content: raw }));
+  const disclosure = screen.getByText(/Structured result/).closest("details");
+  disclosure?.setAttribute("open", "");
+  if (disclosure) fireEvent(disclosure, new Event("toggle"));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Copy code" })).toBeTruthy());
+  expect(disclosure?.querySelector("code")?.textContent).toBe(raw);
+});
+
+describe("MessageItem continuation", () => {
+  it("drops the repeated author line and puts a reply's actions under its text", () => {
+    const { container } = render(
+      <TooltipProvider>
+        <MessageItem continuation message={msg({ model: "gpt-6-luna", parts: [{ kind: "text", text: "Done." }] })} />
+      </TooltipProvider>,
+    );
+    expect(screen.queryByText("Assistant")).toBeNull();
+    const copy = screen.getByRole("button", { name: "Copy message" });
+    // After the text in document order, not floated over it.
+    const text = screen.getByText("Done.");
+    expect(text.compareDocumentPosition(copy) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(container.querySelector(".absolute")).toBeNull();
+  });
+
+  it("gives a tool-only continuation no action row to cover its card", () => {
+    render(
+      <TooltipProvider>
+        <MessageItem continuation message={msg({ parts: [{ kind: "tool_call", callId: "c1", toolName: "bash", args: { command: "ls" }, status: "completed" }] })} />
+      </TooltipProvider>,
+    );
+    expect(screen.queryByRole("button", { name: "Copy message" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Good reply|Bad reply/ })).toBeNull();
+  });
+
+  it("shows the author line and the rating controls on the first message of a turn", () => {
+    renderItem(msg({ parts: [{ kind: "text", text: "Done." }] }));
+    expect(screen.getByText("Assistant")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Good reply/ })).toBeTruthy();
   });
 });

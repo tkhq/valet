@@ -30,6 +30,7 @@ Replace the 16 current `drive.*` actions in `packages/plugin-google-workspace/` 
 | `drive.delete_file` | `fileId` | Permanently delete a file (cannot be undone) | critical | WRITE_MODIFY |
 | `drive.download_file` | `fileId`, `maxSizeBytes?` | Download file content as text (with Google Workspace export) | low | READ_GET |
 | `drive.create_from_template` | `templateId`, `title`, `folderId?`, `replacements?` | Create a new document from a template with placeholder substitution | medium | CREATE |
+| `drive.export_file` | `fileId`, `format?`, `fileName?` | Save a Drive file as a thread file; convert Docs, Sheets, and Slides to PDF or Office formats (added 2026-10-30, see `2026-10-30-gmail-attachments-drive-export-design.md`) | low | READ_GET |
 
 ## Tools Being Dropped
 
@@ -37,7 +38,7 @@ Replace the 16 current `drive.*` actions in `packages/plugin-google-workspace/` 
 |-------------------|--------|-------------|
 | `drive.get_file` | Replaced by `drive.get_document_info` | No |
 | `drive.read_file` | Not in reference repo (text reading with PDF extraction) | **Yes** -- agents lose the ability to read file contents via Drive |
-| `drive.export_file` | Not in reference repo | **Yes** -- agents lose explicit format export; `download_file` covers some cases |
+| `drive.export_file` | Not in reference repo | Restored 2026-10-30 with new behavior: it saves a thread file instead of returning content |
 | `drive.create_file` | Replaced by `drive.create_document` (Docs-specific) | Partial -- generic file creation (text, CSV) is lost |
 | `drive.update_metadata` | Subsumed by `drive.rename_file` + `drive.move_file` | No -- dedicated single-purpose tools are cleaner |
 | `drive.update_content` | Not in reference repo | **Yes** -- agents lose the ability to update file content via Drive |
@@ -58,7 +59,7 @@ Same pattern as the Docs port (see `2026-04-23-google-workspace-docs-port-design
 - **Upload endpoint:** `https://www.googleapis.com/upload/drive/v3` for file creation with content
 - **`create_document`** is the most complex tool: creates a Doc via Docs API, optionally inserts markdown content via batchUpdate, then moves to target folder via Drive API. This combines Docs + Drive APIs in one action.
 - **`create_from_template`** copies a template doc then does find-and-replace on placeholders. Two API calls chained.
-- **`download_file`** replaces our `read_file` but is simpler: exports Google Workspace files as text, downloads regular files as text, rejects binary files. No PDF extraction.
+- **`download_file`** replaces our `read_file` but is simpler: exports Google Workspace files as text, downloads regular text files, rejects unsupported binary files, and extracts PDF text. PDF media is read with a byte cap before extraction. It uses `extractDownloadedPdf`. See `docs/specs/2026-09-17-channel-document-attachments-design.md`.
 
 ## Files Changed
 

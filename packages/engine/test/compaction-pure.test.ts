@@ -7,15 +7,20 @@ import {
   estimateContextTokens,
   estimateLiveContextTokens,
   estimateTokens,
+  estimateTotalTokens,
   estimateEntryTokens,
+  estimateSummaryEntryTokens,
   extractFileContext,
   planPrune,
   selectCutPoint,
+  selectSummaryCheckpointTail,
   storedToolResultText,
   stripAnalysisScratchpad,
   tailBudget,
   turns,
   usableTokens,
+  walkTranscriptDag,
+  type CompactionEntry,
   type MessageEntry,
   type SessionEntry,
 } from "../src/index.js";
@@ -85,6 +90,20 @@ describe("compaction: estimateTokens / estimateEntryTokens", () => {
     expect(tokens).toBeLessThan(50);
   });
 
+  it("counts a tool-result image as one image, not as its base64 text", () => {
+    const preview = "a".repeat(2_000_000);
+    const result = { content: [{ type: "text", text: "x".repeat(40) }, { type: "image", data: preview, mimeType: "image/png" }] };
+    const e = assistant("a", "", [
+      { type: "tool_call", callId: "c", toolName: "openai_native_image", status: "completed", result },
+    ]);
+    const tokens = estimateEntryTokens(e);
+    expect(tokens).toBeGreaterThanOrEqual(1_500 + 10);
+    expect(tokens).toBeLessThan(2_000);
+    // The same ruler drives pruning: one preview must not blow the protection window.
+    const plan = planPrune({ entries: [e], cfg: { pruneProtectTokens: 40_000 } });
+    expect(plan.toElide.size).toBe(0);
+  });
+
   it("ignores elided tool results", () => {
     const e = assistant("a", "", [
       {
@@ -128,6 +147,308 @@ describe("compaction: usableTokens / tailBudget", () => {
     expect(tailBudget(100_000, { maxPreserveRecentTokens: 8_000 })).toBe(8_000);
     // The floor still wins over a configured ceiling below it.
     expect(tailBudget(100_000, { maxPreserveRecentTokens: 1_000 })).toBe(2_000);
+  });
+});
+
+describe("compaction: transcript DAG", () => {
+  it("walks only the active branch and keeps its tool output for the summary", () => {
+    const root = user("u-root", "implement the fix");
+    const tool = assistant("a-tool", "", [
+      {
+        type: "tool_call",
+        callId: "call-active",
+        toolName: "bash",
+        status: "completed",
+        args: { command: "git status --short" },
+        result: "M packages/engine/src/thread.ts",
+      },
+    ]);
+    tool.parentId = root.id;
+    const activeUser = user("u-active", "continue the implementation");
+    activeUser.parentId = tool.id;
+    const activeLeaf = assistant("a-active", "working");
+    activeLeaf.parentId = activeUser.id;
+    const abandonedUser = user("u-abandoned", "unrelated branch");
+    abandonedUser.parentId = root.id;
+    const abandonedLeaf = assistant("a-abandoned", "wrong branch");
+    abandonedLeaf.parentId = abandonedUser.id;
+    const entries = [root, tool, abandonedUser, abandonedLeaf, activeUser, activeLeaf];
+
+    const path = walkTranscriptDag(entries, activeLeaf.id);
+    expect(path.map((entry) => entry.id)).toEqual([
+      root.id,
+      tool.id,
+      activeUser.id,
+      activeLeaf.id,
+    ]);
+    const summaryInput = entriesToSummaryMessages(path, { toolOutputMaxChars: 2_000 });
+    expect(JSON.stringify(summaryInput)).toContain("M packages/engine/src/thread.ts");
+    expect(JSON.stringify(summaryInput)).not.toContain("wrong branch");
+
+    const live = entriesToAgentMessages(entries, MODEL, { activeLeafEntryId: activeLeaf.id });
+    expect(JSON.stringify(live)).toContain("continue the implementation");
+    expect(JSON.stringify(live)).not.toContain("unrelated branch");
+  });
+
+  it("keeps the chronological prefix from transcripts written before DAG links", () => {
+    const oldUser = user("old-user", "old request");
+    const oldAssistant = assistant("old-assistant", "old answer");
+    const continued = user("continued", "new request");
+    continued.parentId = oldAssistant.id;
+
+    expect(
+      walkTranscriptDag([oldUser, oldAssistant, continued], continued.id).map(
+        (entry) => entry.id,
+      ),
+    ).toEqual([oldUser.id, oldAssistant.id, continued.id]);
+  });
+
+  it("keeps a legacy compaction and its chronological null-parent suffix", () => {
+    const e1 = user("e1", "covered request");
+    const e2 = assistant("e2", "covered answer");
+    const c1: CompactionEntry = {
+      id: "c1",
+      sessionId: "s",
+      threadId: "t",
+      parentId: e2.id,
+      type: "compaction",
+      summary: "LEGACY-SUMMARY",
+      coveredEntryIds: [e1.id, e2.id],
+      tokenCountBefore: 20,
+      tokenCountAfter: 5,
+      createdAt: 3,
+    };
+    const inactive = user("inactive", "inactive linked branch");
+    inactive.parentId = e1.id;
+    const e3 = user("e3", "post-compaction instruction");
+    const e4 = assistant("e4", "post-compaction detail");
+
+    const active = walkTranscriptDag([e1, e2, c1, inactive, e3, e4], e4.id);
+    expect(active.map((entry) => entry.id)).toEqual([c1.id, e3.id, e4.id]);
+    const messages = entriesToAgentMessages(active, MODEL, { activeLeafEntryId: e4.id });
+    expect(JSON.stringify(messages)).toContain("LEGACY-SUMMARY");
+    expect(JSON.stringify(messages)).toContain("post-compaction instruction");
+    expect(JSON.stringify(messages)).not.toContain("inactive linked branch");
+  });
+
+  it("gives a path that starts at a branch note no legacy prefix", () => {
+    const oldRoot = user("old-root", "old first message");
+    const oldReply = assistant("old-reply", "old answer");
+    oldReply.parentId = oldRoot.id;
+    const note: SessionEntry = {
+      id: "note", sessionId: "s", threadId: "t", parentId: null, type: "branch_summary",
+      branchRootId: oldRoot.id, branchLeafId: oldReply.id, summary: "NOTE-TEXT", createdAt: 3,
+    };
+    const edited = user("edited", "new first message");
+    edited.parentId = note.id;
+
+    const active = walkTranscriptDag([oldRoot, oldReply, note, edited], edited.id);
+    expect(active.map((entry) => entry.id)).toEqual([note.id, edited.id]);
+    const live = JSON.stringify(entriesToAgentMessages([oldRoot, oldReply, note, edited], MODEL, { activeLeafEntryId: edited.id }));
+    expect(live).toContain("<branch-note>\\nNOTE-TEXT\\n</branch-note>");
+    expect(live).not.toContain("old first message");
+    expect(JSON.stringify(entriesToSummaryMessages(active, { toolOutputMaxChars: 1000, attributeAuthors: false }))).toContain("NOTE-TEXT");
+  });
+
+  it("brings entries a compaction covered back when the leaf moves before that compaction", () => {
+    const u1 = user("u1", "covered request");
+    const a1 = assistant("a1", "covered answer");
+    a1.parentId = u1.id;
+    const u2 = user("u2", "edited later");
+    u2.parentId = a1.id;
+    const c1: CompactionEntry = {
+      id: "c1", sessionId: "s", threadId: "t", parentId: u2.id, type: "compaction",
+      summary: "SUMMARY", coveredEntryIds: [u1.id, a1.id], tokenCountBefore: 20, tokenCountAfter: 5, createdAt: 4,
+    };
+    const note: SessionEntry = {
+      id: "note", sessionId: "s", threadId: "t", parentId: a1.id, type: "branch_summary",
+      branchRootId: u2.id, branchLeafId: c1.id, summary: "NOTE", createdAt: 5,
+    };
+    const live = JSON.stringify(entriesToAgentMessages([u1, a1, u2, c1, note], MODEL, { activeLeafEntryId: note.id }));
+    expect(live).toContain("covered request");
+    expect(live).not.toContain("SUMMARY");
+    expect(live).not.toContain("edited later");
+  });
+
+  it("rejects a broken active path instead of silently dropping context", () => {
+    const leaf = assistant("leaf", "answer");
+    leaf.parentId = "missing-parent";
+    expect(() => walkTranscriptDag([leaf], leaf.id)).toThrow(
+      "Transcript DAG is missing entry missing-parent.",
+    );
+  });
+});
+
+describe("compaction: summary checkpoint tail", () => {
+  function commandResult(id: string): SessionEntry {
+    return {
+      id,
+      sessionId: "s",
+      threadId: "t",
+      parentId: null,
+      type: "command_result",
+      command: "/status",
+      source: "builtin",
+      ok: true,
+      output: "ready",
+      createdAt: 1,
+    };
+  }
+
+  it("keeps the newest evidence within a bounded token suffix", () => {
+    const old = user("old-tail", "x".repeat(20_000));
+    const recent = user("recent-tail", "recent checkpoint evidence");
+    const latest = assistant("latest-tail", "latest state");
+    expect(
+      selectSummaryCheckpointTail([old, recent, latest], 100).map((entry) => entry.id),
+    ).toEqual([recent.id, latest.id]);
+  });
+
+  it("keeps a mid-turn window instead of aligning it to the next user entry", () => {
+    const old = user("old-boundary", "x".repeat(20_000));
+    const boundaryAssistant = assistant("assistant-boundary", "x".repeat(40));
+    const checkpoint = user("checkpoint-user", "current checkpoint");
+    const evidence = assistant("checkpoint-evidence", "tests are green");
+
+    const selected = selectSummaryCheckpointTail(
+      [old, boundaryAssistant, checkpoint, evidence],
+      20,
+    );
+
+    // Aligning forward to `checkpoint` would drop an assistant step the
+    // budget still holds, and the caller records that step as covered
+    // either way (TKAI-461). `summarize` prepends its own preface, so a
+    // window that opens mid-turn is a legal payload.
+    expect(selected.map((entry) => entry.id)).toEqual([
+      boundaryAssistant.id,
+      checkpoint.id,
+      evidence.id,
+    ]);
+    expect(estimateTotalTokens(selected)).toBeLessThanOrEqual(20);
+  });
+
+  it("keeps the newest entry even when it alone exceeds the budget", () => {
+    const latest = user("large-latest", "x".repeat(20_000));
+    expect(selectSummaryCheckpointTail([latest], 100)).toEqual([latest]);
+  });
+
+  it("stays inside the budget when the window opens inside one long turn", () => {
+    // One user message followed by an assistant run larger than the budget.
+    // Returning nothing here handed the summarizer an empty transcript while
+    // the caller still marked the whole head covered (TKAI-461). Extending
+    // backward to the turn opener instead would return the whole head and
+    // defeat the budget, so the window stops where the budget stops.
+    const opener = user("turn-opener", "start the long turn");
+    const bulk = assistant("assistant-bulk", "x".repeat(40_000));
+    const latest = assistant("assistant-latest", "latest step");
+
+    const selected = selectSummaryCheckpointTail([opener, bulk, latest], 8_000);
+
+    expect(selected.map((entry) => entry.id)).toEqual([latest.id]);
+    expect(estimateTotalTokens(selected)).toBeLessThanOrEqual(8_000);
+  });
+
+  it("sizes the window with the caps the summarizer payload applies", () => {
+    const opener = user("capped-opener", "start the long turn");
+    const bulk = assistant("capped-bulk", "x".repeat(300_000));
+    const latest = assistant("capped-latest", "latest step");
+
+    // The raw estimate says this step costs 75_000 tokens. The summarizer
+    // caps one prose block at 20_000 chars, so its real cost is ~5_000.
+    expect(estimateEntryTokens(bulk)).toBeGreaterThan(64_000);
+    expect(estimateSummaryEntryTokens(bulk)).toBeLessThan(8_000);
+
+    const selected = selectSummaryCheckpointTail([opener, bulk, latest], 8_000, {
+      sizeOf: estimateSummaryEntryTokens,
+    });
+
+    expect(selected.map((entry) => entry.id)).toEqual([opener.id, bulk.id, latest.id]);
+  });
+
+  it("keeps an assistant-only window when no user entry precedes it", () => {
+    const bulk = assistant("assistant-only-bulk", "x".repeat(40_000));
+    const latest = assistant("assistant-only-latest", "latest step");
+
+    const selected = selectSummaryCheckpointTail([bulk, latest], 8_000);
+
+    expect(selected.map((entry) => entry.id)).toEqual([latest.id]);
+  });
+
+  it("steps back to the newest entry the summarizer can read", () => {
+    // A command result renders into no summarizer message. A window made
+    // only of command results converts to an empty transcript, and the
+    // summary is then written from the prompt template alone.
+    const opener = user("gap-opener", "start the turn");
+    const bulk = assistant("gap-bulk", "x".repeat(40_000));
+    const command = commandResult("gap-command");
+    const second = commandResult("gap-command-2");
+    expect(estimateSummaryEntryTokens(command)).toBe(0);
+
+    const selected = selectSummaryCheckpointTail([opener, bulk, command, second], 10, {
+      sizeOf: estimateSummaryEntryTokens,
+    });
+
+    expect(selected.map((entry) => entry.id)).toEqual([bulk.id, command.id, second.id]);
+    expect(entriesToSummaryMessages(selected, { toolOutputMaxChars: 2_000 })).toHaveLength(1);
+  });
+
+  it("charges a branch note to the summary window, because the summary keeps it", () => {
+    const branch: SessionEntry = {
+      id: "gap-branch", sessionId: "s", threadId: "t", parentId: null, type: "branch_summary",
+      summary: "y".repeat(4_000), branchRootId: "b-root", branchLeafId: "b-leaf", createdAt: 1,
+    };
+    expect(estimateSummaryEntryTokens(branch)).toBeGreaterThan(0);
+  });
+
+  it("trims optional evidence to the budget instead of dropping all of it", () => {
+    const oldest = user("evidence-oldest", "x".repeat(4_000));
+    const middle = user("evidence-middle", "x".repeat(4_000));
+    const newest = user("evidence-newest", "x".repeat(4_000));
+
+    const selected = selectSummaryCheckpointTail([oldest, middle, newest], 2_200, {
+      keepNewest: false,
+    });
+
+    expect(selected.map((entry) => entry.id)).toEqual([middle.id, newest.id]);
+    // Optional evidence that cannot fit at all yields nothing, instead of
+    // spending the budget a mandatory window needs.
+    expect(selectSummaryCheckpointTail([newest], 100, { keepNewest: false })).toEqual([]);
+  });
+
+  it("sends a budget-fitting suffix of a long head, not the whole head", () => {
+    // How much of a long head one pass can take. The checkpoint claims this
+    // window and no more, so the rest of the head stays in live context and
+    // the next pass starts where this one stopped. The numbers here are the
+    // ones quoted in the compaction spec, so a budget or cap change moves
+    // them together.
+    const head: SessionEntry[] = [];
+    for (let i = 0; i < 400; i++) {
+      head.push(
+        i % 8 === 0
+          ? user(`u-${i}`, `prompt ${i} ` + "word ".repeat(40))
+          : assistant(`a-${i}`, "", [
+              { type: "text", text: `step ${i} ` + "word ".repeat(500) },
+              {
+                type: "tool_call",
+                callId: `c-${i}`,
+                toolName: "bash",
+                status: "completed",
+                args: { command: "ls" },
+                result: "output ".repeat(400),
+              },
+            ]),
+      );
+    }
+    const sizeOf = (entry: SessionEntry): number => estimateSummaryEntryTokens(entry);
+    const headTokens = head.reduce((total, entry) => total + sizeOf(entry), 0);
+    expect(headTokens).toBe(404_161);
+
+    const sent = selectSummaryCheckpointTail(head, 64_000, { sizeOf });
+    expect(sent).toHaveLength(62);
+    // The window is a suffix: the oldest 338 entries do not reach the model
+    // on this pass, so they are not covered and a later pass takes them.
+    expect(sent[0].id).toBe(head[338].id);
+    expect(sent.at(-1)!.id).toBe(head.at(-1)!.id);
   });
 });
 
@@ -297,6 +618,20 @@ describe("compaction: planPrune", () => {
     // cumulative, a3 at ~25k. So only a2 might be elided. Either way, "a1" is never in
     // the elision plan.
     expect(plan.toElide.has("a1")).toBe(false);
+  });
+
+  it("prunes skill path reads while preserving SKILL.md bodies", () => {
+    const reference = tcResult("reference", "file", "skill", 17_000);
+    const part = reference.parts?.[0];
+    if (!part || part.type !== "tool_call") throw new Error("Missing reference tool call");
+    part.args = { name: "alert-triage", path: "references/examples.md", offset: 0 };
+    const entries = [tcResult("body", "body", "skill", 17_000), reference];
+    for (const protectedTools of [undefined, new Set(["skill"])]) {
+      const result = planPrune({ entries, protectedTools,
+        cfg: { pruneProtectTokens: 0, pruneMinimumTokens: 1, protectedTools: ["skill"] } });
+      expect(result.toElide.get("reference")).toEqual(["file"]);
+      expect(result.toElide.has("body")).toBe(false);
+    }
   });
 
   it("skips already-elided parts", () => {
@@ -642,4 +977,12 @@ describe("compaction: elided results and the summarizer (TKAI-305)", () => {
     expect(text).toContain("[output elided to save context]");
     expect(text).not.toContain("blue-green");
   });
+});
+
+
+it("reserves retained task and fixed context before choosing a compaction tail", () => {
+  const entries: SessionEntry[] = [user("task", "a".repeat(60_000)), assistant("old", "b".repeat(8_000)), user("latest", "c".repeat(8_000))];
+  const cut = selectCutPoint({ entries, model: { ...MODEL, contextWindow: 20_000, maxTokens: 5 }, cfg: { tailTurns: 2 }, reservedTokens: 18_000,
+    tokenize: entry => entry.id === "task" ? 0 : estimateEntryTokens(entry) });
+  expect(cut.cutIndex).toBe(2);
 });

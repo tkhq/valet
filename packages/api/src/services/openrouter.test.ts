@@ -5,6 +5,7 @@
  * fail HERE, not silently shrink the seeded catalog.
  */
 import { describe, expect, it } from "vitest";
+import { benchmarkFor } from "@valet/shared";
 import {
   OPENROUTER_DEFAULT_MODEL_IDS,
   curatedOpenrouterModels,
@@ -14,6 +15,9 @@ import {
 } from "./openrouter.js";
 
 describe("openrouter curated defaults", () => {
+  it("every curated id has a benchmark snapshot entry", () => {
+    for (const id of OPENROUTER_DEFAULT_MODEL_IDS) expect(benchmarkFor(`openrouter/${id}`), id).toBeDefined();
+  });
   it("every curated id exists in the pi-ai openrouter registry", () => {
     const registry = openrouterRegistry();
     const missing = OPENROUTER_DEFAULT_MODEL_IDS.filter((id) => !registry.has(id));

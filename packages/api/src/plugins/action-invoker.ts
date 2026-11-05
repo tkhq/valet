@@ -1,3 +1,5 @@
+import { actionInScope, scopeRefusal, type ToolScope } from "@valet/shared";
+import { mergeAppearance, readAppearance, type Appearance } from "@valet/shared";
 /**
  * Headless ActionInvoker (plugin-system-v2 plan Task 6) — the real
  * implementation behind the workflow `tool` node's `engine.invokeAction`
@@ -30,24 +32,28 @@ import {
   type Credential,
   type CredentialOwner,
   type CredentialProvider,
+  type CredentialSource,
   type CredentialStore,
   type PluginAction,
   type PluginActionContext,
   type PluginActionResult,
   type Principal,
+  type ResolvedCredential,
   type RiskLevel,
   type Sandbox,
+  type StoredCredential,
   type ValetPlugin,
   credentialSecret,
+  reportError,
 } from "@valet/engine";
 import type { WorkflowInvokeActionRequest, WorkflowInvokeActionResult } from "@valet/workflow";
 import type { Static } from "typebox";
 import type { AppDb } from "../lib/drizzle.js";
 import { qualifiedActionId } from "./action-id.js";
-import { assistantSenderIdentity, findDefaultAssistant } from "../assistants/service.js";
+import { workspaceSenderIdentity } from "../services/workspace-sender.js";
 import { withSlackOwnerMetadata } from "../channels/identity-links.js";
 import { type ConnectMode, connectModeFor, findCredentialDeclaration } from "../services/integration-availability.js";
-import { actionInvocations } from "../schema/index.js";
+import { actionInvocations, users } from "../schema/index.js";
 import {
   GITHUB_INSTALLATION_CREDENTIAL_SERVICE,
   isUsableGithubUserRow,
@@ -55,15 +61,24 @@ import {
   type GitHubTokenDeps,
 } from "../services/github-tokens.js";
 import {
+  isAppCredentialRowService,
+  nativeAppCredentialServiceFor,
+  noteAppCredentialFallback,
   orgFallbackPolicy,
+  resolveAppCredentialRead,
+  resolveNativeAppCredentialRead,
+  resolveOrgNativeAppRead,
   resolveOrgCredentialRead,
-  resolveTeamCredentialRead,
-  resolveUserCredentialRead,
-  onePasswordScopesFor,
-} from "../services/credential-resolution.js";
+  readTeamCredential,
+  teamFallbackReason,
+  readUserCredential,
+  onePasswordScopesFor, orgManagedCredentialService } from "../services/credential-resolution.js";
 import type { OnePasswordService } from "../services/onepassword.js";
-import { resolveSessionGitHubToken } from "../services/session-github-token.js";
-import { persistInvocationAudit, resolveActionPolicy, updateInvocationOutcome } from "../policies/service.js";
+import { primaryRepoBinding, resolveSessionGitHubToken } from "../services/session-github-token.js";
+import { extractDocumentText } from "../services/pdf-extract.js";
+import { persistInvocationAudit, resolveActionPolicy, updateInvocationOutcome, type AuditInvocationRow } from "../policies/service.js";
+import { shareGeneration, canBorrowCredential } from "../services/credential-borrow.js";
+import { membersSharing, withSharerName } from "../services/credential-shares.js";
 
 /** `PluginActionContext.signal` timeout for a headless invocation — no live turn to bound it otherwise. */
 const ACTION_TIMEOUT_MS = 120_000;
@@ -79,6 +94,11 @@ const ACTION_TIMEOUT_MS = 120_000;
  * resolves this from the run and passes it in.
  */
 export interface ActionInvocationContext {
+  toolScope?: ToolScope;
+  presence?: Appearance;
+  /** The assistant this invocation belongs to, when the caller can name
+   * one. It keys the carried-over sender profile (`workspaceSenderIdentity`). */
+  assistantId?: string;
   userId: string;
   orgId: string;
   owner: Principal;
@@ -103,6 +123,29 @@ export interface ActionInvocationContext {
    * context), so the action executes as before.
    */
   workflowExecutionId?: string;
+  /**
+   * Set for a call from an external agent harness (MCP or the CLI) acting
+   * for `userId`. The call resolves policy exactly as the person's own Valet
+   * agent does (`appliesIn: "session"`), so the policy hierarchy is inherited,
+   * and it writes an audit row keyed `pol:ext:{invocationId}:{attempt}`. `client` names
+   * the caller in the row's `caller` column: `mcp:<OAuth client id>`, or the
+   * credential type (`cli`, `apiKey`, `session`).
+   */
+  external?: {
+    client: string;
+    /** Unique per request. A retry reuses the invocation id for result
+     * deduplication, so the audit row needs its own key per attempt: one
+     * row records one decision and that attempt's outcome. */
+    attempt: string;
+  };
+}
+
+/** The audit-row key for a policy-enforced invocation, or undefined when none is written. */
+function auditKey(req: WorkflowInvokeActionRequest, ctx: ActionInvocationContext): string | undefined {
+  if (!ctx.orgId) return undefined;
+  if (ctx.workflowExecutionId) return `pol:wf:${req.invocationId}`;
+  if (ctx.external) return `pol:ext:${req.invocationId}:${ctx.external.attempt}`;
+  return undefined;
 }
 
 export interface ActionInvokerOpts {
@@ -170,10 +213,25 @@ export function buildActionInvoker(opts: ActionInvokerOpts): ActionInvoker {
   const clock = opts.clock ?? Date.now;
 
   return async (req, ctx) => {
+    const actionId = req.action.includes(".") ? req.action : `${req.service}.${req.action}`;
+    if (!actionInScope(ctx.toolScope, actionId)) return { ok: false, error: scopeRefusal(actionId), errorCode: "policy_denied" };
     const existing = await selectStoredResult(opts.db, req.invocationId);
     if (existing) return existing;
 
-    const result = await computeResult(opts, req, ctx);
+    // `computeResult` returns early on many paths before policy enforcement
+    // writes the audit row. The wrapper writes the row for those paths, so
+    // each attempt with an audit key gets exactly one row.
+    const audit: AuditTrack = { written: false };
+    let result: WorkflowInvokeActionResult;
+    try {
+      result = await computeResult(opts, req, ctx, audit);
+    } catch (err) {
+      if (!audit.written) {
+        await recordAttemptAudit(opts, req, ctx, { ok: false, error: err instanceof Error ? err.message : String(err) }, audit.actionId);
+      }
+      throw err;
+    }
+    if (!audit.written) await recordAttemptAudit(opts, req, ctx, result, audit.actionId);
 
     // Gate outcomes must not be stored: the approved retry must reach
     // enforcement fresh (re-evaluating the current policy state) rather than
@@ -219,7 +277,7 @@ function parseStoredResult(value: unknown): WorkflowInvokeActionResult {
     return { ok: true, result: record.result };
   }
   if (record.ok === false && typeof record.error === "string") {
-    return { ok: false, error: record.error };
+    return { ok: false, error: record.error, ...(record.errorCode === "policy_denied" ? { errorCode: "policy_denied" as const } : {}) };
   }
   // A requiresApproval row must never land in the dedup table (the guard in
   // buildActionInvoker skips the insert). If one exists, the data is corrupt.
@@ -229,11 +287,76 @@ function parseStoredResult(value: unknown): WorkflowInvokeActionResult {
   throw new Error(`action-invoker: corrupt stored result: ${JSON.stringify(value)}`);
 }
 
+/**
+ * Whether this attempt wrote its audit row. `enforceWorkflowPolicy` sets
+ * `written` when it writes the decision row. `actionId` is the resolved
+ * policy-facing id, when the action was found.
+ */
+interface AuditTrack {
+  written: boolean;
+  actionId?: string;
+}
+
+/**
+ * Write the audit row for an attempt that returned before policy enforcement
+ * wrote one: an unknown action, a refusal, a credential or discovery error,
+ * or a shared-account park. A no-op when the invocation has no audit key.
+ * Exported for the route that refuses a call before it reaches the invoker.
+ */
+export async function recordAttemptAudit(
+  opts: Pick<ActionInvokerOpts, "db" | "clock">,
+  req: WorkflowInvokeActionRequest,
+  ctx: ActionInvocationContext,
+  result: WorkflowInvokeActionResult,
+  actionId?: string,
+): Promise<void> {
+  const key = auditKey(req, ctx);
+  if (!key) return;
+  const parked = !result.ok && "requiresApproval" in result;
+  await persistInvocationAudit(opts.db, {
+    invocationId: key,
+    service: req.service,
+    actionId: actionId ?? (req.action.includes(".") ? req.action : `${req.service}.${req.action}`),
+    ...(parked ? { resolvedMode: "require_approval" as const } : {}),
+    status: result.ok ? "completed" : parked ? "pending" : "error",
+    ...(!result.ok && "error" in result ? { error: result.error } : {}),
+    workflowExecutionId: ctx.workflowExecutionId,
+    caller: ctx.external?.client,
+    userId: ctx.userId,
+    orgId: ctx.orgId,
+    params: req.params,
+    createdAt: (opts.clock ?? Date.now)(),
+  });
+  if (!parked) await updateInvocationOutcome(opts.db, key, ctx.orgId, {
+    status: result.ok ? "completed" : "error",
+    ...(!result.ok && "error" in result ? { error: result.error } : {}),
+  });
+}
+
+/**
+ * Services that change Valet itself rather than an integration: workflows
+ * and their schedules, skills, event subscriptions, and profile pictures.
+ * An external agent cannot call them through the broker
+ * (`ActionInvocationContext.external`): it could install a schedule that
+ * keeps prompting the person's assistant after the agent is disconnected.
+ * Valet's own assistant still uses them inside a thread.
+ */
+export const VALET_INTERNAL_SERVICES: ReadonlySet<string> = new Set(["workflows", "skills", "events", "profile_pictures"]);
+
+export function externalServiceRefusal(service: string): string | undefined {
+  return VALET_INTERNAL_SERVICES.has(service)
+    ? `${service} tools change Valet itself, so agents cannot call them through the tool broker. Ask the person to make the change in Valet.`
+    : undefined;
+}
+
 async function computeResult(
   opts: ActionInvokerOpts,
   req: WorkflowInvokeActionRequest,
   ctx: ActionInvocationContext,
+  audit: AuditTrack,
 ): Promise<WorkflowInvokeActionResult> {
+  const refused = ctx.external ? externalServiceRefusal(req.service) : undefined;
+  if (refused) return { ok: false, error: refused };
   const entry = opts.actionPluginByService.get(req.service);
   if (!entry) return unknownAction(req);
 
@@ -276,11 +399,16 @@ async function computeResult(
       };
     }
   }
-  // `github` is the only service that resolves a credential identity today.
-  // Any other service would IGNORE the selection, and a node that asked to
-  // act as the application would silently act as the workflow owner —
-  // exactly the failure `credential` exists to prevent. Refuse instead.
-  if (req.credential !== undefined && req.credential !== "auto" && credentialService !== "github") {
+  // A tool node's `credential` picks the identity it acts as. GitHub picks
+  // through its own provider below. Any other native service may pick its
+  // app identity or a person's credential (native credential policy, Part
+  // E). A non-native service would IGNORE the selection, and a node that
+  // asked to act as the application would silently act as the workflow
+  // owner, which is exactly the failure `credential` exists to prevent.
+  // Refuse instead.
+  const selection = req.credential ?? "auto";
+  const appService = credentialService === "github" ? undefined : nativeAppCredentialServiceFor(registry, credentialService);
+  if (selection !== "auto" && credentialService !== "github" && !appService) {
     return {
       ok: false,
       error:
@@ -288,13 +416,42 @@ async function computeResult(
         `Remove the credential field from this tool node.`,
     };
   }
+  if (appService && selection === "user" && ctx.owner.type === "org") {
+    return {
+      ok: false,
+      error:
+        `An organization-owned workflow has no person to act as, so this ${req.service} node cannot use the "user" credential. ` +
+        `Set credential to "app", or remove the credential field.`,
+    };
+  }
+  if (appService && selection === "app") {
+    const app = await resolveNativeAppCredentialRead(
+      { credentials: opts.credentials, onePassword: opts.onePassword }, { orgId: ctx.orgId }, credentialService, appService, registry,
+    );
+    if (!app) {
+      return {
+        ok: false,
+        error:
+          `This ${req.service} node uses the "app" credential, and the ${credentialService} app is not connected for this organization. ` +
+          `An admin can connect it in Settings → Organization, or remove the credential field.`,
+      };
+    }
+  }
   // User→org owner precedence + 1Password reference resolution, matching
   // `engine/host.ts`. A user-owned run reads the user row first and falls
   // back to the org row; an org-owned run reads the org row only.
-  const baseProvider =
+  // Two providers over the same reads: discovery and the team refusal
+  // probe use the first, and the action itself the second. Only the
+  // action's own read counts an app-token fallback, so one action counts
+  // once (`valet_credentials_app_fallback_total`).
+  const providerFor = (countsFallback: boolean) =>
     credentialService === "github"
       ? buildGithubCredentialProvider(opts, req, ctx, owner)
-      : buildCredentialProvider(opts, ctx, owner, credentialService);
+      : buildCredentialProvider(opts, ctx, owner, credentialService, { selection, appService, countsFallback });
+  const withIdentity = (provider: CredentialProvider) =>
+    credentialService === "slack" && ctx.owner.type === "user"
+      ? withOwnerSlackIdentity(provider, opts.db, ctx.owner.id)
+      : provider;
   // Identity enrichment, the second half of the session path's slack branch
   // (`engine/host.ts`): the resolved token alone cannot answer "may the run
   // owner read this private channel" — `slack.dm_owner` and the private-
@@ -304,10 +461,7 @@ async function computeResult(
   // runs only: a team/org-owned run has no single person whose channel
   // membership could authorize the read, so its credential stays bare and
   // those actions keep failing closed.
-  const credentials =
-    credentialService === "slack" && ctx.owner.type === "user"
-      ? withOwnerSlackIdentity(baseProvider, opts.db, ctx.owner.id)
-      : baseProvider;
+  const credentials = withIdentity(providerFor(false));
 
   // Dynamic `resolveActions` discovery runs BEFORE policy enforcement because
   // resolution needs the action's `riskLevel` (rung 5 fallback) — which only
@@ -317,7 +471,8 @@ async function computeResult(
   // Team refusal (team credentials design, decision 3): a team run with no
   // resolvable credential refuses here, before any action code runs. A
   // personal run keeps executing on a null credential because the action's
-  // own guards answer for one person; a team run must fail the same way
+  // own guards answer for one person (except a `"user"` pin on a native
+  // service, below); a team run must fail the same way
   // for every member, so the refusal is made once, up front, and names the
   // corrective action. Only a declared service is gated (an undeclared one
   // never needed a credential), and only when the org does not provide it
@@ -334,19 +489,46 @@ async function computeResult(
   // the authenticated upstream), so for one of those the refusal runs
   // before discovery: discovery would only echo the plugin's own generic
   // "no credential connected" message, which names no fix.
-  const teamGated = ctx.owner.type === "team" && declared !== null && mode !== "org";
+  //
+  // A native service pinned `"user"` is gated even when the org provides
+  // it: the org row is the app identity, which the pin never reads
+  // (`buildCredentialProvider`), so without a person's credential the
+  // action would run on a null one. That holds for a personal run too: its
+  // owner is the only person the pin can act as, so the run refuses instead
+  // of failing inside the action. The refusal names the connect fix, or,
+  // for an org-managed service (`requires.orgCredential`) that has no
+  // personal account, the node's credential setting. Template install does
+  // not block on that pin, so this refusal is where the user learns the fix.
+  const userPinnedNative = selection === "user" && appService !== undefined;
+  const gated = declared !== null && (
+    (ctx.owner.type === "team" && (mode !== "org" || userPinnedNative))
+    || (ctx.owner.type === "user" && userPinnedNative));
+  const refusalText = ctx.owner.type === "user"
+    ? userPinnedPersonalRefusalMessage(credentialService, { orgManaged: orgManagedCredentialService(registry, credentialService) })
+    : userPinnedNative ? userPinnedTeamRefusalMessage(credentialService) : teamRefusalMessage(credentialService);
+  // An `auto` team read of a native service ends at the app token (Part B),
+  // so a team with no person's credential is not refused when it answers.
+  const teamAppTier = selection === "auto" && appService && isAppCredentialRowService(appService) ? appService : undefined;
+  // A team run that would use another member's shared account parks until
+  // that member approves (`services/credential-borrow.ts`).
+  if (ctx.owner.type === "team" && !req.approval && selection !== "app") {
+    const approver = await sharedAccountApprover(opts, ctx, ctx.owner.id, credentialService);
+    if (approver) return { ok: false, requiresApproval: true, provenance: "shared_account", approver };
+  }
   let action = findAction(entry.actionPlugin.actions, req.service, req.action);
   if (!action && entry.actionPlugin.resolveActions) {
-    if (teamGated) {
-      const refusal = await refuseTeamRunWithoutCredential(credentials, credentialService);
+    if (gated) {
+      const refusal = await refuseRunWithoutCredential(credentials, refusalText, teamAppTier);
       if (refusal) return refusal;
     }
-    // A credential read can throw a typed refusal (a broken delegation, a
+    // A credential read can throw a typed refusal (a broken share, a
     // ref outside the team's 1Password lease). That message names the fix,
     // so it comes back as a failed result, the same way execute reports.
     let resolved: PluginAction[];
     try {
-      resolved = await entry.actionPlugin.resolveActions({ credentials });
+      resolved = await entry.actionPlugin.resolveActions({
+        credentials,
+      });
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
@@ -354,8 +536,8 @@ async function computeResult(
   }
   if (!action) return unknownAction(req);
 
-  if (teamGated) {
-    const refusal = await refuseTeamRunWithoutCredential(credentials, credentialService);
+  if (gated) {
+    const refusal = await refuseRunWithoutCredential(credentials, refusalText, teamAppTier);
     if (refusal) return refusal;
   }
 
@@ -371,9 +553,15 @@ async function computeResult(
   // is the fully-qualified fqid (spec Deviations T6 #3, fixed): one
   // canonical id matches both the session and workflow paths.
   const policyActionId = qualifiedActionId(req.service, action);
+  audit.actionId = policyActionId;
   // Set only when enforceWorkflowPolicy wrote a decision row (org + run
   // context present); also the org scope for the outcome-stamp UPDATE.
-  const auditOrgId = ctx.orgId && ctx.workflowExecutionId ? ctx.orgId : undefined;
+  const auditOrgId = auditKey(req, ctx) ? ctx.orgId : undefined;
+  const auditId = auditKey(req, ctx) ?? "";
+  // Policy and audit see the effective parameters, schema defaults applied, the
+  // same as the session path, so an omitted field cannot bypass a matcher on
+  // its default. Invalid params keep their raw shape and fail below.
+  const prepared = prepareActionArgs(action.parameters, req.params);
   const denial = await enforceWorkflowPolicy(
     opts,
     req,
@@ -381,21 +569,25 @@ async function computeResult(
     action.riskLevel,
     entry.actionPlugin.defaultApprovalMode,
     policyActionId,
+    audit,
+    prepared.ok ? prepared.args : req.params,
   );
   if (denial) return denial;
 
-  const prepared = prepareActionArgs(action.parameters, req.params);
   if (!prepared.ok) {
     if (auditOrgId) {
-      await updateInvocationOutcome(opts.db, `pol:wf:${req.invocationId}`, auditOrgId, {
+      await updateInvocationOutcome(opts.db, auditId, auditOrgId, {
         status: "error",
         error: `invalid params: ${prepared.error}`,
       });
     }
-    return { ok: false, error: prepared.error };
+    // A bare schema path ("/: must have required properties repo") names no
+    // fix. Workflow nodes and external callers share this text, so the fix is
+    // worded for both: an agent changes its call, a person edits the node.
+    return { ok: false, error: `Invalid params for ${policyActionId}: ${prepared.error}. Change the params to match the tool's parameter schema.` };
   }
 
-  const actionCtx = buildActionContext(req, ctx, credentials, action.id, opts.db);
+  const actionCtx = buildActionContext(req, ctx, withIdentity(providerFor(true)), action.id, opts.db);
 
   const startedAt = (opts.clock ?? Date.now)();
   let result: PluginActionResult;
@@ -408,9 +600,10 @@ async function computeResult(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (auditOrgId) {
-      await updateInvocationOutcome(opts.db, `pol:wf:${req.invocationId}`, auditOrgId, {
+      await updateInvocationOutcome(opts.db, auditId, auditOrgId, {
         status: "error",
         error: message,
+        startedAt,
         durationMs: (opts.clock ?? Date.now)() - startedAt,
       });
     }
@@ -423,10 +616,11 @@ async function computeResult(
   // `result` is the full `PluginActionResult` — the same shape the session
   // path's `PolicyInvocationRecord.result` carries.
   if (auditOrgId) {
-    await updateInvocationOutcome(opts.db, `pol:wf:${req.invocationId}`, auditOrgId, {
+    await updateInvocationOutcome(opts.db, auditId, auditOrgId, {
       status: result.success ? "completed" : "error",
       result,
       error: result.success ? undefined : (result.error ?? "failed with no error detail"),
+      startedAt,
       durationMs: (opts.clock ?? Date.now)() - startedAt,
     });
   }
@@ -449,16 +643,50 @@ function unknownAction(req: WorkflowInvokeActionRequest): WorkflowInvokeActionRe
  * delegated reference, a scope refusal) is mapped the way `execute`'s own
  * try/catch maps it, so the typed message reaches the run unchanged.
  */
-async function refuseTeamRunWithoutCredential(
+async function refuseRunWithoutCredential(
   credentials: CredentialProvider,
-  service: string,
+  refusal: string,
+  appTier?: string,
 ): Promise<WorkflowInvokeActionResult | null> {
   try {
     if ((await credentials.get()) !== null) return null;
+    if (appTier && (await credentials.get(appTier)) !== null) return null;
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
-  return { ok: false, error: teamRefusalMessage(service) };
+  return { ok: false, error: refusal };
+}
+
+/** The refusal for a native service pinned `"user"` in a personal run whose
+ * owner has no credential for it. The template gallery and install gate
+ * report the same block (`workflows/templates.ts#templateRequirements`),
+ * except for an org-managed service: install does not block on that pin,
+ * and the gallery shows a note (`orgManagedPinCaveats`). */
+export function userPinnedPersonalRefusalMessage(service: string, opts: { orgManaged?: boolean } = {}): string {
+  if (opts.orgManaged) {
+    // The org connects this service for everyone (`requires.orgCredential`),
+    // so the Integrations page offers no personal connect control for it.
+    const own = service === "slack" ? ", or use slack-user for your own account" : "";
+    return (
+      `This node uses your own ${service} account, but ${service} connects for the whole organization, so there is no personal account to connect. ` +
+      `Change the node's credential setting to the app${own}.`
+    );
+  }
+  return (
+    `This node uses your own ${service} account, and none is connected. ` +
+    `Connect ${service} on the Integrations page, or change the node's credential setting.`
+  );
+}
+
+/** The refusal for a native service pinned `"user"` in a team run that only
+ * the org's app identity would answer. Readiness reports the same fix
+ * (`workflows/team-service-readiness.ts`). */
+function userPinnedTeamRefusalMessage(service: string): string {
+  return (
+    `This ${service} node uses the "user" credential, and this team has no ${service} credential of a person. ` +
+    `Share one from Integrations, store one for the team in Settings → Organization → Teams, ` +
+    `or remove the credential field from this tool node.`
+  );
 }
 
 /**
@@ -495,9 +723,25 @@ async function enforceWorkflowPolicy(
   riskLevel: RiskLevel,
   pluginDefault: ApprovalMode | undefined,
   policyActionId: string,
+  audit: AuditTrack,
+  /** The effective parameters: schema defaults applied when the params validate. */
+  params: Record<string, unknown> | undefined,
 ): Promise<WorkflowInvokeActionResult | null> {
-  if (!ctx.orgId || !ctx.workflowExecutionId) return null;
+  const key = auditKey(req, ctx);
+  if (!ctx.orgId || !key) return null;
+  // Every row this function writes goes through `persist`, which marks the
+  // attempt as audited. The resolver-error park writes no row here, so the
+  // wrapper in `buildActionInvoker` writes it.
+  const persist = async (row: AuditInvocationRow): Promise<void> => {
+    audit.written = true;
+    await persistInvocationAudit(opts.db, row);
+  };
   const now = (opts.clock ?? Date.now)();
+  // A workflow run resolves in its own scope. An external harness acts for
+  // the person interactively, so it resolves exactly as their Valet agent does.
+  const scope = ctx.workflowExecutionId
+    ? { appliesIn: "workflow" as const, workflowExecutionId: ctx.workflowExecutionId }
+    : { appliesIn: "session" as const };
 
   let decision: Awaited<ReturnType<typeof resolveActionPolicy>>;
   try {
@@ -508,22 +752,21 @@ async function enforceWorkflowPolicy(
       service: req.service,
       actionId: policyActionId,
       riskLevel,
-      params: req.params,
-      appliesIn: "workflow",
-      workflowExecutionId: ctx.workflowExecutionId,
+      params,
+      ...scope,
       pluginDefault,
       now,
     });
   } catch (err) {
-    console.error("action-invoker: policy resolution failed:", err);
+    reportError({ area: "plugins", reason: "policy_resolution" }, "action-invoker: policy resolution failed", err);
     if (req.approval && ctx.owner.type !== "team") {
       // Team actions must re-check team denies even after approval.
       // Human approval is the authorization — proceed even though the
       // resolver could not be consulted. The signal is the authority.
       // Write a best-effort audit row so the approved execution is
       // auditable even when the policy store was unreachable.
-      await persistInvocationAudit(opts.db, {
-        invocationId: `pol:wf:${req.invocationId}`,
+      await persist({
+        invocationId: key,
         service: req.service,
         actionId: policyActionId,
         riskLevel,
@@ -534,9 +777,10 @@ async function enforceWorkflowPolicy(
         matchedOverrideId: null,
         status: "approved",
         workflowExecutionId: ctx.workflowExecutionId,
+        caller: ctx.external?.client,
         userId: ctx.userId,
         orgId: ctx.orgId,
-        params: req.params,
+        params,
         createdAt: now,
       });
       return null;
@@ -545,8 +789,8 @@ async function enforceWorkflowPolicy(
   }
 
   if (decision.mode === "allow") {
-    await persistInvocationAudit(opts.db, {
-      invocationId: `pol:wf:${req.invocationId}`,
+    await persist({
+      invocationId: key,
       service: req.service,
       actionId: policyActionId,
       riskLevel,
@@ -557,17 +801,19 @@ async function enforceWorkflowPolicy(
       matchedOverrideId: decision.provenance.matchedOverrideId ?? null,
       status: "allowed",
       workflowExecutionId: ctx.workflowExecutionId,
+      caller: ctx.external?.client,
       userId: ctx.userId,
       orgId: ctx.orgId,
-      params: req.params,
+      params,
       createdAt: now,
     });
     return null;
   }
 
   if (decision.mode === "deny") {
-    await persistInvocationAudit(opts.db, {
-      invocationId: `pol:wf:${req.invocationId}`,
+    const error = `${req.service}.${req.action} is blocked by ${decision.provenance.source === "team_policy" ? "team" : "org"} policy`;
+    await persist({
+      invocationId: key,
       service: req.service,
       actionId: policyActionId,
       riskLevel,
@@ -578,19 +824,21 @@ async function enforceWorkflowPolicy(
       matchedOverrideId: decision.provenance.matchedOverrideId ?? null,
       status: "denied",
       workflowExecutionId: ctx.workflowExecutionId,
+      caller: ctx.external?.client,
       userId: ctx.userId,
       orgId: ctx.orgId,
-      params: req.params,
+      params,
       createdAt: now,
     });
-    return { ok: false, error: `${req.service}.${req.action} is blocked by ${decision.provenance.source === "team_policy" ? "team" : "org"} policy` };
+    await updateInvocationOutcome(opts.db, key, ctx.orgId, { status: "denied", error });
+    return { ok: false, error, errorCode: "policy_denied" };
   }
 
   // decision.mode === "require_approval"
   if (req.approval) {
     // The tool executor holds an approved, unconsumed signal — treat as authorized.
-    await persistInvocationAudit(opts.db, {
-      invocationId: `pol:wf:${req.invocationId}`,
+    await persist({
+      invocationId: key,
       service: req.service,
       actionId: policyActionId,
       riskLevel,
@@ -601,9 +849,10 @@ async function enforceWorkflowPolicy(
       matchedOverrideId: decision.provenance.matchedOverrideId ?? null,
       status: "approved",
       workflowExecutionId: ctx.workflowExecutionId,
+      caller: ctx.external?.client,
       userId: ctx.userId,
       orgId: ctx.orgId,
-      params: req.params,
+      params,
       createdAt: now,
     });
     return null;
@@ -612,8 +861,8 @@ async function enforceWorkflowPolicy(
   // Park: write a "pending" audit row so the gate is visible in the audit log,
   // then return the requiresApproval signal. This row must NOT live in the
   // dedup table — the approved retry must reach enforcement fresh.
-  await persistInvocationAudit(opts.db, {
-    invocationId: `pol:wf:${req.invocationId}`,
+  await persist({
+    invocationId: key,
     service: req.service,
     actionId: policyActionId,
     riskLevel,
@@ -624,15 +873,98 @@ async function enforceWorkflowPolicy(
     matchedOverrideId: decision.provenance.matchedOverrideId ?? null,
     status: "pending",
     workflowExecutionId: ctx.workflowExecutionId,
+    caller: ctx.external?.client,
     userId: ctx.userId,
     orgId: ctx.orgId,
-    params: req.params,
+    params,
     createdAt: now,
   });
   return { ok: false, requiresApproval: true, riskLevel, provenance: decision.provenance.source };
 }
 
 export { qualifiedActionId };
+
+/** One service's actions for a caller, or why it has none. */
+export type ServiceActions =
+  | { service: string; actions: PluginAction[] }
+  | { service: string; unavailable: string };
+
+/**
+ * List the actions a caller can use on one service: static actions plus any
+ * the plugin discovers with the caller's credential (an MCP-backed service
+ * lists its tools over the authenticated upstream). Runs the same
+ * availability gate and credential resolution as an invocation. Executes no
+ * action. External harnesses use this for tool search and description.
+ */
+export async function discoverServiceActions(
+  opts: ActionInvokerOpts,
+  ctx: ActionInvocationContext,
+  service: string,
+): Promise<ServiceActions> {
+  const entry = opts.actionPluginByService.get(service);
+  if (!entry) return { service, unavailable: `unknown service: ${service}` };
+  const owner = credentialOwnerFor(ctx.owner);
+  if (!owner) return { service, unavailable: `owner type "${ctx.owner.type}" cannot use actions` };
+  const credentialService = entry.actionPlugin.credentialService ?? entry.actionPlugin.service;
+  const registry = registryOf(opts);
+  const declared = findCredentialDeclaration(registry, credentialService);
+  if (declared) {
+    const mode = await connectModeFor({
+      plugins: registry, decl: declared, service: credentialService, orgId: ctx.orgId,
+      credentials: opts.credentials, env: process.env, owner,
+    });
+    if (mode === "unconfigured") {
+      return { service, unavailable: `${credentialService} is not configured for this organization. An admin can set it up in Settings → Organization.` };
+    }
+  }
+  if (!entry.actionPlugin.resolveActions) return { service, actions: entry.actionPlugin.actions };
+  const probe: WorkflowInvokeActionRequest = { service, action: "", params: {}, invocationId: "" };
+  const base = credentialService === "github"
+    ? buildGithubCredentialProvider(opts, probe, ctx, owner)
+    : buildCredentialProvider(opts, ctx, owner, credentialService);
+  const credentials = credentialService === "slack" && ctx.owner.type === "user"
+    ? withOwnerSlackIdentity(base, opts.db, ctx.owner.id)
+    : base;
+  try {
+    const resolved = await entry.actionPlugin.resolveActions({ credentials });
+    const ids = new Set(entry.actionPlugin.actions.map((a) => a.id));
+    return { service, actions: [...entry.actionPlugin.actions, ...resolved.filter((a) => !ids.has(a.id))] };
+  } catch (err) {
+    return { service, unavailable: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * The policy mode an external call to this action would resolve to now:
+ * `allow`, `require_approval`, or `deny`. Same precedence and scope as
+ * `invoke` with `external` set. Pass the call's params: a policy can match
+ * on them, so a mode without params can differ from the call's. Writes nothing.
+ */
+export async function externalActionMode(
+  opts: ActionInvokerOpts,
+  ctx: ActionInvocationContext,
+  service: string,
+  action: PluginAction,
+  params?: Record<string, unknown>,
+): Promise<ApprovalMode> {
+  const entry = opts.actionPluginByService.get(service);
+  // Preview what execution decides: schema defaults applied, as `invoke` does.
+  // Without params the answer is for any params, so nothing is defaulted.
+  const prepared = params === undefined ? undefined : prepareActionArgs(action.parameters, params);
+  const decision = await resolveActionPolicy(opts.db, {
+    orgId: ctx.orgId,
+    teamId: ctx.owner.type === "team" ? ctx.owner.id : undefined,
+    userId: ctx.userId,
+    service,
+    actionId: qualifiedActionId(service, action),
+    riskLevel: action.riskLevel,
+    params: prepared?.ok ? prepared.args : params,
+    appliesIn: "session",
+    pluginDefault: entry?.actionPlugin.defaultApprovalMode,
+    now: (opts.clock ?? Date.now)(),
+  });
+  return decision.mode;
+}
 
 /** Matches a bare or service-qualified `PluginAction.id` against `(service, action)`, mirroring `@valet/engine`'s `plugin-catalog.ts` fqid convention. */
 export function findAction(actions: PluginAction[], service: string, actionId: string): PluginAction | undefined {
@@ -664,44 +996,46 @@ function credentialOwnerFor(owner: Principal): CredentialOwner | null {
  * personal-tokenScope 1Password reference to resolve against. Either path
  * fills a `metadata.onepassword` row's secret when `opts.onePassword` is
  * wired; absent onePassword or a non-reference row passes through raw.
+ *
+ * For a native service, `pick` applies the native credential policy
+ * (docs/specs/2026-10-15-native-integration-credential-policy-design.md):
+ *
+ *   - `"auto"` keeps the order above and adds the app step: a read of the
+ *     row-backed app credential service (`linear:app`) returns the bare app
+ *     token. An org-owned run reads the app token first. An action whose
+ *     read ends at the app token is counted
+ *     (`valet_credentials_app_fallback_total`) when `pick.countsFallback`
+ *     is set: the provider the action executes with, not the discovery
+ *     and refusal reads.
+ *   - `"app"` returns the app identity for the service and for its app step.
+ *   - `"user"` reads a person's credential only. It never reaches the app
+ *     step, and an org-provided org row does not count as a person's.
  */
 function buildCredentialProvider(
   opts: ActionInvokerOpts,
   ctx: ActionInvocationContext,
   owner: CredentialOwner,
   defaultService: string,
+  pick: { selection: "auto" | "app" | "user"; appService?: string; countsFallback?: boolean } = {
+    selection: "auto",
+    appService: nativeAppCredentialServiceFor(registryOf(opts), defaultService),
+  },
 ): CredentialProvider {
-  const deps = { credentials: opts.credentials, onePassword: opts.onePassword };
+  const deps = { credentials: opts.credentials, onePassword: opts.onePassword, shares: (teamId: string, svc: string) => membersSharing(opts.db, teamId, svc) };
+  const readDeps = { credentials: opts.credentials, onePassword: opts.onePassword };
+  // A run borrows another member's account only once that member approved it
+  // for this run (`services/credential-borrow.ts`).
+  const mayBorrow = (svc: string) => async (memberId: string) =>
+    ctx.workflowExecutionId && owner.type === "team" ? canBorrowCredential(opts.db, { orgId: ctx.orgId, teamId: owner.id, actorId: ctx.userId, sessionId: `wf:${ctx.workflowExecutionId}`, service: svc, memberId }) : false;
+  const { selection, appService } = pick;
+  // The app step a plugin reads after its own service (`linear:app`), the
+  // last tier of the Part B order. Only a row-backed app credential is one.
+  const appTier = appService && isAppCredentialRowService(appService) ? appService : undefined;
   return {
     async get(service?: string): Promise<Credential | null> {
       const svc = service ?? defaultService;
-      // Escalation applies to THIS provider's own service only. An incidental
-      // read of some other service must not reach the org's credentials, even
-      // when that other service is org-provided in its own right.
-      //
-      // The registry falls back to the plugins behind `actionPluginByService`,
-      // the same way the availability gate above resolves it: a caller that
-      // wires only the action map still gets declaration-driven escalation
-      // rather than silently losing it.
-      const registry =
-        registryOf(opts);
-      const fallback = svc === defaultService ? orgFallbackPolicy(registry, svc) : "none";
-      const stored =
-        owner.type === "user"
-          ? await resolveUserCredentialRead(
-              deps,
-              { orgId: ctx.orgId, userId: owner.id, scopes: onePasswordScopesFor("user") },
-              svc,
-              fallback,
-            )
-          : owner.type === "team"
-            ? await resolveTeamCredentialRead(
-                deps,
-                { orgId: ctx.orgId, teamId: owner.id, userId: ctx.userId, scopes: onePasswordScopesFor("team", owner.id) },
-                svc,
-                fallback,
-              )
-            : await resolveOrgCredentialRead(deps, { orgId: ctx.orgId, userId: ctx.userId, scopes: ["org"] }, svc);
+      const registry = registryOf(opts);
+      const stored = await read(svc, registry);
       if (!stored) return null;
       const accessToken = credentialSecret(stored) ?? "";
       if (accessToken === "") return null;
@@ -711,12 +1045,131 @@ function buildCredentialProvider(
         expiresAt: stored.expiresAt,
         scopes: stored.scopes,
         metadata: stored.metadata,
+        ...(stored.source ? { source: stored.source } : {}),
       };
     },
     request(): Promise<Credential> {
       return Promise.reject(new Error("credential requests are not supported in workflow action invocation"));
     },
   };
+
+  /** The row, with whose account it is, so a plugin names the right fix
+   * when the provider rejects the token. */
+  function from(stored: StoredCredential | null, source: CredentialSource | undefined): ResolvedCredential | null {
+    return stored ? { ...stored, ...(source ? { source } : {}) } : null;
+  }
+
+  async function read(svc: string, registry: ValetPlugin[]): Promise<ResolvedCredential | null> {
+    // A node pinned to `app` acts as the app identity for its own service
+    // and for the app step alike (native credential policy, Part E).
+    if (appService && selection === "app" && (svc === defaultService || svc === appService)) {
+      return from(await resolveNativeAppCredentialRead(readDeps, { orgId: ctx.orgId }, defaultService, appService, registry), { kind: "app" });
+    }
+    // The app step. A node pinned to `user` never reaches it.
+    if (appTier && svc === appTier) {
+      return selection === "user" ? null : from(await resolveAppCredentialRead(readDeps, { orgId: ctx.orgId }, appTier, registry), { kind: "app" });
+    }
+    // Escalation applies to THIS provider's own service only. An incidental
+    // read of some other service must not reach the org's credentials, even
+    // when that other service is org-provided in its own right.
+    //
+    // The registry falls back to the plugins behind `actionPluginByService`,
+    // the same way the availability gate above resolves it: a caller that
+    // wires only the action map still gets declaration-driven escalation
+    // rather than silently losing it.
+    const policy = svc === defaultService ? orgFallbackPolicy(registry, svc) : "none";
+    // A node pinned to `user` reads a person's credential only. For a native
+    // service, an org-provided org row is the app identity, so it is not one.
+    const fallback = selection === "user" && appService && policy === "org-provided" ? "reference-only" : policy;
+    // An `auto` read of the provider's own service ends at the app token
+    // when nothing else answers. The action's own read counts that
+    // fallback (`valet_credentials_app_fallback_total`).
+    const reachesApp = selection === "auto" && appTier !== undefined && svc === defaultService;
+    const countsFallback = reachesApp && pick.countsFallback === true;
+    if (owner.type === "user") {
+      const { credential: stored, source } = await readUserCredential(
+        deps,
+        { orgId: ctx.orgId, userId: owner.id, scopes: onePasswordScopesFor("user") },
+        svc,
+        fallback,
+      );
+      if (!stored && countsFallback) await noteAppCredentialFallback(readDeps, { orgId: ctx.orgId }, svc, "no_personal", registry);
+      return from(stored, source);
+    }
+    if (owner.type === "team") {
+      let deadDelegated = false;
+      const { credential: stored, source, approvalFrom } = await readTeamCredential(
+        deps,
+        {
+          orgId: ctx.orgId, teamId: owner.id, userId: ctx.userId, scopes: onePasswordScopesFor("team", owner.id),
+          // Discovery can contact the provider, so it requires the same approval.
+          mayBorrow: mayBorrow(svc),
+          // A dead team connection or a broken share gives way to the app
+          // token, the same as in a session (`engine/host.ts`).
+          ...(reachesApp && appTier
+            ? {
+                laterTier: async () => {
+                  deadDelegated = (await resolveAppCredentialRead(readDeps, { orgId: ctx.orgId }, appTier, registry)) !== null;
+                  return deadDelegated;
+                },
+              }
+            : {}),
+        },
+        svc,
+        fallback,
+      );
+      if (!stored && countsFallback) {
+        await noteAppCredentialFallback(readDeps, { orgId: ctx.orgId }, svc, teamFallbackReason(approvalFrom, deadDelegated), registry);
+      }
+      return from(stored, await withSharerName(opts.db, source));
+    }
+    if (reachesApp) {
+      const app = await resolveOrgNativeAppRead(readDeps, { orgId: ctx.orgId }, svc, registry, countsFallback);
+      if (app) return from(app, { kind: "app" });
+    }
+    return from(await resolveOrgCredentialRead(deps, { orgId: ctx.orgId, userId: ctx.userId, scopes: ["org"] }, svc), { kind: "org" });
+  }
+}
+
+/** The member whose shared account a team run would use for `service`, when
+ * no account of the run's actor or the team's own answers and that member
+ * has not yet approved this run. GitHub has the organization App behind the
+ * team's row, so it never borrows. */
+export async function sharedAccountApprover(
+  opts: ActionInvokerOpts,
+  ctx: ActionInvocationContext,
+  teamId: string,
+  service: string,
+): Promise<{ userId: string; name?: string; shareGeneration: string; allowTeamConsent: true } | undefined> {
+  // An external call has no run to attach a member's approval to, so it
+  // never borrows. It still reports whose approval the account needs, so the
+  // caller hears to delegate with start_thread instead of "no credential".
+  if (service === "github" || (!ctx.workflowExecutionId && !ctx.external)) return undefined;
+  const runId = ctx.workflowExecutionId;
+  const sharers = await membersSharing(opts.db, teamId, service);
+  if (sharers.length === 0) return undefined;
+  let approvalFrom: string | undefined;
+  try {
+    ({ approvalFrom } = await readTeamCredential(
+      { credentials: opts.credentials, onePassword: opts.onePassword, shares: async () => sharers },
+      {
+        orgId: ctx.orgId, teamId, userId: ctx.userId, scopes: onePasswordScopesFor("team", teamId),
+        mayBorrow: (memberId) => runId
+          ? canBorrowCredential(opts.db, { orgId: ctx.orgId, teamId, actorId: ctx.userId, sessionId: `wf:${runId}`, service, memberId })
+          : Promise.resolve(false),
+      },
+      service,
+      orgFallbackPolicy(registryOf(opts), service),
+    ));
+  } catch {
+    // A share that no longer resolves: the action itself reports that.
+    return undefined;
+  }
+  if (!approvalFrom) return undefined;
+  const [member] = await opts.db.select({ name: users.name }).from(users).where(eq(users.id, approvalFrom)).limit(1);
+  const generation = await shareGeneration(opts.db, teamId, service, approvalFrom);
+  if (!generation) return undefined;
+  return { allowTeamConsent: true, shareGeneration: generation, userId: approvalFrom, ...(member?.name ? { name: member.name } : {}) };
 }
 
 /**
@@ -833,6 +1286,18 @@ function buildGithubCredentialProvider(
         const token = await resolveInstallationApiToken(deps, ctx.orgId, repoFromParams(req.params)?.owner);
         return token === null ? null : { accessToken: token };
       }
+      if (owner.type === "org" && selection === "auto") {
+        // An org-owned run acts for no person, so `auto` uses the App
+        // installation first, as an org session does (native credential
+        // policy, Part C). The org PAT row stays the tier behind it, through
+        // the `auto` read below. A session binding that names its own `auth`
+        // still wins, so the read skips this step for it.
+        const binding = ctx.sessionId ? await primaryRepoBinding(opts.db, ctx.sessionId) : undefined;
+        if (!binding || binding.auth === "auto") {
+          const token = await resolveInstallationApiToken(deps, ctx.orgId, repoFromParams(req.params)?.owner ?? binding?.repo.owner);
+          if (token !== null) return { accessToken: token };
+        }
+      }
       // `params` are template-rendered, so a webhook payload can choose this
       // repo. That is safe only because `mintInstallationToken` looks an
       // installation up by `(orgId, accountLogin)` — the reachable set is
@@ -893,27 +1358,34 @@ function buildActionContext(
   db: AppDb,
 ): PluginActionContext {
   const sessionId = `wf:invoke:${req.invocationId}`;
+  const presence = mergeAppearance(readAppearance(ctx.presence));
   return {
+    toolScope: ctx.toolScope,
+    // Headless actions have no mutable focus. Their delegated scope is the ceiling.
+    toolScopeCeiling: ctx.toolScope,
     userId: ctx.userId,
     orgId: ctx.orgId,
     sessionId,
     threadId: "invoke",
     actionId,
     service: req.service,
+    owner: ctx.owner,
+    sessionPurpose: "workflow",
     // `WorkflowInvokeActionRequest` carries no summary field (the `tool`
     // node executor's `engine.invokeAction` call never sets one) — left
     // undefined rather than guessing at a value the type doesn't offer.
     summary: undefined,
     credentials,
-    // Workflow tool nodes have no live agent session. Resolve the run
-    // owner's configured default assistant at post time so Slack actions use
-    // the same identity as session-backed agent actions. No assistant, name,
-    // or avatar leaves Slack's bot identity unchanged.
-    resolveOutboundSender: async () => {
-      const assistant = await findDefaultAssistant(db, ctx.orgId, ctx.owner);
-      return assistant ? assistantSenderIdentity(assistant) : undefined;
-    },
+    // Workflow actions use the same owner identity as session-backed actions.
+    resolveOutboundSender: async () => mergeAppearance(await workspaceSenderIdentity(db, ctx.orgId, ctx.owner, ctx.assistantId), presence),
     sandbox: throwingSandbox(sessionId),
+    // Unlike the capabilities stubbed out below, document extraction is
+    // genuinely available here: it is a pure call over bytes against the
+    // native extractor in this process, needing no session, thread or
+    // sandbox. Leaving it unset made a workflow node reading a PDF report
+    // that extraction is unavailable on the deployment, which was wrong
+    // about the deployment and only true of this context.
+    extractDocument: extractDocumentText,
     signal: AbortSignal.timeout(ACTION_TIMEOUT_MS),
     requestDecision: () =>
       Promise.reject(

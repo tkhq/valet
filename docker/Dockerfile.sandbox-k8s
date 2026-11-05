@@ -13,7 +13,8 @@
 # depending on profile:
 #   - `headless` (default): a non-terminating tail (mirroring sandbox-
 #     docker's default `node:20-bookworm` container) — agent-only, no
-#     interactive services. `docker/start-full.sh` mirrors this branch when
+#     interactive services. Browser-enabled headless sessions run preflight
+#     and can start the browser viewer gateway independently. `docker/start-full.sh` mirrors this branch when
 #     `VALET_SANDBOX_PROFILE` is unset/`headless`, so the sandbox-docker
 #     provider gets the same behavior from the same image/entrypoint.
 #   - `full`: `["/bin/bash", "/start-full.sh"]` — starts ttyd, code-server,
@@ -23,8 +24,8 @@
 # What matters either way: a shell, coreutils (incl. base64, used for
 # binary-safe file ops over `pods/exec` — see the design doc's "File ops
 # ride exec" section), git, ripgrep, ca-certificates, Node, and the
-# `agent-browser` CLI with its chromium (the engine's exec-based tool calls
-# and the bundled `browser` skill assume these are on PATH) — plus, for
+# managed browser runtime with pinned Chromium. The legacy `agent-browser`
+# CLI remains available for compatibility. The `full` profile also ships
 # `full` profile, ttyd + code-server + the bundled `@valet/sandbox-gateway`.
 #
 # Build with plain `docker build` (decision 2 — moby mode, not nerdctl):
@@ -49,7 +50,7 @@
 # providers always set `command`/entrypoint explicitly per profile.
 
 # ─── Base agent tooling (shared by both profiles) ──────────────────────
-FROM node:22-bookworm-slim AS base
+FROM node:22.23.3-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS base
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
@@ -58,10 +59,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     coreutils \
     curl \
     procps \
+    bubblewrap util-linux \
     tini=0.19.0-1+b3 \
     bash \
     openssh-client \
   && rm -rf /var/lib/apt/lists/*
+
+# TEMPORARY (2026-10-20 eMudhra CA compromise): Debian ca-certificates
+# 20250419~deb12u2 removes the two affected roots from the system store. The
+# script fails the build if either root is still there. Node must read that
+# store: its bundled store still trusts the emSign root, and `--use-system-ca`
+# only ADDS the system store to it, so `--use-openssl-ca` is required.
+# NODE_EXTRA_CA_CERTS still works (additive). The managed Chromium ignores the
+# system store, so a Chrome policy built from the committed root files in
+# docker/distrusted-roots distrusts the roots for it. Removal condition is
+# documented in docker/distrust-compromised-roots.sh. The Bun-compiled `valet`
+# binary is not shipped in this image. The check step upgrades ca-certificates
+# first: a build cache can restore the install layer above from before
+# 20250419~deb12u2, and the check must see the current package.
+COPY docker/distrust-compromised-roots.sh /usr/local/sbin/distrust-compromised-roots.sh
+COPY docker/distrusted-roots /usr/local/share/valet/distrusted-roots
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends --only-upgrade ca-certificates \
+  && rm -rf /var/lib/apt/lists/* \
+  && /usr/local/sbin/distrust-compromised-roots.sh --chromium-policy /usr/local/share/valet/distrusted-roots
+ENV NODE_OPTIONS=--use-openssl-ca
 
 RUN mkdir -p /workspace
 WORKDIR /workspace
@@ -79,12 +101,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libs
     && git -C /src/tk checkout "${TK_GIT_REV}" \
     && cargo build --release --manifest-path /src/tk/Cargo.toml -p tk \
     && install -m 0755 /src/tk/target/release/tk /out-tk
+# Native document libraries and render tools for both sandbox profiles.
+# This stage can be built alone to test the office runtime.
+FROM base AS office-runtime
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3 python3-venv \
+      libreoffice-writer libreoffice-calc libreoffice-impress \
+      poppler-utils fonts-liberation fonts-dejavu-core fonts-noto-core \
+    && rm -rf /var/lib/apt/lists/*
+COPY docker/native-documents /opt/valet-office-src
+RUN python3 -m venv /opt/valet-office \
+    && /opt/valet-office/bin/python -m pip install --no-cache-dir --only-binary=:all: --require-hashes \
+         -r /opt/valet-office-src/requirements.txt \
+    && cp /opt/valet-office-src/office.py /opt/valet-office/office.py \
+    && /opt/valet-office/bin/python /opt/valet-office/office.py check \
+    && /opt/valet-office/bin/python /opt/valet-office-src/test_office.py
 
 # ─── Gateway build stage ────────────────────────────────────────────────
 # Builds @valet/sandbox-gateway's dist/ and produces a self-contained,
 # production-only package dir (workspace deps resolved to real files, no
 # devDependencies) at /out/gateway.
-FROM node:22-bookworm-slim AS gateway-build
+FROM node:22.23.3-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS gateway-build
 
 # `prepare --activate` warms corepack's cache AND sets the default shim
 # version — but inside this repo the `packageManager` pin in package.json
@@ -100,14 +137,24 @@ WORKDIR /repo
 # pre-1.0 local/CI image.
 COPY . .
 
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ && rm -rf /var/lib/apt/lists/*
 RUN pnpm install --frozen-lockfile
 
 RUN pnpm --filter @valet/sandbox-gateway run build
 # --legacy: pnpm 9 deploy semantics under pnpm 10+ (see Dockerfile.api).
 RUN pnpm --filter @valet/sandbox-gateway deploy --legacy --prod /out/gateway
+RUN pnpm --filter @valet/shared build && pnpm --filter @valet/browser-runtime build
+RUN pnpm --filter @valet/browser-runtime deploy --legacy --prod /out/browser
 
 # ─── Final image ────────────────────────────────────────────────────────
-FROM base
+FROM office-runtime
+
+# Image runtime contract (docs/plans/2026-10-26-image-pipeline-health-design.md,
+# section 5). Bump together with SANDBOX_IMAGE_CONTRACT in
+# packages/sandbox-kubernetes/src/manifest.ts whenever the pod spec starts
+# depending on something new in this image. Inherited by every bake that
+# FROMs this image.
+LABEL io.valet.sandbox.contract="3"
 
 # Turnkey CLI for commit signing; see the tk-build stage above.
 COPY --from=tk-build /out-tk /usr/local/bin/tk
@@ -164,10 +211,9 @@ RUN curl -fsSL -o /tmp/gh.deb \
 # image"): pinned, read-only, offline-capable — personas run them against
 # the clone, and rule updates ride image rebuilds, not runtime downloads,
 # so sandbox egress stays closed. gitleaks ships its default ruleset inside
-# the binary. gitleaks ONLY: semgrep is a Python package and this image
-# carries no Python runtime, so baking it would add a whole toolchain for
-# one tool (spec implementation deviation; plan risk 6 pre-authorizes
-# gitleaks-only). Release assets are per-arch tarballs with a published
+# the binary. gitleaks ONLY: semgrep remains outside the baked scanner scope
+# (spec implementation deviation; plan risk 6 pre-authorizes gitleaks-only).
+# Release assets are per-arch tarballs with a published
 # checksums.txt — the sha256 per arch is pinned below, so a GITLEAKS_VERSION
 # bump must also update both hashes from the new checksums.txt.
 ARG GITLEAKS_VERSION=8.30.1
@@ -205,32 +251,30 @@ RUN chmod +x /usr/local/bin/sec-preflight
 # static scanners above.
 COPY docker/sec-fuzz-wordlist.txt /usr/local/share/valet/sec-fuzz-wordlist.txt
 
-# Browser automation. The bundled `browser` plugin skill tells the agent it
-# has `agent-browser`; without these two layers the agent follows the skill
-# and bash answers "command not found".
-#
-# Headless only. V1 ran the browser on an X display and showed it in a VNC
-# panel; V2 has no X server, no VNC panel, and no screenshot tool, so the
-# skill directs the agent to `agent-browser screenshot <path>` instead. Do
-# not add `--headed` support without also adding Xvfb and a viewer.
-#
-# Chromium comes from apt and is what Playwright (bundled inside
-# agent-browser since 0.30) launches, through AGENT_BROWSER_EXECUTABLE_PATH.
-# Playwright's own `chromium-headless-shell` was measured as an alternative:
-# it needs the same X/GTK shared libraries, so it saves under 40 MB and adds
-# a second browser-version axis to keep aligned.
-#
-# SIZE: these two layers add ~794 MB (chromium ~699 MB, agent-browser
-# ~94 MB) to a ~386 MB base. That is the price of the capability — the
-# browser binary is most of it and there is no smaller one that runs
-# Playwright.
+# Managed browser. Playwright selects this exact Chromium revision through channel "chromium".
+# The legacy CLI uses the same executable with its own unrelated profile.
+COPY --from=gateway-build /out/browser /opt/valet/browser
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/valet/playwright
+RUN cd /opt/valet/browser \
+    && node node_modules/playwright-core/cli.js install-deps chromium \
+    && node node_modules/playwright-core/cli.js install chromium --no-shell \
+    && chmod -R a+rX /opt/valet/playwright \
+    && rm -rf /var/lib/apt/lists/*
 ARG AGENT_BROWSER_VERSION=0.34.0
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      chromium fonts-liberation \
-    && rm -rf /var/lib/apt/lists/* \
-    && npm install -g "agent-browser@${AGENT_BROWSER_VERSION}" \
-    && npm cache clean --force
-ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
+RUN npm install -g "agent-browser@${AGENT_BROWSER_VERSION}" && npm cache clean --force \
+    && node --input-type=module -e 'import {chromium} from "/opt/valet/browser/node_modules/playwright-core/index.mjs"; import {symlinkSync} from "node:fs"; symlinkSync(chromium.executablePath(),"/usr/local/bin/valet-chromium");'
+ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/local/bin/valet-chromium
+COPY packages/sandbox-docker/seccomp/browser.json /opt/valet/browser/config/container-seccomp.json
+COPY packages/sandbox-docker/seccomp/LICENSE /opt/valet/browser/config/LICENSE.seccomp
+COPY docker/browser-manifest.mjs /opt/valet/browser/config/browser-manifest.mjs
+COPY docker/browser-preflight.sh /browser-preflight.sh
+COPY docker/valet-browser-client.sh /usr/local/bin/valet-browser-client
+RUN groupadd --gid 1501 valet-browser && useradd --uid 1501 --gid 1501 --home-dir /var/lib/valet/browser --no-create-home browser \
+    && mkdir -p /var/lib/valet/browser \
+    && chown 1501:1501 /var/lib/valet/browser \
+    && chmod 0755 /var/lib/valet \
+    && chmod 0700 /var/lib/valet/browser \
+    && chmod 0755 /browser-preflight.sh /usr/local/bin/valet-browser-client
 
 # Bundled auth gateway (Task 2): `node /gateway/dist/bin.js` is what
 # docker/start-full.sh execs. Requires VALET_SESSION_ID +
@@ -243,7 +287,7 @@ COPY --from=gateway-build /out/gateway /gateway
 # the non-root `dockerd` user. Pinned; bump deliberately.
 ARG DOCKER_VERSION=5:29.7.2-1~debian.12~bookworm
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      gnupg uidmap fuse-overlayfs slirp4netns iproute2 iptables \
+      gnupg uidmap fuse-overlayfs slirp4netns=1.2.0-1 iproute2 iptables \
     && install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
     && echo "deb [signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" \
@@ -255,6 +299,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         docker-ce-rootless-extras=${DOCKER_VERSION} \
         docker-buildx-plugin \
     && rm -rf /var/lib/apt/lists/*
+
+# First-class nested Kubernetes v1 artifacts. The vector lock supplies these hashes.
+ARG K3S_VERSION=v1.31.5+k3s1
+ARG KUBECTL_VERSION=v1.31.5
+ARG TARGETARCH
+RUN case "${TARGETARCH:-amd64}" in \
+      amd64) K3S_URL="https://github.com/k3s-io/k3s/releases/download/v1.31.5%2Bk3s1/k3s"; K3S_SHA=399b87b432ce55013fa81adad572a8e4ecf56e0df97369cf02d4b8a41f039091; KUBECTL_URL="https://dl.k8s.io/release/v1.31.5/bin/linux/amd64/kubectl"; KUBECTL_SHA=fbecbfd375b3686002c2e81d51c390172f5ffba3d6b47920d55342cb03f557af ;; \
+      arm64) K3S_URL="https://github.com/k3s-io/k3s/releases/download/v1.31.5%2Bk3s1/k3s-arm64"; K3S_SHA=b719566c43ab1379fe2a7ce477e02bc1c79ea106bdaa7223fa9f6e19a735b477; KUBECTL_URL="https://dl.k8s.io/release/v1.31.5/bin/linux/arm64/kubectl"; KUBECTL_SHA=697c8b4239f9e53cba46296e114bcc02c726b5c7a45e1c464804aad56e5c7a86 ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; esac \
+    && curl -fsSL -o /usr/local/bin/k3s "${K3S_URL}" \
+    && curl -fsSL -o /usr/local/bin/kubectl "${KUBECTL_URL}" \
+    && echo "${K3S_SHA}  /usr/local/bin/k3s" | sha256sum -c - \
+    && echo "${KUBECTL_SHA}  /usr/local/bin/kubectl" | sha256sum -c - \
+    && chmod 0755 /usr/local/bin/k3s /usr/local/bin/kubectl
 
 # Exec-identity contract: `dockerd` gets its own primary group plus ONE
 # supplementary group: `docker` (already created by the docker-ce
@@ -276,13 +334,17 @@ RUN (getent group docker >/dev/null || groupadd docker) \
     && echo "dockerd:65536:65535" >> /etc/subgid
 
 COPY docker/cgroup-delegation.sh /cgroup-delegation.sh
+COPY docker/cgroup-bootstrap.sh /cgroup-bootstrap.sh
+COPY docker/kubernetes-preflight.sh /kubernetes-preflight.sh
+COPY docker/valet-kubernetes.mjs /usr/local/bin/valet-kubernetes
 COPY docker/userns-preflight.sh /userns-preflight.sh
 COPY docker/start-docker.sh /start-docker.sh
 COPY docker/start-headless.sh /start-headless.sh
-RUN chmod +x /cgroup-delegation.sh /userns-preflight.sh /start-docker.sh /start-headless.sh
+RUN chmod +x /cgroup-bootstrap.sh /cgroup-delegation.sh /kubernetes-preflight.sh /userns-preflight.sh /start-docker.sh /start-headless.sh \
+    && chmod 0755 /usr/local/bin/valet-kubernetes
 
 COPY docker/start-full.sh /start-full.sh
-RUN chmod +x /start-full.sh
+RUN chmod +x /start-full.sh && node /opt/valet/browser/config/browser-manifest.mjs
 
 # Ports (full profile only — headless exposes none of these):
 #   7681  ttyd (bound to 127.0.0.1, reached only via the gateway proxy)

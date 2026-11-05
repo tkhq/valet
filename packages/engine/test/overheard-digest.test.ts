@@ -1,3 +1,4 @@
+import { readAppearance } from "@valet/shared";
 import { describe, it, expect } from "vitest";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import {
@@ -159,6 +160,19 @@ describe("overheard digest: pure helpers", () => {
     expect(second.content.attributes?.digest).toBe("3");
     expect(second.digest.constituentIds).toEqual(["q3", "q4"]);
   });
+
+  it("keeps every constituent's attachments, across a re-merge", () => {
+    const image = { type: "image" as const, data: new Uint8Array([1]), mimeType: "image/png", name: "shot.png" };
+    const pdf = { type: "image" as const, data: new Uint8Array([2]), mimeType: "application/pdf", name: "spec.pdf" };
+    const a = queueItemOf({ ...overheardSignal({ body: "see this", sender: "Alice" }), attachments: [image] }, "q1", 1);
+    const b = queueItemOf(overheardSignal({ body: "thoughts?", sender: "Alice" }), "q2", 2);
+    const first = buildOverheardDigest([a, b]);
+    expect(first.content.attachments).toEqual([image]);
+    const digestItem: QueueItem = { ...queueItemOf(first.content, "q3", 3), metadata: { overheardDigest: first.digest } };
+    const c = queueItemOf({ ...overheardSignal({ body: "and this", sender: "Alice" }), attachments: [pdf] }, "q4", 4);
+    expect(buildOverheardDigest([digestItem, c]).content.attachments).toEqual([image, pdf]);
+    expect(buildOverheardDigest([b]).content).not.toHaveProperty("attachments");
+  });
 });
 
 function makeEngine() {
@@ -253,6 +267,126 @@ describe("overheard digest: queue coalescing", () => {
     faux.unregister();
   });
 
+  it("a cancel during a digest's admission loses, so the digest never carries canceled text", async () => {
+    const faux = registerFauxProvider({ provider: "overheard-cancel" });
+    const store = new InMemorySessionStore();
+    // Hold the digest's admission open: the window between the coalescer's
+    // read of the queue and its merge of the constituents.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let digestAdmitting!: () => void;
+    const admitting = new Promise<void>((resolve) => { digestAdmitting = resolve; });
+    const admit = store.admitSubmission.bind(store);
+    store.admitSubmission = async (sessionId, threadId, item, opts) => {
+      if (item.metadata?.overheardDigest !== undefined) {
+        digestAdmitting();
+        await gate;
+      }
+      return admit(sessionId, threadId, item, opts);
+    };
+    const engine = new Engine({
+      providers: { store, stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() },
+    });
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+    const thread = session.thread(THREAD_KEY);
+    await thread.pause();
+    const x = await thread.submitPrompt(overheardSignal({ body: "cancel me", sender: "Sender A" }), { dispatchId: "slack:follow:x" });
+    const y = thread.submitPrompt(overheardSignal({ body: "keep me", sender: "Sender B", messageTs: "200.1" }), {
+      dispatchId: "slack:follow:y",
+    });
+    await admitting;
+    const canceled = thread.cancelQueuedItem(x.queueItemId);
+    release();
+    const [receipt, wasCanceled] = await Promise.all([y, canceled]);
+
+    expect(wasCanceled).toBe(false);
+    expect((await store.getQueueItem(session.id, x.queueItemId))?.outcome).toEqual({ outcome: "merged" });
+    const digest = await store.getQueueItem(session.id, receipt.queueItemId);
+    const body = typeof digest?.content === "object" && digest.content !== null && "body" in digest.content
+      ? String(digest.content.body) : "";
+    expect(body).toContain("cancel me");
+    faux.unregister();
+  });
+
+  it("refuses to cancel an item a digest lists after its merge settlement failed", async () => {
+    const faux = registerFauxProvider({ provider: "overheard-cancel-partial" });
+    const store = new InMemorySessionStore();
+    // Fail the first merge settlement once, after the digest is admitted.
+    let failNextMerge = true;
+    const settle = store.settleUnclaimed.bind(store);
+    store.settleUnclaimed = async (sessionId, threadId, itemId, outcome, opts) => {
+      if (outcome.outcome === "merged" && failNextMerge) {
+        failNextMerge = false;
+        throw new Error("transient store error");
+      }
+      return settle(sessionId, threadId, itemId, outcome, opts);
+    };
+    const engine = new Engine({
+      providers: { store, stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() },
+    });
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+    const thread = session.thread(THREAD_KEY);
+    await thread.pause();
+    const x = await thread.submitPrompt(overheardSignal({ body: "cancel me", sender: "Sender A" }), { dispatchId: "slack:follow:x" });
+    await expect(
+      thread.submitPrompt(overheardSignal({ body: "keep me", sender: "Sender B", messageTs: "200.1" }), { dispatchId: "slack:follow:y" }),
+    ).rejects.toThrow("transient store error");
+
+    // The digest is admitted and lists x, but x still reads `queued`.
+    const unsettled = await store.listUnsettledSubmissions(session.id);
+    const digest = unsettled.find((i) => i.metadata?.overheardDigest !== undefined);
+    expect(digest).toBeDefined();
+    expect((await store.getQueueItem(session.id, x.queueItemId))?.status).toBe("queued");
+
+    expect(await thread.cancelQueuedItem(x.queueItemId)).toBe(false);
+    expect((await store.getQueueItem(session.id, x.queueItemId))?.status).toBe("queued");
+    faux.unregister();
+  });
+
+  it("keeps custom-presence submissions outside default overheard digests", async () => {
+    const faux = registerFauxProvider({ provider: "digest-presence" });
+    try {
+      const { engine, store } = makeEngine();
+      const session = await engine.createSession({ userId: "owner", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+      const thread = session.thread(THREAD_KEY);
+      await thread.pause();
+      const plain = await thread.submitPrompt(overheardSignal({ body: "plain" }), {});
+      const custom = await thread.submitPrompt(overheardSignal({ body: "custom" }), { metadata: { presence: { displayName: "Automation" } } });
+      const customAgain = await thread.submitPrompt(overheardSignal({ body: "custom again" }), { metadata: { presence: { displayName: "Automation" } } });
+      const digest = await thread.submitPrompt(overheardSignal({ body: "plain again" }), {});
+      expect((await store.getQueueItem(session.id, plain.queueItemId))?.outcome).toEqual({ outcome: "merged" });
+      expect((await store.getQueueItem(session.id, custom.queueItemId))?.outcome).toEqual({ outcome: "merged" });
+      expect(await store.getQueueItem(session.id, customAgain.queueItemId)).toMatchObject({ status: "queued", metadata: { presence: { displayName: "Automation" } } });
+      for (let i = 0; i < 25; i++) {
+        await thread.submitPrompt(overheardSignal({ body: `custom ${i}` }), { metadata: { presence: { displayName: "Automation" } } });
+      }
+      await thread.submitPrompt(overheardSignal({ body: "other identity" }), { metadata: { presence: { displayName: "Other" } } });
+      await thread.submitPrompt(overheardSignal({ body: "different avatar" }), { metadata: { presence: { displayName: "Automation", avatarUrl: "https://example.com/avatar.png" } } });
+      const pending = await store.listUnsettledSubmissions(session.id);
+      expect(pending).toHaveLength(4);
+      expect(pending.filter(item => readAppearance(item.metadata?.presence)?.displayName === "Automation")).toHaveLength(2);
+      const content = (await store.getQueueItem(session.id, digest.queueItemId))?.content;
+      if (!content || typeof content !== "object" || !("kind" in content)) throw new Error("Expected a digest signal");
+      expect(content.body.split("\n").sort()).toEqual([OVERHEARD_DIGEST_HEADER, "plain", "plain again"].sort());
+    } finally {
+      faux.unregister();
+    }
+  });
+
+  it("queues custom presence separately when collect mode is requested", async () => {
+    const faux = registerFauxProvider({ provider: "collect-presence" });
+    try {
+      const { engine, store } = makeEngine();
+      const session = await engine.createSession({ userId: "owner", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+      const thread = session.thread(THREAD_KEY);
+      await thread.pause();
+      const receipt = await thread.submitPrompt("custom", { queueMode: "collect", metadata: { presence: { displayName: "Automation" } } });
+      expect(await store.getQueueItem(session.id, receipt.queueItemId)).toMatchObject({ status: "queued", metadata: { presence: { displayName: "Automation" } } });
+    } finally {
+      faux.unregister();
+    }
+  });
+
   it("preserves the digest actor and never merges different actors", async () => {
     const faux = registerFauxProvider({ provider: "digest-actor" });
     const { engine, store } = makeEngine();
@@ -267,6 +401,42 @@ describe("overheard digest: queue coalescing", () => {
     expect((await store.getQueueItem(session.id, b.queueItemId))?.outcome).toEqual({ outcome: "merged" });
     expect((await store.getQueueItem(session.id, digest.queueItemId))?.author).toEqual({ id: "b" });
     faux.unregister();
+  });
+
+  it.each([true, false])("keeps sender authority separate when the first sender is external=%s", async (externalFirst) => {
+    const faux = registerFauxProvider({ provider: `digest-authority-${externalFirst}` });
+    try {
+      const { engine, store } = makeEngine();
+      const session = await engine.createSession({ userId: "owner", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+      const thread = session.thread(THREAD_KEY);
+      await thread.pause();
+      // An unlinked channel sender runs under the creator's ID, but must
+      // never acquire the creator's authority when their messages merge.
+      const external = { id: "creator", externalSender: true };
+      const teammate = { id: "creator" };
+      const authors = externalFirst ? [external, teammate] : [teammate, external];
+      const first = await thread.submitPrompt(overheardSignal({ body: "first" }), { author: authors[0] });
+      const second = await thread.submitPrompt(overheardSignal({ body: "second" }), { author: authors[1] });
+      expect((await store.getQueueItem(session.id, first.queueItemId))?.status).toBe("queued");
+      expect((await store.getQueueItem(session.id, second.queueItemId))?.status).toBe("queued");
+
+      // Each authority class still coalesces and remains separate after
+      // the recovery sweep has repaired its constituent settlements.
+      await thread.submitPrompt(overheardSignal({ body: "first again" }), { author: authors[0] });
+      await thread.submitPrompt(overheardSignal({ body: "second again" }), { author: authors[1] });
+      await session.sweepOnce();
+      const queued = await store.listUnsettledSubmissions(session.id);
+      expect(queued).toHaveLength(2);
+      for (const [index, body] of ["first", "second"].entries()) {
+        const digest = queued.find(item => Boolean(item.author?.externalSender) === Boolean(authors[index].externalSender));
+        expect(digest?.author).toEqual(authors[index]);
+        const content = digest?.content;
+        if (typeof content !== "object" || content === null || !("kind" in content)) throw new Error("Expected a digest signal");
+        expect(content.body.split("\n").sort()).toEqual([OVERHEARD_DIGEST_HEADER, body, `${body} again`].sort());
+      }
+    } finally {
+      faux.unregister();
+    }
   });
 
   it("keeps multiple settlements independent next to coalesced overheard chatter", async () => {

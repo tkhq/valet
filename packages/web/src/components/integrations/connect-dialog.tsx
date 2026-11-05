@@ -30,6 +30,7 @@ import type { PluginServiceSummary } from "@valet/api/wire";
 import {
   Badge,
   Button,
+  Callout,
   Dialog,
   DialogContent,
   DialogTitle,
@@ -240,8 +241,9 @@ function DecisionPane({
         <Button size="lg" className="w-full" onClick={() => void onContinue()} disabled={blocked || connectGithub.isPending}>
           {connectGithub.isPending ? "Opening GitHub…" : service.connected ? "Reconnect" : "Continue"}
         </Button>
-        {/* The escape hatch still sits behind the disclosure, never beside it. */}
-        {path !== "manual" && !blocked && (
+        {/* The escape hatch still sits behind the disclosure, never beside it.
+            An `oauthOnly` provider refuses every pasted token, so it gets none. */}
+        {path !== "manual" && !blocked && !service.oauthOnly && (
           <button
             type="button"
             className="text-xs text-muted underline-offset-2 hover:underline"
@@ -264,14 +266,8 @@ function DecisionPane({
       <p className="flex items-start gap-2 border-t border-line pt-4 text-xs leading-relaxed text-muted">
         <Lock className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
         <span>
-          Valet encrypts this token before it saves it. To remove it later, go to{" "}
-          <a
-            href="/settings/connected-accounts"
-            className="text-ink underline underline-offset-2"
-          >
-            Connected accounts
-          </a>
-          .
+          Valet encrypts this token before it saves it. To remove it later, select Disconnect on
+          this integration.
         </span>
       </p>
     </div>
@@ -534,13 +530,12 @@ function TokenForm({
         placeholder={`Paste the ${fieldLabel.toLowerCase()}…`}
         autoFocus
       />
+      {/* The server's sentence names the fix; `Error.message` is only the
+          request line ("PUT /credentials/pylon → 400"). */}
       {connect.error && (
-        <div
-          role="alert"
-          className="rounded border border-line bg-danger-wash px-3 py-2 text-xs text-danger-600"
-        >
-          {connect.error.message}
-        </div>
+        <Callout role="alert" tone="danger" className="text-xs">
+          {errorText(connect.error)}
+        </Callout>
       )}
       <Button
         size="lg"

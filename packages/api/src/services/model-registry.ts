@@ -56,17 +56,17 @@ import {
   type Model,
   type MutableModels,
 } from "@earendil-works/pi-ai";
-import { bundledModel, bundledModels } from "@valet/engine/model-catalog";
+import { bundledModel, bundledModels, isCatalogModel } from "@valet/engine/model-catalog";
 import type { AppDb } from "../lib/drizzle.js";
 import { startSweepTimer, type SweepTimer } from "../lib/sweep-timer.js";
 import { PgModelsStore } from "./models-store-pg.js";
-import { parseLastModified, parseRemoteCatalog, type RegistryModel } from "./model-registry-parse.js";
+import { isRegistryModel, parseLastModified, parseRemoteCatalog, type RegistryModel } from "./model-registry-parse.js";
 
 /** The providers Valet reads a catalog for. These are exactly the kinds the
  * org catalog and the resolver understand (`services/model-catalog.ts`'s
  * known kinds plus openrouter). Adding one here is not enough to make it
  * selectable — the catalog's own kind lists govern that. */
-export const REGISTRY_PROVIDERS = ["anthropic", "openai", "google", "openrouter"] as const;
+export const REGISTRY_PROVIDERS = ["anthropic", "openai", "google", "openrouter", "amazon-bedrock"] as const;
 
 export type RegistryProvider = (typeof REGISTRY_PROVIDERS)[number];
 
@@ -185,7 +185,7 @@ export class ModelRegistry {
   ): Promise<RegistryModel[]> {
     const state = this.state.get(providerId);
     const stored = await this.store.read(providerId);
-    const keepStored = (): RegistryModel[] => (stored ? [...stored.models] : []);
+    const keepStored = (): RegistryModel[] => (stored ? stored.models.filter(isRegistryModel) : []);
 
     const base = modelRegistryUrl();
     if (!base) return keepStored();
@@ -256,7 +256,7 @@ export class ModelRegistry {
    * landed, bundled otherwise. Never empty for a registry provider. */
   listModels(providerId: RegistryProvider): RegistryModel[] {
     const live = this.models.getModels(providerId);
-    return live.length > 0 ? [...live] : bundledModels(providerId);
+    return (live.length > 0 ? [...live] : bundledModels(providerId)).filter((model) => isCatalogModel(providerId, model.id));
   }
 
   /** One model by provider and WIRE id, or undefined when the provider does
@@ -300,10 +300,9 @@ export class ModelRegistry {
     for (const providerId of REGISTRY_PROVIDERS) {
       const stored = await this.store.read(providerId);
       const state = this.state.get(providerId);
-      const live = this.models.getModels(providerId);
       providers.push({
         providerId,
-        modelCount: live.length > 0 ? live.length : bundledModels(providerId).length,
+        modelCount: this.listModels(providerId).length,
         checkedAt: stored?.checkedAt ?? null,
         usingBundledFallback: (state?.fetchedCount ?? 0) === 0,
         lastError: state?.lastError ?? null,

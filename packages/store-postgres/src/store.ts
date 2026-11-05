@@ -1,8 +1,34 @@
-import { ConflictError, NotFoundError, PendingCapError, StaleAttemptError, ValidationError, withSpan } from "@valet/engine";
+import {
+  boundEventDigest,
+  interruptibleBy,
+  isInteractiveSlackInput,
+  queuedOriginInputs,
+  carryInputMetadata,
+  withoutCarriedInputs,
+  stripNul,
+  ConflictError,
+  EVENT_BUFFER_MAX_DIGESTS,
+  EVENT_DELIVERED_MAX_KEYS,
+  EVENT_SOURCE_SEEN_MAX_KEYS,
+  NotFoundError,
+  PendingCapError,
+  recordEventWaiterBufferFull,
+  recordWakeupBadRow,
+  recordWakeupEnded,
+  StaleAttemptError,
+  SUBMISSION_TIMEOUT_MS,
+  ValidationError,
+  walkTranscriptDag,
+  withSpan,
+} from "@valet/engine";
+import { CONTINUATION_SOURCE_ITEM_KEY, continuationToolScope, INHERIT_TOOL_SCOPE_KEY, steerKeepsSubmission, TOOL_SCOPE_KEY } from "@valet/shared";
 import type {
   DecisionGate,
   DecisionGateEntry,
   DecisionGateRef,
+  EventMatchDigest,
+  Lease,
+  LeaseReleaseCause,
   ListOpts,
   MessageQuery,
   Principal,
@@ -14,27 +40,42 @@ import type {
   SessionStatus,
   SessionStore,
   SettlePatchRef,
+  SubmissionAdmissionOptions,
   SubmissionClaim,
   SubmissionOutcome,
   SuspendedTurnState,
   ThreadData,
+  Wakeup,
+  WakeupCount,
+  WakeupKind,
+  WakeupPatch,
+  WakeupCursor,
+  WakeupStatus,
   WriteFence,
 } from "@valet/engine";
 import { isPgUniqueViolation } from "./db.js";
 import type { PgDb, PgQueryable } from "./db.js";
 import {
+  asString,
+  asStringOrNull,
   entryToRow,
   jsonOrNull,
   parseJson,
   parseJsonRequired,
+  restorePromptBytes,
   rawToEntryRow,
   rawToGateRow,
+  rawToLeaseRow,
   rawToQueueItemRow,
   rawToSessionRow,
   rawToSuspendedTurnRow,
   rawToThreadRow,
+  rawToWakeupRow,
   rowToEntry,
+  USAGE_ENTRY_TYPE,
   rowToGate,
+  rowToLease,
+  rowToWakeup,
   toNum,
   toNumOrNull,
   type EntryInsertRow,
@@ -50,7 +91,7 @@ function queueItemRowToItem(row: QueueItemRow): QueueItem {
     id: row.id,
     threadId: row.threadId,
     dispatchId: row.dispatchId ?? undefined,
-    content: parseJsonRequired<PromptContent>(row.content),
+    content: restorePromptBytes(parseJsonRequired<PromptContent>(row.content)),
     author: parseJson<PromptAuthor>(row.author),
     channel: parseJson(row.channel),
     replyTarget: parseJson(row.replyTarget),
@@ -58,6 +99,7 @@ function queueItemRowToItem(row: QueueItemRow): QueueItem {
     role: row.role ?? undefined,
     metadata: parseJson(row.metadata),
     status: row.status as QueueItem["status"],
+    childResultDelivery: row.childResultDelivery,
     outcome: row.outcome
       ? { outcome: row.outcome as SubmissionOutcome["outcome"], error: row.error ?? undefined }
       : undefined,
@@ -140,24 +182,35 @@ const INSERT_QUEUE_ITEM_SQL = `
 // Steer supersession: stamp every unsettled, not-yet-superseded item of the
 // thread admitted at or before the steering item's createdAt (matches
 // InMemorySessionStore.admitSubmission's steer loop exactly).
+const PROMOTION_PENDING_SQL = `
+  SELECT * FROM engine_queue_items
+  WHERE session_id = $1 AND thread_id = $2
+    AND status != 'settled' AND superseded_by_item_id IS NULL
+  FOR UPDATE
+`;
+
 const STEER_CANDIDATES_SQL = `
-  SELECT id FROM engine_queue_items
+  SELECT id, metadata FROM engine_queue_items
   WHERE session_id = $1 AND thread_id = $2 AND id != $3
     AND status != 'settled'
     AND superseded_by_item_id IS NULL
     AND created_at <= $4
 `;
 
-// claimSubmission: single-statement CAS (decision 6, bucket 1). Succeeds
+// claimSubmission: single-statement CAS (decision 6, bucket 1). A claim with
+// attempt_count = 0 also starts the execution clock ($8 is the budget), so
+// time spent queued does not count against timeout_at. Succeeds
 // only when itemId IS the thread's runnable head (oldest 'queued',
 // not-superseded item) — the subquery re-derives the head so a concurrent
-// claim of a different item (or of a non-head item) loses (rowCount=0). No
-// transaction/row-lock needed: this is one atomic UPDATE statement, and
-// Postgres's own MVCC serializes concurrent UPDATEs against the same rows.
+// claim of a different item (or of a non-head item) loses (rowCount=0).
+// claimSubmission locks the thread row first, runs this CAS, then captures
+// continuation provenance before execution starts. Steer admission uses the
+// same thread-then-item lock order, so the two writers cannot form a cycle.
 const CLAIM_SQL = `
   UPDATE engine_queue_items
   SET status = 'running', attempt_id = $1, owner_id = $2,
       lease_expires_at = $3, attempt_count = attempt_count + 1,
+      timeout_at = CASE WHEN attempt_count = 0 THEN $4::bigint + $8::bigint ELSE timeout_at END,
       updated_at = $4
   WHERE id = $5 AND session_id = $6 AND thread_id = $7
     AND status = 'queued' AND superseded_by_item_id IS NULL
@@ -189,6 +242,17 @@ const REPLACE_ATTEMPT_SQL = `
     AND attempt_id = $8
 `;
 
+// Stamp the gesture's durable target in one statement. Status and identity
+// matching prevent a delayed retry from stamping a queued successor.
+const ABORT_ACTIVE_SUBMISSION_SQL = `
+  UPDATE engine_queue_items
+  SET abort_requested_at = COALESCE(abort_requested_at, $1),
+      updated_at = CASE WHEN abort_requested_at IS NULL THEN $1 ELSE updated_at END
+  WHERE session_id = $2 AND thread_id = $3 AND id = $4
+    AND status IN ('running', 'blocked_on_decision_gate')
+  RETURNING *
+`;
+
 // Pending-cap denominator (mirrors countPendingForCap's semantics applied to
 // an already-unsettled item list): unsettled, non-superseded items of the
 // thread. Read inside admitSubmission's own transaction (after the per-thread
@@ -196,6 +260,14 @@ const REPLACE_ATTEMPT_SQL = `
 // admissions.
 const PENDING_COUNT_SQL = `
   SELECT COUNT(*) as count FROM engine_queue_items
+  WHERE session_id = $1 AND thread_id = $2
+    AND status != 'settled' AND superseded_by_item_id IS NULL
+`;
+
+// The same rows with metadata and admission time, for a full steer: it
+// counts only the items it keeps.
+const PENDING_METADATA_SQL = `
+  SELECT metadata, created_at FROM engine_queue_items
   WHERE session_id = $1 AND thread_id = $2
     AND status != 'settled' AND superseded_by_item_id IS NULL
 `;
@@ -237,6 +309,33 @@ const ENTRY_COLUMNS = [
   "attachments",
   "created_at",
 ] as const;
+
+/** Payload a transcript stub leaves NULL, by entry type (see `getTranscriptSnapshot`).
+ * Messages and compactions carry the bulk of a long thread. Other types are
+ * small, and some (decision gates) cannot be read without their metadata. */
+const STUB_NULL_COLUMNS: Record<string, readonly string[]> = {
+  message: ["content", "parts", "signal", "author", "channel", "metadata", "usage", "cost", "attachments"],
+  compaction: ["summary", "covered_entry_ids", "file_context", "metadata"],
+};
+const STUB_SELECT = [...ENTRY_COLUMNS.map((column) => {
+  const types = Object.keys(STUB_NULL_COLUMNS).filter((type) => STUB_NULL_COLUMNS[type]!.includes(column));
+  return types.length === 0 ? column : `CASE WHEN entry_type IN (${types.map((type) => `'${type}'`).join(", ")}) THEN NULL ELSE ${column} END AS ${column}`;
+}), "seq"].join(", ");
+
+/** Rows above which a whole-thread read logs a warning. Hot paths read by
+ * queue item, tail, head or outline; a read this large is the shape that ran
+ * the api out of memory on 2026-10-28. */
+export const LARGE_THREAD_READ_ENTRIES = 2_000;
+const LARGE_READ_WARN_INTERVAL_MS = 60_000;
+let lastLargeReadWarnAt = 0;
+
+function noteWholeThreadRead(read: string, sessionId: string, threadId: string, rows: number): void {
+  if (rows <= LARGE_THREAD_READ_ENTRIES) return;
+  const now = Date.now();
+  if (now - lastLargeReadWarnAt < LARGE_READ_WARN_INTERVAL_MS) return;
+  lastLargeReadWarnAt = now;
+  console.warn(`store-postgres: ${read} loaded ${rows} entries with payloads for one thread. Scope the read by queue item, tail, head or outline.`, { sessionId, threadId });
+}
 
 const INSERT_ENTRY_SQL = `
   INSERT INTO engine_entries (${ENTRY_COLUMNS.join(", ")})
@@ -332,12 +431,12 @@ export class PgSessionStore implements SessionStore {
        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
        ON CONFLICT (id) DO UPDATE SET
          status = EXCLUDED.status,
-         active_leaf_entry_id = EXCLUDED.active_leaf_entry_id,
          queue_mode = EXCLUDED.queue_mode,
          paused = EXCLUDED.paused,
          model = EXCLUDED.model,
          reasoning = EXCLUDED.reasoning,
          summary = EXCLUDED.summary,
+         metadata = EXCLUDED.metadata,
          updated_at = EXCLUDED.updated_at`,
       [
         thread.id,
@@ -427,6 +526,37 @@ export class PgSessionStore implements SessionStore {
     });
   }
 
+  async appendBranch(
+    sessionId: string,
+    threadId: string,
+    entries: SessionEntry[],
+    opts: { expectedLeafId: string | null; fence?: WriteFence },
+  ): Promise<boolean> {
+    return this.db.transaction(async (tx) => {
+      await this.checkFenceTx(tx, opts.fence);
+      // Lock the thread row first: appendEntries and getThreadSnapshot take
+      // the same row, so the leaf read here is the one this write replaces.
+      const current = await tx.query(
+        "SELECT active_leaf_entry_id FROM engine_threads WHERE session_id = $1 AND id = $2 FOR UPDATE",
+        [sessionId, threadId],
+      );
+      const raw = current.rows[0];
+      if (!raw) return false;
+      const leaf = typeof raw.active_leaf_entry_id === "string" ? raw.active_leaf_entry_id : null;
+      if (leaf !== opts.expectedLeafId) return false;
+      if (entries.length === 0) return true;
+      for (const e of entries) {
+        await tx.query(INSERT_ENTRY_SQL, entryInsertParams(entryToRow(e)));
+      }
+      await tx.query("UPDATE engine_threads SET active_leaf_entry_id = $1, updated_at = $2 WHERE id = $3", [
+        entries[entries.length - 1].id,
+        Date.now(),
+        threadId,
+      ]);
+      return true;
+    });
+  }
+
   async updateEntry(sessionId: string, threadId: string, entry: SessionEntry, fence?: WriteFence): Promise<void> {
     await this.db.transaction(async (tx) => {
       await this.checkFenceTx(tx, fence);
@@ -485,12 +615,13 @@ export class PgSessionStore implements SessionStore {
       `INSERT INTO engine_decision_gates (
          id, session_id, thread_id, queue_item_id, resume_key, ordinal, type,
          status, title, body, actions, origin, context, resolution, expires_at,
-         created_at, updated_at
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+         created_at, updated_at, agent_reason
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
        ON CONFLICT (id) DO UPDATE SET
          status = EXCLUDED.status,
          title = EXCLUDED.title,
          body = EXCLUDED.body,
+         agent_reason = EXCLUDED.agent_reason,
          actions = EXCLUDED.actions,
          context = EXCLUDED.context,
          resolution = EXCLUDED.resolution,
@@ -513,6 +644,7 @@ export class PgSessionStore implements SessionStore {
         gate.expiresAt ?? null,
         gate.createdAt,
         gate.updatedAt,
+        gate.agentReason === undefined ? null : stripNul(gate.agentReason),
       ],
     );
   }
@@ -525,8 +657,8 @@ export class PgSessionStore implements SessionStore {
   ): Promise<void> {
     await this.db.query(
       `INSERT INTO engine_decision_gate_refs (id, gate_id, channel_type, ref, created_at, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6)`,
-      [`${gateId}:${ref.channelType}:${ref.ref.messageId}`, gateId, ref.channelType, JSON.stringify(ref.ref), Date.now(), Date.now()],
+       VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (id) DO NOTHING`,
+      [JSON.stringify([gateId, ref.channelType, ref.ref.channelId, ref.ref.messageId]), gateId, ref.channelType, JSON.stringify(ref.ref), Date.now(), Date.now()],
     );
   }
 
@@ -618,6 +750,11 @@ export class PgSessionStore implements SessionStore {
     );
   }
 
+  async clearSessionSandboxId(sessionId: string, sandboxId: string): Promise<boolean> {
+    const cleared = await this.db.query("UPDATE engine_sessions SET sandbox_id = NULL WHERE id = $1 AND sandbox_id = $2 RETURNING id", [sessionId, sandboxId]);
+    return cleared.rows.length > 0;
+  }
+
   async getSession(id: string): Promise<SessionData | null> {
     const result = await this.db.query("SELECT * FROM engine_sessions WHERE id = $1", [id]);
     const raw = result.rows[0];
@@ -629,6 +766,103 @@ export class PgSessionStore implements SessionStore {
     let list = result.rows.map((r) => rowToSession(rawToSessionRow(r)));
     if (opts?.status) list = list.filter((s) => s.status === opts.status);
     return list;
+  }
+
+  async getThreadSnapshot(
+    sessionId: string,
+    threadId: string,
+  ): Promise<{ thread: ThreadData; entries: SessionEntry[] } | null> {
+    return this.db.transaction(async (tx) => {
+      // Lock the thread row before reading entries. appendEntries updates this
+      // row last, so the pair is either wholly before or wholly after an append.
+      const threadResult = await tx.query(
+        "SELECT * FROM engine_threads WHERE session_id = $1 AND id = $2 FOR SHARE",
+        [sessionId, threadId],
+      );
+      const rawThread = threadResult.rows[0];
+      if (!rawThread) return null;
+      const entryResult = await tx.query(
+        "SELECT * FROM engine_entries WHERE session_id = $1 AND thread_id = $2 AND entry_type <> $3 ORDER BY created_at ASC, seq ASC",
+        [sessionId, threadId, USAGE_ENTRY_TYPE],
+      );
+      noteWholeThreadRead("getThreadSnapshot", sessionId, threadId, entryResult.rows.length);
+      return {
+        thread: rowToThread(rawToThreadRow(rawThread)),
+        entries: entryResult.rows.map(rawToEntryRow).map(rowToEntry),
+      };
+    });
+  }
+
+  async getTranscriptSnapshot(
+    sessionId: string,
+    threadId: string,
+    opts?: { keepQueueItemId?: string },
+  ): Promise<{ thread: ThreadData; entries: SessionEntry[] } | null> {
+    return withSpan("store.transcript_snapshot", { "valet.session.id": sessionId, "valet.thread.id": threadId }, (span) =>
+      this.db.transaction(async (tx) => {
+        const threadResult = await tx.query(
+          "SELECT * FROM engine_threads WHERE session_id = $1 AND id = $2 FOR SHARE",
+          [sessionId, threadId],
+        );
+        const rawThread = threadResult.rows[0];
+        if (!rawThread) return null;
+        const thread = rowToThread(rawToThreadRow(rawThread));
+        const order = "ORDER BY created_at ASC, seq ASC";
+        // Stubs first: every entry without its payload, so the active branch
+        // and its newest compaction come from the same walk the engine runs.
+        const stubResult = await tx.query(
+          `SELECT ${STUB_SELECT} FROM engine_entries WHERE session_id = $1 AND thread_id = $2 AND entry_type <> $3 ${order}`,
+          [sessionId, threadId, USAGE_ENTRY_TYPE],
+        );
+        const stubs = stubResult.rows.map(rawToEntryRow).map(rowToEntry);
+        let path: SessionEntry[];
+        try {
+          path = walkTranscriptDag(stubs, thread.activeLeafEntryId);
+        } catch {
+          path = [];
+        }
+        const compaction = [...path].reverse().find((entry) => entry.type === "compaction");
+        const covered = compaction
+          ? await tx.query("SELECT covered_entry_ids FROM engine_entries WHERE session_id = $1 AND thread_id = $2 AND id = $3", [sessionId, threadId, compaction.id])
+          : undefined;
+        const rawCovered: unknown = covered?.rows[0]?.covered_entry_ids;
+        const coveredIds = new Set(parseJson<string[]>(typeof rawCovered === "string" ? rawCovered : null) ?? []);
+        for (const stub of stubs) {
+          if (stub.type === "message" && opts?.keepQueueItemId !== undefined && stub.queueItemId === opts.keepQueueItemId) coveredIds.delete(stub.id);
+        }
+        // A broken walk keeps the full read: the engine reports the DAG error itself.
+        const full = await tx.query(
+          `SELECT * FROM engine_entries WHERE session_id = $1 AND thread_id = $2 AND entry_type <> $3 AND NOT (id = ANY($4::text[])) ${order}`,
+          [sessionId, threadId, USAGE_ENTRY_TYPE, path.length === 0 ? [] : [...coveredIds]],
+        );
+        const loaded = new Map(full.rows.map(rawToEntryRow).map(rowToEntry).map((entry) => [entry.id, entry]));
+        span.setAttribute("valet.entries.loaded", loaded.size);
+        span.setAttribute("valet.entries.stubbed", stubs.length - loaded.size);
+        return { thread, entries: stubs.map((stub) => loaded.get(stub.id) ?? stub) };
+      }),
+    );
+  }
+
+  async getThreadOutline(
+    sessionId: string,
+    threadId: string,
+  ): Promise<{ thread: ThreadData; entries: SessionEntry[] } | null> {
+    return withSpan("store.thread_outline", { "valet.session.id": sessionId, "valet.thread.id": threadId }, (span) =>
+      this.db.transaction(async (tx) => {
+        const threadResult = await tx.query(
+          "SELECT * FROM engine_threads WHERE session_id = $1 AND id = $2 FOR SHARE",
+          [sessionId, threadId],
+        );
+        const rawThread = threadResult.rows[0];
+        if (!rawThread) return null;
+        const stubResult = await tx.query(
+          `SELECT ${STUB_SELECT} FROM engine_entries WHERE session_id = $1 AND thread_id = $2 AND entry_type <> $3 ORDER BY created_at ASC, seq ASC`,
+          [sessionId, threadId, USAGE_ENTRY_TYPE],
+        );
+        span.setAttribute("valet.entries.stubbed", stubResult.rows.length);
+        return { thread: rowToThread(rawToThreadRow(rawThread)), entries: stubResult.rows.map(rawToEntryRow).map(rowToEntry) };
+      }),
+    );
   }
 
   async getThread(sessionId: string, threadId: string): Promise<ThreadData | null> {
@@ -645,6 +879,12 @@ export class PgSessionStore implements SessionStore {
     return result.rows.map((r) => rowToThread(rawToThreadRow(r)));
   }
 
+  async listThreadsForSessions(sessionIds: readonly string[]): Promise<ThreadData[]> {
+    if (sessionIds.length === 0) return [];
+    const result = await this.db.query("SELECT * FROM engine_threads WHERE session_id = ANY($1::text[])", [[...new Set(sessionIds)]]);
+    return result.rows.map((r) => rowToThread(rawToThreadRow(r)));
+  }
+
   async getEntries(sessionId: string, threadId: string, opts?: MessageQuery): Promise<SessionEntry[]> {
     return withSpan(
       "store.entries.read",
@@ -654,14 +894,38 @@ export class PgSessionStore implements SessionStore {
         // routine within one turn, so seq — a monotonic insertion counter — breaks
         // them in insertion order (TKAI-303). Without it Postgres may return a tie
         // in any order, which surfaced as chat bubbles rendering out of sequence.
-        const result = await this.db.query(
-          "SELECT * FROM engine_entries WHERE session_id = $1 AND thread_id = $2 ORDER BY created_at ASC, seq ASC",
-          [sessionId, threadId],
-        );
-        let rows = result.rows.map(rawToEntryRow);
-        if (opts?.includeCompacted === false) rows = rows.filter((r) => r.entryType !== "compaction");
-        if (opts?.limit && opts.limit > 0) rows = rows.slice(-opts.limit);
+        const scoped = opts?.queueItemId !== undefined;
+        const limit = opts?.limit && opts.limit > 0 ? opts.limit : undefined;
+        const headLimit = limit === undefined && opts?.headLimit && opts.headLimit > 0 ? opts.headLimit : undefined;
+        const newestFirst = (scoped && headLimit === undefined) || limit !== undefined;
+        const conditions = ["session_id = $1", "thread_id = $2", "entry_type <> $3"];
+        const params: unknown[] = [sessionId, threadId, USAGE_ENTRY_TYPE];
+        if (scoped) {
+          params.push(opts.queueItemId);
+          conditions.push(`queue_item_id = $${params.length}`);
+        }
+        if (opts?.entryIds !== undefined) {
+          params.push([...opts.entryIds]);
+          conditions.push(`id = ANY($${params.length}::text[])`);
+        }
+        if (opts?.entryTypes !== undefined) {
+          params.push([...opts.entryTypes]);
+          conditions.push(`entry_type = ANY($${params.length}::text[])`);
+        }
+        if (opts?.includeCompacted === false) conditions.push("entry_type != 'compaction'");
+        // Select the tail (or head) in SQL so payloads outside the window never load.
+        let query = `SELECT * FROM engine_entries WHERE ${conditions.join(" AND ")} ORDER BY created_at ${newestFirst ? "DESC" : "ASC"}, seq ${newestFirst ? "DESC" : "ASC"}`;
+        if (limit !== undefined || headLimit !== undefined) {
+          params.push(limit ?? headLimit);
+          query += ` LIMIT $${params.length}`;
+        }
+        const result = await this.db.query(query, params);
+        const rows = result.rows.map(rawToEntryRow);
+        if (newestFirst) rows.reverse();
         span.setAttribute("valet.entries.loaded", rows.length);
+        if (!scoped && limit === undefined && headLimit === undefined && opts?.entryIds === undefined) {
+          noteWholeThreadRead("getEntries", sessionId, threadId, rows.length);
+        }
         if (span.isRecording()) {
           span.setAttribute("valet.entries.parts_bytes", rows.reduce(
             (bytes, row) => bytes + (row.parts === null ? 0 : Buffer.byteLength(row.parts, "utf8")), 0,
@@ -672,13 +936,18 @@ export class PgSessionStore implements SessionStore {
     );
   }
 
-  async listDecisionGates(sessionId: string, threadId?: string): Promise<DecisionGate[]> {
-    const result = threadId
-      ? await this.db.query("SELECT * FROM engine_decision_gates WHERE session_id = $1 AND thread_id = $2", [
-          sessionId,
-          threadId,
-        ])
-      : await this.db.query("SELECT * FROM engine_decision_gates WHERE session_id = $1", [sessionId]);
+  async listDecisionGates(sessionId: string, threadId?: string, status?: DecisionGate["status"]): Promise<DecisionGate[]> {
+    const params = [sessionId];
+    const conditions = ["session_id = $1"];
+    if (threadId !== undefined) {
+      params.push(threadId);
+      conditions.push(`thread_id = $${params.length}`);
+    }
+    if (status !== undefined) {
+      params.push(status);
+      conditions.push(`status = $${params.length}`);
+    }
+    const result = await this.db.query(`SELECT * FROM engine_decision_gates WHERE ${conditions.join(" AND ")}`, params);
     return result.rows.map((r) => rowToGate(rawToGateRow(r)));
   }
 
@@ -771,13 +1040,19 @@ export class PgSessionStore implements SessionStore {
     sessionId: string,
     threadId: string,
     item: QueueItem,
-    opts?: { steer?: boolean; maxPending?: number; promoteFromItemId?: string },
+    opts?: SubmissionAdmissionOptions,
   ): Promise<{ item: QueueItem; admitted: boolean; supersededItemIds: string[] }> {
+    item = withoutCarriedInputs(item);
     let deduped: QueueItem | null;
+    let admittedItem: QueueItem | null;
     let supersededItemIds: string[];
     try {
-      ({ deduped, supersededItemIds } = await this.db.transaction(
-        async (tx): Promise<{ deduped: QueueItem | null; supersededItemIds: string[] }> => {
+      ({ deduped, admittedItem, supersededItemIds } = await this.db.transaction(
+        async (tx): Promise<{
+          deduped: QueueItem | null;
+          admittedItem: QueueItem | null;
+          supersededItemIds: string[];
+        }> => {
           // Serialize admissions for this thread. The dispatchId dedup check,
           // pending-cap count, and insert must all observe the same snapshot
           // as a concurrent admission for the same thread — analogous to
@@ -794,27 +1069,83 @@ export class PgSessionStore implements SessionStore {
             );
             const raw = existing.rows[0];
             if (raw) {
-              return { deduped: this.resolveDispatchDedup(raw, item), supersededItemIds: [] };
+              return {
+                deduped: this.resolveDispatchDedup(raw, item),
+                admittedItem: null,
+                supersededItemIds: [],
+              };
             }
           }
 
-          if (opts?.maxPending !== undefined) {
-            const countResult = await tx.query(PENDING_COUNT_SQL, [sessionId, threadId]);
-            const count = toNum(countResult.rows[0]?.count, "count");
+          if (opts?.maxPending !== undefined && opts.steerScope !== "active-origin") {
+            // Count every item the admission leaves live. A full steer
+            // supersedes the items admitted at or before it, except workflow
+            // items (STEER_CANDIDATES_SQL), so it keeps workflow items and
+            // later items. A scoped steer keeps queued siblings, so they all count.
+            const count = opts.steer === true && (opts.steerScope ?? "all") === "all"
+              ? (await tx.query(PENDING_METADATA_SQL, [sessionId, threadId])).rows
+                .filter((row) => toNum(row.created_at, "created_at") > item.createdAt
+                  || steerKeepsSubmission(parseJson<Record<string, unknown>>(typeof row.metadata === "string" ? row.metadata : null) ?? undefined)).length
+              : toNum((await tx.query(PENDING_COUNT_SQL, [sessionId, threadId])).rows[0]?.count, "count");
             if (count >= opts.maxPending) {
               throw new PendingCapError(threadId, opts.maxPending);
             }
           }
 
-          if (opts?.promoteFromItemId) {
-            // Lock the source row so a concurrent claim waits. If the
-            // item is no longer queued, abort before the insert.
-            const source = await tx.query(
-              "SELECT * FROM engine_queue_items WHERE session_id = $1 AND id = $2 FOR UPDATE",
-              [sessionId, opts.promoteFromItemId],
+          const promotionScope = opts?.steerScope === "active-and-source";
+          if (promotionScope && (!opts.steer || !opts.promoteFromItemId)) {
+            throw new ValidationError("Promotion steering requires steer and promoteFromItemId.");
+          }
+          const originScope = opts?.steerScope === "active-origin";
+          const activeScope = opts?.steerScope === "active" || originScope;
+          if (activeScope && (!opts.steer || opts.promoteFromItemId)) {
+            throw new ValidationError("Active steering requires steer and takes no promoteFromItemId.");
+          }
+          const lockScope = promotionScope || activeScope;
+          let lockedPending: QueueItem[] = [];
+          if (lockScope) {
+            // Lock every runnable candidate before inserting the promoted
+            // head. A claim that won first is observed as running and gets
+            // superseded; a claim that lost waits, then sees the new head.
+            const pending = await tx.query(PROMOTION_PENDING_SQL, [sessionId, threadId]);
+            lockedPending = pending.rows.map((raw) =>
+              queueItemRowToItem(rawToQueueItemRow(raw)),
             );
-            const raw = source.rows[0];
-            const srcItem = raw ? queueItemRowToItem(rawToQueueItemRow(raw)) : null;
+          }
+
+          // An input must be in history before its turn can be interrupted.
+          // Otherwise a reply racing startup could erase the first message.
+          const entered = originScope ? await tx.query(
+            "SELECT queue_item_id FROM engine_entries WHERE session_id = $1 AND thread_id = $2 AND queue_item_id = ANY($3::text[]) AND entry_type = 'message' AND role = 'user'",
+            [sessionId, threadId, lockedPending.map(candidate => candidate.id)],
+          ) : { rows: [] };
+          const enteredIds = new Set(entered.rows.map(row => row.queue_item_id));
+          const carried = originScope ? queuedOriginInputs(lockedPending, item) : [];
+          const carriedIds = new Set(carried.map(candidate => candidate.id));
+          const matchingActive = !originScope || (isInteractiveSlackInput(item) && lockedPending.some(candidate =>
+            (candidate.status === "running" || candidate.status === "blocked_on_decision_gate") &&
+            interruptibleBy(candidate, item) && enteredIds.has(candidate.id)));
+          if (originScope && opts?.maxPending !== undefined) {
+            const remaining = lockedPending.length - (matchingActive ? 1 : 0) - carried.length;
+            if (remaining >= opts.maxPending) throw new PendingCapError(threadId, opts.maxPending);
+          }
+          const headScope = promotionScope || (activeScope && matchingActive);
+
+          let promotionSource: QueueItem | undefined;
+          if (opts?.promoteFromItemId) {
+            let srcItem: QueueItem | null | undefined;
+            if (promotionScope) {
+              srcItem = lockedPending.find(
+                (candidate) => candidate.id === opts.promoteFromItemId,
+              );
+            } else {
+              const source = await tx.query(
+                "SELECT * FROM engine_queue_items WHERE session_id = $1 AND id = $2 FOR UPDATE",
+                [sessionId, opts.promoteFromItemId],
+              );
+              const raw = source.rows[0];
+              srcItem = raw ? queueItemRowToItem(rawToQueueItemRow(raw)) : null;
+            }
             if (
               !srcItem ||
               srcItem.threadId !== threadId ||
@@ -825,23 +1156,71 @@ export class PgSessionStore implements SessionStore {
                 "That message is no longer queued. Send a new message, or wait for the current turn to finish.",
               );
             }
+            promotionSource = srcItem;
           }
 
-          await tx.query(INSERT_QUEUE_ITEM_SQL, queueItemInsertParams(sessionId, threadId, item));
+          const queuedCreatedAt = headScope
+            ? lockedPending
+                .filter((candidate) => candidate.status === "queued")
+                .map((candidate) => candidate.createdAt)
+            : [];
+          // Queue order is createdAt + id. Move the successor just ahead
+          // of the oldest queued sibling. A promotion's validated source
+          // guarantees a non-empty set; an active steer with no queued
+          // sibling keeps its time.
+          const promotedCreatedAt = headScope && queuedCreatedAt.length > 0
+            ? Math.min(...queuedCreatedAt) - 1
+            // A correction that carries queued inputs takes the oldest one's
+            // place, so work queued after those inputs does not run first.
+            : carried.length > 0 ? Math.min(...carried.map((candidate) => candidate.createdAt))
+            : item.createdAt;
+          const itemToInsert: QueueItem = { ...item, createdAt: promotedCreatedAt,
+            ...((originScope || promotionSource) ? { metadata: carryInputMetadata(item, carried, promotionSource) } : {}),
+          };
+          await tx.query(
+            INSERT_QUEUE_ITEM_SQL,
+            queueItemInsertParams(sessionId, threadId, itemToInsert),
+          );
 
           const superseded: string[] = [];
           if (opts?.steer) {
-            const candidates = await tx.query(STEER_CANDIDATES_SQL, [sessionId, threadId, item.id, item.createdAt]);
-            const ids = candidates.rows.map(rowId);
+            const ids = lockScope
+              ? lockedPending
+                  .filter(
+                    (candidate) =>
+                      (carriedIds.has(candidate.id) || candidate.id === opts.promoteFromItemId ||
+                      ((candidate.status === "running" ||
+                      candidate.status === "blocked_on_decision_gate") && !steerKeepsSubmission(candidate.metadata))) &&
+                      (!originScope || carriedIds.has(candidate.id) || (matchingActive && interruptibleBy(candidate, item))),
+                  )
+                  .map((candidate) => candidate.id)
+              : (
+                  await tx.query(STEER_CANDIDATES_SQL, [
+                    sessionId,
+                    threadId,
+                    itemToInsert.id,
+                    itemToInsert.createdAt,
+                  ])
+                ).rows
+                  .filter((row) => !steerKeepsSubmission(parseJson<Record<string, unknown>>(typeof row.metadata === "string" ? row.metadata : null) ?? undefined))
+                  .map(rowId);
             if (ids.length > 0) {
               await tx.query(
                 `UPDATE engine_queue_items SET superseded_by_item_id = $1, updated_at = $2 WHERE id = ANY($3::text[])`,
                 [item.id, Date.now(), ids],
               );
+              if (carried.length) {
+                await tx.query(
+                  `UPDATE engine_queue_items SET status = 'settled', outcome = 'superseded',
+                     settle_patch_status = 'skipped', settle_patch_reason = 'no_work'
+                   WHERE session_id = $1 AND thread_id = $2 AND id = ANY($3::text[])`,
+                  [sessionId, threadId, carried.map(candidate => candidate.id)],
+                );
+              }
               superseded.push(...ids);
             }
           }
-          return { deduped: null, supersededItemIds: superseded };
+          return { deduped: null, admittedItem: itemToInsert, supersededItemIds: superseded };
         },
       ));
     } catch (err) {
@@ -871,22 +1250,57 @@ export class PgSessionStore implements SessionStore {
     if (deduped) {
       return { item: deduped, admitted: false, supersededItemIds: [] };
     }
-    return { item: { ...item }, admitted: true, supersededItemIds };
+    return { item: { ...(admittedItem ?? item) }, admitted: true, supersededItemIds };
   }
 
   async claimSubmission(claim: SubmissionClaim): Promise<QueueItem | null> {
     const now = Date.now();
-    const result = await this.db.query(CLAIM_SQL, [
-      claim.attemptId,
-      claim.ownerId,
-      now + (claim.leaseDurationMs ?? DEFAULT_LEASE_MS),
-      now,
-      claim.itemId,
-      claim.sessionId,
-      claim.threadId,
-    ]);
-    if (result.rowCount === 0) return null;
-    return this.getQueueItem(claim.sessionId, claim.itemId);
+    return this.db.transaction(async (tx) => {
+      // Same lock root as steer admission: the thread first, then its items.
+      await tx.query("SELECT id FROM engine_threads WHERE id = $1 FOR UPDATE", [claim.threadId]);
+      const result = await tx.query(`${CLAIM_SQL} RETURNING *`, [
+        claim.attemptId, claim.ownerId, now + (claim.leaseDurationMs ?? DEFAULT_LEASE_MS), now,
+        claim.itemId, claim.sessionId, claim.threadId, SUBMISSION_TIMEOUT_MS,
+      ]);
+      const row = result.rows[0];
+      if (!row) return null;
+      const item = queueItemRowToItem(rawToQueueItemRow(row));
+      const signal = typeof item.content === "object" && item.content !== null && "kind" in item.content && item.content.kind === "signal";
+      const delegation = item.metadata?.parentDelegation;
+      const delegated = delegation !== null && typeof delegation === "object" && !Array.isArray(delegation);
+      // Queue JSON is stored as text so user NUL characters survive. Inspect it in JS, never through a jsonb cast.
+      if (item.childResultDelivery === undefined && (signal || delegated)) {
+        const pending = await tx.query(`UPDATE engine_queue_items SET child_result_delivery = 'pending'
+          WHERE session_id = $1 AND id = $2 AND child_result_delivery IS NULL
+            AND EXISTS (SELECT 1 FROM engine_sessions WHERE id = $1 AND purpose = 'child')
+          RETURNING id`, [claim.sessionId, claim.itemId]);
+        if (pending.rows.length) item.childResultDelivery = "pending";
+      }
+      if (item.metadata?.[INHERIT_TOOL_SCOPE_KEY] === true) {
+        const threads = await tx.query("SELECT * FROM engine_threads WHERE session_id = $1", [claim.sessionId]);
+        const scope = continuationToolScope(item.metadata, threads.rows.map((thread) => rowToThread(rawToThreadRow(thread))));
+        item.metadata = { ...item.metadata, [TOOL_SCOPE_KEY]: scope ?? {} };
+        await tx.query("UPDATE engine_queue_items SET metadata = $1 WHERE session_id = $2 AND id = $3", [jsonOrNull(item.metadata), claim.sessionId, claim.itemId]);
+      }
+      if (item.attemptCount === 1) {
+        const thread = await tx.query("SELECT metadata FROM engine_threads WHERE session_id = $1 AND id = $2", [claim.sessionId, claim.threadId]);
+        const metadata = parseJson<Record<string, unknown>>(asStringOrNull(thread.rows[0]?.metadata, "thread.metadata")) ?? {};
+        if (signal) {
+          item.metadata = { ...item.metadata, [CONTINUATION_SOURCE_ITEM_KEY]: metadata[CONTINUATION_SOURCE_ITEM_KEY] ?? null };
+        } else {
+          item.metadata = { ...item.metadata, [CONTINUATION_SOURCE_ITEM_KEY]: item.id };
+          await tx.query("UPDATE engine_threads SET metadata = $1 WHERE session_id = $2 AND id = $3", [jsonOrNull({ ...metadata, [CONTINUATION_SOURCE_ITEM_KEY]: item.id }), claim.sessionId, claim.threadId]);
+        }
+        await tx.query("UPDATE engine_queue_items SET metadata = $1 WHERE session_id = $2 AND id = $3", [jsonOrNull(item.metadata), claim.sessionId, claim.itemId]);
+      }
+      return item;
+    });
+  }
+
+  async resolveChildResultDelivery(sessionId: string, itemId: string, outcome: "delivered" | "denied"): Promise<void> {
+    await this.db.query(`UPDATE engine_queue_items SET child_result_delivery = $3
+      WHERE session_id = $1 AND id = $2 AND (child_result_delivery IS NULL OR child_result_delivery = 'pending')`,
+      [sessionId, itemId, outcome]);
   }
 
   async replaceSubmissionAttempt(
@@ -978,11 +1392,23 @@ export class PgSessionStore implements SessionStore {
     return result.rows.map((r) => queueItemRowToItem(rawToQueueItemRow(r)));
   }
 
+  async listPendingChildResultsBefore(sessionId: string, cutoff: number): Promise<QueueItem[]> {
+    const result = await this.db.query(`SELECT * FROM engine_queue_items
+      WHERE session_id = $1 AND child_result_delivery = 'pending' AND status = 'settled' AND updated_at < $2 ORDER BY updated_at, id`, [sessionId, cutoff]);
+    return result.rows.map(row => queueItemRowToItem(rawToQueueItemRow(row)));
+  }
+
   async getQueueItem(sessionId: string, itemId: string): Promise<QueueItem | null> {
     const result = await this.db.query("SELECT * FROM engine_queue_items WHERE session_id = $1 AND id = $2", [
       sessionId,
       itemId,
     ]);
+    const raw = result.rows[0];
+    return raw ? queueItemRowToItem(rawToQueueItemRow(raw)) : null;
+  }
+
+  async getQueueItemByDispatchId(sessionId: string, dispatchId: string): Promise<QueueItem | null> {
+    const result = await this.db.query("SELECT * FROM engine_queue_items WHERE session_id = $1 AND dispatch_id = $2", [sessionId, dispatchId]);
     const raw = result.rows[0];
     return raw ? queueItemRowToItem(rawToQueueItemRow(raw)) : null;
   }
@@ -998,7 +1424,23 @@ export class PgSessionStore implements SessionStore {
     return toNumOrNull(result.rows[0]?.latest, "latest");
   }
 
-  async listAllUnsettledSubmissions(): Promise<(QueueItem & { sessionId: string })[]> {
+  async listAllUnsettledSubmissions(sessionIds?: readonly string[]): Promise<(QueueItem & { sessionId: string })[]> {
+    if (sessionIds !== undefined) {
+      const items: (QueueItem & { sessionId: string })[] = [];
+      const ids = [...new Set(sessionIds)];
+      for (let offset = 0; offset < ids.length; offset += 1_000) {
+        const batch = ids.slice(offset, offset + 1_000);
+        const result = await this.db.query(
+          `SELECT * FROM engine_queue_items WHERE status != 'settled' AND session_id IN (${batch.map((_, i) => `$${i + 1}`).join(",")})`,
+          batch,
+        );
+        for (const r of result.rows) {
+          const row = rawToQueueItemRow(r);
+          items.push({ ...queueItemRowToItem(row), sessionId: row.sessionId });
+        }
+      }
+      return items;
+    }
     const result = await this.db.query("SELECT * FROM engine_queue_items WHERE status != 'settled'");
     return result.rows.map((r) => {
       const row = rawToQueueItemRow(r);
@@ -1040,9 +1482,16 @@ export class PgSessionStore implements SessionStore {
     });
   }
 
-  async requestAbort(sessionId: string, threadId?: string): Promise<void> {
+  async requestAbort(sessionId: string, threadId?: string, queueItemId?: string): Promise<void> {
     const now = Date.now();
-    if (threadId) {
+    if (queueItemId) {
+      await this.db.query(
+        `UPDATE engine_queue_items SET abort_requested_at = $1, updated_at = $2
+         WHERE session_id = $3 AND id = $4 AND ($5::text IS NULL OR thread_id = $5)
+           AND status != 'settled' AND abort_requested_at IS NULL`,
+        [now, now, sessionId, queueItemId, threadId ?? null],
+      );
+    } else     if (threadId) {
       await this.db.query(
         `UPDATE engine_queue_items SET abort_requested_at = $1, updated_at = $2
          WHERE session_id = $3 AND thread_id = $4 AND status != 'settled' AND abort_requested_at IS NULL`,
@@ -1055,6 +1504,21 @@ export class PgSessionStore implements SessionStore {
         [now, now, sessionId],
       );
     }
+  }
+
+  async requestAbortActiveSubmission(
+    sessionId: string,
+    threadId: string,
+    queueItemId: string,
+  ): Promise<QueueItem | null> {
+    const result = await this.db.query(ABORT_ACTIVE_SUBMISSION_SQL, [
+      Date.now(),
+      sessionId,
+      threadId,
+      queueItemId,
+    ]);
+    const raw = result.rows[0];
+    return raw ? queueItemRowToItem(rawToQueueItemRow(raw)) : null;
   }
 
   async reserveSettlement(
@@ -1126,7 +1590,7 @@ export class PgSessionStore implements SessionStore {
     threadId: string,
     itemId: string,
     outcome: SubmissionOutcome,
-    opts?: { mergedIntoItemId?: string },
+    opts?: { mergedIntoItemId?: string; onlyIfUnsuperseded?: boolean },
   ): Promise<boolean> {
     const mergedIntoItemId = outcome.outcome === "merged" ? (opts?.mergedIntoItemId ?? null) : null;
     // Never-claimed items definitionally ran no tools — stamp the settle-patch
@@ -1137,8 +1601,9 @@ export class PgSessionStore implements SessionStore {
            merged_into_item_id = COALESCE($3, merged_into_item_id),
            settle_patch_status = 'skipped', settle_patch_reason = 'no_work',
            updated_at = $4
-       WHERE id = $5 AND session_id = $6 AND thread_id = $7 AND status IN ('collecting', 'queued')`,
-      [outcome.outcome, outcome.error ?? null, mergedIntoItemId, Date.now(), itemId, sessionId, threadId],
+       WHERE id = $5 AND session_id = $6 AND thread_id = $7 AND status IN ('collecting', 'queued')
+         AND ($8::boolean IS NOT TRUE OR superseded_by_item_id IS NULL)`,
+      [outcome.outcome, outcome.error ?? null, mergedIntoItemId, Date.now(), itemId, sessionId, threadId, opts?.onlyIfUnsuperseded === true],
     );
     return result.rowCount > 0;
   }
@@ -1234,8 +1699,311 @@ export class PgSessionStore implements SessionStore {
     });
   }
 
-  async deleteSession(id: string): Promise<void> {
+  // === Wakeups and leases (spec 2026-10-08) ===
+
+  async createWakeup(w: Wakeup): Promise<void> {
+    await insertWakeup(this.db, w);
+  }
+
+  async createWakeupWithLease(w: Wakeup, lease: Lease): Promise<void> {
     await this.db.transaction(async (tx) => {
+      await insertLease(tx, lease);
+      await insertWakeup(tx, w);
+    });
+  }
+
+  async countWakeupsByKindAndStatus(statuses: readonly WakeupStatus[]): Promise<WakeupCount[]> {
+    // Rows with an unknown kind or status match no other read (listDueWakeups
+    // filters both), so this read selects them too and counts them in
+    // `valet.wakeups.bad_rows` (fix wave 3, data L4).
+    const r = await this.db.query(
+      `SELECT kind, status, count(*)::int AS n FROM engine_wakeups
+       WHERE status = ANY($1::text[]) OR kind <> ALL($2::text[]) OR status <> ALL($3::text[])
+       GROUP BY kind, status`,
+      [[...statuses], [...WAKEUP_KINDS], [...WAKEUP_STATUSES]],
+    );
+    const out: WakeupCount[] = [];
+    for (const raw of r.rows) {
+      const kind = asString(raw.kind, "kind");
+      const status = asString(raw.status, "status");
+      const n = toNum(raw.n, "n");
+      if (!isWakeupKind(kind) || !isWakeupStatus(status)) {
+        recordWakeupBadRow("engine_wakeups", n);
+        console.error(`store-postgres: ${n} engine_wakeups row(s) have kind "${kind}" and status "${status}", which no read can act on.`);
+        continue;
+      }
+      if (!statuses.includes(status)) continue;
+      out.push({ kind, status, count: n });
+    }
+    return out;
+  }
+
+  async transitionWakeupAndReleaseLease(
+    id: string,
+    from: readonly WakeupStatus[],
+    to: WakeupStatus,
+    patch: WakeupPatch,
+    updatedAt: number,
+    releaseCause: LeaseReleaseCause,
+  ): Promise<Wakeup | null> {
+    // One statement: the CAS and the lease release commit together, so a
+    // crash cannot leave a terminal row with an active lease (fix wave 2, B2).
+    const r = await this.db.query(
+      `WITH t AS (${TRANSITION_SQL} RETURNING *),
+       r AS (UPDATE engine_leases SET released_at = $4, release_cause = $19
+             WHERE id = (SELECT lease_id FROM t) AND released_at IS NULL RETURNING id)
+       SELECT * FROM t`,
+      [...transitionParams(id, from, to, patch, updatedAt), releaseCause],
+    );
+    return r.rows[0] ? rowToWakeup(rawToWakeupRow(r.rows[0])) : null;
+  }
+
+  async getWakeup(id: string): Promise<Wakeup | null> {
+    const r = await this.db.query("SELECT * FROM engine_wakeups WHERE id = $1", [id]);
+    // An unreadable row reads as missing and is counted, like every list
+    // read (fix wave 3, data L4).
+    return mapGoodRows(r.rows, "engine_wakeups", (raw) => rowToWakeup(rawToWakeupRow(raw)))[0] ?? null;
+  }
+
+  async listWakeups(sessionId: string, statuses?: readonly WakeupStatus[]): Promise<Wakeup[]> {
+    const params: unknown[] = [sessionId];
+    let where = "session_id = $1";
+    if (statuses && statuses.length > 0) {
+      params.push([...statuses]);
+      where += ` AND status = ANY($2::text[])`;
+    }
+    const r = await this.db.query(`SELECT * FROM engine_wakeups WHERE ${where} ORDER BY created_at, id`, params);
+    return mapGoodRows(r.rows, "engine_wakeups", (raw) => rowToWakeup(rawToWakeupRow(raw)));
+  }
+
+  async listWakeupsForSessions(sessionIds: readonly string[], statuses?: readonly WakeupStatus[]): Promise<Wakeup[]> {
+    if (sessionIds.length === 0) return [];
+    const params: unknown[] = [[...sessionIds]];
+    let where = "session_id = ANY($1::text[])";
+    if (statuses && statuses.length > 0) {
+      params.push([...statuses]);
+      where += ` AND status = ANY($2::text[])`;
+    }
+    const r = await this.db.query(`SELECT * FROM engine_wakeups WHERE ${where} ORDER BY created_at, id`, params);
+    return mapGoodRows(r.rows, "engine_wakeups", (raw) => rowToWakeup(rawToWakeupRow(raw)));
+  }
+
+  async listDueWakeups(now: number, limit: number, after?: WakeupCursor): Promise<{ rows: Wakeup[]; next: WakeupCursor | null }> {
+    const params: unknown[] = [now, limit];
+    let keyset = "";
+    if (after) {
+      params.push(after.createdAt, after.id);
+      keyset = " AND (created_at, id) > ($3, $4)";
+    }
+    const r = await this.db.query(
+      `SELECT * FROM engine_wakeups
+       WHERE ((status IN ('running','pending') AND kind IN ('process','watch'))
+          OR (status = 'pending' AND kind = 'timer' AND fire_at IS NOT NULL AND fire_at <= $1)
+          OR (kind = 'event' AND status = 'running' AND (COALESCE(event_buffer, '[]') <> '[]' OR deadline_at <= $1)))${keyset}
+       ORDER BY created_at, id LIMIT $2`,
+      params,
+    );
+    // The cursor comes from the last raw row, so an unreadable row that
+    // mapGoodRows skips never makes a full page look short (fix wave 4, data N1).
+    const last = r.rows[r.rows.length - 1];
+    const next = r.rows.length < limit || !last ? null : { createdAt: toNum(last.created_at, "created_at"), id: asString(last.id, "id") };
+    return { rows: mapGoodRows(r.rows, "engine_wakeups", (raw) => rowToWakeup(rawToWakeupRow(raw))), next };
+  }
+
+  async transitionWakeup(
+    id: string,
+    from: readonly WakeupStatus[],
+    to: WakeupStatus,
+    patch: WakeupPatch,
+    updatedAt: number,
+    condition?: { eventBufferEmpty: true },
+  ): Promise<Wakeup | null> {
+    const r = await this.db.query(`${TRANSITION_SQL}${condition?.eventBufferEmpty ? " AND COALESCE(event_buffer, '[]') = '[]'" : ""} RETURNING *`, transitionParams(id, from, to, patch, updatedAt));
+    return r.rows[0] ? rowToWakeup(rawToWakeupRow(r.rows[0])) : null;
+  }
+
+  async findEventWaiters(subjects: readonly string[]): Promise<Wakeup[]> {
+    if (subjects.length === 0) return [];
+    // The partial GIN index engine_wakeups_event_subjects serves this read (INV-E6).
+    const r = await this.db.query(
+      `SELECT * FROM engine_wakeups WHERE kind = 'event' AND status = 'running' AND subjects && $1::text[]
+       ORDER BY created_at, id`,
+      [[...subjects]],
+    );
+    return mapGoodRows(r.rows, "engine_wakeups", (raw) => rowToWakeup(rawToWakeupRow(raw)));
+  }
+
+  async appendEventMatch(id: string, digest: EventMatchDigest, updatedAt: number): Promise<boolean> {
+    // One statement: the kind and status checks, the dedupe checks against
+    // the buffer and the seen list, the cap, and the append commit
+    // together, so two ingests of one event append once (INV-E4). The
+    // outer SELECT reads the row as it was before the UPDATE, so it can
+    // tell a refusal at the cap from the other refusals.
+    const r = await this.db.query(
+      `WITH cur AS (
+         SELECT COALESCE(event_buffer, '[]')::jsonb AS buf, jsonb_array_length(COALESCE(event_seen, '[]')::jsonb) AS delivered_count, (COALESCE(event_seen, '[]')::jsonb || COALESCE(event_source_seen, '[]')::jsonb) AS seen
+           FROM engine_wakeups WHERE id = $1 AND kind = 'event' AND status = 'running'
+       ),
+       u AS (
+         UPDATE engine_wakeups
+            SET event_buffer = (COALESCE(event_buffer, '[]')::jsonb || jsonb_build_array($2::jsonb))::text,
+                updated_at = $3
+          WHERE id = $1 AND kind = 'event' AND status = 'running'
+            AND jsonb_array_length(COALESCE(event_buffer, '[]')::jsonb) <
+                CASE WHEN match_json::jsonb ? 'childSessionId' AND $2::jsonb->>'key' = 'child.settled' THEN $4 - 10 ELSE $4 END
+            AND ($2::jsonb ? 'derive' OR jsonb_array_length(COALESCE(event_seen, '[]')::jsonb) +
+                 (SELECT count(*) FROM jsonb_array_elements(COALESCE(event_buffer, '[]')::jsonb) e WHERE NOT e ? 'derive') < $5)
+            AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(event_buffer, '[]')::jsonb) e
+                             WHERE e->>'dedupeKey' = $2::jsonb->>'dedupeKey')
+            AND NOT (COALESCE(event_seen, '[]')::jsonb || COALESCE(event_source_seen, '[]')::jsonb) @> jsonb_build_array($2::jsonb->'dedupeKey')
+         RETURNING id
+       )
+       SELECT EXISTS (SELECT 1 FROM u) AS appended,
+              EXISTS (SELECT 1 FROM cur
+                       WHERE jsonb_array_length(cur.buf) >= $4
+                         AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(cur.buf) e
+                                          WHERE e->>'dedupeKey' = $2::jsonb->>'dedupeKey')
+                         AND NOT cur.seen @> jsonb_build_array($2::jsonb->'dedupeKey')) AS full,
+              EXISTS (SELECT 1 FROM cur WHERE NOT $2::jsonb ? 'derive' AND cur.delivered_count +
+                (SELECT count(*) FROM jsonb_array_elements(cur.buf) e WHERE NOT e ? 'derive') >= $5) AS exhausted`,
+      [id, JSON.stringify(boundEventDigest(digest)), updatedAt, EVENT_BUFFER_MAX_DIGESTS, EVENT_DELIVERED_MAX_KEYS],
+    );
+    const row = r.rows[0];
+    if (row?.appended === true) return true;
+    if (row?.full === true) recordEventWaiterBufferFull();
+    if (row?.exhausted === true) console.warn("Event waiter output budget exhausted; create a new waiter for more outputs", { waiterId: id });
+    return false;
+  }
+
+  async removeEventMatches(id: string, dedupeKeys: readonly string[], updatedAt: number, mode: "delivered" | "source" = "delivered"): Promise<boolean> {
+    // Column names come only from this closed choice, never from caller input.
+    const seenColumn = mode === "source" ? "event_source_seen" : "event_seen";
+    // One statement preserves concurrent appends and records replay state.
+    const keys = [...new Set(dedupeKeys)];
+    const r = await this.db.query(
+      `UPDATE engine_wakeups
+          SET event_buffer = (
+                SELECT COALESCE(jsonb_agg(b.e ORDER BY b.ord), '[]'::jsonb)::text
+                  FROM jsonb_array_elements(COALESCE(event_buffer, '[]')::jsonb) WITH ORDINALITY AS b(e, ord)
+                 WHERE NOT (b.e->>'dedupeKey' = ANY($2::text[]))),
+              ${seenColumn} = (
+                SELECT COALESCE(jsonb_agg(k.key ORDER BY k.pos), '[]'::jsonb)::text
+                  FROM (SELECT a.key, a.pos, row_number() OVER (ORDER BY a.pos DESC) AS rn
+                          FROM (SELECT s.key, s.ord AS pos
+                                  FROM jsonb_array_elements_text(COALESCE(${seenColumn}, '[]')::jsonb) WITH ORDINALITY AS s(key, ord)
+                                 WHERE NOT (s.key = ANY($2::text[]))
+                                UNION ALL
+                                SELECT n.key, 1000000000 + n.ord
+                                  FROM unnest($2::text[]) WITH ORDINALITY AS n(key, ord)) a) k
+                 WHERE ($4::integer IS NULL OR k.rn <= $4)),
+              updated_at = $3
+        WHERE id = $1 AND kind = 'event'
+          AND ($4::integer IS NOT NULL OR
+            (SELECT count(*) FROM jsonb_array_elements_text(COALESCE(event_seen, '[]')::jsonb) s(key) WHERE NOT s.key = ANY($2::text[])) + cardinality($2::text[])
+              <= GREATEST($5, jsonb_array_length(COALESCE(event_seen, '[]')::jsonb)))
+       RETURNING id`,
+      [id, keys, updatedAt, mode === "source" ? EVENT_SOURCE_SEEN_MAX_KEYS : null, EVENT_DELIVERED_MAX_KEYS],
+    );
+    return r.rows.length > 0;
+  }
+
+  async createLease(lease: Lease): Promise<void> {
+    await insertLease(this.db, lease);
+  }
+
+  async claimTerminalSignalLoss(sessionId: string, id: string, admissionAt: number): Promise<boolean> {
+    const sql = id.startsWith("wk_")
+      ? `UPDATE engine_wakeups SET terminal_signal_loss_reported_at = ended_at
+        WHERE session_id = $1 AND id = $2 AND terminal_signal_expected
+          AND status IN ('done', 'expired', 'lost', 'cancelled') AND ended_at IS NOT NULL
+          AND GREATEST(terminal_signal_started_at, ended_at) = $3
+          AND terminal_signal_loss_reported_at IS DISTINCT FROM ended_at RETURNING id`
+      : id.startsWith("ls_")
+        ? `UPDATE engine_leases SET terminal_signal_loss_reported_at = released_at
+          WHERE session_id = $1 AND id = $2 AND owner_kind = 'hold' AND terminal_signal_expected AND released_at IS NOT NULL
+            AND GREATEST(terminal_signal_started_at, released_at) = $3
+            AND terminal_signal_loss_reported_at IS DISTINCT FROM released_at RETURNING id`
+        : undefined;
+    if (!sql) return false;
+    return (await this.db.query(sql, [sessionId, id, admissionAt])).rows.length > 0;
+  }
+
+  async startTerminalSignalAdmission(sessionId: string, id: string, startedAt: number): Promise<void> {
+    if (id.startsWith("wk_")) {
+      await this.db.query(`UPDATE engine_wakeups SET terminal_signal_started_at = $3
+        WHERE session_id = $1 AND id = $2 AND status = 'cancelled' AND terminal_signal_expected
+          AND (terminal_signal_started_at IS NULL OR terminal_signal_started_at < ended_at)`, [sessionId, id, startedAt]);
+    } else if (id.startsWith("ls_")) {
+      await this.db.query(`UPDATE engine_leases SET terminal_signal_started_at = $3
+        WHERE session_id = $1 AND id = $2 AND released_at IS NOT NULL AND release_cause = 'cancelled'
+          AND terminal_signal_expected AND terminal_signal_started_at IS NULL`, [sessionId, id, startedAt]);
+    }
+  }
+
+  async releaseLease(id: string, cause: LeaseReleaseCause, releasedAt: number, opts?: { terminalSignalExpected: true }): Promise<Lease | null> {
+    const r = await this.db.query(
+      `UPDATE engine_leases SET released_at = $2, release_cause = $3, terminal_signal_expected = $4 WHERE id = $1 AND released_at IS NULL RETURNING *`,
+      [id, releasedAt, cause, opts?.terminalSignalExpected ?? false],
+    );
+    return r.rows[0] ? rowToLease(rawToLeaseRow(r.rows[0])) : null;
+  }
+
+  async getLease(id: string): Promise<Lease | null> {
+    const r = await this.db.query("SELECT * FROM engine_leases WHERE id = $1", [id]);
+    return mapGoodRows(r.rows, "engine_leases", (raw) => rowToLease(rawToLeaseRow(raw)))[0] ?? null;
+  }
+
+  async deleteWakeupRows(sessionId: string, rows: { wakeupId?: string; leaseId?: string }): Promise<void> {
+    if (rows.wakeupId !== undefined) {
+      await this.db.query("DELETE FROM engine_wakeups WHERE session_id = $1 AND id = $2", [sessionId, rows.wakeupId]);
+    }
+    if (rows.leaseId !== undefined) {
+      await this.db.query("DELETE FROM engine_leases WHERE session_id = $1 AND id = $2", [sessionId, rows.leaseId]);
+    }
+  }
+
+  async listLeases(sessionId: string): Promise<Lease[]> {
+    const r = await this.db.query("SELECT * FROM engine_leases WHERE session_id = $1 ORDER BY created_at, id", [sessionId]);
+    return mapGoodRows(r.rows, "engine_leases", raw => rowToLease(rawToLeaseRow(raw)));
+  }
+
+  async listActiveLeases(sessionId: string): Promise<Lease[]> {
+    const r = await this.db.query(
+      `SELECT * FROM engine_leases WHERE session_id = $1 AND released_at IS NULL ORDER BY created_at, id`,
+      [sessionId],
+    );
+    return mapGoodRows(r.rows, "engine_leases", (raw) => rowToLease(rawToLeaseRow(raw)));
+  }
+
+  async listAllActiveLeases(): Promise<Lease[]> {
+    const r = await this.db.query(`SELECT * FROM engine_leases WHERE released_at IS NULL ORDER BY created_at, id`);
+    return mapGoodRows(r.rows, "engine_leases", (raw) => rowToLease(rawToLeaseRow(raw)));
+  }
+
+  async countActiveLeases(sessionId: string): Promise<number> {
+    const r = await this.db.query(
+      `SELECT count(*)::int AS n FROM engine_leases WHERE session_id = $1 AND released_at IS NULL`,
+      [sessionId],
+    );
+    return toNum(r.rows[0]?.n, "n");
+  }
+
+  async setLeaseSandboxId(id: string, sandboxId: string): Promise<boolean> {
+    const r = await this.db.query(
+      `UPDATE engine_leases SET sandbox_id = $2 WHERE id = $1 AND released_at IS NULL AND sandbox_id IS NULL RETURNING id`,
+      [id, sandboxId],
+    );
+    return r.rows.length > 0;
+  }
+
+  async deleteSession(id: string): Promise<void> {
+    const ended = await this.db.transaction(async (tx) => {
+      // A deleted session has no sandbox left to probe, so its open wakeups
+      // end here (spec C2). The rows hold the command, the prompt, and a
+      // log tail, so they go with the rest of the session (fix wave 2, M12).
+      // The watcher reads a missing row as a lost CAS.
+      const wakeups = await tx.query(`DELETE FROM engine_wakeups WHERE session_id = $1 RETURNING kind, status`, [id]);
+      await tx.query(`DELETE FROM engine_leases WHERE session_id = $1`, [id]);
       // Lock every queue-item row of the session before deleting so a
       // concurrent single-statement CAS (claimSubmission, settleUnclaimed,
       // etc.) either lands before this transaction opens or blocks until it
@@ -1253,8 +2021,163 @@ export class PgSessionStore implements SessionStore {
       await tx.query("DELETE FROM engine_threads WHERE session_id = $1", [id]);
       await tx.query("DELETE FROM engine_events WHERE session_id = $1", [id]);
       await tx.query("DELETE FROM engine_sessions WHERE id = $1", [id]);
+      return wakeups.rows;
     });
+    // Count after the commit: a rolled-back delete ended nothing.
+    for (const raw of ended) {
+      const kind = asString(raw.kind, "kind");
+      const status = asString(raw.status, "status");
+      if (isWakeupKind(kind) && (status === "pending" || status === "running")) {
+        recordWakeupEnded(kind, "session_deleted");
+      }
+    }
   }
+}
+
+/**
+ * The wakeup CAS, shared by `transitionWakeup` and
+ * `transitionWakeupAndReleaseLease`. `COALESCE` keeps a column the patch
+ * does not set. Parameters come from `transitionParams`.
+ */
+const TRANSITION_SQL = `UPDATE engine_wakeups SET status = $3, updated_at = $4,
+         cause = COALESCE($5, cause), exit_code = COALESCE($6, exit_code), ended_at = COALESCE($7, ended_at),
+         log_offset = COALESCE($8, log_offset), log_tail = COALESCE($9, log_tail), event_count = COALESCE($10, event_count),
+         exec_id = COALESCE($11, exec_id), lease_id = COALESCE($12, lease_id),
+         window_start_at = COALESCE($13, window_start_at), window_count = COALESCE($14, window_count),
+         watch_buffer = COALESCE($15, watch_buffer), last_emit_at = COALESCE($16, last_emit_at),
+         event_buffer = COALESCE($17, event_buffer),
+         terminal_signal_expected = COALESCE($18, terminal_signal_expected)
+       WHERE id = $1 AND status = ANY($2::text[])`;
+
+function transitionParams(
+  id: string,
+  from: readonly WakeupStatus[],
+  to: WakeupStatus,
+  patch: WakeupPatch,
+  updatedAt: number,
+): unknown[] {
+  return [
+    id,
+    [...from],
+    to,
+    updatedAt,
+    patch.cause ?? null,
+    patch.exitCode ?? null,
+    patch.endedAt ?? null,
+    patch.logOffset ?? null,
+    patch.logTail ?? null,
+    patch.eventCount ?? null,
+    patch.execId ?? null,
+    patch.leaseId ?? null,
+    patch.windowStartAt ?? null,
+    patch.windowCount ?? null,
+    patch.watchBuffer ?? null,
+    patch.lastEmitAt ?? null,
+    jsonOrNull(patch.eventBuffer),
+    patch.terminalSignalExpected ?? null,
+  ];
+}
+
+async function insertWakeup(db: PgQueryable, w: Wakeup): Promise<void> {
+  await db.query(
+    `INSERT INTO engine_wakeups (id, session_id, thread_id, kind, status, reason, command, prompt, exec_id, lease_id,
+       fire_at, deadline_at, exit_code, cause, log_offset, log_tail, event_count, created_at, updated_at, ended_at,
+       origin_json, window_start_at, window_count, watch_buffer, last_emit_at, match_json, subjects, event_buffer,
+       event_seen, event_source_seen, terminal_signal_expected, terminal_signal_started_at, terminal_signal_loss_reported_at, source_queue_item_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34)`,
+    [
+      w.id,
+      w.sessionId,
+      w.threadId,
+      w.kind,
+      w.status,
+      w.reason,
+      w.command ?? null,
+      w.prompt ?? null,
+      w.execId ?? null,
+      w.leaseId ?? null,
+      w.fireAt ?? null,
+      w.deadlineAt ?? null,
+      w.exitCode ?? null,
+      w.cause ?? null,
+      w.logOffset,
+      w.logTail,
+      w.eventCount,
+      w.createdAt,
+      w.updatedAt,
+      w.endedAt ?? null,
+      jsonOrNull(w.origin),
+      w.windowStartAt ?? null,
+      w.windowCount ?? null,
+      w.watchBuffer ?? null,
+      w.lastEmitAt ?? null,
+      jsonOrNull(w.eventMatch),
+      w.subjects ? [...w.subjects] : null,
+      jsonOrNull(w.eventBuffer),
+      jsonOrNull(w.eventSeen),
+      jsonOrNull(w.eventSourceSeen),
+      w.terminalSignalExpected ?? false,
+      w.terminalSignalStartedAt ?? null,
+      w.terminalSignalLossReportedAt ?? null,
+      w.sourceQueueItemId ?? null,
+    ],
+  );
+}
+
+async function insertLease(db: PgQueryable, lease: Lease): Promise<void> {
+  await db.query(
+    `INSERT INTO engine_leases (id, session_id, sandbox_id, owner_kind, owner_id, reason, created_at, deadline_at,
+       released_at, release_cause, thread_id, origin_json, terminal_signal_expected, terminal_signal_started_at, terminal_signal_loss_reported_at, source_queue_item_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+    [
+      lease.id,
+      lease.sessionId,
+      lease.sandboxId ?? null,
+      lease.ownerKind,
+      lease.ownerId ?? null,
+      lease.reason,
+      lease.createdAt,
+      lease.deadlineAt,
+      lease.releasedAt ?? null,
+      lease.releaseCause ?? null,
+      lease.threadId ?? null,
+      jsonOrNull(lease.origin),
+      lease.terminalSignalExpected ?? false,
+      lease.terminalSignalStartedAt ?? null,
+      lease.terminalSignalLossReportedAt ?? null,
+      lease.sourceQueueItemId ?? null,
+    ],
+  );
+}
+
+/**
+ * Maps rows one by one. A row that fails to narrow (an unknown enum from a
+ * hand edit or a rolled-back release) is skipped and counted in
+ * `valet.wakeups.bad_rows`, so one bad row never stops the whole sweep
+ * (fix wave 2, M5). The count pages a human; the row stays for them.
+ */
+function mapGoodRows<T>(rows: Record<string, unknown>[], table: "engine_wakeups" | "engine_leases", map: (raw: Record<string, unknown>) => T): T[] {
+  const out: T[] = [];
+  for (const raw of rows) {
+    try {
+      out.push(map(raw));
+    } catch (err) {
+      recordWakeupBadRow(table);
+      console.error(`store-postgres: skipped unreadable ${table} row ${JSON.stringify(raw.id)}:`, err);
+    }
+  }
+  return out;
+}
+
+const WAKEUP_KINDS: readonly WakeupKind[] = ["process", "watch", "timer", "event"];
+const WAKEUP_STATUSES: readonly WakeupStatus[] = ["pending", "running", "done", "cancelled", "expired", "lost"];
+
+function isWakeupKind(v: string): v is WakeupKind {
+  return WAKEUP_KINDS.some((k) => k === v);
+}
+
+function isWakeupStatus(v: string): v is WakeupStatus {
+  return WAKEUP_STATUSES.some((s) => s === v);
 }
 
 function rowToSession(r: SessionRow): SessionData {

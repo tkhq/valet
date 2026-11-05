@@ -39,6 +39,7 @@ describe("toRunCheckpoint — thread id", () => {
     );
     expect(wire.sessionId).toBe("assistant:asst_1");
     expect(wire.threadId).toBe("thr_run_1");
+    expect(wire.queueItemId).toBe("q_1");
   });
 
   it("omits it for a node that dispatched nothing", () => {
@@ -54,11 +55,22 @@ describe("toRunCheckpoint — thread id", () => {
     expect(toRunCheckpoint(checkpoint({ receipt: null })).threadId).toBeUndefined();
     expect(toRunCheckpoint(checkpoint({ receipt: { threadId: 7 } })).threadId).toBeUndefined();
     expect(toRunCheckpoint(checkpoint({ receipt: {} })).threadId).toBeUndefined();
+    expect(toRunCheckpoint(checkpoint({ receipt: { queueItemId: 7 } })).queueItemId).toBeUndefined();
   });
 
   it("keeps childRunId independent of the receipt", () => {
     const wire = toRunCheckpoint(checkpoint({ childRunId: "wfrun_child" }));
     expect(wire.childRunId).toBe("wfrun_child");
     expect(wire.threadId).toBeUndefined();
+  });
+});
+
+describe("toRunCheckpoint — step timing", () => {
+  it("passes the start through and marks a step a retry reused", () => {
+    const ran = toRunCheckpoint({ ...checkpoint(undefined), startedAt: 1_000, createdAt: 4_000 });
+    expect(ran).toMatchObject({ startedAt: 1_000, createdAt: 4_000 });
+    expect(ran.reused).toBeUndefined();
+    // A retry seeds the steps it reuses as attempt 0.
+    expect(toRunCheckpoint({ ...checkpoint(undefined), attempt: 0 }).reused).toBe(true);
   });
 });

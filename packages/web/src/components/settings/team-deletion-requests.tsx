@@ -4,76 +4,91 @@ import { useEffect, useState } from "react";
 import type { TeamDeletionRequestSummary } from "@valet/api/wire";
 import { useMe } from "~/api/settings";
 import { useDecideTeamDeletionRequest, useSubmitTeamDeletionRequest, useTeamDeletionRequests, useTeamDeletionTargets } from "~/api/team-deletion-requests";
-import { Button, ConfirmDialog, ErrorRow, Input, LoadingRow, SelectMenu } from "~/components/primitives";
+import { Badge, type BadgeProps, Button, ConfirmDialog, Dialog, DialogContent, DialogFooter, EmptyRow, ErrorRow, Input, LoadingRow, SelectMenu, WorkList, WorkRow } from "~/components/primitives";
+import { SubSection } from "./section";
 import { errorText } from "~/lib/error-text";
 
-export function TeamDeletionRequests({ teamId, canManage }: { teamId: string; canManage: boolean }) {
-  return <ScopedDeletionRequests key={teamId} teamId={teamId} canManage={canManage} />;
+/** One list, newest first: a filter over a list that is almost always short only hides rows. */
+const STATUS_VARIANT: Partial<Record<TeamDeletionRequestSummary["status"], BadgeProps["variant"]>> = { pending: "warning", approved: "success" };
+
+interface Props {
+  teamId: string;
+  canManage: boolean;
+  /** The open request form's target key: "" before a pick, null when closed.
+   * The team menu sets it to open the form on the team itself. */
+  request?: string | null;
+  onRequestChange?: (request: string | null) => void;
 }
 
-function ScopedDeletionRequests({ teamId, canManage }: { teamId: string; canManage: boolean }) {
+export function TeamDeletionRequests(props: Props) {
+  // The key drops drafts, dialogs, and pages when the team changes.
+  return <ScopedDeletionRequests key={props.teamId} {...props} />;
+}
+
+function ScopedDeletionRequests({ teamId, canManage, request, onRequestChange }: Props) {
   const me = useMe();
-  const [status, setStatus] = useState<"pending" | "history" | "all">("pending");
   const [cursors, setCursors] = useState<string[]>([]);
-  const requests = useTeamDeletionRequests(teamId, { status, limit: 50, cursor: currentCursor(cursors) });
+  const requests = useTeamDeletionRequests(teamId, { status: "all", limit: 50, cursor: currentCursor(cursors) });
   const targets = useTeamDeletionTargets(teamId);
   const submit = useSubmitTeamDeletionRequest(teamId);
   const decide = useDecideTeamDeletionRequest(teamId);
-  const [selected, setSelected] = useState("");
+  const [localRequest, setLocalRequest] = useState<string | null>(null);
+  const selected = request === undefined ? localRequest : request;
+  const setSelected = onRequestChange ?? setLocalRequest;
   const [reason, setReason] = useState("");
   const [note, setNote] = useState("");
   const [confirmation, setConfirmation] = useState<{ row: TeamDeletionRequestSummary; decision: "approve" | "decline" | "withdraw" } | null>(null);
   const readable = requests.isSuccess && !requests.error;
   useEffect(() => {
-    setSelected(""); setReason(""); setNote(""); setConfirmation(null);
-  }, [teamId]);
-  useEffect(() => {
     if (!canManage) setConfirmation((current) => current?.decision === "withdraw" ? current : null);
   }, [canManage]);
   useEffect(() => { if (!readable) setConfirmation(null); }, [readable]);
   const target = targets.data?.targets.find((t) => `${t.resourceType}:${t.resourceId}` === selected);
-  return <section aria-label="Deletion requests" className="space-y-2 py-2">
-    <h4 className="text-xs font-medium uppercase tracking-wide text-muted">Deletion requests</h4>
-    <p className="text-xs text-muted">Ask a team admin to delete a shared resource. Requests expire after 14 days.</p>
-    <SelectMenu<"pending" | "history" | "all"> ariaLabel="Deletion request status" value={status}
-      options={[{ value: "pending", label: "Pending" }, { value: "history", label: "History" }, { value: "all", label: "All requests" }]}
-      onChange={(value) => { setStatus(value); setCursors([]); setConfirmation(null); }} />
+  const closeRequest = () => { setSelected(null); setReason(""); };
+  return <SubSection title="Deletion requests" description="Ask a team admin to delete a shared resource."
+    actions={<Button variant="secondary" size="sm" disabled={!readable} onClick={() => { submit.reset(); setSelected(""); }}>Request deletion…</Button>}>
     {requests.isPending ? <LoadingRow label="Loading deletion requests…" /> : requests.error ?
       <ErrorRow>Could not load deletion requests. <Button onClick={() => void requests.refetch()}>Retry</Button></ErrorRow> :
-      <ul className="space-y-2">{requests.data.requests.length === 0 && <li className="text-xs text-muted">No deletion requests.</li>}
-        {requests.data.requests.map((row) => <li key={row.id} className="rounded border border-line p-2 text-xs">
-          <p>{row.resourceLabel} ({resourceTypeLabel(row.resourceType)}) — {row.status}</p>
-          <p className="text-muted">Requested by {row.requesterName} on {new Date(row.requestedAt).toLocaleDateString()}{!row.requesterIsMember && " (no longer a team member)"}</p>
-          {row.reason && <p>{row.reason}</p>}{row.decisionNote && <p>{row.decisionNote}</p>}
-          {row.lastRefusal && <ErrorRow>{row.lastRefusal}</ErrorRow>}
-          {row.status === "pending" && <div className="mt-1 flex gap-2">
-            {canManage && (["approve", "decline"] as const).map((decision) => <Button key={decision} size="sm" disabled={decide.isPending}
-              onClick={() => { decide.reset(); setNote(""); setConfirmation({ row, decision }); }}>{decision === "approve" ? "Approve" : "Decline"}</Button>)}
-            {row.requestedBy === me.data?.id && <Button size="sm" disabled={decide.isPending} onClick={() => { decide.reset(); setNote(""); setConfirmation({ row, decision: "withdraw" }); }}>Withdraw</Button>}
-          </div>}
-        </li>)}
-      </ul>}
+      requests.data.requests.length === 0 ? <EmptyRow className="py-0">No deletion requests.</EmptyRow> :
+      <WorkList>{requests.data.requests.map((row) => <WorkRow key={row.id} title={row.resourceLabel} time={row.requestedAt}
+        badge={<Badge variant={STATUS_VARIANT[row.status] ?? "neutral"} className="capitalize">{row.status}</Badge>}
+        detail={<>
+          {resourceTypeLabel(row.resourceType)} · Requested by {row.requesterName}{!row.requesterIsMember && " (no longer a team member)"}
+          {row.reason && <span className="block">{row.reason}</span>}
+          {row.decisionNote && <span className="block">{row.decisionNote}</span>}
+          {row.lastRefusal && <span role="alert" className="block text-danger-500">{row.lastRefusal}</span>}
+        </>}
+        actions={row.status === "pending" && <>
+          {canManage && (["approve", "decline"] as const).map((decision) => <Button key={decision} variant="secondary" size="sm" disabled={decide.isPending}
+            onClick={() => { decide.reset(); setNote(""); setConfirmation({ row, decision }); }}>{decision === "approve" ? "Approve" : "Decline"}</Button>)}
+          {row.requestedBy === me.data?.id && <Button variant="secondary" size="sm" disabled={decide.isPending} onClick={() => { decide.reset(); setNote(""); setConfirmation({ row, decision: "withdraw" }); }}>Withdraw</Button>}
+        </>} />)}
+      </WorkList>}
     <Pager label="deletion requests" page={pageNumber(cursors)} hasPrevious={cursors.length > 0}
       hasNext={readable && requests.data?.nextCursor != null} busy={requests.isFetching}
       onPrevious={() => { setConfirmation(null); setCursors(popCursor(cursors)); }}
       onNext={() => {
         if (readable && requests.data?.nextCursor) { setConfirmation(null); setCursors(pushCursor(cursors, requests.data.nextCursor)); }
       }} />
-    {targets.isPending ? <LoadingRow label="Loading team resources…" /> : targets.error ?
-      <ErrorRow>Could not load team resources. <Button onClick={() => void targets.refetch()}>Retry resources</Button></ErrorRow> :
-      <div className="flex flex-wrap gap-2">
-        <SelectMenu ariaLabel="Resource to delete" value={selected}
-          disabled={submit.isPending || !readable || targets.data.targets.length === 0}
-          triggerLabel={target ? `${target.label} (${resourceTypeLabel(target.resourceType)})` : "Choose a team resource"}
-          options={targets.data.targets.map((item) => ({ value: `${item.resourceType}:${item.resourceId}`, label: `${item.label} (${resourceTypeLabel(item.resourceType)})` }))}
-          onChange={setSelected} />
-        {targets.data.targets.length === 0 && <p className="text-xs text-muted">No resources are available for deletion requests.</p>}
-        <Input aria-label="Deletion reason" placeholder="Reason (optional)" maxLength={2000} value={reason} disabled={submit.isPending || !readable} onChange={(e) => setReason(e.target.value)} />
-        <Button size="sm" disabled={!target || submit.isPending || !readable} onClick={() => {
-          if (target) submit.mutate({ resourceType: target.resourceType, resourceId: target.resourceId, reason }, { onSuccess: () => { setSelected(""); setReason(""); } });
-        }}>Request deletion</Button>
-      </div>}
-    {submit.error && <ErrorRow>{errorText(submit.error)}</ErrorRow>}
+    <Dialog open={selected !== null} onOpenChange={(open) => { if (!open) closeRequest(); }}>
+      <DialogContent title="Request deletion" description="A team admin reviews the request. Requests expire after 14 days.">
+        {targets.isPending ? <LoadingRow label="Loading team resources…" /> : targets.error ?
+          <ErrorRow>Could not load team resources. <Button onClick={() => void targets.refetch()}>Retry resources</Button></ErrorRow> :
+          targets.data.targets.length === 0 ? <p className="text-sm text-muted">No resources are available for deletion requests.</p> :
+          <SelectMenu ariaLabel="Resource to delete" value={selected ?? ""} disabled={submit.isPending} triggerClassName="w-full justify-start"
+            triggerLabel={target ? `${target.label} (${resourceTypeLabel(target.resourceType)})` : "Choose a team resource"}
+            options={targets.data.targets.map((item) => ({ value: `${item.resourceType}:${item.resourceId}`, label: `${item.label} (${resourceTypeLabel(item.resourceType)})` }))}
+            onChange={setSelected} />}
+        <Input aria-label="Deletion reason" placeholder="Reason (optional)" maxLength={2000} value={reason} disabled={submit.isPending} onChange={(e) => setReason(e.target.value)} />
+        {submit.error && <ErrorRow className="py-0">{errorText(submit.error)}</ErrorRow>}
+        <DialogFooter>
+          <Button variant="secondary" onClick={closeRequest}>Cancel</Button>
+          <Button disabled={!target || submit.isPending || !readable} onClick={() => {
+            if (target) submit.mutate({ resourceType: target.resourceType, resourceId: target.resourceId, reason }, { onSuccess: closeRequest });
+          }}>Request deletion</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
     {confirmation && <ConfirmDialog open={readable && (confirmation.decision === "withdraw" || canManage)} onOpenChange={(open) => { if (!open) setConfirmation(null); }}
       title={`${confirmation.decision === "approve" ? "Approve deletion of" : confirmation.decision === "decline" ? "Decline deletion of" : "Withdraw request for"} ${confirmation.row.resourceLabel}?`}
       description={confirmation.decision === "approve" ? "Approval deletes this resource for everyone on the team. If it is still in use, the request stays open and explains what to resolve first. Deletion cannot be undone." : "This closes the request without deleting the resource."}
@@ -82,7 +97,7 @@ function ScopedDeletionRequests({ teamId, canManage }: { teamId: string; canMana
       onConfirm={() => decide.mutate({ id: confirmation.row.id, decision: confirmation.decision, note }, { onSuccess: () => setConfirmation(null) })} >
       <Input aria-label="Decision note" placeholder="Decision note (optional)" maxLength={2000} disabled={decide.isPending} value={note} onChange={(e) => setNote(e.target.value)} />
     </ConfirmDialog>}
-  </section>;
+  </SubSection>;
 }
 
 function resourceTypeLabel(type: TeamDeletionRequestSummary["resourceType"]): string {

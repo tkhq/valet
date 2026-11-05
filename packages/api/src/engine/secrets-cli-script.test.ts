@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { RESERVED_CREDENTIAL_LABELS } from "@valet/shared";
 import { commandWrapperScript, secretsCliScript } from "./secrets-cli-script.js";
 
 // The constant is generated from a shell source with two placeholders. A
@@ -41,6 +42,12 @@ describe("commandWrapperScript", () => {
     for (const cmd of [
       { command: "stripe", env: "STRIPE_API_KEY", reference: "op://Eng/Stripe/secret key" },
       { command: "aws", env: "AWS_SECRET_ACCESS_KEY", credential: "aws" },
+      {
+        command: "admin",
+        env: "ADMIN_TOKEN",
+        reference: "op://Sec/Admin/token",
+        launcher: true,
+      },
     ]) {
       const file = write(commandWrapperScript(cmd));
       const parsed = spawnSync("sh", ["-n", file], { encoding: "utf8" });
@@ -77,6 +84,55 @@ describe("commandWrapperScript", () => {
     expect(run.stdout.trim()).toBe("ran-real");
     expect(run.status).toBe(0);
   });
+
+  it("launches the command in its arguments for a security credential", () => {
+    const dir = mkdtempSync(join(tmpdir(), "valet-launcher-"));
+    writeFileSync(
+      join(dir, "valet-secrets"),
+      "#!/bin/sh\nprintf '%s\\n' \"$@\"\n",
+      { mode: 0o755 },
+    );
+    const file = write(
+      commandWrapperScript({
+        command: "admin",
+        env: "ADMIN_TOKEN",
+        reference: "op://Sec/Admin/token",
+        launcher: true,
+      }),
+    );
+    const run = spawnSync("sh", [file, "curl", "https://api.example.com"], {
+      encoding: "utf8",
+      env: { PATH: `${dir}:/usr/bin:/bin` },
+    });
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain(
+      "run\n--env\nADMIN_TOKEN=op://Sec/Admin/token\n--\ncurl\nhttps://api.example.com\n",
+    );
+  });
+
+  it("resolves an mTLS key and certificate in the same launcher invocation", () => {
+    const dir = mkdtempSync(join(tmpdir(), "valet-mtls-"));
+    writeFileSync(join(dir, "valet-secrets"), "#!/bin/sh\nprintf '%s\\n' \"$@\"\n", {
+      mode: 0o755,
+    });
+    const file = write(
+      commandWrapperScript({
+        command: "partner-api",
+        env: "CLIENT_KEY",
+        reference: "op://Sec/Partner/key",
+        additionalEnv: [{ env: "CLIENT_KEY_CERT", reference: "op://Sec/Partner/cert" }],
+        launcher: true,
+      }),
+    );
+    const run = spawnSync("sh", [file, "curl", "https://partner.example"], {
+      encoding: "utf8",
+      env: { PATH: `${dir}:/usr/bin:/bin` },
+    });
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain(
+      "--env\nCLIENT_KEY=op://Sec/Partner/key\n--env\nCLIENT_KEY_CERT=op://Sec/Partner/cert\n--\ncurl\nhttps://partner.example\n",
+    );
+  });
 });
 
 describe("command discovery selection", () => {
@@ -98,5 +154,109 @@ describe("command discovery selection", () => {
     const result = run("team\top://v/i/token");
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("run\n--scope\nteam\n--env\nFAKE_KEY=op://v/i/token\n");
+  });
+});
+
+/** Shell keywords and builtins. The shell runs these itself, so a launcher of
+ * the same name is never reached through PATH. */
+const SHELL_WORDS = new Set(
+  "if then else elif fi case esac for do done while until in exit set shift eval exec local return break continue true false test trap unset export read printf echo".split(
+    " ",
+  ),
+);
+
+/** Words of a quoted message that land in command position. "Run it again;
+ * if it repeats" has a real `;` and `if` inside a string, which this
+ * tokenizer does not parse. */
+const PROSE_WORDS = new Set(["it"]);
+
+/**
+ * The words a generated script runs as commands: the word after a line start,
+ * `$(`, `|`, `||`, `&&`, `;`, `!`, `{` or `)`, and after any chain of `if`,
+ * `then`, `do`, `else`, `elif`, `while`, `until`, `exec`, `command -v`, `!`
+ * or `{` there. A separator other than `$(` needs whitespace after it, so a
+ * case pattern such as `org|personal|team)` yields nothing. A keyword counts
+ * only in command position, so "then run again" inside a quoted message
+ * yields nothing. Heredoc bodies and comment lines are prose, and a function
+ * the script defines shadows PATH, so all three are skipped.
+ */
+function commandWordsOf(script: string): Set<string> {
+  const code: string[] = [];
+  let heredoc: { end: string; tabs: boolean } | undefined;
+  for (const line of script.split("\n")) {
+    if (heredoc !== undefined) {
+      if ((heredoc.tabs ? line.replace(/^\t+/, "") : line) === heredoc.end) heredoc = undefined;
+      continue;
+    }
+    const opener = /<<(-?)\s*(['"]?)(\w+)\2/.exec(line);
+    const end = opener?.[3];
+    heredoc = end === undefined ? undefined : { end, tabs: opener?.[1] === "-" };
+    if (!/^\s*#/.test(line)) code.push(line);
+  }
+  const text = code.join("\n");
+  const functions = new Set([...text.matchAll(/^\s*(\w+)\(\) \{/gm)].map((m) => m[1]));
+  const words = new Set<string>();
+  const command =
+    /(?<=^|\$\(|(?:&&|[|;!{)])\s)\s*(?:(?:if|then|do|else|elif|while|until|exec|command -v|!|\{)\s+)*([a-z][a-z0-9_-]*)(?=[\s;)]|$)/gm;
+  for (const [, word] of text.matchAll(command)) {
+    if (word !== undefined && !SHELL_WORDS.has(word) && !PROSE_WORDS.has(word) && !functions.has(word)) {
+      words.add(word);
+    }
+  }
+  return words;
+}
+
+// A label that shadows a utility these scripts call turns the launcher into
+// a loop: valet-secrets calls the utility through PATH and lands back in the
+// launcher. Reading the words from the scripts keeps the reserved set honest
+// when a script starts calling something new.
+describe("the reserved credential labels", () => {
+  it("cover every utility the generated scripts call", () => {
+    const scripts = [
+      secretsCliScript("http://x:1"),
+      commandWrapperScript({
+        command: "partner-api",
+        env: "CLIENT_KEY",
+        reference: "op://Sec/Partner/key",
+        additionalEnv: [{ env: "CLIENT_KEY_CERT", reference: "op://Sec/Partner/cert" }],
+        launcher: true,
+      }),
+      commandWrapperScript({ command: "aws", env: "AWS_SECRET_ACCESS_KEY", credential: "aws" }),
+    ];
+    const words = new Set(scripts.flatMap((script) => [...commandWordsOf(script)]));
+    // A tokenizer that matched nothing would pass the loop below vacuously.
+    for (const known of ["curl", "sed", "base64", "cat", "cut", "wc", "valet-secrets"]) {
+      expect(words, known).toContain(known);
+    }
+    for (const word of words) {
+      expect(RESERVED_CREDENTIAL_LABELS.has(word), word).toBe(true);
+    }
+    // The reverse: a reserved name with no reason to be reserved takes a
+    // label away from a repo for nothing.
+    const installed = ["git-credential-valet", "valet-gh", "gh", "valet-secrets", "op", "sec-preflight", "gitleaks", "semgrep"];
+    const shells = ["sh", "bash", "dash", "zsh", "env", "command", "printf", "echo"];
+    for (const name of RESERVED_CREDENTIAL_LABELS) {
+      expect(words.has(name) || installed.includes(name) || shells.includes(name), name).toBe(true);
+    }
+  });
+});
+
+describe("commandWordsOf", () => {
+  it("reads command words after keywords and skips every heredoc form", () => {
+    const sample = [
+      "if jq . x; then yq; else zq; fi",
+      "while read l; do awk 1; done",
+      "! grep -q x y",
+      "{ head -1; }",
+      'cat <<"EOF"',
+      "notacmd here",
+      "EOF",
+      "cat <<-'EOF'",
+      "\tnotacmd2 here",
+      "\tEOF",
+      'echo "do not run it"',
+      "after",
+    ].join("\n");
+    expect([...commandWordsOf(sample)].sort()).toEqual(["after", "awk", "cat", "grep", "head", "jq", "yq", "zq"]);
   });
 });

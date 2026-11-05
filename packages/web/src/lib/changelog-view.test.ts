@@ -12,11 +12,13 @@ function entry(
   title: string,
   category: ChangelogEntry["category"],
   commitSha = title,
+  authoredAt?: string,
 ): ChangelogEntry {
   return {
     title,
     description: `${title} description`,
     category,
+    ...(authoredAt ? { authoredAt } : {}),
     sources: { commitSha },
     followUp: false,
   };
@@ -43,13 +45,14 @@ function release(
 }
 
 describe("changelog view logic", () => {
-  it("groups features first and keeps source order within each type", () => {
+  it("groups features first and orders each group by commit time", () => {
     const groups = groupChangelogEntries([
       entry("Fix one", "fix"),
-      entry("Feature one", "feature"),
+      entry("Feature one", "feature", "b", "2026-01-01T00:00:00Z"),
       entry("Security one", "security"),
-      entry("Feature two", "feature"),
+      entry("Feature two", "feature", "a", "2026-01-01T00:00:00Z"),
       entry("Improvement one", "improvement"),
+      entry("Feature three", "feature", "c", "2026-01-02T00:00:00Z"),
     ]);
 
     expect(groups.map((group) => group.category)).toEqual([
@@ -58,7 +61,38 @@ describe("changelog view logic", () => {
       "fix",
       "security",
     ]);
-    expect(groups[0]?.entries.map((item) => item.title)).toEqual(["Feature one", "Feature two"]);
+    expect(groups[0]?.entries.map((item) => item.title)).toEqual([
+      "Feature three",
+      "Feature two",
+      "Feature one",
+    ]);
+  });
+
+  it("orders unreleased and released entries the same way, with invalid dates last", () => {
+    const entries = [
+      entry("Missing", "feature", "d"),
+      entry("Invalid", "feature", "c", "not-a-date"),
+      entry("Older", "feature", "b", "2026-01-01T00:00:00Z"),
+      entry("Newer", "feature", "a", "2026-01-02T00:00:00Z"),
+    ];
+    const unreleased: ChangelogCheckpoint = {
+      kind: "unreleased",
+      id: "unreleased@sha",
+      buildSha: "sha",
+      builtAt: "2026-01-03T00:00:00Z",
+      previousSha: null,
+      entries,
+    };
+    const releasedCheckpoint = release("1.0.0", "2026-01-03T00:00:00Z", entries);
+
+    for (const checkpoint of [unreleased, releasedCheckpoint]) {
+      expect(groupChangelogEntries(checkpoint.entries)[0]?.entries.map((item) => item.title)).toEqual([
+        "Newer",
+        "Older",
+        "Invalid",
+        "Missing",
+      ]);
+    }
   });
 
   it("filters entries and sections by type and search text", () => {

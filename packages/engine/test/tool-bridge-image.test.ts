@@ -66,7 +66,7 @@ describe("toAgentTool image attachments", () => {
       }),
     };
     const agentTool = toAgentTool(def, () => stubContext());
-    const result = await agentTool.execute("call-1", {}, new AbortController().signal);
+    const result = await agentTool.execute("call-1", { intent: "Check the image tool result." }, new AbortController().signal);
     expect(result.content).toEqual([
       { type: "text", text: '{"path":"/workspace/out.png"}' },
       { type: "image", data: Buffer.from("hello").toString("base64"), mimeType: "image/png" },

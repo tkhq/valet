@@ -14,7 +14,10 @@ export {
   fauxAssistantMessage,
   fauxText,
   fauxThinking,
-  fauxToolCall,
   registerFauxProvider,
   type FauxResponseStep,
 } from "@earendil-works/pi-ai/compat";
+
+export { fauxToolCall } from "./tool-intent.js";
+
+export { withoutSentLine } from "./sent-line.js";

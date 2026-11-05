@@ -56,10 +56,34 @@
 
 import { detachedFromTrace } from '@valet/engine';
 
-import { driveUntilPark, settleAndNotify, type OnRunSettled } from './interpreter.js';
+import { abortPoisonedRun, driveUntilPark, settleAndNotify, type OnRunSettled } from './interpreter.js';
 import type { WorkflowEngineDeps } from './engine-deps.js';
+import { isLegacyAccountConsentLoop, matchesGateOccurrence } from './gate-signals.js';
 import type { NodeExecutorRegistry, OnApprovalGrant, OnApprovalPending, OnGateResolved } from './nodes/index.js';
-import { WorkflowFenceError, type RunParams, type RunParkState, type RunWaitCondition, type WorkflowRunOwnerInput, type WorkflowStore } from './store.js';
+import { WorkflowFenceError, type NodeCheckpoint, type RunParams, type RunParkState, type RunWaitCondition, type WorkflowRunOwnerInput, type WorkflowStore } from './store.js';
+import { reportError } from "@valet/engine";
+
+/** A run that a drive parked after opening at least one approval gate. */
+export interface ApprovalParkedInfo {
+  runId: string;
+  /** The drive's attempt. Each claim increments it, so it names one drive. */
+  attempt: number;
+}
+
+/**
+ * Fired once per drive that opened an approval gate and then parked the run.
+ * `onApprovalPending` fires inside the wave, before sibling nodes finish and
+ * before the park records every waiting step. A consumer that reports the
+ * waiting steps as a set uses this hook: when it fires, `waitingOn` holds all
+ * of them. Best-effort: the host logs a throw and keeps the drive.
+ */
+export type OnApprovalParked = (info: ApprovalParkedInfo) => Promise<void> | void;
+
+export interface RunStartOptions {
+  /** Finished checkpoints copied from an earlier run (`retrySeedCheckpoints`).
+   * The host writes them before the run starts, so those steps do not run again. */
+  seed?: readonly NodeCheckpoint[];
+}
 
 /** The spec's `RunHost` port, widened per the "Port deviation" note above, plus lifecycle. */
 export interface RunHost {
@@ -69,6 +93,7 @@ export interface RunHost {
     params: RunParams,
     definition: unknown,
     owner?: WorkflowRunOwnerInput,
+    opts?: RunStartOptions,
   ): Promise<void>;
   /** Resume a parked run now. Spurious wakes are safe. */
   wake(runId: string): Promise<void>;
@@ -85,11 +110,15 @@ export interface RunHost {
 export interface LocalRunHostDeps {
   store: WorkflowStore;
   engine: WorkflowEngineDeps;
+  /** This server's build. Every run it starts records it in `RunParams.build`. */
+  build?: string;
   executors?: NodeExecutorRegistry;
   clock?: () => number;
   onApprovalPending?: OnApprovalPending;
   onApprovalGrant?: OnApprovalGrant;
   onGateResolved?: OnGateResolved;
+  /** See `OnApprovalParked`. */
+  onApprovalParked?: OnApprovalParked;
   /**
    * Settle report (batch-fanout design decision 4). Handed to every drive
    * this host runs, so a run that settles under any path — natural,
@@ -131,11 +160,13 @@ function defaultExit(code: number): never {
 export class LocalRunHost implements RunHost {
   private readonly store: WorkflowStore;
   private readonly engine: WorkflowEngineDeps;
+  private readonly build?: string;
   private readonly executors?: NodeExecutorRegistry;
   private readonly clock: () => number;
   private readonly onApprovalPending?: OnApprovalPending;
   private readonly onApprovalGrant?: OnApprovalGrant;
   private readonly onGateResolved?: OnGateResolved;
+  private readonly onApprovalParked?: OnApprovalParked;
   private readonly onRunSettled?: OnRunSettled;
   private readonly concurrency: number;
   private readonly pollMs: number;
@@ -164,6 +195,14 @@ export class LocalRunHost implements RunHost {
    * restarts re-earns its strikes in minutes.
    */
   private readonly driveFailures = new Map<string, number>();
+  /**
+   * Runs with a gate that opened since their last park report. Held on the
+   * host, not the drive: a drive that opens a gate and then fails retries on
+   * this host, and the retry does not open the gate again. A process that
+   * dies loses the entry, so the report is at most once, like the settle
+   * report.
+   */
+  private readonly gatesToReport = new Set<string>();
   /** How many parked runs a single sweep pass enumerates via `store.listParked`. */
   private readonly sweepBatchLimit = 1_000;
 
@@ -176,11 +215,13 @@ export class LocalRunHost implements RunHost {
   constructor(deps: LocalRunHostDeps) {
     this.store = deps.store;
     this.engine = deps.engine;
+    this.build = deps.build;
     this.executors = deps.executors;
     this.clock = deps.clock ?? (() => Date.now());
     this.onApprovalPending = deps.onApprovalPending;
     this.onApprovalGrant = deps.onApprovalGrant;
     this.onGateResolved = deps.onGateResolved;
+    this.onApprovalParked = deps.onApprovalParked;
     this.onRunSettled = deps.onRunSettled;
     this.concurrency = deps.concurrency ?? 4;
     this.pollMs = deps.pollMs ?? 1_000;
@@ -199,13 +240,29 @@ export class LocalRunHost implements RunHost {
     params: RunParams,
     definition: unknown,
     owner?: WorkflowRunOwnerInput,
+    opts?: RunStartOptions,
   ): Promise<void> {
     // The durable createRun is unconditional: a caller that got a runId back
     // must be able to find the run in the store even if the host is mid-
     // shutdown (the next boot's poll/sweep picks it up). Only the in-process
     // wake is gated on `running`.
-    await this.store.createRun(runId, params, definition, params.definitionVersionId, owner);
+    const stamped = this.build !== undefined && params.build === undefined ? { ...params, build: this.build } : params;
+    await this.store.createRun(runId, stamped, definition, params.definitionVersionId, owner);
+    // Before the wake: a pending run is not runnable until a wake is requested.
+    for (const cp of opts?.seed ?? []) await this.seedCheckpoint(runId, cp);
     await this.wake(runId);
+  }
+
+  /** Writes one copied checkpoint as attempt 0. A re-start finds it already terminal and skips it.
+   * It keeps the source step's start, so its time is the time it took in the earlier run. */
+  private async seedCheckpoint(runId: string, cp: NodeCheckpoint): Promise<void> {
+    const key = { runId, nodeId: cp.nodeId, iteration: cp.iteration, attempt: 0 };
+    try {
+      await this.store.putIntent({ ...key, status: 'intent', createdAt: cp.startedAt ?? cp.createdAt });
+      await this.store.completeCheckpoint(runId, cp.nodeId, cp.iteration, 0, { ...cp, ...key });
+    } catch (err) {
+      if (!(err instanceof WorkflowFenceError)) throw err;
+    }
   }
 
   async wake(runId: string): Promise<void> {
@@ -318,13 +375,18 @@ export class LocalRunHost implements RunHost {
       void this.store.heartbeat(runId, this.ownerId, this.leaseMs);
     }, this.heartbeatMs);
 
+    const onApprovalPending: OnApprovalPending = async (info) => {
+      this.gatesToReport.add(runId);
+      await this.onApprovalPending?.(info);
+    };
+
     try {
       const park = await driveUntilPark(runId, claim.attempt, {
         store: this.store,
         engine: this.engine,
         clock: this.clock,
         executors: this.executors,
-        onApprovalPending: this.onApprovalPending,
+        onApprovalPending,
         onApprovalGrant: this.onApprovalGrant,
         onGateResolved: this.onGateResolved,
         onRunSettled: this.onRunSettled,
@@ -336,13 +398,15 @@ export class LocalRunHost implements RunHost {
             : undefined,
       });
       await this.afterPark(runId, park);
+      if (park.status === 'parked' && this.gatesToReport.delete(runId)) await this.reportApprovalPark(runId, claim.attempt);
+      if (park.status === 'settled') this.gatesToReport.delete(runId);
       this.driveFailures.delete(runId);
     } catch (err) {
       // A `WorkflowFenceError` means a superseded attempt, not a sick run —
       // abandon the lease exactly as before and never count it toward the
       // poisoned-run cap.
       if (err instanceof WorkflowFenceError) {
-        console.error(`workflow drive failed for ${runId} (lease abandoned; will be reclaimed):`, err);
+        reportError({ area: "workflows", reason: "run_drive" }, `workflow drive failed for ${runId} (lease abandoned; will be reclaimed)`, err);
         return;
       }
       // Any other failure — a genuine executor error, or (decision 20) the
@@ -360,24 +424,21 @@ export class LocalRunHost implements RunHost {
       const strikes = (this.driveFailures.get(runId) ?? 0) + 1;
       if (strikes < this.maxConsecutiveDriveFailures) {
         this.driveFailures.set(runId, strikes);
-        console.error(
-          `workflow drive failed for ${runId} (lease abandoned; will be reclaimed; consecutive failure ${strikes}/${this.maxConsecutiveDriveFailures}):`,
-          err,
-        );
+        reportError({ area: "workflows", reason: "run_drive" }, `workflow drive failed for ${runId} (lease abandoned; will be reclaimed; consecutive failure ${strikes}/${this.maxConsecutiveDriveFailures})`, err);
         return;
       }
-      console.error(
-        `workflow drive failed for ${runId} ${strikes} consecutive times — settling the run as failed (poisoned run):`,
-        err,
-      );
+      reportError({ area: "workflows", reason: "run_poisoned" }, `workflow drive failed for ${runId} ${strikes} consecutive times — settling the run as failed (poisoned run)`, err);
       try {
+        // The failed drives may have left work running that no saved wait names.
+        await abortPoisonedRun({ store: this.store, engine: this.engine, clock: this.clock }, runId);
         await settleAndNotify(this.store, this.onRunSettled, runId, 'failed');
         this.driveFailures.delete(runId);
+        this.gatesToReport.delete(runId);
       } catch (settleErr) {
         // Keep the strike count: if the settle write itself failed, the
         // next reclaim lands here again and retries the settle.
         this.driveFailures.set(runId, strikes);
-        console.error(`settling poisoned run ${runId} failed (lease abandoned; will retry on reclaim):`, settleErr);
+        reportError({ area: "workflows", reason: "poisoned_settle" }, `settling poisoned run ${runId} failed (lease abandoned; will retry on reclaim)`, settleErr);
       }
     } finally {
       clearInterval(heartbeat);
@@ -400,6 +461,14 @@ export class LocalRunHost implements RunHost {
       if (wait.kind === 'submission') {
         this.spawnSubmissionWaiter(runId, wait);
       }
+    }
+  }
+
+  private async reportApprovalPark(runId: string, attempt: number): Promise<void> {
+    try {
+      await this.onApprovalParked?.({ runId, attempt });
+    } catch (err) {
+      reportError({ area: "workflows", reason: "approval_park_report" }, `workflow approval park report failed for ${runId}`, err);
     }
   }
 
@@ -471,7 +540,13 @@ export class LocalRunHost implements RunHost {
     const unconsumed = await this.store.listSignals(runId, { unconsumed: true });
     if (unconsumed.length === 0) return false;
     const signalWaits = waitingOn.filter((w): w is Extract<RunWaitCondition, { kind: 'signal' }> => w.kind === 'signal');
-    return unconsumed.some((s) => s.signalType === 'cancel' || signalWaits.some((w) => w.signalType === s.signalType));
+    const checkpoints = await this.store.getCheckpoints(runId);
+    return unconsumed.some((s) => s.signalType === 'cancel' || signalWaits.some(w => {
+      if (w.signalType !== s.signalType) return false;
+      if (!s.signalType.startsWith('approval:')) return true;
+      const checkpoint = checkpoints.find(cp => `approval:${cp.nodeId}${cp.iteration > 0 ? `:${cp.iteration}` : ''}` === s.signalType);
+      return matchesGateOccurrence(s, checkpoint?.effects);
+    }));
   }
 
   private async hasSettledSubmissionWait(waitingOn: RunWaitCondition[]): Promise<boolean> {
@@ -508,18 +583,28 @@ export class LocalRunHost implements RunHost {
     const signals = await this.store.listSignals(runId);
     if (signals.every((s) => s.consumedAt === undefined || !s.consumedBy)) return false;
     const checkpoints = await this.store.getCheckpoints(runId);
-    let voided = false;
+    let shouldWake = false;
     for (const signal of signals) {
       if (signal.consumedAt === undefined || !signal.consumedBy) continue;
       const cp = checkpoints.find(
         (c) => c.nodeId === signal.consumedBy?.nodeId && c.iteration === signal.consumedBy?.iteration,
       );
       const hasMatchingTerminal = cp !== undefined && cp.status !== 'intent' && cp.attempt === signal.consumedBy.attempt;
-      if (!hasMatchingTerminal) {
+      // Account consent can atomically checkpoint the next gate's intent.
+      // Keep every receipt as that node advances through later gates.
+      const receipts = cp?.effects?.resolvedGateSignalIds;
+      const hasGateReceipt = cp !== undefined && cp.attempt >= signal.consumedBy.attempt
+        && Array.isArray(receipts) && receipts.includes(signal.signalId);
+      const payload = signal.payload;
+      const hasLegacyConsentTransition = cp !== undefined && cp.attempt >= signal.consumedBy.attempt
+        && cp.effects?.accountConsentResolved === true && payload !== null && typeof payload === 'object'
+        && 'scope' in payload && payload.scope === 'team_account' && !('gateId' in payload && payload.gateId !== undefined);
+      if (hasLegacyConsentTransition && isLegacyAccountConsentLoop(signal, cp?.effects)) shouldWake = true;
+      if (!hasMatchingTerminal && !hasGateReceipt && !hasLegacyConsentTransition) {
         await this.store.voidConsumption(runId, signal.signalId);
-        voided = true;
+        shouldWake = true;
       }
     }
-    return voided;
+    return shouldWake;
   }
 }

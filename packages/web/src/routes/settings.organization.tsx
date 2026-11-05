@@ -1,8 +1,9 @@
 import type { ReactNode } from "react";
 import { Outlet, createFileRoute, useRouterState } from "@tanstack/react-router";
 import { useOrg } from "~/api/settings";
-import { Button } from "~/components/primitives";
-import { ORG_ONEPASSWORD_PATH, ORG_TEAMS_PATH } from "~/components/settings/settings-rail";
+import { Button, LinkTabs } from "~/components/primitives";
+import { ORG_ONEPASSWORD_PATH, ORG_TEAMS_PATH, orgSectionFor } from "~/components/settings/settings-rail";
+import { ActiveTabLabel } from "~/components/settings/section";
 
 /**
  * `/settings/organization` layout — guards the org sections behind the
@@ -44,9 +45,51 @@ export function isMemberVisiblePath(pathname: string): boolean {
 export function OrganizationLayout() {
   return (
     <OrgRouteGuard>
-      <Outlet />
+      <OrgSectionTabs />
+      <OrgTabOutlet />
     </OrgRouteGuard>
   );
+}
+
+/**
+ * The admin's tab bar over the routes one Organization rail item groups
+ * (settings-redesign spec, decision 2). A plain member reaches only Teams
+ * and 1Password, which are rail items of their own, so they get no tabs.
+ */
+function OrgSectionTabs() {
+  const tabs = useOrgSectionTabs();
+  if (!tabs) return null;
+  return (
+    <div className="mb-8">
+      <h2 className="mb-3 text-lg font-medium text-ink">{tabs.section.label}</h2>
+      <LinkTabs tabs={tabs.section.routes} activeTo={tabs.active.to} label={tabs.section.label} />
+    </div>
+  );
+}
+
+/** The page under the tabs, told which tab it sits under. */
+function OrgTabOutlet() {
+  const tabs = useOrgSectionTabs();
+  return (
+    <ActiveTabLabel.Provider value={tabs?.active.label}>
+      <Outlet />
+    </ActiveTabLabel.Provider>
+  );
+}
+
+/** The admin's Organization section and active tab for this path, or null
+ * when the path shows no tabs. */
+function useOrgSectionTabs() {
+  const orgQ = useOrg();
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const section = orgSectionFor(pathname);
+  if (orgQ.data?.callerRole !== "admin" || !section || section.routes.length < 2) return null;
+  const path = pathname.replace(/\/+$/, "").toLowerCase();
+  const active =
+    section.routes.find((route) =>
+      route.to === "/settings/organization" ? path === route.to : path === route.to || path.startsWith(`${route.to}/`),
+    ) ?? section.routes[0]!;
+  return { section, active };
 }
 
 export function OrgRouteGuard({ children }: { children: ReactNode }) {

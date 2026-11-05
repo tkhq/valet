@@ -7,7 +7,7 @@
 
 .PHONY: help install setup clean \
         dev dev-worker dev-opencode dev-client dev-all \
-        dev-api-node dev-web dev-local dev-clean dev-keycloak dev-keycloak-down smoke-session smoke-orchestrator eval e2e e2e-clean \
+        dev-api-node dev-web dev-local dev-clean dev-keycloak dev-keycloak-down smoke-session smoke-orchestrator eval e2e e2e-clean post-deploy \
         db-setup db-migrate db-seed db-reset \
         docker-build docker-up docker-down docker-logs \
         test test-unit test-integration test-e2e test-pg \
@@ -217,6 +217,9 @@ eval: ## Run the eval suite through the engine (real LLM). EVAL_ARGS="--filter x
 e2e: ## Unified e2e scorecard (see docs/specs/2026-07-25-e2e-runner-design.md). E2E_ARGS="--list|--doctor|--only <ids>|--json|--verbose"
 	$(PNPM) exec tsx scripts/e2e.ts $(E2E_ARGS)
 
+post-deploy: ## Run real user journeys against a deployed Valet (runbook: docs/testing/post-deploy-journeys.md). POST_DEPLOY_ARGS="--list|--only <ids>|--json|--sweep"
+	$(PNPM) exec tsx scripts/post-deploy.ts $(POST_DEPLOY_ARGS)
+
 e2e-clean: ## Sweep state leaked by crashed e2e runs. Idempotent. NOTE: removes ALL local valet-sandbox-* containers, including dev-local session sandboxes (they are recreated on demand).
 	@echo "$(YELLOW)Removing valet sandbox containers…$(NC)"
 	@for c in $$(docker ps -aq --filter "name=valet-sandbox-" 2>/dev/null); do docker rm -f $$c; done
@@ -351,6 +354,7 @@ k8s-up: ## Install agent-sandbox (if needed) + helm upgrade --install the valet 
 	$(HELM_RANCHER) upgrade --install $(HELM_RELEASE) deploy/chart/valet \
 	  --namespace $(K8S_NAMESPACE) --create-namespace \
 	  --set api.secrets.anthropicApiKey="$$ANTHROPIC_API_KEY" \
+	  --set api.auth.methods=password \
 	  $(HELM_EXTRA_ARGS) \
 	  --wait --timeout 5m
 	@echo "$(GREEN)Deployed. Port-forward with:$(NC) kubectl --context rancher-desktop -n $(K8S_NAMESPACE) port-forward svc/$(HELM_RELEASE)-api 8080:80"
@@ -526,15 +530,15 @@ typecheck: generate-registries ## Run TypeScript type checking
 # Testing
 # ==========================================
 
-test: test-unit test-integration ## Run all tests
+test: test-unit ## Run the root v2 test suite; use make e2e for release validation
 
 test-unit: ## Run unit tests
 	@echo "$(GREEN)Running unit tests...$(NC)"
-	$(PNPM) run test:unit 2>/dev/null || echo "$(YELLOW)No unit tests configured$(NC)"
+	$(PNPM) run test:unit
 
 test-integration: ## Run integration tests
 	@echo "$(GREEN)Running integration tests...$(NC)"
-	$(PNPM) run test:integration 2>/dev/null || echo "$(YELLOW)No integration tests configured$(NC)"
+	$(PNPM) exec tsx scripts/e2e.ts --only integration-core
 
 test-e2e: wait-for-services ## Run end-to-end tests
 	@echo "$(GREEN)Running E2E tests...$(NC)"
@@ -542,25 +546,23 @@ test-e2e: wait-for-services ## Run end-to-end tests
 	@make test-triggers
 	@make test-webhooks
 
-test-pg: ## Run store-postgres conformance suite against a dockerized postgres:17 (host port 5433, ephemeral)
-	@echo "$(GREEN)Starting postgres:17 for test-pg...$(NC)"
-	@docker rm -f valet-test-pg >/dev/null 2>&1 || true
-	@docker run --rm -d --name valet-test-pg -p 5433:5432 \
-		-e POSTGRES_USER=valet -e POSTGRES_PASSWORD=valet -e POSTGRES_DB=valet_test \
-		postgres:17 >/dev/null
-	@echo "Waiting for postgres to accept connections..."
-	@for i in $$(seq 1 30); do \
-		docker exec valet-test-pg pg_isready -U valet >/dev/null 2>&1 && break; \
+test-pg: ## Run store-postgres conformance against ephemeral postgres:17
+	@set -eu; \
+	pg_container=$$(docker run --rm -d -p 127.0.0.1::5432 \
+		-e POSTGRES_USER=valet -e POSTGRES_PASSWORD=valet -e POSTGRES_DB=valet_test postgres:17); \
+	trap 'docker stop "$$pg_container" >/dev/null 2>&1 || true' EXIT INT TERM; \
+	for i in $$(seq 1 30); do \
+		docker exec "$$pg_container" pg_isready -U valet >/dev/null 2>&1 && break; \
 		sleep 1; \
-	done
-	@TEST_DATABASE_URL=postgres://valet:valet@localhost:5433/valet_test $(PNPM) --filter @valet/store-postgres test; \
-		status=$$?; \
-		TEST_DATABASE_URL=postgres://valet:valet@localhost:5433/valet_test $(PNPM) --filter @valet/api test pg-store credential-store; \
-		status2=$$?; \
-		echo "$(GREEN)Stopping postgres:17...$(NC)"; \
-		docker stop valet-test-pg >/dev/null 2>&1 || true; \
-		if [ $$status -ne 0 ]; then exit $$status; fi; \
-		exit $$status2
+	done; \
+	docker exec "$$pg_container" pg_isready -U valet >/dev/null; \
+	pg_port=$$(docker port "$$pg_container" 5432/tcp | cut -d: -f2); \
+	export TEST_DATABASE_URL="postgres://valet:valet@127.0.0.1:$$pg_port/valet_test"; \
+	status=0; status2=0; \
+	$(PNPM) --filter @valet/store-postgres test || status=$$?; \
+	$(PNPM) --filter @valet/api test pg-store credential-store || status2=$$?; \
+	if [ $$status -ne 0 ]; then exit $$status; fi; \
+	exit $$status2
 
 smoke-test: ## Run API smoke tests (direct API + agent-dispatched)
 	@WORKER_URL=$(WORKER_URL) API_TOKEN=$(API_TOKEN) pnpm vitest run --config tests/smoke/vitest.config.ts

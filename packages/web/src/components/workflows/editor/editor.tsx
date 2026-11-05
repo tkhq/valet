@@ -1,3 +1,5 @@
+import { validateAppearance } from "@valet/shared";
+import { AppearanceSettings } from "~/components/presence/appearance-settings";
 /**
  * Editor composition (plan decision 10 / Task 10): owns the
  * `WorkflowDefinition` state and wires the palette, canvas, inspector, and
@@ -19,7 +21,7 @@
  * an invalid definition is otherwise a completely normal in-progress
  * editing state and is never silently discarded.
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
 import { validateWorkflowDefinition, type WorkflowDefinition } from "@valet/workflow";
 import { ArrowLeft, MoreHorizontal } from "lucide-react";
 import { ApiError } from "~/api/client";
@@ -30,8 +32,16 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
   Label,
+  StatusDot,
+  TabBar,
   Textarea,
 } from "~/components/primitives";
+
+const EMPTY_GATES: ReadonlyMap<string, "require_approval" | "deny"> = new Map();
+export const WORKFLOW_VIEW_KEY = "valet.workflow-view";
+function storedWorkflowView(): "steps" | "map" {
+  try { return localStorage.getItem(WORKFLOW_VIEW_KEY) === "map" ? "map" : "steps"; } catch { return "steps"; }
+}
 import {
   isWorkflowDefinitionShape,
   connect,
@@ -55,13 +65,22 @@ import {
   type WorkflowFlowEdge,
 } from "../editor-model";
 import { Canvas } from "./canvas";
+import { StepsView } from "./steps-view";
 import { EdgeInspector } from "./edge-inspector";
 import { Inspector } from "./inspector";
 import { cn } from "~/lib/cn";
 import { CompactPalette, Palette } from "./palette";
 import { errorNodeIdsFrom, ValidationBanner } from "./validation-banner";
 
+/** What the page can ask the editor to do. */
+export interface EditorHandle {
+  /** Put the assistant conversation on screen: close a step form, and on a
+   * narrow screen switch to the Assistant view. */
+  showAssistant(): void;
+}
+
 export interface EditorProps {
+  ref?: Ref<EditorHandle>;
   /**
    * The definition as the server currently holds it. It seeds the local
    * draft at mount and backs Cancel, and the editor also ADOPTS it when it
@@ -103,6 +122,9 @@ export interface EditorProps {
   /** Per-node policy predictions for the canvas cards, keyed by node id.
    * The page owns the query (it is per stored workflow, not per draft). */
   gateByNodeId?: ReadonlyMap<string, "require_approval" | "deny">;
+  /** The models each step called in the workflow's last run, keyed by node
+   * id. The page owns the query, like `gateByNodeId`. */
+  lastRunModels?: ReadonlyMap<string, string[]>;
   /** A mirrored workflow is edited in its file. Disable definition changes
    * and hide Save and the JSON hatch. */
   readOnly?: boolean;
@@ -122,7 +144,9 @@ function EditorDraft({
   onCancelExternal,
   onDirtyChange,
   gateByNodeId,
+  lastRunModels,
   readOnly = false,
+  ref,
 }: EditorProps) {
   const [definition, setDefinition] = useState<WorkflowDefinition>(initialDefinition);
   const [dirty, setDirty] = useState(false);
@@ -130,9 +154,18 @@ function EditorDraft({
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [jsonMode, setJsonMode] = useState(false);
   const [compactView, setCompactView] = useState<"canvas" | "assistant">("canvas");
+  // Steps is the reading view most people want: Valet wrote the workflow and
+  // they check each step. The map is the graph, where steps are added and wired.
+  // Each viewer's last choice is remembered on this device.
+  const [mainView, setMainViewState] = useState<"steps" | "map">(storedWorkflowView);
+  const setMainView = (view: "steps" | "map") => {
+    setMainViewState(view);
+    try { localStorage.setItem(WORKFLOW_VIEW_KEY, view); } catch { /* storage unavailable: keep it for this visit */ }
+  };
   const inspectorBackRef = useRef<HTMLButtonElement>(null);
   const canvasViewRef = useRef<HTMLButtonElement>(null);
   const wasInspectingRef = useRef(false);
+  const [appearanceOpen, setAppearanceOpen] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   // Raised when the stored definition moved while the user has unsaved
   // edits. Adopting would throw their work away, so the editor asks.
@@ -300,6 +333,8 @@ function EditorDraft({
   async function handleSave() {
     if (readOnly) return;
     setSaveError(null);
+    const presenceError = validateAppearance(definition.presence ?? {});
+    if (presenceError) { setSaveError(presenceError); return; }
     try {
       await onSave(definition);
       // Record what went to the server, so the refetch that follows does
@@ -331,7 +366,9 @@ function EditorDraft({
     setCompactView("assistant");
   }
 
-  const saveDisabled = !effectiveDirty || !validation.ok || saving === true;
+  useImperativeHandle(ref, () => ({ showAssistant }));
+
+  const saveDisabled = !effectiveDirty || !validation.ok || validateAppearance(definition.presence ?? {}) !== null || saving === true;
 
   // The form for whatever is selected, or null when nothing is. JSON mode
   // edits the whole definition as text, so a selection made on the canvas
@@ -341,6 +378,7 @@ function EditorDraft({
       readOnly={readOnly}
       key={selectedNode.id}
       node={selectedNode}
+      lastRunModels={lastRunModels?.get(selectedNode.id)}
       onChange={(patch) => handleNodeChange(selectedNode.id, patch)}
       onRemove={() => handleRemoveNode(selectedNode.id)}
       onDuplicate={() => handleDuplicateNode(selectedNode.id)}
@@ -371,34 +409,38 @@ function EditorDraft({
     <div className="flex h-full min-h-0 min-w-0 flex-col" data-testid="workflow-editor">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-3 py-2">
         <div className="flex items-center gap-2">
+          {!jsonMode && (
+            <TabBar label="Workflow view" size="sm" active={mainView} onSelect={setMainView}
+              tabs={[{ id: "steps", label: "Steps" }, { id: "map", label: "Map" }]} />
+          )}
           {effectiveDirty && (
-            <span
-              data-testid="unsaved-indicator"
-              title="Unsaved changes"
-              className="inline-block h-2 w-2 rounded-full bg-amber"
-            />
+            <StatusDot data-testid="unsaved-indicator" title="Unsaved changes" tone="warning" />
           )}
           {/* JSON mode is the escape hatch for a change the assistant
               cannot express, so it stays — but out of the way. Reaching it
               takes a menu; leaving it takes one visible button, because
-              nobody should have to hunt for the way back to the canvas. */}
-          {!readOnly &&
-            (jsonMode ? (
-              <Button variant="secondary" size="sm" onClick={() => setJsonMode(false)}>
-                Visual editor
+              nobody should have to hunt for the way back to the canvas.
+              "Appears as" sits in the same menu, as on a Presence line. */}
+          {!readOnly && jsonMode && (
+            <Button variant="secondary" size="sm" onClick={() => setJsonMode(false)}>
+              Visual editor
+            </Button>
+          )}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="sm" aria-label="More editor actions">
+                <MoreHorizontal className="h-4 w-4" aria-hidden />
               </Button>
-            ) : (
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="ghost" size="sm" aria-label="More editor actions">
-                    <MoreHorizontal className="h-4 w-4" aria-hidden />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start">
-                  <DropdownMenuItem onSelect={() => { setJsonMode(true); setCompactView("canvas"); }}>Edit JSON</DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            ))}
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start">
+              <DropdownMenuItem onSelect={() => setAppearanceOpen(!appearanceOpen)}>
+                {appearanceOpen ? "Hide Appears as" : "Appears as"}
+              </DropdownMenuItem>
+              {!readOnly && !jsonMode && (
+                <DropdownMenuItem onSelect={() => { setJsonMode(true); setCompactView("canvas"); }}>Edit JSON</DropdownMenuItem>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
         {!readOnly && (
           <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -417,10 +459,19 @@ function EditorDraft({
         )}
       </div>
 
+      {appearanceOpen && <div className="max-h-72 overflow-y-auto border-b border-line p-3">
+        <AppearanceSettings value={definition.presence ?? {}} disabled={readOnly || saving === true} onChange={(presence) => {
+          const next = { ...definition };
+          if (Object.keys(presence).length === 0) delete next.presence;
+          else next.presence = presence;
+          mutate(next);
+        }} />
+      </div>}
+
       {conflict && (
         <div
           role="alert"
-          className="flex items-center gap-3 border-b border-amber/40 bg-amber/10 px-3 py-2 text-xs text-ink"
+          className="flex flex-col items-start gap-3 border-b border-amber/40 sm:flex-row sm:items-center bg-amber/10 px-3 py-2 text-xs text-ink"
         >
           <span className="min-w-0 flex-1">
             The assistant changed this workflow while you were editing. Your unsaved edits are
@@ -443,12 +494,12 @@ function EditorDraft({
         <Button
           size="sm"
           variant={compactView === "canvas" ? "secondary" : "ghost"}
-          aria-label="Show canvas"
+          aria-label="Show workflow"
           ref={canvasViewRef}
           aria-pressed={compactView === "canvas"}
           onClick={showCanvas}
         >
-          Canvas
+          Workflow
         </Button>
         <Button
           size="sm"
@@ -459,7 +510,7 @@ function EditorDraft({
         >
           Assistant
         </Button>
-        {!jsonMode && <CompactPalette onAdd={handleAddNode} disabled={readOnly} />}
+        {!jsonMode && mainView === "map" && <CompactPalette onAdd={handleAddNode} disabled={readOnly} />}
       </div>
 
       <div className="flex min-h-0 flex-1">
@@ -471,6 +522,11 @@ function EditorDraft({
         {jsonMode && !readOnly ? (
           <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-3">
             <JsonDefinitionEditor definition={definition} onApply={handleApplyJson} />
+          </div>
+        ) : mainView === "steps" ? (
+          <div className="min-w-0 flex-1">
+            <StepsView definition={definition} gateByNodeId={gateByNodeId ?? EMPTY_GATES} errorNodeIds={errorNodeIds}
+              selectedNodeId={selectedNodeId} onSelect={(nodeId) => handleSelectNode(nodeId)} />
           </div>
         ) : (
           <>
@@ -501,7 +557,7 @@ function EditorDraft({
             covered conversation out of the tab order and out of the
             accessibility tree, so only one of the two answers a query. */}
         <div className={cn(
-          "relative min-w-0 w-full flex-col bg-paper lg:flex lg:w-[--editor-aside] lg:max-w-full lg:shrink-0 lg:border-l lg:border-line",
+          "relative min-h-0 min-w-0 w-full flex-col bg-paper lg:flex lg:w-[--editor-aside] lg:max-w-full lg:shrink-0 lg:border-l lg:border-line",
           compactView === "assistant" || inspector ? "flex" : "hidden",
         )}>
           <div className="flex min-h-0 flex-1 flex-col" inert={inspector !== null}>
@@ -524,7 +580,7 @@ function EditorDraft({
                 </Button>
                 <Button ref={inspectorBackRef} variant="ghost" size="sm" className="lg:hidden" onClick={showCanvas}>
                   <ArrowLeft className="h-3.5 w-3.5" aria-hidden />
-                  Back to canvas
+                  Back to workflow
                 </Button>
               </div>
               <div className="min-h-0 flex-1 overflow-y-auto">{inspector}</div>

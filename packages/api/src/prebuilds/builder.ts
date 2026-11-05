@@ -65,6 +65,8 @@ export interface PrebuildSpec {
   /** Extra setup commands from a `.valet/prebuild.yaml` override, run after
    * `recipe` steps. */
   setup?: string[];
+  /** Add the nested Kubernetes v1 OCI capability label. */
+  kubernetes?: boolean;
   /** Fully-qualified image tag the builder must produce. Naming (including
    * the `valet-prebuild/<repo-slug>:<sha>` convention) is owned by the
    * caller/service layer, not the builder. */

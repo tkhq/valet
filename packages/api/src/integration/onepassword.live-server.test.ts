@@ -39,11 +39,10 @@ describeIfToken("api integration: 1Password over a running server", () => {
     if (!TOKEN) throw new Error("unreachable: gated on OP_SERVICE_ACCOUNT_TOKEN");
     api = await bootTestApi();
 
-    // The real adapter, no `createClient` override. `getAllowPersonal` is the
-    // only stub: this case never touches the personal scope.
+    // The real adapter, no `createClient` override: only the credential
+    // store is a test double.
     api.providers.onePassword = createOnePasswordService({
       credentials: api.providers.engineCredentials,
-      getAllowPersonal: async () => true,
     });
 
     // Store the token the way the settings page does.

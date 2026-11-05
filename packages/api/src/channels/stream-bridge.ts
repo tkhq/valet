@@ -33,6 +33,7 @@ import {
   type EventStream,
   type StreamRef,
   type Unsubscribe,
+  reportError,
 } from "@valet/engine";
 import type { ActiveStreamRecord, ActiveStreamStore } from "./active-streams.js";
 
@@ -99,6 +100,9 @@ export const STREAM_MAX_AGE_MS = 30 * 60_000;
  */
 export const STREAM_ABANDON_AFTER_MS = 24 * 60 * 60_000;
 
+/** The last line of a reply whose turn failed. */
+const TURN_FAILED_NOTE = "This turn failed. Send the message again, or open the session in Valet.";
+
 /** Cap on the streamed-message marker set. Same shape as the host's own dedup LRU. */
 const STREAMED_CAP = 2048;
 
@@ -109,6 +113,9 @@ export interface StreamTurn {
   threadId: string;
   /** Provider reply anchor for this turn (Slack `thread_ts`). */
   threadTs: string;
+  /** The person this turn's stream is for, in provider ids. Set for a group
+   * conversation, where Slack requires a recipient. */
+  recipient?: { userId: string; teamId: string };
   orgId: string;
   /**
    * The admitted submission this registration belongs to, bound by the host
@@ -142,6 +149,8 @@ export interface ChannelStreamBridgeDeps {
   markDelivered(dedupeKey: string): void;
   /** Stops the engine turn. Called when the reader stops the stream in Slack. */
   abortTurn(sessionId: string, threadId: string): Promise<void>;
+  /** Called once per provider message this bridge closes, for the channel record. */
+  onMessageClosed?(turn: StreamTurn, providerMessageId: string, engineMessageId: string): Promise<void>;
   now?: () => number;
 }
 
@@ -169,6 +178,12 @@ interface ActiveStream {
   /** The provider stream is gone. Remaining text goes out as plain messages. */
   degraded: boolean;
   closed: boolean;
+  /**
+   * The model call behind this stream failed before any text reached the
+   * reader, and the engine may retry it. The stream stays open until the
+   * retry's `message_start` takes it over or the submission settles.
+   */
+  awaitingRetry: boolean;
 }
 
 function stateKey(sessionId: string, threadId: string): string {
@@ -225,7 +240,7 @@ export class ChannelStreamBridge {
   start(): void {
     if (this.unsubscribe) return;
     this.unsubscribe = this.deps.eventStream.subscribe(
-      { eventTypes: ["message_start", "text_delta", "message_end", "error", "turn_end"] },
+      { eventTypes: ["message_start", "text_delta", "message_end", "error", "turn_end", "submission_settled"] },
       (event) => this.onBusEvent(event),
     );
     this.sweepTimer = setInterval(() => {
@@ -263,7 +278,6 @@ export class ChannelStreamBridge {
     const transport = this.deps.transportFor(turn.channelType);
     if (!transport || !canStream(transport)) return undefined;
     this.pending.set(stateKey(turn.sessionId, turn.threadId), turn);
-    void this.setStatus(turn, "is thinking…");
     return turn;
   }
 
@@ -311,7 +325,6 @@ export class ChannelStreamBridge {
     if (turn) {
       // The gate opens a new segment: let the post-approval text stream.
       turn.streamedText = false;
-      await this.setStatus(turn, "is waiting for your approval…");
     }
   }
 
@@ -325,6 +338,18 @@ export class ChannelStreamBridge {
 
     if (e.type === "message_start") {
       if (e.role !== "assistant") return;
+      const held = this.active.get(key);
+      if (held?.awaitingRetry) {
+        // The engine retried the failed model call, or moved it to a fallback
+        // provider. The new message continues the same reply.
+        if (held.turn.queueItemId !== undefined && event.queueItemId !== undefined && event.queueItemId !== held.turn.queueItemId) return;
+        this.deps.markDelivered(`${held.turn.sessionId}:${held.engineMessageId}`);
+        held.engineMessageId = e.messageId;
+        held.buffer = "";
+        held.awaitingRetry = false;
+        this.markStreamed(event.sessionId, e.messageId);
+        return;
+      }
       const turn = this.pending.get(key);
       if (!turn || this.active.has(key)) return;
       // The registration belongs to ONE submission. A message from any other
@@ -371,12 +396,24 @@ export class ChannelStreamBridge {
     }
 
     if (e.type === "message_end") {
-      if (!this.active.has(key)) return;
+      const stream = this.active.get(key);
+      if (!stream) return;
+      // A model call that failed before the reader saw any text may be
+      // retried. Closing now would post "This turn failed" above the retry's
+      // answer, so hold the stream until the retry starts or the submission
+      // settles. A failure after visible text still closes: a stream cannot
+      // take that text back.
+      if (e.reason === "error" && !stream.turn.streamedText && !stream.inFlight) {
+        stream.awaitingRetry = true;
+        if (stream.timer) clearTimeout(stream.timer);
+        stream.timer = null;
+        return;
+      }
       const note =
         e.reason === "abort"
           ? "Stopped."
           : e.reason === "error"
-            ? "This turn failed. Send the message again, or open the session in Valet."
+            ? TURN_FAILED_NOTE
             : undefined;
       void this.guard("finish", () => this.finish(key, note));
       return;
@@ -384,6 +421,10 @@ export class ChannelStreamBridge {
 
     if (e.type === "error") {
       if (!this.active.has(key)) return;
+      // A model call's own failure (code "error") comes before the engine
+      // decides to retry, so it must not end the reply with "This turn
+      // failed". Its message_end closes the stream.
+      if (e.code === "error") return;
       // The engine's own error text is the useful half; the corrective action
       // is ours to add.
       const note = `This turn failed: ${e.error}. Send the message again, or open the session in Valet.`;
@@ -391,8 +432,26 @@ export class ChannelStreamBridge {
       return;
     }
 
+    if (e.type === "submission_settled") {
+      const stream = this.active.get(key);
+      if (!stream?.awaitingRetry) return;
+      if (stream.turn.queueItemId !== undefined && e.queueItemId !== stream.turn.queueItemId) return;
+      // No retry took the held stream over: the turn ended on that failure.
+      this.pending.delete(key);
+      const note =
+        e.outcome.outcome === "aborted"
+          ? "Stopped."
+          : e.outcome.outcome === "failed"
+            ? TURN_FAILED_NOTE
+            : undefined;
+      void this.guard("finish", () => this.finish(key, note));
+      return;
+    }
+
     if (e.type === "turn_end") {
-      const turn = this.pending.get(key);
+      // A failed attempt's turn_end comes before the engine decides to
+      // retry. Keep the registration and the held stream for the retry.
+      if (this.active.get(key)?.awaitingRetry) return;
       this.pending.delete(key);
       // A turn can end without a message_end for an open stream (a crash
       // between rounds). Close anything still open rather than trust that
@@ -400,7 +459,6 @@ export class ChannelStreamBridge {
       if (this.active.has(key)) {
         void this.guard("finish", () => this.finish(key));
       }
-      if (turn) void this.setStatus(turn, "");
     }
   }
 
@@ -411,7 +469,7 @@ export class ChannelStreamBridge {
     try {
       await run();
     } catch (err) {
-      console.error(`[channels] stream ${what} failed`, err);
+      reportError({ area: "channels", reason: "stream_operation" }, `[channels] stream ${what} failed`, err);
     }
   }
 
@@ -444,6 +502,7 @@ export class ChannelStreamBridge {
       retryAfter: 0,
       degraded: false,
       closed: false,
+      awaitingRetry: false,
     };
     // Registered before the opener runs so deltas that arrive during
     // startStream are buffered rather than dropped.
@@ -462,6 +521,7 @@ export class ChannelStreamBridge {
     try {
       const ref = await transport.startStream(stream.turn.conversationKey, {
         threadTs: stream.turn.threadTs,
+        ...(stream.turn.recipient ? { recipient: stream.turn.recipient } : {}),
       });
       stream.ref = ref;
       await this.deps.streams.insert(this.recordFor(stream));
@@ -617,7 +677,7 @@ export class ChannelStreamBridge {
       await this.discard(stream);
       await this.deps
         .abortTurn(stream.turn.sessionId, stream.turn.threadId)
-        .catch((abortErr: unknown) => console.error("[channels] abort after reader stop failed", abortErr));
+        .catch((abortErr: unknown) => reportError({ area: "channels", reason: "stream_abort" }, "[channels] abort after reader stop failed", abortErr));
       return "stop";
     }
 
@@ -648,7 +708,7 @@ export class ChannelStreamBridge {
     // the rest as plain messages: that is a different method, so a different
     // rate-limit bucket.
     if (kind !== "rate_limited") {
-      console.error(`[channels] ${stream.turn.channelType}: appendStream failed`, err);
+      reportError({ area: "channels", reason: "stream_append", provider: stream.turn.channelType }, `[channels] ${stream.turn.channelType}: appendStream failed`, err);
     }
     stream.degraded = true;
     await this.closeRef(stream);
@@ -664,6 +724,7 @@ export class ChannelStreamBridge {
     try {
       stream.ref = await transport.startStream(stream.turn.conversationKey, {
         threadTs: stream.turn.threadTs,
+        ...(stream.turn.recipient ? { recipient: stream.turn.recipient } : {}),
       });
       stream.sentChars = 0;
       await this.deps.streams.insert(this.recordFor(stream));
@@ -691,7 +752,7 @@ export class ChannelStreamBridge {
     try {
       await this.flush(stream, true);
     } catch (err) {
-      console.error("[channels] final flush failed", err);
+      reportError({ area: "channels", reason: "stream_final_flush" }, "[channels] final flush failed", err);
     }
     // Marked closed only after the last flush, so `scheduleFlush` cannot
     // arm a timer for a stream that is on its way out.
@@ -707,14 +768,19 @@ export class ChannelStreamBridge {
     const ref = stream.ref;
     stream.ref = null;
     if (!ref) return;
+    let keepRecord = false;
     if (transport && canStream(transport)) {
       const outcome = await this.tryStop(transport, ref, stream.turn.channelType);
       // The row is the ONLY record that a stream is open. Drop it when the
       // close worked, and when the provider says the message is already gone.
       // Keep it after any other failure: the orphan sweep is then the reader's
       // last chance at a message that would otherwise shimmer for ever.
-      if (outcome === "retry") return;
+      keepRecord = outcome === "retry";
     }
+    // The callback can restore processing status after Slack closes the reply.
+    await this.deps.onMessageClosed?.(stream.turn, ref.messageId, stream.engineMessageId)
+      .catch((err: unknown) => reportError({ area: "channels", reason: "stream_record" }, "[channels] stream record failed", err));
+    if (keepRecord) return;
     await this.deleteRecordFor(stream.turn.channelType, stream.turn.conversationKey, ref.messageId);
   }
 
@@ -737,7 +803,7 @@ export class ChannelStreamBridge {
       return "done";
     } catch (err) {
       const kind = err instanceof ChannelStreamError ? err.kind : "unknown";
-      console.error(`[channels] ${channelType}: stopStream failed`, err);
+      reportError({ area: "channels", reason: "stream_stop", provider: channelType }, `[channels] ${channelType}: stopStream failed`, err);
       // `stream_gone` and `stopped_by_user` both mean the provider has already
       // closed this message. Retrying would fail the same way for ever.
       return kind === "stream_gone" || kind === "stopped_by_user" ? "done" : "retry";
@@ -767,7 +833,7 @@ export class ChannelStreamBridge {
     try {
       await this.deps.streams.delete({ channelType, conversationKey, messageId });
     } catch (err) {
-      console.error("[channels] active-stream row delete failed", err);
+      reportError({ area: "channels", reason: "stream_row_delete" }, "[channels] active-stream row delete failed", err);
     }
   }
 
@@ -778,17 +844,6 @@ export class ChannelStreamBridge {
     if (this.streamedOrder.length > STREAMED_CAP) {
       const evict = this.streamedOrder.shift();
       if (evict !== undefined) this.streamed.delete(evict);
-    }
-  }
-
-  private async setStatus(turn: StreamTurn, status: string): Promise<void> {
-    const transport = this.deps.transportFor(turn.channelType);
-    if (!transport?.setStatus) return;
-    try {
-      await transport.setStatus(turn.conversationKey, turn.threadTs, status);
-    } catch (err) {
-      // A status shimmer is decoration. Losing it must not fail a turn.
-      console.error(`[channels] ${turn.channelType}: setStatus failed`, err);
     }
   }
 
@@ -837,7 +892,7 @@ export class ChannelStreamBridge {
           "This answer stopped before it finished. Send the message again, or open the session in Valet.",
         );
       } catch (err) {
-        console.error(`[channels] ${channelType}: orphan sweep failed`, err);
+        reportError({ area: "channels", reason: "stream_orphan_sweep", provider: channelType }, `[channels] ${channelType}: orphan sweep failed`, err);
       }
     }
     return closed;
@@ -866,7 +921,8 @@ export class ChannelStreamBridge {
         // the message is still shimmering on someone's screen.
         continue;
       } else {
-        console.error(
+        reportError(
+          { area: "channels", reason: "stream_abandoned", provider: row.channelType },
           `[channels] ${row.channelType}: giving up on stream ${row.messageId} after ` +
             `${Math.round(STREAM_ABANDON_AFTER_MS / 60_000)} minutes of failed closes`,
         );

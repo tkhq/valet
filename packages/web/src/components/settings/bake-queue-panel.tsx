@@ -2,7 +2,7 @@ import { useState } from "react";
 import { ArrowDown, ArrowUp, ArrowUpToLine, Boxes, CheckCircle2, Clock3, Layers3 } from "lucide-react";
 import { ApiError } from "~/api/client";
 import { useBakeQueue, useReorderBakeQueue, type BakeQueueItem } from "~/api/sources";
-import { Badge, Button, Spinner } from "~/components/primitives";
+import { Badge, Button, Spinner, StatusDot } from "~/components/primitives";
 import { relativeTime } from "~/lib/relative-time";
 
 function bakeName(bake: BakeQueueItem) {
@@ -47,7 +47,7 @@ export function BakeQueuePanel() {
         </div>
         {data && data.builderAvailable && (
           <span className="flex items-center gap-1.5 text-xs text-muted">
-            <span className="h-1.5 w-1.5 rounded-full bg-moss" aria-hidden /> Refreshes every 5s
+            <StatusDot tone="success" size="sm" /> Refreshes every 5s
           </span>
         )}
       </div>

@@ -8,11 +8,11 @@ import {
   Dialog,
   DialogContent,
   DialogFooter,
+  FilterChips,
   Input,
   Label,
 } from "~/components/primitives";
 import { ServiceIcon } from "~/components/service-icon";
-import { cn } from "~/lib/cn";
 
 /**
  * File-issue dialog (valet-security design §Filing issues). Two modes:
@@ -164,29 +164,23 @@ function FileIssueDialogInner({
     <Dialog open onOpenChange={(open) => (!open ? onClose() : undefined)}>
       <DialogContent title={title} description={description}>
         <div className="space-y-3 text-xs">
-          <fieldset>
-            <legend className="text-muted mb-1">Provider</legend>
-            <div className="flex gap-1.5">
-              {(["github", "linear"] as const).map((p) => (
-                <button
-                  key={p}
-                  type="button"
-                  disabled={!connected[p]}
-                  aria-pressed={provider === p}
-                  onClick={() => setProvider(p)}
-                  className={cn(
-                    "inline-flex items-center gap-1.5 rounded-md border px-2 py-1.5",
-                    provider === p
-                      ? "border-accent-500 bg-accent-100/50 dark:bg-accent-900/40 text-ink"
-                      : "border-line text-muted hover:text-ink",
-                    !connected[p] && "opacity-50 cursor-not-allowed hover:text-muted",
-                  )}
-                >
-                  <ServiceIcon slug={p} label={p} size="sm" />
-                  {p === "github" ? "GitHub" : "Linear"}
-                </button>
-              ))}
-            </div>
+          <div>
+            <p className="text-muted mb-1">Provider</p>
+            <FilterChips
+              label="Provider"
+              value={provider ?? undefined}
+              onChange={setProvider}
+              options={(["github", "linear"] as const).map((p) => ({
+                value: p,
+                disabled: !connected[p],
+                label: (
+                  <>
+                    <ServiceIcon slug={p} label={p} size="sm" />
+                    {p === "github" ? "GitHub" : "Linear"}
+                  </>
+                ),
+              }))}
+            />
             {(["github", "linear"] as const).map((p) =>
               !connected[p] ? (
                 <p key={p} className="mt-1 text-muted">
@@ -194,7 +188,7 @@ function FileIssueDialogInner({
                 </p>
               ) : null,
             )}
-          </fieldset>
+          </div>
 
           {provider === "github" && (
             <div className="space-y-1">

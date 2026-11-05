@@ -15,6 +15,35 @@ const OWNERS: Principal[] = [
 ];
 
 describe("orchestratorPersona", () => {
+  it("documents steer-by-default child sends and the queue opt-in", () => {
+    const persona = orchestratorPersona({ type: "user", id: "u1" });
+    expect(flat(persona)).toContain("child_send supersedes the current turn by default");
+    expect(flat(persona)).toContain("waiting on an approval withdraws that pending approval");
+    expect(flat(persona)).toContain("queue: true if the approval must remain actionable");
+  });
+
+  it("answers a child's question itself and asks the person only when it cannot", () => {
+    const persona = flat(orchestratorPersona({ type: "user", id: "u1" }));
+    expect(persona).toContain("A child cannot ask the person: when it is blocked, its result is a question.");
+    expect(persona).toContain("Answer it yourself from your brief, this thread, and memory, then send the answer with child_send");
+    expect(persona).toContain("Only when you cannot answer, ask the person with ask_question in this thread");
+    expect(persona).toContain("Its card shows in this thread, labeled with the child's title");
+    expect(persona).not.toContain("Do not answer it for them");
+  });
+
+  // TKAI-484. The agent used to write a personal file, copy it to the team,
+  // then delete the original, because mem_write had no way to name a team.
+  it("tells the agent to write a team directly instead of copying into it", () => {
+    const persona = orchestratorPersona({ type: "user", id: "u1" });
+    expect(persona).toContain("pass \`teamId\` on mem_write or mem_patch");
+    expect(persona).toContain("Do not write a personal file and copy");
+    // The discovery vocabulary, so the agent knows where an id comes from.
+    expect(persona).toContain("team:{id}/");
+    // Both copy tools exist and the list used to omit them.
+    expect(persona).toContain("mem_copy_to_team");
+    expect(persona).toContain("mem_copy_from_team");
+  });
+
   it("carries the shared rule sections, in order, for every owner kind", () => {
     for (const owner of OWNERS) {
       const persona = orchestratorPersona(owner);
@@ -29,6 +58,39 @@ describe("orchestratorPersona", () => {
       const positions = sections.map((s) => persona.indexOf(s));
       expect(positions.every((p) => p >= 0), `${owner.type} persona has all sections`).toBe(true);
       expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+    }
+  });
+
+  // Fix wave 3 (UX prompts 7, 10): a wakeup signal is the assistant's own
+  // scheduled work. It renders addressed="false" because nothing may
+  // auto-post, so the persona must say to act on it anyway.
+  it("treats a wakeup signal as addressed to the assistant and names the background tools", () => {
+    for (const owner of OWNERS) {
+      const persona = orchestratorPersona(owner);
+      expect(persona).toContain("## Background work");
+      expect(persona).toContain('A `<wakeup>` signal is your own scheduled work, even when it shows `addressed="false"`');
+      expect(persona).toContain("reply_to_origin");
+      expect(persona).toContain("`wake_at`");
+    }
+  });
+
+  // Event wakeups (spec 2026-10-15, Part I): tells the assistant to arm an
+  // event waiter instead of polling GitHub, Slack, or Linear.
+  it("tells the assistant to call wait_for_event instead of polling an external service", () => {
+    for (const owner of OWNERS) {
+      const persona = orchestratorPersona(owner);
+      expect(persona).toContain(
+        "To wait for something in GitHub, Slack, or Linear, such as CI, a review, a reply, or a new ticket, call `wait_for_event` with its URL and end your turn. Do not poll with `watch` or `sleep`. Arm it before the action that triggers it, for example before `git push`.",
+      );
+    }
+  });
+
+  // A plan in thread metadata survives compaction; the persona says when to keep one.
+  it("tells the assistant to keep a plan for work with three or more steps", () => {
+    for (const owner of OWNERS) {
+      expect(orchestratorPersona(owner)).toContain(
+        "For work with three or more steps, call `update_plan` before you start, and update it when each step finishes. Keep exactly one item `in_progress`, and mark an item `done` only when it is done.",
+      );
     }
   });
 
@@ -49,10 +111,13 @@ describe("orchestratorPersona", () => {
     expect(persona).toContain("Later updates and the final result stay internal");
     expect(persona).toContain("reply_to_origin action for later updates and results");
     expect(persona).toContain("suppresses the automatic copy and keeps one delivery");
-    expect(persona).toContain("Stay silent unless you can add something useful");
+    expect(persona).toContain("Manual delivery prevents automatic posting");
+    expect(persona).toContain("follows up on your last reply");
+    expect(persona).toContain("Stay silent when people are talking to each other");
     expect(persona).toContain("telegram.reply_to_origin");
     expect(persona).toContain("reply_file_to_origin");
-    expect(persona).not.toContain("delivery_failure");
+    expect(persona).toContain("A `delivery_failure` note means your response was not posted");
+    expect(persona).toContain("origin service's reply_to_origin action");
   });
 
   it("tells the model to check list_tools before denying a capability", () => {
@@ -136,6 +201,13 @@ describe("orchestratorPersona", () => {
     expect(orchestratorPersona({ type: "team", id: "t1" })).toContain("shared assistant for a team");
     expect(orchestratorPersona({ type: "org", id: "o1" })).toContain("chief of staff");
   });
+
+  // Asked which workspace it ran in, a personal assistant said the name was
+  // not exposed to it. Team and org personas already named theirs.
+  it("names the personal workspace owner when known", () => {
+    expect(flat(orchestratorPersona({ type: "user", id: "u1" }, "Ada Lovelace"))).toContain("You run in Ada Lovelace's personal workspace.");
+    expect(flat(orchestratorPersona({ type: "user", id: "u1" }))).toContain("You run in this person's personal workspace.");
+  });
   // Asked for a 1Password value, the orchestrator ran `op read`, got zero
   // bytes, and told the user their vault and item names were wrong. The rule
   // it needed named a tool it does not have and never named 1Password, so
@@ -152,7 +224,20 @@ describe("orchestratorPersona", () => {
       expect(persona).toContain("valet-secrets");
       // The section has to be reachable from the router, not only defined.
       expect(persona.indexOf("## Secrets")).toBeGreaterThan(-1);
+      // A request that names only the credential is answerable: the child
+      // can search for it. Asking the user to name the vault is what happens
+      // after that search comes back empty.
+      expect(persona).toContain("valet-secrets find <name>");
+      expect(persona).toContain("delegate it and let the child look");
       expect(persona).toContain("never ask anyone to paste one");
+    }
+  });
+
+  it("asks when blocked and names the assumption when it goes ahead on a guess", () => {
+    for (const owner of OWNERS) {
+      const persona = flat(orchestratorPersona(owner));
+      expect(persona).toContain("call ask_question instead of ending your turn");
+      expect(persona).toContain("say what you assumed in one line");
     }
   });
 });

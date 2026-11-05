@@ -26,6 +26,7 @@ import { and, eq, isNull, ne, or, sql } from "drizzle-orm";
 import type {
   ActionPlugin,
   ApprovalMode,
+  CredentialStore,
   DecisionResolution,
   PolicyDecision,
   PolicyInvocationRecord,
@@ -35,13 +36,27 @@ import type {
   ValetPlugin,
 } from "@valet/engine";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
-import { agentSessions, actionInvocations, actionPolicies, actionPolicyOverrides, runtimeGrants } from "../schema/index.js";
+import { agentSessions, actionInvocations, actionPolicies, actionPolicyOverrides, runtimeGrants, users, workflowActionGrants, workflowDefinitions, workflowRuns } from "../schema/index.js";
+import { shareGeneration, canBorrowCredential, isUnattendedTeamSession, writeBorrowGrant } from "../services/credential-borrow.js";
+import { sameWorkflowSteps } from "../workflows/definition-version.js";
+import { orgFallbackPolicy, readTeamCredential } from "../services/credential-resolution.js";
+import { membersSharing } from "../services/credential-shares.js";
+import type { OnePasswordService } from "../services/onepassword.js";
+import type { ServiceProbes } from "../plugins/service-probe.js";
+import type { ListedAction } from "../plugins/action-id.js";
+import type { WorkflowStepGrant } from "../workflows/step-grants.js";
+import { canAdministerTeam, isTeamMember } from "../services/teams.js";
+import { lockTeamDeletionAccess } from "../services/team-deletion-access.js";
+import { threadApprovalBypass } from "../services/thread-approval-bypass.js";
+import { listPolicies, upsertOverride, upsertSimpleTeamPolicy, validateOverrideBounds, type PolicyCatalog } from "./admin.js";
 import { isOrgAdmin } from "../services/org.js";
+import { recordActionChannelMessage } from "../services/channel-messages.js";
 import {
   grantPolicyKey,
   resolvePolicyDecision,
   type ActionPolicyOverrideRow,
   type ActionPolicyRow,
+  type PolicyResolutionInput,
   type PolicyResolutionRows,
   type RuntimeGrantRow,
 } from "./resolution.js";
@@ -59,6 +74,18 @@ export const POLICY_AUDIT_FIELD_CAP = 8192;
  *  `onResolution`, and any UI stay in lockstep on the ids. */
 export const GATE_ACTION_APPROVE_SESSION = "approve_session";
 export const GATE_ACTION_ALWAYS_ALLOW = "always_allow";
+/** Allows the action from now on for the session's owner: the person's own
+ *  override in a personal session, the team's policy in a team session. It
+ *  writes the same rows as the Integrations and team permission settings. */
+export const GATE_ACTION_ALWAYS_ALLOW_OWNER = "always_allow_owner";
+/** The labels of the extra approval-card choices. The `approvals` skill
+ *  quotes each one, and a test holds the two together. */
+export const GATE_ACTION_LABELS = {
+  approveSession: "Approve for this session",
+  alwaysAllowForMe: "Always allow for me",
+  alwaysAllowForTeam: "Always allow for this team",
+  alwaysAllowOrg: "Always allow (org)",
+} as const;
 
 /**
  * May `userId` pick `always_allow` on a gate raised in `sessionOrgId`?
@@ -84,11 +111,14 @@ export function alwaysAllowPolicyId(orgId: string, actionId: string): string {
 }
 
 export interface PolicyRowScope {
+  workflowId?: string;
   orgId: string;
   teamId?: string;
   userId?: string;
   sessionId?: string;
   workflowExecutionId?: string;
+  /** Leave out the session's grants: a newcomer's turn asks again. */
+  externalSender?: boolean;
 }
 
 /**
@@ -98,14 +128,189 @@ export interface PolicyRowScope {
  * session/execution, and the user's overrides. Filtering/precedence is the
  * pure core's job; this only narrows the query.
  */
-export async function loadPolicyRows(db: AppQueryable, scope: PolicyRowScope): Promise<PolicyResolutionRows> {
-  // Session ownership comes from the durable row, never the acting member.
-  let teamId = scope.teamId;
-  if (scope.sessionId) {
-    const [session] = await db.select({ ownerType: agentSessions.ownerType, ownerId: agentSessions.ownerId })
-      .from(agentSessions).where(and(eq(agentSessions.id, scope.sessionId), eq(agentSessions.orgId, scope.orgId))).limit(1);
-    if (session) teamId = session.ownerType === "team" ? session.ownerId ?? undefined : undefined;
+/**
+ * Whose permission settings apply to a call. Session ownership comes from the
+ * durable row, never the acting member. A personal session follows its
+ * owner's settings, also on a turn another member sent from a shared thread
+ * (`services/thread-share.ts`). A session with no app row (a workflow step)
+ * keeps the caller's team or user.
+ */
+export async function policyOwner(
+  db: AppQueryable,
+  scope: { orgId: string; sessionId?: string; teamId?: string; userId?: string },
+): Promise<{ teamId?: string; userId?: string; personalSession: boolean }> {
+  const fallback = { teamId: scope.teamId, userId: scope.userId, personalSession: false };
+  if (!scope.sessionId) return fallback;
+  const [session] = await db.select({ ownerType: agentSessions.ownerType, ownerId: agentSessions.ownerId })
+    .from(agentSessions).where(and(eq(agentSessions.id, scope.sessionId), eq(agentSessions.orgId, scope.orgId))).limit(1);
+  if (!session) return fallback;
+  if (session.ownerType === "user" && session.ownerId) return { userId: session.ownerId, personalSession: true };
+  return { teamId: session.ownerType === "team" ? session.ownerId ?? undefined : undefined, userId: scope.userId, personalSession: false };
+}
+
+/**
+ * Why `userId` may not pick `always_allow_owner` on a gate in this session,
+ * or `undefined` when they may. In a personal session only its owner may
+ * allow the action for themselves. In a team session any member may stop
+ * the asking for the whole team, so one approval covers everyone. A team
+ * admin still decides a critical action and an action that any team rule
+ * names: a member cannot write over or beside a rule a team admin set. The
+ * check reads the team's current rules, not the gate's snapshot. Every
+ * resolver surface calls this before the engine consumes the gate, as
+ * `canApplyAlwaysAllow` does for the org option.
+ */
+const TEAM_ADMIN_FOR_CRITICAL = "Only a team admin can always allow a critical action for the team. Approve it once, or ask a team admin.";
+const TEAM_ADMIN_FOR_TEAM_RULE = "A team rule covers this action, and only a team admin can change it. Approve it once, or ask a team admin.";
+
+/** The action a policy gate asks about, from the gate's context. */
+export interface GatePolicyFacts { riskLevel?: RiskLevel; service?: string; actionId?: string }
+
+export function gatePolicyFacts(gate: { context?: Record<string, unknown> }): GatePolicyFacts {
+  const { riskLevel: risk, service, tool_id: actionId } = gate.context ?? {};
+  return {
+    ...(risk === "low" || risk === "medium" || risk === "high" || risk === "critical" ? { riskLevel: risk } : {}),
+    ...(typeof service === "string" ? { service } : {}),
+    ...(typeof actionId === "string" ? { actionId } : {}),
+  };
+}
+
+/** True when a live team rule names this action, its service, or its risk level. */
+export function teamRuleNamesAction(
+  rules: ReadonlyArray<{ service: string | null; actionId: string | null; riskLevel: string | null; expiresAt: number | null }>,
+  action: GatePolicyFacts,
+  now: number,
+): boolean {
+  return rules.some((rule) => (rule.expiresAt === null || rule.expiresAt > now) && (
+    (rule.actionId !== null && rule.actionId === action.actionId)
+    || (rule.service !== null && rule.service === action.service)
+    || (rule.riskLevel !== null && rule.riskLevel === action.riskLevel)));
+}
+
+/** Why a team member who is not a team admin may not write the team's allow, given the team's rules. */
+function memberRefusal(teamRules: Parameters<typeof teamRuleNamesAction>[0], action: GatePolicyFacts, now: number): string | undefined {
+  if (action.riskLevel === "critical") return TEAM_ADMIN_FOR_CRITICAL;
+  // A gate that does not name its action cannot be checked against the rules.
+  if (!action.actionId || teamRuleNamesAction(teamRules, action, now)) return TEAM_ADMIN_FOR_TEAM_RULE;
+  return undefined;
+}
+
+export async function ownerAlwaysAllowRefusal(
+  db: AppQueryable,
+  scope: { orgId: string; sessionId?: string; teamId?: string; userId?: string } & GatePolicyFacts,
+  resolverId: string,
+  now = Date.now(),
+): Promise<string | undefined> {
+  const owner = await policyOwner(db, scope);
+  if (owner.teamId) {
+    if (await canAdministerTeam(db, owner.teamId, resolverId)) return undefined;
+    if (!(await isTeamMember(db, owner.teamId, resolverId))) {
+      return "Only a member of this team can always allow this for the team. Approve it once instead.";
+    }
+    return memberRefusal(await listPolicies(db, { orgId: scope.orgId, type: "team", id: owner.teamId }), scope, now);
   }
+  return owner.userId === resolverId ? undefined : "Only the owner of this conversation can always allow this. Approve it once instead.";
+}
+
+/**
+ * Would the owner's lasting allow actually allow this call? Applies the write
+ * to the loaded rows, as `upsertOverride` or `upsertSimpleTeamPolicy` would,
+ * and resolves again. A conditional rule that still requires approval would
+ * make the option look done and change nothing, so it is not offered.
+ */
+export function ownerAllowTakesEffect(
+  rows: PolicyResolutionRows,
+  owner: { teamId?: string },
+  input: PolicyResolutionInput,
+  pluginDefault: ApprovalMode | undefined,
+): boolean {
+  const sameTarget = (row: { service: string | null; actionId: string | null; riskLevel: RiskLevel | null }) =>
+    row.service === null && row.riskLevel === null && row.actionId === input.actionId;
+  const written: ActionPolicyOverrideRow = { id: "owner-allow", service: null, actionId: input.actionId, riskLevel: null, mode: "allow", paramMatchers: [], updatedAt: input.now };
+  const applied: PolicyResolutionRows = owner.teamId
+    ? { ...rows, policies: [
+      ...rows.policies.filter((row) => !(row.principalType === "team" && sameTarget(row)
+        && row.appliesIn === "any" && row.paramMatchers.length === 0 && row.expiresAt === null)),
+      { ...written, principalType: "team", appliesIn: "any", expiresAt: null, revokedAt: null },
+    ] }
+    : { ...rows, overrides: [...rows.overrides.filter((row) => !sameTarget(row)), written] };
+  return resolvePolicyDecision(applied, input, pluginDefault).mode === "allow";
+}
+
+/** Writes `always_allow_owner`: the team's simple policy in a team session,
+ *  the owner's own override in a personal one. Same writers, locks, and
+ *  bounds as the team permission route and the Integrations panel. */
+async function writeOwnerAlwaysAllow(
+  deps: PolicyResolverDeps,
+  input: PolicyResolveInput & { orgId: string },
+  resolvedBy: string,
+  now: number,
+): Promise<void> {
+  const action: GatePolicyFacts = { service: input.service, actionId: input.actionId, ...(input.riskLevel ? { riskLevel: input.riskLevel } : {}) };
+  const refusal = await ownerAlwaysAllowRefusal(deps.db, { ...input, ...action }, resolvedBy, now);
+  if (refusal) throw new Error(refusal);
+  const target = { actionId: input.actionId };
+  const { teamId } = await policyOwner(deps.db, input);
+  if (teamId) {
+    await deps.db.transaction(async (tx) => {
+      // The lock refuses a non-member and says whether the member is an admin.
+      const teamScope = { orgId: input.orgId, type: "team" as const, id: teamId };
+      // Read the rules again under the lock: a rule a team admin added after
+      // the card opened still wins over a member's click.
+      const admin = await lockTeamDeletionAccess(tx, { orgId: input.orgId, userId: resolvedBy }, teamId);
+      const adminOnly = admin ? undefined : memberRefusal(await listPolicies(tx, teamScope), action, now);
+      if (adminOnly) throw new Error(adminOnly);
+      const bounds = await validateOverrideBounds(tx, input.orgId, target, "allow", now, invocationCatalog(deps, { type: "team", id: teamId }, input));
+      if (!bounds.ok) throw new Error(bounds.error);
+      await upsertSimpleTeamPolicy(tx, teamScope, { ...target, mode: "allow", managedBy: resolvedBy, now });
+    });
+    return;
+  }
+  const result = await upsertOverride(deps.db, input.orgId, resolvedBy, { ...target, mode: "allow", now }, invocationCatalog(deps, { type: "user", id: resolvedBy }, input));
+  if (!result.ok) throw new Error(result.error);
+}
+
+/**
+ * The actions a policy write for `owner` may name: the static manifest,
+ * plus each dynamic (MCP) service's tool listing for that owner's account
+ * when the host wires `serviceProbes`. Without it, or with no owner, a
+ * dynamic tool stays unverifiable and keeps the static-only behaviour.
+ */
+function policyCatalog(deps: PolicyResolverDeps, owner: { type: "user" | "team"; id: string } | undefined): PolicyCatalog {
+  return {
+    actionPluginByService: deps.actionPluginByService,
+    ...(deps.serviceProbes && owner ? { dynamicActions: deps.serviceProbes.listedActionsFor(owner) } : {}),
+  };
+}
+
+/**
+ * `policyCatalog` for a write made from a live call. The engine resolved
+ * the called tool for this very call, so its facts (`service`, `riskLevel`)
+ * answer for that one id without a listing: fresher than any cache, and no
+ * network wait before a gate opens. Every other id reads the owner's
+ * listing as usual. Without a `riskLevel` the call carries no fact to
+ * answer with, and the listing alone decides.
+ */
+function invocationCatalog(
+  deps: PolicyResolverDeps,
+  owner: { type: "user" | "team"; id: string } | undefined,
+  call: { service: string; actionId: string; riskLevel?: RiskLevel },
+): PolicyCatalog {
+  const listed = policyCatalog(deps, owner);
+  if (!call.riskLevel) return listed;
+  const known: ListedAction = { id: call.actionId, name: call.actionId, description: "", riskLevel: call.riskLevel };
+  return {
+    ...listed,
+    dynamicActions: async (service, actionPlugin) =>
+      service === call.service ? [known] : ((await listed.dynamicActions?.(service, actionPlugin)) ?? []),
+  };
+}
+
+export async function loadPolicyRows(db: AppQueryable, scope: PolicyRowScope): Promise<PolicyResolutionRows> {
+  // A turn another member sent in a personal session is not covered by the
+  // owner's session grants: it asks again.
+  const { teamId, userId, personalSession } = await policyOwner(db, scope);
+  let sessionGrants = !scope.externalSender;
+  if (personalSession && scope.userId && scope.userId !== userId) sessionGrants = false;
   const principalFilter = teamId
     ? or(and(eq(actionPolicies.principalType, "org"), eq(actionPolicies.principalId, scope.orgId)), and(eq(actionPolicies.principalType, "team"), eq(actionPolicies.principalId, teamId)))
     : and(eq(actionPolicies.principalType, "org"), eq(actionPolicies.principalId, scope.orgId));
@@ -129,7 +334,7 @@ export async function loadPolicyRows(db: AppQueryable, scope: PolicyRowScope): P
   }));
 
   let grants: RuntimeGrantRow[] = [];
-  if (scope.sessionId) {
+  if (scope.sessionId && sessionGrants) {
     const rows = await db
       .select()
       .from(runtimeGrants)
@@ -156,11 +361,11 @@ export async function loadPolicyRows(db: AppQueryable, scope: PolicyRowScope): P
   }
 
   let overrides: ActionPolicyOverrideRow[] = [];
-  if (scope.userId && !teamId) {
+  if (userId && !teamId) {
     const rows = await db
       .select()
       .from(actionPolicyOverrides)
-      .where(and(eq(actionPolicyOverrides.orgId, scope.orgId), eq(actionPolicyOverrides.userId, scope.userId)));
+      .where(and(eq(actionPolicyOverrides.orgId, scope.orgId), eq(actionPolicyOverrides.userId, userId)));
     overrides = rows.map((r) => ({
       id: r.id,
       service: r.service,
@@ -172,7 +377,31 @@ export async function loadPolicyRows(db: AppQueryable, scope: PolicyRowScope): P
     }));
   }
 
-  return { policies, grants, overrides };
+  const grantOwner = and(eq(workflowActionGrants.orgId, scope.orgId),
+    eq(workflowActionGrants.ownerType, teamId ? "team" : "user"), eq(workflowActionGrants.ownerId, teamId ?? userId ?? ""),
+    scope.workflowId ? eq(workflowActionGrants.workflowId, scope.workflowId) : undefined);
+  const savedWorkflow = and(eq(workflowDefinitions.id, workflowActionGrants.workflowId),
+    eq(workflowDefinitions.orgId, scope.orgId), eq(workflowDefinitions.ownerType, workflowActionGrants.ownerType),
+    eq(workflowDefinitions.ownerId, workflowActionGrants.ownerId));
+  let workflowGrants: { id: string; actionId: string }[] = [];
+  if (scope.workflowExecutionId) {
+    // A workflow grant covers the saved steps a person reviewed, and every
+    // step change revokes it. A run that started on other steps, such as a
+    // snapshot from before an edit, does not use it. One statement reads the
+    // grants with both definitions, so an edit and a new approval between two
+    // reads cannot give this run another version's grants.
+    const rows = await db.select({ id: workflowActionGrants.id, actionId: workflowActionGrants.actionId,
+      definition: workflowDefinitions.definition, runDefinition: workflowRuns.definition })
+      .from(workflowActionGrants)
+      .innerJoin(workflowDefinitions, savedWorkflow)
+      .innerJoin(workflowRuns, and(eq(workflowRuns.id, scope.workflowExecutionId), eq(workflowRuns.workflowId, workflowActionGrants.workflowId)))
+      .where(grantOwner);
+    workflowGrants = rows.filter((row) => sameWorkflowSteps(row.definition, row.runDefinition)).map(({ id, actionId }) => ({ id, actionId }));
+  } else if (scope.workflowId) {
+    workflowGrants = await db.select({ id: workflowActionGrants.id, actionId: workflowActionGrants.actionId })
+      .from(workflowActionGrants).innerJoin(workflowDefinitions, savedWorkflow).where(grantOwner);
+  }
+  return { policies, grants, overrides, workflowGrants };
 }
 
 function toGrantRow(r: {
@@ -204,6 +433,12 @@ export interface ResolveActionPolicyInput {
   workflowExecutionId?: string;
   pluginDefault: ApprovalMode | undefined;
   now: number;
+  externalSender?: boolean;
+  /** See `PolicyResolutionInput.partialParams`. */
+  partialParams?: boolean;
+  /** A workflow agent step that declares this exact action: its workflow's
+   * grants apply while its run has the saved steps. */
+  agentStep?: { workflowId: string; runId: string };
 }
 
 /**
@@ -218,6 +453,8 @@ export async function resolveActionPolicy(db: AppDb, input: ResolveActionPolicyI
     userId: input.userId,
     sessionId: input.sessionId,
     workflowExecutionId: input.workflowExecutionId,
+    ...(input.agentStep ? { workflowId: input.agentStep.workflowId, workflowExecutionId: input.agentStep.runId } : {}),
+    ...(input.externalSender ? { externalSender: true } : {}),
   });
   return resolvePolicyDecision(
     rows,
@@ -230,6 +467,8 @@ export async function resolveActionPolicy(db: AppDb, input: ResolveActionPolicyI
       sessionId: input.sessionId,
       workflowExecutionId: input.workflowExecutionId,
       now: input.now,
+      ...(input.partialParams ? { partialParams: true } : {}),
+      ...(input.agentStep ? { agentStep: true } : {}),
     },
     input.pluginDefault,
   );
@@ -276,7 +515,7 @@ export async function writeSessionGrant(db: AppDb, sessionId: string, grant: Gra
 /** Workflow-execution-scoped twin of `writeSessionGrant` — backed by the
  *  `runtime_grants_execution_policy_key` partial unique index. */
 export async function writeExecutionGrant(
-  db: AppDb,
+  db: AppQueryable,
   workflowExecutionId: string,
   grant: GrantWrite,
 ): Promise<void> {
@@ -429,6 +668,7 @@ export interface AuditInvocationRow {
   matchedOverrideId?: string | null;
   status?: PolicyInvocationRecord["status"] | null;
   sessionId?: string | null;
+  threadId?: string | null;
   workflowExecutionId?: string | null;
   userId?: string | null;
   orgId?: string | null;
@@ -438,6 +678,10 @@ export interface AuditInvocationRow {
   durationMs?: number | null;
   startedAt?: number | null;
   createdAt?: number;
+  /** External caller label (`ActionInvocationContext.external.client`). */
+  caller?: string | null;
+  /** The queue item whose turn made the call; usage bills the action with it. */
+  queueItemId?: string | null;
 }
 
 /**
@@ -471,6 +715,7 @@ export async function persistInvocationAudit(db: AppDb, row: AuditInvocationRow)
         matchedOverrideId: row.matchedOverrideId ?? null,
         status: row.status ?? null,
         sessionId: row.sessionId ?? null,
+        threadId: row.threadId ?? null,
         workflowExecutionId: row.workflowExecutionId ?? null,
         userId: row.userId ?? null,
         orgId: row.orgId ?? null,
@@ -481,6 +726,8 @@ export async function persistInvocationAudit(db: AppDb, row: AuditInvocationRow)
         error,
         durationMs: row.durationMs ?? null,
         startedAt: row.startedAt ?? null,
+        caller: row.caller ?? null,
+        queueItemId: row.queueItemId ?? null,
       })
       .onConflictDoNothing();
   } catch (err) {
@@ -504,6 +751,7 @@ export async function updateInvocationOutcome(
     result?: unknown;
     error?: string;
     durationMs?: number;
+    startedAt?: number;
     resolvedBy?: string;
   },
 ): Promise<void> {
@@ -521,6 +769,7 @@ export async function updateInvocationOutcome(
         resultTruncated: result ? result.truncated : null,
         error,
         durationMs: outcome.durationMs ?? null,
+        ...(outcome.startedAt !== undefined ? { startedAt: outcome.startedAt } : {}),
         ...(outcome.resolvedBy !== undefined ? { resolvedBy: outcome.resolvedBy } : {}),
       })
       // Org-scoped: `invocationId` embeds the workflow node id, which the
@@ -552,10 +801,41 @@ export function gatedAuditId(
 
 // ── Engine PolicyResolver ──────────────────────────────────────────
 
+/**
+ * Whether "Run without asking" covers this call. On a personal thread it
+ * covers only the turns of the person who turned it on, so a member who
+ * replies in a shared thread never borrows it. On a team thread it covers the
+ * team's members and the team's own unattended turns.
+ */
+async function threadBypassCovers(
+  db: AppDb,
+  input: { sessionId: string; threadId: string; userId?: string },
+  owner: { userId?: string; teamId?: string },
+): Promise<boolean> {
+  if (!input.userId) return false;
+  const bypass = await threadApprovalBypass(db, { sessionId: input.sessionId, threadId: input.threadId });
+  if (!bypass) return false;
+  if (!owner.teamId) return input.userId === bypass.enabledBy && owner.userId === bypass.enabledBy;
+  return input.userId === `team:${owner.teamId}` || await isTeamMember(db, owner.teamId, input.userId);
+}
+
 export interface PolicyResolverDeps {
   db: AppDb;
   actionPluginByService: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>;
+  /** The cached tool listings of dynamic (MCP) services, so the owner's
+   * "always allow" on one of their tools passes the bounds check that the
+   * static manifest alone would refuse. Absent: static catalog only. */
+  serviceProbes?: ServiceProbes;
   clock?: () => number;
+  /** The team accounts an action could use, read to tell when it would use
+   * another member's shared account (`services/credential-borrow.ts`).
+   * Absent: an action never asks a member. */
+  credentials?: CredentialStore;
+  onePassword?: OnePasswordService;
+  plugins?: ValetPlugin[];
+  /** The workflow agent step a call runs in, when its run may use saved
+   * workflow grants (`workflows/step-grants.ts`). Absent: no agent step does. */
+  workflowStepGrant?: (input: { orgId: string; sessionId: string; queueItemId?: string; teamId?: string; userId?: string }) => Promise<WorkflowStepGrant | undefined>;
 }
 
 /**
@@ -566,6 +846,40 @@ export interface PolicyResolverDeps {
  */
 export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
   const clock = deps.clock ?? Date.now;
+  const credentialServiceFor = (service: string): string =>
+    deps.actionPluginByService.get(service)?.actionPlugin.credentialService ?? service;
+
+  /** The member whose shared account this team action would use, when no
+   * account of the acting member's or the team's own answers. GitHub has the
+   * organization App behind the team's row, so it never borrows. */
+  async function sharedAccountApprover(input: PolicyResolveInput, step: WorkflowStepGrant | undefined): Promise<{ userId: string; name?: string; shareGeneration: string; allowTeamConsent: true } | undefined> {
+    const service = credentialServiceFor(input.service);
+    if (!deps.credentials || !input.teamId || !input.orgId || service === "github") return undefined;
+    const sharers = await membersSharing(deps.db, input.teamId, service);
+    if (sharers.length === 0) return undefined;
+    let approvalFrom: string | undefined;
+    try {
+      ({ approvalFrom } = await readTeamCredential(
+        { credentials: deps.credentials, onePassword: deps.onePassword, shares: async () => sharers },
+        {
+          orgId: input.orgId, teamId: input.teamId,
+          ...(input.userId && !input.externalSender ? { userId: input.userId } : {}),
+          // A sender with no Valet account never rides a teammate's approval.
+          mayBorrow: async (memberId) => !input.externalSender && canBorrowCredential(deps.db, { orgId: input.orgId!, teamId: input.teamId!, actorId: input.userId, sessionId: input.sessionId, threadId: input.threadId, service, memberId, ...(step ? { step } : {}) }),
+        },
+        service,
+        orgFallbackPolicy(deps.plugins, service),
+      ));
+    } catch {
+      // A share that no longer resolves: the action itself reports that.
+      return undefined;
+    }
+    if (!approvalFrom) return undefined;
+    const [member] = await deps.db.select({ name: users.name }).from(users).where(eq(users.id, approvalFrom)).limit(1);
+    const generation = await shareGeneration(deps.db, input.teamId, service, approvalFrom);
+    if (!generation) return undefined;
+    return { allowTeamConsent: true, shareGeneration: generation, userId: approvalFrom, ...(member?.name ? { name: member.name } : {}) };
+  }
 
   const pluginDefaultFor = (service: string): ApprovalMode | undefined =>
     deps.actionPluginByService.get(service)?.actionPlugin.defaultApprovalMode;
@@ -587,11 +901,14 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
             appliesIn: input.appliesIn,
             sessionId: input.sessionId,
             now: clock(),
+            ...(input.partialParams ? { partialParams: true } : {}),
           },
           pluginDefaultFor(input.service),
         );
       }
 
+      const step = input.externalSender ? undefined : await deps.workflowStepGrant?.({ orgId: input.orgId, sessionId: input.sessionId,
+        ...(input.queueItemId ? { queueItemId: input.queueItemId } : {}), ...(input.teamId ? { teamId: input.teamId } : {}), ...(input.userId ? { userId: input.userId } : {}) });
       const decision = await resolveActionPolicy(deps.db, {
         orgId: input.orgId,
         teamId: input.teamId,
@@ -604,18 +921,66 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
         sessionId: input.sessionId,
         pluginDefault: pluginDefaultFor(input.service),
         now: clock(),
+        ...(input.externalSender ? { externalSender: true } : {}),
+        ...(input.partialParams ? { partialParams: true } : {}),
+        ...(step?.actions.includes(input.actionId) ? { agentStep: { workflowId: step.workflowId, runId: step.runId } } : {}),
       });
 
+      if (decision.mode === "deny") return decision;
+      // Another member's account: they answer, and nobody else can.
+      const approver = await sharedAccountApprover(input, step);
+      if (approver) {
+        if (!input.externalSender && (!input.userId || !input.teamId || (!await isTeamMember(deps.db, input.teamId, input.userId) && !await isUnattendedTeamSession(deps.db, {
+          orgId: input.orgId, teamId: input.teamId, sessionId: input.sessionId, threadId: input.threadId, actorId: input.userId,
+        })))) {
+          return { mode: "deny", provenance: { ...decision.provenance, source: "shared_account" } };
+        }
+        return { mode: "require_approval", provenance: { ...decision.provenance, source: "shared_account" }, approver,
+          extraGateActions: [{ id: "always_allow_account", label: GATE_ACTION_LABELS.alwaysAllowForTeam, approves: true }] };
+      }
       if (decision.mode !== "require_approval") return decision;
 
-      // Offer the two escalation actions on the gate. `onResolution`
-      // enforces the admin check for `always_allow`; the engine strips the
-      // `approves` flag before opening the gate.
+      // Offer the escalation actions on the gate. `onResolution` enforces who
+      // may pick each one; the engine strips the `approves` flag before
+      // opening the gate. The owner option appears only where the owner's
+      // own setting could allow the action, the rule Integrations applies.
+      const owner = await policyOwner(deps.db, { ...input, orgId: input.orgId });
+      const now = clock();
+      const rows = await loadPolicyRows(deps.db, { orgId: input.orgId, teamId: input.teamId, userId: input.userId, sessionId: input.sessionId });
+      const ownerCatalog = invocationCatalog(
+        deps,
+        owner.teamId ? { type: "team", id: owner.teamId } : owner.userId ? { type: "user", id: owner.userId } : undefined,
+        input,
+      );
+      const ownerMayAllow = !input.externalSender && (owner.teamId ?? owner.userId) !== undefined
+        && (await validateOverrideBounds(deps.db, input.orgId, { actionId: input.actionId }, "allow", now, ownerCatalog)).ok
+        && ownerAllowTakesEffect(
+          rows,
+          owner,
+          { service: input.service, actionId: input.actionId, riskLevel: input.riskLevel, params: input.params, appliesIn: input.appliesIn,
+            sessionId: input.sessionId, now, ...(input.partialParams ? { partialParams: true } : {}) },
+          pluginDefaultFor(input.service),
+        );
+      // Fewer buttons: when anyone who may answer can stop the asking for
+      // good, the session-long approval adds nothing a person would pick. It
+      // stays where an org rule hides the owner option, and where only a team
+      // admin may set the team's allow: a critical action, or one a team rule
+      // names. A member who is refused the allow still has a lasting choice.
+      const anyoneMayAllow = ownerMayAllow && input.riskLevel !== "critical"
+        && !(owner.teamId && teamRuleNamesAction(rows.policies.filter((rule) => rule.principalType === "team"), input, now));
+      // "Run without asking" approves exactly what the person could stop
+      // asking for themselves: the same rule as the buttons above.
+      if (anyoneMayAllow && await threadBypassCovers(deps.db, input, owner)) {
+        return { mode: "allow", provenance: { ...decision.provenance, source: "thread_bypass" } };
+      }
       return {
         ...decision,
         extraGateActions: [
-          { id: GATE_ACTION_APPROVE_SESSION, label: "Approve for this session", approves: true },
-          { id: GATE_ACTION_ALWAYS_ALLOW, label: "Always allow (org)", approves: true },
+          ...(anyoneMayAllow ? [] : [{ id: GATE_ACTION_APPROVE_SESSION, label: GATE_ACTION_LABELS.approveSession, approves: true }]),
+          ...(ownerMayAllow
+            ? [{ id: GATE_ACTION_ALWAYS_ALLOW_OWNER, label: owner.teamId ? GATE_ACTION_LABELS.alwaysAllowForTeam : GATE_ACTION_LABELS.alwaysAllowForMe, approves: true }]
+            : []),
+          { id: GATE_ACTION_ALWAYS_ALLOW, label: GATE_ACTION_LABELS.alwaysAllowOrg, approves: true },
         ],
       };
     },
@@ -637,6 +1002,25 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
       if (!input.orgId) return;
 
       const now = clock();
+      if (decision.approver) {
+        if (resolution.actionId !== "approve" && resolution.actionId !== "always_allow_account") return;
+        const lasting = resolution.actionId === "always_allow_account";
+        if (lasting && (!decision.approver.allowTeamConsent || !["web", "slack"].includes(resolution.source?.channelType ?? ""))) {
+          throw new Error("Open this account approval in Valet or Slack to allow it for the team.");
+        }
+        // The routes let only the approver answer; refuse anyone else here too.
+        if (resolution.resolvedBy !== decision.approver.userId) {
+          throw new Error(`Only ${decision.approver.name ?? "the account's owner"} can allow use of their account.`);
+        }
+        if (!decision.approver.shareGeneration) throw new Error("This approval is stale. Request account approval again.");
+        if (!input.teamId) throw new Error("The team is unavailable. Request account approval again.");
+        await writeBorrowGrant(deps.db, input.orgId, {
+          teamId: input.teamId, shareGeneration: decision.approver.shareGeneration,
+          consentScope: lasting ? "team" : undefined,
+          sessionId: input.sessionId, threadId: input.threadId, service: credentialServiceFor(input.service), memberId: decision.approver.userId,
+        }, now);
+        return;
+      }
       if (resolution.actionId === GATE_ACTION_APPROVE_SESSION) {
         if (!input.sessionId) return;
         await writeSessionGrant(deps.db, input.sessionId, {
@@ -655,6 +1039,10 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
           grantedBy: resolution.resolvedBy,
           now,
         });
+      } else if (resolution.actionId === GATE_ACTION_ALWAYS_ALLOW_OWNER) {
+        // Throws for a resolver who may not choose it, or when an org policy
+        // now stops the allow; the engine fails the approval closed.
+        await writeOwnerAlwaysAllow(deps, { ...input, orgId: input.orgId }, resolution.resolvedBy, now);
       }
       // Plain "approve" (or any other resolution) is a one-shot allow — no
       // durable write.
@@ -683,6 +1071,8 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
         matchedOverrideId: record.provenance.matchedOverrideId ?? null,
         status: record.status,
         sessionId: record.sessionId,
+        threadId: record.threadId,
+        queueItemId: record.queueItemId ?? null,
         workflowExecutionId: null,
         userId: record.userId ?? null,
         orgId: record.orgId ?? null,
@@ -692,6 +1082,7 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
         durationMs,
         startedAt,
       });
+      await recordActionChannelMessage(deps.db, record);
     },
   };
 }

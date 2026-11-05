@@ -1,0 +1,463 @@
+/**
+ * Durable inbox for Slack deliveries, and the consumers that process it.
+ *
+ * The Slack plugin's `events` route (`@valet/plugin-slack/http`) verifies
+ * each delivery and then calls `admitSlackDelivery` through a host
+ * capability (`plugins/http-slack.ts`). Admission saves the encrypted request
+ * before the route acknowledges Slack. The dispatcher drains the inbox after
+ * the response and fans each update out to three consumers:
+ *
+ * - channel: `transport.parseUpdate` then `channelHost.handleUpdate` — the
+ *   agent surface (`app_home_opened` on the Messages tab, `message.im`,
+ *   `app_context_changed`) and Block Kit approval callbacks.
+ * - events: the Slack `TriggerDef`s then `ingestEvent` — workflow
+ *   subscriptions. Ingest is match-gated: an event that matches no
+ *   subscription is dropped and never lands in the events table. A message
+ *   event gets its channel name first, for `channel_name` filters.
+ * - follow: `handleFollowedMessage` for threads bound to an assistant.
+ *
+ * ── Durability and redelivery ────────────────────────────────────────────
+ * The encrypted inbox insert completes before the 200. The dispatcher
+ * resumes saved requests after a crash; diagnostic receipts alone do not
+ * establish acceptance. The inbox key is a hash of the organization and the
+ * request bytes, so a byte-identical redelivery adds no second row. A
+ * redelivery that differs is processed like any other delivery. Processing
+ * is safe because both consumers dedupe durably: the engine holds a unique
+ * index on `(session_id, dispatch_id)`, and ingest holds an
+ * `ON CONFLICT DO NOTHING` on `(service, dedupe_key)`. Slack repeats
+ * `event_id` across retries, so both keys are stable.
+ *
+ * ── Which credential, and which workspace ────────────────────────────────
+ * The org's Slack credential holds the signing secret and the workspace id,
+ * both recorded at connect time by `PUT /api/credentials/slack?scope=org`.
+ * A Slack app's signing secret is valid for every workspace that installs
+ * that app, so a valid signature alone does not prove the update belongs to
+ * us: the update must also name our workspace. An update from any other
+ * workspace, or one that names none, is dropped. Inside our workspace each
+ * Slack user reaches only their own linked Valet user's orchestrator
+ * session (`ChannelHost.routeUpdate`), so two members of one workspace
+ * never see each other's threads.
+ *
+ * Linking works two ways. The OAuth auto-link runs when a user completes the
+ * slack-user connect flow and records their Slack user id at that point. The
+ * `link <code>` DM command lets a user link manually: the Slack transport
+ * parses the message into a `command` event that `ChannelHost.handleStart`
+ * consumes. Until a user completes one of these flows their DMs drop at
+ * `unlinked_sender`.
+ *
+ * Org resolution is the single-org assumption this deployment makes
+ * everywhere else (`lib/org.ts`). A multi-org deployment needs a real
+ * workspace-to-org lookup in `plugins/http-slack.ts`.
+ */
+import { createHash } from "node:crypto";
+import { and, eq, inArray, lte, asc, isNull, sql } from "drizzle-orm";
+import { slackWebhookInbox, eventDropLog } from "../schema/index.js";
+import { encryptSecret, decryptSecret, deriveSecretKey } from "../lib/secret-crypto.js";
+import type { Providers } from "../providers/types.js";
+import { createEventReceipt, appendReceiptStage } from "../events/receipts.js";
+import { credentialSecret, reportError } from "@valet/engine";
+import { withEventChannelName } from "@valet/plugin-slack/actions";
+import type { ChannelTransport, RawChannelUpdate, TriggerDef, ValetPlugin } from "@valet/engine";
+import type { AppDb } from "../lib/drizzle.js";
+import { writeDropLog } from "../orchestrator/signals.js";
+import { ingestEvent, logSlackBotIdentityMissing, logSlackMessageBotNearMiss } from "../events/ingest.js";
+import { waiterMatchDeps, type WaiterMatchDeps } from "../events/waiters.js";
+import type { ChannelHost } from "./host.js";
+import type { EngineHost } from "../engine/host.js";
+import { handleFollowedMessage } from "./follow-router.js";
+import { channelMessageNormalizer } from "../events/channel-origin.js";
+import { channelThreadWindowFetcher } from "../events/channel-thread-context.js";
+import { maybeNotifyUnlinkedSlackSender } from "./slack-link-notice.js";
+import { resolveSlackBotIdentity, slackBotUserIdOf } from "../services/slack-bot-identity.js";
+import type { SlackWorkspaceIdentity } from "../services/slack-connect.js";
+
+/** Same rationale as `ChannelHost.maybeLogVerifyFailed`: the Slack events route is
+ * public and unauthenticated, so a burst of bad or half-configured posts
+ * must not flood `event_drop_log`. The throttle covers the write, never the
+ * response — every bad request still gets its real status. */
+const DROPLOG_COOLDOWN_MS = 60_000;
+const droplogLoggedAt = new Map<string, number>();
+const interactionLoggedAt = new Map<string, number>();
+
+/** Test-only: clears the per-process drop-log throttle so suites can assert
+ * one row per reason without the cooldown bleeding across cases. */
+export function __resetSlackWebhookThrottle(): void {
+  droplogLoggedAt.clear();
+  interactionLoggedAt.clear();
+}
+
+async function safeWriteDropLog(db: AppDb, args: Parameters<typeof writeDropLog>[1]): Promise<void> {
+  try { await writeDropLog(db, args); }
+  catch { reportError({ area: "channels", reason: "slack_problem_diagnostic", provider: "slack", level: "warn" }, "[slack-webhook] problem diagnostic write unavailable"); }
+}
+
+export async function throttledDropLog(db: AppDb, args: { orgId: string; reason: string; detail: string }): Promise<void> {
+  const now = Date.now();
+  const last = droplogLoggedAt.get(args.reason);
+  if (last !== undefined && now - last < DROPLOG_COOLDOWN_MS) return;
+  droplogLoggedAt.set(args.reason, now);
+  await safeWriteDropLog(db, args);
+}
+
+function slackTriggerDefs(plugins: ValetPlugin[]): TriggerDef[] {
+  return plugins.flatMap((p) => p.triggers ?? []).filter((t) => t.service === "slack");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+/** `team_id` sits on the Events API envelope; interactivity nests it at `team.id`. */
+function teamIdOf(update: unknown): string | undefined {
+  if (!isRecord(update)) return undefined;
+  if (typeof update.team_id === "string") return update.team_id;
+  if (isRecord(update.team) && typeof update.team.id === "string") return update.team.id;
+  return undefined;
+}
+
+const DIAGNOSTIC_INTERACTION_TYPES = new Set(["block_actions", "view_submission"]);
+
+/** Retain only diagnostic metadata for Slack forms. The event payload, including
+ * Slack's deprecated verification token, never enters durable storage. */
+async function logUnmatchedInteraction(db: AppDb, orgId: string, raw: RawChannelUpdate): Promise<void> {
+  const type = isRecord(raw) && typeof raw.type === "string" ? raw.type : undefined;
+  if (!type || !DIAGNOSTIC_INTERACTION_TYPES.has(type)) return;
+  const throttleKey = `${orgId}:${type}`;
+  const now = Date.now();
+  const last = interactionLoggedAt.get(throttleKey);
+  if (last !== undefined && now - last < DROPLOG_COOLDOWN_MS) return;
+  interactionLoggedAt.set(throttleKey, now);
+  await safeWriteDropLog(db, {
+    orgId,
+    reason: "slack_interaction_unmatched",
+    detail: `A Slack ${type} interaction arrived. Valet did not start a workflow because no line or workflow listens for Slack interactions.`,
+  });
+}
+
+/** Only verified envelopes reach this diagnostic; never retain message text or tokens. */
+function classifierExplanation(deps: FanOutDeps, raw: RawChannelUpdate): string {
+  if (!isRecord(raw) || raw.type !== "event_callback" || !isRecord(raw.event)) return "Valet does not listen for Slack interactions or this kind of Slack request.";
+  const event = raw.event;
+  const type = typeof event.type === "string" ? event.type : "unknown";
+  const botId = typeof event.bot_id === "string" ? event.bot_id : isRecord(event.bot_profile) && typeof event.bot_profile.id === "string" ? event.bot_profile.id : undefined;
+  return botId && botId === deps.botId || event.user === deps.botUserId && deps.botUserId !== undefined
+    ? "Ignored Valet's own message to prevent a reply loop."
+    : !raw.event_id ? "The Slack request has no event ID."
+    : type === "message" && event.subtype && event.subtype !== "bot_message"
+      ? "No line can listen for this kind of message (for example, an edit or a deletion)."
+      : botId && !deps.botId ? "Bot message classification requires the connected Valet bot identity."
+      : "No Slack event Valet reads matches this event type or message shape.";
+}
+
+async function logClassifierRejection(deps: FanOutDeps, raw: RawChannelUpdate): Promise<void> {
+  if (!isRecord(raw) || raw.type !== "event_callback" || !isRecord(raw.event)) return;
+  const explanation = classifierExplanation(deps, raw);
+  const key = `${deps.orgId}:classifier:${explanation}`;
+  const now = Date.now();
+  const last = interactionLoggedAt.get(key);
+  if (last !== undefined && now - last < DROPLOG_COOLDOWN_MS) return;
+  interactionLoggedAt.set(key, now);
+  await safeWriteDropLog(deps.db, { orgId: deps.orgId, reason: "slack_classifier_rejected", detail: `A verified Slack event arrived, but Valet did not compare it with any line. ${explanation}` });
+}
+
+interface FanOutDeps {
+  workspaceId: string;
+  verifiedReceivedAt?: number;
+  botUserId?: string;
+  botId?: string;
+  resolveBotIdentity?: () => Promise<SlackWorkspaceIdentity | undefined>;
+  /** The org's Slack bot token. It reads channel names for `channel_name` filters. */
+  slackToken?: string;
+  db: AppDb;
+  plugins: ValetPlugin[];
+  transport: ChannelTransport;
+  channelHost: ChannelHost;
+  engineHost: EngineHost;
+  triggerDefs: TriggerDef[];
+  onIngest: () => void;
+  /** Event waiter matching for each normalized event. */
+  waiters?: WaiterMatchDeps;
+  orgId: string;
+  webhookSecret: string;
+  headers: Record<string, string>;
+  rawBody: Uint8Array;
+}
+
+function botMessageOf(raw: RawChannelUpdate): Record<string, unknown> | undefined {
+  if (!isRecord(raw) || raw.type !== "event_callback" || !isRecord(raw.event)) return undefined;
+  const event = raw.event;
+  if (event.type !== "message" || (event.subtype !== undefined && event.subtype !== "bot_message")) return undefined;
+  const botId = typeof event.bot_id === "string" && event.bot_id
+    ? event.bot_id
+    : isRecord(event.bot_profile) && typeof event.bot_profile.id === "string" ? event.bot_profile.id : undefined;
+  return botId ? { ...event, bot_id: botId } : undefined;
+}
+
+/**
+ * Feeds one verified update to both consumers. Errors are contained per
+ * update: one malformed payload must not stop the rest of a batch, and
+ * neither consumer may block the other.
+ */
+async function recordVerifiedReceipt(
+  db: AppDb,
+  orgId: string,
+  raw: RawChannelUpdate,
+  credentialTeamId: string | undefined,
+  deps: FanOutDeps,
+  delivery: { retryNum: string | undefined; retryReason: string | undefined; payloadBytes: number },
+): Promise<string | undefined> {
+  const envelope = isRecord(raw) ? raw : {};
+  const event = isRecord(envelope.event) ? envelope.event : {};
+  const sameWorkspace = teamIdOf(raw) === credentialTeamId;
+  const scalar = (value: unknown) => typeof value === "string" ? value : undefined;
+  const receiptId = await createEventReceipt(db, { orgId, service: "slack",
+    externalId: sameWorkspace ? scalar(envelope.event_id) : undefined,
+    metadata: {
+      workspaceId: teamIdOf(raw),
+      rawType: scalar(event.type) ?? scalar(envelope.type),
+      ...(sameWorkspace ? {
+        rawSubtype: scalar(event.subtype), channelId: scalar(event.channel) ?? (isRecord(envelope.channel) ? scalar(envelope.channel.id) : undefined),
+        actorId: scalar(event.user), botId: scalar(event.bot_id) ?? (isRecord(event.bot_profile) ? scalar(event.bot_profile.id) : undefined),
+        appId: scalar(envelope.api_app_id), messageTs: scalar(event.ts), threadTs: scalar(event.thread_ts),
+      } : {}),
+      retryNum: delivery.retryNum, ...(delivery.retryNum !== undefined ? { retryReason: delivery.retryReason } : {}),
+      botIdentityAvailable: !!deps.botId, botUserIdentityAvailable: !!deps.botUserId,
+      payloadBytes: delivery.payloadBytes, configuredTriggerCount: deps.triggerDefs.length,
+    },
+  });
+  await appendReceiptStage(db, receiptId, { stage: "verification", outcome: "verified", detail: "The Slack signature was verified. This Diagnostics entry keeps no message body or credential headers." });
+  return receiptId;
+}
+
+async function fanOutUpdate(deps: FanOutDeps, raw: RawChannelUpdate, receiptId: string | undefined): Promise<void> {
+  let failed = false;
+  // This callback is created only after signature and workspace verification.
+  const notifyUnlinked = () => maybeNotifyUnlinkedSlackSender({
+    db: deps.db, transport: deps.transport, orgId: deps.orgId, workspaceId: deps.workspaceId, raw, receiptId, botUserId: deps.botUserId,
+  });
+  try {
+    await appendReceiptStage(deps.db, receiptId, { stage: "channel", outcome: "started", detail: "Direct-channel processing started." });
+    const event = deps.transport.parseUpdate(raw);
+    if (event) await deps.channelHost.handleUpdate("slack", event, true);
+    await appendReceiptStage(deps.db, receiptId, { stage: "channel", outcome: event ? "completed" : "not_applicable",
+      detail: event ? "Direct-channel handling completed. It can still decline a message, so a workflow did not necessarily run." : "Valet read no direct-channel event. Valet still compares the event with lines and workflows separately." });
+  } catch (err) {
+    await appendReceiptStage(deps.db, receiptId, { stage: "channel", outcome: "failed", detail: "Direct-channel processing failed. Line matching and followed-thread checks continue separately. Search the server logs for this Diagnostics entry's ID." });
+    failed = true;
+    reportError({ area: "channels", reason: "slack_inbox_channel_consumer", provider: "slack" }, `[slack-webhook] receipt ${receiptId ?? "unavailable"} channel consumer failed`, err);
+  }
+
+  // Follow-router: a threaded message on a followed thread routes to the bound
+  // assistant. Its error is contained. It runs before subscription ingestion:
+  // the dispatcher skips a followed reply only after the router's cursor
+  // passed it, and ingestion nudges the dispatcher at once (spec 2026-10-16:
+  // delivery threads and claims, Part C step 4).
+  try {
+    await appendReceiptStage(deps.db, receiptId, { stage: "follow", outcome: "started", detail: "Checking whether a followed Slack thread applies." });
+    await handleFollowedMessage(
+      {
+        db: deps.db,
+        botUserId: deps.botUserId,
+        engineHost: deps.engineHost,
+        normalizeChannelMessage: channelMessageNormalizer(deps.channelHost),
+        fetchThreadWindow: channelThreadWindowFetcher(deps.channelHost),
+        onSenderDenied: notifyUnlinked,
+      },
+      { orgId: deps.orgId, raw },
+    );
+    await appendReceiptStage(deps.db, receiptId, { stage: "follow", outcome: "completed", detail: "Followed-thread check completed. This does not show that a binding existed or that a prompt reached a thread." });
+  } catch (err) {
+    await appendReceiptStage(deps.db, receiptId, { stage: "follow", outcome: "failed", detail: "Followed-thread processing failed. Search the server logs for this Diagnostics entry's ID. The other checks ran separately." });
+    failed = true;
+    reportError({ area: "channels", reason: "slack_inbox_follow_router", provider: "slack" }, `[slack-webhook] receipt ${receiptId ?? "unavailable"} follow-router failed`, err);
+  }
+
+  // The trigger definitions re-verify over the same raw bytes so their own
+  // extraction stays authoritative. The HMAC is cheap, and each definition
+  // rejects event types outside its family, so the first match wins.
+  let eventPhase = "classification";
+  try {
+    await appendReceiptStage(deps.db, receiptId, { stage: "classification", outcome: "started", detail: `Checking the ${deps.triggerDefs.length} kinds of Slack event Valet reads.` });
+    const botMessage = botMessageOf(raw);
+    if (!deps.botId && botMessage && (!deps.botUserId || botMessage.user !== deps.botUserId)) {
+      const identity = await deps.resolveBotIdentity?.();
+      if (identity) {
+        deps.botId = identity.botId;
+        deps.botUserId = identity.botUserId;
+      }
+    }
+    let matchedTrigger = false;
+    for (const def of deps.triggerDefs) {
+      const verified = await def.verify({ headers: deps.headers, rawBody: deps.rawBody }, { webhookSecret: deps.webhookSecret, ...(deps.verifiedReceivedAt !== undefined ? { verifiedReceivedAt: String(deps.verifiedReceivedAt) } : {}), ...(deps.botId ? { botId: deps.botId } : {}), ...(deps.botUserId ? { botUserId: deps.botUserId } : {}) });
+      if (!verified) continue;
+      // A message event names its channel by ID only. Add the name before
+      // matching, so a `channel_name` filter and the stored payload see it.
+      const normalized = def.toEvent(await withEventChannelName(verified, deps.slackToken));
+      eventPhase = "line matching";
+      const ingestResult = await ingestEvent(
+        { db: deps.db, plugins: deps.plugins, onIngest: deps.onIngest, ...(deps.waiters ? { waiters: deps.waiters } : {}) },
+        { orgId: deps.orgId, service: "slack", event: normalized, receiptId },
+      );
+      if (normalized.key === "slack.app_mention" && ingestResult.authorizationDenied) await notifyUnlinked();
+      // A bot-message subscription that matched or excluded this event owns
+      // its diagnostic. Only a classifier miss with no named bot subscription
+      // should suggest that a slack.message subscription use slack.bot_message.
+      if (normalized.key === "slack.bot_message" && ingestResult.skipped && !ingestResult.namedSubscription) {
+        await logSlackMessageBotNearMiss(deps, deps.orgId, normalized.payload);
+      }
+      matchedTrigger = true;
+      break;
+    }
+    if (!matchedTrigger) {
+      await appendReceiptStage(deps.db, receiptId, { stage: "classification", outcome: "rejected", detail: classifierExplanation(deps, raw) });
+      await logUnmatchedInteraction(deps.db, deps.orgId, raw);
+      if (!deps.botId && botMessage && (!deps.botUserId || botMessage.user !== deps.botUserId)) {
+        await logSlackBotIdentityMissing(deps, deps.orgId, botMessage);
+      } else {
+        await logClassifierRejection(deps, raw);
+      }
+    }
+  } catch (err) {
+    await appendReceiptStage(deps.db, receiptId, { stage: "ingestion", outcome: "failed", detail: `Event processing failed during ${eventPhase}. Search the server logs for this Diagnostics entry's ID. Valet keeps no error details here.` });
+    failed = true;
+    reportError({ area: "channels", reason: "slack_inbox_event_consumer", provider: "slack" }, `[slack-webhook] receipt ${receiptId ?? "unavailable"} event consumer failed`, err);
+  }
+  if (failed) throw new Error("Slack consumers did not all finish. The durable inbox will retry.");
+}
+
+/** The verified request and the connection it was verified against. */
+export interface SlackAdmission {
+  orgId: string;
+  /** Lowercase provider headers. The host removed its own credentials. */
+  headers: Record<string, string>;
+  rawBody: Uint8Array;
+  webhookSecret: string;
+  credentialTeamId: string;
+  updates: RawChannelUpdate[];
+  retryNum: string | undefined;
+  retryReason: string;
+}
+
+/**
+ * Persists a verified request before the acknowledgement. A diagnostic
+ * receipt cannot replay the consumers after a crash, so it is not an
+ * acceptance record. Throws when the insert fails, so Slack retries.
+ */
+export async function admitSlackDelivery(providers: Providers, admission: SlackAdmission): Promise<void> {
+  const { db } = providers;
+  const now = Date.now();
+  const payload = JSON.stringify({ raws: admission.updates, headers: admission.headers,
+    rawBody: Buffer.from(admission.rawBody).toString("base64"), webhookSecret: admission.webhookSecret,
+    credentialTeamId: admission.credentialTeamId, verifiedReceivedAt: now,
+    retryNum: admission.retryNum, retryReason: admission.retryReason });
+  const id = createHash("sha256").update(`${admission.orgId}:`).update(admission.rawBody).digest("hex");
+  await db.insert(slackWebhookInbox).values({ id, orgId: admission.orgId,
+    payload: encryptSecret(payload, deriveSecretKey(`slack-inbox:${providers.encryptionKey}`)),
+    createdAt: now, nextAttemptAt: now }).onConflictDoNothing();
+  configureSlackIngress(providers);
+  providers.eventDispatcher.nudge();
+}
+
+/** Use the dispatcher's existing lifecycle for crash recovery, including before new webhooks arrive. */
+export function configureSlackIngress(providers: Providers): void {
+  providers.eventDispatcher.setIngressDrain(() => drainSlackIngress(providers));
+}
+
+export async function drainSlackIngress(providers: Providers): Promise<void> {
+  const { db } = providers;
+  const now = Date.now();
+  const due = db.select({ id: slackWebhookInbox.id }).from(slackWebhookInbox)
+    .where(and(isNull(slackWebhookInbox.failedAt), lte(slackWebhookInbox.nextAttemptAt, now))).orderBy(asc(slackWebhookInbox.nextAttemptAt)).limit(10);
+  // Repeat the due predicate on UPDATE to fence concurrent process claims.
+  const rows = await db.update(slackWebhookInbox).set({ nextAttemptAt: now + 60_000, attempts: sql`${slackWebhookInbox.attempts} + 1` })
+    .where(and(inArray(slackWebhookInbox.id, due), isNull(slackWebhookInbox.failedAt), lte(slackWebhookInbox.nextAttemptAt, now))).returning();
+  await Promise.all(rows.map(async row => {
+    let leaseUntil = row.nextAttemptAt;
+    let leaseLost = false;
+    let renewal = Promise.resolve();
+    const heartbeat = setInterval(() => {
+      renewal = renewal.then(async () => {
+        const next = Date.now() + 60_000;
+        const [claimed] = await db.update(slackWebhookInbox).set({ nextAttemptAt: next })
+          .where(and(eq(slackWebhookInbox.id, row.id), eq(slackWebhookInbox.nextAttemptAt, leaseUntil))).returning({ id: slackWebhookInbox.id });
+        if (!claimed) leaseLost = true;
+        else leaseUntil = next;
+      }).catch(err => { leaseLost = true; reportError({ area: "channels", reason: "slack_inbox_lease_renewal", provider: "slack" }, `[slack-webhook] inbox ${row.id} lease renewal failed`, err); });
+    }, 20_000);
+    heartbeat.unref?.();
+    try {
+      const payload: unknown = JSON.parse(decryptSecret(row.payload, deriveSecretKey(`slack-inbox:${providers.encryptionKey}`)));
+      if (!isRecord(payload) || !Array.isArray(payload.raws) || !isRecord(payload.headers)
+        || typeof payload.rawBody !== "string" || typeof payload.webhookSecret !== "string"
+        || typeof payload.credentialTeamId !== "string" || typeof payload.verifiedReceivedAt !== "number") {
+        throw new Error("Invalid Slack inbox record. Inspect the stored request version.");
+      }
+      const headers: Record<string, string> = {};
+      for (const [key, value] of Object.entries(payload.headers)) if (typeof value === "string") headers[key] = value;
+      const credential = await providers.engineCredentials.get({ type: "org", id: row.orgId }, "slack");
+      const transport = providers.channelHost.transportFor("slack");
+      if (!transport || credential?.metadata?.teamId !== payload.credentialTeamId) {
+        throw new Error("The Slack workspace that accepted these events is not connected. Reconnect it in Settings to process them.");
+      }
+      const credentialTeamId = payload.credentialTeamId;
+      const accessToken = credentialSecret(credential);
+      const rawBody = Buffer.from(payload.rawBody, "base64");
+      const deps: FanOutDeps = {
+        db, workspaceId: credentialTeamId, plugins: providers.plugins, transport, channelHost: providers.channelHost, engineHost: providers.engineHost,
+        orgId: row.orgId, webhookSecret: payload.webhookSecret, headers, rawBody,
+        verifiedReceivedAt: payload.verifiedReceivedAt,
+        // The follow router and the event matchers read one bot user id.
+        botUserId: await slackBotUserIdOf(providers.engineCredentials, row.orgId, credential),
+        botId: typeof credential.metadata?.botId === "string" ? credential.metadata.botId : undefined,
+        resolveBotIdentity: accessToken ? () => resolveSlackBotIdentity(providers.engineCredentials,
+          { orgId: row.orgId, accessToken, teamId: credentialTeamId }) : undefined,
+        ...(accessToken ? { slackToken: accessToken } : {}),
+        triggerDefs: slackTriggerDefs(providers.plugins), onIngest: providers.eventDispatcher.nudge,
+      };
+      const waiters = waiterMatchDeps(providers, { nudge: (ids) => providers.wakeWatcher.nudge(ids) });
+      // Reuse the bot user id this drain already read, or later resolved.
+      deps.waiters = { ...waiters, slackBotUserId: async (orgId) => deps.botUserId ?? waiters.slackBotUserId(orgId) };
+      for (const raw of payload.raws) {
+        const receiptId = await recordVerifiedReceipt(db, row.orgId, raw, payload.credentialTeamId, deps,
+          { retryNum: typeof payload.retryNum === "string" ? payload.retryNum : undefined,
+            retryReason: typeof payload.retryReason === "string" ? payload.retryReason : undefined, payloadBytes: rawBody.byteLength });
+        if (teamIdOf(raw) !== payload.credentialTeamId) {
+          await appendReceiptStage(db, receiptId, { stage: "workspace", outcome: "rejected", detail: "The signed Slack request belongs to a different Slack workspace." });
+          await throttledDropLog(db, { orgId: row.orgId, reason: "foreign_workspace", detail: "The signed Slack request belongs to a different Slack workspace." });
+          continue;
+        }
+        await appendReceiptStage(db, receiptId, { stage: "workspace", outcome: "accepted", detail: "The Slack request belongs to the connected Slack workspace." });
+        if (leaseLost) throw new Error("Another api process took over this Slack request. Leave the kept request to that process.");
+        await fanOutUpdate(deps, raw, receiptId);
+      }
+      clearInterval(heartbeat);
+      await renewal;
+      if (leaseLost) throw new Error("Another api process took over this Slack request. Leave the kept request to that process.");
+      await db.delete(slackWebhookInbox).where(and(eq(slackWebhookInbox.id, row.id), eq(slackWebhookInbox.nextAttemptAt, leaseUntil)));
+    } catch (err) {
+      clearInterval(heartbeat);
+      await renewal;
+      if (leaseLost) return;
+      // Keep the accepted encrypted request. Persistent failures need operator
+      // recovery instead of repeating side effects indefinitely.
+      if (row.attempts >= 10) {
+        await db.transaction(async tx => {
+          const failedAt = Date.now();
+          const [failed] = await tx.update(slackWebhookInbox).set({ failedAt })
+            .where(and(eq(slackWebhookInbox.id, row.id), eq(slackWebhookInbox.nextAttemptAt, leaseUntil))).returning({ id: slackWebhookInbox.id });
+          if (!failed) return;
+          // The terminal state and its per-delivery problem must commit together.
+          // A shared reason throttle would permanently hide other failed records.
+          const detail = `Slack request ${row.id} failed after ${row.attempts} attempts. Ask an operator to read its Diagnostics entries and repair the failing step before replaying the kept request.`;
+          await tx.insert(eventDropLog).values({ id: `slack-inbox:${row.id}`, orgId: row.orgId,
+            reason: "slack_delivery_failed", detail, createdAt: failedAt })
+            .onConflictDoUpdate({ target: eventDropLog.id, set: { detail, createdAt: failedAt } });
+        });
+      }
+      reportError({ area: "channels", reason: "slack_inbox_processing", provider: "slack" }, `[slack-webhook] inbox ${row.id} processing failed`, err);
+    } finally {
+      clearInterval(heartbeat);
+      await renewal;
+    }
+  }));
+}

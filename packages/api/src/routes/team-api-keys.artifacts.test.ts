@@ -9,6 +9,7 @@ import { artifacts } from "../schema/index.js";
 import { describe, expect, it, afterEach } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import type { CreateTeamApiKeyResponse, CreateTeamResponse, ShareArtifactResponse } from "../wire/types.js";
+import { bootstrapAdminInviteCode } from "../test-helpers/bootstrap-admin-code.js";
 
 let api: TestApi | undefined;
 
@@ -24,11 +25,11 @@ function extractSessionCookie(setCookieHeader: string | null): string {
   return match![0];
 }
 
-async function signUp(baseUrl: string, email: string, name: string): Promise<string> {
+async function signUp(baseUrl: string, email: string, name: string, inviteCode?: string): Promise<string> {
   const res = await fetch(`${baseUrl}/api/auth/sign-up/email`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, email, password: "correct-horse-battery" }),
+    body: JSON.stringify({ name, email, password: "correct-horse-battery", ...(inviteCode ? { inviteCode } : {}) }),
   });
   expect(res.status).toBe(200);
   return extractSessionCookie(res.headers.get("set-cookie"));
@@ -99,7 +100,7 @@ interface Fixture {
 
 async function bootFixture(): Promise<Fixture> {
   api = await bootTestApi({ auth: true });
-  const cookie = await signUp(api.baseUrl, "admin@nowhere.test", "First Admin");
+  const cookie = await signUp(api.baseUrl, "admin@nowhere.test", "First Admin", await bootstrapAdminInviteCode(api.providers.db));
   const teamId = await createTeam(api.baseUrl, cookie, "Platform");
   const teamKey = await mintTeamKey(api.baseUrl, cookie, teamId);
   const { id, readUrl } = await shareArtifact(api.baseUrl, cookie);
@@ -154,9 +155,13 @@ describe("team API key on the public artifact router", () => {
 
     const asTeamKey = await fetch(f.readUrl, { headers: { "x-api-key": f.teamKey } });
     expect(asTeamKey.status).toBe(200);
-    const body = (await asTeamKey.json()) as { sharedBy?: string; canComment: boolean };
+    const body = (await asTeamKey.json()) as { sharedBy?: string; canComment: boolean; management?: { id: string } };
     expect(body.sharedBy).toBeUndefined();
     expect(body.canComment).toBe(false);
+    expect(body.management).toBeUndefined();
+    const anonymous = await fetch(f.readUrl);
+    expect(anonymous.status).toBe(200);
+    expect(await anonymous.json()).not.toHaveProperty("management");
   });
 
   it("is refused on every comment route, public artifact or not", async () => {

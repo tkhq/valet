@@ -92,6 +92,13 @@ describe("loadPrebuildOverride", () => {
     });
   });
 
+  it("parses the nested Kubernetes capability and rejects other types", async () => {
+    await expect(loadPrebuildOverride(readerFor({ ".valet/prebuild.yaml": "kubernetes: true\n" })))
+      .resolves.toEqual({ kubernetes: true });
+    await expect(loadPrebuildOverride(readerFor({ ".valet/prebuild.yaml": "kubernetes: yes please\n" })))
+      .rejects.toThrow("use kubernetes: true or false");
+  });
+
   it("returns an empty object for an empty file", async () => {
     const override = await loadPrebuildOverride(readerFor({ ".valet/prebuild.yaml": "" }));
     expect(override).toEqual({});
@@ -150,9 +157,16 @@ describe("loadPrebuildOverride", () => {
     expect(override).toEqual({ resources: { memory: "4Gi" } });
   });
 
+  it("parses scratch and trims a padded value", async () => {
+    const override = await loadPrebuildOverride(
+      readerFor({ ".valet/prebuild.yaml": 'resources:\n  scratch: " 800Gi "\n' }),
+    );
+    expect(override).toEqual({ resources: { scratch: "800Gi" } });
+  });
+
   it("rejects an invalid resources declaration", async () => {
     const cases = [
-      ["resources: 1\n", /resources must be a mapping.*resources.*cpu.*memory/],
+      ["resources: 1\n", /resources must be a mapping.*cpu.*memory.*scratch.*resources.*cpu.*memory/],
       ["resources:\n  cpu: \"4\"\n", /resources\.cpu.*greater than 0.*Set resources\.cpu/],
       ["resources:\n  cpu: 0\n", /resources\.cpu.*greater than 0.*Set resources\.cpu/],
       ["resources:\n  cpu: -1\n", /resources\.cpu.*greater than 0.*Set resources\.cpu/],
@@ -163,6 +177,8 @@ describe("loadPrebuildOverride", () => {
       ["resources:\n  memory: \"0\"\n", /resources\.memory.*positive.*resources.*cpu.*memory/],
       ["resources:\n  memory: \"-1Gi\"\n", /resources\.memory.*positive.*resources.*cpu.*memory/],
       ["resources:\n  memory: \"8GB\"\n", /resources\.memory.*quantity.*resources.*cpu.*memory/],
+      ["resources:\n  scratch: 4\n", /resources\.scratch must be a quantity string of at least 1Gi/],
+      ["resources:\n  scratch: \"500Mi\"\n", /resources\.scratch must be a quantity string of at least 1Gi/],
     ] as const;
     for (const [yaml, error] of cases) {
       await expect(loadPrebuildOverride(readerFor({ ".valet/prebuild.yaml": yaml }))).rejects.toThrow(
@@ -333,10 +349,10 @@ RUN --mount=type=secret,id=git-token sh -c '\\
   printf "#!/bin/sh\\ncase \\"\\$1\\" in\\n  *[Uu]sername*) echo x-access-token ;;\\n  *) cat /run/secrets/git-token ;;\\nesac\\n" > /tmp/valet-git-askpass.sh && \\
   chmod +x /tmp/valet-git-askpass.sh && \\
   GIT_ASKPASS=/tmp/valet-git-askpass.sh git clone "https://github.com/acme/widgets.git" /prebuilt/repo && \\
+  git -C /prebuilt/repo checkout a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2 && \\
   rm -f /tmp/valet-git-askpass.sh'
 
 WORKDIR /prebuilt/repo
-RUN git checkout a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2
 
 RUN command -v pnpm >/dev/null 2>&1 && pnpm install --frozen-lockfile || echo "prebuild: no pnpm in this image, skipping pnpm-install"
 

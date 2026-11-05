@@ -132,9 +132,13 @@ async function seedBake(
     imageRef: string;
     createdAt?: number;
     commitSha?: string;
+    contractVersion?: number | null;
+    contractSource?: "label" | "missing" | "override" | null;
   },
 ): Promise<void> {
   await db.insert(bakes).values({
+    contractVersion: opts.contractVersion ?? null,
+    contractSource: opts.contractSource ?? null,
     id: opts.id,
     sourceId,
     identityHash: "",
@@ -276,6 +280,26 @@ describe("resolveSnapshot", () => {
   // ── baseBakeRef (Task 16) ──────────────────────────────────────────────────
 
   describe("baseBakeRef", () => {
+    it("an incompatible org base bake on kubernetes degrades to the stock image", async () => {
+      const baseId = await seedBaseSource(db);
+      await seedBake(db, baseId, { id: "base-old", status: "pushed", imageRef: BASE_IMAGE_REF, createdAt: NOW, contractVersion: 0, contractSource: "missing" });
+      const snap = await resolveSnapshot({ db, provider: fakeProvider(true, "kubernetes"), meta: meta({ repos: [] }), apiUrl: API_URL, stockImage: STOCK_IMAGE });
+      expect(snap.baseBakeRef).toBeNull();
+      expect(computeSpec(snap).image).toBe(STOCK_IMAGE);
+    });
+
+    it("an incompatible repo bake with a compatible base falls back to the base image and fires onIncompatible", async () => {
+      const baseId = await seedBaseSource(db);
+      await seedBake(db, baseId, { id: "base-ok", status: "pushed", imageRef: BASE_IMAGE_REF, createdAt: NOW, contractVersion: 3, contractSource: "label" });
+      const repoId = await seedRepoBakeSource(db);
+      await seedBake(db, repoId, { id: "repo-bad", status: "pushed", imageRef: "r:bad", commitSha: "s", createdAt: NOW, contractVersion: 0, contractSource: "missing" });
+      const calls: unknown[] = [];
+      const snap = await resolveSnapshot({ db, provider: fakeProvider(true, "kubernetes"), meta: meta(), apiUrl: API_URL, stockImage: STOCK_IMAGE, onIncompatible: (i) => { calls.push(i); } });
+      expect(snap.repoBake).toBeNull();
+      expect(computeSpec(snap).image).toBe(BASE_IMAGE_REF);
+      expect(calls).toHaveLength(1);
+    });
+
     it("unbound session + org base source with pushed bake → baseBakeRef = its imageRef", async () => {
       const baseId = await seedBaseSource(db);
       await seedBake(db, baseId, { id: "base-bake-1", status: "pushed", imageRef: BASE_IMAGE_REF });
@@ -368,6 +392,8 @@ describe("resolveSnapshot", () => {
         id: "base-bake-k8s",
         status: "pushed",
         imageRef: "localhost:30500/valet/base-sandbox:v1",
+        contractVersion: 3,
+        contractSource: "label",
       });
 
       const fetchImpl: typeof fetch = async () => {

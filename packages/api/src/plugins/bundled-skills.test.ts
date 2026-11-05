@@ -63,6 +63,13 @@ function skillsOnDisk(): SkillOnDisk[] {
 describe("bundled skills follow the Agent Skills spec", () => {
   const onDisk = skillsOnDisk();
 
+  it("provides native document skills without a connected account", () => {
+    const { skills } = pluginSessionExtras(bundledPlugins);
+    expect(skills.map((skill) => skill.name)).toEqual(expect.arrayContaining([
+      "native-docx", "native-xlsx", "native-pptx", "native-pdf",
+    ]));
+  });
+
   it("finds every skill as a directory holding a SKILL.md", () => {
     expect(onDisk.length).toBeGreaterThan(0);
     for (const skill of onDisk) {

@@ -14,17 +14,17 @@
  * test (vitest.setup.ts), so `vi.stubEnv` sits on top of a clean base.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { orgs, teams, users, type LlmProviderModel } from "../schema/index.js";
 import { createLlmProvider, updateLlmProvider } from "../services/llm-providers.js";
-import { DEFAULT_TIER_MAP, setOrgTierMap } from "../services/model-tiers.js";
+import { DEFAULT_TIER_MAP, setOrgDefaultTier, setOrgTierMap } from "../services/model-tiers.js";
 import { setOrgReasoningSettings } from "../services/reasoning.js";
 import { createTeam } from "../services/teams.js";
-import { NoCredentialsError } from "@valet/engine";
+import { NoCredentialsError, type CredentialOwner } from "@valet/engine";
 import { resolveModelSpec } from "../services/model-resolution.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
@@ -77,10 +77,16 @@ describe("resolveModelSpec (catalog-aware bridge)", () => {
     });
   });
 
+  it("resolves Astra with OpenAI credentials", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "env-openai");
+    expect(await resolveModelSpec(db, credentials, orgId, "openai/gpt-6-astra")).toMatchObject({ model: { id: "gpt-6-astra" } });
+  });
+
   describe("new model resolution", () => {
     it.each([
       ["anthropic/claude-fable-5-1", "claude-fable-5-1", "anthropic", "ANTHROPIC_API_KEY"],
-      ["openai/gpt-6-astra", "gpt-6-astra", "openai", "OPENAI_API_KEY"],
+      ["openai/gpt-6.1-sol", "gpt-6.1-sol", "openai", "OPENAI_API_KEY"],
+      ["openai/gpt-5.6-sol", "gpt-5.6-sol", "openai", "OPENAI_API_KEY"],
     ] as const)("resolves %s", async (spec, wireId, provider, envName) => {
       vi.stubEnv(envName, "test-key");
       const resolved = await resolveModelSpec(db, credentials, orgId, spec);
@@ -122,6 +128,98 @@ describe("resolveModelSpec (catalog-aware bridge)", () => {
       await createLlmProvider(db, { orgId, kind: "openai", name: "OpenAI" });
       const resolved = await resolveModelSpec(db, credentials, orgId, `openai/${OPENAI_MODEL}`);
       expect(resolved?.apiKey).toBe("env-openai");
+    });
+  });
+
+  describe("amazon-bedrock: AWS credential chain", () => {
+    const BEDROCK_SPEC = "amazon-bedrock/us.anthropic.claude-sonnet-5-5";
+
+    it("no row: ambient AWS credentials resolve with apiKey undefined so the SDK chain runs", async () => {
+      vi.stubEnv("AWS_PROFILE", "dev");
+      const resolved = await resolveModelSpec(db, credentials, orgId, BEDROCK_SPEC);
+      expect(resolved?.model.provider).toBe("amazon-bedrock");
+      expect(resolved?.model.id).toBe("us.anthropic.claude-sonnet-5-5");
+      expect(resolved?.apiKey).toBeUndefined();
+      expect(resolved?.canonicalId).toBe(BEDROCK_SPEC);
+    });
+
+    it("row + ambient credentials: apiKey is undefined, never the <authenticated> marker", async () => {
+      vi.stubEnv("AWS_WEB_IDENTITY_TOKEN_FILE", "/var/run/secrets/eks.amazonaws.com/serviceaccount/token");
+      await createLlmProvider(db, { orgId, kind: "amazon-bedrock", name: "Amazon Bedrock" });
+      const resolved = await resolveModelSpec(db, credentials, orgId, BEDROCK_SPEC);
+      expect(resolved?.apiKey).toBeUndefined();
+      expect(resolved?.apiKey).not.toBe("<authenticated>");
+    });
+
+    it("stored org bearer token wins over ambient credentials", async () => {
+      vi.stubEnv("AWS_PROFILE", "dev");
+      const row = await createLlmProvider(db, { orgId, kind: "amazon-bedrock", name: "Amazon Bedrock" });
+      await saveKey(row.id, "bedrock-token-123");
+      const resolved = await resolveModelSpec(db, credentials, orgId, BEDROCK_SPEC);
+      expect(resolved?.apiKey).toBe("bedrock-token-123");
+    });
+
+    it("blank stored key is absent and falls through to the chain", async () => {
+      vi.stubEnv("AWS_PROFILE", "dev");
+      const row = await createLlmProvider(db, { orgId, kind: "amazon-bedrock", name: "Amazon Bedrock" });
+      await saveKey(row.id, "   ");
+      const resolved = await resolveModelSpec(db, credentials, orgId, BEDROCK_SPEC);
+      expect(resolved?.apiKey).toBeUndefined();
+    });
+
+    it("no org key and no AWS environment → NoCredentialsError (row and no-row)", async () => {
+      // vitest.setup.ts scrubbed the AWS env vars.
+      const noRow = await resolveModelSpec(db, credentials, orgId, BEDROCK_SPEC).then(() => undefined, (e: unknown) => e);
+      expect(noRow).toBeInstanceOf(NoCredentialsError);
+      await createLlmProvider(db, { orgId, kind: "amazon-bedrock", name: "Amazon Bedrock" });
+      const withRow = await resolveModelSpec(db, credentials, orgId, BEDROCK_SPEC).then(() => undefined, (e: unknown) => e);
+      expect(withRow).toBeInstanceOf(NoCredentialsError);
+      expect((withRow as NoCredentialsError).model?.id).toBe(BEDROCK_SPEC);
+    });
+
+    it("AWS_REGION alone is not a credential", async () => {
+      vi.stubEnv("AWS_REGION", "us-east-1");
+      const err = await resolveModelSpec(db, credentials, orgId, BEDROCK_SPEC).then(() => undefined, (e: unknown) => e);
+      expect(err).toBeInstanceOf(NoCredentialsError);
+    });
+
+    it("a NON-REGISTRY row selection (account-discovered model) synthesizes a bedrock-converse-stream model", async () => {
+      vi.stubEnv("AWS_PROFILE", "dev");
+      const row = await createLlmProvider(db, {
+        orgId,
+        kind: "amazon-bedrock",
+        name: "Amazon Bedrock",
+        models: [{ id: "vendor.brand-new-model", name: "Brand New", contextWindow: 64_000 }],
+      });
+      expect(row.id).toBeTruthy();
+      const spec = "amazon-bedrock/vendor.brand-new-model";
+      const r = await resolveModelSpec(db, credentials, orgId, spec);
+      expect(r?.model.id).toBe("vendor.brand-new-model");
+      expect(r?.model.api).toBe("bedrock-converse-stream");
+      expect(r?.model.provider).toBe("amazon-bedrock");
+      expect(r?.model.contextWindow).toBe(64_000);
+      expect(r?.model.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+      expect(r?.canonicalId).toBe(spec);
+      expect(r?.apiKey).toBeUndefined();
+    });
+
+    it("an UNSELECTED non-registry id on a bedrock row stays unresolvable", async () => {
+      vi.stubEnv("AWS_PROFILE", "dev");
+      await createLlmProvider(db, { orgId, kind: "amazon-bedrock", name: "Amazon Bedrock", models: [] });
+      expect(await resolveModelSpec(db, credentials, orgId, "amazon-bedrock/vendor.never-selected")).toBeNull();
+    });
+
+    it("a registry id resolves from the registry even when the row's selection omits it", async () => {
+      vi.stubEnv("AWS_PROFILE", "dev");
+      await createLlmProvider(db, { orgId, kind: "amazon-bedrock", name: "Amazon Bedrock", models: [] });
+      const r = await resolveModelSpec(db, credentials, orgId, BEDROCK_SPEC);
+      expect(r?.model.id).toBe("us.anthropic.claude-sonnet-5-5");
+    });
+
+    it("other known kinds still require a real key when only AWS credentials exist", async () => {
+      vi.stubEnv("AWS_PROFILE", "dev");
+      const err = await resolveModelSpec(db, credentials, orgId, `openai/${OPENAI_MODEL}`).then(() => undefined, (e: unknown) => e);
+      expect(err).toBeInstanceOf(NoCredentialsError);
     });
   });
 
@@ -261,7 +359,7 @@ describe("resolveModelSpec (catalog-aware bridge)", () => {
         orgId,
         kind: "openai_compatible",
         name: "Rotate",
-        baseUrl: "https://x/v1",
+        baseUrl: "https://x.example/v1",
         models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
       });
       await saveKey(row.id, "key-1");
@@ -302,7 +400,7 @@ describe("resolveModelSpec (catalog-aware bridge)", () => {
         orgId,
         kind: "openai_compatible",
         name: "Custom",
-        baseUrl: "https://x/v1",
+        baseUrl: "https://x.example/v1",
         models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
       });
       await saveKey(row.id, "org-custom");
@@ -414,6 +512,29 @@ describe("EngineHost model resolution wiring", () => {
     expect(session.options.model.id).toBe("anthropic/claude-haiku-4-5");
   });
 
+  it("wires runtime fallback to the assistant organization's configured tier", async () => {
+    api = await bootTestApi();
+    vi.stubEnv("OPENAI_API_KEY", "fallback-key");
+    try {
+      await setOrgTierMap(api.providers.db, "local-org", {
+        ...DEFAULT_TIER_MAP, s: [`anthropic/${ANTHROPIC_MODEL}`, `openai/${OPENAI_MODEL}`],
+      });
+      const session = await defaultAssistantSessionFor(api.providers,
+        { type: "user", id: "local-user" },
+        { actorUserId: "local-user", orgId: "local-org" },
+      );
+      expect(session.options.resolveFallbackModel).toBeTypeOf("function");
+      const resolved = await session.options.resolveFallbackModel?.({
+        requestedSpec: "s",
+        failedModel: { model: session.options.model },
+        attemptedProviderIds: ["anthropic"],
+      });
+      expect(resolved).toMatchObject({ canonicalId: `openai/${OPENAI_MODEL}`, apiKey: "fallback-key" });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("remapping the org's \"s\" tier changes what a fallback session resolves to", async () => {
     api = await bootTestApi();
     const { db, engineHost } = api.providers;
@@ -446,7 +567,7 @@ describe("EngineHost model resolution wiring", () => {
       orgId: "local-org",
       kind: "openai_compatible",
       name: "Custom",
-      baseUrl: "https://x/v1",
+      baseUrl: "https://x.example/v1",
       models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
     });
     // enabled: true (default), but no org credential was ever saved for
@@ -468,7 +589,7 @@ describe("EngineHost model resolution wiring", () => {
       orgId: "local-org",
       kind: "openai_compatible",
       name: "Custom",
-      baseUrl: "https://x/v1",
+      baseUrl: "https://x.example/v1",
       models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
     });
     await updateLlmProvider(db, "local-org", row.id, { enabled: false });
@@ -488,7 +609,7 @@ describe("EngineHost model resolution wiring", () => {
       orgId: "local-org",
       kind: "openai_compatible",
       name: "Custom",
-      baseUrl: "https://x/v1",
+      baseUrl: "https://x.example/v1",
       models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
     });
     await updateLlmProvider(db, "local-org", row.id, { enabled: false });
@@ -590,7 +711,7 @@ describe("EngineHost model resolution wiring", () => {
       orgId: "local-org",
       kind: "openai_compatible",
       name: "Custom",
-      baseUrl: "https://x/v1",
+      baseUrl: "https://x.example/v1",
       models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
     });
     await updateLlmProvider(db, "local-org", row.id, { enabled: false });
@@ -637,7 +758,7 @@ describe("EngineHost model resolution wiring", () => {
     const session = await engineHost.sessionFor("team-owned-restore", meta);
     expect(session.options.model.id).toBe("anthropic/claude-sonnet-4-5");
 
-    engineHost.evictAll();
+    engineHost.evictAll({ shutdown: false });
     await db.update(teams).set({ defaultModel: "claude-opus-4-5" }).where(eq(teams.id, team.id));
 
     const restored = await engineHost.sessionFor("team-owned-restore", meta);
@@ -651,7 +772,7 @@ describe("EngineHost model resolution wiring", () => {
       orgId: "local-org",
       kind: "openai_compatible",
       name: "Custom",
-      baseUrl: "https://x/v1",
+      baseUrl: "https://x.example/v1",
       models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
     });
     await engineCredentials.save({ type: "org", id: "local-org" }, `llm:${row.id}`, {
@@ -669,7 +790,7 @@ describe("EngineHost model resolution wiring", () => {
     expect(session.options.modelSpec).toBe(spec);
     expect(session.options.model.id).toBe("m1"); // wire id
 
-    engineHost.evictAll();
+    engineHost.evictAll({ shutdown: false });
     await updateLlmProvider(db, "local-org", row.id, { enabled: false });
 
     await expect(
@@ -681,6 +802,27 @@ describe("EngineHost model resolution wiring", () => {
     ).rejects.toThrow(/provider Custom is disabled/);
   });
 
+  it.each([null, "openai/gpt-6-astra"])("reopens an Astra-pinned session with saved user default %s and permits an allowed model change", async (defaultModel) => {
+    vi.stubEnv("OPENAI_API_KEY", "env-openai");
+    api = await bootTestApi();
+    const { engineHost, engineStore } = api.providers;
+    const meta = { userId: "local-user", orgId: "local-org", workspace: "/tmp" };
+    const session = await engineHost.sessionFor("restore-astra", meta);
+    const thread = await session.createThread("web:retained");
+    const saved = await engineStore.getSession(session.id);
+    if (!saved) throw new Error("Session was not persisted");
+    await engineStore.saveSession({ ...saved, model: "openai/gpt-6-astra" });
+    await api.providers.db.update(users).set({ defaultModel }).where(eq(users.id, "local-user"));
+    engineHost.evictAll({ shutdown: false });
+
+    const restored = await engineHost.sessionFor(session.id, meta);
+    expect(restored.options.modelSpec).toBe("openai/gpt-6-astra");
+    expect(restored.threadById(thread.id)?.key).toBe("web:retained");
+    await restored.setModel("anthropic/claude-sonnet-4-5");
+    engineHost.evictAll({ shutdown: false });
+    expect((await engineHost.sessionFor(session.id, meta)).options.modelSpec).toBe("anthropic/claude-sonnet-4-5");
+  });
+
   it("restore-no-clobber: a persisted namespaced custom model restores verbatim", async () => {
     api = await bootTestApi();
     const { db, engineHost, engineCredentials } = api.providers;
@@ -690,7 +832,7 @@ describe("EngineHost model resolution wiring", () => {
       orgId: "local-org",
       kind: "openai_compatible",
       name: "Custom",
-      baseUrl: "https://x/v1",
+      baseUrl: "https://x.example/v1",
       models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
     });
     await engineCredentials.save({ type: "org", id: "local-org" }, `llm:${row.id}`, {
@@ -708,7 +850,7 @@ describe("EngineHost model resolution wiring", () => {
     expect(session.options.modelSpec).toBe(spec);
     expect(session.options.model.id).toBe("m1"); // wire id
 
-    engineHost.evictAll();
+    engineHost.evictAll({ shutdown: false });
     // Change the user default to prove restore prefers the persisted model.
     await db.update(users).set({ defaultModel: "claude-opus-4-5" }).where(eq(users.id, "local-user"));
 
@@ -722,10 +864,182 @@ describe("EngineHost model resolution wiring", () => {
     expect(restored.options.model.provider).toBe(row.id);
   });
 
-  // `assistantDefault` (model-selector-overhaul Task 9): an assistant's own
-  // stored `model` column, threaded into the cascade from `assistantSessionFor`.
-  describe("assistantDefault cascade slot (Task 9)", () => {
-    it("new-session precedence: the assistant's own model wins over the user's personal default", async () => {
+  // The org default tier sits after the team default and before the "s"
+  // fallback. Children keep `childDefault: "s"`, so it never reaches them.
+  // A session uses the org default tier only when a provider with a key
+  // serves it, so these tests give the org a deployment Anthropic key. A
+  // keyed resolution returns the registry model, whose id is the wire id.
+  describe("org default tier", () => {
+    beforeEach(() => {
+      vi.stubEnv("ANTHROPIC_API_KEY", "env-anthropic");
+    });
+
+    afterEach(() => vi.unstubAllEnvs());
+
+    it("an unset org default tier keeps the \"s\" fallback", async () => {
+      api = await bootTestApi();
+      await setOrgDefaultTier(api.providers.db, "local-org", "l");
+      await setOrgDefaultTier(api.providers.db, "local-org", null);
+
+      const session = await defaultAssistantSessionFor(api.providers,
+        { type: "user", id: "local-user" },
+        { actorUserId: "local-user", orgId: "local-org" },
+      );
+      expect(session.options.modelSpec).toBe("s");
+      expect(session.options.model.id).toBe("claude-haiku-4-5");
+    });
+
+    it("beats the \"s\" fallback when nothing else is set", async () => {
+      api = await bootTestApi();
+      await setOrgDefaultTier(api.providers.db, "local-org", "m");
+
+      const session = await defaultAssistantSessionFor(api.providers,
+        { type: "user", id: "local-user" },
+        { actorUserId: "local-user", orgId: "local-org" },
+      );
+      expect(session.options.modelSpec).toBe("m");
+      expect(session.options.model.id).toBe("claude-sonnet-4-6");
+    });
+
+    it("falls through to \"s\" when a provider change leaves the org default tier with no active target", async () => {
+      api = await bootTestApi();
+      const { db } = api.providers;
+      await setOrgDefaultTier(db, "local-org", "l");
+      const row = await createLlmProvider(db, { orgId: "local-org", kind: "openai", name: "OpenAI" });
+      await setOrgTierMap(db, "local-org", { ...DEFAULT_TIER_MAP, l: [`openai/${OPENAI_MODEL}`] });
+      await updateLlmProvider(db, "local-org", row.id, { enabled: false });
+
+      const session = await defaultAssistantSessionFor(api.providers,
+        { type: "user", id: "local-user" },
+        { actorUserId: "local-user", orgId: "local-org" },
+      );
+      expect(session.options.modelSpec).toBe("s");
+      expect(session.options.model.id).toBe("claude-haiku-4-5");
+    });
+
+    it("falls through to \"s\" when the default tier's provider stays enabled but loses its key", async () => {
+      api = await bootTestApi();
+      const { db, engineCredentials, engineHost } = api.providers;
+      const owner: CredentialOwner = { type: "org", id: "local-org" };
+      const row = await createLlmProvider(db, { orgId: "local-org", kind: "openai", name: "OpenAI" });
+      await engineCredentials.save(owner, `llm:${row.id}`, { type: "api_key", apiKey: "org-openai" });
+      await setOrgTierMap(db, "local-org", { ...DEFAULT_TIER_MAP, l: [`openai/${OPENAI_MODEL}`] });
+      await setOrgDefaultTier(db, "local-org", "l");
+
+      const keyed = await engineHost.sessionFor("org-tier-keyed", {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/tmp",
+      });
+      expect(keyed.options.modelSpec).toBe("l");
+
+      // The provider row stays enabled. Only its org key goes away, so an
+      // active-provider test alone still picks "l" and the build runs keyless.
+      await engineCredentials.delete(owner, `llm:${row.id}`);
+      const keyless = await engineHost.sessionFor("org-tier-keyless", {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/tmp",
+      });
+      expect(keyless.options.modelSpec).toBe("s");
+      expect(keyless.options.model.id).toBe("claude-haiku-4-5");
+    });
+
+    it("falls through to \"s\" when a keyed custom provider no longer lists the default tier's model", async () => {
+      api = await bootTestApi();
+      const { db, engineCredentials, engineHost } = api.providers;
+      const row = await createLlmProvider(db, {
+        orgId: "local-org",
+        kind: "openai_compatible",
+        name: "Custom",
+        baseUrl: "https://x.example/v1",
+        models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
+      });
+      await engineCredentials.save({ type: "org", id: "local-org" }, `llm:${row.id}`, { type: "api_key", apiKey: "org-custom" });
+      await setOrgTierMap(db, "local-org", { ...DEFAULT_TIER_MAP, l: [`${row.id}/m1`] });
+      await setOrgDefaultTier(db, "local-org", "l");
+      // The provider stays enabled and keyed. Only its model list changes.
+      await updateLlmProvider(db, "local-org", row.id, { models: [{ id: "m2", name: "M2", contextWindow: 8000 }] });
+
+      const session = await engineHost.sessionFor("org-tier-model-gone", {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/tmp",
+      });
+      expect(session.options.modelSpec).toBe("s");
+      expect(session.options.model.id).toBe("claude-haiku-4-5");
+    });
+
+    it("a user default beats the org default tier", async () => {
+      api = await bootTestApi();
+      const { db } = api.providers;
+      await setOrgDefaultTier(db, "local-org", "m");
+      await db.update(users).set({ defaultModel: "claude-opus-4-5" }).where(eq(users.id, "local-user"));
+
+      const session = await defaultAssistantSessionFor(api.providers,
+        { type: "user", id: "local-user" },
+        { actorUserId: "local-user", orgId: "local-org" },
+      );
+      expect(session.options.model.id).toBe("claude-opus-4-5");
+    });
+
+    it("the owning team's default beats the org default tier", async () => {
+      api = await bootTestApi();
+      const { db, engineHost } = api.providers;
+      await setOrgDefaultTier(db, "local-org", "l");
+      const team = await createTeam(db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+      await db.update(teams).set({ defaultModel: "anthropic/claude-sonnet-4-5" }).where(eq(teams.id, team.id));
+
+      const session = await engineHost.sessionFor("team-owned-org-tier", {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/tmp",
+        ownerTeamId: team.id,
+      });
+      expect(session.options.model.id).toBe("claude-sonnet-4-5");
+    });
+
+    it("a team assistant with no team default uses the org default tier", async () => {
+      api = await bootTestApi();
+      const { db } = api.providers;
+      await setOrgDefaultTier(db, "local-org", "l");
+      const team = await createTeam(db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+
+      const session = await defaultAssistantSessionFor(api.providers,
+        { type: "team", id: team.id },
+        { actorUserId: "local-user", orgId: "local-org" },
+      );
+      expect(session.options.modelSpec).toBe("l");
+      expect(session.options.model.id).toBe("claude-opus-4-7");
+    });
+
+    it("a child without an explicit model stays on the \"s\" tier", async () => {
+      api = await bootTestApi();
+      const { db, engineHost } = api.providers;
+      await setOrgDefaultTier(db, "local-org", "l");
+
+      const parent = await engineHost.sessionFor("parent-org-tier", {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/tmp",
+      });
+      const child = await engineHost.childSessionFor("child-org-tier", {
+        parentSessionId: "parent-org-tier",
+        parentThreadId: parent.thread("web:default").id,
+        actorUserId: "local-user",
+        orgId: "local-org",
+        owner: { type: "user", id: "local-user" },
+        workspace: "/tmp",
+      });
+      expect(parent.options.modelSpec).toBe("l");
+      expect(child.options.modelSpec).toBe("s");
+      expect(child.options.model.id).toBe("claude-haiku-4-5");
+    });
+  });
+
+  // Workspace runtimes inherit their owner defaults.
+  describe("workspace owner model defaults", () => {
+    it("new workspace runtime uses the personal owner model default", async () => {
       api = await bootTestApi();
       const { db, engineHost } = api.providers;
       await db.update(users).set({ defaultModel: "claude-opus-4-5" }).where(eq(users.id, "local-user"));
@@ -734,7 +1048,7 @@ describe("EngineHost model resolution wiring", () => {
       // "l" tier resolves to anthropic/claude-opus-4-7 by built-in default
       // (model-tiers.ts) — distinct from the user's "claude-opus-4-5" pick,
       // so the two tiers are distinguishable.
-      await db.update(assistants).set({ model: "l" }).where(eq(assistants.id, assistant.id));
+      await db.update(users).set({ defaultModel: "l" }).where(eq(users.id, "local-user"));
 
       const session = await engineHost.assistantSessionFor(assistant.id, {
         actorUserId: "local-user",
@@ -745,12 +1059,50 @@ describe("EngineHost model resolution wiring", () => {
       expect(session.options.modelSpec).toBe("l");
     });
 
-    it("new-session precedence: an explicit overrideId wins over the assistant's own model", async () => {
+    it("uses the personal owner's defaults instead of the member who wakes it", async () => {
+      api = await bootTestApi();
+      const { db, engineHost } = api.providers;
+      await db.update(users).set({ defaultModel: "l", defaultReasoning: "high" }).where(eq(users.id, "local-user"));
+      await db.update(users).set({ defaultModel: "m", defaultReasoning: "low" }).where(eq(users.id, "test-member"));
+      const assistant = await resolveDefaultAssistant(db, "local-org", { type: "user", id: "local-user" });
+      const session = await engineHost.assistantSessionFor(assistant.id, { actorUserId: "test-member", orgId: "local-org" });
+      expect(session.options.modelSpec).toBe("l");
+      expect(session.options.sampling?.reasoning).toBe("high");
+      expect(await engineHost.resolveFreshThreadSettings(session.id, { userId: "test-member", orgId: "local-org", workspace: "/tmp" })).toEqual({ model: "l", reasoning: "high" });
+    });
+
+    it("keeps the model and reasoning an upgraded assistant carried", async () => {
+      api = await bootTestApi();
+      const { db, engineHost } = api.providers;
+      await db.update(users).set({ defaultModel: "m", defaultReasoning: "low" }).where(eq(users.id, "local-user"));
+      const assistant = await resolveDefaultAssistant(db, "local-org", { type: "user", id: "local-user" });
+      // An upgraded database still holds the columns a fresh schema no longer has.
+      await db.execute(sql`ALTER TABLE assistants ADD COLUMN IF NOT EXISTS model text, ADD COLUMN IF NOT EXISTS reasoning text`);
+      await db.execute(sql`UPDATE assistants SET model = 'l', reasoning = 'high' WHERE id = ${assistant.id}`);
+      const session = await engineHost.assistantSessionFor(assistant.id, { actorUserId: "local-user", orgId: "local-org" });
+      expect(session.options.modelSpec).toBe("l");
+      expect(session.options.sampling?.reasoning).toBe("high");
+      expect(await engineHost.resolveFreshThreadSettings(session.id, { userId: "local-user", orgId: "local-org", workspace: "/tmp" })).toEqual({ model: "l", reasoning: "high" });
+    });
+
+    it("uses the owner default when the carried assistant model no longer resolves", async () => {
+      api = await bootTestApi();
+      const { db, engineHost } = api.providers;
+      await db.update(users).set({ defaultModel: "m" }).where(eq(users.id, "local-user"));
+      const assistant = await resolveDefaultAssistant(db, "local-org", { type: "user", id: "local-user" });
+      await db.execute(sql`ALTER TABLE assistants ADD COLUMN IF NOT EXISTS model text, ADD COLUMN IF NOT EXISTS reasoning text`);
+      await db.execute(sql`UPDATE assistants SET model = 'prov_gone/m1' WHERE id = ${assistant.id}`);
+      const session = await engineHost.assistantSessionFor(assistant.id, { actorUserId: "local-user", orgId: "local-org" });
+      expect(session.options.modelSpec).toBe("m");
+      expect((await engineHost.resolveFreshThreadSettings(session.id, { userId: "local-user", orgId: "local-org", workspace: "/tmp" })).model).toBe("m");
+    });
+
+    it("an explicit session override wins over the personal owner default", async () => {
       api = await bootTestApi();
       const { db, engineHost } = api.providers;
 
       const assistant = await resolveDefaultAssistant(db, "local-org", { type: "user", id: "local-user" });
-      await db.update(assistants).set({ model: "l" }).where(eq(assistants.id, assistant.id));
+      await db.update(users).set({ defaultModel: "l" }).where(eq(users.id, "local-user"));
 
       const session = await engineHost.assistantSessionFor(
         assistant.id,
@@ -767,19 +1119,18 @@ describe("EngineHost model resolution wiring", () => {
   // re-resolves a fresh cascade value on every cache-eviction rebuild would
   // silently clobber an explicit `session.setReasoning(...)`.
   describe("reasoning cascade (Task 11)", () => {
-    it("assistant default beats the user's personal default", async () => {
+    it("workspace runtime uses the personal owner reasoning default", async () => {
       api = await bootTestApi();
       const { db, engineHost } = api.providers;
       await db.update(users).set({ defaultReasoning: "low" }).where(eq(users.id, "local-user"));
 
       const assistant = await resolveDefaultAssistant(db, "local-org", { type: "user", id: "local-user" });
-      await db.update(assistants).set({ reasoning: "high" }).where(eq(assistants.id, assistant.id));
 
       const session = await engineHost.assistantSessionFor(assistant.id, {
         actorUserId: "local-user",
         orgId: "local-org",
       });
-      expect(session.options.sampling?.reasoning).toBe("high");
+      expect(session.options.sampling?.reasoning).toBe("low");
     });
 
     it("org default applies when nothing else is set", async () => {
@@ -793,6 +1144,62 @@ describe("EngineHost model resolution wiring", () => {
         workspace: "/tmp",
       });
       expect(session.options.sampling?.reasoning).toBe("medium");
+    });
+
+    it("falls back to the Valet default when no layer sets one", async () => {
+      api = await bootTestApi();
+      const { engineHost } = api.providers;
+
+      const session = await engineHost.sessionFor("reasoning-valet-default", {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/tmp",
+      });
+      expect(session.options.sampling?.reasoning).toBe("medium");
+      expect(await engineHost.resolveFreshThreadSettings(session.id, {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/tmp",
+      })).toMatchObject({ reasoning: "medium" });
+    });
+
+    it("stores the resolved level when it restores a session with no stored level", async () => {
+      api = await bootTestApi();
+      const { db, engineHost, engineStore } = api.providers;
+      const meta = { userId: "local-user", orgId: "local-org", workspace: "/tmp" };
+      await engineHost.sessionFor("reasoning-legacy-null", meta);
+      // Sessions from before the Valet default stored no level.
+      const stored = (await engineStore.getSession("reasoning-legacy-null"))!;
+      await engineStore.saveSession({ ...stored, reasoning: undefined });
+      engineHost.evictAll({ shutdown: false });
+
+      const restored = await engineHost.sessionFor("reasoning-legacy-null", meta);
+      expect(restored.options.sampling?.reasoning).toBe("medium");
+      expect((await engineStore.getSession("reasoning-legacy-null"))?.reasoning).toBe("medium");
+
+      // The stored level now wins over a later org default, like any persisted level.
+      engineHost.evictAll({ shutdown: false });
+      await setOrgReasoningSettings(db, "local-org", { default: "low" });
+      const rebuilt = await engineHost.sessionFor("reasoning-legacy-null", meta);
+      expect(rebuilt.options.sampling?.reasoning).toBe("medium");
+    });
+
+    it("clamps the Valet default to the org max", async () => {
+      api = await bootTestApi();
+      const { db, engineHost } = api.providers;
+      await setOrgReasoningSettings(db, "local-org", { max: "low" });
+
+      const session = await engineHost.sessionFor("reasoning-valet-default-clamp", {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/tmp",
+      });
+      expect(session.options.sampling?.reasoning).toBe("low");
+      expect(await engineHost.resolveFreshThreadSettings(session.id, {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/tmp",
+      })).toMatchObject({ reasoning: "low" });
     });
 
     it("a resolved level above the org max clamps down to the max", async () => {
@@ -821,7 +1228,7 @@ describe("EngineHost model resolution wiring", () => {
       await session.setReasoning("high");
       expect(session.options.sampling?.reasoning).toBe("high");
 
-      engineHost.evictAll();
+      engineHost.evictAll({ shutdown: false });
       // Change every cascade input that could otherwise win on rebuild —
       // if the host re-resolved the cascade instead of reading the
       // persisted value first, one of these would clobber "high".

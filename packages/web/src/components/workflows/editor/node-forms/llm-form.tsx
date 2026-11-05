@@ -1,15 +1,34 @@
 import type { LlmNode } from "@valet/workflow";
-import { JsonTextarea, LabeledInput, LabeledTextarea, NumberField } from "../fields";
+import { JsonTextarea, LabeledTextarea, NumberField } from "../fields";
+import { Label } from "~/components/primitives";
+import { ModelCombobox } from "~/components/settings/model-combobox";
 import { ErrorPolicyField, type ErrorPolicyProps } from "./error-policy-field";
+import { LastRunModel } from "./last-run-model";
 
 export function LlmForm({
   node,
   onChange,
   allowOnError = true,
-}: { node: LlmNode; onChange: (patch: Record<string, unknown>) => void } & ErrorPolicyProps) {
+  lastRunModels,
+}: {
+  node: LlmNode;
+  onChange: (patch: Record<string, unknown>) => void;
+  /** The models this step called in the workflow's last run. */
+  lastRunModels?: string[];
+} & ErrorPolicyProps) {
   return (
     <div className="flex flex-col gap-3">
-      <LabeledInput label="Model" value={node.model} onChange={(value) => onChange({ model: value })} />
+      <div className="grid gap-1">
+        <Label>Model</Label>
+        <ModelCombobox
+          value={node.model}
+          onSelect={(model) => onChange({ model })}
+          onClear={() => onChange({ model: "" })}
+          emptyLabel="Choose a model"
+          ariaLabel="Model"
+        />
+        <LastRunModel models={lastRunModels} />
+      </div>
       <LabeledTextarea label="System" value={node.system ?? ""} onChange={(value) => onChange({ system: value || undefined })} />
       <LabeledTextarea label="Prompt" value={node.prompt} onChange={(value) => onChange({ prompt: value })} />
       <JsonTextarea

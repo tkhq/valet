@@ -10,20 +10,33 @@
  * The `llm` node cases are the strongest of these. If the preview ever
  * executed one, the test would attempt a real completion.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import {
   collectTemplateFields,
   orderNodes,
   staticShape,
 } from "./workflow-preview.js";
+import { encodeToolOutput, type PluginAction, type PluginActionContext, type ValetPlugin } from "@valet/engine";
+import { workflowsActionPlugin } from "../workflows/actions.js";
 import type { CreateWorkflowResponse, PreviewWorkflowResponse } from "../wire/types.js";
+import { workflowActionGrants } from "../schema/index.js";
 
 let api: TestApi | undefined;
+
+beforeEach(() => {
+  // `POST /api/workflows` validates a model against the org's own model
+  // set, so the subject definitions below save only while the org can
+  // reach a provider for `MODEL`. Nothing here is about credentials — the
+  // preview never runs an `llm` node — so one key stands in for the whole
+  // org catalog.
+  vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
+});
 
 afterEach(async () => {
   await api?.cleanup();
   api = undefined;
+  vi.unstubAllEnvs();
 });
 
 const MODEL = "claude-haiku-4-5";
@@ -223,7 +236,22 @@ describe("POST /api/workflows/:id/preview — effectful nodes", () => {
     expect(draft.outputShape.paths).toContain("nodes.draft.result.text");
   });
 
-  it("describes an orchestrator node and still reports its unresolved paths", async () => {
+  it("stores the Thread step as orchestrator, the type an older binary can run", async () => {
+    api = await bootTestApi();
+    const create = (type: string) => fetch(`${api!.baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: `Step ${type}`, definition: {
+        version: "dag/v1",
+        nodes: [{ id: "start", type: "trigger" }, { id: "ask", type, prompt: "hello" }],
+        edges: [{ from: "start", to: "ask" }],
+      } }),
+    });
+    expect((await create("orchestrator")).status).toBe(201);
+    expect((await create("thread")).status).toBe(400);
+  });
+
+  it("describes a thread node and still reports its unresolved paths", async () => {
     api = await bootTestApi();
     const created = await createWorkflow(api.baseUrl, EFFECTFUL_DEFINITION);
 
@@ -232,6 +260,7 @@ describe("POST /api/workflows/:id/preview — effectful nodes", () => {
     const handOff = nodeNamed(body, "hand-off");
     expect(handOff.fidelity).toBe("described");
     expect(handOff.output).toBeUndefined();
+    expect(handOff.outputShape.paths).toContain("nodes.hand-off.result.threadId");
     // `draft` never ran, so its result is genuinely absent. The preview says
     // so rather than rendering the prompt with a hole in it and staying quiet.
     expect(handOff.unresolved.map((u) => u.path)).toEqual(["nodes.draft.result.response"]);
@@ -251,8 +280,70 @@ describe("POST /api/workflows/:id/preview — effectful nodes", () => {
 
     const kick = nodeNamed(await preview(api.baseUrl, created.id), "kick");
     expect(kick.warnings.join(" ")).toContain("wait.mode is 'none'");
+    expect(kick.outputShape.paths).toContain("nodes.kick.result.threadId");
     expect(kick.outputShape.paths).not.toContain("nodes.kick.result.response");
     expect(kick.outputShape.note).toContain("until_idle");
+  });
+});
+
+describe("POST /api/workflows/:id/preview — step design", () => {
+  it("warns when an agent step tells its agent to get a person's approval", async () => {
+    api = await bootTestApi();
+    const definition = {
+      version: "dag/v1",
+      nodes: [
+        { id: "trigger", type: "trigger" },
+        { id: "run", type: "session", mode: "start", prompt: "DM the people lead that the project is ready for approval, then create it." },
+        { id: "finish", type: "session", mode: "start", prompt: "The project exists. Do not ask anyone for approval." },
+      ],
+      edges: [{ from: "trigger", to: "run" }, { from: "run", to: "finish" }],
+    };
+    const created = await createWorkflow(api.baseUrl, definition);
+
+    const response = await preview(api.baseUrl, created.id);
+    expect(nodeNamed(response, "run").warnings.join(" ")).toContain("Put the action that needs approval in a tool step");
+    expect(nodeNamed(response, "finish").warnings.join(" ")).not.toContain("approval");
+  });
+
+  it("warns when a step reads a trigger field that the workflow also reads under trigger.data.input, once a schedule starts it", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl, {
+      version: "dag/v1",
+      nodes: [
+        { id: "trigger", type: "trigger" },
+        { id: "refresh", type: "session", mode: "start", prompt: "Scheduled push: {{trigger.data.input.push}}. If {{trigger.data.push}} is true, save the report." },
+      ],
+      edges: [{ from: "trigger", to: "refresh" }],
+    });
+    expect(nodeNamed(await preview(api.baseUrl, created.id), "refresh").warnings.join(" ")).not.toContain("trigger.data.input");
+
+    const scheduled = await fetch(`${api.baseUrl}/api/workflows/${created.id}/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Nightly refresh", cron: "0 18 * * *", input: { push: true } }),
+    });
+    expect(scheduled.status).toBe(201);
+    const refresh = nodeNamed(await preview(api.baseUrl, created.id), "refresh");
+    expect(refresh.warnings.join(" ")).toContain("{{trigger.data.input.push || trigger.data.push}}");
+  });
+
+  it("does not count a saved grant for a draft whose steps the save would change", async () => {
+    // An MCP-style service: a run learns its actions, and their risk, when it calls one.
+    const dynamic: ValetPlugin = { name: "mcp-fixture", version: "0.0.1", actions: [{ service: "mcpish", actions: [], resolveActions: async () => [] }] };
+    api = await bootTestApi({ plugins: [dynamic] });
+    const step = (params: Record<string, unknown>) => ({
+      version: "dag/v1",
+      nodes: [{ id: "trigger", type: "trigger" }, { id: "mystery", type: "tool", service: "mcpish", action: "thing", params }],
+      edges: [{ from: "trigger", to: "mystery" }],
+    });
+    const created = await createWorkflow(api.baseUrl, step({}));
+    await api.providers.db.insert(workflowActionGrants).values({
+      id: "grant-mystery", orgId: "local-org", workflowId: created.id, ownerType: "user", ownerId: "local-user",
+      actionId: "mcpish.thing", grantedBy: "local-user", createdAt: Date.now(),
+    });
+    const warned = async (body: unknown) => nodeNamed(await preview(api!.baseUrl, created.id, body), "mystery").warnings.join(" ");
+    expect(await warned({})).not.toContain("Allow for this workflow");
+    expect(await warned({ definition: step({ note: "changed" }) })).toContain("Allow for this workflow");
   });
 });
 
@@ -558,6 +649,141 @@ describe("POST /api/workflows/:id/preview — the editor's correction loop", () 
     expect(saveRes.status).toBe(400);
     const saveBody = (await saveRes.json()) as { error: string; errors: string[] };
     expect(saveBody.errors).toEqual(previewBody.errors);
+  });
+});
+
+/** The agent's action, wired to the same providers the route reads. */
+function previewAction(testApi: TestApi): { action: PluginAction; ctx: PluginActionContext } {
+  const { providers } = testApi;
+  const plugin = workflowsActionPlugin(() => ({
+    db: providers.db,
+    workflowStore: providers.workflowStore,
+    workflowRunHost: providers.workflowRunHost,
+    credentials: providers.engineCredentials,
+    engineStore: providers.engineStore,
+    actionPluginByService: providers.actionPluginByService,
+  }));
+  const action = plugin.actions.find((a) => a.id === "workflows.preview_workflow");
+  if (!action) throw new Error("missing preview_workflow action");
+  // The action reads only host-stamped identity; sandbox and credential methods are unused.
+  const ctx = { orgId: "local-org", userId: "local-user", actionId: action.id, service: "workflows" } as PluginActionContext;
+  return { action, ctx };
+}
+
+describe("workflows.preview_workflow", () => {
+  it("returns the route's preview for the same workflow and input", async () => {
+    api = await bootTestApi();
+    const { action, ctx } = previewAction(api);
+    const cases = [
+      { definition: PURE_DEFINITION, input: { email: "a@example.com" } },
+      { definition: EFFECTFUL_DEFINITION, input: { topic: "caching" } },
+    ];
+
+    for (const { definition, input } of cases) {
+      const created = await createWorkflow(api.baseUrl, definition);
+      // A workflow with no run gets a synthetic trigger stamped with the
+      // current time. Hold the clock so both previews stamp the same value.
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-10-13T12:00:00Z"));
+      try {
+        const routeBody = await preview(api.baseUrl, created.id, { input });
+        const result = await action.execute({ workflow_id: created.id, input }, ctx);
+        expect(result.error).toBeUndefined();
+        // The route's reply went through JSON, so the action's must too.
+        const { workflowId, ...actionBody } = JSON.parse(JSON.stringify(result.data)) as PreviewWorkflowResponse & { workflowId: string };
+        expect(workflowId).toBe(created.id);
+        expect(actionBody).toEqual(routeBody);
+        expect(routeBody.nodes).toHaveLength(definition.nodes.length);
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  });
+
+  it("names the corrective action for a node id the definition does not hold", async () => {
+    api = await bootTestApi();
+    const { action, ctx } = previewAction(api);
+    const created = await createWorkflow(api.baseUrl, PURE_DEFINITION);
+
+    const result = await action.execute({ workflow_id: created.id, node_id: "nope" }, ctx);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("omit nodeId");
+  });
+
+  it("cuts long sample values so the tool result keeps the get_node_result budget", async () => {
+    api = await bootTestApi();
+    const { action, ctx } = previewAction(api);
+    // The preview repeats the draft's text five times: as the draft's
+    // observed example, as the copy step's field, output and example, and
+    // in the hand-off prompt.
+    const created = await createWorkflow(api.baseUrl, {
+      version: "dag/v1",
+      nodes: [
+        { id: "trigger", type: "trigger" },
+        { id: "draft", type: "llm", model: MODEL, prompt: "Write the report" },
+        { id: "copy", type: "set", values: { text: "{{nodes.draft.result.text}}" } },
+        { id: "hand-off", type: "orchestrator", prompt: "Review: {{nodes.copy.result.text}}" },
+      ],
+      edges: [
+        { from: "trigger", to: "draft" },
+        { from: "draft", to: "copy" },
+        { from: "copy", to: "hand-off" },
+      ],
+    });
+    const runId = "wfr_preview_large";
+    const store = api.providers.workflowStore;
+    await store.createRun(
+      runId,
+      { workflowId: created.id, definitionVersionId: "v1", input: {} },
+      created.definition,
+      "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+    const attempt = (await store.claimRun(runId, "test", 60_000))?.attempt ?? 1;
+    const checkpoint = { runId, nodeId: "draft", iteration: 0, attempt, createdAt: Date.now() };
+    await store.putIntent({ ...checkpoint, status: "intent" });
+    await store.completeCheckpoint(runId, "draft", 0, attempt, {
+      ...checkpoint,
+      status: "completed",
+      result: { text: "x".repeat(200_000) },
+    });
+
+    // The editor's route keeps every copy.
+    expect(JSON.stringify(await preview(api.baseUrl, created.id)).length).toBeGreaterThan(1_000_000);
+
+    const result = await action.execute({ workflow_id: created.id }, ctx);
+    expect(result.success).toBe(true);
+    // Measure what the model reads, encoded the way the engine encodes it.
+    const text = encodeToolOutput(result.data);
+    expect(text.length).toBeLessThan(20_000);
+    expect(JSON.stringify(result.data).length).toBeLessThan(20_000);
+    expect(text).toContain("truncated: true");
+    expect(text).toContain("call get_node_result");
+    // Only the values are cut. Every step still reports on itself.
+    for (const nodeId of ["trigger", "draft", "copy", "hand-off"]) expect(text).toContain(`nodeId: ${nodeId}`);
+  });
+
+  it("keeps a deeply nested sample value inside the encoded tool result budget", async () => {
+    api = await bootTestApi();
+    const { action, ctx } = previewAction(api);
+    const created = await createWorkflow(api.baseUrl, {
+      version: "dag/v1",
+      nodes: [
+        { id: "trigger", type: "trigger" },
+        { id: "copy", type: "set", values: { value: "{{trigger.data.value}}" } },
+      ],
+      edges: [{ from: "trigger", to: "copy" }],
+    });
+    // The encoder indents each level, so 100 levels encode to about ten
+    // times their compact JSON. The JSON alone fits the budget.
+    let value: unknown = "leaf";
+    for (let i = 0; i < 100; i++) value = { child: value };
+
+    const result = await action.execute({ workflow_id: created.id, sample: "none", input: { value } }, ctx);
+    expect(result.success).toBe(true);
+    const text = encodeToolOutput(result.data);
+    expect(text.length).toBeLessThanOrEqual(20_000);
+    expect(text).toContain("call get_node_result");
   });
 });
 

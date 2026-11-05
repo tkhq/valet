@@ -33,7 +33,7 @@ const ROUTE_PATH = "/api/sandbox/git-credential";
  * generated in-sandbox script reads it this way, so it is written once.
  * Leaves `tok` set; empty when neither source has a token.
  */
-export const SANDBOX_TOKEN_READ_SH = `tok=$(cat /etc/valet/creds/token 2>/dev/null)
+export const SANDBOX_TOKEN_READ_SH = `tok=$(cat /etc/valet/creds/token 2>/dev/null) || tok=
 [ -n "$tok" ] || tok=\${VALET_SANDBOX_TOKEN:-}`;
 
 /**

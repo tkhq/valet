@@ -15,9 +15,10 @@
  * reading a skill is not invoking it — the agent's `skill` tool fills them
  * at invoke time.
  */
-import { Link } from "@tanstack/react-router";
+import type { SkillSummary } from "@valet/api/wire";
+import { SkillUsage } from "./skill-usage";
 import type { ReactNode } from "react";
-import { Spinner } from "~/components/primitives";
+import { BackLink, Spinner, pageClass } from "~/components/primitives";
 import { Markdown } from "~/components/markdown";
 import { Section } from "~/components/settings/section";
 
@@ -31,9 +32,11 @@ export function SkillDocument({
   isLoading,
   error,
   skillName,
+  skill,
   children,
 }: {
   title: string;
+  skill?: SkillSummary;
   description?: string;
   /** Mono line on the right of the header: where the skill comes from. */
   meta?: ReactNode;
@@ -51,10 +54,8 @@ export function SkillDocument({
 }) {
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6 sm:py-10">
-        <Link to="/skills" className="inline-flex min-h-11 items-center text-xs text-muted underline-offset-2 hover:underline">
-          ← Skills
-        </Link>
+      <div className={pageClass}>
+        <BackLink to="/skills">Skills</BackLink>
 
         <div className="mt-4 flex flex-col items-start justify-between gap-4 sm:flex-row sm:items-end">
           <div>
@@ -68,6 +69,8 @@ export function SkillDocument({
         </div>
 
         {notice && <div className="mt-4 text-sm text-danger-500">{notice}</div>}
+
+        {!children && !isLoading && !error && skill && <SkillUsage skill={skill} />}
 
         <div className="mt-10">
           {children ?? (

@@ -67,7 +67,7 @@ Run a handful of sessions (some web, one long-running with a >60s job, one error
 
 `GET /api/usage/daily-agents?scope=org&window=30d` returns daily activity for collection outside Valet. It uses the existing usage scope checks. Org reads require an org admin; team reads require membership. The response contains aggregate counts, not session IDs.
 
-An active agent is a distinct engine session with positive recorded token usage on a UTC calendar day. Repeated turns and threads count once per session per day. Children and workflow agents count separately from their parent assistant. Kinds are `assistant`, `child`, `workflow`, and `session`. Idle sessions, page views, zero-token entries, and external proxy calls do not count. Unpriced usage counts.
+An active agent is a distinct engine session with positive recorded token usage on a UTC calendar day. Repeated turns and threads count once per session per day. Children and workflow agents count separately from their parent assistant. Kinds are `assistant`, `child`, `workflow`, and `session`. Idle sessions, page views, zero-token entries, and external proxy calls do not count. Unpriced usage counts. Every count keys a turn by the engine session that made the model call, not by its billing key, from the member activity rollups (`scopedAgentActivity`). A Thread step's turn bills to its step but makes its assistant active. An LLM step's id carries spend but is not an engine session, so it does not count. The overview total, the daily chart, and member activity therefore agree.
 
 Each row contains `dayMs`, `teamId`, `teamName`, `kind`, and `activeAgents`. Team attribution uses the session or workflow owner from `cost_entries`, never the actor's team memberships. A null team ID means no team owner. Names reflect current team names. Sum the kinds for a team's daily total; do not sum daily counts to compute monthly unique agents.
 
@@ -77,7 +77,7 @@ Windows include the current partial UTC day and the preceding calendar days: `24
 
 The team Usage page adds **Avg daily active agents** to **By member**. The breakdown API returns `byUser[].avgDailyActiveAgents` and `dailyAgentWindow` only when the caller administers the team. Existing membership and org checks apply.
 
-An active agent is a distinct engine session with positive recorded token usage on a UTC day. Children and workflow node sessions, including separate iteration sessions, count individually. Repeated turns and threads count once per session, actor, and day. Unpriced turns count. Idle sessions, zero-token entries, and proxy requests do not count.
+An active agent is a distinct engine session with positive recorded token usage on a UTC day. Children and workflow node sessions, including separate iteration sessions, count individually. Repeated turns and threads count once per session, actor, and day. Unpriced turns count. Idle sessions, zero-token entries, and proxy requests do not count. LLM-step ids do not count. A Thread step's turn counts for the assistant that ran it, as on the daily chart.
 
 The average divides session-days by all calendar days in the selected window: 1, 7, 30, or 90. This includes days without activity and the current partial UTC day. The `24h` selection means today for this metric. Spend retains its existing rolling window.
 
@@ -101,3 +101,437 @@ The headline uses the selected rolling window. The By member daily average
 keeps its calendar-day definition; its values are not summed for this headline.
 The five headline cards wrap from one to two to five columns as width permits.
 Retained usage and ownership determine the count; this does not add permanent history.
+
+## Usage reporting periods (2026-09-22)
+
+The Usage page keeps the 24h, 7d, and 30d rolling lookbacks. It also accepts a
+UTC calendar month or a custom start and end date. Custom dates are inclusive
+in the UI. The API converts them to a half-open interval from the start day's
+UTC midnight through the midnight after the end date. A completed month uses
+its exact UTC month boundaries. The current month ends after the current UTC
+day.
+
+The API rejects invalid dates, reversed ranges, future dates, and custom ranges
+longer than 366 days. All aggregate, drill-down, activity, and CSV queries use
+the same lower and upper bounds. SQL applies direct comparisons to
+`created_at`; it does not transform the indexed predicate or load raw turns for
+aggregation. CSV filenames include the selected month or custom range.
+
+## Finance CSV identity and work context (2026-09-24)
+
+The usage CSV keeps its existing columns and adds `employee_name`,
+`employee_email`, `repository`, `channel_type`, and `channel_id`. `user_id`
+remains the stable identity column. Missing users and rows without a user keep
+blank human identity fields. A plain team member cannot read any employee
+identity fields.
+
+Employee identity is a current join to the user table. It is not a historical
+snapshot. Repository values come from durable session repository bindings and
+use semicolons when a session has multiple bindings. Channel type and ID come
+from the queue item linked to the billable engine entry. Queue items and usage
+entries have the same session lifecycle. Historical rows without a linked queue
+item or channel stay blank. Proxy rows also have blank work context. The export
+does not infer a project or accounting category.
+
+## Usage CSV export modes (2026-09-25)
+
+`GET /api/usage/export.csv` accepts `granularity=day|hour|turn`. The default is
+`day`. The route rejects any other value before it sends CSV data.
+
+Daily and hourly exports aggregate the ledger in SQL. Each row uses a UTC
+bucket start and groups by use case, recorded provider, model, owner type,
+owner ID, and user identity. Provider is blank for engine entries because the
+engine ledger does not record it. Proxy rows use their recorded provider kind.
+The export includes turns, unpriced turns, each token type, total tokens, and
+the sum of priced cost. These sums use the same predicates as the Usage
+breakdown and reconcile for the same period and scope. Aggregate rows do not
+include session, repository, or channel fields.
+
+A plain team member gets no user identity dimensions. The SQL omits user ID,
+name, and email from the group, so multiple members merge into one row when
+the remaining dimensions match. Team admins and org admins keep the current
+identity join. CSV formula neutralization applies to all text dimensions.
+
+The `turn` mode keeps the itemized columns and descending time order. It has
+no row cap. The API reads keyset pages of 5,000 rows in the stable descending
+order `(created_at, use_case, entry_id)`. It never uses `OFFSET`. Repository
+bindings are aggregated once for each page instead of once for each row. The
+response stream holds at most one page of rows in application memory.
+
+The route completes authentication, scope, period, and granularity checks
+before it sends the CSV header. The web client also runs a validation request
+before it starts the native browser download. The download does not use a
+JavaScript response buffer or timeout. If a page query fails after streaming
+starts, the API errors the stream and closes the connection as failed. It does
+not end a truncated CSV as a successful file.
+
+## Tool work and query cost (2026-09-25)
+
+The usage page compares settled assistant tool calls with model tokens. It counts stored assistant `tool_call` parts with `completed` or `error` status. A handled failure can count, so this is an activity measure. It counts completed or failed workflow tool nodes with an execution duration as model-free actions. It excludes session action audit rows to avoid counting a model-directed call twice.
+
+The page shows model-directed calls per million model tokens and lists model-free actions separately. A zero-token use case has no rate. Unpriced turns still add tokens. These measures do not establish task quality or business value. The store does not record whether tool-result bytes entered a model prompt, so result size cannot establish tokens saved.
+
+`GET /api/usage/tool-efficiency` uses the same personal, organization, team, and date-range rules as the cost breakdown. It starts after the breakdown response. Assistant calls use entry time. Workflow actions use execution start time, with creation time as a fallback for old audit rows.
+
+The cost breakdown computes use-case, model, day, member, and total aggregates with one `GROUPING SETS` query over `cost_entries`. A scratch PGlite sample of 30,000 rows reduced the earlier five-query aggregate from about 0.9 seconds to about 0.23 seconds. Production latency and the tool-parts query still need measurement before adding an index.
+
+## Confirmed outcomes (2026-09-25)
+
+`GET /api/usage/outcomes` uses the same scope and period checks as the breakdown. It counts successful GitHub PR creation, submitted PR reviews, Slack channel messages, and Slack DMs from `action_invocations`. A completed audit row counts only when its plugin result reports `success: true`. Pending reviews and failed actions do not count. The Slack rows describe delivery actions; they do not claim a message was a report.
+
+The terminal path counts a `bash` call only when the engine stored a recognized outcome in the tool result. A direct `gh pr create` needs exit code zero and a PR URL. A direct `gh pr review` needs exit code zero and a submission flag. Compound shell commands are excluded. Old terminal transcripts have no outcome marker, so this path starts counting when the marker ships.
+
+The tool-call queries replace serialized NUL escapes before they parse stored parts. This lets a binary tool result leave call counts available. Workflow session actions resolve the parent run from the `wf:<run>:<node>` session ID. Review counts use the successful result state, because the audit can cap long request parameters. Member spend rows sort by descending cost.
+
+An outcome belongs to its session or workflow run. For each parent, the endpoint divides priced model spend in the selected period evenly across that parent's counted outcomes. Each outcome type gets its share. Spend from parents with no counted outcomes stays unallocated. The UI calls this allocated model spend, not marginal cost or ROI. Unpriced turns make the estimate a floor. Audit writes are best effort, so outcome counts can be incomplete.
+
+Tool-result context bypass needs a separate trace of which result bytes entered a model prompt. A tool result's size alone cannot establish tokens saved.
+
+## Home dashboard proxy exclusion (2026-09-26)
+
+The home dashboard counts Valet sessions, orchestrators, and workflows only.
+`GET /api/usage/summary` excludes proxy rows from personal windows and organization member rankings.
+This filter applies to costs, tokens, turns, and unpriced counts.
+The Usage page, exports, and proxy request log retain external proxy activity.
+The home card states this scope so its totals need not match the full Usage page.
+
+## Indexed usage facts (2026-09-26)
+
+The Usage page reads compact facts instead of parsing transcript bodies on every request.
+`usage_entry_facts` has one row per engine entry. It stores model usage, model cost, and settled tool/outcome counts.
+A database trigger updates the fact in the same transaction as each relevant entry insert or update.
+The source foreign key cascades deletes. Repeated tool-result updates replace counts; they do not increment counters.
+The projection sanitizes escaped NUL characters with the same rule as the prior read query.
+
+`usage_entries` resolves current session or workflow ownership. Two exclusive branches preserve session precedence and allow scope filters into the joins.
+The `cost_entries` view uses these facts and retains the proxy branch and existing column contract.
+Ownership changes take effect without rebuilding facts. Tool efficiency and terminal outcomes use stored counts.
+Outcome allocation reads costs only for parents with confirmed outcomes in the requested period.
+Skill adoption and carried context use separate date-bounded inputs. Historical invocations can still carry context in the current period.
+
+Indexes cover fact date/session/workflow lookups, effective action time, confirmed outcome actions, skill-context dates, and session organization/user ownership.
+Effective action time remains `COALESCE(started_at, created_at)`, including delayed approvals.
+A broad organization query may scan compact facts when most rows match. It does not decode raw transcript bodies.
+This is an exact per-entry projection, not a periodically refreshed cache or an approximate daily rollup.
+
+### Existing database rollout
+
+Fresh databases create the projection in `0000_app.sql`. Existing databases use a resumable schema repair.
+
+1. Install the fact table and trigger in a short transaction with a five-second lock acquisition timeout.
+2. Build audit and skill indexes concurrently.
+3. Backfill at most 500 source entries per statement, releasing row locks between batches.
+4. Publish the new views after the backfill completes.
+
+Old API instances keep the original views during backfill. Writes after trigger installation maintain facts immediately.
+Backfill inserts skip facts already written by the trigger. Key-share locks prevent source deletion races within each batch.
+An interrupted upgrade resumes missing facts on the next startup. It does not publish a partial projection.
+The new API waits for the repair before serving requests. Initial DDL and final view replacement still require brief locks.
+No production upgrade was run during development.
+
+### Local performance evidence
+
+The disposable PGlite benchmark uses 100,000 transcript entries, 100,000 action audits, and 200,000 skill-context records.
+Before/after result payloads matched, allowing floating-point summation tolerance.
+Measured times were: breakdown 873 to 372 ms; tool efficiency 930 to 40 ms; outcomes 1,046 to 211 ms.
+These measurements are local evidence, not production latency guarantees. Production validation must measure the deployed database and its data distribution.
+The plans read compact facts and use the effective-time and outcome-action indexes. They do not scan transcript bodies for these endpoints.
+
+Run `BENCH_ROWS=100000 BENCH_EXPLAIN=1 pnpm --filter @valet/api exec node --import tsx scripts/benchmark-usage.ts` for timings and plans.
+
+
+## Maintained daily and hourly summaries (2026-09-26)
+
+Individual indexed facts still scale with event volume. A ten-million-fact PostgreSQL diagnostic took 45.8 seconds for breakdown.
+Dashboard aggregates read complete UTC days from daily summaries and remaining complete hours from hourly summaries.
+They read indexed facts only for the two partial boundary hours.
+Periods shorter than one hour use one exact source range. The ranges never overlap.
+
+`usage_hourly` stores numeric cost, token, turn, tool, and terminal outcome totals per session, model, and hour.
+Statement triggers maintain the same dimensions in `usage_daily`, grouped by UTC day.
+Hourly CSV exports use hourly summaries to preserve their requested resolution.
+Proxy groups retain organization, user, team, model, provider, and harness dimensions. Home dashboard totals continue to exclude proxy usage.
+Session and workflow ownership is resolved at read time, including workflow fallback and session precedence.
+Distinct active agents count session identities across the selected range. They do not sum hourly distinct counts.
+The breakdown computes that distinct count once, separately from its additive grouping sets.
+Session, workflow, and proxy harness drill totals and aggregate CSV exports use the same period relation.
+Per-turn exports retain keyset pagination over individual facts.
+
+Action summaries retain source organization, session, workflow, and confirmed outcome kind.
+Skill summaries retain invocation metadata, session, and invoker identity.
+Request membership reference counts preserve exact carrying-call counts across duplicate contexts.
+Only requests that cross hourly groups need a duplicate correction query.
+Member activity summaries retain session and prompt actor identity. Queue-author corrections update their contributions.
+Current child-session, assistant, and ownership relationships determine actor fallbacks at read time.
+
+Database statement triggers apply grouped old/new deltas in stable key order.
+Upserts contribute once. Corrections subtract the old contribution before adding the new contribution.
+Deletes remove contributions. Bulk imports update each affected summary group once per statement.
+Aggregate reads use read-only READ COMMITTED transactions with local `jit=off` and `work_mem=16MB` settings.
+The settings expire with the transaction and do not change pooled connections.
+The application uses READ COMMITTED transactions. Historical hourly-row mutations and related skill or queue attribution reject stale isolation levels with SQLSTATE 40001.
+The error instructs callers to retry at READ COMMITTED isolation.
+
+### Rollout and repair
+
+The repair installs tracking in short transactions. The existing API can keep serving its prior queries during backfill.
+Hourly backfill locks at most 10,000 source rows per batch and advances a durable primary-key cursor atomically with the aggregate writes.
+Live writes mark their own contributions, so backfill skips them. Old unmarked rows below the committed cursor are already counted.
+Each batch seeks through the primary-key index. It does not scan all preceding rows or rewrite every source row and index.
+Fresh installs maintain daily summaries during the hourly backfill.
+An existing hourly-only install builds daily summaries once while holding a SHARE ROW EXCLUSIVE lock on hourly summaries.
+This transaction has a five-second lock acquisition timeout and a thirty-second statement timeout.
+Action, skill, and member projections backfill in independent bounded batches.
+Readiness views publish only after their backfills complete. Repairs resume after an interrupted process.
+Database initialization precedes the HTTP listener. The chart permits a configurable startup budget for this one-time backfill.
+Readiness continues to keep traffic on the previous pod until the new instance finishes initialization.
+
+Schema repair creates missing indexes independently. It reports missing parts of an existing projection instead of silently creating inconsistent totals.
+Restore missing projection tables from backup before restarting. Manual deletion or truncation of projection data is not a supported reset procedure.
+Backfill remains a one-time operation proportional to retained data. Dashboard reads scale with summary groups and boundary facts.
+A workload with one event per session/model/day has little daily compression and requires separate capacity validation.
+Action, skill, and member queries retain hourly summaries; their compression depends on those dimensions.
+
+### Validation
+
+Regression coverage includes exact boundary timestamps, upserts, corrections, deletes, ownership changes, interrupted repairs, and duplicate skill requests.
+PostgreSQL race checks cover updates and deletes waiting on backfill, concurrent queue-author changes, and stale-snapshot rejection.
+The scale harness compares endpoint payloads with the previous implementation before measuring concurrent dashboard loads.
+Run the benchmark only against its explicitly named disposable loopback database. It never reads the application's DATABASE_URL.
+
+
+### PostgreSQL scale validation
+
+The disposable PostgreSQL 17 container has two CPUs, 2 GiB of memory, and 512 MiB of shared-memory capacity.
+The main fixture has ten million usage facts, 10,000 sessions, five models plus unknown models, and 35 days of history.
+It includes 100,000 proxy requests, 100,000 actions, 10,000 skill invocations, and 200,000 skill-context records.
+One percent of sessions are long-running orchestrators. Other sessions concentrate their activity within a day.
+The selected organization owns 90 percent of sessions. The thirty-day range selects about 7.7 million facts.
+
+The fixture omits transcript bodies and workflow-run rows. It measures aggregate reads and summary initialization, not complete ingestion throughput.
+Correctness tests cover workflow ownership separately. A separate million-entry benchmark covers member attribution with real engine entries.
+The main fixture produces 83,136 daily groups and 523,948 hourly groups.
+Nine organization, personal, and proxy-drill response comparisons match the previous implementation.
+Integer counts match exactly. Fractional costs permit floating-point summation tolerance.
+
+A second fixture spreads one million facts across the same session, model, and date dimensions with almost no summary compression.
+This fixture tests the cost of many reporting groups. Row count alone does not establish a production latency guarantee.
+The initial concurrent run exceeded Docker's default 64 MiB shared-memory capacity.
+The repeated run uses 512 MiB shared-memory capacity within the same 2 GiB container limit.
+All nine response comparisons pass in that run. Four concurrent dashboards complete in 11.8 seconds.
+Warm organization reads take 2,229 ms for breakdown, 243 ms for tools, 598 ms for outcomes, and 1,316 ms for activity.
+This workload produces about one million daily groups from one million facts.
+Partial outcome indexes avoid scanning unrelated summaries for sparse outcome counts.
+
+Run `packages/api/scripts/benchmark-usage-scale.ts` with an explicit `BENCH_DATABASE_URL` for a disposable loopback database.
+The database name must start with `usage_rollup_bench_`. The seed phase refuses a nonempty database.
+Use `BENCH_ROWS=10000000 BENCH_SHAPE=sessions` for the main fixture.
+Use `BENCH_ROWS=1000000 BENCH_SHAPE=dispersed` for the high-cardinality fixture.
+Set `BENCH_EXPLAIN=1` to capture query plans with the same transaction-local settings as the endpoint reads.
+
+
+The final main-fixture measurements are milliseconds. Baseline reads use the previous indexed-fact implementation; summary reads use warmed data.
+These are local measurements, not cold-cache or production guarantees.
+
+| Organization endpoint | Baseline | Daily/hourly summaries |
+| --- | ---: | ---: |
+| Breakdown | 33,074 | 1,149 |
+| Tool efficiency | 1,226 | 239 |
+| Outcomes | 6,413 | 463 |
+| Agent activity | 14,897 | 542 |
+
+Four simultaneous main-fixture dashboards finish in 1,834 ms. Each dashboard requests all four endpoints.
+The existing hourly-only projection builds its daily layer in 2.33 seconds on this fixture.
+Full source backfill has a separate, data-dependent cost. Interrupted backfill resumes from its committed cursor.
+
+
+Usage repair helpers share migration SQL with fresh installs. The server build embeds this SQL, including formatter-added trailing commas in asset reads.
+Asset parity and bundle guards reject migration paths that would require source files at runtime.
+
+## Usage page views
+
+The Usage page opens in Overview. Overview shows spend totals, token and cache statistics, active agents, and the daily chart.
+Breakdown shows tool efficiency, outcomes, use cases, skills, models, and member tables when authorized.
+Activity shows the personal proxy request log and gateway settings links. Team workspaces show a direction to switch to Personal.
+The Activity log does not use the spend period filter. Spend loading and error states appear only in Overview and Breakdown.
+
+The period, scope, and export controls remain available across views. Switching views preserves the selected period, expanded breakdown rows, and request page.
+Switching workspaces resets the request page. Hidden breakdown details and inactive Activity queries do not fetch.
+The views do not change authorization, usage calculations, or CSV export behavior.
+
+Usage query functions forward their abort signals to the API client, which retains its separate 30-second timeout.
+The client forwards caller cancellation through its request controller without requiring `AbortSignal.any`. It removes the caller listener when the request settles.
+Disabling a mounted Usage query cancels its pending request when no other enabled observer needs it.
+Period changes cancel unused requests for the previous period. Leaving the page cancels requests without remaining observers.
+Cancellation preserves cached data and does not report a timeout. Rapid-switch tests exercise all six query families through mocked pending fetches.
+
+## Workflow cost by step (2026-10-09)
+
+A workflow author tunes a workflow one step at a time, so Usage and the run page show model spend per step. Every model call a workflow makes bills to its step's id, `wf:{runId}:{nodeId}`, plus `:{iteration}` inside a foreach body. A session step already ran in a session with that id. Two step kinds did not, and their spend was missing from workflow totals:
+
+- **LLM steps** call the model directly and had no session, so their spend reached no usage table. The API now writes each call as one `usage` entry in `engine_entries` under the step's id (`workflows/step-usage.ts`). The entry follows the engine's turn rule, shared as `modelCallUsage` in `@valet/engine`: no entry without tokens, and no cost when the provider reports no price. The usage triggers then project it like any other turn. No engine session or thread exists for the id, so no conversation shows the entry. The Postgres store's entry readers skip `usage` rows (`USAGE_ENTRY_TYPE`), so a reader never fails on one. A failed call that billed tokens is recorded too.
+- **Thread steps** prompt the workspace assistant, so their turns were billed to the assistant session. `valet_usage_fact` now bills an assistant turn to the step when its queue item carries a workflow dispatch id (`workflow:{runId}:{nodeId}[:{iteration}][:repair]`). Only an assistant message with a queue item calls `valet_usage_step_session`, which makes primary-key probes of the queue item and the run. A prompt that send-now promoted runs as a new queue item without the dispatch id, which is unique per session. That item names its source in `metadata.promotedFromItemId`, and the lookup reads the dispatch id from the source. The lookup and the repair read that key from the metadata text with a pattern, never through a `jsonb` cast. The metadata copies prompt arguments, and text that `jsonb` rejects would otherwise fail the entry's write and stop the repair, and with it the boot. Every other entry keeps the original fact plan, so inserting 100,001 plain entries takes as long as before this rule. `usage_entry_facts.session_id` is the billing key. It equals the entry's own session except for these turns. A model-directed action follows the same rule. The policy audit records the queue item of the turn that made the call in `action_invocations.queue_item_id`, and `valet_action_fact` bills a Thread step's action to the step, so its outcome and the step's model spend share one parent and cost per outcome pairs them. Audits from before the column bill to the session that ran them. The upgrade repair keeps a Thread-step turn on the assistant when such an audit falls in its queue item's lifetime, so the turn and its action keep one parent.
+
+The billing key is not provenance. The turn CSV exports a re-billed turn's repositories and channel only when the session that ran it passes the export's own scope, so a team export never shows the context of a member's personal assistant that a team run reported through. The confirmed-outcomes feed joins entries by entry id and links a terminal write to the session and thread that ran it, so a Thread step's pull request keeps its conversation link.
+
+A run records its org in `workflow_runs.org_id`. An insert trigger copies it from the workflow when the run starts. Usage reads the org of workflow spend, outcomes, action calls, and skills from the run, so deleting a workflow, which keeps its runs, removes none of them from the org's totals, and cost per outcome stays consistent. A run whose workflow was deleted before this column existed has no org. Its Thread-step turns stay billed to the assistant, so the upgrade leaves every total unchanged.
+
+Deployed databases receive the billing rule through the `usage workflow step attribution` repair (`lib/usage-step-attribution.ts`), probed by `usage_step_attribution_ready`. The repair installs the function, then moves existing Thread-step facts in one pass over `engine_queue_items` in primary-key order, 2,000 items per committed page. A page reads entries only for its workflow-dispatched and promoted items. Each page stores its watermark in `usage_hourly_progress` (`step-attribution`), so a restarted boot resumes there, and the row's lock serializes concurrent boots. With 10,000 Thread-step items among 510,000 queue items, the pass takes 1.5 s on PostgreSQL 18. Each fact update fires the hourly trigger, which moves the turn between buckets, so the hourly and daily totals stay consistent. Only the completed repair creates the ready view on a deployed database. The install sections that other usage repairs run do not create it, so a backfill that fails stays pending and runs again on the next boot. A fresh database installs the rule with the projection and creates the ready view at the end of the migration.
+
+Usage → Breakdown → Workflows lists one row per workflow, linked to its page, with the number of runs that spent in the period. Its steps follow, by cost, each with its average cost over the runs in which it spent, labeled "avg over N runs". Foreach iterations of one step add up. A sub-workflow bills to its own workflow there.
+
+`GET /api/workflows/runs/:runId` returns `stepCosts`, and only that route computes it. The run reads behind the approval inbox and the agent's workflow tools leave it out, so they do not walk sub-runs. `stepCosts` lists cost, calls, unpriced calls, tokens, and models per step and iteration, read from `usage_entry_facts`. A `workflow` step includes the runs it started, up to five levels deep, found through the checkpoints' `childRunId`. The Steps list shows each step's cost and the run total. A `+` marks a step with unpriced calls, whose cost is a lower bound, and marks the run total when any step has one. Costs show four decimals, and a cost below that precision shows as `<$0.0001`.
+
+Child sessions that a session step spawns keep their own ids and do not roll up into the step.
+
+### Model changes between runs (2026-10-13)
+
+The platform can change the model a step runs on with no edit to the workflow. An admin can remap a size tier, or a default can change. A workflow that worked can then give worse results. Pinning a concrete model at save would block such remaps, and a run fails when a pinned model retires, so Valet shows the change instead (`workflows/model-drift.ts`).
+
+`GET /api/workflows/runs/:runId` also returns `modelChanges`. The route finds the previous run of the same workflow whose steps are the same (`sameWorkflowSteps`), among the 20 runs before it. It skips a run that the viewer may not read, with the check the run detail route uses (`canReadWorkflowRun`). A run started from another member's private thread or a private Slack channel is skipped, so its models do not show. The route then compares the models of each step in the two runs' `stepCosts`, over all iterations. It lists a step only when the step called none of the same models in the two runs. A `switch_model` call or a provider fallback adds a model for one turn, and the step still calls its assigned model, so a model that both runs share means no remap. A remap that occurs during a run puts both models in that run, so that remap is not listed. A first run, or a run after an edit to the steps, has no previous run to compare, so it lists nothing. A step that called no model in either run is not compared. A `workflow` step is not compared either: its models come from the runs it started, and their workflow can change apart from this one. A run with no model calls skips the lookup.
+
+The Steps list shows each step's models below its name. A step whose models changed carries a warning badge on its first row, and a banner at the top of the run page counts the changed steps. In the editor, the session and LLM step forms show the models the step called in the newest settled run. The run detail route supplies them, so the editor needs no new endpoint. A run records the provider's own model id, such as `claude-sonnet-4-5` or `default`, and not the provider that served it. Two providers can expose the same id. A custom provider can declare any id, and an OpenRouter id such as `openai/gpt-4.1` is also the OpenAI provider's catalog id. The model catalog (`GET /api/models`) lists only active providers, so one match there does not identify the provider of an older run. The form shows the recorded id and offers no one-click pin. To keep the model, the person picks it in the step's model field and saves the draft.
+
+## Member labels (2026-10-14)
+
+Unattended work runs as its workspace principal. A team's schedules, event subscriptions, and team API keys act as `team:{teamId}`. Org-owned work acts as `org:{orgId}`. That id becomes the session user or the prompt author, so a By member row can belong to a team instead of a person.
+
+The By member rows and the home ranking never show a raw id as a label. `memberLabels` in `services/usage.ts` resolves each actor id:
+
+- A person shows their name, or their email when the name is empty. A deleted user shows "Former member".
+- A team shows its current name. A team the viewer cannot name shows "Another team", the label the channel list uses. One label covers a deleted team and a hidden team, so the label does not tell the viewer which teams exist.
+- The org principal shows "Organization".
+
+The read decides which teams a row can name:
+
+- Org scope requires an org admin, so it names every team of the org.
+- A team scope names only its own team. Another team's name depends on access to that team, and the team scope does not carry that access.
+- Every org member reads the home ranking. It names every team for an org admin, and only the viewer's own teams for anyone else.
+
+`byUser[].isTeam` and `org.members[].isTeam` mark a team row. The Usage page and the home usage card show the workspace switcher's team icon before the team's name, so a team does not read as a person. The `userId` key keeps the actor id. The CSV export keeps its `user_id`, `owner_type`, and `owner_id` columns as stable ids.
+
+## Tool intent and surface usage (TKAI-656)
+
+The shared tool contract lives in `@valet/shared`.
+Hosted and MCP tools require `intent`, except broker and pinned tools, which use `summary`.
+The server trims this string and accepts 1 to 500 characters.
+The schema asks for one plain-language sentence about the purpose and reason.
+It does not infer sentence boundaries.
+Intent is metadata, not a provider argument.
+The bridges remove it before policy matching, approval parameter comparison, execution, and idempotency hashing.
+Suspended hosted calls retain intent for replay and approval explanations.
+Broker `call_tool` and pinned tools use their required `summary` as intent.
+They do not add a separate `intent` argument.
+The bridge publishes an added argument only once.
+An action's own `intent` parameter is preserved.
+Non-object schemas remain unchanged.
+A collision skips injected intent and warns once per tool name per process.
+Validation errors name the required field and its `arguments` path.
+
+Tool approval gates carry a separate `agentReason` field.
+The web card labels it "Agent's stated reason" and identifies it as model-authored text.
+Channel prompts render it as an escaped field labelled "Model-authored reason".
+Account-sharing approvals carry the same separate summary outside a thread.
+`ask_question` and `ask_approval` keep their original body without this field.
+Gate persistence and wire projection retain the separate field.
+Restart replay starts a new execution clock and records a fact with the original queue author.
+Approval waiting does not contribute to execution duration.
+Turn end and abort clear transient telemetry state.
+
+Actual sandbox primitives declare `ToolDef.intent: "exempt"`: `bash`, `read`, `write`, `edit`, `process_read`, `watch`, and `sec_fs_*`.
+Exemption does not depend on a tool name.
+A plugin action named `read` does not inherit it.
+Internal native-image receipts also declare exemption and do not fabricate intent.
+Old receipts without intent remain replayable.
+These high-volume file and shell operations keep their existing schemas.
+They do not produce usage facts.
+This avoids repeated model output and schema tokens for low-level I/O.
+
+The `external_calls` table stores all three surfaces: `hosted`, `mcp`, and `cli`.
+Facts contain identity, ownership, tool or command name, outcome, duration, timestamp, and optional intent.
+Hosted facts also contain session, thread, and persona context.
+No fact contains arguments, results, or credentials.
+Telemetry failures are reported without their payload and cannot fail execution.
+Recording promises are not awaited by tool or request execution.
+Hosted lifecycle events include SDK validation failures.
+The test fixtures use a deterministic provider and do not measure live model latency.
+
+CLI requests carry an invocation UUID, normalized command path, and version in headers.
+Command paths exclude positional values and option values.
+The server derives user and organization from authentication.
+An upsert keeps one row per invocation across its HTTP requests.
+Later completion timestamps win when requests finish out of order.
+An earlier-arriving start can extend duration without replacing a newer outcome.
+Invocation IDs are namespaced by authenticated organization and user.
+Health checks skip authentication and usage recording.
+MCP initialization metadata comes from the SDK client version and is stored by organization, user, and OAuth client ID.
+The registration schema observes parsed tool arguments, including invalid intent, without cloning request bodies.
+Unknown broker IDs are stored as `unknown`, never as model-written tool names.
+Only thread routes can supply a thread ID from their response.
+No bearer token is retained in that metadata.
+Client-info writes do not block initialization.
+MCP telemetry observes the final JSON-RPC reply before serialization.
+An inner request error does not override a successful final tool result.
+`pending-approval` is distinct from a denial.
+
+`GET /api/usage/external` uses the existing period and personal, team, or organization scope rules.
+The optional `surface` filter applies to daily counts, tools, clients, and recent intents.
+Daily counts include zero days.
+Recent intents use literal `strpos` text search and offset pagination.
+Personal-workspace rows are excluded from the organization recent-intents feed by default.
+They remain in organization aggregates.
+`ORG_RECENT_INCLUDES_PERSONAL` is the one-line switch for that privacy decision.
+Team automation without a human actor stores a null user and retains team ownership.
+Distinct-user counts exclude null users.
+A team ownership/time index supports scoped reads.
+The event dispatcher nulls intent text older than 90 days in bounded asynchronous batches.
+It retains the usage rows and counts.
+A partial `created_at` index includes only rows with intent.
+A nullable clearing timestamp distinguishes retained-text deletion from missing or invalid intent.
+Retention failures postpone the next attempt by one minute.
+Hosted inserts remain asynchronous per-call writes, not batched writes.
+The search query remains a substring scan within the scoped time range.
+The usage query retains previous data while search changes, so the input keeps focus.
+Team members can see aggregates.
+Team admins can also see individual intents from threads they can read.
+The recent feed uses the existing batched thread visibility check, including private-channel and personal-helper restrictions.
+Text search first selects candidates within the scoped period.
+Each request checks at most five times its visible offset plus page size and lookahead, capped at 500 candidates.
+Visibility is applied before visible offsets, page limits, and `hasMore`.
+Hidden-only matches never set `hasMore`, and the response does not expose candidate offsets.
+This bounded recent feed can omit older matches beyond its candidate window.
+Thread checks deduplicate thread pairs and Slack channels for one viewer/request.
+Session-only team rows use the existing session resource audience check, cached by session for that request.
+Sessionless team MCP/CLI rows normally have no narrower thread audience and remain visible to team admins.
+Workflow-step sessions and team workflow-run operations are exceptions: they remain aggregate-only.
+Their current telemetry facts cannot establish the originating run audience, so recent details exclude them before search.
+Null-user team rows show the team name.
+Changing scope or period resets the recent-feed page.
+Admitted workflow paths resolve ownership from stored definitions or runs for MCP and CLI telemetry.
+Admitted invoke bodies supply team workspace ownership for MCP and CLI calls.
+CLI discovery requests do not overwrite an invocation's resolved team ownership.
+Legacy replay repairs missing or invalid metadata without relaxing fresh-call validation.
+External policy refusals carry `errorCode: "policy_denied"` and record a denied outcome.
+Error rates divide execution errors by completed `ok` and `error` calls only.
+Denied and pending-approval calls do not enter this denominator.
+All surfaces use snake_case error codes, including `policy_denied` and `action_failed`.
+Scope refusals and expired approvals are denied outcomes.
+The Usage page adds a Tool usage view with the same scope and period controls.
+
+Classification is not part of this change.
+The telemetry table has no `intent_category` or `taxonomy_version` columns.
+
+## Upstream thread editing and tool integration
+
+File tools retain their `sideEffect: files` checkpoint markers and remain intent-exempt.
+Planning and skill-file tools use the same required intent contract as other non-exempt tools.
+Replay restores channel and reply-target data from the original durable queue item, alongside its author and metadata.
+Branch editing tests use intent-aware model fixtures so completed external actions remain visible in branch notes.
+
+### Postgres string boundaries
+
+External-call facts and truncated MCP client metadata use the shared JSON string sanitizer before storage.
+The sanitizer removes NUL and lone UTF-16 surrogates and keeps complete astral characters.
+Decision-gate stores apply the same rule to the new model-authored reason field.
+Invalid reason text must not block a durable gate or cause a usage fact to disappear.
+Configuration handoff preserves the stored reason when a parked approval moves to a rebuilt owner.

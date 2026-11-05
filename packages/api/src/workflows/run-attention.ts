@@ -1,4 +1,10 @@
+import { actionParamsLabel, readToolScope } from "@valet/shared";
 /**
+ * What the api does when a workflow run settles. Two observers live here,
+ * both driven by `LocalRunHost`'s `onRunSettled` hook: the failed-run
+ * notification below, and the per-run thread archive at the end of the
+ * file.
+ *
  * Failed-run attention (batch-fanout design decision 4). A workflow run
  * that settles `failed` reaches its owner through the attention router an
  * approval park already uses, so `routeAttention` stays the only writer of
@@ -15,21 +21,76 @@
  *     narrows an escalation on a team-owned run to team admins, which would
  *     hide a failed batch from the people who run it.
  */
+import { runEventChannel, slackEventsThreadKey } from "../services/thread-access.js";
 import { eq } from "drizzle-orm";
-import type { NodeCheckpoint, OnRunSettled, WorkflowStore } from "@valet/workflow";
+import type { SessionStore } from "@valet/engine";
+import type { NodeCheckpoint, OnApprovalParked, OnApprovalPending, OnRunSettled, WorkflowRun, WorkflowStore } from "@valet/workflow";
 import type { AppDb } from "../lib/drizzle.js";
-import { principalFromOwner, routeAttention } from "../orchestrator/attention.js";
-import { workflowDefinitions } from "../schema/index.js";
+import { ensureAssistantRuntime, loadAssistantBySessionId } from "../assistants/service.js";
+import type { EngineHost } from "../engine/host.js";
+import { principalFromOwner, routeAttention, type AttentionChannelDeliverer, type AttentionDeps } from "../orchestrator/attention.js";
+import { assistantExecutions, sessionThreads, workflowDefinitions } from "../schema/index.js";
+import { resolveWorkflowReportTarget } from "./report-target.js";
+import { workflowRunIdFromThreadKey } from "./run-conversations.js";
+import { endChildSubscriptions, selectWork } from "../engine/wakeups-admin.js";
+import { reportError } from "@valet/engine";
+import { hasUnreportedChild } from "./delegated-work.js";
+
+export function workflowApprovalHref(runId: string, nodeId: string): string {
+  return `/workflows/runs/${encodeURIComponent(runId)}?gate=${encodeURIComponent(nodeId)}`;
+}
+
+/** Names the action and, when its parameters have one, what it would change,
+ * so two waiting approvals for one action read differently. A parameter can
+ * come from a webhook or a model. Slack renders the title as markdown, so a
+ * space after "]" keeps "[text](url)" from becoming a disguised link. */
+function policyGateTitle(info: { service?: string; action?: string; params?: unknown }): string {
+  const label = actionParamsLabel(info.params)?.value.replaceAll("](", "] (");
+  return `Approval needed: ${info.service ?? "?"}.${info.action ?? "?"}${label ? ` for "${label}"` : ""}`;
+}
+
+/** Routes an account gate to its lender and other gates to the run's audience. */
+export function buildRunApprovalAttention(deps: {
+  db: AppDb;
+  store: Pick<WorkflowStore, "getRun">;
+  channels?: AttentionChannelDeliverer[];
+  access?: AttentionDeps["access"];
+}): OnApprovalPending {
+  return async info => {
+    try {
+      const run = await deps.store.getRun(info.runId);
+      const owner = principalFromOwner(run?.owner);
+      if (!owner) return;
+      const channel = run && !run.params.origin ? runEventChannel(run.params) : undefined;
+      await routeAttention({ db: deps.db, channels: deps.channels, access: deps.access }, {
+        kind: "approval",
+        workflowGate: { runId: info.runId, nodeId: info.nodeId, iteration: info.iteration ?? 0, ...(info.gateId ? { gateId: info.gateId } : {}) },
+        owner: info.approver ? { type: "user", id: info.approver.userId } : owner,
+        ...(run?.params.origin && !info.approver ? { sessionId: run.params.origin.assistantSessionId, threadId: run.params.origin.threadId } : {}),
+        ...(channel ? { audienceKey: slackEventsThreadKey(channel) } : {}),
+        title: info.summary ?? info.prompt ?? policyGateTitle(info),
+        body: info.kind === "policy_gate" ? `Workflow run ${info.runId} is paused on ${info.nodeId}.` : info.summary ? info.prompt : undefined,
+        href: workflowApprovalHref(info.runId, info.nodeId),
+        dedupeKey: `${info.runId}:${info.gateId ?? `${info.nodeId}${info.iteration !== undefined && info.iteration > 0 ? `:${info.iteration}` : ""}`}`,
+      });
+    } catch (err) {
+      // A failed notification must not prevent the run from parking.
+      reportError({ area: "workflows", reason: "approval_notify" }, `workflow approval notification failed for ${info.runId}:${info.nodeId}`, err);
+    }
+  };
+}
 
 export interface RunSettledAttentionDeps {
   db: AppDb;
-  store: Pick<WorkflowStore, "getCheckpoints">;
+  store: Pick<WorkflowStore, "getCheckpoints" | "getRun">;
+  channels?: AttentionChannelDeliverer[];
+  /** Credential access for a private Slack thread's membership check (`AttentionDeps.access`). */
+  access?: AttentionDeps["access"];
 }
 
-/** How many failed nodes the body names before it counts the rest. */
-const NAMED_FAILURES = 2;
-/** Per-node error budget in the body. A tool error can carry a whole response. */
-const ERROR_CHARS = 200;
+/** Budget for the failed nodes and their errors: one Slack text section.
+ * A tool error can carry a whole response, so a longer summary is cut. */
+const SUMMARY_CHARS = 3_000;
 
 /**
  * Builds the `onRunSettled` handler `LocalRunHost` drives. Contained by
@@ -47,12 +108,20 @@ export function buildRunSettledAttention(deps: RunSettledAttentionDeps): OnRunSe
     try {
       const name = await workflowName(deps.db, info.workflowId);
       const checkpoints = await deps.store.getCheckpoints(info.runId);
+      // A run started from a thread is that thread's audience's
+      // (`thread-access.ts`): a private thread's run notifies only them.
+      const params = (await deps.store.getRun(info.runId))?.params;
+      const origin = params?.origin;
+      // A run a Slack channel's event started reaches that channel's audience.
+      const slackChannel = params && !origin ? runEventChannel(params) : undefined;
       await routeAttention(
-        { db: deps.db },
+        { db: deps.db, channels: deps.channels, ...(deps.access ? { access: deps.access } : {}) },
         {
           kind: "notification",
           urgency: "high",
           owner,
+          ...(origin ? { sessionId: origin.assistantSessionId, threadId: origin.threadId } : {}),
+          ...(slackChannel ? { audienceKey: slackEventsThreadKey(slackChannel) } : {}),
           title: `Workflow run failed: ${name}`,
           body: failedNodeSummary(checkpoints),
           href: `/workflows/runs/${info.runId}`,
@@ -63,7 +132,7 @@ export function buildRunSettledAttention(deps: RunSettledAttentionDeps): OnRunSe
         },
       );
     } catch (err) {
-      console.error(`workflow failed-run notification failed for ${info.runId}:`, err);
+      reportError({ area: "workflows", reason: "failed_run_notify" }, `workflow failed-run notification failed for ${info.runId}`, err);
     }
   };
 }
@@ -79,23 +148,331 @@ async function workflowName(db: AppDb, workflowId: string): Promise<string> {
 }
 
 /**
- * Names the nodes that failed, so the reader knows what broke before
- * opening the run. `foreach` body rows carry a non-zero iteration and are
- * labelled with it — the same node id can fail on several items.
+ * Each failed node with its whole error, one per line, so the reader can
+ * act from the notification without opening the run. `foreach` body rows
+ * carry a non-zero iteration and are labelled with it: the same node id can
+ * fail on several items. Only a summary over `SUMMARY_CHARS` is cut, and
+ * then it points to the run for the rest.
  */
 export function failedNodeSummary(checkpoints: NodeCheckpoint[]): string {
   const failed = checkpoints.filter((cp) => cp.status === "failed");
   if (failed.length === 0) return "Open the run to see why it stopped.";
 
-  const named = failed.slice(0, NAMED_FAILURES).map((cp) => {
+  // Build only up to the budget: a batch can fail on hundreds of rows, each
+  // carrying a whole response body.
+  let summary = "";
+  for (const cp of failed) {
     const label = cp.iteration > 0 ? `${cp.nodeId}[${cp.iteration}]` : cp.nodeId;
-    return `${label}: ${truncate(cp.error ?? "no error recorded")}`;
-  });
-  const rest = failed.length - named.length;
-  const more = rest > 0 ? ` (+${rest} more)` : "";
-  return `${named.join("; ")}${more}. Open the run to see the full error.`;
+    const line = `${summary ? "\n" : ""}${label}: `;
+    const error = cp.error ?? "no error recorded";
+    const room = SUMMARY_CHARS - summary.length - line.length;
+    if (error.length > room) {
+      return `${summary}${room > 0 ? `${line}${error.slice(0, room)}` : ""}…\n\nOpen the run to see the rest.`;
+    }
+    summary += `${line}${error}`;
+  }
+  return summary;
 }
 
-function truncate(text: string): string {
-  return text.length <= ERROR_CHARS ? text : `${text.slice(0, ERROR_CHARS)}…`;
+export interface RunOriginReportDeps {
+  db: AppDb;
+  engineHost: EngineHost;
+  store: Pick<WorkflowStore, "getRun" | "getCheckpoints">;
+}
+
+/** Budget for the run's final output in the report. */
+const OUTPUT_CHARS = 2_000;
+
+/**
+ * Reports a settled run to the assistant thread that started it, as a
+ * `workflow.settled` signal. The thread's turn starts from the result, the
+ * way a parent continues from a child's `child.settled`, so Valet can read
+ * a failure, fix the workflow, and start the next run without someone
+ * asking it to check. Only a top-level run that a thread started reports
+ * here; a scheduled or event run has no thread waiting on it.
+ *
+ * Contained by contract, like the notification above. Idempotent: the
+ * dispatch id is the run's, so a run reclaimed while `terminalizing`
+ * reports once.
+ */
+export function buildRunOriginReport(deps: RunOriginReportDeps): OnRunSettled {
+  return async (info) => {
+    if (info.parentRunId !== undefined) return;
+    try {
+      const run = await deps.store.getRun(info.runId);
+      if (!run) return;
+      await signalOrigin(deps, run, `workflow-settled:${info.runId}`, async () => ({
+        signalType: "workflow.settled",
+        body: runReport(await workflowName(deps.db, info.workflowId), info.runId, info.outcome, await deps.store.getCheckpoints(info.runId)) +
+          "\nContinue the workflow task now. Call workflows.get_run and inspect the relevant node results. " +
+          "For failed or empty agent output, call workflows.get_node_diagnostics. " +
+          "Report the outcome and the requested checks to the user. Verify external delivery from recorded tool results before claiming it succeeded.",
+        attributes: { runId: info.runId, outcome: info.outcome },
+      }));
+    } catch (err) {
+      reportError({ area: "workflows", reason: "run_report" }, `workflow run report to its thread failed for ${info.runId}`, err);
+    }
+  };
+}
+
+/**
+ * Sends a signal to the assistant thread that started `run`, once per
+ * `dispatchId`. A run no thread started (scheduled, event, or a sub-run)
+ * has nowhere to report.
+ *
+ * The signal queues as `followup`, whatever the thread's own mode. A
+ * personal thread steers, and a steer admission supersedes the person's
+ * queued messages, aborts the running turn, and withdraws its open
+ * decision cards. A run report must wait its turn instead.
+ */
+async function signalOrigin(
+  deps: Pick<RunOriginReportDeps, "db" | "engineHost">,
+  run: WorkflowRun,
+  dispatchId: string,
+  signal: () => Promise<{ signalType: string; body: string; attributes: Record<string, string> }>,
+): Promise<void> {
+  const origin = run.params.origin;
+  if (!origin) return;
+  const assistant = await loadAssistantBySessionId(deps.db, origin.assistantSessionId);
+  if (!assistant || assistant.archivedAt !== null) return;
+  const actorUserId = run.actorUserId ?? (assistant.ownerType === "user" ? assistant.ownerId : undefined);
+  if (!actorUserId) return;
+  const meta = { actorUserId, orgId: assistant.orgId };
+  const source = await ensureAssistantRuntime(deps, assistant, meta);
+  const sourceThread = source.session.threadById(origin.threadId);
+  if (!sourceThread) return;
+  const { thread, priorQueueItemId } = await resolveWorkflowReportTarget(deps,
+    { type: assistant.ownerType, id: assistant.ownerId }, meta, source.session, sourceThread, dispatchId);
+  if (priorQueueItemId) return;
+  // Execution inherits focus; reports inherit only the origin's authorization ceiling.
+  // Older runs did not record that ceiling, so retain their execution restriction.
+  const toolScope = run.params.originToolScope ?? run.params.toolScope;
+  await thread.submitPrompt({ kind: "signal", ...(await signal()) }, { dispatchId, queueMode: "followup",
+    // Continue with the starting member's authority, including private run evidence.
+    // Signal turns remain non-interactive in the engine and retain normal access checks.
+    author: { id: actorUserId, name: "Valet" },
+    ...(toolScope !== undefined ? { metadata: { toolScope: readToolScope(toolScope) } } : {}),
+  });
+}
+
+export type RunApprovalReportDeps = RunOriginReportDeps;
+
+/**
+ * Tells the thread that started a run that the run waits for approval, as a
+ * `workflow.approval_needed` signal, so Valet can say which steps wait and
+ * offer to approve them instead of staying silent until the run settles.
+ *
+ * The host fires this after a drive that opened a gate parks the run, so
+ * `get_run` already lists every waiting step. Steps that park in one drive
+ * share one signal, keyed on the drive's attempt. A drive that only
+ * resolves some gates opens none and sends nothing. A sub-run reports
+ * nothing, like the settle report: its parent's thread did not start it.
+ * Contained like the reports above.
+ */
+export function buildRunApprovalReport(deps: RunApprovalReportDeps): OnApprovalParked {
+  return async (info) => {
+    try {
+      const run = await deps.store.getRun(info.runId);
+      if (!run || run.params.parentRunId !== undefined) return;
+      await signalOrigin(deps, run, `workflow-approval:${info.runId}:${info.attempt}`, async () => ({
+        signalType: "workflow.approval_needed",
+        body: approvalReport(await workflowName(deps.db, run.params.workflowId), info.runId),
+        attributes: { runId: info.runId },
+      }));
+    } catch (err) {
+      reportError({ area: "workflows", reason: "approval_report" }, `workflow approval report to its thread failed for ${info.runId}`, err);
+    }
+  };
+}
+
+/** What a run waiting for approval tells the thread that started it. */
+export function approvalReport(name: string, runId: string): string {
+  return `Workflow "${name}" is waiting for approval. Call get_run: pendingGates lists every step that waits, ` +
+    `and names the teammate who must approve a step on their shared account. Run ${runId} (/workflows/runs/${runId}).`;
+}
+
+/** What a settled run tells the thread that started it. */
+export function runReport(name: string, runId: string, outcome: string, checkpoints: NodeCheckpoint[]): string {
+  const link = `Run ${runId} (/workflows/runs/${runId}).`;
+  if (outcome === "failed") return `Workflow "${name}" failed. ${failedNodeSummary(checkpoints)} ${link}`;
+  if (outcome === "cancelled") return `Workflow "${name}" was cancelled. ${link}`;
+  const stop = [...checkpoints].reverse().find((cp) => cp.status === "completed" && isStopResult(cp.result));
+  const result = stop && isStopResult(stop.result) ? stop.result : undefined;
+  const output = result?.output === undefined ? "" : `\nOutput: ${clip(JSON.stringify(result.output))}`;
+  const message = result?.message ? `\n${clip(result.message)}` : "";
+  return `Workflow "${name}" completed. ${link}${message}${output}`;
+}
+
+function isStopResult(value: unknown): value is { outcome?: string; output?: unknown; message?: string } {
+  return typeof value === "object" && value !== null && "outcome" in value;
+}
+
+function clip(text: string): string {
+  return text.length <= OUTPUT_CHARS ? text : `${text.slice(0, OUTPUT_CHARS)}…`;
+}
+
+export interface RunThreadArchiveDeps {
+  db: AppDb;
+  store: Pick<WorkflowStore, "getCheckpoints">;
+  /** The engine's own session store, for the thread's key and creation time,
+   * and for the state of the submission the node dispatched onto it. */
+  engineStore: Pick<
+    SessionStore,
+    "getThread" | "getQueueItem" | "listUnsettledSubmissions" | "listDecisionGates" | "listWakeups" | "listActiveLeases" | "getWakeup" | "transitionWakeup"
+  >;
+  engineHost?: Pick<EngineHost, "liveSession" | "evictCache">;
+}
+
+/**
+ * Archives the assistant thread an unattended run reported on, at the
+ * moment the run settles.
+ *
+ * Each run gets its own thread (`engine-deps.ts#workflowRunThreadKey`), and
+ * each `thread: "step"` step or foreach entry one more
+ * (`workflowStepThreadKey`), so a workflow that runs every hour would add
+ * live threads to the assistant sidebar every hour. This hook is the single
+ * owner of that cleanup: a settled run's thread leaves the default thread list and stays
+ * readable under "Show archived". Nothing is deleted, and there is no
+ * sweep or timer — a run that never settles keeps its thread, which is the
+ * state the person needs to see.
+ *
+ * Two kinds of thread are deliberately left alone. The thread an attended
+ * run was started from belongs to the person, not to the run. A `session`
+ * node's thread belongs to a workflow session, which has no sidebar. The
+ * thread key is what tells them apart.
+ *
+ * A third kind is left alone for a different reason: the run can settle
+ * before the assistant turn it started finishes. An orchestrator node with
+ * `wait: { mode: "none" }` completes its checkpoint at dispatch, so the run
+ * reaches `stop` with the prompt still queued. The strike-cap settle in
+ * `local-host.ts` aborts no submission either. In both cases the thread has
+ * not yet carried the report, so this hook reads the submission's state and
+ * archives only a thread whose submission has settled. Nothing re-runs
+ * later: an unarchived thread is the visible state, and the person can
+ * archive it themselves.
+ *
+ * Contained by contract, like the notification above: the run is already
+ * settled when this fires, so a throw would abandon a drive lease nothing
+ * reclaims. Idempotent: a run reclaimed while `terminalizing` reports
+ * twice, and the second archive write is the same write.
+ */
+export function buildRunThreadArchive(deps: RunThreadArchiveDeps): OnRunSettled {
+  return async (info) => {
+    try {
+      // Grouped by thread, not deduplicated to the first checkpoint: several
+      // nodes can dispatch onto one per-run thread, and ONE unsettled
+      // submission among them holds the whole thread in the list.
+      const byThread = new Map<string, { sessionId: string; threadId: string; queueItemIds: string[] }>();
+      for (const checkpoint of await deps.store.getCheckpoints(info.runId)) {
+        const dispatch = submissionDispatch(checkpoint.effects);
+        if (!dispatch) continue;
+        const seen = `${dispatch.sessionId}\n${dispatch.threadId}`;
+        const group = byThread.get(seen);
+        if (group) group.queueItemIds.push(dispatch.queueItemId);
+        else byThread.set(seen, { ...dispatch, queueItemIds: [dispatch.queueItemId] });
+      }
+      for (const dispatch of byThread.values()) {
+        const thread = await deps.engineStore.getThread(dispatch.sessionId, dispatch.threadId);
+        if (!thread) {
+          // A thread a node dispatched onto should still be there. Report
+          // it rather than archive nothing in silence; a key that does not
+          // match is ordinary (an origin thread, or a session node's own).
+          console.debug(
+            `workflow run thread archive: run ${info.runId} recorded thread ${dispatch.threadId} ` +
+              `on session ${dispatch.sessionId}, which the engine store no longer holds.`,
+          );
+          continue;
+        }
+        // The run's thread, or a step's own thread (`workflowStepThreadKey`),
+        // plain or under the event's channel.
+        if (!thread.key || workflowRunIdFromThreadKey(thread.key) !== info.runId) continue;
+        const items = await Promise.all(
+          dispatch.queueItemIds.map((itemId) => deps.engineStore.getQueueItem(dispatch.sessionId, itemId)),
+        );
+        const open = items.findIndex((item) => item?.status !== "settled");
+        if (open >= 0) {
+          console.debug(
+            `workflow run thread archive: run ${info.runId} settled while submission ` +
+              `${dispatch.queueItemIds[open]} is ${items[open]?.status ?? "no longer recorded"} — ` +
+              `leaving thread ${dispatch.threadId} in the list.`,
+          );
+          continue;
+        }
+        // Background work on the thread (a process, a watch, a timer, a
+        // hold) still reports there. Archiving would hide its signals, and
+        // stopping it is a person's choice, so the thread stays in the list
+        // (fix wave 3, group C).
+        const [wakeups, leases] = await Promise.all([
+          deps.engineStore.listWakeups(dispatch.sessionId, ["pending", "running"]),
+          deps.engineStore.listActiveLeases(dispatch.sessionId),
+        ]);
+        if (selectWork({ wakeups, leases }, { threadId: thread.id }).length > 0) {
+          console.debug(
+            `workflow run thread archive: run ${info.runId} settled with background work open on ` +
+              `thread ${dispatch.threadId}; leaving the thread in the list.`,
+          );
+          continue;
+        }
+        // A child that has not reported back still delivers its result here.
+        // The step normally waits for that report, but a run can settle first
+        // (`wait: { mode: "none" }`, the strike cap). Keep the delivery and the
+        // thread. A cancelled run ends it: the person stopped the work.
+        if (info.outcome !== "cancelled" && await hasUnreportedChild(deps.db, dispatch.sessionId, thread.id)) {
+          console.debug(
+            `workflow run thread archive: run ${info.runId} settled while a child on ` +
+              `thread ${dispatch.threadId} has not reported back; leaving the thread in the list.`,
+          );
+          continue;
+        }
+        await endChildSubscriptions(deps.engineStore, dispatch.sessionId, thread.id, deps.db);
+        await deps.db
+          .insert(sessionThreads)
+          .values({
+            id: thread.id,
+            sessionId: dispatch.sessionId,
+            createdAt: thread.createdAt,
+            archivedAt: info.settledAt,
+          })
+          .onConflictDoUpdate({ target: sessionThreads.id, set: { archivedAt: info.settledAt } });
+        // Only a per-run report execution owns this cache lifetime. Preserve
+        // durable history, sandbox files, and ordinary origin conversations.
+        if (deps.engineHost) {
+          const [execution] = await deps.db.select().from(assistantExecutions)
+            .where(eq(assistantExecutions.sessionId, dispatch.sessionId)).limit(1);
+          if (!execution || workflowRunIdFromThreadKey(execution.conversationKey) !== info.runId) continue;
+          if ((await deps.engineStore.listDecisionGates(dispatch.sessionId)).some(gate => gate.status === "pending")) continue;
+          if ((await deps.engineStore.listUnsettledSubmissions(dispatch.sessionId)).length > 0) continue;
+          const live = deps.engineHost.liveSession(dispatch.sessionId);
+          if (live?.listThreads().some(t => t.runningItemId() !== undefined)) continue;
+          deps.engineHost.evictCache(dispatch.sessionId);
+        }
+      }
+    } catch (err) {
+      reportError({ area: "workflows", reason: "run_thread_archive" }, `workflow run thread archive failed for ${info.runId}`, err);
+    }
+  };
+}
+
+/**
+ * The session, thread and submission a node recorded when it dispatched
+ * (`@valet/workflow`'s `submission-node.ts` writes them into the node's
+ * checkpoint effects). Returns null for every other node.
+ *
+ * The queue item id comes back with the thread because the run and the
+ * submission settle independently: a `wait: { mode: "none" }` node completes
+ * its checkpoint at dispatch, so the thread's own state is the only way to
+ * tell a finished turn from a queued one.
+ */
+function submissionDispatch(
+  effects: Record<string, unknown> | undefined,
+): { sessionId: string; threadId: string; queueItemId: string } | null {
+  const sessionId = effects?.sessionId;
+  const receipt = effects?.receipt;
+  if (typeof sessionId !== "string") return null;
+  if (typeof receipt !== "object" || receipt === null) return null;
+  if (!("threadId" in receipt) || !("queueItemId" in receipt)) return null;
+  const threadId = receipt.threadId;
+  const queueItemId = receipt.queueItemId;
+  if (typeof threadId !== "string" || typeof queueItemId !== "string") return null;
+  return { sessionId, threadId, queueItemId };
 }

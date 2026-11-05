@@ -1,14 +1,20 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { orgMembers, orgs, users } from "../schema/index.js";
+import { memoryFiles, orgMembers, orgs, users } from "../schema/index.js";
+import { BUILTIN_PRINCIPLES } from "@valet/shared";
 import { addMember, createTeam, removeMember } from "./teams.js";
 import { parseConcept } from "../lib/okf.js";
 import {
+  exportFiles,
+  importFiles,
   linksForFile,
   listFiles,
+  listPrincipleFiles,
   moveFile,
+  MAX_PATCH_BATCH,
   patchFile,
+  patchFiles,
   readFile,
   removeFile,
   searchFiles,
@@ -35,6 +41,34 @@ describe("memory service", () => {
   function scopeFor(userId: string): MemoryScope {
     return { owner: { type: "user", id: userId }, actorUserId: userId };
   }
+
+  it("isolates execution memory across mutation, search, export and team read unions", async () => {
+    const team = await createTeam(db, { orgId, name: "Isolated", creatorUserId: "u1" });
+    await addMember(db, { teamId: team.id, userId: "u2", role: "member" });
+    const shared: MemoryScope = { owner: { type: "team", id: team.id }, actorUserId: "u1" };
+    const alice = { ...shared, namespace: "execution-alice" };
+    const bob = { ...shared, actorUserId: "u2", namespace: "execution-bob" };
+    await writeFile(db, shared, { path: "notes/plan.md", content: "Shared plan" });
+    await writeFile(db, alice, { path: "notes/plan.md", content: "Confidential acquisition" });
+    await writeFile(db, bob, { path: "notes/plan.md", content: "Bob plan" });
+    expect(await searchFiles(db, bob, { query: "acquisition" })).toEqual([]);
+    expect(await searchFiles(db, scopeFor("u2"), { query: "acquisition" })).toEqual([]);
+    expect(await readFile(db, scopeFor("u2"), `team:${team.id}/notes/plan.md`)).toMatchObject({ kind: "file", file: { content: "Shared plan" } });
+    await patchFile(db, alice, { path: "notes/plan.md", oldString: "acquisition", newString: "merger" });
+    expect(await readFile(db, bob, "notes/plan.md")).toMatchObject({ kind: "file", file: { content: "Bob plan" } });
+    await moveFile(db, alice, { from: "notes/plan.md", to: "notes/private.md" });
+    expect((await listFiles(db, bob)).map(row => row.path)).toEqual(["notes/plan.md", `team:${team.id}/notes/plan.md`]);
+    expect(await readFile(db, bob, `team:${team.id}/notes/plan.md`)).toMatchObject({ kind: "file", file: { content: "Shared plan" } });
+    expect((await searchFiles(db, bob, { query: "plan" })).map(row => row.path)).toEqual(expect.arrayContaining(["notes/plan.md", `team:${team.id}/notes/plan.md`]));
+    await expect(writeFile(db, bob, { path: `team:${team.id}/notes/plan.md`, content: "Unsafe publication" })).rejects.toThrow();
+    const exported = await exportFiles(db, alice);
+    expect(exported["notes/private.md"]?.content).toContain("Confidential merger");
+    expect(exported).not.toHaveProperty("notes/plan.md");
+    await importFiles(db, alice, { trusted: false, files: { "notes/plan.md": "Imported private" } });
+    expect(await readFile(db, shared, "notes/plan.md")).toMatchObject({ kind: "file", file: { content: "Shared plan" } });
+    await removeFile(db, alice, "notes/plan.md");
+    expect(await readFile(db, bob, "notes/plan.md")).toMatchObject({ kind: "file", file: { content: "Bob plan" } });
+  });
 
   describe("write / read", () => {
     it("creates a file and reads it back rendered", async () => {
@@ -130,6 +164,58 @@ describe("memory service", () => {
       await expect(
         patchFile(db, scope, { path: "notes/p.md", oldString: "nope", newString: "x" }),
       ).rejects.toThrow(/not found/);
+    });
+  });
+
+  describe("patchFiles", () => {
+    async function body(scope: MemoryScope, path: string): Promise<string> {
+      const result = await readFile(db, scope, path);
+      if (result.kind !== "file") throw new Error("expected file");
+      return result.file.content;
+    }
+
+    it("applies several patches across files in one call", async () => {
+      const scope = scopeFor("u1");
+      await writeFile(db, scope, { path: "notes/a.md", content: "alpha one\n" });
+      await writeFile(db, scope, { path: "notes/b.md", content: "beta one\n" });
+      const results = await patchFiles(db, scope, { patches: [
+        { path: "notes/a.md", oldString: "one", newString: "two" },
+        { path: "notes/b.md", oldString: "one", newString: "two" },
+        { path: "journal/2026-10-31.md", oldString: "", newString: "new\n" },
+      ] });
+      expect(results.map((r) => r.file.path)).toEqual(["notes/a.md", "notes/b.md", "journal/2026-10-31.md"]);
+      expect(await body(scope, "notes/a.md")).toBe("alpha two\n");
+      expect(await body(scope, "notes/b.md")).toBe("beta two\n");
+      expect(await body(scope, "journal/2026-10-31.md")).toBe("new\n");
+    });
+
+    it("applies patches to one file in order", async () => {
+      const scope = scopeFor("u1");
+      await writeFile(db, scope, { path: "notes/a.md", content: "one\n" });
+      await patchFiles(db, scope, { patches: [
+        { path: "notes/a.md", oldString: "one", newString: "two" },
+        { path: "notes/a.md", oldString: "two", newString: "three" },
+      ] });
+      expect(await body(scope, "notes/a.md")).toBe("three\n");
+    });
+
+    it("applies no patch when one fails, and names the one that failed", async () => {
+      const scope = scopeFor("u1");
+      await writeFile(db, scope, { path: "notes/a.md", content: "alpha one\n" });
+      await writeFile(db, scope, { path: "notes/b.md", content: "beta one\n" });
+      await expect(patchFiles(db, scope, { patches: [
+        { path: "notes/a.md", oldString: "one", newString: "two" },
+        { path: "notes/b.md", oldString: "missing", newString: "two" },
+      ] })).rejects.toThrow(/Patch 2 of 2 \(notes\/b\.md\).*No patch was applied/);
+      expect(await body(scope, "notes/a.md")).toBe("alpha one\n");
+      expect(await body(scope, "notes/b.md")).toBe("beta one\n");
+    });
+
+    it("refuses an empty batch and one past the limit", async () => {
+      const scope = scopeFor("u1");
+      await expect(patchFiles(db, scope, { patches: [] })).rejects.toThrow(/at least one patch/);
+      const many = Array.from({ length: MAX_PATCH_BATCH + 1 }, (_, i) => ({ path: `notes/${i}.md`, oldString: "", newString: "x" }));
+      await expect(patchFiles(db, scope, { patches: many })).rejects.toThrow(/at most 20 patches/);
     });
   });
 
@@ -379,6 +465,118 @@ describe("memory service", () => {
 
     it("throws NotFound for a path with no file behind it", async () => {
       await expect(linksForFile(db, scopeFor("u1"), "notes/nope.md")).rejects.toThrow(/not found/i);
+    });
+  });
+
+  describe("built-in and synced principles", () => {
+    const builtin = BUILTIN_PRINCIPLES[0];
+    const path = `principles/${builtin.name}.md`;
+
+    it("reads a built-in principle's text until the scope writes its own file", async () => {
+      const scope = scopeFor("u1");
+      const shipped = await readFile(db, scope, path);
+      expect(shipped.kind).toBe("file");
+      if (shipped.kind !== "file") return;
+      expect(shipped.rendered).toContain(`# ${builtin.rule}`);
+      expect(shipped.rendered).toContain(builtin.when);
+      expect(shipped.file.version).toBe(0);
+      expect(await listFiles(db, scope)).toEqual([]);
+
+      await writeFile(db, scope, { path, content: "# My rule\n\nMine.", type: "principle", description: "Always" });
+      const own = await readFile(db, scope, path);
+      expect(own.kind === "file" && own.rendered).toContain("# My rule");
+      // Another user still reads the shipped text.
+      const other = await readFile(db, scopeFor("u2"), path);
+      expect(other.kind === "file" && other.rendered).toContain(`# ${builtin.rule}`);
+    });
+
+    it("patches a built-in principle into an own file that keeps its rule metadata", async () => {
+      const scope = scopeFor("u1");
+      const firstLine = builtin.details.split("\n")[0];
+      const { file } = await patchFile(db, scope, { path, oldString: firstLine, newString: `${firstLine} Also attach the output.` });
+      expect(file.version).toBe(1);
+      expect(file.type).toBe("principle");
+      expect(file.description).toBe(builtin.when);
+      expect(file.title).toBe(builtin.rule);
+      expect(file.content).toContain("Also attach the output.");
+      const listed = await listPrincipleFiles(db, scope);
+      expect(listed.map((entry) => entry.path)).toEqual([path]);
+    });
+
+    it("lists a principle synced from a repository under lib/principles/", async () => {
+      const now = Date.now();
+      await db.insert(memoryFiles).values({
+        ownerType: "user", ownerId: "u1", path: "lib/principles/canonical-source-wins.md", title: "The canonical source wins",
+        content: "# The canonical source wins\n", type: "principle", description: "When two sources disagree.",
+        sourceId: "src1", upstreamPath: ".valet/memory/principles/canonical-source-wins.md", createdAt: now, updatedAt: now,
+      });
+      const listed = await listPrincipleFiles(db, scopeFor("u1"));
+      expect(listed.map((entry) => [entry.path, entry.title])).toEqual([["lib/principles/canonical-source-wins.md", "The canonical source wins"]]);
+      await expect(writeFile(db, scopeFor("u1"), { path: "lib/principles/canonical-source-wins.md", content: "# Changed\n" }))
+        .rejects.toThrow(/lib\/ is reserved/);
+    });
+
+    it("lets org members read what an org source mirrors, and nobody else", async () => {
+      const now = Date.now();
+      await db.insert(orgs).values({ id: "org2", name: "Other", createdAt: now });
+      await seedUser(db, "u3", "org2");
+      await db.insert(memoryFiles).values({
+        ownerType: "org", ownerId: orgId, path: "lib/principles/merge-bar.md", title: "Verify before merge",
+        content: "# Verify before merge\n", type: "principle", description: "Before a merge.", sourceId: "src-org", createdAt: now, updatedAt: now,
+      });
+      const listed = await listPrincipleFiles(db, scopeFor("u1"));
+      expect(listed.map((entry) => entry.path)).toEqual([`org:${orgId}/lib/principles/merge-bar.md`]);
+      const read = await readFile(db, scopeFor("u1"), `org:${orgId}/lib/principles/merge-bar.md`);
+      expect(read.kind === "file" && read.rendered).toContain("# Verify before merge");
+      expect(await listPrincipleFiles(db, scopeFor("u3"))).toEqual([]);
+      await expect(readFile(db, scopeFor("u3"), `org:${orgId}/lib/principles/merge-bar.md`)).rejects.toThrow();
+      await expect(writeFile(db, scopeFor("u1"), { path: `org:${orgId}/lib/principles/merge-bar.md`, content: "# Changed\n" })).rejects.toThrow();
+    });
+  });
+
+  describe("team principles", () => {
+    it("lets a team member write team notes but only a team admin write team principles", async () => {
+      const team = await createTeam(db, { orgId, name: "Rules", creatorUserId: "u1" });
+      await addMember(db, { teamId: team.id, userId: "u2", role: "member" });
+      const member: MemoryScope = { owner: { type: "team", id: team.id }, actorUserId: "u2" };
+      const admin: MemoryScope = { ...member, actorUserId: "u1" };
+
+      await writeFile(db, member, { path: "notes/plan.md", content: "# Plan\n" });
+      const refused = /Ask a team admin to add the rule, or save it as a personal principle/;
+      await expect(writeFile(db, member, { path: "principles/ship-small.md", content: "# Ship small\n" })).rejects.toThrow(refused);
+      await expect(patchFile(db, member, { path: "principles/ship-small.md", oldString: "", newString: "# Ship small\n" })).rejects.toThrow(refused);
+      await expect(moveFile(db, member, { from: "notes/plan.md", to: "principles/plan.md" })).rejects.toThrow(refused);
+      const imported = await importFiles(db, member, { files: { "principles/ship-small.md": "# Ship small\n" }, trusted: false });
+      expect(imported.imported).toEqual([]);
+      expect(imported.skipped[0]?.reason).toMatch(refused);
+
+      await writeFile(db, admin, { path: "principles/ship-small.md", content: "# Ship small\n" });
+      await expect(removeFile(db, member, "principles/ship-small.md")).rejects.toThrow(refused);
+      await expect(moveFile(db, member, { from: "principles/ship-small.md", to: "notes/ship-small.md" })).rejects.toThrow(refused);
+      // Personal principles need no admin.
+      await writeFile(db, scopeFor("u2"), { path: "principles/mine.md", content: "# Mine\n" });
+    });
+
+    it("records the agent source as frontmatter on a principle, and only on a principle", async () => {
+      const scope = scopeFor("u1");
+      const source = { sessionId: "s1", threadId: "t1" };
+      await writeFile(db, scope, { path: "principles/prove-it.md", content: "# Prove it\n", source });
+      await writeFile(db, scope, { path: "notes/plain.md", content: "# Plain\n", source });
+
+      const principle = await readFile(db, scope, "principles/prove-it.md");
+      if (principle.kind !== "file") throw new Error("expected a file");
+      expect(parseConcept(principle.rendered).extras).toEqual({
+        "source-actor": "u1", "source-session": "s1", "source-thread": "t1",
+      });
+      const plain = await readFile(db, scope, "notes/plain.md");
+      if (plain.kind !== "file") throw new Error("expected a file");
+      expect(parseConcept(plain.rendered).extras).toEqual({});
+
+      // A later write from a session with no thread replaces the source.
+      await patchFile(db, scope, { path: "principles/prove-it.md", oldString: "Prove it", newString: "Prove it works", source: { sessionId: "s2" } });
+      const patched = await readFile(db, scope, "principles/prove-it.md");
+      if (patched.kind !== "file") throw new Error("expected a file");
+      expect(parseConcept(patched.rendered).extras).toEqual({ "source-actor": "u1", "source-session": "s2" });
     });
   });
 });

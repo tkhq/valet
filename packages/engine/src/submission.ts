@@ -12,6 +12,9 @@ import type {
   SubmissionOutcome,
   SuspendedTurnState,
 } from "./types.js";
+import { UNATTENDED_DELIVERY_KEY } from "@valet/shared";
+import { RECORD_ONLY_KEY } from "./types.js";
+import { readModelResponseMetadata } from "./model-response.js";
 import { ValidationError } from "./errors.js";
 import { formatTranscriptText } from "./transcript-formatter.js";
 
@@ -20,6 +23,14 @@ export const SIGNAL_HOP_BUDGET = 3;
 
 /** Default max unsettled, non-superseded submissions a single thread may hold (Phase 4 decision 5). */
 export const MAX_PENDING_PER_THREAD = 20;
+
+/**
+ * Time budget of one submission, counted from its first claim. A claim with
+ * `attemptCount === 0` sets `timeoutAt` to claim time + this budget, so time
+ * spent queued does not count. Time a claimed turn spends parked on a gate
+ * still counts.
+ */
+export const SUBMISSION_TIMEOUT_MS = 3_600_000;
 
 const SIGNAL_TAG_NAME_RE = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
 
@@ -133,6 +144,8 @@ export function buildOverheardDigest(items: QueueItem[]): {
     throw new ValidationError("buildOverheardDigest requires at least one signal-content item");
   }
   const lines = items.flatMap(overheardLines);
+  // The constituents settle as merged, so their media rides on the digest.
+  const attachments = items.flatMap((i) => (isSignalContent(i.content) ? i.content.attachments ?? [] : []));
   const attributes: Record<string, string> = { ...(newest.content.attributes ?? {}) };
   delete attributes.sender;
   attributes.digest = String(lines.length);
@@ -144,6 +157,7 @@ export function buildOverheardDigest(items: QueueItem[]): {
       body: `${OVERHEARD_DIGEST_HEADER}\n${lines.join("\n")}`,
       attributes,
       origin: newest.content.origin,
+      ...(attachments.length > 0 ? { attachments } : {}),
     },
     digest: { constituentIds: items.map((i) => i.id), lines },
   };
@@ -209,6 +223,25 @@ export function namespaceInternalDispatchId(senderSessionId: string, dispatchId:
  * model cannot tell from a real one. `||` (not `??`) so an empty-string
  * name still falls through to email/id.
  */
+/**
+ * Which user entries carry a `[from: …]` sender line in the transcript.
+ * `true` marks every authored entry: on a team or org session several people
+ * prompt one thread. `{ ownerId }` marks only entries from someone other than
+ * the owner: on a personal session the owner's own prompts need no label, and
+ * a person who replies in a shared thread does. Signal entries are exempt in
+ * every case, because their envelope names the sender.
+ */
+export type AuthorAttribution = boolean | { ownerId: string };
+
+/** The author to name on a user entry, or undefined for none. */
+export function attributedAuthor(
+  attribution: AuthorAttribution | undefined,
+  author: PromptAuthor | undefined,
+): PromptAuthor | undefined {
+  if (!author || !attribution) return undefined;
+  return attribution === true || author.id !== attribution.ownerId ? author : undefined;
+}
+
 export function formatSenderLine(sender: PromptAuthor | undefined): string | undefined {
   if (!sender) return undefined;
   const name = sanitizeSenderLabel(sender.name);
@@ -262,6 +295,9 @@ export function deriveQueueState(
   const blocked = threadItems.some((i) => i.status === "blocked_on_decision_gate");
   const pending = threadItems.filter((i) => i.status === "queued" && !i.supersededByItemId);
   const collectBuffer = threadItems.filter((i) => i.status === "collecting");
+  const collectDeadlines = collectBuffer
+    .map((i) => i.metadata?.collectDeadline)
+    .filter((deadline): deadline is number => typeof deadline === "number" && Number.isFinite(deadline));
 
   let status: QueueStatus;
   if (paused) status = "paused";
@@ -277,6 +313,7 @@ export function deriveQueueState(
     activeItemId: running?.id,
     pending,
     collectBuffer: collectBuffer.length > 0 ? collectBuffer : undefined,
+    collectDeadline: collectDeadlines.length > 0 ? Math.min(...collectDeadlines) : undefined,
     blockedGateId,
   };
 }
@@ -328,7 +365,7 @@ export interface ReconcileContext {
  *      expired/withdrawn/missing fall THROUGH to 5-7. Gate-blocked items are
  *      EXEMPT from the step-6 timeout.
  *   5. attemptCount >= maxAttempts → settle failed (retry budget exhausted)
- *   6. now >= timeoutAt (and not gate-blocked) → settle failed (timed out)
+ *   6. now >= timeoutAt (attemptCount > 0, not gate-blocked) → settle failed (timed out)
  *   7. otherwise → resume
  */
 export function decideReconciliation(item: QueueItem, ctx: ReconcileContext): ReconcileAction {
@@ -364,9 +401,11 @@ export function decideReconciliation(item: QueueItem, ctx: ReconcileContext): Re
     return { kind: "settle", outcome: { outcome: "failed", error: "retry budget exhausted" } };
   }
 
-  // Step 6 — timeout. Gate-blocked items are exempt (their bound is the gate's
-  // own expiry, not the execution timeout).
-  if (!gateBlocked && ctx.now >= item.timeoutAt) {
+  // Step 6 — timeout. The clock starts at the first claim, so an item that
+  // has not run (attemptCount 0: never claimed, or released before it ran)
+  // cannot time out. It waits behind its thread's head, which its own timeout or its
+  // gate's expiry bounds. Gate-blocked items are exempt too.
+  if (!gateBlocked && item.attemptCount > 0 && ctx.now >= item.timeoutAt) {
     return { kind: "settle", outcome: { outcome: "failed", error: "timed out" } };
   }
 
@@ -390,6 +429,21 @@ export function resolveSubmissionText(entries: SessionEntry[], queueItemId: stri
     }
   }
   return text;
+}
+
+/** Validate transport completion, not whether a consumer requires text or structured output. */
+export function completedSubmissionOutcome(entries: SessionEntry[], queueItemId: string): SubmissionOutcome {
+  const last = [...entries].reverse().find((entry): entry is MessageEntry =>
+    entry.type === "message" && entry.role === "assistant" && entry.queueItemId === queueItemId);
+  const response = last ? readModelResponseMetadata(last) : null;
+  if (last?.stopReason === "abort") return { outcome: "aborted" };
+  if (response?.stopReason === "length") {
+    return { outcome: "failed", error: "The model reached its output limit. Inspect the node diagnostics before retrying." };
+  }
+  if (last?.stopReason !== "end_turn" || (response && response.stopReason !== "stop")) {
+    return { outcome: "failed", error: "The model did not record a complete terminal response. Inspect the node diagnostics before retrying." };
+  }
+  return { outcome: "completed" };
 }
 
 /**
@@ -425,4 +479,114 @@ export function originFromEntries(entries: SessionEntry[], queueItemId: string):
     }
   }
   return origin;
+}
+
+/** Only messages from the same external conversation can interrupt each other. */
+export function sameSubmissionOrigin(left: PromptContent, right: PromptContent): boolean {
+  if (!isSignalContent(left) || !isSignalContent(right)) return false;
+  const a = left.origin;
+  const b = right.origin;
+  return !!a?.threadKey && !!b?.threadKey && a.channelType === b.channelType && a.threadKey === b.threadKey;
+}
+
+/** Addressed Slack human input. Passive context and automated signals cannot steer. */
+export function isInteractiveSlackSignal(content: PromptContent): content is SignalContent {
+  return isSignalContent(content) && content.origin?.channelType === "slack" &&
+    !!content.origin.threadKey && content.origin.reply === "auto" &&
+    ["slack.message", "slack.app_mention", "app_mention"].includes(content.signalType) &&
+    content.attributes?.senderBot !== "true" && content.attributes?.rehydrated === undefined &&
+    content.attributes?.feedback === undefined;
+}
+
+/** Whole-message stop phrases. Every other reply waits for the turn and never cancels it. */
+const STOP_PHRASES = new Set(["stop", "cancel", "wait", "hold on", "nevermind", "never mind"]);
+
+/**
+ * An addressed Slack message whose whole text is a stop phrase, ignoring case
+ * and punctuation. An emoji or other symbol makes it an ordinary reply. `text`
+ * is the sender's own words when the body carries added context, as a group
+ * message does.
+ */
+export function isSlackStopRequest(content: PromptContent, text?: string): boolean {
+  if (!isInteractiveSlackSignal(content) || content.attachments?.length) return false;
+  return STOP_PHRASES.has((text ?? content.body).toLowerCase().replace(/\p{P}/gu, " ").trim().split(/\s+/).join(" "));
+}
+
+/** Only the person who sent an input can interrupt it or have it carried. */
+export function sameSubmissionAuthor(left: QueueItem, right: QueueItem): boolean {
+  return left.author?.id === right.author?.id && left.author?.externalId === right.author?.externalId;
+}
+
+/** An active input that a stop request from its own sender in its own conversation may interrupt. */
+export function interruptibleBy(candidate: QueueItem, incoming: QueueItem): boolean {
+  return isInteractiveSlackInput(candidate) && sameSubmissionOrigin(candidate.content, incoming.content) &&
+    sameSubmissionAuthor(candidate, incoming);
+}
+
+/** A record-only note or unattended delivery must keep its own queue behavior. */
+export function isInteractiveSlackInput(item: QueueItem): boolean {
+  return isInteractiveSlackSignal(item.content) && item.metadata?.[UNATTENDED_DELIVERY_KEY] !== true &&
+    item.metadata?.[RECORD_ONLY_KEY] !== true;
+}
+
+/** Maximum original inputs retained by one correction. Admission fails before changing any rows. */
+export const MAX_CARRIED_INPUTS = 128;
+
+/** Durable references to original inputs, in conversation order. No authority is inherited. */
+export function carriedInputIds(item: QueueItem): string[] {
+  const ids = item.metadata?.carriedInputIds;
+  return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string") : [];
+}
+
+/** Select only the sender's queued human inputs on this engine thread and external conversation. */
+export function queuedOriginInputs(items: Iterable<QueueItem>, incoming: QueueItem): QueueItem[] {
+  if (!isInteractiveSlackInput(incoming)) return [];
+  return [...items].filter(candidate => candidate.threadId === incoming.threadId &&
+    candidate.status === "queued" && !candidate.supersededByItemId && isInteractiveSlackInput(candidate) &&
+    sameSubmissionOrigin(candidate.content, incoming.content) && sameSubmissionAuthor(candidate, incoming))
+    .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
+/** Called inside atomic admission. Original content stays unchanged for dispatch deduplication. */
+export function carryInputMetadata(incoming: QueueItem, queued: QueueItem[], promotionSource?: QueueItem): QueueItem["metadata"] {
+  const sourceIds = promotionSource ? carriedInputIds(promotionSource) : [];
+  if (sourceIds.length && JSON.stringify(promotionSource?.content) !== JSON.stringify(incoming.content)) {
+    throw new ValidationError("The promoted correction changed content. Promote the original queued correction, then send a new reply.");
+  }
+  const ids = [...new Set([...sourceIds, ...queued.flatMap(candidate => [...carriedInputIds(candidate), candidate.id])])];
+  const bridges = [...new Set([
+    ...queued.flatMap(carriedInputBridgeIds),
+    ...(promotionSource && sourceIds.length ? [...carriedInputBridgeIds(promotionSource), promotionSource.id] : []),
+  ])];
+  if (ids.length + bridges.length > MAX_CARRIED_INPUTS) {
+    throw new ValidationError("Too many queued Slack inputs to carry. Stop the thread, then retry the correction.");
+  }
+  for (const candidate of queued) {
+    if (!isSignalContent(candidate.content)) continue;
+    for (const attachment of candidate.content.attachments ?? []) {
+      const supported = attachment.type === "file"
+        ? typeof attachment.path === "string" && typeof attachment.bytes === "number" &&
+          typeof attachment.sha256 === "string" && typeof attachment.name === "string"
+        : attachment.type === "image" && typeof attachment.mimeType === "string" &&
+          ((typeof attachment.url === "string" && attachment.url.length > 0) || attachment.data instanceof Uint8Array);
+      if (!supported) {
+        throw new ValidationError("A queued Slack attachment cannot be carried. Stop the thread, then resend the attachment and correction.");
+      }
+    }
+  }
+  const metadata = withoutCarriedInputs(incoming).metadata;
+  return ids.length ? { ...metadata, carriedInputIds: ids, ...(bridges.length ? { carriedInputBridgeIds: bridges } : {}) } : metadata;
+}
+
+/** Validated promotion sources form provenance bridges without duplicate displayed input. */
+export function carriedInputBridgeIds(item: QueueItem): string[] {
+  const ids = item.metadata?.carriedInputBridgeIds;
+  return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string") : [];
+}
+
+/** Caller metadata cannot create internal carry references, including on ordinary queued items. */
+export function withoutCarriedInputs(item: QueueItem): QueueItem {
+  if (item.metadata?.carriedInputIds === undefined && item.metadata?.carriedInputBridgeIds === undefined) return item;
+  const { carriedInputIds: _ignored, carriedInputBridgeIds: _bridges, ...metadata } = item.metadata;
+  return { ...item, metadata: Object.keys(metadata).length ? metadata : undefined };
 }

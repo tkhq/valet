@@ -3,7 +3,7 @@ import { eq } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { agentSessions, sessionThreads } from "../schema/index.js";
-import { autoTitle, sanitizeTitle, withNamerTimeout } from "./auto-title.js";
+import { autoTitle, sanitizeTitle, withNamerTimeout, skipsAutoTitle } from "./auto-title.js";
 
 describe("sanitizeTitle", () => {
   it("strips wrapping quotes, backticks, and asterisks", () => {
@@ -87,7 +87,7 @@ describe("autoTitle", () => {
   it("titles a session it does not directly own — authorization is the route's job", async () => {
     // The ownership filter used to live in this query, which made a
     // team-owned session titleable only by whichever member opened it
-    // first. `POST /:id/auto-title` now applies `canViewSession` instead.
+    // first. Callers authorize before they name a session.
     await seedSession(null, "s1", "someone-else");
     const result = await autoTitle(
       {
@@ -201,5 +201,15 @@ describe("autoTitle", () => {
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.threadTitle).toBeNull();
     expect(await threadTitle("th1")).toBe("User-picked name");
+  });
+});
+
+describe("skipsAutoTitle", () => {
+  it("skips only the home thread", () => {
+    expect(skipsAutoTitle({ key: "home" })).toBe(true);
+    expect(skipsAutoTitle({ key: "web:abc" })).toBe(false);
+    expect(skipsAutoTitle({ key: "slack:D1:1.1" })).toBe(false);
+    expect(skipsAutoTitle({})).toBe(false);
+    expect(skipsAutoTitle(null)).toBe(false);
   });
 });

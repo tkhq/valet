@@ -5,7 +5,28 @@ description: Valet DAG workflow operations. Use when creating, updating, inspect
 
 # Workflows
 
+For a failure, unexpected output, missing data, or a missing report, load `workflow-troubleshooting` first.
+Select repair focus before editing. Before an authorized test, select validate with the exact actions and native tools needed.
+Focused discovery returns summaries. Use `list_tools` with `detail: "schema"` and an exact query to read parameters.
+Select general focus when the person changes to another task. Existing approval policies always apply.
+
 Workflows are dag/v1 definitions: a flat list of `nodes` plus directed `edges`. Runs execute on the server's checkpointed interpreter — they park on waits/approvals and resume on signals. Users see workflows as node diagrams in chat and at `/workflows`.
+
+## Design the steps
+
+Split the job by what each part needs. A workflow that does everything in one agent step fails in ways that are hard to see.
+
+- Put an integration call with known inputs in a `tool` step. Put judgment in an `llm` step or an agent step (`session` or `orchestrator`). Put shell work, scripts, and data jobs with many calls in a `session` step.
+- Put every action that a person approves on each run in a `tool` step. Policy stops that step for approval on each run. For a sign-off that no action covers, add an `approval` step before the work. Never tell an agent step to ask for approval, to wait for a person, or to tell someone that an approval is ready: a run refuses the request, and nobody gets a card.
+- Publish a page or file from the step that writes it: `artifact_publish` with `path`, or `file_attach`. Pass only the URL, size, and hash to later steps. Never pass page content, base64, or chunks through a step's output, because a model copy corrupts them.
+- For a list of unknown size, list the items in one step, handle one item in each iteration of a `foreach` step, then combine the results in a later step.
+- If one action returns the list, list the items in a `tool` step, not an agent step. An agent step that lists data pays model turns on each run, and its list can drop or repeat items. For pull requests merged in a time window, use `github.search_issues` with `is:pr is:merged merged:>=@now-7d` and a `limit` up to 1000. If the list needs judgment, put an `llm` step after the tool step, or decide each item in the `foreach`.
+- Write each result in one model step. Do not add a model step that checks or rewrites another model step's draft before a tool step sends it. A second pass can change correct facts as easily as it fixes wrong ones. Put the rules in the first step's prompt and `outputSchema`. To check exact fields, use an `if` step.
+- Use `{{trigger.timestamp}}` for the run's date. Never write today's date into a prompt.
+- Write team memory from an `orchestrator` step; a `session` step has no memory tools. Use the sandbox actions API only from a `session` step; an `orchestrator` step is refused.
+- Run `validate_definition` on every draft before you call it ready or show it to the person. Fix each error it returns, then run it again until it returns `valid: true`. If the draft changes a saved workflow, pass its `workflow_id`. Fix each warning it returns, or tell the person why it does not apply.
+- After each save, run `preview_workflow`. Fix each step warning it reports, or tell the person why it does not apply.
+- On a saved workflow that the person did not ask you to restructure, mention a warning that an agent step builds a foreach list, or that a step rewrites a draft, in one sentence. Do not change the steps for it unless the person asks. A step change revokes the workflow's saved permissions, so the person must allow them again.
 
 ## Use the workflow tools, not raw API calls
 
@@ -13,18 +34,27 @@ Discover them with `list_tools` (service `workflows`), invoke with `call_tool`:
 
 - `workflows.list_workflows` — list definitions (id, name)
 - `workflows.get_workflow` — full definition by id
+- `workflows.get_permissions` — each tool step's approval `mode` and the rule that set it (`provenance`), as the workflow page's Permissions section shows them
+- `workflows.allow_permissions` — one approval card in which the person allows the steps that need approval and their shared accounts for every later run of the current steps
+- `workflows.validate_definition` — check a draft `definition` with the save validator, without saving it, and list step-design warnings
 - `workflows.save_workflow` — create (omit `workflow_id`) or update (pass it)
 - `workflows.patch_workflow` — small edits without re-sending the definition: rename, upsert/remove single nodes, add/remove edges (result is fully linted)
-- `workflows.delete_workflow` — permanently delete a definition (refused while runs are active; settled history is kept)
+- `workflows.update_model` — set an approved model or org size tier on selected `llm` and `session` nodes
+- `workflows.delete_workflow` — permanently delete a definition (refused while runs are active; settled history is kept). Team deletion requires a current admin in direct web chat.
+- `workflows.request_workflow_deletion` — open or reuse a team workflow deletion request for admin review. Requires a signed-in person in direct web chat. This does not delete the workflow.
+- `workflows.get_node_diagnostics` — trace selected response metadata and original or repair submissions
 - `workflows.start_run` — start a run; returns `runId`
 - `workflows.get_run` — run status, per-node checkpoints, pending waits
 - `workflows.get_node_result` — a node's FULL checkpoint output, for debugging failures
 - `workflows.list_runs` — a workflow's runs (find parked/active ones)
 - `workflows.cancel_run` — terminate a run (settles asynchronously; re-check with `get_run`)
-- `workflows.resolve_approval` — approve/deny a gate, ONLY when the user has explicitly told you their decision (the call itself asks the user to confirm)
+- `workflows.resolve_approval` — approve/deny a gate (an approval node, or a tool node that policy holds), ONLY when the user asks. Valet shows the user a card, and the gate resolves as the person who confirms it. Call it once per gate.
 - `workflows.list_event_types` — event keys workflows can be triggered by
 - `workflows.create_trigger` / `workflows.list_triggers` / `workflows.delete_trigger` — run a workflow automatically on matching events. Event data arrives as `{{trigger.data.payload...}}`.
-- `workflows.create_schedule` / `workflows.list_schedules` / `workflows.delete_schedule` — cron schedules (5-field cron + IANA timezone, ~30s fire accuracy; downtime collapses to one catch-up run). Target a WORKFLOW (`workflow_id`; static `input` arrives as `{{trigger.data.input...}}`) or the ORCHESTRATOR (`prompt`: you receive the prompt each fire — use this for recurring assistant tasks like "review my inbox each morning").
+- When the person asks for a run "when someone is back online" or "next time they come online", trigger on `slack.user_online`, not a fixed schedule. Find the Slack user ID with `slack.list_users` or `slack.lookup_user_by_email`, then call `workflows.create_trigger` with `event_keys: ["slack.user_online"]` and the filter `{ "field": "user", "op": "eq", "value": "U…" }`. The person is required. Set `once_per_hours` (for example 8) so a person who drifts between away and active is nudged once. Valet checks about once a minute and counts a return only after 5 minutes away, so a run can start a minute or two late. The event arrives as `{{trigger.data.payload.user}}` and `{{trigger.data.payload.away_minutes}}`.
+- To run on a schedule or another event only while someone is online, add a `tool` step that calls `slack.get_user_status` and an `if` step on its `online` field. Do not build a trigger for that.
+- `workflows.create_webhook` / `workflows.get_webhook` / `workflows.delete_webhook` — give a workflow its own URL; a POST of any JSON object to it starts a run. Use it when `list_event_types` has no event for the source, such as a third-party service that can send webhooks. Tell the person to register the URL in the source, and say that some services limit webhooks to certain plans or to admins. If the source is a connected integration, always end your reply with one sentence that offers a schedule instead: each run lists the items created since `{{trigger.metadata.previousFiredAt}}` (the previous run; empty on the first run, so look back one interval), it needs no setup in the source, and runs can start late while Valet is down. The URL is the credential, so show it only to the workflow owner. Calling `create_webhook` again rotates it and the old URL stops working. The POST body arrives at `{{trigger.data.<field>}}`. A retried delivery starts a second run unless the sender sets an `Idempotency-Key` header.
+- `workflows.create_schedule` / `workflows.list_schedules` / `workflows.delete_schedule` — cron schedules (5-field cron + IANA timezone, ~30s fire accuracy; downtime collapses to one catch-up run). Target a WORKFLOW (`workflow_id`; static `input` arrives at `{{trigger.data.<field>}}`, the same path a manual run uses) or the ORCHESTRATOR (`prompt`: you receive the prompt each fire — use this for recurring assistant tasks like "review my inbox each morning").
 
 Always surface returned `workflowId`/`runId` values — the chat UI uses them to render the diagram and run status.
 
@@ -38,7 +68,7 @@ Always surface returned `workflowId`/`runId` values — the chat UI uses them to
     { "id": "greet", "type": "set", "values": { "greeting": "hello" } },
     { "id": "gate", "type": "approval", "prompt": "Proceed with the demo?" },
     { "id": "haiku", "type": "llm", "model": "s", "prompt": "Write a haiku about {{nodes.greet.result.greeting}}" },
-    { "id": "done", "type": "stop", "outcome": "completed" }
+    { "id": "done", "type": "stop", "outcome": "success" }
   ],
   "edges": [
     { "from": "start", "to": "greet" },
@@ -56,14 +86,132 @@ Node types:
 - `if` — conditional; outgoing edges use `"fromOutput": "true"` / `"false"`
 - `wait` — pause for a duration (`{ "mode": "duration", "duration": "5m" }`)
 - `approval` — park until a human approves/denies (`prompt`, optional `summary`, `details`, `timeout`, `onDeny`)
-- `session` — start an agent session with a `prompt` (optional `title`, `model`, `outputSchema`, `wait`)
-- `orchestrator` — prompt the user's orchestrator (optional `outputSchema`, `wait`)
+- `session` — start an agent session with a `prompt` (optional `title`, `model`, `outputSchema`, `maxModelCalls`, `wait`)
+- `orchestrator` — prompt the workspace assistant in a durable workflow thread (optional `outputSchema`, `maxModelCalls`, `wait`, `thread`). The app labels this step "Thread". By default it runs on the run's one thread, after the earlier agent steps and with their transcript. Set `"thread": "step"` to give it a new conversation of its own, without the earlier steps' transcript. A `foreach` body with `"thread": "step"` runs its entries in parallel only when the foreach sets `concurrency` above 1; the default of 1 runs them one at a time. A `wait: none` step on its own thread runs beside the steps after it. These threads share the run's working directory, so tell each parallel entry to write to its own path or clone into its own folder.
 - `tool` — invoke a plugin action (`service`, `action`, `params`)
 - `llm` — one-shot LLM call (`model`, `prompt`, optional `system`, `outputSchema`)
-- `foreach` — iterate `items` over `body` nodes (optional `maxItems`, `concurrency`)
-- `stop` — terminal node (`outcome`, optional `output`, `message`)
+- `foreach` — run one inline `body` node once for each entry of `items` (optional `itemAlias`, `indexAlias`, `maxItems`, `concurrency`, `onItemError`). See Loop over a list.
+- `stop` — terminal node (optional `outcome`, `output`, `message`). A stop step's `outcome` is `success` (default) or `failure`, not the run outcome (`completed`, `failed`, or `cancelled`).
 
 Edges may carry `"when"` (an expression) to gate a branch.
+
+**Loop over a list (`foreach`).** `body` is ONE inline node object, not a list of node ids. Do not add the body to `nodes`. Do not give the body edges. The body type is `llm`, `tool`, `set`, `session`, `orchestrator`, or `workflow`.
+
+```json
+{
+  "version": "dag/v1",
+  "nodes": [
+    { "id": "start", "type": "trigger", "dataSchema": {
+      "notes": { "type": "string", "required": true, "description": "Meeting notes" }
+    } },
+    { "id": "list", "type": "llm", "model": "s",
+      "prompt": "List each action item in these notes: {{trigger.data.notes}}",
+      "outputSchema": { "type": "object", "properties": { "tasks": { "type": "array", "items": { "type": "string" } } }, "required": ["tasks"] } },
+    { "id": "each_task", "type": "foreach", "items": "{{nodes.list.result.output.tasks}}",
+      "itemAlias": "task", "maxItems": 20, "concurrency": 3, "onItemError": "collect",
+      "body": { "id": "draft", "type": "llm", "model": "s", "prompt": "Write one follow-up question for this task: {{task}}" } },
+    { "id": "done", "type": "stop", "outcome": "success",
+      "output": { "results": "{{nodes.each_task.result.items}}", "dropped": "{{nodes.each_task.result.truncatedCount}}" } }
+  ],
+  "edges": [
+    { "from": "start", "to": "list" },
+    { "from": "list", "to": "each_task" },
+    { "from": "each_task", "to": "done" }
+  ]
+}
+```
+
+- The body reads the current entry as `{{task}}` (the `itemAlias`, default `item`) and its position as `{{index}}` (the `indexAlias`).
+- `onItemError` sets what one failed entry does. `fail` (default) fails the step. `skip` marks the entry `skipped` and continues. `collect` marks it `failed` and continues.
+- Do not set `onError` on the body. Use `onItemError` on the foreach node.
+- Give the body an `id` that no node and no other foreach body uses.
+- Set `maxItems`. Without it, a list of more than 100 entries fails the step. With it, extra entries are dropped and `result.truncatedCount` counts them.
+
+## Model selection
+
+Use a size tier (`xs`, `s`, `m`, `l`, or `xl`) when the org should control the concrete model. Use an approved catalog id when the workflow needs a fixed model. An `llm` node requires `model`. A `session` node uses its `model` when set and otherwise uses the session default. An `orchestrator` node has no model field. It uses the workspace assistant's saved model. Its result includes `threadId` in both dispatch-only and settled modes. `update_model` changes `llm` and `session` nodes only, including a `foreach` body.
+
+## Step reference
+
+<!-- step-reference:start (generated from packages/workflow/src/dag/step-reference.ts; run scripts/workflows/write-step-reference.mjs to update) -->
+Every step has `id` and `type`. A step accepts only the fields listed for its type, and a save refuses any other field.
+
+- `trigger`:
+  - `dataSchema` (optional): object of run inputs, each `{ type, required?, default?, description?, enum? }`; `type` is one of "string", "number", "integer", "boolean", "object", "array"
+- `set`:
+  - `values` (required): object of names to values; a value may be a template
+- `if`:
+  - `conditions` (required): array of at least one `{ left, dataType, operation, right? }` (see Conditions below)
+  - `combinator` (optional): "and" (default) or "or"
+- `wait`:
+  - `mode` (required): "duration"
+  - `duration` (required): a duration: a number and a unit, such as "30s", "5m", "2h", or "1d"
+- `approval`:
+  - `prompt` (required): text the approver reads
+  - `summary` (optional): one line for the approval card
+  - `details` (optional): extra data the card shows
+  - `timeout` (optional): a duration: a number and a unit, such as "30s", "5m", "2h", or "1d"; how long the step waits for a decision
+  - `onDeny` (optional): "fail" (default) or "skip"
+- `session`:
+  - `mode` (required): "start", always
+  - `prompt` (required): the task for the agent
+  - `title` (optional): a title for the agent's session
+  - `model` (optional): a size tier (`xs`, `s`, `m`, `l`, `xl`) or an approved model id
+  - `outputSchema` (optional): a JSON Schema object; the parsed reply is at `nodes.<id>.result.output`
+  - `maxModelCalls` (optional): an integer from 1 to 500
+  - `wait` (optional): omit it to wait for the step to finish; `{ mode: "none" }` starts it and moves on
+  - `toolScope` (optional): `{ tools?, actions? }`: native tool names and exact `service.action` ids the step may use
+- `orchestrator`:
+  - `prompt` (required): the task for the workspace assistant
+  - `outputSchema` (optional): a JSON Schema object; the parsed reply is at `nodes.<id>.result.output`
+  - `maxModelCalls` (optional): an integer from 1 to 500
+  - `wait` (optional): omit it to wait for the step to finish; `{ mode: "none" }` starts it and moves on
+  - `toolScope` (optional): `{ tools?, actions? }`: native tool names and exact `service.action` ids the step may use
+  - `thread` (optional): "run" (default) or "step"; `step` gives the step, or each foreach entry, its own new thread that runs in parallel
+- `tool`:
+  - `service` (required): the plugin service, such as "github"
+  - `action` (required): the action name, such as "create_issue"
+  - `params` (required): object of the action's parameters (`{}` when it takes none); a value may be a template
+  - `summary` (optional): one line that the approval card shows
+  - `credential` (optional): "auto" (default), "app", or "user"
+  - `onError` (optional): "fail" (default) or "continue"
+  - `onDeny` (optional): "fail" (default) or "skip", when an approval is denied or times out
+  - `approvalTimeout` (optional): a duration: a number and a unit, such as "30s", "5m", "2h", or "1d"
+- `llm`:
+  - `model` (required): a size tier (`xs`, `s`, `m`, `l`, `xl`) or an approved model id
+  - `prompt` (required): the prompt; it may use templates
+  - `system` (optional): a system prompt
+  - `outputSchema` (optional): a JSON Schema object; the parsed reply is at `nodes.<id>.result.output`
+  - `temperature` (optional): a number from 0 to 2
+  - `maxOutputTokens` (optional): a positive integer
+  - `reasoning` (optional): one of "minimal", "low", "medium", "high", "xhigh", "max"; omit it for the owner's default
+  - `onError` (optional): "fail" (default) or "continue"
+- `workflow`:
+  - `workflowId` (required): the id of a workflow with the same owner
+  - `input` (optional): becomes the called run's `trigger.data`; it may use templates
+  - `onError` (optional): "fail" (default) or "continue"
+- `foreach`:
+  - `items` (required): a template that resolves to an array, such as "{{nodes.list.result.output.tasks}}"
+  - `body` (required): ONE inline step object, never a list of node ids; its type is one of "llm", "tool", "set", "orchestrator", "session", "workflow"; it has its own unique `id`, no edges, and no `onError`
+  - `maxItems` (optional): a positive integer; without it, a list of more than 100 entries fails the step
+  - `concurrency` (optional): an integer from 1 to 10
+  - `itemAlias` (optional): the name the body reads the entry by (default "item")
+  - `indexAlias` (optional): the name the body reads the position by (default "index")
+  - `onItemError` (optional): "fail" (default), "skip", or "collect"
+- `stop`:
+  - `outcome` (optional): "success" (default) or "failure"; not the run outcome ("completed", "failed", "cancelled")
+  - `output` (optional): the run's result; it may use templates
+  - `message` (optional): a message for the run
+
+**Conditions.** `left` is an expression without braces, such as `nodes.check.result.output.count`. `dataType` is one of "string", "number", "date", "boolean", "array", "object". `right` is the value to compare, when the operation takes one. An `if` step's outgoing edges carry `"fromOutput": "true"` or `"fromOutput": "false"`. The operations for each `dataType`:
+
+- `string`: `exists`, `doesNotExist`, `isEmpty`, `isNotEmpty`, `equals`, `notEquals`, `contains`, `doesNotContain`, `startsWith`, `endsWith`, `matchesRegex`
+- `number`: `exists`, `doesNotExist`, `isEmpty`, `isNotEmpty`, `equals`, `notEquals`, `greaterThan`, `lessThan`, `greaterThanOrEqual`, `lessThanOrEqual`
+- `date`: `exists`, `doesNotExist`, `equals`, `notEquals`, `after`, `before`, `afterOrEqual`, `beforeOrEqual`
+- `boolean`: `exists`, `doesNotExist`, `isTrue`, `isFalse`, `equals`, `notEquals`
+- `array`: `exists`, `doesNotExist`, `isEmpty`, `isNotEmpty`, `contains`, `doesNotContain`, `lengthEquals`, `lengthGreaterThan`, `lengthLessThan`
+- `object`: `exists`, `doesNotExist`, `isEmpty`, `isNotEmpty`
+<!-- step-reference:end -->
 
 ## Templates: reading data between nodes
 
@@ -82,7 +230,7 @@ Templates are `{{path}}` reads over `{ trigger, nodes }`. Property paths drill i
 - `start_run` (manual): the `input` you passed → `{{trigger.data.<field>}}`.
 - Event trigger: `{ key, summary, refs, payload }` — `payload` is the provider's event body. GitHub example: `{{trigger.data.payload.pull_request.number}}` (single `payload`, then GitHub's own webhook shape).
 - Webhook: the raw JSON POST body.
-- Schedule: `{ scheduleName, cron, input }` → static input at `{{trigger.data.input...}}`.
+- Schedule: `{ <input fields>, scheduleName, cron, input }`. Read the schedule's static input at `{{trigger.data.<field>}}`, as a manual run does. A field the schedule leaves out takes its `dataSchema` default. Reading `trigger.data.input.<field>` keeps that field nested only, with no default.
 
 **Declared trigger inputs (`dataSchema`).** When a workflow expects manual input, declare it on the trigger node instead of documenting it in prose. `dataSchema` (NOT `inputSchema` — it is a field map, not a JSON Schema) maps each input field to `{ type, required?, default?, description?, enum?, label?, placeholder?, hidden? }` with `type` one of `string | number | boolean | object | array` (`integer` is an accepted alias for `number` and adds no integer-only check, so a non-integer value like `7.5` is accepted):
 
@@ -97,7 +245,13 @@ Templates are `{{path}}` reads over `{ trigger, nodes }`. Property paths drill i
 
 **Rendering rules.** A field that is exactly one `{{...}}` keeps the value's type (objects/arrays/numbers survive). Mixed text stringifies each expression. A path that resolves to nothing renders as `null` in a single-template field and `""` in mixed text — the save-time linter and the run-time error messages both name bad paths, but a syntactically-valid path to a missing key only surfaces at run time. When a tool param fails validation ("must be string"), suspect a template that rendered null; the node error lists the unresolved paths.
 
+**Step budgets.** A `session` or `orchestrator` step stops after `maxModelCalls` model calls (default 150, at most 500) and fails with that reason. Do not raise the limit to fit a list of unknown size. List the items in one step (a `tool` step when one action returns them), handle one item in each iteration of a `foreach` step, then combine the results in a later step. `preview_workflow` warns when a step asks one agent to handle every item in a list.
+
 **Structured LLM output.** Give `llm` (and `session`/`orchestrator`) nodes an `outputSchema` (JSON Schema object). The runtime parses and validates the response, retries once with a repair prompt on mismatch, and puts the parsed object at `result.output`. Use this instead of prompt-engineering JSON or chaining a second extraction LLM node.
+
+An incomplete or failed transport does not get schema repair. For awaited session and orchestrator submissions, adapted `length`, `error`, and `aborted` stops fail completion even when partial JSON validates. A clean-stop empty reply can be intentional silence without a schema. An awaited submission with a schema receives the existing one repair opportunity for that empty reply.
+
+**Distinguish empty inventory from failed inspection.** A schema-valid empty array does not prove that inspection succeeded. If that distinction matters, require an explicit inspection status and evidence, such as inspected sources and failures. Branch incomplete or failed inspection to review or failure before consuming candidates. Never use `candidates: []` as a fallback for failed inspection. Format repair must reuse successful tool results without repeating actions with side effects.
 
 **Let the model abstain.** When an `outputSchema` field feeds a tool param, a required plain string forces the model to invent a value it does not have ("Unable to determine…" as a GitHub username) — and the invented value fails nodes later, at the tool, with a confusing API error. Give the field an explicit abstain value (`""`, or an enum member like `"none"`), tell the prompt when to return it, and branch on it with `when`-guarded edges to a stop node:
 
@@ -110,19 +264,67 @@ Templates are `{{path}}` reads over `{ trigger, nodes }`. Property paths drill i
 The schema alone does not enforce abstention — it still requires a string — so keep both halves: the abstain value the schema accepts and the prompt line that says when to return it. Drop either and the model invents a value again.
 
 ```json
-{ "from": "pick", "to": "assign", "when": "nodes.pick.result.output.assignee" },
-{ "from": "pick", "to": "no_assignee", "when": "!nodes.pick.result.output.assignee" }
+[
+  { "from": "pick", "to": "assign", "when": "nodes.pick.result.output.assignee" },
+  { "from": "pick", "to": "no_assignee", "when": "!nodes.pick.result.output.assignee" }
+]
 ```
 
 For list-shaped output, abstain with an empty array and gate on `if` with `lengthGreaterThan`.
 
 ## Working practices
 
-- `save_workflow` runs a full linter over the definition: field shapes per node type (with did-you-mean hints), template syntax, `nodes.<id>` references and segments, edge semantics, reachability, model ids, tool service/actions, and tool `params` keys against the action's own parameter schema (missing required parameters and unknown parameter names, with did-you-mean hints; templated values are never type-checked). On error it returns a bulleted list — fix each item and retry; never save around validation.
+- Before you create a workflow, restate the plan in two or three lines: what starts it, what each step does and its step type (see Design the steps), and where the result goes. If a gap would change the build, such as which event, channel, repo, or account to use, call `ask_question` once with the plan as `detail` and the likely answers as `options`. Otherwise, build it and list what you assumed.
+- `save_workflow` runs a full linter over the definition: field shapes per node type (with did-you-mean hints), template syntax, `nodes.<id>` references and segments, edge semantics, reachability, model ids, tool service/actions, and tool `params` keys against the action's own parameter schema (missing required parameters and unknown parameter names, with did-you-mean hints; templated values are never type-checked). On error it returns a bulleted list — fix each item and retry; never save around validation. `validate_definition` runs the same linter and saves nothing.
 - Fields live FLAT on the node (`model`, `prompt`, `values`, …) — never nested under a `config` object.
 - Node ids containing `-` need bracket form in templates: `nodes["my-id"].result`.
 - To modify a workflow: `get_workflow` first, edit the returned definition, then `save_workflow` with the same `workflow_id`. Updates never affect in-flight runs (runs snapshot their definition at start) — a parked run can be waiting on a node from an OLDER definition version; read the run's own checkpoints, not the current definition.
-- After `start_run`, use `get_run` to report progress. `status: "parked"` with an approval in `waitingOn` means a human must approve — tell the user and point them at the approval card; you cannot approve on their behalf.
+- After `start_run`, read `followUp` and follow `next`. Promise an automatic reply only when `followUp.registered` is true. End your turn when the run reports here. Otherwise use `get_run` to check progress.
+- After `resolve_approval`, follow the result's `next` field. Name any steps that still wait and who must approve each. If the run reports here, end your turn and continue from its signal. Do not poll a run that reports here. If the run reports elsewhere, use `get_run` to check its result.
+- A `workflow.approval_needed` signal means a human must approve. A `workflow.settled` signal reports completion, failure, or cancellation. Read `get_run` and tell the user. If they ask you to approve, call `resolve_approval` once per gate. Each call shows a card and records the person who confirms it.
 - `tool` nodes can park WITHOUT an approval node in the definition: when org policy resolves the action to require_approval, the node raises a policy gate and parks on `approval:<nodeId>` until a human resolves it (optional `approvalTimeout`, `onDeny` on the tool node). `list_runs` shows each parked run's `waitingOn`.
+- Before you tell a user that a step needs approval, read `get_permissions`. Mode `allow` means no policy gates the step, whatever its risk level. A step with `sharedAccount: true` can ask the member whose shared account it uses on every run, unless a team 1Password item covers the service; a human can authorize their own shared accounts for this workflow through Review permissions, or connect an account owned by the team. With `runtimeParams: true`, a policy rule keys on a parameter the step fills in at run time, so a run can decide differently. Rows with `agentStep: true` are exact actions an agent step lists in `toolScope.actions`. A row with `granted: true` is already allowed by the workflow's saved permissions, even though its mode is `unknown`. Other agent-step calls and sub-workflow steps are checked when they run. To confirm, read a recent run's `waitingOn` with `get_run` or `list_runs`.
+- No save allows anything: not a browser save, an assistant save, a copy, or a template install. Saved steps can come from untrusted content, so a person allows them explicitly, once, when the workflow is built. A save result lists `needsApproval` when steps wait for approval or use the person's shared accounts. Call `workflows.allow_permissions` once after the build and before a test run. It shows the person one card with those actions and accounts, and on approval allows them for the current steps. The person can also use Review permissions on the workflow page. Any later step change, by anyone, revokes those grants, and a run that started on other steps does not use them. A member can choose Allow my shared accounts without granting tool actions, or Remove my account permission to revoke only their own consent. Explicit policies and other members' account consent still apply. Reset saved permissions revokes workflow action and account grants.
+- Runs never ask a person from an agent step: a run refuses `ask_approval` and `ask_question`. If the person wants to approve an action on every run, put that action in a `tool` node: it stops for approval on each run while policy requires approval. The person clicks Approve once on each run's card. Approve and stop asking ends the per-run ask. For a sign-off that no action policy covers, add an `approval` node. Never tell an agent step's prompt to ask for approval.
+- A `session` or `orchestrator` step that sends, writes, or uses a teammate's shared account needs `toolScope.actions` with the exact action ids, such as `slack.send_message`. The permission review allows only exact entries; a `service.*` entry limits the step but allows nothing. Keep `service.*` for steps that only read. A run that an agent starts on its own, without the person's own signed-in prompt, uses no allowed permissions in its agent steps.
+- If a step is `require_approval` from `risk_default` or `plugin_default`, the workflow owner or a team admin can allow it for every later run. They click "Approve and stop asking" on the run's approval card, or "Review permissions" in the workflow page's Permissions section. Review permissions cannot allow a `tool` step's MCP action, because `get_permissions` reports it as `unknown`; the run's card can. For a step on a member's shared account, that member can click "Always allow for this workflow" on the run's card. It covers later runs until the steps change. A workflow mirrored from a repository takes no such grant; change the policy instead.
+- If the provenance is `org_policy`, only an org admin can change it, in Settings → Organization → Policies. For `team_policy`, a team admin changes the team's Policies page.
+- A `session` step's script can call the same integrations its run can: POST `{"params": {...}}` to `$VALET_API_URL/api/sandbox/actions/<service.action>/invoke` with header `x-valet-sandbox` set from `/etc/valet/creds/token` (or `$VALET_SANDBOX_TOKEN`). The reply is `{status, result}`. Use it for data jobs with many calls; the script never holds a credential and has the step agent's permissions, no more. Add `"idempotencyKey"` to make a retry safe. If the reply is `in_progress`, the first call still runs; call again with the same key and params. An action that policy holds for approval is refused, so put it in a `tool` node instead.
 - Debug a surprising node with `get_node_result` — it returns the checkpoint result verbatim, the same value templates read via `nodes.<id>.result` (oversized results come back as `{ truncated: true, jsonPrefix }`).
+- To learn WHY a session or orchestrator step produced its result, read `get_node_transcript`: the prompt it received with templates filled in, its replies, each tool call with its result or error, and any format-repair prompt. `get_run` marks a step with `repairAttempted` and `schemaError` when its first reply failed the output schema. Page back with `before`. The transcript includes saved compaction summaries and flags synthetic continuation prompts. For clipped content, pass `message_id`, `content_field` (`text`, `tool_args`, `tool_result`, or `tool_error`), `call_id` for tool fields, and `offset`. Follow `data.content.nextOffset` until null. These slices use the same step access checks. Shared orchestrator transcripts exclude compaction entries that have no submission ID.
+- For empty or failed agent output, call `get_node_diagnostics`. It traces original and repair submission IDs, the selected message, stored text lengths, stop reason, provider error, model, usage, and cost. Pass `iteration` for a foreach step. Missing receipts or fields mean evidence is unavailable. These readers do not expose raw provider responses. If selected stored text is empty but text parts exist, report a stored content/parts mismatch. Do not claim the provider returned empty. Use `get_node_transcript` for the same run, node, and iteration to inspect content. If `entriesMayBeTruncated` is true, qualify conclusions about message selection.
+- Interpret `modelResponse.stopReason` as adapted, and `rawStopReason` as the stop label exposed by the adapter. Null effective limits, request IDs, provider terminal status, or incomplete reasons mean unknown. Requested limits do not establish effective limits. Text lengths count UTF-16 code units. Matching stored, parts, adapted, and streamed lengths show recorded consistency. Report full provider-response capture as not verified when the raw response is unavailable. Use the Observed, Inference, and Unknown format in `workflow-troubleshooting`.
+- To check automatic follow-up, read `get_run.followUp`. `awaiting_settlement` means the run has not reported yet. `queued` and `running` describe the follow-up turn. `settled` describes that turn, not external delivery. `not_recorded` means the run settled without a stored completion signal; inspect its results and tell the user. Do not claim monitoring is active when `registered` is false.
+- A `workflow.settled` signal resumes the task. Inspect the run and relevant node results, then report the requested checks. Verify Slack delivery from posting results, including message IDs. Do not end with another promise to check later.
 - A run is finished when `status: "settled"`; report the `outcome`.
+- To test a workflow, first state 2 to 4 concrete checks that the result must pass. Then call `preview_workflow` to find template and structure errors. It runs only `trigger`, `set`, `if` and `stop` steps and describes the other steps, so it has no side effects. Start a real run only after the person agrees, because a real run posts messages and calls integrations. Read the result in the `workflow.settled` report and with `get_node_result`. Fix the workflow and run it again, at most 3 times. End the test with each check marked passed or failed.
+
+
+### Team workflow deletion
+
+An ordinary tool approval does not grant team administration rights. In direct web
+chat, `delete_workflow` checks the authenticated author's current admin role.
+Members use `request_workflow_deletion` with the exact `workflow_id` and an optional
+`reason`. Report its `deleted: false` and pending status accurately. The returned
+`reviewUrl` opens team settings, where an admin decides the request.
+
+Automated workflows, child sessions, signals, and unlinked channel senders cannot
+borrow a creator's admin role or submit a deletion request as that person. Ask a
+signed-in person to continue in web chat or team settings. Do not repeat an
+ordinary tool approval as a substitute for the resource's admin check.
+
+### Slack sender identity
+
+Set top-level `definition.presence: { displayName: "Hestia · People", avatarUrl: "<supplied HTTPS URL>" }`.
+Omit `avatarUrl` if no image was supplied. `patch_workflow` accepts `presence` directly; `null` clears it.
+For an uploaded photo, call `profile_pictures.publish_avatar` in its chat and save the returned `avatar_url` as `presence.avatarUrl`.
+An event subscription's `target.appearance` overrides individual workflow fields. Unset fields inherit the workflow, then workspace default.
+Tool steps, agent tool calls, automatic replies, and approval cards inherit this identity without extra prompt instructions or `set` nodes.
+Explicit Slack `sender_name` / `sender_avatar_url` arguments still override one message; use them only for deliberate exceptions.
+These settings customize messages, not the Slack account or DM conversation. See the `slack-tools` skill.
+
+For an existing event subscription, call `events.list_subscriptions` in its personal or team workspace.
+Use the exact `name` filter or follow `nextOffset` with `offset` to find its ID.
+Call `events.set_subscription_presence` with `subscription_id` and `presence: { displayName?, avatarUrl? }`.
+This replaces the override. Send `presence: null` to clear it. The tool preserves matching rules, target, and enabled state.
+`workflows.create_trigger` and `workflows.propose_trigger` also accept optional `presence`.

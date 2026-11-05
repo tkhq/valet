@@ -4,5 +4,8 @@
  */
 export { slackPlugin, slimMessage } from "./actions.js";
 export { slackFetch, slackGet } from "./api.js";
-export { checkPrivateChannelAccess } from "./channel-access.js";
+export { checkPrivateChannelAccess, isPermanentSlackAccessError } from "./channel-access.js";
+export { withEventChannelName } from "../event-channel-name.js";
 export { markdownToSlackMrkdwn } from "../transport/format.js";
+export { joinedChannelDirectory } from "../transport/filter-options.js";
+export { USER_ONLINE_EVENT_KEY, onlineEvent, readOnlineStatus, type OnlineStatusResult, type SlackOnlineStatus } from "../online-status.js";

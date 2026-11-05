@@ -1,14 +1,54 @@
+import { intersectToolScopes } from "@valet/shared";
+import { toolScopeSchema } from "../tool-scope-schema.js";
 import { Type } from "typebox";
-import type { TSchema } from "typebox";
-import { isValidSandboxCpu, parseResourceQuantity, sandboxCpuRange } from "@valet/shared";
+import {
+  isValidSandboxCpu,
+  parseResourceQuantity,
+  sandboxCpuRange,
+  MIN_SCRATCH_BYTES,
+  isScratchRequestError,
+  ScratchRequestError,
+} from "@valet/shared";
 import { storedToolResultText } from "../compaction.js";
-import { isDecisionGateExpired } from "../decision-gate.js";
+import { isDecisionGateExpired, isDecisionGateWithdrawn, isUnattendedWorkflowRefusal } from "../decision-gate.js";
+import { answerTimeLine } from "../model-context.js";
+import { terminalOutcome } from "./terminal-outcome.js";
+import { defineTool } from "./define.js";
+export { defineTool } from "./define.js";
+import { updatePlanTool } from "./update-plan.js";
+export { updatePlanTool } from "./update-plan.js";
+import {
+  watchTool,
+  wakeAtTool,
+  holdSandboxTool,
+  processReadTool,
+  wakeupListTool,
+  wakeupCancelTool,
+  waitForEventTool,
+  startBackgroundProcess,
+} from "./wakeups.js";
+export {
+  watchTool,
+  wakeAtTool,
+  holdSandboxTool,
+  processReadTool,
+  wakeupListTool,
+  wakeupCancelTool,
+  waitForEventTool,
+  startBackgroundProcess,
+} from "./wakeups.js";
+import { validateBackground, sleepRefusal } from "../wakeups/validate.js";
+import type { WakeupLimits } from "../wakeups/types.js";
 import type {
   ChildReader,
   ChildSender,
   ChildSpawner,
   ChildStatusReader,
+  ChildStopper,
+  DecisionResolution,
   ExecJobHandle,
+  ExecOpts,
+  ExecResult,
   JobPoll,
   MessagePart,
   MessageQuery,
@@ -89,6 +129,21 @@ function abortErrorFrom(signal: AbortSignal): Error {
 }
 
 /**
+ * The foreground timeout text (fix wave 2, M16). A short command usually
+ * needs a larger timeout, not background mode, so the background advice
+ * appears only after a command ran a minute or more. It names every field
+ * background mode requires, so the retry does not fail validation. At the
+ * 3600-second max, a larger timeout is not an option (fix wave 3, UX L5).
+ */
+export function timeoutHint(timeoutMs: number): string {
+  const seconds = Math.round(timeoutMs / 1000);
+  const background = "For work longer than an hour, rerun with background: true, deadline_hours, and reason.";
+  if (seconds >= 3600) return `[timed out after ${seconds}s] This is the largest timeout. ${background}`;
+  const base = `[timed out after ${seconds}s] Rerun with a larger timeout (max 3600).`;
+  return seconds >= 60 ? `${base} ${background}` : base;
+}
+
+/**
  * Best-effort job cancellation: the sandbox may already be gone
  * (SandboxUnavailableError) or the exec superseded (SandboxSupersededError)
  * by the time we try to cancel it. Either way, cancellation failing must
@@ -104,6 +159,25 @@ async function bestEffortCancel(cancelJob: (execId: string) => Promise<void>, ex
   }
 }
 
+/** A stuck transport poll must not postpone cancellation past the command deadline. */
+async function pollWithinDeadline(poll: () => Promise<JobPoll>, deadline: number, signal: AbortSignal): Promise<JobPoll | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  const interrupted = new Promise<undefined>(resolve => {
+    onAbort = () => resolve(undefined);
+    timer = setTimeout(onAbort, Math.max(0, deadline - Date.now()));
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
+  try { return await Promise.race([poll(), interrupted]); }
+  finally {
+    clearTimeout(timer);
+    if (onAbort) signal.removeEventListener("abort", onAbort);
+  }
+}
+
+type ForegroundExecResult = Omit<ExecResult, "exitCode"> & { exitCode?: number; jobFailed?: boolean; jobTimedOut?: boolean };
+
 /**
  * Poll a job-mode exec to completion, accumulating output across polls
  * (spec decision 10). Deadline exceeded or `ctx.signal` abort both cancel
@@ -116,7 +190,7 @@ async function pollJobToCompletion(
   cancelJob: (execId: string) => Promise<void>,
   execId: string,
   timeoutMs: number,
-): Promise<ToolResult> {
+): Promise<ForegroundExecResult> {
   const deadline = Date.now() + timeoutMs;
   let offset = 0;
   let output = "";
@@ -130,40 +204,29 @@ async function pollJobToCompletion(
     }
     if (Date.now() >= deadline) {
       await bestEffortCancel(cancelJob, execId);
-      const truncNote = truncated ? BASH_TRUNCATION_NOTE : "";
-      return { text: `${output}${truncNote}\n[timed out after ${Math.round(timeoutMs / 1000)}s]` };
+      return { stdout: output, stderr: "", exitCode: 124, timedOut: true, jobTimedOut: true, truncated };
     }
 
-    const poll = await pollJob(execId, offset);
+    const poll = await pollWithinDeadline(() => pollJob(execId, offset), deadline, ctx.signal);
+    if (!poll) continue;
     pollCount++;
     output += poll.output;
     offset = poll.nextOffset;
     if (poll.truncated) truncated = true;
 
     if (poll.status === "done") {
-      const exitNote = poll.exitCode !== undefined && poll.exitCode !== 0 ? `\n[exit ${poll.exitCode}]` : "";
-      const truncNote = truncated ? BASH_TRUNCATION_NOTE : "";
-      return { text: `${output}${truncNote}${exitNote}` };
+      return { stdout: output, stderr: "", exitCode: poll.exitCode, truncated };
     }
     if (poll.status === "failed") {
-      const truncNote = truncated ? BASH_TRUNCATION_NOTE : "";
-      return { text: `${output}${truncNote}\n[job failed]` };
+      return { stdout: output, stderr: "", jobFailed: true, truncated };
     }
 
     // Warm-up ramp: first poll is immediate (no sleep before it, above),
     // successive waits climb JOB_POLL_WARMUP_MS before settling into the
     // JOB_POLL_INTERVAL_MS steady state.
     const waitMs = JOB_POLL_WARMUP_MS[pollCount - 1] ?? JOB_POLL_INTERVAL_MS;
-    await sleep(waitMs, ctx.signal);
+    await sleep(Math.min(waitMs, Math.max(0, deadline - Date.now())), ctx.signal);
   }
-}
-
-/**
- * Helper that preserves the schema's static type through the ToolDef so
- * `args` in `execute` is typed precisely instead of `unknown`.
- */
-export function defineTool<T extends TSchema>(def: ToolDef<T>): ToolDef<T> {
-  return def;
 }
 
 /**
@@ -200,6 +263,7 @@ export function normalizeGatePath(path: string, cwd: string | undefined): string
 
 export const readTool = defineTool({
   name: "read",
+  intent: "exempt",
   description: "Read the contents of a file from the sandbox.",
   parameters: Type.Object({ path: Type.String() }),
   concurrencySafe: true,
@@ -212,6 +276,8 @@ export const readTool = defineTool({
 
 export const writeTool = defineTool({
   name: "write",
+  sideEffect: "files",
+  intent: "exempt",
   description: "Write contents to a file in the sandbox (creates or overwrites).",
   parameters: Type.Object({ path: Type.String(), content: Type.String() }),
   execute: async (args, ctx) => {
@@ -247,6 +313,8 @@ export const writeTool = defineTool({
 
 export const editTool = defineTool({
   name: "edit",
+  sideEffect: "files",
+  intent: "exempt",
   description: "Replace exact text occurrences in a file.",
   parameters: Type.Object({
     path: Type.String(),
@@ -285,69 +353,103 @@ export const editTool = defineTool({
   },
 });
 
+export const DEFAULT_WAKEUP_LIMITS: WakeupLimits = { leaseMaxHours: 72, timerMaxHours: 720, perSession: 20, watchMaxEventsPerHour: 120 };
+
+/** Run a foreground command with provider job cancellation above the bash threshold. */
+export async function runForegroundExec(ctx: ToolContext, command: string, opts: ExecOpts): Promise<ForegroundExecResult> {
+  const sandbox = ctx.sandbox;
+  if (!sandbox) throw new Error("No sandbox. Run this command in a session with a sandbox.");
+  const { timeout, ...jobOpts } = opts;
+  const timeoutMs = timeout ?? BASH_DEFAULT_TIMEOUT_S * 1000;
+  // PolicySandbox always exposes job methods. Fall back only when kickoff says unsupported.
+  // Bind the instance: policy methods use this.dispatch internally.
+  const execJob = sandbox.execJob?.bind(sandbox);
+  const pollJob = sandbox.pollJob?.bind(sandbox);
+  const cancelJob = sandbox.cancelJob?.bind(sandbox);
+  if (timeoutMs > JOB_MODE_THRESHOLD_MS && execJob && pollJob && cancelJob) {
+    let handle: ExecJobHandle | undefined;
+    try { handle = await execJob(command, jobOpts); }
+    catch (err) { if (!isJobUnsupported(err)) throw err; }
+    if (handle) return pollJobToCompletion(ctx, pollJob, cancelJob, handle.execId, timeoutMs);
+  }
+  return sandbox.exec(command, opts);
+}
+
 export const bashTool = defineTool({
   name: "bash",
+  sideEffect: "files",
+  intent: "exempt",
   description:
     "Execute a shell command in the sandbox. `timeout` (seconds, default " +
     `${BASH_DEFAULT_TIMEOUT_S}, max 3600) bounds how long the command may ` +
     "run; commands with an effective timeout beyond 60s automatically run " +
     "in job mode (poll-based, non-blocking on the transport) when the " +
-    "sandbox supports it.",
+    "sandbox supports it. `background: true` starts the command as a " +
+    "detached sandbox process and returns at once; give `deadline_hours` " +
+    "(1 to the deploy max) and `reason`. The process is killed at the " +
+    "deadline, and the deadline cannot be extended; `timeout` does not " +
+    "apply to it. The thread receives a `process.exited` signal when it " +
+    "ends. Use it for work longer than an hour. When the session has " +
+    "/scratch, put large temporary files there; it is wiped when the " +
+    "sandbox stops.",
   parameters: Type.Object({
     command: Type.String(),
     timeout: Type.Optional(Type.Integer({ minimum: 1, maximum: 3600 })),
+    background: Type.Optional(Type.Boolean()),
+    deadline_hours: Type.Optional(Type.Number()),
+    reason: Type.Optional(Type.String()),
   }),
   execute: async (args, ctx) => {
+    if (args.background) {
+      const limits = ctx.wakeups?.limits ?? DEFAULT_WAKEUP_LIMITS;
+      const v = validateBackground(args, limits);
+      if (!v.ok) return { text: v.text };
+      return startBackgroundProcess(ctx, args.command, v.value);
+    }
+    const sleep = sleepRefusal(args.command);
+    if (sleep) return { text: sleep };
+
     const timeoutMs = (args.timeout ?? BASH_DEFAULT_TIMEOUT_S) * 1000;
 
-    // Mode selection (spec decision 10). NOTE: `ctx.sandbox` is normally a
-    // PolicySandbox, whose execJob/pollJob/cancelJob are ALWAYS defined
-    // (they throw a `[job_unsupported]` error internally when the raw
-    // sandbox lacks the capability) — so `typeof ... === "function"` can't
-    // be used to detect support. Instead: past the threshold, try job mode;
-    // if execJob itself rejects with `[job_unsupported]`, fall back to sync
-    // exec. Once execJob has succeeded (a job exists), never fall back —
-    // the poll loop's errors propagate untouched.
-    //
-    // IMPORTANT: bind these off `ctx.sandbox` rather than destructuring bare
-    // references. `ctx.sandbox` is a real `PolicySandbox` class instance in
-    // production whose methods read `this.dispatch(...)` internally — a bare
-    // destructure (`const { execJob } = ctx.sandbox`) strips that binding and
-    // every job-mode call throws `Cannot read properties of undefined
-    // (reading 'dispatch')`. Every unit test in this area stubs `ctx.sandbox`
-    // as a plain object literal (methods with no `this` dependency), which is
-    // why this went undetected until an end-to-end test exercised a real
-    // PolicySandbox.
-    const execJob = ctx.sandbox.execJob?.bind(ctx.sandbox);
-    const pollJob = ctx.sandbox.pollJob?.bind(ctx.sandbox);
-    const cancelJob = ctx.sandbox.cancelJob?.bind(ctx.sandbox);
-    if (timeoutMs > JOB_MODE_THRESHOLD_MS && execJob && pollJob && cancelJob) {
-      let handle: ExecJobHandle | undefined;
-      try {
-        handle = await execJob(args.command, { signal: ctx.signal });
-      } catch (err) {
-        if (!isJobUnsupported(err)) throw err;
-        // Underlying sandbox doesn't support job mode — fall through to sync exec.
-      }
-      if (handle) {
-        return pollJobToCompletion(ctx, pollJob, cancelJob, handle.execId, timeoutMs);
-      }
-    }
-
-    const result = await ctx.sandbox.exec(args.command, { signal: ctx.signal, timeout: timeoutMs });
-    const exitNote = result.exitCode === 0 ? "" : `\n[exit ${result.exitCode}]`;
+    const result = await runForegroundExec(ctx, args.command, { signal: ctx.signal, timeout: timeoutMs });
     const truncNote = result.truncated ? BASH_TRUNCATION_NOTE : "";
-    return { text: `${result.stdout}${result.stderr}${truncNote}${exitNote}` };
+    const timeoutNote = result.timedOut ? `\n${timeoutHint(timeoutMs)}` : "";
+    const exitNote = !result.timedOut && result.exitCode !== undefined && result.exitCode !== 0 ? `\n[exit ${result.exitCode}]` : "";
+    const outcome = result.jobTimedOut || result.jobFailed ? undefined : terminalOutcome(args.command, result.stdout, result.exitCode);
+    return { text: `${result.stdout}${result.stderr}${truncNote}${exitNote}${timeoutNote}${result.jobFailed ? "\n[job failed]" : ""}`, ...(outcome ? { outcome } : {}) };
   },
 });
+
+/**
+ * The thread a `thread_read` argument names. A person points at a thread by
+ * pasting its link: the web app links `/threads/<id>`, and older chat links
+ * carry `?thread=<id>`. Anything that is not an http(s) URL is a key or an id
+ * as given; `web:default` parses as a URL, so the scheme check matters.
+ */
+export function threadReference(value: string): string {
+  const trimmed = value.trim();
+  if (!/^https?:\/\//i.test(trimmed)) return trimmed;
+  let url: URL;
+  try { url = new URL(trimmed); } catch { return trimmed; }
+  const fromPath = /\/threads\/([^/]+)/.exec(url.pathname)?.[1];
+  if (fromPath) {
+    // A malformed escape in a pasted link is not a thread id; keep the link so
+    // the lookup reports it as not found instead of throwing.
+    try { return decodeURIComponent(fromPath); } catch { return trimmed; }
+  }
+  // URLSearchParams has already decoded the value.
+  return url.searchParams.get("thread") || trimmed;
+}
 
 export const threadReadTool = defineTool({
   name: "thread_read",
   concurrencySafe: true,
+  ownerOnly: true,
   description:
-    "Read recent messages from another thread in this session. Useful for cross-thread context (e.g. an orchestrator pulling notes from a worker thread, or a thread checking what a sibling has done).",
+    "Read recent messages from another thread in this session. Useful for cross-thread context (e.g. an orchestrator pulling notes from a worker thread, or a thread checking what a sibling has done). " +
+    "Accepts a thread key, a thread id, or a Valet thread link a person pasted (`/threads/<id>`, or a chat link with `?thread=<id>`).",
   parameters: Type.Object({
-    key: Type.String({ description: "Thread key to read from (e.g. 'web:default', 'task:research')." }),
+    key: Type.String({ description: "Thread key (e.g. 'web:default', 'task:research'), thread id, or a pasted Valet thread link." }),
     limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })),
     includeCompacted: Type.Optional(Type.Boolean()),
   }),
@@ -356,9 +458,10 @@ export const threadReadTool = defineTool({
       limit: args.limit ?? 30,
       includeCompacted: args.includeCompacted ?? true,
     };
-    const entries = await ctx.threadRead(args.key, opts);
-    if (entries.length === 0) return { text: `(thread "${args.key}" has no messages)` };
-    return { text: renderEntries(`thread:${args.key}`, entries) };
+    const ref = threadReference(args.key);
+    const entries = await ctx.threadRead(ref, opts);
+    if (entries.length === 0) return { text: `(thread "${ref}" has no messages, or is not a thread in this session)` };
+    return { text: renderEntries(`thread:${ref}`, entries) };
   },
 });
 
@@ -434,6 +537,7 @@ function renderEntries(heading: string, entries: SessionEntry[]): string {
     } else if (e.type === "decision_gate") {
       lines.push(`\n## [decision gate: ${e.gate.type} — ${e.gate.status}] ${e.gate.title}`);
       if (e.gate.body) lines.push(e.gate.body);
+      if (e.gate.agentReason) lines.push(`Agent's stated reason (model-authored): ${e.gate.agentReason}`);
     } else if (e.type === "branch_summary") {
       lines.push(`\n## [branch summary]`);
       lines.push(e.summary);
@@ -441,6 +545,16 @@ function renderEntries(heading: string, entries: SessionEntry[]): string {
   }
   return lines.join("\n");
 }
+
+/** A child runs as the session's user and does not carry the newcomer marker,
+ * so a turn from a channel sender with no Valet account may not start or
+ * steer one (`ToolContext.externalSender`). */
+const EXTERNAL_SENDER_CHILDREN = {
+  text: "[child_unavailable] Only a teammate with a linked Valet account can start or message background tasks. Answer directly, or ask a teammate.",
+};
+
+/** Longest `task` batch name. It is a label the model picks, not content. */
+export const TASK_BATCH_MAX_CHARS = 64;
 
 /**
  * Byte ceiling on one `child_read` result. Matches the api's
@@ -473,7 +587,7 @@ export const childReadTool = defineTool({
 
     const entries = await reader(
       { childSessionId: args.child_session_id, limit: args.limit },
-      { parentSessionId: ctx.sessionId },
+      { parentSessionId: ctx.sessionId, readerThreadId: ctx.threadId },
     );
     if (entries === null) {
       return {
@@ -506,9 +620,10 @@ export const childSendTool = defineTool({
   name: "child_send",
   description:
     "Send a message to a child session this session spawned — steer it " +
-    "mid-run or follow up after it settled. By default the message queues " +
-    "behind the child's current work; set `interrupt: true` to supersede " +
-    "that work (use it when the child is heading the wrong direction). " +
+    "mid-run or follow up after it settled. By default the message supersedes " +
+    "the child's in-flight work. Steering a child that is blocked on a decision " +
+    "gate withdraws its pending approval. Set `queue: true` if that approval " +
+    "must remain actionable or the message must wait for the current turn. " +
     "Either way the settlement watch re-arms: the child's next result " +
     "arrives as a fresh `child.settled` signal on the thread that spawned " +
     "the child.",
@@ -517,13 +632,15 @@ export const childSendTool = defineTool({
       description: "The child session to message, as returned by `task` or named in a child.settled signal.",
     }),
     message: Type.String({ minLength: 1, description: "The message to deliver to the child." }),
-    interrupt: Type.Optional(
+    queue: Type.Optional(
       Type.Boolean({
-        description: "Supersede the child's in-flight work instead of queueing behind it. Default false.",
+        description:
+          "Deliver after the child's current turn. Use this to keep a pending approval actionable. Default false.",
       }),
     ),
   }),
   execute: async (args, ctx) => {
+    if (ctx.externalSender) return EXTERNAL_SENDER_CHILDREN;
     // Same `toolConfig` passthrough convention as `task`'s childSpawner:
     // `ctx.config` is verbatim `Record<string, unknown>`, so a
     // sender-shaped value is known only by convention.
@@ -537,9 +654,18 @@ export const childSendTool = defineTool({
       {
         childSessionId: args.child_session_id,
         message: args.message,
-        ...(args.interrupt !== undefined ? { interrupt: args.interrupt } : {}),
+        ...(args.queue !== undefined ? { queue: args.queue } : {}),
       },
-      { parentSessionId: ctx.sessionId, parentThreadId: ctx.threadId, actorUserId: ctx.userId },
+      {
+        parentSessionId: ctx.sessionId, parentThreadId: ctx.threadId, actorUserId: ctx.userId,
+        // A child inherits the parent's ceiling, never its thread focus: focus is
+        // the parent's own reversible choice, so it grants no authority to keep.
+        ...(ctx.toolScopeCeiling ? { toolScope: ctx.toolScopeCeiling } : {}),
+        // The host keeps automatic channel replies only for a channel turn.
+        ...(ctx.origin !== undefined ? { origin: ctx.origin } : {}),
+        ...(ctx.unattendedWorkflow ? { unattendedWorkflow: true } : {}),
+        ...(ctx.queueItemId ? { parentQueueItemId: ctx.queueItemId } : {}),
+      },
     );
     if (result === null) {
       return {
@@ -548,9 +674,9 @@ export const childSendTool = defineTool({
           `Use the child_session_id from a task result or a child.settled signal in this thread.`,
       };
     }
-    const mode = args.interrupt
-      ? "superseding its in-flight work"
-      : "queued behind its current work";
+    const mode = args.queue === true
+      ? "queued behind its current work"
+      : "superseding its in-flight work";
     return {
       text:
         `sent to child ${args.child_session_id} (submission ${result.queueItemId}, ${mode}). ` +
@@ -584,7 +710,7 @@ export const childStatusTool = defineTool({
 
     const status = await reader(
       { childSessionId: args.child_session_id },
-      { parentSessionId: ctx.sessionId },
+      { parentSessionId: ctx.sessionId, readerThreadId: ctx.threadId },
     );
     if (status === null) {
       return {
@@ -607,9 +733,54 @@ export const childStatusTool = defineTool({
   },
 });
 
+/**
+ * Not in `builtinTools`: the host registers it only on sessions that can
+ * spawn children, so child and workflow sessions do not carry a tool they
+ * cannot use.
+ */
+export const childStopTool = defineTool({
+  name: "child_stop",
+  description:
+    "Stop a child you spawned: abort its running and queued work. Its partial result " +
+    "still arrives as a child.settled signal. child_send starts it again.",
+  parameters: Type.Object({
+    child_session_id: Type.String({ description: "The child to stop." }),
+  }),
+  execute: async (args, ctx) => {
+    if (ctx.externalSender) return EXTERNAL_SENDER_CHILDREN;
+    // Same `toolConfig` passthrough convention as `child_send`'s childSender.
+    const rawStopper = ctx.config?.childStopper;
+    if (typeof rawStopper !== "function") {
+      return { text: "[child_stop_unavailable] this session cannot stop child sessions" };
+    }
+    const stopper = rawStopper as ChildStopper; // narrowed by typeof check above
+
+    const result = await stopper(
+      { childSessionId: args.child_session_id },
+      { parentSessionId: ctx.sessionId, parentThreadId: ctx.threadId },
+    );
+    if (result === null) {
+      return {
+        text:
+          `[child_not_found] "${args.child_session_id}" is not a child of this session. ` +
+          `Use the child_session_id from a task result or a child.settled signal in this thread.`,
+      };
+    }
+    if (result.stopped === 0) {
+      return { text: `child ${args.child_session_id} had no running or queued work to stop.` };
+    }
+    return {
+      text:
+        `stopped child ${args.child_session_id} (${result.stopped} submission${result.stopped === 1 ? "" : "s"} aborted). ` +
+        `Its partial result will arrive as a child.settled signal; you do not need to wait for anything else from it.`,
+    };
+  },
+});
+
 export const listThreadsTool = defineTool({
   name: "list_threads",
   concurrencySafe: true,
+  ownerOnly: true,
   description:
     "List sibling threads in this session, including paused ones. Use this " +
     "to discover thread keys before calling `thread_read`. Returns key, " +
@@ -671,10 +842,13 @@ export const switchModelTool = defineTool({
 
 export const askApprovalTool = defineTool({
   name: "ask_approval",
+  sideEffect: "none",
   description:
     "Ask the user for an explicit approval before proceeding with an action. " +
     "Blocks until the user approves or denies (or the gate expires). Use for " +
-    "irreversible or sensitive steps the user should sign off on.",
+    "irreversible or sensitive steps the user should sign off on. " +
+    "Do not use it before an integration action: call_tool asks for approval itself " +
+    "when policy requires it, and that request offers to allow the action from then on.",
   parameters: Type.Object({
     title: Type.String({ description: "Short question, e.g. 'Delete the staging database?'" }),
     body: Type.Optional(Type.String({ description: "Details the user needs to decide." })),
@@ -701,12 +875,115 @@ export const askApprovalTool = defineTool({
       }
       throw err;
     }
+    // The model must not report a request that nobody received: an owner who
+    // reads "waiting for approval" looks for a card that does not exist.
+    if (isUnattendedWorkflowRefusal(resolution)) {
+      return {
+        text:
+          `not asked: "${args.title}". This is an unattended run (a workflow, an automated event, or a schedule), so Valet sent no approval request and nobody can approve. ` +
+          "Do not do the action. Do not ask again, and do not ask anyone in a message. " +
+          "Do not say that you asked for approval or that approval is pending. " +
+          "In your result, say that the action did not run because an unattended run cannot ask for approval. " +
+          "Also say the fix. In a workflow, to approve it on each run, its owner can add an Approval step before this step " +
+          "and remove the request for approval from this step's prompt. For an event subscription or a schedule, remove the " +
+          "request for approval from its prompt, and allow the action by policy in Settings if the action needs approval.",
+      };
+    }
     return {
-      text:
+      text: await withAnswerTime(
         resolution.actionId === "approve"
           ? `approved: ${args.title}`
           : `denied: ${args.title}. This denial is final for the current turn — do not ask again. Tell the user what was denied.`,
+        resolution,
+        ctx,
+      ),
     };
+  },
+});
+
+/**
+ * Put the `[answered: …]` line (`answerTimeLine`) first on a decision tool's
+ * result. The answer can come days after the turn's newest `[sent: …]` line,
+ * and this line is the only new time the model gets.
+ */
+async function withAnswerTime(text: string, resolution: DecisionResolution, ctx: ToolContext): Promise<string> {
+  const line = answerTimeLine(resolution.resolvedAt, await ctx.currentUserTimezone?.());
+  return line ? `${line}\n\n${text}` : text;
+}
+
+export const askQuestionTool = defineTool({
+  name: "ask_question",
+  sideEffect: "none",
+  description:
+    "Ask the person a question and wait for the answer. Use it when a decision or a missing " +
+    "fact blocks the work, not to confirm something you can check yourself. Give `options` " +
+    "when the answer is one of a few choices: each becomes a button, in the app and in Slack. " +
+    "In the app the person can also type a different answer. Blocks until someone answers " +
+    "or the question expires. If the person asks you to wait or pause, acknowledge and end " +
+    "the turn without opening a question.",
+  parameters: Type.Object({
+    question: Type.String({ minLength: 1, maxLength: 300, description: "One question, e.g. 'Which workflow should I build first?'" }),
+    options: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 80 }), {
+      maxItems: 6, description: "Up to six short answers to choose from.",
+    })),
+    detail: Type.Optional(Type.String({ maxLength: 2000, description: "Context the person needs to answer." })),
+  }),
+  execute: async (args, ctx) => {
+    const options = args.options ?? [];
+    let resolution;
+    try {
+      resolution = await ctx.requestDecision({
+        type: "question",
+        title: args.question,
+        body: args.detail,
+        actions: options.map((label, index) => ({ id: `option-${index}`, label })),
+        resumeKey: `ask_question:${args.question}`,
+      });
+    } catch (err) {
+      if (isDecisionGateExpired(err)) {
+        return {
+          text:
+            `question expired: "${args.question}". Nobody answered before the deadline. ` +
+            "Do not ask again in this turn. Do not send, change, or delete anything that depends on the answer; " +
+            "say what was missing. Continue with the rest of the work, and say what you assumed.",
+        };
+      }
+      if (isDecisionGateWithdrawn(err) && err.reason === "message") {
+        return {
+          text:
+            `The person wrote a message instead of answering "${args.question}". It follows this result. ` +
+            "Reply to it first. If you still need the answer, ask the question again after your reply.",
+        };
+      }
+      throw err;
+    }
+    if (isUnattendedWorkflowRefusal(resolution)) {
+      return {
+        text:
+          `No one can answer "${args.question}": this is an unattended run (a workflow, an automated event, or a schedule). ` +
+          "Do not send, change, or delete anything that depends on the answer. " +
+          "Say in the result what was missing, so its author can fix the workflow, subscription, or schedule. " +
+          "Continue with the rest of the work, and say what you assumed.",
+      };
+    }
+    const picked = resolution.actionId?.startsWith("option-") ? options[Number(resolution.actionId.slice("option-".length))] : undefined;
+    // The host checks the type, but a resolution is stored data: narrow it here too.
+    const typed = typeof resolution.value === "string" ? resolution.value.trim() : "";
+    const attachments: NonNullable<ToolResult["attachments"]> = [];
+    for (const image of resolution.attachments ?? []) {
+      const match = image.url.match(/^data:(image\/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/]+=*)$/);
+      if (match && match[1] === image.mimeType) {
+        attachments.push({ type: "image", data: new Uint8Array(Buffer.from(match[2]!, "base64")), mimeType: image.mimeType, name: image.name });
+      }
+    }
+    const answer = typed || picked || (attachments.length ? "See the attached images." : undefined);
+    // A typed reply can be a question back, such as what an option means.
+    // Say so, or the model reads it as an off-list choice and asks again.
+    const typedNote = typed && options.length > 0 && !options.includes(typed)
+      ? " The person typed this instead of picking an option. If it asks you something, reply to it first, then ask again if you still need a choice."
+      : "";
+    const text = answer ? `answer to "${args.question}": ${answer}${typedNote}` : `the question "${args.question}" was closed without an answer.`;
+    return { text: await withAnswerTime(text, resolution, ctx), ...(attachments.length ? { attachments } : {}) };
   },
 });
 
@@ -722,9 +999,12 @@ export const taskTool = defineTool({
     "XL children review only. Include the scope, selected tier and reason, " +
     "and acceptance checks in the brief. Tiers resolve through org config; " +
     "do not name specific models. To retry capacity-blocked children, set " +
-    "task.resources to lower CPU or memory values. Omitted fields inherit defaults.",
+    "task.resources to lower CPU or memory values. resources.scratch requests " +
+    "node-local scratch disk for the child, bounded by the deploy agent cap. " +
+    "Omitted fields inherit defaults.",
   parameters: Type.Object({
     prompt: Type.String({ minLength: 1, description: "The task for the child session to perform." }),
+    toolScope: Type.Optional(toolScopeSchema),
     title: Type.Optional(Type.String()),
     repo: Type.Optional(Type.String({ description: "Clone URL or org/repo; interpretation is host policy." })),
     branch: Type.Optional(Type.String()),
@@ -737,6 +1017,12 @@ export const taskTool = defineTool({
         memory: Type.Optional(
           Type.String({
             description: 'Memory for the child\'s sandbox as a Kubernetes quantity, such as "4Gi". Omit to use the host default.',
+          }),
+        ),
+        scratch: Type.Optional(
+          Type.String({
+            description:
+              'Node-local /scratch size for the child, in whole bytes or with a Ki, Mi, Gi, or Ti suffix, such as "200Gi". Other forms, such as "500G", are refused. Wiped when the child\'s sandbox stops. Bounded by the deploy agent cap.',
           }),
         ),
       }),
@@ -752,8 +1038,16 @@ export const taskTool = defineTool({
         description: "Provision the child's sandbox with a rootless docker daemon (docker-in-sandbox).",
       }),
     ),
+    batch: Type.Optional(
+      Type.String({
+        minLength: 1,
+        maxLength: TASK_BATCH_MAX_CHARS,
+        description: "Children with the same batch report together, in one child.settled signal after the last settles.",
+      }),
+    ),
   }),
   execute: async (args, ctx) => {
+    if (ctx.externalSender) return EXTERNAL_SENDER_CHILDREN;
     // ctx.config is `Record<string, unknown>` (verbatim toolConfig
     // passthrough, Phase 4 decision 7) — a spawner-shaped value is only
     // known by convention, hence the typeof guard before the single
@@ -789,13 +1083,28 @@ export const taskTool = defineTool({
         }
       }
 
+      const scratchRaw = args.resources.scratch;
+      let normalizedScratch: string | undefined;
+      if (scratchRaw !== undefined) {
+        // Syntax only here; the spawner applies the deploy and agent caps
+        // (spec A4) because the caps live in api config.
+        const text = typeof scratchRaw === "string" ? scratchRaw.trim() : "";
+        const bytes = text ? parseResourceQuantity(text) : null;
+        if (bytes === null || bytes < MIN_SCRATCH_BYTES) {
+          return { text: `[task_resources] scratch "${String(scratchRaw)}" is not a Kubernetes quantity of at least 1Gi. Use a form like "200Gi".` };
+        }
+        normalizedScratch = text;
+      }
+
       resources = {
         ...(args.resources.cpu !== undefined ? { cpu: args.resources.cpu } : {}),
         ...(normalizedMemory !== undefined ? { memory: normalizedMemory } : {}),
+        ...(normalizedScratch !== undefined ? { scratch: normalizedScratch } : {}),
       };
     }
 
     const req: SpawnChildRequest = {
+      toolScope: intersectToolScopes(ctx.toolScopeCeiling, args.toolScope),
       prompt: args.prompt,
       title: args.title,
       repo: args.repo,
@@ -804,20 +1113,34 @@ export const taskTool = defineTool({
       resources,
       profile: args.profile,
       docker: args.docker,
+      ...(args.batch?.trim() ? { batch: args.batch.trim() } : {}),
     };
     const owner = ctx.owner ?? { type: "user", id: ctx.userId };
-    const result = await spawner(req, {
-      parentSessionId: ctx.sessionId,
-      parentThreadId: ctx.threadId,
-      actorUserId: ctx.userId,
-      owner,
-      // The spawning submission's channel origin rides to the watcher, so
-      // the child.settled signal can inherit it (see ChildWatcher).
-      ...(ctx.origin !== undefined ? { origin: ctx.origin } : {}),
-    });
+    let result;
+    try {
+      result = await spawner(req, {
+        parentSessionId: ctx.sessionId,
+        parentThreadId: ctx.threadId,
+        actorUserId: ctx.userId,
+        owner,
+        // The spawning submission's channel origin rides to the watcher, so
+        // the child.settled signal can inherit it (see ChildWatcher).
+        ...(ctx.origin !== undefined ? { origin: ctx.origin } : {}),
+        ...(ctx.unattendedWorkflow ? { unattendedWorkflow: true } : {}),
+        ...(ctx.queueItemId ? { parentQueueItemId: ctx.queueItemId } : {}),
+      });
+    } catch (err) {
+      if (isScratchRequestError(err)) {
+        return { text: `[task_resources] ${err.message}` };
+      }
+      throw err;
+    }
     return {
       text: [
-        `spawned child session ${result.childSessionId} (submission ${result.queueItemId}). Its result will arrive in this thread as a child.settled signal.`,
+        req.batch
+          ? `spawned child session ${result.childSessionId} (submission ${result.queueItemId}) in batch "${req.batch}". ` +
+            `Its result will arrive with the rest of the batch, in one child.settled signal, after the last child in the batch settles.`
+          : `spawned child session ${result.childSessionId} (submission ${result.queueItemId}). Its result will arrive in this thread as a child.settled signal.`,
         ...(result.warnings ?? []).map((warning) => `Warning: ${warning}`),
       ].join("\n"),
     };
@@ -829,12 +1152,30 @@ export const builtinTools: ToolDef[] = [
   writeTool,
   editTool,
   bashTool,
+  watchTool,
+  wakeAtTool,
+  holdSandboxTool,
+  processReadTool,
+  wakeupListTool,
+  wakeupCancelTool,
+  waitForEventTool,
   threadReadTool,
   listThreadsTool,
+  updatePlanTool,
   switchModelTool,
   askApprovalTool,
+  askQuestionTool,
   taskTool,
   childReadTool,
   childSendTool,
   childStatusTool,
 ];
+
+/** Built-in tools a child session does not get (`purpose: "child"`). */
+export const CHILD_EXCLUDED_TOOL_NAMES: ReadonlySet<string> = new Set([askQuestionTool.name]);
+
+/** The tools that need a session's wakeup seam (`CreateSessionOptions.wakeups`).
+ * A session without the seam leaves them out (`session.ts`). */
+export const WAKEUP_TOOL_NAMES: ReadonlySet<string> = new Set(
+  [watchTool, wakeAtTool, holdSandboxTool, processReadTool, wakeupListTool, wakeupCancelTool].map((tool) => tool.name),
+);

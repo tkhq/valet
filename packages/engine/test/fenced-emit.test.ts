@@ -1,5 +1,7 @@
+import { getCurrentSystemPrompt } from "@earendil-works/pi-ai/utils/transcript";
 import { describe, it, expect, vi } from "vitest";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import {
   Engine,
   InMemoryEventStream,
@@ -235,7 +237,7 @@ describe("attempt-fenced EventStream appends (decision 12)", () => {
     base.setResponses([
       (context) => {
         baseCalls += 1;
-        nextPromptSystem = context.systemPrompt;
+        nextPromptSystem = getCurrentSystemPrompt(context.messages);
         return fauxAssistantMessage("next prompt completed");
       },
     ]);
@@ -311,7 +313,7 @@ describe("attempt-fenced EventStream appends (decision 12)", () => {
       ),
     );
     expect(baseCalls).toBe(1);
-    expect(nextPromptSystem).toMatch(/^Baseline prompt\.\n\n## Runtime model\n/);
+    expect(nextPromptSystem).toMatch(/^Baseline prompt\.\n\n## Thread started[\s\S]*?\n\n## Runtime model\n/);
     expect(nextPromptSystem).toContain(`Current provider: ${base.getModel().provider}`);
     expect(nextPromptSystem).toContain("Temporary override: none");
     expect(await thread.currentModelState()).toBeNull();

@@ -83,7 +83,7 @@
  * whole group death was somehow otherwise observed, which for SIGKILL never
  * comes). See `jobKickoffCommand`'s capped branch for the fifo wiring.
  */
-import type { ExecJobHandle, ExecOpts, JobPoll } from "@valet/engine";
+import { jobLogCappedLine, recordJobLogsPruned, type ExecJobHandle, type ExecOpts, type JobPoll, type JobPollOpts } from "@valet/engine";
 import { buildShellCommand, execInPod, JOBS_DIR, shQuote, type ExecDeps } from "./exec.js";
 
 function jobOutPath(execId: string): string {
@@ -95,15 +95,73 @@ function jobExitPath(execId: string): string {
 function jobPidPath(execId: string): string {
   return `${JOBS_DIR}/${execId}.pid`;
 }
+/** Marker the image start scripts write for a job that a container restart
+ * killed (docker/start-headless.sh, docker/start-full.sh). */
+function jobDeadPath(execId: string): string {
+  return `${JOBS_DIR}/${execId}.dead`;
+}
 function jobFifoPath(execId: string): string {
   return `${JOBS_DIR}/${execId}.fifo`;
+}
+
+/** Kickoff exit status when the exec id already has job files. */
+const KICKOFF_ID_IN_USE_EXIT = 17;
+
+/** Job files whose `.exit` or `.dead` is older than this many minutes are pruned. */
+const JOB_FILES_RETENTION_MINUTES = 24 * 60;
+
+/**
+ * Deletes the files of jobs that ended more than a day ago and prints
+ * `pruned=<n>` when it deleted any (fix wave 3, k8s M-B). Job files used to
+ * live as long as the pod, and on a scratch pod they count against the
+ * `/scratch` size limit. Logs grow only through kickoffs, so pruning at
+ * each kickoff bounds them without any row state. Best effort: a failure
+ * here never blocks the kickoff.
+ *
+ * `find -exec` passes each name as one argument, so a workload-chosen name
+ * is never split or globbed in the kickoff's working directory. A job
+ * counts once, and only when both of its stamps are gone after the `rm`:
+ * a root-owned `.dead` that the sticky bit keeps is not counted again on
+ * every later kickoff (fix wave 4, security N6 and k8s N-3).
+ */
+export function pruneOldJobFilesScript(jobsDir: string = JOBS_DIR): string {
+  const dir = shQuote(jobsDir);
+  const each =
+    'for f in "$@"; do [ -e "$f" ] || continue; b="${f%.*}"; ' +
+    'rm -f "$b.out" "$b.pid" "$b.exit" "$b.dead" "$b.fifo" 2>/dev/null; ' +
+    '[ -e "$b.exit" ] || [ -e "$b.dead" ] || echo pruned; done';
+  return (
+    `n=$(find ${dir} -maxdepth 1 \\( -name '*.exit' -o -name '*.dead' \\) -mmin +${JOB_FILES_RETENTION_MINUTES} ` +
+    `-exec sh -c ${shQuote(each)} sh {} + 2>/dev/null | wc -l | tr -d ' '); ` +
+    `if [ "\${n:-0}" -gt 0 ]; then echo "pruned=$n"; fi; `
+  );
+}
+
+/**
+ * The capping filter that writes a job's output to `outFile`: the first
+ * `limit` bytes, then one marker line when more output follows, then a
+ * `cat` that drains the rest. GNU head writes through stdio, which buffers
+ * a file in 4 KB blocks, so a running job's log stayed empty until it
+ * printed 4 KB or exited. `stdbuf -o0` turns that buffering off, so a poll
+ * (`process_read`, a `watch`) sees each line as the job prints it. Without
+ * stdbuf (a BusyBox image), head keeps its buffering: the log then shows in
+ * 4 KB steps and at exit.
+ */
+export function jobCappingFilter(limit: number, outFile: string, marker: string): string {
+  return (
+    `if command -v stdbuf >/dev/null 2>&1; then stdbuf -o0 head -c ${limit}; else head -c ${limit}; fi > ${shQuote(outFile)}; ` +
+    `if [ "$(head -c 1 | wc -c | tr -d ' ')" -gt 0 ]; then printf '\\n%s' ${shQuote(marker)} >> ${shQuote(outFile)}; fi; ` +
+    `cat > /dev/null`
+  );
 }
 
 /**
  * Builds the kickoff script. Structure (see module docblock for why the
  * grouping matters):
  *
- *   mkdir -p JOBS_DIR && : > OUT &&
+ *   mkdir -p JOBS_DIR || exit 1
+ *   if OUT, PID, EXIT, or DEAD exists; then exit 17; fi
+ *   : > OUT || exit 1
  *   ( setsid sh -c 'echo $$ > PID; exec sh -c '"<inner, quoted>"'' \
  *       > OUT 2>&1 < /dev/null
  *     echo $? > EXIT
@@ -186,7 +244,14 @@ export function jobKickoffCommand(execId: string, innerCommand: string, maxOutpu
   } else {
     const limit = Math.max(0, Math.floor(maxOutputBytes));
     const fifo = jobFifoPath(execId);
-    const cappingFilter = `head -c ${limit} > ${shQuote(outFile)}; cat > /dev/null`;
+    // Past the cap, one marker line goes to the end of OUT, so a tail read
+    // or a watch sees that output stopped there (fix wave 3, k8s M-B).
+    // `head -c 1 | wc -c` waits for one byte past the cap; a job that stays
+    // under the cap reaches EOF and gets no marker. This needs a `head`
+    // that reads no more than it writes from a pipe: GNU coreutils does
+    // (checked on the sandbox image); BSD head over-reads, so the marker
+    // can be missing there.
+    const cappingFilter = jobCappingFilter(limit, outFile, jobLogCappedLine(limit));
     // The capping filter has to run as a SEPARATE process from the job
     // (see module docblock's "maxOutputBytes" section for why a plain
     // `head -c LIMIT` alone would SIGPIPE-kill the job early) — but piping
@@ -214,12 +279,16 @@ export function jobKickoffCommand(execId: string, innerCommand: string, maxOutpu
     // each get their own independent view of a regular file instead of a
     // shared pipe). Sequencing `mkfifo` synchronously before anything
     // touches the path closes that race.
+    // EXIT is written only after the filter drained the fifo into OUT: a
+    // poll that sees EXIT then reads a complete log (PR review, finding 6).
+    // The job's exit (or its group kill) closes the fifo's write end, so
+    // the filter reaches EOF at once and the wait adds no cancel latency.
     wrapped =
       `rm -f ${shQuote(fifo)}; mkfifo ${shQuote(fifo)}; ` +
       `( ${cappingFilter} ) < ${shQuote(fifo)} & filterpid=$!; ` +
-      `${innerSetsid} > ${shQuote(fifo)} 2>&1; ` +
-      `echo $? > ${shQuote(exitFile)}; ` +
+      `${innerSetsid} > ${shQuote(fifo)} 2>&1; rc=$?; ` +
       `wait "$filterpid"; ` +
+      `echo "$rc" > ${shQuote(exitFile)}; ` +
       `rm -f ${shQuote(fifo)}`;
   }
 
@@ -235,8 +304,17 @@ export function jobKickoffCommand(execId: string, innerCommand: string, maxOutpu
   // command longer than 60s. dockerd (local Rancher/moby) does NOT wait for the
   // drain, which is why this stayed invisible in dev. Nulling the group's stdio
   // lets the kickoff return as soon as `echo started` prints.
+  // Job files live as long as the pod. Refuse an id that already has any of
+  // them, before `: > OUT` can truncate a live job's log (fix wave 2, B1).
+  const existing = [outFile, pidFile, exitFile, jobDeadPath(execId)].map((f) => `[ -e ${shQuote(f)} ]`).join(" || ");
+  const refuse =
+    `if ${existing}; then echo ${shQuote(`job id ${execId} already has files in ${JOBS_DIR}`)} >&2; ` +
+    `exit ${KICKOFF_ID_IN_USE_EXIT}; fi; `;
+  // Each setup step is its own statement. In `a && b && ( job ) &`, the `&`
+  // backgrounds the whole and-list, so the refusal's `exit` would end only
+  // that background shell and the kickoff would report success.
   return (
-    `mkdir -p ${shQuote(JOBS_DIR)} && : > ${shQuote(outFile)} && ` +
+    `mkdir -p ${shQuote(JOBS_DIR)} || exit 1; ${pruneOldJobFilesScript()}${refuse}: > ${shQuote(outFile)} || exit 1; ` +
     `( ${wrapped} ) </dev/null >/dev/null 2>&1 & ` +
     `${waitForPid}; ` +
     `echo started`
@@ -256,19 +334,51 @@ export function jobKickoffCommand(execId: string, innerCommand: string, maxOutpu
  * poll script's stdio is entirely separate from the job's own captured
  * `.out` file content — it's a fresh exec, not the job process itself.
  */
-export function pollCommand(execId: string, offset: number): string {
-  const outFile = jobOutPath(execId);
-  const exitFile = jobExitPath(execId);
+export function pollCommand(execId: string, offset: number, opts: JobPollOpts = {}): string {
+  const outFile = shQuote(jobOutPath(execId));
+  const exitFile = shQuote(jobExitPath(execId));
+  const pidFile = shQuote(jobPidPath(execId));
+  const deadFile = shQuote(jobDeadPath(execId));
   const tailFrom = offset + 1;
+  const maxBytes = opts.maxBytes === undefined ? undefined : Math.max(0, Math.floor(opts.maxBytes));
+  // Status is read BEFORE the output: a job whose `.exit` exists has written
+  // all of its output, so the bytes read next are complete.
+  //
+  // No `.exit` and a pid group that no longer exists means the job died
+  // without its wrapper writing `.exit`, for example when a container
+  // restart killed it but `/scratch` kept the files. The one-second recheck
+  // covers the short gap between the job's exit and the wrapper's `.exit`
+  // write. A `.dead` marker from the start scripts covers pid reuse after a
+  // restart (spec B4).
+  const status =
+    `if [ -f ${exitFile} ]; then st=$(cat ${exitFile}); ` +
+    `elif [ -f ${deadFile} ]; then st=dead; ` +
+    `elif [ -f ${pidFile} ] && ! kill -0 -"$(cat ${pidFile})" 2>/dev/null; then ` +
+    `sleep 1; if [ -f ${exitFile} ]; then st=$(cat ${exitFile}); else st=dead; fi; ` +
+    `else st=running; fi; `;
+  let read: string;
+  if (maxBytes === undefined) {
+    read = `tail -c +${tailFrom} ${outFile} | base64 -w0; echo "$st" 1>&2`;
+  } else if (opts.tail) {
+    // The size is read once, so the bytes returned and the end offset agree
+    // even while the job keeps writing.
+    read =
+      `size=$(wc -c < ${outFile}); ` +
+      `head -c $size ${outFile} | tail -c +${tailFrom} | tail -c ${maxBytes} | base64 -w0; ` +
+      `echo "$st" 1>&2; echo $size 1>&2`;
+  } else {
+    // One byte past the cap tells the caller that more output remains.
+    read = `tail -c +${tailFrom} ${outFile} | head -c ${maxBytes + 1} | base64 -w0; echo "$st" 1>&2`;
+  }
   return (
     // Absent .out file means this execId was never started here (or the
     // pod lost /tmp — recreated out from under a tracked job) — a distinct
     // "unknown" stderr marker so pollJobInPod can report the engine's
     // Map-miss-equivalent "failed" shape instead of misreading it as
     // "running" or trying to parse an empty exit code.
-    `if [ ! -f ${shQuote(outFile)} ]; then echo unknown 1>&2; exit 0; fi; ` +
-    `tail -c +${tailFrom} ${shQuote(outFile)} | base64 -w0; ` +
-    `if [ -f ${shQuote(exitFile)} ]; then cat ${shQuote(exitFile)} 1>&2; else echo running 1>&2; fi`
+    `if [ ! -f ${outFile} ]; then echo unknown 1>&2; exit 0; fi; ` +
+    status +
+    read
   );
 }
 
@@ -295,8 +405,11 @@ export function pollCommand(execId: string, offset: number): string {
 export function cancelCommand(execId: string): string {
   const pidFile = jobPidPath(execId);
   const exitFile = jobExitPath(execId);
+  const deadFile = jobDeadPath(execId);
+  // A job with `.exit` or `.dead` already ended, and its pid may now belong
+  // to an unrelated group. Skip the kill then (fix wave 2, L9).
   return (
-    `if [ -f ${shQuote(pidFile)} ]; then ` +
+    `if [ -f ${shQuote(pidFile)} ] && [ ! -f ${shQuote(exitFile)} ] && [ ! -f ${shQuote(deadFile)} ]; then ` +
     `pid=$(cat ${shQuote(pidFile)}); ` +
     `kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true; ` +
     `fi; ` +
@@ -322,9 +435,16 @@ export async function execJobInPod(
   // the whole kickoff (and thus the detached job) as the dockerd workload
   // user unless the caller asked for root.
   const result = await execInPod(deps, podName, kickoff, opts?.privileged ? { privileged: true } : undefined);
+  if (result.exitCode === KICKOFF_ID_IN_USE_EXIT) {
+    throw new Error(
+      `execJob kickoff refused: job id ${execId} already has files in ${JOBS_DIR}, so it did not start. Retry the command; a retry gets a new job id.`,
+    );
+  }
   if (result.exitCode !== 0) {
     throw new Error(`execJob kickoff failed (exit ${result.exitCode}): ${result.stderr.trim() || "no diagnostic output"}. Check the sandbox pod status before retrying.`);
   }
+  const pruned = /pruned=(\d+)/.exec(result.stdout);
+  if (pruned) recordJobLogsPruned(Number(pruned[1]));
   return { execId };
 }
 
@@ -332,7 +452,8 @@ export async function execJobInPod(
  * testing without a cluster. */
 export function parseJobStatus(statusText: string): { status: "running" | "done" | "failed"; exitCode?: number } {
   const trimmed = statusText.trim();
-  if (trimmed === "unknown") return { status: "failed" };
+  // `dead`: the job's process group is gone and it wrote no exit code.
+  if (trimmed === "unknown" || trimmed === "dead") return { status: "failed" };
   if (trimmed === "running") return { status: "running" };
   const exitCode = Number(trimmed);
   if (!/^\d+$/.test(trimmed) || exitCode > 255) {
@@ -393,7 +514,47 @@ export function incompleteUtf8TailLength(buf: Buffer): number {
 export function decodeUtf8HoldingTail(buf: Buffer): { text: string; deliveredBytes: number } {
   const heldBack = incompleteUtf8TailLength(buf);
   const deliveredBytes = buf.length - heldBack;
-  return { text: buf.subarray(0, deliveredBytes).toString("utf8"), deliveredBytes };
+  return { text: replaceInvalidUtf8(buf.subarray(0, deliveredBytes)).toString("utf8"), deliveredBytes };
+}
+
+/** True when `b` is a UTF-8 continuation byte in `[lo, hi]` (default 0x80..0xBF). */
+function cont(b: number | undefined, lo = 0x80, hi = 0xbf): boolean {
+  return b !== undefined && b >= lo && b <= hi;
+}
+
+/**
+ * Returns a copy of `buf` with every byte of an ill-formed UTF-8 sequence
+ * replaced by `?` (0x3F). The result decodes to text whose UTF-8 length
+ * equals `buf.length`, byte for byte. A plain decode turns one invalid byte
+ * into U+FFFD, three bytes long, so a caller that subtracts decoded byte
+ * lengths from raw offsets (the WakeWatcher's watch kernel) would count
+ * wrong and could re-read lines it already sent (PR review 2, item 4).
+ * Valid sequences follow the Unicode well-formed byte table: no overlongs,
+ * no surrogates, nothing above U+10FFFF. Pure; exported for unit testing.
+ */
+export function replaceInvalidUtf8(buf: Buffer): Buffer {
+  let out: Buffer | null = null;
+  let i = 0;
+  while (i < buf.length) {
+    const b = buf[i] ?? 0;
+    let n = 0;
+    if (b <= 0x7f) n = 1;
+    else if (b >= 0xc2 && b <= 0xdf) n = cont(buf[i + 1]) ? 2 : 0;
+    else if (b === 0xe0) n = cont(buf[i + 1], 0xa0) && cont(buf[i + 2]) ? 3 : 0;
+    else if ((b >= 0xe1 && b <= 0xec) || b === 0xee || b === 0xef) n = cont(buf[i + 1]) && cont(buf[i + 2]) ? 3 : 0;
+    else if (b === 0xed) n = cont(buf[i + 1], 0x80, 0x9f) && cont(buf[i + 2]) ? 3 : 0;
+    else if (b === 0xf0) n = cont(buf[i + 1], 0x90) && cont(buf[i + 2]) && cont(buf[i + 3]) ? 4 : 0;
+    else if (b >= 0xf1 && b <= 0xf3) n = cont(buf[i + 1]) && cont(buf[i + 2]) && cont(buf[i + 3]) ? 4 : 0;
+    else if (b === 0xf4) n = cont(buf[i + 1], 0x80, 0x8f) && cont(buf[i + 2]) && cont(buf[i + 3]) ? 4 : 0;
+    if (n > 0) {
+      i += n;
+      continue;
+    }
+    out ??= Buffer.from(buf);
+    out[i] = 0x3f;
+    i += 1;
+  }
+  return out ?? buf;
 }
 
 /**
@@ -411,24 +572,55 @@ export function decodeUtf8HoldingTail(buf: Buffer): { text: string; deliveredByt
  * poll's byte range instead of decoding it prematurely. This closes the gap
  * for split-but-valid UTF-8; it does NOT make arbitrary binary output
  * lossless — a job that emits genuinely non-UTF-8 bytes (not merely a
- * boundary artifact) will still see them come back as U+FFFD replacement
- * characters, same limitation as the docker provider, only reachable here
- * if the job's raw output itself isn't valid UTF-8 (a poll-boundary split of
+ * boundary artifact) sees each such byte come back as `?`
+ * (`replaceInvalidUtf8`), so the text stays exactly as long in bytes as
+ * the raw range `nextOffset` advanced over. A poll-boundary split of
  * *valid* UTF-8 is exactly what this function fixes and is no longer a
- * source of corruption).
+ * source of corruption.
  */
-export async function pollJobInPod(deps: ExecDeps, podName: string, execId: string, offset: number): Promise<JobPoll> {
-  const result = await execInPod(deps, podName, pollCommand(execId, offset));
+export async function pollJobInPod(
+  deps: ExecDeps,
+  podName: string,
+  execId: string,
+  offset: number,
+  opts: JobPollOpts = {},
+): Promise<JobPoll> {
+  const result = await execInPod(deps, podName, pollCommand(execId, offset, opts));
   if (result.exitCode !== 0) {
     throw new Error(`pollJob failed (exit ${result.exitCode}): ${result.stderr.trim() || "no diagnostic output"}. Check the sandbox pod status before retrying.`);
   }
-  const { status, exitCode } = parseJobStatus(result.stderr);
-  if (status === "failed") {
+  const [statusLine = "", sizeLine] = result.stderr.trim().split("\n");
+  const { status, exitCode } = parseJobStatus(statusLine);
+  if (statusLine.trim() === "unknown") {
     return { status, output: "", nextOffset: offset };
   }
-  const fetched = Buffer.from(result.stdout.trim(), "base64");
+  let fetched = Buffer.from(result.stdout.trim(), "base64");
+  const maxBytes = opts.maxBytes === undefined ? undefined : Math.max(0, Math.floor(opts.maxBytes));
+  if (maxBytes !== undefined && opts.tail) {
+    const size = Number(sizeLine?.trim());
+    if (!Number.isInteger(size) || size < 0) {
+      throw new Error(`pollJob: unexpected log size ${JSON.stringify(sizeLine)}. Check the sandbox pod status before retrying.`);
+    }
+    // A cut start can land inside a codepoint. Drop its continuation bytes.
+    if (size - offset > fetched.length) {
+      let skipped = 0;
+      while (skipped < fetched.length && skipped < 3 && ((fetched[skipped] ?? 0) & 0xc0) === 0x80) skipped++;
+      fetched = fetched.subarray(skipped);
+    }
+    const { text, deliveredBytes } = decodeUtf8HoldingTail(fetched);
+    const nextOffset = Math.max(offset, size - (fetched.length - deliveredBytes));
+    return { status, ...(exitCode !== undefined ? { exitCode } : {}), output: text, nextOffset };
+  }
+  let more = false;
+  if (maxBytes !== undefined && fetched.length > maxBytes) {
+    more = true;
+    fetched = fetched.subarray(0, maxBytes);
+  }
   const { text, deliveredBytes } = decodeUtf8HoldingTail(fetched);
   const nextOffset = offset + deliveredBytes;
+  // Bytes left past the cap keep the job "running" for this caller, so it
+  // polls again from nextOffset before it sees the exit.
+  if (more) return { status: "running", output: text, nextOffset };
   return { status, exitCode, output: text, nextOffset };
 }
 

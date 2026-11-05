@@ -11,6 +11,7 @@
  * a nonexistent id — this route never leaks cross-org existence via a 403.
  */
 import { Hono } from "hono";
+import { auditRequest } from "./_admin-audit.js";
 import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
 import {
@@ -27,6 +28,8 @@ import {
   validateTarget,
   type ActionLogFilters,
 } from "../policies/admin.js";
+import { prepareActionArgs } from "@valet/engine";
+import { findAction } from "../plugins/action-invoker.js";
 import { resolveActionPolicy } from "../policies/service.js";
 import { validateParamMatchers } from "../policies/matchers.js";
 import type { ActionInvocationRow, ActionPolicyRow } from "../schema/index.js";
@@ -43,6 +46,24 @@ import type {
   PreviewOrgPolicyRequest,
   PreviewOrgPolicyResponse,
 } from "../wire/types.js";
+
+/** The audited fields of an action policy row. */
+export function policyAudit(row: ActionPolicyRow): Record<string, unknown> {
+  return {
+    service: row.service,
+    actionId: row.actionId,
+    riskLevel: row.riskLevel,
+    mode: row.mode,
+    appliesIn: row.appliesIn,
+    expiresAt: row.expiresAt,
+    paramMatcherCount: Array.isArray(row.paramMatchers) ? row.paramMatchers.length : 0,
+  };
+}
+
+/** The audit target name of a policy: what it applies to. */
+export function policyTargetName(row: Pick<ActionPolicyRow, "service" | "actionId" | "riskLevel">): string {
+  return row.actionId ?? row.service ?? (row.riskLevel ? `${row.riskLevel} risk` : "policy");
+}
 
 export const policiesRouter = new Hono<AppEnv>();
 export const actionLogRouter = new Hono<AppEnv>();
@@ -161,6 +182,7 @@ policiesRouter.post("/", async (c) => {
     managedBy: user.id,
     now,
   });
+  await auditRequest(c, { action: "org_policy.create", targetType: "org_policy", targetId: row.id, targetName: policyTargetName(row), changes: policyAudit(row) });
   const resp: CreateOrgPolicyResponse = toPolicyWire(row);
   return c.json(resp, 201);
 });
@@ -209,6 +231,7 @@ policiesRouter.patch("/:id", async (c) => {
     now: Date.now(),
   });
   if (!updated) return c.json(POLICY_NOT_FOUND, 404);
+  await auditRequest(c, { action: "org_policy.update", targetType: "org_policy", targetId: id, targetName: policyTargetName(updated), changes: policyAudit(updated) });
   const resp: PatchOrgPolicyResponse = toPolicyWire(updated);
   return c.json(resp);
 });
@@ -225,6 +248,7 @@ policiesRouter.delete("/:id", async (c) => {
 
   const revoked = await revokeOrgPolicy(db, user.orgId, id, Date.now());
   if (!revoked) return c.json(POLICY_NOT_FOUND, 404);
+  await auditRequest(c, { action: "org_policy.revoke", targetType: "org_policy", targetId: id, targetName: policyTargetName(revoked), changes: policyAudit(revoked) });
   const resp: DeleteOrgPolicyResponse = toPolicyWire(revoked);
   return c.json(resp);
 });
@@ -264,13 +288,17 @@ policiesRouter.post("/preview", async (c) => {
     return c.json({ error: "workflowExecutionId is required when appliesIn is workflow" }, 400);
   }
 
+  // Preview what execution decides: schema defaults applied when the action is known.
+  const previewAction = actionPluginByService.get(body.service)?.actionPlugin.actions;
+  const action = previewAction ? findAction(previewAction, body.service, body.actionId) : undefined;
+  const prepared = action && body.params !== undefined ? prepareActionArgs(action.parameters, body.params) : undefined;
   const decision = await resolveActionPolicy(db, {
     orgId: user.orgId,
     userId: body.userId,
     service: body.service,
     actionId: body.actionId,
     riskLevel: body.riskLevel,
-    params: body.params,
+    params: prepared?.ok ? prepared.args : body.params,
     appliesIn: body.appliesIn,
     sessionId: body.sessionId,
     workflowExecutionId: body.workflowExecutionId,

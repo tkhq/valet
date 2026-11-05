@@ -1,0 +1,166 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { InMemorySessionStore, VirtualSandboxProvider, type BlobStore, type SandboxProvider } from '@valet/engine';
+import { browserSessionHooks, prepareBrowserSandboxStop } from './browser-host.js';
+import { freshTestPgDb } from '../test-helpers/pg-test-db.js';
+import { pluginStore } from './plugin-store.js';
+
+async function fixture() {
+  const { appDb } = await freshTestPgDb();
+  const store = pluginStore(appDb, 'browser');
+  const sessions = new InMemorySessionStore();
+  const now = Date.now();
+  await sessions.saveSession({ id: 'session', owner: { type: 'user', id: 'owner' }, userId: 'owner', orgId: 'org', workspace: '/', purpose: 'interactive', status: 'running', createdAt: now, updatedAt: now });
+  const base = new VirtualSandboxProvider();
+  const sandbox = await base.create({ sessionId: 'session' });
+  const commands: string[] = [];
+  vi.spyOn(sandbox, 'exec').mockImplementation(async (command, opts) => {
+    if (command.startsWith('test ')) return { exitCode: 0, stdout: '', stderr: '' };
+    const request: unknown = JSON.parse(opts?.stdin ?? '{}');
+    if (request && typeof request === 'object') commands.push(String(Reflect.get(request, 'command')));
+    return { exitCode: 0, stdout: JSON.stringify({ protocolVersion: '1.0', runtimeId: 'runtime', ok: true, events: [], cursor: 0, gap: false, audit: [], auditTotal: 0 }), stderr: '' };
+  });
+  const data = new Map<string, Uint8Array>();
+  const blobs: BlobStore = { put: async (key, bytes) => { data.set(key, bytes instanceof Uint8Array ? bytes : new Uint8Array(await new Response(bytes).arrayBuffer())); }, get: async (key) => { const bytes = data.get(key); return bytes ? { data: new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(bytes); controller.close(); } }) } : null; }, delete: async (key) => { data.delete(key); } };
+  const provider: SandboxProvider = { backend: 'fixture', capabilities: () => ({ ...base.capabilities(), browserAutomation: true }), create: (opts) => base.create(opts), restore: async () => sandbox, status: async () => ({ id: sandbox.id, state: 'released' }), list: async () => [{ id: sandbox.id, sessionId: 'session', createdAtMs: now }], destroy: (id) => base.destroy(id) };
+  return { store, sessions, sandbox, commands, blobs, data, provider };
+}
+
+describe('browser lifecycle persistence', () => {
+  beforeEach(() => vi.restoreAllMocks());
+
+  it('retains cleanup without waking compute and drains it after host reconstruction', async () => {
+    const f = await fixture();
+    await browserSessionHooks('session', f.sessions, f.blobs, f.store, f.provider).onTurnComplete?.({ sessionId: 'session', submissionId: 'submission', threadId: 'thread', actorId: 'actor', owner: { type: 'user', id: 'owner' } });
+    expect(f.commands).toEqual([]);
+    expect((await f.store.session('session').list('turn_cleanup')).items).toHaveLength(1);
+    await browserSessionHooks('session', f.sessions, f.blobs, f.store).sandboxLifecycle?.afterReady?.(f.sandbox);
+    expect(f.commands).toEqual(['turn_end']);
+    expect((await f.store.session('session').list('turn_cleanup')).items).toHaveLength(0);
+  });
+
+  it('does not retain cleanup for a sandbox-less session with no browser state', async () => {
+    const f = await fixture();
+    f.provider.list = async () => [];
+
+    await browserSessionHooks('session', f.sessions, f.blobs, f.store, f.provider).onTurnComplete?.({ sessionId: 'session', submissionId: 'submission', threadId: 'thread', actorId: 'actor', owner: { type: 'user', id: 'owner' } });
+
+    expect((await f.store.session('session').list('turn_cleanup')).items).toHaveLength(0);
+  });
+
+  it('settles a sandbox-less turn from the session inventory, never a fleet listing', async () => {
+    const f = await fixture();
+    const list = vi.fn(f.provider.list);
+    f.provider.list = list;
+    f.provider.listBrowserForSession = async (sessionId) => sessionId === 'session' ? [{ id: f.sandbox.id, sessionId, browserEnabled: true, createdAtMs: null }] : [];
+
+    await browserSessionHooks('session', f.sessions, f.blobs, f.store, f.provider).onTurnComplete?.({ sessionId: 'session', submissionId: 'submission', threadId: 'thread', actorId: 'actor', owner: { type: 'user', id: 'owner' } });
+
+    expect(list).not.toHaveBeenCalled();
+    expect((await f.store.session('session').list('turn_cleanup')).items).toHaveLength(1);
+  });
+
+  it('keeps the cleanup record and settles when the inventory read fails', async () => {
+    const f = await fixture();
+    f.provider.listBrowserForSession = async () => { throw new Error('apiserver timeout'); };
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await browserSessionHooks('session', f.sessions, f.blobs, f.store, f.provider).onTurnComplete?.({ sessionId: 'session', submissionId: 'submission', threadId: 'thread', actorId: 'actor', owner: { type: 'user', id: 'owner' } });
+
+    expect((await f.store.session('session').list('turn_cleanup')).items).toHaveLength(1);
+  });
+
+  it('exports crashed retained audit through the provider before permitting deletion', async () => {
+    const f = await fixture();
+    const read = vi.fn(async () => ({ entries: [], total: 0 }));
+    f.provider.readBrowserAudit = read;
+    await prepareBrowserSandboxStop(f.provider, f.sandbox.id, 'destroy', f.sessions, f.blobs, f.store);
+    expect(read).toHaveBeenCalledWith(f.sandbox.id);
+    expect(f.data.size).toBe(1);
+    expect(f.commands).toEqual([]);
+  });
+
+  it('blocks deletion when a retained audit reader returns a partial export', async () => {
+    const f = await fixture();
+    f.provider.readBrowserAudit = async () => ({
+      entries: [{ invocationId: 'i', cellId: 'c', operationId: 'o', sessionId: 'session', threadId: 't', actorId: 'a', runtimeId: 'r', method: 'click', hash: 'h', status: 'completed' }],
+      total: 2,
+    });
+    await expect(prepareBrowserSandboxStop(f.provider, f.sandbox.id, 'destroy', f.sessions, f.blobs, f.store)).rejects.toThrow(/incomplete/i);
+    expect(f.data.size).toBe(0);
+  });
+
+  it('exports every live audit page before it records a deletion checkpoint', async () => {
+    const f = await fixture();
+    const entries = ["one", "two"].map((operationId) => ({
+      invocationId: 'i', cellId: 'c', operationId, sessionId: 'session', threadId: 't', actorId: 'a', runtimeId: 'runtime', method: 'click', hash: operationId, status: 'completed' as const,
+    }));
+    vi.spyOn(f.sandbox, 'exec').mockImplementation(async (command, opts) => {
+      if (command.startsWith('test ')) return { exitCode: 0, stdout: '', stderr: '' };
+      const request = JSON.parse(opts?.stdin ?? '{}') as { command?: string; offset?: number };
+      const audit = request.command === 'audit' ? [entries[request.offset ?? 0]].filter(Boolean) : undefined;
+      return { exitCode: 0, stdout: JSON.stringify({ protocolVersion: '1.0', runtimeId: 'runtime', ok: true, events: [], cursor: 0, gap: false, audit, auditTotal: audit ? 2 : undefined }), stderr: '' };
+    });
+
+    await browserSessionHooks('session', f.sessions, f.blobs, f.store).sandboxLifecycle?.beforeStop(f.sandbox, 'destroy');
+
+    const bytes = [...f.data.values()][0];
+    expect(bytes).toBeDefined();
+    if (!bytes) throw new Error('Audit blob was not written.');
+    const exported = JSON.parse(new TextDecoder().decode(bytes)) as { entries: unknown[]; total: number; truncated: boolean };
+    expect(exported.entries).toHaveLength(2);
+    expect(exported.total).toBe(2);
+    expect(exported.truncated).toBe(false);
+  });
+
+  it('deletes stopped state without listing the fleet when the provider has no retained-audit reader', async () => {
+    const f = await fixture();
+    const list = vi.fn(async () => { throw new Error('fleet listing must not run'); });
+    f.provider.list = list;
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await expect(prepareBrowserSandboxStop(f.provider, f.sandbox.id, 'destroy', f.sessions, f.blobs, f.store)).resolves.toBeUndefined();
+    expect(list).not.toHaveBeenCalled();
+    expect(f.data.size).toBe(0);
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(log.mock.calls[0]?.[0]).toMatch(/no retained-audit reader; skipping the audit export check/);
+  });
+
+  it('allows cold suspended deletion only while the export checkpoint remains valid', async () => {
+    const f = await fixture();
+    f.provider.status = async () => ({ id: f.sandbox.id, state: 'idle' });
+    const read = vi.fn(async () => { throw new Error('reader must not run while the checkpoint is valid'); });
+    f.provider.readBrowserAudit = read;
+    const hooks = browserSessionHooks('session', f.sessions, f.blobs, f.store);
+    await hooks.sandboxLifecycle?.beforeStop(f.sandbox, 'suspend');
+    await expect(prepareBrowserSandboxStop(f.provider, f.sandbox.id, 'destroy', f.sessions, f.blobs, f.store)).resolves.toBeUndefined();
+    expect(read).not.toHaveBeenCalled();
+    await hooks.sandboxLifecycle?.afterReady?.(f.sandbox);
+    f.provider.readBrowserAudit = async () => ({ entries: [], total: 1 });
+    await expect(prepareBrowserSandboxStop(f.provider, f.sandbox.id, 'destroy', f.sessions, f.blobs, f.store)).rejects.toThrow('audit');
+  });
+
+  it('uses the saved export to delete a warm suspended sandbox without executing in a missing pod', async () => {
+    const f = await fixture();
+    const hooks = browserSessionHooks('session', f.sessions, f.blobs, f.store);
+    await hooks.sandboxLifecycle?.beforeStop(f.sandbox, 'suspend');
+    vi.spyOn(f.sandbox, 'exec').mockRejectedValue(new Error('pod is stopped'));
+    await expect(hooks.sandboxLifecycle?.beforeStop(f.sandbox, 'destroy', { suspended: true })).resolves.toBeUndefined();
+  });
+
+  it('keeps retained browser audit checks when new browser allocations are disabled', async () => {
+    const f = await fixture();
+    f.provider.capabilities = () => ({ snapshot: 'none', persistentWorkspace: true, tunnels: false, warmPool: false, hibernation: false, customImage: false, coldStartEstimateMs: 0, browserAutomation: false });
+    f.provider.list = async () => [{ id: f.sandbox.id, sessionId: 'session', createdAtMs: 0, browserEnabled: true }];
+    f.provider.readBrowserAudit = async () => ({ entries: [], total: 1 });
+    await expect(prepareBrowserSandboxStop(f.provider, f.sandbox.id, 'destroy', f.sessions, f.blobs, f.store)).rejects.toThrow('audit');
+  });
+
+  it('skips audit checks for sandboxes recorded without browser state', async () => {
+    const f = await fixture();
+    f.provider.list = async () => [{ id: f.sandbox.id, sessionId: 'session', createdAtMs: 0, browserEnabled: false }];
+    const read = vi.fn(async () => { throw new Error('reader must not run for a sandbox without browser state'); });
+    f.provider.readBrowserAudit = read;
+    await expect(prepareBrowserSandboxStop(f.provider, f.sandbox.id, 'destroy', f.sessions, f.blobs, f.store)).resolves.toBeUndefined();
+    expect(read).not.toHaveBeenCalled();
+    expect(f.data.size).toBe(0);
+  });
+});

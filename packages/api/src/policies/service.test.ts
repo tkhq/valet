@@ -9,11 +9,16 @@
  */
 import { PGlite } from "@electric-sql/pglite";
 import { eq } from "drizzle-orm";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { pgDbFromPglite } from "@valet/store-postgres";
-import type { DecisionResolution, PolicyInvocationRecord, PolicyResolveInput } from "@valet/engine";
+import { InMemoryCredentialStore, type DecisionResolution, type PolicyInvocationRecord, type PolicyResolveInput } from "@valet/engine";
+import { shareCredential, revokeShare } from "../services/credential-shares.js";
+import { setThreadApprovalBypass } from "../services/thread-approval-bypass.js";
+import slackPlugin from "@valet/plugin-slack/plugin";
+import { upsertOverride } from "./admin.js";
+import { qualifiedActionId } from "../plugins/action-id.js";
 import { applyAppMigrations, buildAppDb, type AppDb } from "../lib/drizzle.js";
-import { agentSessions, actionInvocations, actionPolicies, actionPolicyOverrides, orgMembers, orgs, runtimeGrants, users } from "../schema/index.js";
+import { assistants, agentSessions, childWatches, actionInvocations, credentials as credentialRows, actionPolicies, actionPolicyOverrides, orgMembers, orgs, runtimeGrants, teams, users } from "../schema/index.js";
 import {
   AlwaysAllowNotAdminError,
   alwaysAllowPolicyId,
@@ -30,7 +35,9 @@ import {
   writeExecutionGrant,
   writeSessionGrant,
   GATE_ACTION_ALWAYS_ALLOW,
+  GATE_ACTION_ALWAYS_ALLOW_OWNER,
   GATE_ACTION_APPROVE_SESSION,
+  ownerAlwaysAllowRefusal,
 } from "./service.js";
 
 const ORG = "org_test";
@@ -49,6 +56,8 @@ async function reset(): Promise<void> {
   await pg.query("DELETE FROM action_policies");
   await pg.query("DELETE FROM action_policy_overrides");
   await pg.query("DELETE FROM action_invocations");
+  await pg.query("DELETE FROM session_threads");
+  await pg.query("DELETE FROM child_watches");
 }
 
 beforeAll(async () => {
@@ -280,6 +289,14 @@ describe("persistInvocationAudit", () => {
 // ── updateInvocationOutcome ───────────────────────────────────────
 
 describe("updateInvocationOutcome", () => {
+  it("records execution start after a workflow approval wait", async () => {
+    await persistInvocationAudit(db, { invocationId: "inv-start", orgId: ORG, status: "pending", createdAt: 1000 });
+    await updateInvocationOutcome(db, "inv-start", ORG, { status: "completed", startedAt: 9000, durationMs: 20 });
+    const row = (await db.select().from(actionInvocations).where(eq(actionInvocations.invocationId, "inv-start")))[0];
+    expect(row.createdAt).toBe(1000);
+    expect(row.startedAt).toBe(9000);
+  });
+
   it("stamps resolvedBy on a row when provided", async () => {
     // Seed an invocation row
     await persistInvocationAudit(db, { invocationId: "inv1", orgId: ORG, status: "pending" });
@@ -445,6 +462,24 @@ describe("buildPolicyResolver", () => {
 // ── loadPolicyRows shape ───────────────────────────────────────────
 
 describe("loadPolicyRows", () => {
+  it("preserves legacy personal allows in chat and workflows within their original scope", async () => {
+    await db.insert(actionPolicyOverrides).values([
+      { id: "old-allow", orgId: ORG, userId: MEMBER, actionId: "gmail.send_email", paramMatchers: [{ path: "to", op: "eq", value: "approved@example.com" }], mode: "allow", legacyUnscoped: true, createdAt: 1, updatedAt: 1 },
+      { id: "old-deny", orgId: ORG, userId: MEMBER, actionId: "github.create_issue", mode: "deny", legacyUnscoped: true, createdAt: 1, updatedAt: 1 },
+    ]);
+    const input = { service: "gmail", actionId: "gmail.send_email", riskLevel: "high", params: { to: "approved@example.com" },
+      userId: MEMBER, orgId: ORG, sessionId: SESSION, pluginDefault: undefined, now: 2 } as const;
+    for (const appliesIn of ["session", "workflow"] as const) {
+      expect((await resolveActionPolicy(db, { ...input, appliesIn, workflowExecutionId: RUN })).mode).toBe("allow");
+    }
+    expect((await loadPolicyRows(db, { orgId: ORG, userId: MEMBER, sessionId: SESSION })).overrides.map(row => row.id)).toEqual(["old-allow", "old-deny"]);
+    expect((await resolveActionPolicy(db, { ...input, userId: ADMIN, appliesIn: "session" })).mode).toBe("require_approval");
+    expect((await resolveActionPolicy(db, { ...input, params: { to: "other@example.com" }, appliesIn: "session" })).mode).toBe("require_approval");
+    expect((await resolveActionPolicy(db, { ...input, actionId: "gmail.delete_email", appliesIn: "session" })).mode).toBe("require_approval");
+    expect((await loadPolicyRows(db, { orgId: "other-org", userId: MEMBER })).overrides).toEqual([]);
+    expect(await upsertOverride(db, ORG, MEMBER, { service: "gmail", mode: "allow", now: 3 }, { actionPluginByService: new Map() })).toMatchObject({ ok: true });
+    expect((await resolveActionPolicy(db, { ...input, appliesIn: "session" })).mode).toBe("allow");
+  });
   it("loads org policies + session grants + user overrides for the scope", async () => {
     await db.insert(actionPolicies).values({
       id: "p1", orgId: ORG, principalType: "org", principalId: ORG,
@@ -461,9 +496,37 @@ describe("loadPolicyRows", () => {
     expect(rows.policies).toHaveLength(1);
     expect(rows.grants).toHaveLength(1);
     expect(rows.overrides).toHaveLength(1);
+    // A newcomer's turn is not covered by a teammate's session-wide approval.
+    expect((await loadPolicyRows(db, { orgId: ORG, userId: MEMBER, sessionId: SESSION, externalSender: true })).grants).toEqual([]);
   });
 });
 
+
+describe("personal policy ownership", () => {
+  it("applies the owner's overrides to another member's turn in the owner's session", async () => {
+    // A member who replies in the owner's shared thread runs under the
+    // owner's permission settings, never their own.
+    await db.insert(agentSessions).values({ id: SESSION, userId: ADMIN, orgId: ORG, workspace: "test", ownerType: "user", ownerId: ADMIN, createdAt: 1, updatedAt: 1 });
+    await db.insert(actionPolicyOverrides).values([
+      { id: "owner-ask", orgId: ORG, userId: ADMIN, service: "gmail", mode: "require_approval", createdAt: 1, updatedAt: 1 },
+      { id: "replier-allow", orgId: ORG, userId: MEMBER, service: "gmail", mode: "allow", createdAt: 1, updatedAt: 1 },
+    ]);
+    const rows = await loadPolicyRows(db, { orgId: ORG, userId: MEMBER, sessionId: SESSION });
+    expect(rows.overrides.map((row) => row.id)).toEqual(["owner-ask"]);
+    const decision = await resolveActionPolicy(db, { service: "gmail", actionId: "gmail.send_email", riskLevel: "low", params: {},
+      userId: MEMBER, orgId: ORG, sessionId: SESSION, appliesIn: "session", pluginDefault: undefined, now: 2 });
+    expect(decision).toMatchObject({ mode: "require_approval", provenance: { source: "override" } });
+  });
+
+  it("leaves the owner's session grants out of another member's turn", async () => {
+    // An approval the owner gave for the session covers the owner's turns.
+    // A reply in the shared thread asks the owner again.
+    await db.insert(agentSessions).values({ id: SESSION, userId: ADMIN, orgId: ORG, workspace: "test", ownerType: "user", ownerId: ADMIN, createdAt: 1, updatedAt: 1 });
+    await writeSessionGrant(db, SESSION, { orgId: ORG, service: "github", actionId: "create_issue", grantedBy: ADMIN, now: 1 });
+    expect((await loadPolicyRows(db, { orgId: ORG, userId: ADMIN, sessionId: SESSION })).grants).toHaveLength(1);
+    expect((await loadPolicyRows(db, { orgId: ORG, userId: MEMBER, sessionId: SESSION })).grants).toEqual([]);
+  });
+});
 
 describe("team policy ownership", () => {
   async function seedTeamRule() {
@@ -485,5 +548,302 @@ describe("team policy ownership", () => {
     const resolver = buildPolicyResolver({ db, actionPluginByService: new Map() });
     expect(await resolver.resolve({ ...input, sessionId: "wf:run:triage", teamId: "team-a" })).toMatchObject({ mode: "require_approval", provenance: { source: "team_policy" } });
     expect(await resolver.resolve({ ...input, sessionId: "wf:other:triage", teamId: "team-b" })).toMatchObject({ mode: "allow", provenance: { source: "risk_default" } });
+  });
+});
+
+describe("another member's shared account", () => {
+  const TEAM = "team-share";
+  const input: PolicyResolveInput = {
+    teamId: TEAM, service: "linear", actionId: "linear.create_issue", riskLevel: "low", params: {},
+    userId: ADMIN, orgId: ORG, sessionId: SESSION, threadId: "thread-1", appliesIn: "session",
+  };
+  async function sharedByMember() {
+    await db.insert(teams).values({ id: TEAM, orgId: ORG, name: "Shared", createdAt: 1 }).onConflictDoNothing();
+    await db.insert(agentSessions).values({ id: SESSION, userId: ADMIN, orgId: ORG, workspace: "test", ownerType: "team", ownerId: TEAM, createdAt: 1, updatedAt: 1 });
+    await pg.query(`INSERT INTO team_members(team_id, user_id, role) VALUES ('${TEAM}', '${MEMBER}', 'member'), ('${TEAM}', '${ADMIN}', 'admin') ON CONFLICT DO NOTHING`);
+    await shareCredential(db, { teamId: TEAM, service: "linear", userId: MEMBER, createdAt: 1 });
+    const credentials = new InMemoryCredentialStore();
+    await credentials.save({ type: "user", id: MEMBER }, "linear", { type: "api_key", apiKey: "member-key" });
+    return buildPolicyResolver({ db, actionPluginByService: new Map(), credentials });
+  }
+
+  it("asks that member, and only them, before an action uses their account", async () => {
+    const resolver = await sharedByMember();
+    const decision = await resolver.resolve(input);
+    expect(decision).toMatchObject({ mode: "require_approval", provenance: { source: "shared_account" }, approver: { userId: MEMBER, name: "Member" } });
+
+    // Another person's approval is refused, and grants nothing.
+    await expect(resolver.onResolution!(input, decision, { actionId: "approve", resolvedBy: ADMIN, resolvedAt: 1 })).rejects.toThrow(/Only Member/);
+    expect((await resolver.resolve(input)).approver).toBeDefined();
+
+    // The member's approval holds for this conversation.
+    await resolver.onResolution!(input, decision, { actionId: "approve", resolvedBy: MEMBER, resolvedAt: 1 });
+    expect((await resolver.resolve(input)).approver).toBeUndefined();
+    expect(await resolver.resolve({ ...input, userId: "outsider" })).toMatchObject({ mode: "deny", provenance: { source: "shared_account" } });
+    expect(await resolver.resolve({ ...input, userId: `team:${TEAM}` })).toMatchObject({ mode: "deny" });
+    // A Slack sender with no Valet account in the same thread does not ride it.
+    expect((await resolver.resolve({ ...input, externalSender: true })).approver).toMatchObject({ userId: MEMBER, name: "Member" });
+    expect((await resolver.resolve({ ...input, threadId: "thread-2" })).approver).toMatchObject({ userId: MEMBER, name: "Member" });
+    await revokeShare(db, { teamId: TEAM, service: "linear", userId: MEMBER });
+    await shareCredential(db, { teamId: TEAM, service: "linear", userId: MEMBER, createdAt: 1 });
+    await expect(resolver.onResolution!(input, decision, { actionId: "approve", resolvedBy: MEMBER, resolvedAt: 2 })).rejects.toThrow(/share changed/);
+    const fresh = await resolver.resolve(input);
+    expect(fresh.approver?.shareGeneration).not.toBe(decision.approver?.shareGeneration);
+    await resolver.onResolution!(input, fresh, { actionId: "approve", resolvedBy: MEMBER, resolvedAt: 3 });
+    expect((await resolver.resolve(input)).approver).toBeUndefined();
+  });
+
+  it("saves explicit account consent without allowing a separate action policy", async () => {
+    const resolver = await sharedByMember();
+    await db.insert(credentialRows).values({ ownerType: "user", ownerId: MEMBER, service: "linear", type: "api_key", apiKeyEnc: "test", createdAt: 1, updatedAt: 1 }).onConflictDoNothing();
+    await db.insert(actionPolicies).values({ id: "account-still-asks", orgId: ORG, principalType: "org", principalId: ORG, service: "linear", mode: "require_approval", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 1, updatedAt: 1 });
+    const decision = await resolver.resolve(input);
+    expect(decision.approver?.allowTeamConsent).toBe(true);
+    const answer: DecisionResolution = { actionId: "always_allow_account", resolvedBy: MEMBER, resolvedAt: 1, source: { channelType: "web" } };
+    await expect(resolver.onResolution?.(input, decision, { ...answer, resolvedBy: ADMIN })).rejects.toThrow(/Only Member/);
+    await expect(resolver.onResolution?.(input, decision, { ...answer, source: undefined })).rejects.toThrow(/Open this account approval/);
+    await resolver.onResolution?.(input, decision, answer);
+    const later = await resolver.resolve({ ...input, threadId: "later-thread" });
+    expect(later.approver).toBeUndefined();
+    expect(later).toMatchObject({ mode: "require_approval", provenance: { source: "org_policy" } });
+    expect(await db.select().from(runtimeGrants)).toEqual([]);
+  });
+
+  it("lets a live unattended workspace runtime ask its lender and reuse only that thread's consent", async () => {
+    const resolver = await sharedByMember();
+    await db.insert(assistants).values({ id: "borrow-runtime", orgId: ORG, ownerType: "team", ownerId: TEAM, sessionId: SESSION, createdAt: 1 });
+    const machine = { ...input, userId: `team:${TEAM}` };
+    const decision = await resolver.resolve(machine);
+    expect(decision).toMatchObject({ mode: "require_approval", approver: { userId: MEMBER } });
+    await expect(resolver.onResolution!(machine, decision, { actionId: "approve", resolvedBy: ADMIN, resolvedAt: 1 })).rejects.toThrow(/Only Member/);
+    await resolver.onResolution!(machine, decision, { actionId: "approve", resolvedBy: MEMBER, resolvedAt: 1 });
+    expect(await resolver.resolve(machine)).toMatchObject({ mode: "allow" });
+    expect((await resolver.resolve({ ...machine, threadId: "another-thread" })).approver).toMatchObject({ userId: MEMBER });
+    expect((await resolver.resolve({ ...machine, externalSender: true })).approver).toMatchObject({ userId: MEMBER });
+    await db.update(assistants).set({ archivedAt: 2 }).where(eq(assistants.id, "borrow-runtime"));
+    expect(await resolver.resolve(machine)).toMatchObject({ mode: "deny" });
+    await db.delete(assistants).where(eq(assistants.id, "borrow-runtime"));
+  });
+
+  it("never asks the member acting on their own account", async () => {
+    const resolver = await sharedByMember();
+    expect((await resolver.resolve({ ...input, userId: MEMBER })).approver).toBeUndefined();
+  });
+
+  afterEach(async () => {
+    await pg.query("DELETE FROM credential_shares");
+    await pg.query(`DELETE FROM team_members WHERE team_id = '${TEAM}'`);
+  });
+});
+
+describe("always allow for the session's owner", () => {
+  const TEAM = "team-owner";
+  const TEAM_ADMIN = "user_team_admin";
+  const slackActions = slackPlugin.actions?.find((plugin) => plugin.service === "slack");
+  const send = slackActions?.actions.find((action) => action.id.endsWith("send_message"));
+  if (!slackActions || !send) throw new Error("The Slack plugin must declare send_message.");
+  const SEND = qualifiedActionId("slack", send);
+  const resolver = buildPolicyResolver({ db, actionPluginByService: new Map([["slack", { plugin: slackPlugin, actionPlugin: slackActions }]]), clock: () => 7000 });
+  const input: PolicyResolveInput = {
+    service: "slack", actionId: SEND, riskLevel: send.riskLevel, params: { channel: "C1", text: "promoted" },
+    userId: MEMBER, orgId: ORG, sessionId: SESSION, threadId: "t1", appliesIn: "session",
+  };
+  const ownerOption = (decision: { extraGateActions?: { id: string; label: string }[] }) =>
+    decision.extraGateActions?.find((action) => action.id === GATE_ACTION_ALWAYS_ALLOW_OWNER);
+  const resolution = (resolvedBy: string): DecisionResolution => ({ actionId: GATE_ACTION_ALWAYS_ALLOW_OWNER, resolvedBy, resolvedAt: 1, gateOrdinal: 0 });
+
+  async function personalSession(id: string) {
+    await db.insert(agentSessions).values({ id, userId: MEMBER, orgId: ORG, workspace: "test", ownerType: "user", ownerId: MEMBER, createdAt: 1, updatedAt: 1 });
+  }
+
+  async function teamSession() {
+    await db.insert(users).values({ id: TEAM_ADMIN, name: "Team admin", email: "t@x.co", emailVerified: true, createdAt: new Date(), updatedAt: new Date() }).onConflictDoNothing();
+    await db.insert(orgMembers).values({ orgId: ORG, userId: TEAM_ADMIN, role: "member", createdAt: 1 }).onConflictDoNothing();
+    await db.insert(teams).values({ id: TEAM, orgId: ORG, name: "Releases", createdAt: 1 }).onConflictDoNothing();
+    await pg.query(`INSERT INTO team_members(team_id, user_id, role) VALUES ('${TEAM}', '${MEMBER}', 'member'), ('${TEAM}', '${TEAM_ADMIN}', 'admin') ON CONFLICT DO NOTHING`);
+    await db.insert(agentSessions).values({ id: SESSION, userId: MEMBER, orgId: ORG, workspace: "test", ownerType: "team", ownerId: TEAM, createdAt: 1, updatedAt: 1 });
+  }
+
+  afterEach(async () => {
+    await pg.query(`DELETE FROM team_members WHERE team_id = '${TEAM}'`);
+  });
+
+  it("lets a member allow an action for their own sessions, so the next run does not ask", async () => {
+    await personalSession(SESSION);
+    const first = await resolver.resolve(input);
+    expect(first.mode).toBe("require_approval");
+    expect(ownerOption(first)?.label).toBe("Always allow for me");
+    await resolver.onResolution?.(input, first, resolution(MEMBER));
+    // Each run or event starts a new session. The member's own setting covers it.
+    await personalSession("sess_next_run");
+    expect(await resolver.resolve({ ...input, sessionId: "sess_next_run" })).toMatchObject({ mode: "allow", provenance: { source: "override" } });
+    expect(await db.select().from(actionPolicies)).toEqual([]);
+  });
+
+  it("offers and writes the owner's allow for a dynamic (MCP) tool from the call's own facts, with no listing", async () => {
+    // A dynamic service declares no static actions. The engine resolved the
+    // called tool live, so the gate verifies it from the call's service and
+    // risk level and never lists the server (the host wires no probes here).
+    const grafana = { service: "grafana", actions: [], resolveActions: async () => { throw new Error("must not list"); } };
+    const dynamicResolver = buildPolicyResolver({
+      db,
+      actionPluginByService: new Map([["grafana", { plugin: { name: "mcp-config:grafana", version: "0.0.0", actions: [grafana] }, actionPlugin: grafana }]]),
+      clock: () => 7000,
+    });
+    const call: PolicyResolveInput = { ...input, service: "grafana", actionId: "grafana.query_sql", riskLevel: "high", params: { sql: "select 1" } };
+    await personalSession(SESSION);
+    const first = await dynamicResolver.resolve(call);
+    expect(first.mode).toBe("require_approval");
+    expect(ownerOption(first)?.label).toBe("Always allow for me");
+    await dynamicResolver.onResolution?.(call, first, resolution(MEMBER));
+    expect(await db.select().from(actionPolicyOverrides)).toContainEqual(expect.objectContaining({ actionId: "grafana.query_sql", mode: "allow" }));
+    await personalSession("sess_next_run");
+    expect(await dynamicResolver.resolve({ ...call, sessionId: "sess_next_run" })).toMatchObject({ mode: "allow", provenance: { source: "override" } });
+  });
+
+  it("refuses another member's choice in a personal session", async () => {
+    await personalSession(SESSION);
+    expect(await ownerAlwaysAllowRefusal(db, { orgId: ORG, sessionId: SESSION }, ADMIN)).toBe("Only the owner of this conversation can always allow this. Approve it once instead.");
+    const decision = await resolver.resolve(input);
+    await expect(resolver.onResolution?.(input, decision, resolution(ADMIN))).rejects.toThrow("Only the owner of this conversation");
+    expect(await db.select().from(actionPolicyOverrides)).toEqual([]);
+  });
+
+  it("lets any team member stop the asking for the whole team, without the session option", async () => {
+    await teamSession();
+    const teamInput = { ...input, teamId: TEAM };
+    const decision = await resolver.resolve(teamInput);
+    expect(ownerOption(decision)?.label).toBe("Always allow for this team");
+    expect((decision.extraGateActions ?? []).map((action) => action.id)).toEqual([GATE_ACTION_ALWAYS_ALLOW_OWNER, GATE_ACTION_ALWAYS_ALLOW]);
+    expect(await ownerAlwaysAllowRefusal(db, { orgId: ORG, sessionId: SESSION, riskLevel: "high", service: "slack", actionId: SEND }, MEMBER)).toBeUndefined();
+    // A gate that does not name its action is refused, since the team's rules cannot be checked.
+    expect(await ownerAlwaysAllowRefusal(db, { orgId: ORG, sessionId: SESSION, riskLevel: "high" }, MEMBER)).toBe("A team rule covers this action, and only a team admin can change it. Approve it once, or ask a team admin.");
+    await resolver.onResolution?.(teamInput, decision, resolution(MEMBER));
+    expect(await resolver.resolve(teamInput)).toMatchObject({ mode: "allow", provenance: { source: "team_policy" } });
+  });
+
+  it("keeps a critical action's team allow for team admins, and refuses someone outside the team", async () => {
+    await teamSession();
+    const OUTSIDER = "user_outsider";
+    await db.insert(users).values({ id: OUTSIDER, name: "Outsider", email: "o@x.co", emailVerified: true, createdAt: new Date(), updatedAt: new Date() }).onConflictDoNothing();
+    await db.insert(orgMembers).values({ orgId: ORG, userId: OUTSIDER, role: "member", createdAt: 1 }).onConflictDoNothing();
+    const critical = { orgId: ORG, sessionId: SESSION, riskLevel: "critical" as const };
+    expect(await ownerAlwaysAllowRefusal(db, critical, MEMBER)).toBe("Only a team admin can always allow a critical action for the team. Approve it once, or ask a team admin.");
+    expect(await ownerAlwaysAllowRefusal(db, critical, TEAM_ADMIN)).toBeUndefined();
+    expect(await ownerAlwaysAllowRefusal(db, { orgId: ORG, sessionId: SESSION, riskLevel: "high" }, OUTSIDER)).toBe("Only a member of this team can always allow this for the team. Approve it once instead.");
+    const teamInput = { ...input, teamId: TEAM, riskLevel: "critical" as const };
+    const decision = await resolver.resolve(teamInput);
+    await expect(resolver.onResolution?.(teamInput, decision, resolution(MEMBER))).rejects.toThrow("Only a team admin can always allow a critical action");
+  });
+
+  it("keeps a team admin's rule that asks for team admins to loosen", async () => {
+    await teamSession();
+    await db.insert(actionPolicies).values({ id: "team-ask", orgId: ORG, principalType: "team", principalId: TEAM, actionId: SEND, mode: "require_approval", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 1, updatedAt: 1 });
+    const teamInput = { ...input, teamId: TEAM };
+    const decision = await resolver.resolve(teamInput);
+    expect(decision.provenance.source).toBe("team_policy");
+    expect(ownerOption(decision)?.label).toBe("Always allow for this team");
+    // The member keeps a lasting choice they may pick.
+    expect((decision.extraGateActions ?? []).map((action) => action.id)).toContain(GATE_ACTION_APPROVE_SESSION);
+    const action = { orgId: ORG, sessionId: SESSION, riskLevel: "high" as const, service: "slack", actionId: SEND };
+    expect(await ownerAlwaysAllowRefusal(db, action, MEMBER)).toBe("A team rule covers this action, and only a team admin can change it. Approve it once, or ask a team admin.");
+    await expect(resolver.onResolution?.(teamInput, decision, resolution(MEMBER))).rejects.toThrow("only a team admin can change it");
+    expect(await resolver.resolve(teamInput)).toMatchObject({ mode: "require_approval", provenance: { source: "team_policy" } });
+    await resolver.onResolution?.(teamInput, decision, resolution(TEAM_ADMIN));
+    expect(await resolver.resolve(teamInput)).toMatchObject({ mode: "allow", provenance: { source: "team_policy" } });
+  });
+
+  it("reads the team's current rules when a member answers an older card", async () => {
+    await teamSession();
+    const teamInput = { ...input, teamId: TEAM };
+    // The card opened while no team rule named the action.
+    const decision = await resolver.resolve(teamInput);
+    expect(decision.provenance.source).not.toBe("team_policy");
+    expect(ownerOption(decision)).toBeDefined();
+    // A team admin adds a rule before the member clicks.
+    await db.insert(actionPolicies).values({ id: "team-late", orgId: ORG, principalType: "team", principalId: TEAM, actionId: SEND, mode: "require_approval", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 2, updatedAt: 2 });
+    await expect(resolver.onResolution?.(teamInput, decision, resolution(MEMBER))).rejects.toThrow("only a team admin can change it");
+    expect(await resolver.resolve(teamInput)).toMatchObject({ mode: "require_approval", provenance: { source: "team_policy" } });
+  });
+
+  describe("run without asking", () => {
+    const thread = (id: string, sessionId = SESSION) => ({ id, sessionId, createdAt: 1 });
+
+    it("approves what the owner could always allow, in their own turns only", async () => {
+      await personalSession(SESSION);
+      await setThreadApprovalBypass(db, thread("t1"), MEMBER);
+      expect(await resolver.resolve(input)).toMatchObject({ mode: "allow", provenance: { source: "thread_bypass" } });
+      // Another thread, and another person's turn in this one, still ask.
+      expect((await resolver.resolve({ ...input, threadId: "t2" })).mode).toBe("require_approval");
+      expect((await resolver.resolve({ ...input, userId: ADMIN })).mode).toBe("require_approval");
+      await setThreadApprovalBypass(db, thread("t1"), null);
+      expect((await resolver.resolve(input)).mode).toBe("require_approval");
+      // Nothing lasting was written: the setting is the thread's, not a policy.
+      expect(await db.select().from(actionPolicyOverrides)).toEqual([]);
+    });
+
+    it("still asks for a critical action", async () => {
+      await personalSession(SESSION);
+      await setThreadApprovalBypass(db, thread("t1"), MEMBER);
+      expect((await resolver.resolve({ ...input, riskLevel: "critical" })).mode).toBe("require_approval");
+    });
+
+    it("covers the child agents the thread starts, and stops for them when it is turned off", async () => {
+      await personalSession(SESSION);
+      await personalSession("sess_child");
+      await personalSession("sess_grandchild");
+      await db.insert(childWatches).values([
+        { childSessionId: "sess_child", queueItemId: "q1", parentSessionId: SESSION, parentThreadId: "t1", actorUserId: MEMBER, orgId: ORG, createdAt: 1 },
+        { childSessionId: "sess_grandchild", queueItemId: "q2", parentSessionId: "sess_child", parentThreadId: "ct", actorUserId: MEMBER, orgId: ORG, createdAt: 1 },
+      ]);
+      const grandchild = { ...input, sessionId: "sess_grandchild", threadId: "gt" };
+      expect((await resolver.resolve(grandchild)).mode).toBe("require_approval");
+      await setThreadApprovalBypass(db, thread("t1"), MEMBER);
+      expect(await resolver.resolve(grandchild)).toMatchObject({ mode: "allow", provenance: { source: "thread_bypass" } });
+      await setThreadApprovalBypass(db, thread("t1"), null);
+      expect((await resolver.resolve(grandchild)).mode).toBe("require_approval");
+    });
+
+    it("covers team members and the team's own runs, but not an action a team rule names", async () => {
+      await teamSession();
+      await setThreadApprovalBypass(db, thread("t1"), TEAM_ADMIN);
+      const teamInput = { ...input, teamId: TEAM };
+      expect(await resolver.resolve(teamInput)).toMatchObject({ mode: "allow", provenance: { source: "thread_bypass" } });
+      expect((await resolver.resolve({ ...teamInput, userId: `team:${TEAM}` })).mode).toBe("allow");
+      expect((await resolver.resolve({ ...teamInput, userId: ADMIN })).mode).toBe("require_approval");
+      await db.insert(actionPolicies).values({ id: "team-ask-bypass", orgId: ORG, principalType: "team", principalId: TEAM, actionId: SEND, mode: "require_approval", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 1, updatedAt: 1 });
+      expect(await resolver.resolve(teamInput)).toMatchObject({ mode: "require_approval", provenance: { source: "team_policy" } });
+    });
+
+    it("never covers a sender with no Valet account", async () => {
+      await personalSession(SESSION);
+      await setThreadApprovalBypass(db, thread("t1"), MEMBER);
+      expect((await resolver.resolve({ ...input, externalSender: true })).mode).toBe("require_approval");
+    });
+  });
+
+  it("leaves the team option out when a conditional team rule would still ask for this call", async () => {
+    await teamSession();
+    await db.insert(actionPolicies).values({ id: "team-c1", orgId: ORG, principalType: "team", principalId: TEAM, actionId: SEND, mode: "require_approval", paramMatchers: [{ path: "channel", op: "eq", value: "C1" }], appliesIn: "any", origin: "admin", createdAt: 1, updatedAt: 1 });
+    const teamInput = { ...input, teamId: TEAM };
+    // The C1 rule outranks an unconditional allow, so writing one would change nothing.
+    expect(ownerOption(await resolver.resolve(teamInput))).toBeUndefined();
+    // Another channel does not match the rule: the option is offered and works.
+    const otherChannel = { ...teamInput, params: { channel: "C2", text: "promoted" } };
+    const decision = await resolver.resolve(otherChannel);
+    expect(ownerOption(decision)?.label).toBe("Always allow for this team");
+    // A member's allow would outrank the C1 rule, so only a team admin may write it.
+    await expect(resolver.onResolution?.(otherChannel, decision, resolution(MEMBER))).rejects.toThrow("only a team admin can change it");
+    expect((decision.extraGateActions ?? []).map((action) => action.id)).toContain(GATE_ACTION_APPROVE_SESSION);
+    await resolver.onResolution?.(otherChannel, decision, resolution(TEAM_ADMIN));
+    expect(await resolver.resolve(otherChannel)).toMatchObject({ mode: "allow", provenance: { source: "team_policy" } });
+  });
+
+  it("leaves the option out when an org policy requires approval for the action", async () => {
+    await personalSession(SESSION);
+    await db.insert(actionPolicies).values({ id: "org-ask", orgId: ORG, principalType: "org", principalId: ORG, actionId: SEND, mode: "require_approval", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 1, updatedAt: 1 });
+    const decision = await resolver.resolve(input);
+    expect(decision.mode).toBe("require_approval");
+    expect((decision.extraGateActions ?? []).map((action) => action.id)).toEqual([GATE_ACTION_APPROVE_SESSION, GATE_ACTION_ALWAYS_ALLOW]);
   });
 });

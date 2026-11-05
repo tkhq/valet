@@ -36,18 +36,39 @@ export function extractStructuredOutput(text: string, schema: TSchema): { output
 }
 
 const FENCED_JSON_RE = /```json\s*\n?([\s\S]*?)```/g;
+// A closing fence on its own line. Valid JSON cannot hold a raw line break
+// inside a string, so a ``` inside a string value cannot end this block.
+const LINE_FENCED_JSON_RE = /```json[ \t]*\n([\s\S]*?)\n[ \t]*```/g;
+
+function lastFencedBlock(text: string, re: RegExp): string | undefined {
+  let lastMatch: string | undefined;
+  for (const match of text.matchAll(re)) {
+    lastMatch = match[1];
+  }
+  return lastMatch;
+}
+
+function parses(candidate: string): boolean {
+  try {
+    JSON.parse(candidate);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function extractCandidate(text: string): string | undefined {
   const trimmed = text.trim();
   if (trimmed.length === 0) return undefined;
 
-  let lastMatch: string | undefined;
-  for (const match of trimmed.matchAll(FENCED_JSON_RE)) {
-    lastMatch = match[1];
-  }
-  if (lastMatch !== undefined) {
-    return lastMatch.trim();
-  }
+  // The original match wins whenever it parses, so every reply that parsed
+  // before reads the same. The line match is only a fallback, for a code
+  // fence inside a JSON string that cut the original match short.
+  const lastMatch = lastFencedBlock(trimmed, FENCED_JSON_RE)?.trim();
+  if (lastMatch !== undefined && parses(lastMatch)) return lastMatch;
+  const lineMatch = lastFencedBlock(trimmed, LINE_FENCED_JSON_RE)?.trim();
+  if (lineMatch !== undefined && parses(lineMatch)) return lineMatch;
+  if (lastMatch !== undefined) return lastMatch;
 
   return trimmed;
 }

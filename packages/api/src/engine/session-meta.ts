@@ -44,6 +44,8 @@ export interface SessionMetaSource {
   /** Request a rootless docker daemon inside the sandbox (docker-in-sandbox).
    * Omitted by orchestrator/child callers. */
   docker?: boolean;
+  /** Persisted nested Kubernetes request. */
+  kubernetes?: boolean;
   /** Per-child CPU and memory overrides persisted on the app session row. */
   sandboxResourceOverrides?: PrebuildResources | null;
   /**
@@ -99,6 +101,7 @@ export async function loadSessionMeta(db: AppDb, src: SessionMetaSource): Promis
       fullName: r.fullName,
       cloneUrl: r.cloneUrl,
       ref: r.ref ?? undefined,
+      resolvedRef: r.resolvedRef ?? undefined,
       auth: r.auth,
     }));
     // Check whether any row is missing a target_dir (legacy session).
@@ -116,6 +119,7 @@ export async function loadSessionMeta(db: AppDb, src: SessionMetaSource): Promis
     workspace: src.workspace,
     ...(src.profile !== undefined ? { profile: src.profile } : {}),
     ...(src.docker !== undefined ? { docker: src.docker } : {}),
+    ...(src.kubernetes !== undefined ? { kubernetes: src.kubernetes } : {}),
     ...(src.sandboxResourceOverrides !== undefined && src.sandboxResourceOverrides !== null
       ? { sandboxResourceOverrides: src.sandboxResourceOverrides }
       : {}),

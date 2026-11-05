@@ -1,9 +1,10 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { ChevronRight, Minus, Move, Plus, RotateCcw } from "lucide-react";
 import { CodeBlock } from "./code-block";
 import { renderMermaid } from "~/lib/mermaid";
 import { useMermaidTheme } from "~/lib/use-mermaid-theme";
 import { cn } from "~/lib/cn";
+import { Button } from "~/components/primitives";
 
 interface RenderState {
   source: string;
@@ -96,7 +97,7 @@ export function MermaidDiagram({ source }: { source: string }) {
           <button
             type="button"
             onClick={() => setCollapsed((value) => !value)}
-            className="flex min-w-0 flex-1 items-center gap-2 text-left text-xs font-mono hover:text-accent-600 dark:hover:text-accent-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40"
+            className="flex min-w-0 flex-1 items-center gap-2 text-left text-xs font-mono hover:text-accent-600 dark:hover:text-accent-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss/40"
             aria-expanded={!collapsed}
             aria-controls={`mermaid-body-${reactId}`}
           >
@@ -111,15 +112,15 @@ export function MermaidDiagram({ source }: { source: string }) {
           </button>
           {!collapsed && (
             <div className="flex shrink-0 items-center gap-0.5" aria-label="Diagram controls">
-              <DiagramButton label="Zoom out" onClick={() => changeScale(-SCALE_STEP)}>
+              <Button variant="ghost" size="icon" aria-label="Zoom out" title="Zoom out" onClick={() => changeScale(-SCALE_STEP)}>
                 <Minus className="h-3.5 w-3.5" aria-hidden />
-              </DiagramButton>
-              <DiagramButton label="Zoom in" onClick={() => changeScale(SCALE_STEP)}>
+              </Button>
+              <Button variant="ghost" size="icon" aria-label="Zoom in" title="Zoom in" onClick={() => changeScale(SCALE_STEP)}>
                 <Plus className="h-3.5 w-3.5" aria-hidden />
-              </DiagramButton>
-              <DiagramButton label="Reset diagram view" onClick={resetViewport}>
+              </Button>
+              <Button variant="ghost" size="icon" aria-label="Reset diagram view" title="Reset diagram view" onClick={resetViewport}>
                 <RotateCcw className="h-3.5 w-3.5" aria-hidden />
-              </DiagramButton>
+              </Button>
             </div>
           )}
         </header>
@@ -128,7 +129,7 @@ export function MermaidDiagram({ source }: { source: string }) {
             ref={viewportRef}
             id={`mermaid-body-${reactId}`}
             data-max-height="384"
-            className="max-h-96 touch-none overflow-hidden bg-ink-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-500/40"
+            className="max-h-96 touch-none overflow-hidden bg-ink-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-moss/40"
             role="region"
             tabIndex={0}
             aria-label="Mermaid diagram viewport"
@@ -194,19 +195,5 @@ export function MermaidDiagram({ source }: { source: string }) {
       )}
       <CodeBlock code={source} language="mermaid" />
     </div>
-  );
-}
-
-function DiagramButton({ children, label, onClick }: { children: ReactNode; label: string; onClick: () => void }) {
-  return (
-    <button
-      type="button"
-      aria-label={label}
-      title={label}
-      onClick={onClick}
-      className="rounded p-1 text-muted hover:bg-ink-wash hover:text-[--fg] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40"
-    >
-      {children}
-    </button>
   );
 }

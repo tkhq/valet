@@ -17,6 +17,7 @@ import {
   type PluginCatalog,
   type SessionEntry,
 } from "../src/index.js";
+import { formatPluginOutcome } from "../src/session.js";
 
 const cleanups: Array<() => void> = [];
 afterEach(() => {
@@ -424,6 +425,41 @@ describe("Session.prompt plugin command execution", () => {
     });
   });
 
+  it("blocks unavailable services through the slash-command path", async () => {
+    const faux = registerFauxProvider({ provider: "s-plugin-unavailable" });
+    cleanups.push(() => faux.unregister());
+    const { engine, store } = makeEngine();
+    const fx = echoFixture();
+    const execute = vi.spyOn(fx.actionPlugins[0].actions[0], "execute");
+    const catalog = buildPluginCatalog(fx.actionPlugins, undefined, {
+      resolveServiceAvailability: () => [{
+        service: "testplug",
+        state: "disabled_by_org",
+        reason: "the organization disabled this plugin",
+        fix: "An org admin must enable the testplug plugin.",
+      }],
+    });
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/workspace",
+      sandbox: {},
+      model: faux.getModel(),
+      pluginCommands: fx.commands,
+      pluginCatalog: catalog,
+    });
+    const threadId = session.thread().id;
+
+    await session.prompt("/testplug:echo hello");
+
+    const last = lastEntry(await store.getEntries(session.id, threadId));
+    expect(last?.type === "command_result" && last.ok).toBe(false);
+    const output = last?.type === "command_result" ? last.output : "";
+    expect(output).toContain("the organization disabled this plugin");
+    expect(output).toContain("An org admin must enable the testplug plugin.");
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it("missing credentials produce a corrective error", async () => {
     const faux = registerFauxProvider({ provider: "s-plugin-cred" });
     cleanups.push(() => faux.unregister());
@@ -471,6 +507,18 @@ describe("Session.prompt plugin command execution", () => {
     const last = lastEntry(await store.getEntries(session.id, threadId));
     expect(last?.type === "command_result" && last.ok).toBe(false);
     const output = last?.type === "command_result" ? last.output : "";
-    expect(output).toContain("Connect the testplug integration in Settings.");
+    expect(output).toContain("Connect testplug on the Integrations page (/integrations). After connecting, call list_tools (service: \"testplug\") to confirm — actions appear when the connection worked; otherwise this warning returns with the reason.");
+  });
+});
+
+describe("formatPluginOutcome", () => {
+  it("says no request was sent when an unattended workflow run refuses an approval", () => {
+    const { ok, output } = formatPluginOutcome({ kind: "denied-unattended" }, "linear.save_project");
+    expect(ok).toBe(false);
+    expect(output).toContain("Valet sent no approval request");
+    expect(output).toContain("move the action to a Tool step, which asks for approval on each run");
+    expect(output).toContain("Saved permissions do not apply to a run that an agent started or retried.");
+    // Since build-time approval, saving a workflow allows nothing.
+    expect(output).not.toContain("saving the workflow approves");
   });
 });

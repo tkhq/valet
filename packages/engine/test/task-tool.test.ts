@@ -152,6 +152,21 @@ describe("task tool: spawner present", () => {
     expect(result.text).toContain("spawned child session child-1");
   });
 
+  it("forwards a trimmed batch name and says the result arrives with the batch", async () => {
+    let seenReq: SpawnChildRequest | undefined;
+    const spawner = vi.fn(async (req: SpawnChildRequest) => {
+      seenReq = req;
+      return { childSessionId: "child-1", queueItemId: "queue-1" } satisfies SpawnChildResult;
+    });
+    const result = await executeTask({ prompt: "review part one", batch: " review " }, makeCtx({ config: { childSpawner: spawner } }));
+    expect(seenReq?.batch).toBe("review");
+    expect(result.text).toContain('in batch "review"');
+    expect(result.text).toContain("after the last child in the batch settles");
+
+    await executeTask({ prompt: "solo work", batch: "   " }, makeCtx({ config: { childSpawner: spawner } }));
+    expect(seenReq?.batch).toBeUndefined();
+  });
+
   it("forwards valid child sandbox resource overrides", async () => {
     let seenReq: SpawnChildRequest | undefined;
     const spawner = vi.fn(async (req: SpawnChildRequest) => {
@@ -166,6 +181,26 @@ describe("task tool: spawner present", () => {
     );
 
     expect(seenReq?.resources).toEqual({ cpu: 2, memory: "4Gi" });
+  });
+
+  it("gives the child the parent's ceiling, not the parent's thread focus", async () => {
+    let seenReq: SpawnChildRequest | undefined;
+    const spawner = vi.fn(async (req: SpawnChildRequest) => {
+      seenReq = req;
+      return { childSessionId: "child-1", queueItemId: "queue-1" } satisfies SpawnChildResult;
+    });
+    // A research child must keep shell and web reads that a workflow-diagnosis focus hides from the parent.
+    const ctx = makeCtx({
+      toolScope: { tools: ["task"], actions: ["workflows.get_run"] },
+      toolScopeCeiling: { tools: ["task", "bash", "web_fetch"] },
+      config: { childSpawner: spawner },
+    });
+
+    await executeTask({ prompt: "research the failure" }, ctx);
+    expect(seenReq?.toolScope).toEqual({ tools: ["task", "bash", "web_fetch"] });
+
+    await executeTask({ prompt: "read only", toolScope: { tools: ["web_fetch"] } }, ctx);
+    expect(seenReq?.toolScope).toEqual({ tools: ["web_fetch"] });
   });
 
   it.each([0, 65])("rejects invalid CPU %s without calling the spawner", async (cpu) => {
@@ -226,5 +261,14 @@ describe("task tool: spawner present", () => {
     await taskTool.execute({ prompt: "do the thing" }, ctx);
 
     expect(seenCtx?.owner).toEqual({ type: "user", id: "u2" });
+  });
+});
+
+describe("task tool: newcomer turn", () => {
+  it("refuses a channel sender with no Valet account before it spawns a child", async () => {
+    const spawner = vi.fn();
+    const result = await taskTool.execute({ prompt: "do it" }, makeCtx({ externalSender: true, config: { childSpawner: spawner } }));
+    expect(result.text).toContain("[child_unavailable]");
+    expect(spawner).not.toHaveBeenCalled();
   });
 });

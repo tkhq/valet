@@ -1,6 +1,14 @@
 import { describe, it, expect } from "vitest";
 import { Type } from "typebox";
-import { validateValetPlugin, type ValetPlugin, type NormalizedEvent, type EventCatalogEntry } from "../src/index.js";
+import {
+  pluginHandlerAccepts,
+  validateValetPlugin,
+  subjectService,
+  type ValetPlugin,
+  type NormalizedEvent,
+  type EventCatalogEntry,
+  type DeriveContext,
+} from "../src/index.js";
 
 function minimalPlugin(): ValetPlugin {
   return { name: "demo", version: "1.0.0" };
@@ -256,6 +264,14 @@ describe("validateValetPlugin credential.oauth", () => {
     if (!result.ok) {
       expect(result.issues.some((i) => i.path === "credentials[0].oauth")).toBe(true);
     }
+  });
+
+  it("accepts oauthOnly with oauth, and rejects it without", () => {
+    const mcp = { mode: "mcp", serverUrl: "https://mcp.example.com/mcp" };
+    expect(validateValetPlugin(manifestWith({ type: "oauth2", configKeys: ["accessToken"], oauth: mcp, oauthOnly: true })).ok).toBe(true);
+    const result = validateValetPlugin(manifestWith({ type: "oauth2", configKeys: ["accessToken"], oauthOnly: true }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.issues.some((i) => i.path === "credentials[0].oauthOnly")).toBe(true);
   });
 
   it("rejects an unknown mode", () => {
@@ -610,22 +626,21 @@ describe("validateValetPlugin identityLink", () => {
     expect(result.ok).toBe(false);
   });
 
-  it("accepts a non-empty deliveryDm string with a deliveryReply function", () => {
+  it("accepts a deliveryDm function", () => {
     const result = validateValetPlugin({
       name: "fixture",
       version: "0.1.0",
       identityLink: {
         provider: "slack",
         instructions: "DM the Valet app: link <code>",
-        deliveryDm: "Reply with the command shown in Valet.",
-        deliveryReply: (ctx: { code: string }) => `link ${ctx.code}`,
+        deliveryDm: (ctx: { code: string }) => `Your Valet link code is ${ctx.code}.`,
       },
     });
     expect(result.ok).toBe(true);
   });
 
-  it("rejects a function-valued or empty deliveryDm (pre-string-contract plugins)", () => {
-    for (const deliveryDm of [() => "dm", ""]) {
+  it("rejects a deliveryDm that is not a function", () => {
+    for (const deliveryDm of ["Reply in Valet.", 42]) {
       const result = validateValetPlugin({
         name: "fixture",
         version: "0.1.0",
@@ -642,19 +657,210 @@ describe("validateValetPlugin identityLink", () => {
     }
   });
 
-  it("rejects a non-function deliveryReply", () => {
+  it("rejects an oauthService that is not a service name", () => {
     const result = validateValetPlugin({
       name: "fixture",
       version: "0.1.0",
-      identityLink: {
-        provider: "slack",
-        instructions: "DM the Valet app: link <code>",
-        deliveryReply: "link <code>",
-      },
+      identityLink: { provider: "slack", instructions: "DM the Valet app: link <code>", oauthService: "Slack User" },
     });
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.issues.some((i) => i.path === "identityLink.deliveryReply")).toBe(true);
+      expect(result.issues.some((i) => i.path === "identityLink.oauthService")).toBe(true);
     }
+  });
+});
+
+// Native integration credential policy, Part A
+// (docs/specs/2026-10-15-native-integration-credential-policy-design.md).
+describe("validateValetPlugin native classification", () => {
+  it("accepts a native plugin that names its app credential service", () => {
+    const res = validateValetPlugin({ ...minimalPlugin(), native: true, appCredentialService: "demo:app" });
+    expect(res.ok).toBe(true);
+  });
+
+  it("accepts native: false with no app credential service", () => {
+    expect(validateValetPlugin({ ...minimalPlugin(), native: false }).ok).toBe(true);
+  });
+
+  it("rejects a non-boolean native", () => {
+    const res = validateValetPlugin({ ...minimalPlugin(), native: "yes" });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.issues.map((i) => i.path)).toContain("native");
+  });
+
+  it("rejects a native plugin with no app credential service", () => {
+    const res = validateValetPlugin({ ...minimalPlugin(), native: true });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.issues.map((i) => i.path)).toContain("appCredentialService");
+  });
+
+  it("rejects an app credential service on a plugin that is not native", () => {
+    const res = validateValetPlugin({ ...minimalPlugin(), appCredentialService: "demo:app" });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.issues.map((i) => i.path)).toContain("appCredentialService");
+  });
+
+  it("rejects an empty app credential service", () => {
+    const res = validateValetPlugin({ ...minimalPlugin(), native: true, appCredentialService: "" });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.issues.map((i) => i.path)).toContain("appCredentialService");
+  });
+});
+
+describe("subjectService", () => {
+  it("returns the prefix before the first colon", () => {
+    expect(subjectService("github:acme/x#1")).toBe("github");
+    expect(subjectService("slack:T001/C001/1712345678.000100")).toBe("slack");
+    expect(subjectService("linear:team/ENG")).toBe("linear");
+  });
+});
+
+describe("validateValetPlugin event contracts", () => {
+  function derivedEventDef(overrides: Partial<Record<string, unknown>> = {}): Record<string, unknown> {
+    return {
+      key: "github.pull_request.checks_completed",
+      description: "All checks finished",
+      sources: ["github.check_run.completed"],
+      derive: async (
+        _ctx: DeriveContext,
+        _subject: string,
+        _source: NormalizedEvent,
+      ): Promise<NormalizedEvent | null> => null,
+      ...overrides,
+    };
+  }
+
+  it("accepts a plugin with eventSubjects, derivedEvents, and statusResolver", () => {
+    const plugin: Record<string, unknown> = {
+      name: "demo",
+      version: "1.0.0",
+      eventSubjects: {
+        fromUrl: () => null,
+        label: (subject: string) => subject,
+        url: () => null,
+      },
+      derivedEvents: [derivedEventDef()],
+      statusResolver: {
+        resolve: async () => null,
+      },
+    };
+    const res = validateValetPlugin(plugin);
+    expect(res.ok).toBe(true);
+  });
+
+  it("accepts a plugin without eventSubjects, derivedEvents, or statusResolver (unchanged behavior)", () => {
+    const res = validateValetPlugin({ name: "demo", version: "1.0.0" });
+    expect(res.ok).toBe(true);
+  });
+
+  it("rejects a derived event with an empty key, naming derivedEvents[0].key", () => {
+    const res = validateValetPlugin({
+      name: "demo",
+      version: "1.0.0",
+      derivedEvents: [derivedEventDef({ key: "" })],
+    });
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.issues.some((i) => i.path === "derivedEvents[0].key")).toBe(true);
+    }
+  });
+
+  it("rejects a derived event with an empty sources array", () => {
+    const res = validateValetPlugin({
+      name: "demo",
+      version: "1.0.0",
+      derivedEvents: [derivedEventDef({ sources: [] })],
+    });
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.issues.some((i) => i.path === "derivedEvents[0].sources")).toBe(true);
+    }
+  });
+
+  it("rejects a derived event missing derive", () => {
+    const { derive: _omit, ...rest } = derivedEventDef();
+    const res = validateValetPlugin({ name: "demo", version: "1.0.0", derivedEvents: [rest] });
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.issues.some((i) => i.path === "derivedEvents[0].derive")).toBe(true);
+    }
+  });
+
+  it("accepts a plugin with a naturalSubject function", () => {
+    const res = validateValetPlugin({
+      name: "demo",
+      version: "1.0.0",
+      naturalSubject: (_event: NormalizedEvent) => null,
+    });
+    expect(res.ok).toBe(true);
+  });
+
+  it("rejects a naturalSubject that is not a function", () => {
+    const res = validateValetPlugin({ name: "demo", version: "1.0.0", naturalSubject: "nope" });
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.issues.some((i) => i.path === "naturalSubject")).toBe(true);
+    }
+  });
+
+  it("accepts a plugin with a conversationalTwin function", () => {
+    const res = validateValetPlugin({
+      name: "demo",
+      version: "1.0.0",
+      conversationalTwin: (_event: NormalizedEvent, _identity: { botUserId?: string }) => null,
+    });
+    expect(res.ok).toBe(true);
+  });
+
+  it("rejects a conversationalTwin that is not a function", () => {
+    const res = validateValetPlugin({ name: "demo", version: "1.0.0", conversationalTwin: "nope" });
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.issues.some((i) => i.path === "conversationalTwin")).toBe(true);
+    }
+  });
+});
+
+describe("plugin event handlers", () => {
+  const handler = { id: "review-pr", description: "Review a pull request.", events: ["github.pull_request.*"], handle: async () => {} };
+
+  it("accepts a declared handler", () => {
+    expect(validateValetPlugin({ ...minimalPlugin(), eventHandlers: [handler] }).ok).toBe(true);
+  });
+
+  it("rejects bad ids, duplicates, empty events and a missing handle", () => {
+    const res = validateValetPlugin({
+      ...minimalPlugin(),
+      eventHandlers: [handler, handler, { ...handler, id: "Bad Id" }, { ...handler, id: "no-events", events: [] }, { id: "no-handle", description: "d", events: ["x.y"] }],
+    });
+    expect(res.ok).toBe(false);
+    const paths = res.ok ? [] : res.issues.map((i) => `${i.path}: ${i.message}`);
+    expect(paths).toEqual(expect.arrayContaining([
+      "eventHandlers[1].id: duplicate handler id review-pr",
+      "eventHandlers[2].id: must match /^[a-z][a-z0-9-]*$/",
+      "eventHandlers[3].events: required non-empty array of event keys",
+      "eventHandlers[4].handle: required function",
+    ]));
+  });
+
+  it("accepts a settings schema and a concurrency mode, and rejects bad ones", () => {
+    const configured = { ...handler, configSchema: { type: "object", properties: {} }, concurrency: "supersede" };
+    expect(validateValetPlugin({ ...minimalPlugin(), eventHandlers: [configured] }).ok).toBe(true);
+    const res = validateValetPlugin({
+      ...minimalPlugin(),
+      eventHandlers: [{ ...handler, id: "bad-mode", concurrency: "latest" }, { ...handler, id: "bad-schema", configSchema: "object" }],
+    });
+    const paths = res.ok ? [] : res.issues.map((i) => `${i.path}: ${i.message}`);
+    expect(paths).toEqual([
+      'eventHandlers[0].concurrency: must be "parallel" or "supersede"',
+      "eventHandlers[1].configSchema: must be a JSON Schema object",
+    ]);
+  });
+
+  it("matches exact keys and trailing-wildcard families", () => {
+    expect(pluginHandlerAccepts(handler, "github.pull_request.synchronize")).toBe(true);
+    expect(pluginHandlerAccepts(handler, "github.issues.opened")).toBe(false);
+    expect(pluginHandlerAccepts({ events: ["github.push"] }, "github.push")).toBe(true);
+    expect(pluginHandlerAccepts({ events: ["github.push"] }, "github.push.x")).toBe(false);
   });
 });

@@ -1,3 +1,4 @@
+import { getCurrentSystemPrompt } from "@earendil-works/pi-ai/utils/transcript";
 import { describe, it, expect, vi } from "vitest";
 import {
   fauxAssistantMessage,
@@ -9,6 +10,9 @@ import {
   Engine,
   InMemoryEventStream,
   InMemorySessionStore,
+  MODEL_RESPONSE_METADATA_KEY,
+  modelResponseMetadata,
+  SUBMISSION_TIMEOUT_MS,
   VirtualSandboxProvider,
   type BusEvent,
   type DecisionGate,
@@ -286,6 +290,12 @@ describe("decideReconciliation — step 6 (timeout)", () => {
   it("now < timeoutAt → resume", () => {
     expect(decideReconciliation(item({ timeoutAt: NOW + 1 }), ctx())).toEqual({ kind: "resume" });
   });
+
+  it("attemptCount 0 past timeoutAt → resume (an item that has not run cannot time out)", () => {
+    const { attemptId: _claimed, ...running } = item({ timeoutAt: NOW - 1 });
+    const queued: QueueItem = { ...running, status: "queued", attemptCount: 0 };
+    expect(decideReconciliation(queued, ctx())).toEqual({ kind: "resume" });
+  });
 });
 
 // ── Step 7: resume ──────────────────────────────────────────────────
@@ -481,9 +491,11 @@ async function seedCrashedRunningTurn(
     supersededByItemId?: string;
     withGate?: boolean;
     gateExpiresAt?: number;
+    /** When the crashed turn was admitted. Defaults to now. */
+    at?: number;
   } = {},
 ): Promise<{ itemId: string; attemptId: string; callId: string }> {
-  const now = Date.now();
+  const now = opts.at ?? Date.now();
   await store.saveSession({
     id: SESSION,
     owner: { type: "user", id: "u1" },
@@ -666,7 +678,96 @@ function modelStatesFor(events: BusEvent[], queueItemId: string) {
   );
 }
 
+describe("read-only cutover reconciliation", () => {
+  it.each([false, true])("aborts queued and claimed legacy work without execution (gate=%s)", async (withGate) => {
+    const store = new InMemorySessionStore();
+    const { itemId, attemptId } = await seedCrashedRunningTurn(store, { withGate });
+    const now = Date.now();
+    await store.admitSubmission(SESSION, THREAD, {
+      id: "queued-cutover", threadId: THREAD, content: "must not run", status: "queued",
+      attemptCount: 0, maxAttempts: 10, timeoutAt: now + 60_000, createdAt: now, updatedAt: now,
+    });
+    const spy = spyTool();
+    const faux = registerFauxProvider({ provider: "read-only-cutover" });
+    const stream = new InMemoryEventStream();
+    const engine = new Engine({ providers: { store, stream, sandboxProvider: new VirtualSandboxProvider() } });
+    const readOnlyReason = "This legacy team conversation is read-only. Start a new isolated conversation.";
+    try {
+      const restored = await engine.restoreSession({ sessionId: SESSION, options: {
+        userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(), tools: [spy.def], readOnlyReason,
+      } });
+      expect(await store.listUnsettledSubmissions(SESSION)).toEqual([]);
+      for (const id of [itemId, "queued-cutover"]) {
+        expect(await store.getQueueItem(SESSION, id)).toMatchObject({ status: "settled", outcome: { outcome: "aborted", error: readOnlyReason } });
+        expect(await restored.threadById(THREAD)?.awaitResult(id)).toMatchObject({ outcome: "aborted", error: readOnlyReason });
+      }
+      expect(await store.hasAttemptMarker(itemId, attemptId)).toBe(false);
+      if (withGate) {
+        expect(await store.getDecisionGate(SESSION, "g-crash")).toMatchObject({ status: "withdrawn" });
+        expect(await store.getSuspendedTurn(SESSION, THREAD)).toBeNull();
+      }
+      await restored.reconcile();
+      expect(spy.calls()).toBe(0);
+      expect(restored.threadById(THREAD)?.runningItemId()).toBeUndefined();
+    } finally { faux.unregister(); }
+  });
+});
+
 describe("reconciliation executor (integration)", () => {
+  it("keeps prompts queued behind a parked turn across restarts, however long they waited", async () => {
+    const store = new InMemorySessionStore();
+    const start = Date.now() - 3 * SUBMISSION_TIMEOUT_MS;
+    const { itemId } = await seedCrashedRunningTurn(store, { withGate: true, at: start });
+    const admittedAt = start + SUBMISSION_TIMEOUT_MS;
+    await store.admitSubmission(SESSION, THREAD, {
+      id: "q-behind", threadId: THREAD, content: "queued behind the gate", status: "queued", attemptCount: 0,
+      maxAttempts: 10, timeoutAt: admittedAt + SUBMISSION_TIMEOUT_MS, createdAt: admittedAt, updatedAt: admittedAt,
+    });
+    const faux = registerFauxProvider({ provider: "queued-behind-gate" });
+    const spy = spyTool();
+    try {
+      for (let restart = 0; restart < 2; restart++) {
+        const engine = new Engine({ providers: { store, stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() } });
+        await engine.restoreSession({ sessionId: SESSION,
+          options: { userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(), tools: [spy.def] } });
+        expect(await store.getQueueItem(SESSION, itemId)).toMatchObject({ status: "blocked_on_decision_gate" });
+        expect(await store.getQueueItem(SESSION, "q-behind")).toMatchObject({ status: "queued", attemptCount: 0 });
+      }
+    } finally {
+      faux.unregister();
+    }
+  });
+
+  it.each(["empty", "length"])("settles a persisted %s terminal response without continuing after a crash", async kind => {
+    const store = new InMemorySessionStore();
+    const { itemId, attemptId } = await seedCrashedRunningTurn(store);
+    const final: MessageEntry = {
+      id: "e-final", sessionId: SESSION, threadId: THREAD, parentId: null, type: "message", role: "assistant",
+      content: kind === "empty" ? "" : "partial", stopReason: "end_turn", queueItemId: itemId, createdAt: Date.now(),
+      metadata: { [MODEL_RESPONSE_METADATA_KEY]: modelResponseMetadata(
+        fauxAssistantMessage(kind === "empty" ? [] : "partial", { stopReason: kind === "empty" ? "stop" : "length" }), 0, undefined) },
+    };
+    await store.appendEntries(SESSION, THREAD, [final], { itemId, attemptId });
+    const faux = registerFauxProvider({ provider: `crash-${kind}` });
+    const spy = spyTool();
+    const engine = new Engine({ providers: { store, stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() } });
+    const session = await engine.restoreSession({ sessionId: SESSION,
+      options: { userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(), tools: [spy.def] } });
+    try {
+      const thread = session.threadById(THREAD);
+      if (!thread) throw new Error("restored thread missing");
+      const outcome = kind === "empty" ? "completed" : "failed";
+      expect(await thread.awaitResult(itemId)).toMatchObject({ outcome });
+      expect((await store.getQueueItem(SESSION, itemId))?.outcome?.outcome).toBe(outcome);
+      const structured = await thread.awaitResult(itemId, { resultSchema: Type.Object({ answer: Type.String() }) });
+      expect(structured.output).toBeUndefined();
+      expect(structured.error).toBeTruthy();
+      await session.reconcile();
+      expect(faux.state.callCount).toBe(0);
+      expect(spy.calls()).toBe(0);
+    } finally { session.suspendTimers(); faux.unregister(); }
+  });
+
   it.each(["resume", "replay"] as const)(
     "%s publishes the resolved model before continuation and clears it after success",
     async (mode) => {
@@ -741,9 +842,8 @@ describe("reconciliation executor (integration)", () => {
     const options = {
       userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(), tools: [spyTool().def],
     };
-    const getEntries = store.getEntries.bind(store);
-    const reads = vi.spyOn(store, "getEntries")
-      .mockImplementationOnce(getEntries)
+    const reads = vi
+      .spyOn(store, "getThreadSnapshot")
       .mockRejectedValueOnce(new Error("history unavailable"));
     try {
       await expect(engine.restoreSession({ sessionId: SESSION, options })).rejects.toThrow("history unavailable");
@@ -843,7 +943,7 @@ describe("reconciliation executor (integration)", () => {
       nextFaux.setResponses([
         (context) => {
           nextCalls += 1;
-          nextPromptSystem = context.systemPrompt;
+          nextPromptSystem = getCurrentSystemPrompt(context.messages);
           return fauxAssistantMessage("next prompt completed");
         },
       ]);
@@ -901,7 +1001,7 @@ describe("reconciliation executor (integration)", () => {
         4000,
       );
       expect(nextCalls).toBe(1);
-      expect(nextPromptSystem).toMatch(/^Baseline recovery prompt\.\n\n## Runtime model\n/);
+      expect(nextPromptSystem).toMatch(/^Baseline recovery prompt\.\n\n## Thread started[\s\S]*?\n\n## Runtime model\n/);
       expect(nextPromptSystem).toContain(`Current provider: ${nextFaux.getModel().provider}`);
       expect(nextPromptSystem).toContain("Temporary override: none");
       recoveryFaux.unregister();
@@ -992,7 +1092,7 @@ describe("reconciliation executor (integration)", () => {
       nextFaux.setResponses([
         (context) => {
           nextCalls += 1;
-          nextPromptSystem = context.systemPrompt;
+          nextPromptSystem = getCurrentSystemPrompt(context.messages);
           return fauxAssistantMessage("next prompt completed");
         },
       ]);
@@ -1063,7 +1163,7 @@ describe("reconciliation executor (integration)", () => {
         4000,
       );
       expect(nextCalls).toBe(1);
-      expect(nextPromptSystem).toMatch(/^Baseline recovery prompt\.\n\n## Runtime model\n/);
+      expect(nextPromptSystem).toMatch(/^Baseline recovery prompt\.\n\n## Thread started[\s\S]*?\n\n## Runtime model\n/);
       expect(nextPromptSystem).toContain(`Current provider: ${nextFaux.getModel().provider}`);
       expect(nextPromptSystem).toContain("Temporary override: none");
       expect(modelStatesFor(events, next.queueItemId)).toEqual([
@@ -1510,6 +1610,27 @@ describe("reconciliation executor (integration)", () => {
     faux.unregister();
   });
 
+  it("cancels a re-armed decision without continuing the model after restart", async () => {
+    const store = new InMemorySessionStore();
+    const spy = spyTool();
+    const { itemId } = await seedCrashedRunningTurn(store, { withGate: true });
+    const faux = registerFauxProvider({ provider: "recon-gate-cancel" });
+    faux.setResponses([fauxAssistantMessage("must not continue after cancelled restart")]);
+    const engine = new Engine({ providers: { store, stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() } });
+    try {
+      const session = await engine.restoreSession({ sessionId: SESSION, options: {
+        userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(), tools: [spy.def],
+      } });
+      await session.withdrawDecision("g-crash", "cancel");
+      await waitForAsync(async () => (await store.getQueueItem(SESSION, itemId))?.status === "settled");
+      expect((await store.getQueueItem(SESSION, itemId))?.outcome).toEqual({ outcome: "aborted" });
+      expect((await store.getDecisionGate(SESSION, "g-crash"))?.status).toBe("withdrawn");
+      expect(await store.getSuspendedTurn(SESSION, THREAD)).toBeNull();
+      expect(spy.calls()).toBe(0);
+      expect(JSON.stringify(await store.getEntries(SESSION, THREAD))).not.toContain("must not continue after cancelled restart");
+    } finally { faux.unregister(); }
+  });
+
   it("re-armed pending gate that expires AFTER restart terminalizes and settles the turn", async () => {
     const store = new InMemorySessionStore();
     const spy = spyTool();
@@ -1577,6 +1698,50 @@ function makeLive() {
   });
   return { engine, store, stream, events };
 }
+
+describe("stuck-head alarm on startup reconciliation", () => {
+  async function restoreAndCollectStuck(store: SessionStore, provider: string): Promise<BusEvent[]> {
+    const faux = registerFauxProvider({ provider });
+    faux.setResponses([fauxAssistantMessage("resumed and done")]);
+    const bus = new InMemoryEventStream();
+    const stuck: BusEvent[] = [];
+    bus.subscribe({ eventTypes: ["submission_stuck"] }, (e) => stuck.push(e));
+    const engine = new Engine({ providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() } });
+    const session = await engine.restoreSession({ sessionId: SESSION,
+      options: { userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(), tools: [spyTool().def] } });
+    try {
+      await waitForAsync(async () => (await store.getQueueItem(SESSION, "q-crash"))?.status === "settled", 4000);
+    } finally { session.suspendTimers(); faux.unregister(); }
+    return stuck;
+  }
+
+  it("does not flag a first-attempt turn older than 15 minutes that a restart interrupted", async () => {
+    const store = new InMemorySessionStore();
+    await seedCrashedRunningTurn(store, { at: Date.now() - 30 * 60_000 });
+
+    expect(await restoreAndCollectStuck(store, "stuck-long-turn")).toEqual([]);
+    expect(await store.getQueueItem(SESSION, "q-crash")).toMatchObject({ outcome: { outcome: "completed" } });
+  });
+
+  it("flags a head that crashed on three attempts", async () => {
+    const store = new InMemorySessionStore();
+    const { itemId, attemptId } = await seedCrashedRunningTurn(store);
+    // Two earlier restarts each resumed the turn on a new attempt, then died.
+    let expected = attemptId;
+    for (const next of ["att-crash-2", "att-crash-3"]) {
+      const replaced = await store.replaceSubmissionAttempt(SESSION, THREAD, itemId,
+        { sessionId: SESSION, threadId: THREAD, itemId, attemptId: next, ownerId: "dead-owner" },
+        { expectedAttemptId: expected });
+      if (!replaced) throw new Error("seed: replace failed");
+      expected = next;
+    }
+
+    const stuck = await restoreAndCollectStuck(store, "stuck-crash-loop");
+    expect(stuck.map((e) => e.event)).toEqual([expect.objectContaining({
+      type: "submission_stuck", queueItemId: itemId, attemptCount: 3,
+    })]);
+  });
+});
 
 async function settledEventsFor(
   stream: InMemoryEventStream,
@@ -1930,10 +2095,8 @@ describe("sweep interval rejection guard", () => {
       session.ensureTimers();
       // First sweep tick — listUnsettledSubmissions throws, wrapper catches.
       await vi.advanceTimersByTimeAsync(5_000);
-      expect(errSpy).toHaveBeenCalledWith(
-        expect.stringContaining("[engine] sweep failed"),
-        expect.stringContaining("SQLITE_BUSY"),
-      );
+      expect(errSpy.mock.calls.some(([line]) =>
+        String(line).includes("[engine] sweep failed") && String(line).includes("SQLITE_BUSY"))).toBe(true);
       const callsAfterFirst = listSpy.mock.calls.length;
       expect(callsAfterFirst).toBeGreaterThanOrEqual(1);
       // Second tick — the store recovered; sweep runs again cleanly.

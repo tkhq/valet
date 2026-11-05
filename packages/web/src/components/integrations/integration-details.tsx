@@ -1,0 +1,56 @@
+import type { PluginSummary } from "@valet/api/wire";
+import { displayName } from "./display-name";
+import { ToolPermissions } from "./tool-permissions";
+
+/** Manifest capabilities, separate from the account's connection and access
+ * checks. In the detail panel each tool carries its effective permission
+ * (`ToolPermissions`); the collapsed list on a team setup row names the
+ * tools only. */
+export function IntegrationDetails({ plugin, expanded = false }: {
+  plugin: PluginSummary;
+  /** In the detail panel the list is the content, so it shows open with a heading. */
+  expanded?: boolean;
+}) {
+  const services = plugin.actionServices ?? plugin.services.map((service) => ({
+    service: service.service, actions: service.actions, dynamic: service.dynamic,
+  }));
+  const dynamicNote = services.some((service) => service.dynamic) && <p className="text-xs text-muted">
+    {services.some((service) => service.actions.length > 0) ? "More tools may be discovered when connected." : "Tools are discovered when connected."}
+  </p>;
+  const body = <div className="mt-3 space-y-4">
+      <p className="text-xs text-muted">Tools that use an account need a usable connection and access to the requested files or resources.</p>
+      {expanded ? <div>
+        <ToolPermissions plugin={plugin} />
+        {dynamicNote}
+      </div> : services.map((service) => <div key={service.service}>
+        <h4 className="text-xs font-medium text-ink">{displayName(service.service)} tools</h4>
+        {service.actions.length > 0 ? <ul className="mt-2 max-h-64 space-y-2 overflow-y-auto pr-2 text-xs">
+          {service.actions.map((action) => <li key={action.id} className="min-w-0 break-words">{action.name}</li>)}
+        </ul> : <p className="mt-1 text-xs text-muted">{service.dynamic ? "Tools are discovered when connected." : "No tools declared for this service."}</p>}
+        {service.dynamic && service.actions.length > 0 && <p className="mt-2 text-xs text-muted">More tools may be discovered when connected.</p>}
+      </div>)}
+      {plugin.services.some((service) => service.scopes?.length) && <details>
+        <summary className="cursor-pointer text-xs text-muted">Requested permissions</summary>
+        <p className="mt-2 text-xs text-muted">These permissions are requested by the plugin. They do not confirm the current account's grants or file access.</p>
+        <ul className="mt-2 max-h-40 overflow-y-auto text-xs text-muted">
+          {[...new Set(plugin.services.flatMap((service) => service.scopes ?? []))].map((scope) => <li key={scope} className="break-all py-1">{scope}</li>)}
+        </ul>
+      </details>}
+      <div>
+        <h4 className="text-xs font-medium text-ink">Related skills</h4>
+        {plugin.skills?.length ? <ul className="mt-2 space-y-2">
+          {plugin.skills.map((skill) => <li key={skill.name}>
+            <a className="break-words text-xs text-moss underline underline-offset-2" href={`/skills/${encodeURIComponent(skill.name)}`}>{displayName(skill.name)}</a>
+            {skill.description && <p className="mt-1 text-xs text-muted">{skill.description}</p>}
+          </li>)}
+        </ul> : <p className="mt-1 text-xs text-muted">{plugin.skills ? "This plugin does not include a skill." : "Skill details are unavailable. Open Skills to browse installed playbooks."}</p>}
+      </div>
+    </div>;
+  return expanded ? <section aria-label="Tools and skills" className="mt-5 min-w-0 border-t border-line pt-4 text-sm">
+    <h3 className="text-sm font-medium text-ink">Tools and skills</h3>
+    {body}
+  </section> : <details className="mt-2 min-w-0 pl-12 text-sm">
+    <summary className="cursor-pointer py-1 text-xs text-muted hover:text-ink">Tools and skills</summary>
+    {body}
+  </details>;
+}

@@ -31,7 +31,7 @@ export const readRenderer: ToolRenderer = {
             already shows a truncated path, but here we render it with the
             directory dimmed so the file name pops. */}
         {path && (
-          <div className="px-3 py-1.5 border-b border-[--border]/60 bg-neutral-50 dark:bg-neutral-900/60 text-[11px]">
+          <div className="px-3 py-1.5 border-b border-line/60 bg-neutral-50 dark:bg-neutral-900/60 text-[11px]">
             <PathLabel path={path} />
           </div>
         )}

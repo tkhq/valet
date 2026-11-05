@@ -148,6 +148,28 @@ iteration suffix (`{runId}:{nodeId}{iterationSuffix}`) — the current
 The existing attention `href` (`/workflows/runs/{runId}`) is the deep link;
 channel deliverers get it for free and remain the mobile story for v1.
 
+The host also tells the thread that started the run (2026-10-14,
+`buildRunApprovalReport` in `run-attention.ts`). It submits a
+`workflow.approval_needed` signal to the origin thread, so the assistant says
+which steps wait and offers to approve them, instead of staying silent until
+the run settles. The run host fires the report through `onApprovalParked`,
+after a drive that opened a gate parks the run. `onApprovalPending` fires
+inside the wave, before slow sibling nodes finish and before the park records
+every waiting step, so it is too early. The dispatch id is
+`workflow-approval:{runId}:{attempt}`. Each drive has its own attempt, so the
+steps one drive parks wake the thread once. A later drive that opens a gate
+wakes it again, whether the earlier gate was approved, denied, or timed out.
+A drive that only resolves gates opens none and sends nothing. The host keeps
+a run that opened a gate until a park reports it, so if the drive fails
+before it parks, the retry on that host reports. A process that dies loses
+the report: delivery is at most once, like the settle report. The signal
+queues as `followup` on every thread. A personal thread steers by default,
+and a steer admission would drop the person's queued messages, abort the
+running turn, and withdraw open decision cards. The body tells the assistant
+to call `get_run`, whose `pendingGates` names each waiting step and the
+teammate who must approve a step on a shared account. A run with no origin
+thread (scheduled or event) and a sub-run send no signal.
+
 ### 3. Approval scopes
 
 The gate card offers three approve scopes and deny:
@@ -205,18 +227,45 @@ Hardening (applies to approval-node resolutions too — shared route):
    resolutions can no longer mint grants — the executor's `onApprovalGrant`
    path stays but the route never feeds it. Blanket coverage now comes from
    a policy gate's `run` scope or an org policy.
-4. **Humans only.** The agent-callable `workflows.resolve_approval` action
-   refuses to resolve policy gates (`approval:{nodeId}` waits on `tool`
-   nodes) and refuses to run at all from a workflow tool-node invocation
-   context (the synthetic `wf:invoke:` session id) — a workflow must not
-   approve its own or another run's gates. Its error names the corrective
-   action ("A human must resolve this gate from the run page."). Policy-gate
-   resolution is HTTP-principal-only by construction, not by prompt.
+4. **Humans only.** A person resolves every gate. The agent-callable
+   `workflows.resolve_approval` action relays a request: on each call it
+   opens a decision card in the thread (`ctx.requestDecision`), and the gate
+   resolves as the person who confirms that card (`resolvedBy`), with the same
+   access checks as the run page and `resolvedVia: 'thread'`. No policy can
+   skip the card, so the action is `medium` and the catalog adds no second
+   card. A direct `via: 'agent'` resolution of a policy gate still returns
+   `human_only`. The action refuses to run from a workflow tool-node
+   invocation context (the synthetic `wf:invoke:` session id), so a workflow
+   cannot approve its own or another run's gates. Updated 2026-10-14: before,
+   the action refused policy gates, and an agent could only send the user to
+   the run page. Updated 2026-10-15: the result's `next` field says what
+   follows. When the approving conversation started the run
+   (`runReportsToThread`), the run's `workflow.settled` and
+   `workflow.approval_needed` signals arrive there, so the assistant ends its
+   turn, the same rule as after `start_run`. An assistant that polled
+   `get_run` after an approval reported a fast run twice: once from the poll
+   and once from the settle signal. When another conversation started the
+   run, or none did, the signals do not arrive, so `next` tells the
+   assistant to read `get_run` instead. When other gates were already
+   waiting, `next` names them (`resolvedGateStillWaiting`): a drive that
+   only resolves gates opens none, so no `workflow.approval_needed` signal
+   would report them. The run wakes as soon as the approval is recorded, so
+   `gatesStillWaiting` counts only gates that waited just before the
+   approval and still wait after it; a gate the drive opens gets its own
+   signal. The pending-gate projection keeps consumed answers, because the
+   drive can consume an answer before it replaces the run's waiting list.
+   If the status read fails after resolution, approval still succeeds.
+   The assistant must call `get_run` to check for remaining approvals.
+   An unknown waiting state must not tell it to wait for a signal.
+   Known gap: a team run started before its thread moved
+   to an execution session stores the root session as its origin, while its
+   reports go to the execution thread, so `next` there says to read
+   `get_run`.
 5. **Timeout.** After `timeoutAt` has passed, resolution returns 409
    `Gate timed out`.
 
 The signal payload records `resolvedBy`, `note`, `scope`, and
-`resolvedVia: 'web'` for the audit trail.
+`resolvedVia` (`'web'` or `'thread'`) for the audit trail.
 
 ### 5. Run-page UI
 
@@ -400,3 +449,37 @@ place). Run `make dev-clean` and restart the stack.
    only for tool-node (policy gate) resolutions. Approval-node resolutions use
    the signal as the authorization for that one invocation; no grant row is
    written.
+
+The notification decision inbox scans at most 100 pending gates per page. An indexed creation-time/ID cursor advances past hidden gates. Cursors are encrypted and bound to the caller and organization. Authorization and private-thread checks still apply. The bell offers Next approvals and First approvals; a plus sign marks a partial count.
+
+## Bulk answers in the bell
+
+The notification inbox uses one bordered surface for each thread request.
+The conversation label and Open thread link share a compact header above the request.
+The conversation label wraps to show its full name on narrow screens, including requests without an Open thread link.
+`DecisionGateCard` uses its notification placement inside that surface, without a second border or the thread column's outer padding.
+The request title, details, response field, and actions share one left edge.
+Approval and credential action rows start at that edge. Thread cards keep their existing action alignment.
+The request type is a plain label. Permission scope and account-owner restrictions remain visible.
+
+Added 2026-10-09. The bell's "Needs action" heading has **Approve all** and **Deny all**. The buttons show only when at least one listed item is eligible. A bulk answer covers only the items listed in the bell now. When the decision inbox has more pages, the buttons read "Approve N listed" and "Deny N listed", and the dialog says that other pages are not included. A bulk answer never loads or answers an item the user has not seen.
+
+Eligible items (`planBulkAnswers` in `packages/web/src/components/layout/bulk-answers.ts`):
+
+| Item | Eligible when | Approve sends | Deny sends |
+| ---- | ------------- | ------------- | ---------- |
+| Thread decision gate | `type` is `approval`, `status` is `pending`, `oneShot` is true, no `approver`, `provenance.source` is not `resolver_error` or `risk_default`, `riskLevel` is not `high` or `critical`, and `actions` include both `approve` and `deny` | `{ actionId: "approve" }` | `{ actionId: "deny" }` |
+| Workflow approval node | No `approver` | `{ approved: true, iteration }` | `{ approved: false, iteration }` |
+| Workflow policy gate | No `approver`, `provenance` is not `resolver_error`, and `riskLevel` is not `high` or `critical` | `{ approved: true, scope: "once", iteration }` | `{ approved: false, iteration }` |
+
+`approve` and `deny` are the engine's built-in gate actions. Other approval gates use the same ids, so the bell does not infer one-shot behavior from them. The server sets `oneShot` only on a tool approval gate whose approval allows exactly that one call (`docs/specs/2026-07-16-action-policies-audit-design.md`). `ask_approval` and `sec_start` gates do not carry it. A bulk approval never sends `approve_session`, `always_allow`, or a `run` or `workflow` scope, because each of those writes a lasting grant. A gate that names an approver lends a member's shared account, and its approval also covers later calls in the thread or run. The bell skips it: "Waits on another member" when the approver is someone else, and "Lends your shared account" when the approver is the caller. A failed policy check or a high-risk action needs the warning, risk badge, tool id, and arguments that only the per-item card shows. A `risk_default` gate opened because its risk is high or critical. For these reasons the bell skips such gates with the reason "Policy check failed" or "High-risk action". Questions and credential requests are never eligible, because they need a typed answer or a credential.
+
+The bell opens a confirmation dialog before it sends anything. The dialog lists each covered item and each skipped item with its reason. On confirm, the web client sends each answer through the same endpoint as the per-item button, so the server applies the same authorization.
+
+At most four answers are in flight at one time. One failure does not stop the others. A `404` or `409` means the item is no longer waiting for this caller: another answer or a timeout settled it, or the caller lost access. The summary reports it as "no longer waiting", never as answered.
+
+A bulk answer to a thread gate invalidates only that session's gates, not the notification inbox. The inbox scan is expensive, so a batch fetches it once, at the end. A single answer from a gate card still refreshes the inbox. After the last answer, the bell refetches the lists it covered. An item that the refetched lists still show is reported as "still waiting", whatever its response said. If the refetch fails, the bell keeps the response-based summary. A status line shows progress ("Approving 3 of 12…") and then the summary ("Approved 10. 1 was no longer waiting. 1 failed: title: error").
+
+The dialog says what an approval does. A tool action runs once, and Valet saves no rule. A workflow approval node lets its run continue to the next steps. After a confirmed run, focus moves to the status line. After Cancel, focus returns to the button that opened the dialog. When the bell closes after a run has settled, the summary clears.
+
+`NotificationsBell` owns the run state, not the popover content. If the user closes the bell during a run, the run continues. When the bell opens again, it shows the progress or the summary, and both buttons stay disabled until the run settles. A second run cannot start while one is in flight.

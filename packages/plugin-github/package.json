@@ -10,6 +10,7 @@
   },
   "exports": {
     "./actions": "./src/actions/index.ts",
+    "./http": "./src/http/index.ts",
     "./repo": "./src/repo.ts",
     "./repo-contents": "./src/actions/repo-directory.ts",
     "./plugin": "./src/plugin.ts"

@@ -7,11 +7,12 @@
  * for new sessions and a maximum allowed level (cap) that no session can exceed.
  *
  * The org's reasoning settings live in `orgs.reasoning_settings` (jsonb, nullable).
- * A null column means no default and no cap.
+ * A null column means no org default and no cap. With no org, team, or user
+ * default, a new thread uses `VALET_DEFAULT_REASONING` (`wire/types.ts`).
  */
 import { eq } from "drizzle-orm";
 import type { AppQueryable } from "../lib/drizzle.js";
-import { orgs } from "../schema/index.js";
+import { orgs, teams, users } from "../schema/index.js";
 
 /** The six reasoning levels, in order. */
 export const REASONING_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -156,4 +157,32 @@ export async function assertReasoningSelectable(
   }
 
   return null;
+}
+
+/**
+ * A workflow step's reasoning level: the one the step names, otherwise the
+ * run owner's default (the team's or the user's), then the org's, capped at
+ * the org's maximum. Unlike chat threads, a step with no default sends no
+ * level, so a step that sets `temperature` keeps working on models that
+ * accept temperature only with reasoning off.
+ */
+export async function workflowReasoningLevel(
+  db: AppQueryable,
+  orgId: string,
+  owner: { type: string; id: string },
+  requested: string | undefined,
+): Promise<ReasoningLevel | undefined> {
+  const settings = await getOrgReasoningSettings(db, orgId);
+  let ownerDefault: string | null | undefined;
+  if (requested === undefined && owner.type === "team") {
+    ownerDefault = (await db.select({ level: teams.defaultReasoning }).from(teams).where(eq(teams.id, owner.id)).limit(1))[0]?.level;
+  } else if (requested === undefined && owner.type === "user") {
+    ownerDefault = (await db.select({ level: users.defaultReasoning }).from(users).where(eq(users.id, owner.id)).limit(1))[0]?.level;
+  }
+  const level = requested ?? ownerDefault ?? settings.default;
+  return isLevel(level) ? clampToMax(level, settings.max) : undefined;
+}
+
+function isLevel(value: unknown): value is ReasoningLevel {
+  return typeof value === "string" && (REASONING_LEVELS as readonly string[]).includes(value);
 }

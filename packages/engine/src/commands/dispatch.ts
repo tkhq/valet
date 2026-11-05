@@ -1,3 +1,4 @@
+import { skillFileManifest } from "../roles-skills/loader.js";
 import { buildSkillBlock } from "@valet/shared";
 import { parseCommandArgs, substituteArgs } from "./args.js";
 import type { CommandRegistry } from "./registry.js";
@@ -54,13 +55,13 @@ export function dispatchCommand(text: string, registry: CommandRegistry): Dispat
         const args = parseCommandArgs(raw);
         return {
           kind: "expand",
-          text: substituteArgs(skill.content, args),
+          text: substituteArgs(skill.content, args) + skillFileManifest(skill),
           skill: { source: skill, args: raw, path: "slash_prompt" },
         };
       }
       return {
         kind: "expand",
-        text: buildSkillBlock(skill.name, skill.content, raw),
+        text: buildSkillBlock(skill.name, skill.content + skillFileManifest(skill), raw),
         skill: { source: skill, args: raw, path: "slash_context" },
       };
     }

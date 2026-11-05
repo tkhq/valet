@@ -10,7 +10,7 @@ import { invalidateWorkflowSources } from "./content-sync/invalidation.js";
 import { markAttentionNotificationsRead } from "../orchestrator/attention.js";
 import { teamDeletionRequests } from "../schema/index.js";
 import { randomUUID } from "node:crypto";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, count, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Principal } from "@valet/engine";
 import { NotFoundError } from "@valet/shared";
 import { isPgUniqueViolation } from "@valet/store-postgres";
@@ -22,6 +22,7 @@ import {
   assistants,
   channelBindings,
   credentials,
+  credentialShares,
   eventSubscriptions,
   followedThreads,
   orgMembers,
@@ -31,6 +32,7 @@ import {
   teamMembers,
   teams,
   workflowDefinitions,
+  workflowSchedules,
   type AssistantRow,
   type ContentSourceRow,
   type TeamRow,
@@ -44,6 +46,29 @@ import {
 } from "./content-sources.js";
 
 export type TeamRole = "admin" | "member";
+
+/** Aggregate only authorized teams; never materialize their full memberships. */
+export async function teamMembershipSummaries(
+  db: AppDb,
+  orgId: string,
+  teamIds: readonly string[],
+  callerUserId: string,
+): Promise<Map<string, { memberCount: number; callerRole: TeamRole | null }>> {
+  const summaries = new Map<string, { memberCount: number; callerRole: TeamRole | null }>();
+  const ids = [...new Set(teamIds)];
+  for (let offset = 0; offset < ids.length; offset += 1_000) {
+    const rows = await db.select({
+      teamId: teamMembers.teamId,
+      memberCount: count(),
+      callerRole: sql<TeamRole | null>`max(case when ${teamMembers.userId} = ${callerUserId} then ${teamMembers.role} end)`,
+    }).from(teamMembers)
+      .innerJoin(teams, eq(teams.id, teamMembers.teamId))
+      .where(and(eq(teams.orgId, orgId), inArray(teamMembers.teamId, ids.slice(offset, offset + 1_000))))
+      .groupBy(teamMembers.teamId);
+    for (const row of rows) summaries.set(row.teamId, { memberCount: row.memberCount, callerRole: row.callerRole });
+  }
+  return summaries;
+}
 
 /** Thrown when creating a team whose name is already taken within the org. */
 export class TeamNameConflictError extends Error {
@@ -298,7 +323,6 @@ export async function seedMissingTeamDefaults(db: AppDb): Promise<string[]> {
         eq(assistants.ownerType, "team"),
         eq(assistants.ownerId, teams.id),
         eq(assistants.orgId, teams.orgId),
-        eq(assistants.isDefault, true),
       ),
     )
     .where(isNull(assistants.id))
@@ -366,6 +390,7 @@ export async function createTeam(db: AppDb, opts: CreateTeamOptions): Promise<Cr
     createdAt: now,
     defaultModel: null,
     defaultReasoning: null,
+    slackHomeChannelId: null,
   };
   const adoptedSources: ContentSourceRow[] = [];
 
@@ -493,6 +518,10 @@ export async function removeMember(db: AppDb, opts: RemoveMemberOptions): Promis
     await tx
       .delete(teamMembers)
       .where(and(eq(teamMembers.teamId, opts.teamId), eq(teamMembers.userId, opts.userId)));
+    // A shared account belongs to the member, so it leaves with them.
+    await tx
+      .delete(credentialShares)
+      .where(and(eq(credentialShares.teamId, opts.teamId), eq(credentialShares.userId, opts.userId)));
     await invalidateWorkflowSources(tx, { teamId: opts.teamId });
   });
 }
@@ -509,6 +538,7 @@ export async function listTeamsForUser(db: AppDb, userId: string): Promise<TeamR
       createdAt: teams.createdAt,
       defaultModel: teams.defaultModel,
       defaultReasoning: teams.defaultReasoning,
+      slackHomeChannelId: teams.slackHomeChannelId,
     })
     .from(teamMembers)
     .innerJoin(teams, eq(teamMembers.teamId, teams.id))
@@ -619,6 +649,7 @@ export async function listTeamsForOrg(db: AppDb, orgId: string): Promise<TeamRow
       createdAt: teams.createdAt,
       defaultModel: teams.defaultModel,
       defaultReasoning: teams.defaultReasoning,
+      slackHomeChannelId: teams.slackHomeChannelId,
     })
     .from(teams)
     .where(eq(teams.orgId, orgId))
@@ -666,6 +697,32 @@ export async function assertNoTeamOwnedWorkflows(db: AppQueryable, teamId: strin
  */
 export async function lockTeamForOwnership(tx: AppQueryable, teamId: string): Promise<void> {
   await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${teamId}))`);
+}
+
+/** Validates a prospective team owner and writes under the same transaction
+ * lock used by deletion. `principalTeamId: null` is a user/org request;
+ * another team id is a cross-team request and always fails closed. */
+export async function withAuthorizedTeamOwnership<T>(
+  db: AppDb,
+  opts: {
+    teamId: string;
+    orgId: string;
+    userId: string;
+    principalTeamId: string | null;
+    requireMembership: boolean;
+  },
+  write: (tx: AppQueryable) => Promise<T>,
+): Promise<T | null> {
+  return db.transaction(async (tx) => {
+    await lockTeamForOwnership(tx, opts.teamId);
+    const principalMatches = opts.principalTeamId === opts.teamId;
+    const trustedPrincipal = principalMatches && !opts.requireMembership;
+    const mayUseMembership = opts.principalTeamId === null || principalMatches;
+    const authorized = trustedPrincipal ||
+      (mayUseMembership && await isTeamMember(tx, opts.teamId, opts.userId));
+    if (!(await getTeamInOrg(tx, opts.orgId, opts.teamId)) || !authorized) return null;
+    return write(tx);
+  });
 }
 
 export interface DeleteTeamOptions {
@@ -736,11 +793,13 @@ export async function deleteTeam(db: AppDb, opts: DeleteTeamOptions): Promise<vo
       .where(and(eq(assistants.ownerType, "team"), eq(assistants.ownerId, opts.teamId)));
     for (const assistant of teamAssistants) {
       await retireAssistant(tx, assistant.id);
-      await tx
-        .update(agentSessions)
-        .set({ status: "deleted", updatedAt: Date.now() })
-        .where(eq(agentSessions.id, assistant.sessionId));
     }
+    await tx.update(agentSessions).set({ status: "deleted", updatedAt: Date.now() })
+      .where(and(eq(agentSessions.orgId, team.orgId), eq(agentSessions.ownerType, "team"), eq(agentSessions.ownerId, opts.teamId)));
+    await tx.execute(sql`UPDATE engine_queue_items q SET child_result_delivery = 'denied'
+      WHERE q.child_result_delivery = 'pending' AND q.session_id IN (
+        SELECT id FROM agent_sessions WHERE org_id = ${team.orgId} AND owner_type = 'team' AND owner_id = ${opts.teamId}
+      )`);
     // Machine-driven delivery targets go too. A surviving team-owned event
     // subscription, channel binding, or followed thread keeps dispatching
     // to the team principal, and `resolveDefaultAssistant` would then MINT
@@ -751,6 +810,9 @@ export async function deleteTeam(db: AppDb, opts: DeleteTeamOptions): Promise<vo
       .delete(eventSubscriptions)
       .where(and(eq(eventSubscriptions.ownerType, "team"), eq(eventSubscriptions.ownerId, opts.teamId)));
     await tx
+      .delete(workflowSchedules)
+      .where(and(eq(workflowSchedules.ownerType, "team"), eq(workflowSchedules.ownerId, opts.teamId)));
+    await tx
       .delete(channelBindings)
       .where(and(eq(channelBindings.ownerType, "team"), eq(channelBindings.ownerId, opts.teamId)));
     await tx
@@ -759,6 +821,7 @@ export async function deleteTeam(db: AppDb, opts: DeleteTeamOptions): Promise<vo
     await tx
       .delete(credentials)
       .where(and(eq(credentials.ownerType, "team"), eq(credentials.ownerId, opts.teamId)));
+    await tx.delete(credentialShares).where(eq(credentialShares.teamId, opts.teamId));
     // The team's `vlt_` keys go with it. Once the team row is gone, every
     // route that could revoke one is closed: the team key list 404s, and
     // the personal routes refuse a team-pinned key, so a surviving row is

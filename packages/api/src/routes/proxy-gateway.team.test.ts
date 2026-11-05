@@ -4,6 +4,7 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { apikey, llmProxyRequests, orgMembers, teams } from "../schema/index.js";
 import { createLlmProvider } from "../services/llm-providers.js";
 import { setProxySettings } from "../services/org.js";
+import { bootstrapAdminInviteCode } from "../test-helpers/bootstrap-admin-code.js";
 
 
 let api: TestApi | undefined;
@@ -19,7 +20,7 @@ describe("shared team proxy key", () => {
     const { baseUrl, providers } = api;
     const signup = await fetch(`${baseUrl}/api/auth/sign-up/email`, {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: "Admin", email: "proxy-admin@example.test", password: "correct-horse-battery" }),
+      body: JSON.stringify({ name: "Admin", email: "proxy-admin@example.test", password: "correct-horse-battery", inviteCode: await bootstrapAdminInviteCode(api.providers.db) }),
     });
     expect(signup.status).toBe(200);
     const cookie = signup.headers.get("set-cookie")?.match(/better-auth\.session_token=[^;]+/)?.[0];
@@ -51,12 +52,12 @@ describe("shared team proxy key", () => {
       const url = input instanceof Request ? input.url : String(input);
       return url.startsWith("https://api.openai.com/") ? upstream(input, init) : nativeFetch(input, init);
     });
-    async function proxy(providerKey?: string) {
+    async function proxy(providerKey?: string, model = "gpt-4o-mini") {
       return fetch(`${baseUrl}/proxy/openai/v1/chat/completions`, {
         method: "POST", headers: {
           "content-type": "application/json", "x-api-key": key.key,
           ...(providerKey ? { authorization: `Bearer ${providerKey}` } : {}),
-        }, body: JSON.stringify({ model: "gpt-4o-mini", messages: [{ role: "user", content: "hello" }] }),
+        }, body: JSON.stringify({ model, messages: [{ role: "user", content: "hello" }] }),
       });
     }
     await setProxySettings(providers.db, team.orgId, { enabled: false, mode: "passthrough" });
@@ -65,7 +66,21 @@ describe("shared team proxy key", () => {
     await setProxySettings(providers.db, team.orgId, { enabled: true });
     expect((await proxy()).status).toBe(400);
     expect(upstream).not.toHaveBeenCalled();
-    const forwarded = await proxy("approved-provider-key");
+    for (const endpoint of ["/v1/batches", "/v1/batches/", "/v1/%62atches"]) {
+      const blocked = await fetch(`${baseUrl}/proxy/openai${endpoint}`, {
+        method: "POST", headers: { "content-type": "application/json", "x-api-key": key.key, authorization: "Bearer approved-provider-key" },
+        body: JSON.stringify({ input_file_id: "file-astra", endpoint: "/v1/responses", completion_window: "24h" }),
+      });
+      expect(blocked.status).toBe(403);
+      expect(upstream).not.toHaveBeenCalled();
+    }
+    const ambiguous = await fetch(`${baseUrl}/proxy/openai/v1/responses`, {
+      method: "POST", headers: { "content-type": "application/json", "x-api-key": key.key, authorization: "Bearer approved-provider-key" },
+      body: JSON.stringify({ previous_response_id: "resp-astra", input: "continue" }),
+    });
+    expect(ambiguous.status).toBe(400);
+    expect(upstream).not.toHaveBeenCalled();
+    const forwarded = await proxy("approved-provider-key", "gpt-6-astra");
     expect(forwarded.status).toBe(200);
     await forwarded.text();
     expect(new Headers(upstream.mock.calls[0][1]?.headers).get("authorization")).toBe("Bearer approved-provider-key");

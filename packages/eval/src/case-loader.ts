@@ -12,7 +12,10 @@ import { parse } from "yaml";
 import {
   CHECK_TYPES,
   REASONING_LEVELS,
+  REVIEW_PROFILES,
   type Check,
+  type GoldenComment,
+  type PullRequestSpec,
   type EvalCase,
   type EvalTurn,
   type MockToolSpec,
@@ -184,6 +187,7 @@ function parseCheck(raw: unknown, i: number, source: string): Check {
       };
     }
     case "max_tokens":
+    case "min_compactions":
     case "max_cost":
     case "max_duration":
       return { type, value: requireNumber("value") };
@@ -202,6 +206,44 @@ function parseCheck(raw: unknown, i: number, source: string): Check {
         ...(expectOutput !== undefined ? { expect_output: expectOutput } : {}),
         ...(expectExitCode !== undefined ? { expect_exit_code: expectExitCode } : {}),
         ...(timeoutS !== undefined ? { timeout_s: timeoutS } : {}),
+      };
+    }
+    case "workflow_definition": {
+      const optBoolean = (key: string): boolean | undefined => {
+        const v = raw[key];
+        if (v === undefined || v === null) return undefined;
+        if (typeof v !== "boolean") throw new CaseValidationError(source, `\`${at}.${key}\` must be a boolean`);
+        return v;
+      };
+      const optSelectors = (key: string): string[] | undefined => {
+        const v = raw[key];
+        if (v === undefined || v === null) return undefined;
+        if (!Array.isArray(v) || v.length === 0 || v.some((x) => typeof x !== "string" || x.length === 0)) {
+          throw new CaseValidationError(source, `\`${at}.${key}\` must be a non-empty array of step selectors`);
+        }
+        return v as string[];
+      };
+      const foreach = optBoolean("foreach");
+      const scheduleInput = optBoolean("schedule_input");
+      const runDate = optBoolean("run_date");
+      const declaredInputs = optBoolean("declared_inputs");
+      const saved = optBoolean("saved");
+      const toolSteps = optSelectors("tool_steps");
+      const approvedActions = optSelectors("approved_actions");
+      const order = optSelectors("order");
+      if (order !== undefined && order.length < 2) {
+        throw new CaseValidationError(source, `\`${at}.order\` needs at least two selectors`);
+      }
+      return {
+        type,
+        ...(foreach !== undefined ? { foreach } : {}),
+        ...(toolSteps !== undefined ? { tool_steps: toolSteps } : {}),
+        ...(approvedActions !== undefined ? { approved_actions: approvedActions } : {}),
+        ...(order !== undefined ? { order } : {}),
+        ...(scheduleInput !== undefined ? { schedule_input: scheduleInput } : {}),
+        ...(runDate !== undefined ? { run_date: runDate } : {}),
+        ...(declaredInputs !== undefined ? { declared_inputs: declaredInputs } : {}),
+        ...(saved !== undefined ? { saved } : {}),
       };
     }
     case "judge_output":
@@ -226,9 +268,92 @@ function parseCheck(raw: unknown, i: number, source: string): Check {
         ...(judgeModel !== undefined ? { judge_model: judgeModel } : {}),
       };
     }
+    case "review_match": {
+      const golden = raw.golden;
+      if (!Array.isArray(golden) || golden.length === 0) {
+        throw new CaseValidationError(source, `\`${at}.golden\` must be a non-empty array of {comment, category}`);
+      }
+      const parsedGolden: GoldenComment[] = golden.map((g, gi) => {
+        if (!isRecord(g) || typeof g.comment !== "string" || typeof g.category !== "string") {
+          throw new CaseValidationError(source, `\`${at}.golden[${gi}]\` needs string \`comment\` and \`category\``);
+        }
+        return { comment: g.comment, category: g.category, ...(typeof g.severity === "string" ? { severity: g.severity } : {}) };
+      });
+      const profile = optString("profile");
+      if (profile !== undefined && !(REVIEW_PROFILES as readonly string[]).includes(profile)) {
+        throw new CaseValidationError(source, `\`${at}.profile\` must be one of: ${REVIEW_PROFILES.join(", ")}`);
+      }
+      const minRecall = optNumber("min_recall");
+      if (minRecall !== undefined && (minRecall < 0 || minRecall > 1)) {
+        throw new CaseValidationError(source, `\`${at}.min_recall\` must be in [0, 1]`);
+      }
+      const judgeModel = optString("judge_model");
+      const reference = parseReviewReference(raw.reference, `${at}.reference`, source);
+      return {
+        type,
+        golden: parsedGolden,
+        ...(profile !== undefined ? { profile: profile as ReviewProfileName } : {}),
+        ...(minRecall !== undefined ? { min_recall: minRecall } : {}),
+        ...(judgeModel !== undefined ? { judge_model: judgeModel } : {}),
+        ...(reference !== undefined ? { reference } : {}),
+      };
+    }
     default:
       throw new CaseValidationError(source, `unhandled check type ${type}`);
   }
+}
+
+type ReviewProfileName = (typeof REVIEW_PROFILES)[number];
+
+function parseReviewReference(
+  v: unknown,
+  at: string,
+  source: string,
+): Record<string, { matched: number[]; fp: number }> | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (!isRecord(v)) throw new CaseValidationError(source, `\`${at}\` must be a map of tool name to {matched, fp}`);
+  const out: Record<string, { matched: number[]; fp: number }> = {};
+  for (const [tool, r] of Object.entries(v)) {
+    if (
+      !isRecord(r) ||
+      !Array.isArray(r.matched) ||
+      r.matched.some((m) => !Number.isInteger(m)) ||
+      typeof r.fp !== "number"
+    ) {
+      throw new CaseValidationError(source, `\`${at}.${tool}\` needs integer array \`matched\` and number \`fp\``);
+    }
+    out[tool] = { matched: r.matched.filter((m): m is number => typeof m === "number"), fp: r.fp };
+  }
+  return out;
+}
+
+function parsePullRequest(raw: Record<string, unknown>, source: string): PullRequestSpec | undefined {
+  const v = raw.pull_request;
+  if (v === undefined || v === null) return undefined;
+  if (!isRecord(v)) throw new CaseValidationError(source, "`pull_request` must be a mapping");
+  const field = (key: string): string => {
+    const x = v[key];
+    if (typeof x !== "string" || x.length === 0) {
+      throw new CaseValidationError(source, `\`pull_request.${key}\` is required and must be a non-empty string`);
+    }
+    return x;
+  };
+  const spec: PullRequestSpec = {
+    repo: field("repo"),
+    remote: field("remote"),
+    base: field("base"),
+    head: field("head"),
+    title: field("title"),
+  };
+  if (!/^[a-z0-9][a-z0-9._-]*$/i.test(spec.repo)) {
+    throw new CaseValidationError(source, "`pull_request.repo` must be a simple name (letters, digits, . _ -)");
+  }
+  if (typeof v.body === "string") spec.body = v.body;
+  if (v.verify !== undefined) {
+    if (typeof v.verify !== "boolean") throw new CaseValidationError(source, "`pull_request.verify` must be true or false");
+    spec.verify = v.verify;
+  }
+  return spec;
 }
 
 function parseMockTools(
@@ -302,6 +427,15 @@ export function parseEvalCase(raw: unknown, source: string): EvalCase {
       "`drive: product` requires `session_type: orchestrator` (the production agent surface)",
     );
   }
+  const contextBudgetTokens = optionalNumber(raw, "context_budget_tokens", source);
+  if (contextBudgetTokens !== undefined) {
+    if (!Number.isInteger(contextBudgetTokens) || contextBudgetTokens < 1) {
+      throw new CaseValidationError(source, "`context_budget_tokens` must be a positive integer");
+    }
+    if (drive === "product") {
+      throw new CaseValidationError(source, "`context_budget_tokens` needs `drive: engine` (it sets the in-process session's compaction budget)");
+    }
+  }
   const allowedActions = optionalStringArray(raw, "allowed_actions", source);
   if (allowedActions !== undefined) {
     for (const id of allowedActions) {
@@ -313,16 +447,34 @@ export function parseEvalCase(raw: unknown, source: string): EvalCase {
       }
     }
   }
+  const connected = optionalStringArray(raw, "connected", source);
+  if (connected !== undefined && drive !== "product") {
+    throw new CaseValidationError(source, "`connected` needs `drive: product` (it seeds the booted api's credentials)");
+  }
   const profile = optionalString(raw, "profile", source);
   if (profile !== undefined && !(PROFILES as readonly string[]).includes(profile)) {
     throw new CaseValidationError(source, `\`profile\` must be one of: ${PROFILES.join(", ")}`);
   }
 
+  const pullRequest = parsePullRequest(raw, source);
   const evalCase: EvalCase = {
     id,
-    turns: parseTurns(raw, source),
+    // A pull_request case gets its prompt from the reviewer, not from turns.
+    turns: pullRequest !== undefined && raw.turns === undefined ? [] : parseTurns(raw, source),
     checks: checksRaw.map((c, i) => parseCheck(c, i, source)),
   };
+  if (pullRequest !== undefined) {
+    if (evalCase.turns.length > 0) {
+      throw new CaseValidationError(source, "`pull_request` cases take no `turns`; the reviewer builds its own prompt");
+    }
+    if (drive === "product" || sessionType === "orchestrator" || (profile !== undefined && profile !== "unit")) {
+      throw new CaseValidationError(source, "`pull_request` cases run the reviewer on the engine drive with the default profile");
+    }
+    evalCase.pull_request = pullRequest;
+  }
+  if (evalCase.checks.some((c) => c.type === "review_match") && pullRequest === undefined) {
+    throw new CaseValidationError(source, "`review_match` checks need `pull_request` (they score the submitted review)");
+  }
 
   // verify_command runs a real shell command in the case sandbox; the
   // virtual sandbox only simulates exec, and product-drive orchestrator
@@ -369,11 +521,13 @@ export function parseEvalCase(raw: unknown, source: string): EvalCase {
   if (reasoning !== undefined) evalCase.reasoning = reasoning as EvalCase["reasoning"];
   if (tools !== undefined) evalCase.tools = tools;
   if (sessionType !== undefined) evalCase.session_type = sessionType as EvalCase["session_type"];
+  if (contextBudgetTokens !== undefined) evalCase.context_budget_tokens = contextBudgetTokens;
   if (drive !== undefined) evalCase.drive = drive;
   if (allowedActions !== undefined) evalCase.allowed_actions = allowedActions;
   if (profile !== undefined) evalCase.profile = profile as EvalCase["profile"];
   if (mockTools !== undefined) evalCase.mock_tools = mockTools;
   if (requiredCredentials !== undefined) evalCase.required_credentials = requiredCredentials;
+  if (connected !== undefined) evalCase.connected = connected;
   return evalCase;
 }
 

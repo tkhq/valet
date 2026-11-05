@@ -49,8 +49,8 @@ Decisions (locked in during brainstorming):
 
 - **Consumers:** all four — workflow triggers, orchestrator prompts,
   running-run signals, API/UI feed.
-- **Linear setup:** Linear OAuth app; webhook created automatically via
-  Linear's API on connect.
+- **Linear setup:** organization app configured with `client_credentials`;
+  Linear owns the app webhook (see Organization Linear application setup below).
 - **Filter model:** namespaced event key + structured declarative filters on
   catalog-declared fields.
 - **Source contract:** plugin-level (`TriggerDef` evolution) — GitHub and
@@ -117,6 +117,7 @@ Three new tables plus a Linear installation mapping (Drizzle schema in
 | `summary` | text |
 | `payload` | jsonb (raw provider payload) |
 | `occurred_at`, `received_at` | timestamps |
+| `subjects` | `text[]`, nullable. Canonical subjects the event concerns, coarse to fine (e.g. `github:acme`, `github:acme/lean-proofs#42`). See [Event wakeups](2026-10-15-event-wakeups-design.md) Part A. Null on a row stored before this column existed |
 
 A retention job (default 30 days) is a deferred follow-up; nothing prunes
 `events` yet.
@@ -129,8 +130,8 @@ A retention job (default 30 days) is a deferred follow-up; nothing prunes
 | `org_id`, `owner_type`, `owner_id` | scoping |
 | `name` | display name |
 | `event_keys` | `text[]`; supports trailing-wildcard patterns (`github.pull_request.*`) |
-| `filters` | jsonb: `{ field, op: eq\|in\|prefix\|contains, value }[]` over catalog fields; a filter's `field` must be declared by a catalog entry actually selected by `event_keys` (not merely by any service's catalog — a cross-service field would validate and then never match at ingest) |
-| `target` | jsonb: `{ kind: "workflow" \| "orchestrator", ...ref }` — `signal` is designed (dispatcher supports it) but REJECTED by the CRUD validator until a workflow node exists that parks on the `event:{key}` signal shape; accepting it earlier would create silently-inert subscriptions |
+| `filters` | jsonb: `{ field, op: eq\|in\|prefix\|contains\|regex\|not_in\|not_prefix\|not_regex, value }[]` over catalog fields (see "Filter matching"); a filter's `field` must be declared by a catalog entry actually selected by `event_keys` (not merely by any service's catalog — a cross-service field would validate and then never match at ingest). Every catalog entry also carries the implicit field `subject`, matched against the event's `subjects` column with `eq` or `prefix` (2026-10-15) |
+| `target` | jsonb: `{ kind: "workflow" \| "orchestrator", ...ref }`. `signal` is designed (dispatcher supports it) but REJECTED by the CRUD validator until a workflow node exists that parks on the `event:{key}` signal shape; accepting it earlier would create silently-inert subscriptions. An orchestrator target may also carry `systemPrompt` and `userPromptTemplate` (see "Orchestrator prompt templates") |
 | `enabled` | bool |
 | `created_by`, timestamps | |
 
@@ -138,6 +139,34 @@ Workflow event-triggers are rows here too — a subscription with a
 `{ kind: "workflow" }` target starts that workflow, so one matching engine
 serves everything. (Auto-syncing subscription rows from workflow-definition
 trigger nodes is deferred — see Out of scope.)
+
+#### Filter matching
+
+Every filter must match. `eq` matches one value and `in` matches a list.
+`prefix`, `contains`, and `regex` match a pattern over the text. The three
+exclusion ops were added on 2026-10-22: `not_in` takes a list and fails when
+the value is in it, `not_prefix` takes text and fails when the value starts
+with it, and `not_regex` takes a pattern and fails when the value matches
+it. Presence shows them as "is not", "doesn't start with", and "doesn't
+match". A line that must skip some sources, such as some alert bots, puts
+them in an exclusion filter, so an excluded event starts no assistant turn.
+
+A value is absent when the event's catalog entry does not declare the field,
+or when the payload holds no text or number at the field's path. An absent
+value fails `eq`, `in`, `prefix`, `contains`, and `regex`. It passes
+`not_in`, `not_prefix`, and `not_regex`, because an absent value is not in
+the excluded set. For
+example, `bot_id not_in [B1]` on `slack.message` and `slack.bot_message` still
+matches a person's message, which has no `bot_id`. `channel_name not_prefix
+alerts-dev` still matches a direct message, and it also matches a channel
+message when intake could not read the channel's name in time.
+
+The write validator (`events/subscription-write.ts`) needs a non-empty list
+of strings for `not_in` and a non-empty string for `not_prefix`. A
+`not_regex` pattern passes the same checks as a `regex` pattern
+(`validateRegexPattern`), and the matcher compiles it once and tests a
+bounded slice of the value. A pattern that does not compile fails closed for
+both ops. The implicit `subject` field takes only `eq` and `prefix`.
 
 ### `event_deliveries`
 
@@ -147,6 +176,7 @@ trigger nodes is deferred — see Out of scope.)
 | `event_id`, `subscription_id` | fks |
 | `status` | `pending` → `delivered` \| `failed` → `dead` |
 | `attempts`, `next_attempt_at`, `last_error`, `delivered_at` | retry bookkeeping |
+| `queue_item_id` | the engine queue item an assistant delivery admitted; null for workflow and signal deliveries |
 
 ### `linear_installations`
 
@@ -165,14 +195,26 @@ Public route `POST /webhooks/events/:service`, mounted pre-auth (like
    `organizationId` from body → `linear_installations`; GitHub —
    `installation.id` → `github_installations`. Then run the plugin's
    `verify()` with that org's secret over the raw bytes.
-3. `toEvent()` → insert into `events`. Duplicate `dedupe_key` → 204 no-op.
+3. `toEvent()` → insert into `events`. Duplicate `dedupe_key` → 200 no-op.
+
+
 4. In the same transaction, match active subscriptions (indexed `org_id` +
    event-key match, filters evaluated in memory) and insert `event_deliveries`
-   rows. Nudge the in-process dispatcher (`dispatcher.nudge()`); return 204.
+   rows. Nudge the in-process dispatcher (`dispatcher.nudge()`); return 200.
+   Linear counts only HTTP 200 as delivered. It retries any other answer and
+   can disable a webhook that keeps failing.
+5. If no trigger verifies the request, the plugin's optional
+   `explainRejection()` says why. The ingress answers 200 to a correctly
+   signed delivery it does not handle (`unsupported_event`, `stale_delivery`,
+   `malformed_callback`) and 403 only to `bad_signature`. Each rejection is
+   drop-logged with the delivery's type, action, and webhook ID, never its
+   content.
 
 Matching inside the ingest transaction means an accepted event either has its
 delivery rows or doesn't exist — no persisted-but-never-matched window. Actual
 delivery stays async.
+
+Event delivery retries check for an admitted `event:{deliveryId}` submission before selecting a runtime. The lookup preserves the original organization and owner. An existing admission retains its runtime, thread, queue item, and completed tool results across routing changes. Content must match the original signal, including the engine's default signal tag and optional channel-history wrapper. Unsettled work uses normal session recovery. Settled work is acknowledged without another prompt. Diagnostic receipt retention never controls admission deduplication.
 
 **GitHub routing:** the existing `/webhooks/github-app` route keeps handling
 `installation*` events (installations sync); all other event types it receives
@@ -228,44 +270,86 @@ implemented in `packages/api/src/events/dispatcher.ts`:
     has no sender session); its second-layer defense is replicated in
     `orchestrator-target.ts` instead — the resolved session's durable org is
     asserted against the event's org, mismatches drop-log
-    (`event_target_mismatch`) and throw.
+    (`event_target_mismatch`) and throw. A rule that carries prompt templates
+    renders the body first (see "Orchestrator prompt templates" below); one
+    that carries none delivers the body described here unchanged. A delivery
+    with no person to answer it runs unattended: a question or an approval its
+    turn asks is refused at once, and the turn ends with what was missing.
+    Without this, one waiting question held back every later delivery on the
+    same thread. The dispatcher marks a delivery unattended unless it is a
+    mention or a pull request comment that reaches the thread that opened the
+    pull request; the scheduler marks every assistant-prompt schedule. The
+    host also treats every turn a person did not type on the "events" thread
+    or a `slack-events:<channel>` thread as unattended, which covers a
+    delegated task's follow-up and items queued before the marker existed.
+    A task that such a turn starts stays attended and can ask in the inbox.
+    Its question does not hold the shared thread, because `task` does not
+    wait. Only a workflow task makes the tasks it starts unattended. A
+    delivery also cannot ask a teammate to lend a shared account, because
+    that approval would park the thread too. A team subscription or schedule
+    can use a teammate's account in one of two ways. The account owner
+    chooses "Always allow for this team" on an account approval in an
+    attended thread or a workflow run. Or the team connects its own account
+    on the team's Integrations page.
+    The rule's thread policy, a conversation binding, or a waiter claim picks
+    the destination thread. The delivery threads spec
+    (`2026-10-16-delivery-threads-and-claims-design.md`, Part B) defines that
+    choice; no events thread or per-channel thread heuristic remains.
   - **signal** — insert into `workflow_signals` for runs waiting on
     `event:{key}` conditions. Dispatcher support exists but the CRUD validator
     rejects the target kind until a `waitForEvent`-style node parks on that
     shape (see `event_subscriptions` table notes).
 - Retries: backoff 30s → 2m → 10m → 30m, then `dead`. `last_error` recorded;
   dead deliveries visible in the UI feed.
+- A failed assistant turn: an assistant delivery is `delivered` once its
+  prompt is queued, and the dispatcher records the queue item in
+  `queue_item_id`. If that turn settles `failed` (an output limit, a provider
+  error), `events/delivery-turn.ts` moves the delivery to `dead` with
+  `last_error` = "The assistant turn failed: " plus the engine's reason. The
+  statement finds the turn through the dispatch id `event:{deliveryId}`, so a
+  delivery admitted before `queue_item_id` existed is also marked, and it
+  records the queue item. Three callers run it: the settle watcher, the
+  dispatcher right after its "delivered" write (the turn can settle first),
+  and a dispatcher sweep every 60 seconds over rows delivered in the last 24
+  hours, which reads the partial index `event_deliveries_delivered` and joins
+  the recorded queue item by key, so it covers only rows that recorded one. The
+  dispatcher's own check only logs a failure, because the delivery already
+  succeeded. The sweep exists because the watcher's write can fail or the API can
+  exit before it. The delivery is not retried: a retry only recovers the same
+  admission. The turn started before it failed, so it may have replied
+  or acted. `GET /api/events/:id` marks such a delivery `turnFailed`, and the
+  events UI tells the reader to check its thread before Redeliver. Limits:
+  an `aborted` turn (a person stopped it) stays delivered;
+  a delivery merged into an overheard digest is not followed to the digest's
+  turn; a turn that fails more than 24 hours after its delivery and that the
+  watcher misses stays delivered.
+- The events Log shows a failed event's latest reason as its detail
+  (`services/event-log.ts`), so the Problems filter names why. A dead
+  delivery that a later redelivery superseded gives no reason, as it gives no
+  failed status.
 
 ## Linear installation flow
 
-New `linear-connect` routes (mirroring `github-connect` / `github-app`):
-
-1. Admin OAuth authorize → callback stores an org-level `linear` credential
-   (workspace access token) in `credentials`. One workspace per org: the org
-   credential holds exactly one token, so connecting a second, different
-   workspace is rejected (409) until the first is disconnected — otherwise
-   the first workspace's webhook could never be deleted again.
-2. On callback: persist the credential (with the generated signing secret in
-   `metadata.webhookSecret`) and the `linear_installations` row FIRST, then
-   call Linear GraphQL `webhookCreate` (resource types: Issue, Comment,
-   Project, Cycle, IssueLabel, Reaction) pointing at
-   `{API_PUBLIC_URL}/webhooks/events/linear`, then patch `webhook_id` onto
-   the install row. Order matters: Linear can deliver the moment the webhook
-   exists, and a delivery the ingress can't resolve is 204'd and never
-   retried. A failed `webhookCreate` leaves a repairable half-connected
-   state (`webhookConfigured: false`), not a delivery gap.
-3. Verification: `Linear-Signature` header (HMAC-SHA256 over raw body) +
-   `webhookTimestamp` replay check, implemented in `plugin-linear`'s new
-   `triggers.ts` (`verify` + `toEvent` + catalog: `linear.issue.create`,
-   `linear.issue.update`, `linear.comment.create`, `linear.project.update`, …
-   — keys use Linear's own action verbs, `create`/`update`/`remove`).
-4. Disconnect: `webhookDelete` via API; remove installation + credential rows.
+Superseded on 2026-09-29 by "Organization Linear application setup" below. The original flow ran an admin OAuth authorization with the `admin` scope and created the workspace webhook through `webhookCreate` with a generated secret. Linear's `actor=app` installations cannot hold `admin`, and Linear access tokens from that flow expire after 24 hours. Signature verification is unchanged: the `Linear-Signature` header (HMAC-SHA256 over the raw body) plus the `webhookTimestamp` replay check in `plugin-linear`'s `triggers.ts`.
 
 ## API surface
 
 - `GET /api/events` — org event feed (filter by service/key/time);
   `GET /api/events/:id` includes its deliveries (debugging "why didn't my
   trigger fire").
+- Each delivery on `GET /api/events/:id` names where it went, when the
+  caller may open it: `thread` (`sessionId`, `threadId`) for an assistant
+  delivery, `runId` for a workflow delivery. The dispatcher admits an
+  assistant delivery under the dispatch id `event:{deliveryId}`, and the
+  engine keeps that id on the queue item. One query over
+  `engine_queue_items` finds the thread of every delivery of the event. A
+  thread must pass the `/threads/:threadId` rule, through the same two
+  checks the thread routes call: `threadEntry` (`routes/_thread-access.ts`)
+  admits a viewer of the session or a member the thread's share admits, and
+  `threadsVisibleTo` then checks the thread's key. A run must pass the
+  run page rule (`canReadWorkflowRun`) for the derived id
+  `wfrun_evt_{deliveryId}`. A delivery that reached nothing, or that the
+  caller may not open, has neither field.
 - `GET /api/events/catalog` — merged catalog from loaded plugins; drives the
   subscription-builder UI.
 - `POST/GET/PATCH/DELETE /api/event-subscriptions` — CRUD; validates event
@@ -273,7 +357,10 @@ New `linear-connect` routes (mirroring `github-connect` / `github-app`):
 - Collision gate (TKAI-294, `events/collisions.ts`): a create, a match edit,
   or an enable is compared against the org's enabled subscriptions. The
   comparison is symbolic — "filter A implies filter B" over `eq`, `in`,
-  `prefix`, `contains`; `regex` proves nothing and can only warn. A write
+  `prefix`, `contains`, `not_in`, `not_prefix`; `regex` and `not_regex`
+  prove nothing and can only warn. An exclusion also holds every event with no value for the
+  field, so two exclusions always overlap, and a positive filter never
+  covers an exclusion. A write
   that covers an existing rule on a shared event key (equal or superset)
   answers 409 with the colliding rules in the payload; `allowCollision: true`
   commits it anyway and logs the override. A partial overlap or subset
@@ -281,6 +368,35 @@ New `linear-connect` routes (mirroring `github-connect` / `github-app`):
   workflow targets on different workflows never collide (intentional
   fan-out); a workflow↔orchestrator pair warns but never blocks. Disabled
   rows are skipped — they cannot fire — and enabling one re-runs the gate.
+- Replacement proposals: `events.propose_subscription` takes an optional
+  `replaces`, the ID of an enabled assistant subscription
+  (`target.kind: "assistant"`; rows written before the 2026-10-16 presence hub rename store `"orchestrator"`) with the same owner, and stores it as
+  `target.replaces`. The action refuses an unknown ID, an ID from another
+  workspace, a workflow trigger, and a disabled subscription. When a person
+  enables the proposal, the PATCH route disables the replaced subscription in
+  the same transaction and leaves it out of the collision gate, so one version
+  replies. The PATCH lookup applies the same owner and kind checks. The
+  disable requires the replaced subscription to still be on. If it is off,
+  the enable is refused with 409. The message tells the person to delete the
+  proposal and, to change the subscription that replies now, ask for a new
+  proposal that replaces it. It never advises turning the old version back
+  on: a successor, a later version that replaced the successor, or a
+  rollback can each make that leave two versions replying, and the rows do
+  not keep that history reliably. If the old version was removed, the
+  message tells the person to delete the proposal and ask for a new one. Deliveries already
+  queued for the replaced version when it turns off are skipped at dispatch,
+  as for any disabled subscription, and the replacement gets no delivery for
+  an event ingested before it was on. A swap can therefore miss an event
+  that arrives during it. The review dialog
+  says when the replaced version is already off instead of promising to turn
+  it off. The enable clears `target.replaces` and records the ID as
+  `target.replaced`, so turning the new version off and on later leaves the
+  old one alone. A repeated proposal key returns the stored proposal before it
+  checks `replaces`; a retry matches the spent form only when `replaced`
+  names the same ID, so adding `replaces` to a proposal stored without one is
+  a key conflict. The review dialog names the
+  replaced subscription. An agent still cannot enable or change a live
+  subscription.
 - Workflow editor: an "event" trigger node type whose save/update syncs an
   `event_subscriptions` row.
 
@@ -301,6 +417,11 @@ first UI over this system. Two tabs:
   badge team owners with the team's name and a colleague's personal
   subscription with "Personal"; an unbadged row is the caller's own.
 
+An event also has its own page (`routes/events.$eventId.tsx`). Its delivery
+list (`components/events/delivery-list.tsx`) shows "Open thread" or "Open
+run" on a delivery that carries a `thread` or a `runId`. A reader can then
+open the transcript or the run that the event caused.
+
 Each mutable row's menu opens an edit dialog
 (`components/events/edit-subscription-dialog.tsx`): name, event keys, and
 filters, through the same match step the wizard's advanced outcome uses. A
@@ -320,7 +441,8 @@ overlap shows the same list as a warning before the dialog closes.
 ## Error handling
 
 - Rejected/unverifiable webhooks → `event_drop_log` with reason
-  (`bad_signature`, `unknown_org`, `oversized`), throttled logging (existing
+  (`bad_signature`, `unsupported_event`, `stale_delivery`, `unknown_org`,
+  `oversized`), throttled logging (existing
   GitHub-route pattern).
 - Delivery failures never lose events: the event row persists; the delivery
   row records attempts and last error and lands in `dead` after backoff is
@@ -329,7 +451,9 @@ overlap shows the same list as a warning before the dialog closes.
 ## Testing
 
 - Unit: `verify()` with signed fixtures (pattern in `github-app.test.ts`),
-  `toEvent()` normalization, filter-matching engine as a pure function.
+  `toEvent()` normalization, filter-matching engine as a pure function,
+  including a truth table for `not_in`, `not_prefix`, and `not_regex` with
+  the value present, absent, and undeclared.
 - Route: ingest → event + delivery rows in one transaction; duplicate delivery
   id is a no-op; bad signature → drop log.
 - Dispatcher: retry/backoff, `SKIP LOCKED` claiming, each target kind against
@@ -362,3 +486,226 @@ job.
 Team assistant subscriptions use the organization Slack bot and authorize the linked sender against current team membership.
 Ingress and redelivery share this check before creating deliveries. The dispatcher checks again and attributes delivery to the mentioner.
 Personal and workflow mention rules remain creator-scoped. See `2026-09-04-team-slack-mention-subscriptions-design.md`.
+
+
+## Orchestrator prompt templates (2026-09-16)
+
+A workflow states what its nodes send to a model. A subscription that routes
+to an assistant had no such control: every matching event arrived as the
+generic `SignalContent` body above. A team could not give one rule its own
+standing instruction, or shape the message the assistant reads.
+
+An orchestrator target now carries two optional strings:
+
+| Field | Meaning |
+|---|---|
+| `systemPrompt` | A standing instruction for this rule. It renders above the event in every delivery the rule makes. |
+| `userPromptTemplate` | The event message, in place of the default body. |
+
+Both are optional and both are absent by default. A rule that sets neither
+delivers the same body it delivered before this feature, byte for byte: the
+dispatcher only calls the renderer when the target carries a field
+(`events/dispatcher.ts`). Workflow targets refuse both fields, because a
+workflow keeps its prompt configuration on its own llm and session nodes.
+
+### The variable set
+
+Both fields are templates over one closed set of variables, drawn from the
+normalized event:
+
+| Variable | Value | `systemPrompt` | `userPromptTemplate` |
+|---|---|---|---|
+| `{{event.key}}` | the normalized event key | yes | yes |
+| `{{event.summary}}` | the one-line summary the source plugin wrote | no | yes |
+| `{{event.body}}` | the body the rule delivers with no user template | no | yes |
+| `{{refs.<name>}}` | one scope ref (`repo`, `installation_id`, `channel`, …) | yes | yes |
+| `{{payload.<field>}}` | one catalog-declared filter field of the raw payload | no | yes |
+
+`{{event.body}}` keeps a channel rule usable: a Slack mention's default body
+is the sender's cleaned message text, so a template can add instructions
+around the message instead of replacing it.
+
+`{{payload.<field>}}` reaches the payload only through the catalog entry for
+the event's own key, over the same `field` → `path` map the filters match on.
+An undeclared field is not addressable, so no template reads an unreviewed
+corner of a provider payload. No variable reaches a session, a thread, or
+another subscription.
+
+`{{payload.<field>}}` is declared per event key. A rule that selects several
+events, and names a field only some of them declare, renders an empty value
+on the others. The write gate accepts it, because one selected event does
+declare the field.
+
+A `{{refs.<name>}}` name is not checked at write time. Refs arrive on the
+normalized event at runtime and no catalog entry declares them, so a
+misspelled ref is stored and renders as an empty string. The form says so.
+
+### Rendering and safety
+
+The language is substitution and nothing else (`events/prompt-template.ts`).
+There is no expression syntax, no path walk, no function call, and no
+recursion: one pass of `{{ name }}` replacement, so a rendered value that
+itself contains `{{ ... }}` stays literal and payload text cannot smuggle in
+a variable. Rendering is deterministic, and it happens at delivery time,
+inside the dispatcher, before the existing assistant delivery path
+(`events/assistant-delivery.ts`) takes the signal.
+
+The write gate (`events/subscription-write.ts`) is what keeps the renderer
+total. It refuses an empty field, a field over 4,000 characters (see Length
+limit below), a malformed
+placeholder, a name outside the set above, a `payload.<field>` that no event
+selected by `eventKeys` declares, and, in `systemPrompt`, a name outside that
+field's narrower column. A patch re-validates the stored templates against
+the patched `eventKeys`, so narrowing a rule to events that declare fewer
+fields fails the write instead of rendering empty values later. At delivery
+an absent value renders as an empty string, and the rendered body is capped
+at 8000 characters.
+
+The placeholder check reads the template left to right: `{{` opens a
+placeholder and the next `}}` closes it. The scan makes two refusals: an
+unclosed `{{`, and a `{{` inside another `{{ }}`. A `}}` with no open
+placeholder in front of it is literal text, so a template may show the
+assistant a JSON shape such as `{"a": {"b": 1}}`.
+
+A `userPromptTemplate` that renders to nothing delivers the default body
+instead, and the dispatcher logs the substitution. An empty signal body costs
+the assistant a turn and tells it nothing, and the usual cause is the
+per-event declaration above.
+
+A rendered `systemPrompt` is delivered as the first block of the signal body,
+under the heading `Instructions for this subscription:`, with the event under
+it. The assistant session is shared by every rule that names it, so a per
+delivery change of the session system prompt would leak one rule's
+instruction into another rule's turn. The block is per delivery and holds
+only this rule's text.
+
+The heading is why `systemPrompt` takes the narrower variable set. The
+summary, the default body, and every payload field carry text that the sender
+of the event wrote. A rule such as `Follow the direction: {{payload.text}}`
+would put that sender's words under a heading that presents them as the
+rule's own instruction. The write gate refuses those names in that field, and
+the renderer builds the instruction over `event.key` alone,
+so a row that reaches the renderer another way keeps the same property. The
+sender's text still reaches the assistant, below the separator, where it
+reads as the event.
+
+Prompt configuration does not change what a rule matches, so a write that
+only changes a template runs no collision gate.
+
+### Length limit
+
+Each template field stores at most 4,000 characters. One constant,
+`MAX_PROMPT_TEMPLATE_CHARS` in `@valet/shared`, holds the number. The write
+gate refuses a longer field, and the Presence editor counts characters and
+holds Save against the same constant, so the two cannot drift.
+
+The refusal names the field, its length, the limit, and the corrective
+action: `systemPrompt is too long: 4512 of 4000 characters. Shorten it or
+move details into a skill.` The
+editor shows the same refusal in its own words next to the Instructions
+field (presence hub spec, Part H).
+
+The limit stays at 4,000 (reviewed 2026-10-30). The reasons:
+
+- The model context is not the constraint. 4,000 characters is about 1,000
+  tokens, under 1% of a 200,000-token window.
+- The instruction repeats. It rides above the event in every delivery, so a
+  line that works in one thread adds it to that thread on each event.
+- The delivered body is capped at 8,000 characters, and the rendered
+  instruction at 4,000. A higher template limit would truncate the
+  instruction at render time, or take room from the event.
+- Comparable products sit in the same range. ChatGPT custom instructions
+  allow 1,500 characters for each field. GitHub Copilot code review reads
+  the first 4,000 characters of an instruction file. A custom GPT and a
+  Copilot Studio agent allow 8,000 characters, but those instructions cover
+  the whole agent and appear once in its context, not once for each event.
+- Long guidance has a better home: a skill. The assistant reads a skill only
+  when it needs it, so the guidance costs nothing on deliveries that do not
+  use it.
+
+### Surfaces
+
+- `POST /api/event-subscriptions` takes both fields inside `target`.
+- `PATCH /api/event-subscriptions/:id` takes `systemPrompt` and
+  `userPromptTemplate` at the top level, like `assistantId`. `null` clears a
+  field and returns the rule to the default body. They are the only other
+  part of `target` a patch may rewrite.
+- The creation wizard collects both on the config step of every outcome that
+  notifies an assistant: the Then step for the event and notify outcomes, and
+  the Reply step for the Slack reply outcome. The edit dialog shows them for
+  every assistant-target rule.
+
+### Limits
+
+A followed thread is not a match of the rule that bound it. Later messages in
+that thread reach the assistant through the follow router
+(`channels/follow-router.ts`), which carries the message itself, so they keep
+the default body. Only the deliveries the subscription matches render its
+templates. The form states this where a rule follows a thread, so a reader
+does not expect an instruction to hold for the whole conversation.
+
+### Linear event connection readiness
+
+Personal Linear OAuth enables MCP tools, including `linear.save_issue`. It does
+not install a webhook. Events such as `linear.issue.update` require the separate
+organization connection. An admin configures the app in Organization settings >
+Linear using the `client_credentials` setup below; there is no browser approval
+callback or `webhookCreate` call.
+
+Trigger catalogs show incoming event labels and organization readiness. Readiness
+requires an installation and an organization credential with a signing secret;
+the credential's workspace ID must match when present. No webhook ID is required.
+Readiness does not prove that Linear delivered a particular event.
+Creation and activation report missing setup instead of accepting an event source
+that cannot receive events. Template installation uses the same check. Repository
+imports keep workflow definitions but leave missing-ingress triggers unarmed with
+a setup warning. Existing rules can still be disabled. Non-admins get
+an instruction to ask an organization admin; credentials remain admin-only.
+
+Linear's Integrations entry is an ordinary integration card: Connect Linear adds a
+personal or team credential for its tools. The organization's native Linear
+connection lives only in Organization settings, as Slack's and GitHub's do.
+Removing the personal or team credential does not disconnect the organization's native webhook.
+Native event authorization does not currently replace MCP-backed action tools.
+
+## Organization Linear application setup (2026-09-29)
+
+The organization's Linear connection follows the Slack model: paste, verify, store. The settings page is named Linear, because it holds the organization's native Linear integration.
+
+Linear issues three credentials for an OAuth app: a client ID, a client secret, and a webhook signing secret (https://linear.app/developers/oauth-2-0-authentication). The admin pastes all three.
+
+1. Step one links to Linear's prefilled app creation form (https://linear.app/developers/oauth-app-manifests). It sets the app name, redirect URI, private distribution, both `authorization_code` and `client_credentials` grants, and the app's webhook: `{public URL}/webhooks/events/linear` with the resource types in `LINEAR_WEBHOOK_RESOURCE_TYPES`. Linear accepts only a public HTTPS webhook URL, so without `VALET_PUBLIC_URL` the form omits the webhook and the page warns.
+2. `PUT /api/org/linear` takes the three values. Before it stores anything, the server requests a `client_credentials` token (scope `read,write`) and reads the Linear workspace with it, the way the Slack save runs `auth.test`. A refused grant returns 400 with the fix (turn on Client credentials, or recopy the ID and secret). On success it stores `linear_app` (client ID in metadata, secret encrypted), the org `linear` row (token, `webhookSecret`, `workspaceId`, `grant`, `tokenExpiresAt`), and the `linear_installations` row. One Linear workspace per org still applies (409).
+3. There is no browser approval. Linear installs a private app in its own workspace when it issues the `client_credentials` token. A live test on 2026-09-29 showed the approval screen reporting "already installed" with no way back to Valet. Linear requires a redirect URI on every app, so the form registers `{public URL}/api/org/linear/callback`, but Valet never redirects to it.
+
+No `admin` scope is requested: `actor=app` installations cannot hold it. Valet no longer calls `webhookCreate`.
+
+`client_credentials` tokens last 30 days and have no refresh token. `LinearAppTokenStore` (a credential store decorator) mints a replacement on read when the org token is within a day of `tokenExpiresAt`, using the saved client ID and secret. A failed renewal stamps `metadata.refreshFailedAt`. The scope string stays constant, because Linear revokes an app's other tokens when a different scope set is requested.
+
+Readiness requires the installation, the signing secret, and a matching workspace. `DELETE /api/org/linear` removes such a legacy webhook best effort, then deletes the installation, the org `linear` row, and `linear_app`. The app itself stays in Linear.
+
+The Linear plugin serves GET, PUT, and DELETE at `/api/plugins/linear/http/connection`. The host keeps `/api/org/linear` as an alias with the same authentication and responses ([Plugin HTTP interfaces](2026-10-07-plugin-http-interfaces-design.md#linear-connection-binding)).
+
+Deployment environment variables (`LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET`) are no longer a fallback. Generic credential routes cannot change app credentials. Agent and workflow credential resolution follows the class rule of the [native integration credential policy](2026-10-15-native-integration-credential-policy-design.md). A native integration (GitHub, Slack, Linear) falls back to its app identity when no person's credential applies. The resolver hands that identity to an action as a bare token, never as the stored row, so the webhook signing secret does not reach an action. A non-native service never receives an app credential.
+
+Known gaps: when a workspace removes the app, Linear sends a signed `OAuthApp` `revoked` event. The ingress acknowledges it and drop-logs it as `unsupported_event` with a reconnect instruction, but does not mark the connection broken. Valet does not revoke tokens with Linear on disconnect.
+
+The Events Log defaults to subscription delivery history. Disabling a subscription stops new matching and preserves existing history. Show diagnostics includes organization-wide ingestion problems and exposes raw receipts to administrators. A filter miss (`filter_excluded`) is the exception to organization-wide: it shows only in a workspace whose enabled subscriptions, or the organization's, name its event key, exactly or through a `prefix.*` pattern. A workspace that never subscribed to the event does not see another workspace's filter miss as its own. The diagnostics filter is part of both the query cache key and page cursor scope.
+
+## Subjects, status, and derived events (2026-10-15)
+
+[Event wakeups](2026-10-15-event-wakeups-design.md) adds three fields to
+`NormalizedEvent`: `subjects` (canonical strings that name the GitHub,
+Slack, or Linear object an event concerns, coarse to fine), `status` (one
+normalized outcome, when the event has one, such as `failure` or
+`triage`), and `previousStatus` (the status before an update, when the
+provider reports it). Every plugin event now carries at least one subject.
+The `events` table stores `subjects` so delivery-time rechecks (team
+coverage, redeliver) match a `subject` filter the same way ingest did.
+
+A native plugin may also declare a derived event key: one computed from a
+source event by one extra provider read, such as
+`github.pull_request.checks_completed` from a pull request's check runs.
+Subscriptions reject derived keys; `workflows.list_event_types` lists them
+marked `derived`. See that spec's Parts A, B, and G for the full grammar,
+mapping, and vectors.

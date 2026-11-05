@@ -10,6 +10,8 @@ metadata on the user message and renders a note the agent can act on.
 ## Surfaces
 
 - **API**: `POST /api/sessions/:id/files` (multipart form-data).
+- **API**: `GET /api/sessions/:id/threads/:threadId/files?path=` downloads a
+  file attachment of that thread (see [Download route](#download-route)).
 - **Web**: composer file chips (`packages/web/src/components/session/composer-files.ts`).
 - **CLI**: `valet upload <session-id> <path...>` (`packages/api/src/cli/commands/upload.ts`).
 - **Engine**: `type:"file"` attachments on `MessageEntry.attachments`, rendered
@@ -147,6 +149,17 @@ where it would persist as a phantom image and silently vanish from the REST
 projection on reload. The transcript note renders from the persisted
 attachments on both the hot turn and reload (`entriesToAgentMessages`).
 
+## Download route
+
+The thread context panel's Sources list links each uploaded file to
+`GET /api/sessions/:id/threads/:threadId/files?path=<path>`. The route uses
+the same access check as the thread's messages. The `path` must equal the
+`path` of a `type:"file"` attachment on a message of that thread, so the
+route cannot read other sandbox files. The route wakes the sandbox and
+streams the file as `Content-Disposition: attachment` with the attachment's
+name and mime type. A path that no attachment names, or a file that is gone
+from the sandbox, returns 404.
+
 ## Web composer
 
 Budgets: 5 files, `DEFAULT_MAX_UPLOAD_BYTES` per file, 250 MB total.
@@ -174,10 +187,14 @@ mapped through `errorMessage`, which prefers the server's `corrective`.
 | 400 | Bad multipart, missing file/filename, bad `extract` value, invalid path, read error. |
 | 404 | Unknown session or non-owner. |
 | 408 | The client canceled while the route waited for the sandbox. |
-| 409 | Destination exists; readiness timed out (`wake:true`); or the sandbox was released or is unavailable. |
+| 409 | Destination exists; readiness timed out (`wake:true`); or the resolved sandbox was released or is unavailable. |
 | 413 | Content-Length or file above the cap. |
 | 415 | `extract=true` on a non-extractable file. |
 | 422 | Zip guard rejection or PDF extraction failure with `extract=true`. |
 | 500 | Session load, startup/preparation, missing ready handle, mkdir, write, or destination-verification failure. |
+
+A released cached session is evicted before resolution. Uploads rebuild its attachment and keep durable submissions.
+The `409` release response still applies if destruction starts after the upload resolves its session.
+Deleted sessions remain unavailable and return `404`; uploads do not recreate them.
 
 Every error body carries `error` and a `corrective` naming the next action.

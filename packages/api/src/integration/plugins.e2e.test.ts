@@ -24,7 +24,7 @@
  *      kill/restart harness — see the test body for why that's the
  *      disclosed, deliberately narrower choice for this task.
  *   4. Credential-unavailable UX (ungated) — `list_tools`'s output includes
- *      the `no credential connected` warning for a declared-but-unconnected
+ *      the `not connected` warning for a declared-but-unconnected
  *      fixture service, driven by calling the `list_tools` `ToolDef.execute`
  *      directly (via `pluginSessionExtras`) with a minimal `ToolContext`
  *      built from the booted providers — no model involved.
@@ -46,7 +46,7 @@ import { bundledPlugins } from "../plugins/registry.gen.js";
 import { actionInvocations } from "../schema/index.js";
 import type {
   CreateWorkflowResponse,
-  EnsureOrchestratorResponse,
+  EnsureWorkspaceRuntimeResponse,
   GetWorkflowRunResponse,
   ListMessagesResponse,
   StartWorkflowRunResponse,
@@ -116,9 +116,9 @@ describeIfKey("api integration: plugin system exit criteria — orchestrator flo
         apiKey: "fixture-demo-key",
       });
 
-      const ensureRes = await fetch(`${api.baseUrl}/api/orchestrator`, { method: "POST" });
+      const ensureRes = await fetch(`${api.baseUrl}/api/workspaces/user/runtime`, { method: "POST" });
       expect(ensureRes.status).toBe(200);
-      const { sessionId } = (await ensureRes.json()) as EnsureOrchestratorResponse;
+      const { sessionId } = (await ensureRes.json()) as EnsureWorkspaceRuntimeResponse;
 
       await driveTurn({
         baseUrl: api.baseUrl,
@@ -382,7 +382,7 @@ describe("api integration: plugin system exit criteria — credential-unavailabl
       warnings?: Array<{ service: string; reason: string }>;
     };
     expect(filteredParsed.tools.map((t) => t.tool_id)).toEqual(["demo.ping"]);
-    expect(filteredParsed.warnings?.[0]?.reason).toBe("no credential connected");
+    expect(filteredParsed.warnings?.[0]?.reason).toBe("not connected");
   });
 });
 

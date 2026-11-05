@@ -14,7 +14,7 @@ function baseSpec(overrides: Partial<PrebuildSpec> = {}): PrebuildSpec {
     prebuildId: "pb-1",
     cloneUrl: "https://github.com/octocat/Hello-World.git",
     commitSha: "abc123",
-    baseImage: "alpine:3",
+    baseImage: "public.ecr.aws/docker/library/alpine:3",
     recipe: [],
     imageRef: "valet-prebuild/octocat-hello-world:abc123",
     ...overrides,
@@ -430,6 +430,9 @@ function dockerAvailable(): boolean {
 
 const describeDocker = dockerAvailable() ? describe : describe.skip;
 
+/** A registry pull refused for rate or data limits, as BuildKit reports it. */
+const REGISTRY_RATE_LIMIT = /429 Too Many Requests|toomanyrequests/;
+
 describeDocker("DockerImageBuilder (live docker)", () => {
   const imagesToClean: string[] = [];
 
@@ -439,7 +442,7 @@ describeDocker("DockerImageBuilder (live docker)", () => {
     }
   });
 
-  it("builds a trivial public-repo spec end-to-end and pushes to the local daemon", async () => {
+  it("builds a trivial public-repo spec end-to-end and pushes to the local daemon", async (ctx) => {
     const imageRef = `valet-prebuild-test/hello-world:${Date.now()}`;
     imagesToClean.push(imageRef);
     const builder = new DockerImageBuilder();
@@ -449,13 +452,12 @@ describeDocker("DockerImageBuilder (live docker)", () => {
       prebuildId: "pb-live",
       cloneUrl: "https://github.com/octocat/Hello-World.git",
       commitSha: "7fd1a60b01f91b314f59955a4e4d4e80d8edf11",
-      // Plain `alpine:3` has no `git` binary — the generated Dockerfile's
-      // clone step needs one already present in the base image (recipe.ts,
-      // Task 1, doesn't install git itself). `alpine/git` is alpine + git
-      // with an `ENTRYPOINT ["git"]`; that's irrelevant here since `RUN`
-      // always executes via `/bin/sh -c`, never through the image's
-      // entrypoint.
-      baseImage: "alpine/git:latest",
+      // Plain `alpine:3` has no `git` binary, and the generated Dockerfile's
+      // clone step needs one already present in the base image (recipe.ts
+      // does not install git). `buildpack-deps:bookworm-scm` is the official
+      // Debian image with git. It comes from the ECR Public mirror because
+      // anonymous Docker Hub pulls hit the shared CI runner rate limit.
+      baseImage: "public.ecr.aws/docker/library/buildpack-deps:bookworm-scm",
       recipe: [],
       imageRef,
     });
@@ -468,7 +470,13 @@ describeDocker("DockerImageBuilder (live docker)", () => {
       status = await builder.status(buildId);
     }
 
-    expect(status.state).toBe("pushed");
+    // Shared CI runners exceed ECR Public's anonymous data limit on some
+    // days. That is an external outage, not a builder failure, so the test
+    // reports a skip with the reason instead of a red build.
+    if (status.state === "failed" && REGISTRY_RATE_LIMIT.test(status.logTail ?? "")) {
+      ctx.skip("the base image registry rate-limited this runner (429)");
+    }
+    expect(status.state, `build ended ${status.state}: ${JSON.stringify(status)}`).toBe("pushed");
 
     const inspect = spawnSync("docker", ["image", "inspect", imageRef], { stdio: "pipe" });
     expect(inspect.status).toBe(0);
@@ -485,7 +493,7 @@ describeDocker("DockerImageBuilder (live docker)", () => {
       prebuildId: "pb-live-fail",
       cloneUrl: "https://github.com/octocat/Hello-World.git",
       commitSha: "7fd1a60b01f91b314f59955a4e4d4e80d8edf11",
-      baseImage: "this-image-definitely-does-not-exist-anywhere:v999",
+      baseImage: "public.ecr.aws/docker/library/this-image-definitely-does-not-exist-anywhere:v999",
       recipe: [],
       imageRef,
     });

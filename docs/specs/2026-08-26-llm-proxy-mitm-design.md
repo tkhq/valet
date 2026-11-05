@@ -110,7 +110,7 @@ resolveUpstream(orgId, kind):   // kind ∈ { "anthropic", "openai" }
 
 `defaultBase("anthropic") = "https://api.anthropic.com"`, `defaultBase("openai") = "https://api.openai.com"`.
 
-**Env auto-provision** (`ensureEnvProviders`, called at boot after migrations): for each kind, if the env key is set and `defaultLlmProvider(orgId, kind)` is null, call the existing `createLlmProvider` + credential write with the env value and a name such as `env:anthropic`. Idempotent — a second boot finds the row and skips.
+**Env auto-provision** (`ensureEnvProviders`, called at boot after migrations): for each kind, if the env key is set and the org has no provider of that kind, call `createLlmProvider` with a name such as `env:anthropic`. The row stores no key. Every key reader falls back to the env key when `llm:{id}` is empty, so rotating the env var and restarting the api changes the key Valet uses (TKAI-710). Earlier builds stored a copy of the env key on the row. The same step deletes that copy from any `env:` row whose credential has no `metadata.last4`. A key saved in Settings always has `metadata.last4`, so it stays and still wins. Idempotent: a second boot finds the row and changes nothing.
 
 ### 4. Forward and tee
 
@@ -240,11 +240,11 @@ WHERE p."org_id" IS NOT NULL;
 
 ### 7. API surface
 
-New router `/api/proxy`, mounted under the normal `/api` auth ladder (cookie/session identity). Members see their own rows; org-admins see the whole org.
+New router `/api/proxy`, mounted under the normal `/api` auth ladder (cookie/session identity). The personal usage surface always returns only the caller's personal rows, including for organization admins. Team rows are excluded.
 
-- `GET /api/proxy/usage/summary?window=...` — time-series buckets plus breakdowns by user, model, and harness. Reads `llm_proxy_requests` with a raw aggregate, same pattern as `routes/usage.ts`.
-- `GET /api/proxy/requests?user=&model=&harness=&from=&to=&cursor=` — filtered, paginated list (metadata columns, no bodies).
-- `GET /api/proxy/requests/:id` — one row with full request and response bodies for drill-down. Ownership-gated: a member reads only their own row; an admin reads any row in the org; a row in another org 404s.
+- `GET /api/proxy/usage/summary?window=...` — time-series buckets plus breakdowns by user, model, and harness. The maximum window is 30d. Reads `llm_proxy_requests` with a raw aggregate, same pattern as `routes/usage.ts`.
+- `GET /api/proxy/requests?model=&harness=&from=&to=&cursor=&limit=` — filtered, paginated list (metadata columns, no bodies). `from` and `to` are non-negative Unix milliseconds within the Date range.
+- `GET /api/proxy/requests/:id` — one row with full request and response bodies for internal analysis. It is personal-scope gated: a row not owned by the caller returns 404.
 - `POST /api/proxy/keys` / `GET /api/proxy/keys` / `DELETE /api/proxy/keys/:id` — issue, list, and revoke `vlt_` proxy keys, wrapping the existing `apiKey` plugin. Reused by the onboarding panel.
 
 ### 8. Dashboard (web)
@@ -252,18 +252,24 @@ New router `/api/proxy`, mounted under the normal `/api` auth ladder (cookie/ses
 New route in `packages/web/src/routes/` (proposed `usage.tsx`, or a tab under settings), TanStack Query against the endpoints above:
 
 - **Time-series** — spend (USD) and tokens over the selected window, stacked by model.
-- **Breakdown tables** — by user (admin view), by model, and by harness; each row shows requests, tokens, and cost.
-- **Request log** — a paginated table with filters (user, model, harness, date range); each row links to drill-down.
-- **Drill-down** — renders the normalized `Sample` (`parsed`) with the existing session message-rendering components: system, tools, input turns, and the assistant output as readable message blocks. Falls back to raw request/response JSON when `parsed` is null (parse failed or pending reprocess). The raw bodies stay available behind a "view raw" toggle.
+- **Breakdown tables** — by model and by harness. Each row shows requests, tokens, and cost.
+- **Request log** — a cursor-paginated metadata table. It has an explicit page size and Previous/Next navigation. It does not show owner identifiers, prompts, responses, raw request bodies, or raw failure text. A failure row has only a status and failure indicator.
+- **Content safety** — prompt and response bodies remain stored for the internal analysis pipeline. The usage page does not fetch or render them.
 
 ### 9. Onboarding panel
 
-A settings panel that issues a proxy key and shows copy-paste setup:
+A settings panel that issues a proxy key and shows copy-paste setup. Every tool reads the key from one environment variable, `VALET_PROXY_KEY`, so the reader sets the key once:
+
+```
+export VALET_PROXY_KEY=vlt_<key>
+```
+
+A proxy key is an ordinary valet API key (`vlt_` prefix, the better-auth `apiKey` plugin). The panel names it `proxy-key`. The gateway and the `/api` auth ladder verify it the same way.
 
 - **Claude Code:**
   ```
   export ANTHROPIC_BASE_URL=https://<valet-host>/proxy/anthropic
-  export ANTHROPIC_AUTH_TOKEN=vlt_<key>
+  export ANTHROPIC_AUTH_TOKEN="$VALET_PROXY_KEY"
   ```
 - **Codex** (`~/.codex/config.toml`):
   ```toml
@@ -271,10 +277,35 @@ A settings panel that issues a proxy key and shows copy-paste setup:
   [model_providers.valet]
   name = "valet"
   base_url = "https://<valet-host>/proxy/openai/v1"
-  env_key = "VALET_KEY"
+  env_key = "VALET_PROXY_KEY"
   wire_api = "responses"
   ```
-  plus `export VALET_KEY=vlt_<key>`.
+- **OpenCode** (`opencode.json`):
+  ```json
+  {
+    "provider": {
+      "anthropic": {
+        "options": {
+          "baseURL": "https://<valet-host>/proxy/anthropic/v1",
+          "apiKey": "{env:VALET_PROXY_KEY}"
+        }
+      }
+    }
+  }
+  ```
+  The `baseURL` ends in `/v1`. OpenCode's Anthropic client appends `/messages` to `baseURL` directly, so the Claude Code base URL makes it request `/proxy/anthropic/messages`. OpenCode also reads `ANTHROPIC_BASE_URL` as its `baseURL`, so the same path comes from the Claude Code environment. The gateway adds a missing `/v1` to every Anthropic subpath (`proxySubpath`), so both base URLs reach `/v1/messages` upstream. OpenAI subpaths stay unchanged, because an org's custom OpenAI upstream (Azure) can use other path shapes.
+- **OpenAI SDK** (scripts): `base_url` is `https://<valet-host>/proxy/openai/v1` and `api_key` is `os.environ["VALET_PROXY_KEY"]`.
+
+In pass-through mode, the shared block also exports `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`. Each tool sends the provider key in one header and the `vlt_` key in the other:
+
+| Tool | Provider key | `vlt_` key |
+|---|---|---|
+| Claude Code | `ANTHROPIC_API_KEY` as `x-api-key` | `ANTHROPIC_AUTH_TOKEN` as Bearer |
+| Codex | `env_key = "OPENAI_API_KEY"` as Bearer | `env_http_headers = { "x-api-key" = "VALET_PROXY_KEY" }` |
+| OpenCode | `apiKey` from `ANTHROPIC_API_KEY` as `x-api-key` | `options.headers` Bearer from `VALET_PROXY_KEY` |
+| OpenAI SDK | `api_key` as Bearer | `default_headers` `x-api-key` |
+
+Before a key exists, the panel shows steps 3 and 4 in a collapsed setup guide. The guide renders the same snippets with the `<your-valet-proxy-key>` placeholder, so a reader can see the setup without creating a key. A team member who cannot create a key can also read it. After creation, the snippets contain the real key.
 
 ## Error handling
 
@@ -308,7 +339,7 @@ The gateway puts valet in the inference hot path for every engineer's local Clau
 - **Recorder integration** — a fake upstream serving a canned SSE stream; drive `proxyCompletion` and assert one `llm_proxy_requests` row with the recorded **request body** (finding 1), correct usage, cost, latency, `provider_response_id`, full response body, and a non-null `parsed` sample; assert the client received the identical stream bytes.
 - **Sample parser** — `parseSample` fixtures for both wires: a plain text turn, a tool-use/function-call turn, an image input, and a streamed response reassembled to the same `Sample` as its non-streamed twin. Assert `system`, `tools`, `input`, and `output` blocks are populated; assert an unknown block type is preserved as `{type:"unknown"}` not dropped; assert a Codex request with `previous_response_id` yields a partial `input` plus the recorded pointer.
 - **cost_entries union** — insert a proxy row; assert `/api/usage/summary` includes its cost.
-- **API authorization** — a member cannot read another member's drill-down; an admin can; a cross-org row 404s.
+- **API authorization** — a caller cannot read another user's or a team record, including when the caller is an organization admin. A cross-org row returns 404.
 
 **Success-criteria validation (manual):** point local Claude Code (`ANTHROPIC_BASE_URL` + `vlt_` key) and Codex (`config.toml` provider) at the dev stack. Run a prompt in each. Confirm each produces streamed output identical to going direct, a `llm_proxy_requests` row lands with correct usage, and the dashboard reflects the spend under the acting user. Then run `make e2e` for a clean scorecard.
 
@@ -323,7 +354,7 @@ The gateway puts valet in the inference hot path for every engineer's local Clau
 7. `/proxy` router mount for both kinds; wire into `app.ts`.
 8. Per-key spend metric + alert through the OTEL meter (decision 8).
 9. `/api/proxy/*` endpoints, with authorization tests.
-10. Web dashboard (Sample drill-down) + onboarding panel.
+10. Web dashboard (bounded metadata log) + onboarding panel.
 11. Manual success-criteria run + `make e2e`.
 
 ## Out of scope
@@ -338,7 +369,7 @@ The gateway puts valet in the inference hot path for every engineer's local Clau
 
 ## Team proxy settings (2026-09-11)
 
-In a team workspace, `/settings/proxy` uses the personal page's `ProxyGovernance` and numbered `OnboardingPanel` flow. Governance is read-only. A team adapter creates keys through the team endpoint without mounting the personal key hook. Team and organization admins can create keys. Members see a disabled create action and instructions to request a shared key from an admin.
+In a team workspace, `/settings/proxy` uses the personal page's `ProxyGovernance` and numbered `OnboardingPanel` flow. Governance is read-only. A team adapter creates keys through the team endpoint without mounting the personal key hook. Team and organization admins can create keys. Members see a disabled create action. The disabled action carries an explanation that names who can create the key and what the member does next.
 
 The page reads organization gateway enablement and credential mode. It offers no governance mutations, including for organization admins. Loading, failed, and unavailable team states block setup. Changing workspace remounts the panel so key reveals and late creation callbacks cannot cross teams. The flow also remounts after admin access changes. Failed team, organization, key-access, or proxy-setting queries unmount the flow even when cached data remains. Restored access starts at key creation.
 
@@ -346,12 +377,60 @@ The gateway accepts a verified team key only when its metadata matches the store
 
 Organization governance applies to team traffic. A disabled gateway forwards nothing. Centralized mode uses the organization's provider credential. Pass-through mode requires an approved provider credential alongside the shared team key. The team page never reads personal provider credentials.
 
-Proxy records store `team_id` and a null `user_id` for team traffic. Personal records retain `user_id` and a null `team_id`. Metrics label the team instead of the creating admin. The `cost_entries` view projects team ownership, including after key revocation. Team usage drill-down groups proxy rows by harness and filters by both organization and team. Existing detailed proxy log access remains limited to organization admins for team records. Personal members cannot read those records through their user identity.
+Proxy records store `team_id` and a null `user_id` for team traffic. Personal records retain `user_id` and a null `team_id`. Metrics label the team instead of the creating admin. The `cost_entries` view projects team ownership, including after key revocation. Team usage drill-down groups proxy rows by harness and filters by both organization and team. The personal proxy endpoints exclude team records for every caller.
 
 The in-place schema repair adds `team_id`, permits a null `user_id`, and updates the cost view. One SQL block updates attribution and creates the team index atomically. The index is the repair completion marker. Fresh migrations contain the same schema and view.
 
 Regression coverage includes real team key forwarding in both credential modes, disabled governance, creator departure, invalid key pins, deleted teams, revocation, recording attribution, schema repair, permissions, and workspace transitions.
 
-Both scopes start with the Proxy section and Step 2, Create your key. Success shows the new secret once, setup snippets containing that key, Run it commands, and Create another key. Create another clears the secret and returns to creation. Team snippets retain the organization credential mode. The shared API keys link opens scoped key management; no separate key list or placeholder setup appears on the Proxy page. Snippets and revealed keys scroll inside the settings column. Key creation errors show the server corrective message, including when real authentication is disabled.
+Both scopes start with the Proxy section and Step 2, Create your key. Success shows the new secret once, setup snippets containing that key, Run it commands, and Create another key. Create another clears the secret and returns to creation. Team snippets retain the organization credential mode. The shared API keys link opens scoped key management; no separate key list appears on the Proxy page. Before creation, a collapsed setup guide shows the snippets with a key placeholder (section 9). Snippets and revealed keys scroll inside the settings column. Key creation errors show the server corrective message, including when real authentication is disabled.
 
-Frontend regression tests cover successful creation in both scopes, actual-key snippets, Run it, Create another, member and admin permissions, scope changes, access errors, and delayed responses.
+Frontend regression tests cover successful creation in both scopes, actual-key snippets, Run it, Create another, member and admin permissions, scope changes, access errors, and delayed responses. The permission cases cover a plain member, a team admin, an organization admin who is not on the team, and a regular user in a personal workspace.
+
+
+### Who can create a proxy key (TKAI-483)
+
+A report said that a regular user cannot create a proxy token and that no organization setting enables it. The gate is the workspace, not an organization setting. In a personal workspace every signed-in user creates a proxy key. In a team workspace only a team admin or an organization admin creates the shared key, because the key bills and authorizes as the team. No organization toggle changes this rule, and none is added.
+
+The blocked state on a team's API keys and proxy tab (`/settings/teams/$teamId/access`) states three things:
+
+1. Only a team admin or an organization admin can create a shared key for this team.
+2. Ask an admin of this team to create the key.
+3. To create your own key, open Personal workspace → API keys and proxy (`/settings/api-keys`). Team settings pin the team, so the workspace switcher cannot make that tab personal.
+
+The API refusal for the same member (`TEAM_KEY_ADMIN_REQUIRED`, code `team_admin_required`) states the same three things.
+
+In pass-through mode the third statement adds that the member must also supply a provider key, because a personal proxy key alone forwards no credential.
+
+The copy speaks about a team, so the panel shows it only in a team workspace. A caller that blocks creation in another scope gets no team instructions.
+
+The blocked button is inert, not disabled: it carries `aria-disabled` and points at the explanation with `aria-describedby`. A `disabled` button leaves the tab order, so a keyboard reader never lands on it and never hears the reason. The click handler refuses the click. A pending create still uses `disabled`, because that state is short and a second create must not queue.
+
+## Cache pricing correction (2026-09-26)
+
+OpenAI reports cached input as a subset of input tokens in Responses and Chat Completions.
+The recorder keeps these provider counts. Before pricing, subtract cached input from input tokens for pi-ai.
+Anthropic input already excludes cache tokens and needs no subtraction.
+Proxy dollar values are estimates from catalog rates, not reconciled provider invoices.
+The Usage page identifies this distinction. The home dashboard excludes all proxy activity from its windows and member rankings.
+
+### Repair stored estimates
+
+New pricing does not change existing `cost_usd` values. Use the explicit repair command for historical OpenAI rows with cached input.
+The command requires an organization and an exclusive cutoff. It uses current catalog rates, which can differ from historical rates.
+It skips unknown models and unpriced rows. It preserves token counts and raw recordings.
+Repeated runs with the same catalog do not change corrected rows. Concurrent cost changes are skipped.
+The repair does not rewrite exported telemetry counters or provider invoices.
+Historical rows lack payment-source metadata, so the repair cannot classify organization versus personal charges.
+
+1. Set `DATABASE_URL` for the target database.
+2. Run the dry run from `packages/api`:
+
+   ```sh
+   node --import tsx scripts/reprice-proxy.ts --org <org-id> --before <ISO-date>
+   ```
+
+3. Review the changed count and old and new estimate totals.
+4. Add `--apply` to update those estimates.
+
+The command processes 500 rows per batch. A stopped run can resume by repeating the command.

@@ -1,4 +1,3 @@
-import type { ListTeamDeletionRequestsParams, ListTeamDeletionRequestsResponse, ListTeamDeletionTargetsResponse, SubmitTeamDeletionRequest } from "@valet/api/wire";
 /**
  * Typed REST client. Routes are documented inline; types come from
  * `@valet/api/wire` so server + web agree on the shape.
@@ -7,25 +6,45 @@ import type { ListTeamDeletionRequestsParams, ListTeamDeletionRequestsResponse, 
  * (or no) Authorization header. We don't ship one for now; later when real
  * auth lands we'll wire token storage here.
  */
+import type { ThreadProjectsOperation, ThreadProjectsResponse } from "@valet/shared";
 import type {
+  HomeConversationResponse,
+  HomeTasksResponse,
+  SessionOutcomeUsage,
+  ExternalUsageResponse,
+  GetLinearConnectionResponse,
+  ListTeamDeletionRequestsParams,
+  ListTeamDeletionRequestsResponse,
+  ListTeamDeletionTargetsResponse,
+  SubmitTeamDeletionRequest,
+  ListChannelsResponse,
+  WorkspaceIntegrationLimitResponse,
+  ListPresencePlacesResponse,
+  ListThreadFeedersResponse,
+  PresencePlaceDetailResponse,
+  ThreadChannelActivity,
+  ThreadContextResponse,
+  ActiveViewersResponse,
+  ThreadPlanResponse,
+  ThreadProgressResponse,
+  ThreadRecapResponse,
+  AbortThreadRequest,
   AddTeamMemberRequest,
   AuthConfigResponse,
   GetCommitSigningResponse,
   PostCommitSigningEnrollRequest,
   PostCommitSigningEnrollResponse,
-  CreateAssistantRequest,
-  CreateAssistantResponse,
-  EnsureAssistantSessionResponse,
-  ListAssistantsResponse,
-  PatchAssistantRequest,
-  PatchAssistantResponse,
   AllowWorkflowPermissionsRequest,
   AllowWorkflowPermissionsResponse,
   CancelWorkflowRunResponse,
   DeleteWorkflowWebhookResponse,
+  GetWorkflowWebhookResponse,
   GetWorkflowPermissionsResponse,
   WorkflowWebhookResponse,
   CreateSourceResponse,
+  ListSourceChangesResponse,
+  PendingSourceChangeResponse,
+  ResolveSourceChangeResponse,
   ListBakesResponse,
   ListSourcesResponse,
   ListBakeQueueResponse,
@@ -45,6 +64,12 @@ import type {
   CreateInviteRequest,
   CreateInviteResponse,
   CreateThreadRequest,
+  EditPreviewResponse,
+  ForkThreadRequest,
+  MoveThreadRequest,
+  ForkThreadResponse,
+  ReturnToBranchRequest,
+  ReturnToBranchResponse,
   CreateThreadResponse,
   CreateWorkflowRequest,
   CreateWorkflowResponse,
@@ -56,11 +81,16 @@ import type {
   DeleteOrgPolicyResponse,
   DeletePolicyOverrideRequest,
   DeletePolicyOverrideResponse,
-  EnsureOrchestratorResponse,
+  EnsureWorkspaceRuntimeResponse,
+  EnsureWorkspaceConversationRequest,
+  EnsureWorkspaceConversationResponse,
+  ListWorkspaceConversationsResponse,
+  WorkspaceRuntimeInfoResponse,
   GetArtifactResponse,
   GetChangelogResponse,
   GetGithubAppResponse,
   GetGithubOrgStatusResponse,
+  GetMemoryPrinciplesResponse,
   GetMemoryTreeResponse,
   ListArtifactsResponse,
   PatchArtifactRequest,
@@ -69,9 +99,7 @@ import type {
   ShareArtifactResponse,
   OrgSettingsResponse,
   PatchOrgSettingsRequest,
-  GetOrchestratorChildrenResponse,
-  GetOrchestratorInfoResponse,
-  GetPrebuildForRepoResponse,
+  ChildWorkResponse,
   GetReposResponse,
   GetSlackAppResponse,
   GetWorkflowImportFileResponse,
@@ -85,31 +113,32 @@ import type {
   SecurityFileIssueResponse,
   SecurityFindingSeverity,
   SecurityFindingStatus,
-  SecurityPlanCellInput,
   SecurityPreviewRequest,
   SecurityPreviewResponse,
   SecurityResolveNeedsResponse,
   SecurityReviewFindingResponse,
-  SecuritySetConfigResponse,
-  SecuritySetPlanResponse,
   GetWorkflowResponse,
+  EnsureWorkflowConversationResponse,
   GetWorkflowRunResponse,
   GetWorkflowTriggerCatalogResponse,
   DeliverIdentityLinkFallback,
   DeliverIdentityLinkRequest,
   DeliverIdentityLinkResponse,
+  VerifyIdentityLinkResponse,
   ListLinkMembersResponse,
   ListCredentialsResponse,
   DelegateCredentialRequest,
   DelegateCredentialResponse,
   ListActionLogResponse,
+  ListAdminAuditResponse,
   ListDecisionsResponse,
   ListGrantsResponse,
   ListIdentityLinksResponse,
   ListInvitesResponse,
-  ListAllWorkflowRunsResponse,
+  ListWorkflowActionRequiredResponse,
   ListOrgPoliciesResponse,
   ListPolicyOverridesResponse,
+  ListToolPermissionsResponse,
   CreateLlmProviderRequest,
   CreateLlmProviderResponse,
   GetModelTiersResponse,
@@ -124,7 +153,9 @@ import type {
   ListMessagesResponse,
   ListNotificationPreferencesResponse,
   ListNotificationsResponse,
+  ListNotificationDecisionsResponse,
   ListModelsResponse,
+  ListCodeReviewsResponse,
   ListPluginsResponse,
   ListSessionsResponse,
   ListSkillsResponse,
@@ -141,31 +172,25 @@ import type {
   ListTeamMembersResponse,
   ListTeamsResponse,
   ListThreadsResponse,
+  ListAllWorkflowRunsResponse,
   ListWorkflowRunsResponse,
-  GetTeamChildrenResponse,
   ListWorkflowTriggersResponse,
-  WorkflowRunOutcome,
-  WorkflowRunStatus,
   ListWorkflowVersionsResponse,
   GetWorkflowVersionResponse,
   ListWorkflowsResponse,
-  ListWorkflowTemplatesResponse,
-  InstallWorkflowTemplateRequest,
-  InstallWorkflowTemplateResponse,
   MeResponse,
   OnePasswordSettingsResponse,
   TeamOnePasswordStatusResponse,
   OrgDirectoryResponse,
   OrgMembersResponse,
   OrgPluginsResponse,
+  OrgMcpServersResponse,
   OrgResponse,
   PatchLlmProviderRequest,
   PatchLlmProviderResponse,
   PatchMeRequest,
   PatchMeResponse,
   ProfilePictureUploadResponse,
-  PatchOrchestratorInfoRequest,
-  PatchOrchestratorInfoResponse,
   PatchOrgMemberRequest,
   PatchOrgMemberResponse,
   PatchIdentityLinkRequest,
@@ -178,17 +203,24 @@ import type {
   PatchSessionRequest,
   PatchSessionResponse,
   PauseSessionResponse,
+  ReplaceSandboxResponse,
+  BackgroundWorkConflict,
+  BackgroundWorkItem,
+  ListSessionWakeupsResponse,
+  CancelSessionWakeupResponse,
   GetSessionRatingsResponse,
   PutRatingRequest,
   PutRatingResponse,
   SessionKind,
   PatchThreadRequest,
   PatchThreadResponse,
+  ThreadAddress,
   PostGithubAppCredentialRequest,
   PostGithubAppManifestRequest,
   PostGithubAppManifestResponse,
   PostGithubConnectResponse,
   OpenrouterRegistryResponse,
+  ProviderModelCatalogResponse,
   PreviewOrgPolicyRequest,
   PreviewOrgPolicyResponse,
   ProbeLlmProviderResponse,
@@ -201,24 +233,27 @@ import type {
   FilterOptionsResponse,
   GetEventCatalogResponse,
   GetEventResponse,
-  ListEventDropsResponse,
-  ListEventsResponse,
+  EventLogResponse,
+  ListEventReceiptsResponse,
   ListEventSubscriptionsResponse,
+  ListSubscriptionDeliveriesResponse,
+  LineActivityResponse,
   PatchEventSubscriptionRequest,
   PatchEventSubscriptionResponse,
   PutPolicyOverrideRequest,
   PutPolicyOverrideResponse,
   RedeliverEventResponse,
-  PutOnePasswordSettingsRequest,
   ResolveDecisionRequest,
   ResolveWorkflowApprovalRequest,
   ResolveWorkflowApprovalResponse,
+  RetryWorkflowRunRequest,
   RetryWorkflowRunResponse,
   RevokeInviteResponse,
   SandboxJwtResponse,
   SendPromptRequest,
   SendPromptResponse,
   SetNotificationPreferenceRequest,
+  WebPresenceRequest,
   StartIdentityLinkResponse,
   SetTeamMemberRoleRequest,
   StartWorkflowRunRequest,
@@ -226,6 +261,8 @@ import type {
   TestLlmProviderRequest,
   TestLlmProviderResponse,
   UpdateWorkflowEventTriggerRequest,
+  UpdateWorkflowModelRequest,
+  UpdateWorkflowModelResponse,
   UpdateWorkflowRequest,
   UpdateWorkflowScheduleRequest,
   UsageSummaryResponse,
@@ -234,21 +271,22 @@ import type {
   WorkflowScheduleResponse,
   WithdrawDecisionRequest,
   ListCommandsResponse,
-  ProxyUsageSummary,
-  ProxyRequestDetail,
-  ProxyRequestListItem,
+  ProxyRequestListResponse,
   ProxySettingsResponse,
   UsageBreakdownResponse,
-  UsageSessionsResponse,
   UsageDrillResponse,
-  UsageDrillItem,
   UsageScopeName,
+  UsageToolEfficiencyResponse,
+  UsageOutcomesResponse,
+  UsageExportGranularity,
+  UsagePeriodSelection,
   UsageUseCase,
   AddArtifactCommentRequest,
   AddArtifactCommentResponse,
   ArtifactCommentWire,
   ListArtifactCommentsResponse,
   ListArtifactVersionsResponse,
+  ToolOutputResponse,
 } from "@valet/api/wire";
 import type {
   ExportMemoryResponse,
@@ -259,6 +297,8 @@ import type {
   SearchMemoryResponse,
 } from "./memory-types";
 import { safeNextPath } from "~/lib/next-path";
+import { ApiError } from "./api-error";
+import { isServerUnavailable, reportServerUnavailable } from "./connection";
 
 const BASE = "/api"; // Vite proxies /api → server; same in production.
 
@@ -301,14 +341,6 @@ function ownerSuffix(owner: OwnerFilter | undefined): string {
   return params ? `&${params}` : "";
 }
 
-class ApiError extends Error {
-  constructor(public status: number, message: string, public payload?: unknown) {
-    super(message);
-    this.name = "ApiError";
-  }
-}
-
-
 export interface MemoryCopyRequest {
   from: string;
   to: string;
@@ -327,6 +359,49 @@ export function memoryCopyConflict(error: unknown): { version: string | null; ch
   const version = payload.destinationVersion;
   if (changed && version === null) return { version, changed };
   return typeof version === "string" && version.length > 0 ? { version, changed } : null;
+}
+
+const WORK_KINDS: ReadonlySet<string> = new Set(["process", "watch", "timer", "hold"]);
+
+function isWorkKind(kind: string): kind is BackgroundWorkItem["kind"] {
+  return WORK_KINDS.has(kind);
+}
+
+/** One work item of a 409 body, or null when it is malformed. A missing `status` reads as running. */
+function toWorkItem(value: unknown): BackgroundWorkItem | null {
+  if (typeof value !== "object" || value === null) return null;
+  if (!("id" in value) || typeof value.id !== "string") return null;
+  if (!("kind" in value) || typeof value.kind !== "string" || !isWorkKind(value.kind)) return null;
+  if (!("reason" in value) || typeof value.reason !== "string") return null;
+  if (!("createdAt" in value) || typeof value.createdAt !== "number") return null;
+  return {
+    id: value.id,
+    kind: value.kind,
+    status: "status" in value && value.status === "pending" ? "pending" : "running",
+    reason: value.reason,
+    ...("threadId" in value && typeof value.threadId === "string" ? { threadId: value.threadId } : {}),
+    ...("deadlineAt" in value && typeof value.deadlineAt === "number" ? { deadlineAt: value.deadlineAt } : {}),
+    ...("fireAt" in value && typeof value.fireAt === "number" ? { fireAt: value.fireAt } : {}),
+    createdAt: value.createdAt,
+  };
+}
+
+/**
+ * The structured 409 an action returns while background work would stop
+ * (pause, replace, a profile change, a move, a thread archive). Null for
+ * any other error. A caller shows the work and resends with `force`.
+ */
+export function backgroundWorkConflict(error: unknown): BackgroundWorkConflict | null {
+  if (!(error instanceof ApiError) || error.status !== 409) return null;
+  const payload = error.payload;
+  if (typeof payload !== "object" || payload === null) return null;
+  if (!("code" in payload) || payload.code !== "background_work") return null;
+  if (!("error" in payload) || typeof payload.error !== "string") return null;
+  if (!("work" in payload) || !Array.isArray(payload.work)) return null;
+  const work: unknown[] = payload.work;
+  const hiddenCount = "hiddenCount" in payload && typeof payload.hiddenCount === "number" ? payload.hiddenCount : 0;
+  const forceAllowed = "forceAllowed" in payload && payload.forceAllowed === true;
+  return { error: payload.error, code: "background_work", work: work.flatMap((v) => { const item = toWorkItem(v); return item ? [item] : []; }), hiddenCount, forceAllowed };
 }
 
 // `GET /api/auth-config` is unauthenticated and doesn't change without a
@@ -420,6 +495,7 @@ async function requestForm<T>(path: string, form: FormData): Promise<T> {
         `POST ${path} got no response in ${REQUEST_TIMEOUT_MS / 1000}s. Check that the server is running, then try again.`,
       );
     }
+    if (isServerUnavailable(err)) reportServerUnavailable();
     throw err;
   } finally {
     clearTimeout(timer);
@@ -432,9 +508,17 @@ function uploadProfilePicture(path: string, file: File): Promise<ProfilePictureU
   return requestForm<ProfilePictureUploadResponse>(path, form);
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function request<T>(method: string, path: string, body?: unknown, callerSignal?: AbortSignal): Promise<T> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  let timedOut = false;
+  const forwardAbort = () => controller.abort(callerSignal?.reason);
+  if (callerSignal?.aborted) forwardAbort();
+  else callerSignal?.addEventListener("abort", forwardAbort, { once: true });
+  const timer = setTimeout(() => {
+    if (controller.signal.aborted) return;
+    timedOut = true;
+    controller.abort();
+  }, REQUEST_TIMEOUT_MS);
   try {
     const res = await fetch(`${BASE}${path}`, {
       method,
@@ -458,15 +542,17 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     if (res.status === 204) return undefined as T;
     return (await res.json()) as T;
   } catch (err) {
-    if (controller.signal.aborted) {
+    if (timedOut) {
       throw new ApiError(
         NO_RESPONSE_STATUS,
         `${method} ${path} got no response in ${REQUEST_TIMEOUT_MS / 1000}s. Check that the server is running, then try again.`,
       );
     }
+    if (isServerUnavailable(err)) reportServerUnavailable();
     throw err;
   } finally {
     clearTimeout(timer);
+    callerSignal?.removeEventListener("abort", forwardAbort);
   }
 }
 
@@ -517,16 +603,28 @@ export interface SecurityFindingsQuery {
   limit?: number;
 }
 
-/** Filters the cross-workflow run list accepts. Array fields match any-of. */
-export interface WorkflowRunFilter extends WorkflowRunPage {
-  workflowIds?: string[];
-  status?: WorkflowRunStatus[];
-  outcome?: WorkflowRunOutcome[];
-  parentRunId?: string;
-  since?: number;
+export function usagePeriodSearchParams(period: UsagePeriodSelection): URLSearchParams {
+  if (period.kind === "lookback") return new URLSearchParams({ window: period.window });
+  if (period.kind === "month") return new URLSearchParams({ month: period.month });
+  return new URLSearchParams({ start: period.start, end: period.end });
 }
 
 export const api = {
+  oauthConsent: (consentCode: string) =>
+    request<import("@valet/api/wire").OAuthConsentInfo>("GET", `/oauth/consent?consent_code=${encodeURIComponent(consentCode)}`),
+  decideOAuthConsent: (consentCode: string, accept: boolean) =>
+    request<import("@valet/api/wire").OAuthConsentDecision>("POST", "/oauth/consent", { consent_code: consentCode, accept }),
+  cliDevice: (userCode: string) =>
+    request<import("@valet/api/wire").CliDeviceInfo>("GET", `/cli/device?user_code=${encodeURIComponent(userCode)}`),
+  decideCliDevice: (userCode: string, accept: boolean) =>
+    request<{ ok: true }>("POST", "/cli/device", { user_code: userCode, accept }),
+  agentAccess: () => request<import("@valet/api/wire").AgentAccessResponse>("GET", "/me/agent-access"),
+  disconnectMcpApp: (clientId: string) => request<{ ok: true }>("DELETE", `/me/agent-access/mcp/${encodeURIComponent(clientId)}`),
+  disconnectCliDevice: (id: string) => request<{ ok: true }>("DELETE", `/me/agent-access/cli/${encodeURIComponent(id)}`),
+  tutorial: () => request<import("@valet/api/wire").TutorialStateResponse>("GET", "/tutorial"),
+  updateTutorial: (body: import("@valet/api/wire").UpdateTutorialRequest) =>
+    request<import("@valet/api/wire").TutorialStateResponse>("PUT", "/tutorial", body),
+  resetTutorial: () => request<import("@valet/api/wire").ResetTutorialResponse>("POST", "/tutorial/reset"),
   listTeamDeletionRequests: (teamId: string, options: ListTeamDeletionRequestsParams = {}) => {
     const query = new URLSearchParams();
     if (options.status) query.set("status", options.status);
@@ -552,6 +650,44 @@ export const api = {
       "GET",
       kind ? `/sessions?kind=${kind}${ownerSuffix(owner)}` : `/sessions${ownerQuery(owner)}`,
     ),
+  listWorkspaceChannels: (owner: OwnerFilter) =>
+    request<ListChannelsResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/channels`),
+  getIntegrationLimit: (owner: OwnerFilter) =>
+    request<WorkspaceIntegrationLimitResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/integration-limit`),
+  clearIntegrationLimit: (owner: OwnerFilter) =>
+    request<void>("DELETE", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/integration-limit`),
+  /** `scope` is the workspace key: `user`, or a team id. */
+  listPresencePlaces: (scope: string) =>
+    request<ListPresencePlacesResponse>("GET", `/presence/places?scope=${encodeURIComponent(scope)}`),
+  getPresencePlace: (scope: string, subject: string) =>
+    request<PresencePlaceDetailResponse>("GET", `/presence/places/${encodeURIComponent(subject)}?scope=${encodeURIComponent(scope)}`),
+  /** The listeners and routines that feed a thread (spec Part G). 404s when
+   * the viewer cannot read the thread. */
+  getThreadFeeders: (sessionId: string, threadId: string) =>
+    request<ListThreadFeedersResponse>("GET", `/presence/feeders?sessionId=${encodeURIComponent(sessionId)}&threadId=${encodeURIComponent(threadId)}`),
+  getThreadChannelActivity: (threadId: string) =>
+    request<ThreadChannelActivity>("GET", `/threads/${encodeURIComponent(threadId)}/channel-activity`),
+  /** How full the thread's model context is. Reading it never wakes the sandbox. */
+  getThreadContext: (threadId: string) =>
+    request<ThreadContextResponse>("GET", `/threads/${encodeURIComponent(threadId)}/context`),
+  getActiveViewers: (workspace: string) =>
+    request<ActiveViewersResponse>("GET", `/threads/viewers?workspace=${encodeURIComponent(workspace)}`),
+  /** The checklist the model keeps with `update_plan`. */
+  getThreadProgress: (threadId: string) =>
+    request<ThreadProgressResponse>("GET", `/threads/${encodeURIComponent(threadId)}/progress`),
+  /** One tool call's full result, when the transcript trimmed it. */
+  getToolOutput: (threadId: string, entryId: string, callId: string) =>
+    request<ToolOutputResponse>("GET", `/threads/${encodeURIComponent(threadId)}/tool-output?entryId=${encodeURIComponent(entryId)}&callId=${encodeURIComponent(callId)}`),
+
+  getThreadPlan: (threadId: string) =>
+    request<ThreadPlanResponse>("GET", `/threads/${encodeURIComponent(threadId)}/plan`),
+  getThreadRecap: (threadId: string, since?: number) =>
+    request<ThreadRecapResponse>("GET", `/threads/${encodeURIComponent(threadId)}/recap${since === undefined ? "" : `?since=${since}`}`),
+  /** Download URL for a file attached to the thread; an `<a download>` target. */
+  threadFileUrl: (sessionId: string, threadId: string, path: string): string =>
+    `/api/sessions/${encodeURIComponent(sessionId)}/threads/${encodeURIComponent(threadId)}/files?${new URLSearchParams({ path })}`,
+  getThreadAddress: (id: string) =>
+    request<ThreadAddress>("GET", `/threads/${encodeURIComponent(id)}`),
   getSession: (id: string) =>
     request<GetSessionResponse>("GET", `/sessions/${encodeURIComponent(id)}`),
   /** GET /sessions/:id/security — the session's engagement + cells
@@ -580,27 +716,6 @@ export const api = {
     request<ListSecurityCoverageResponse>(
       "GET",
       `/sessions/${encodeURIComponent(id)}/security/coverage`,
-    ),
-  /** POST /sessions/:id/security/plan/cells — replace the plan from structured
-   * steps during planning (dynamic-config M-F2; session admin). The server
-   * assigns dense ordinals in array order. Returns the new cell count. */
-  setSecurityPlanCells: (id: string, cells: SecurityPlanCellInput[]) =>
-    request<SecuritySetPlanResponse>(
-      "POST",
-      `/sessions/${encodeURIComponent(id)}/security/plan/cells`,
-      { cells },
-    ),
-  /** POST /sessions/:id/security/config — edit the engagement's focus, known
-   * invariants, and loaded threat categories during planning (dynamic-config
-   * M-F3, M-P2a; session admin). Returns the saved values. */
-  setSecurityConfig: (
-    id: string,
-    body: { focus?: string | null; invariants?: string[]; categories?: string[] },
-  ) =>
-    request<SecuritySetConfigResponse>(
-      "POST",
-      `/sessions/${encodeURIComponent(id)}/security/config`,
-      body,
     ),
   /** POST /sessions/:id/security/findings/:findingId/status — human
    * verify/refute (forward-only; session admin). */
@@ -655,10 +770,13 @@ export const api = {
     ),
   /** POST /sessions/:id/security/needs/resolve — the consolidated human answer
    * + delta re-run (pivot-coordinator, M-P4c; session admin). Marks each need
-   * answered and resets only the affected cells to pending. */
+   * answered and resets only the affected cells to pending. A `kind:
+   * "credential"` need takes `credentialLabel` (a declared label) instead of
+   * `resolution` (Part 12, INV-39): the CHECK constraint on `security_needs`
+   * refuses a non-null `resolution` on that kind. */
   resolveSecurityNeeds: (
     id: string,
-    answers: { needId: string; resolution: string; dismiss?: boolean }[],
+    answers: { needId: string; resolution?: string; credentialLabel?: string; dismiss?: boolean }[],
   ) =>
     request<SecurityResolveNeedsResponse>(
       "POST",
@@ -689,8 +807,6 @@ export const api = {
     request<PatchSessionResponse>("PATCH", `/sessions/${encodeURIComponent(id)}`, body),
   getSessionRatings: (id: string) =>
     request<GetSessionRatingsResponse>("GET", `/sessions/${encodeURIComponent(id)}/ratings`),
-  rateSession: (id: string, body: PutRatingRequest) =>
-    request<PutRatingResponse>("POST", `/sessions/${encodeURIComponent(id)}/rating`, body),
   rateMessage: (sessionId: string, entryId: string, body: PutRatingRequest) =>
     request<PutRatingResponse>(
       "POST",
@@ -699,57 +815,48 @@ export const api = {
     ),
   mintSandboxJwt: (id: string) =>
     request<SandboxJwtResponse>("POST", `/sessions/${encodeURIComponent(id)}/sandbox-jwt`),
-  pauseSession: (id: string) =>
-    request<PauseSessionResponse>("POST", `/sessions/${encodeURIComponent(id)}/pause`),
-  replaceSandbox: (id: string) =>
-    request<{ ok: true }>("POST", `/sessions/${encodeURIComponent(id)}/sandbox/replace`),
-  // orchestrator (session ids contain colons — always encoded above too, but
-  // this entry point never touches a raw id itself, only ensures one exists)
-  ensureOrchestrator: () =>
-    request<EnsureOrchestratorResponse>("POST", "/orchestrator"),
-  getOrchestratorInfo: () =>
-    request<GetOrchestratorInfoResponse>("GET", "/orchestrator/info"),
-  patchOrchestratorInfo: (body: PatchOrchestratorInfoRequest) =>
-    request<PatchOrchestratorInfoResponse>("PATCH", "/orchestrator/info", body),
-  /** `sessionId` scopes the list to one assistant's children — the open
-   * assistant in the chat thread tree, so a team assistant's runs nest under
-   * it. Omitted = your own default assistant. */
-  getOrchestratorChildren: (sessionId?: string) =>
-    request<GetOrchestratorChildrenResponse>(
-      "GET",
-      sessionId
-        ? `/orchestrator/children?sessionId=${encodeURIComponent(sessionId)}`
-        : "/orchestrator/children",
-    ),
-  dismissChild: (childSessionId: string) =>
-    request<{ ok: true }>(
+  /** `force` stops background work that would block the pause. */
+  pauseSession: (id: string, opts?: { force?: boolean }) =>
+    request<PauseSessionResponse>(
       "POST",
-      `/orchestrator/children/${encodeURIComponent(childSessionId)}/dismiss`,
+      `/sessions/${encodeURIComponent(id)}/pause`,
+      opts?.force ? { force: true } : undefined,
     ),
-
-  // assistants (`docs/specs/2026-08-13-assistants-design.md`). The list is
-  // also how the client learns each assistant's session id, so it replaces
-  // the client-side id derivation the rail used to do.
-  listAssistants: () => request<ListAssistantsResponse>("GET", "/assistants"),
-  createAssistant: (body: CreateAssistantRequest) =>
-    request<CreateAssistantResponse>("POST", "/assistants", body),
-  patchAssistant: (id: string, body: PatchAssistantRequest) =>
-    request<PatchAssistantResponse>("PATCH", `/assistants/${encodeURIComponent(id)}`, body),
-  uploadAssistantAvatar: (id: string, file: File) =>
-    uploadProfilePicture(`/assistants/${encodeURIComponent(id)}/avatar`, file),
-  // Archive, not destroy: the row keeps `archived_at` and the conversation
-  // it held survives. `DELETE` carries it because the wire's
-  // `PatchAssistantRequest` covers `name` and `isDefault` only, and the
-  // house convention for a soft remove is the same verb as `deleteTeam`.
-  archiveAssistant: (id: string) =>
-    request<{ ok: true }>("DELETE", `/assistants/${encodeURIComponent(id)}`),
-  /** Get-or-create one assistant's session. Creating an assistant writes no
-   * session, so the chat page calls this before opening the conversation. */
-  ensureAssistantSession: (id: string) =>
-    request<EnsureAssistantSessionResponse>(
+  /** `force` stops background work that would block the replace. */
+  replaceSandbox: (id: string, opts?: { force?: boolean }) =>
+    request<ReplaceSandboxResponse>(
       "POST",
-      `/assistants/${encodeURIComponent(id)}/session`,
+      `/sessions/${encodeURIComponent(id)}/sandbox/replace`,
+      opts?.force ? { force: true } : undefined,
     ),
+  listSessionWakeups: (id: string) =>
+    request<ListSessionWakeupsResponse>("GET", `/sessions/${encodeURIComponent(id)}/wakeups`),
+  cancelSessionWakeup: (id: string, wakeupId: string) =>
+    request<CancelSessionWakeupResponse>(
+      "POST",
+      `/sessions/${encodeURIComponent(id)}/wakeups/${encodeURIComponent(wakeupId)}/cancel`,
+    ),
+  // workspace runtime: these entry points take a workspace key, never a raw
+  // session id, and only ensure the runtime exists
+  ensureWorkspaceConversation: (workspace: string, body?: EnsureWorkspaceConversationRequest) =>
+    request<EnsureWorkspaceConversationResponse>("POST", `/workspaces/${encodeURIComponent(workspace)}/conversation`, body),
+  listWorkspaceConversations: (workspace: string) =>
+    request<ListWorkspaceConversationsResponse>("GET", `/workspaces/${encodeURIComponent(workspace)}/conversations`),
+  ensureHomeConversation: () => request<HomeConversationResponse>("POST", "/home"),
+  getHomeTasks: () => request<HomeTasksResponse>("GET", "/home/tasks"),
+  markHomeTaskDone: (taskId: string) => request<void>("POST", `/home/tasks/${encodeURIComponent(taskId)}/done`),
+  ensureWorkspaceRuntime: (workspace: string) =>
+    request<EnsureWorkspaceRuntimeResponse>("POST", `/workspaces/${encodeURIComponent(workspace)}/runtime`),
+  getWorkspaceRuntimeInfo: (workspace: string) =>
+    request<WorkspaceRuntimeInfoResponse>("GET", `/workspaces/${encodeURIComponent(workspace)}/runtime/info`),
+  getChildWork: (sessionId: string, opts?: { cursor?: string; limit?: number }) => {
+    const qs = new URLSearchParams();
+    if (opts?.cursor) qs.set("cursor", opts.cursor);
+    if (opts?.limit !== undefined) qs.set("limit", String(opts.limit));
+    return request<ChildWorkResponse>("GET", `/sessions/${encodeURIComponent(sessionId)}/children?${qs}`);
+  },
+  dismissChild: (sessionId: string, childSessionId: string) =>
+    request<{ ok: true }>("POST", `/sessions/${encodeURIComponent(sessionId)}/children/${encodeURIComponent(childSessionId)}/dismiss`),
 
   // memory (assistant-centered web UI decision 7; dashboard memory card +
   // the Task 6 explorer share these reads)
@@ -757,6 +864,8 @@ export const api = {
    * — a team's memory is the team's, not a view of yours. */
   getMemoryTree: (owner?: OwnerFilter) =>
     request<GetMemoryTreeResponse>("GET", `/memory/tree${ownerQuery(owner)}`),
+  getMemoryPrinciples: (owner?: OwnerFilter) =>
+    request<GetMemoryPrinciplesResponse>("GET", `/memory/principles${ownerQuery(owner)}`),
 
   // artifacts (artifacts design). `getArtifact` is the token-addressed
   // read the public `/a/$token` page uses — org-visibility artifacts 401
@@ -765,14 +874,14 @@ export const api = {
     request<GetArtifactResponse>("GET", `/artifacts/${encodeURIComponent(token)}`),
   shareArtifact: (body: ShareArtifactRequest) =>
     request<ShareArtifactResponse>("POST", "/artifacts/share", body),
-  getTeamChildren: (teamId: string) =>
-    request<GetTeamChildrenResponse>("GET", `/teams/${encodeURIComponent(teamId)}/children`),
   // `mine=1` is the caller-scoped gallery view (server-filtered — see the
   // route's comment on why this replaced a client-side `actorUserId` match)
   // and composes with nothing, so it is a separate option, not `OwnerFilter`.
-  listArtifacts: (owner?: OwnerFilter, opts?: { mine?: boolean; limit?: number; cursor?: string }) => {
+  listArtifacts: (owner?: OwnerFilter, opts?: { mine?: boolean; limit?: number; cursor?: string; sourceSessionId?: string; sourceThreadId?: string }) => {
     const qs = new URLSearchParams(ownerParams(owner));
     if (opts?.mine) qs.set("mine", "1");
+    if (opts?.sourceSessionId) qs.set("sourceSessionId", opts.sourceSessionId);
+    if (opts?.sourceThreadId) qs.set("sourceThreadId", opts.sourceThreadId);
     if (opts?.limit !== undefined) qs.set("limit", String(opts.limit));
     if (opts?.cursor !== undefined) qs.set("cursor", opts.cursor);
     return request<ListArtifactsResponse>("GET", `/artifacts${qs.size ? `?${qs}` : ""}`);
@@ -800,6 +909,9 @@ export const api = {
   // org plugin entitlements (plugin-entitlements design). `getOrgPlugins` is
   // member-readable; `patchOrgPlugin` is org-admin-only (403 otherwise).
   getOrgPlugins: () => request<OrgPluginsResponse>("GET", "/org/plugins"),
+  // Config-declared MCP servers (instance config `mcpServers`). Org-admin-only
+  // (403 otherwise) and read-only: the operator edits the config file.
+  getOrgMcpServers: () => request<OrgMcpServersResponse>("GET", "/org/mcp-servers"),
   patchOrgPlugin: (name: string, body: PatchOrgPluginRequest) =>
     request<PatchOrgPluginResponse>("PATCH", `/org/plugins/${encodeURIComponent(name)}`, body),
   getMemoryDoc: (path: string, owner?: OwnerFilter) =>
@@ -828,57 +940,95 @@ export const api = {
   // `owner` scopes the bundle to a workspace, like every other memory read:
   // a team export is the team's corpus, a team import writes into it (the
   // route authorizes the write). Omitted reads/writes your own.
-  // Commit signing (agent commit signing design).
-  getCommitSigning: () => request<GetCommitSigningResponse>("GET", "/me/commit-signing"),
-  enrollCommitSigning: (body: PostCommitSigningEnrollRequest) =>
-    request<PostCommitSigningEnrollResponse>("POST", "/me/commit-signing/enroll", body),
   exportMemory: (owner?: OwnerFilter) =>
     request<ExportMemoryResponse>("GET", `/memory/export${ownerQuery(owner)}`),
   importMemory: (body: ImportMemoryRequest, owner?: OwnerFilter) =>
     request<ImportMemoryResponse>("POST", `/memory/import${ownerQuery(owner)}`, body),
 
   // threads + messages (session-scoped)
-  listThreads: (sessionId: string, opts?: { archived?: boolean }) =>
-    request<ListThreadsResponse>(
+  listThreads: (sessionId: string, opts?: { archived?: boolean; q?: string; threadId?: string; limit?: number; cursor?: string; sort?: string; origin?: string; fixedIds?: string[]; fixedOnly?: boolean }) => {
+    const params = new URLSearchParams();
+    if (opts?.archived) params.set("archived", "1");
+    if (opts?.q) params.set("q", opts.q);
+    if (opts?.threadId) params.set("threadId", opts.threadId);
+    if (opts?.limit) params.set("limit", String(opts.limit));
+    if (opts?.cursor) params.set("cursor", opts.cursor);
+    if (opts?.sort) params.set("sort", opts.sort);
+    if (opts?.origin) params.set("origin", opts.origin);
+    if (opts?.fixedOnly) params.set("fixedOnly", "1");
+    for (const id of opts?.fixedIds ?? []) params.append("fixedId", id);
+    const query = params.toString();
+    return request<ListThreadsResponse>(
       "GET",
-      `/sessions/${encodeURIComponent(sessionId)}/threads${opts?.archived ? "?archived=1" : ""}`,
-    ),
+      `/sessions/${encodeURIComponent(sessionId)}/threads${query ? `?${query}` : ""}`,
+    );
+  },
+  markThreadsRead: (sessionId: string, threadIds?: string[]) =>
+    request<void>("POST", `/sessions/${encodeURIComponent(sessionId)}/threads/read`, threadIds ? { threadIds } : {}),
   createThread: (sessionId: string, body: CreateThreadRequest = {}) =>
     request<CreateThreadResponse>(
       "POST",
       `/sessions/${encodeURIComponent(sessionId)}/threads`,
       body,
     ),
-  patchThread: (sessionId: string, threadId: string, body: PatchThreadRequest) =>
+  patchThread: (threadId: string, body: PatchThreadRequest) =>
     request<PatchThreadResponse>(
       "PATCH",
-      `/sessions/${encodeURIComponent(sessionId)}/threads/${encodeURIComponent(threadId)}`,
+      `/threads/${encodeURIComponent(threadId)}`,
       body,
     ),
   listMessages: (
     sessionId: string,
-    opts?: { limit?: number; cursor?: string; threadId?: string },
+    opts?: { limit?: number; cursor?: string; threadId?: string; queueItemId?: string },
   ) => {
     const qs = new URLSearchParams();
     if (opts?.limit) qs.set("limit", String(opts.limit));
     if (opts?.cursor) qs.set("cursor", opts.cursor);
-    if (opts?.threadId) qs.set("threadId", opts.threadId);
+    if (opts?.queueItemId) qs.set("queueItemId", opts.queueItemId);
+    // A workflow step's thread has no thread route for its transcript. The
+    // session route reads it and checks that the caller can read the run.
+    const workflowStep = sessionId.startsWith("wf:");
+    if (workflowStep && opts?.threadId) qs.set("threadId", opts.threadId);
+
     const tail = qs.toString() ? `?${qs}` : "";
     return request<ListMessagesResponse>(
       "GET",
-      `/sessions/${encodeURIComponent(sessionId)}/messages${tail}`,
+      opts?.threadId && !workflowStep ? `/threads/${encodeURIComponent(opts.threadId)}/messages${tail}` : `/sessions/${encodeURIComponent(sessionId)}/messages${tail}`,
     );
   },
   sendPrompt: (sessionId: string, body: SendPromptRequest) =>
     request<SendPromptResponse>(
       "POST",
-      `/sessions/${encodeURIComponent(sessionId)}/messages`,
+      body.threadId ? `/threads/${encodeURIComponent(body.threadId)}/messages` : `/sessions/${encodeURIComponent(sessionId)}/messages`,
       body,
     ),
-  abortThread: (sessionId: string, threadId: string) =>
+  abortThread: (threadId: string, body: AbortThreadRequest) =>
     request<{ ok: true }>(
       "POST",
-      `/sessions/${encodeURIComponent(sessionId)}/threads/${encodeURIComponent(threadId)}/abort`,
+      `/threads/${encodeURIComponent(threadId)}/abort`,
+      body,
+    ),
+  resumeThread: (threadId: string) =>
+    request<{ ok: true }>(
+      "POST",
+      `/threads/${encodeURIComponent(threadId)}/resume`,
+    ),
+  branchPreview: (threadId: string, noteEntryId: string, cursor?: string) =>
+    request<ListMessagesResponse>("GET", `/threads/${encodeURIComponent(threadId)}/branch-preview?noteEntryId=${encodeURIComponent(noteEntryId)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
+  editPreview: (threadId: string, entryId: string) =>
+    request<EditPreviewResponse>("GET", `/threads/${encodeURIComponent(threadId)}/edit-preview?entryId=${encodeURIComponent(entryId)}`),
+  forkThread: (threadId: string, body: ForkThreadRequest) =>
+    request<ForkThreadResponse>("POST", `/threads/${encodeURIComponent(threadId)}/fork`, body),
+  moveThread: (threadId: string, body: MoveThreadRequest) =>
+    request<ForkThreadResponse>("POST", `/threads/${encodeURIComponent(threadId)}/move`, body),
+  duplicateThread: (threadId: string) =>
+    request<ForkThreadResponse>("POST", `/threads/${encodeURIComponent(threadId)}/duplicate`),
+  returnToBranch: (threadId: string, body: ReturnToBranchRequest) =>
+    request<ReturnToBranchResponse>("POST", `/threads/${encodeURIComponent(threadId)}/branch/return`, body),
+  cancelQueuedItem: (threadId: string, itemId: string) =>
+    request<{ ok: true }>(
+      "POST",
+      `/threads/${encodeURIComponent(threadId)}/queue/${encodeURIComponent(itemId)}/cancel`,
     ),
 
   // slash commands
@@ -889,11 +1039,14 @@ export const api = {
     ),
 
   // decision gates
+  listNotificationDecisions: (cursor?: string) => request<ListNotificationDecisionsResponse>("GET", `/notifications/decisions${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`),
   listDecisions: (sessionId: string) =>
     request<ListDecisionsResponse>(
       "GET",
       `/sessions/${encodeURIComponent(sessionId)}/decisions`,
     ),
+  listThreadDecisions: (threadId: string) =>
+    request<ListDecisionsResponse>("GET", `/threads/${encodeURIComponent(threadId)}/decisions`),
   resolveDecision: (
     sessionId: string,
     gateId: string,
@@ -916,6 +1069,8 @@ export const api = {
     ),
 
   // notifications
+  reportWebPresence: (body: WebPresenceRequest) =>
+    request<{ ok: true }>("POST", "/notifications/presence", body),
   listNotifications: (opts?: { unread?: boolean }) =>
     request<ListNotificationsResponse>(
       "GET",
@@ -937,6 +1092,7 @@ export const api = {
    * half-specified pair rather than guessing. */
   listWorkflows: (owner?: OwnerFilter) =>
     request<ListWorkflowsResponse>("GET", `/workflows${ownerQuery(owner)}`),
+  ensureWorkflowConversation: (workflowId: string) => request<EnsureWorkflowConversationResponse>("POST", `/workflows/${encodeURIComponent(workflowId)}/conversation`),
   getWorkflow: (id: string) =>
     request<GetWorkflowResponse>("GET", `/workflows/${encodeURIComponent(id)}`),
   createWorkflow: (body: CreateWorkflowRequest) =>
@@ -953,6 +1109,8 @@ export const api = {
   },
   updateWorkflow: (id: string, body: UpdateWorkflowRequest) =>
     request<UpdateWorkflowResponse>("PUT", `/workflows/${encodeURIComponent(id)}`, body),
+  updateWorkflowModel: (id: string, body: UpdateWorkflowModelRequest) =>
+    request<UpdateWorkflowModelResponse>("PATCH", `/workflows/${encodeURIComponent(id)}/model`, body),
   deleteWorkflow: (id: string) =>
     request<{ ok: true }>("DELETE", `/workflows/${encodeURIComponent(id)}`),
   startWorkflowRun: (id: string, body: StartWorkflowRunRequest = {}) =>
@@ -971,32 +1129,14 @@ export const api = {
       `/workflows/${encodeURIComponent(id)}/runs${tail}`,
     );
   },
-  // Cross-workflow run list. `parentRunId` is how a batch parent's child
-  // runs come back in one request.
-  listRuns: (opts?: WorkflowRunFilter): Promise<ListAllWorkflowRunsResponse> => {
-    // An any-of filter with no values matches nothing. A query string cannot
-    // carry an empty repeated field, so an unguarded request would drop the
-    // filter and list every readable run — the opposite of what was asked.
-    for (const values of [opts?.workflowIds, opts?.status, opts?.outcome]) {
-      if (values?.length === 0) return Promise.resolve({ runs: [] });
-    }
-    const qs = new URLSearchParams();
-    for (const workflowId of opts?.workflowIds ?? []) qs.append("workflowId", workflowId);
-    for (const status of opts?.status ?? []) qs.append("status", status);
-    for (const outcome of opts?.outcome ?? []) qs.append("outcome", outcome);
-    if (opts?.parentRunId) qs.set("parentRunId", opts.parentRunId);
-    if (opts?.since !== undefined) qs.set("since", String(opts.since));
-    if (opts?.limit) qs.set("limit", String(opts.limit));
-    if (opts?.cursor) qs.set("cursor", opts.cursor);
-    const tail = qs.toString() ? `?${qs}` : "";
-    return request<ListAllWorkflowRunsResponse>("GET", `/workflows/runs${tail}`);
-  },
   getWorkflowPermissions: (id: string) =>
     request<GetWorkflowPermissionsResponse>(
       "GET",
       `/workflows/${encodeURIComponent(id)}/permissions`,
     ),
-  allowWorkflowPermissions: (id: string, body: AllowWorkflowPermissionsRequest = {}) =>
+  revokeOwnWorkflowAccounts: (id: string) => request<{ ok: boolean }>("DELETE", `/workflows/${encodeURIComponent(id)}/permissions/accounts`),
+  revokeWorkflowPermissions: (id: string) => request<{ ok: boolean }>("DELETE", `/workflows/${encodeURIComponent(id)}/permissions/allow`),
+  allowWorkflowPermissions: (id: string, body: AllowWorkflowPermissionsRequest) =>
     request<AllowWorkflowPermissionsResponse>(
       "POST",
       `/workflows/${encodeURIComponent(id)}/permissions/allow`,
@@ -1026,10 +1166,11 @@ export const api = {
       "POST",
       `/workflows/runs/${encodeURIComponent(runId)}/cancel`,
     ),
-  retryWorkflowRun: (runId: string) =>
+  retryWorkflowRun: (runId: string, body?: RetryWorkflowRunRequest) =>
     request<RetryWorkflowRunResponse>(
       "POST",
       `/workflows/runs/${encodeURIComponent(runId)}/retry`,
+      body,
     ),
 
   // events (event-system design): org feed, per-event detail with delivery
@@ -1046,20 +1187,43 @@ export const api = {
     for (const [field, value] of Object.entries(params.deps ?? {})) qs.set(field, value);
     return request<FilterOptionsResponse>("GET", `/events/filter-options?${qs.toString()}`);
   },
-  listEvents: (params?: { service?: string; key?: string }, owner?: OwnerFilter) => {
-    const qs = new URLSearchParams();
-    if (params?.service) qs.set("service", params.service);
-    if (params?.key) qs.set("key", params.key);
-    const q = qs.toString();
-    const path = q ? `/events?${q}${ownerSuffix(owner)}` : `/events${ownerQuery(owner)}`;
-    return request<ListEventsResponse>("GET", path);
+  getEventLog: (params: { owner: OwnerFilter; problems?: boolean; diagnostics?: boolean; q?: string; place?: string; cursor?: string }) => {
+    const qs = new URLSearchParams({ ownerType: params.owner.ownerType, ownerId: params.owner.ownerId });
+    if (params.problems) qs.set("problems", "1");
+    if (params.diagnostics) qs.set("diagnostics", "1");
+    if (params.q) qs.set("q", params.q);
+    if (params.place) qs.set("place", params.place);
+    if (params.cursor) qs.set("cursor", params.cursor);
+    return request<EventLogResponse>("GET", `/events/log${qs.size ? `?${qs}` : ""}`);
   },
-  listEventDrops: () => request<ListEventDropsResponse>("GET", "/events/drops"),
+  listEventReceipts: (params: { q?: string; cursor?: string; limit?: number; subscriptionId?: string } = {}) => {
+    const qs = new URLSearchParams();
+    if (params.q) qs.set("q", params.q);
+    if (params.subscriptionId) qs.set("subscriptionId", params.subscriptionId);
+    if (params.cursor) qs.set("cursor", params.cursor);
+    if (params.limit !== undefined) qs.set("limit", String(params.limit));
+    return request<ListEventReceiptsResponse>("GET", `/events/receipts${qs.size ? `?${qs}` : ""}`);
+  },
   getEvent: (id: string) => request<GetEventResponse>("GET", `/events/${encodeURIComponent(id)}`),
   redeliverEvent: (id: string) =>
     request<RedeliverEventResponse>("POST", `/events/${encodeURIComponent(id)}/redeliver`),
   listEventSubscriptions: (owner?: OwnerFilter) =>
     request<ListEventSubscriptionsResponse>("GET", `/event-subscriptions${ownerQuery(owner)}`),
+  listSubscriptionDeliveries: (id: string, limit?: number) =>
+    request<ListSubscriptionDeliveriesResponse>(
+      "GET",
+      `/event-subscriptions/${encodeURIComponent(id)}/deliveries${limit !== undefined ? `?limit=${limit}` : ""}`,
+    ),
+  /** One line's Activity, newest first, with the health strip's counts. `before` is the previous page's `nextCursor`. */
+  getLineActivity: (id: string, params: { before?: string; limit?: number } = {}) => {
+    const qs = new URLSearchParams();
+    if (params.before !== undefined) qs.set("before", params.before);
+    if (params.limit !== undefined) qs.set("limit", String(params.limit));
+    return request<LineActivityResponse>(
+      "GET",
+      `/event-subscriptions/${encodeURIComponent(id)}/activity${qs.size ? `?${qs}` : ""}`,
+    );
+  },
   createEventSubscription: (body: CreateEventSubscriptionRequest) =>
     request<CreateEventSubscriptionResponse>("POST", "/event-subscriptions", body),
   patchEventSubscription: (id: string, body: PatchEventSubscriptionRequest) =>
@@ -1073,26 +1237,11 @@ export const api = {
   // workflow webhook URL management. Schedules and event triggers are the
   // flat trigger surface below, not this per-workflow one.
   getWorkflowWebhook: (id: string) =>
-    request<WorkflowWebhookResponse>("GET", `/workflows/${encodeURIComponent(id)}/webhook`),
+    request<GetWorkflowWebhookResponse>("GET", `/workflows/${encodeURIComponent(id)}/webhook`),
   mintWorkflowWebhook: (id: string) =>
     request<WorkflowWebhookResponse>("POST", `/workflows/${encodeURIComponent(id)}/webhook`),
   deleteWorkflowWebhook: (id: string) =>
     request<DeleteWorkflowWebhookResponse>("DELETE", `/workflows/${encodeURIComponent(id)}/webhook`),
-
-  // workflow templates — the starting points the gallery on /workflows offers.
-  // `teamId` scopes the requirements to a team workspace: the server stamps
-  // each template against the principal the install would act as.
-  listWorkflowTemplates: (teamId?: string) =>
-    request<ListWorkflowTemplatesResponse>(
-      "GET",
-      teamId === undefined ? "/templates" : `/templates?teamId=${encodeURIComponent(teamId)}`,
-    ),
-  installWorkflowTemplate: (id: string, body: InstallWorkflowTemplateRequest = {}) =>
-    request<InstallWorkflowTemplateResponse>(
-      "POST",
-      `/templates/${encodeURIComponent(id)}/install`,
-      body,
-    ),
 
   // workflow triggers (spec 2026-08-15). `owner` scopes the flat hub list to
   // one workspace; the per-workflow editor passes `workflowId` and no owner.
@@ -1105,16 +1254,14 @@ export const api = {
     ),
   getWorkflowTriggerCatalog: () =>
     request<GetWorkflowTriggerCatalogResponse>("GET", "/workflows/trigger-catalog"),
+  listWorkflowActionRequired: () => request<ListWorkflowActionRequiredResponse>("GET", "/workflows/action-required"),
+  /** Every workflow run in one workspace, newest first. Paged by `nextCursor`. */
   listAllWorkflowRuns: (owner?: OwnerFilter, page?: WorkflowRunPage) => {
     const qs = new URLSearchParams();
     if (page?.limit) qs.set("limit", String(page.limit));
     if (page?.cursor) qs.set("cursor", page.cursor);
-    const owned = ownerParams(owner);
-    const joined = [qs.toString(), owned].filter(Boolean).join("&");
-    return request<ListAllWorkflowRunsResponse>(
-      "GET",
-      `/workflows/runs${joined ? `?${joined}` : ""}`,
-    );
+    const joined = [qs.toString(), ownerParams(owner)].filter(Boolean).join("&");
+    return request<ListAllWorkflowRunsResponse>("GET", `/workflows/runs${joined ? `?${joined}` : ""}`);
   },
   createWorkflowSchedule: (body: CreateWorkflowScheduleRequest) =>
     request<WorkflowScheduleResponse>("POST", "/workflows/schedules", body),
@@ -1133,29 +1280,82 @@ export const api = {
 
   // settings shell (split-settings design): per-user profile, org, models
   getMe: () => request<MeResponse>("GET", "/me"),
+  // Commit signing (agent commit signing design).
+  getCommitSigning: () => request<GetCommitSigningResponse>("GET", "/me/commit-signing"),
+  enrollCommitSigning: (body: PostCommitSigningEnrollRequest) =>
+    request<PostCommitSigningEnrollResponse>("POST", "/me/commit-signing/enroll", body),
+  getThreadProjects: (sessionId: string, expectedViewerId: string, signal?: AbortSignal) => request<ThreadProjectsResponse>("GET", `/me/thread-projects/${encodeURIComponent(sessionId)}?expectedViewerId=${encodeURIComponent(expectedViewerId)}`, undefined, signal),
+  changeThreadProjects: (sessionId: string, operations: ThreadProjectsOperation[], expectedViewerId: string, signal?: AbortSignal) =>
+    request<ThreadProjectsResponse>("PATCH", `/me/thread-projects/${encodeURIComponent(sessionId)}`, { expectedViewerId, operations }, signal),
   patchMe: (body: PatchMeRequest) => request<PatchMeResponse>("PATCH", "/me", body),
   uploadMyAvatar: (file: File) => uploadProfilePicture("/me/avatar", file),
   listModels: () => request<ListModelsResponse>("GET", "/models"),
   getUsageSummary: () => request<UsageSummaryResponse>("GET", "/usage/summary"),
-  usageBreakdown: (window: string = "7d", scope: UsageScopeName = "me", teamId?: string) => {
-    const qs = new URLSearchParams({ window, scope });
+  usageBreakdown: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string, signal?: AbortSignal) => {
+    const qs = usagePeriodSearchParams(period);
+    qs.set("scope", scope);
     if (teamId !== undefined) qs.set("teamId", teamId);
-    return request<UsageBreakdownResponse>("GET", `/usage/breakdown?${qs}`);
+    return request<UsageBreakdownResponse>("GET", `/usage/breakdown?${qs}`, undefined, signal);
   },
-  usageItems: (window: string, scope: UsageScopeName, useCase: UsageUseCase, teamId?: string) => {
-    const qs = new URLSearchParams({ window, scope, useCase });
+  usageToolEfficiency: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string, signal?: AbortSignal) => {
+    const qs = usagePeriodSearchParams(period);
+    qs.set("scope", scope);
     if (teamId !== undefined) qs.set("teamId", teamId);
-    return request<UsageDrillResponse>("GET", `/usage/items?${qs}`);
+    return request<UsageToolEfficiencyResponse>("GET", `/usage/tool-efficiency?${qs}`, undefined, signal);
   },
-  usageExportCsvUrl: (window: string, scope: UsageScopeName, teamId?: string): string => {
-    const qs = new URLSearchParams({ window, scope });
+  sessionOutcomeUsage: (period: UsagePeriodSelection, scope: UsageScopeName, teamId?: string, signal?: AbortSignal) => {
+    const qs = usagePeriodSearchParams(period); qs.set("scope", scope); if (teamId) qs.set("teamId", teamId);
+    return request<SessionOutcomeUsage>("GET", `/usage/session-outcomes?${qs}`, undefined, signal);
+  },
+  editTagKey: (dimension: string, key: string, change: { label: string; definition: string }) => request<{ ok: boolean }>("PATCH", `/org/tag-keys/${encodeURIComponent(dimension)}/${encodeURIComponent(key)}`, change),
+  mergeTagKey: (dimension: string, key: string, into: string) => request<{ ok: boolean }>("POST", `/org/tag-keys/${encodeURIComponent(dimension)}/${encodeURIComponent(key)}/merge`, { into }),
+  externalUsage: (period: UsagePeriodSelection, scope: UsageScopeName, teamId: string | undefined, search: string, offset: number, surface?: "hosted" | "mcp" | "cli", signal?: AbortSignal, key?: string) => {
+    const qs = usagePeriodSearchParams(period);
+    qs.set("scope", scope);
+    if (teamId) qs.set("teamId", teamId);
+    qs.set("q", search);
+    qs.set("offset", String(offset));
+    if (surface) qs.set("surface", surface);
+    if (key) qs.set("key", key);
+    return request<ExternalUsageResponse>("GET", `/usage/external?${qs}`, undefined, signal);
+  },
+  usageOutcomes: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string, signal?: AbortSignal) => {
+    const qs = usagePeriodSearchParams(period);
+    qs.set("scope", scope);
     if (teamId !== undefined) qs.set("teamId", teamId);
+    return request<UsageOutcomesResponse>("GET", `/usage/outcomes?${qs}`, undefined, signal);
+  },
+  usageItems: (period: UsagePeriodSelection, scope: UsageScopeName, useCase: UsageUseCase, teamId?: string, signal?: AbortSignal) => {
+    const qs = usagePeriodSearchParams(period);
+    qs.set("scope", scope);
+    qs.set("useCase", useCase);
+    if (teamId !== undefined) qs.set("teamId", teamId);
+    return request<UsageDrillResponse>("GET", `/usage/items?${qs}`, undefined, signal);
+  },
+  usageExportCsvUrl: (
+    period: UsagePeriodSelection,
+    scope: UsageScopeName,
+    granularity: UsageExportGranularity = "day",
+    teamId?: string,
+  ): string => {
+    const qs = usagePeriodSearchParams(period);
+    qs.set("scope", scope);
+    if (teamId !== undefined) qs.set("teamId", teamId);
+    qs.set("granularity", granularity);
     return `/api/usage/export.csv?${qs}`;
   },
-  usageSessions: (window: string = "7d", useCase?: "orchestrator" | "session") => {
-    const qs = new URLSearchParams({ window });
-    if (useCase) qs.set("useCase", useCase);
-    return request<UsageSessionsResponse>("GET", `/usage/sessions?${qs}`);
+  validateUsageExport: (
+    period: UsagePeriodSelection,
+    scope: UsageScopeName,
+    granularity: UsageExportGranularity,
+    teamId?: string,
+  ): Promise<void> => {
+    const qs = usagePeriodSearchParams(period);
+    qs.set("scope", scope);
+    if (teamId !== undefined) qs.set("teamId", teamId);
+    qs.set("granularity", granularity);
+    qs.set("validate", "1");
+    return request<void>("GET", `/usage/export.csv?${qs}`);
   },
   getJournalSummary: () =>
     request<{ date: string; summary: string | null }>("GET", "/memory/journal-summary"),
@@ -1195,6 +1395,10 @@ export const api = {
     request<ProbeLlmProviderResponse>("POST", `/org/llm-providers/${encodeURIComponent(id)}/probe`),
   openrouterRegistry: () =>
     request<OpenrouterRegistryResponse>("GET", "/org/llm-providers/openrouter/models"),
+  /** Pickable models for a curated known kind: OpenRouter's live catalog, or
+   * what the AWS account can invoke for amazon-bedrock. */
+  providerModelCatalog: (kind: "openrouter" | "amazon-bedrock") =>
+    request<ProviderModelCatalogResponse>("GET", `/org/llm-providers/${kind}/models`),
   testLlmProvider: (id: string, body: TestLlmProviderRequest) =>
     request<TestLlmProviderResponse>(
       "POST",
@@ -1245,8 +1449,6 @@ export const api = {
       "DELETE",
       `/teams/${encodeURIComponent(id)}/members/${encodeURIComponent(userId)}`,
     ),
-  ensureTeamOrchestrator: (id: string) =>
-    request<EnsureOrchestratorResponse>("POST", `/teams/${encodeURIComponent(id)}/orchestrator`),
   listTeamApiKeys: (id: string) =>
     request<ListTeamApiKeysResponse>("GET", `/teams/${encodeURIComponent(id)}/api-keys`),
   createTeamApiKey: (id: string, body: CreateTeamApiKeyRequest) =>
@@ -1255,7 +1457,16 @@ export const api = {
     request<{ ok: true }>("DELETE", `/teams/${encodeURIComponent(id)}/api-keys/${encodeURIComponent(keyId)}`),
 
   // plugins + credentials (plugin-system-v2 plan Task 15 — connect surface)
-  listPlugins: () => request<ListPluginsResponse>("GET", "/plugins"),
+  listCodeReviews: (teamId?: string) =>
+    request<ListCodeReviewsResponse>(
+      "GET",
+      teamId === undefined ? "/code-review/reviews" : `/code-review/reviews?teamId=${encodeURIComponent(teamId)}`,
+    ),
+  listPlugins: (teamId?: string) =>
+    request<ListPluginsResponse>(
+      "GET",
+      teamId === undefined ? "/plugins" : `/plugins?teamId=${encodeURIComponent(teamId)}`,
+    ),
   listCredentials: (scope?: "user" | "org" | "team", teamId?: string) => {
     const qs = new URLSearchParams();
     if (scope === "org" || scope === "team") qs.set("scope", scope);
@@ -1287,22 +1498,20 @@ export const api = {
       `/credentials/${encodeURIComponent(service)}/delegate`,
       body,
     ),
-  revokeDelegation: (service: string, teamId: string) =>
+  /** Ends a share: the caller's own, or a member's (`userId`) as a team admin. */
+  revokeDelegation: (service: string, teamId: string, userId?: string) =>
     request<DeleteCredentialResponse>(
       "DELETE",
-      `/credentials/${encodeURIComponent(service)}/delegations/${encodeURIComponent(teamId)}`,
+      `/credentials/${encodeURIComponent(service)}/delegations/${encodeURIComponent(teamId)}${userId ? `?userId=${encodeURIComponent(userId)}` : ""}`,
     ),
 
   // 1Password picker backend + settings. `scope` selects which
   // service-account token to browse with — "org" (open to any org member
-  // once the org token is connected) or "personal" (gated server-side by
-  // the org's allowPersonal toggle).
+  // once the org token is connected) or "personal" (the caller's own).
   getTeamOnePasswordStatus: (teamId: string) =>
     request<TeamOnePasswordStatusResponse>("GET", `/onepassword/team-status?teamId=${encodeURIComponent(teamId)}`),
   getOnePasswordSettings: () =>
     request<OnePasswordSettingsResponse>("GET", "/onepassword/settings"),
-  putOnePasswordSettings: (body: PutOnePasswordSettingsRequest) =>
-    request<OnePasswordSettingsResponse>("PUT", "/onepassword/settings", body),
 
   // skills — the markdown playbooks the agent reads. The catalog mixes the
   // plugin-supplied ones with the stored ones the caller owns. Only a
@@ -1356,25 +1565,30 @@ export const api = {
   // the caller has access to — only `github` today.
   getRepos: () => request<GetReposResponse>("GET", "/repos"),
 
-  getPrebuildForRepo: (fullName: string) =>
-    request<GetPrebuildForRepoResponse>(
-      "GET",
-      `/sources/for-repo?fullName=${encodeURIComponent(fullName)}`,
-    ),
-
   // sandbox image sources (sandbox-reconciliation plan, Task 18): org-admin
   // CRUD for all source kinds (external/base/repo) and bake history.
   listBakeQueue: () => request<ListBakeQueueResponse>("GET", "/org/sources/queue"),
   reorderBakeQueue: (bakeIds: string[]) => request<{ ok: true }>("PATCH", "/org/sources/queue", { bakeIds }),
   listSources: () => request<ListSourcesResponse>("GET", "/org/sources"),
-  createSource: (body: Record<string, unknown>) => request<CreateSourceResponse>("POST", "/org/sources", body),
+  createSource: (body: Record<string, unknown>) => request<CreateSourceResponse | PendingSourceChangeResponse>("POST", "/org/sources", body),
   patchSource: (id: string, body: Record<string, unknown>) =>
-    request<PatchSourceResponse>("PATCH", `/org/sources/${encodeURIComponent(id)}`, body),
+    request<PatchSourceResponse | PendingSourceChangeResponse>("PATCH", `/org/sources/${encodeURIComponent(id)}`, body),
   deleteSource: (id: string) => request<{ ok: true }>("DELETE", `/org/sources/${encodeURIComponent(id)}`),
   bakeSource: (id: string) => request<TriggerBakeResponse>("POST", `/org/sources/${encodeURIComponent(id)}/bake`),
+  listSourceChanges: () => request<ListSourceChangesResponse>("GET", "/org/sources/changes"),
+  approveSourceChange: (id: string) =>
+    request<ResolveSourceChangeResponse>("POST", `/org/sources/changes/${encodeURIComponent(id)}/approve`),
+  rejectSourceChange: (id: string) =>
+    request<ResolveSourceChangeResponse>("POST", `/org/sources/changes/${encodeURIComponent(id)}/reject`, {}),
+  withdrawSourceChange: (id: string) =>
+    request<ResolveSourceChangeResponse>("DELETE", `/org/sources/changes/${encodeURIComponent(id)}`),
   listSourceBakes: (id: string) => request<ListBakesResponse>("GET", `/org/sources/${encodeURIComponent(id)}/bakes`),
 
   // org GitHub App setup (GitHub/repo integration plan, Task 5) — admin-gated
+  getLinearConnection: () => request<GetLinearConnectionResponse>("GET", "/org/linear"),
+  putLinearConnection: (body: { clientId: string; clientSecret: string; webhookSecret: string }) =>
+    request<GetLinearConnectionResponse>("PUT", "/org/linear", body),
+  deleteLinearConnection: () => request<undefined>("DELETE", "/org/linear"),
   getGithubApp: () => request<GetGithubAppResponse>("GET", "/org/github-app"),
   postGithubAppManifest: (body: PostGithubAppManifestRequest = {}) =>
     request<PostGithubAppManifestResponse>("POST", "/org/github-app/manifest", body),
@@ -1415,6 +1629,12 @@ export const api = {
       "POST",
       `/me/identity-links/${encodeURIComponent(provider)}/deliver`,
       body,
+    ),
+  verifyIdentityLink: (provider: string, code: string) =>
+    request<VerifyIdentityLinkResponse>(
+      "POST",
+      `/me/identity-links/${encodeURIComponent(provider)}/verify`,
+      { code },
     ),
   searchLinkMembers: (provider: string, query: string) =>
     request<ListLinkMembersResponse>(
@@ -1467,8 +1687,20 @@ export const api = {
     return request<ListActionLogResponse>("GET", `/org/action-log${tail}`);
   },
 
+  // admin audit log (docs/specs/2026-11-03-admin-audit-log-design.md)
+  listAdminAudit: (opts?: { cursor?: string; limit?: number; targetType?: string; actorUserId?: string }) => {
+    const qs = new URLSearchParams();
+    if (opts?.cursor) qs.set("cursor", opts.cursor);
+    if (opts?.limit) qs.set("limit", String(opts.limit));
+    if (opts?.targetType) qs.set("targetType", opts.targetType);
+    if (opts?.actorUserId) qs.set("actorUserId", opts.actorUserId);
+    const tail = qs.toString() ? `?${qs}` : "";
+    return request<ListAdminAuditResponse>("GET", `/org/audit-log${tail}`);
+  },
+
   // per-user policy overrides + runtime grants (action-policies plan, Task 4/5)
   listMyPolicyOverrides: () => request<ListPolicyOverridesResponse>("GET", "/me/policy-overrides"),
+  listMyToolPermissions: () => request<ListToolPermissionsResponse>("GET", "/me/tool-permissions"),
   putMyPolicyOverride: (body: PutPolicyOverrideRequest) =>
     request<PutPolicyOverrideResponse>("PUT", "/me/policy-overrides", body),
   deleteMyPolicyOverride: (body: DeletePolicyOverrideRequest) =>
@@ -1482,19 +1714,15 @@ export const api = {
     request<DeleteGrantResponse>("DELETE", "/me/grants", body),
 
   // ── LLM proxy usage (recording-gateway dashboard) ──────────────────────
-  proxyUsageSummary: (window: string = "7d") =>
-    request<ProxyUsageSummary>("GET", `/proxy/usage/summary?window=${encodeURIComponent(window)}`),
   proxyRequests: (opts: {
-    user?: string;
     model?: string;
     harness?: string;
     from?: number;
     to?: number;
     cursor?: string;
     limit?: number;
-  } = {}) => {
+  } = {}, signal?: AbortSignal) => {
     const qs = new URLSearchParams();
-    if (opts.user) qs.set("user", opts.user);
     if (opts.model) qs.set("model", opts.model);
     if (opts.harness) qs.set("harness", opts.harness);
     if (opts.from !== undefined) qs.set("from", String(opts.from));
@@ -1502,12 +1730,10 @@ export const api = {
     if (opts.cursor) qs.set("cursor", opts.cursor);
     if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
     const tail = qs.toString() ? `?${qs}` : "";
-    return request<{ requests: ProxyRequestListItem[]; nextCursor?: string }>("GET", `/proxy/requests${tail}`);
+    return request<ProxyRequestListResponse>("GET", `/proxy/requests${tail}`, undefined, signal);
   },
-  proxyRequestDetail: (id: string) =>
-    request<ProxyRequestDetail>("GET", `/proxy/requests/${encodeURIComponent(id)}`),
-  proxySettings: () =>
-    request<ProxySettingsResponse>("GET", "/proxy/settings"),
+  proxySettings: (signal?: AbortSignal) =>
+    request<ProxySettingsResponse>("GET", "/proxy/settings", undefined, signal),
   setProxyMode: (mode: "centralized" | "passthrough") =>
     request<ProxySettingsResponse>("PUT", "/proxy/settings", { mode }),
   updateProxySettings: (patch: { enabled?: boolean; mode?: "centralized" | "passthrough" }) =>

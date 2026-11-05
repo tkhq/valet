@@ -5,11 +5,12 @@
  * better-auth's verified hook points.
  */
 import { createAuthMiddleware, APIError } from "better-auth/api";
+import { recordAdminAudit } from "../services/admin-audit.js";
 import type { Account, BetterAuthOptions, User } from "better-auth";
 import { eq, and } from "drizzle-orm";
 import type { CredentialStore } from "@valet/engine";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
-import { orgMembers, users, teams, teamMembers } from "../schema/index.js";
+import { orgMembers, teams, teamMembers } from "../schema/index.js";
 import { ensureOrg, findOrg } from "../services/org.js";
 import { readTeamClaim } from "../services/team-sync.js";
 import { refreshTeamJoinEligibility } from "../services/team-join-eligibility.js";
@@ -18,15 +19,11 @@ import type { InstanceConfig } from "../config/instance-config.js";
 import type { SourceService } from "../bakes/source-service.js";
 import { acceptInvite, findValidInviteByCode, findValidInviteByEmail } from "./invites.js";
 import { guardPersonalApiKeyRoutes } from "./api-key-hooks.js";
+import { guardSsoRoutes } from "./sso-hooks.js";
 
 export type Admission =
   | { allowed: true; role: "admin" | "member"; inviteId?: string }
   | { allowed: false };
-
-async function countUsers(db: AppQueryable): Promise<number> {
-  const rows = await db.select({ id: users.id }).from(users);
-  return rows.length;
-}
 
 function domainOf(email: string): string | undefined {
   return email.trim().toLowerCase().split("@").pop();
@@ -35,11 +32,17 @@ function domainOf(email: string): string | undefined {
 /**
  * The single admission rule, used by both the signup invite gate and the
  * OAuth/SSO creation gate. Order (first match wins):
- *   1. zero users in the db → admin (bootstraps the first operator)
- *   2. a valid invite matching by code, else by email → the invite's role
+ *   1. a valid invite matching by code, else by email → the invite's role
+ *   2. unrestricted signup enabled AND no domain allow-list → member. A
+ *      configured allow-list is a fence that signup does not lift.
  *   3. email domain ∈ cfg.allowedEmailDomains (exact match, case-insensitive,
  *      no subdomain match) → member
  *   4. otherwise → denied
+ *
+ * No rule makes the first user an admin: on a reachable host that would be
+ * whoever signs up first. The first admin comes from an invite, either a
+ * config-declared admin or the one-time link `ensureBootstrapAdminInvite`
+ * prints to the server log.
  *
  * The invite rule precedes the domain rule so a config-declared admin whose
  * email domain is also allowlisted is admitted as admin (the invite's role),
@@ -52,13 +55,13 @@ export async function evaluateAdmission(
   email: string,
   inviteCode?: string,
 ): Promise<Admission> {
-  if ((await countUsers(db)) === 0) {
-    return { allowed: true, role: "admin" };
-  }
-
   const invite = (inviteCode && (await findValidInviteByCode(db, inviteCode))) || (await findValidInviteByEmail(db, email));
   if (invite) {
     return { allowed: true, role: invite.role, inviteId: invite.id };
+  }
+
+  if (cfg.allowSignup && cfg.allowedEmailDomains.length === 0) {
+    return { allowed: true, role: "member" };
   }
 
   const domain = domainOf(email);
@@ -71,6 +74,30 @@ export async function evaluateAdmission(
 
 /** Exact rejection copy for the invite gate — asserted byte-exact by tests/spec. */
 export const INVITE_REQUIRED_MESSAGE = "an invite is required to join this deployment";
+
+/** Rejection copy when a password sign-up names an administrator's email without the admin code. */
+export const ADMIN_EMAIL_RESERVED_MESSAGE =
+  "this email belongs to an administrator: sign in with SSO, Google, or GitHub, or use the one-time admin link from the server log";
+
+/** Admin admission for a verified AUTH_ADMIN_EMAILS sign-in; keeps a matched invite so `.after` still accepts it. */
+function adminAdmission(admission: Admission): Admission {
+  return { allowed: true, role: "admin", ...(admission.allowed && admission.inviteId ? { inviteId: admission.inviteId } : {}) };
+}
+
+function isAdminEmail(cfg: AuthConfig, email: string): boolean {
+  return cfg.adminEmails?.includes(email.trim().toLowerCase()) ?? false;
+}
+
+/**
+ * True for an email only a verified sign-in may claim: an `AUTH_ADMIN_EMAILS`
+ * entry, or the target of a pending admin invite (a config-declared admin).
+ * Password sign-up does not prove that the person owns the email, so for
+ * these it needs an admin invite matched by code.
+ */
+async function isReservedAdminEmail(db: AppQueryable, cfg: AuthConfig, email: string): Promise<boolean> {
+  if (isAdminEmail(cfg, email)) return true;
+  return (await findValidInviteByEmail(db, email))?.role === "admin";
+}
 
 /**
  * The subset of better-auth's `GenericEndpointContext` our hooks read.
@@ -150,8 +177,7 @@ function isSsoPath(path: string | undefined): boolean {
 }
 
 /** SSO paths never reject: an admission the rule would otherwise deny still
- * resolves to "member" (spec: "SSO paths skip the rule entirely (→ member,
- * or admin if first user)"). */
+ * resolves to "member". Admin comes only from an invite, as on every path. */
 function roleFromAdmission(admission: Admission): "admin" | "member" {
   return admission.allowed ? admission.role : "member";
 }
@@ -193,12 +219,18 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
     if (ctx.path === "/sign-up/email") {
       const body = (ctx.body ?? undefined) as Record<string, unknown> | undefined;
       const email = typeof body?.email === "string" ? body.email : "";
-      const admission = await evaluateAdmission(db, cfg, email, readInviteCode(body));
+      const code = readInviteCode(body);
+      if (await isReservedAdminEmail(db, cfg, email) && (!code || (await findValidInviteByCode(db, code))?.role !== "admin")) {
+        throw new APIError("FORBIDDEN", { message: ADMIN_EMAIL_RESERVED_MESSAGE });
+      }
+      const admission = await evaluateAdmission(db, cfg, email, code);
       if (!admission.allowed) {
         throw new APIError("FORBIDDEN", { message: INVITE_REQUIRED_MESSAGE });
       }
       return;
     }
+    const params = "params" in ctx && ctx.params && typeof ctx.params === "object" ? (ctx.params as Record<string, unknown>) : null;
+    guardSsoRoutes({ path: ctx.path, body: ctx.body ?? null, params }, cfg.oidc !== undefined);
     const query = "query" in ctx && ctx.query && typeof ctx.query === "object" ? (ctx.query as Record<string, unknown>) : null;
     await guardPersonalApiKeyRoutes({ path: ctx.path, body: ctx.body ?? null, query }, db);
   });
@@ -210,11 +242,19 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
     const path = context?.path;
     let admission: Admission;
 
+    // An AUTH_ADMIN_EMAILS entry is an admin when the identity provider
+    // vouches for the email: the deployment's own SSO, or Google/GitHub with
+    // a verified email. Password sign-up never gets here for one without the
+    // admin code (`beforeHook`).
+    const verifiedAdmin = isAdminEmail(cfg, user.email) &&
+      (isSsoPath(path) || (isSocialPath(path) && user.emailVerified === true));
     if (isSsoPath(path)) {
       // SSO always passes regardless of admission's verdict (see roleFromAdmission).
       admission = await evaluateAdmission(db, cfg, user.email);
+      if (verifiedAdmin) admission = adminAdmission(admission);
     } else if (isSocialPath(path)) {
       admission = await evaluateAdmission(db, cfg, user.email);
+      if (verifiedAdmin) admission = adminAdmission(admission);
       if (!admission.allowed) return false;
     } else {
       // "/sign-up/email" (already gated by beforeHook, above) or a null/internal
@@ -243,6 +283,19 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
     if (admission?.allowed && admission.inviteId) {
       await acceptInvite(db, admission.inviteId, user.id);
     }
+
+    // Every new account joins the org here, whatever the sign-in method, so
+    // this is the one audit point for new users and new admins.
+    await recordAdminAudit(db, {
+      orgId: org.id,
+      actor: { userId: user.id, email: user.email },
+      action: "user.join",
+      targetType: "user",
+      targetId: user.id,
+      targetName: user.email,
+      changes: { role, inviteId: admission?.allowed ? admission.inviteId ?? null : null },
+      alert: role === "admin" ? "new_admin" : "new_user",
+    });
 
     // Bind the user to any config-declared teams whose member list includes
     // this email. Team rows are resolved by name within the org — if a team

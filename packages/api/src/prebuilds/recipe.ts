@@ -13,8 +13,8 @@
  * also the emitted step order, which matters for determinism.
  */
 import { createHash } from "node:crypto";
-import type { SandboxResources } from "@valet/engine";
-import { isValidSandboxCpu, sandboxCpuRange } from "@valet/shared";
+import { NESTED_KUBERNETES_IDENTITY, type SandboxResources } from "@valet/engine";
+import { isValidSandboxCpu, MIN_SCRATCH_BYTES, sandboxCpuRange } from "@valet/shared";
 import { parse as parseYaml } from "yaml";
 import { parseStorageQuantity } from "@valet/sandbox-kubernetes";
 
@@ -104,6 +104,8 @@ export interface PrebuildOverride {
   setup?: string[];
   skipDetect?: boolean;
   docker?: boolean;
+  /** Start one managed nested Kubernetes v1 cluster in the sandbox. */
+  kubernetes?: boolean;
   resources?: PrebuildResources;
   /** Workspace volume size this repo requests (Kubernetes quantity, e.g.
    * "4Gi"). The api reads it at session create time. Like `docker`, this is a
@@ -125,8 +127,8 @@ export interface PrebuildOverride {
   baseSetup?: string[];
 }
 
-/** Sandbox CPU and memory requested by a repository prebuild. */
-export type PrebuildResources = Pick<SandboxResources, "cpu" | "memory">;
+/** Sandbox CPU, memory, and scratch requested by a repository prebuild. */
+export type PrebuildResources = Pick<SandboxResources, "cpu" | "memory" | "scratch">;
 
 /**
  * Loads `.valet/prebuild.yaml` if present. Returns `null` when the file
@@ -168,10 +170,16 @@ export async function loadPrebuildOverride(
     }
     override.docker = obj.docker;
   }
+  if (obj.kubernetes !== undefined) {
+    if (typeof obj.kubernetes !== "boolean") {
+      throw new Error(".valet/prebuild.yaml: use kubernetes: true or false");
+    }
+    override.kubernetes = obj.kubernetes;
+  }
   if (obj.resources !== undefined) {
     if (typeof obj.resources !== "object" || obj.resources === null || Array.isArray(obj.resources)) {
       throw new Error(
-        '.valet/prebuild.yaml: resources must be a mapping with optional cpu and memory fields — use resources: { cpu: 2, memory: "4Gi" }',
+        '.valet/prebuild.yaml: resources must be a mapping with optional cpu, memory, and scratch fields — use resources: { cpu: 2, memory: "4Gi" }',
       );
     }
     const resourcesObj = obj.resources as Record<string, unknown>;
@@ -198,6 +206,16 @@ export async function loadPrebuildOverride(
         );
       }
       resources.memory = memory;
+    }
+    if (resourcesObj.scratch !== undefined) {
+      const scratch = typeof resourcesObj.scratch === "string" ? resourcesObj.scratch.trim() : "";
+      const bytes = scratch ? parseStorageQuantity(scratch) : null;
+      if (bytes === null || bytes < MIN_SCRATCH_BYTES) {
+        throw new Error(
+          '.valet/prebuild.yaml: resources.scratch must be a quantity string of at least 1Gi — use resources: { scratch: "200Gi" }',
+        );
+      }
+      resources.scratch = scratch;
     }
     override.resources = resources;
   }
@@ -242,6 +260,8 @@ export interface ResolvedRecipe {
   image?: string;
   /** Docker daemon inside sandbox, when the repo enables it. */
   docker?: boolean;
+  /** First-class nested Kubernetes v1 capability. */
+  kubernetes?: boolean;
 }
 
 /**
@@ -265,6 +285,7 @@ export async function resolveRecipe(
     baseSetup: override?.baseSetup ?? [],
     image: override?.image,
     ...(override?.docker !== undefined ? { docker: override.docker } : {}),
+    ...(override?.kubernetes !== undefined ? { kubernetes: override.kubernetes } : {}),
   };
 }
 
@@ -324,6 +345,7 @@ export interface GenerateDockerfileOpts {
   commitSha: string;
   recipe: RecipeStep[];
   setup?: string[];
+  kubernetes?: boolean;
 }
 
 /**
@@ -341,7 +363,7 @@ export interface GenerateDockerfileOpts {
  * commands and override `setup` commands run there via `WORKDIR`.
  */
 export function generateDockerfile(opts: GenerateDockerfileOpts): string {
-  const { baseImage, cloneUrl, commitSha, recipe, setup = [] } = opts;
+  const { baseImage, cloneUrl, commitSha, recipe, setup = [], kubernetes = false } = opts;
 
   const lines: string[] = [];
   lines.push(`FROM ${baseImage}`);
@@ -354,10 +376,14 @@ export function generateDockerfile(opts: GenerateDockerfileOpts): string {
   lines.push(
     `  GIT_ASKPASS=${ASKPASS_PATH} git clone "${cloneUrl}" ${PREBUILT_REPO_PATH} && \\`,
   );
+  // The checkout shares the clone's RUN so the commit is part of that
+  // layer's cache key. As a separate step, Docker reused a cached clone from
+  // an earlier bake, which lacked every newer commit, and the checkout failed
+  // with "reference is not a tree" on every bake after the first.
+  lines.push(`  git -C ${PREBUILT_REPO_PATH} checkout ${commitSha} && \\`);
   lines.push(`  rm -f ${ASKPASS_PATH}'`);
   lines.push("");
   lines.push(`WORKDIR ${PREBUILT_REPO_PATH}`);
-  lines.push(`RUN git checkout ${commitSha}`);
 
   emitStepRuns(lines, recipe, setup);
 
@@ -365,6 +391,7 @@ export function generateDockerfile(opts: GenerateDockerfileOpts): string {
   const identity = `${baseImage}|${cloneUrl}@${commitSha}|${identityHash}`;
   lines.push("");
   lines.push(`LABEL valet.prebuild.identity="${identity}"`);
+  if (kubernetes) lines.push(`LABEL dev.valet.capability.nested-kubernetes="${NESTED_KUBERNETES_IDENTITY}"`);
   lines.push("");
 
   return lines.join("\n");

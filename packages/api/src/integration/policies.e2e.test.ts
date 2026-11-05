@@ -58,7 +58,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "typebox";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration, type JsonObject } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "@valet/engine/test-helpers";
 import type { PluginAction, ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "./_setup.js";
 import type {
@@ -179,7 +180,7 @@ async function poll<T>(fn: () => Promise<T>, ok: (v: T) => boolean, timeoutMs = 
 /** Queue one faux LLM turn: a `call_tool` invocation followed by a plain
  * text acknowledgement (consumed once the tool call — gated or not —
  * settles and the agent loop asks the model what to say next). */
-function queueCallTool(f: FauxProviderRegistration, toolId: string, params: Record<string, unknown>, summary: string) {
+function queueCallTool(f: FauxProviderRegistration, toolId: string, params: JsonObject, summary: string) {
   f.appendResponses([
     fauxAssistantMessage([fauxToolCall("call_tool", { tool_id: toolId, params, summary }, { id: `tc-${toolId}-${Date.now()}-${Math.random()}` })], {
       stopReason: "toolUse",
@@ -303,7 +304,7 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       queueCallTool(faux, "widgets.nuke", {}, "nuke it");
       await postPrompt(baseUrl, sessionA, "call nuke");
       const defaultGate = await waitForGate(baseUrl, sessionA);
-      expect(defaultGate.actions.map((a) => a.id).sort()).toEqual(["always_allow", "approve", "approve_session", "deny"]);
+      expect(defaultGate.actions.map((a) => a.id).sort()).toEqual(["always_allow", "always_allow_owner", "approve", "approve_session", "deny"]);
       // The live gate carries WHY it opened (spec Deviations T6 #5, fixed):
       // risk default for an unconfigured critical action.
       expect(defaultGate.provenance).toMatchObject({ baseMode: "require_approval", source: "risk_default" });
@@ -454,23 +455,35 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       expect(fixture.calls("widgets.ping")).toBe(2);
       expect(pingOverrideRow).toMatchObject({ resolvedMode: "require_approval", baseMode: "allow", matchedOverrideId: override.id });
 
-      // The SAME override does not apply to a different user — proven via
+      // The SAME override does not apply to a different user's own session,
+      // and it does apply to another member's turn in this user's session (a
+      // reply in a shared thread runs under the owner's settings). Proven via
       // the admin-only resolver preview route (dry-run, no writes).
-      const previewRes = await fetch(`${baseUrl}/api/org/policies/preview`, {
+      const createSessionCRes = await fetch(`${baseUrl}/api/sessions`, {
         method: "POST",
-        headers: HEADERS,
-        body: JSON.stringify({
-          service: "widgets",
-          actionId: "widgets.ping",
-          riskLevel: "low",
-          appliesIn: "session",
-          sessionId: sessionB,
-          userId: "test-member",
-        }),
+        headers: MEMBER_HEADERS,
+        body: JSON.stringify({ workspace: join(workspaceRoot, "sC") }),
       });
-      expect(previewRes.status).toBe(200);
-      const preview = (await previewRes.json()) as PreviewOrgPolicyResponse;
-      expect(preview.mode).toBe("allow");
+      expect(createSessionCRes.status).toBe(201);
+      const sessionC = ((await createSessionCRes.json()) as CreateSessionResponse).id;
+      const previewPing = async (sessionId: string) => {
+        const res = await fetch(`${baseUrl}/api/org/policies/preview`, {
+          method: "POST",
+          headers: HEADERS,
+          body: JSON.stringify({
+            service: "widgets",
+            actionId: "widgets.ping",
+            riskLevel: "low",
+            appliesIn: "session",
+            sessionId,
+            userId: "test-member",
+          }),
+        });
+        expect(res.status).toBe(200);
+        return ((await res.json()) as PreviewOrgPolicyResponse).mode;
+      };
+      expect(await previewPing(sessionC)).toBe("allow");
+      expect(await previewPing(sessionB)).toBe("require_approval");
 
       // Non-admin members cannot see the admin-only surfaces this test used.
       const memberActionLogRes = await fetch(`${baseUrl}/api/org/action-log`, { headers: MEMBER_HEADERS });
@@ -527,7 +540,7 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       const denyRes = await fetch(`${baseUrl}/api/workflows/runs/${runNoGrant}/approvals/call`, {
         method: "POST",
         headers: HEADERS,
-        body: JSON.stringify({ approved: false }),
+        body: JSON.stringify({ approved: false, gateId: parkedNoGrant.pendingGates.find(gate => gate.nodeId === "call")?.gateId }),
       });
       expect(denyRes.status).toBe(200);
       expect(((await denyRes.json()) as ResolveWorkflowApprovalResponse).ok).toBe(true);
@@ -599,7 +612,7 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       expect(((await approveNodeRes.json()) as ResolveWorkflowApprovalResponse).ok).toBe(true);
 
       // Poll for the run to park again on the tool gate (policy gate for `call`).
-      await poll(
+      const parkedGrant = await poll(
         async () => {
           const r = await fetch(`${baseUrl}/api/workflows/runs/${runGrant}`);
           expect(r.status).toBe(200);
@@ -617,7 +630,7 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       const approveGateRes = await fetch(`${baseUrl}/api/workflows/runs/${runGrant}/approvals/call`, {
         method: "POST",
         headers: HEADERS,
-        body: JSON.stringify({ approved: true, scope: "run" }),
+        body: JSON.stringify({ approved: true, scope: "run", gateId: parkedGrant.pendingGates.find(gate => gate.nodeId === "call")?.gateId }),
       });
       expect(approveGateRes.status).toBe(200);
       expect(((await approveGateRes.json()) as ResolveWorkflowApprovalResponse).ok).toBe(true);

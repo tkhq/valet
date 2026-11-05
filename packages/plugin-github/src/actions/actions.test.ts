@@ -7,15 +7,16 @@
  * mocked Octokit method name.
  */
 import process from "node:process";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PluginAction } from "@valet/engine";
-import { githubPlugin } from "./actions.js";
+import { expandRelativeDates, githubPlugin } from "./actions.js";
 import { fakeActionContext } from "../test-helpers/action-context.js";
 import {
   startGithubFixture,
   type GithubFixture,
   type GithubFixtureCall,
   type GithubFixtureHandlers,
+  type GithubFixtureResponse,
 } from "../test-helpers/github-fixture.js";
 
 const prevGithubApiUrl = process.env.GITHUB_API_URL;
@@ -41,6 +42,24 @@ function findAction(id: string): PluginAction {
   return action;
 }
 
+describe("github action abort signal", () => {
+  it("sends no request once the action is stopped", async () => {
+    // Every Octokit carries the action's signal, so an action that does not
+    // pass it per request still stops.
+    const server = useFixture();
+    const stop = new AbortController();
+    stop.abort();
+
+    const result = await findAction("github.get_repository").execute(
+      { owner: "acme", repo: "widgets" },
+      { ...fakeActionContext("test-token"), signal: stop.signal },
+    );
+
+    expect(result.success).toBe(false);
+    expect(server.calls).toHaveLength(0);
+  });
+});
+
 describe("github action base URL", () => {
   it("sends requests to GITHUB_API_URL when it is set", async () => {
     const server = useFixture();
@@ -53,6 +72,51 @@ describe("github action base URL", () => {
     expect(result.success).toBe(true);
     expect(server.calls.map((c) => `${c.method} ${c.path}`)).toEqual(["GET /repos/acme/widgets"]);
     expect(server.calls[0].authHeader).toContain("test-token");
+  });
+});
+
+// ─── repository view ────────────────────────────────────────────────────────
+
+describe("github.get_repository result", () => {
+  // A raw fork response was about 15,000 characters, mostly API link
+  // templates and the full parent and source repositories.
+  it("drops API link templates and shrinks nested objects but keeps every setting", async () => {
+    const owner = { login: "acme", type: "Organization", id: 1, url: "https://api.github.com/users/acme", repos_url: "https://api.github.com/users/acme/repos" };
+    const parent = { full_name: "upstream/widgets", html_url: "https://github.com/upstream/widgets", owner, hooks_url: "https://api.github.com/repos/upstream/widgets/hooks" };
+    useFixture({
+      getRepo: () => ({
+        body: {
+          id: 7, name: "widgets", full_name: "acme/widgets", owner, private: false, visibility: "public",
+          description: "Widgets", fork: true, parent, source: parent,
+          html_url: "https://github.com/acme/widgets", clone_url: "https://github.com/acme/widgets.git",
+          default_branch: "main", license: { key: "mit", name: "MIT License", spdx_id: "MIT", url: "https://api.github.com/licenses/mit", node_id: "L1" },
+          allow_merge_commit: false, allow_squash_merge: true, delete_branch_on_merge: true, has_issues: false, size: 640, node_id: "R1",
+          permissions: { admin: false, push: true, pull: true },
+          hooks_url: "https://api.github.com/repos/acme/widgets/hooks",
+          issues_url: "https://api.github.com/repos/acme/widgets/issues{/number}",
+        },
+      }),
+    });
+
+    const result = await findAction("github.get_repository").execute({ owner: "acme", repo: "widgets" }, fakeActionContext("t"));
+
+    expect(result.success).toBe(true);
+    if (!result.success) throw new Error("expected success");
+    expect(result.data).toMatchObject({
+      full_name: "acme/widgets",
+      owner: { login: "acme", id: 1, type: "Organization" },
+      parent: { full_name: "upstream/widgets", html_url: "https://github.com/upstream/widgets" },
+      html_url: "https://github.com/acme/widgets",
+      clone_url: "https://github.com/acme/widgets.git",
+      default_branch: "main",
+      license: { key: "mit", name: "MIT License", spdx_id: "MIT" },
+      permissions: { push: true },
+      // Callers pick a merge method from these; merge_pull_request defaults to "merge".
+      allow_merge_commit: false, allow_squash_merge: true, delete_branch_on_merge: true, has_issues: false, size: 640, node_id: "R1",
+    });
+    expect(result.data).not.toHaveProperty("hooks_url");
+    const text = JSON.stringify(result.data);
+    expect(text).not.toContain("api.github.com");
   });
 });
 
@@ -451,10 +515,57 @@ describe("github.inspect_pull_request path scoping", () => {
   });
 });
 
+describe("github.inspect_pull_request merge facts", () => {
+  it("returns when and by whom the PR merged, and its labels", async () => {
+    useFixture({
+      getPull: (ref) => ({
+        body: {
+          number: Number(ref.pullNumber),
+          title: "fixture pull request",
+          state: "closed",
+          merged: true,
+          merged_at: "2026-10-20T12:00:00Z",
+          merged_by: { login: "release-lead" },
+          merge_commit_sha: "merge-sha",
+          closed_at: "2026-10-20T12:00:00Z",
+          labels: [{ name: "release" }],
+          user: { login: "fixture-user" },
+          html_url: "https://github.com/acme/widgets/pull/7",
+          head: { ref: "feature", sha: "head-sha" },
+          base: { ref: "main" },
+          additions: 1,
+          deletions: 0,
+          changed_files: 0,
+        },
+      }),
+      listPullFiles: pagedFiles([]),
+    });
+
+    const data = await inspectRaw({});
+
+    expect(data).toMatchObject({
+      merged_at: "2026-10-20T12:00:00Z",
+      merged_by: "release-lead",
+      merge_commit_sha: "merge-sha",
+      labels: ["release"],
+    });
+  });
+});
+
 describe("github.inspect_pull_request file pagination", () => {
   const MANY = Array.from({ length: 150 }, (_, i) =>
     fileEntry(i < 120 ? `source/rest/f${i}.go` : `docs/f${i}.md`),
   );
+
+  it("reads each file once when the limit ends inside a page", async () => {
+    const server = useFixture({ getPull: pullWith(150), listPullFiles: pagedFiles(MANY) });
+
+    const data = await inspect({ filesLimit: 150, pathPrefixes: ["docs/"] });
+
+    const fileCalls = server.calls.filter((c) => c.path.endsWith("/files"));
+    expect(fileCalls.map((c) => c.query.per_page)).toEqual(["100", "100"]);
+    expect(data.matched_file_count).toBe(30);
+  });
 
   it("pages past GitHub's 100-per-page ceiling so the count is not short", async () => {
     const server = useFixture({ getPull: pullWith(150), listPullFiles: pagedFiles(MANY) });
@@ -548,10 +659,15 @@ describe("github.search_issues", () => {
               state: "open",
               user: { login: "fixture-user" },
               html_url: "https://github.com/acme/widgets/pull/7",
-              pull_request: { url: "https://api.github.com/repos/acme/widgets/pulls/7" },
+              repository_url: "https://api.github.com/repos/acme/widgets",
+              pull_request: {
+                url: "https://api.github.com/repos/acme/widgets/pulls/7",
+                merged_at: "2026-08-09T00:00:00Z",
+              },
               labels: [{ name: "area/api" }],
               created_at: "2026-08-01T00:00:00Z",
               updated_at: "2026-08-10T00:00:00Z",
+              closed_at: "2026-08-09T00:00:00Z",
             },
           ],
         },
@@ -566,9 +682,73 @@ describe("github.search_issues", () => {
     expect(Array.isArray(items) ? items[0] : undefined).toMatchObject({
       number: 7,
       url: "https://github.com/acme/widgets/pull/7",
+      repo: "acme/widgets",
       created_at: "2026-08-01T00:00:00Z",
+      merged_at: "2026-08-09T00:00:00Z",
+      labels: ["area/api"],
       is_pr: true,
     });
+  });
+
+  it("sends relative dates as ISO dates and reports the query it sent", async () => {
+    const server = useFixture();
+
+    const result = await search({ q: "is:pr is:merged merged:>=@now-7d" });
+
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    const sent = server.calls[0]?.query.q ?? "";
+    expect(sent).toMatch(/^is:pr is:merged merged:>=\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/);
+    expect(result.data).toMatchObject({ query: sent });
+  });
+
+  describe("paging past 100 results", () => {
+    const MATCHES = Array.from({ length: 250 }, (_, i) => ({
+      number: i + 1,
+      title: `pull request ${i + 1}`,
+      state: "closed",
+      user: { login: "fixture-user" },
+      html_url: `https://github.com/acme/widgets/pull/${i + 1}`,
+      repository_url: "https://api.github.com/repos/acme/widgets",
+      pull_request: { url: "", merged_at: "2026-08-09T00:00:00Z" },
+      labels: [],
+      created_at: "2026-08-01T00:00:00Z",
+      updated_at: "2026-08-10T00:00:00Z",
+      closed_at: "2026-08-09T00:00:00Z",
+    }));
+    /** Serves `MATCHES` as GitHub pages them: by `per_page` and `page`. */
+    function pagedSearch(query: Record<string, string>): GithubFixtureResponse {
+      const perPage = Number(query.per_page ?? "30");
+      const start = (Number(query.page ?? "1") - 1) * perPage;
+      return { body: { total_count: MATCHES.length, incomplete_results: false, items: MATCHES.slice(start, start + perPage) } };
+    }
+    function numbers(data: unknown): unknown[] {
+      const items = isRecord(data) ? data.items : undefined;
+      return Array.isArray(items) ? items.map((item) => (isRecord(item) ? item.number : undefined)) : [];
+    }
+
+    it("reads every page up to the limit, each result once", async () => {
+      const server = useFixture({ searchIssues: pagedSearch });
+
+      const result = await search({ limit: 250 });
+
+      expect(result.success).toBe(true);
+      if (!result.success) return;
+      expect(server.calls.map((c) => [c.query.page, c.query.per_page])).toEqual([["1", "100"], ["2", "100"], ["3", "100"]]);
+      expect(numbers(result.data)).toEqual(MATCHES.map((m) => m.number));
+      expect(result.data).toMatchObject({ total_count: 250, truncated: false });
+    }, 20_000); // Octokit's search throttle holds pages about 2 s apart.
+
+    it("stops at a limit inside a page and says the list is truncated", async () => {
+      useFixture({ searchIssues: pagedSearch });
+
+      const result = await search({ limit: 150 });
+
+      expect(result.success).toBe(true);
+      if (!result.success) return;
+      expect(numbers(result.data)).toEqual(MATCHES.slice(0, 150).map((m) => m.number));
+      expect(result.data).toMatchObject({ total_count: 250, truncated: true });
+    }, 20_000);
   });
 });
 
@@ -609,6 +789,214 @@ describe("github.read_repo_file", () => {
     expect(result.error).toContain('no file at ".github/reviewer-routing.csv" in acme/handbook');
     expect(result.error).toContain("Correct the path");
     expect(result.error).toContain("read access to that repository");
+  });
+
+  it("fails at once with the reset time when the rate limit is used up", async () => {
+    // Octokit's default handler sleeps until the quota resets, up to an
+    // hour, and the sleep ignores the action signal. A turn stuck there
+    // could not be stopped.
+    const reset = Math.floor(Date.now() / 1000) + 3600;
+    const server = useFixture({
+      readFile: () => ({
+        status: 403,
+        body: { message: "API rate limit exceeded for installation." },
+        headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(reset) },
+      }),
+    });
+
+    const started = Date.now();
+    const result = await read(".github/reviewer-routing.csv");
+
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(server.calls).toHaveLength(1);
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error).toContain("rate limit for this account is used up");
+    expect(result.error).toContain(`resets at ${new Date(reset * 1000).toISOString().slice(11, 16)} UTC`);
+    expect(result.error).not.toContain("permission");
+  });
+
+  function secondaryLimit(retryAfter: string): GithubFixtureResponse {
+    return {
+      status: 403,
+      body: JSON.stringify({ message: "You have exceeded a secondary rate limit. Please wait a few minutes before you try again." }),
+      headers: { "content-type": "application/json", "retry-after": retryAfter },
+    };
+  }
+
+  it("waits out a short secondary rate limit and retries once", async () => {
+    // GitHub sends no reset time for a secondary limit and asks clients to
+    // wait. Failing every one at once broke unattended review runs.
+    let calls = 0;
+    const server = useFixture({
+      readFile: (_owner, _repo, path) => (++calls === 1
+        ? secondaryLimit("1")
+        : { body: { type: "file", encoding: "base64", path, size: 2, content: Buffer.from("ok").toString("base64") } }),
+    });
+
+    const result = await read(".github/reviewer-routing.csv");
+
+    expect(server.calls).toHaveLength(2);
+    expect(result.success).toBe(true);
+  });
+
+  it("ends a rate-limit wait when the action is stopped", async () => {
+    const server = useFixture({ readFile: () => secondaryLimit("30") });
+    const stop = new AbortController();
+    setTimeout(() => stop.abort(), 100);
+
+    const started = Date.now();
+    const result = await findAction("github.read_repo_file").execute(
+      { owner: "acme", repo: "handbook", path: "README.md" },
+      { ...fakeActionContext("test-token"), signal: stop.signal },
+    );
+
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(server.calls).toHaveLength(1);
+    expect(result.success).toBe(false);
+  });
+
+  it("fails at once when the secondary limit asks for more than 60s", async () => {
+    const server = useFixture({ readFile: () => secondaryLimit("120") });
+
+    const started = Date.now();
+    const result = await read(".github/reviewer-routing.csv");
+
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(server.calls).toHaveLength(1);
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error).toContain("in about 2 min");
+  });
+
+  it("reads a PDF through the shared extractor", async () => {
+    const bytes = Buffer.from("%PDF-1.4 fixture");
+    useFixture({
+      readFile: (_owner, _repo, path, accept) => accept?.includes(".raw")
+        ? { body: bytes, headers: { "Content-Type": "application/pdf" } }
+        : { body: { type: "file", encoding: "base64", path, size: bytes.length, content: bytes.toString("base64") } },
+    });
+
+    const result = await findAction("github.read_repo_file").execute(
+      { owner: "acme", repo: "handbook", path: "legal/nda.pdf" },
+      { ...fakeActionContext("test-token"), extractDocument: async () => ({ markdown: "# NDA" }) },
+    );
+
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(isRecord(result.data) ? result.data.content : undefined).toBe("# NDA");
+  });
+
+  it("passes the action signal to Contents metadata and raw fallback requests", async () => {
+    const bytes = Buffer.from("%PDF-1.4 fixture");
+    useFixture({
+      readFile: (_owner, _repo, path, accept) => accept?.includes(".raw")
+        ? { body: bytes, headers: { "Content-Type": "application/pdf" } }
+        : { body: { type: "file", encoding: "none", path, size: bytes.length, content: "" } },
+    });
+    const controller = new AbortController();
+    const signals: Array<AbortSignal | null | undefined> = [];
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = input instanceof Request ? input : undefined;
+      signals.push(init?.signal ?? request?.signal);
+      return originalFetch(input, init);
+    });
+
+    try {
+      const result = await findAction("github.read_repo_file").execute(
+        { owner: "acme", repo: "handbook", path: "legal/nda.pdf" },
+        { ...fakeActionContext("test-token"), signal: controller.signal, extractDocument: async () => ({ markdown: "# NDA" }) },
+      );
+      expect(result.success).toBe(true);
+      expect(signals).toHaveLength(2);
+      expect(signals).toEqual([controller.signal, controller.signal]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("extracts an extensionless PDF larger than the Contents API inline limit", async () => {
+    const bytes = new Uint8Array(1_048_577);
+    bytes.set(Buffer.from("%PDF-1.4"));
+    useFixture({
+      readFile: (_owner, _repo, path) => ({
+        status: 200,
+        body: { type: "file", encoding: "none", path, sha: "metadata-sha", size: bytes.length, content: "" },
+      }),
+      readBlob: (_owner, _repo, sha) => ({ body: bytes, headers: { "Content-Type": "application/pdf", "X-Blob-Sha": sha } }),
+    });
+
+    const result = await findAction("github.read_repo_file").execute(
+      { owner: "acme", repo: "handbook", path: "legal/large" },
+      { ...fakeActionContext("test-token"), extractDocument: async () => ({ markdown: "# Large PDF" }) },
+    );
+
+    expect(result).toMatchObject({ success: true, data: { content: "# Large PDF" } });
+    expect(fixture?.calls).toHaveLength(2);
+    expect(fixture?.calls[1].acceptHeader).toContain(".raw");
+    expect(fixture?.calls[1].path).toBe("/repos/acme/handbook/git/blobs/metadata-sha");
+  });
+
+  it("reads an extensionless inline PDF through the extractor", async () => {
+    const bytes = Buffer.from("%PDF-1.4 fixture");
+    useFixture({
+      readFile: (_owner, _repo, path) => ({ body: { type: "file", encoding: "base64", path, sha: "pdf-sha", size: bytes.length, content: bytes.toString("base64") } }),
+      readBlob: () => ({ body: bytes, headers: { "Content-Type": "application/pdf" } }),
+    });
+
+    const result = await findAction("github.read_repo_file").execute(
+      { owner: "acme", repo: "handbook", path: "legal/nda", ref: "main" },
+      { ...fakeActionContext("test-token"), extractDocument: async () => ({ markdown: "# NDA" }) },
+    );
+
+    expect(result).toMatchObject({ success: true, data: { content: "# NDA", ref: "main" } });
+  });
+
+  it("rejects a declared PDF without a PDF signature", async () => {
+    const html = Buffer.from("<html>sign in</html>");
+    let extracted = false;
+    useFixture({
+      readFile: (_owner, _repo, path, accept) => accept?.includes(".raw")
+        ? { body: html, headers: { "Content-Type": "application/pdf" } }
+        : { body: { type: "file", encoding: "base64", path, size: html.length, content: html.toString("base64") } },
+    });
+
+    const result = await findAction("github.read_repo_file").execute(
+      { owner: "acme", repo: "handbook", path: "legal/login.pdf" },
+      { ...fakeActionContext("test-token"), extractDocument: async () => { extracted = true; return { markdown: "must not extract" }; } },
+    );
+
+    expect(result.success).toBe(false);
+    expect(extracted).toBe(false);
+  });
+
+  it("does not return empty content for an unclassified large file", async () => {
+    const bytes = Buffer.from("PK\x03\x04");
+    useFixture({
+      readFile: (_owner, _repo, path) => ({ body: { type: "file", encoding: "none", path, sha: "binary-sha", size: 2_000_000, content: "" } }),
+      readBlob: () => ({ body: bytes, headers: { "Content-Type": "application/octet-stream" } }),
+    });
+
+    const result = await read("legal/archive");
+
+    expect(result.success).toBe(false);
+    if (!result.success) expect(result.error).toContain("Cannot read binary file legal/archive");
+  });
+
+  it("names a missing extractor instead of returning PDF bytes as text", async () => {
+    const bytes = Buffer.from("%PDF-1.4 fixture");
+    useFixture({
+      readFile: (_owner, _repo, path, accept) => accept?.includes(".raw")
+        ? { body: bytes, headers: { "Content-Type": "application/pdf" } }
+        : { body: { type: "file", encoding: "base64", path, size: bytes.length, content: bytes.toString("base64") } },
+    });
+
+    const result = await read("legal/nda.pdf");
+
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error).toContain("PDF text extraction is not available");
   });
 });
 
@@ -902,6 +1290,137 @@ describe("github.create_review", () => {
   });
 });
 
+// ─── request_reviewers ──────────────────────────────────────────────────────
+
+describe("github.request_reviewers", () => {
+  function request(args: Record<string, unknown>) {
+    return findAction("github.request_reviewers").execute(
+      { owner: "acme", repo: "widgets", pullNumber: 7, reviewers: ["octavia"], ...args },
+      fakeActionContext("test-token"),
+    );
+  }
+
+  it("publishes optional non-empty user and team reviewer lists", () => {
+    const action = findAction("github.request_reviewers");
+
+    expect(action.parameters).toMatchObject({
+      required: ["owner", "repo", "pullNumber"],
+      properties: {
+        pullNumber: { minimum: 1 },
+        reviewers: { minItems: 1, items: { minLength: 1 } },
+        teamReviewers: { minItems: 1, items: { minLength: 1 } },
+      },
+    });
+  });
+
+  it("requests user and team reviewers without changing assignees", async () => {
+    const server = useFixture({
+      requestReviewers: () => ({
+        body: {
+          number: 7,
+          html_url: "https://github.com/acme/widgets/pull/7",
+          requested_reviewers: [{ login: "octavia" }],
+          requested_teams: [{ slug: "platform" }],
+        },
+      }),
+    });
+
+    const result = await request({ teamReviewers: ["platform"] });
+
+    expect(result).toMatchObject({
+      success: true,
+      data: {
+        number: 7,
+        url: "https://github.com/acme/widgets/pull/7",
+        requested_reviewers: ["octavia"],
+        requested_teams: ["platform"],
+      },
+    });
+    expect(server.calls).toHaveLength(1);
+    expect(server.calls[0]).toMatchObject({
+      method: "POST",
+      path: "/repos/acme/widgets/pulls/7/requested_reviewers",
+      body: { reviewers: ["octavia"], team_reviewers: ["platform"] },
+    });
+    expect(server.calls[0]?.path).not.toContain("issues");
+  });
+
+  it("requests a team when no individual reviewer is supplied", async () => {
+    const server = useFixture({
+      requestReviewers: () => ({
+        body: {
+          number: 7,
+          html_url: "https://github.com/acme/widgets/pull/7",
+          requested_reviewers: [],
+          requested_teams: [{ slug: "platform" }],
+        },
+      }),
+    });
+
+    const result = await request({ reviewers: undefined, teamReviewers: ["platform"] });
+
+    expect(result).toMatchObject({
+      success: true,
+      data: { requested_reviewers: [], requested_teams: ["platform"] },
+    });
+    expect(server.calls[0]?.body).toEqual({ reviewers: [], team_reviewers: ["platform"] });
+  });
+
+  it("rejects a call without individual or team reviewers before GitHub", async () => {
+    const server = useFixture();
+
+    const result = await request({ reviewers: undefined, teamReviewers: undefined });
+
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error("expected failure");
+    expect(result.error).toContain("reviewers");
+    expect(result.error).toContain("teamReviewers");
+    expect(server.calls).toHaveLength(0);
+  });
+
+  it("does not send team_reviewers when no teams are requested", async () => {
+    const server = useFixture();
+
+    await request({});
+
+    expect(server.calls[0]?.body).toEqual({ reviewers: ["octavia"] });
+  });
+
+  it("explains author, collaborator, and atomic failures from GitHub", async () => {
+    useFixture({
+      requestReviewers: () => ({
+        status: 422,
+        body: { message: "Validation Failed" },
+      }),
+    });
+
+    const result = await request({});
+
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error("expected failure");
+    expect(result.error).toContain("author");
+    expect(result.error).toContain("collaborator");
+    expect(result.error).toContain("atomically");
+    expect(result.error).toContain("no reviewer was added");
+  });
+
+  it("reports the required permission when GitHub denies the request", async () => {
+    useFixture({
+      requestReviewers: () => ({
+        status: 403,
+        body: { message: "Resource not accessible by integration" },
+      }),
+    });
+
+    const result = await request({});
+
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error("expected failure");
+    expect(result.error).toContain("403 Forbidden");
+    expect(result.error).toContain("pull_requests:write");
+  });
+});
+
 // ─── update_pull_request ────────────────────────────────────────────────────
 
 describe("github.update_pull_request", () => {
@@ -977,5 +1496,19 @@ describe("github.update_pull_request", () => {
       "PATCH /repos/acme/widgets/issues/7",
     ]);
     expect(server.calls[0].body).toEqual({ assignees: [] });
+  });
+});
+
+describe("expandRelativeDates", () => {
+  const NOW = new Date("2026-10-26T15:04:05.678Z");
+
+  it("expands @now and @today with offsets back in time", () => {
+    expect(expandRelativeDates("merged:>=@now-7d", NOW)).toBe("merged:>=2026-10-19T15:04:05Z");
+    expect(expandRelativeDates("merged:@today-1w..@today", NOW)).toBe("merged:2026-10-19..2026-10-26");
+    expect(expandRelativeDates("updated:>@now-36h", NOW)).toBe("updated:>2026-10-25T03:04:05Z");
+  });
+
+  it("leaves other @ words alone", () => {
+    expect(expandRelativeDates("mentions:@nowhere author:@today-team is:pr", NOW)).toBe("mentions:@nowhere author:@today-team is:pr");
   });
 });

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ChannelDeliveryRejectedError } from "@valet/engine";
 import { SlackApi } from "./api.js";
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -78,5 +79,132 @@ describe("SlackApi.joinChannel", () => {
 
     const [url] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("http://127.0.0.1:9999/conversations.join");
+  });
+});
+
+
+describe("attention reconciliation", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("finds the delivery metadata on a later history page", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, messages: [{ ts: "1", metadata: { event_type: "other" } }], response_metadata: { next_cursor: "next" } }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, messages: [{ ts: "2", metadata: { event_type: "valet_attention", event_payload: { delivery_id: "job" } } }] }));
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await new SlackApi("test").findAttentionMessage("D123", "job", 120_000)).toEqual({ ts: "2" });
+    const url = new URL(String(fetchMock.mock.calls[1]?.[0]));
+    expect(url.searchParams.get("channel")).toBe("D123");
+    expect(url.searchParams.get("cursor")).toBe("next");
+    expect(url.searchParams.get("include_all_metadata")).toBe("true");
+    expect(url.searchParams.get("oldest")).toBe("60");
+  });
+
+  it("identifies an actual gate prompt from its metadata", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(jsonResponse(200, { ok: true, messages: [
+      { ts: "3", metadata: { event_type: "valet_attention_gate", event_payload: { delivery_id: "job" } } },
+    ] })));
+    expect(await new SlackApi("test").findAttentionMessage("D123", "job", 0)).toEqual({ ts: "3", gateCard: true });
+  });
+
+  it("does not sleep through a history rate limit", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ ok: false, error: "ratelimited" }), {
+      status: 429, headers: { "Content-Type": "application/json", "Retry-After": "120" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(new SlackApi("test").findAttentionMessage("D123", "job", 0)).rejects.toThrow("ratelimited");
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0]?.[1].signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("returns a miss and throws lookup errors so the outbox can resend", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse(200, { ok: true, messages: [] }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: false, error: "missing_scope" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new SlackApi("test");
+    expect(await api.findAttentionMessage("D123", "job", 0)).toBeNull();
+    await expect(api.findAttentionMessage("D123", "job", 0)).rejects.toThrow("missing_scope");
+  });
+});
+
+describe("attention-only deadlines", () => {
+  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+
+  it("bounds attention posts, settlements, and DM opens, not ordinary requests", async () => {
+    const fetchMock = vi.fn(async (_url: unknown, _init?: RequestInit) => jsonResponse(200, { ok: true, ts: "1", channel: { id: "D123" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new SlackApi("test");
+    await api.postMessage({ channel: "D123", text: "Approval", attentionDeliveryId: "job" });
+    await api.openConversation("U123", true);
+    await api.updateMessage({ channel: "D123", ts: "1", text: "Settled", attention: true });
+    await api.updateMessage({ channel: "C123", ts: "2", text: "Ordinary" });
+    await api.postMessage({ channel: "C123", text: "Reply" });
+    await api.openConversation("U123");
+    await api.uploadToUrl("https://uploads.test/file", new Uint8Array([1]), "text/plain");
+    expect(fetchMock.mock.calls.map(([, init]) => init?.signal instanceof AbortSignal)).toEqual([true, true, true, false, false, false, false]);
+  });
+});
+
+describe("definite attention rejections", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  it.each(["user_not_found", "cannot_dm_bot", "channel_not_found"])("classifies %s on attention sends and DM opens", async error => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(200, { ok: false, error })));
+    const api = new SlackApi("test");
+    await expect(api.postMessage({ channel: "D123", text: "Attention", attentionDeliveryId: "token" })).rejects.toMatchObject({ channel: "slack", reason: error });
+    await expect(api.openConversation("U123", true)).rejects.toBeInstanceOf(ChannelDeliveryRejectedError);
+    await expect(api.postMessage({ channel: "C123", text: "Ordinary" })).rejects.not.toBeInstanceOf(ChannelDeliveryRejectedError);
+  });
+  it.each(["ratelimited", "internal_error", "unknown_failure", "missing_scope", "invalid_auth", "account_inactive"])("keeps %s retryable", async error => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(200, { ok: false, error })));
+    const api = new SlackApi("test");
+    await expect(api.postMessage({ channel: "D123", text: "Attention", attentionDeliveryId: "token" })).rejects.not.toBeInstanceOf(ChannelDeliveryRejectedError);
+    await expect(api.openConversation("U123", true)).rejects.not.toBeInstanceOf(ChannelDeliveryRejectedError);
+  });
+});
+
+
+describe("attention batch cancellation", () => {
+  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+
+  it.each(["post", "update", "open", "history"])("does not begin an aborted %s request", async method => {
+    const fetchMock = vi.fn(); vi.stubGlobal("fetch", fetchMock);
+    const signal = AbortSignal.abort(new Error("batch expired"));
+    const api = new SlackApi("test");
+    const call = method === "post" ? api.postMessage({ channel: "D123", text: "Approval", attentionDeliveryId: "job", signal })
+      : method === "update" ? api.updateMessage({ channel: "D123", ts: "1", text: "Settled", attention: true, signal })
+      : method === "open" ? api.openConversation("U123", true, signal)
+      : api.findAttentionMessage("D123", "job", 0, signal);
+    await expect(call).rejects.toThrow("batch expired");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["post", "update", "open", "history"])("aborts an in-flight %s fetch", async method => {
+    const controller = new AbortController();
+    let requestSignal: AbortSignal | null | undefined;
+    const fetchMock = vi.fn((_url: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      requestSignal = init?.signal;
+      requestSignal?.addEventListener("abort", () => reject(requestSignal?.reason), { once: true });
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new SlackApi("test"); const signal = controller.signal;
+    const call = method === "post" ? api.postMessage({ channel: "D123", text: "Approval", attentionDeliveryId: "job", signal })
+      : method === "update" ? api.updateMessage({ channel: "D123", ts: "1", text: "Settled", attention: true, signal })
+      : method === "open" ? api.openConversation("U123", true, signal)
+      : api.findAttentionMessage("D123", "job", 0, signal);
+    controller.abort(new Error("batch expired"));
+    await expect(call).rejects.toThrow("batch expired");
+    expect(requestSignal?.aborted).toBe(true);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("does not request another history page after abort while reading its response", async () => {
+    const controller = new AbortController();
+    const response = jsonResponse(200, {});
+    vi.spyOn(response, "json").mockImplementation(async () => {
+      controller.abort(new Error("batch expired"));
+      return { ok: true, messages: [], response_metadata: { next_cursor: "next" } };
+    });
+    const fetchMock = vi.fn().mockResolvedValue(response); vi.stubGlobal("fetch", fetchMock);
+    await expect(new SlackApi("test").findAttentionMessage("D123", "job", 0, controller.signal)).rejects.toThrow("batch expired");
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 });

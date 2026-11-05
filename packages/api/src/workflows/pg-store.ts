@@ -93,6 +93,7 @@ interface WorkflowCheckpointRow {
   effects: unknown;
   error: string | null;
   createdAt: number;
+  startedAt: number | null;
 }
 
 interface WorkflowSignalRow {
@@ -173,6 +174,7 @@ function rawToCheckpointRow(raw: Record<string, unknown>): WorkflowCheckpointRow
     effects: raw.effects,
     error: asStringOrNull(raw.error, 'error'),
     createdAt: toNum(raw.created_at, 'created_at'),
+    startedAt: toNumOrNull(raw.started_at, 'started_at'),
   };
 }
 
@@ -248,6 +250,7 @@ function rowToCheckpoint(row: WorkflowCheckpointRow): NodeCheckpoint {
     effects: fromJsonbColumn<Record<string, unknown>>(row.effects),
     attempt: row.attempt,
     createdAt: row.createdAt,
+    ...(row.startedAt !== null ? { startedAt: row.startedAt } : {}),
   };
 }
 
@@ -265,23 +268,23 @@ function rowToSignal(row: WorkflowSignalRow): RunSignal {
 
 export interface PgWorkflowStoreOptions {
   /**
-   * Serialize a team-owned `createRun` against `deleteTeam` on the team's
-   * ownership lock and refuse when the definition is gone. On by default;
+   * Serialize owned `createRun` against definition deletion, also holding
+   * the team ownership lock for team runs. On by default;
    * the store conformance suite, which creates runs for definitions it never
    * writes, is the one caller that turns it off.
    */
-  guardTeamOwnedRuns?: boolean;
+  guardOwnedRuns?: boolean;
 }
 
 export class PgWorkflowStore implements WorkflowStore {
-  private readonly guardTeamOwnedRuns: boolean;
+  private readonly guardOwnedRuns: boolean;
 
   constructor(
     private readonly db: PgDb,
     private readonly clock: () => number = () => Date.now(),
     options: PgWorkflowStoreOptions = {},
   ) {
-    this.guardTeamOwnedRuns = options.guardTeamOwnedRuns ?? true;
+    this.guardOwnedRuns = options.guardOwnedRuns ?? true;
   }
 
   private async getRunRow(q: PgQueryable, runId: string): Promise<WorkflowRunRow | undefined> {
@@ -311,7 +314,7 @@ export class PgWorkflowStore implements WorkflowStore {
     owner?: WorkflowRunOwnerInput,
   ): Promise<WorkflowRun> {
     const now = this.clock();
-    if (owner?.ownerType === "team" && this.guardTeamOwnedRuns) {
+    if (owner && this.guardOwnedRuns) {
       // A team-owned run serializes against `deleteTeam` on the team's
       // ownership lock (`services/teams.ts#lockTeamForOwnership`): the reap
       // checks for unsettled runs under that lock, so a starter that read the
@@ -319,8 +322,10 @@ export class PgWorkflowStore implements WorkflowStore {
       // gone and refuses. Without this a scheduler tick, an event delivery,
       // or a webhook could insert a run for a team that no longer exists.
       await this.db.transaction(async (tx) => {
-        await tx.query("select pg_advisory_xact_lock(hashtext($1))", [owner.ownerId]);
-        const def = await tx.query("SELECT 1 FROM workflow_definitions WHERE id = $1", [params.workflowId]);
+        if (owner.ownerType === "team") await tx.query("select pg_advisory_xact_lock(hashtext($1))", [owner.ownerId]);
+        // The service authorizes the definition. Org definitions deliberately
+        // run as the caller, so definition ownership and run ownership differ.
+        const def = await tx.query("SELECT 1 FROM workflow_definitions WHERE id = $1 FOR UPDATE", [params.workflowId]);
         if (def.rows.length === 0) {
           throw new Error(
             `workflow ${params.workflowId} was deleted before the run could start; nothing was started.`,
@@ -568,16 +573,18 @@ export class PgWorkflowStore implements WorkflowStore {
         }
       }
       await tx.query(
-        `INSERT INTO workflow_checkpoints (run_id, node_id, iteration, attempt, status, result, effects, error, created_at)
-         VALUES ($1,$2,$3,$4,'intent',$5,$6,$7,$8)
+        `INSERT INTO workflow_checkpoints (run_id, node_id, iteration, attempt, status, result, effects, error, created_at, started_at)
+         VALUES ($1,$2,$3,$4,'intent',$5,$6,$7,$8,$9)
          ON CONFLICT (run_id, node_id, iteration) DO UPDATE SET
            attempt = EXCLUDED.attempt,
            status = 'intent',
            result = EXCLUDED.result,
            effects = EXCLUDED.effects,
            error = EXCLUDED.error,
-           created_at = EXCLUDED.created_at`,
-        [cp.runId, cp.nodeId, cp.iteration, cp.attempt, jsonbToParam(cp.result), jsonbToParam(cp.effects), cp.error ?? null, cp.createdAt],
+           created_at = EXCLUDED.created_at,
+           -- The first intent write is when the step began; a rewrite keeps it.
+           started_at = COALESCE(workflow_checkpoints.started_at, workflow_checkpoints.created_at)`,
+        [cp.runId, cp.nodeId, cp.iteration, cp.attempt, jsonbToParam(cp.result), jsonbToParam(cp.effects), cp.error ?? null, cp.createdAt, cp.startedAt ?? cp.createdAt],
       );
     });
   }
@@ -608,15 +615,19 @@ export class PgWorkflowStore implements WorkflowStore {
   /** Raw upsert of a terminal checkpoint row — caller has already validated the fence (and locked the row, where applicable). */
   private async writeTerminalCheckpoint(q: PgQueryable, terminal: NodeCheckpoint): Promise<void> {
     await q.query(
-      `INSERT INTO workflow_checkpoints (run_id, node_id, iteration, attempt, status, result, effects, error, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+      `INSERT INTO workflow_checkpoints (run_id, node_id, iteration, attempt, status, result, effects, error, created_at, started_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
        ON CONFLICT (run_id, node_id, iteration) DO UPDATE SET
          attempt = EXCLUDED.attempt,
          status = EXCLUDED.status,
          result = EXCLUDED.result,
          effects = EXCLUDED.effects,
          error = EXCLUDED.error,
-         created_at = EXCLUDED.created_at`,
+         created_at = EXCLUDED.created_at,
+         -- The intent row's start is when the step began; keep it.
+         started_at = CASE WHEN workflow_checkpoints.status = 'intent'
+           THEN COALESCE(workflow_checkpoints.started_at, workflow_checkpoints.created_at)
+           ELSE workflow_checkpoints.started_at END`,
       [
         terminal.runId,
         terminal.nodeId,
@@ -627,6 +638,7 @@ export class PgWorkflowStore implements WorkflowStore {
         jsonbToParam(terminal.effects),
         terminal.error ?? null,
         terminal.createdAt,
+        terminal.startedAt ?? null,
       ],
     );
   }

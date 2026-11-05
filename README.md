@@ -166,6 +166,7 @@ make k8s-down
 ## Documentation
 
 - **[The `valet` CLI](docs/cli.md)** — serve, sessions, send, chat, gates, instance profiles
+- **[Secrets with 1Password](docs/onepassword-secrets.md)** — connect a service account token, and let an agent use a credential without reading it
 - **[Kubernetes architecture](docs/kubernetes.md)** — what gets deployed and the constraints to respect
 - **[Deploy runbook](deploy/README.md)** — the local reference environment, step by step
 - **[Subsystem specs](docs/specs/)** — source of truth per domain; dated `YYYY-MM-DD-*-design.md` files describe the current (v2) stack

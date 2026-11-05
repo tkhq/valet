@@ -13,7 +13,7 @@ import type {
   SendRef,
   TransportContext,
 } from "@valet/engine";
-import { credentialSecret } from "@valet/engine";
+import { credentialSecret, sniffImageMediaType } from "@valet/engine";
 import { TelegramApi } from "./api.js";
 import { escapeTelegramHtml, markdownToTelegramHtml } from "./format.js";
 
@@ -181,7 +181,7 @@ export class TelegramTransport implements ChannelTransport {
 
   async send(conversationKey: string, message: OutboundChannelMessage): Promise<SendRef> {
     const chatId = chatIdFromConversationKey(conversationKey);
-    const res = await this.api.sendMessage({ chatId, html: markdownToTelegramHtml(message.markdown) });
+    const res = await this.api.sendMessage({ chatId, html: markdownToTelegramHtml(message.markdown), signal: message.signal, attention: message.attentionDeliveryId !== undefined });
     return { conversationKey, messageId: String(res.messageId) };
   }
 
@@ -211,7 +211,10 @@ export class TelegramTransport implements ChannelTransport {
       text: `${ACTION_EMOJI[a.id] ?? ""}${a.label}`,
       callback_data: `g|${a.id}`,
     }));
-    const res = await this.api.sendMessage({ chatId, html, replyMarkup: { inline_keyboard: [buttons] } });
+    // An open question has no buttons; send no keyboard rather than an empty row.
+    const res = await this.api.sendMessage({
+      chatId, html, signal: gate.signal, attention: gate.attentionDeliveryId !== undefined, ...(buttons.length > 0 ? { replyMarkup: { inline_keyboard: [buttons] } } : {}),
+    });
     return { conversationKey, messageId: String(res.messageId) };
   }
 
@@ -226,13 +229,15 @@ export class TelegramTransport implements ChannelTransport {
       // name, and the converter would turn "[text](url)" in a name into a
       // live link inside the edited approval message.
       await this.api.editMessageText({
+        signal: resolution.signal, attention: resolution.attention,
         chatId, messageId, html: escapeTelegramHtml(resolution.label),
         replyMarkup: { inline_keyboard: [] },
       });
     } catch (err) {
       // Best-effort: make sure the buttons don't stay live even if the text edit failed.
       try {
-        await this.api.editMessageReplyMarkup({ chatId, messageId });
+        resolution.signal?.throwIfAborted();
+        await this.api.editMessageReplyMarkup({ chatId, messageId, signal: resolution.signal });
       } catch {
         // Swallow — we're already about to rethrow the original failure.
       }
@@ -261,7 +266,7 @@ export class TelegramTransport implements ChannelTransport {
       (media.kind === "photo"
         ? ext === "png" ? "image/png" : "image/jpeg"
         : media.kind === "voice" ? "audio/ogg" : "application/octet-stream");
-    return { data, mimeType, name: media.fileName };
+    return { data, mimeType: (mimeType.startsWith("image/") ? sniffImageMediaType(data) : undefined) ?? mimeType, name: media.fileName };
   }
 
   async sendTyping(conversationKey: string): Promise<void> {

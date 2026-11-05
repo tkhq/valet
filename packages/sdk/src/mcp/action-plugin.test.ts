@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { Credential, CredentialProvider, PluginActionContext, RiskLevel } from '@valet/engine';
+import type { Credential, CredentialProvider, CredentialSource, PluginActionContext, RiskLevel } from '@valet/engine';
 import { mcpActionPlugin } from './action-plugin.js';
 import type { McpTool, McpToolResult } from './types.js';
 
@@ -31,19 +31,10 @@ interface CapturedRequest {
 }
 
 function jsonResponse(body: unknown, headers: Record<string, string> = {}): Response {
-  const lowered: Record<string, string> = {};
-  for (const [k, v] of Object.entries(headers)) lowered[k.toLowerCase()] = v;
-  if (!lowered['content-type']) lowered['content-type'] = 'application/json';
-  // Hand-rolled Response double for the test's mocked `fetch` — McpClient
-  // only reads .ok/.headers.get/.json/.text, so a full DOM Response isn't
-  // needed. The cast bridges this minimal shape to the global fetch type.
-  return {
-    ok: true,
+  return new Response(JSON.stringify(body), {
     status: 200,
-    headers: { get: (k: string) => lowered[k.toLowerCase()] ?? null },
-    json: async () => body,
-    text: async () => JSON.stringify(body),
-  } as Response;
+    headers: { 'content-type': 'application/json', ...headers },
+  });
 }
 
 function makeFetchMock(opts: {
@@ -89,6 +80,27 @@ function makeFetchMock(opts: {
 function fakeCredentialProvider(cred: Credential | null): CredentialProvider {
   return {
     get: vi.fn(async () => cred),
+    request: vi.fn(async () => {
+      throw new Error('request() not implemented in test fixture');
+    }),
+  };
+}
+
+/**
+ * A provider that answers differently per service name, for exercising the
+ * personal-vs-app fallback: `credentials.get()` (no arg, or the plugin's own
+ * service) returns `personal`; `credentials.get(appService)` returns `app`.
+ */
+function fakeScopedCredentialProvider(opts: {
+  personal: Credential | null;
+  app: Credential | null;
+  appService: string;
+}): CredentialProvider {
+  return {
+    get: vi.fn(async (service?: string) => {
+      if (service === opts.appService) return opts.app;
+      return opts.personal;
+    }),
     request: vi.fn(async () => {
       throw new Error('request() not implemented in test fixture');
     }),
@@ -631,5 +643,619 @@ describe('mcpActionPlugin generated action execute', () => {
     const result = await action.execute({}, fakeContext(credentials));
 
     expect(result).toEqual({ success: false, error: 'MCP tool returned empty response' });
+  });
+});
+
+// ── appCredentialService fallback (Part C Linear) ───────────────────────
+
+describe('mcpActionPlugin appCredentialService fallback', () => {
+  it('exposes appCredentialService on the plugin so the catalog probe can use it', () => {
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.linear.app/mcp',
+      serviceName: 'linear',
+      defaultRiskLevel: 'medium',
+      appCredentialService: 'linear:app',
+    });
+    expect(plugin.appCredentialService).toBe('linear:app');
+  });
+
+  it('sends the app token as Bearer at discovery when no personal credential is connected', async () => {
+    let listRequest: CapturedRequest | undefined;
+    vi.stubGlobal(
+      'fetch',
+      makeFetchMock({
+        tools: [fixtureTools[0]],
+        onRequest: (req) => {
+          if (req.body.method === 'tools/list') listRequest = req;
+        },
+      }),
+    );
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.linear.app/mcp',
+      serviceName: 'linear',
+      defaultRiskLevel: 'medium',
+      appCredentialService: 'linear:app',
+    });
+    const credentials = fakeScopedCredentialProvider({
+      personal: null,
+      app: { accessToken: 'app-token' },
+      appService: 'linear:app',
+    });
+
+    const actions = await plugin.resolveActions!({ credentials });
+
+    expect(actions).toHaveLength(1);
+    expect(listRequest?.headers.Authorization).toBe('Bearer app-token');
+  });
+
+  it('sends the app token as Bearer on a call when no personal credential is connected', async () => {
+    let callRequest: CapturedRequest | undefined;
+    vi.stubGlobal(
+      'fetch',
+      makeFetchMock({
+        tools: [fixtureTools[0]],
+        callResult: { content: [{ type: 'text', text: 'ok' }] },
+        onRequest: (req) => {
+          if (req.body.method === 'tools/call') callRequest = req;
+        },
+      }),
+    );
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.linear.app/mcp',
+      serviceName: 'linear',
+      defaultRiskLevel: 'medium',
+      appCredentialService: 'linear:app',
+    });
+    const credentials = fakeScopedCredentialProvider({
+      personal: null,
+      app: { accessToken: 'app-token' },
+      appService: 'linear:app',
+    });
+    const [action] = await plugin.resolveActions!({ credentials });
+
+    const result = await action.execute({}, fakeContext(credentials));
+
+    expect(result).toEqual({ success: true, data: 'ok' });
+    expect(callRequest?.headers.Authorization).toBe('Bearer app-token');
+  });
+
+  it('prefers the personal credential over the app token at discovery', async () => {
+    let listRequest: CapturedRequest | undefined;
+    vi.stubGlobal(
+      'fetch',
+      makeFetchMock({
+        tools: [fixtureTools[0]],
+        onRequest: (req) => {
+          if (req.body.method === 'tools/list') listRequest = req;
+        },
+      }),
+    );
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.linear.app/mcp',
+      serviceName: 'linear',
+      defaultRiskLevel: 'medium',
+      appCredentialService: 'linear:app',
+    });
+    const credentials = fakeScopedCredentialProvider({
+      personal: { accessToken: 'personal-token' },
+      app: { accessToken: 'app-token' },
+      appService: 'linear:app',
+    });
+
+    await plugin.resolveActions!({ credentials });
+
+    expect(listRequest?.headers.Authorization).toBe('Bearer personal-token');
+  });
+
+  it('prefers the personal credential over the app token on a call', async () => {
+    let callRequest: CapturedRequest | undefined;
+    vi.stubGlobal(
+      'fetch',
+      makeFetchMock({
+        tools: [fixtureTools[0]],
+        callResult: { content: [{ type: 'text', text: 'ok' }] },
+        onRequest: (req) => {
+          if (req.body.method === 'tools/call') callRequest = req;
+        },
+      }),
+    );
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.linear.app/mcp',
+      serviceName: 'linear',
+      defaultRiskLevel: 'medium',
+      appCredentialService: 'linear:app',
+    });
+    const credentials = fakeScopedCredentialProvider({
+      personal: { accessToken: 'personal-token' },
+      app: { accessToken: 'app-token' },
+      appService: 'linear:app',
+    });
+    const [action] = await plugin.resolveActions!({ credentials });
+
+    await action.execute({}, fakeContext(credentials));
+
+    expect(callRequest?.headers.Authorization).toBe('Bearer personal-token');
+  });
+
+  it('throws the unchanged refusal text when neither personal nor app credential is connected', async () => {
+    vi.stubGlobal('fetch', makeFetchMock({ tools: [fixtureTools[0]] }));
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.linear.app/mcp',
+      serviceName: 'linear',
+      defaultRiskLevel: 'medium',
+      appCredentialService: 'linear:app',
+    });
+    const credentials = fakeScopedCredentialProvider({
+      personal: null,
+      app: null,
+      appService: 'linear:app',
+    });
+
+    await expect(plugin.resolveActions!({ credentials })).rejects.toThrow(
+      'linear: no credential connected',
+    );
+  });
+
+  it('leaves behavior unchanged when appCredentialService is absent (no fallback attempted)', async () => {
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.example.com/mcp',
+      serviceName: 'example',
+      defaultRiskLevel: 'medium',
+    });
+    const getSpy = vi.fn(async (service?: string) => {
+      // Only the no-arg (personal) lookup should ever happen.
+      expect(service).toBeUndefined();
+      return null;
+    });
+    const credentials: CredentialProvider = { get: getSpy, request: vi.fn() };
+
+    await expect(plugin.resolveActions!({ credentials })).rejects.toThrow(
+      'example: no credential connected',
+    );
+    expect(getSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── auth-rejection messages on HTTP 401/403 (fix round 1) ───────────────
+
+function errorResponse(status: number, body: string, headers: Record<string, string> = {}): Response {
+  return new Response(body, { status, headers });
+}
+
+function makeFetchMockFailingCall(status: number, body = 'nope', headers: Record<string, string> = {}) {
+  return vi.fn(async (url: string | URL, init?: RequestInit) => {
+    const reqBody = JSON.parse(String(init?.body ?? '{}')) as { method: string; id?: number };
+    if (reqBody.method === 'initialize') {
+      return jsonResponse(
+        {
+          jsonrpc: '2.0',
+          id: reqBody.id,
+          result: { protocolVersion: '2024-11-05', capabilities: {}, serverInfo: { name: 'test-server', version: '1.0.0' } },
+        },
+        { 'mcp-session-id': 'sess-1' },
+      );
+    }
+    if (reqBody.method === 'notifications/initialized') return jsonResponse({});
+    if (reqBody.method === 'tools/list') {
+      return jsonResponse({ jsonrpc: '2.0', id: reqBody.id, result: { tools: [fixtureTools[0]] } });
+    }
+    if (reqBody.method === 'tools/call') {
+      return errorResponse(status, body, headers);
+    }
+    throw new Error(`unexpected MCP method in test fixture: ${reqBody.method}`);
+  });
+}
+
+describe('mcpActionPlugin auth-rejection messages (HTTP 401/403)', () => {
+  // Metabase 1.64: the challenge lists the scopes the token holds plus the
+  // one the tool needs.
+  const metabaseScopeChallenge = {
+    'www-authenticate': 'Bearer error="insufficient_scope", scope="agent:query:run agent:content:read"',
+  };
+  async function insufficientScopeError(source: CredentialSource): Promise<unknown> {
+    vi.stubGlobal('fetch', makeFetchMockFailingCall(403, 'forbidden', metabaseScopeChallenge));
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mb.example.com/api/metabase-mcp',
+      serviceName: 'metabase',
+      defaultRiskLevel: 'low',
+      displayName: 'Turnkey Metabase',
+      configScopes: ['agent:query:run'],
+    });
+    const credentials = fakeCredentialProvider({ accessToken: 'tok', scopes: ['agent:query:run'], source });
+    const [action] = await plugin.resolveActions!({ credentials });
+    const result = await action.execute({}, fakeContext(credentials));
+    return result.success ? undefined : result.error;
+  }
+
+  it('links the caller to grant the missing scope on their own connection (step-up)', async () => {
+    expect(await insufficientScopeError({ kind: 'personal' })).toBe(
+      'Turnkey Metabase refused this call: the connection does not hold the agent:content:read scope. ' +
+        'To grant it, open /api/credentials/metabase/connect?addScopes=agent%3Acontent%3Aread+agent%3Aquery%3Arun ' +
+        "and approve the request on Turnkey Metabase's screen. Then ask me to retry.",
+    );
+  });
+
+  // A team connection is shared: a member's sign-in would make the team act
+  // as that member, so its missing scope stays an admin fix.
+  it.each([{ kind: 'team' }, { kind: 'app' }] as CredentialSource[])('keeps the admin fix for a $kind connection', async (source) => {
+    expect(await insufficientScopeError(source)).toBe(
+      'Turnkey Metabase refused this call: the connection does not hold the agent:content:read scope. ' +
+        "Ask an admin to add agent:content:read to the Turnkey Metabase integration's scopes. Then reconnect Turnkey Metabase.",
+    );
+  });
+
+  // The scope is declared, but the server granted less (the user lacks the
+  // permission). Editing the entry cannot help, so no config advice.
+  it('keeps the account fix when the missing scope is already declared', async () => {
+    vi.stubGlobal(
+      'fetch',
+      makeFetchMockFailingCall(403, 'forbidden', {
+        'www-authenticate': 'Bearer error="insufficient_scope", scope="agent:sql:run"',
+      }),
+    );
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mb.example.com/api/metabase-mcp',
+      serviceName: 'metabase',
+      defaultRiskLevel: 'low',
+      displayName: 'Turnkey Metabase',
+      configScopes: ['agent:query:run', 'agent:sql:run'],
+    });
+    const credentials = fakeCredentialProvider({ accessToken: 'tok', scopes: ['agent:query:run'] });
+    const [action] = await plugin.resolveActions!({ credentials });
+
+    expect(await action.execute({}, fakeContext(credentials))).toEqual({
+      success: false,
+      error:
+        'Turnkey Metabase has not granted the agent:sql:run scope to this connection. ' +
+        'Turnkey Metabase rejected your connected account. Reconnect Turnkey Metabase on the Integrations page.',
+    });
+  });
+
+  // A pasted token records no grant, so Valet cannot tell which scopes it lacks.
+  it('names no scope when the credential records no grant', async () => {
+    vi.stubGlobal(
+      'fetch',
+      makeFetchMockFailingCall(403, 'forbidden', {
+        'www-authenticate': 'Bearer error="insufficient_scope", scope="agent:query:run agent:content:read"',
+      }),
+    );
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mb.example.com/api/metabase-mcp',
+      serviceName: 'metabase',
+      defaultRiskLevel: 'low',
+      displayName: 'Turnkey Metabase',
+      configScopes: ['agent:query:run'],
+    });
+    const credentials = fakeCredentialProvider({ accessToken: 'pasted' });
+    const [action] = await plugin.resolveActions!({ credentials });
+
+    expect(await action.execute({}, fakeContext(credentials))).toEqual({
+      success: false,
+      error: 'Turnkey Metabase rejected your connected account. Reconnect Turnkey Metabase on the Integrations page.',
+    });
+  });
+
+  it('reads an unquoted, capitalized insufficient_scope challenge (RFC 7235)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      makeFetchMockFailingCall(403, 'forbidden', {
+        'www-authenticate': 'Bearer Error=insufficient_scope, Scope="agent:query:run agent:content:read"',
+      }),
+    );
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mb.example.com/api/metabase-mcp',
+      serviceName: 'metabase',
+      defaultRiskLevel: 'low',
+      displayName: 'Turnkey Metabase',
+      configScopes: ['agent:query:run'],
+    });
+    const credentials = fakeCredentialProvider({ accessToken: 'tok', scopes: ['agent:query:run'] });
+    const [action] = await plugin.resolveActions!({ credentials });
+
+    const result = await action.execute({}, fakeContext(credentials));
+    expect(result.error).toContain('the connection does not hold the agent:content:read scope.');
+    expect(result.error).toContain('addScopes=agent%3Acontent%3Aread+agent%3Aquery%3Arun');
+  });
+
+  it('names the missing scope but keeps the account fix when config cannot supply scopes', async () => {
+    // A bundled plugin keeps its scopes in code: no admin can add one.
+    vi.stubGlobal(
+      'fetch',
+      makeFetchMockFailingCall(403, 'forbidden', {
+        'www-authenticate': 'Bearer error="insufficient_scope", scope="admin:read"',
+      }),
+    );
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.linear.app/mcp',
+      serviceName: 'linear',
+      defaultRiskLevel: 'medium',
+      displayName: 'Linear',
+    });
+    const credentials = fakeCredentialProvider({ accessToken: 'tok', scopes: ['read'] });
+    const [action] = await plugin.resolveActions!({ credentials });
+
+    expect(await action.execute({}, fakeContext(credentials))).toEqual({
+      success: false,
+      error:
+        'Linear has not granted the admin:read scope to this connection. ' +
+        'Linear rejected your connected account. Reconnect Linear on the Integrations page.',
+    });
+  });
+
+  it('names the Valet app and the admin fix when the APP token is rejected', async () => {
+    vi.stubGlobal('fetch', makeFetchMockFailingCall(401));
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.linear.app/mcp',
+      serviceName: 'linear',
+      defaultRiskLevel: 'medium',
+      appCredentialService: 'linear:app',
+      displayName: 'Linear',
+      appConnectHint: 'Settings, Organization, Linear',
+    });
+    const credentials = fakeScopedCredentialProvider({
+      personal: null,
+      app: { accessToken: 'app-token' },
+      appService: 'linear:app',
+    });
+    const [action] = await plugin.resolveActions!({ credentials });
+
+    const result = await action.execute({}, fakeContext(credentials));
+
+    expect(result).toEqual({
+      success: false,
+      error:
+        "Linear rejected the Valet app's access. Ask an admin to reconnect the Linear app in Settings, Organization, Linear, or connect your own Linear account on the Integrations page.",
+    });
+  });
+
+  it('names the reconnect fix when the PERSONAL token is rejected', async () => {
+    vi.stubGlobal('fetch', makeFetchMockFailingCall(403));
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.linear.app/mcp',
+      serviceName: 'linear',
+      defaultRiskLevel: 'medium',
+      appCredentialService: 'linear:app',
+      displayName: 'Linear',
+      appConnectHint: 'Settings, Organization, Linear',
+    });
+    const credentials = fakeScopedCredentialProvider({
+      personal: { accessToken: 'personal-token' },
+      app: { accessToken: 'app-token' },
+      appService: 'linear:app',
+    });
+    const [action] = await plugin.resolveActions!({ credentials });
+
+    const result = await action.execute({}, fakeContext(credentials));
+
+    expect(result).toEqual({
+      success: false,
+      error: 'Linear rejected your connected account. Reconnect Linear on the Integrations page.',
+    });
+  });
+
+  // A rejected account gets the fix from whoever holds it, not the caller.
+  it.each([
+    [
+      'the team connection',
+      { kind: 'team' },
+      "Linear rejected the team's Linear connection. Ask a team admin to reconnect Linear for the team, or connect your own Linear account on the Integrations page.",
+    ],
+    [
+      "another member's share",
+      { kind: 'shared', memberId: 'u-002', memberName: 'Dana' },
+      'Linear rejected the Linear account that Dana shared with the team. Ask Dana to reconnect Linear, or connect your own Linear account on the Integrations page.',
+    ],
+    [
+      'a share whose member has no name',
+      { kind: 'shared', memberId: 'u-002' },
+      'Linear rejected a Linear account a team member shared. Ask that member to reconnect Linear, or connect your own Linear account on the Integrations page.',
+    ],
+    [
+      'the org credential',
+      { kind: 'org' },
+      "Linear rejected the organization's Linear credential. Ask an organization admin to reconnect Linear in Settings, Organization, or connect your own Linear account on the Integrations page.",
+    ],
+    [
+      'the app identity the host resolved',
+      { kind: 'app' },
+      "Linear rejected the Valet app's access. Ask an admin to reconnect the Linear app in Settings, Organization, Linear, or connect your own Linear account on the Integrations page.",
+    ],
+    [
+      'a 1Password item',
+      { kind: 'vault' },
+      'Linear rejected the token from its 1Password item. Ask the owner of the Linear item in 1Password to update it, or connect your own Linear account on the Integrations page.',
+    ],
+  ] satisfies [string, CredentialSource, string][])('names the fix for %s', async (_label, source, error) => {
+    vi.stubGlobal('fetch', makeFetchMockFailingCall(401));
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.linear.app/mcp',
+      serviceName: 'linear',
+      defaultRiskLevel: 'medium',
+      appCredentialService: 'linear:app',
+      displayName: 'Linear',
+      appConnectHint: 'Settings, Organization, Linear',
+    });
+    const credentials = fakeScopedCredentialProvider({
+      personal: { accessToken: 'held-token', source },
+      app: { accessToken: 'app-token' },
+      appService: 'linear:app',
+    });
+    const [action] = await plugin.resolveActions!({ credentials });
+
+    expect(await action.execute({}, fakeContext(credentials))).toEqual({ success: false, error });
+  });
+
+  it('falls back to the service id when no displayName is configured', async () => {
+    vi.stubGlobal('fetch', makeFetchMockFailingCall(401));
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.example.com/mcp',
+      serviceName: 'example',
+      defaultRiskLevel: 'medium',
+    });
+    const credentials = fakeCredentialProvider({ accessToken: 'tok' });
+    const [action] = await plugin.resolveActions!({ credentials });
+
+    const result = await action.execute({}, fakeContext(credentials));
+
+    expect(result).toEqual({
+      success: false,
+      error:
+        "example rejected your connected account. Reconnect example on the Integrations page.",
+    });
+  });
+
+  it('keeps today\'s verbatim text for a non-auth failure (HTTP 500)', async () => {
+    vi.stubGlobal('fetch', makeFetchMockFailingCall(500, 'server exploded'));
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.linear.app/mcp',
+      serviceName: 'linear',
+      defaultRiskLevel: 'medium',
+      appCredentialService: 'linear:app',
+      displayName: 'Linear',
+      appConnectHint: 'Settings, Organization, Linear',
+    });
+    const credentials = fakeScopedCredentialProvider({
+      personal: { accessToken: 'personal-token' },
+      app: null,
+      appService: 'linear:app',
+    });
+    const [action] = await plugin.resolveActions!({ credentials });
+
+    const result = await action.execute({}, fakeContext(credentials));
+
+    expect(result).toEqual({
+      success: false,
+      error: 'MCP linear tools/call failed: HTTP 500 — server exploded',
+    });
+  });
+
+  it('does not misclassify a 500 whose body text contains "HTTP 401" as an auth rejection', async () => {
+    // Fix round 2, finding 1: detection must key off McpHttpError.status, not
+    // a text match on the message — the message's tail is the server's own
+    // response body, verbatim.
+    vi.stubGlobal('fetch', makeFetchMockFailingCall(500, 'upstream returned HTTP 401'));
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.linear.app/mcp',
+      serviceName: 'linear',
+      defaultRiskLevel: 'medium',
+      appCredentialService: 'linear:app',
+      displayName: 'Linear',
+      appConnectHint: 'Settings, Organization, Linear',
+    });
+    const credentials = fakeScopedCredentialProvider({
+      personal: { accessToken: 'personal-token' },
+      app: null,
+      appService: 'linear:app',
+    });
+    const [action] = await plugin.resolveActions!({ credentials });
+
+    const result = await action.execute({}, fakeContext(credentials));
+
+    expect(result).toEqual({
+      success: false,
+      error: 'MCP linear tools/call failed: HTTP 500 — upstream returned HTTP 401',
+    });
+  });
+});
+
+// ── auth-rejection messages on discovery (fix round 2, finding 2) ──────
+
+function makeFetchMockFailingList(status: number, body = 'nope') {
+  return vi.fn(async (url: string | URL, init?: RequestInit) => {
+    const reqBody = JSON.parse(String(init?.body ?? '{}')) as { method: string; id?: number };
+    if (reqBody.method === 'initialize') {
+      return jsonResponse(
+        {
+          jsonrpc: '2.0',
+          id: reqBody.id,
+          result: { protocolVersion: '2024-11-05', capabilities: {}, serverInfo: { name: 'test-server', version: '1.0.0' } },
+        },
+        { 'mcp-session-id': 'sess-1' },
+      );
+    }
+    if (reqBody.method === 'notifications/initialized') return jsonResponse({});
+    if (reqBody.method === 'tools/list') return errorResponse(status, body);
+    throw new Error(`unexpected MCP method in test fixture: ${reqBody.method}`);
+  });
+}
+
+describe('mcpActionPlugin auth-rejection messages on discovery (HTTP 401/403)', () => {
+  it('rethrows the app-token guidance when discovery is rejected using the app token', async () => {
+    vi.stubGlobal('fetch', makeFetchMockFailingList(401));
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.linear.app/mcp',
+      serviceName: 'linear',
+      defaultRiskLevel: 'medium',
+      appCredentialService: 'linear:app',
+      displayName: 'Linear',
+      appConnectHint: 'Settings, Organization, Linear',
+    });
+    const credentials = fakeScopedCredentialProvider({
+      personal: null,
+      app: { accessToken: 'app-token' },
+      appService: 'linear:app',
+    });
+
+    await expect(plugin.resolveActions!({ credentials })).rejects.toThrow(
+      "Linear rejected the Valet app's access. Ask an admin to reconnect the Linear app in Settings, Organization, Linear, or connect your own Linear account on the Integrations page.",
+    );
+  });
+
+  it('rethrows the personal reconnect guidance when discovery is rejected using the personal token', async () => {
+    vi.stubGlobal('fetch', makeFetchMockFailingList(403));
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.linear.app/mcp',
+      serviceName: 'linear',
+      defaultRiskLevel: 'medium',
+      appCredentialService: 'linear:app',
+      displayName: 'Linear',
+      appConnectHint: 'Settings, Organization, Linear',
+    });
+    const credentials = fakeScopedCredentialProvider({
+      personal: { accessToken: 'personal-token' },
+      app: { accessToken: 'app-token' },
+      appService: 'linear:app',
+    });
+
+    await expect(plugin.resolveActions!({ credentials })).rejects.toThrow(
+      'Linear rejected your connected account. Reconnect Linear on the Integrations page.',
+    );
+  });
+
+  it('tells the user to disconnect and sign in when an oauthOnly server rejects the personal account', async () => {
+    vi.stubGlobal('fetch', makeFetchMockFailingList(401));
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.usepylon.com',
+      serviceName: 'pylon',
+      defaultRiskLevel: 'low',
+      displayName: 'Pylon',
+      oauthOnly: true,
+    });
+    const credentials = fakeCredentialProvider({ accessToken: 'pasted-api-token' });
+
+    await expect(plugin.resolveActions!({ credentials })).rejects.toThrow(
+      'Pylon rejected your connected account. Disconnect Pylon on the Integrations page, then select Connect to sign in with Pylon.',
+    );
+  });
+
+  it('rethrows a non-auth discovery failure unchanged (HTTP 500)', async () => {
+    vi.stubGlobal('fetch', makeFetchMockFailingList(500, 'server exploded'));
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.linear.app/mcp',
+      serviceName: 'linear',
+      defaultRiskLevel: 'medium',
+      appCredentialService: 'linear:app',
+      displayName: 'Linear',
+      appConnectHint: 'Settings, Organization, Linear',
+    });
+    const credentials = fakeScopedCredentialProvider({
+      personal: { accessToken: 'personal-token' },
+      app: null,
+      appService: 'linear:app',
+    });
+
+    await expect(plugin.resolveActions!({ credentials })).rejects.toThrow(
+      'MCP linear tools/list failed: HTTP 500 — server exploded',
+    );
   });
 });

@@ -18,31 +18,58 @@
  *   GET /api/proxy/requests   → paginated request log  (unchanged)
  *   GET /api/proxy/settings   → enabled flag           (unchanged)
  */
-import { useEffect, useState } from "react";
+import { SessionOutcomes } from "~/components/usage/SessionOutcomes";
+import { ToolUsage } from "~/components/usage/ToolUsage";
+import { useEffect, useRef, useState } from "react";
 import { Link, createFileRoute } from "@tanstack/react-router";
-import { useUsageBreakdown, useUsageItems } from "~/api/usage";
+import { Users } from "lucide-react";
+import { useUsageBreakdown, useUsageItems, useUsageOutcomes, useUsageToolEfficiency } from "~/api/usage";
 import { useProxyRequests, useProxySettings } from "~/api/proxy-usage";
 import { useOrg } from "~/api/settings";
 import { SpendChart } from "~/components/usage/SpendChart";
 import { RequestLog } from "~/components/usage/RequestLog";
-import { SampleView } from "~/components/usage/SampleView";
 import { WorkspaceClause, useActiveWorkspace } from "~/components/workspace-clause";
-import type { UsageUseCase, UsageDrillItem, UsageScopeName } from "@valet/api/wire";
+import type { UsageExportGranularity, UsageUseCase, UsageDrillItem, UsagePeriodSelection, UsageScopeName } from "@valet/api/wire";
 import { api } from "~/api/client";
+import { Button, FilterChips, Input, PageHeader, Select, TabBar, pageClass } from "~/components/primitives";
+import { cn } from "~/lib/cn";
+import { formatTurns, formatUsdPrecise } from "~/lib/format-usage";
 
 export const Route = createFileRoute("/usage")({
   component: UsagePage,
 });
 
 const WINDOWS = ["24h", "7d", "30d"] as const;
+const VIEWS = [
+  { id: "overview", label: "Overview" },
+  { id: "breakdown", label: "Breakdown" },
+  { id: "activity", label: "Activity" },
+  { id: "tools", label: "Tool usage" },
+] as const;
+/** Marks the field that holds the applied period: the month, or both custom dates. */
+const ACTIVE_PERIOD = "border-moss bg-moss-wash font-medium text-moss";
 type Window = (typeof WINDOWS)[number];
+
+function usageErrorText(error: unknown): string {
+  if (typeof error === "object" && error !== null && "payload" in error) {
+    const payload = error.payload;
+    if (typeof payload === "object" && payload !== null && "error" in payload) {
+      const detail = payload.error;
+      if (
+        typeof detail === "object" &&
+        detail !== null &&
+        "message" in detail &&
+        typeof detail.message === "string"
+      ) {
+        return detail.message;
+      }
+    }
+  }
+  return String(error);
+}
 
 function fmt(n: number) {
   return n.toLocaleString();
-}
-
-function fmtUsd(n: number) {
-  return `$${n.toFixed(4)}`;
 }
 
 function fmtPct(n: number) {
@@ -68,7 +95,8 @@ function StatCard({
 }
 
 const USE_CASE_LABELS: Record<UsageUseCase, string> = {
-  orchestrator: "Orchestrator",
+  tagging: "Automatic tagging",
+  orchestrator: "Assistant",
   session: "Sessions",
   workflow: "Workflows",
   proxy: "Proxy (external tools)",
@@ -101,17 +129,19 @@ function nestItems(items: UsageDrillItem[]): UsageDrillItem[] {
 
 /** Lazy-loaded item list for one use case. */
 function ItemList({
-  window,
+  period,
   scope,
   teamId,
   useCase,
+  active,
 }: {
-  window: string;
+  active: boolean;
+  period: UsagePeriodSelection;
   scope: UsageScopeName;
   teamId: string | undefined;
   useCase: UsageUseCase;
 }) {
-  const q = useUsageItems(window, scope, useCase, teamId);
+  const q = useUsageItems(period, scope, useCase, teamId, { enabled: active });
 
   if (q.isLoading) {
     return <p className="text-xs text-muted px-4 py-2">Loading…</p>;
@@ -129,9 +159,18 @@ function ItemList({
   return (
     <div className="border-t border-line divide-y divide-line">
       {items.map((item) => {
-        const isOrchId = item.sessionId?.startsWith("orchestrator:") ?? false;
-        const canLink = item.sessionId !== null && !isOrchId;
-        const labelEl = canLink ? (
+        // A workspace runtime has no session page; its threads open from chat.
+        const isRuntimeId = /^(orchestrator|assistant):/.test(item.sessionId ?? "");
+        const canLink = item.sessionId !== null && !isRuntimeId;
+        const labelEl = item.workflowId !== undefined && !item.isChild ? (
+          <Link
+            to="/workflows/$workflowId"
+            params={{ workflowId: item.workflowId }}
+            className="block min-h-11 max-w-full break-words py-3 text-moss hover:underline underline-offset-2 sm:min-h-0 sm:py-0"
+          >
+            {item.label}
+          </Link>
+        ) : canLink ? (
           <Link
             to="/sessions/$sessionId"
             params={{ sessionId: item.sessionId! }}
@@ -151,14 +190,23 @@ function ItemList({
             }`}
           >
             <div className="basis-full min-w-0 sm:basis-auto sm:flex-1">{labelEl}</div>
+            {item.runs !== undefined && item.runs > 0 && (
+              <span className="tabular-nums text-muted shrink-0">
+                {item.isChild
+                  ? `${formatUsdPrecise(item.costUsd / item.runs)} avg over ${item.runs} ${item.runs === 1 ? "run" : "runs"}`
+                  : `${item.runs} ${item.runs === 1 ? "run" : "runs"}`}
+              </span>
+            )}
             <span className="tabular-nums text-muted shrink-0">
-              {fmtUsd(item.costUsd)}
+              {formatUsdPrecise(item.costUsd)}
             </span>
-            <span className="tabular-nums text-muted shrink-0 sm:w-20 sm:text-right">
+            {/* A workflow row leads with cost per run; on a phone that and the
+                total are the whole row. */}
+            <span className={`tabular-nums text-muted shrink-0 sm:w-20 sm:text-right ${item.runs !== undefined ? "max-sm:hidden" : ""}`}>
               {fmt(item.totalTokens)} tok
             </span>
-            <span className="tabular-nums text-muted shrink-0 sm:w-14 sm:text-right">
-              {item.turns} turns
+            <span className={`tabular-nums text-muted shrink-0 sm:w-14 sm:text-right ${item.runs !== undefined ? "max-sm:hidden" : ""}`}>
+              {formatTurns(item.turns)}
             </span>
           </div>
         );
@@ -173,15 +221,17 @@ function UseCaseRow({
   costUsd,
   totalTokens,
   turns,
-  window,
+  period,
   scope,
   teamId,
+  active,
 }: {
+  active: boolean;
   useCase: UsageUseCase;
   costUsd: number;
   totalTokens: number;
   turns: number;
-  window: string;
+  period: UsagePeriodSelection;
   scope: UsageScopeName;
   teamId: string | undefined;
 }) {
@@ -207,25 +257,34 @@ function UseCaseRow({
           ›
         </span>
         <span className="min-w-0 basis-4/5 grow break-words text-ink font-medium sm:basis-auto">{USE_CASE_LABELS[useCase]}</span>
-        <span className="tabular-nums text-muted sm:w-24 sm:text-right">{fmtUsd(costUsd)}</span>
+        <span className="tabular-nums text-muted sm:w-24 sm:text-right">{formatUsdPrecise(costUsd)}</span>
         <span className="tabular-nums text-muted sm:w-24 sm:text-right">
           {fmt(totalTokens)} tok
         </span>
-        <span className="tabular-nums text-muted sm:w-16 sm:text-right">{turns} turns</span>
+        <span className="tabular-nums text-muted sm:w-16 sm:text-right">{formatTurns(turns)}</span>
       </div>
       {expanded && (
-        <ItemList window={window} scope={scope} teamId={teamId} useCase={useCase} />
+        <ItemList active={active} period={period} scope={scope} teamId={teamId} useCase={useCase} />
       )}
     </div>
   );
 }
 
 export function UsagePage() {
-  const [window, setWindow] = useState<Window>("7d");
+  const [view, setView] = useState<(typeof VIEWS)[number]["id"]>("overview");
+  const [period, setPeriod] = useState<UsagePeriodSelection>({ kind: "lookback", window: "7d" });
+  const [month, setMonth] = useState("");
+  const [customStart, setCustomStart] = useState("");
+  const [customEnd, setCustomEnd] = useState("");
+  const [exportError, setExportError] = useState<unknown>();
+  const [exporting, setExporting] = useState(false);
+  const [exportGranularity, setExportGranularity] = useState<UsageExportGranularity>("day");
+  const exportLinkRef = useRef<HTMLAnchorElement>(null);
   const [personalScope, setPersonalScope] = useState<"me" | "org">("me");
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [cursor, setCursor] = useState<string | undefined>(undefined);
-  const [items, setItems] = useState<Parameters<typeof RequestLog>[0]["items"]>([]);
+  // Keep only cursor history, not every loaded row. Each page remains bounded
+  // by the server's explicit page size.
+  const [pageCursors, setPageCursors] = useState<(string | undefined)[]>([undefined]);
+  const cursor = pageCursors[pageCursors.length - 1];
 
   const orgQ = useOrg();
   const isOrgAdmin =
@@ -245,35 +304,22 @@ export function UsagePage() {
   const personalWorkspace = ws?.kind === "personal";
   const teamId = ws?.kind === "team" ? ws.team.id : undefined;
   const scope: UsageScopeName = teamId !== undefined ? "team" : personalScope;
+  const todayUtc = new Date().toISOString().slice(0, 10);
+  const currentMonthUtc = todayUtc.slice(0, 7);
 
-  const breakdownQ = useUsageBreakdown(window, scope, teamId, { enabled: scopeKnown });
+  const breakdownQ = useUsageBreakdown(period, scope, teamId, { enabled: scopeKnown });
+  const toolEfficiencyQ = useUsageToolEfficiency(period, scope, teamId, { enabled: scopeKnown && breakdownQ.isSuccess && view === "breakdown" });
+  const outcomesQ = useUsageOutcomes(period, scope, teamId, { enabled: scopeKnown && breakdownQ.isSuccess && view === "breakdown" });
   // Proxy traffic is personal; every consumer of these two queries renders
   // only in the personal workspace, so do not fetch outside it.
-  const requestsQ = useProxyRequests({ limit: 50, cursor }, { enabled: personalWorkspace });
-  const settingsQ = useProxySettings({ enabled: personalWorkspace });
+  const requestsQ = useProxyRequests({ limit: 25, cursor }, { enabled: personalWorkspace && view === "activity" });
+  const settingsQ = useProxySettings({ enabled: personalWorkspace && view === "activity" });
 
-  // Accumulate proxy request items across page loads.
-  const [seenCursors] = useState(() => new Set<string | undefined>());
-
-  // A workspace switch hides and reshapes the page; drop the proxy log's
-  // accumulated pages and any open detail so a return to the personal
-  // workspace starts from page one, not a mid-list cursor.
+  // A workspace switch resets the bounded request-log pager. Team records
+  // never appear in this personal surface.
   useEffect(() => {
-    setCursor(undefined);
-    setItems((prev) => (prev.length === 0 ? prev : []));
-    seenCursors.clear();
-    setSelectedId(null);
-  }, [teamId, seenCursors]);
-
-  if (!seenCursors.has(cursor) && requestsQ.data) {
-    seenCursors.add(cursor);
-    const newItems = requestsQ.data.items ?? [];
-    setItems((prev) => {
-      const ids = new Set(prev.map((i) => i.id));
-      const fresh = newItems.filter((i) => !ids.has(i.id));
-      return [...prev, ...fresh];
-    });
-  }
+    setPageCursors([undefined]);
+  }, [teamId]);
 
   const breakdown = breakdownQ.data;
   const USE_CASE_ORDER: UsageUseCase[] = [
@@ -296,34 +342,97 @@ export function UsagePage() {
         (breakdown.totalInputTokens + breakdown.totalCacheReadTokens)
       : null;
 
-  const csvHref = api.usageExportCsvUrl(window, scope, teamId);
+  const csvHref = api.usageExportCsvUrl(period, scope, exportGranularity, teamId);
+  const periodLabel = period.kind === "lookback"
+    ? period.window
+    : period.kind === "month"
+      ? period.month
+      : `${period.start} to ${period.end}`;
+  const customPeriodApplied =
+    period.kind === "custom" && period.start === customStart && period.end === customEnd;
+  const customPeriodPending =
+    Boolean(customStart && customEnd && customStart <= customEnd) && !customPeriodApplied;
 
   function handleWindowChange(w: Window) {
-    setWindow(w);
-    setCursor(undefined);
-    setItems([]);
-    seenCursors.clear();
+    setMonth("");
+    setCustomStart("");
+    setCustomEnd("");
+    setPeriod({ kind: "lookback", window: w });
+  }
+
+  function handleMonthChange(next: string) {
+    setMonth(next);
+    setCustomStart("");
+    setCustomEnd("");
+    setPeriod(next ? { kind: "month", month: next } : { kind: "lookback", window: "7d" });
+  }
+
+  function applyCustomPeriod() {
+    setMonth("");
+    setPeriod({ kind: "custom", start: customStart, end: customEnd });
+  }
+
+  async function handleCsvDownload() {
+    if (exporting) return;
+    setExportError(undefined);
+    setExporting(true);
+    try {
+      await api.validateUsageExport(period, scope, exportGranularity, teamId);
+      exportLinkRef.current?.click();
+    } catch (error) {
+      setExportError(error);
+    } finally {
+      setExporting(false);
+    }
   }
 
   return (
     <div className="min-w-0 flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-5xl px-4 py-6 sm:px-6 sm:py-10 space-y-10">
+      <div className={cn(pageClass, "space-y-10")}>
         {/* Header — the workspace clause names the active scope, same as the
             other scoped list pages. */}
-        <div>
-          <h1 className="font-display text-2xl text-ink flex flex-wrap items-baseline gap-x-3 gap-y-1">
-            Usage
-            <WorkspaceClause />
-          </h1>
-          <p className="mt-1 text-sm text-muted">
-            {scope === "team"
-              ? "Spend across all Valet use cases for this team."
-              : "Spend across all Valet use cases for your account."}
-          </p>
-        </div>
+        <PageHeader
+          title="Usage"
+          clause={<WorkspaceClause />}
+          description={scope === "team"
+            ? "Spend across all Valet use cases for this team."
+            : "Spend across all Valet use cases for your account."}
+          actions={scopeKnown ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <label>
+                <span className="sr-only">CSV granularity</span>
+                <Select
+                  size="sm"
+                  aria-label="CSV granularity"
+                  value={exportGranularity}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    if (value === "day" || value === "hour" || value === "turn") setExportGranularity(value);
+                  }}
+                >
+                  <option value="day">Daily</option>
+                  <option value="hour">Hourly</option>
+                  <option value="turn">Itemized (per turn)</option>
+                </Select>
+              </label>
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={exporting}
+                onClick={handleCsvDownload}
+                aria-label={`Download CSV (${periodLabel}, ${scope})`}
+              >
+                {exporting ? "Validating export…" : `Download CSV (${periodLabel}, ${scope})`}
+              </Button>
+              <a ref={exportLinkRef} href={csvHref} className="sr-only" tabIndex={-1} aria-hidden="true">Download</a>
+            </div>
+          ) : undefined}
+        />
+
+        <TabBar label="Usage views" tabs={VIEWS} active={view} onSelect={setView} />
 
         {/* Disabled-gateway notice */}
-        {personalWorkspace && settingsQ.data?.enabled === false && (
+        {view === "activity" && personalWorkspace && settingsQ.data?.enabled === false && (
           <div className="rounded border border-line bg-paper px-4 py-3 text-sm text-muted">
             The recording gateway is disabled — enable it in{" "}
             <Link
@@ -336,74 +445,94 @@ export function UsagePage() {
           </div>
         )}
 
-        {/* Window selector + scope toggle + CSV export */}
+        {/* Window selector + scope toggle. The CSV export is a page action in the header. */}
         <div className="flex items-center gap-2 flex-wrap">
-          {WINDOWS.map((w) => (
-            <button
-              key={w}
-              type="button"
-              onClick={() => handleWindowChange(w)}
-              className={`min-h-11 rounded px-3 py-2 text-sm border sm:min-h-0 sm:py-1 ${
-                window === w
-                  ? "border-moss text-moss bg-moss-wash font-medium"
-                  : "border-line text-muted hover:text-ink hover:border-ink"
-              }`}
-            >
-              {w}
-            </button>
-          ))}
+          <FilterChips<string>
+            label="Period"
+            value={period.kind === "lookback" ? period.window : ""}
+            onChange={(w) => { const window = WINDOWS.find((candidate) => candidate === w); if (window) handleWindowChange(window); }}
+            options={WINDOWS.map((w) => ({ value: w, label: w }))}
+          />
+          <label className="flex items-center gap-2 text-xs text-muted">
+            <span>Month</span>
+            <Input
+              size="sm"
+              type="month"
+              aria-label="Calendar month"
+              max={currentMonthUtc}
+              value={month}
+              onChange={(event) => handleMonthChange(event.target.value)}
+              aria-current={period.kind === "month" ? "date" : undefined}
+              className={cn("w-auto", period.kind === "month" && ACTIVE_PERIOD)}
+            />
+          </label>
+          {/* One row that shrinks its inputs, so the range never splits. */}
+          <div className="flex min-w-0 items-center gap-2 max-sm:w-full">
+            <label className="min-w-0 flex-1 sm:flex-none">
+              <span className="sr-only">Custom start date</span>
+              <Input
+                size="sm"
+                type="date"
+                aria-label="Custom start date"
+                max={todayUtc}
+                value={customStart}
+                onChange={(event) => setCustomStart(event.target.value)}
+                className={cn("min-w-0", customPeriodApplied && ACTIVE_PERIOD)}
+              />
+            </label>
+            <span className="text-xs text-muted">to</span>
+            <label className="min-w-0 flex-1 sm:flex-none">
+              <span className="sr-only">Custom end date</span>
+              <Input
+                size="sm"
+                type="date"
+                aria-label="Custom end date"
+                min={customStart}
+                max={todayUtc}
+                value={customEnd}
+                onChange={(event) => setCustomEnd(event.target.value)}
+                className={cn("min-w-0", customPeriodApplied && ACTIVE_PERIOD)}
+              />
+            </label>
+          </div>
+          {/* Edited dates that differ from the applied range fill the button. */}
+          <Button
+            size="sm"
+            variant={customPeriodPending ? "primary" : "secondary"}
+            disabled={!customStart || !customEnd || customStart > customEnd}
+            onClick={applyCustomPeriod}
+            aria-pressed={customPeriodApplied}
+          >
+            Apply dates
+          </Button>
           {personalWorkspace && isOrgAdmin && (
-            <div className="flex items-center gap-1 sm:ml-4 rounded border border-line overflow-hidden text-sm">
-              <button
-                type="button"
-                onClick={() => setPersonalScope("me")}
-                className={`min-h-11 px-3 py-2 sm:min-h-0 sm:py-1 ${
-                  scope === "me"
-                    ? "bg-moss-wash text-moss font-medium"
-                    : "text-muted hover:text-ink"
-                }`}
-                aria-pressed={scope === "me"}
-              >
-                My usage
-              </button>
-              <button
-                type="button"
-                onClick={() => setPersonalScope("org")}
-                className={`min-h-11 px-3 py-2 sm:min-h-0 sm:py-1 ${
-                  scope === "org"
-                    ? "bg-moss-wash text-moss font-medium"
-                    : "text-muted hover:text-ink"
-                }`}
-                aria-pressed={scope === "org"}
-              >
-                Organization
-              </button>
-            </div>
-          )}
-          {scopeKnown && (
-            <a
-              href={csvHref}
-              download
-              className="inline-flex w-full items-center justify-center sm:ml-auto sm:w-auto min-h-11 rounded px-3 py-2 text-sm border sm:min-h-0 sm:py-1 border-line text-muted hover:text-ink hover:border-ink"
-              aria-label={`Download CSV (${window}, ${scope})`}
-            >
-              Download CSV ({window}, {scope})
-            </a>
+            <FilterChips
+              label="Whose usage"
+              className="sm:ml-auto"
+              value={personalScope}
+              onChange={setPersonalScope}
+              options={[{ value: "me", label: "My usage" }, { value: "org", label: "Organization" }]}
+            />
           )}
         </div>
+        {exportError !== undefined && (
+          <p className="text-sm text-danger-600">{usageErrorText(exportError)}</p>
+        )}
 
         {/* Totals + chart + by-use-case + by-model. A disabled query (scope
             still resolving) reports isLoading=false, so gate on both. */}
         {!scopeKnown || breakdownQ.isLoading ? (
-          <p className="text-sm text-muted">Loading…</p>
+          view !== "activity" && <p className="text-sm text-muted">Loading…</p>
         ) : breakdownQ.error ? (
-          <p className="text-sm text-danger-600">{String(breakdownQ.error)}</p>
+          view !== "activity" && <p className="text-sm text-danger-600">{usageErrorText(breakdownQ.error)}</p>
         ) : breakdown ? (
           <>
             {/* Total stat cards — cost + token types + cache-hit-rate + unpriced */}
+            <div hidden={view !== "overview"} className="space-y-8">
+            {view === "overview" && scopeKnown && <SessionOutcomes period={period} scope={scope} teamId={teamId} />}
             <div className="grid grid-cols-1 min-[360px]:grid-cols-2 lg:grid-cols-5 gap-3">
               <StatCard label="Active agents" value={fmt(breakdown.activeAgents)} sub="Unique agents with token usage in this period." />
-              <StatCard label="Total cost" value={fmtUsd(breakdown.totalCostUsd)} />
+              <StatCard label="Total cost" value={formatUsdPrecise(breakdown.totalCostUsd)} />
               <StatCard label="Total tokens" value={fmt(breakdown.totalTokens)} />
               <StatCard
                 label="Input / Output"
@@ -423,7 +552,7 @@ export function UsagePage() {
             {/* Unpriced indicator */}
             {breakdown.unpricedTurns > 0 && (
               <div className="rounded border border-line bg-paper px-4 py-2 text-sm text-muted">
-                <span className="font-medium text-ink">{fmt(breakdown.unpricedTurns)} turns unpriced</span>
+                <span className="font-medium text-ink">{formatTurns(breakdown.unpricedTurns)} unpriced</span>
                 {" "}— these turns used custom or dev models with no list price. The cost shown is a floor, not a total.
               </div>
             )}
@@ -432,6 +561,94 @@ export function UsagePage() {
             <div>
               <h2 className="text-sm font-medium text-ink mb-3">Daily spend</h2>
               <SpendChart buckets={chartBuckets} />
+            </div>
+
+            </div>
+            {view === "tools" && scopeKnown && <ToolUsage key={JSON.stringify([period, scope, teamId])} period={period} scope={scope} teamId={teamId} />}
+            <div hidden={view !== "breakdown"} className="space-y-8">
+            <div>
+              <h2 className="text-sm font-medium text-ink mb-2">Tool work per model token</h2>
+              <p className="text-xs text-muted mb-3">
+                Settled tool calls include handled failures. Workflow tool actions run without a model call at that node.
+              </p>
+              {toolEfficiencyQ.isLoading ? (
+                <p className="text-xs text-muted">Loading tool work…</p>
+              ) : toolEfficiencyQ.error ? (
+                <p className="text-xs text-danger-600">Tool work could not load. Refresh the page to try again.</p>
+              ) : (
+                <div className="overflow-x-auto rounded border border-line">
+                  <table className="w-full text-sm">
+                    <thead className="bg-paper-muted text-muted">
+                      <tr>
+                        <th className="px-3 py-2 text-left font-medium">Use case</th>
+                        <th className="px-3 py-2 text-right font-medium">Model-directed calls</th>
+                        <th className="px-3 py-2 text-right font-medium">Model tokens</th>
+                        <th className="px-3 py-2 text-right font-medium">Calls / 1M tokens</th>
+                        <th className="px-3 py-2 text-right font-medium">Model-free actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(["session", "workflow"] as const).map((useCase) => {
+                        const tool = toolEfficiencyQ.data?.byUseCase.find((r) => r.useCase === useCase);
+                        const tokens = breakdown.byUseCase.find((r) => r.useCase === useCase)?.totalTokens ?? 0;
+                        const rate = tokens > 0 && tool ? Math.round(tool.modelDirectedCalls * 1_000_000 / tokens) : null;
+                        return (
+                          <tr key={useCase} className="border-t border-line">
+                            <th scope="row" className="px-3 py-2 text-left font-medium">{USE_CASE_LABELS[useCase]}</th>
+                            <td className="px-3 py-2 text-right tabular-nums">{fmt(tool?.modelDirectedCalls ?? 0)}</td>
+                            <td className="px-3 py-2 text-right tabular-nums">{fmt(tokens)}</td>
+                            <td className="px-3 py-2 text-right tabular-nums">{rate === null ? "—" : fmt(rate)}</td>
+                            <td className="px-3 py-2 text-right tabular-nums">{fmt(tool?.modelFreeActions ?? 0)}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            <div>
+              <h2 className="text-sm font-medium text-ink mb-2">Outcomes</h2>
+              <p className="text-xs text-muted mb-3">
+                Confirmed GitHub actions and Slack deliveries. Model spend is allocated evenly across outcomes in each runtime or workflow run during this period.
+              </p>
+              {outcomesQ.isLoading ? (
+                <p className="text-xs text-muted">Loading outcomes…</p>
+              ) : outcomesQ.error ? (
+                <p className="text-xs text-danger-600">Outcomes could not load. Refresh the page to try again.</p>
+              ) : (
+                <div className="overflow-x-auto rounded border border-line">
+                  <table className="w-full text-sm">
+                    <thead className="bg-paper-muted text-muted">
+                      <tr>
+                        <th className="px-3 py-2 text-left font-medium">Outcome</th>
+                        <th className="px-3 py-2 text-right font-medium">Count</th>
+                        <th className="px-3 py-2 text-right font-medium">Allocated model spend</th>
+                        <th className="px-3 py-2 text-right font-medium">Est. spend / outcome</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {outcomesQ.data?.byOutcome.map((row) => (
+                        <tr key={row.kind} className="border-t border-line">
+                          <th scope="row" className="px-3 py-2 text-left font-medium">{{
+                            pull_request_created: "PRs created",
+                            review_submitted: "Reviews submitted",
+                            slack_message_sent: "Slack messages sent",
+                            slack_dm_sent: "Slack DMs sent",
+                          }[row.kind]}</th>
+                          <td className="px-3 py-2 text-right tabular-nums">{fmt(row.count)}</td>
+                          <td className="px-3 py-2 text-right tabular-nums">{formatUsdPrecise(row.estimatedCostUsd)}</td>
+                          <td className="px-3 py-2 text-right tabular-nums">{row.estimatedCostPerOutcomeUsd === null ? "—" : formatUsdPrecise(row.estimatedCostPerOutcomeUsd)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {outcomesQ.data && outcomesQ.data.unpricedTurns > 0 && (
+                <p className="text-xs text-muted mt-2">{formatTurns(outcomesQ.data.unpricedTurns)} unpriced: these spend estimates are a floor.</p>
+              )}
             </div>
 
             {/* By use case — all four rows expandable. Keyed by the WORKSPACE
@@ -460,10 +677,11 @@ export function UsagePage() {
                     <UseCaseRow
                       key={uc}
                       useCase={uc}
+                      active={view === "breakdown"}
                       costUsd={bucket.costUsd}
                       totalTokens={bucket.totalTokens}
                       turns={bucket.turns}
-                      window={window}
+                      period={period}
                       scope={scope}
                       teamId={teamId}
                     />
@@ -593,9 +811,9 @@ export function UsagePage() {
                     <details>
                       <summary className="min-h-11 cursor-pointer py-3 sm:min-h-0 sm:py-0">How active agents are counted</summary>
                       <p className="mt-2">
-                        Each session with recorded token usage counts once per member per UTC day.
+                        Each runtime with recorded token usage counts once per member per UTC day.
                         {" "}Averages cover {dailyAgentWindow.days} UTC calendar {dailyAgentWindow.days === 1 ? "day" : "days"}, including zero-activity days and today so far.
-                        {" "}Activity uses the prompt author, then the child’s spawning member; older ordinary sessions use the session user.
+                        {" "}Activity uses the prompt author, then the child’s spawning member; older ordinary runtimes use the runtime owner.
                         {" "}Unattributed activity appears under Team / shared. An agent used by multiple members counts for each.
                         {" "}Spend uses billing attribution and the rolling time range.
                       </p>
@@ -620,7 +838,17 @@ export function UsagePage() {
                           className="border-b border-line last:border-0 hover:bg-ink-wash"
                         >
                           <td className="px-3 py-2 text-ink truncate max-w-[14rem]" title={row.name}>
-                            {row.name || <span className="text-muted italic">unknown</span>}
+                            {/* A team's own work (schedules, event rules, API
+                                keys): the switcher's team icon tells it
+                                apart from a person. */}
+                            {row.isTeam ? (
+                              <span className="inline-flex min-w-0 max-w-full items-center gap-1">
+                                <Users role="img" aria-label="Team" className="h-3.5 w-3.5 shrink-0 text-muted" />
+                                <span className="truncate">{row.name}</span>
+                              </span>
+                            ) : (
+                              row.name || <span className="text-muted italic">unknown</span>
+                            )}
                           </td>
                           {dailyAgentWindow && (
                             <td className="px-3 py-2 text-right tabular-nums text-muted">
@@ -643,52 +871,56 @@ export function UsagePage() {
                 </div>
               </div>
             )}
+            </div>
           </>
         ) : null}
 
         {/* Proxy (external tools) — request log + drill-down. Proxy traffic is
             always personal (never team-owned), so the log and the key-setup
             callout stay out of a team workspace's view. */}
-        {personalWorkspace && (
+        {view === "activity" && personalWorkspace && (
         <div>
           <h2 className="text-sm font-medium text-ink mb-1">
             Proxy (external tools) — request log
           </h2>
+          <p className="text-sm text-muted mb-3">
+            Proxy costs are estimates from model rates, not provider invoices. Requests can use organization or personal provider keys.
+          </p>
           <p className="text-xs text-muted mb-3">
-            Recorded prompts from external tools routed through the gateway.
+            Recent requests from external tools routed through the gateway. This log is independent of the spend period above.
           </p>
           {requestsQ.error && (
             <p className="text-sm text-danger-600 mb-2">{String(requestsQ.error)}</p>
           )}
           <RequestLog
-            items={items}
-            selectedId={selectedId}
-            onSelect={(id) => setSelectedId((prev) => (prev === id ? null : id))}
-            nextCursor={requestsQ.data?.nextCursor}
-            onLoadMore={() => {
-              if (requestsQ.data?.nextCursor) {
-                setCursor(requestsQ.data.nextCursor);
-              }
+            items={requestsQ.data?.items ?? []}
+            pageNumber={pageCursors.length}
+            pageSize={requestsQ.data?.pageSize ?? 25}
+            hasPreviousPage={pageCursors.length > 1}
+            hasNextPage={requestsQ.data?.hasMore ?? false}
+            onPreviousPage={() => setPageCursors((pages) => pages.slice(0, -1))}
+            onNextPage={() => {
+              const nextCursor = requestsQ.data?.nextCursor;
+              if (nextCursor) setPageCursors((pages) => [...pages, nextCursor]);
             }}
             isLoading={requestsQ.isLoading}
           />
-          {selectedId && (
-            <div className="mt-4">
-              <SampleView id={selectedId} onClose={() => setSelectedId(null)} />
-            </div>
-          )}
         </div>
         )}
 
+        {view === "activity" && !personalWorkspace && scopeKnown && (
+          <p className="rounded border border-line p-4 text-sm text-muted">The request log contains personal proxy traffic. Switch to Personal to view it. Team spend is available in Overview and Breakdown.</p>
+        )}
+
         {/* Key setup callout */}
-        {personalWorkspace && (
+        {view === "activity" && personalWorkspace && (
         <div className="rounded border border-line bg-paper px-4 py-3 text-sm text-muted">
           Generate a key and set up your tools in{" "}
           <Link
-            to="/settings/proxy"
+            to="/settings/api-keys"
             className="text-moss underline-offset-2 hover:underline"
           >
-            Settings → Proxy
+            Personal workspace → API keys and proxy
           </Link>
           .
         </div>

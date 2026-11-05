@@ -6,7 +6,7 @@
  * task-tool.test.ts) and a fake sender in `ctx.config.childSender`.
  */
 import { describe, it, expect, vi } from "vitest";
-import { childSendTool } from "../src/builtin-tools/index.js";
+import { childSendTool, taskTool } from "../src/builtin-tools/index.js";
 import type {
   Credential,
   CredentialProvider,
@@ -48,8 +48,11 @@ function makeCtx(overrides: Partial<ToolContext> = {}): ToolContext {
 }
 
 describe("child_send tool: params schema", () => {
-  it("rejects an empty message", () => {
+  it("exposes queue as the only delivery-mode option and documents gate behavior", () => {
     expect(childSendTool.parameters.properties.message.minLength).toBe(1);
+    expect(childSendTool.parameters.properties).toHaveProperty("queue");
+    expect(childSendTool.parameters.properties).not.toHaveProperty("interrupt");
+    expect(childSendTool.description).toContain("withdraws its pending approval");
   });
 });
 
@@ -78,14 +81,14 @@ describe("child_send tool: no sender", () => {
 });
 
 describe("child_send tool: sender present", () => {
-  it("passes message/interrupt through, and ctx fields reach the sender", async () => {
-    let seenReq: { childSessionId: string; message: string; interrupt?: boolean } | undefined;
+  it("passes queue through, and ctx fields reach the sender", async () => {
+    let seenReq: { childSessionId: string; message: string; queue?: boolean } | undefined;
     let seenCtx:
       | { parentSessionId: string; parentThreadId: string; actorUserId: string }
       | undefined;
     const sender = vi.fn(
       async (
-        req: { childSessionId: string; message: string; interrupt?: boolean },
+        req: { childSessionId: string; message: string; queue?: boolean },
         sendCtx: { parentSessionId: string; parentThreadId: string; actorUserId: string },
       ) => {
         seenReq = req;
@@ -101,15 +104,15 @@ describe("child_send tool: sender present", () => {
     });
 
     const result = await childSendTool.execute(
-      { child_session_id: "child-1", message: "drop the fallback, fix the chart", interrupt: true },
+      { child_session_id: "child-1", message: "after this, update the docs", queue: true },
       ctx,
     );
 
     expect(sender).toHaveBeenCalledTimes(1);
     expect(seenReq).toEqual({
       childSessionId: "child-1",
-      message: "drop the fallback, fix the chart",
-      interrupt: true,
+      message: "after this, update the docs",
+      queue: true,
     });
     expect(seenCtx).toEqual({
       parentSessionId: "parent-session",
@@ -118,7 +121,33 @@ describe("child_send tool: sender present", () => {
     });
     expect(result.text).toContain("child-1");
     expect(result.text).toContain("queue-2");
+    expect(result.text).toContain("queued behind its current work");
     expect(result.text).toContain("child.settled");
+  });
+
+  it("passes the current turn's channel origin to the sender", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const origin = { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" as const };
+    const ctx = makeCtx({
+      origin,
+      config: { childSender: async (_req: unknown, sendCtx: Record<string, unknown>) => { seen.push(sendCtx); return { queueItemId: "queue-3" }; } },
+    });
+    await childSendTool.execute({ child_session_id: "child-1", message: "continue" }, ctx);
+    expect(seen[0]?.origin).toEqual(origin);
+  });
+
+  it("confirms that a default send supersedes in-flight work", async () => {
+    const ctx = makeCtx({
+      config: { childSender: async () => ({ queueItemId: "queue-default" }) },
+    });
+
+    const result = await childSendTool.execute(
+      { child_session_id: "child-default", message: "change course" },
+      ctx,
+    );
+
+    expect(result.text).toContain("superseding its in-flight work");
+    expect(result.text).not.toContain("queued behind");
   });
 
   it("answers null from the sender with [child_not_found]", async () => {
@@ -142,5 +171,37 @@ describe("child_send tool: sender present", () => {
     await expect(
       childSendTool.execute({ child_session_id: "child-1", message: "hello" }, ctx),
     ).rejects.toThrow("engine store unavailable");
+  });
+});
+
+describe("child_send tool: newcomer turn", () => {
+  it("refuses a channel sender with no Valet account before it reaches the sender", async () => {
+    const sender = vi.fn();
+    const result = await childSendTool.execute(
+      { child_session_id: "child-1", message: "go" },
+      makeCtx({ externalSender: true, config: { childSender: sender } }),
+    );
+    expect(result.text).toContain("[child_unavailable]");
+    expect(sender).not.toHaveBeenCalled();
+  });
+});
+
+describe("delegation from an unattended workflow task", () => {
+  it("passes the unattended flag to a spawned child and to a steering message", async () => {
+    const spawned: unknown[] = [];
+    const sent: unknown[] = [];
+    const config = {
+      childSpawner: async (_req: unknown, ctx: unknown) => { spawned.push(ctx); return { childSessionId: "child_1", queueItemId: "q1" }; },
+      childSender: async (_req: unknown, ctx: unknown) => { sent.push(ctx); return { queueItemId: "q2" }; },
+    };
+    for (const unattendedWorkflow of [true, undefined]) {
+      const ctx = makeCtx({ config, ...(unattendedWorkflow ? { unattendedWorkflow } : {}) });
+      await taskTool.execute({ prompt: "check the release" }, ctx);
+      await childSendTool.execute({ child_session_id: "child_1", message: "also check gitops" }, ctx);
+    }
+    expect(spawned).toMatchObject([{ unattendedWorkflow: true }, {}]);
+    expect(sent).toMatchObject([{ unattendedWorkflow: true }, {}]);
+    expect(spawned[1]).not.toHaveProperty("unattendedWorkflow");
+    expect(sent[1]).not.toHaveProperty("unattendedWorkflow");
   });
 });

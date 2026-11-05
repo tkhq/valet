@@ -1,0 +1,22 @@
+id: mock-slack-file-read
+description: Read a Slack attachment instead of requesting a duplicate upload.
+profile: mock
+turns:
+  - role: user
+    content: In our team chat, please read the Slack attachment scope.docx (file ID F123) and summarize its scope. It is in a channel our bot belongs to.
+timeout_ms: 120000
+mock_tools:
+  slack.fetch_file:
+    response: '{"content":"Phase one delivers the audience dashboard. Phase two adds creator access.","filename":"scope.docx"}'
+checks:
+  - type: tool_called
+    tool: slack.fetch_file
+  - type: tool_args_match
+    tool: slack.fetch_file
+    args:
+      file_id: F123
+  - type: output_contains
+    value: dashboard
+  - type: judge_output
+    rubric: The response summarizes the document. It must not claim team runs cannot access Slack files or ask for a re-upload.
+  - type: no_errors

@@ -21,7 +21,8 @@ export type {
   ForeachBodyNode,
   LlmNode,
   NodeErrorPolicy,
-  OrchestratorNode,
+  ThreadNode,
+  ThreadPlacement,
   ToolNode,
   ToolCredentialMode,
   WorkflowCallNode,
@@ -41,9 +42,11 @@ export {
 export type { TemplateContext } from './dag/expression.js';
 
 export { normalizeIfOperation, isIfOperationSupported, allowedIfOperations } from './dag/if-operations.js';
+export { normalizeLegacyDefinition } from './dag/legacy.js';
 export type { IfDataType } from './dag/if-operations.js';
 
 export { parseDurationMs } from './dag/duration.js';
+export { matchesGateOccurrence } from './gate-signals.js';
 
 export {
   normalizeInputType,
@@ -54,6 +57,17 @@ export {
 export type { TriggerInputError, ResolvedTriggerInput } from './dag/trigger-input.js';
 
 export { validateWorkflowDefinition } from './dag/validate.js';
+export {
+  STEP_FIELDS,
+  STEP_REFERENCE_START,
+  STEP_REFERENCE_END,
+  renderStepReference,
+  renderStepReferenceBlock,
+} from './dag/step-reference.js';
+export type { StepField } from './dag/step-reference.js';
+export { DEFAULT_STEP_MODEL_CALLS, MAX_STEP_MODEL_CALLS, stepModelCallLimit, unboundedWorkWarning } from './dag/step-budget.js';
+export { approvalRequestWarning, listingAgentStepWarnings, pushesGitCommits, rewriteStepWarnings, scheduledRunMisses, scheduledTriggerData, sharedWorkingDirectoryWarning } from './dag/step-design.js';
+export type { ScheduledRunMiss, TriggerReadSite } from './dag/step-design.js';
 export type { ValidationResult, ValidateEnvironment } from './dag/validate.js';
 
 export {
@@ -72,6 +86,9 @@ export type {
   WorkflowTemplateFileMeta,
 } from './file.js';
 
+export { convertV1Workflows, readV1Paste, v1ChecklistPrompt } from './v1-convert.js';
+export type { V1Conversion, V1ConvertedWorkflow, V1ConvertResult } from './v1-convert.js';
+
 export { WorkflowCursorError, WorkflowFenceError, decodeRunCursor, encodeRunCursor, splitRunOwner } from './store.js';
 export type {
   ListRunsFilter,
@@ -83,6 +100,7 @@ export type {
   RunWaitCondition,
   WorkflowRun,
   WorkflowRunListItem,
+  WorkflowRunOrigin,
   WorkflowRunOwnerInput,
   WorkflowRunPrincipal,
   WorkflowStore,
@@ -111,6 +129,7 @@ export {
   executeSet,
   executeStop,
   executeTrigger,
+  workflowStepSessionId,
 } from './nodes/index.js';
 export type {
   NodeExecuteResult,
@@ -126,4 +145,5 @@ export { driveUntilPark } from './interpreter.js';
 export type { InterpreterDeps, OnRunSettled, RunSettledInfo } from './interpreter.js';
 
 export { LocalRunHost } from './local-host.js';
-export type { LocalRunHostDeps, RunHost } from './local-host.js';
+export { retrySeedCheckpoints } from './retry-seed.js';
+export type { ApprovalParkedInfo, LocalRunHostDeps, OnApprovalParked, RunHost, RunStartOptions } from './local-host.js';

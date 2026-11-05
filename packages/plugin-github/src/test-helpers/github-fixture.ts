@@ -25,12 +25,14 @@ export interface GithubFixtureCall {
   /** Parsed query string. `c.req.path` drops it, so this is the only view of it. */
   query: Record<string, string>;
   authHeader?: string;
+  acceptHeader?: string;
   body?: unknown;
 }
 
 export interface GithubFixtureResponse {
   status?: ContentfulStatusCode;
   body: unknown;
+  headers?: Record<string, string>;
 }
 
 export interface PullRef {
@@ -57,6 +59,8 @@ export interface GithubFixtureHandlers {
   listReviews?: (ref: PullRef, query: Record<string, string>) => GithubFixtureResponse;
   /** `POST /repos/:owner/:repo/pulls/:pull_number/reviews` */
   createReview?: (ref: PullRef, body: unknown) => GithubFixtureResponse;
+  /** `POST /repos/:owner/:repo/pulls/:pull_number/requested_reviewers` */
+  requestReviewers?: (ref: PullRef, body: unknown) => GithubFixtureResponse;
   /** `PUT /repos/:owner/:repo/pulls/:pull_number/reviews/:review_id` */
   updateReview?: (ref: PullRef, reviewId: string, body: unknown) => GithubFixtureResponse;
   /** `GET /repos/:owner/:repo/pulls/:pull_number/comments` */
@@ -66,7 +70,9 @@ export interface GithubFixtureHandlers {
   /** `GET /repos/:owner/:repo/contents/:path` — one file. Answer with a
    * status to exercise a failure, which is what a caller reading a file out
    * of another repository meets most often. */
-  readFile?: (owner: string, repo: string, path: string) => GithubFixtureResponse;
+  readFile?: (owner: string, repo: string, path: string, accept: string | undefined) => GithubFixtureResponse;
+  /** GET /repos/:owner/:repo/git/blobs/:file_sha */
+  readBlob?: (owner: string, repo: string, sha: string, accept: string | undefined) => GithubFixtureResponse;
   /** `GET /search/issues` — receives the parsed query, because the order
    * and the page size are the part of a search a caller depends on and
    * cannot see in the response. */
@@ -123,12 +129,21 @@ const DEFAULTS: Required<GithubFixtureHandlers> = {
   listPullFiles: () => ({ body: [] }),
   listReviews: () => ({ body: [] }),
   createReview: () => ({ status: 200, body: { id: 5001, state: "COMMENTED", html_url: "https://github.com/o/r/pull/1#pullrequestreview-5001" } }),
+  requestReviewers: (ref) => ({
+    body: {
+      number: Number(ref.pullNumber),
+      html_url: `https://github.com/${ref.owner}/${ref.repo}/pull/${ref.pullNumber}`,
+      requested_reviewers: [],
+      requested_teams: [],
+    },
+  }),
   updateReview: (_ref, reviewId) => ({
     body: { id: Number(reviewId), state: "COMMENTED", html_url: `https://github.com/o/r/pull/1#pullrequestreview-${reviewId}` },
   }),
   listReviewComments: () => ({ body: [] }),
   listCheckRuns: () => ({ body: { total_count: 0, check_runs: [] } }),
   readFile: (_owner, _repo, path) => ({ body: { type: "file", encoding: "base64", path, size: 0, content: "" } }),
+  readBlob: () => ({ body: new Uint8Array() }),
   searchIssues: () => ({ body: { total_count: 0, items: [] } }),
   listUserRepos: () => ({ body: [{ full_name: "fixture-user/repo" }] }),
   listInstallationRepos: () => ({
@@ -169,6 +184,7 @@ export function startGithubFixture(handlerOverrides: GithubFixtureHandlers = {})
       params,
       query: c.req.query(),
       authHeader: c.req.header("authorization") ?? undefined,
+      acceptHeader: c.req.header("accept") ?? undefined,
       body,
     });
   }
@@ -213,6 +229,14 @@ export function startGithubFixture(handlerOverrides: GithubFixtureHandlers = {})
     record(c, asParams(ref), body);
     const { status, body: respBody } = handlers.createReview(ref, body);
     return c.json(respBody as object, status ?? 200);
+  });
+
+  app.post("/repos/:owner/:repo/pulls/:pull_number/requested_reviewers", async (c) => {
+    const ref = pullRef(c);
+    const body = await readJson(c);
+    record(c, asParams(ref), body);
+    const { status, body: respBody } = handlers.requestReviewers(ref, body);
+    return c.json(respBody as object, status ?? 201);
   });
 
   app.put("/repos/:owner/:repo/pulls/:pull_number/reviews/:review_id", async (c) => {
@@ -265,13 +289,24 @@ export function startGithubFixture(handlerOverrides: GithubFixtureHandlers = {})
     return c.json(body as object, status ?? 200);
   });
 
+  app.get("/repos/:owner/:repo/git/blobs/:file_sha", (c) => {
+    const owner = c.req.param("owner");
+    const repo = c.req.param("repo");
+    const sha = c.req.param("file_sha");
+    record(c, { owner, repo, file_sha: sha });
+    const { status, body, headers } = handlers.readBlob(owner, repo, sha, c.req.header("accept"));
+    if (headers) return new Response(body as BodyInit, { status: status ?? 200, headers });
+    return c.json(body as object, status ?? 200);
+  });
+
   // A file path holds slashes, which a plain `:path` segment refuses.
   app.get("/repos/:owner/:repo/contents/:path{.+}", (c) => {
     const owner = c.req.param("owner");
     const repo = c.req.param("repo");
     const path = c.req.param("path");
     record(c, { owner, repo, path });
-    const { status, body } = handlers.readFile(owner, repo, path);
+    const { status, body, headers } = handlers.readFile(owner, repo, path, c.req.header("accept"));
+    if (headers) return new Response(body as BodyInit, { status: status ?? 200, headers });
     return c.json(body as object, status ?? 200);
   });
 

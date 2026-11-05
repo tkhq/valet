@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import {
   Engine,
   GATE_EXPIRY_DEFAULT_MS,
@@ -10,8 +11,12 @@ import {
   type DecisionGate,
   type SessionEntry,
   type ToolDef,
+  type PromptContent,
+  type ToolContext,
+  type DecisionResolution,
   type WriteFence,
 } from "../src/index.js";
+import type { ToolUsageFact } from "@valet/shared";
 import { findStickyTerminalGate, fromRequest } from "../src/decision-gate.js";
 
 function makeEngine() {
@@ -134,6 +139,192 @@ describe("decision gates: pending -> resolved", () => {
     const resolved = events.find((e) => e.event.type === "decision_gate_resolved");
     expect(resolved).toBeTruthy();
 
+    faux.unregister();
+  });
+});
+
+describe("decision gates: user cancellation", () => {
+  it.each(["approval", "question"] as const)("dismisses a %s without another model turn and accepts a fresh prompt", async (type) => {
+    const faux = registerFauxProvider({ provider: `gate-cancel-${type}` });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("wait_for_person", {}, { id: "wait-1" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("must not continue after cancellation"),
+    ]);
+    const { engine, store, events } = makeEngine();
+    const tool: ToolDef = {
+      name: "wait_for_person", description: "Wait for a decision", parameters: Type.Object({}),
+      execute: async (_args, ctx) => {
+        await ctx.requestDecision({ type, title: "Continue?", resumeKey: "wait-1" });
+        return { text: "answered" };
+      },
+    };
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(), tools: [tool] });
+    try {
+      const receipt = await session.prompt("ask me");
+      await waitFor(() => gatesFrom(events).length === 1);
+      const gate = gatesFrom(events)[0];
+      if (!gate) throw new Error("missing gate");
+      await session.withdrawDecision(gate.id, "cancel");
+      await waitForAsync(async () => (await store.getQueueItem(session.id, receipt.queueItemId))?.status === "settled");
+      expect((await store.getQueueItem(session.id, receipt.queueItemId))?.outcome).toEqual({ outcome: "aborted" });
+      expect((await store.getDecisionGate(session.id, gate.id))?.status).toBe("withdrawn");
+      expect(events.some((e) => e.event.type === "decision_gate_withdrawn" && e.event.gateId === gate.id && e.event.reason === "cancel")).toBe(true);
+      expect(await store.getSuspendedTurn(session.id, gate.threadId)).toBeFalsy();
+      expect(JSON.stringify(await session.readEntries("web:default"))).not.toContain("must not continue after cancellation");
+      faux.setResponses([fauxAssistantMessage("fresh prompt accepted")]);
+      const next = await session.prompt("continue now");
+      await waitForAsync(async () => (await store.getQueueItem(session.id, next.queueItemId))?.status === "settled");
+      expect((await store.getQueueItem(session.id, next.queueItemId))?.outcome).toEqual({ outcome: "completed" });
+      expect(JSON.stringify(await session.readEntries("web:default"))).toContain("fresh prompt accepted");
+    } finally { faux.unregister(); }
+  });
+});
+
+describe("decision gates: sender with no Valet account", () => {
+  it("refuses the request without opening a gate", async () => {
+    const faux = registerFauxProvider({ provider: "gate-external-sender" });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("do_thing", { arg: "x" }, { id: "tc1" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("could not"),
+    ]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(), tools: [approvalTool()] });
+
+    await session.prompt("please do thing", { author: { id: "u1", name: "Slack member", externalSender: true } });
+    await waitFor(() => events.some((e) => e.event.type === "status" && e.event.status === "idle"));
+
+    expect(gatesFrom(events)).toEqual([]);
+    const entries = await session.readEntries("web:default");
+    // The tool acts as the workspace, so the turn refuses it before it can ask.
+    expect(JSON.stringify(entries)).toContain("[not_available] do_thing");
+    expect(JSON.stringify(entries)).not.toContain("did the thing");
+    faux.unregister();
+  });
+});
+
+describe("tool actor identity", () => {
+  it.each(["orchestrator", "workflow", "child"] as const)("aligns policy and credentials for an authorless %s turn", async (purpose) => {
+    const faux = registerFauxProvider({ provider: `actor-${purpose}` });
+    const actors: string[] = [];
+    const credentialActors: (string | undefined)[] = [];
+    const tool: ToolDef = {
+      name: "inspect_actor", description: "Inspect the acting identity.", parameters: Type.Object({}),
+      execute: async (_args, ctx) => {
+        actors.push(ctx.userId);
+        await ctx.credentials.get("linear");
+        return { text: "checked" };
+      },
+    };
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("inspect_actor", {}, { id: "actor-check" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("done"),
+    ]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "runtime-creator", orgId: "o1", owner: { type: "team", id: "t1" }, purpose,
+      workspace: "/", sandbox: {}, model: faux.getModel(), tools: [tool],
+      credentialResolver: async (_owner, _service, use) => { credentialActors.push(use.actorId); return null; },
+    });
+    await session.prompt("inspect", {});
+    await waitFor(() => events.some((e) => e.event.type === "status" && e.event.status === "idle"));
+    const expected = purpose === "orchestrator" ? "team:t1" : "runtime-creator";
+    expect(actors).toEqual([expected]);
+    expect(credentialActors).toEqual([expected]);
+    faux.unregister();
+  });
+});
+
+describe("tools on a turn from a sender with no Valet account", () => {
+  it("refuses a tool that acts as the workspace, and runs it for a member", async () => {
+    const faux = registerFauxProvider({ provider: "external-sender-tools" });
+    let ran = 0;
+    const writeTool: ToolDef = {
+      name: "write_note", description: "Write a note into the workspace.", parameters: Type.Object({}),
+      execute: async () => { ran += 1; return { text: "written" }; },
+    };
+    const turn = () => [
+      fauxAssistantMessage([fauxToolCall("write_note", {}, { id: `tc${ran}` })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("done"),
+    ];
+    faux.setResponses([...turn(), ...turn()]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(), tools: [writeTool] });
+
+    await session.prompt("write it", { author: { id: "u1", name: "Slack member", externalSender: true } });
+    await waitFor(() => events.filter((e) => e.event.type === "status" && e.event.status === "idle").length >= 1);
+    expect(ran).toBe(0);
+    expect(JSON.stringify(await session.readEntries("web:default"))).toContain("[not_available] write_note");
+
+    await session.prompt("write it", { author: { id: "u1" } });
+    await waitFor(() => ran === 1);
+    faux.unregister();
+  });
+});
+
+describe("tools on a reply from another member in a shared personal thread", () => {
+  it("refuses the owner's other threads and memory, and runs them for the owner", async () => {
+    const faux = registerFauxProvider({ provider: "shared-thread-guest-tools" });
+    let memoryReads = 0;
+    const memRead: ToolDef = {
+      name: "mem_read", description: "Read the owner's memory.", parameters: Type.Object({}), ownerOnly: true,
+      execute: async () => { memoryReads += 1; return { text: "owner memory" }; },
+    };
+    const turn = (n: number) => [
+      fauxAssistantMessage([
+        fauxToolCall("thread_read", { key: "web:private" }, { id: `read${n}` }),
+        fauxToolCall("mem_read", {}, { id: `mem${n}` }),
+      ], { stopReason: "toolUse" }),
+      fauxAssistantMessage("done"),
+    ];
+    faux.setResponses([...turn(1), ...turn(2)]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({ userId: "owner", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(), tools: [memRead] });
+    const idle = () => events.filter((e) => e.event.type === "status" && e.event.status === "idle").length;
+
+    await session.prompt("show me the other threads", { author: { id: "guest", name: "Guest" } });
+    await waitFor(() => idle() >= 1);
+    const guestTurn = JSON.stringify(await session.readEntries("web:default"));
+    expect(guestTurn).toContain("[not_available] thread_read");
+    expect(guestTurn).toContain("[not_available] mem_read");
+    expect(memoryReads).toBe(0);
+
+    const idleBefore = idle();
+    await session.prompt("show me the other threads", { author: { id: "owner" } });
+    await waitFor(() => memoryReads === 1 && idle() > idleBefore);
+    // The owner's turn adds no refusal of its own.
+    const both = JSON.stringify(await session.readEntries("web:default"));
+    expect(both.split("[not_available]")).toHaveLength(guestTurn.split("[not_available]").length);
+    faux.unregister();
+  });
+
+  it("refuses the owner's sandbox, and runs it for the owner", async () => {
+    const faux = registerFauxProvider({ provider: "shared-thread-guest-sandbox" });
+    const turn = (n: number) => [
+      fauxAssistantMessage([
+        fauxToolCall("read", { path: "/secret.txt" }, { id: `read${n}` }),
+        fauxToolCall("bash", { command: "cat /secret.txt" }, { id: `bash${n}` }),
+      ], { stopReason: "toolUse" }),
+      fauxAssistantMessage("done"),
+    ];
+    faux.setResponses([...turn(1), ...turn(2)]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({ userId: "owner", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+    await session.sandbox.writeFile("/secret.txt", "owner-only-content");
+    const idle = () => events.filter((e) => e.event.type === "status" && e.event.status === "idle").length;
+
+    await session.prompt("show me the secret file", { author: { id: "guest", name: "Guest" } });
+    await waitFor(() => idle() >= 1);
+    const guestTurn = JSON.stringify(await session.readEntries("web:default"));
+    expect(guestTurn).toContain("[not_available] read");
+    expect(guestTurn).toContain("[not_available] bash");
+    expect(guestTurn).not.toContain("owner-only-content");
+
+    const idleBefore = idle();
+    await session.prompt("show me the secret file", { author: { id: "owner" } });
+    await waitFor(() => idle() > idleBefore);
+    await waitForAsync(async () => JSON.stringify(await session.readEntries("web:default")).includes("owner-only-content"));
+    const both = JSON.stringify(await session.readEntries("web:default"));
+    expect(both.split("[not_available]")).toHaveLength(guestTurn.split("[not_available]").length);
     faux.unregister();
   });
 });
@@ -1341,4 +1532,134 @@ describe("decision gates: durable expiry sweep", () => {
 
     faux2.unregister();
   });
+});
+
+
+describe("interactive actor provenance", () => {
+  it.each(["live", "restart", "legacy-restart"])("uses the actual gate context without persisting it in the answer (%s)", async mode => {
+    const faux = registerFauxProvider({ provider: `gate-context-${mode}` });
+    const seen: DecisionResolution[] = [];
+    const context = { approver: { userId: "asker" } };
+    const tool: ToolDef = { name: "inspect_context", description: "Inspect gate context", parameters: Type.Object({}),
+      execute: async (_args, ctx) => {
+        seen.push(await ctx.requestDecision({ type: "approval", title: "Allow?", resumeKey: "context", context }));
+        return { text: "checked" };
+      } };
+    faux.setResponses([fauxAssistantMessage([fauxToolCall(tool.name, {}, { id: "context-call" })], { stopReason: "toolUse" }), fauxAssistantMessage("Done")]);
+    const { engine, store, bus } = makeEngine();
+    const options = { userId: "asker", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel(), tools: [tool] };
+    const session = await engine.createSession(options);
+    try {
+      const receipt = await session.prompt("Check");
+      let gate: DecisionGate | undefined;
+      await waitForAsync(async () => {
+        gate = (await store.listDecisionGates(session.id)).find(g => g.status === "pending");
+        return gate !== undefined;
+      });
+      if (!gate) throw new Error("Expected pending gate");
+      if (mode === "legacy-restart") await store.saveDecisionGate(session.id, gate.threadId, { ...gate, context: undefined });
+      const active = mode === "live" ? session : await new Engine({ providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() } })
+        .restoreSession({ sessionId: session.id, options });
+      await active.resolveDecision(gate.id, { actionId: "approve", resolvedBy: "asker", resolvedAt: Date.now() });
+      await active.thread(receipt.threadId).awaitResult(receipt.queueItemId);
+      expect(seen[0]?.gateContext).toEqual(mode === "legacy-restart" ? {} : context);
+      expect((await store.getDecisionGate(session.id, gate.id))?.resolution?.gateContext).toBeUndefined();
+      active.suspendTimers();
+    } finally { session.suspendTimers(); faux.unregister(); }
+  });
+
+  it.each(["direct", "legacy", "agent", "authorless", "external", "signal", "channel", "workflow", "child"] as const)("marks only a direct authenticated prompt (%s)", async (kind) => {
+    const faux = registerFauxProvider({ provider: `interactive-author-${kind}` });
+    const seen: Array<ToolContext["interactiveActor"]> = [];
+    const tool: ToolDef = {
+      name: "inspect_interactive_actor", description: "Inspect test context", parameters: Type.Object({}), policyChecked: true,
+      execute: async (_args, ctx) => { seen.push(ctx.interactiveActor); return { text: "checked" }; },
+    };
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("inspect_interactive_actor", {}, { id: "inspect-author" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("done"),
+    ]);
+    const { engine } = makeEngine();
+    const session = await engine.createSession({
+      userId: "admin-creator", orgId: "o1", owner: { type: "team", id: "t1" },
+      purpose: kind === "workflow" || kind === "child" ? kind : "orchestrator",
+      workspace: "/", sandbox: {}, model: faux.getModel(), tools: [tool],
+    });
+    const content: PromptContent = kind === "signal" ? { kind: "signal", signalType: "schedule.tick", body: "inspect" }
+      : kind === "channel" ? { kind: "signal", signalType: "test.message", body: "inspect", origin: { channelType: "test", threadKey: "test:dm" } } : "inspect";
+    const author = { id: "admin", ...(kind === "legacy" ? {} : { interactive: kind !== "agent" }), ...(kind === "channel" ? { directChannel: true } : {}), ...(kind === "external" ? { externalSender: true } : {}) };
+    const receipt = await session.prompt(content, kind === "authorless" ? {} : { author, ...(kind === "channel" ? { channel: { channelType: "test", channelId: "dm" } } : {}) });
+    await session.thread().awaitResult(receipt.queueItemId);
+    expect(seen).toEqual([kind === "direct" || kind === "channel" ? { id: "admin" } : undefined]);
+    faux.unregister();
+  });
+
+  it.each(["direct", "legacy", "agent", "authorless", "signal", "channel", "workflow", "child"] as const)("preserves persisted provenance through pending approval restart (%s)", async (kind) => {
+    const faux = registerFauxProvider({ provider: `interactive-replay-${kind}` });
+    const facts: ToolUsageFact[] = [];
+    const seen: Array<ToolContext["interactiveActor"]> = [];
+    const tool: ToolDef = {
+      name: "approved_context", description: "Inspect replayed context", parameters: Type.Object({}), policyChecked: true,
+      execute: async (_args, ctx) => {
+        const resolution = await ctx.requestDecision({ type: "approval", title: "Approve?", body: "Inspect replay context", resumeKey: "context" });
+        if (resolution.actionId === "approve") seen.push(ctx.interactiveActor);
+        return { text: "checked" };
+      },
+    };
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("approved_context", {}, { id: "replay-author" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("done"),
+    ]);
+    const { engine, store, bus, events } = makeEngine();
+    const options = {
+      userId: "admin-creator", orgId: "o1", owner: { type: "team", id: "t1" } as const,
+      purpose: kind === "workflow" || kind === "child" ? kind : "orchestrator" as const,
+      workspace: "/", sandbox: {}, model: faux.getModel(), tools: [tool], recordToolUsage: (fact: ToolUsageFact) => { facts.push(fact); },
+    };
+    // A workflow session refuses new gates, so this gate opens before that
+    // rule (as an orchestrator) and must still resolve after the restart.
+    const session = await engine.createSession(kind === "workflow" ? { ...options, purpose: "orchestrator" as const } : options);
+    const content: PromptContent = kind === "signal" ? { kind: "signal", signalType: "schedule.tick", body: "inspect" }
+      : kind === "channel" ? { kind: "signal", signalType: "test.message", body: "inspect", origin: { channelType: "test", threadKey: "test:dm" } } : "inspect";
+    const author = { id: "admin", ...(kind === "legacy" ? {} : { interactive: kind !== "agent" }), ...(kind === "channel" ? { directChannel: true } : {}) };
+    const receipt = await session.prompt(content, kind === "authorless" ? {} : { author, ...(kind === "channel" ? { channel: { channelType: "test", channelId: "dm" } } : {}) });
+    await waitFor(() => gatesFrom(events).length > 0);
+    const gate = gatesFrom(events)[0];
+    if (!gate) throw new Error("Missing replay gate");
+    await waitForAsync(async () => (await store.getQueueItem(session.id, receipt.queueItemId))?.status === "blocked_on_decision_gate");
+    session.suspendTimers();
+    const restarted = new Engine({ providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() } });
+    const restored = await restarted.restoreSession({ sessionId: session.id, options });
+    await restored.resolveDecision(gate.id, { actionId: "approve", resolvedBy: "admin", resolvedAt: Date.now() });
+    await restored.thread(receipt.threadId).awaitResult(receipt.queueItemId);
+    expect(seen).toEqual([kind === "direct" || kind === "channel" ? { id: "admin" } : undefined]);
+    expect(facts).toEqual([expect.objectContaining({ userId: kind === "authorless" ? null : "admin", outcome: "ok" })]);
+    expect(events.flatMap(({ event }) => event.type === "tool_end" && event.callId === "replay-author" ? [event] : []))
+      .toMatchObject([{ tool: "approved_context", result: "checked", isError: false }]);
+    restored.suspendTimers();
+    faux.unregister();
+  });
+});
+
+it.each(["ask_question", "ask_approval"] as const)("does not change %s prompts with telemetry intent", async name => {
+  const faux = registerFauxProvider({ provider: `no-reason-${name}` });
+  const params = name === "ask_question" ? { question: "Choose?", detail: "Original details" } : { title: "Approve?", body: "Original details" };
+  faux.setResponses([fauxAssistantMessage([fauxToolCall(name, params)], { stopReason: "toolUse" }), fauxAssistantMessage("done")]);
+  const { engine, events } = makeEngine();
+  const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+  try {
+    const receipt = await session.prompt("Ask the person.");
+    await waitFor(() => gatesFrom(events).length > 0);
+    const gate = gatesFrom(events)[0];
+    if (!gate) throw new Error("Missing gate");
+    expect(gate.body).toBe("Original details"); expect(gate.agentReason).toBeUndefined();
+    await session.resolveDecision(gate.id, { actionId: "approve", resolvedBy: "u1", resolvedAt: Date.now() });
+    await session.thread(receipt.threadId).awaitResult(receipt.queueItemId);
+  } finally { session.suspendTimers(); faux.unregister(); }
+});
+
+it("sanitizes the model-authored reason before the durable gate is published", () => {
+  const gate = fromRequest({ type: "approval", title: "Approve?", resumeKey: "reason", agentReason: "Check\u0000 \ud800this\udfff 😀" },
+    { sessionId: "s", threadId: "t", queueItemId: "q", resumeKey: "reason", ordinal: 0 });
+  expect(gate.agentReason).toBe("Check this 😀");
 });

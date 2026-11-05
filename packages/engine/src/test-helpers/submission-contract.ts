@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { ConflictError, NotFoundError, PendingCapError, StaleAttemptError, ValidationError } from "../errors.js";
+import { SUBMISSION_TIMEOUT_MS } from "../submission.js";
+import { CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, TOOL_SCOPE_KEY, UNATTENDED_WORKFLOW_KEY, WORKFLOW_STEP_KEY } from "@valet/shared";
 import type {
   MessageEntry,
   QueueItem,
@@ -74,6 +76,24 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
 
     // --- Admission ---
 
+    it.each([THREAD_ID, "other-thread"])("clamps continuation scope at claim using current metadata from %s", async (sourceThreadId) => {
+      const item = makeItem({ metadata: { [INHERIT_TOOL_SCOPE_KEY]: true, [TOOL_SCOPE_KEY]: { actions: ["demo.echo"] } } });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, item);
+      // The scope changed after the driver's snapshot/admission, on either thread.
+      await store.saveThread(SESSION_ID, { ...newThread(sourceThreadId, sourceThreadId), metadata: { [CONTINUATION_TOOL_SCOPE_KEY]: { tools: [], actions: [] } } });
+      const claimed = await store.claimSubmission({ sessionId: SESSION_ID, threadId: THREAD_ID, itemId: item.id, attemptId: "a1", ownerId: "host" });
+      expect(claimed?.metadata?.[TOOL_SCOPE_KEY]).toEqual({ tools: [], actions: [] });
+      expect((await store.getQueueItem(SESSION_ID, item.id))?.metadata?.[TOOL_SCOPE_KEY]).toEqual({ tools: [], actions: [] });
+    });
+
+    it("leaves a new human task independent of the previous continuation ceiling", async () => {
+      await store.saveThread(SESSION_ID, { ...newThread(), metadata: { [CONTINUATION_TOOL_SCOPE_KEY]: { tools: [], actions: [] } } });
+      const item = makeItem();
+      await store.admitSubmission(SESSION_ID, THREAD_ID, item);
+      const claimed = await store.claimSubmission({ sessionId: SESSION_ID, threadId: THREAD_ID, itemId: item.id, attemptId: "a1", ownerId: "host" });
+      expect(claimed?.metadata?.[TOOL_SCOPE_KEY]).toBeUndefined();
+    });
+
     it("admits and reads back a submission", async () => {
       const item = makeItem();
       const result = await store.admitSubmission(SESSION_ID, THREAD_ID, item);
@@ -82,6 +102,17 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       expect(result.item).toEqual(item);
       const loaded = await store.getQueueItem(SESSION_ID, item.id);
       expect(loaded).toEqual(item);
+    });
+
+    it("recovers a receipt by dispatch ID before and after settlement, scoped to the session", async () => {
+      const item = makeItem({ dispatchId: "recover-receipt" });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, item);
+      expect(await store.getQueueItemByDispatchId(SESSION_ID, "recover-receipt")).toEqual(item);
+      expect(await store.getQueueItemByDispatchId(SESSION_ID, "missing")).toBeNull();
+      await store.saveSession(newSession({ id: "other-session", orgId: "other-org" }));
+      expect(await store.getQueueItemByDispatchId("other-session", "recover-receipt")).toBeNull();
+      await store.settleUnclaimed(SESSION_ID, THREAD_ID, item.id, { outcome: "completed" });
+      expect(await store.getQueueItemByDispatchId(SESSION_ID, "recover-receipt")).toMatchObject({ id: item.id, status: "settled" });
     });
 
     it("same dispatchId + same content returns the original item, admitted=false", async () => {
@@ -232,6 +263,333 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       expect(result.supersededItemIds).toContain(source.id);
     });
 
+    it("settleUnclaimed with onlyIfUnsuperseded refuses a promoted source and a claimed item", async () => {
+      const source = makeItem({ createdAt: 100, updatedAt: 100 });
+      const other = makeItem({ createdAt: 150, updatedAt: 150 });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, source);
+      await store.admitSubmission(SESSION_ID, THREAD_ID, other);
+      await store.admitSubmission(SESSION_ID, THREAD_ID, makeItem({
+        createdAt: 200, updatedAt: 200, metadata: { promotedFromItemId: source.id },
+      }), { steer: true, promoteFromItemId: source.id });
+
+      const cancel = (id: string) => store.settleUnclaimed(SESSION_ID, THREAD_ID, id, { outcome: "aborted" }, { onlyIfUnsuperseded: true });
+      expect(await cancel(source.id)).toBe(false);
+      expect((await store.getQueueItem(SESSION_ID, source.id))?.status).not.toBe("settled");
+
+      await store.claimSubmission({ sessionId: SESSION_ID, threadId: THREAD_ID, itemId: other.id, attemptId: "att-o", ownerId: "o" });
+      expect(await cancel(other.id)).toBe(false);
+
+      const fresh = makeItem({ createdAt: 300, updatedAt: 300 });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, fresh);
+      expect(await cancel(fresh.id)).toBe(true);
+      expect((await store.getQueueItem(SESSION_ID, fresh.id))?.outcome).toEqual({ outcome: "aborted" });
+    });
+
+    it("promotion steer preserves queued siblings and claims the promoted successor first", async () => {
+      const active = makeItem({ createdAt: 100, updatedAt: 100 });
+      const q1 = makeItem({ createdAt: 200, updatedAt: 200, content: "q1" });
+      const q2 = makeItem({ createdAt: 300, updatedAt: 300, content: "q2" });
+      const q3 = makeItem({ createdAt: 400, updatedAt: 400, content: "q3" });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, active);
+      await store.admitSubmission(SESSION_ID, THREAD_ID, q1);
+      await store.admitSubmission(SESSION_ID, THREAD_ID, q2);
+      await store.admitSubmission(SESSION_ID, THREAD_ID, q3);
+      await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: active.id,
+        attemptId: "att-active",
+        ownerId: "o",
+      });
+      await store.setSubmissionBlocked(
+        SESSION_ID,
+        THREAD_ID,
+        active.id,
+        true,
+        { itemId: active.id, attemptId: "att-active" },
+      );
+
+      const promoted = makeItem({
+        createdAt: 500,
+        updatedAt: 500,
+        content: q2.content,
+        metadata: { promotedFromItemId: q2.id },
+      });
+      const admitted = await store.admitSubmission(
+        SESSION_ID,
+        THREAD_ID,
+        promoted,
+        {
+          steer: true,
+          steerScope: "active-and-source",
+          promoteFromItemId: q2.id,
+        },
+      );
+
+      expect(admitted.supersededItemIds.sort()).toEqual([active.id, q2.id].sort());
+      expect((await store.getQueueItem(SESSION_ID, q1.id))?.supersededByItemId).toBeUndefined();
+      expect((await store.getQueueItem(SESSION_ID, q3.id))?.supersededByItemId).toBeUndefined();
+      expect((await store.getQueueItem(SESSION_ID, q2.id))?.supersededByItemId).toBe(promoted.id);
+      expect(admitted.item.createdAt).toBeLessThan(q1.createdAt);
+
+      const claimPromoted = await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: promoted.id,
+        attemptId: "att-promoted",
+        ownerId: "o",
+      });
+      expect(claimPromoted?.id).toBe(promoted.id);
+      expect(
+        await store.claimSubmission({
+          sessionId: SESSION_ID,
+          threadId: THREAD_ID,
+          itemId: q1.id,
+          attemptId: "att-q1-too-soon",
+          ownerId: "o",
+        }),
+      ).toBeNull();
+      await store.reserveSettlement(
+        SESSION_ID,
+        THREAD_ID,
+        promoted.id,
+        { outcome: "completed" },
+        { itemId: promoted.id, attemptId: "att-promoted" },
+      );
+      await store.finalizeSettlement(
+        SESSION_ID,
+        THREAD_ID,
+        promoted.id,
+        { itemId: promoted.id, attemptId: "att-promoted" },
+      );
+
+      const claimQ1 = await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: q1.id,
+        attemptId: "att-q1",
+        ownerId: "o",
+      });
+      expect(claimQ1?.id).toBe(q1.id);
+      await store.reserveSettlement(
+        SESSION_ID,
+        THREAD_ID,
+        q1.id,
+        { outcome: "completed" },
+        { itemId: q1.id, attemptId: "att-q1" },
+      );
+      await store.finalizeSettlement(
+        SESSION_ID,
+        THREAD_ID,
+        q1.id,
+        { itemId: q1.id, attemptId: "att-q1" },
+      );
+
+      const claimQ3 = await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: q3.id,
+        attemptId: "att-q3",
+        ownerId: "o",
+      });
+      expect(claimQ3?.id).toBe(q3.id);
+      expect((await store.getQueueItem(SESSION_ID, q2.id))?.status).toBe("queued");
+    });
+
+    it("active steer supersedes only the running item and runs ahead of queued siblings", async () => {
+      const active = makeItem({ createdAt: 100, updatedAt: 100 });
+      const q1 = makeItem({ createdAt: 200, updatedAt: 200, content: "q1" });
+      const q2 = makeItem({ createdAt: 300, updatedAt: 300, content: "q2" });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, active);
+      await store.admitSubmission(SESSION_ID, THREAD_ID, q1);
+      await store.admitSubmission(SESSION_ID, THREAD_ID, q2);
+      await store.claimSubmission({
+        sessionId: SESSION_ID, threadId: THREAD_ID, itemId: active.id, attemptId: "att-active", ownerId: "o",
+      });
+
+      const edit = makeItem({ createdAt: 400, updatedAt: 400, content: "edited" });
+      const admitted = await store.admitSubmission(SESSION_ID, THREAD_ID, edit, { steer: true, steerScope: "active" });
+
+      expect(admitted.supersededItemIds).toEqual([active.id]);
+      expect((await store.getQueueItem(SESSION_ID, q1.id))?.supersededByItemId).toBeUndefined();
+      expect((await store.getQueueItem(SESSION_ID, q2.id))?.supersededByItemId).toBeUndefined();
+      expect(admitted.item.createdAt).toBeLessThan(q1.createdAt);
+
+      await store.reserveSettlement(SESSION_ID, THREAD_ID, active.id, { outcome: "superseded" }, { itemId: active.id, attemptId: "att-active" });
+      await store.finalizeSettlement(SESSION_ID, THREAD_ID, active.id, { itemId: active.id, attemptId: "att-active" });
+      expect(await store.claimSubmission({
+        sessionId: SESSION_ID, threadId: THREAD_ID, itemId: q1.id, attemptId: "att-q1", ownerId: "o",
+      })).toBeNull();
+      expect((await store.claimSubmission({
+        sessionId: SESSION_ID, threadId: THREAD_ID, itemId: edit.id, attemptId: "att-edit", ownerId: "o",
+      }))?.id).toBe(edit.id);
+    });
+
+    it.each(["same", "different-thread", "different-channel", "different-author", "no-origin", "not-entered"])("origin steering isolates %s conversations and keeps queued work", async (variant) => {
+      const active = makeItem({ createdAt: 100, updatedAt: 100, content: {
+        kind: "signal", signalType: "slack.message", body: "working", origin: { channelType: "slack", threadKey: "slack:D1:1", reply: "auto" },
+      } });
+      const queued = makeItem({ createdAt: 200, updatedAt: 200, content: "queued" });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, active);
+      await store.admitSubmission(SESSION_ID, THREAD_ID, queued);
+      await store.claimSubmission({ sessionId: SESSION_ID, threadId: THREAD_ID, itemId: active.id, attemptId: "origin-active", ownerId: "o" });
+      if (variant !== "not-entered") await store.appendEntries(SESSION_ID, THREAD_ID, [{
+        id: uid("e"), sessionId: SESSION_ID, threadId: THREAD_ID, parentId: null,
+        type: "message", role: "user", content: "working", createdAt: 100, queueItemId: active.id,
+      }], { itemId: active.id, attemptId: "origin-active" });
+      const incoming = makeItem({ createdAt: 300, updatedAt: 300, ...(variant === "different-author" ? { author: { id: "someone-else" } } : {}), content: variant === "no-origin" ? "web message" : {
+        kind: "signal", signalType: "slack.message", body: "reply", origin: {
+          channelType: variant === "different-channel" ? "telegram" : "slack",
+          threadKey: variant === "different-thread" ? "slack:D1:2" : "slack:D1:1", reply: "auto",
+        },
+      } });
+      const receipt = await store.admitSubmission(SESSION_ID, THREAD_ID, incoming, { steer: true, steerScope: "active-origin" });
+      expect(receipt.supersededItemIds).toEqual(variant === "same" ? [active.id] : []);
+      expect((await store.getQueueItem(SESSION_ID, queued.id))?.supersededByItemId).toBeUndefined();
+      expect(receipt.item.createdAt < queued.createdAt).toBe(variant === "same");
+    });
+
+    it.each([true, false])("origin correction carries queued requests atomically with matching active=%s", async (matchingActive) => {
+      const content = (body: string, threadKey = "slack:C1:1") => ({
+        kind: "signal" as const, signalType: "slack.message", body,
+        origin: { channelType: "slack", threadKey, reply: "auto" as const },
+      });
+      const sender = { id: "sender" };
+      const active = makeItem({ content: content("working", matchingActive ? "slack:C1:1" : "slack:C2:1"), createdAt: 100, author: sender });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, active);
+      await store.claimSubmission({ sessionId: SESSION_ID, threadId: THREAD_ID, itemId: active.id, attemptId: "carry-active", ownerId: "o" });
+      await store.appendEntries(SESSION_ID, THREAD_ID, [{ id: uid("e"), sessionId: SESSION_ID, threadId: THREAD_ID, parentId: null,
+        type: "message", role: "user", content: "working", createdAt: 100, queueItemId: active.id,
+      }], { itemId: active.id, attemptId: "carry-active" });
+      const deploy = makeItem({ content: content("deploy"), createdAt: 200, dispatchId: "carry-deploy", author: sender, metadata: { [TOOL_SCOPE_KEY]: { actions: ["deploy"] } } });
+      const unrelated = makeItem({ content: content("other work", "slack:C3:1"), createdAt: 210, author: sender });
+      const otherSender = makeItem({ content: content("other request"), createdAt: 220, author: { id: "other" } });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, deploy);
+      await store.admitSubmission(SESSION_ID, THREAD_ID, unrelated);
+      await store.admitSubmission(SESSION_ID, THREAD_ID, otherSender);
+      const stop = makeItem({ content: content("stop"), createdAt: 300, dispatchId: "carry-stop", author: sender });
+      const opts = { steer: true, steerScope: "active-origin" as const, maxPending: 4 };
+      const result = await store.admitSubmission(SESSION_ID, THREAD_ID, stop, opts);
+      expect(result.item.metadata?.carriedInputIds).toEqual([deploy.id]);
+      expect(result.item.author).toEqual(sender);
+      expect(result.item.metadata?.[TOOL_SCOPE_KEY]).toBeUndefined();
+      expect(await store.getQueueItem(SESSION_ID, deploy.id)).toMatchObject({ status: "settled", outcome: { outcome: "superseded" }, supersededByItemId: stop.id, author: sender });
+      expect((await store.getQueueItem(SESSION_ID, unrelated.id))?.supersededByItemId).toBeUndefined();
+      expect(await store.getQueueItem(SESSION_ID, otherSender.id)).toMatchObject({ status: "queued" });
+      expect((await store.getQueueItem(SESSION_ID, otherSender.id))?.supersededByItemId).toBeUndefined();
+      expect((await store.getQueueItem(SESSION_ID, active.id))?.supersededByItemId).toBe(matchingActive ? stop.id : undefined);
+      expect(await store.claimSubmission({ sessionId: SESSION_ID, threadId: THREAD_ID, itemId: deploy.id, attemptId: "unsafe-deploy", ownerId: "o" })).toBeNull();
+      const replay = await store.admitSubmission(SESSION_ID, THREAD_ID, stop, opts);
+      expect(replay.admitted).toBe(false);
+      expect(replay.item.metadata?.carriedInputIds).toEqual([deploy.id]);
+      const newest = makeItem({ content: content("keep stopped"), createdAt: 400, author: sender });
+      const next = await store.admitSubmission(SESSION_ID, THREAD_ID, newest, { steer: true, steerScope: "active-origin" });
+      expect(next.item.metadata?.carriedInputIds).toEqual([deploy.id, stop.id]);
+      expect(next.item.content).toEqual(newest.content);
+    });
+
+    it("enforces the cap after origin steering and dedups replays at capacity", async () => {
+      const content = { kind: "signal" as const, signalType: "slack.message", body: "work", origin: { channelType: "slack", threadKey: "slack:D1:1", reply: "auto" as const } };
+      const active = makeItem({ content });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, active);
+      await store.claimSubmission({ sessionId: SESSION_ID, threadId: THREAD_ID, itemId: active.id, attemptId: "origin-cap", ownerId: "o" });
+      await store.appendEntries(SESSION_ID, THREAD_ID, [{ id: uid("e"), sessionId: SESSION_ID, threadId: THREAD_ID, parentId: null, type: "message", role: "user", content: "work", createdAt: 100, queueItemId: active.id }], { itemId: active.id, attemptId: "origin-cap" });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, makeItem());
+      const opts = { steer: true, steerScope: "active-origin" as const, maxPending: 2 };
+      await expect(store.admitSubmission(SESSION_ID, THREAD_ID, makeItem(), opts)).rejects.toBeInstanceOf(PendingCapError);
+      const reply = makeItem({ content, dispatchId: "origin-cap-reply" });
+      expect((await store.admitSubmission(SESSION_ID, THREAD_ID, reply, opts)).supersededItemIds).toEqual([active.id]);
+      expect((await store.admitSubmission(SESSION_ID, THREAD_ID, reply, { ...opts, maxPending: 0 })).admitted).toBe(false);
+      expect((await store.admitSubmission(SESSION_ID, THREAD_ID, makeItem({ content }), opts)).item.metadata?.carriedInputIds).toEqual([reply.id]);
+    });
+
+    it.each(["manual", "unspecified", "bot", "unattended", "record-only", "other-thread", "other-session", "other-author"])("origin carry preserves %s queued inputs", async (variant) => {
+      const content = { kind: "signal" as const, signalType: "slack.message", body: "older",
+        origin: { channelType: "slack", threadKey: "slack:C1:1", reply: "auto" as const } };
+      const incoming = makeItem({ content: { ...content, body: "correction" } });
+      const older = makeItem({ content: variant === "manual" ? { ...content, origin: { ...content.origin, reply: "manual" } } :
+        variant === "unspecified" ? { ...content, origin: { channelType: "slack", threadKey: "slack:C1:1" } } :
+        variant === "bot" ? { ...content, attributes: { senderBot: "true" } } : content,
+        metadata: variant === "unattended" ? { unattendedDelivery: true } : variant === "record-only" ? { recordOnly: true } : undefined,
+        ...(variant === "other-author" ? { author: { id: "other" } } : {}) });
+      let sessionId = SESSION_ID;
+      let threadId = THREAD_ID;
+      if (variant === "other-session") { sessionId = "other-session"; await store.saveSession(newSession({ id: sessionId })); }
+      if (variant === "other-thread" || variant === "other-session") {
+        threadId = "other-thread";
+        await store.saveThread(sessionId, { ...newThread(threadId, threadId), sessionId });
+      }
+      older.threadId = threadId;
+      await store.admitSubmission(sessionId, threadId, older);
+      const result = await store.admitSubmission(SESSION_ID, THREAD_ID, incoming, { steer: true, steerScope: "active-origin" });
+      expect(result.item.metadata?.carriedInputIds).toBeUndefined();
+      expect(await store.getQueueItem(sessionId, older.id)).toMatchObject({ status: "queued" });
+      expect(result.supersededItemIds).toEqual([]);
+    });
+
+    it("strips caller carry references before they can become transitive", async () => {
+      const content = { kind: "signal" as const, signalType: "slack.message", body: "input", origin: { channelType: "slack", threadKey: "slack:C1:1", reply: "auto" as const } };
+      const older = makeItem({ content, dispatchId: "forged-carry-replay", metadata: { carriedInputIds: ["forged-private-input"] } });
+      const first = await store.admitSubmission(SESSION_ID, THREAD_ID, older);
+      expect(first.item.metadata?.carriedInputIds).toBeUndefined();
+      const correction = makeItem({ content: { ...content, body: "correction" }, metadata: { carriedInputIds: ["forged-other-input"] } });
+      const next = await store.admitSubmission(SESSION_ID, THREAD_ID, correction, { steer: true, steerScope: "active-origin" });
+      expect(next.item.metadata?.carriedInputIds).toEqual([older.id]);
+      expect((await store.admitSubmission(SESSION_ID, THREAD_ID, older)).item.outcome?.outcome).toBe("superseded");
+    });
+
+    it("rejects a carry overflow without changing receipts or admitting the correction", async () => {
+      const content = { kind: "signal" as const, signalType: "slack.message", body: "input", origin: { channelType: "slack", threadKey: "slack:C1:1", reply: "auto" as const } };
+      const opts = { steer: true, steerScope: "active-origin" as const };
+      let previous = makeItem({ content });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, previous);
+      for (let i = 0; i < 128; i++) {
+        const next = makeItem({ content: { ...content, body: `correction ${i}` } });
+        await store.admitSubmission(SESSION_ID, THREAD_ID, next, opts);
+        previous = next;
+      }
+      const overflow = makeItem({ content: { ...content, body: "overflow" } });
+      await expect(store.admitSubmission(SESSION_ID, THREAD_ID, overflow, opts)).rejects.toThrow("Too many queued Slack inputs");
+      expect(await store.getQueueItem(SESSION_ID, overflow.id)).toBeNull();
+      expect(await store.getQueueItem(SESSION_ID, previous.id)).toMatchObject({ status: "queued" });
+      expect((await store.getQueueItem(SESSION_ID, previous.id))?.supersededByItemId).toBeUndefined();
+    });
+
+    it("refuses an unsupported carried attachment without changing either receipt", async () => {
+      const content = { kind: "signal" as const, signalType: "slack.message", body: "input", origin: { channelType: "slack", threadKey: "slack:C1:1", reply: "auto" as const } };
+      const original = makeItem({ content: { ...content, attachments: [{ type: "image", mimeType: "image/png", name: "missing-image" }] } });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, original);
+      const correction = makeItem({ content: { ...content, body: "correction" } });
+      await expect(store.admitSubmission(SESSION_ID, THREAD_ID, correction, { steer: true, steerScope: "active-origin" })).rejects.toThrow("attachment cannot be carried");
+      expect(await store.getQueueItem(SESSION_ID, correction.id)).toBeNull();
+      expect(await store.getQueueItem(SESSION_ID, original.id)).toMatchObject({ status: "queued" });
+      expect((await store.getQueueItem(SESSION_ID, original.id))?.supersededByItemId).toBeUndefined();
+    });
+
+    it("reconstructs promotion carry references from the locked source instead of caller metadata", async () => {
+      const content = { kind: "signal" as const, signalType: "slack.message", body: "image", origin: { channelType: "slack", threadKey: "slack:C1:1", reply: "auto" as const } };
+      const image = makeItem({ content: { ...content, attachments: [{ type: "image", mimeType: "image/png", data: new Uint8Array([1, 2, 3]) }] } });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, image);
+      const correction = makeItem({ content: { ...content, body: "stop" } });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, correction, { steer: true, steerScope: "active-origin" });
+      const promoted = makeItem({ content: correction.content, metadata: { carriedInputIds: ["forged"], carriedInputBridgeIds: ["forged-source"] } });
+      const result = await store.admitSubmission(SESSION_ID, THREAD_ID, promoted, { steer: true, steerScope: "active-and-source", promoteFromItemId: correction.id });
+      expect(result.item.metadata?.carriedInputIds).toEqual([image.id]);
+      expect(result.item.metadata?.carriedInputBridgeIds).toEqual([correction.id]);
+      expect((await store.getQueueItem(SESSION_ID, image.id))?.supersededByItemId).toBe(correction.id);
+      expect((await store.getQueueItem(SESSION_ID, correction.id))?.supersededByItemId).toBe(promoted.id);
+      expect((await store.getQueueItem(SESSION_ID, image.id))?.content).toEqual(image.content);
+    });
+
+    it("active steer on an idle thread keeps its admission time", async () => {
+      const edit = makeItem({ createdAt: 400, updatedAt: 400 });
+      const admitted = await store.admitSubmission(SESSION_ID, THREAD_ID, edit, { steer: true, steerScope: "active" });
+      expect(admitted.supersededItemIds).toEqual([]);
+      expect(admitted.item.createdAt).toBe(400);
+      await expect(store.admitSubmission(SESSION_ID, THREAD_ID, makeItem(), { steerScope: "active" }))
+        .rejects.toBeInstanceOf(ValidationError);
+    });
+
     it("an idempotent replay at the cap dedups instead of throwing PendingCapError", async () => {
       const first = await store.admitSubmission(
         SESSION_ID,
@@ -272,6 +630,25 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       expect(claimed?.ownerId).toBe("owner-1");
       expect(claimed?.attemptCount).toBe(1);
       expect(claimed?.leaseExpiresAt).toBeGreaterThan(Date.now());
+    });
+
+    it("starts the execution clock at a claim with attemptCount 0, not at admission", async () => {
+      const admittedAt = Date.now() - 5 * SUBMISSION_TIMEOUT_MS;
+      const item = makeItem({ createdAt: admittedAt, updatedAt: admittedAt });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, item);
+      const before = Date.now();
+      const claim = { sessionId: SESSION_ID, threadId: THREAD_ID, itemId: item.id, ownerId: "o" };
+      const first = await store.claimSubmission({ ...claim, attemptId: "att-1" });
+      const timeoutAt = first?.timeoutAt ?? 0;
+      expect(timeoutAt).toBeGreaterThanOrEqual(before + SUBMISSION_TIMEOUT_MS);
+      expect(timeoutAt).toBeLessThanOrEqual(Date.now() + SUBMISSION_TIMEOUT_MS);
+      expect((await store.getQueueItem(SESSION_ID, item.id))?.timeoutAt).toBe(timeoutAt);
+
+      // A plain release keeps attemptCount, so the next claim keeps the deadline.
+      expect(await store.releaseSubmission(SESSION_ID, THREAD_ID, item.id, { itemId: item.id, attemptId: "att-1" })).toBe(true);
+      const again = await store.claimSubmission({ ...claim, attemptId: "att-2" });
+      expect(again?.attemptCount).toBe(2);
+      expect(again?.timeoutAt).toBe(timeoutAt);
     });
 
     it("second concurrent claim for the same item returns null", async () => {
@@ -499,6 +876,48 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       expect(loadedA?.supersededByItemId).toBe(s.id);
       expect(loadedB?.supersededByItemId).toBe(s.id);
       expect(loadedS?.supersededByItemId).toBeUndefined();
+    });
+
+    it("steer leaves workflow tasks and steps queued and running", async () => {
+      const step = makeItem({ createdAt: 100, updatedAt: 100, metadata: { [UNATTENDED_WORKFLOW_KEY]: true, [WORKFLOW_STEP_KEY]: { runId: "run", nodeId: "node" } } });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, step);
+      await store.claimSubmission({ sessionId: SESSION_ID, threadId: THREAD_ID, itemId: step.id, attemptId: "att-step", ownerId: "o" });
+      const task = makeItem({ createdAt: 150, updatedAt: 150, metadata: { [UNATTENDED_WORKFLOW_KEY]: true } });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, task);
+      const followup = makeItem({ createdAt: 200, updatedAt: 200, content: "follow-up" });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, followup);
+
+      const steer = await store.admitSubmission(SESSION_ID, THREAD_ID, makeItem({ createdAt: 300, updatedAt: 300 }), { steer: true });
+      expect(steer.supersededItemIds).toEqual([followup.id]);
+      const active = await store.admitSubmission(SESSION_ID, THREAD_ID, makeItem({ createdAt: 400, updatedAt: 400 }), { steer: true, steerScope: "active" });
+      expect(active.supersededItemIds).toEqual([]);
+      expect((await store.getQueueItem(SESSION_ID, step.id))?.supersededByItemId).toBeUndefined();
+      expect((await store.getQueueItem(SESSION_ID, task.id))?.supersededByItemId).toBeUndefined();
+    });
+
+    it("a steer counts the workflow items it keeps against the pending cap", async () => {
+      const workflow = { [UNATTENDED_WORKFLOW_KEY]: true };
+      await store.admitSubmission(SESSION_ID, THREAD_ID, makeItem({ createdAt: 100, updatedAt: 100, metadata: workflow }));
+      await store.admitSubmission(SESSION_ID, THREAD_ID, makeItem({ createdAt: 200, updatedAt: 200, metadata: workflow }));
+      await store.admitSubmission(SESSION_ID, THREAD_ID, makeItem({ createdAt: 300, updatedAt: 300, content: "follow-up" }));
+      // Two kept workflow items fill a cap of 2; the follow-up does not count.
+      await expect(store.admitSubmission(SESSION_ID, THREAD_ID, makeItem({ createdAt: 400, updatedAt: 400 }), { steer: true, maxPending: 2 }))
+        .rejects.toBeInstanceOf(PendingCapError);
+      const admitted = await store.admitSubmission(SESSION_ID, THREAD_ID, makeItem({ createdAt: 500, updatedAt: 500 }), { steer: true, maxPending: 3 });
+      expect(admitted.supersededItemIds).toHaveLength(1);
+    });
+
+    it("a full steer counts a later item it keeps against the pending cap", async () => {
+      // A delayed admission or clock skew can leave a queued item newer than the steer.
+      await store.admitSubmission(SESSION_ID, THREAD_ID, makeItem({ createdAt: 500, updatedAt: 500, content: "later" }));
+      await expect(store.admitSubmission(SESSION_ID, THREAD_ID, makeItem({ createdAt: 400, updatedAt: 400 }), { steer: true, maxPending: 1 }))
+        .rejects.toBeInstanceOf(PendingCapError);
+    });
+
+    it("a scoped steer counts every item it keeps against the pending cap", async () => {
+      await store.admitSubmission(SESSION_ID, THREAD_ID, makeItem({ createdAt: 100, updatedAt: 100, content: "queued" }));
+      await expect(store.admitSubmission(SESSION_ID, THREAD_ID, makeItem({ createdAt: 200, updatedAt: 200 }), { steer: true, steerScope: "active", maxPending: 1 }))
+        .rejects.toBeInstanceOf(PendingCapError);
     });
 
     it("steer does not stamp settled items or items admitted after it", async () => {
@@ -1185,6 +1604,111 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
 
     // --- Abort + blocked ---
 
+    it("requestAbort can target one item and rejects a different thread scope", async () => {
+      const a = makeItem();
+      const b = makeItem();
+      await store.admitSubmission(SESSION_ID, THREAD_ID, a);
+      await store.admitSubmission(SESSION_ID, THREAD_ID, b);
+      await store.requestAbort(SESSION_ID, "other-thread", a.id);
+      expect((await store.getQueueItem(SESSION_ID, a.id))?.abortRequestedAt).toBeUndefined();
+      await store.requestAbort(SESSION_ID, THREAD_ID, a.id);
+      expect((await store.getQueueItem(SESSION_ID, a.id))?.abortRequestedAt).toBeDefined();
+      expect((await store.getQueueItem(SESSION_ID, b.id))?.abortRequestedAt).toBeUndefined();
+    });
+
+    it("requestAbortActiveSubmission stamps only the running item", async () => {
+      const active = makeItem({ createdAt: 100, updatedAt: 100 });
+      const queued = makeItem({ createdAt: 200, updatedAt: 200 });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, active);
+      await store.admitSubmission(SESSION_ID, THREAD_ID, queued);
+      await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: active.id,
+        attemptId: "att-active-abort",
+        ownerId: "o",
+      });
+
+      const stamped = await store.requestAbortActiveSubmission(SESSION_ID, THREAD_ID, active.id);
+
+      expect(stamped?.id).toBe(active.id);
+      expect(stamped?.abortRequestedAt).toBeDefined();
+      expect((await store.getQueueItem(SESSION_ID, active.id))?.abortRequestedAt).toBeDefined();
+      expect((await store.getQueueItem(SESSION_ID, queued.id))?.abortRequestedAt).toBeUndefined();
+    });
+
+    it("keeps a repeated targeted abort from stamping a running successor", async () => {
+      const first = makeItem({ createdAt: 100, updatedAt: 100 });
+      const successor = makeItem({ createdAt: 200, updatedAt: 200 });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, first);
+      await store.admitSubmission(SESSION_ID, THREAD_ID, successor);
+      await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: first.id,
+        attemptId: "att-first-targeted-abort",
+        ownerId: "o",
+      });
+
+      expect(
+        (await store.requestAbortActiveSubmission(SESSION_ID, THREAD_ID, first.id))?.id,
+      ).toBe(first.id);
+      await store.forceSettle(SESSION_ID, first.id, "aborted");
+      await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: successor.id,
+        attemptId: "att-successor-targeted-abort",
+        ownerId: "o",
+      });
+
+      expect(
+        await store.requestAbortActiveSubmission(SESSION_ID, THREAD_ID, first.id),
+      ).toBeNull();
+      expect(
+        (await store.getQueueItem(SESSION_ID, successor.id))?.abortRequestedAt,
+      ).toBeUndefined();
+      expect(
+        (await store.requestAbortActiveSubmission(SESSION_ID, THREAD_ID, successor.id))?.id,
+      ).toBe(successor.id);
+      expect(
+        (await store.getQueueItem(SESSION_ID, successor.id))?.abortRequestedAt,
+      ).toBeDefined();
+    });
+
+    it("requestAbortActiveSubmission stamps a blocked durable head", async () => {
+      const blocked = makeItem();
+      await store.admitSubmission(SESSION_ID, THREAD_ID, blocked);
+      const claimed = await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: blocked.id,
+        attemptId: "att-blocked-abort",
+        ownerId: "o",
+      });
+      await store.setSubmissionBlocked(
+        SESSION_ID,
+        THREAD_ID,
+        blocked.id,
+        true,
+        { itemId: blocked.id, attemptId: claimed!.attemptId! },
+      );
+
+      const stamped = await store.requestAbortActiveSubmission(SESSION_ID, THREAD_ID, blocked.id);
+
+      expect(stamped?.id).toBe(blocked.id);
+      expect(stamped?.status).toBe("blocked_on_decision_gate");
+      expect(stamped?.abortRequestedAt).toBeDefined();
+    });
+
+    it("requestAbortActiveSubmission ignores a queued head", async () => {
+      const queued = makeItem();
+      await store.admitSubmission(SESSION_ID, THREAD_ID, queued);
+
+      expect(await store.requestAbortActiveSubmission(SESSION_ID, THREAD_ID, queued.id)).toBeNull();
+      expect((await store.getQueueItem(SESSION_ID, queued.id))?.abortRequestedAt).toBeUndefined();
+    });
+
     it("requestAbort stamps abortRequestedAt on unsettled items in scope only; first write wins", async () => {
       const otherThreadId = "th-2";
       await store.saveThread(SESSION_ID, newThread(otherThreadId, "web:other"));
@@ -1334,6 +1858,13 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       const other = all.find((i) => i.id === unsettledOther.id);
       expect(here?.sessionId).toBe(SESSION_ID);
       expect(other?.sessionId).toBe(OTHER);
+      expect((await store.listAllUnsettledSubmissions([SESSION_ID])).map((i) => i.id)).toEqual([unsettledHere.id]);
+      expect(await store.listAllUnsettledSubmissions([])).toEqual([]);
+      expect(await store.listAllUnsettledSubmissions(["missing"])).toEqual([]);
+      const scoped = await store.listAllUnsettledSubmissions([
+        ...Array.from({ length: 1_001 }, (_, i) => `missing-${i}`), OTHER, OTHER,
+      ]);
+      expect(scoped.map((i) => i.id)).toEqual([unsettledOther.id]);
     });
 
     it("forceSettle on a running item settles it, clears markers, and fences off the old attempt", async () => {

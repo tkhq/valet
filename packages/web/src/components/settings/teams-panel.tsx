@@ -1,8 +1,23 @@
-import { TeamDeletionRequests } from "./team-deletion-requests";
-import { useEffect, useId, useMemo, useRef, useState } from "react";
-import { Link } from "@tanstack/react-router";
-import { Bot, ChevronRight, MoreHorizontal, UserPlus, X } from "lucide-react";
+import { LineEditor } from "~/components/presence/editor/line-editor";
+import { Link, useNavigate } from "@tanstack/react-router";
 import type { OrgDirectoryUserWire, TeamSummary } from "@valet/api/wire";
+import { ChevronRight, MoreHorizontal, UserPlus, X } from "lucide-react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { ApiError } from "~/api/client";
+import {
+  useAddTeamMember,
+  useCreateTeam,
+  useDeleteTeam,
+  useMe,
+  useModelTiers,
+  useModels,
+  usePatchTeam,
+  useRemoveTeamMember,
+  useSetTeamMemberRole,
+  useTeamMembers,
+  useTeams,
+} from "~/api/settings";
+import { TeamCredentials } from "~/components/integrations/team-credentials";
 import {
   Avatar,
   AvatarFallback,
@@ -20,31 +35,20 @@ import {
   Popover,
   PopoverContent,
   PopoverTrigger,
+  SelectMenu,
+  textLinkClass,
 } from "~/components/primitives";
-import { TeamOnePasswordToken } from "./team-onepassword-token";
-import { ApiError } from "~/api/client";
-import { defaultAssistantFor, useAssistants } from "~/api/assistants";
+import { FieldRow } from "~/components/settings/field-row";
+import { ModelCombobox } from "~/components/settings/model-combobox";
+import { ReasoningSelect } from "~/components/settings/reasoning-select";
+import { SubSection } from "~/components/settings/section";
 import { errorText } from "~/lib/error-text";
 import { formatDate } from "~/lib/format-when";
-import { matchesNeedle } from "~/lib/text-match";
-import {
-  useAddTeamMember,
-  useCreateTeam,
-  useDeleteTeam,
-  useMe,
-  useModels,
-  usePatchTeam,
-  useRemoveTeamMember,
-  useSetTeamMemberRole,
-  useTeamMembers,
-  useTeams,
-} from "~/api/settings";
-import { ModelCombobox } from "~/components/settings/model-combobox";
-import { TeamCredentials } from "~/components/integrations/team-credentials";
-import { ReasoningSelect } from "~/components/settings/reasoning-select";
+import { fallbackLabel, isSizeTier, TIER_LABELS } from "~/lib/model-tiers";
 import { curatedForCatalogId } from "~/lib/models";
-import { isSizeTier, TIER_LABELS } from "~/lib/model-tiers";
 import { reasoningLabelFor } from "~/lib/reasoning";
+import { matchesNeedle } from "~/lib/text-match";
+import { TeamDeletionRequests } from "./team-deletion-requests";
 
 /**
  * Says what a declared team's controls do and do not survive.
@@ -86,10 +90,15 @@ const DELETE_TEAM_NOTE =
 export function TeamsPanel({
   orgMembers,
   teamId,
+  page = false,
 }: {
   orgMembers: OrgDirectoryUserWire[];
   /** Pin the panel to the selected workspace, without team creation. */
   teamId?: string;
+  /** The team's own settings page (`/settings/teams/$teamId`), which already
+   * names the team and links its threads: the row drops its collapsible
+   * header and stays open. */
+  page?: boolean;
 }) {
   const teamsQ = useTeams();
   const meQ = useMe();
@@ -116,14 +125,15 @@ export function TeamsPanel({
       )}
 
       {ready && teamsQ.data && teams.length > 0 && (
-        <div className="divide-y divide-line border-t border-line">
+        <div className={page ? undefined : "divide-y divide-line border-t border-line"}>
           {teams.map((team) => (
             <TeamRow
               key={team.id}
               team={team}
               orgMembers={orgMembers}
               canMutate={orgAdmin || team.callerRole === "admin"}
-              open={expanded === team.id}
+              page={page}
+              open={page || expanded === team.id}
               onToggle={() => setExpanded((cur) => (cur === team.id ? null : team.id))}
             />
           ))}
@@ -186,25 +196,38 @@ function TeamRow({
   team,
   orgMembers,
   canMutate,
+  page,
   open,
   onToggle,
 }: {
   team: TeamSummary;
   orgMembers: OrgDirectoryUserWire[];
   canMutate: boolean;
+  page: boolean;
   open: boolean;
   onToggle: () => void;
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deletionRequest, setDeletionRequest] = useState<string | null>(null);
   const deleteTeam = useDeleteTeam();
-  const assistantsQ = useAssistants();
-  const assistant = defaultAssistantFor(assistantsQ.data?.assistants, "team", team.id);
+  const navigate = useNavigate();
+  // On the team's own page, a team the caller deleted or left would read as
+  // "not a member" there. Profile is the settings landing page. Replace, so
+  // Back does not return to the gone team.
+  const leavePage = page ? () => void navigate({ to: "/settings/profile", replace: true }) : undefined;
   const idpBacked = team.origin === "idp";
   const declared = team.origin === "config";
 
   return (
-    <div className="py-3">
+    <div className={page ? undefined : "py-3"}>
       <div className="flex flex-wrap items-center gap-3">
+        {page ? (
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+            {idpBacked && <Badge variant="neutral">Identity provider</Badge>}
+            {declared && <Badge variant="neutral" title={CONFIG_MANAGED_NOTE}>Declared in valet.yaml</Badge>}
+            <span className="text-xs text-muted">Created {formatDate(team.createdAt)}</span>
+          </div>
+        ) : (
         <button
           type="button"
           onClick={onToggle}
@@ -233,20 +256,11 @@ function TeamRow({
             {team.memberCount} {team.memberCount === 1 ? "member" : "members"}
           </span>
         </button>
-        <span className="hidden shrink-0 text-xs text-muted sm:block">
-          Created {formatDate(team.createdAt)}
-        </span>
-        {/* A cross-link to the working surface, not a second door: `/chat`
-            owns the get-or-create, so this creates nothing and needs no
-            pending or error state of its own. It opens the team's DEFAULT
-            assistant; the rail is where the others are chosen. */}
-        {assistant && (
-          <Button asChild variant="ghost" size="sm" className="shrink-0 gap-1.5">
-            <Link to="/chat" search={{ assistant: assistant.id }}>
-              <Bot className="h-3.5 w-3.5" aria-hidden />
-              Assistant
-            </Link>
-          </Button>
+        )}
+        {!page && (
+          <span className="hidden shrink-0 text-xs text-muted sm:block">
+            Created {formatDate(team.createdAt)}
+          </span>
         )}
         {/* Two gates, both required. `canMutate` is authorization; origin is
             provenance — the API refuses a delete on a mirrored team and on a
@@ -274,7 +288,10 @@ function TeamRow({
                   if (canMutate) {
                     deleteTeam.reset();
                     setConfirmDelete(true);
-                  } else if (!open) onToggle();
+                  } else {
+                    if (!open) onToggle();
+                    setDeletionRequest(`team:${team.id}`);
+                  }
                 }}
               >
                 {canMutate ? "Delete team" : "Request deletion"}
@@ -285,12 +302,21 @@ function TeamRow({
       </div>
 
       {open && (
-        <div className="ml-6 mt-2 space-y-2 border-l border-line pl-4">
-          <TeamDeletionRequests key={`deletion-requests:${team.id}`} teamId={team.id} canManage={canMutate} />
+        <div className={page ? "mt-6 space-y-10" : "ml-6 mt-3 space-y-8 border-l border-line pl-4"}>
+          {canMutate && !declared && <TeamName key={team.id} team={team} />}
+          <TeamMembers team={team} orgMembers={orgMembers} canMutate={canMutate} onSelfRemoved={leavePage} />
           <TeamDefaults team={team} canMutate={canMutate} />
-          <TeamCredentials team={team} orgMembers={orgMembers} canMutate={canMutate} />
-          <TeamOnePasswordToken key={team.id} teamId={team.id} teamName={team.name} canMutate={canMutate} />
-          <TeamMembers team={team} orgMembers={orgMembers} canMutate={canMutate} />
+          <TeamSlack key={team.id} team={team} canMutate={canMutate} />
+          <SubSection title="Connections">
+            <TeamCredentials team={team} orgMembers={orgMembers} canMutate={canMutate} />
+          </SubSection>
+          <TeamDeletionRequests
+            key={`deletion-requests:${team.id}`}
+            teamId={team.id}
+            canManage={canMutate}
+            request={deletionRequest}
+            onRequestChange={setDeletionRequest}
+          />
         </div>
       )}
 
@@ -303,7 +329,12 @@ function TeamRow({
         pendingLabel="Deleting…"
         pending={deleteTeam.isPending}
         error={deleteTeam.error != null ? errorText(deleteTeam.error) : undefined}
-        onConfirm={() => deleteTeam.mutate(team.id, { onSuccess: () => setConfirmDelete(false) })}
+        onConfirm={() => deleteTeam.mutate(team.id, {
+          onSuccess: () => {
+            setConfirmDelete(false);
+            leavePage?.();
+          },
+        })}
       />
     </div>
   );
@@ -335,65 +366,55 @@ function TeamDefaults({
   // catalog name, then raw id) so members and admins read the same words
   // for one value.
   const modelsQ = useModels();
+  const tiersQ = useModelTiers();
+  // Unset falls to the org default tier, so the label names that tier.
+  const modelFallbackLabel = fallbackLabel("Organization default", tiersQ.data);
   const entry = modelsQ.data?.models.find((m) => m.id === team.defaultModel);
   const readOnlyModelLabel = team.defaultModel
     ? isSizeTier(team.defaultModel)
       ? TIER_LABELS[team.defaultModel]
       : (curatedForCatalogId(team.defaultModel)?.label ?? entry?.name ?? team.defaultModel)
-    : "Organization default";
+    : modelFallbackLabel;
   const readOnlyReasoningLabel = team.defaultReasoning
     ? reasoningLabelFor(team.defaultReasoning)
     : "Organization default";
 
   return (
-    <div>
-      <div className="flex flex-col gap-1 py-1 sm:flex-row sm:items-center sm:gap-3">
-        <span className="shrink-0 text-xs font-medium text-muted">Default model</span>
-        {canMutate ? (
-          <div className="w-full max-w-xs">
+    <SubSection
+      title="Defaults"
+      description="New runtimes in this team's workspace use these, unless the member who starts one has a personal default."
+    >
+      <div className="divide-y divide-line">
+        <FieldRow label="Model">
+          {canMutate ? (
             <ModelCombobox
               value={team.defaultModel}
               onSelect={(id) => patchTeam.mutate({ id: team.id, body: { defaultModel: id } })}
               onClear={() => patchTeam.mutate({ id: team.id, body: { defaultModel: null } })}
-              emptyLabel="Organization default"
+              emptyLabel={modelFallbackLabel}
             />
-          </div>
-        ) : (
-          <span className="min-w-0 truncate text-sm text-ink" title={team.defaultModel ?? undefined}>
-            {readOnlyModelLabel}
-          </span>
-        )}
-      </div>
-      <div className="flex flex-col gap-1 py-1 sm:flex-row sm:items-center sm:gap-3">
-        <span className="shrink-0 text-xs font-medium text-muted">Default reasoning</span>
-        {canMutate ? (
-          <div className="w-full max-w-xs">
+          ) : (
+            <p className="truncate text-sm text-ink sm:pt-2" title={team.defaultModel ?? undefined}>
+              {readOnlyModelLabel}
+            </p>
+          )}
+        </FieldRow>
+        <FieldRow label="Reasoning">
+          {canMutate ? (
             <ReasoningSelect
               value={team.defaultReasoning ?? null}
-              onChange={(defaultReasoning) =>
-                patchTeam.mutate({ id: team.id, body: { defaultReasoning } })
-              }
+              onChange={(defaultReasoning) => patchTeam.mutate({ id: team.id, body: { defaultReasoning } })}
               emptyLabel="Organization default"
             />
-          </div>
-        ) : (
-          <span
-            className="min-w-0 truncate text-sm text-ink"
-            title={team.defaultReasoning ?? undefined}
-          >
-            {readOnlyReasoningLabel}
-          </span>
-        )}
+          ) : (
+            <p className="truncate text-sm text-ink sm:pt-2" title={team.defaultReasoning ?? undefined}>
+              {readOnlyReasoningLabel}
+            </p>
+          )}
+        </FieldRow>
       </div>
-      <p className="text-xs text-muted">
-        New sessions started in this team's workspace use this model and reasoning level. A
-        member's personal default wins for sessions that member starts. Existing sessions keep
-        their settings, including the team assistant if anyone has already opened it.
-      </p>
-      {patchTeam.error != null && (
-        <p className="text-xs text-danger-500">{errorText(patchTeam.error)}</p>
-      )}
-    </div>
+      {patchTeam.error != null && <ErrorRow className="py-0 text-xs">{errorText(patchTeam.error)}</ErrorRow>}
+    </SubSection>
   );
 }
 
@@ -401,11 +422,15 @@ function TeamMembers({
   team,
   orgMembers,
   canMutate,
+  onSelfRemoved,
 }: {
   team: TeamSummary;
   orgMembers: OrgDirectoryUserWire[];
   canMutate: boolean;
+  /** Runs once the caller removes their own membership. */
+  onSelfRemoved?: () => void;
 }) {
+  const meQ = useMe();
   const teamId = team.id;
   const teamName = team.name;
   const declared = team.origin === "config";
@@ -420,90 +445,79 @@ function TeamMembers({
   const addable = orgMembers.filter((m) => !memberIds.has(m.userId));
 
   return (
-    <div className="space-y-2">
-      {declared && <p className="pt-1 text-xs text-muted">{CONFIG_MANAGED_NOTE}</p>}
-
-      {membersQ.isLoading && <LoadingRow label="Loading members…" className="py-2 text-xs" />}
-      {membersQ.error != null && (
-        <ErrorRow className="py-2 text-xs">Failed to load {teamName}'s members.</ErrorRow>
-      )}
-
-      {memberRows.map((member) => {
-        const identity = byId.get(member.userId);
-        return (
-          <div key={member.userId} className="flex items-center gap-2 py-1">
-            <Avatar size="sm">
-              <AvatarFallback>
-                {(identity?.name ?? identity?.email ?? member.userId).slice(0, 1).toUpperCase()}
-              </AvatarFallback>
-            </Avatar>
-            <span className="min-w-0 flex-1 truncate text-sm text-ink">
-              {identity?.name ?? identity?.email ?? member.userId}
-            </span>
-            {!canMutate ? (
-              <Badge variant={member.role === "admin" ? "accent" : "neutral"}>
-                {member.role === "admin" ? "Admin" : "Member"}
-              </Badge>
-            ) : (
-              <>
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button type="button" variant="secondary" size="sm">
-                      <Badge variant={member.role === "admin" ? "accent" : "neutral"} className="pointer-events-none">
-                        {member.role === "admin" ? "Admin" : "Member"}
-                      </Badge>
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end">
-                    <DropdownMenuItem
-                      onSelect={() =>
-                        setRole.mutate({ teamId, userId: member.userId, body: { role: "admin" } })
-                      }
-                    >
-                      Admin
-                    </DropdownMenuItem>
-                    <DropdownMenuItem
-                      onSelect={() =>
-                        setRole.mutate({ teamId, userId: member.userId, body: { role: "member" } })
-                      }
-                    >
-                      Member
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  aria-label={`Remove ${identity?.name ?? identity?.email ?? member.userId} from ${teamName}`}
-                  onClick={() => removeMember.mutate({ teamId, userId: member.userId })}
-                >
-                  <X className="h-3.5 w-3.5" aria-hidden />
-                </Button>
-              </>
-            )}
-          </div>
-        );
-      })}
-
-      {canMutate && (
-        <>
+    <SubSection
+      title="Members"
+      description={declared ? CONFIG_MANAGED_NOTE : undefined}
+      actions={
+        canMutate && (
           <AddMemberPicker
             teamName={teamName}
             addable={addable}
             pending={addMember.isPending}
             onAdd={(userId) => addMember.mutate({ teamId, body: { userId, role: "member" } })}
           />
-          {addMember.error != null && (
-            <ErrorRow className="py-1 text-xs">
-              Failed to add the member: {errorText(addMember.error)}
-            </ErrorRow>
-          )}
-        </>
+        )
+      }
+    >
+      {membersQ.isLoading && <LoadingRow label="Loading members…" className="py-2 text-xs" />}
+      {membersQ.error != null && (
+        <ErrorRow className="py-2 text-xs">Failed to load {teamName}'s members.</ErrorRow>
       )}
-    </div>
+
+      <ul className="space-y-1">
+        {memberRows.map((member) => {
+          const identity = byId.get(member.userId);
+          const name = identity?.name ?? identity?.email ?? member.userId;
+          return (
+            <li key={member.userId} className="flex items-center gap-3 py-1">
+              <Avatar size="sm">
+                <AvatarFallback>{name.slice(0, 1).toUpperCase()}</AvatarFallback>
+              </Avatar>
+              <span className="min-w-0 flex-1 truncate text-sm text-ink">{name}</span>
+              {canMutate ? (
+                <>
+                  <SelectMenu
+                    value={member.role}
+                    options={ROLE_OPTIONS}
+                    align="end"
+                    onChange={(role) => {
+                      if (role !== member.role) setRole.mutate({ teamId, userId: member.userId, body: { role } });
+                    }}
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    aria-label={`Remove ${name} from ${teamName}`}
+                    onClick={() => removeMember.mutate(
+                      { teamId, userId: member.userId },
+                      { onSuccess: () => { if (member.userId === meQ.data?.id) onSelfRemoved?.(); } },
+                    )}
+                  >
+                    <X className="h-3.5 w-3.5" aria-hidden />
+                  </Button>
+                </>
+              ) : (
+                <Badge variant={member.role === "admin" ? "accent" : "neutral"}>
+                  {member.role === "admin" ? "Admin" : "Member"}
+                </Badge>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+
+      {addMember.error != null && (
+        <ErrorRow className="py-1 text-xs">Failed to add the member: {errorText(addMember.error)}</ErrorRow>
+      )}
+    </SubSection>
   );
 }
+
+const ROLE_OPTIONS = [
+  { value: "admin", label: "Admin" },
+  { value: "member", label: "Member" },
+] as const;
 
 /** DOM cap for the picker list. The height cap alone fixes the clipping, not
  * the cost of mounting a row per org member; past this a footer row says to
@@ -593,9 +607,9 @@ function AddMemberPicker({
       <PopoverTrigger asChild>
         <Button
           type="button"
-          variant="ghost"
+          variant="secondary"
           size="sm"
-          className={`gap-1.5 ${inert ? "text-muted" : ""}`}
+          className={inert ? "text-muted" : undefined}
           aria-disabled={inert || undefined}
           title={
             addable.length === 0
@@ -607,7 +621,7 @@ function AddMemberPicker({
           Add member
         </Button>
       </PopoverTrigger>
-      <PopoverContent align="start" className="w-72 max-w-[calc(100vw-2rem)] p-0">
+      <PopoverContent align="end" className="w-72 max-w-[calc(100vw-2rem)] p-0">
         <div className="border-b border-line p-2">
           <Input
             value={query}
@@ -676,5 +690,64 @@ function AddMemberPicker({
         </div>
       </PopoverContent>
     </Popover>
+  );
+}
+
+/** Rename. Hidden for a team declared in the config file, which the API
+ * refuses: the config reconciler matches a declared team by name. */
+function TeamName({ team }: { team: TeamSummary }) {
+  const [name, setName] = useState(team.name);
+  const patch = usePatchTeam();
+  useEffect(() => setName(team.name), [team.name]);
+  const next = name.trim();
+  return (
+    <SubSection title="Name">
+      <FieldRow label="Team name" error={patch.error ? errorText(patch.error) : undefined}>
+        <div className="flex gap-2">
+          <Input aria-label="Team name" value={name} onChange={(event) => setName(event.target.value)} />
+          <Button
+            disabled={patch.isPending || next === "" || next === team.name}
+            onClick={() => patch.mutate({ id: team.id, body: { name: next } })}
+          >
+            Save
+          </Button>
+        </div>
+      </FieldRow>
+    </SubSection>
+  );
+}
+
+function TeamSlack({ team, canMutate }: { team: TeamSummary; canMutate: boolean }) {
+  const [channel, setChannel] = useState(team.slackHomeChannelId ?? "");
+  const [replySetup, setReplySetup] = useState(false);
+  const patch = usePatchTeam();
+  useEffect(() => setChannel(team.slackHomeChannelId ?? ""), [team.slackHomeChannelId]);
+  return (
+    <SubSection
+      title="Slack"
+      description="Valet posts new team notifications in the home channel. Add the Valet bot to that channel first."
+      actions={<Button variant="secondary" size="sm" onClick={() => setReplySetup(true)}>Set up Slack replies</Button>}
+    >
+      <FieldRow label="Home channel" error={patch.error ? errorText(patch.error) : undefined}>
+        {canMutate ? (
+          <div className="flex gap-2">
+            <Input aria-label="Slack home channel ID" placeholder="C0123456789" value={channel} onChange={(event) => setChannel(event.target.value)} />
+            <Button
+              disabled={patch.isPending || channel.trim() === (team.slackHomeChannelId ?? "")}
+              onClick={() => patch.mutate({ id: team.id, body: { slackHomeChannelId: channel.trim() || null } })}
+            >
+              Save
+            </Button>
+          </div>
+        ) : (
+          <p className="text-sm text-ink sm:pt-2">{team.slackHomeChannelId ?? "Not set"}</p>
+        )}
+      </FieldRow>
+      <div className="flex flex-wrap gap-x-4 gap-y-2 text-sm">
+        <Link to="/presence" search={{ workspace: team.id }} className={textLinkClass}>Open Presence</Link>
+        <Link to="/settings/notifications" className={textLinkClass}>My DM preferences</Link>
+      </div>
+      <LineEditor key={team.id} open={replySetup} onOpenChange={setReplySetup} mode={{ kind: "create", preselected: { team: { id: team.id, name: team.name } } }} />
+    </SubSection>
   );
 }

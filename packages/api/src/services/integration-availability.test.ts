@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Type } from "typebox";
 import {
   InMemoryCredentialStore,
@@ -13,9 +13,38 @@ import {
   missingClientEnv,
   orgProvidedServiceSet,
   unavailableServiceSet,
+  unavailableServiceInventory,
 } from "./integration-availability.js";
 
 const ORG = "org-1";
+
+it("checks only the requested action's credential aliases and refreshes changed credentials", async () => {
+  const credentials = new InMemoryCredentialStore();
+  const plugins = [
+    makePlugin("slack-plugin", {
+      actions: [{ ...makeActionPlugin("slack_admin"), credentialService: "slack" }],
+      credentials: [{ service: "slack", type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    }),
+    makePlugin("telegram", {
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    }),
+  ];
+  const get = credentials.get.bind(credentials);
+  const reads = vi.spyOn(credentials, "get").mockImplementation(async (owner, service) => {
+    if (service === "telegram") throw new Error("unrelated service unavailable");
+    return get(owner, service);
+  });
+  const context = { plugins, credentials, orgId: ORG, env: {} };
+  const missing = await unavailableServiceInventory({ ...context, actionService: "slack_admin" });
+  expect(missing.unavailable).toEqual(new Set(["slack"]));
+  expect(missing.failures).toEqual([]);
+  expect(reads).toHaveBeenCalledExactlyOnceWith({ type: "org", id: ORG }, "slack");
+  await credentials.save({ type: "org", id: ORG }, "slack", { type: "bot_token", accessToken: "new-token" });
+  expect((await unavailableServiceInventory({ ...context, actionService: "slack_admin" })).unavailable.size).toBe(0);
+  expect((await unavailableServiceInventory(context)).failures).toEqual([
+    { service: "telegram", reason: "unrelated service unavailable" },
+  ]);
+});
 
 function makeAction(id: string): PluginAction {
   return {
@@ -186,6 +215,44 @@ describe("connectModeFor", () => {
         owner: { type: "user", id: "u1" },
       }),
     ).resolves.toBe("unconfigured");
+  });
+
+  // Runtime precedence: a team run reads its own row first and only reaches
+  // the org bot when that row gives nothing. The catalog has to say the same,
+  // or a team sees "org" for a service its own token actually serves.
+  it("requires.orgCredential with both rows present and a team owner is \"manual\"", async () => {
+    const decl: CredentialDeclaration = {
+      type: "bot_token",
+      configKeys: ["accessToken"],
+      requires: { orgCredential: true },
+    };
+    const plugins = [makePlugin("slack", { credentials: [decl] })];
+    const store = await storeWithOrgCredential("slack");
+    await store.save({ type: "team", id: "team-1" }, "slack", { type: "bot_token", accessToken: "xoxb-team" });
+
+    await expect(
+      connectModeFor({
+        plugins,
+        decl,
+        service: "slack",
+        orgId: ORG,
+        credentials: store,
+        env: {},
+        owner: { type: "team", id: "team-1" },
+      }),
+    ).resolves.toBe("manual");
+    // The org bot still answers for a team that holds no row of its own.
+    await expect(
+      connectModeFor({
+        plugins,
+        decl,
+        service: "slack",
+        orgId: ORG,
+        credentials: store,
+        env: {},
+        owner: { type: "team", id: "team-2" },
+      }),
+    ).resolves.toBe("org");
   });
 
   it("a declaration with no oauth and no requires is \"manual\"", async () => {

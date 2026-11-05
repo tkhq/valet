@@ -21,10 +21,12 @@
   },
   "dependencies": {
     "@valet/engine": "workspace:*",
+    "sharp": "0.34.5",
     "typebox": "^1.1.24"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@valet/sandbox-local": "workspace:*",
     "typescript": "^5.3.3",
     "vitest": "^4.0.18"
   }

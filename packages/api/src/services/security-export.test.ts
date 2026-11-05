@@ -42,6 +42,7 @@ const ENGAGEMENT: SecurityEngagementRow = {
   reportGeneratedAt: null,
   createdAt: 1_000,
   updatedAt: 2_000,
+  credentialsJson: null,
 };
 
 function cell(overrides: Partial<SecurityCellRow> & { id: string; ordinal: number }): SecurityCellRow {

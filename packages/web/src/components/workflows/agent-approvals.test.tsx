@@ -43,7 +43,7 @@ describe("WorkflowAgentApprovals", () => {
     state.gates = [gate("resolved")];
     render(<WorkflowAgentApprovals sessionId="wf:run:triage" />);
     expect(screen.getByText(/No pending approvals/)).toBeTruthy();
-    expect(screen.getByText("Open workflow run")).toBeTruthy();
+    expect(screen.getByText("← Workflow run")).toBeTruthy();
   });
   it("explains access failures", () => {
     state.error = true;

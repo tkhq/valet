@@ -108,6 +108,7 @@ export function withSandboxCapacityGate(
             `org sandbox ceiling reached (${opts.ceiling} concurrent). ` +
               `Waited ${Math.round((Date.now() - startedAt) / 1000)}s for capacity. ` +
               "Finish or pause other sessions, or raise VALET_ORG_SANDBOX_CEILING.",
+            "capacity",
           );
         }
         if (!waited) {
@@ -150,8 +151,14 @@ export function withSandboxCapacityGate(
   if (inner.release) gated.release = inner.release.bind(inner);
   if (inner.deriveId) gated.deriveId = inner.deriveId.bind(inner);
   if (inner.list) gated.list = inner.list.bind(inner);
+  if (inner.readBrowserAudit) gated.readBrowserAudit = inner.readBrowserAudit.bind(inner);
   if (inner.suspend) gated.suspend = inner.suspend.bind(inner);
   if (inner.resume) gated.resume = inner.resume.bind(inner);
   if (inner.updateCreds) gated.updateCreds = inner.updateCreds.bind(inner);
+  // The WakeWatcher's lease eviction protection (spec INV-3) reads these
+  // through the gate; dropping them left every leased pod unprotected on
+  // the kubernetes backend (PR review, finding 1).
+  if (inner.setEvictionProtection) gated.setEvictionProtection = inner.setEvictionProtection.bind(inner);
+  if (inner.listEvictionProtected) gated.listEvictionProtected = inner.listEvictionProtected.bind(inner);
   return gated;
 }

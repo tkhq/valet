@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { setOrgTierMap, type TierMap } from "../services/model-tiers.js";
+import { getOrgTierMap, setOrgTierMap, type TierMap } from "../services/model-tiers.js";
+
+import { setApprovedModels } from "../services/approved-models.js";
 
 const TIER_MAP: TierMap = {
   xs: ["anthropic/claude-haiku-4-5"],
@@ -39,6 +41,67 @@ describe("PUT /api/org/approved-models", () => {
     expect(((await response.json()) as { error: string }).error).toBe(
       'Model "anthropic/claude-sonnet-4-6" is still used by tier "m". Change the model tier first.',
     );
+  });
+
+  it.each([false, true])("allows upgrading retired Sol approval (retain old: %s)", async (retainOld) => {
+    vi.stubEnv("OPENAI_API_KEY", "sk-test");
+    vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-test");
+    api = await bootTestApi();
+    const previous = { ...TIER_MAP, l: ["openai/gpt-5.6-sol"] };
+    await setOrgTierMap(api.providers.db, "local-org", previous);
+    await setApprovedModels(api.providers.db, "local-org", [...new Set(Object.values(previous).flat())]);
+    const approved = [...new Set(Object.values({ ...previous, l: ["openai/gpt-6.1-sol"] }).flat())];
+    if (retainOld) approved.push("openai/gpt-5.6-sol");
+    const response = await fetch(`${api.baseUrl}/api/org/approved-models`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approved }),
+    });
+    expect(response.status).toBe(200);
+    expect((await getOrgTierMap(api.providers.db, "local-org")).l).toEqual(["openai/gpt-6.1-sol"]);
+  });
+
+  it("keeps a previously approved id that left the catalog, but still rejects a new unknown id", async () => {
+    // Settings sends the stored list plus or minus one id. A model approved
+    // while it was a Bedrock default and later removed from the row's
+    // selection must not block every later toggle (agents-dev, 2026-10-30).
+    vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-test");
+    api = await bootTestApi();
+    await setOrgTierMap(api.providers.db, "local-org", TIER_MAP);
+    const tiers = [...new Set(Object.values(TIER_MAP).flat())];
+    const stale = "amazon-bedrock/qwen.qwen3-coder-next";
+    await setApprovedModels(api.providers.db, "local-org", [...tiers, stale]);
+
+    const retain = await fetch(`${api.baseUrl}/api/org/approved-models`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approved: [...tiers, stale, "anthropic/claude-opus-4-6"] }),
+    });
+    expect(retain.status, await retain.text()).toBe(200);
+
+    const introduce = await fetch(`${api.baseUrl}/api/org/approved-models`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approved: [...tiers, "amazon-bedrock/vendor.never-seen"] }),
+    });
+    expect(introduce.status).toBe(400);
+    expect(((await introduce.json()) as { error: string }).error).toContain('Unknown model "amazon-bedrock/vendor.never-seen"');
+  });
+
+  it("saves Astra approval without changing configured tiers", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "sk-test");
+    vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-test");
+    api = await bootTestApi();
+    await setOrgTierMap(api.providers.db, "local-org", TIER_MAP);
+    const approved = [...new Set(Object.values(TIER_MAP).flat()), "openai/gpt-6-astra"];
+    const response = await fetch(`${api.baseUrl}/api/org/approved-models`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approved }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ approved });
+    expect(await getOrgTierMap(api.providers.db, "local-org")).toEqual(TIER_MAP);
   });
 
   it("allows null to clear the restriction", async () => {

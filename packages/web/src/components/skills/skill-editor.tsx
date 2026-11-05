@@ -25,7 +25,7 @@
  */
 import { useState } from "react";
 import type { CreateSkillRequest, SkillResponse, UpdateSkillRequest } from "@valet/api/wire";
-import { Button, Input, Label, Spinner, Textarea } from "~/components/primitives";
+import { Button, Input, Label, Select, Spinner, Textarea } from "~/components/primitives";
 import { MarkdownEditor } from "~/components/markdown-editor";
 import { useCreateSkill, useUpdateSkill } from "~/api/skills";
 import { useOrg } from "~/api/settings";
@@ -169,15 +169,15 @@ export function SkillEditor({
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-1.5">
           <Label htmlFor="skill-invocation">Invocation</Label>
-          <select
+          <Select
             id="skill-invocation"
             value={invocation}
             onChange={(e) => setInvocation(e.target.value === "prompt" ? "prompt" : "context")}
-            className="h-9 max-sm:min-h-11 max-sm:text-base w-full rounded border border-[--border] bg-[--bg] px-3 text-sm text-[--fg]"
+            className="w-full"
           >
             <option value="context">Context — load as reference</option>
             <option value="prompt">Prompt — substitute args and send</option>
-          </select>
+          </Select>
           <p className="text-xs text-muted">
             A context skill loads the body as reference. A prompt skill fills its arguments and
             sends the body as the message.

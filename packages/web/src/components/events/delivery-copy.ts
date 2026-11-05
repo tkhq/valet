@@ -6,6 +6,7 @@
  * countdown, and "Retries in 8 minutes" is the sentence that stops someone
  * escalating. `now` is injectable so the wording is testable without clocks.
  */
+import { eventKeyMatches } from "@valet/shared";
 import type { EventDeliveryWire, EventSubscriptionWire } from "@valet/api/wire";
 
 const MINUTE = 60_000;
@@ -34,11 +35,19 @@ export function retryPhrase(ms: number): string {
  * dead delivery names Redeliver, because that is the only way back.
  */
 export function deliveryStatusLine(delivery: EventDeliveryWire, now: number): string {
+  if (delivery.status === "skipped") {
+    // A row without `claimedBy` comes from a viewer who may not open the
+    // claiming thread. An older server still sends that thread's id.
+    if (!delivery.claimedBy && delivery.lastError?.startsWith("Skipped, claimed by thread ")) return "Skipped, claimed by another thread.";
+    return delivery.lastError ?? "Skipped because a team line also matches";
+  }
   const attempts = `${delivery.attempts} ${plural(delivery.attempts, "attempt", "attempts")}`;
   switch (delivery.status) {
     case "delivered":
       return attempts;
     case "dead":
+      // The turn started before it failed, so it may have replied or acted.
+      if (delivery.turnFailed) return "The assistant's turn failed after it started, so it may have replied or acted already. Check its thread before you press Redeliver.";
       return `Gave up after ${attempts}. To send it again, press Redeliver.`;
     case "pending":
     case "failed": {
@@ -77,9 +86,7 @@ export function subscriptionsMatchingKey(
   return subscriptions.filter(
     (sub) =>
       sub.enabled &&
-      sub.eventKeys.some((pattern) =>
-        pattern.endsWith(".*") ? eventKey.startsWith(pattern.slice(0, -1)) : pattern === eventKey,
-      ),
+      eventKeyMatches(eventKey, sub.eventKeys),
   );
 }
 
@@ -89,16 +96,16 @@ export function redeliverConfirmDescription(matchCount: number, scheduledCount: 
   const lines: string[] =
     matchCount === 0
       ? [
-          "No enabled subscription matches this event key.",
-          "Redelivery creates nothing until you enable or edit one on the Subscriptions tab.",
+          "Nothing in Presence that is on matches this event.",
+          "Redelivery creates nothing until you turn on or edit what should match in Presence.",
         ]
       : [
-          `This event matches up to ${matchCount} enabled ${plural(matchCount, "subscription", "subscriptions")}.`,
-          `Each match creates one delivery, so this can start up to ${matchCount} ${plural(matchCount, "run", "runs")}.`,
+          `This event matches up to ${matchCount} ${plural(matchCount, "line", "lines")} in Presence that ${plural(matchCount, "is", "are")} on.`,
+          `Each match can start one run, so this can start up to ${matchCount} ${plural(matchCount, "run", "runs")}.`,
         ];
   if (scheduledCount > 0) {
     lines.push(
-      `${scheduledCount} earlier ${plural(scheduledCount, "delivery", "deliveries")} ${plural(scheduledCount, "is", "are")} still scheduled to retry.`,
+      `${scheduledCount} earlier ${plural(scheduledCount, "attempt", "attempts")} ${plural(scheduledCount, "is", "are")} still scheduled to retry.`,
       "Redelivery now can run the same work twice.",
     );
   }
@@ -109,7 +116,7 @@ export function redeliverConfirmDescription(matchCount: number, scheduledCount: 
  * outcome, not a silent success. */
 export function redeliverResultText(created: number): string {
   if (created === 0) {
-    return "Nothing was queued. No enabled subscription matches this event. Enable or edit one on the Subscriptions tab, then redeliver.";
+    return "Nothing was queued. Nothing in Presence that is on matches this event. Turn on or edit what should match in Presence, then redeliver.";
   }
-  return `Queued ${created} ${plural(created, "delivery", "deliveries")}. The result appears in this list.`;
+  return `Queued the event for ${created} ${plural(created, "line", "lines")}. The result appears in this list.`;
 }

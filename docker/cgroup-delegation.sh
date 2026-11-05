@@ -26,8 +26,9 @@ delegation_error() {
 has_word() { case " $1 " in *" $2 "*) return 0;; *) return 1;; esac; }
 
 establish_cgroup_topology() {
-  local root=$1 user=$2 manager="$1/init" services="$1/init/services"
-  local controllers enabled uid gid target pid pass
+  local root=$1 user=$2 requested=${3:-} manager="$1/init" services="$1/init/services"
+  local controllers enabled required uid gid target pid pass
+  required=${requested:-"cpu pids"}
   local -a pids
   [ -d "$manager" ] && [ ! -L "$manager" ] || delegation_error \
     "The required cgroup manager /init is missing or unsafe. Recreate the sandbox with the valet-docker RuntimeClass." || return 1
@@ -41,7 +42,7 @@ establish_cgroup_topology() {
   fi
   for target in "$manager"/*; do
     [ -d "$target" ] || continue
-    case "$target" in "$services"|"$manager/tkhq-k3s") ;; *)
+    case "$target" in "$services"|"$manager/tkhq-k3s"|"$manager/valet-kubernetes") ;; *)
       delegation_error "The cgroup manager /init has an unexpected child. Recreate the sandbox."; return 1;;
     esac
   done
@@ -71,17 +72,17 @@ establish_cgroup_topology() {
   fi
 
   controllers=$(cat "$manager/cgroup.controllers") || return 1
-  for target in cpu pids; do
+  for target in $required; do
     has_word "$controllers" "$target" || {
       delegation_error "The $target cgroup controller is unavailable. Configure the valet-docker RuntimeClass to delegate cpu and pids."; return 1
     }
   done
-  enabled=${controllers// / +}; enabled="+${enabled}"
+  enabled=${requested:-$controllers}; enabled=${enabled// / +}; enabled="+${enabled}"
   cgroup_enable "$manager/cgroup.subtree_control" "$enabled" || {
     delegation_error "Cannot enable controllers below /init. Ensure /init is empty, then recreate the sandbox."; return 1
   }
   enabled=$(cat "$manager/cgroup.subtree_control") || return 1
-  for target in cpu pids; do
+  for target in $required; do
     has_word "$enabled" "$target" || {
       delegation_error "The $target controller was not enabled below /init. Correct the valet-docker RuntimeClass and recreate the sandbox."; return 1
     }
@@ -116,7 +117,7 @@ establish_cgroup_topology() {
 }
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
-  [ "$#" -eq 2 ] || { echo "Usage: $0 CGROUP_ROOT USER" >&2; exit 2; }
+  { [ "$#" -eq 2 ] || [ "$#" -eq 3 ]; } || { echo "Usage: $0 CGROUP_ROOT USER [CONTROLLERS]" >&2; exit 2; }
   [ "$1" = /sys/fs/cgroup ] || delegation_error \
     "Refusing the unexpected cgroup root $1. Rebuild the Valet sandbox image." || exit 1
   establish_cgroup_topology "$@"

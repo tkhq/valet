@@ -238,6 +238,45 @@ cri-dockerd (the chart pins concrete tags with
 `imagePullPolicy: IfNotPresent`, so no pull is attempted). Any remote or
 multi-node cluster should use the GHCR images above instead.
 
+## Runbook: Valet returns 503
+
+A 503 has three sources. The load balancer returns it when no API pod is
+Ready: during a rollout (the Deployment uses `Recreate`, so every rollout
+causes 30 to 60 seconds of 503), after a crash or OOM kill, and while a
+new pod runs its boot chain (`/api/ready` stays 503 until it finishes).
+The API returns it from a route, such as a sandbox teardown that cannot
+reach the sandbox. Use `--context` on every `kubectl` command; never use
+the ambient context.
+
+1. Ask Valet, in a private conversation as an organization admin, to run
+   `diagnostics.list_pod_restarts`. If Valet does not answer, use step 2.
+2. Run `kubectl --context <cluster> -n valet get pods -o wide`.
+3. If a rollout is in progress, wait 60 seconds and check again.
+4. If the API container shows `OOMKilled` as its last termination, go to
+   step 8.
+5. If the Warning events show `Unhealthy` liveness failures, go to step 9.
+6. If the pod is Running but not Ready, read its log for `boot restore`
+   and `area":"boot"` lines. The boot chain waits on them.
+7. If the pod is Ready, the API itself returns the 503. Ask Valet to run
+   `diagnostics.list_server_errors`, then go to step 10.
+8. For an OOM kill, compare `valet_process_memory_bytes{kind="cgroup_usage"}`
+   to `{kind="cgroup_limit"}`, and `{kind="heap_used"}` to
+   `valet_process_heap_limit_bytes`. A heap near its limit points at
+   unscoped transcript reads; see the 2026-10-28 outage notes.
+9. For liveness failures, read `valet_process_event_loop_delay_milliseconds{quantile="max"}`.
+   A delay of several seconds blocks the health probe.
+10. Read `sum by (area, reason) (increase(valet_errors_total[15m]))` and
+    `valet_http_request_duration_milliseconds_count{status="503"}` by
+    route. Each `reason` names one code path.
+11. Before you restart or delete a pod, save `kubectl describe pod` and
+    the last 500 log lines. A restart clears the in-process windows that
+    the diagnostics tools read.
+
+`diagnostics.list_pod_restarts` reads the `valet` namespace only after an
+operator grants the Role in
+[the error instrumentation spec](specs/2026-10-30-error-instrumentation-design.md).
+Without it, the tool names the missing rule and reports sandbox pods only.
+
 ## Not Implemented Yet
 
 These are on the roadmap but not built. Plan deployments around their

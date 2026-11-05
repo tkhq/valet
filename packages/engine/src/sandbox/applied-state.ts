@@ -18,10 +18,18 @@
  * step list and `steps` keys as evidence that the prior run was interrupted.
  */
 
-import type { Sandbox, SandboxResources, PrepStep, DesiredSandboxSpec } from "../types.js";
+import type { Sandbox, SandboxResourceField, SandboxResources, PrepStep, DesiredSandboxSpec } from "../types.js";
+import { reportError } from "../error-report.js";
 
 /** Absolute path of the applied-state file inside the container filesystem. */
 export const APPLIED_PATH = "/etc/valet/applied.json";
+
+/**
+ * Authoritative resource fields tracked for drift and persistence. The sole
+ * field list `attachment.ts` imports too, so a new resource field is added
+ * in one place instead of drifting across the two modules.
+ */
+export const DRIFT_FIELDS = ["cpu", "memory", "scratch"] as const satisfies readonly SandboxResourceField[];
 
 /**
  * Persisted record of what the sandbox has successfully applied.
@@ -31,8 +39,8 @@ export interface AppliedState {
   image: string;
   specHash: string;
   steps: Record<string, string>;
-  /** Repository CPU and memory overrides. Old files omit this field. */
-  resources?: Pick<SandboxResources, "cpu" | "memory">;
+  /** Repository CPU, memory, and scratch overrides. Old files omit this field. */
+  resources?: Pick<SandboxResources, "cpu" | "memory" | "scratch">;
 }
 
 function validResources(resources: unknown): boolean {
@@ -42,6 +50,9 @@ function validResources(resources: unknown): boolean {
   }
   if ("memory" in resources && resources.memory !== undefined) {
     if (typeof resources.memory !== "string" || resources.memory.trim().length === 0) return false;
+  }
+  if ("scratch" in resources && resources.scratch !== undefined) {
+    if (typeof resources.scratch !== "string" || resources.scratch.trim().length === 0) return false;
   }
   return true;
 }
@@ -172,10 +183,8 @@ export async function applyPlan(
     ...resourceState,
   };
   // Missing resources and an empty object both mean no repository overrides.
-  const resourcesChanged = desired.resources !== undefined && (
-    desired.resources.cpu !== applied?.resources?.cpu ||
-    desired.resources.memory !== applied?.resources?.memory
-  );
+  const resourcesChanged = desired.resources !== undefined &&
+    DRIFT_FIELDS.some((field) => desired.resources?.[field] !== applied?.resources?.[field]);
   if (resourcesChanged) {
     // Resource metadata must survive even when no preparation step succeeds.
     state.specHash = desired.specHash;
@@ -191,9 +200,7 @@ export async function applyPlan(
         // Critical failure: caller wraps in SandboxPreparationError
         throw err;
       }
-      console.error(
-        `[applied-state] non-critical step "${step.id}" failed: ${(err as Error).message}`,
-      );
+      reportError({ area: "sandbox", reason: "prep_step_noncritical" }, `[applied-state] non-critical step "${step.id}" failed: ${(err as Error).message}`);
       // Do NOT record this step as applied; skip to the next one
       continue;
     }

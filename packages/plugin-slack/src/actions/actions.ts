@@ -1,18 +1,35 @@
 import { Type } from "typebox";
 import type { Static, TSchema } from "typebox";
-import type {
-  ActionPlugin,
-  Credential,
-  PluginAction,
-  PluginActionContext,
-  PluginActionResult,
+import {
+  DOCX_DOCUMENT_MIME,
+  extractDownloadedDocx,
+  extractDownloadedPdf,
+  isDocxDocument,
+  isDocxDocumentMime,
+  isPdfDocument,
+  isTextDocumentMime,
+  MAX_PDF_DOCUMENT_BYTES,
+  normalizeDocumentMime,
+  readResponseBytes,
+  readPdfCandidateResponse,
+  readResponseText,
+  validatedImageMediaType,
+  type ActionPlugin,
+  type Credential,
+  type PluginAction,
+  type PluginActionContext,
+  type PluginActionResult,
 } from "@valet/engine";
-import { slackFetch, slackGet } from "./api.js";
+import { CHART_LIMITS, chartAsMarkdown, chartProblem, readChart, type Chart } from "@valet/shared";
+import { authorizeSlackFile } from "./file-access.js";
+import { slackFetch, slackGet, slackGetOnce } from "./api.js";
 import { checkPrivateChannelAccess } from "./channel-access.js";
-import { buildContentBlocks, SLACK_TEXT_LIMIT, SLACK_MAX_BLOCKS } from "../message-chunking.js";
-import { SlackApi } from "../transport/api.js";
+import { cachedChannelName, rememberChannelName, resolveChannelName } from "./channel-names.js";
+import { buildContentBlocks, hasTableBlock, needsContentBlocks, slackEscapedText, splitTableMessage, truncateSlackText, SLACK_TEXT_LIMIT, SLACK_MAX_BLOCKS, SLACK_UPDATE_TEXT_BYTES } from "../message-chunking.js";
+import { SlackApi, SlackApiError } from "../transport/api.js";
 import { slackIdentityOverride } from "../sender-identity.js";
-import { markdownToSlackMrkdwn } from "../transport/format.js";
+import { markdownToSlackMrkdwn, stripCode } from "../transport/format.js";
+import { readOnlineStatus } from "../online-status.js";
 
 /**
  * Curried action builder. The first call binds T from the parameters
@@ -33,6 +50,21 @@ function action<TParams extends TSchema>(parameters: TParams) {
   }): PluginAction<TParams> => ({ ...rest, parameters });
 }
 
+const senderParameters = {
+  sender_name: Type.Optional(Type.String({
+    minLength: 1,
+    maxLength: 80,
+    pattern: '\\S',
+    description: 'Custom Slack message display name, such as Hestia · People. Overrides the workspace name for this message. This does not change the bot account or DM conversation.',
+  })),
+  sender_avatar_url: Type.Optional(Type.String({
+    pattern: '^https://[^\\s]+$',
+    description: 'Public HTTPS image URL for this message’s profile picture. Slack must be able to fetch it. Omit to use the default avatar.',
+  })),
+};
+
+type SenderParams = { sender_name?: string; sender_avatar_url?: string };
+
 type SlackPostData = { ok: boolean; error?: string; ts?: string; channel?: string };
 
 async function actionIdentity(ctx: PluginActionContext): Promise<{ username?: string; iconUrl?: string }> {
@@ -48,14 +80,22 @@ async function actionIdentity(ctx: PluginActionContext): Promise<{ username?: st
 
 /**
  * Post with the current assistant identity. If Slack rejects cosmetic override
- * fields, retry once without them so the message body still lands.
+ * fields, retry once without them so the message body still lands. If Slack
+ * rejects a generated native table block on any attempt, post the same
+ * content once more with `fallbackBlocks`, its Markdown rendering, instead
+ * of losing it.
  */
 async function postActionMessage(
   token: string,
   body: Record<string, unknown>,
   ctx: PluginActionContext,
+  sender: SenderParams = {},
+  fallbackBlocks?: Record<string, unknown>[],
 ): Promise<{ res: Response; data: SlackPostData }> {
-  const override = await actionIdentity(ctx);
+  const override = {
+    ...await actionIdentity(ctx),
+    ...slackIdentityOverride({ displayName: sender.sender_name, avatarUrl: sender.sender_avatar_url }),
+  };
   const post = async (postBody: Record<string, unknown>) => {
     const res = await slackFetch('chat.postMessage', token, postBody);
     try {
@@ -70,19 +110,48 @@ async function postActionMessage(
     }
   };
   const { iconUrl, ...rest } = override;
-  const first = await post({ ...body, ...rest, ...(iconUrl ? { icon_url: iconUrl } : {}) });
+  const withIdentity = (postBody: Record<string, unknown>) =>
+    ({ ...postBody, ...rest, ...(iconUrl ? { icon_url: iconUrl } : {}) });
+  // Either rejection can come first: a token without chat:write.customize
+  // fails on the identity before Slack validates the blocks. So the table
+  // fallback applies after every attempt, the identity retry included.
+  let sent = body;
+  const postWithFallback = async (identity: boolean) => {
+    const result = await post(identity ? withIdentity(sent) : sent);
+    if (!fallbackBlocks || sent.blocks === fallbackBlocks || result.data.error !== 'invalid_blocks') return result;
+    sent = { ...body, blocks: fallbackBlocks };
+    return post(identity ? withIdentity(sent) : sent);
+  };
+  const result = await postWithFallback(true);
   if (
-    !first.providerRejected ||
+    !result.providerRejected ||
     (override.username === undefined && override.iconUrl === undefined)
   ) {
-    return first;
+    return result;
   }
-  return post(body);
+  return postWithFallback(false);
 }
 
-/** Build a descriptive error from a Slack API response. */
-async function slackError(res: Response, data?: { ok: boolean; error?: string }): Promise<PluginActionResult> {
-  if (data && !data.ok) return { success: false, error: `Slack API error: ${data.error || 'unknown'}` };
+/** The Markdown rendering of generated blocks, for a table block Slack rejects. */
+function markdownFallbackBlocks(
+  blocks: Record<string, unknown>[] | undefined,
+  text: string,
+  formattedText: string,
+  maxBlocks: number,
+): Record<string, unknown>[] | undefined {
+  if (!hasTableBlock(blocks)) return undefined;
+  return buildContentBlocks(text, formattedText, maxBlocks, { preserveSlackNativeSpans: true, nativeTables: false });
+}
+
+/** Build a descriptive error from a Slack API response, with Slack's own detail messages when it sends them. */
+async function slackError(
+  res: Response,
+  data?: { ok: boolean; error?: string; response_metadata?: { messages?: string[]; next_cursor?: string } },
+): Promise<PluginActionResult> {
+  if (data && !data.ok) {
+    const detail = data.response_metadata?.messages?.join('; ');
+    return { success: false, error: `Slack API error: ${data.error || 'unknown'}${detail ? ` (${detail})` : ''}` };
+  }
   return { success: false, error: `Slack API ${res.status}: ${res.statusText}` };
 }
 
@@ -95,13 +164,27 @@ function ownerSlackUserId(cred: Credential | null): string | undefined {
   return typeof raw === "string" ? raw : undefined;
 }
 
-/** Guard that checks private channel membership. Returns an error PluginActionResult if denied, or null if allowed. */
-async function guardPrivateChannel(token: string, channelId: string, ownerId: string | undefined): Promise<PluginActionResult | null> {
-  const result = await checkPrivateChannelAccess(token, channelId, ownerId);
+/** The answer of the private-channel guard. */
+interface ChannelGuard {
+  /** The error result the action must return. Absent when access is allowed. */
+  denied?: PluginActionResult;
+  /** The channel name from `conversations.info`. Absent for a conversation
+   *  Slack gives no name, such as a direct message, and for a denied check. */
+  name?: string;
+}
+
+/** Guard that checks private channel membership. */
+async function guardPrivateChannel(token: string, channelId: string, ownerId: string | undefined, ownerType?: "user" | "team" | "org"): Promise<ChannelGuard> {
+  const result = await checkPrivateChannelAccess(token, channelId, ownerId, { ownerType });
   if (!result.allowed) {
-    return { success: false, error: result.error || 'Access denied' };
+    return { denied: { success: false, error: result.error || 'Access denied' } };
   }
-  return null;
+  // The check read conversations.info, so an action that labels the channel
+  // needs no second request. The name goes to the cache as well, because
+  // message text can mention the channel that is read. The guard runs on each
+  // read, so a rename reaches the cache on the next read.
+  rememberChannelName(token, channelId, result.name ?? null);
+  return { name: result.name };
 }
 
 const NOISE_SUBTYPES = new Set([
@@ -114,9 +197,10 @@ const NOISE_SUBTYPES = new Set([
 const SLACK_USER_MENTION_RE = /<@([UW][A-Z0-9]+)(?:\|[^>]*)?>/g;
 const SLACK_CHANNEL_MENTION_RE = /<#([C][A-Z0-9]+)(?:\|([^>]*))?>/g;
 
-/** Module-level caches — survive across requests within a worker isolate. */
+/** Module-level caches. They survive across requests within a worker isolate.
+ *  Channel names have their own bounded cache in channel-names.ts, which the
+ *  private-channel guard also fills. */
 const userCache = new Map<string, string>();
-const channelCache = new Map<string, string>();
 const botCache = new Map<string, string>();
 
 function formatUserDisplay(uid: string, user: Record<string, unknown>): string {
@@ -143,12 +227,11 @@ async function resolveAndEnrichMessages(token: string, messages: Record<string, 
     if (typeof msg.text === 'string') {
       for (const m of msg.text.matchAll(SLACK_USER_MENTION_RE)) userIds.add(m[1]);
       for (const m of msg.text.matchAll(SLACK_CHANNEL_MENTION_RE)) {
-        // If the label is already present (e.g. <#C123|general>), cache it directly
-        if (m[2]) {
-          channelCache.set(m[1], `#${m[2]}`);
-        } else {
-          channelIds.add(m[1]);
-        }
+        // A mention can carry a label (<#C123|general>). Slack keeps that label
+        // as the author wrote it at post time, so it can name the channel
+        // wrongly, and a sender chooses it. Look up an ID that carries no
+        // label; a label stays a fallback for the text of this one message.
+        if (!m[2]) channelIds.add(m[1]);
       }
     }
   }
@@ -168,14 +251,9 @@ async function resolveAndEnrichMessages(token: string, messages: Record<string, 
   }
 
   for (const cid of channelIds) {
-    if (channelCache.has(cid)) continue;
-    fetches.push(
-      slackGet('conversations.info', token, { channel: cid }).then(async (res) => {
-        if (!res.ok) return;
-        const data = (await res.json()) as { ok: boolean; channel?: Record<string, unknown> };
-        if (data.ok && data.channel) channelCache.set(cid, `#${data.channel.name} (${cid})`);
-      }).catch(() => {}),
-    );
+    // resolveChannelName answers from the cache when it can, and it never
+    // throws: an unresolved mention keeps its raw ID.
+    fetches.push(resolveChannelName(token, cid).then(() => {}));
   }
 
   for (const bid of botIds) {
@@ -211,13 +289,108 @@ async function resolveAndEnrichMessages(token: string, messages: Record<string, 
         return userCache.get(uid) || `@${uid}`;
       });
       text = text.replace(SLACK_CHANNEL_MENTION_RE, (_match, cid: string, label?: string) => {
-        return channelCache.get(cid) || (label ? `#${label}` : `#${cid}`);
+        const name = cachedChannelName(token, cid);
+        if (name) return `#${name} (${cid})`;
+        return label ? `#${label}` : `#${cid}`;
       });
       enriched.text = text;
     }
 
     return enriched;
   });
+}
+
+/** The most distinct mentioned users one post checks. Mentions past this
+ *  number go out unchecked. */
+const MAX_CHECKED_MENTIONS = 20;
+
+/** The longest time one users.info lookup in the mention check can take. A
+ *  slower lookup counts as failed, and the post goes out unchecked. */
+const MENTION_LOOKUP_TIMEOUT_MS = 3_000;
+
+/** Block Kit fields that Slack never shows as message text: IDs, URLs, image
+ *  alt text, and the `value` that a button or a select option sends back. */
+const UNRENDERED_KEYS = new Set(['action_id', 'block_id', 'callback_id', 'alt_text', 'url', 'image_url', 'value']);
+
+/** Block Kit object types whose text Slack shows literally: `plain_text`
+ *  objects, and rich-text `text` and `link` elements. A rich-text mention is
+ *  a separate `user` element. */
+const LITERAL_TEXT_TYPES = new Set(['plain_text', 'text', 'link']);
+
+/**
+ * The user IDs that message content mentions, in first-seen order. Each
+ * source is message text or parsed Block Kit JSON. The walk scans every
+ * string for `<@U…>` mentions outside code and adds the user_id of every
+ * rich-text `user` element. It skips objects of a LITERAL_TEXT_TYPES type
+ * and fields in UNRENDERED_KEYS: a `<@U…>` there mentions no one.
+ */
+function mentionedUserIds(sources: unknown[]): Set<string> {
+  const ids = new Set<string>();
+  // A queue, not recursion: blocks are caller-supplied JSON of any depth.
+  const queue = [...sources];
+  for (let i = 0; i < queue.length; i++) {
+    const value = queue[i];
+    if (typeof value === 'string') {
+      for (const m of stripCode(value).matchAll(SLACK_USER_MENTION_RE)) ids.add(m[1]);
+    } else if (Array.isArray(value)) {
+      for (const item of value) queue.push(item);
+    } else if (typeof value === 'object' && value !== null) {
+      if ('type' in value && typeof value.type === 'string' && LITERAL_TEXT_TYPES.has(value.type)) continue;
+      if ('type' in value && value.type === 'user' && 'user_id' in value && typeof value.user_id === 'string') {
+        ids.add(value.user_id);
+      }
+      for (const [key, item] of Object.entries(value)) {
+        if (!UNRENDERED_KEYS.has(key)) queue.push(item);
+      }
+    }
+  }
+  return ids;
+}
+
+/**
+ * The error for outgoing message content that mentions a user ID Slack does
+ * not know, or undefined when the content can go out. Slack accepts such a
+ * post and shows a broken mention, so a mistyped ID otherwise fails with no
+ * signal.
+ *
+ * Every action that posts or edits message content calls this once, right
+ * before it writes, on the content it sends: the converted text, the blocks
+ * after any block-budget slice, and the fallback blocks it can send instead.
+ * The conversion can add a mention: a Markdown link `[label](@U…)` becomes
+ * `<@U…|label>`. Each source is message text or parsed Block Kit JSON.
+ * `linkedUserId` is the owner's linked Slack user ID, which the attribution
+ * block mentions. Valet adds that mention and Slack identity linking supplied
+ * the ID, so the check skips it.
+ */
+async function unknownMentionError(
+  token: string,
+  sources: unknown[],
+  linkedUserId?: string,
+): Promise<PluginActionResult | undefined> {
+  const ids = mentionedUserIds(sources);
+  if (linkedUserId) ids.delete(linkedUserId);
+  const results = await Promise.all([...ids].slice(0, MAX_CHECKED_MENTIONS).map(async (id) => {
+    // Only Slack's definite user_not_found refuses the post. The check exists
+    // to catch a mistyped ID. A lookup that fails for another reason (rate
+    // limit, timeout, missing users:read scope, network) must not stop every
+    // post. The lookup makes one attempt: a retry would wait out Slack's
+    // Retry-After and hold the post back.
+    try {
+      const res = await slackGetOnce('users.info', token, { user: id }, MENTION_LOOKUP_TIMEOUT_MS);
+      if (!res.ok) return undefined;
+      const data = (await res.json()) as { ok: boolean; error?: string };
+      return !data.ok && data.error === 'user_not_found' ? id : undefined;
+    } catch {
+      return undefined;
+    }
+  }));
+  const unknown = results.filter((id) => id !== undefined);
+  if (unknown.length === 0) return undefined;
+  return {
+    success: false,
+    error: `Slack has no user with ID${unknown.length > 1 ? 's' : ''} ${unknown.join(', ')}, so Valet did not send the message. ` +
+      'Look up the user again with slack.list_users or slack.lookup_user_by_email. Then retry with the correct ID.',
+  };
 }
 
 // ─── Response Helpers ─────────────────────────────────────────────────────────
@@ -255,6 +428,7 @@ export function slimMessage(msg: Record<string, unknown>): Record<string, unknow
     .filter((f) => f.mode !== 'tombstone')
     .map((f) => {
       const entry: Record<string, unknown> = {
+        id: f.id,
         name: f.name,
         mimetype: f.mimetype || undefined,
         size: f.size,
@@ -296,6 +470,7 @@ async function openAndSendDM(
   userId: string,
   text: string,
   ctx: PluginActionContext,
+  sender: SenderParams,
 ): Promise<PluginActionResult> {
   const openRes = await slackFetch('conversations.open', token, { users: userId });
   if (!openRes.ok) return slackError(openRes);
@@ -305,15 +480,19 @@ async function openAndSendDM(
   const formattedText = markdownToSlackMrkdwn(text, { preserveSlackNativeSpans: true });
   const body: Record<string, unknown> = { channel: openData.channel.id, text: formattedText, mrkdwn: true };
 
-  // For long messages, use blocks so Slack doesn't split into separate threads.
-  // Prefers markdown blocks (native table/formatting support), falls back to
+  // Use blocks for tables and long messages: native table blocks with
+  // Markdown blocks around them, a single Markdown block otherwise, and
   // section blocks for very long messages (> 12K).
-  if (text.length > SLACK_TEXT_LIMIT) {
-    body.blocks = buildContentBlocks(text, formattedText);
+  let fallbackBlocks: Record<string, unknown>[] | undefined;
+  if (needsContentBlocks(text)) {
+    body.blocks = buildContentBlocks(text, formattedText, SLACK_MAX_BLOCKS, { preserveSlackNativeSpans: true });
     body.text = formattedText.slice(0, SLACK_TEXT_LIMIT); // notification fallback
+    fallbackBlocks = markdownFallbackBlocks(body.blocks as Record<string, unknown>[], text, formattedText, SLACK_MAX_BLOCKS);
   }
 
-  const { res, data } = await postActionMessage(token, body, ctx);
+  const mentionError = await unknownMentionError(token, [body.text, body.blocks, fallbackBlocks]);
+  if (mentionError) return mentionError;
+  const { res, data } = await postActionMessage(token, body, ctx, sender, fallbackBlocks);
   if (!res.ok) return slackError(res);
   if (!data.ok) return slackError(res, data);
 
@@ -323,37 +502,104 @@ async function openAndSendDM(
 // ─── Action Definitions ──────────────────────────────────────────────────────
 
 const dmOwner = action(Type.Object({
+    ...senderParameters,
     text: Type.String({ description: 'Message text' }),
   }))({
   id: 'slack.dm_owner',
   name: 'DM Owner',
-  description: 'Send a direct message to the session owner on Slack. No user lookup needed.',
+  description: 'Send a direct message to a personal session or workflow owner with a linked Slack identity. For team or organization owners, use dm_user with an explicit recipient.',
   riskLevel: 'low',
   execute: async (args, ctx) => {
     const p = args;
     const cred = await ctx.credentials.get();
     const token = cred?.accessToken ?? "";
     if (!token) return { success: false, error: 'Missing bot_token' };
+    if (ctx.owner && ctx.owner.type !== "user") {
+      return { success: false, error: "This run has no personal Slack recipient. Use slack.dm_user with the intended recipient’s Slack user ID." };
+    }
     const ownerSlackId = ownerSlackUserId(cred);
-    if (!ownerSlackId) return { success: false, error: 'Owner has not linked their Slack identity. Ask them to link it in Settings > Integrations > Slack.' };
-    return openAndSendDM(token, ownerSlackId, p.text, ctx);
+    if (!ownerSlackId) return { success: false, error: 'Owner has not linked their Slack identity. Ask them to link Slack in Integrations → Slack.' };
+    return openAndSendDM(token, ownerSlackId, p.text, ctx, p);
   },
 });
 
 const dmUser = action(Type.Object({
+    ...senderParameters,
     user: Type.String({ description: 'User ID (U...)' }),
     text: Type.String({ description: 'Message text' }),
   }))({
   id: 'slack.dm_user',
   name: 'DM User',
-  description: 'Send a direct message to a Slack user by their user ID (U...). Use list_users to find IDs.',
+  description: 'Send a direct message to a Slack user by their user ID (U...). Use list_users to find IDs. This uses the bot token and does not require a personal Slack identity.',
   riskLevel: 'low',
   execute: async (args, ctx) => {
     const p = args;
     const cred = await ctx.credentials.get();
     const token = cred?.accessToken ?? "";
     if (!token) return { success: false, error: 'Missing bot_token' };
-    return openAndSendDM(token, p.user, p.text, ctx);
+    return openAndSendDM(token, p.user, p.text, ctx, p);
+  },
+});
+
+const lookupUserByEmail = action(Type.Object({
+    email: Type.String({ description: 'Exact Slack account email address.' }),
+  }))({
+  id: 'slack.lookup_user_by_email',
+  name: 'Lookup User by Email',
+  description: 'Resolve one explicit Slack email address to a user ID for dm_user. Use the returned id only for that email recipient. This needs the users:read.email bot scope.',
+  riskLevel: 'low',
+  execute: async (args, ctx) => {
+    const email = args.email.trim();
+    if (email === '') {
+      return { success: false, error: 'Recipient email is required. Provide the exact Slack account email address.' };
+    }
+
+    const cred = await ctx.credentials.get();
+    const token = cred?.accessToken ?? '';
+    if (!token) return { success: false, error: 'Missing bot_token. Connect the organization Slack app in Settings.' };
+
+    try {
+      const match = await new SlackApi(token).lookupUserByEmail(email);
+      if (!match) {
+        return { success: false, error: `No Slack user matches ${email}. Check the recipient email, then try again.` };
+      }
+      return { success: true, data: { id: match.id, display_name: match.displayName } };
+    } catch (err) {
+      if (err instanceof SlackApiError && err.detail === 'missing_scope') {
+        return {
+          success: false,
+          error: 'Slack recipient lookup needs the users:read.email bot scope. Reinstall the Slack app to grant it.',
+        };
+      }
+      const detail = err instanceof SlackApiError ? err.detail : 'unknown error';
+      return {
+        success: false,
+        error: `Slack recipient lookup failed: ${detail}. Check the Slack app connection, then try again.`,
+      };
+    }
+  },
+});
+
+const getUserStatus = action(Type.Object({
+    user: Type.String({ pattern: '^[UW][A-Z0-9]+$', description: 'Slack user ID (U...). Use list_users or lookup_user_by_email to find it.' }),
+    include_local_time: Type.Optional(Type.Boolean({ description: "Also return the user's local time and time zone." })),
+  }))({
+  id: 'slack.get_user_status',
+  name: 'Get User Online Status',
+  description: 'Check whether a Slack user is online now: presence active or away, plus their status text and emoji, and optionally their local time. Works only for members of the connected Slack workspace. For "when they come back online", create a workflow trigger on slack.user_online instead of checking in a loop.',
+  riskLevel: 'low',
+  execute: async (args, ctx) => {
+    const cred = await ctx.credentials.get();
+    const token = cred?.accessToken ?? '';
+    if (!token) return { success: false, error: 'Slack is not connected. Connect Slack in Settings → Organization → Slack.' };
+    const teamId = typeof cred?.metadata?.teamId === 'string' ? cred.metadata.teamId : undefined;
+    const result = await readOnlineStatus(token, args.user, {
+      ...(teamId ? { teamId } : {}),
+      includeLocalTime: args.include_local_time === true,
+      signal: ctx.signal,
+    });
+    if (!result.ok) return { success: false, error: result.error };
+    return { success: true, data: result.status };
   },
 });
 
@@ -371,8 +617,8 @@ const addReaction = action(Type.Object({
     const cred = await ctx.credentials.get();
     const token = cred?.accessToken ?? "";
     if (!token) return { success: false, error: 'Missing bot_token' };
-    const denied = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred));
-    if (denied) return denied;
+    const guard = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred), ctx.owner?.type);
+    if (guard.denied) return guard.denied;
     const res = await slackFetch('reactions.add', token, {
       channel: p.channel,
       timestamp: p.timestamp,
@@ -390,17 +636,19 @@ const listChannels = action(Type.Object({
     scope: Type.Optional(Type.Union([Type.Literal('joined'), Type.Literal('all')], {
       description: 'Which channels to list: "joined" (default) = bot member channels, "all" = all public channels',
     })),
-    prefix: Type.Optional(Type.String({ description: 'Filter channels whose name starts with this prefix' })),
+    query: Type.Optional(Type.String({ minLength: 1, description: 'Channel name or part of it, such as lead-acme, #lead-acme, or ACME. Case-insensitive substring search; exact matches rank first.' })),
+    prefix: Type.Optional(Type.String({ description: 'Legacy case-insensitive starts-with filter. ACME does not match lead-acme. Prefer query for finding a channel by name.' })),
   }))({
   id: 'slack.list_channels',
   name: 'List Channels',
-  description: 'List Slack channels. By default lists only channels the bot has joined. Set scope to "all" to discover all public channels in the workspace. Use prefix to filter by channel name prefix (e.g. "eng-" or "team-").',
+  description: 'List Slack channels available to this run. "joined" lists bot member channels; "all" lists public channels only. Team and organization runs can access private channels where the connected bot is a member. Personal runs require a linked Slack identity and channel membership for private access. Read access_note before suggesting another invitation. Use query to search names. Empty matches do not prove missing access. Resolve ambiguous matches before sending messages.',
   riskLevel: 'low',
   execute: async (args, ctx) => {
     const p = args;
     const cred = await ctx.credentials.get();
     const token = cred?.accessToken ?? "";
     if (!token) return { success: false, error: 'Missing bot_token' };
+    if (p.query !== undefined && (!p.query.trim().replace(/^#/, '') || p.prefix !== undefined)) return { success: false, error: 'Supply a nonempty query without prefix.' };
     const wantAll = p.scope === 'all';
 
     // users.conversations = only joined channels (public + private)
@@ -433,26 +681,42 @@ const listChannels = action(Type.Object({
       channels = channels.filter((ch) => typeof ch.name === 'string' && ch.name.toLowerCase().startsWith(pfx));
     }
 
+    const query = p.query?.trim().replace(/^#/, '').toLowerCase();
+    if (query) {
+      channels = channels.filter((ch) => typeof ch.name === 'string' && ch.name.toLowerCase().includes(query));
+      channels.sort((a, b) => Number(typeof b.name === 'string' && b.name.toLowerCase() === query) - Number(typeof a.name === 'string' && a.name.toLowerCase() === query));
+    }
+
     // Filter out private channels the owner doesn't have access to
     const ownerSlackId = ownerSlackUserId(cred);
-    if (ownerSlackId) {
+    const sharedOwner = ctx.owner?.type === 'team' || ctx.owner?.type === 'org';
+    if (!sharedOwner && ownerSlackId) {
       const privateChannels = channels.filter((ch) => ch.is_private === true);
       if (privateChannels.length > 0) {
         const accessChecks = await Promise.all(
           privateChannels.map(async (ch) => {
-            const result = await checkPrivateChannelAccess(token, ch.id as string, ownerSlackId);
+            if (typeof ch.id !== 'string') return { id: ch.id, allowed: false };
+            const result = await checkPrivateChannelAccess(token, ch.id, ownerSlackId, { ownerType: ctx.owner?.type });
             return { id: ch.id, allowed: result.allowed };
           }),
         );
         const deniedIds = new Set(accessChecks.filter((c) => !c.allowed).map((c) => c.id));
         channels = channels.filter((ch) => !deniedIds.has(ch.id));
       }
-    } else {
-      // No linked identity — filter out all private channels
+    } else if (!sharedOwner) {
+      // Personal runs need a linked member identity.
       channels = channels.filter((ch) => ch.is_private !== true);
     }
 
-    return { success: true, data: { channels, total: channels.length } };
+    const visibility = wantAll || (!sharedOwner && !ownerSlackId) ? 'public_only' : 'public_and_authorized_private';
+    const accessNote = sharedOwner
+      ? wantAll ? 'scope="all" lists public channels only. Use scope="joined" for private channels where the bot is a member.' : 'Private channels are included where the connected bot is a member. Team and organization runs use bot membership, not a person’s private access. Direct messages remain restricted.'
+      : !ownerSlackId
+        ? 'Private channels are excluded because the personal owner has no linked Slack identity. Link Slack in Integrations → Slack. Then use scope="joined".'
+        : wantAll
+          ? 'scope="all" lists public channels only. Use scope="joined" to find private channels where both the bot and personal owner are members.'
+          : 'Private channels are included only when the linked personal owner is a member. An absent channel is not proof that the bot needs an invitation.';
+    return { success: true, data: { channels, total: channels.length, scope: wantAll ? 'all' : 'joined', visibility, access_note: accessNote, ...(query ? { query, search_complete: true, ambiguous: channels.length > 1, match_status: channels.length ? 'matched' : 'no_match', search_note: 'No matches are not proof of missing access. Check the supplied name and scope. Resolve multiple matches before sending.' } : {}) } };
   },
 });
 
@@ -470,15 +734,15 @@ const readHistory = action(Type.Object({
   }))({
   id: 'slack.read_history',
   name: 'Read History',
-  description: 'Read recent messages from a Slack channel the bot has joined. Use list_channels to get channel IDs. Each message ts can be used as thread_ts for replies. Use oldest/latest to narrow to a time window.',
+  description: 'Read recent messages from a Slack channel the bot has joined. Use list_channels to get channel IDs. Each message ts can be used as thread_ts for replies. Use oldest/latest to narrow to a time window. The result names the channel in channel_name. Use that name when you write about the channel. Use the ID in tool arguments.',
   riskLevel: 'low',
   execute: async (args, ctx) => {
     const p = args;
     const cred = await ctx.credentials.get();
     const token = cred?.accessToken ?? "";
     if (!token) return { success: false, error: 'Missing bot_token' };
-    const denied = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred));
-    if (denied) return denied;
+    const guard = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred), ctx.owner?.type);
+    if (guard.denied) return guard.denied;
     const query: Record<string, unknown> = {
       channel: p.channel,
       limit: p.limit || 100,
@@ -512,8 +776,22 @@ const readHistory = action(Type.Object({
 
     const next_cursor = data.response_metadata?.next_cursor || undefined;
     const filtered = p.filter || p.threads_only;
+    // The guard read conversations.info for this channel. Message text cannot
+    // reach this name.
+    const channelName = guard.name;
     // Put pagination metadata first — large message arrays may be truncated by tool output limits
-    return { success: true, data: { has_more: data.has_more, next_cursor, ...(filtered ? { fetched } : {}), total: messages.length, messages } };
+    return {
+      success: true,
+      data: {
+        channel: p.channel,
+        ...(channelName ? { channel_name: channelName } : {}),
+        has_more: data.has_more,
+        next_cursor,
+        ...(filtered ? { fetched } : {}),
+        total: messages.length,
+        messages,
+      },
+    };
   },
 });
 
@@ -525,15 +803,15 @@ const readThread = action(Type.Object({
   }))({
   id: 'slack.read_thread',
   name: 'Read Thread',
-  description: 'Read replies in a Slack thread. Bot must be a member of the channel.',
+  description: 'Read replies in a Slack thread. Bot must be a member of the channel. The result names the channel in channel_name. Use that name when you write about the channel. Use the ID in tool arguments.',
   riskLevel: 'low',
   execute: async (args, ctx) => {
     const p = args;
     const cred = await ctx.credentials.get();
     const token = cred?.accessToken ?? "";
     if (!token) return { success: false, error: 'Missing bot_token' };
-    const denied = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred));
-    if (denied) return denied;
+    const guard = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred), ctx.owner?.type);
+    if (guard.denied) return guard.denied;
     const query: Record<string, unknown> = {
       channel: p.channel,
       ts: p.thread_ts,
@@ -551,7 +829,20 @@ const readThread = action(Type.Object({
     );
 
     const next_cursor = data.response_metadata?.next_cursor || undefined;
-    return { success: true, data: { has_more: data.has_more, next_cursor, total: messages.length, messages } };
+    // The guard read conversations.info for this channel. Message text cannot
+    // reach this name.
+    const channelName = guard.name;
+    return {
+      success: true,
+      data: {
+        channel: p.channel,
+        ...(channelName ? { channel_name: channelName } : {}),
+        has_more: data.has_more,
+        next_cursor,
+        total: messages.length,
+        messages,
+      },
+    };
   },
 });
 
@@ -579,51 +870,66 @@ const listUsers = action(Type.Object({}))({
   },
 });
 
+const searchChannels = action(Type.Object({
+  query: Type.String({ minLength: 1, description: 'Original channel name or keyword, such as #lead-acme or ACME. Exact matches rank first, followed by substring matches.' }),
+  scope: Type.Optional(Type.Union([Type.Literal('joined'), Type.Literal('all')], {
+    description: 'joined (default) includes authorized private channels. all searches public channels only.',
+  })),
+}))({
+  id: 'slack.search_channels',
+  name: 'Search Channels',
+  description: 'Find accessible Slack channels by name with case-insensitive substring matching. Pass the user’s original name or keyword in query. Empty matches do not prove missing access. Resolve ambiguous matches before posting.',
+  riskLevel: 'low',
+  execute: (args, ctx) => listChannels.execute(args, ctx),
+});
+
 const fetchFile = action(Type.Object({
-    url: Type.String({ description: 'Slack file URL (from the files array in message data)' }),
+    url: Type.Optional(Type.String({ description: 'Slack file URL from message data. Prefer file_id when available.' })),
+    file_id: Type.Optional(Type.String({ pattern: '^F[A-Z0-9]+$', description: 'File ID from the message files array. Access is checked for this run.' })),
+    output_path: Type.Optional(Type.String({ minLength: 1, description: 'Optional destination in the sandbox. Saves original bytes for editing instead of extracting text. Maximum 25 MB.' })),
   }))({
   id: 'slack.fetch_file',
   name: 'Fetch File',
-  description: 'Download a file from Slack. For images, the content is returned visually so you can see it. For text files, the content is returned as text. Use the url from the files array in message data. IMPORTANT: Call this tool one at a time, not in parallel — each image fetch interrupts the session to deliver the image to your vision.',
+  description: 'Read or download a Slack attachment using this run’s connected account. Works in personal, team, and organization runs after channel access checks. Pass file_id from message data, or its Slack URL. Images return visually; text, PDF, and DOCX return extracted text. Set output_path to save original bytes in the sandbox for editing. Shared runs cannot read DM-only files. Fetch images one at a time.',
   riskLevel: 'low',
   execute: async (args, ctx) => {
-    const p = args;
     const cred = await ctx.credentials.get();
-    const token = cred?.accessToken ?? "";
-    if (!token) return { success: false, error: 'Missing bot_token' };
-
-    // Only allow files.slack.com URLs
-    let parsedUrl: URL;
+    if (!cred?.accessToken) return { success: false, error: 'Connect Slack in Settings, then retry.' };
+    const file = await authorizeSlackFile(args, cred, ctx);
+    if ('error' in file) return { success: false, error: file.error };
+    const parsedUrl = file.url;
+    let res: Response;
     try {
-      parsedUrl = new URL(p.url);
-    } catch {
-      return { success: false, error: 'Invalid URL' };
+      res = await fetch(parsedUrl.toString(), {
+        headers: { Authorization: `Bearer ${cred.accessToken}` },
+        redirect: 'error',
+        signal: ctx.signal,
+      });
+    } catch (error) {
+      if (ctx.signal.aborted) throw error;
+      return { success: false, error: 'Slack file download failed. Read the source message again, then retry.' };
     }
-    if (!parsedUrl.hostname.endsWith('.slack.com')) {
-      return { success: false, error: 'This is an external file (e.g. Google Docs). Open the URL directly — it cannot be fetched through Slack. Only files hosted on Slack (files.slack.com) can be downloaded.' };
+    if (!res.ok) return { success: false, error: `Slack file download failed (${res.status}). Check the Slack connection, then retry.` };
+    if (args.output_path) {
+      const downloaded = await readResponseBytes(res, MAX_PDF_DOCUMENT_BYTES, ctx.signal);
+      if (!downloaded.ok) return { success: false, error: 'File exceeds the 25 MB download limit. Use a smaller file.' };
+      await ctx.sandbox.writeBinary(args.output_path, downloaded.data);
+      return { success: true, data: { path: args.output_path, filename: file.name, size: downloaded.data.byteLength } };
     }
 
-    const res = await fetch(p.url, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!res.ok) {
-      return { success: false, error: `Failed to fetch file: ${res.status} ${res.statusText}` };
-    }
-
-    const rawContentType = res.headers.get('content-type') || 'application/octet-stream';
-    const contentType = rawContentType.split(';')[0].trim();
+    const contentType = normalizeDocumentMime(res.headers.get('content-type') ?? undefined) || 'application/octet-stream';
     // Images up to 1MB get broadcast to the chat UI; larger ones return metadata only
     const MAX_IMAGE_DISPLAY = 1 * 1024 * 1024;
     const MAX_IMAGE_FETCH = 10 * 1024 * 1024;
     const MAX_TEXT_SIZE = 1 * 1024 * 1024;
+    const MAX_PDF_FETCH = MAX_PDF_DOCUMENT_BYTES;
 
     // Image files — return via the attachments pipeline so the user can see them in the chat UI
     if (contentType.startsWith('image/')) {
-      const buf = await res.arrayBuffer();
+      const image = await readResponseBytes(res, MAX_IMAGE_FETCH, ctx.signal);
+      if (!image.ok) return { success: false, error: 'Image exceeds the 10 MB limit. Use a smaller image.' };
+      const buf = image.data;
       const filename = parsedUrl.pathname.split('/').pop() || 'image';
-      if (buf.byteLength > MAX_IMAGE_FETCH) {
-        return { success: false, error: `Image too large (${Math.round(buf.byteLength / 1024 / 1024)}MB). Max 10MB.` };
-      }
       if (buf.byteLength > MAX_IMAGE_DISPLAY) {
         return {
           success: true,
@@ -638,13 +944,50 @@ const fetchFile = action(Type.Object({
       };
     }
 
-    // Text files — return content directly
-    if (contentType.startsWith('text/') || contentType === 'application/json' || contentType === 'application/xml') {
-      const text = await res.text();
-      if (text.length > MAX_TEXT_SIZE) {
-        return { success: false, error: `File too large for text extraction (${Math.round(text.length / 1024)}KB). Max 1MB.` };
+    // Text files — return content directly. The type list lives in the engine.
+    if (isTextDocumentMime(contentType)) {
+      const downloaded = await readResponseText(res, MAX_TEXT_SIZE, ctx.signal);
+      if (!downloaded.ok) {
+        return { success: false, error: `File too large for text extraction (${Math.round(downloaded.size / 1024)}KB). Max 1MB.` };
       }
-      return { success: true, data: { content: text, mimetype: contentType } };
+      return { success: true, data: { content: downloaded.text, mimetype: contentType } };
+    }
+
+    const documentFilename = file.name;
+    if (isDocxDocumentMime(contentType, documentFilename)) {
+      const downloaded = await readResponseBytes(res, MAX_PDF_FETCH, ctx.signal);
+      if (!downloaded.ok) {
+        return { success: false, error: 'DOCX file exceeds the 25 MB limit. Upload a smaller file.' };
+      }
+      if (!isDocxDocument(downloaded.data)) {
+        return { success: false, error: 'This file is not a valid DOCX document. Upload a DOCX file exported from Word.' };
+      }
+      const read = await extractDownloadedDocx({ data: downloaded.data, name: documentFilename, extractDocument: ctx.extractDocument, signal: ctx.signal });
+      if (!read.ok) return { success: false, error: read.error };
+      return { success: true, data: { content: read.content, mimetype: DOCX_DOCUMENT_MIME, filename: documentFilename } };
+    }
+
+    if (contentType === 'application/pdf' || contentType === 'application/octet-stream') {
+      const filename = parsedUrl.pathname.split('/').pop() || 'document.pdf';
+      let data: Uint8Array | undefined;
+      if (contentType === 'application/pdf') {
+        const downloaded = await readResponseBytes(res, MAX_PDF_FETCH, ctx.signal);
+        if (!downloaded.ok) {
+          return { success: false, error: `PDF too large (${Math.round(downloaded.size / 1024 / 1024)}MB). Max 25MB.` };
+        }
+        data = downloaded.data;
+      } else {
+        const candidate = await readPdfCandidateResponse(res, MAX_PDF_FETCH, ctx.signal);
+        if (candidate.kind === 'oversize') {
+          return { success: false, error: `PDF too large (${Math.round(candidate.size / 1024 / 1024)}MB). Max 25MB.` };
+        }
+        if (candidate.kind === 'pdf') data = candidate.data;
+      }
+      if (data && isPdfDocument(data)) {
+        const read = await extractDownloadedPdf({ data, name: filename, extractDocument: ctx.extractDocument, signal: ctx.signal });
+        if (!read.ok) return { success: false, error: read.error };
+        return { success: true, data: { content: read.content, mimetype: 'application/pdf', filename } };
+      }
     }
 
     // Other file types — return metadata only
@@ -652,7 +995,7 @@ const fetchFile = action(Type.Object({
       success: true,
       data: {
         mimetype: contentType,
-        note: 'File type is not viewable. Only images and text files can be fetched.',
+        note: 'This file type cannot be read here. Images, text files, PDFs, and DOCX files can be fetched.',
       },
     };
   },
@@ -663,15 +1006,15 @@ const getPins = action(Type.Object({
   }))({
   id: 'slack.get_pins',
   name: 'Get Pins',
-  description: 'Get pinned messages in a channel. Returns messages in the same format as read_history. Useful for understanding what a channel considers important.',
+  description: 'Get pinned messages in a channel. Returns messages in the same format as read_history. Useful for understanding what a channel considers important. The result names the channel in channel_name. Use that name when you write about the channel. Use the ID in tool arguments.',
   riskLevel: 'low',
   execute: async (args, ctx) => {
     const p = args;
     const cred = await ctx.credentials.get();
     const token = cred?.accessToken ?? "";
     if (!token) return { success: false, error: 'Missing bot_token' };
-    const denied = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred));
-    if (denied) return denied;
+    const guard = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred), ctx.owner?.type);
+    if (guard.denied) return guard.denied;
 
     const res = await slackGet('pins.list', token, { channel: p.channel });
     if (!res.ok) return slackError(res);
@@ -696,10 +1039,22 @@ const getPins = action(Type.Object({
       .filter((item) => item.type === 'file' && item.file)
       .map((item) => {
         const f = item.file as Record<string, unknown>;
-        return { type: 'file', name: f.name, mimetype: f.mimetype || undefined, size: f.size, url: f.url_private };
+        return { type: 'file', id: f.id, name: f.name, mimetype: f.mimetype || undefined, size: f.size, url: f.url_private };
       });
 
-    return { success: true, data: { total: pins.length + fileItems.length, pins, ...(fileItems.length > 0 ? { files: fileItems } : {}) } };
+    // The guard read conversations.info for this channel. Message text cannot
+    // reach this name.
+    const channelName = guard.name;
+    return {
+      success: true,
+      data: {
+        channel: p.channel,
+        ...(channelName ? { channel_name: channelName } : {}),
+        total: pins.length + fileItems.length,
+        pins,
+        ...(fileItems.length > 0 ? { files: fileItems } : {}),
+      },
+    };
   },
 });
 
@@ -715,8 +1070,8 @@ const getChannelInfo = action(Type.Object({
     const cred = await ctx.credentials.get();
     const token = cred?.accessToken ?? "";
     if (!token) return { success: false, error: 'Missing bot_token' };
-    const denied = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred));
-    if (denied) return denied;
+    const guard = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred), ctx.owner?.type);
+    if (guard.denied) return guard.denied;
 
     const res = await slackGet('conversations.info', token, { channel: p.channel, include_num_members: true });
     if (!res.ok) return slackError(res);
@@ -789,8 +1144,8 @@ const getReactions = action(Type.Object({
     const cred = await ctx.credentials.get();
     const token = cred?.accessToken ?? "";
     if (!token) return { success: false, error: 'Missing bot_token' };
-    const denied = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred));
-    if (denied) return denied;
+    const guard = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred), ctx.owner?.type);
+    if (guard.denied) return guard.denied;
 
     const res = await slackGet('reactions.get', token, {
       channel: p.channel,
@@ -843,7 +1198,12 @@ const getReactions = action(Type.Object({
   },
 });
 
+/** Wait between the parts of a split message: Slack allows about one
+ * message per second in a channel. */
+const SLACK_PART_INTERVAL_MS = 1100;
+
 const sendMessage = action(Type.Object({
+    ...senderParameters,
     channel: Type.String({ description: 'Channel ID (C...) or channel name with # prefix (e.g. #proj-valet). Use list_channels to find IDs.' }),
     text: Type.String({ description: 'Message body in CommonMark. Valet converts it to Slack mrkdwn. Use **bold**, *italic*, ~~strike~~, [text](url), and backticks for code.' }),
     thread_ts: Type.Optional(Type.String({ description: 'Post as a threaded reply under an existing message. Use the ts value returned by a previous send_message call (e.g. "1780887543.189519").' })),
@@ -853,7 +1213,7 @@ const sendMessage = action(Type.Object({
   }))({
   id: 'slack.send_message',
   name: 'Send Message',
-  description: 'Post a message to an arbitrary Slack channel or thread the bot has joined. This requires approval on every call, because it can post outside the current conversation — for example into a customer channel. To answer or follow up in the thread this turn came from, use reply_to_origin instead: it needs no approval and cannot reach a wrong channel. Returns ts (message timestamp) and channel — save ts to thread a follow-up under this message via thread_ts, or to edit or delete this message later with update_message / delete_message.',
+  description: 'Post a message to an arbitrary Slack channel or thread the bot has joined. It can post outside the current conversation, for example into a customer channel, so Valet asks for approval when your organization\'s policy requires it. Do not call ask_approval before this action. To answer or follow up in the thread this turn came from, use reply_to_origin instead: it cannot reach a wrong channel. Returns ts (message timestamp) and channel — save ts to thread a follow-up under this message via thread_ts, or to edit or delete this message later with update_message / delete_message. A table too large for one Slack message is sent as several native tables: the first part goes to the channel or thread you name, the rest follow in its thread, ts names the first part, and part_ts lists every part.',
   riskLevel: 'high',
   execute: async (args, ctx) => {
     const p = args;
@@ -886,12 +1246,8 @@ const sendMessage = action(Type.Object({
       if (!found) return { success: false, error: `Channel "${p.channel}" not found or bot is not a member. Use list_channels to find available channels.` };
     }
 
-    const denied = await guardPrivateChannel(token, channelId, ownerSlackUserId(cred));
-    if (denied) return denied;
-
-    const formattedText = markdownToSlackMrkdwn(p.text, { preserveSlackNativeSpans: true });
-    const body: Record<string, unknown> = { channel: channelId, text: formattedText, mrkdwn: true };
-    if (p.thread_ts) body.thread_ts = p.thread_ts;
+    const guard = await guardPrivateChannel(token, channelId, ownerSlackUserId(cred), ctx.owner?.type);
+    if (guard.denied) return guard.denied;
 
     let userBlocks: Record<string, unknown>[] | undefined;
     if (p.blocks) {
@@ -907,37 +1263,75 @@ const sendMessage = action(Type.Object({
       }
     }
 
-    if (p.unfurl_links !== undefined) body.unfurl_links = p.unfurl_links;
-    if (p.unfurl_media !== undefined) body.unfurl_media = p.unfurl_media;
-
     // Attribute non-DM posts to the session owner (mirrors the channel
     // transport's attribution context block on agent-authored replies).
     const ownerSlackId = ownerSlackUserId(cred);
     const hasAttribution = Boolean(ownerSlackId) && !channelId.startsWith('D');
-    const needsLongBlocks = !userBlocks && p.text.length > SLACK_TEXT_LIMIT;
+    const blockBudget = hasAttribution ? SLACK_MAX_BLOCKS - 1 : SLACK_MAX_BLOCKS;
 
-    if (hasAttribution || needsLongBlocks) {
-      const blockBudget = hasAttribution ? SLACK_MAX_BLOCKS - 1 : SLACK_MAX_BLOCKS;
-      const contentBlocks = userBlocks
-        ? userBlocks.slice(0, blockBudget)
-        : buildContentBlocks(p.text, formattedText, blockBudget);
-      if (hasAttribution) {
-        contentBlocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `↳ <@${ownerSlackId}>` }] });
+    const post = async (text: string, threadTs: string | undefined): Promise<{ ts?: string; channel?: string } | { failed: PluginActionResult }> => {
+      const formattedText = markdownToSlackMrkdwn(text, { preserveSlackNativeSpans: true });
+      const body: Record<string, unknown> = { channel: channelId, text: formattedText, mrkdwn: true };
+      if (threadTs) body.thread_ts = threadTs;
+      if (p.unfurl_links !== undefined) body.unfurl_links = p.unfurl_links;
+      if (p.unfurl_media !== undefined) body.unfurl_media = p.unfurl_media;
+
+      const needsGeneratedBlocks = !userBlocks && needsContentBlocks(text);
+      let fallbackBlocks: Record<string, unknown>[] | undefined;
+      if (hasAttribution || needsGeneratedBlocks) {
+        const attribution = { type: 'context', elements: [{ type: 'mrkdwn', text: `↳ <@${ownerSlackId}>` }] };
+        const contentBlocks = userBlocks
+          ? userBlocks.slice(0, blockBudget)
+          : buildContentBlocks(text, formattedText, blockBudget, { preserveSlackNativeSpans: true });
+        if (!userBlocks) {
+          fallbackBlocks = markdownFallbackBlocks(contentBlocks, text, formattedText, blockBudget);
+          if (fallbackBlocks && hasAttribution) fallbackBlocks.push(attribution);
+        }
+        if (hasAttribution) contentBlocks.push(attribution);
+        body.blocks = contentBlocks;
+        if (needsGeneratedBlocks) {
+          body.text = formattedText.slice(0, SLACK_TEXT_LIMIT);
+        }
+      } else if (userBlocks) {
+        body.blocks = userBlocks;
       }
-      body.blocks = contentBlocks;
-      if (needsLongBlocks) {
-        body.text = formattedText.slice(0, SLACK_TEXT_LIMIT);
+
+      const mentionError = await unknownMentionError(token, [body.text, body.blocks, fallbackBlocks], ownerSlackId);
+      if (mentionError) return { failed: mentionError };
+      const { res, data } = await postActionMessage(token, body, ctx, p, fallbackBlocks);
+      if (!res.ok || !data.ok) {
+        return { failed: { success: false, error: `Slack API error: ${data.error || res.statusText}` } };
       }
-    } else if (userBlocks) {
-      body.blocks = userBlocks;
-    }
+      return { ts: data.ts, channel: data.channel };
+    };
 
-    const { res, data } = await postActionMessage(token, body, ctx);
-    if (!res.ok || !data.ok) {
-      return { success: false, error: `Slack API error: ${data.error || res.statusText}` };
+    // A table too large for one message goes out as several native tables.
+    // The first part goes where the caller aimed it; the rest follow in its
+    // thread, so replies threaded under the returned ts come after them.
+    const parts = userBlocks
+      ? undefined
+      : splitTableMessage(p.text, blockBudget, p.thread_ts ? '_Continued below._' : '_Continued in the thread._');
+    if (!parts) {
+      const sent = await post(p.text, p.thread_ts);
+      if ('failed' in sent) return sent.failed;
+      return { success: true, data: { ts: sent.ts, channel: sent.channel } };
     }
-
-    return { success: true, data: { ts: data.ts, channel: data.channel } };
+    const first = await post(parts[0], p.thread_ts);
+    if ('failed' in first) return first.failed;
+    const partTs = [first.ts];
+    for (const [index, part] of parts.entries()) {
+      if (index === 0) continue;
+      await new Promise((resolve) => setTimeout(resolve, SLACK_PART_INTERVAL_MS));
+      const sent = await post(part, p.thread_ts ?? first.ts);
+      if ('failed' in sent) {
+        return {
+          success: false,
+          error: `Slack posted parts 1-${index} of ${parts.length} (ts ${partTs.join(', ')}) and rejected part ${index + 1}: ${sent.failed.error}. Delete the posted parts with delete_message before you send the message again.`,
+        };
+      }
+      partTs.push(sent.ts);
+    }
+    return { success: true, data: { ts: first.ts, channel: first.channel, part_ts: partTs } };
   },
 });
 
@@ -971,65 +1365,168 @@ async function resolveSlackOrigin(
 }
 
 const replyToOrigin = action(Type.Object({
+    ...senderParameters,
     text: Type.String({ description: 'Reply text in CommonMark. Valet converts it to Slack mrkdwn.' }),
+    charts: Type.Optional(Type.Array(Type.Record(Type.String(), Type.Any()), {
+      maxItems: CHART_LIMITS.perMessage,
+      description:
+        'Up to 2 native Slack charts, drawn below the text. Each is { title, chart } with chart one of ' +
+        '{ type: "pie", segments: [{ label, value }] } or { type: "bar" | "line" | "area", series: [{ name, data: [{ label, value }] }], ' +
+        'axis_config: { categories: [...], x_label?, y_label? } }. Labels, names, and categories are at most 20 characters; ' +
+        'at most 12 series or segments and 20 categories; every series has one point per category.',
+    })),
   }))({
   id: 'slack.reply_to_origin',
   name: 'Reply to Origin',
   description:
-    'Reply in the Slack thread this turn came from. Use it for later updates and final results. On an addressed turn, the first assistant text posts automatically unless this action sends the first reply. No channel or thread id is needed.',
+    'Reply in the Slack thread this turn came from. Use it for later updates and final results, and to post a chart: pass charts and Slack draws them natively. On an addressed turn, the first assistant text posts automatically unless this action sends the first reply. No channel or thread id is needed.',
   riskLevel: 'medium',
   execute: async (args, ctx) => {
+    const charts: Chart[] = [];
+    for (const [index, value] of (args.charts ?? []).entries()) {
+      const chart = readChart(value);
+      if (!chart) return { success: false, error: `Chart ${index + 1}: ${chartProblem(value)}` };
+      charts.push(chart);
+    }
     const o = await resolveSlackOrigin(ctx);
     if ('error' in o) return { success: false, error: o.error };
-    const { res, data } = await postActionMessage(o.token, {
+    const formattedText = markdownToSlackMrkdwn(args.text, { preserveSlackNativeSpans: true });
+    const body: Record<string, unknown> = {
       channel: o.channelId,
       thread_ts: o.threadTs,
-      text: markdownToSlackMrkdwn(args.text, { preserveSlackNativeSpans: true }),
+      text: formattedText,
       mrkdwn: true,
-    }, ctx);
+    };
+    // A workspace where Slack has not rolled out the chart block rejects it
+    // as invalid_blocks; the fallback posts each chart as a table instead.
+    let fallbackBlocks: Record<string, unknown>[] | undefined;
+    if (charts.length > 0) {
+      const textBudget = SLACK_MAX_BLOCKS - charts.length;
+      body.text = formattedText.slice(0, SLACK_TEXT_LIMIT);
+      body.blocks = [
+        ...buildContentBlocks(args.text, formattedText, textBudget, { preserveSlackNativeSpans: true }),
+        ...charts.map((chart) => ({ type: 'data_visualization', title: chart.title, chart: chart.chart })),
+      ];
+      const withTables = [args.text, ...charts.map(chartAsMarkdown)].join('\n\n');
+      fallbackBlocks = buildContentBlocks(withTables, markdownToSlackMrkdwn(withTables, { preserveSlackNativeSpans: true }),
+        SLACK_MAX_BLOCKS, { preserveSlackNativeSpans: true, nativeTables: false });
+    }
+    const mentionError = await unknownMentionError(o.token, [formattedText, body.blocks, fallbackBlocks]);
+    if (mentionError) return mentionError;
+    const { res, data } = await postActionMessage(o.token, body, ctx, args, fallbackBlocks);
     if (!res.ok) return slackError(res);
     if (!data.ok) return slackError(res, data);
-    return { success: true, data: { channel: o.channelId, ts: data.ts } };
+    return { success: true, data: { channel: o.channelId, ts: data.ts, ...(charts.length > 0 ? { charts: charts.length } : {}) } };
   },
 });
 
+/** Slack's limit on an image's alt text. */
+const SLACK_ALT_TEXT_LIMIT = 1000;
+
+/**
+ * The upload's MIME type. Only bytes make a file an image: a raster signature,
+ * or a safe SVG. A declared or stored image type without image bytes uploads
+ * as a plain file, so Slack never gets a broken image.
+ */
+export function uploadMimeType(data: Uint8Array, name: string, declared?: string): string {
+  const image = validatedImageMediaType(data, name);
+  if (image) return image;
+  if (declared && !declared.toLowerCase().startsWith('image/')) return declared;
+  return 'application/octet-stream';
+}
+
 const replyFileToOrigin = action(Type.Object({
-    path: Type.String({ minLength: 1, description: 'Sandbox path of the file to upload.' }),
+    path: Type.Optional(Type.String({ minLength: 1, description: 'Sandbox path of the file to upload. Pass path or file_id.' })),
+    file_id: Type.Optional(Type.String({
+      minLength: 1,
+      description: 'id of a file this thread already saved, from file_attach or render_diagram. Pass path or file_id.',
+    })),
     name: Type.Optional(Type.String({
       minLength: 1,
-      description: 'Displayed filename. Defaults to the path basename.',
+      description: 'Displayed filename. Defaults to the path basename or the saved file name.',
+    })),
+    title: Type.Optional(Type.String({
+      minLength: 1,
+      maxLength: 255,
+      description: 'Title Slack shows above the file, such as "Weekly signups". Defaults to the filename.',
+    })),
+    alt_text: Type.Optional(Type.String({
+      minLength: 1,
+      maxLength: SLACK_ALT_TEXT_LIMIT,
+      description: 'What the image shows, for screen readers. Send it for every image, chart, and diagram.',
     })),
     mime_type: Type.Optional(Type.String({
       minLength: 1,
-      description: 'File MIME type. Defaults to application/octet-stream.',
+      description: 'File MIME type. Image bytes decide it for PNG, JPEG, GIF, and WebP. Defaults to application/octet-stream.',
     })),
     caption: Type.Optional(Type.String({ description: 'Optional message posted with the file.' })),
   }))({
   id: 'slack.reply_file_to_origin',
   name: 'Reply with File to Origin',
   description:
-    'Upload a sandbox file to the Slack thread this turn came from. Use it for generated images, documents, and other file results. No channel or thread id is needed.',
+    'Upload a file to the Slack thread this turn came from: a generated image, chart, or diagram, a rendered document, or any other file result. Pass a sandbox path, or the file_id that file_attach or render_diagram returned. PNG, JPEG, GIF, and WebP images show inline; send alt_text and title with them. No channel or thread id is needed.',
   riskLevel: 'medium',
   execute: async (args, ctx) => {
+    if ((args.path === undefined) === (args.file_id === undefined)) {
+      return { success: false, error: 'Pass exactly one of path or file_id, then retry.' };
+    }
     const o = await resolveSlackOrigin(ctx);
     if ('error' in o) return { success: false, error: o.error };
-    const stat = await ctx.sandbox.stat(args.path);
-    if (!stat.isFile) {
-      return { success: false, error: 'The upload path is not a file. Choose a file in the sandbox and retry.' };
+    let data: Uint8Array;
+    let defaultName: string;
+    let storedMime: string | undefined;
+    if (args.file_id !== undefined) {
+      if (!ctx.threadFiles) {
+        return { success: false, error: 'This run has no saved thread files. Pass the sandbox path instead.' };
+      }
+      // The store is bound to this thread, so an id from another thread reads as missing.
+      const saved = await ctx.threadFiles.read(args.file_id);
+      if (!saved) {
+        return { success: false, error: 'No file with that file_id is saved in this thread. Pass the id file_attach returned in this thread, or a sandbox path.' };
+      }
+      data = saved.data;
+      defaultName = saved.name;
+      storedMime = saved.mimeType;
+    } else {
+      const path = args.path ?? '';
+      const stat = await ctx.sandbox.stat(path);
+      if (!stat.isFile) {
+        return { success: false, error: 'The upload path is not a file. Choose a file in the sandbox and retry.' };
+      }
+      data = await ctx.sandbox.readBinary(path);
+      defaultName = path.split('/').filter(Boolean).at(-1) ?? 'file';
     }
-    const data = await ctx.sandbox.readBinary(args.path);
-    const name = args.name ?? args.path.split('/').filter(Boolean).at(-1) ?? 'file';
+    // completeUploadExternal posts this same conversion of the caption. The
+    // check runs before the upload, so a refused caption leaves no file behind.
+    const caption = args.caption === undefined
+      ? undefined
+      : markdownToSlackMrkdwn(args.caption, { preserveSlackNativeSpans: true });
+    const mentionError = await unknownMentionError(o.token, [caption]);
+    if (mentionError) return mentionError;
+    const name = args.name ?? defaultName;
+    const mimeType = uploadMimeType(data, name, args.mime_type ?? storedMime);
     const api = new SlackApi(o.token);
-    const { uploadUrl, fileId } = await api.getUploadUrlExternal(name, data.byteLength);
-    await api.uploadToUrl(uploadUrl, data, args.mime_type ?? 'application/octet-stream');
+    const { uploadUrl, fileId } = await api.getUploadUrlExternal(name, data.byteLength, args.alt_text);
+    await api.uploadToUrl(uploadUrl, data, mimeType);
     await api.completeUploadExternal({
       fileId,
+      title: args.title,
       channelId: o.channelId,
       threadTs: o.threadTs,
       initialComment: args.caption,
       preserveSlackNativeSpans: true,
     });
-    return { success: true, data: { channel: o.channelId, fileId } };
+    const inline = mimeType.startsWith('image/') && mimeType !== 'image/svg+xml';
+    return {
+      success: true,
+      data: {
+        channel: o.channelId,
+        fileId,
+        mime_type: mimeType,
+        ...(mimeType === 'image/svg+xml' ? { note: 'Slack shows no inline preview for SVG. Upload a PNG copy for an inline image.' } : {}),
+        ...(inline && !args.alt_text ? { note: 'Send alt_text with the next image so screen readers can describe it.' } : {}),
+      },
+    };
   },
 });
 
@@ -1073,32 +1570,47 @@ const updateMessage = action(Type.Object({
     const token = cred?.accessToken;
     if (!token) return { success: false, error: 'Missing bot_token' };
 
-    const denied = await guardPrivateChannel(token, args.channel, ownerSlackUserId(cred));
-    if (denied) return denied;
+    const guard = await guardPrivateChannel(token, args.channel, ownerSlackUserId(cred), ctx.owner?.type);
+    if (guard.denied) return guard.denied;
 
     // chat.update defaults to parse:'client' (unlike chat.postMessage's 'none'),
     // which would mangle <url|label> markup on every edit — pin 'none'. It also
     // keeps a message's existing blocks unless the field is sent, so always send
     // blocks: rebuilt content for long text, an explicit [] otherwise. Editing a
     // previously block-formatted (long) message down to short text must not leave
-    // the stale blocks rendering.
+    // the stale blocks rendering. chat.update measures its text limit in UTF-8
+    // bytes of the text as Slack escapes it, so the limit check and the cut
+    // fallback both use that escaped form.
     const formattedText = markdownToSlackMrkdwn(args.text, { preserveSlackNativeSpans: true });
+    const escapedText = slackEscapedText(formattedText);
+    const fallbackText = truncateSlackText(escapedText, SLACK_UPDATE_TEXT_BYTES);
     const body: Record<string, unknown> = {
       channel: args.channel,
       ts: args.ts,
       text: formattedText,
       parse: 'none',
     };
-    if (args.text.length > SLACK_TEXT_LIMIT) {
-      body.blocks = buildContentBlocks(args.text, formattedText);
-      body.text = formattedText.slice(0, SLACK_TEXT_LIMIT);
+    let fallbackBlocks: Record<string, unknown>[] | undefined;
+    if (needsContentBlocks(args.text) || fallbackText !== escapedText) {
+      body.blocks = buildContentBlocks(args.text, formattedText, SLACK_MAX_BLOCKS, { preserveSlackNativeSpans: true });
+      body.text = fallbackText;
+      fallbackBlocks = markdownFallbackBlocks(body.blocks as Record<string, unknown>[], args.text, formattedText, SLACK_MAX_BLOCKS);
     } else {
       body.blocks = [];
     }
 
-    const res = await slackFetch('chat.update', token, body);
+    const mentionError = await unknownMentionError(token, [body.text, body.blocks, fallbackBlocks]);
+    if (mentionError) return mentionError;
+    type UpdateData = { ok: boolean; error?: string; ts?: string; channel?: string; text?: string; response_metadata?: { messages?: string[] } };
+    let res = await slackFetch('chat.update', token, body);
     if (!res.ok) return slackError(res);
-    const data = (await res.json()) as { ok: boolean; error?: string; ts?: string; channel?: string; text?: string };
+    let data = (await res.json()) as UpdateData;
+    if (!data.ok && data.error === 'invalid_blocks' && fallbackBlocks) {
+      // Slack rejected the generated table block; edit with its Markdown rendering.
+      res = await slackFetch('chat.update', token, { ...body, blocks: fallbackBlocks });
+      if (!res.ok) return slackError(res);
+      data = (await res.json()) as UpdateData;
+    }
     if (!data.ok) {
       if (data.error === 'cant_update_message') {
         return { success: false, error: 'Slack rejected the edit (cant_update_message): Valet can only edit its own messages. Check that ts belongs to a message Valet sent.' };
@@ -1125,8 +1637,8 @@ const deleteMessage = action(Type.Object({
     const token = cred?.accessToken;
     if (!token) return { success: false, error: 'Missing bot_token' };
 
-    const denied = await guardPrivateChannel(token, args.channel, ownerSlackUserId(cred));
-    if (denied) return denied;
+    const guard = await guardPrivateChannel(token, args.channel, ownerSlackUserId(cred), ctx.owner?.type);
+    if (guard.denied) return guard.denied;
 
     const res = await slackFetch('chat.delete', token, { channel: args.channel, ts: args.ts });
     if (!res.ok) return slackError(res);
@@ -1169,8 +1681,11 @@ export const slackPlugin: ActionPlugin = {
   actions: [
     dmOwner,
     dmUser,
+    lookupUserByEmail,
+    getUserStatus,
     addReaction,
     listChannels,
+    searchChannels,
     readHistory,
     readThread,
     listUsers,

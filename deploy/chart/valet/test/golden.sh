@@ -39,6 +39,22 @@ pass "helm lint clean"
 echo "== helm template (bundled postgres, default values) =="
 helm template valet "$CHART_DIR" --kube-version 1.30.0 > "$TMP_DIR/bundled.yaml"
 pass "renders with default values"
+grep -q 'type: Recreate' "$TMP_DIR/bundled.yaml" && grep -q 'rollingUpdate: null' "$TMP_DIR/bundled.yaml" \
+  || fail "API updates must stop old schema writers"
+
+grep -q 'VALET_BROWSER_ENABLED: "0"' "$TMP_DIR/bundled.yaml" \
+  || fail "managed browser must remain opt-in until nodes have the seccomp profile"
+helm --kube-context rancher-desktop template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --set sandbox.browserEnabled=true > "$TMP_DIR/browser-enabled.yaml"
+grep -q 'VALET_BROWSER_ENABLED: "1"' "$TMP_DIR/browser-enabled.yaml" \
+  || fail "browser opt-in must enable the runtime in the API config"
+pass "browser deployment is opt-in"
+
+echo "== helm template (platform-owned sandbox namespace) =="
+helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --set sandbox.createNamespace=false \
+  > "$TMP_DIR/platform-namespace.yaml"
+pass "renders with sandbox.createNamespace=false"
 
 echo "== helm template (external database) =="
 helm template valet "$CHART_DIR" --kube-version 1.30.0 \
@@ -76,86 +92,125 @@ grep -q 'VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT: "50Gi"' "$TMP_DIR/storage-overri
   || fail "sandbox storage limit override was lost"
 pass "independent sandbox storage request and limit"
 
+# Background job log cap (fix wave 2): the api reads VALET_JOB_LOG_MAX_BYTES.
+grep -q 'VALET_JOB_LOG_MAX_BYTES: "2Gi"' "$TMP_DIR/bundled.yaml" \
+  || fail "default render must carry VALET_JOB_LOG_MAX_BYTES \"2Gi\""
+grep -q 'VALET_SANDBOX_SCRATCH_MAX: "0"' "$TMP_DIR/bundled.yaml" \
+  || fail "scratch must stay disabled by default"
+helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --set-string sandbox.jobLogMaxBytes=512Mi > "$TMP_DIR/job-log.yaml"
+grep -q 'VALET_JOB_LOG_MAX_BYTES: "512Mi"' "$TMP_DIR/job-log.yaml" \
+  || fail "sandbox.jobLogMaxBytes override was lost"
+pass "job log cap and scratch defaults render"
+
+# Watch interval and scratch pool marker (fix wave 3).
+grep -q 'VALET_WATCH_MIN_INTERVAL_MS: "120000"' "$TMP_DIR/bundled.yaml" \
+  || fail "default render must carry VALET_WATCH_MIN_INTERVAL_MS \"120000\""
+grep -q 'VALET_SANDBOX_SCRATCH_POOL_READY: "0"' "$TMP_DIR/bundled.yaml" \
+  || fail "the scratch pool must default to not ready"
+helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --set sandbox.scratchPoolReady=true \
+  --set sandbox.watchMinIntervalMs=30000 > "$TMP_DIR/scratch-pool.yaml"
+grep -q 'VALET_SANDBOX_SCRATCH_POOL_READY: "1"' "$TMP_DIR/scratch-pool.yaml" \
+  || fail "sandbox.scratchPoolReady=true must render \"1\""
+grep -q 'VALET_WATCH_MIN_INTERVAL_MS: "30000"' "$TMP_DIR/scratch-pool.yaml" \
+  || fail "sandbox.watchMinIntervalMs override was lost"
+pass "watch interval and scratch pool marker render"
+
+# Build pod placement (untrusted bakes): unset by default, JSON when set.
+if grep -q 'VALET_PREBUILD_BUILD_NODE_SELECTOR\|VALET_PREBUILD_BUILD_TOLERATIONS' "$TMP_DIR/bundled.yaml"; then
+  fail "default render must not set build pod placement"
+fi
+helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --set build.nodeSelector.pool=builds \
+  --set 'build.tolerations[0].key=valet.dev/build' \
+  --set 'build.tolerations[0].operator=Exists' \
+  --set 'build.tolerations[0].effect=NoSchedule' > "$TMP_DIR/build-placement.yaml"
+grep -q 'VALET_PREBUILD_BUILD_NODE_SELECTOR: "{\\"pool\\":\\"builds\\"}"' "$TMP_DIR/build-placement.yaml" \
+  || fail "build.nodeSelector must render as JSON in VALET_PREBUILD_BUILD_NODE_SELECTOR"
+grep -q 'VALET_PREBUILD_BUILD_TOLERATIONS: "\[{\\"effect\\":\\"NoSchedule\\",\\"key\\":\\"valet.dev/build\\",\\"operator\\":\\"Exists\\"}\]"' "$TMP_DIR/build-placement.yaml" \
+  || fail "build.tolerations must render as JSON in VALET_PREBUILD_BUILD_TOLERATIONS"
+pass "build pod placement renders"
+
+# --- sandbox namespace ownership -----------------------------------------
+[ "$(grep -c '^kind: Namespace$' "$TMP_DIR/bundled.yaml")" -eq 1 ] \
+  || fail "default render must include exactly one sandbox Namespace"
+NAMESPACE_BLOCK=$(awk '
+  /^---$/ {
+    if (is_namespace) printf "%s", block
+    block=""
+    is_namespace=0
+    next
+  }
+  { block=block $0 ORS }
+  $0 == "kind: Namespace" { is_namespace=1 }
+  END { if (is_namespace) printf "%s", block }
+' "$TMP_DIR/bundled.yaml")
+printf '%s\n' "$NAMESPACE_BLOCK" | grep -q '^  name: valet-sandboxes$' \
+  || fail "default render does not create sandbox.namespace"
+printf '%s\n' "$NAMESPACE_BLOCK" | grep -q '^    helm.sh/resource-policy: keep$' \
+  || fail "default sandbox Namespace must carry the Helm keep annotation"
+if grep -q '^kind: Namespace$' "$TMP_DIR/platform-namespace.yaml"; then
+  fail "sandbox.createNamespace=false must omit the Namespace manifest"
+fi
+grep -q '^kind: Role$' "$TMP_DIR/platform-namespace.yaml" \
+  || fail "sandbox.createNamespace=false removed namespaced application resources"
+if helm template valet "$CHART_DIR" --set-string sandbox.createNamespace=invalid >/dev/null 2>&1; then
+  fail "sandbox.createNamespace must reject non-boolean values"
+fi
+pass "sandbox namespace renders by default and is omitted for platform ownership"
+
 # --- RBAC: namespaced only, nothing cluster-scoped ---------------------
 grep -q '^kind: Role$' "$TMP_DIR/bundled.yaml" || fail "no namespaced Role rendered"
 grep -q '^kind: RoleBinding$' "$TMP_DIR/bundled.yaml" || fail "no RoleBinding rendered"
 if grep -qE '^kind: (ClusterRole|ClusterRoleBinding)$' "$TMP_DIR/bundled.yaml"; then
-  fail "cluster-scoped RBAC object found (ClusterRole/ClusterRoleBinding) — spec requires namespaced-only"
+  fail "cluster-scoped RBAC object found; spec requires namespaced-only"
 fi
 pass "no cluster-scoped RBAC objects"
 
-# Extract the Role's rule block and check exact expected resources/verbs.
-ROLE_BLOCK=$(awk '/^kind: Role$/,/^---$/' "$TMP_DIR/bundled.yaml")
-for resource in sandboxes pods pods/exec pods/log; do
-  echo "$ROLE_BLOCK" | grep -q "\"$resource\"" || fail "Role missing resource: $resource"
-done
-for verb in create get list watch delete; do
-  echo "$ROLE_BLOCK" | grep -q "\"$verb\"" || fail "Role missing verb: $verb"
-done
-# The sandboxes rule specifically needs `update`: the adopt-on-409 path calls
-# replaceNamespacedCustomObject (PUT = update). A generic whole-Role grep for
-# "update" is not enough — assert it on the sandboxes rule's own verb line.
-SANDBOX_VERBS=$(echo "$ROLE_BLOCK" | grep -A8 '"sandboxes"' | grep -m1 'verbs:')
-echo "$SANDBOX_VERBS" | grep -q '"update"' \
-  || fail "sandboxes rule missing 'update' verb — adopt/re-provision (replaceNamespacedCustomObject PUT) would 403"
-# `patch` guards hibernation: suspend/resume flip spec.operatingMode via a
-# JSON merge patch — omitting it 403s the idle sweep and the pause route.
-echo "$SANDBOX_VERBS" | grep -q '"patch"' \
-  || fail "sandboxes rule missing 'patch' verb — hibernation suspend/resume (merge-patch operatingMode) would 403"
-# On-demand workspace growth (Sandbox.growWorkspace, workspace-fit spec
-# 2026-09-03) reads and merge-patches the workspace PVC. EXACTLY get+patch:
-# PVC create/delete stay with the agent-sandbox controller (it
-# owner-references PVCs to the Sandbox CR), so any lifecycle verb here is
-# a regression.
-echo "$ROLE_BLOCK" | grep -q '"persistentvolumeclaims"' \
-  || fail "Role missing resource: persistentvolumeclaims — workspace growth (Sandbox.growWorkspace) would 403"
-PVC_VERBS=$(echo "$ROLE_BLOCK" | grep -A4 '"persistentvolumeclaims"' | grep -m1 'verbs:')
-for verb in get patch; do
-  echo "$PVC_VERBS" | grep -q "\"$verb\"" || fail "persistentvolumeclaims rule missing verb: $verb"
-done
-for verb in create delete list watch update; do
-  if echo "$PVC_VERBS" | grep -q "\"$verb\""; then
-    fail "persistentvolumeclaims rule grants '$verb' — agent-sandbox controller owns PVC lifecycle; api gets get/patch only"
-  fi
-done
-pass "Role has the expected sandbox/pods/exec/log verbs incl. sandboxes:update, PVC get/patch only"
+# Assert each rule against its source call sites.
+ROLE_BLOCK=$(awk '
+  /^---$/ {
+    if (is_role && has_name) printf "%s", block
+    block=""
+    is_role=0
+    has_name=0
+    next
+  }
+  { block=block $0 ORS }
+  $0 == "kind: Role" { is_role=1 }
+  $0 == "  name: valet-sandbox-operator" { has_name=1 }
+  END { if (is_role && has_name) printf "%s", block }
+' "$TMP_DIR/bundled.yaml")
+RULE_COUNT=$(printf '%s\n' "$ROLE_BLOCK" | grep -c '^  - apiGroups:')
+[ "$RULE_COUNT" -eq 9 ] || fail "Role must contain exactly 9 audited rules, found $RULE_COUNT"
 
-# --- RBAC: batch/jobs (Task 5 BuildKit builder), scoped -------------------
-echo "$ROLE_BLOCK" | grep -q '"batch"' || fail "Role missing apiGroup: batch"
-echo "$ROLE_BLOCK" | grep -q '"jobs"' || fail "Role missing resource: jobs"
-JOBS_VERBS=$(echo "$ROLE_BLOCK" | grep -A6 '"jobs"' | grep -m1 'verbs:')
-for verb in create get list watch delete; do
-  echo "$JOBS_VERBS" | grep -q "\"$verb\"" || fail "jobs rule missing verb: $verb"
-done
-pass "Role has the expected batch/jobs verbs"
+rule_verbs() {
+  printf '%s\n' "$ROLE_BLOCK" | awk -v resource="$1" '
+    index($0, "resources: [\"" resource "\"]") { found=1; next }
+    found && /verbs:/ { print; exit }
+  '
+}
+assert_rule() {
+  actual=$(rule_verbs "$1")
+  [ "$actual" = "    verbs: [$2]" ] \
+    || fail "$1 verbs differ: expected [$2], got $actual"
+}
 
-# --- RBAC: configmaps/secrets (Task 5 Dockerfile/git-token resources) -----
-echo "$ROLE_BLOCK" | grep -q '"configmaps"' || fail "Role missing resource: configmaps"
-CONFIGMAPS_VERBS=$(echo "$ROLE_BLOCK" | grep -A4 '"configmaps"' | grep -m1 'verbs:')
-for verb in create delete; do
-  echo "$CONFIGMAPS_VERBS" | grep -q "\"$verb\"" || fail "configmaps rule missing verb: $verb"
-done
-# configmaps grant is deliberately minimal (mirrors secrets below): no `get` —
-# the api only creates/deletes build ConfigMaps by name, never reads one back.
-if echo "$CONFIGMAPS_VERBS" | grep -q '"get"'; then
-  fail "configmaps rule grants 'get' — the api never reads a build ConfigMap back, keep this grant minimal"
+assert_rule sandboxes '"create", "get", "list", "update", "patch", "delete"'
+assert_rule pods '"get", "list", "patch", "delete"'
+assert_rule events '"list"'
+assert_rule persistentvolumeclaims '"get", "patch", "create", "list", "delete"'
+assert_rule pods/exec '"get", "create"'
+assert_rule pods/log '"get"'
+assert_rule jobs '"create", "get", "delete"'
+assert_rule configmaps '"create", "delete"'
+assert_rule secrets '"create", "get", "patch", "update", "delete"'
+
+if printf '%s\n' "$ROLE_BLOCK" | grep -q '"watch"'; then
+  fail "Role contains an unused watch permission"
 fi
-if echo "$CONFIGMAPS_VERBS" | grep -qE '"list"|"watch"'; then
-  fail "configmaps rule grants list/watch — unnecessary, keep this grant minimal"
-fi
-echo "$ROLE_BLOCK" | grep -q '"secrets"' || fail "Role missing resource: secrets"
-SECRETS_VERBS=$(echo "$ROLE_BLOCK" | grep -A4 '"secrets"' | grep -m1 'verbs:')
-for verb in create delete; do
-  echo "$SECRETS_VERBS" | grep -q "\"$verb\"" || fail "secrets rule missing verb: $verb"
-done
-# Secrets grant: `get` is REQUIRED (Task 9). writeSecret/upsertSecret GET the
-# Secret for its resourceVersion before replace (optimistic concurrency) — the
-# api reads the metadata, never the decoded contents. `list`/`watch` stay
-# forbidden: nothing enumerates or watches Secrets.
-if echo "$SECRETS_VERBS" | grep -qE '"list"|"watch"'; then
-  fail "secrets rule grants list/watch — unnecessary, keep this grant minimal"
-fi
-pass "Role has the expected configmaps/secrets verbs (secrets: create/get/patch/update/delete for optimistic-concurrency writes, no list/watch; configmaps: create/delete only)"
+pass "Role rules exactly match Sandbox, pod, PVC, Job, ConfigMap, and Secret call sites"
 
 # --- DATABASE_URL wiring: bundled vs external ---------------------------
 grep -q 'name: DATABASE_URL' "$TMP_DIR/bundled.yaml" || fail "bundled render: api Deployment missing DATABASE_URL env"
@@ -170,6 +225,25 @@ if grep -q 'name: valet-postgres' "$TMP_DIR/external.yaml"; then
   fail "external render: bundled postgres StatefulSet still rendered when externalDatabase.url is set"
 fi
 pass "external render: DATABASE_URL from externalDatabase.url, bundled postgres resources absent"
+
+# --- api pg pool env: omitted by default, rendered when set --------------
+if grep -q 'VALET_PG_POOL_MAX' "$TMP_DIR/bundled.yaml"; then
+  fail "default render: VALET_PG_POOL_MAX rendered with empty api.pgPoolMax"
+fi
+if grep -q 'VALET_PG_POOL_CONNECT_TIMEOUT_MS' "$TMP_DIR/bundled.yaml"; then
+  fail "default render: VALET_PG_POOL_CONNECT_TIMEOUT_MS rendered with empty api.pgPoolConnectTimeoutMs"
+fi
+pass "default render: pg pool env omitted (api defaults apply)"
+
+helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --set api.pgPoolMax=50 \
+  --set api.pgPoolConnectTimeoutMs=0 \
+  > "$TMP_DIR/pg-pool.yaml"
+grep -q 'VALET_PG_POOL_MAX: "50"' "$TMP_DIR/pg-pool.yaml" \
+  || fail "pool render: VALET_PG_POOL_MAX not rendered from api.pgPoolMax"
+grep -q 'VALET_PG_POOL_CONNECT_TIMEOUT_MS: "0"' "$TMP_DIR/pg-pool.yaml" \
+  || fail "pool render: explicit api.pgPoolConnectTimeoutMs=0 (no timeout) not rendered"
+pass "pool render: pg pool env wired from api.pgPoolMax / api.pgPoolConnectTimeoutMs"
 
 # --- VALET_SANDBOX_API_URL: pod-reachable in-cluster Service DNS ---------
 grep -q 'VALET_SANDBOX_API_URL: "http://valet-api.default.svc.cluster.local:80"' "$TMP_DIR/bundled.yaml" \
@@ -226,6 +300,75 @@ STARTUP_BLOCK=$(echo "$API_DEPLOY_BLOCK" | grep -A3 'startupProbe:')
 echo "$STARTUP_BLOCK" | grep -q 'path: /api/health' \
   || fail "startupProbe does not hit /api/health — startup must never wait on boot-restore work"
 pass "probe split: readiness /api/ready, startup+liveness /api/health"
+
+# Database upgrades run before the listener binds. Keep a separate rollout budget.
+echo "$API_DEPLOY_BLOCK" | grep -q '^  progressDeadlineSeconds: 2100$' \
+  || fail "default api rollout must allow 35 minutes for database upgrades"
+echo "$API_DEPLOY_BLOCK" | grep -A6 'startupProbe:' | grep -q 'failureThreshold: 1800' \
+  || fail "default startup probe must allow 30 minutes (360 five-second units, polled every 1s)"
+echo "$API_DEPLOY_BLOCK" | grep -A6 'startupProbe:' | grep -q 'periodSeconds: 1$' \
+  || fail "startup probe must poll every second; readiness waits on it during the Recreate gap"
+echo "$API_DEPLOY_BLOCK" | grep -A6 'readinessProbe:' | grep -q 'periodSeconds: 1$' \
+  || fail "readiness probe must poll every second"
+echo "$API_DEPLOY_BLOCK" | grep -A7 'livenessProbe:' | grep -q 'timeoutSeconds: 5$' \
+  || fail "liveness probe needs a 5s timeout; a busy event loop must not kill the only replica"
+echo "$API_DEPLOY_BLOCK" | grep -A7 'livenessProbe:' | grep -q 'failureThreshold: 6$' \
+  || fail "liveness probe needs failureThreshold 6 (about a minute of no answer before a restart)"
+echo "$API_DEPLOY_BLOCK" | grep -q 'terminationGracePeriodSeconds: 30$' \
+  || fail "api grace period must stay above the 20s shutdown bound in main.ts"
+helm --kube-context rancher-desktop template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --show-only templates/deployment.yaml \
+  --set api.startupProbe.failureThreshold=480 --set api.progressDeadlineSeconds=2700 \
+  > "$TMP_DIR/upgrade-budget.yaml"
+grep -q '^  progressDeadlineSeconds: 2700$' "$TMP_DIR/upgrade-budget.yaml" \
+  || fail "api rollout deadline override was lost"
+grep -A6 'startupProbe:' "$TMP_DIR/upgrade-budget.yaml" | grep -q 'failureThreshold: 2400' \
+  || fail "api startup probe threshold override was lost"
+pass "database upgrade startup and rollout budgets support overrides"
+
+# --- Recreate boot/drain: the Service routes to the not-ready api pod ------
+SERVICE=$(helm template valet "$CHART_DIR" --kube-version 1.30.0 --show-only templates/service.yaml)
+echo "$SERVICE" | grep -q 'publishNotReadyAddresses: true' \
+  || fail "api Service must publish not-ready addresses so callers get the api's 503 + Retry-After"
+helm template valet "$CHART_DIR" --kube-version 1.30.0 --show-only templates/service.yaml \
+  --set api.publishNotReadyAddresses=false | grep -q 'publishNotReadyAddresses' \
+  && fail "api.publishNotReadyAddresses=false must drop the field (RollingUpdate)"
+pass "api Service publishes not-ready addresses by default, with an opt-out"
+
+# --- api image pre-pull hook: no image pull inside the Recreate gap -------
+PREPULL=$(helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --show-only templates/api-image-prepull-job.yaml --set api.image.tag=sha-test)
+echo "$PREPULL" | grep -q '"helm.sh/hook": pre-upgrade' \
+  || fail "image pre-pull Job must be a pre-upgrade hook so Helm waits before Recreate"
+echo "$PREPULL" | grep -q 'image: ".*:sha-test"' \
+  || fail "image pre-pull Job must pull the same api image tag as the Deployment"
+echo "$PREPULL" | grep -q 'app.kubernetes.io/component: api-image-prepull' \
+  || fail "image pre-pull pods need their own component label"
+echo "$PREPULL" | grep -q 'app.kubernetes.io/component: api$' \
+  && fail "image pre-pull pods must not match the api Service selector"
+helm template valet "$CHART_DIR" --kube-version 1.30.0 --set api.imagePrepull.enabled=false \
+  | grep -q 'api-image-prepull' && fail "api.imagePrepull.enabled=false must not render the Job"
+pass "api image pre-pull hook renders as a pre-upgrade Job on the new image"
+AFFINITY_ARGS=(--set 'api.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].key=pool'
+  --set 'api.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].operator=In'
+  --set 'api.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].values[0]=api'
+  --set 'api.affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution[0].topologyKey=kubernetes.io/hostname'
+  --set 'api.affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution[0].labelSelector.matchLabels.app=other')
+PREPULL_AFFINITY=$(helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --show-only templates/api-image-prepull-job.yaml "${AFFINITY_ARGS[@]}")
+echo "$PREPULL_AFFINITY" | grep -A8 'nodeAffinity:' | grep -q 'key: pool' \
+  || fail "image pre-pull Job must copy api.affinity.nodeAffinity so it warms the api's nodes"
+echo "$PREPULL_AFFINITY" | grep -q '^ *podAntiAffinity:' \
+  && fail "image pre-pull Job must not copy api pod (anti-)affinity terms"
+echo "$PREPULL" | grep -A6 'topologySpreadConstraints:' | grep -q 'whenUnsatisfiable: DoNotSchedule' \
+  || fail "image pre-pull spread must be hard so each eligible node gets a pod"
+echo "$PREPULL" | grep -A6 'topologySpreadConstraints:' | grep -q 'nodeTaintsPolicy: Honor' \
+  || fail "image pre-pull spread must ignore cordoned/NotReady nodes (nodeTaintsPolicy: Honor)"
+echo "$PREPULL" | grep -q '^ *affinity:' \
+  && fail "image pre-pull Job must not render an empty affinity without api.affinity"
+pass "image pre-pull Job copies api node placement and spreads one pod per node"
+
+
 
 # --- lookup-retain helper present in Secret template ---------------------
 grep -q 'define "valet.retainedSecretValue"' "$CHART_DIR/templates/_helpers.tpl" \
@@ -297,6 +440,37 @@ grep -q 'name: valet-registry' "$TMP_DIR/bundled.yaml" || fail "bundled render: 
 grep -q '^kind: CronJob$' "$TMP_DIR/bundled.yaml" || fail "bundled render: no registry-gc CronJob"
 grep -q 'REGISTRY_STORAGE_DELETE_ENABLED' "$TMP_DIR/bundled.yaml" || fail "bundled render: registry missing REGISTRY_STORAGE_DELETE_ENABLED=true (required for retention's manifest DELETE)"
 pass "bundled render: registry StatefulSet/Service/GC-CronJob present"
+
+# Required affinity must select the registry pod, including release overrides.
+for release in valet gc-custom; do
+  overrides=(--kube-version 1.30.0)
+  if [ "$release" = gc-custom ]; then
+    overrides+=(--set nameOverride=gc-chart,sandbox.namespace=gc-sandboxes)
+  fi
+  helm template "$release" "$CHART_DIR" \
+    "${overrides[@]}" \
+    --show-only templates/registry-statefulset.yaml > "$TMP_DIR/registry.yaml"
+  helm template "$release" "$CHART_DIR" \
+    "${overrides[@]}" \
+    --show-only templates/registry-gc-cronjob.yaml > "$TMP_DIR/registry-gc.yaml"
+  # Extract the pod labels and the required affinity selector at their YAML depths.
+  awk '/^      labels:$/ { labels=1; next }
+       labels && /^        [^ ]/ { sub(/^        /, ""); print; next }
+       labels { exit }' "$TMP_DIR/registry.yaml" | sort > "$TMP_DIR/pod-labels"
+  awk '/^                    matchLabels:$/ { labels=1; next }
+       labels && /^                      [^ ]/ { sub(/^                      /, ""); print; next }
+       labels { exit }' "$TMP_DIR/registry-gc.yaml" | sort > "$TMP_DIR/gc-selector"
+  [ -s "$TMP_DIR/gc-selector" ] || fail "registry GC affinity selector is missing"
+  diff -u "$TMP_DIR/pod-labels" "$TMP_DIR/gc-selector" \
+    || fail "registry GC affinity selector differs from registry pod labels"
+  grep -q '^              requiredDuringSchedulingIgnoredDuringExecution:$' "$TMP_DIR/registry-gc.yaml" \
+    || fail "registry GC affinity must be required"
+  grep -q '^                  topologyKey: kubernetes.io/hostname$' "$TMP_DIR/registry-gc.yaml" \
+    || fail "registry GC affinity must use the node hostname"
+  grep -q '^      activeDeadlineSeconds: 3600$' "$TMP_DIR/registry-gc.yaml" \
+    || fail "registry GC Job must stop after one hour so later schedules can run"
+done
+pass "registry GC required affinity matches pod labels and Job runtime is bounded"
 
 # The registry Service must be NodePort (kubelet pulls prebuilt images via
 # localhost:<nodePort> — a ClusterIP-only Service name is unresolvable by the
@@ -420,6 +594,10 @@ grep -q 'valet-prebuild-registry-divergence' "$TMP_DIR/bundled.yaml" \
   || fail "bundled render: registry divergence alert is missing"
 grep -q 'or vector(0)' "$TMP_DIR/bundled.yaml" \
   || fail "bundled render: stuck queue alert does not handle an absent started series"
+grep -q 'valet-events-alerts.yaml' "$TMP_DIR/bundled.yaml" \
+  || fail "bundled render: event alert provisioning is missing"
+grep -q 'reason="pin_unavailable"' "$TMP_DIR/bundled.yaml" \
+  || fail "bundled render: pinned thread alert is missing"
 if grep -q 'digest_mismatch' "$TMP_DIR/bundled.yaml"; then
   fail "bundled render: registry alert advertises unsupported digest comparison"
 fi
@@ -549,5 +727,39 @@ if grep -qE 'registry-health|VALET_REGISTRY_HEALTH_URL:' <<<"$DISABLED_REGISTRY"
   fail "disabled registry must omit bundled health resources and URL"
 fi
 pass "registry health service, security, endpoint, and reserve wiring"
+
+echo "== sign-in methods =="
+if grep -q 'AUTH_METHODS:' "$TMP_DIR/bundled.yaml"; then
+  fail "default values must leave every sign-in method off"
+fi
+EXPLICIT=$(helm template valet "$CHART_DIR" --kube-version 1.30.0 --set api.auth.oidcIssuer=https://sso.example.com/realms/x \
+  --set 'api.auth.methods=oidc\,password' --set api.auth.primaryMethod=oidc)
+grep -q 'AUTH_METHODS: "oidc,password"' <<<"$EXPLICIT" || fail "explicit methods must override the SSO default"
+grep -q 'AUTH_PRIMARY_METHOD: "oidc"' <<<"$EXPLICIT" || fail "primaryMethod must render AUTH_PRIMARY_METHOD"
+pass "sign-in methods render only when listed"
+
+echo "== MCP registration settings =="
+if grep -q 'AUTH_MCP_' "$TMP_DIR/bundled.yaml"; then
+  fail "default values must leave every AUTH_MCP_ setting to the api default"
+fi
+MCP=$(helm template valet "$CHART_DIR" --kube-version 1.30.0 --set api.auth.mcp.registration=off \
+  --set api.auth.mcp.registrationRatePerHour=0 --set api.auth.mcp.unconsentedClientCap=50 \
+  --set api.auth.mcp.maxRedirectUris=2 --set 'api.auth.mcp.appSchemes=claude')
+grep -q 'AUTH_MCP_REGISTRATION: "off"' <<<"$MCP" || fail "mcp.registration must render AUTH_MCP_REGISTRATION"
+grep -q 'AUTH_MCP_REGISTRATION_RATE_PER_HOUR: "0"' <<<"$MCP" || fail "a 0 rate must still render"
+grep -q 'AUTH_MCP_UNCONSENTED_CLIENT_CAP: "50"' <<<"$MCP" || fail "mcp.unconsentedClientCap must render"
+grep -q 'AUTH_MCP_MAX_REDIRECT_URIS: "2"' <<<"$MCP" || fail "mcp.maxRedirectUris must render"
+grep -q 'AUTH_MCP_APP_SCHEMES: "claude"' <<<"$MCP" || fail "mcp.appSchemes must render"
+pass "MCP registration settings render only when set"
+
+echo "== outbound URL guard =="
+if grep -qE 'VALET_OUTBOUND_URL_ALLOWLIST|VALET_INTERNAL_HOSTS' "$TMP_DIR/bundled.yaml"; then
+  fail "default values must leave the outbound URL guard settings unset"
+fi
+GUARD=$(helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --set 'api.security.outboundUrlAllowlist=vllm.corp.example\,10.20.0.0/16' --set 'api.security.internalHosts=ecr-proxy.corp.example')
+grep -q 'VALET_OUTBOUND_URL_ALLOWLIST: "vllm.corp.example,10.20.0.0/16"' <<<"$GUARD" || fail "security.outboundUrlAllowlist must render"
+grep -q 'VALET_INTERNAL_HOSTS: "ecr-proxy.corp.example"' <<<"$GUARD" || fail "security.internalHosts must render"
+pass "outbound URL guard settings render only when set"
 
 echo "All golden assertions passed."

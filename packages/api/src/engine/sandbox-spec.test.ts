@@ -35,8 +35,10 @@ const snapWithRepoBake: ResolveSnapshot = {
     bakedSha: "deadbeef",
     recipe: [],
     bakeId: "bake-1",
+    sizeBytes: 3_000_000_000,
   },
   baseBakeRef: "ghcr.io/valet/base-bake:v1",
+  baseBakeSizeBytes: 2_000_000_000,
   repos: [makeBinding()],
   userName: "Alice",
   userEmail: "alice@example.com",
@@ -71,6 +73,30 @@ describe("image resolution", () => {
   it("falls back to stockImage when both bake refs are null", () => {
     const spec = computeSpec(snapWithStockOnly);
     expect(spec.image).toBe("ghcr.io/valet/sandbox:latest");
+  });
+});
+
+// ── Image size (workspace floor input, TKAI-538) ────────────────────────────
+
+describe("imageSizeBytes", () => {
+  it("reports the repo bake size when the repo bake is selected", () => {
+    expect(computeSpec(snapWithRepoBake).imageSizeBytes).toBe(3_000_000_000);
+  });
+
+  it("reports the base bake size when the base image is selected", () => {
+    expect(computeSpec(snapWithBaseBake).imageSizeBytes).toBe(2_000_000_000);
+  });
+
+  it("is null for the stock image, which has no bake row", () => {
+    expect(computeSpec(snapWithStockOnly).imageSizeBytes).toBeNull();
+  });
+
+  it("is null when the selected repo bake has no recorded size", () => {
+    const snap: ResolveSnapshot = {
+      ...snapWithRepoBake,
+      repoBake: { ...snapWithRepoBake.repoBake!, sizeBytes: null },
+    };
+    expect(computeSpec(snap).imageSizeBytes).toBeNull();
   });
 });
 
@@ -134,17 +160,17 @@ describe("determinism", () => {
 describe("golden hashes", () => {
   it("repoBake image spec has expected specHash", () => {
     const spec = computeSpec(snapWithRepoBake);
-    expect(specHash(spec)).toMatchInlineSnapshot(`"f68548dceaf63b2658f7c64e47563ec3b785e11e7664fe7bb0d34c6ea404e658"`);
+    expect(specHash(spec)).toMatchInlineSnapshot(`"2638771556b5d105441311912fbb95eb8703fa1d5fee19283a8c3fa84eb25aa7"`);
   });
 
   it("baseBake image spec has expected specHash", () => {
     const spec = computeSpec(snapWithBaseBake);
-    expect(specHash(spec)).toMatchInlineSnapshot(`"dbfcde68b06e0713118b4aad9d494ac1b843185734fca4610eab82bda5e893cb"`);
+    expect(specHash(spec)).toMatchInlineSnapshot(`"16b84897c55fd2dbaa940a3b8b93b9fe328a1974628e7c00c5dfe836efd8faab"`);
   });
 
   it("stock image spec has expected specHash", () => {
     const spec = computeSpec(snapWithStockOnly);
-    expect(specHash(spec)).toMatchInlineSnapshot(`"0dbc2faf2ad33ae382fbe9a69e112672697d1e411091712703d8894a64cab717"`);
+    expect(specHash(spec)).toMatchInlineSnapshot(`"838aa86953fd9b7a3c1ceac628d10594ddde7d2cfd5bc34d02115ee1ec38b311"`);
   });
 });
 
@@ -153,7 +179,7 @@ describe("resource opinion hashing", () => {
 
   it("preserves the existing hash when no resource opinion exists", () => {
     expect(specHash(spec, undefined)).toBe(specHash(spec));
-    expect(specHash(spec)).toBe("f68548dceaf63b2658f7c64e47563ec3b785e11e7664fe7bb0d34c6ea404e658");
+    expect(specHash(spec)).toBe("2638771556b5d105441311912fbb95eb8703fa1d5fee19283a8c3fa84eb25aa7");
   });
 
   it("uses fixed cpu then memory order independent of insertion order", () => {
@@ -175,6 +201,17 @@ describe("resource opinion hashing", () => {
     const base = specHash(spec, { cpu: 4, memory: "8Gi" });
     expect(specHash(spec, { cpu: 2, memory: "8Gi" })).not.toBe(base);
     expect(specHash(spec, { cpu: 4, memory: "4Gi" })).not.toBe(base);
+  });
+
+  it("changes when scratch changes, so a corrected value skips the failure backoff (M7)", () => {
+    const base = specHash(spec, { cpu: 4, scratch: "800Gi" });
+    expect(specHash(spec, { cpu: 4, scratch: "200Gi" })).not.toBe(base);
+    expect(specHash(spec, { cpu: 4 })).not.toBe(base);
+  });
+
+  it("keeps the scratch-less hash unchanged", () => {
+    expect(specHash(spec, { cpu: 4, memory: "8Gi" })).toBe(specHash(spec, { memory: "8Gi", cpu: 4 }));
+    expect(specHash(spec, { cpu: 4, memory: "8Gi", scratch: undefined })).toBe(specHash(spec, { cpu: 4, memory: "8Gi" }));
   });
 
   it("changes when resource field authority changes", () => {

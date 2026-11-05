@@ -120,7 +120,7 @@ as before (caller's own; org admins see org-wide). New service function
   without queries.
 - New hooks: `useTeamChildren(teamId)` (30s refetch — runs move), a
   team-scoped artifacts list, and a breakdown query with the team scope.
-  Workflow runs reuse `useRuns` with the owner filter; memory stats reuse
+  Workflow runs come from each workflow's latest run; memory stats reuse
   the tree endpoint with `ownerType/ownerId`.
 
 ## Error and empty states

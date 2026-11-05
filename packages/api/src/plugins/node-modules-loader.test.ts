@@ -3,6 +3,9 @@ import { mkdtemp, mkdir, writeFile, rm, copyFile, symlink } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { Hono } from "hono";
+import type { AppEnv } from "../env.js";
+import { mountPluginHttpRoutes } from "./http-routes.js";
 import { loadNodeModulesPlugins } from "./node-modules-loader.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -56,6 +59,48 @@ describe("loadNodeModulesPlugins", () => {
     expect(result.quarantined).toHaveLength(1);
     expect(result.quarantined[0]?.pkg).toBe("bad-plugin");
     expect(result.quarantined[0]?.reason).toMatch(/boom during import/);
+  });
+
+  it("quarantines a package that omits a route ID the host binds or aliases", async () => {
+    await writePackage(root, "slack-shadow", {
+      entryContent: `export default { name: "slack", version: "1", httpRoutes: [{
+        id: "events-renamed", path: "/events", method: "POST", auth: "public", maxBodyBytes: 1024,
+        handle: () => new Response("ok"),
+      }] };`,
+    });
+    const result = await loadNodeModulesPlugins({ searchPaths: [root] });
+    expect(result.plugins).toEqual([]);
+    expect(result.quarantined).toEqual([{
+      pkg: "slack-shadow", reason: expect.stringContaining("Plugin slack declares no HTTP route for host route ID(s) events, app."),
+    }]);
+  });
+
+  it("quarantines a replacement that moves a host-bound route", async () => {
+    await writePackage(root, "slack-replacement", {
+      entryContent: `export default { name: "slack", version: "1", httpRoutes: [{
+        id: "app", method: "GET", path: "/setup", auth: "org-admin", maxBodyBytes: 0,
+        handle: () => new Response("plugin"),
+      }] };`,
+    });
+    const result = await loadNodeModulesPlugins({ searchPaths: [root] });
+    expect(result.plugins).toEqual([]);
+    expect(result.quarantined).toEqual([{
+      pkg: "slack-replacement", reason: "Declare slack route app as GET /app with org-admin authentication.",
+    }]);
+  });
+
+  it("quarantines a replacement that widens the authentication of a host-bound route", async () => {
+    await writePackage(root, "linear-replacement", {
+      entryContent: `export default { name: "linear", version: "1", httpRoutes: [{
+        id: "connection-save", method: "PUT", path: "/connection", auth: "user", maxBodyBytes: 1024,
+        handle: () => new Response("plugin"),
+      }] };`,
+    });
+    const result = await loadNodeModulesPlugins({ searchPaths: [root] });
+    expect(result.plugins).toEqual([]);
+    expect(result.quarantined).toEqual([{
+      pkg: "linear-replacement", reason: "Declare linear route connection-save as PUT /connection with org-admin authentication.",
+    }]);
   });
 
   it("skips a denylisted package even though it is otherwise valid", async () => {

@@ -154,6 +154,8 @@ Contents:
   They are already an `ActionPlugin` over an injected credential. Apply
   the current type-safety rules during the port (no `any`, no double
   casts).
+- **Status read**: add `slack_user.get_status`. It reads the connected
+  user's custom status text, emoji, and expiration. It is new in v2.
 - **Credential declaration**: service `slack-user`, type `oauth2`, the
   full V1 user-scope bundle (read/search + act-as; bot-only and admin
   scopes excluded — see `provider.ts` on `main` for the list and the
@@ -239,6 +241,34 @@ into the same event shape Telegram emits
 `ChannelHost.handleStart` already consumes this shape and already treats
 an unlinked sender's first message as the link command. No host changes.
 
+### Linking from Settings (2026-10-08)
+
+On 2026-10-08 a new user could not link from Settings → Connected accounts.
+That card showed only a bare code to send the bot, while the v1 flows ("DM
+me", "Find me by name", "Sign in with Slack") lived on the Integrations tile,
+and the v2 port of "DM me" had reversed v1's code direction.
+
+- Settings renders the same `IdentityLinkBlock` as the Integrations tile.
+- "DM me" and "Find me by name" run in v1's direction: the bot DMs a code,
+  and the person types it into Valet (`POST /api/me/identity-links/:provider/verify`).
+  The code row records the account it was DMed to
+  (`identity_link_codes.external_id`) and the requesting user. Only that
+  user can redeem it, and only through verify. `consumeLinkCode`, the chat
+  path, skips bound codes, so a picked member who replies with the code
+  links nothing.
+- Deliver and verify return 409 for an account another Valet user linked,
+  the same rule as the OAuth connect's `identity_conflict`.
+- Settings also offers "Sign in with Slack". The Slack `identityLink`
+  declares `oauthService: "slack-user"`, and `GET /api/me/identity-links`
+  reports it only when that OAuth client's environment is set. The card
+  says the connect also lets Valet search, read, and post as the person.
+  It starts the connect with `landing=connected-accounts`, a fixed page
+  name in the signed state, so a successful connect returns to Settings. A
+  failure still lands on `/integrations`, which renders the error.
+
+`packages/api/src/channels/slack-link-handshake.test.ts` runs the DM flow
+with the real Slack plugin, transport, routes, and host.
+
 This closes the exact gap the `slack-webhook.ts` docblock names. Update
 that docblock in the same commit.
 
@@ -249,22 +279,14 @@ single decision point for a session's credentials and already branches on
 `service === "github"`. Add a branch for `service === "slack"`:
 
 The Slack bot token is org-shared by design. `PUT
-/api/credentials/slack?scope=org` stores it under `{ type: "org", id:
-orgId }`. The engine's session always calls the resolver with a user owner
-(`{ type: "user", id: userId }`), so a plain exact-owner read returns null
-for every production session.
+/api/credentials/slack?scope=org` stores it under `{ type: "org", id: orgId }`.
+Session and workflow credentials resolve from the durable workspace owner.
+A team run never uses the workflow creator or first caller as its personal owner.
 
-The resolver reads the user credential first (a personal credential, if
-ever present, takes precedence). When the user-scoped read returns null,
-the resolver escalates to the org owner and reads from there. Whichever
-credential resolves — user or org — is then enriched: the resolver looks up
-the session user's `user_identity_links` row for provider `slack` and
-merges `owner_slack_user_id: externalId` into the credential metadata.
-Unlinked user → no metadata key, and the plugin's existing behavior (deny
-private-channel reads) holds. No credential at either scope → `null`.
-
-This org-owner escalation is specific to `slack`. All other services keep
-the exact-owner read with no fallback.
+Personal runs enrich the resolved bot credential with the owner's linked Slack
+user ID as `metadata.owner_slack_user_id`. Team and organization runs receive
+no personal identity enrichment. An unlinked personal owner cannot use private
+channels. A missing bot credential remains a separate integration error.
 
 The identity link is the single source of truth, whether it arrived via
 OAuth auto-link or the code flow. The resolver never reads the
@@ -282,19 +304,49 @@ session resolver). Without it, private-channel reads and `slack.dm_owner`
 fail with "Owner has not linked their Slack identity" even when the owner
 is linked — the failure mode of run `wfrun_mt1kva4i5wqesi`.
 
-Team- and org-owned runs get no enrichment: no single person's channel
-membership can authorize a private-channel read, so those actions keep
-failing closed.
+Team- and org-owned runs get no personal identity enrichment. They can access
+private channels when the connected bot's membership is verified. The access
+check uses `conversations.info.is_member`; if absent, it searches the bot's
+paginated `users.conversations` list. A member's personal identity link grants
+no additional access to the shared run. Unverified membership is denied with an
+instruction to invite Valet to the channel.
+`slack.list_channels` returns its scope, visibility, and an access note.
+`scope="all"` lists public channels only; `scope="joined"` includes private
+channels joined by the bot for shared owners. Personal private discovery still
+requires the linked owner's membership.
+
+The org bot credential supports public-channel reads and `slack.dm_user` sends
+without a personal identity link. Shared runs cannot read DM or group DM history,
+even when the bot can access those conversations. `slack.dm_user`
+uses its explicit recipient. It does not infer the workflow creator as recipient.
+Outbound display names follow the run owner. Team runs use the team name;
+organization runs use the organization name. Personal runs use the connected
+bot's default identity. The invoking member does not select the display name.
+These names decorate posts from the organization bot; they do not create
+separate Slack accounts or DM conversations. If Slack rejects the decoration,
+the action retries with the bot's default identity.
+`slack.dm_owner` requires a personal owner. For team and organization runs, its
+error directs the caller to `slack.dm_user` with the intended Slack user ID.
+Shared runs also cannot use `slack.fetch_file`. A private file URL alone does not
+prove that the shared audience can read the file. The action denies access before
+any download. Use an authorized personal assistant or a team Google Drive
+connection. Slack DOCX extraction is available to personal runs. Shared Slack
+file support requires a separate authorization check before it can be enabled.
+
+A team workflow failure still requires the recorded action name, arguments,
+owner, and error to diagnose. A successful mention reply proves that inbound
+routing and bot posting work. It does not prove private-channel authorization
+or a valid implicit DM recipient.
 
 ## 6. Compliance sweep
 
 | Router | Disposition |
 | --- | --- |
 | `identity-links.ts` Telegram routes | Migrate to the generic provider-parameterized routes; delete the hardcoded handlers. |
-| `github-connect.ts`, `github-app.ts` | Stay. Locked constraint from the integration-oauth design: the GitHub App flow (installations, repo bindings, token tiers) is not a credential connect. |
-| `linear-connect.ts` | Stays, as a documented exception. It is org-admin-gated and its callback performs app-table side effects (`linear_installations` upsert, workspace webhook creation) that a plugin manifest cannot reach. Making it plugin-forward needs an org-scoped connect variant with a host-side post-connect capability — a separate design if ever wanted. |
-| `slack-app.ts` | Stays. Org manifest handout, not OAuth. |
-| `slack-webhook.ts` | Stays. Dedicated for documented reasons (challenge echo, dedupe, workspace gate). |
+| `github-connect.ts`, `github-app.ts` | Moved into the GitHub plugin as plugin routes. `/api/org/github-app/*`, `/api/me/github/*`, and `/webhooks/github-app` remain host aliases ([Plugin HTTP interfaces](2026-10-07-plugin-http-interfaces-design.md#github-adoption)). They stay outside the generic connect surface. Locked constraint from the integration-oauth design: the GitHub App flow (installations, repo bindings, token tiers) is not a credential connect. |
+| `linear-connect.ts` | Moved into the Linear plugin as org-admin plugin routes. `/api/org/linear` remains a host alias ([Plugin HTTP interfaces](2026-10-07-plugin-http-interfaces-design.md#linear-connection-binding)). It is org-admin-gated, verifies app credentials with `client_credentials`, and stores the app, organization credential, and `linear_installations` mapping. Linear owns the app webhook; there is no browser approval callback or `webhookCreate` call. See [Organization Linear application setup](2026-07-20-event-system-design.md#organization-linear-application-setup-2026-09-29). |
+| `slack-app.ts` | Moved into the Slack plugin as the org-admin `app` route. `/api/org/slack` remains a host alias ([Plugin HTTP interfaces](2026-10-07-plugin-http-interfaces-design.md#slack-adoption)). Org manifest handout, not OAuth. |
+| `slack-webhook.ts` | Moved into the Slack plugin as the public `events` route. `/api/channels/slack/webhook` remains a host alias. The durable inbox and its drain stay in `channels/slack-inbox.ts`. Dedicated for documented reasons (challenge echo, dedupe, workspace gate). |
 
 **Rule**: user-scoped credential connects have exactly one home — the
 generic connect surface plus plugin declarations. A PR that adds a new

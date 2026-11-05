@@ -12,11 +12,15 @@
  *   - Local stub instances (`VALET_LOCAL_AUTH=1`) need no credential — when
  *     `apiKey` is undefined the header is simply omitted.
  */
+import { cliTelemetryHeaders } from "./telemetry.js";
 import { ApiError, AuthError, UnreachableError } from "./exit.js";
+import { latestCredential } from "./token-refresh.js";
 import type {
+  CreateThreadRequest,
+  CreateThreadResponse,
   CreateSessionRequest,
   CreateSessionResponse,
-  EnsureOrchestratorResponse,
+  EnsureWorkspaceRuntimeResponse,
   GetSessionResponse,
   HealthResponse,
   ListDecisionsResponse,
@@ -25,9 +29,15 @@ import type {
   ListThreadsResponse,
   GetMeResponse,
   PostSessionFileUploadResponse,
+  ProxyKeyStatusResponse,
+  ProxySettingsResponse,
   ResolveDecisionRequest,
   SendPromptRequest,
   SendPromptResponse,
+  ActionDescribeResponse,
+  ActionInvokeRequest,
+  ActionInvokeResponse,
+  ActionSearchResponse,
 } from "../wire/types.js";
 import * as fs from "fs";
 import * as path from "path";
@@ -46,7 +56,8 @@ export interface ListMessagesOpts {
 
 export class InstanceClient {
   private readonly base: string;
-  private readonly apiKey?: string;
+  /** Replaced when a long command picks up a refreshed CLI token (`latestCredential`). */
+  private apiKey?: string;
   /** `GET /api/me`, read once per client: a client lives for one command,
    * and the credential does not change under it. */
   private identity?: Promise<GetMeResponse>;
@@ -64,6 +75,7 @@ export class InstanceClient {
 
   private headers(json: boolean): Record<string, string> {
     return {
+      ...cliTelemetryHeaders(),
       // A FormData body sets its own multipart content-type (with boundary);
       // only JSON bodies get one here.
       ...(json ? { "content-type": "application/json" } : {}),
@@ -74,20 +86,31 @@ export class InstanceClient {
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     const url = `${this.base}${path}`;
     const isForm = body instanceof FormData;
-    let res: Response;
-    try {
-      res = await fetch(url, {
-        method,
-        headers: this.headers(!isForm),
-        body: isForm ? body : body !== undefined ? JSON.stringify(body) : undefined,
-      });
-    } catch (err) {
-      // fetch rejects only on transport/network failure (DNS, refused, reset).
-      throw new UnreachableError(`could not reach ${url}: ${(err as Error).message}`);
+    const send = async (): Promise<Response> => {
+      try {
+        return await fetch(url, {
+          method,
+          headers: this.headers(!isForm),
+          body: isForm ? body : body !== undefined ? JSON.stringify(body) : undefined,
+        });
+      } catch (err) {
+        // fetch rejects only on transport/network failure (DNS, refused, reset).
+        throw new UnreachableError(`could not reach ${url}: ${(err as Error).message}`);
+      }
+    };
+    let res = await send();
+    // A CLI token this command started with may have been replaced by
+    // another command's refresh. Pick up the new one and try once more.
+    if (res.status === 401) {
+      const fresh = await latestCredential(this.apiKey);
+      if (fresh !== this.apiKey) {
+        this.apiKey = fresh;
+        res = await send();
+      }
     }
 
     if (res.status === 401) {
-      throw new AuthError(`authentication failed (401) for ${url}`);
+      throw new AuthError(`authentication failed (401) for ${url}. Run \`valet login ${this.base}\` to sign in again.`);
     }
     if (!res.ok) {
       throw new ApiError(res.status, await res.text());
@@ -99,6 +122,30 @@ export class InstanceClient {
     const text = await res.text();
     if (text === "") return undefined as T;
     return JSON.parse(text) as T;
+  }
+
+  // ── tool broker (`/api/actions`) ───────────────────────────────────────
+
+  searchTools(opts: { query?: string; service?: string; workspace?: string; limit?: number }): Promise<ActionSearchResponse> {
+    const params = new URLSearchParams();
+    if (opts.query) params.set("q", opts.query);
+    if (opts.service) params.set("service", opts.service);
+    if (opts.workspace) params.set("workspace", opts.workspace);
+    if (opts.limit) params.set("limit", String(opts.limit));
+    const suffix = params.size > 0 ? `?${params.toString()}` : "";
+    return this.request<ActionSearchResponse>("GET", `/api/actions${suffix}`);
+  }
+
+  describeTool(toolId: string, workspace?: string, params?: Record<string, unknown>): Promise<ActionDescribeResponse> {
+    const q = new URLSearchParams();
+    if (workspace) q.set("workspace", workspace);
+    if (params) q.set("params", JSON.stringify(params));
+    const suffix = q.size > 0 ? `?${q.toString()}` : "";
+    return this.request<ActionDescribeResponse>("GET", `/api/actions/${encodeURIComponent(toolId)}${suffix}`);
+  }
+
+  callTool(toolId: string, body: ActionInvokeRequest): Promise<ActionInvokeResponse> {
+    return this.request<ActionInvokeResponse>("POST", `/api/actions/${encodeURIComponent(toolId)}/invoke`, body);
   }
 
   // ── auth / identity ────────────────────────────────────────────────────
@@ -115,21 +162,38 @@ export class InstanceClient {
     return this.request<GetMeResponse>("GET", "/api/me");
   }
 
+  // ── LLM proxy (`valet proxy`) ──────────────────────────────────────────
+
+  /** `GET /api/proxy/settings` — whether the org's gateway is on, and its credential mode. */
+  proxySettings(): Promise<ProxySettingsResponse> {
+    return this.request<ProxySettingsResponse>("GET", "/api/proxy/settings");
+  }
+
+  /** `GET /api/proxy/keys/:id` — a stored proxy key that still works. Throws `ApiError` 404 when it is revoked or gone. */
+  proxyKeyStatus(id: string): Promise<ProxyKeyStatusResponse> {
+    return this.request<ProxyKeyStatusResponse>("GET", `/api/proxy/keys/${encodeURIComponent(id)}`);
+  }
+
+  /** `DELETE /api/proxy/keys/:id` — revoke a proxy key from `valet proxy setup`. */
+  deleteProxyKey(id: string): Promise<void> {
+    return this.request<void>("DELETE", `/api/proxy/keys/${encodeURIComponent(id)}`);
+  }
+
   // ── orchestrator ───────────────────────────────────────────────────────
 
   /**
    * The caller's default assistant session, ensure-if-absent. A personal
-   * credential posts `/api/orchestrator`. A team key posts
-   * `/api/teams/:id/orchestrator` for its own team, because the key acts
-   * as the team and `/api/orchestrator` would name the person who minted
+   * credential posts `/api/workspaces/user/runtime`. A team key posts
+   * `/api/workspaces/:id/runtime` for its own team, because the key acts
+   * as the team and `/api/workspaces/user/runtime` would name the person who minted
    * it. Which one applies is read off `GET /api/me`.
    */
-  async ensureOrchestrator(): Promise<EnsureOrchestratorResponse> {
+  async ensureOrchestrator(): Promise<EnsureWorkspaceRuntimeResponse> {
     this.identity ??= this.me();
     const me = await this.identity;
     const path =
-      me.role === "team" ? `/api/teams/${encodeURIComponent(me.id)}/orchestrator` : "/api/orchestrator";
-    return this.request<EnsureOrchestratorResponse>("POST", path);
+      me.role === "team" ? `/api/workspaces/${encodeURIComponent(me.id)}/runtime` : "/api/workspaces/user/runtime";
+    return this.request<EnsureWorkspaceRuntimeResponse>("POST", path);
   }
 
   // ── sessions ───────────────────────────────────────────────────────────
@@ -161,22 +225,52 @@ export class InstanceClient {
     );
   }
 
-  /** `POST /api/sessions/:id/messages` — enqueue a prompt (server answers 202). */
-  sendPrompt(id: string, body: SendPromptRequest): Promise<SendPromptResponse> {
-    return this.request<SendPromptResponse>(
-      "POST",
-      `/api/sessions/${encodeURIComponent(id)}/messages`,
-      body,
-    );
+  /**
+   * `POST /api/sessions/:id/messages` — enqueue a prompt (server answers 202).
+   * A server from before the `inject` queue mode answers 400 for it. The
+   * prompt is then sent once more without a queue mode, so the thread
+   * default applies.
+   */
+  async sendPrompt(id: string, body: SendPromptRequest): Promise<SendPromptResponse> {
+    const path = `/api/sessions/${encodeURIComponent(id)}/messages`;
+    try {
+      return await this.request<SendPromptResponse>("POST", path, body);
+    } catch (err) {
+      if (!(err instanceof ApiError) || err.status !== 400 || body.queueMode === undefined || !err.body.includes("queueMode")) throw err;
+      const withoutMode: SendPromptRequest = { ...body };
+      delete withoutMode.queueMode;
+      return this.request<SendPromptResponse>("POST", path, withoutMode);
+    }
   }
 
   // ── threads ────────────────────────────────────────────────────────────
+
+  getThread(id: string): Promise<{ id: string; sessionId: string; title: string | null; createdAt: number; archivedAt: number | null }> {
+    return this.request("GET", `/api/threads/${encodeURIComponent(id)}`);
+  }
+
+  listWorkspaceThreads(workspace?: string): Promise<ListThreadsResponse> {
+    return this.request("GET", `/api/threads${workspace ? `?workspace=${encodeURIComponent(workspace)}` : ""}`);
+  }
+
+  createWorkspaceThread(body: CreateThreadRequest, workspace?: string): Promise<CreateThreadResponse> {
+    return this.request("POST", `/api/threads${workspace ? `?workspace=${encodeURIComponent(workspace)}` : ""}`, body);
+  }
+
 
   listThreads(id: string): Promise<ListThreadsResponse> {
     return this.request<ListThreadsResponse>(
       "GET",
       `/api/sessions/${encodeURIComponent(id)}/threads`,
     );
+  }
+
+  listThreadDecisions(id: string): Promise<ListDecisionsResponse> {
+    return this.request("GET", `/api/threads/${encodeURIComponent(id)}/decisions`);
+  }
+
+  resolveThreadDecision(id: string, gateId: string, body: ResolveDecisionRequest): Promise<void> {
+    return this.request("POST", `/api/threads/${encodeURIComponent(id)}/decisions/${encodeURIComponent(gateId)}/resolve`, body);
   }
 
   // ── decision gates ─────────────────────────────────────────────────────

@@ -2,6 +2,8 @@
 
 *Depends on: Part 00, Part 01, Part 04, Part 05, Part 06, Part 08. Conformance: L1+ (server-side gates and route behavior); L3 pulls in the pivot round.*
 
+Part 13 (`13-ux-v2.md`) supersedes the sections listed in its supersession table. Read Part 13 first for the current UX contract.
+
 ## Purpose
 
 Two user-visible gaps in v0/v1:

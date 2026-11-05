@@ -16,8 +16,14 @@
  * (`expiresAt`, `metadata.login`, `metadata.identityOnly`,
  * `metadata.refreshFailedAt`). `connected` alone is set membership in the
  * credential store, so an expired or revoked token reads as connected while
- * `list_tools` hides the service. Health says otherwise, from what the
- * credential row already knows — this route calls no vendor.
+ * `list_tools` hides the service. Health says otherwise.
+ *
+ * A connected dynamic (MCP) service is also listed live, TTL-cached. The
+ * listing's tools join the service's `actions` (both groupings) in the same
+ * wire shape as static ones, so the Policies combobox offers them, and sets
+ * its `toolCount`. The same listing adds the probe's health fields: the
+ * server refused the credential (`rejected`), or the grant lacks scopes some
+ * tools need (`missingScopes`). See `plugins/service-probe.ts`.
  */
 import { Hono } from "hono";
 import {
@@ -28,6 +34,7 @@ import {
   type StoredCredential,
 } from "@valet/engine";
 import { qualifiedActionId } from "../plugins/action-id.js";
+import type { ServiceProbe } from "../plugins/service-probe.js";
 import type { AppEnv } from "../env.js";
 import type {
   ListPluginsResponse,
@@ -38,7 +45,10 @@ import type {
 } from "../wire/types.js";
 import { connectModeFor, missingClientEnv } from "../services/integration-availability.js";
 import { isOrgAdmin } from "../services/org.js";
+import { canViewTeam, getTeamInOrg } from "../services/teams.js";
 import { pluginIconSlugs } from "../plugins/registry.gen.js";
+import { listTeamShares } from "../services/credential-shares.js";
+import { isTeamMember } from "../services/teams.js";
 
 export const pluginsRouter = new Hono<AppEnv>();
 
@@ -65,6 +75,19 @@ function toActionSummary(actionPlugin: ActionPlugin, action: PluginAction): Plug
 }
 
 /**
+ * The actions a service can name right now: its static manifest plus, for a
+ * connected dynamic service, the tools its listing returned (the probe's
+ * cached tool schema). A listed tool that repeats a static id is dropped,
+ * so one id maps to one row.
+ */
+function knownActions(actionPlugin: ActionPlugin, probe: ServiceProbe | undefined): PluginAction[] {
+  const listed = probe?.actions;
+  if (!listed || listed.length === 0) return actionPlugin.actions;
+  const staticIds = new Set(actionPlugin.actions.map((action) => qualifiedActionId(actionPlugin.service, action)));
+  return [...actionPlugin.actions, ...listed.filter((action) => !staticIds.has(qualifiedActionId(actionPlugin.service, action)))];
+}
+
+/**
  * What the stored credential says about itself. Mirrors
  * `services/github-tokens.ts`'s health rules, minus the parts that need a
  * token exchange: this is a read of the row, not a probe of the vendor.
@@ -81,9 +104,29 @@ function credentialHealth(stored: StoredCredential): PluginServiceSummary["healt
   };
 }
 
+/** The row's health plus whatever the live listing found. A probe that
+ * failed or found nothing adds no field. */
+function withProbe(
+  row: PluginServiceSummary["health"],
+  probe: ServiceProbe | undefined,
+): PluginServiceSummary["health"] {
+  return probe?.health ? { ...row, ...probe.health } : row;
+}
+
 pluginsRouter.get("/", async (c) => {
-  const { plugins, engineCredentials, actionPluginByService, dynamicToolCounts, db } = c.var.providers;
-  const owner: CredentialOwner = { type: "user", id: c.var.user.id };
+  const { plugins, engineCredentials, actionPluginByService, serviceProbes, db } = c.var.providers;
+  const teamId = c.req.query("teamId");
+  let owner: CredentialOwner = { type: "user", id: c.var.user.id };
+  if (teamId) {
+    // A team catalog reports the credentials a team workflow can use. Do
+    // this authorization before reading credentials so a member cannot use
+    // this endpoint to probe another team's connection state.
+    const team = await getTeamInOrg(db, c.var.user.orgId, teamId);
+    if (!team || !(await canViewTeam(db, teamId, c.var.user.id))) {
+      return c.json({ error: "Team not found." }, 404);
+    }
+    owner = { type: "team", id: teamId };
+  }
 
   // Who may read WHY a service is unconfigured. `org_members.role` is the
   // authority (`services/org.ts`), not the global JWT role. Read once per
@@ -102,19 +145,28 @@ pluginsRouter.get("/", async (c) => {
     [...connectedServices].map(async (service) => {
       const stored = await engineCredentials.get(owner, service);
       if (stored) health.set(service, credentialHealth(stored));
+      else connectedServices.delete(service);
     }),
   );
+  // A member's shared account connects the service for the team too, while
+  // that member is on the team and their own account still stands.
+  if (owner.type === "team") {
+    await Promise.all((await listTeamShares(db, owner.id)).map(async (share) => {
+      if (connectedServices.has(share.service) || !(await isTeamMember(db, owner.id, share.userId))) return;
+      if (await engineCredentials.get({ type: "user", id: share.userId }, share.service)) connectedServices.add(share.service);
+    }));
+  }
 
-  // Connected dynamic services get a live-resolved tool count (TTL-cached,
-  // fail-soft — see plugins/dynamic-tool-count.ts). Resolved up front and
-  // concurrently so a slow MCP server costs one timeout, not one per row.
-  const toolCounts = new Map<string, number>();
+  // Connected dynamic services are listed live for a tool count and the
+  // probe's health fields (TTL-cached, fail-soft — see
+  // plugins/service-probe.ts). Probed up front and concurrently so a slow
+  // MCP server costs one timeout, not one per row.
+  const probes = new Map<string, ServiceProbe>();
   await Promise.all(
     [...connectedServices].map(async (service) => {
       const entry = actionPluginByService.get(service);
       if (!entry?.actionPlugin.resolveActions) return;
-      const count = await dynamicToolCounts.get(owner, service, entry.actionPlugin);
-      if (count !== undefined) toolCounts.set(service, count);
+      probes.set(service, await serviceProbes.get(owner, service, entry.actionPlugin));
     }),
   );
 
@@ -134,7 +186,7 @@ pluginsRouter.get("/", async (c) => {
     for (const actionPlugin of actionPlugins) {
       const key = actionPlugin.credentialService ?? actionPlugin.service;
       const unlocked = actionsByCredentialKey.get(key) ?? [];
-      for (const action of actionPlugin.actions) {
+      for (const action of knownActions(actionPlugin, probes.get(key))) {
         unlocked.push(toActionSummary(actionPlugin, action));
       }
       actionsByCredentialKey.set(key, unlocked);
@@ -161,6 +213,7 @@ pluginsRouter.get("/", async (c) => {
         orgId: c.var.user.orgId,
         credentials: engineCredentials,
         env: process.env,
+        owner,
       });
       // Two things about an unconfigured service, with two audiences.
       //
@@ -185,17 +238,21 @@ pluginsRouter.get("/", async (c) => {
         scopes: decl.scopes,
         connectLabel: decl.connectLabel,
         configKeys: decl.configKeys,
-        connected: connectedServices.has(service),
+        oauthOnly: decl.oauthOnly,
+        // `org` means an organization credential resolves for this owner.
+        // Only a team catalog treats it as connected. A personal catalog
+        // must not offer to disconnect an organization-owned credential.
+        connected: connectedServices.has(service) || (owner.type === "team" && connect === "org"),
         dynamic: dynamicServices.has(service) ? true : undefined,
         connect,
         connectBlockedBy,
         missingEnv: missingEnv.length > 0 ? missingEnv : undefined,
-        toolCount: toolCounts.get(service),
+        toolCount: probes.get(service)?.actions?.length,
         // The slug is declared per plugin (`plugin.yaml`), so every service a
         // plugin declares shares its plugin's mark. A service that names
         // itself takes its own slug when one exists.
         iconSlug: pluginIconSlugs[service] ?? pluginIconSlugs[plugin.name],
-        health: health.get(service),
+        health: withProbe(health.get(service), probes.get(service)),
         actions: actionsByCredentialKey.get(service) ?? [],
       };
     }));
@@ -203,7 +260,9 @@ pluginsRouter.get("/", async (c) => {
     const actionServices: PluginActionServiceSummary[] = actionPlugins.map((actionPlugin) => ({
       service: actionPlugin.service,
       ...(actionPlugin.resolveActions !== undefined ? { dynamic: true as const } : {}),
-      actions: actionPlugin.actions.map((action) => toActionSummary(actionPlugin, action)),
+      actions: knownActions(actionPlugin, probes.get(actionPlugin.credentialService ?? actionPlugin.service)).map((action) =>
+        toActionSummary(actionPlugin, action),
+      ),
     }));
 
     return {
@@ -215,6 +274,18 @@ pluginsRouter.get("/", async (c) => {
       dynamic: dynamicServices.size > 0 ? true : undefined,
       services,
       actionServices,
+      skills: (plugin.skills ?? []).map((skill) => ({ name: skill.name, description: skill.description })),
+      ...(plugin.eventHandlers?.length
+        ? {
+          eventHandlers: plugin.eventHandlers.map((handler) => ({
+            id: handler.id,
+            description: handler.description,
+            events: handler.events,
+            // A TypeBox schema is plain JSON Schema plus symbol keys, which JSON drops.
+            ...(handler.configSchema ? { configSchema: handler.configSchema as Record<string, unknown> } : {}),
+          })),
+        }
+        : {}),
     };
   }));
 

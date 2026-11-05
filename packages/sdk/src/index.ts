@@ -2,7 +2,7 @@
 export * from './meta.js';
 
 // MCP client infrastructure (for MCP-backed action sources)
-export { McpClient } from './mcp/client.js';
+export { McpClient, McpHttpError } from './mcp/client.js';
 export type { McpTool, McpToolResult } from './mcp/types.js';
 export { mcpActionPlugin } from './mcp/action-plugin.js';
 export type { McpActionPluginOptions } from './mcp/action-plugin.js';
@@ -15,8 +15,10 @@ export {
   buildAuthorizationUrl,
   exchangeCodePkce,
   refreshTokenPkce,
+  OAuthTokenError,
 } from './mcp/oauth.js';
 export type { AuthServerMetadata, RegisteredClient, TokenResponse } from './mcp/oauth.js';
 
 // NOTE: React UI components are exported from '@valet/sdk/ui'
 // to avoid pulling React into backend bundles.
+export type { BrowserPolicyService, BrowserSettings, BrowserGrant } from '@valet/shared';

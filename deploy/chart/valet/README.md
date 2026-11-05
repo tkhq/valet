@@ -32,6 +32,52 @@ session-provision time, not at chart-install time. The RBAC is scoped for
 the CRs, but the CRD itself will not exist, and Helm does not validate CRD
 existence for API groups it does not own.
 
+## Database upgrade startup budget
+
+The API completes database upgrades before it binds the HTTP listener.
+Large retained usage histories can require several minutes of backfill.
+The startup probe permits 30 minutes by default: `api.startupProbe.failureThreshold: 360`, counted in five-second units. The probe polls every second, and the chart multiplies the value by 5.
+`api.progressDeadlineSeconds: 2100` permits 35 minutes of Deployment rollout progress.
+These limits cover database initialization. Session restore runs after the listener binds and remains controlled by readiness.
+
+For the first usage-rollup upgrade, set the Helm timeout to at least 35 minutes.
+Use `--wait --timeout 40m` to allow additional deployment work:
+
+```sh
+helm upgrade --install valet deploy/chart/valet \
+  --kube-context rancher-desktop --namespace valet \
+  --wait --timeout 40m
+```
+
+Keep the existing release values and image settings when you run the upgrade.
+If measured database upgrade time exceeds 30 minutes, increase both API budgets and the Helm timeout before deployment.
+The database repair resumes completed batches after a restart.
+
+## Upgrade downtime
+
+The api Deployment uses the `Recreate` strategy with one replica.
+The old pod stops before the new pod starts, so no pod is ready during an upgrade.
+The chart and the api keep this window short and make it answer with a retry hint:
+
+1. A `pre-upgrade` hook Job (`api.imagePrepull`) pulls the new api image onto the api nodes before Helm changes the Deployment. Set `api.imagePrepull.replicas` to the number of nodes the api can schedule on.
+2. On SIGTERM, the api drains: `/api/ready` returns 503, claim loops and schedulers stop, and requests in flight get up to 10 seconds to finish. New API, MCP, webhook, and proxy requests get 503 with `Retry-After: 5`. The api exits within 20 seconds. `api.terminationGracePeriodSeconds` (30) must stay above that bound.
+3. The new process binds a boot listener before database upgrades. It answers every request, `/api/health` included, with 503 and `Retry-After`, so the startup budget still covers the upgrades.
+4. The real app takes the port after the database upgrades. Gated routes return 503 with `Retry-After` until the boot chain finishes, then serve traffic at once.
+5. `api.publishNotReadyAddresses: true` routes Service traffic to the pod while it is not ready, so callers see these 503s instead of an ingress error.
+
+Callers still get an ingress error or a refused connection for two short spans: while the new pod is scheduled, and while the process loads its modules before the boot listener binds.
+
+### Moving to RollingUpdate
+
+`RollingUpdate` with `maxSurge: 1` and `maxUnavailable: 0` removes the window: the old pod serves traffic until the new pod is ready.
+The api cannot run two pods at once yet. These changes must land first:
+
+1. **Leader lock.** The submission claim loop, the workflow run host and scheduler, the event dispatcher, the WakeWatcher, and the periodic sweeps assume one process. Each must start only in the pod that holds a lock, either a Postgres advisory lock on a dedicated connection or a Kubernetes `Lease`. The new pod serves HTTP while the old pod still holds the lock.
+2. **Lock release in the drain.** The old pod must release the lock in its SIGTERM drain, after it stops its claim loops and before it evicts sessions. The new pod must then pick up the work.
+3. **In-memory session state.** Live sessions, WebSocket fan-out, and approval waiters live in one process. A request for a session that runs in the other pod must reach that pod, or the state must move to the store.
+4. **Schema repair as a Job.** Move `SCHEMA_REPAIRS` and migrations (`packages/api/src/lib/drizzle.ts`) out of api boot into a `pre-upgrade` hook Job. Each repair must be backward compatible, because the old pod keeps running against the new schema.
+5. **Chart.** Set `strategy.type: RollingUpdate` with `maxSurge: 1` and `maxUnavailable: 0`, remove `rollingUpdate: null`, and set `api.publishNotReadyAddresses: false`. Add a `preStop` sleep of about 5 seconds, so the ingress drops the old pod before it drains. Update the `type: Recreate` assertion in `test/golden.sh`.
+
 ## What's in the chart
 
 - **api Deployment**, Service, and Ingress (Traefik, TLS terminated at the
@@ -45,12 +91,12 @@ existence for API groups it does not own.
   Grafana), a ClusterIP Service for OTLP ingest, a NodePort Service for
   Grafana (30300), a PVC for telemetry storage, and the provisioned
   "Valet — Agent Observability" dashboard.
-- **Sandbox namespace + RBAC**: a `Namespace`, a namespaced `Role`, and a
-  `RoleBinding` to the api's `ServiceAccount`. The Role grants sandbox
-  CRs, pods, pods/exec, and pods/log, plus `get`/`patch` on
-  persistentvolumeclaims for on-demand workspace growth. It grants no
-  cluster-scoped permissions and no PVC lifecycle verbs — the
-  agent-sandbox controller owns PVC create/delete.
+- **Sandbox namespace + RBAC**: an optional `Namespace`, a namespaced
+  `Role`, and a `RoleBinding` to the api's `ServiceAccount`. The Role
+  grants only the operations that the api calls. These include Sandbox CR
+  lifecycle, pod read/delete and exec, pod log reads, PVC growth, build Jobs,
+  build ConfigMaps, and credential Secrets. It grants no cluster-scoped
+  permissions. The agent-sandbox controller owns pod and PVC creation.
 - **App Secret** with a `lookup`-based retain guard. `BETTER_AUTH_SECRET`
   and `VALET_ENCRYPTION_KEY` are generated once when values do not supply
   them, then reused on every later `helm upgrade`. Regenerating them would
@@ -58,6 +104,147 @@ existence for API groups it does not own.
   master, because `VALET_SANDBOX_JWT_MASTER` falls back to
   `BETTER_AUTH_SECRET` when unset.
 - **`helm test`**: a Pod hook that curls the api Service's `/api/health`.
+
+## Resource ownership
+
+The default `sandbox.createNamespace: true` keeps local install behavior.
+The chart creates `sandbox.namespace` before it creates namespaced resources.
+The Namespace has `helm.sh/resource-policy: keep`. Helm does not delete it
+when an upgrade omits it or an operator uninstalls the release.
+
+Set `sandbox.createNamespace: false` when the platform owns the Namespace.
+The platform must create the Namespace before helm-controller installs the
+chart. Helm omits only the Namespace manifest in this mode.
+
+### Move an existing Namespace to the platform
+
+Do not set `sandbox.createNamespace=false` before this procedure. The old
+release manifest must contain the keep annotation before Helm omits the
+Namespace.
+
+1. Set the release variables.
+
+   ```sh
+   release=valet
+   release_namespace=valet
+   sandbox_namespace=valet-sandboxes
+   chart_ref=oci://ghcr.io/tkhq/charts/valet
+   chart_version=0.10.12
+   ```
+
+2. Add the keep annotation to the live Namespace.
+
+   ```sh
+   kubectl annotate namespace "$sandbox_namespace" \
+     helm.sh/resource-policy=keep --overwrite
+   ```
+
+3. Verify the live annotation.
+
+   ```sh
+   test "$(kubectl get namespace "$sandbox_namespace" \
+     -o jsonpath='{.metadata.annotations.helm\.sh/resource-policy}')" = keep
+   ```
+
+4. Upgrade once while Helm still renders the Namespace.
+
+   ```sh
+   helm upgrade "$release" "$chart_ref" \
+     --version "$chart_version" \
+     --namespace "$release_namespace" \
+     --reuse-values \
+     --set sandbox.createNamespace=true
+   ```
+
+5. Verify that Helm stored the annotated Namespace manifest.
+
+   ```sh
+   helm get manifest "$release" --namespace "$release_namespace" |
+     kubectl create --dry-run=client -f - -o json |
+     jq -e --arg namespace "$sandbox_namespace" '
+       (.items // [.])[] |
+       select(.apiVersion == "v1" and .kind == "Namespace") |
+       select(.metadata.name == $namespace) |
+       .metadata.annotations["helm.sh/resource-policy"] == "keep"
+     '
+   ```
+
+6. Apply the platform change that adopts the live Namespace.
+
+7. Verify that the platform owns the Namespace before the next Helm upgrade.
+
+8. Set `sandbox.createNamespace=false` in the Helm values.
+
+Helm owns the api resources, sandbox Role, and sandbox RoleBinding. The Role
+uses only namespaced permissions. Kubernetes authorizes the `pods/exec`
+connect subresource with the `create` verb for both the SPDY (POST) and the
+client-node WebSocket (GET) path, so the Role grants `create` (and `get`) on
+`pods/exec`. Granting `get` alone rejects every exec with HTTP 403.
+
+A restricted Helm reconciler does not need Namespace access or RBAC
+`escalate` and `bind`. Kubernetes requires the reconciler to hold each
+permission that it writes into a Role. The Sandbox CR verbs are the
+exceptional grant because the built-in namespaced `admin` role does not
+include that custom API group. Grant those exact verbs to the reconciler
+before installation. Do not grant `escalate` or `bind`.
+
+`api.instanceConfig` is chart content. When it is set, Helm owns the instance
+ConfigMap and its checksum rolls the api Deployment. Use `api.extraEnvFrom`
+for ConfigMaps and Secrets that the platform owns. An ExternalSecret can own a
+target Secret that this list references. The chart does not render or copy
+those external values. Their updates do not change a pod-template checksum,
+so restart the api Deployment after an external value changes.
+
+### Return Namespace ownership to Helm
+
+Do not delete or recreate the Namespace. Stop platform reconciliation for the
+Namespace before this procedure.
+
+1. Set the release variables from the migration procedure.
+
+2. Remove or disable the platform resource that owns the Namespace.
+
+3. Add the Helm ownership metadata to the live Namespace.
+
+   ```sh
+   kubectl label namespace "$sandbox_namespace" \
+     app.kubernetes.io/managed-by=Helm --overwrite
+   kubectl annotate namespace "$sandbox_namespace" \
+     meta.helm.sh/release-name="$release" \
+     meta.helm.sh/release-namespace="$release_namespace" \
+     helm.sh/resource-policy=keep \
+     --overwrite
+   ```
+
+4. Verify the Helm ownership metadata.
+
+   ```sh
+   test "$(kubectl get namespace "$sandbox_namespace" \
+     -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}')" = Helm
+   test "$(kubectl get namespace "$sandbox_namespace" \
+     -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}')" = "$release"
+   test "$(kubectl get namespace "$sandbox_namespace" \
+     -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-namespace}')" = "$release_namespace"
+   test "$(kubectl get namespace "$sandbox_namespace" \
+     -o jsonpath='{.metadata.annotations.helm\.sh/resource-policy}')" = keep
+   ```
+
+5. Upgrade with Namespace creation enabled.
+
+   ```sh
+   helm upgrade "$release" "$chart_ref" \
+     --version "$chart_version" \
+     --namespace "$release_namespace" \
+     --reuse-values \
+     --set sandbox.createNamespace=true
+   ```
+
+If a Helm rollback restores a revision that renders the Namespace, complete
+steps 1 through 4 first. Then run this command with the target revision:
+
+```sh
+helm rollback "$release" <revision> --namespace "$release_namespace"
+```
 
 ## Registry filesystem health
 

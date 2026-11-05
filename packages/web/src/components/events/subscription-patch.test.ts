@@ -21,7 +21,7 @@ function sub(over: Partial<EventSubscriptionWire> = {}): EventSubscriptionWire {
     ownerId: "u1",
     eventKeys: ["github.pr.opened"],
     filters: [],
-    target: { kind: "orchestrator" },
+    target: { kind: "assistant" },
     enabled: true,
     createdBy: "u1",
     createdAt: 1,
@@ -160,5 +160,97 @@ describe("buildSubscriptionPatch", () => {
       anyChannel: true,
     });
     expect(patch).toEqual({ filters: [CHANNEL_EQ] });
+  });
+
+  describe("prompt templates", () => {
+    const withPrompts = sub({
+      target: { kind: "assistant", systemPrompt: "Triage it.", userPromptTemplate: "{{event.summary}}" },
+    });
+
+    it("sends nothing when the templates are untouched", () => {
+      const patch = buildSubscriptionPatch(withPrompts, {
+        ...unchangedForm(withPrompts),
+        prompts: { systemPrompt: "Triage it.", userPromptTemplate: "{{event.summary}}" },
+      });
+      expect(patch).toBeNull();
+    });
+
+    it("sends only the changed template", () => {
+      const patch = buildSubscriptionPatch(withPrompts, {
+        ...unchangedForm(withPrompts),
+        prompts: { systemPrompt: "Summarize it.", userPromptTemplate: "{{event.summary}}" },
+      });
+      expect(patch).toEqual({ systemPrompt: "Summarize it." });
+    });
+
+    it("sends null for an emptied template, which clears it on the row", () => {
+      const patch = buildSubscriptionPatch(withPrompts, {
+        ...unchangedForm(withPrompts),
+        prompts: { systemPrompt: "   ", userPromptTemplate: "" },
+      });
+      expect(patch).toEqual({ systemPrompt: null, userPromptTemplate: null });
+    });
+
+    it("adds a template to a rule that had none", () => {
+      const s = sub();
+      const patch = buildSubscriptionPatch(s, {
+        ...unchangedForm(s),
+        prompts: { systemPrompt: "", userPromptTemplate: "{{event.body}}" },
+      });
+      expect(patch).toEqual({ userPromptTemplate: "{{event.body}}" });
+    });
+
+    it("sends no template for a workflow target, which renders none", () => {
+      const s = sub({ target: { kind: "workflow", workflowId: "wf-1" } });
+      const patch = buildSubscriptionPatch(s, {
+        ...unchangedForm(s),
+        prompts: { systemPrompt: "Triage it.", userPromptTemplate: "" },
+      });
+      expect(patch).toBeNull();
+    });
+  });
+});
+
+
+describe("appearance overrides", () => {
+  it.each(["workflow", "assistant"] as const)("preserves and clears %s appearance without rewriting the match", (kind) => {
+    const appearance = { displayName: "Release bot", avatarUrl: "https://example.com/avatar.png" };
+    const target = kind === "workflow" ? { kind, workflowId: "wf_1", appearance } : { kind, appearance };
+    const stored = sub({ target });
+    expect(buildSubscriptionPatch(stored, { ...unchangedForm(stored), appearance })).toBeNull();
+    expect(buildSubscriptionPatch(stored, { ...unchangedForm(stored), appearance: {} })).toEqual({ appearance: null });
+    expect(buildSubscriptionPatch(stored, { ...unchangedForm(stored), appearance: { displayName: "New bot" } }))
+      .toEqual({ appearance: { displayName: "New bot" } });
+    expect(buildSubscriptionPatch(stored, { ...unchangedForm(stored), name: "Renamed" }))
+      .toEqual({ name: "Renamed" });
+  });
+});
+
+describe("buildSubscriptionPatch thread policy", () => {
+  const base = { name: "PR alerts", eventKeys: ["github.pr.opened"], filters: [], anyChannel: false };
+
+  it("sends nothing when the policy equals the effective stored one", () => {
+    expect(buildSubscriptionPatch(sub(), { ...base, thread: { mode: "own" } })).toBeNull();
+    expect(buildSubscriptionPatch(
+      sub({ target: { kind: "assistant", follow: true } }), { ...base, thread: { mode: "new" } },
+    )).toBeNull();
+    expect(buildSubscriptionPatch(
+      sub({ target: { kind: "assistant", thread: { mode: "existing", sessionId: "s", threadId: "t" } } }),
+      { ...base, thread: { mode: "existing", sessionId: "s", threadId: "t" } },
+    )).toBeNull();
+  });
+
+  it("sends a changed policy", () => {
+    expect(buildSubscriptionPatch(sub(), { ...base, thread: { mode: "subject" } })).toEqual({ thread: { mode: "subject" } });
+    expect(buildSubscriptionPatch(
+      sub({ target: { kind: "assistant", thread: { mode: "existing", sessionId: "s", threadId: "t" } } }),
+      { ...base, thread: { mode: "existing", sessionId: "s", threadId: "t2" } },
+    )).toEqual({ thread: { mode: "existing", sessionId: "s", threadId: "t2" } });
+  });
+
+  it("never sends a policy for a workflow target", () => {
+    expect(buildSubscriptionPatch(
+      sub({ target: { kind: "workflow", workflowId: "wf" } }), { ...base, thread: { mode: "new" } },
+    )).toBeNull();
   });
 });

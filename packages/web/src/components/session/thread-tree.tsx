@@ -1,92 +1,219 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { Link, useNavigate, useSearch } from "@tanstack/react-router";
+import { useDebouncedValue } from "~/hooks/use-debounced-value";
+import { useWorkspaceViewers } from "~/api/active-viewers";
+import { RowFaces, ViewerNames } from "./viewer-faces";
+import { SpacesNav } from "./spaces-nav";
+import { CHROME_BUTTON, HOVER_CHROME, NESTED_ROW, SELECTED_ROW, SIDEBAR_LABEL, TOP_ROW } from "./sidebar-rows";
+import { useSidebarControls } from "~/components/layout/app-shell";
+import { useWorkspaceRuntimeInfo } from "~/api/workspace-runtime";
+import { useHomeConversation } from "~/api/home";
+import { bucketCounts, threadChannelType, threadOriginBucket, THREAD_ORIGIN_FILTERS, type ThreadOriginBucket } from "~/lib/thread-origin";
+import { useChildWork, flattenChildWork, useDismissChild } from "~/api/child-work";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { Link, useNavigate, useRouterState, useSearch } from "@tanstack/react-router";
 import {
   Archive,
   ArchiveRestore,
+  ArrowDownUp,
+  ArrowRightLeft,
+  Copy,
+  Lock,
+  Users,
+  Bot,
+  Filter,
+  Hash,
+  House,
+  Slack,
+  Zap,
+  Folder,
+  FolderOpen,
+  PanelLeft,
+  PanelLeftClose,
   Bell,
+  Check,
+  CheckCheck,
   ChevronDown,
+  FileText,
+  GitMerge,
+  GitPullRequest,
+  GitPullRequestClosed,
   MessageSquare,
   MoreHorizontal,
   Pencil,
+  Pin,
+  PinOff,
   Plus,
   RefreshCw,
   Search,
+  Share2,
+  Trash2,
+  Workflow,
   X,
 } from "lucide-react";
 import type {
+  ActiveViewer,
+  ArtifactListItem,
   DecisionGate,
-  GetModelTiersResponse,
-  ModelInfo,
-  OrchestratorChildSummary,
+  ChildWorkSummary,
+  ThreadPullRequest,
   ThreadSummary,
+  WorkflowDefinitionSummary,
 } from "@valet/api/wire";
+import { useQueryClient } from "@tanstack/react-query";
 import {
+  prefetchSession,
+  prefetchTranscript,
   useArchivedThreads,
   useCreateThread,
+  useDuplicateThread,
   useRenameThread,
   useReplaceSandbox,
-  useSession,
+  useMarkThreadsRead,
+  useMoveThread,
   useSetThreadArchived,
-  useThreads,
+  useSessionWakeups,
+  useSidebarThreads,
+  useThreadSearch,
 } from "~/api/queries";
+import { isThreadUnread, pendingAgentQuestion, rowPullRequest } from "~/lib/thread-read";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { useChatHotkeysStore } from "~/stores/chat-hotkeys";
-import { useDismissChild, useOrchestratorChildren, useOrchestratorInfo } from "~/api/orchestrator";
-import { useModels, useModelTiers } from "~/api/settings";
+import { projectThreadIds, removeArchivedProject, useThreadProjects } from "~/lib/thread-projects";
+import { backgroundWorkConflict } from "~/api/client";
+import { errorText } from "~/lib/error-text";
+import { useBackgroundWorkGuard, type GuardedAction } from "./background-work-confirm";
+import { ThreadEventLine, ThreadTimerLine, threadEventWaits, threadTimerWaits, type ThreadEventWait } from "./background-work";
+
+const STOP_AND_ARCHIVE: GuardedAction = {
+  title: "Stop background work and archive?",
+  confirmLabel: "Stop background work and archive",
+};
+const STOP_AND_REPLACE: GuardedAction = {
+  title: "Stop background work and replace the sandbox?",
+  confirmLabel: "Stop background work and replace",
+};
+import { downloadTextFile } from "~/lib/download";
+import { useMe, useTeams } from "~/api/settings";
 import { usePendingGatesSeed } from "~/hooks/use-pending-gates-seed";
-import { useStreamStore } from "~/stores/stream";
+import { THREAD_TITLE_CLASS, ThreadStateMark, threadNeedsYou, threadRowState } from "./thread-state-mark";
+import { ThreadStatusIcon } from "./thread-status-icon";
+import { useMobileLayout } from "~/hooks/use-mobile-layout";
+import { useWorkflows } from "~/api/workflows";
+import { useArtifacts } from "~/api/artifacts";
+import { useListOwner } from "~/lib/use-list-owner";
+import { useStreamStore, useThreadLiveStatus, useQueueStateForThread, queueBusy } from "~/stores/stream";
 import { createDebouncer } from "~/lib/debounce";
 import { formatChord } from "~/lib/chat-keybindings";
 import {
-  bucketCounts,
-  filterThreads,
-  THREAD_ORIGIN_FILTERS,
-  threadOriginBucket,
-  type ThreadOriginBucket,
-} from "~/lib/thread-origin";
-import {
+  Button,
+  ConfirmDialog,
+  Dialog,
+  DialogContent,
+  DialogTitle,
+  FilterChips,
+  Input,
+  DropdownMenuSub,
+  DropdownMenuSubTrigger,
+  DropdownMenuSubContent,
+  DropdownMenuSeparator,
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuTrigger,
   Spinner,
+  StatusDot,
   Tooltip,
 } from "~/components/primitives";
 import { formatWhen } from "~/lib/format-when";
 import { cn } from "~/lib/cn";
-import { sameModelSpec } from "~/lib/models";
-import { isSizeTier, selectionLabel, tierSubtitle, TIER_LABELS } from "~/lib/model-tiers";
 import { getSubconversationsCollapsed, setSubconversationsCollapsed } from "~/lib/preferences";
+import { defaultThreadId, isAppAssistantThread, isHiddenFromThreadList } from "~/lib/thread-default";
 
-/**
- * What an untitled thread is called.
- *
- * This used to be `Thread ${index + 1}`, which is a number that claims an
- * identity and then reassigns it: threads sort newest-first, so every new
- * thread pushed "Thread 5" down to "Thread 6" and renumbered every row
- * below it. At two threads nobody notices. At thirty it is a wall of
- * numbers that all move.
- *
- * A creation stamp never swaps between rows. It is also the only thing we
- * actually know about a thread nobody has titled and nothing has been said
- * in. The newest thread keeps a friendlier name because it is the one the
- * "New thread" button just created and is about to be typed into.
- */
-export function untitledThreadLabel(thread: ThreadSummary, index: number): string {
-  if (index === 0) return "New thread";
-  return formatWhen(thread.createdAt);
+/** Creation order, not the current sidebar order, determines this label. */
+export function untitledThreadLabel(thread: ThreadSummary, isNewestCreated: boolean): string {
+  return isNewestCreated ? "New thread" : formatWhen(thread.createdAt);
 }
 
-const BUCKET_STORAGE_KEY = "valet:thread-bucket";
+const THREAD_DRAG_TYPE = "application/x-valet-thread";
 
-function loadStoredBucket(): ThreadOriginBucket {
+/** A list action a phone leaves out: the drawer is for opening threads. */
+const PHONE_HIDDEN = "max-md:hidden";
+/** A thread row's wait line: a full-width item of the row's flex wrap, under the title (32px indent + 14px icon + 8px gap). */
+const WAIT_LINE_CLASS = "basis-full -mt-0.5 pb-1 pl-[3.375rem]";
+/** Recents rows a wider screen shows before "Show more". */
+const RECENTS_LIMIT = 5;
+/** A sub-conversation row action: left out on a phone, shown on hover or focus on a wider screen (`group/child`). */
+const CHILD_HOVER_ACTION = "max-md:hidden opacity-0 group-hover/child:opacity-100 group-focus-within/child:opacity-100 focus-visible:opacity-100";
+const THREAD_SORT_STORAGE_KEY = "valet:thread-sort";
+const THREAD_ORIGIN_STORAGE_KEY = "valet:thread-origin";
+
+function loadStoredOriginFilter(): ThreadOriginBucket {
   try {
-    const raw = window.localStorage.getItem(BUCKET_STORAGE_KEY);
-    if (raw && THREAD_ORIGIN_FILTERS.some((f) => f.id === raw)) return raw as ThreadOriginBucket;
+    const raw = window.localStorage.getItem(THREAD_ORIGIN_STORAGE_KEY);
+    const match = THREAD_ORIGIN_FILTERS.find((candidate) => candidate.id === raw);
+    if (match) return match.id;
   } catch {
     // Fall through.
   }
   return "all";
+}
+
+const PR_ICONS = {
+  open: { Icon: GitPullRequest, label: "Pull request open", className: "text-emerald-600" },
+  merged: { Icon: GitMerge, label: "Pull request merged", className: "text-violet-500" },
+  closed: { Icon: GitPullRequestClosed, label: "Pull request closed", className: "text-muted" },
+} as const;
+
+/** The state of the pull request this thread created: open, merged, or closed. */
+export function ThreadPullRequestIcon({ pr, count }: { pr: ThreadPullRequest; count: number }) {
+  const { Icon, label, className } = PR_ICONS[pr.state];
+  const text = `${label}: ${pr.repo}#${pr.number}${count > 1 ? ` (${count} pull requests)` : ""}`;
+  return (
+    <Tooltip content={text}>
+      <span role="img" aria-label={text} className="ml-1 inline-flex h-5 w-5 shrink-0 items-center justify-center">
+        <Icon aria-hidden className={cn("h-3.5 w-3.5", className)} />
+      </span>
+    </Tooltip>
+  );
+}
+
+/** Where a thread came from, as a small row icon: Slack, another channel,
+ * web chat, an automation, or another agent. */
+export function ThreadOriginIcon({ thread }: { thread: Pick<ThreadSummary, "key"> }) {
+  const bucket = threadOriginBucket(thread);
+  const channel = threadChannelType(thread);
+  const [Icon, label] = bucket === "channel"
+    ? channel === "slack" ? [Slack, "From Slack"] as const : [Hash, `From ${channel ?? "a channel"}`] as const
+    : bucket === "auto" ? [Zap, "From an automation"] as const
+    : bucket === "other" ? [Bot, "From another agent"] as const
+    : [MessageSquare, "From web chat"] as const;
+  return <Icon role="img" aria-label={label} className="mr-2 h-3.5 w-3.5 shrink-0 text-muted"><title>{label}</title></Icon>;
+}
+
+export const THREAD_SORT_MODES = [
+  { id: "last-user-activity", label: "Last user activity" },
+  { id: "created", label: "Created" },
+] as const;
+
+export type ThreadSortMode = (typeof THREAD_SORT_MODES)[number]["id"];
+
+function loadStoredThreadSort(): ThreadSortMode {
+  try {
+    const raw = window.localStorage.getItem(THREAD_SORT_STORAGE_KEY);
+    const mode = THREAD_SORT_MODES.find((candidate) => candidate.id === raw);
+    if (mode) return mode.id;
+  } catch {
+    // Fall through.
+  }
+  return "last-user-activity";
+}
+
+/** Pure: orders active threads by the selected per-user preference. */
+export function sortThreads(threads: ThreadSummary[], mode: ThreadSortMode): ThreadSummary[] {
+  return [...threads].sort((a, b) => {
+    if (mode === "created") return b.createdAt - a.createdAt;
+    return b.lastUserActivityAt - a.lastUserActivityAt || b.createdAt - a.createdAt;
+  });
 }
 
 const CHILDREN_POLL_MS = 30_000;
@@ -98,9 +225,9 @@ const NO_REFETCH = () => {};
 
 /** Pure: groups children by the thread that spawned them. */
 export function groupChildrenByThread(
-  children: OrchestratorChildSummary[],
-): Map<string, OrchestratorChildSummary[]> {
-  const map = new Map<string, OrchestratorChildSummary[]>();
+  children: ChildWorkSummary[],
+): Map<string, ChildWorkSummary[]> {
+  const map = new Map<string, ChildWorkSummary[]>();
   for (const c of children) {
     const list = map.get(c.parentThreadId);
     if (list) list.push(c);
@@ -124,23 +251,6 @@ export function threadIdsWithPendingGates(
 }
 
 /**
- * Pure: the rows the tree renders. Applies the origin-bucket and search
- * filters, but a thread with a pending gate is exempt from both — hiding
- * the row would hide the only in-session surface for its gate.
- */
-export function visibleThreads(
-  threads: ThreadSummary[],
-  bucket: ThreadOriginBucket,
-  query: string,
-  gatedThreadIds: Set<string>,
-): ThreadSummary[] {
-  const filtered = filterThreads(threads, bucket, query);
-  if (gatedThreadIds.size === 0) return filtered;
-  const shown = new Set(filtered.map((t) => t.id));
-  return threads.filter((t) => shown.has(t.id) || gatedThreadIds.has(t.id));
-}
-
-/**
  * Pure: true when a pending gate sits on a thread that is NOT in the
  * active-thread list — an archived thread. Marks the "Show archived"
  * toggle so the gate has a surface while the section is closed.
@@ -157,9 +267,63 @@ export function hasGateOutsideList(
   return false;
 }
 
+/** When a thread last changed: the newest of its creation, your activity, and the agent's. */
+function lastActivityAt(thread: ThreadSummary): number {
+  return Math.max(thread.createdAt, thread.lastUserActivityAt, thread.lastAgentActivityAt ?? 0);
+}
+
+/**
+ * Pure: splits the listed threads into the ones that need you, newest
+ * activity first, and the rest in list order. A thread that needs you shows
+ * in the "Needs you" section only, never also in Pinned, a project, or
+ * Recents.
+ */
+export function splitNeedsYou(
+  threads: ThreadSummary[],
+  needsYou: (thread: ThreadSummary) => boolean,
+): { needsYou: ThreadSummary[]; rest: ThreadSummary[] } {
+  const waiting = threads.filter(needsYou);
+  if (waiting.length === 0) return { needsYou: [], rest: threads };
+  const ids = new Set(waiting.map((thread) => thread.id));
+  return {
+    needsYou: waiting.sort((a, b) => lastActivityAt(b) - lastActivityAt(a)),
+    rest: threads.filter((thread) => !ids.has(thread.id)),
+  };
+}
+
+type SearchScope = "all" | "threads" | "workflows" | "files";
+
+const SEARCH_SCOPES: ReadonlyArray<{ value: SearchScope; label: string }> = [
+  { value: "all", label: "All" },
+  { value: "threads", label: "Threads" },
+  { value: "workflows", label: "Workflows" },
+  { value: "files", label: "Files" },
+];
+
+/** The most results one group shows under "All". */
+const SEARCH_GROUP_LIMIT = 8;
+
+/** Pure: the workflows whose name contains the lowercase query. */
+export function matchingWorkflows(workflows: WorkflowDefinitionSummary[], query: string): WorkflowDefinitionSummary[] {
+  return workflows.filter((workflow) => workflow.name.toLowerCase().includes(query));
+}
+
+/** Pure: the artifacts you can open whose title or path contains the lowercase query. */
+export function matchingArtifacts(artifacts: ArtifactListItem[], query: string): ArtifactListItem[] {
+  return artifacts.filter((artifact) => !artifact.revoked && `${artifact.title} ${artifact.path}`.toLowerCase().includes(query));
+}
+
+/** A workspace a thread can move to. */
+type MoveTarget = { to: "private" | { teamId: string }; label: string };
+
+type SearchItem =
+  | { key: string; kind: "thread"; thread: ThreadSummary }
+  | { key: string; kind: "workflow"; workflow: WorkflowDefinitionSummary }
+  | { key: string; kind: "file"; artifact: ArtifactListItem };
+
 /** Pure: status-dot class for a child row. Calm-companion visual language —
  * running is moss with a subtle pulse, settled is a muted checkmark. */
-export function childStatusDotClassName(status: OrchestratorChildSummary["status"]): string {
+export function childStatusDotClassName(status: ChildWorkSummary["status"]): string {
   return status === "running"
     ? "bg-moss animate-pulse motion-reduce:animate-none"
     : "bg-muted";
@@ -175,15 +339,15 @@ export function childStatusDotClassName(status: OrchestratorChildSummary["status
  * treatment (moss left rail + soft ink wash), and the full title is
  * recoverable via hover tooltip when truncated.
  */
-export function ThreadTree({ sessionId: override, showChildren = true }: ThreadTreeProps = {}) {
-  const info = useOrchestratorInfo();
+export function ThreadTree({ sessionId: override, showChildren = true, workspace }: ThreadTreeProps = {}) {
+  const info = useWorkspaceRuntimeInfo(override ? undefined : "user");
   // No `override` means the caller's own assistant — the original and still
   // the default behavior.
   const sessionId = override ?? info.data?.sessionId;
 
   if (!sessionId) return <ThreadTreeWaiting />;
 
-  return <ThreadTreeInner sessionId={sessionId} showChildren={showChildren} />;
+  return <ThreadTreeInner key={sessionId} sessionId={sessionId} showChildren={showChildren} workspace={workspace} />;
 }
 
 /**
@@ -205,59 +369,68 @@ export interface ThreadTreeProps {
   sessionId?: string;
   /**
    * Nest child sessions under the thread that spawned them. Safe for any
-   * assistant the caller can view: `GET /api/orchestrator/children?sessionId=`
+   * assistant the caller can view: `GET /api/sessions/:sessionId/children`
    * scopes the list to THIS `sessionId` (access-checked), so a team
    * assistant's runs nest under its own threads rather than borrowing the
    * caller's personal children.
    */
   showChildren?: boolean;
+  /** The workspace the rows belong to ("user" or a team id), for the faces of
+   * who is in each thread. Without it the rows show no faces. */
+  workspace?: string;
 }
 
-function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showChildren: boolean }) {
-  const threadsQ = useThreads(sessionId);
-  // Session default model, for the pin chip: a chip renders only on threads
-  // whose pin DIVERGES from it (every new thread pins at creation, so an
-  // always-on chip would just be noise).
-  const sessionQ = useSession(sessionId);
-  const sessionModel = sessionQ.data?.model;
-  const modelsQ = useModels();
-  const tierMapQ = useModelTiers();
-  const childrenQ = useOrchestratorChildren(sessionId, {
-    refetchInterval: CHILDREN_POLL_MS,
-    enabled: showChildren,
-  });
-  // `refetch()` fires even on a disabled query, so gate the live-update
-  // hook too rather than relying on `enabled` alone.
-  useInvalidateChildrenOnQueueState(sessionId, showChildren ? childrenQ.refetch : NO_REFETCH);
-  const createThread = useCreateThread(sessionId);
-  const setArchived = useSetThreadArchived(sessionId);
-  const renameThread = useRenameThread(sessionId);
-  const replaceSandbox = useReplaceSandbox(sessionId);
-  const dismissChild = useDismissChild(sessionId);
-  const [showArchived, setShowArchived] = useState(false);
-  const archivedQ = useArchivedThreads(sessionId, { enabled: showArchived });
-  const navigate = useNavigate({ from: "/chat" });
+const NO_VIEWERS: ActiveViewer[] = [];
 
+function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: string; showChildren: boolean; workspace?: string }) {
+  const viewer = useMe();
+  // The phone drawer shows Home's helper conversations as rows and groups
+  // what needs you first. A wider screen keeps the web sidebar: helper
+  // conversations live in the Ask Valet panel.
+  const mobile = useMobileLayout();
+  const unlisted = (thread: Pick<ThreadSummary, "key">) => isHiddenFromThreadList(thread) || (!mobile && isAppAssistantThread(thread));
+  // Home is a place, not a row. The web sidebar pins it above the list in
+  // every workspace and opens it at `/`; a phone opens Home as its first
+  // screen instead. Its thread lives in the personal session only.
+  const home = useHomeConversation(!mobile);
+  const homeId = !mobile ? home.data?.threadId : undefined;
+  const homeInList = homeId !== undefined && home.data?.sessionId === sessionId;
+  const onHome = useRouterState({ select: (state) => state.location.pathname === "/" });
+  const onThreadsPage = useRouterState({ select: (state) => state.location.pathname === "/" || state.location.pathname === "/chat" });
+  const sidebarControls = useSidebarControls();
+  // Who is in which thread now: faces on the rows.
+  const workspaceViewers = useWorkspaceViewers(workspace);
+  const projects = useThreadProjects(viewer.data?.id ?? "loading", sessionId);
+  const [projectDialog, setProjectDialog] = useState(false);
+  const [projectName, setProjectName] = useState("");
+  const [editingProjectId, setEditingProjectId] = useState<string>();
+  const [projectMenu, setProjectMenu] = useState<string>();
+  const [deleteProject, setDeleteProject] = useState<{ id: string; name: string }>();
+  const [deletingProject, setDeletingProject] = useState(false);
+  const deletingRef = useRef(false);
+  const [deleteError, setDeleteError] = useState<string>();
+
+  const [projectError, setProjectError] = useState<string>();
+  function createProject() {
+    const name = projectName.trim();
+    if (!name) return;
+    if (projects.value.projects.some((project) => project.id !== editingProjectId && project.name.toLocaleLowerCase() === name.toLocaleLowerCase())) {
+      setProjectError("A project with this name already exists. Choose another name.");
+      return;
+    }
+    // The folder shows at once; a failed save reports under Projects.
+    void projects.update((current) => ({ ...current, grouped: true, collapsed: false,
+      projects: editingProjectId ? current.projects.map(project => project.id === editingProjectId ? { ...project, name } : project)
+        : [...current.projects, { id: crypto.randomUUID(), name, collapsed: false }] }));
+    setProjectDialog(false);
+    setProjectName("");
+  }
   const search = (useSearch({ strict: false }) ?? {}) as { thread?: string; child?: string };
-  // Sorted by CREATION, newest first — deliberately not by last activity.
-  //
-  // Chat products sort history by last activity and it reads fine there,
-  // because a document only moves when a person touches it. These rows are
-  // agents that work while you look away, so an activity sort makes the
-  // list reorder itself under the cursor: you look back and the thread you
-  // were about to click has moved. Creation order is stable, so a thread
-  // stays where you last saw it.
-  //
-  // This will look like a bug to anyone arriving from a chat app. It is
-  // not. If recency is ever wanted, it belongs behind an explicit sort
-  // control that is off by default.
-  const threads = useMemo(
-    () => [...(threadsQ.data?.threads ?? [])].sort((a, b) => b.createdAt - a.createdAt),
-    [threadsQ.data],
-  );
-  const activeThreadId = search.thread ?? threads[0]?.id;
-  const grouped = groupChildrenByThread(showChildren ? (childrenQ.data?.children ?? []) : []);
-
+  // Read after a save answers, so a refused archive sees the current view.
+  const openThread = useRef(search.thread);
+  openThread.current = search.thread;
+  const [sortMode, setSortMode] = useState<ThreadSortMode>(() => loadStoredThreadSort());
+  const [originFilter, setOriginFilter] = useState<ThreadOriginBucket>(() => loadStoredOriginFilter());
   // Seed pending gates from REST for ourselves — the tree must not depend
   // on a SessionView being mounted for the same session. Live updates
   // arrive via the wire (`gate.*` frames); the record's identity only
@@ -266,38 +439,160 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
   const pendingGates = useStreamStore((s) => s.bySession[sessionId]?.pendingGates);
   const gatedThreadIds = useMemo(() => threadIdsWithPendingGates(pendingGates), [pendingGates]);
 
-  const [bucket, setBucket] = useState<ThreadOriginBucket>(() => loadStoredBucket());
-  const [query, setQuery] = useState("");
-  const counts = useMemo(() => bucketCounts(threads), [threads]);
-  // Chips earn their row only when threads actually span buckets — a
-  // chat-only session keeps the sidebar clean.
-  const bucketsInUse = THREAD_ORIGIN_FILTERS.filter((f) => f.id !== "all" && counts[f.id] > 0);
-  const showFilters = bucketsInUse.length > 1;
-  const effectiveBucket = showFilters ? bucket : "all";
-  const visible = useMemo(
-    () => visibleThreads(threads, effectiveBucket, query, gatedThreadIds),
-    [threads, effectiveBucket, query, gatedThreadIds],
+  // The home thread rides along as a fixed thread so its row has live state.
+  const fixedIds = [...new Set([...(homeInList ? [homeId] : []), ...gatedThreadIds, ...projects.value.pinned, ...Object.keys(projects.value.assignments).filter(id =>
+    projects.value.grouped && projects.value.projects.some(project => project.id === projects.value.assignments[id]))])].sort();
+  const threadsQ = useSidebarThreads(sessionId, { sort: sortMode, origin: originFilter, fixedIds, threadId: search.thread });
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const moreRef = useRef<HTMLButtonElement>(null);
+  const [recentsExpanded, setRecentsExpanded] = useState(false);
+  useEffect(() => {
+    const target = moreRef.current;
+    if (!target || !threadsQ.hasNextPage || threadsQ.isFetching || threadsQ.isError || typeof IntersectionObserver === "undefined") return;
+    let requested = false;
+    const observer = new IntersectionObserver(entries => {
+      if (!requested && entries.some(entry => entry.isIntersecting)) {
+        requested = true;
+        void threadsQ.fetchNextPage();
+      }
+    }, { root: scrollRef.current });
+    observer.observe(target);
+    return () => observer.disconnect();
+    // "Show more" mounts the sentinel, so expanding Recents observes it again.
+  }, [threadsQ.hasNextPage, threadsQ.isFetching, threadsQ.isError, threadsQ.fetchNextPage, recentsExpanded]);
+  const markRead = useMarkThreadsRead(sessionId);
+  const childrenQ = useChildWork(sessionId, {
+    refetchInterval: CHILDREN_POLL_MS,
+    enabled: showChildren,
+  });
+  // `refetch()` fires even on a disabled query, so gate the live-update
+  // hook too rather than relying on `enabled` alone.
+  useInvalidateChildrenOnQueueState(sessionId, showChildren ? childrenQ.refetch : NO_REFETCH);
+  // One query for the session, shared with the composer status line through
+  // the query cache: a row line never costs its own request.
+  const wakeupsData = useSessionWakeups(sessionId).data;
+  const timerWaits = threadTimerWaits(wakeupsData);
+  const eventWaits = threadEventWaits(wakeupsData);
+  const createThread = useCreateThread(sessionId);
+  const setArchived = useSetThreadArchived(sessionId);
+  const renameThread = useRenameThread(sessionId);
+  const replaceSandbox = useReplaceSandbox(sessionId);
+  // Archive and Replace sandbox stop background work. The server refuses
+  // them with a 409 that lists the work; the guard asks, then resends with
+  // `force` (fix wave 3, H1 and H3). Other failures show in `actionError`.
+  const workGuard = useBackgroundWorkGuard();
+  const [actionError, setActionError] = useState<string>();
+  const dismissChild = useDismissChild(sessionId);
+  const [showArchived, setShowArchived] = useState(false);
+  const archivedQ = useArchivedThreads(sessionId, { enabled: showArchived });
+  const navigate = useNavigate({ from: "/chat" });
+
+  const threads = useMemo(
+    () => sortThreads((threadsQ.data?.threads ?? []).filter((thread) => !unlisted(thread)), sortMode),
+    // `unlisted` changes only with `mobile`.
+    [threadsQ.data, sortMode, mobile],
   );
+  // Both the sidebar and SessionView use this creation-order default. Sort only changes row order.
+  const defaultId = threadsQ.data?.defaultThreadId ?? defaultThreadId(threads);
+  // The list is the drawer on every page, but a row is open only on /chat.
+  const onChat = useRouterState({ select: (state) => state.location.pathname === "/chat" });
+  const activeThreadId = search.thread ?? defaultId;
+  const openThreadId = onChat ? activeThreadId : undefined;
+  const grouped = groupChildrenByThread(showChildren ? (childrenQ.error ? [] : flattenChildWork(childrenQ.data)) : []);
+
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchSelectedId, setSearchSelectedId] = useState<string>();
+  const normalizedSearch = searchQuery.trim().toLowerCase();
+  const debouncedSearch = useDebouncedValue(normalizedSearch, 250);
+  const matchingProjects = projects.value.projects.filter(project => project.name.toLowerCase().includes(debouncedSearch));
+  const projectSearchIds = Object.keys(projects.value.assignments).filter(id => matchingProjects.some(project => project.id === projects.value.assignments[id]));
+  const contentSearch = useThreadSearch(sessionId, debouncedSearch, searchOpen, projectSearchIds);
+  const contentMatchIds = new Set(
+    debouncedSearch === normalizedSearch ? contentSearch.data?.threads.map((thread) => thread.id) : [],
+  );
+  const searching = !!normalizedSearch && (debouncedSearch !== normalizedSearch || contentSearch.isFetching);
+  const searchCandidates = [...new Map([...threads, ...(debouncedSearch === normalizedSearch ? contentSearch.data?.threads ?? [] : [])].map(thread => [thread.id, thread])).values()];
+  // Home has no row in the list, but a content match still finds it.
+  const searchResults = sortThreads(searchCandidates.filter(thread => !unlisted(thread) || thread.id === homeId), sortMode).filter((thread) => {
+    const project = projects.value.projects.find((p) => p.id === projects.value.assignments[thread.id]);
+    return contentMatchIds.has(thread.id) || `${thread.title ?? ""} ${project?.name ?? ""}`.toLowerCase().includes(normalizedSearch);
+  });
+  const [chosenScope, setSearchScope] = useState<SearchScope>("all");
+  // Workflow and file results are a phone feature; a wider screen searches threads.
+  const searchScope: SearchScope = mobile ? chosenScope : "threads";
+  // The workspace's workflows and files, read only while the dialog is open.
+  const listOwner = useListOwner();
+  const workflowsQ = useWorkflows(listOwner, { enabled: mobile && searchOpen && listOwner !== undefined });
+  const artifactsQ = useArtifacts(listOwner, { enabled: mobile && searchOpen && listOwner !== undefined });
+  const groupLimit = searchScope === "all" ? SEARCH_GROUP_LIMIT : undefined;
+  const threadItems: SearchItem[] = searchScope === "all" || searchScope === "threads"
+    ? searchResults.slice(0, groupLimit).map((thread) => ({ key: `thread-${thread.id}`, kind: "thread", thread })) : [];
+  const workflowItems: SearchItem[] = searchScope === "all" || searchScope === "workflows"
+    ? matchingWorkflows(workflowsQ.data?.workflows ?? [], normalizedSearch).slice(0, groupLimit).map((workflow) => ({ key: `workflow-${workflow.id}`, kind: "workflow", workflow })) : [];
+  const fileItems: SearchItem[] = searchScope === "all" || searchScope === "files"
+    ? matchingArtifacts(artifactsQ.data?.artifacts ?? [], normalizedSearch).slice(0, groupLimit).map((artifact) => ({ key: `file-${artifact.id}`, kind: "file", artifact })) : [];
+  // One list for the arrow keys, in the order the groups show.
+  const searchItems = [...threadItems, ...workflowItems, ...fileItems];
+  const searchIndex = Math.max(0, searchItems.findIndex((item) => item.key === searchSelectedId));
+  function openNewProject() { setEditingProjectId(undefined); setProjectError(undefined); setProjectName(""); setProjectDialog(true); }
+  function openSearch() { setSearchQuery(""); setSearchSelectedId(undefined); setSearchScope("all"); setSearchOpen(true); }
+  function selectSearchItem(item: SearchItem) {
+    setSearchOpen(false);
+    if (item.kind === "workflow") navigate({ to: "/workflows/$workflowId", params: { workflowId: item.workflow.id } });
+    else if (item.kind === "file") navigate({ to: "/a/$token", params: { token: item.artifact.token } });
+    else navigate({ search: (prev) => ({ ...prev, thread: item.thread.id, child: undefined }) });
+  }
+  const selectedSearchKey = searchItems[searchIndex]?.key;
+  /** A chip shows its own group always. "All" shows a group that has results or a status line. */
+  function showSearchGroup(scope: SearchScope, items: SearchItem[], status: boolean): boolean {
+    return searchScope === scope || (searchScope === "all" && (items.length > 0 || status));
+  }
+  function renderSearchOption(item: SearchItem) {
+    const selected = item.key === selectedSearchKey;
+    const project = item.kind === "thread" ? projects.value.projects.find((p) => p.id === projects.value.assignments[item.thread.id]) : undefined;
+    const [label, detail] = item.kind === "thread" ? [item.thread.title || untitledThreadLabel(item.thread, item.thread.id === defaultId), project?.name]
+      : item.kind === "workflow" ? [item.workflow.name, undefined]
+      : [item.artifact.title, item.artifact.path];
+    return <button key={item.key} id={`thread-search-${item.key}`} type="button" role="option" aria-selected={selected}
+      onMouseMove={() => setSearchSelectedId(item.key)} onClick={() => selectSearchItem(item)}
+      className={cn("flex w-full items-center gap-3 rounded-lg px-4 py-2.5 text-left text-sm", selected && "bg-ink-wash")}>
+      <span className="flex h-5 w-5 shrink-0 items-center justify-center">
+        {item.kind === "thread" ? gatedThreadIds.has(item.thread.id) && <Bell className="h-4 w-4 text-amber-500" />
+          : item.kind === "workflow" ? <Workflow aria-hidden className="h-4 w-4 text-muted" />
+          : <FileText aria-hidden className="h-4 w-4 text-muted" />}
+      </span>
+      <span className="min-w-0 flex-1 truncate">{label}</span>
+      {detail && <span className="max-w-[30%] truncate text-muted">{detail}</span>}
+    </button>;
+  }
+  const originCounts = threadsQ.data?.originCounts ?? bucketCounts(threads);
+  const visible = originFilter === "all" ? threads : threads.filter((thread) => threadOriginBucket(thread) === originFilter);
+  // A thread that needs you moves to the top section and leaves the others.
+  const { needsYou: needsYouThreads, rest: listed } = mobile
+    ? splitNeedsYou(visible, (thread) => threadNeedsYou({ pendingGate: gatedThreadIds.has(thread.id), question: pendingAgentQuestion(thread) }))
+    : { needsYou: [], rest: visible };
+  const recents = listed.filter((thread) => !projects.value.pinned.includes(thread.id) && (!projects.value.grouped || !projects.value.projects.some((project) => project.id === projects.value.assignments[thread.id])));
+  // A wider screen shows the first few Recents, plus the open thread wherever
+  // it falls. The phone drawer lists them all: it is for opening threads.
+  const shownRecents = mobile || recentsExpanded ? recents : recents.filter((thread, index) => index < RECENTS_LIMIT || thread.id === openThreadId);
+  const recentsCollapsible = !mobile && recents.length > RECENTS_LIMIT;
+  function selectOriginFilter(next: ThreadOriginBucket) {
+    setOriginFilter(next);
+    try {
+      window.localStorage.setItem(THREAD_ORIGIN_STORAGE_KEY, next);
+    } catch {
+      // In-session only when storage is unavailable.
+    }
+  }
   // A gate on an archived thread has no row in `visible`; without this the
   // gate would be invisible while the archived section is closed.
-  const archivedGated = threadsQ.data !== undefined && hasGateOutsideList(threads, gatedThreadIds);
+  const archivedGated = threadsQ.data !== undefined && threadsQ.fixedReady && hasGateOutsideList(threadsQ.data?.threads ?? [], gatedThreadIds);
 
-  // Auto-switch when the ACTIVE thread would be filtered out (deep link
-  // into an automation thread while the chip says Chat) — the selection
-  // must always be visible in the list.
-  useEffect(() => {
-    if (!showFilters || bucket === "all") return;
-    const active = threads.find((t) => t.id === activeThreadId);
-    if (active && threadOriginBucket(active) !== bucket) {
-      setBucket("all");
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeThreadId, threads, showFilters]);
-
-  function selectBucket(next: ThreadOriginBucket) {
-    setBucket(next);
+  function selectThreadSort(next: ThreadSortMode) {
+    setSortMode(next);
     try {
-      window.localStorage.setItem(BUCKET_STORAGE_KEY, next);
+      window.localStorage.setItem(THREAD_SORT_STORAGE_KEY, next);
     } catch {
       // In-session only when storage is unavailable.
     }
@@ -305,33 +600,218 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
 
   const searchInputRef = useRef<HTMLInputElement>(null);
 
-  async function createAndNavigate() {
-    const thread = await createThread.mutateAsync(
-      activeThreadId ? { sourceThreadId: activeThreadId } : {},
-    );
-    navigate({ search: (prev) => ({ ...prev, thread: thread.id, child: undefined }) });
-    // Land the cursor in the composer — a fresh thread exists to be
-    // typed into.
-    useComposerPrefillStore.getState().requestFocus();
+  const [creationError, setCreationError] = useState<string>();
+  const currentSession = useRef<string | undefined>(sessionId);
+  useEffect(() => {
+    currentSession.current = sessionId;
+    return () => { currentSession.current = undefined; };
+  }, [sessionId]);
+
+  async function createAndNavigate(projectId?: string) {
+    setCreationError(undefined);
+    const projectOperation = projects.beginOperation();
+    try {
+      // A new thread uses the workspace defaults, not the active thread's settings.
+      const thread = await createThread.mutateAsync();
+      if (projectId) await moveThread(thread.id, projectId, projectOperation.update);
+      // A workspace switch during creation must not open the old workspace's thread.
+      if (currentSession.current !== sessionId) return;
+      navigate({ search: (prev) => ({ ...prev, thread: thread.id, child: undefined }) });
+      useComposerPrefillStore.getState().requestFocus();
+    } catch {
+      if (currentSession.current === sessionId) setCreationError("Could not create the thread. Try again.");
+    }
+  }
+
+  async function confirmDeleteProject() {
+    if (!deleteProject || deletingRef.current) return;
+    deletingRef.current = true;
+    setDeletingProject(true);
+    setDeleteError(undefined);
+    const projectOperation = projects.beginOperation();
+    const archivedIds = new Set<string>();
+    let busyChats = 0;
+    let removed = false;
+    try {
+      const ids = projectThreadIds(await projectOperation.refresh(), deleteProject.id);
+      let failed = false;
+      for (const threadId of ids) {
+        // Each archive starts from current membership, including unloaded chats.
+        const current = await projectOperation.refresh();
+        if (current.assignments[threadId] !== deleteProject.id) continue;
+        try {
+          await setArchived.mutateAsync({ threadId, archived: true });
+          archivedIds.add(threadId);
+        } catch (err) {
+          failed = true;
+          // A chat with background work is never archived without its own confirm.
+          if (backgroundWorkConflict(err)) busyChats += 1;
+        }
+      }
+      if (!failed) {
+        const saved = await projectOperation.update(current => removeArchivedProject(current, deleteProject.id, archivedIds));
+        removed = saved !== undefined && !saved.projects.some(project => project.id === deleteProject.id);
+      }
+    } catch { /* Keep the folder when membership cannot be checked. */ }
+    deletingRef.current = false;
+    if (currentSession.current !== sessionId) return;
+    setDeletingProject(false);
+    if (removed) {
+      setDeleteProject(undefined);
+      if (activeThreadId && archivedIds.has(activeThreadId)) {
+        navigate({ search: prev => ({ ...prev, thread: undefined, child: undefined }) });
+      }
+    } else {
+      setDeleteError(busyChats > 0
+        ? `The project was kept because ${busyChats === 1 ? "1 chat has" : `${busyChats} chats have`} background work running. Archive ${busyChats === 1 ? "that chat" : "those chats"} first, then delete the project.`
+        : "The project was kept because some chats could not be archived or its assignments changed. Already archived chats stay archived. Try again to finish deleting the project.");
+    }
+  }
+
+  const { attempt } = workGuard;
+  const archiveThread = useCallback((threadId: string) => {
+    setActionError(undefined);
+    // The row leaves at once, so the view leaves the thread at once too: it
+    // would otherwise show a thread that the list no longer has.
+    const leftThread = threadId === activeThreadId;
+    if (leftThread) navigate({ search: (prev) => ({ ...prev, thread: undefined, child: undefined }) });
+    attempt(
+      STOP_AND_ARCHIVE,
+      (force) => setArchived.mutateAsync({ threadId, archived: true, ...(force ? { force: true } : {}) }),
+    ).catch((err: unknown) => {
+      setActionError(errorText(err, "Could not archive the thread. Try again."));
+      // A refused archive, such as one with a turn running, puts the row
+      // back. Return to the thread unless the view moved on meanwhile.
+      if (leftThread && openThread.current === undefined) navigate({ search: (prev) => ({ ...prev, thread: threadId }) });
+    });
+  }, [activeThreadId, attempt, navigate, setArchived]);
+
+  // Move (docs/specs/2026-10-22-thread-edit-fork-design.md): a thread goes
+  // to the person's private threads or to any other team they are on. The
+  // copy opens; the source is archived here.
+  const teams = useTeams();
+  const teamWorkspace = workspace !== undefined && workspace !== "user" ? workspace : undefined;
+  const moveTargets: MoveTarget[] = [
+    ...(teamWorkspace ? [{ to: "private" as const, label: "Private" }] : []),
+    ...(teams.data?.teams ?? []).filter((team) => team.callerRole !== null && team.id !== teamWorkspace).map((team) => ({ to: { teamId: team.id }, label: team.name })),
+  ];
+  const moveThreadM = useMoveThread();
+  const [pendingMove, setPendingMove] = useState<{ threadId: string; target: MoveTarget }>();
+  const [moveError, setMoveError] = useState<string>();
+  async function confirmMove() {
+    if (!pendingMove) return;
+    setMoveError(undefined);
+    const { threadId, target } = pendingMove;
+    try {
+      const result = await moveThreadM.mutateAsync({ threadId, to: target.to, ...(target.to === "private" ? {} : { confirm: true as const }) });
+      setPendingMove(undefined);
+      navigate({ search: (prev) => ({ ...prev, thread: result.thread.id, workspace: result.workspace, child: undefined }) });
+    } catch (err) {
+      setMoveError(errorText(err, "Could not move the thread. Try again."));
+    }
+  }
+
+  // Duplicate: the whole thread is copied into this workspace and opens.
+  // The source stays as it is.
+  const duplicateThread = useDuplicateThread();
+  function duplicate(threadId: string) {
+    if (duplicateThread.isPending) return;
+    setActionError(undefined);
+    duplicateThread.mutateAsync({ threadId })
+      .then((result) => navigate({ search: (prev) => ({ ...prev, thread: result.thread.id, workspace: result.workspace, child: undefined }) }))
+      .catch((err: unknown) => setActionError(errorText(err, "Could not duplicate the thread. Try again.")));
   }
 
   const archiveActive = useCallback(() => {
-    if (!activeThreadId) return;
-    void setArchived.mutateAsync({ threadId: activeThreadId, archived: true });
-    navigate({ search: (prev) => ({ ...prev, thread: undefined, child: undefined }) });
-  }, [activeThreadId, navigate, setArchived]);
+    if (!activeThreadId || isAppAssistantThread(threadsQ.data?.threads.find((thread) => thread.id === activeThreadId) ?? {})) return;
+    archiveThread(activeThreadId);
+  }, [activeThreadId, archiveThread, threadsQ.data]);
+
+  function replaceSessionSandbox() {
+    setActionError(undefined);
+    attempt(STOP_AND_REPLACE, (force) => replaceSandbox.mutateAsync(force ? { force: true } : undefined))
+      .catch((err: unknown) => setActionError(errorText(err, "Could not replace the sandbox. Try again.")));
+  }
 
   // Register this surface's hotkey targets for the global listener.
   useEffect(() => {
     return useChatHotkeysStore.getState().register({
       newThread: () => void createAndNavigate(),
       archiveActiveThread: archiveActive,
-      focusThreadSearch: () => searchInputRef.current?.focus(),
+      focusThreadSearch: openSearch,
     });
     // createAndNavigate closes over createThread/navigate; re-register when
     // those identities change so the hotkey never calls a stale mutator.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [archiveActive, createThread, navigate]);
+
+  const [dropTarget, setDropTarget] = useState<string>();
+  function moveThread(threadId: string, projectId?: string, update: typeof projects.update = projects.update) {
+    return update((current) => {
+      const assignments = { ...current.assignments };
+      if (projectId) assignments[threadId] = projectId;
+      else delete assignments[threadId];
+      return { ...current, assignments, projects: current.projects.map((project) => project.id === projectId ? { ...project, collapsed: false } : project) };
+    });
+  }
+  function dropHandlers(projectId?: string) {
+    const target = projectId ?? "recents";
+    return {
+      onDragOver: (event: ReactDragEvent<HTMLElement>) => {
+        if (!event.dataTransfer.types.includes(THREAD_DRAG_TYPE)) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+        setDropTarget(target);
+      },
+      onDragLeave: (event: ReactDragEvent<HTMLElement>) => {
+        if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return;
+        setDropTarget(undefined);
+      },
+      onDrop: (event: ReactDragEvent<HTMLElement>) => {
+        if (!event.dataTransfer.types.includes(THREAD_DRAG_TYPE)) return;
+        event.preventDefault();
+        setDropTarget(undefined);
+        try {
+          const data: unknown = JSON.parse(event.dataTransfer.getData(THREAD_DRAG_TYPE));
+          if (!data || typeof data !== "object" || !("sessionId" in data) || data.sessionId !== sessionId || !("threadId" in data) || typeof data.threadId !== "string") return;
+          if (!threads.some((thread) => thread.id === data.threadId)) return;
+          moveThread(data.threadId, projectId);
+        } catch { /* Ignore unrelated or malformed drag data. */ }
+      },
+    };
+  }
+
+  const renderThread = (t: ThreadSummary) => (
+            <ThreadNode
+              key={t.id}
+              thread={t}
+              isDefault={t.id === defaultId}
+              active={t.id === openThreadId}
+              hasPendingGate={gatedThreadIds.has(t.id)}
+              timerFireAt={timerWaits.get(t.id)}
+              eventWait={eventWaits.get(t.id)}
+              childSessions={grouped.get(t.id) ?? []}
+              activeChildId={search.child}
+              projects={projects.value.projects}
+              projectId={projects.value.assignments[t.id]}
+              pinned={projects.value.pinned.includes(t.id)}
+              onPin={() => projects.update((current) => ({ ...current, pinned: current.pinned.includes(t.id) ? current.pinned.filter((id) => id !== t.id) : [...current.pinned, t.id] }))}
+              onMove={(projectId) => moveThread(t.id, projectId)}
+              organizingDisabled={!projects.isReady || projects.isSaving}
+              onDragEnd={() => setDropTarget(undefined)}
+              onArchive={archiveThread}
+              moveTargets={t.key?.startsWith("web:") ? moveTargets : []}
+              onMoveWorkspace={(target) => { setMoveError(undefined); setPendingMove({ threadId: t.id, target }); }}
+              onDuplicate={isAppAssistantThread(t) ? undefined : () => duplicate(t.id)}
+              onReplaceSandbox={replaceSessionSandbox}
+              onDismissChild={(childSessionId) => void dismissChild.mutateAsync(childSessionId)}
+              onRename={(threadId, title) =>
+                void renameThread.mutateAsync({ threadId, title })
+              }
+              viewers={(workspaceViewers.data?.threads[t.id] ?? NO_VIEWERS).filter((person) => person.userId !== viewer.data?.id)}
+            />
+
+  );
 
   return (
     <>
@@ -339,112 +819,193 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
           longer floats over the sidebar — it now sits in the top nav
           (see `SidebarControls` in `app-shell.tsx`), so there is nothing
           left to reserve room for at the aside's top-right corner. */}
-      <div className="px-2 pt-2">
+      {/* On a wider screen this row matches the thread header's height, so its bottom border continues that line. */}
+      <div className={cn("flex items-center gap-1 px-2", mobile ? "pt-2" : "h-[--nav-height] shrink-0 border-b border-line")}>
         <button
           type="button"
           onClick={() => void createAndNavigate()}
           disabled={createThread.isPending}
-          className="w-full flex items-center gap-2 rounded px-2 py-1.5 text-sm text-muted hover:text-ink hover:bg-ink-wash transition-colors focus-visible:outline-none focus-visible:bg-ink-wash disabled:opacity-50 whitespace-nowrap"
+          className="flex-1 flex items-center gap-2 rounded px-2 py-1.5 text-sm text-muted hover:text-ink hover:bg-ink-wash transition-colors focus-visible:outline-none focus-visible:bg-ink-wash disabled:opacity-50 whitespace-nowrap max-md:min-h-11 max-md:text-[15px]"
         >
           <Plus className="h-3.5 w-3.5 shrink-0" />
           <span>New thread</span>
         </button>
+        <button type="button" aria-label="Search threads" title="Search threads" onClick={openSearch} className="flex h-8 w-8 shrink-0 items-center justify-center rounded text-muted hover:bg-ink-wash hover:text-ink max-md:h-11 max-md:w-11"><Search className="h-4 w-4" /></button>
+        {!mobile && sidebarControls?.present && <button type="button" aria-label="Collapse sidebar" title="Collapse sidebar" onClick={sidebarControls.toggleCollapsed}
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded text-muted hover:bg-ink-wash hover:text-ink"><PanelLeftClose className="h-4 w-4" /></button>}
       </div>
-      <div className="px-2 pt-1 pb-2 space-y-1.5">
-        <div className="flex items-center gap-1.5 rounded border border-line bg-[--bg] px-2 focus-within:border-moss/60">
-          <Search className="h-3.5 w-3.5 text-muted shrink-0" aria-hidden />
-          <input
-            ref={searchInputRef}
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search threads…"
-            aria-label="Search threads"
-            className="h-7 w-full min-w-0 bg-transparent text-sm text-ink placeholder:text-muted focus:outline-none"
-          />
-          {query && (
-            <button
-              type="button"
-              aria-label="Clear search"
-              onClick={() => setQuery("")}
-              className="text-muted hover:text-ink"
-            >
-              <X className="h-3.5 w-3.5" />
-            </button>
-          )}
-        </div>
-        {showFilters && (
-          <div className="flex flex-wrap gap-1" role="tablist" aria-label="Thread origin">
-            {[THREAD_ORIGIN_FILTERS[0]!, ...bucketsInUse].map((f) => (
-              <button
-                key={f.id}
-                type="button"
-                role="tab"
-                aria-selected={effectiveBucket === f.id}
-                onClick={() => selectBucket(f.id)}
-                className={cn(
-                  "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] transition-colors",
-                  "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-moss",
-                  effectiveBucket === f.id
-                    ? "bg-moss-wash-strong text-ink font-medium"
-                    : "text-muted hover:text-ink hover:bg-ink-wash",
-                )}
-              >
-                {f.label}
-                <span className="tabular-nums text-[10px] opacity-70">{counts[f.id]}</span>
-              </button>
-            ))}
+      {creationError && <p role="alert" className="px-4 py-2 text-xs text-danger-500">{creationError}</p>}
+      {actionError && <p role="alert" className="px-4 py-2 text-xs text-danger-500">{actionError}</p>}
+      {workGuard.dialog}
+      <Dialog open={searchOpen} onOpenChange={setSearchOpen}>
+        {/* On a phone the dialog is pinned near the top, so the input and
+            chips stay put while the results change height, and a small phone
+            gets the full width at the top edge. A wider screen centers it. */}
+        <DialogContent hideClose className={mobile ? "top-24 max-w-2xl translate-y-0 gap-1 rounded-2xl p-2 max-sm:top-0 max-sm:w-full max-sm:rounded-t-none" : "max-w-2xl rounded-2xl p-2 gap-1"} onOpenAutoFocus={(event) => { event.preventDefault(); searchInputRef.current?.focus(); }}>
+          <DialogTitle className="sr-only">Search threads</DialogTitle>
+          <input ref={searchInputRef} value={searchQuery} onChange={(event) => { setSearchQuery(event.target.value); setSearchSelectedId(undefined); }}
+            placeholder="Search names and chat content" aria-label="Search threads" maxLength={500} role="combobox" aria-expanded aria-controls="thread-search-results" aria-activedescendant={selectedSearchKey ? `thread-search-${selectedSearchKey}` : undefined}
+            className="w-full bg-transparent px-4 py-4 text-lg outline-none placeholder:text-muted"
+            onKeyDown={(event) => {
+              if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                event.preventDefault();
+                const next = Math.max(0, Math.min(searchItems.length - 1, searchIndex + (event.key === "ArrowDown" ? 1 : -1)));
+                setSearchSelectedId(searchItems[next]?.key);
+                document.getElementById(`thread-search-${searchItems[next]?.key}`)?.scrollIntoView({ block: "nearest" });
+              }
+              const selected = searchItems[searchIndex];
+              if (event.key === "Enter" && selected) { event.preventDefault(); selectSearchItem(selected); }
+            }} />
+          {mobile && <FilterChips layout="scroll" label="Search in" options={SEARCH_SCOPES} value={searchScope} className="px-4 pb-1"
+            onChange={(next) => { setSearchScope(next); setSearchSelectedId(undefined); searchInputRef.current?.focus(); }} />}
+          <div id="thread-search-results" role="listbox" aria-label={mobile ? "Search results" : "Threads"} className="max-h-[45dvh] overflow-y-auto">
+            {showSearchGroup("threads", threadItems, searching || (!!normalizedSearch && contentSearch.isError)) && <div role="group" aria-label="Threads">
+              <p aria-hidden className="px-4 pt-2 pb-1 text-xs text-muted">{searchQuery ? "Threads" : "Recent threads"}</p>
+              {threadItems.map(renderSearchOption)}
+              {searching && <p role="status" className="px-4 py-2 text-sm text-muted">Searching chat content…</p>}
+              {normalizedSearch && contentSearch.isError && <p role="alert" className="px-4 py-2 text-sm text-muted">Could not search chat content. <button type="button" onClick={() => void contentSearch.refetch()} className="underline">Try again</button></p>}
+              {searchScope === "threads" && threadItems.length === 0 && !searching && !contentSearch.isError && <p className="px-4 py-6 text-sm text-muted">No matching threads in this workspace.</p>}
+            </div>}
+            {showSearchGroup("workflows", workflowItems, workflowsQ.isPending || workflowsQ.isError) && <div role="group" aria-label="Workflows">
+              <p aria-hidden className="px-4 pt-2 pb-1 text-xs text-muted">Workflows</p>
+              {workflowItems.map(renderSearchOption)}
+              {workflowsQ.isPending && <p role="status" className="px-4 py-2 text-sm text-muted">Loading workflows…</p>}
+              {workflowsQ.isError && <p role="alert" className="px-4 py-2 text-sm text-muted">Could not load workflows. <button type="button" onClick={() => void workflowsQ.refetch()} className="underline">Try again</button></p>}
+              {searchScope === "workflows" && workflowsQ.isSuccess && workflowItems.length === 0 && <p className="px-4 py-6 text-sm text-muted">No matching workflows in this workspace.</p>}
+            </div>}
+            {showSearchGroup("files", fileItems, artifactsQ.isPending || artifactsQ.isError) && <div role="group" aria-label="Files">
+              <p aria-hidden className="px-4 pt-2 pb-1 text-xs text-muted">Files</p>
+              {fileItems.map(renderSearchOption)}
+              {artifactsQ.isPending && <p role="status" className="px-4 py-2 text-sm text-muted">Loading files…</p>}
+              {artifactsQ.isError && <p role="alert" className="px-4 py-2 text-sm text-muted">Could not load files. <button type="button" onClick={() => void artifactsQ.refetch()} className="underline">Try again</button></p>}
+              {searchScope === "files" && artifactsQ.isSuccess && fileItems.length === 0 && <p className="px-4 py-6 text-sm text-muted">No matching files in this workspace.</p>}
+            </div>}
+            {searchScope === "all" && searchItems.length === 0 && !searching && !contentSearch.isError && workflowsQ.isSuccess && artifactsQ.isSuccess && <p className="px-4 py-6 text-sm text-muted">No matches in this workspace.</p>}
           </div>
-        )}
-      </div>
+          <div className="mt-2 border-t border-line pt-2">
+            <button type="button" disabled={createThread.isPending} onClick={() => { setSearchOpen(false); void createAndNavigate(); }} className="flex w-full items-center gap-3 rounded-lg px-4 py-3 text-sm hover:bg-ink-wash"><Plus className="h-5 w-5" />New thread</button>
+          </div>
+        </DialogContent>
+      </Dialog>
       {/* Plain overflow div, NOT the Radix ScrollArea — its viewport wraps
           content in a `display: table` div that sizes to intrinsic content
-          width, which defeats both the sidebar's max-content sizing and
-          row truncation when clamped. */}
-      <div className="flex-1 min-h-0 overflow-y-auto">
-        <nav className="pb-3">
+          width, which defeats row truncation within the fixed-width sidebar. */}
+      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto">
+        <nav aria-label="Sidebar" className="pb-3">
+          {homeId && home.data && <HomeRow sessionId={home.data.sessionId} threadId={homeId} thread={homeInList ? threadsQ.data?.threads.find((t) => t.id === homeId) : undefined}
+            active={onHome} hasPendingGate={homeInList && gatedThreadIds.has(homeId)} />}
+          <SpacesNav />
+          {/* A space's Projects and threads show while its Threads or Home is open; a phone's drawer always shows them. */}
+          {(mobile || onThreadsPage) && <>
+          <div data-tour="projects" className="group flex items-center gap-1 pb-1 pl-4 pr-3 pt-4">
+            <button disabled={!projects.isReady} onClick={() => projects.setCollapsed(!projects.value.collapsed)} aria-expanded={!projects.value.collapsed} className="flex flex-1 items-center gap-1 text-[11px] font-medium text-muted hover:text-ink focus-visible:outline-none max-md:text-xs">Projects {!mobile && threads.some((thread) => gatedThreadIds.has(thread.id) && projects.value.assignments[thread.id]) && <Bell aria-label="Project threads need approval" className="h-3.5 w-3.5 text-amber-500" />} <ChevronDown aria-hidden className={cn("h-3 w-3", HOVER_CHROME, projects.value.collapsed && "-rotate-90")} /></button>
+            <DropdownMenu>
+              {/* The one list-wide menu (sort, filter, mark all read) stays on a
+                  phone: it is the only place those live. Per-row actions do not. */}
+              <DropdownMenuTrigger asChild><button aria-label="Sidebar options" className={cn(CHROME_BUTTON, HOVER_CHROME)}><MoreHorizontal className="h-3.5 w-3.5" /></button></DropdownMenuTrigger>
+              <DropdownMenuContent align="start">
+                <DropdownMenuSub>
+                  <DropdownMenuSubTrigger><PanelLeft className="h-4 w-4" />Organize sidebar</DropdownMenuSubTrigger>
+                  <DropdownMenuSubContent>
+                    {[{ label: "By project", grouped: true }, { label: "In one list", grouped: false }].map((option) => <DropdownMenuItem key={option.label} role="menuitemradio" disabled={!projects.isReady || projects.isSaving} aria-checked={projects.value.grouped === option.grouped} onSelect={() => projects.update((current) => ({ ...current, grouped: option.grouped }))}><Check className={cn("h-4 w-4", projects.value.grouped !== option.grouped && "invisible")} />{option.label}</DropdownMenuItem>)}
+                  </DropdownMenuSubContent>
+                </DropdownMenuSub>
+                <DropdownMenuSub>
+                  <DropdownMenuSubTrigger><Filter className="h-4 w-4" />Show threads from</DropdownMenuSubTrigger>
+                  <DropdownMenuSubContent>{THREAD_ORIGIN_FILTERS.map((option) => <DropdownMenuItem key={option.id} role="menuitemradio" aria-checked={originFilter === option.id} onSelect={() => selectOriginFilter(option.id)}><Check className={cn("h-4 w-4", originFilter !== option.id && "invisible")} /><span className="flex-1">{option.label}</span><span className="text-xs text-muted">{originCounts[option.id]}</span></DropdownMenuItem>)}</DropdownMenuSubContent>
+                </DropdownMenuSub>
+                <DropdownMenuItem disabled={!threads.some((thread) => isThreadUnread(thread))} onSelect={() => markRead.mutate({})}><CheckCheck className="h-4 w-4" />Mark all as read</DropdownMenuItem>
+                <DropdownMenuSub>
+                  <DropdownMenuSubTrigger><ArrowDownUp className="h-4 w-4" />Sort chats by</DropdownMenuSubTrigger>
+                  <DropdownMenuSubContent>{THREAD_SORT_MODES.map((mode) => <DropdownMenuItem key={mode.id} role="menuitemradio" aria-checked={sortMode === mode.id} onSelect={() => selectThreadSort(mode.id)}><Check className={cn("h-4 w-4", sortMode !== mode.id && "invisible")} />{mode.label}</DropdownMenuItem>)}</DropdownMenuSubContent>
+                </DropdownMenuSub>
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <button aria-label="New project" disabled={!viewer.data?.id || !projects.isReady || projects.isSaving} onClick={openNewProject} className={cn(CHROME_BUTTON, HOVER_CHROME, PHONE_HIDDEN)}><Plus className="h-3.5 w-3.5" /></button>
+          </div>
+          {projects.isLoading && <p role="status" className="px-4 py-2 text-xs text-muted">Syncing project folders…</p>}
+          {projects.isSaving && <p role="status" className="px-4 py-2 text-xs text-muted">Saving sidebar changes…</p>}
+          {projects.error && <p role="alert" className="px-4 py-2 text-xs text-danger-500">Could not sync project folders. {projects.error} {projects.unsyncedLegacy && <>Folders saved on this device remain in browser storage. <button type="button" className="underline" onClick={() => downloadTextFile("valet-project-folders.json", projects.unsyncedLegacy ?? "", "application/json")}>Download saved folders</button>{" "}</>}<button type="button" className="underline" onClick={() => void projects.retry()}>Retry sync</button></p>}
+          {originFilter !== "all" && (
+            <p className="flex items-center gap-2 px-4 pb-1 text-xs text-muted">
+              Showing {THREAD_ORIGIN_FILTERS.find((option) => option.id === originFilter)?.label.toLowerCase()}
+              <button type="button" className="underline hover:text-ink" onClick={() => selectOriginFilter("all")}>Clear</button>
+            </p>
+          )}
+          <Dialog open={projectDialog} onOpenChange={setProjectDialog}>
+            <DialogContent title={editingProjectId ? "Rename project" : "New project"} aria-describedby={undefined}>
+              <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); createProject(); }}>
+                <label className="grid gap-2 text-sm">Project name<Input autoFocus value={projectName} disabled={projects.isSaving} onChange={(event) => { setProjectName(event.target.value); setProjectError(undefined); }} placeholder="e.g. turnkey" maxLength={100} /></label>
+                {projectError && <p role="alert" className="text-xs text-danger-500">{projectError}</p>}
+                {projects.error && <p role="alert" className="text-xs text-danger-500">{projects.error} Retry saving the project.</p>}
+                <div className="flex justify-end gap-2"><Button type="button" variant="ghost" onClick={() => setProjectDialog(false)}>Cancel</Button><Button type="submit" disabled={!projectName.trim() || !projects.isReady || projects.isSaving}>{editingProjectId ? "Save project" : "Create project"}</Button></div>
+              </form>
+            </DialogContent>
+          </Dialog>
+
+          <ConfirmDialog open={!!pendingMove} onOpenChange={open => { if (!open && !moveThreadM.isPending) { setPendingMove(undefined); setMoveError(undefined); } }}
+            title={pendingMove?.target.to === "private" ? "Move to your private threads?" : `Move to ${pendingMove?.target.label ?? "the team"}?`}
+            description={pendingMove?.target.to === "private"
+              ? "Your teammates will no longer see this thread. It is archived here with a note that it moved, and continues in your private threads with its files."
+              : `Everyone on ${pendingMove?.target.label ?? "the team"} will see this thread's messages and files, and it runs with the team's accounts. ${teamWorkspace ? "Your teammates here will no longer see it. " : ""}It is archived here.`}
+            confirmLabel="Move thread" pendingLabel="Moving…" pending={moveThreadM.isPending} confirmVariant="primary"
+            error={moveError ? <span role="alert">{moveError}</span> : undefined} onConfirm={() => void confirmMove()} />
+
+          <ConfirmDialog open={!!deleteProject} onOpenChange={open => { if (!open && !deletingRef.current) { setDeleteProject(undefined); setDeleteError(undefined); } }}
+            title={`Delete project “${deleteProject?.name ?? ""}”?`}
+            description="All chats assigned to this project will be archived, including chats outside the loaded list. You can restore them from archived chats. The project folder will be removed."
+            confirmLabel={deleteError ? "Retry delete project" : "Delete project"} pendingLabel="Archiving chats…" pending={deletingProject}
+            error={deleteError ? <span role="alert">{deleteError}</span> : undefined} onConfirm={() => void confirmDeleteProject()} />
+
           {threadsQ.isLoading && (
             <div className="px-4 py-3 flex items-center gap-2 text-sm text-muted">
               <Spinner size={14} /> Loading…
             </div>
           )}
+          {threadsQ.fixedError && (
+            <div role="alert" className="px-4 py-3 text-sm text-danger-500">Could not load pinned, project, or selected threads. {threadsQ.fixedError.message} <button type="button" onClick={() => void threadsQ.refetchFixed()} className="underline">Retry</button></div>
+          )}
           {threadsQ.error && (
-            <div className="px-4 py-3 text-sm text-danger-500">Failed to load threads</div>
+            <div role="alert" className="px-4 py-3 text-sm text-danger-500">Could not load threads. <button type="button" onClick={() => void (threadsQ.isFetchNextPageError ? threadsQ.fetchNextPage() : threadsQ.refetch())} className="underline">Retry</button></div>
           )}
-          {!threadsQ.isLoading && !threadsQ.error && visible.length === 0 && threads.length > 0 && (
-            <div className="px-4 py-3 text-xs text-muted">
-              No threads match{query ? ` "${query}"` : " this filter"}.
-            </div>
-          )}
-          {visible.map((t) => (
-            <ThreadNode
-              key={t.id}
-              thread={t}
-              index={threads.indexOf(t)}
-              sessionModel={sessionModel}
-              models={modelsQ.data?.models ?? []}
-              tierMap={tierMapQ.data}
-              active={t.id === activeThreadId}
-              hasPendingGate={gatedThreadIds.has(t.id)}
-              childSessions={grouped.get(t.id) ?? []}
-              activeChildId={search.child}
-              onArchive={(threadId) => {
-                void setArchived.mutateAsync({ threadId, archived: true });
-                // Archiving the thread you're looking at would strand the
-                // view on a thread absent from the list — return to the
-                // default thread.
-                if (threadId === activeThreadId) {
-                  navigate({ search: (prev) => ({ ...prev, thread: undefined, child: undefined }) });
-                }
-              }}
-              onReplaceSandbox={() => void replaceSandbox.mutateAsync()}
-              onDismissChild={(childSessionId) => void dismissChild.mutateAsync(childSessionId)}
-              onRename={(threadId, title) =>
-                void renameThread.mutateAsync({ threadId, title })
-              }
-            />
-          ))}
+          {needsYouThreads.length > 0 && <section aria-label="Needs you" className="space-y-0.5"><h2 className={SIDEBAR_LABEL}>Needs you</h2>{needsYouThreads.map(renderThread)}</section>}
+          {listed.some((thread) => projects.value.pinned.includes(thread.id)) && <section aria-label="Pinned" className="space-y-0.5"><h2 className={SIDEBAR_LABEL}>Pinned</h2>{listed.filter((thread) => projects.value.pinned.includes(thread.id)).map(renderThread)}</section>}
+          {projects.value.grouped && !projects.value.collapsed && projects.value.projects.map((project) => {
+            const members = listed.filter((thread) => !projects.value.pinned.includes(thread.id) && projects.value.assignments[thread.id] === project.id);
+            return <section key={project.id} aria-label={`Project: ${project.name}`} {...dropHandlers(project.id)} className={cn("mb-0.5 rounded-md transition-colors", dropTarget === project.id && "bg-moss-wash-strong ring-1 ring-inset ring-moss")}>
+              <div className={cn("group gap-0.5 pr-1 hover:bg-ink-wash", TOP_ROW)} onContextMenu={event => { event.preventDefault(); setProjectMenu(project.id); }}>
+              <button type="button" disabled={!projects.isReady} aria-expanded={!project.collapsed} onClick={() => projects.setCollapsed(!project.collapsed, project.id)} className="flex min-w-0 flex-1 items-center gap-2 self-stretch rounded-md pl-2 text-left focus-visible:bg-ink-wash focus-visible:outline-none">
+                {project.collapsed ? <Folder aria-hidden className="h-4 w-4 shrink-0 text-muted" /> : <FolderOpen aria-hidden className="h-4 w-4 shrink-0 text-muted" />}
+                <span className="truncate">{project.name}</span>{!mobile && members.some((thread) => gatedThreadIds.has(thread.id)) && <Bell aria-label="Needs approval" className="ml-auto h-3.5 w-3.5 shrink-0 text-amber-500" />}
+              </button>
+                <button type="button" aria-label={`New thread in ${project.name}`} title={`New thread in ${project.name}`} disabled={createThread.isPending || !projects.isReady || projects.isSaving}
+                  onClick={() => void createAndNavigate(project.id)}
+                  className={cn(CHROME_BUTTON, HOVER_CHROME)}>
+                  <Plus className="h-3.5 w-3.5" aria-hidden />
+                </button>
+                <DropdownMenu open={projectMenu === project.id} onOpenChange={open => setProjectMenu(open ? project.id : undefined)}>
+                  <DropdownMenuTrigger asChild><button type="button" aria-label={`Project menu: ${project.name}`} className={cn(CHROME_BUTTON, HOVER_CHROME, PHONE_HIDDEN)}><MoreHorizontal className="h-3.5 w-3.5" aria-hidden /></button></DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem disabled={!projects.isReady || projects.isSaving} onSelect={() => { setEditingProjectId(project.id); setProjectName(project.name); setProjectError(undefined); setProjectDialog(true); }}>Rename project</DropdownMenuItem>
+                    <DropdownMenuItem disabled={!projects.isReady || projects.isSaving} onSelect={() => { setDeleteError(undefined); setDeleteProject({ id: project.id, name: project.name }); }}><Trash2 aria-hidden />Delete project</DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
+              {!project.collapsed && <div className="mt-0.5 space-y-0.5">{members.map(renderThread)}{members.length === 0 && <p className="py-1 pl-10 pr-4 text-xs text-muted max-md:hidden">Start a thread with + or move one here</p>}</div>}
+            </section>;
+          })}
+          <section aria-label="Recents" {...dropHandlers()} className={cn("min-h-16 space-y-0.5 rounded-lg transition-colors", dropTarget === "recents" && "bg-moss-wash-strong ring-1 ring-inset ring-moss")}><h2 className={SIDEBAR_LABEL}>Recents</h2>
+          {shownRecents.map(renderThread)}
+          {recentsCollapsible && <button type="button" aria-expanded={recentsExpanded} onClick={() => setRecentsExpanded((expanded) => !expanded)}
+            className={cn(NESTED_ROW, "w-[calc(100%-1rem)] pl-8 pr-2 text-muted hover:bg-ink-wash hover:text-ink focus-visible:bg-ink-wash focus-visible:outline-none")}>{recentsExpanded ? "Show less" : "Show more"}</button>}
+          </section>
+          {threadsQ.hasNextPage && shownRecents.length === recents.length && <button ref={moreRef} type="button" disabled={threadsQ.isFetching} onClick={() => void threadsQ.fetchNextPage()} className="px-4 py-2 text-xs text-moss">{threadsQ.isFetchingNextPage ? "Loading threads…" : "Load more threads"}</button>}
+          </>}
         </nav>
-        <div className="border-t border-line/60 px-2 py-1.5">
+        {showChildren && childrenQ.isLoading && <p className="px-4 py-2 text-xs text-muted">Loading work…</p>}
+        {showChildren && childrenQ.error && <p className="px-4 py-2 text-xs text-danger-500">Could not load work. <button onClick={() => void childrenQ.refetch()} className="underline">Retry</button></p>}
+        {showChildren && !childrenQ.error && childrenQ.hasNextPage && <button className="px-4 py-2 text-xs text-moss" disabled={childrenQ.isFetchingNextPage} onClick={() => void childrenQ.fetchNextPage()}>{childrenQ.isFetchingNextPage ? "Loading…" : "Load more work"}</button>}
+        {(mobile || onThreadsPage) && <div className="border-t border-line/60 px-2 py-1.5">
           <button
             type="button"
             onClick={() => setShowArchived((v) => !v)}
@@ -461,12 +1022,12 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
           </button>
           {showArchived && (
             <ul className="mt-1 space-y-0.5">
-              {(archivedQ.data?.threads ?? []).length === 0 && !archivedQ.isLoading && (
+              {(archivedQ.data?.threads ?? []).filter((thread) => !unlisted(thread)).length === 0 && !archivedQ.isLoading && (
                 <li className="px-2 py-1 text-xs text-muted">No archived threads.</li>
               )}
-              {(archivedQ.data?.threads ?? []).map((t) => (
+              {(archivedQ.data?.threads ?? []).filter((thread) => !unlisted(thread)).map((t) => (
                 <li key={t.id} className="flex items-center gap-1 px-2 py-1 text-xs text-muted">
-                  <span className="flex-1 truncate">{t.title ?? t.id}</span>
+                  <span className="flex-1 truncate" title={t.title ?? t.id}>{t.title ?? t.id}</span>
                   {gatedThreadIds.has(t.id) && (
                     <span role="img" aria-label="Response required" title="Response required">
                       <Bell className="h-3 w-3 shrink-0 text-amber-600 dark:text-amber-300" aria-hidden />
@@ -475,7 +1036,8 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
                   <button
                     type="button"
                     aria-label={`Unarchive ${t.title ?? t.id}`}
-                    onClick={() => void setArchived.mutateAsync({ threadId: t.id, archived: false })}
+                    onClick={() => setArchived.mutateAsync({ threadId: t.id, archived: false })
+                      .catch((err: unknown) => setActionError(errorText(err, "Could not restore the thread. Try again.")))}
                     className="inline-flex items-center justify-center max-md:min-h-11 max-md:min-w-11 shrink-0 rounded p-0.5 hover:text-ink hover:bg-ink-wash focus-visible:outline-none focus-visible:bg-ink-wash"
                   >
                     <ArchiveRestore className="h-3 w-3" aria-hidden />
@@ -484,50 +1046,143 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
               ))}
             </ul>
           )}
-        </div>
+        </div>}
       </div>
     </>
   );
 }
 
+/**
+ * The pinned Home row at the top of the web sidebar: the person's one
+ * conversation with Valet, the same one the phone opens first. It cannot be
+ * archived, renamed, pinned, or moved, so it has no thread row controls.
+ * Its marks follow the thread rows'.
+ */
+function HomeRow({ sessionId, threadId, thread, active, hasPendingGate }: {
+  sessionId: string;
+  threadId: string;
+  /** The home thread's summary, once the fixed-thread read returns it. */
+  thread?: ThreadSummary;
+  active: boolean;
+  hasPendingGate: boolean;
+}) {
+  const liveStatus = useThreadLiveStatus(sessionId, threadId);
+  const queueState = useQueueStateForThread(sessionId, threadId);
+  const question = thread ? pendingAgentQuestion(thread) : undefined;
+  const unread = !active && thread !== undefined && isThreadUnread(thread);
+  return (
+    <section aria-label="Home" className="pt-2">
+      <Tooltip content="Your private conversation with Valet, available on your phone and desktop." delayDuration={600}>
+        <Link
+          to="/"
+          data-tour="home"
+          className={cn(TOP_ROW, "gap-2 px-2 transition-colors focus-visible:bg-ink-wash focus-visible:outline-none", active ? SELECTED_ROW : "hover:bg-ink-wash")}
+        >
+          <House aria-hidden className="h-4 w-4 shrink-0 text-muted" />
+          <span className={cn("flex-1 truncate", unread && "font-medium text-ink")}>Home</span>
+          {question
+            ? <Tooltip content={`Valet asks: ${question}`}><span className="mx-1.5 inline-flex"><StatusDot tone="warning" label="Valet asked you a question" /></span></Tooltip>
+            : unread && <StatusDot tone="info" label="Unread" className="mx-1.5" />}
+          <ThreadStatusIcon status={liveStatus.status} busy={queueBusy(queueState)} needsApproval={hasPendingGate} />
+        </Link>
+      </Tooltip>
+    </section>
+  );
+}
+
+/** The indented list of a row's children: under the thread's title, with no guide line. */
+const NESTED_LIST_CLASS = "ml-[3.375rem] mr-2 mt-0.5 mb-1 space-y-0.5";
+
+/** Pure: one nested row. Settled work recedes: its run is over. */
+function nestedRowClass(settled: boolean, active: boolean): string {
+  return cn(
+    "flex-1 min-w-0 h-6 max-md:h-auto max-md:min-h-11 flex items-center gap-2 rounded-md px-2 text-xs transition-colors",
+    "focus-visible:outline-none focus-visible:bg-ink-wash",
+    settled && "opacity-60",
+    active ? SELECTED_ROW : "text-muted hover:bg-ink-wash hover:text-ink",
+  );
+}
+
 function ThreadNode({
   thread,
-  index,
-  sessionModel,
-  models,
-  tierMap,
+  isDefault,
   active,
   hasPendingGate,
   childSessions,
   activeChildId,
   onArchive,
+  moveTargets,
+  onMoveWorkspace,
+  onDuplicate,
   onReplaceSandbox,
   onDismissChild,
   onRename,
+  projects,
+  projectId,
+  onMove,
+  onDragEnd,
+  pinned,
+  onPin,
+  organizingDisabled,
+  timerFireAt,
+  eventWait,
+  viewers,
 }: {
+  /** The other people with this thread open now. */
+  viewers: ActiveViewer[];
+  organizingDisabled: boolean;
+  /** When the thread's soonest timer fires. Only timers get a row line. */
+  timerFireAt?: number;
+  /** The thread's event waits, named by the oldest one, when it has any. */
+  eventWait?: ThreadEventWait;
+  pinned: boolean;
+  onPin: () => void;
+  projects: Array<{ id: string; name: string }>;
+  projectId?: string;
+  onMove: (projectId?: string) => void;
+  onDragEnd: () => void;
   thread: ThreadSummary;
-  index: number;
-  /** Session default model — the pin chip shows only when the thread's pin diverges from it. */
-  sessionModel?: string;
-  models: ModelInfo[];
-  tierMap?: GetModelTiersResponse;
+  isDefault: boolean;
   active: boolean;
-  /** The thread holds a pending decision gate — show the response-required bell. */
+  /** The thread holds a pending decision gate, so it needs you. */
   hasPendingGate: boolean;
-  childSessions: OrchestratorChildSummary[];
+  childSessions: ChildWorkSummary[];
   activeChildId?: string;
   onArchive: (threadId: string) => void;
+  /** Workspaces this thread can move to; empty when it cannot move. */
+  moveTargets: MoveTarget[];
+  onMoveWorkspace: (target: MoveTarget) => void;
+  /** Copies the whole thread into this workspace; absent when it cannot duplicate. */
+  onDuplicate?: () => void;
   onReplaceSandbox: () => void;
   onDismissChild: (childSessionId: string) => void;
   /** Send `null` to clear the stored title. */
   onRename: (threadId: string, title: string | null) => void;
 }) {
-  const label = thread.title ?? untitledThreadLabel(thread, index);
-  const [collapsed, setCollapsed] = useState(() => getSubconversationsCollapsed(thread.id));
+  const label = thread.title ?? untitledThreadLabel(thread, isDefault);
+  const mobile = useMobileLayout();
+  const qc = useQueryClient();
+  const prefetchTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const prefetch = () => { prefetchTranscript(qc, thread.id); prefetchSession(qc, thread.sessionId); };
+  useEffect(() => () => clearTimeout(prefetchTimer.current), []);
+  const liveStatus = useThreadLiveStatus(thread.sessionId, thread.id);
+  const queueState = useQueueStateForThread(thread.sessionId, thread.id);
+  const pullRequest = rowPullRequest(thread.pullRequests);
+  const question = pendingAgentQuestion(thread);
+  // One mark per row. The open thread's view marks it read (`useThreadRecap`), so an open row never shows unread.
+  const state = threadRowState({
+    pendingGate: hasPendingGate,
+    question,
+    status: liveStatus.status,
+    busy: queueBusy(queueState),
+    unread: !active && isThreadUnread(thread),
+  });
+  // The phone drawer starts sub-conversations collapsed; a wider screen starts them open.
+  const [collapsed, setCollapsed] = useState(() => getSubconversationsCollapsed(thread.id, mobile));
 
   useEffect(() => {
-    setCollapsed(getSubconversationsCollapsed(thread.id));
-  }, [thread.id]);
+    setCollapsed(getSubconversationsCollapsed(thread.id, mobile));
+  }, [thread.id, mobile]);
 
   function toggleCollapsed() {
     const next = !collapsed;
@@ -535,28 +1190,16 @@ function ThreadNode({
     setSubconversationsCollapsed(thread.id, next);
   }
 
-  // Pin chip: the thread runs on a model other than the session default.
-  // Requires a KNOWN session default — while the session query loads, and
-  // for non-live sessions (GET /sessions/:id omits `model` unless the
-  // engine session is materialized), divergence is unknowable and a chip on
-  // every stamped thread would be pure noise.
-  const pinnedModel =
-    sessionModel && thread.model && !sameModelSpec(thread.model, sessionModel)
-      ? thread.model
-      : undefined;
-  const pinnedTier = isSizeTier(pinnedModel) ? pinnedModel : undefined;
-  const pinnedModelLabel = pinnedModel
-    ? pinnedTier
-      ? tierSubtitle(pinnedTier, tierMap, models)
-      : selectionLabel(pinnedModel, tierMap, models)
-    : undefined;
-
   // Port the v1 inline editor. Enter and blur save. Escape cancels.
   // `savedRef` prevents Enter and its following blur from saving twice.
   const [isEditing, setIsEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const savedRef = useRef(false);
+  // Rename from the row menu starts once the menu has closed. An open menu
+  // keeps focus inside itself and then returns it to its trigger, either of
+  // which would blur (and save) a title field opened from the item.
+  const renameFromMenuRef = useRef(false);
 
   useEffect(() => {
     if (!isEditing) return;
@@ -607,18 +1250,18 @@ function ThreadNode({
   return (
     <div>
       {/* Row = link + context menu side by side; nesting the menu button
-          inside the Link would make it part of the navigation target. */}
+          inside the Link would make it part of the navigation target. A
+          wait line wraps onto its own line inside the row, so the selected
+          tint, accent bar, and hover cover it too. */}
       <div
         className={cn(
-          "group flex items-center pr-2 transition-colors",
-          active
-            ? "bg-moss-wash-strong border-l-2 border-moss"
-            : "hover:bg-ink-wash/60 border-l-2 border-transparent",
+          "group mx-2 flex flex-wrap items-center rounded-md pr-1 transition-colors",
+          active ? "bg-ink-wash-strong" : "hover:bg-ink-wash",
         )}
       >
         {isEditing ? (
-          <div className={cn("flex-1 min-w-0 py-1", active ? "pl-[calc(1rem-2px)]" : "pl-4")}>
-            <input
+          <div className="flex-1 min-w-0 py-0.5 pl-6">
+            <Input
               ref={inputRef}
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
@@ -635,52 +1278,49 @@ function ThreadNode({
               maxLength={200}
               aria-label={`Rename thread: ${label}`}
               placeholder="Thread name"
-              className={cn(
-                "w-full rounded border border-line bg-surface px-1.5 py-0.5 text-sm text-ink",
-                "outline-none focus:ring-1 focus:ring-moss",
-              )}
             />
           </div>
         ) : (
-          <Tooltip content={label} delayDuration={600}>
+          <Tooltip content={<>{label}<span className="text-muted"><ViewerNames viewers={viewers} /></span></>} delayDuration={600}>
             <Link
               to="/chat"
               search={(prev) => ({
                 ...prev,
-                thread: index === 0 ? undefined : thread.id,
+                thread: isDefault ? undefined : thread.id,
                 child: undefined,
               })}
               className={cn(
-                "flex-1 min-w-0 max-md:min-h-11 flex items-center py-2 text-sm",
+                "flex-1 min-w-0 h-[26px] max-md:h-auto max-md:min-h-11 flex items-center rounded-md pl-8 text-[13px] max-md:text-[15px]",
                 "focus-visible:outline-none focus-visible:bg-ink-wash",
-                active ? "text-ink pl-[calc(1rem-2px)] font-medium" : "text-ink/85 pl-4",
+                active ? "font-medium text-ink" : "text-ink/70 group-hover:text-ink",
               )}
+              draggable
+              // Start the transcript before the click lands, as a native app would.
+              onPointerEnter={() => { prefetchTimer.current = setTimeout(prefetch, 80); }}
+              onPointerLeave={() => clearTimeout(prefetchTimer.current)}
+              onPointerDown={prefetch}
+              onFocus={prefetch}
+              onDragStart={(event) => {
+                event.dataTransfer.effectAllowed = "move";
+                event.dataTransfer.setData(THREAD_DRAG_TYPE, JSON.stringify({ sessionId: thread.sessionId, threadId: thread.id }));
+              }}
+              onDragEnd={onDragEnd}
               onDoubleClick={(event) => {
                 event.stopPropagation();
                 startEditing();
               }}
             >
-              <span className="flex-1 truncate">{label}</span>
-              {pinnedModelLabel && (
-                <span className="ml-2 flex min-w-0 items-center gap-1" title={pinnedModelLabel}>
-                  <span className="max-w-28 truncate text-[10px] font-normal text-muted">
-                    {pinnedModelLabel}
-                  </span>
-                  {pinnedTier && (
-                    <span className="shrink-0 rounded-sm bg-ink-wash px-1 py-0.5 text-[9px] font-normal text-muted">
-                      {TIER_LABELS[pinnedTier]}
-                    </span>
-                  )}
-                </span>
-              )}
-              {hasPendingGate && (
-                <span role="img" aria-label="Response required" title="Response required">
-                  <Bell
-                    className="ml-2 h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-300"
-                    aria-hidden
-                  />
-                </span>
-              )}
+              <ThreadOriginIcon thread={thread} />
+              <span className={cn("flex-1 truncate", mobile ? THREAD_TITLE_CLASS[state] : !active && isThreadUnread(thread) && "font-medium text-ink")}>{label}</span>
+              {thread.share && <Share2 className="mx-1 h-3.5 w-3.5 shrink-0 text-muted" role="img" aria-label="Shared" />}
+              <RowFaces viewers={viewers} />
+              {pullRequest && <ThreadPullRequestIcon pr={pullRequest} count={thread.pullRequests?.length ?? 0} />}
+              {mobile ? <ThreadStateMark state={state} question={question} /> : <>
+                {question
+                  ? <Tooltip content={`Valet asks: ${question}`}><span className="mx-1.5 inline-flex"><StatusDot tone="warning" label="Valet asked you a question" /></span></Tooltip>
+                  : !active && isThreadUnread(thread) && <StatusDot tone="info" label="Unread" className="mx-1.5" />}
+                <ThreadStatusIcon status={liveStatus.status} busy={queueBusy(queueState)} needsApproval={hasPendingGate} />
+              </>}
             </Link>
           </Tooltip>
         )}
@@ -690,7 +1330,7 @@ function ThreadNode({
             aria-label={`${collapsed ? "Expand" : "Collapse"} subconversations for ${label}`}
             aria-expanded={!collapsed}
             onClick={toggleCollapsed}
-            className="inline-flex items-center justify-center max-md:min-h-11 max-md:min-w-11 shrink-0 rounded p-1 text-muted hover:text-ink hover:bg-ink-wash focus-visible:outline-none focus-visible:bg-ink-wash"
+            className={cn(CHROME_BUTTON, HOVER_CHROME)}
           >
             <ChevronDown
               className={cn("h-3.5 w-3.5 transition-transform", collapsed && "-rotate-90")}
@@ -698,62 +1338,89 @@ function ThreadNode({
             />
           </button>
         )}
+        <Tooltip content={pinned ? "Unpin thread" : "Pin thread"}><button type="button" aria-label={pinned ? "Unpin thread" : "Pin thread"} disabled={organizingDisabled} onClick={onPin} className={cn(CHROME_BUTTON, HOVER_CHROME, "max-md:hidden")}>{pinned ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}</button></Tooltip>
         <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
           <DropdownMenuTrigger asChild>
             <button
               type="button"
               aria-label={`Thread menu: ${label}`}
-              className="inline-flex items-center justify-center max-md:min-h-11 max-md:min-w-11 shrink-0 rounded p-1 text-muted opacity-0 max-md:opacity-100 group-hover:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100 hover:text-ink hover:bg-ink-wash focus-visible:outline-none"
+              // A phone shows the menu on the open thread only: one control
+              // per row made the list read as a toolbar.
+              className={cn("inline-flex items-center justify-center max-md:min-h-11 max-md:min-w-11 shrink-0 rounded p-1 text-muted opacity-0 group-hover:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100 hover:text-ink hover:bg-ink-wash focus-visible:outline-none",
+                active ? "max-md:opacity-100" : "max-md:hidden")}
             >
               <MoreHorizontal className="h-3.5 w-3.5" aria-hidden />
             </button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" onKeyDown={handleMenuKeyDown}>
+          <DropdownMenuContent align="start" onKeyDown={handleMenuKeyDown} onCloseAutoFocus={(event) => {
+            if (!renameFromMenuRef.current) return;
+            renameFromMenuRef.current = false;
+            event.preventDefault();
+            startEditing();
+          }}>
+            {/* A phone row shows only this menu, so Pin lives here too. */}
+            <DropdownMenuItem disabled={organizingDisabled} onSelect={onPin}>
+              {pinned ? <PinOff className="h-4 w-4" aria-hidden /> : <Pin className="h-4 w-4" aria-hidden />}
+              {pinned ? "Unpin thread" : "Pin thread"}
+            </DropdownMenuItem>
+            {/* One Move to: a project in this sidebar, or another workspace. */}
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger><ArrowRightLeft className="h-4 w-4" />Move to</DropdownMenuSubTrigger>
+              <DropdownMenuSubContent>
+                <DropdownMenuLabel className="text-xs font-normal text-muted">Project</DropdownMenuLabel>
+                <DropdownMenuItem disabled={organizingDisabled} onSelect={() => onMove()}><Check className={cn("h-4 w-4", !!projectId && "invisible")} />Recents</DropdownMenuItem>
+                {projects.map((project) => <DropdownMenuItem key={project.id} disabled={organizingDisabled} onSelect={() => onMove(project.id)}><Check className={cn("h-4 w-4", projectId !== project.id && "invisible")} />{project.name}</DropdownMenuItem>)}
+                {moveTargets.length > 0 && <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuLabel className="text-xs font-normal text-muted">Workspace</DropdownMenuLabel>
+                  {moveTargets.map((target) => <DropdownMenuItem key={target.label} onSelect={() => onMoveWorkspace(target)}>{target.to === "private" ? <Lock className="h-4 w-4" aria-hidden /> : <Users className="h-4 w-4" aria-hidden />}{target.label}</DropdownMenuItem>)}
+                </>}
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+            {onDuplicate && (
+              <DropdownMenuItem onSelect={onDuplicate}>
+                <Copy className="h-4 w-4" aria-hidden />
+                Duplicate thread
+              </DropdownMenuItem>
+            )}
             <DropdownMenuItem
               onSelect={() => onArchive(thread.id)}
               className="justify-between gap-3"
             >
               <span className="inline-flex items-center gap-2">
-                <Archive className="h-3.5 w-3.5" aria-hidden />
+                <Archive className="h-4 w-4" aria-hidden />
                 Archive thread
               </span>
               <span className="text-[10px] text-muted tabular-nums" title={archiveGlobalHint}>
                 A
               </span>
             </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => startEditing()}>
-              <Pencil className="h-3.5 w-3.5 mr-2" aria-hidden />
+            <DropdownMenuItem onSelect={() => { renameFromMenuRef.current = true; }}>
+              <Pencil className="h-4 w-4" aria-hidden />
               Rename thread
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={onReplaceSandbox}>
-              <RefreshCw className="h-3.5 w-3.5 mr-2" aria-hidden />
+              <RefreshCw className="h-4 w-4" aria-hidden />
               Replace sandbox (all threads)
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
+        {timerFireAt !== undefined && <ThreadTimerLine fireAt={timerFireAt} className={WAIT_LINE_CLASS} />}
+        {eventWait !== undefined && <ThreadEventLine label={eventWait.label} moreCount={eventWait.moreCount} className={WAIT_LINE_CLASS} />}
       </div>
       {childSessions.length > 0 && !collapsed && (
-        <ul className="ml-8 mt-0.5 mb-1 border-l border-line/60 pl-2 space-y-0.5">
+        <ul className={NESTED_LIST_CLASS}>
           {childSessions.map((c) => (
             <li key={c.sessionId} className="group/child flex items-center gap-1">
               <Link
                 to="/chat"
                 search={(prev) => ({ ...prev, child: c.sessionId })}
-                className={cn(
-                  "flex-1 min-w-0 max-md:min-h-11 flex items-center gap-2 rounded px-2 py-1.5 text-xs transition-colors",
-                  "focus-visible:outline-none focus-visible:bg-ink-wash",
-                  // Settled children recede: their work is done and their
-                  // compute reclaimed — visually distinct from live ones.
-                  c.status === "settled" && "opacity-60",
-                  c.sessionId === activeChildId
-                    ? "bg-moss-wash-strong text-ink"
-                    : "text-muted hover:bg-ink-wash/60 hover:text-ink",
-                )}
+                className={nestedRowClass(c.status === "settled", c.sessionId === activeChildId)}
               >
                 <MessageSquare className="h-3 w-3 shrink-0" />
-                <span className="flex-1 truncate">{c.title || c.sessionId}</span>
+                <span className="flex-1 truncate" title={c.title || c.sessionId}>{c.title || c.sessionId}</span>
                 {c.status === "settled" ? (
-                  <span role="img" aria-label="settled" className="shrink-0 text-muted">
+                  <span role="img" aria-label="settled" className={cn("shrink-0 text-muted", PHONE_HIDDEN)}>
                     ✓
                   </span>
                 ) : (
@@ -769,7 +1436,8 @@ function ThreadNode({
                   type="button"
                   aria-label={`Dismiss ${c.title || c.sessionId}`}
                   onClick={() => onDismissChild(c.sessionId)}
-                  className="inline-flex items-center justify-center max-md:min-h-11 max-md:min-w-11 shrink-0 rounded p-0.5 text-muted opacity-0 max-md:opacity-100 group-hover/child:opacity-100 focus-visible:opacity-100 hover:text-ink hover:bg-ink-wash focus-visible:outline-none"
+                  // A phone dismisses from the child's own page.
+                  className={cn("inline-flex shrink-0 items-center justify-center rounded p-0.5 text-muted hover:text-ink hover:bg-ink-wash focus-visible:outline-none", CHILD_HOVER_ACTION)}
                 >
                   <X className="h-3 w-3" aria-hidden />
                 </button>
@@ -786,7 +1454,7 @@ function ThreadNode({
  * Live-updates the children query (decision 12): refetch on any
  * `queue.state` frame for the assistant session, debounced so a burst of
  * frames only triggers one refetch. The 30s poll (`refetchInterval` on
- * `useOrchestratorChildren`) is the fallback for when no WS frames arrive.
+ * `useChildWork`) is the fallback for when no WS frames arrive.
  */
 function useInvalidateChildrenOnQueueState(sessionId: string, refetch: () => void) {
   const queueByThread = useStreamStore((s) => s.bySession[sessionId]?.queueByThread);

@@ -9,6 +9,7 @@
 import { completeSimple, resolveModelId, type Model } from "@valet/engine";
 import { toolResultText } from "../trajectory.js";
 import type { CheckResult, JudgeCheck, Trajectory } from "../types.js";
+import { viaGateway, type LlmGateway } from "../gateway.js";
 import type { JudgeRunner } from "./index.js";
 
 /** Default grading model. */
@@ -44,6 +45,8 @@ export interface JudgeOptions {
   model?: string | Model<string>;
   /** API key for the judge calls. Absent → pi-ai's env-var fallback. */
   apiKey?: string;
+  /** Send judge calls through this Valet gateway with its key (wins over apiKey). */
+  gateway?: LlmGateway;
   /**
    * The model under test (spec form). When the resolved judge matches it,
    * the runner escalates to `CONFLICT_JUDGE_MODEL` and says so in the
@@ -229,7 +232,7 @@ export function buildJudgeRunner(opts: JudgeOptions = {}): JudgeRunner {
       let responseText: string;
       try {
         const result = await completeSimple(
-          model,
+          opts.gateway !== undefined ? viaGateway(model, opts.gateway) : model,
           {
             systemPrompt: JUDGE_SYSTEM_PROMPT,
             messages: [
@@ -240,7 +243,7 @@ export function buildJudgeRunner(opts: JudgeOptions = {}): JudgeRunner {
               },
             ],
           },
-          { apiKey: opts.apiKey, maxRetries: 1, maxRetryDelayMs: 15_000 },
+          { apiKey: opts.gateway?.apiKey ?? opts.apiKey, maxRetries: 1, maxRetryDelayMs: 15_000 },
         );
         if (result.stopReason === "error" || result.stopReason === "aborted" || result.stopReason === "length") {
           return failed(`judge call failed (${result.stopReason}): ${result.errorMessage ?? "no error message"}`);

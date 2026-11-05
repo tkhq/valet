@@ -15,7 +15,6 @@ import { deleteTeamApiKey, deleteTeamCredential, deleteTeamResources } from "./t
 import { markAttentionNotificationsRead, routeAttention } from "../orchestrator/attention.js";
 
 export type RequestActor = { orgId: string; userId: string; teamId: string };
-export type DeletionRequestRow = typeof teamDeletionRequests.$inferSelect;
 export class DeletionRequestError extends Error {
   readonly code = "deletion_request_refused";
   constructor(message: string, readonly statusCode: 400 | 403 | 409 = 409) { super(message); }

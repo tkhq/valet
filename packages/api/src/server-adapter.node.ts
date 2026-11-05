@@ -5,6 +5,7 @@
  * too, but is never *called* there — the composition root passes the Bun
  * adapter when `isBunRuntime()`.
  */
+import type { Socket } from "node:net";
 import { serve } from "@hono/node-server";
 import { createNodeWebSocket } from "@hono/node-ws";
 import type { Hono } from "hono";
@@ -36,11 +37,26 @@ export const nodeServerAdapter: ServerAdapter = {
         });
         // Attach the WS upgrade handler to the running http server.
         injectWebSocket(server);
+        // Every open socket, upgraded WebSockets included. `server.close()`
+        // waits for all of them, and a WebSocket client never closes on its
+        // own, so shutdown sat until the 20 s hard exit. The set holds only
+        // live sockets: each one leaves on its own `close`.
+        const sockets = new Set<Socket>();
+        server.on("connection", (socket: Socket) => {
+          sockets.add(socket);
+          socket.once("close", () => sockets.delete(socket));
+        });
         return {
           get port() {
             return boundPort;
           },
-          close: () => new Promise<void>((res) => server.close(() => res())),
+          // The caller drains in-flight requests first (`Lifecycle.waitForIdle`),
+          // so what remains is idle keep-alive and WebSocket sockets. Clients
+          // reconnect to the next process.
+          close: () => new Promise<void>((res) => {
+            server.close(() => res());
+            for (const socket of sockets) socket.destroy();
+          }),
         };
       },
     };

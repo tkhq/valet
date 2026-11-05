@@ -13,8 +13,8 @@
  *   - By model section shows model names;
  *   - spend chart renders day bars;
  *   - Download CSV control points at /api/usage/export.csv with correct query;
- *   - proxy request log still renders and opens SampleView on row click;
- *   - Settings → Proxy callout link renders;
+ *   - proxy request log has bounded page navigation and never renders raw content;
+ *   - the key setup callout links Personal workspace → API keys and proxy;
  *   - disabled-gateway notice renders.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
@@ -22,9 +22,11 @@ import { render, screen, fireEvent, waitFor, within } from "@testing-library/rea
 
 import type {
   UsageBreakdownResponse,
+  UsageToolEfficiencyResponse,
+  UsageOutcomesResponse,
   UsageDrillResponse,
   ProxyRequestListItem,
-  ProxyRequestDetail,
+  UsagePeriodSelection,
 } from "@valet/api/wire";
 
 // --- mock data -----------------------------------------------------------
@@ -101,6 +103,8 @@ const mockBreakdown: UsageBreakdownResponse = {
       unassignedInvocations: 2,
       attributedContextTokens: 3456,
       carryingCalls: 9,
+      fileReads: 0,
+      scriptRuns: 0,
     },
   ],
   byModel: [
@@ -131,6 +135,33 @@ const mockBreakdown: UsageBreakdownResponse = {
     { dayMs: DAY_A_MS, costUsd: 0.07, totalTokens: 7_000 },
     { dayMs: DAY_B_MS, costUsd: 0.0534, totalTokens: 8_000 },
   ],
+};
+
+const mockToolEfficiency: UsageToolEfficiencyResponse = {
+  windowMs: 7 * 86_400_000,
+  scope: "me",
+  byUseCase: [
+    { useCase: "orchestrator", modelDirectedCalls: 10, modelFreeActions: 0 },
+    { useCase: "session", modelDirectedCalls: 80, modelFreeActions: 0 },
+    { useCase: "workflow", modelDirectedCalls: 2, modelFreeActions: 20 },
+    { useCase: "proxy", modelDirectedCalls: 0, modelFreeActions: 0 },
+  ],
+};
+let toolEfficiencyResult: { data: UsageToolEfficiencyResponse | undefined; isLoading: boolean; error: null | Error } = {
+  data: mockToolEfficiency, isLoading: false, error: null,
+};
+const mockOutcomes: UsageOutcomesResponse = {
+  scope: "me",
+  unpricedTurns: 0,
+  byOutcome: [
+    { kind: "pull_request_created", count: 2, estimatedCostUsd: 1.5, estimatedCostPerOutcomeUsd: 0.75 },
+    { kind: "review_submitted", count: 3, estimatedCostUsd: 0.6, estimatedCostPerOutcomeUsd: 0.2 },
+    { kind: "slack_message_sent", count: 4, estimatedCostUsd: 0.4, estimatedCostPerOutcomeUsd: 0.1 },
+    { kind: "slack_dm_sent", count: 1, estimatedCostUsd: 0.1, estimatedCostPerOutcomeUsd: 0.1 },
+  ],
+};
+let outcomesResult: { data: UsageOutcomesResponse | undefined; isLoading: boolean; error: null | Error } = {
+  data: mockOutcomes, isLoading: false, error: null,
 };
 
 const mockBreakdownWithUnpriced: UsageBreakdownResponse = {
@@ -200,7 +231,7 @@ const mockSessionItems: UsageDrillResponse = {
     },
     {
       id: "sess_child1",
-      label: "Child session",
+      label: "Child thread",
       useCase: "session",
       isChild: true,
       parentId: "sess_parent1",
@@ -215,15 +246,30 @@ const mockSessionItems: UsageDrillResponse = {
 const mockWorkflowItems: UsageDrillResponse = {
   items: [
     {
-      id: "wf_run_1",
-      label: "Deploy pipeline run #12",
+      id: "wf_1",
+      label: "Deploy pipeline",
       useCase: "workflow",
       isChild: false,
       parentId: null,
       sessionId: null,
+      workflowId: "wf_1",
+      runs: 4,
       costUsd: 0.01,
       totalTokens: 1_000,
       turns: 2,
+    },
+    {
+      id: "wf_1/summarize",
+      label: "summarize",
+      useCase: "workflow",
+      isChild: true,
+      parentId: "wf_1",
+      sessionId: null,
+      workflowId: "wf_1",
+      runs: 4,
+      costUsd: 0.008,
+      totalTokens: 800,
+      turns: 4,
     },
   ],
 };
@@ -263,36 +309,10 @@ const reqItem: ProxyRequestListItem = {
   totalTokens: 150,
   costUsd: 0.0012,
   latencyMs: 800,
-  error: null,
+  hasError: false,
 };
 
-const mockRequests = { items: [reqItem], nextCursor: undefined };
-
-const mockDetail: ProxyRequestDetail = {
-  ...reqItem,
-  requestBody: '{"model":"claude-opus-4-5","messages":[{"role":"user","content":"Hello"}]}',
-  responseBody: '{"id":"msg_1","content":[{"type":"text","text":"Hi there!"}]}',
-  parsed: {
-    schema: "valet.llm-sample/v1",
-    provider: "anthropic",
-    parseVersion: 1,
-    model: "claude-opus-4-5",
-    params: {},
-    system: "You are a helpful assistant.",
-    tools: [],
-    previousResponseId: null,
-    input: [
-      { role: "user", content: [{ type: "text", text: "Hello" }] },
-    ],
-    output: { role: "assistant", content: [{ type: "text", text: "Hi there!" }] },
-    stop_reason: "end_turn",
-    usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, total: 15 },
-  },
-  parseVersion: 1,
-  parseError: null,
-  providerResponseId: "msg_1",
-  previousResponseId: null,
-};
+const mockRequests: { items: ProxyRequestListItem[]; nextCursor: string | undefined; pageSize: number; hasMore: boolean } = { items: [reqItem], nextCursor: undefined, pageSize: 25, hasMore: false };
 
 // --- mocks ---------------------------------------------------------------
 
@@ -324,14 +344,24 @@ let itemsResults: Record<
 // Captures the args of the last useUsageBreakdown call so tests can assert
 // the scope/teamId/enabled the page requests.
 let breakdownCalls: unknown[][] = [];
+let toolEfficiencyCalls: unknown[][] = [];
+let outcomeCalls: unknown[][] = [];
+let itemCalls: unknown[][] = [];
+let requestFilters: unknown;
 
 vi.mock("~/api/usage", () => ({
+  useSessionOutcomeUsage: () => ({ data: { outcomes: [] }, isPending: false }),
+  useExternalUsage: () => ({ data: { daily: [], tools: [], clients: [], recent: [], hasMore: false, detailsVisible: true }, isPending: false }),
   useUsageBreakdown: (...args: unknown[]) => {
     breakdownCalls.push(args);
-    return breakdownResult;
+    return { ...breakdownResult, isSuccess: !!breakdownResult.data && !breakdownResult.error };
   },
-  useUsageItems: (_window: string, _scope: string, useCase: string) =>
-    itemsResults[useCase] ?? { data: undefined, isLoading: false, error: null },
+  useUsageToolEfficiency: (...args: unknown[]) => { toolEfficiencyCalls.push(args); return toolEfficiencyResult; },
+  useUsageOutcomes: (...args: unknown[]) => { outcomeCalls.push(args); return outcomesResult; },
+  useUsageItems: (period: UsagePeriodSelection, scope: string, useCase: string, teamId: string | undefined, opts?: { enabled?: boolean }) => {
+    itemCalls.push([period, scope, useCase, teamId, opts]);
+    return itemsResults[useCase] ?? { data: undefined, isLoading: false, error: null };
+  },
   qkUsage: {
     breakdown: () => [],
     items: () => [],
@@ -349,12 +379,6 @@ let requestsResult: {
 let lastProxyRequestsOpts: { enabled?: boolean } | undefined;
 let lastProxySettingsOpts: { enabled?: boolean } | undefined;
 
-let detailResult: {
-  data: ProxyRequestDetail | undefined;
-  isLoading: boolean;
-  error: null | Error;
-} = { data: mockDetail, isLoading: false, error: null };
-
 let settingsResult: {
   data: { enabled: boolean; mode: "centralized" | "passthrough" } | undefined;
   isLoading: boolean;
@@ -362,10 +386,10 @@ let settingsResult: {
 
 vi.mock("~/api/proxy-usage", () => ({
   useProxyRequests: (_filters: unknown, opts?: { enabled?: boolean }) => {
+    requestFilters = _filters;
     lastProxyRequestsOpts = opts;
     return requestsResult;
   },
-  useProxyRequestDetail: () => detailResult,
   useProxySettings: (opts?: { enabled?: boolean }) => {
     lastProxySettingsOpts = opts;
     return settingsResult;
@@ -412,11 +436,24 @@ vi.mock("~/components/workspace-clause", () => ({
         : { kind: "team", team: { id: workspaceTeamId, name: "Team X", memberCount: 2 } },
 }));
 
+let usageExportError: Error | undefined;
+let usageExportValidations: Array<{ granularity: string; scope: string; teamId?: string }> = [];
+
 // Mock api client — usageExportCsvUrl is a pure URL builder.
 vi.mock("~/api/client", () => ({
   api: {
-    usageExportCsvUrl: (window: string, scope: string, teamId?: string) =>
-      `/api/usage/export.csv?window=${window}&scope=${scope}${teamId !== undefined ? `&teamId=${teamId}` : ""}`,
+    validateUsageExport: async (_period: UsagePeriodSelection, scope: string, granularity: string, teamId?: string) => {
+      usageExportValidations.push({ granularity, scope, ...(teamId === undefined ? {} : { teamId }) });
+      if (usageExportError) throw usageExportError;
+    },
+    usageExportCsvUrl: (period: UsagePeriodSelection, scope: string, granularity = "day", teamId?: string) => {
+      const query = period.kind === "lookback"
+        ? `window=${period.window}`
+        : period.kind === "month"
+          ? `month=${period.month}`
+          : `start=${period.start}&end=${period.end}`;
+      return `/api/usage/export.csv?${query}&scope=${scope}${teamId !== undefined ? `&teamId=${teamId}` : ""}&granularity=${granularity}`;
+    },
   },
 }));
 
@@ -424,6 +461,8 @@ import { UsagePage } from "./usage";
 
 beforeEach(() => {
   vi.clearAllMocks();
+  toolEfficiencyResult = { data: mockToolEfficiency, isLoading: false, error: null };
+  outcomesResult = { data: mockOutcomes, isLoading: false, error: null };
   breakdownResult = { data: mockBreakdown, isLoading: false, error: null };
   itemsResults = {
     orchestrator: { data: mockOrchestratorItems, isLoading: false, error: null },
@@ -432,7 +471,6 @@ beforeEach(() => {
     proxy: { data: mockProxyItems, isLoading: false, error: null },
   };
   requestsResult = { data: mockRequests, isLoading: false, error: null };
-  detailResult = { data: mockDetail, isLoading: false, error: null };
   settingsResult = { data: { enabled: true, mode: "centralized" }, isLoading: false };
   orgResult = {
     data: { features: { organizations: false }, callerRole: "member" },
@@ -440,9 +478,42 @@ beforeEach(() => {
   };
   workspaceTeamId = undefined;
   workspaceResolved = true;
+  usageExportError = undefined;
+  usageExportValidations = [];
   breakdownCalls = [];
+  toolEfficiencyCalls = [];
+  outcomeCalls = [];
+  itemCalls = [];
+  requestFilters = undefined;
   lastProxyRequestsOpts = undefined;
   lastProxySettingsOpts = undefined;
+});
+
+describe("UsagePage — tool work", () => {
+  it("shows model-directed calls and model-free workflow actions", () => {
+    render(<UsagePage />);
+    fireEvent.click(screen.getByRole("tab", { name: "Breakdown" }));
+    expect(screen.getByText("Tool work per model token")).toBeTruthy();
+    const rows = screen.getAllByRole("row");
+    const session = rows.find((row) => row.textContent?.includes("Sessions") && row.textContent?.includes("80"));
+    const workflow = rows.find((row) => row.textContent?.includes("Workflows") && row.textContent?.includes("20"));
+    expect(session?.textContent).toContain("10,000");
+    expect(session?.textContent).toContain("8,000");
+    expect(workflow?.textContent).toContain("2,000");
+  });
+});
+
+describe("UsagePage — outcomes", () => {
+  it("shows confirmed outcome types and allocated model spend", () => {
+    render(<UsagePage />);
+    fireEvent.click(screen.getByRole("tab", { name: "Breakdown" }));
+    expect(screen.getByText("Outcomes")).toBeTruthy();
+    const row = screen.getByRole("row", { name: /PRs created/ });
+    expect(row.textContent).toContain("2");
+    expect(row.textContent).toContain("$1.50");
+    expect(row.textContent).toContain("$0.7500");
+    expect(screen.getByRole("row", { name: /Slack DMs sent/ })).toBeTruthy();
+  });
 });
 
 describe("UsagePage — spend summary", () => {
@@ -517,6 +588,7 @@ describe("UsagePage — token/cache stats", () => {
 
   it("renders input/output/cache columns in the By-model table", () => {
     render(<UsagePage />);
+    fireEvent.click(screen.getByRole("tab", { name: "Breakdown" }));
     expect(screen.getByText("Input tok")).toBeTruthy();
     expect(screen.getByText("Output tok")).toBeTruthy();
     expect(screen.getByText("Cache read")).toBeTruthy();
@@ -617,6 +689,7 @@ describe("UsagePage — By-member table (org scope)", () => {
       error: null,
     };
     render(<UsagePage />);
+    fireEvent.click(screen.getByRole("tab", { name: "Breakdown" }));
     // Switch to org scope
     fireEvent.click(screen.getByText("Organization"));
     // Re-render happens with org data
@@ -625,8 +698,37 @@ describe("UsagePage — By-member table (org scope)", () => {
     expect(screen.getByText("Bob Jones")).toBeTruthy();
   });
 
+  it("labels a team's own work by the team's name with a team marker, never by its id", () => {
+    const person = mockBreakdownOrgScope.byUser?.[0];
+    if (!person) throw new Error("Missing member fixture");
+    breakdownResult = {
+      data: {
+        ...mockBreakdownOrgScope,
+        byUser: [
+          person,
+          { ...person, userId: "team:team-x", name: "Platform", isTeam: true },
+          // A deleted team, or one the viewer is not on.
+          { ...person, userId: "team:team-gone", name: "Another team", isTeam: true },
+        ],
+      },
+      isLoading: false,
+      error: null,
+    };
+    render(<UsagePage />);
+    fireEvent.click(screen.getByRole("tab", { name: "Breakdown" }));
+    for (const name of ["Platform", "Another team"]) {
+      const row = screen.getByRole("row", { name: new RegExp(name) });
+      expect(within(row).getByRole("img", { name: "Team" })).toBeTruthy();
+    }
+    const personRow = screen.getByRole("row", { name: new RegExp(person.name) });
+    expect(within(personRow).queryByRole("img", { name: "Team" })).toBeNull();
+    // Not as text, and not in a tooltip either.
+    expect(document.body.innerHTML).not.toContain("team:team-");
+  });
+
   it("does not show By-member table in me scope", () => {
     render(<UsagePage />);
+    fireEvent.click(screen.getByRole("tab", { name: "Breakdown" }));
     // Default scope=me, byUser not present
     expect(screen.queryByText("By member")).toBeNull();
   });
@@ -635,16 +737,18 @@ describe("UsagePage — By-member table (org scope)", () => {
 describe("UsagePage — by-use-case table", () => {
   it("renders all four use-case labels", () => {
     render(<UsagePage />);
-    expect(screen.getByText("Orchestrator")).toBeTruthy();
-    expect(screen.getByText("Sessions")).toBeTruthy();
-    expect(screen.getByText("Workflows")).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: "Breakdown" }));
+    expect(screen.getByText("Assistant")).toBeTruthy();
+    expect(screen.getAllByText("Sessions").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Workflows").length).toBeGreaterThan(0);
     expect(screen.getByText("Proxy (external tools)")).toBeTruthy();
   });
 
-  it("expanding Orchestrator row shows orchestrator items", async () => {
+  it("expanding Assistant row shows runtime items", async () => {
     render(<UsagePage />);
+    fireEvent.click(screen.getByRole("tab", { name: "Breakdown" }));
     const orchRow = screen.getByRole("button", {
-      name: /Orchestrator — expand items/,
+      name: /Assistant — expand items/,
     });
     fireEvent.click(orchRow);
     await waitFor(() => {
@@ -652,10 +756,11 @@ describe("UsagePage — by-use-case table", () => {
     });
   });
 
-  it("orchestrator item does not render as a link (orch: prefix)", async () => {
+  it("runtime item does not render as a link (orchestrator: prefix)", async () => {
     render(<UsagePage />);
+    fireEvent.click(screen.getByRole("tab", { name: "Breakdown" }));
     const orchRow = screen.getByRole("button", {
-      name: /Orchestrator — expand items/,
+      name: /Assistant — expand items/,
     });
     fireEvent.click(orchRow);
     await waitFor(() => {
@@ -669,35 +774,38 @@ describe("UsagePage — by-use-case table", () => {
 
   it("expanding Sessions row shows parent and child items", async () => {
     render(<UsagePage />);
+    fireEvent.click(screen.getByRole("tab", { name: "Breakdown" }));
     const sessRow = screen.getByRole("button", {
       name: /Sessions — expand items/,
     });
     fireEvent.click(sessRow);
     await waitFor(() => {
       expect(screen.getByText("Parent session")).toBeTruthy();
-      expect(screen.getByText("Child session")).toBeTruthy();
+      expect(screen.getByText("Child thread")).toBeTruthy();
     });
   });
 
   it("child session row is indented with pl-8 class", async () => {
     const { container } = render(<UsagePage />);
+    fireEvent.click(screen.getByRole("tab", { name: "Breakdown" }));
     const sessRow = screen.getByRole("button", {
       name: /Sessions — expand items/,
     });
     fireEvent.click(sessRow);
     await waitFor(() => {
-      expect(screen.getByText("Child session")).toBeTruthy();
+      expect(screen.getByText("Child thread")).toBeTruthy();
     });
     const childRows = Array.from(container.querySelectorAll(".pl-8"));
     expect(childRows.length).toBeGreaterThan(0);
     const childText = childRows.some((el) =>
-      el.textContent?.includes("Child session"),
+      el.textContent?.includes("Child thread"),
     );
     expect(childText).toBe(true);
   });
 
   it("regular session item renders as an anchor (links to sessions route)", async () => {
     render(<UsagePage />);
+    fireEvent.click(screen.getByRole("tab", { name: "Breakdown" }));
     const sessRow = screen.getByRole("button", {
       name: /Sessions — expand items/,
     });
@@ -711,24 +819,26 @@ describe("UsagePage — by-use-case table", () => {
     expect(parentLink).toBeTruthy();
   });
 
-  it("expanding Workflows row shows workflow items (not linked)", async () => {
+  it("expanding Workflows shows each workflow, linked, with its steps' cost per run", async () => {
     render(<UsagePage />);
+    fireEvent.click(screen.getByRole("tab", { name: "Breakdown" }));
     const wfRow = screen.getByRole("button", {
       name: /Workflows — expand items/,
     });
     fireEvent.click(wfRow);
     await waitFor(() => {
-      expect(screen.getByText("Deploy pipeline run #12")).toBeTruthy();
+      expect(screen.getByText("Deploy pipeline")).toBeTruthy();
     });
-    // Workflow items have no sessionId — must not be links
-    const wfLinks = Array.from(document.querySelectorAll("a")).filter((a) =>
-      a.textContent?.includes("Deploy pipeline run #12"),
-    );
-    expect(wfLinks.length).toBe(0);
+    expect(screen.getByText("Deploy pipeline").closest("a")?.getAttribute("href")).toBe("/workflows/$workflowId");
+    expect(screen.getByText("4 runs")).toBeTruthy();
+    expect(screen.getByText("summarize").closest("a")).toBeNull();
+    // The average is over the runs the step ran in, and the label says so.
+    expect(screen.getByText("$0.0020 avg over 4 runs")).toBeTruthy();
   });
 
   it("expanding Proxy row shows proxy items (not linked)", async () => {
     render(<UsagePage />);
+    fireEvent.click(screen.getByRole("tab", { name: "Breakdown" }));
     const proxyRow = screen.getByRole("button", {
       name: /Proxy.*expand items/,
     });
@@ -749,6 +859,7 @@ describe("UsagePage — by-use-case table", () => {
 describe("UsagePage — skills section", () => {
   it("renders adoption and estimated context telemetry", () => {
     render(<UsagePage />);
+    fireEvent.click(screen.getByRole("tab", { name: "Breakdown" }));
     const heading = screen.getByText("Skills");
     const section = heading.closest("div");
     expect(section?.textContent).toContain("github");
@@ -761,6 +872,7 @@ describe("UsagePage — skills section", () => {
 describe("UsagePage — by model section", () => {
   it("renders model names in the By model section", () => {
     render(<UsagePage />);
+    fireEvent.click(screen.getByRole("tab", { name: "Breakdown" }));
     const heading = screen.getByText("By model");
     const section = heading.closest("div");
     expect(section).toBeTruthy();
@@ -770,63 +882,49 @@ describe("UsagePage — by model section", () => {
 });
 
 describe("UsagePage — CSV export", () => {
-  it("renders a Download CSV link pointing at /api/usage/export.csv", () => {
+  it("defaults to daily export and builds the native download URL", () => {
     render(<UsagePage />);
-    const csvLink = document.querySelector("a[download]") as HTMLAnchorElement | null;
-    expect(csvLink).toBeTruthy();
-    expect(csvLink!.href).toContain("/api/usage/export.csv");
+    const granularity = screen.getByLabelText("CSV granularity") as HTMLSelectElement;
+    expect(granularity.value).toBe("day");
+    const csvLink = document.querySelector("a[href*='/api/usage/export.csv']") as HTMLAnchorElement;
+    expect(csvLink.href).toContain("window=7d");
+    expect(csvLink.href).toContain("scope=me");
+    expect(csvLink.href).toContain("granularity=day");
+    expect(csvLink.hasAttribute("download")).toBe(false);
   });
 
-  it("CSV link includes the current window param", () => {
+  it("selects itemized export, validates it, then uses the native anchor", async () => {
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
     render(<UsagePage />);
-    const csvLink = document.querySelector("a[download]") as HTMLAnchorElement | null;
-    expect(csvLink!.href).toContain("window=7d");
+    fireEvent.change(screen.getByLabelText("CSV granularity"), { target: { value: "turn" } });
+    const csvLink = document.querySelector("a[href*='/api/usage/export.csv']") as HTMLAnchorElement;
+    expect(csvLink.href).toContain("granularity=turn");
+    fireEvent.click(screen.getByRole("button", { name: "Download CSV (7d, me)" }));
+    await waitFor(() => expect(usageExportValidations).toEqual([{ granularity: "turn", scope: "me" }]));
+    expect(click).toHaveBeenCalledTimes(1);
   });
 
-  it("CSV link includes the current scope param", () => {
+  it("shows validation errors and does not start a native download", async () => {
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    usageExportError = Object.assign(new Error("GET /usage/export.csv → 400"), {
+      payload: { error: { code: "invalid_range", message: "Choose a valid export range." } },
+    });
     render(<UsagePage />);
-    const csvLink = document.querySelector("a[download]") as HTMLAnchorElement | null;
-    expect(csvLink!.href).toContain("scope=me");
-  });
-
-  it("CSV link label mentions current window and scope", () => {
-    render(<UsagePage />);
-    const csvLink = document.querySelector("a[download]") as HTMLAnchorElement | null;
-    expect(csvLink!.textContent).toMatch(/7d/);
-    expect(csvLink!.textContent).toMatch(/me/);
+    fireEvent.click(screen.getByRole("button", { name: "Download CSV (7d, me)" }));
+    expect(await screen.findByText("Choose a valid export range.")).toBeTruthy();
+    expect(click).not.toHaveBeenCalled();
   });
 });
 
-describe("UsagePage — request log drill-down", () => {
-  it("clicking a request row opens the SampleView", async () => {
+describe("UsagePage — request log pagination", () => {
+  it("shows bounded navigation without raw request content", () => {
     render(<UsagePage />);
-    const rowEl = document.querySelector("tr[role='button']") as HTMLElement;
-    expect(rowEl).toBeTruthy();
-    fireEvent.click(rowEl);
-    await waitFor(() => {
-      expect(screen.getByText("Request detail")).toBeTruthy();
-    });
-  });
-
-  it("SampleView shows structured content from parsed detail", async () => {
-    render(<UsagePage />);
-    const rowEl = document.querySelector("tr[role='button']") as HTMLElement;
-    fireEvent.click(rowEl);
-    await waitFor(() => {
-      expect(screen.getByText("Hello")).toBeTruthy();
-      expect(screen.getByText("Hi there!")).toBeTruthy();
-    });
-  });
-
-  it("closing the SampleView removes it", async () => {
-    render(<UsagePage />);
-    const rowEl = document.querySelector("tr[role='button']") as HTMLElement;
-    fireEvent.click(rowEl);
-    await waitFor(() => {
-      expect(screen.getByText("Request detail")).toBeTruthy();
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Close detail" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Activity" }));
+    expect(screen.getByText("Page 1 · 25 requests per page")).toBeTruthy();
+    expect(screen.queryByText("Hello")).toBeNull();
     expect(screen.queryByText("Request detail")).toBeNull();
+    expect((screen.getByRole("button", { name: "Previous" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(true);
   });
 });
 
@@ -842,7 +940,7 @@ describe("UsagePage — team workspace scope", () => {
 
   it("pins the CSV export to scope=team with the team id", () => {
     render(<UsagePage />);
-    const csvLink = document.querySelector("a[download]") as HTMLAnchorElement | null;
+    const csvLink = document.querySelector("a[href*='/api/usage/export.csv']") as HTMLAnchorElement | null;
     expect(csvLink!.href).toContain("scope=team");
     expect(csvLink!.href).toContain("teamId=team-x");
   });
@@ -861,6 +959,7 @@ describe("UsagePage — team workspace scope", () => {
       ],
     };
     const view = render(<UsagePage />);
+    fireEvent.click(screen.getByRole("tab", { name: "Breakdown" }));
     expect(screen.getByRole("columnheader", { name: "Avg daily active agents" })).toBeTruthy();
     const explanation = screen.getByText("How active agents are counted").closest("details");
     expect(explanation?.open).toBe(false);
@@ -871,7 +970,7 @@ describe("UsagePage — team workspace scope", () => {
       expect(within(row).getByText(value ?? "")).toBeTruthy();
     }
     fireEvent.click(screen.getByRole("button", { name: "24h" }));
-    expect(breakdownCalls.at(-1)?.slice(0, 3)).toEqual(["24h", "team", "team-x"]);
+    expect(breakdownCalls.at(-1)?.slice(0, 3)).toEqual([{ kind: "lookback", window: "24h" }, "team", "team-x"]);
     breakdownResult.data = {
       ...breakdownResult.data,
       dailyAgentWindow: { days: 1, sinceMs: DAY_B_MS, untilMs: DAY_B_MS, timezone: "UTC" },
@@ -902,7 +1001,7 @@ describe("UsagePage — team workspace scope", () => {
   it("hides the personal-only proxy surfaces (request log, key setup)", () => {
     render(<UsagePage />);
     expect(screen.queryByText(/request log/)).toBeNull();
-    expect(document.querySelector("a[href='/settings/proxy']")).toBeNull();
+    expect(document.querySelector("a[href='/settings/api-keys']")).toBeNull();
   });
 
   it("names the team in the subtitle", () => {
@@ -937,7 +1036,7 @@ describe("UsagePage — workspace still resolving", () => {
     breakdownResult = { data: undefined, isLoading: false, error: null };
     render(<UsagePage />);
     expect(screen.getByText("Loading…")).toBeTruthy();
-    expect(document.querySelector("a[download]")).toBeNull();
+    expect(document.querySelector("a[href*='/api/usage/export.csv']")).toBeNull();
   });
 });
 
@@ -948,6 +1047,7 @@ describe("UsagePage — expanded drill rows across the me/org toggle", () => {
       isLoading: false,
     };
     render(<UsagePage />);
+    fireEvent.click(screen.getByRole("tab", { name: "Breakdown" }));
     fireEvent.click(screen.getByRole("button", { name: /Sessions — expand items/ }));
     await waitFor(() => {
       expect(screen.getByText("Parent session")).toBeTruthy();
@@ -958,12 +1058,12 @@ describe("UsagePage — expanded drill rows across the me/org toggle", () => {
   });
 });
 
-describe("UsagePage — Settings → Proxy link", () => {
-  it("renders Settings → Proxy callout link", () => {
+describe("UsagePage — key setup link", () => {
+  it("links the personal API keys and proxy page by its rail name", () => {
     render(<UsagePage />);
-    const link = document.querySelector("a[href='/settings/proxy']");
-    expect(link).toBeTruthy();
-    expect(link!.textContent).toMatch(/Settings.*Proxy|Settings → Proxy/);
+    fireEvent.click(screen.getByRole("tab", { name: "Activity" }));
+    const link = screen.getByRole("link", { name: "Personal workspace → API keys and proxy" });
+    expect(link.getAttribute("href")).toBe("/settings/api-keys");
   });
 });
 
@@ -971,6 +1071,7 @@ describe("UsagePage — disabled-gateway notice", () => {
   it("shows the notice when enabled=false", () => {
     settingsResult = { data: { enabled: false, mode: "centralized" }, isLoading: false };
     render(<UsagePage />);
+    fireEvent.click(screen.getByRole("tab", { name: "Activity" }));
     expect(screen.getByText(/recording gateway is disabled/)).toBeTruthy();
     const link = document.querySelector("a[href='/settings/organization/proxy']");
     expect(link).toBeTruthy();
@@ -979,6 +1080,191 @@ describe("UsagePage — disabled-gateway notice", () => {
   it("does not show the notice when enabled=true", () => {
     settingsResult = { data: { enabled: true, mode: "centralized" }, isLoading: false };
     render(<UsagePage />);
+    fireEvent.click(screen.getByRole("tab", { name: "Activity" }));
     expect(screen.queryByText(/recording gateway is disabled/)).toBeNull();
   });
+});
+
+describe("UsagePage custom period controls", () => {
+  it("selects a calendar month and updates the export URL", () => {
+    render(<UsagePage />);
+    const month = screen.getByLabelText("Calendar month") as HTMLInputElement;
+    fireEvent.change(month, { target: { value: "2024-02" } });
+    expect(breakdownCalls.at(-1)?.[0]).toEqual({ kind: "month", month: "2024-02" });
+    const csvLink = document.querySelector("a[href*='/api/usage/export.csv']") as HTMLAnchorElement;
+    expect(csvLink.href).toContain("month=2024-02");
+  });
+
+  it("applies an inclusive custom range to data and CSV", () => {
+    render(<UsagePage />);
+    fireEvent.change(screen.getByLabelText("Custom start date"), { target: { value: "2024-02-01" } });
+    fireEvent.change(screen.getByLabelText("Custom end date"), { target: { value: "2024-02-29" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply dates" }));
+    expect(breakdownCalls.at(-1)?.[0]).toEqual({ kind: "custom", start: "2024-02-01", end: "2024-02-29" });
+    const csvLink = document.querySelector("a[href*='/api/usage/export.csv']") as HTMLAnchorElement;
+    expect(csvLink.href).toContain("start=2024-02-01&end=2024-02-29");
+    expect(screen.getByRole("button", { name: "Download CSV (2024-02-01 to 2024-02-29, me)" })).toBeTruthy();
+  });
+
+  it("marks edited custom dates as pending while data and CSV keep the applied range", () => {
+    render(<UsagePage />);
+    const start = screen.getByLabelText("Custom start date");
+    const end = screen.getByLabelText("Custom end date");
+    const apply = screen.getByRole("button", { name: "Apply dates" });
+
+    fireEvent.change(start, { target: { value: "2024-02-01" } });
+    fireEvent.change(end, { target: { value: "2024-02-29" } });
+    fireEvent.click(apply);
+    expect(apply.getAttribute("aria-pressed")).toBe("true");
+    expect(apply.className).not.toContain("bg-moss");
+
+    fireEvent.change(start, { target: { value: "2024-02-02" } });
+    expect(apply.getAttribute("aria-pressed")).toBe("false");
+    // Pending edits fill the button, so the reader sees they are not applied yet.
+    expect(apply.className).toContain("bg-moss");
+    const csvLink = document.querySelector("a[href*='/api/usage/export.csv']") as HTMLAnchorElement;
+    expect(csvLink.href).toContain("start=2024-02-01&end=2024-02-29");
+    expect(breakdownCalls.at(-1)?.[0]).toEqual({
+      kind: "custom",
+      start: "2024-02-01",
+      end: "2024-02-29",
+    });
+
+    fireEvent.click(apply);
+    expect(apply.getAttribute("aria-pressed")).toBe("true");
+    expect(csvLink.href).toContain("start=2024-02-02&end=2024-02-29");
+  });
+
+  it("shows the server range error message", () => {
+    breakdownResult = {
+      data: undefined,
+      isLoading: false,
+      error: Object.assign(new Error("GET /usage/breakdown → 400"), {
+        payload: { error: { code: "reversed_range", message: "Choose an end date on or after the start date." } },
+      }),
+    };
+    render(<UsagePage />);
+    expect(screen.getByText("Choose an end date on or after the start date.")).toBeTruthy();
+    expect(screen.queryByText(/GET \/usage\/breakdown/)).toBeNull();
+  });
+
+  it("refreshes picker limits when the page renders after UTC midnight", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-12-31T23:59:00Z"));
+    const view = render(<UsagePage />);
+    expect(screen.getByLabelText("Calendar month").getAttribute("max")).toBe("2026-12");
+    expect(screen.getByLabelText("Custom end date").getAttribute("max")).toBe("2026-12-31");
+
+    vi.setSystemTime(new Date("2027-01-01T00:01:00Z"));
+    view.rerender(<UsagePage />);
+    expect(screen.getByLabelText("Calendar month").getAttribute("max")).toBe("2027-01");
+    expect(screen.getByLabelText("Custom end date").getAttribute("max")).toBe("2027-01-01");
+    view.unmount();
+    vi.useRealTimers();
+  });
+
+  it("clears inactive controls and marks the active period", () => {
+    render(<UsagePage />);
+    const month = screen.getByLabelText("Calendar month") as HTMLInputElement;
+    const start = screen.getByLabelText("Custom start date") as HTMLInputElement;
+    const end = screen.getByLabelText("Custom end date") as HTMLInputElement;
+    const apply = screen.getByRole("button", { name: "Apply dates" });
+
+    fireEvent.change(month, { target: { value: "2024-02" } });
+    expect(month.getAttribute("aria-current")).toBe("date");
+    fireEvent.click(screen.getByRole("button", { name: "24h" }));
+    expect(month.value).toBe("");
+    expect(month.getAttribute("aria-current")).toBeNull();
+
+    fireEvent.change(start, { target: { value: "2024-02-01" } });
+    fireEvent.change(end, { target: { value: "2024-02-29" } });
+    fireEvent.click(apply);
+    expect(apply.getAttribute("aria-pressed")).toBe("true");
+    fireEvent.change(month, { target: { value: "2024-01" } });
+    expect(start.value).toBe("");
+    expect(end.value).toBe("");
+    expect(apply.getAttribute("aria-pressed")).toBe("false");
+
+    fireEvent.change(month, { target: { value: "" } });
+    expect(breakdownCalls.at(-1)?.[0]).toEqual({ kind: "lookback", window: "7d" });
+  });
+});
+
+
+describe("UsagePage view navigation", () => {
+  it.each(["loading", "error"])("keeps breakdown %s state out of Activity", (state) => {
+    breakdownResult = { data: undefined, isLoading: state === "loading", error: state === "error" ? new Error("boom-breakdown") : null };
+    render(<UsagePage />);
+    const message = state === "loading" ? "Loading…" : "Error: boom-breakdown";
+    expect(screen.getByText(message)).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: "Activity" }));
+    expect(screen.getByRole("heading", { name: /request log/ })).toBeTruthy();
+    expect(screen.queryByText(message)).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: "Overview" }));
+    expect(screen.getByText(message)).toBeTruthy();
+  });
+
+  it("defaults to Overview and loads detail queries only in their view", () => {
+    render(<UsagePage />);
+    expect(screen.getByRole("tab", { name: "Overview" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.queryByRole("row", { name: /PRs created/ })).toBeNull();
+    expect(screen.queryByRole("heading", { name: /request log/ })).toBeNull();
+    expect(toolEfficiencyCalls.at(-1)?.[3]).toEqual({ enabled: false });
+    expect(outcomeCalls.at(-1)?.[3]).toEqual({ enabled: false });
+    expect(lastProxyRequestsOpts?.enabled).toBe(false);
+    expect(lastProxySettingsOpts?.enabled).toBe(false);
+
+    fireEvent.click(screen.getByRole("tab", { name: "Breakdown" }));
+    expect(screen.getByRole("row", { name: /PRs created/ })).toBeTruthy();
+    expect(toolEfficiencyCalls.at(-1)?.[3]).toEqual({ enabled: true });
+    expect(outcomeCalls.at(-1)?.[3]).toEqual({ enabled: true });
+    expect(lastProxyRequestsOpts?.enabled).toBe(false);
+
+    fireEvent.click(screen.getByRole("tab", { name: "Activity" }));
+    expect(screen.getByRole("heading", { name: /request log/ })).toBeTruthy();
+    expect(toolEfficiencyCalls.at(-1)?.[3]).toEqual({ enabled: false });
+    expect(outcomeCalls.at(-1)?.[3]).toEqual({ enabled: false });
+    expect(lastProxyRequestsOpts?.enabled).toBe(true);
+    expect(lastProxySettingsOpts?.enabled).toBe(true);
+  });
+
+  it("preserves period and expanded rows while pausing hidden drill queries", () => {
+    render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: "30d" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Breakdown" }));
+    fireEvent.click(screen.getByRole("button", { name: /Sessions — expand items/ }));
+    expect(itemCalls.at(-1)?.[4]).toEqual({ enabled: true });
+    fireEvent.click(screen.getByRole("tab", { name: "Overview" }));
+    expect(itemCalls.at(-1)?.[4]).toEqual({ enabled: false });
+    fireEvent.click(screen.getByRole("tab", { name: "Breakdown" }));
+    expect(screen.getByRole("button", { name: /Sessions — expand items/ }).getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByText("Parent session")).toBeTruthy();
+    expect(breakdownCalls.at(-1)?.[0]).toEqual({ kind: "lookback", window: "30d" });
+    expect(itemCalls.at(-1)?.[4]).toEqual({ enabled: true });
+  });
+
+  it("keeps Activity personal and resets its pager when the workspace changes", () => {
+    requestsResult.data = { ...mockRequests, nextCursor: "page-two", hasMore: true };
+    const view = render(<UsagePage />);
+    fireEvent.click(screen.getByRole("tab", { name: "Activity" }));
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(requestFilters).toEqual({ limit: 25, cursor: "page-two" });
+    fireEvent.click(screen.getByRole("tab", { name: "Overview" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Activity" }));
+    expect(requestFilters).toEqual({ limit: 25, cursor: "page-two" });
+    workspaceTeamId = "team-x";
+    view.rerender(<UsagePage />);
+    expect(screen.getByText(/Switch to Personal to view it/)).toBeTruthy();
+    expect(lastProxyRequestsOpts?.enabled).toBe(false);
+    expect(lastProxySettingsOpts?.enabled).toBe(false);
+    expect(requestFilters).toEqual({ limit: 25, cursor: undefined });
+    expect(screen.queryByRole("heading", { name: /request log/ })).toBeNull();
+  });
+});
+
+it("opens Tool usage in the existing usage period and scope", () => {
+  render(<UsagePage />);
+  fireEvent.click(screen.getByRole("tab", { name: "Tool usage" }));
+  expect(screen.getByRole("region", { name: "Tool usage" })).toBeTruthy();
+  expect(screen.getByText("No tool calls in this window.")).toBeTruthy();
 });

@@ -99,6 +99,14 @@ Rules, in order:
    `slack-user` OAuth).
 6. Otherwise → `"manual"`.
 
+Rules 4 and 5 read the team row before the org row when the caller names a
+team owner. A team that holds its own row for the service acts as that row
+at run time, so the catalog reports `"manual"` for it even when the org
+credential also exists. A team row that throws
+`CredentialReferenceBrokenError` reads as an absent row, so the org
+credential behind it still resolves to `"org"`. A caller that names no
+owner, or a user owner, reads the org row alone.
+
 `unavailableServiceSet(plugins, orgId, credentials, env)` returns the
 services that resolve to `"unconfigured"`, for the two enforcement points
 that gate by set membership (session builds, workflow invocations).
@@ -114,7 +122,11 @@ summary stays: an unconfigured-but-connected service still reports
 a service that resolves `"unconfigured"` or `"org"` is rejected with an
 error that names the corrective action. Org-scope saves are exempt — an
 admin's org-scope Slack save is exactly how the service becomes configured.
-Unknown services (no declaration) stay accepted, as before.
+Unknown services (no declaration) stay accepted, as before. A personal
+1Password token (`onepassword`) is exempt by name, whatever a plugin
+declares. It reads the member's own vaults for the member's own sessions, so
+an org token is never a substitute for it
+(`docs/onepassword-secrets.md`).
 
 **3. Session builds (agent tools).** `EngineHost.sessionExtras` — the one
 funnel for all four session builders — filters the plugin set through
@@ -158,13 +170,11 @@ disconnect), but sessions stop receiving the tools.
   - **DM me on <provider>** (`codeDelivery`) — `POST
     /api/me/identity-links/:provider/deliver` resolves the caller in the
     workspace by their Valet email (Slack: `users.lookupByEmail`, needs the
-    `users:read.email` bot scope), mints the code, and DMs the plugin's
-    static `deliveryDm` anchor. The DM never carries the code: only the
-    authenticated session knows it, and the user carrying it into the chat
-    is the ownership proof. The response returns `replyText` — the exact
-    reply the plugin's `deliveryReply(code)` builds (Slack: `link <code>`
-    with the real code) — and the card renders it as one copyable line, so
-    the user never has to assemble the command. A 202
+    `users:read.email` bot scope), mints a code bound to that account, and
+    DMs it (`deliveryDm(code)`). The person types the code into the card,
+    which calls `POST .../verify` (v1's direction, restored 2026-10-08; see
+    `2026-08-17-slack-user-integration-design.md`). A code bound to a DM is
+    never redeemable from chat. A 202
     (`email_not_in_workspace`) falls back to member search when available,
     else to the show-code flow. When the code's TTL elapses, the card
     clears the waiting state and stops polling.
@@ -273,9 +283,27 @@ change, with tests.
 
 ## Deviations from prior specs
 
+`GET /api/plugins?teamId=` returns the effective team catalog after a live
+team-access check. A team catalog marks an org-provided credential connected.
+A personal catalog keeps it disconnected, so it does not offer Disconnect for
+an organization-owned credential. The response does not expose another team's
+catalog.
+
+A broken delegated team credential is disconnected with no health data. The
+catalog remains available and does not expose the delegator. The availability
+resolver treats that row as unconfigured when no organization credential
+exists. Slack identity links remain required for actions that need a person's
+identity, such as private-channel access and `slack.dm_owner`.
+
 `2026-07-20-integration-oauth-design.md` specified that an
 `authorization_code` service with unset client env reports `"manual"` so
 the UI renders token entry instead of a 503ing Connect button. This design
 replaces that fallback with `"unconfigured"`: the manual path cannot
 produce a refreshable Google credential, so offering it was misleading.
 The prior spec carries a pointer to this document.
+
+## Scoped live checks
+
+An action invocation or service-filtered discovery checks only the requested action service and its declared credential aliases.
+An unfiltered catalog request checks all declarations. Each check reads current credentials; no permission or credential result is cached.
+Post-approval checks use the same scope and remain mandatory. A failure in an unrelated credential store does not block a scoped check.

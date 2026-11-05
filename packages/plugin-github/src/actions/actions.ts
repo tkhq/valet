@@ -1,12 +1,19 @@
 import { Type } from "typebox";
 import type { Static, TSchema } from "typebox";
-import type {
-  ActionPlugin,
-  PluginAction,
-  PluginActionContext,
-  PluginActionResult,
+import {
+  extractDownloadedPdf,
+  isPdfDocument,
+  isTextDocumentMime,
+  MAX_PDF_DOCUMENT_BYTES,
+  normalizeDocumentMime,
+  readPdfCandidateResponse,
+  readResponseText,
+  type ActionPlugin,
+  type PluginAction,
+  type PluginActionContext,
+  type PluginActionResult,
 } from "@valet/engine";
-import { Octokit } from "octokit";
+import type { Octokit } from "octokit";
 import { parseJobLog } from "./parse-job-log.js";
 import {
   collectDirectoryEntries,
@@ -14,7 +21,7 @@ import {
   wrongPathKindError,
   MAX_DIRECTORY_ENTRIES,
 } from "./repo-directory.js";
-import { resolveGithubApiUrl } from "./api.js";
+import { githubOctokit, rateLimitError, resolveGithubApiUrl } from "./api.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -26,7 +33,7 @@ async function getOctokit(ctx: PluginActionContext): Promise<Octokit> {
       "Missing GitHub access token. Connect the GitHub integration in Settings.",
     );
   }
-  return new Octokit({ auth: token, baseUrl: resolveGithubApiUrl() });
+  return githubOctokit(token, ctx.signal);
 }
 
 /**
@@ -48,7 +55,7 @@ async function getInstallationOctokit(ctx: PluginActionContext): Promise<Octokit
   const cred = await ctx.credentials.get(GITHUB_INSTALLATION_CREDENTIAL_SERVICE);
   const token = cred?.accessToken;
   if (!token) return null;
-  return new Octokit({ auth: token, baseUrl: resolveGithubApiUrl() });
+  return githubOctokit(token, ctx.signal);
 }
 
 const PERMISSION_HINTS: Record<string, string> = {
@@ -63,6 +70,7 @@ const PERMISSION_HINTS: Record<string, string> = {
   "github.update_issue": "issues:write",
   "github.create_comment": "issues:write",
   "github.create_review": "pull_requests:write",
+  "github.request_reviewers": "pull_requests:write",
   "github.create_pull_request": "pull_requests:write",
   "github.update_pull_request": "pull_requests:write",
   "github.merge_pull_request": "pull_requests:write + contents:write",
@@ -86,6 +94,8 @@ function handleOctokitError(
   actionId: string,
   operation: string,
 ): PluginActionResult {
+  const limited = rateLimitError(err, operation);
+  if (limited) return { success: false, error: limited };
   const e = err as { status?: number; message?: string };
   const status = e.status ?? "unknown";
   const ghMessage = e.message || "";
@@ -121,6 +131,40 @@ function action<TParams extends TSchema>(parameters: TParams) {
   }): PluginAction<TParams> => ({ ...rest, parameters });
 }
 
+/** Link fields a caller can use without a token. Every other `*_url` field is
+ * an API link template (`hooks_url`, `issues_url{/number}`) and is dropped. */
+const KEPT_REPO_URLS = new Set(["html_url", "clone_url", "ssh_url", "git_url", "svn_url", "mirror_url"]);
+
+/** Nested objects that shrink to their identity. A fork's `parent` and
+ * `source` are full repositories, each with its own owner and link templates. */
+const NESTED_ACCOUNT = new Set(["owner", "organization"]);
+const NESTED_REPO = new Set(["parent", "source", "template_repository"]);
+
+function pickFields(value: unknown, fields: readonly string[]): unknown {
+  if (typeof value !== "object" || value === null) return value;
+  return Object.fromEntries(Object.entries(value).filter(([key]) => fields.includes(key)));
+}
+
+/**
+ * A repository without GitHub's API link templates. The raw response is about
+ * 15,000 characters for a fork, most of it `*_url` templates and full copies of
+ * the parent and source repositories. Every scalar setting (`allow_*`,
+ * `has_*`, `delete_branch_on_merge`, `size`) and every other field keeps its
+ * GitHub name and shape, so a reader of the raw response still finds it. Only
+ * the link templates go, and the nested owner and repositories shrink.
+ */
+function repoView(repo: object): Record<string, unknown> {
+  const view: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(repo)) {
+    if (key.endsWith("_url") && !KEPT_REPO_URLS.has(key)) continue;
+    if (NESTED_ACCOUNT.has(key)) view[key] = pickFields(value, ["login", "id", "type"]);
+    else if (NESTED_REPO.has(key)) view[key] = pickFields(value, ["id", "full_name", "html_url", "default_branch"]);
+    else if (key === "license") view[key] = pickFields(value, ["key", "name", "spdx_id"]);
+    else view[key] = value;
+  }
+  return view;
+}
+
 // ─── Actions ────────────────────────────────────────────────────────────────
 
 const getRepository = action(Type.Object({
@@ -135,7 +179,7 @@ const getRepository = action(Type.Object({
     const octokit = await getOctokit(ctx);
     try {
       const { data } = await octokit.request("GET /repos/{owner}/{repo}", { owner, repo });
-      return { success: true, data };
+      return { success: true, data: repoView(data) };
     } catch (err) {
       return handleOctokitError(err, "github.get_repository", "Get repository");
     }
@@ -194,7 +238,7 @@ const listRepos = action(Type.Object({
         per_page: args.perPage,
         page: args.page,
       });
-      return { success: true as const, data: data.repositories };
+      return { success: true as const, data: data.repositories.map(repoView) };
     }
 
     if (scope === "installation") {
@@ -220,7 +264,7 @@ const listRepos = action(Type.Object({
         per_page: args.perPage,
         page: args.page,
       });
-      return { success: true, data };
+      return { success: true, data: data.map(repoView) };
     } catch (err) {
       if (scope === "auto" && isForbidden(err)) {
         try {
@@ -435,8 +479,10 @@ async function fetchPullRequestFiles(
   limit: number,
 ): Promise<PullRequestFile[]> {
   const files: PullRequestFile[] = [];
+  // One page size for every page: a smaller last page would make GitHub
+  // count pages in that size and return files this loop already has.
+  const perPage = Math.min(GITHUB_MAX_PER_PAGE, limit);
   for (let page = 1; files.length < limit; page++) {
-    const perPage = Math.min(GITHUB_MAX_PER_PAGE, limit - files.length);
     const { data } = await octokit.request(
       "GET /repos/{owner}/{repo}/pulls/{pull_number}/files",
       { owner, repo, pull_number: pullNumber, per_page: perPage, page },
@@ -452,7 +498,7 @@ async function fetchPullRequestFiles(
     }
     if (data.length < perPage) break;
   }
-  return files;
+  return files.slice(0, limit);
 }
 
 /** Cuts a patch at the last whole line that fits in `budgetBytes`. Cutting on a
@@ -579,7 +625,7 @@ const inspectPullRequest = action(Type.Object({
   id: "github.inspect_pull_request",
   name: "Inspect Pull Request",
   description:
-    "Get detailed PR info including files changed, review comments, check status, and who is " +
+    "Get detailed PR info including merge time and merger, labels, files changed, review comments, check status, and who is " +
     "already requested to review or assigned. " +
     "Set includePatch to read the diff, and pathPrefixes to scope to a folder; " +
     "`matched_file_count` is a scalar a workflow if-node can compare against a number.",
@@ -677,6 +723,12 @@ const inspectPullRequest = action(Type.Object({
           title: pr.title,
           state: pr.state,
           merged: pr.merged,
+          /** Merge facts a report needs, so it does not call `get_issue` for each PR. */
+          merged_at: pr.merged_at,
+          merged_by: pr.merged_by?.login ?? null,
+          merge_commit_sha: pr.merge_commit_sha,
+          closed_at: pr.closed_at,
+          labels: (pr.labels ?? []).map((label) => label.name),
           draft: pr.draft,
           user: pr.user?.login,
           url: pr.html_url,
@@ -1014,6 +1066,73 @@ const createReview = action(Type.Object({
         };
       }
       return handleOctokitError(err, "github.create_review", "Create review");
+    }
+  },
+});
+
+const requestReviewers = action(Type.Object({
+    owner: Type.String({ description: "Repository owner" }),
+    repo: Type.String({ description: "Repository name" }),
+    pullNumber: Type.Integer({ minimum: 1, description: "Pull request number" }),
+    reviewers: Type.Optional(
+      Type.Array(Type.String({ minLength: 1 }), {
+        minItems: 1,
+        description:
+          "GitHub usernames to request for review. Supply reviewers, teamReviewers, or both. This does not change PR assignees.",
+      }),
+    ),
+    teamReviewers: Type.Optional(
+      Type.Array(Type.String({ minLength: 1 }), {
+        minItems: 1,
+        description:
+          "Organization team slugs to request for review. Supply reviewers, teamReviewers, or both. This does not change PR assignees.",
+      }),
+    ),
+  }))({
+  id: "github.request_reviewers",
+  name: "Request Pull Request Reviewers",
+  description:
+    "Request GitHub users and optional teams to review a pull request. This adds reviewer requests and does not replace PR assignees.",
+  riskLevel: "medium",
+  execute: async (args, ctx) => {
+    if ((args.reviewers?.length ?? 0) === 0 && (args.teamReviewers?.length ?? 0) === 0) {
+      return {
+        success: false,
+        error:
+          "Request reviewers: supply at least one GitHub username in reviewers or one team slug in teamReviewers.",
+      };
+    }
+    const octokit = await getOctokit(ctx);
+    try {
+      const { data: pull } = await octokit.request(
+        "POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers",
+        {
+          owner: args.owner,
+          repo: args.repo,
+          pull_number: args.pullNumber,
+          reviewers: args.reviewers ?? [],
+          ...(args.teamReviewers === undefined ? {} : { team_reviewers: args.teamReviewers }),
+        },
+      );
+      return {
+        success: true,
+        data: {
+          number: pull.number,
+          url: pull.html_url,
+          requested_reviewers: (pull.requested_reviewers ?? []).map((reviewer) => reviewer.login),
+          requested_teams: (pull.requested_teams ?? []).map((team) => team.slug),
+        },
+      };
+    } catch (err) {
+      const e = err as { status?: number };
+      if (e.status === 422) {
+        return {
+          success: false,
+          error:
+            "Request reviewers: GitHub rejected the request (422). A pull request author cannot be requested. Each user or team must be a collaborator with access to this repository. GitHub applies this request atomically, so no reviewer was added. Remove the author and inaccessible reviewers or teams, then try again.",
+        };
+      }
+      return handleOctokitError(err, "github.request_reviewers", "Request reviewers");
     }
   },
 });
@@ -1553,6 +1672,66 @@ const searchCode = action(Type.Object({
   },
 });
 
+/** `@now` or `@today`, with an optional offset back in time: `@now-7d`, `@today-2w`. */
+const RELATIVE_DATE = /@(now|today)(?:-(\d{1,4})([hdw]))?(?![\w-])/g;
+const OFFSET_MS: Record<string, number> = { h: 3_600_000, d: 86_400_000, w: 604_800_000 };
+
+/**
+ * Replaces relative dates in a search query with the ISO dates GitHub
+ * accepts. GitHub's REST search rejects `@today`, and a workflow template
+ * has no date arithmetic, so a tool step could not ask for "the last 7
+ * days" without this. `@now` is a UTC time to the second; `@today` is a
+ * UTC date.
+ */
+export function expandRelativeDates(q: string, now: Date): string {
+  return q.replace(RELATIVE_DATE, (_match, base: string, count: string | undefined, unit: string | undefined) => {
+    const offset = count !== undefined && unit !== undefined ? Number(count) * OFFSET_MS[unit] : 0;
+    const iso = new Date(now.getTime() - offset).toISOString();
+    return base === "today" ? iso.slice(0, 10) : `${iso.slice(0, 19)}Z`;
+  });
+}
+
+/** GitHub search returns at most 1000 results for one query, however it is paged. */
+const GITHUB_SEARCH_MAX_RESULTS = 1000;
+
+/** The `owner/repo` of a search result, from its `repository_url`. */
+function repoFullName(repositoryUrl: string | undefined): string | null {
+  return repositoryUrl?.split("/repos/")[1] ?? null;
+}
+
+/**
+ * Reads up to `limit` search results, in pages of at most 100. One request
+ * returned at most 100, so a week with more merged PRs needed an agent to
+ * split the date range, and the list it built could drop or repeat PRs.
+ */
+async function searchIssuePages(
+  octokit: Octokit,
+  args: { q: string; sort?: "created" | "updated" | "comments"; order?: "asc" | "desc" },
+  limit: number,
+) {
+  type SearchItem = Awaited<ReturnType<typeof octokit.rest.search.issuesAndPullRequests>>["data"]["items"][number];
+  const items: SearchItem[] = [];
+  let totalCount = 0;
+  let incomplete = false;
+  // One page size for every page: a smaller last page would make GitHub
+  // count pages in that size and return results this loop already has.
+  const perPage = Math.min(GITHUB_MAX_PER_PAGE, limit);
+  for (let page = 1; items.length < limit; page++) {
+    const { data } = await octokit.request("GET /search/issues", {
+      q: args.q,
+      per_page: perPage,
+      page,
+      sort: args.sort,
+      order: args.order,
+    });
+    totalCount = data.total_count;
+    incomplete ||= data.incomplete_results;
+    items.push(...data.items);
+    if (data.items.length < perPage || items.length >= totalCount) break;
+  }
+  return { totalCount, incomplete, items: items.slice(0, limit) };
+}
+
 const searchIssues = action(Type.Object({
     q: Type.String({
       description:
@@ -1570,39 +1749,49 @@ const searchIssues = action(Type.Object({
       }),
     ),
     limit: Type.Optional(
-      Type.Integer({ minimum: 1, maximum: 100, description: "Max results (default: 30)" }),
+      Type.Integer({
+        minimum: 1,
+        maximum: GITHUB_SEARCH_MAX_RESULTS,
+        description: "Max results (default: 30, max 1000). Results above 100 are read in pages.",
+      }),
     ),
   }))({
   id: "github.search_issues",
   name: "Search Issues",
-  description: "Search issues and pull requests across GitHub",
+  description:
+    "Search issues and pull requests across GitHub. One call returns up to 1000 results, so a workflow " +
+    "tool step can list a week of merged PRs: `is:pr is:merged merged:>=@now-7d`. " +
+    "In a date qualifier, `@now` and `@today` are the time and UTC date when the call runs; add `-<n>h`, " +
+    "`-<n>d` or `-<n>w` to go back. `query` in the result shows the dates sent to GitHub. " +
+    "`truncated` is true when more results match than the call returned.",
   riskLevel: "low",
   execute: async (args, ctx) => {
     const octokit = await getOctokit(ctx);
-    const limit = Math.min(Math.max(args.limit ?? 30, 1), 100);
+    const limit = Math.min(Math.max(args.limit ?? 30, 1), GITHUB_SEARCH_MAX_RESULTS);
     try {
-      const { data } = await octokit.request("GET /search/issues", {
-        q: args.q,
-        per_page: limit,
-        sort: args.sort,
-        order: args.order,
-      });
+      const q = expandRelativeDates(args.q, new Date());
+      const { totalCount, incomplete, items } = await searchIssuePages(octokit, { ...args, q }, limit);
       return {
         success: true,
         data: {
-          total_count: data.total_count,
-          items: data.items.map((item) => ({
+          query: q,
+          total_count: totalCount,
+          /** GitHub stopped the search early (a timeout), so a match can be missing. */
+          incomplete_results: incomplete,
+          truncated: incomplete || totalCount > items.length,
+          items: items.map((item) => ({
             number: item.number,
             title: item.title,
             state: item.state,
             user: item.user?.login,
             url: item.html_url,
+            repo: repoFullName(item.repository_url),
             is_pr: !!item.pull_request,
-            labels: (item.labels as Array<unknown>)?.map((l) =>
-              typeof l === "string" ? l : (l as { name: string }).name,
-            ),
+            labels: (item.labels ?? []).map((l) => (typeof l === "string" ? l : l.name)),
             created_at: item.created_at,
             updated_at: item.updated_at,
+            closed_at: item.closed_at,
+            merged_at: item.pull_request?.merged_at ?? null,
           })),
         },
       };
@@ -2165,25 +2354,109 @@ const readRepoFile = action(Type.Object({
   }))({
   id: "github.read_repo_file",
   name: "Read Repository File",
-  description: "Read a file from a GitHub repository without cloning it",
+  description: "Read a file from a GitHub repository without cloning it. A PDF comes back as extracted text.",
   riskLevel: "low",
   execute: async (args, ctx) => {
     const octokit = await getOctokit(ctx);
     try {
       const { data } = await octokit.request(
         "GET /repos/{owner}/{repo}/contents/{path}",
-        { owner: args.owner, repo: args.repo, path: args.path, ref: args.ref },
+        { owner: args.owner, repo: args.repo, path: args.path, ref: args.ref, request: { signal: ctx.signal } },
       );
       if (Array.isArray(data) || data.type !== "file") {
         return { success: false, error: wrongPathKindError(contentsKind(data), "file") };
       }
+      const name = typeof data.path === "string" ? data.path : args.path;
       const raw = data.content ?? "";
-      const content =
+      const bytes =
         data.encoding === "base64"
-          ? new TextDecoder().decode(
-              Uint8Array.from(atob(raw.replace(/\n/g, "")), (c) => c.charCodeAt(0)),
+          ? Uint8Array.from(atob(raw.replace(/\n/g, "")), (c) => c.charCodeAt(0))
+          : new TextEncoder().encode(raw);
+      const inlinePdf = isPdfDocument(bytes);
+      const needsRaw = name.toLowerCase().endsWith(".pdf") || inlinePdf || data.encoding === "none";
+
+      if (needsRaw) {
+        // Pin the raw request to the metadata blob. Without the SHA, a branch
+        // can change between the Contents metadata request and the raw read.
+        const blobSha = typeof data.sha === "string" ? data.sha : undefined;
+        const rawRef = blobSha ?? args.ref;
+        const rawResponse = blobSha
+          ? await octokit.request(
+              "GET /repos/{owner}/{repo}/git/blobs/{file_sha}",
+              {
+                owner: args.owner,
+                repo: args.repo,
+                file_sha: blobSha,
+                mediaType: { format: "raw" },
+                request: { parseSuccessResponseBody: false, signal: ctx.signal },
+              },
             )
-          : raw;
+          : await octokit.request(
+              "GET /repos/{owner}/{repo}/contents/{path}",
+              {
+                owner: args.owner,
+                repo: args.repo,
+                path: args.path,
+                ref: rawRef,
+                mediaType: { format: "raw" },
+                request: { parseSuccessResponseBody: false, signal: ctx.signal },
+              },
+            );
+        if (!(rawResponse.data instanceof ReadableStream)) {
+          return { success: false, error: `Could not download ${name}. Try again.` };
+        }
+        const headers = new Headers();
+        for (const [header, value] of Object.entries(rawResponse.headers)) headers.set(header, String(value));
+        const response = new Response(rawResponse.data as ReadableStream<Uint8Array>, { headers });
+        const rawMime = normalizeDocumentMime(headers.get("content-type") ?? undefined);
+        const namedOrInlinePdf = name.toLowerCase().endsWith(".pdf") || inlinePdf;
+        const generic = rawMime === "" || rawMime === "application/octet-stream";
+        const expectsPdf = namedOrInlinePdf || rawMime === "application/pdf" || generic || (data.encoding === "none" && !isTextDocumentMime(rawMime));
+
+        if (expectsPdf) {
+          const downloaded = await readPdfCandidateResponse(response, MAX_PDF_DOCUMENT_BYTES, ctx.signal);
+          if (downloaded.kind === "oversize") {
+            return { success: false, error: `PDF too large (${Math.round(downloaded.size / 1024 / 1024)}MB). Max 25MB.` };
+          }
+          if (downloaded.kind !== "pdf") {
+            if (!namedOrInlinePdf && rawMime !== "application/pdf") {
+              return { success: false, error: `Cannot read binary file ${name}. Only text files and PDFs are supported.` };
+            }
+            return { success: false, error: `Cannot read ${name} as a PDF. The downloaded file does not have a PDF signature.` };
+          }
+          const read = await extractDownloadedPdf({
+            data: downloaded.data,
+            name,
+            extractDocument: ctx.extractDocument,
+            signal: ctx.signal,
+          });
+          if (!read.ok) return { success: false, error: read.error };
+          return {
+            success: true,
+            data: {
+              path: data.path,
+              repo: `${args.owner}/${args.repo}`,
+              ref: args.ref,
+              size: data.size,
+              content: read.content,
+            },
+          };
+        }
+
+        if (isTextDocumentMime(rawMime)) {
+          const downloaded = await readResponseText(response, 1_048_576, ctx.signal);
+          if (!downloaded.ok) {
+            return { success: false, error: `File is ${downloaded.size} bytes, exceeds max 1048576 bytes.` };
+          }
+          return {
+            success: true,
+            data: { path: data.path, repo: `${args.owner}/${args.repo}`, ref: args.ref, size: data.size, content: downloaded.text },
+          };
+        }
+        return { success: false, error: `Cannot read binary file ${name}. Only text files and PDFs are supported.` };
+      }
+
+      const content = new TextDecoder().decode(bytes);
       return {
         success: true,
         data: {
@@ -2279,6 +2552,7 @@ export const githubPlugin: ActionPlugin = {
     listPullRequests,
     inspectPullRequest,
     createReview,
+    requestReviewers,
     updatePullRequest,
     createPullRequest,
     mergePullRequest,

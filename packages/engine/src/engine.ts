@@ -1,4 +1,5 @@
 import { VirtualSandboxProvider } from "./providers/sandbox/virtual.js";
+import { uid } from "./ids.js";
 import { Session } from "./session.js";
 import { SandboxAttachment } from "./sandbox/attachment.js";
 import { PolicySandbox } from "./sandbox/policy.js";
@@ -11,10 +12,6 @@ import type {
   SpecProvider,
 } from "./types.js";
 
-let nextId = 1;
-function uid(prefix: string): string {
-  return `${prefix}-${Date.now().toString(36)}-${(nextId++).toString(36)}`;
-}
 
 export class Engine {
   private sessions = new Map<string, Session>();
@@ -33,6 +30,8 @@ export class Engine {
       opts.sandbox,
       opts.sandboxReadyTimeoutMs,
       opts.specProvider,
+      opts.sandboxLifecycle,
+      opts.isLeased,
     );
     const session = new Session(id, opts, this.opts.providers, sandbox, attachment, policySandbox);
     this.sessions.set(id, session);
@@ -42,15 +41,19 @@ export class Engine {
   }
 
   async restoreSession(args: RestoreSessionOptions): Promise<Session> {
+    if (args.predecessor && args.predecessor.id !== args.sessionId) throw new Error("Configuration handoff must keep the session identity");
     const cached = this.sessions.get(args.sessionId);
     if (cached) return cached;
     const data = await this.opts.providers.store.getSession(args.sessionId);
     if (!data) throw new Error(`session not found: ${args.sessionId}`);
-    const { attachment, sandbox, policySandbox } = await this.materializeSandbox(
+    const shared = args.predecessor?.attachment.state !== "released" ? args.predecessor?.sharedExecutionRuntime() : undefined;
+    const { attachment, sandbox, policySandbox } = shared ?? await this.materializeSandbox(
       args.sessionId,
       args.options.sandbox,
       args.options.sandboxReadyTimeoutMs,
       args.options.specProvider,
+      args.options.sandboxLifecycle,
+      args.options.isLeased,
     );
     const session = await Session.rehydrate(
       data,
@@ -59,6 +62,7 @@ export class Engine {
       sandbox,
       attachment,
       policySandbox,
+      args.predecessor,
     );
     this.sessions.set(args.sessionId, session);
     return session;
@@ -88,13 +92,16 @@ export class Engine {
     arg: Sandbox | SandboxCreateOpts | undefined,
     readyTimeoutMs: number | undefined,
     specProvider?: SpecProvider,
+    lifecycle?: CreateSessionOptions['sandboxLifecycle'],
+    isLeased?: CreateSessionOptions['isLeased'],
   ): Promise<{ attachment: SandboxAttachment; sandbox: Sandbox; policySandbox: PolicySandbox }> {
     let attachment: SandboxAttachment;
     if (arg && typeof (arg as Sandbox).readFile === "function") {
       // A concrete pre-provisioned handle is ready at epoch 1 and never runs
       // `doProvision`, so there is no cold-boot point at which prep could run —
       // the host is responsible for prepping a sandbox it hands in ready.
-      attachment = SandboxAttachment.forSandbox(arg as Sandbox);
+      attachment = SandboxAttachment.forSandbox(arg as Sandbox, lifecycle);
+      await lifecycle?.afterReady?.(arg as Sandbox);
     } else {
       const provider = this.opts.providers.sandboxProvider ?? new VirtualSandboxProvider();
       // Stamp the owning session on the create opts so providers with a
@@ -104,7 +111,7 @@ export class Engine {
       // from another session (or carrying an explicit `sessionId: undefined`
       // key) must never annotate the sandbox with the wrong owner.
       const createOpts: SandboxCreateOpts = { ...((arg ?? {}) as SandboxCreateOpts), sessionId };
-      attachment = new SandboxAttachment(provider, createOpts, specProvider);
+      attachment = new SandboxAttachment(provider, createOpts, specProvider, lifecycle, isLeased);
     }
     const policySandbox = new PolicySandbox(attachment, { readyTimeoutMs });
     return { attachment, sandbox: policySandbox, policySandbox };

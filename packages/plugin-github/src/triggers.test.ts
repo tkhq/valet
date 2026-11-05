@@ -153,7 +153,7 @@ describe("github toEvent", () => {
     expect(event.dedupeKey).toBe("delivery-1");
     expect(event.refs.repo).toBe("tkhq/valet");
     expect(event.refs.installation_id).toBe("42");
-    expect(event.actor).toEqual({ externalId: "7", login: "conner" });
+    expect(event.actor).toEqual({ externalId: "7", login: "conner", bot: false });
     expect(event.summary).toContain("tkhq/valet");
     expect(event.summary).toContain("pull_request opened");
   });

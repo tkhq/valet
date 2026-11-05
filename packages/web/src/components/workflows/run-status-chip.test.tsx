@@ -15,7 +15,7 @@ describe("RunStatusChip", () => {
 
   it("renders the outcome badge text when settled with an outcome", () => {
     render(<RunStatusChip status="settled" outcome="completed" needsApproval={false} />);
-    expect(screen.getByText("completed")).toBeTruthy();
+    expect(screen.getByText("Completed")).toBeTruthy();
   });
 
   it("renders 'Waiting' when parked but needsApproval is false", () => {

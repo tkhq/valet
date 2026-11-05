@@ -1,13 +1,14 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { describeRunHostContract, makeRunHostFixtureEngine, type RunHostFixture, type RunHostFixtureOptions } from './conformance/run-host.js';
 import type { RunSettledInfo } from './interpreter.js';
 import { LocalRunHost } from './local-host.js';
 import { InMemoryWorkflowStore } from './memory-store.js';
-import { createDefaultNodeExecutors, executeStop, type NodeExecutorRegistry } from './nodes/index.js';
+import { createDefaultNodeExecutors, executeStop, type NodeExecuteResult, type NodeExecutor, type NodeExecutorRegistry } from './nodes/index.js';
 import type { RunParams } from './store.js';
-import type { SessionNode } from './dag/nodes.js';
+import type { SessionNode, WaitNode } from './dag/nodes.js';
 import type { WorkflowDefinition } from './dag/shape.js';
+import { scheduledTriggerData } from './dag/step-design.js';
 
 // ─── Test helpers (crashAt test only — the shared suite covers everything else) ─
 
@@ -144,10 +145,150 @@ describe('LocalRunHost crashAt "terminalizing"', () => {
   });
 });
 
+// ─── A scheduled run's input reaches its steps ────────────────────────────────
+
+describe('LocalRunHost scheduled run input', () => {
+  it('gives a step the dataSchema default of a field the schedule leaves out', async () => {
+    const store = new InMemoryWorkflowStore();
+    const host = new LocalRunHost({ store, engine: makeRunHostFixtureEngine(), pollMs: 10, sweepMs: 20 });
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger', dataSchema: { cluster: { type: 'string', default: '.+' }, lookback: { type: 'string', default: '7h' } } },
+        { id: 'read', type: 'set', values: { query: '{cluster=~"{{trigger.data.cluster}}"} since now-{{trigger.data.lookback}}' } },
+        { id: 'e', type: 'stop' },
+      ],
+      edges: [{ from: 't', to: 'read' }, { from: 'read', to: 'e' }],
+    };
+    const data = scheduledTriggerData(definition, { scheduleName: 'Morning scan', cron: '0 8 * * *', input: { lookback: '17h' } });
+    host.startHost();
+    try {
+      await host.start('run-scheduled', runParams({ input: { type: 'schedule', timestamp: '2026-01-01T08:00:00Z', data, metadata: {} } }), definition);
+      await waitFor(async () => (await store.getRun('run-scheduled'))?.status === 'settled');
+      const read = (await store.getCheckpoints('run-scheduled')).find((cp) => cp.nodeId === 'read');
+      expect(read?.result).toEqual({ query: '{cluster=~".+"} since now-17h' });
+    } finally {
+      await host.stopHost();
+    }
+  });
+});
+
 // ─── Restart case: a run parked on a submission wait before the process ─────
 // ─── crashed, re-armed by a fresh process's sweep with zero prior knowledge ─
 
 describe('LocalRunHost sweep survives a process restart', () => {
+  it('fails a preview run already parked on the same account after consumed consent', async () => {
+    const store = new InMemoryWorkflowStore();
+    const engine = makeRunHostFixtureEngine();
+    await store.createRun('legacy-account-loop', runParams(), { version: 'dag/v1', nodes: [
+      { id: 'step', type: 'tool', service: 'demo', action: 'ping', params: {} },
+    ], edges: [] }, 'v1');
+    const claim = await store.claimRun('legacy-account-loop', 'old-host', 30_000);
+    if (!claim) throw new Error('Missing claim');
+    await store.putIntent({ runId: 'legacy-account-loop', nodeId: 'step', iteration: 0, status: 'intent', attempt: claim.attempt,
+      createdAt: 1, effects: { gate: true, accountConsentResolved: true, provenance: 'shared_account',
+        approver: { userId: 'lender', shareGeneration: 'share-1', allowTeamConsent: true } } });
+    await store.insertSignal({ runId: 'legacy-account-loop', signalId: 'approval:step:account:share-1:resolution', signalType: 'approval:step',
+      payload: { approved: true, resolvedBy: 'lender', scope: 'team_account' }, createdAt: 1, consumedAt: 1,
+      consumedBy: { nodeId: 'step', iteration: 0, attempt: claim.attempt } });
+    await store.parkRun('legacy-account-loop', claim.attempt, [{ kind: 'signal', signalType: 'approval:step', nodeId: 'step' }]);
+    const host = new LocalRunHost({ store, engine, pollMs: 100_000, sweepMs: 20 });
+    host.startHost();
+    try {
+      await waitFor(async () => (await store.getRun('legacy-account-loop'))?.status === 'settled');
+      expect((await store.getRun('legacy-account-loop'))?.outcome).toBe('failed');
+      expect((await store.getCheckpoints('legacy-account-loop'))[0]?.error).toContain('account still requires approval');
+      expect((await store.listSignals('legacy-account-loop'))[0]?.consumedAt).toBe(1);
+    } finally { await host.stopHost(); }
+  });
+
+  it.each([false, true])('keeps a preview-format action gate open after legacy consent (consumed=%s)', async consumed => {
+    const store = new InMemoryWorkflowStore();
+    const engine = makeRunHostFixtureEngine();
+    let calls = 0;
+    engine.invokeAction = async req => {
+      calls++;
+      return req.approval ? { ok: true, result: {} } : { ok: false, requiresApproval: true, provenance: 'org_policy' };
+    };
+    await store.createRun('legacy-action', runParams(), { version: 'dag/v1', nodes: [
+      { id: 'step', type: 'tool', service: 'demo', action: 'ping', params: {} },
+    ], edges: [] }, 'v1');
+    const claim = await store.claimRun('legacy-action', 'old-host', 30_000);
+    if (!claim) throw new Error('Missing claim');
+    await store.putIntent({ runId: 'legacy-action', nodeId: 'step', iteration: 0, status: 'intent', attempt: claim.attempt,
+      createdAt: 1, effects: { gate: true, accountConsentResolved: true, provenance: 'org_policy' } });
+    await store.insertSignal({ runId: 'legacy-action', signalId: 'legacy-account-answer', signalType: 'approval:step',
+      payload: { approved: true, resolvedBy: 'lender', scope: 'team_account' }, createdAt: 1,
+      ...(consumed ? { consumedAt: 1, consumedBy: { nodeId: 'step', iteration: 0, attempt: claim.attempt } } : {}) });
+    await store.parkRun('legacy-action', claim.attempt, [{ kind: 'signal', signalType: 'approval:step', nodeId: 'step' }]);
+    let sweeps = 0;
+    const listParked = store.listParked.bind(store);
+    store.listParked = async limit => { sweeps++; return listParked(limit); };
+    const host = new LocalRunHost({ store, engine, pollMs: 100_000, sweepMs: 20 });
+    host.startHost();
+    try {
+      await waitFor(() => sweeps >= 3);
+      expect(calls).toBe(0);
+      expect((await store.getRun('legacy-action'))?.status).toBe('parked');
+      expect((await store.listSignals('legacy-action'))[0]?.consumedAt !== undefined).toBe(consumed);
+      await store.insertSignal({ runId: 'legacy-action', signalId: 'legacy-action-answer', signalType: 'approval:step',
+        payload: { approved: true, resolvedBy: 'requester' }, createdAt: 2 });
+      await waitFor(async () => (await store.getRun('legacy-action'))?.status === 'settled');
+      expect((await store.getRun('legacy-action'))?.outcome).toBe('completed');
+      expect(calls).toBe(1);
+    } finally { await host.stopHost(); }
+  });
+
+  it.each([false, true])('keeps multiple account answers consumed across later gates (legacy=%s)', async legacy => {
+    const store = new InMemoryWorkflowStore();
+    const engine = makeRunHostFixtureEngine();
+    let calls = 0;
+    engine.invokeAction = async req => {
+      calls++;
+      if (req.approval) return { ok: true, result: { done: true } };
+      return calls < 3
+        ? { ok: false, requiresApproval: true, provenance: 'shared_account', approver: { userId: 'lender', shareGeneration: `share-${calls}`, allowTeamConsent: true } }
+        : { ok: false, requiresApproval: true, provenance: 'org_policy' };
+    };
+    const definition: WorkflowDefinition = { version: 'dag/v1', nodes: [
+      { id: 't', type: 'trigger' }, { id: 'step', type: 'tool', service: 'demo', action: 'ping', params: {} },
+    ], edges: [{ from: 't', to: 'step' }] };
+    let sweeps = 0;
+    const listParked = store.listParked.bind(store);
+    store.listParked = async limit => { sweeps++; return listParked(limit); };
+    const host = new LocalRunHost({ store, engine, pollMs: 100_000, sweepMs: 20 });
+    host.startHost();
+    try {
+      await host.start('run-consent-sweep', runParams(), definition);
+      await waitFor(async () => (await store.getRun('run-consent-sweep'))?.status === 'parked');
+      if (legacy) {
+        const cp = (await store.getCheckpoints('run-consent-sweep')).find(c => c.nodeId === 'step');
+        if (!cp) throw new Error('Missing checkpoint');
+        await store.putIntent({ ...cp, effects: { ...cp.effects, gateId: undefined, gateSequence: undefined } });
+      }
+      for (const signalId of ['consent:first', 'consent:second']) {
+        const cp = (await store.getCheckpoints('run-consent-sweep')).find(c => c.nodeId === 'step');
+        await store.insertSignal({ runId: 'run-consent-sweep', signalId, signalType: 'approval:step',
+          payload: { approved: true, resolvedBy: 'lender', scope: 'team_account', gateId: cp?.effects?.gateId }, createdAt: Date.now() });
+        await host.wake('run-consent-sweep');
+        const expectedCalls = signalId === 'consent:first' ? 2 : 3;
+        await waitFor(async () => calls >= expectedCalls && (await store.getRun('run-consent-sweep'))?.status === 'parked');
+      }
+      const beforeSweeps = sweeps;
+      await waitFor(() => sweeps >= beforeSweeps + 3);
+      const checkpoint = (await store.getCheckpoints('run-consent-sweep')).find(c => c.nodeId === 'step');
+      const gateId = legacy ? 'approval:step:gate:2' : 'approval:step:gate:3';
+      expect(checkpoint?.effects?.gateId).toBe(gateId);
+      expect(calls).toBe(3);
+      expect(await store.listSignals('run-consent-sweep', { unconsumed: true })).toEqual([]);
+      await store.insertSignal({ runId: 'run-consent-sweep', signalId: 'action:answer', signalType: 'approval:step',
+        payload: { approved: true, resolvedBy: 'requester', gateId }, createdAt: Date.now() });
+      await waitFor(async () => (await store.getRun('run-consent-sweep'))?.status === 'settled');
+      expect((await store.getRun('run-consent-sweep'))?.outcome).toBe('completed');
+      expect(calls).toBe(4);
+    } finally { await host.stopHost(); }
+  });
+
   it('wakes a run parked on a submission wait that a fresh host never start()ed or wake()d', async () => {
     // This is the finding-1 regression verbatim: the sweep used to
     // enumerate a host-local `knownRunIds` set, populated only by
@@ -253,6 +394,118 @@ describe('LocalRunHost settle reporting', () => {
   });
 });
 
+describe('LocalRunHost approval park reporting', () => {
+  it('reports once per drive that opens a gate, after the park lists every waiting step', async () => {
+    const clock = makeClock();
+    const store = new InMemoryWorkflowStore(clock.now);
+    const reports: { attempt: number; waiting: string[] }[] = [];
+    const host = new LocalRunHost({
+      store,
+      engine: makeRunHostFixtureEngine(),
+      clock: clock.now,
+      pollMs: 10,
+      sweepMs: 20,
+      leaseMs: 2_000,
+      heartbeatMs: 300,
+      onApprovalParked: async ({ runId, attempt }) => {
+        const run = await store.getRun(runId);
+        const waiting = (run?.waitingOn ?? []).map((wait) => (wait.kind === 'signal' ? wait.signalType : wait.kind));
+        reports.push({ attempt, waiting: waiting.sort() });
+      },
+    });
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 'a', type: 'approval', prompt: 'A?', timeout: '1s', onDeny: 'skip' },
+        { id: 'b', type: 'approval', prompt: 'B?' },
+        { id: 'c', type: 'approval', prompt: 'C?' },
+      ],
+      edges: [
+        { from: 't', to: 'a' },
+        { from: 't', to: 'b' },
+        { from: 'a', to: 'c', fromOutput: 'false' },
+      ],
+    };
+
+    host.startHost();
+    try {
+      await host.start('run-gates', runParams(), definition);
+      await waitFor(() => reports.length === 1);
+      expect(reports[0].waiting).toEqual(['approval:a', 'approval:b']);
+
+      // Approving b opens no gate: a still waits, and nothing is reported.
+      await store.insertSignal({ runId: 'run-gates', signalId: 'approval:b:resolution', signalType: 'approval:b',
+        payload: { approved: true, resolvedBy: 'member' }, createdAt: clock.now() });
+      await host.wake('run-gates');
+      await waitFor(async () => (await store.getCheckpoints('run-gates')).some((cp) => cp.nodeId === 'b' && cp.status === 'completed'));
+      await waitFor(async () => (await store.getRun('run-gates'))?.status === 'parked');
+      expect(reports).toHaveLength(1);
+
+      // a times out without a resolution signal and c opens: a new report.
+      clock.advance(5_000);
+      await host.wake('run-gates');
+      await waitFor(() => reports.length === 2);
+      expect(reports[1].waiting).toEqual(['approval:c']);
+      expect(reports[1].attempt).toBeGreaterThan(reports[0].attempt);
+    } finally {
+      await host.stopHost();
+    }
+  });
+});
+
+describe('LocalRunHost approval park reporting after a failed drive', () => {
+  it('reports the gate on the retry when the drive that opened it failed to park', async () => {
+    const clock = makeClock();
+    const store = new InMemoryWorkflowStore(clock.now);
+    const parkRun = store.parkRun.bind(store);
+    let failPark = true;
+    store.parkRun = async (...args) => {
+      if (failPark) {
+        failPark = false;
+        throw new Error('transient park failure');
+      }
+      return parkRun(...args);
+    };
+    let opened = 0;
+    const reports: number[] = [];
+    const host = new LocalRunHost({
+      store,
+      engine: makeRunHostFixtureEngine(),
+      clock: clock.now,
+      pollMs: 10,
+      sweepMs: 20,
+      leaseMs: 50,
+      heartbeatMs: 300,
+      onApprovalPending: () => {
+        opened++;
+      },
+      onApprovalParked: ({ attempt }) => {
+        reports.push(attempt);
+      },
+    });
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [{ id: 't', type: 'trigger' }, { id: 'a', type: 'approval', prompt: 'A?' }],
+      edges: [{ from: 't', to: 'a' }],
+    };
+
+    host.startHost();
+    try {
+      await host.start('run-retry', runParams(), definition);
+      await waitFor(async () => {
+        clock.advance(100);
+        return reports.length > 0;
+      });
+    } finally {
+      await host.stopHost();
+    }
+    expect(opened).toBe(1);
+    expect(reports).toHaveLength(1);
+    expect((await store.getRun('run-retry'))?.waitingOn).toEqual([{ kind: 'signal', nodeId: 'a', signalType: 'approval:a', timeoutAt: undefined }]);
+  });
+});
+
 // ─── LocalRunHost-specific: poisoned-run cap ─────────────────────────────────
 // A run whose drive throws deterministically on every reclaim must settle as
 // `failed` after `maxConsecutiveDriveFailures` strikes instead of retrying
@@ -330,6 +583,57 @@ describe('LocalRunHost poisoned-run cap', () => {
     expect(settled[0]).toMatchObject({ runId: 'run-poisoned', outcome: 'failed' });
   });
 
+  // A drive keeps going after a node parks. A later throw in the same drive
+  // leaves that node's work live with no saved wait on the run.
+  it('aborts work an earlier node parked in the failing drive before it settles the run failed', async () => {
+    const clock = makeClock();
+    const store = new InMemoryWorkflowStore(clock.now);
+    const engine = { ...makeRunHostFixtureEngine(), abort: vi.fn(async () => undefined) };
+    const agent: NodeExecutor<WaitNode> = {
+      async execute(args): Promise<NodeExecuteResult> {
+        const receipt = { threadId: 'thread-agent', queueItemId: 'queue-agent' };
+        await args.store.putIntent({
+          runId: args.run.runId, nodeId: args.node.id, iteration: args.iteration, status: 'intent', attempt: args.attempt,
+          createdAt: args.clock(), effects: { sessionId: 'session-agent', receipt },
+        });
+        return { status: 'parked', waitingOn: [{ kind: 'submission', nodeId: args.node.id, sessionId: 'session-agent', ...receipt }] };
+      },
+    };
+    const executors: NodeExecutorRegistry = {
+      ...throwingStopExecutors(() => undefined),
+      wait: agent,
+    };
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 'agent', type: 'wait', mode: 'duration', duration: '1h' } satisfies WaitNode,
+        { id: 'x', type: 'set', values: { a: 1 } },
+        { id: 'bad', type: 'stop' },
+      ],
+      edges: [{ from: 't', to: 'agent' }, { from: 't', to: 'x' }, { from: 'x', to: 'bad' }],
+    };
+    const host = new LocalRunHost({
+      store, engine, clock: clock.now, pollMs: 10, sweepMs: 20, leaseMs: 50, heartbeatMs: 300,
+      maxConsecutiveDriveFailures: 3, executors,
+    });
+    host.startHost();
+    try {
+      await host.start('run-poisoned-live', runParams(), definition);
+      const advancer = setInterval(() => clock.advance(60), 10);
+      try {
+        await waitFor(async () => (await store.getRun('run-poisoned-live'))?.status === 'settled');
+      } finally {
+        clearInterval(advancer);
+      }
+    } finally {
+      await host.stopHost();
+    }
+
+    expect((await store.getRun('run-poisoned-live'))?.outcome).toBe('failed');
+    expect(engine.abort).toHaveBeenCalledWith('session-agent', 'thread-agent', 'queue-agent');
+  });
+
   it('a drive that recovers below the cap settles normally — transient failures keep retry-via-reclaim', async () => {
     const clock = makeClock();
     const store = new InMemoryWorkflowStore(clock.now);
@@ -366,5 +670,19 @@ describe('LocalRunHost poisoned-run cap', () => {
     // the run completes, proving the cap never fires on a recovered run.
     expect(throws).toBe(2);
     expect(run?.outcome).toBe('completed');
+  });
+});
+
+describe('LocalRunHost build stamp', () => {
+  it('records its build on every run it starts, and keeps a build the caller already set', async () => {
+    const clock = makeClock();
+    const store = new InMemoryWorkflowStore(clock.now);
+    const host = new LocalRunHost({ store, engine: makeRunHostFixtureEngine(), clock: clock.now, build: 'abc1234' });
+
+    await host.start('run-new', runParams(), simpleDefinition());
+    await host.start('run-carried', runParams({ build: 'def5678' }), simpleDefinition());
+
+    expect((await store.getRun('run-new'))?.params.build).toBe('abc1234');
+    expect((await store.getRun('run-carried'))?.params.build).toBe('def5678');
   });
 });

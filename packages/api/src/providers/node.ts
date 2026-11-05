@@ -1,9 +1,18 @@
+import { githubInstallationTokenFor } from "../events/derive.js";
+import { buildPluginThreads, stopPluginDeliveryChildren } from "../plugins/plugin-threads.js";
+import { externalUsageRetention } from "../services/external-usage.js";
+import { taggingDrain } from "../tagging/worker.js";
+import { drainAttentionDeliveries } from "../events/attention-delivery.js";
+import { buildHomeTools } from "../home/tools.js";
+import { buildThreadLinkTools } from "../home/thread-link-tools.js";
+import type { HomeDeps } from "../home/service.js";
+import { settingsActionPlugin } from "../services/settings-actions.js";
 import { PGlite } from "@electric-sql/pglite";
 import { Pool } from "pg";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ChildReader, ChildSender, ChildSpawner, ChildStatusReader, ValetPlugin } from "@valet/engine";
+import type { ChildReader, ChildSender, ChildSpawner, ChildStatusReader, ChildStopper, ValetPlugin } from "@valet/engine";
 import { PgSessionStore, PgEventStream, applyEngineMigrations } from "@valet/store-postgres";
 import { eq } from "drizzle-orm";
 import { tracedSessionStore, tracedWorkflowStore } from "../observability/traced-store.js";
@@ -11,9 +20,9 @@ import {
   createDefaultNodeExecutors,
   LocalRunHost,
   type OnApprovalGrant,
-  type OnApprovalPending,
   type OnGateResolved,
 } from "@valet/workflow";
+import { preserveLegacySandboxTokens } from "../auth/sandbox-tokens.js";
 import { applyAppMigrations, buildAppDb, buildAppQueryable } from "../lib/drizzle.js";
 import { orgMembers, orgs, users, workflowDefinitions } from "../schema/index.js";
 import { writeExecutionGrant, updateInvocationOutcome } from "../policies/service.js";
@@ -22,6 +31,7 @@ import { buildHibernationHooks } from "../engine/hibernation-hooks.js";
 import {
   buildChildReader,
   buildChildSender,
+  buildChildStopper,
   buildChildSpawner,
   buildChildStatusReader,
   ChildWatcher,
@@ -29,17 +39,26 @@ import {
 import { HibernationReaper } from "../engine/hibernation-reaper.js";
 import { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
 import { IdleHibernationSweep } from "../engine/idle-hibernation-sweep.js";
+import { OnlineStatusWatcher } from "../services/online-status-watch.js";
+import { WakeWatcher } from "../engine/wake-watcher.js";
 import { SecurityRunnerDriver } from "../orchestrator/security-runner-driver.js";
+import { routeAttention } from "../orchestrator/attention.js";
+import { attentionHref } from "../orchestrator/attention-wiring.js";
+import { sessionOwner } from "../services/session-owner.js";
 import { submitSessionPrompt } from "../routes/messages.js";
 import { resolveSecurityNudgeIntervalMs, resolveSecurityNudgeMaxStalls } from "./security-nudge.js";
 import { withSandboxCapacityGate } from "../engine/gated-sandbox-provider.js";
-import { principalFromOwner, routeAttention } from "../orchestrator/attention.js";
 import { resolveOrgSessionCeiling } from "../orchestrator/limits.js";
 import { assemblePlugins } from "../plugins/assemble.js";
 import { ensurePluginStoreIndexes } from "../services/plugin-store.js";
 import { workflowsActionPlugin } from "../workflows/actions.js";
+import { profilePictureActions } from "../services/profile-picture-actions.js";
 import { skillsActionPlugin } from "../services/skills-actions.js";
-import { assistantsActionPlugin } from "../assistants/actions.js";
+import { eventsActionPlugin } from "../events/actions.js";
+import { diagnosticsActionPlugin } from "../diagnostics/actions.js";
+import { podHealthTargetFromEnv } from "../diagnostics/pod-health.js";
+import { diagnosticsTemplates } from "../diagnostics/template.js";
+import { productionEventWaiterDeriver } from "../events/derive.js";
 import { ContentSyncService } from "../services/content-sync/service.js";
 import { SkillCollector } from "../services/content-sync/skill-collector.js";
 import { WorkflowCollector } from "../services/content-sync/workflow-collector.js";
@@ -52,17 +71,17 @@ import { skillRepoReaderFactory } from "../services/content-source-credential.js
 import type { WorkflowServiceDeps } from "../workflows/service.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { OAuthRefreshingCredentialStore } from "../plugins/oauth-refreshing-credential-store.js";
+import { LinearAppTokenStore } from "../plugins/linear-app-token-store.js";
 import { TeamCredentialStore } from "../plugins/team-credential-store.js";
 import { isTeamMember } from "../services/teams.js";
 import { createOnePasswordService } from "../services/onepassword.js";
-import { getAllowPersonalOnePassword } from "../services/org.js";
-import { DynamicToolCounts } from "../plugins/dynamic-tool-count.js";
+import { ServiceProbes } from "../plugins/service-probe.js";
 import { loadNodeModulesPlugins } from "../plugins/node-modules-loader.js";
 import { bundledPlugins } from "../plugins/registry.gen.js";
 import { configMcpPlugins } from "../plugins/config-mcp.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
-import { buildRunSettledAttention } from "../workflows/run-attention.js";
+import { buildRunApprovalAttention, buildRunApprovalReport, buildRunOriginReport, buildRunSettledAttention, buildRunThreadArchive } from "../workflows/run-attention.js";
 import { WorkflowSandboxReclaimer } from "../workflows/sandbox-reclaim.js";
 import { WorkflowScheduler } from "../workflows/scheduler.js";
 import { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
@@ -70,13 +89,16 @@ import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { resolveOrgId } from "../lib/org.js";
 import { ChannelHost, publicUrlFromEnv } from "../channels/host.js";
 import { EventDispatcher } from "../events/dispatcher.js";
-import { buildOrchestratorTarget } from "../events/orchestrator-target.js";
+import { buildAssistantTarget } from "../events/assistant-target.js";
 import { channelThreadContextFetcher } from "../events/channel-thread-context.js";
 import { channelOriginResolver, channelMessageNormalizer } from "../events/channel-origin.js";
+import { appendClaimedWaiterDigest } from "../events/claim-recovery.js";
+import { waiterMatchDeps } from "../events/waiters.js";
 import { FsBlobStore } from "./blob-fs.js";
 import { pgliteWasmOptions } from "../assets/base.js";
 import {
   buildSandboxProvider,
+  parseSandboxBackend,
   resolveChildRetentionMs,
   resolveDefaultImage,
   resolveHibernatedRetentionMs,
@@ -84,13 +106,19 @@ import {
   resolveIdleMinutes,
   resolveOrgSandboxCeiling,
   resolveSandboxCapacityWaitMs,
+  resolveJobLogMaxBytes,
+  resolveScratchCaps,
+  resolveWakeupLimits,
+  scratchPoolWarning,
 } from "./sandbox-backend.js";
 import { resolveImageBuilder, resolvePrebuildPreflight } from "./image-builder.js";
 import { SourceService } from "../bakes/source-service.js";
 import type { Providers } from "./types.js";
 import type { InstanceConfig } from "../config/instance-config.js";
-import { InstanceConfigError } from "../config/instance-config.js";
+import { InstanceConfigError, resolveTutorialVersion } from "../config/instance-config.js";
 import { createAutoTitleHost } from "../sessions/auto-title-host.js";
+import { valetBuildSha } from "../version.js";
+import { reportError } from "@valet/engine";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // packages/api/src/providers -> packages/api
@@ -186,8 +214,8 @@ export interface NodeProviderOpts {
    * Seed the `local-user`/`local-org` stub identity (default `true`, for
    * backward compat with every existing stub-mode caller/test). Must be
    * `false` whenever real auth is configured (`BETTER_AUTH_SECRET` set):
-   * `evaluateAdmission`'s "zero users → first signup becomes admin" rule
-   * (`auth/provisioning.ts`) never fires if a local user is pre-seeded, so a
+   * the one-time admin invite (`auth/bootstrap-admin.ts`) is minted only
+   * while there are no users, so with a local user pre-seeded a
    * fresh real deployment could never mint its first admin and every real
    * signup would land in the seeded "Local Dev" org. The stub identity is an
    * admin, so seeding it next to real auth also leaves an admin row nobody
@@ -211,6 +239,37 @@ export interface NodeProviderOpts {
  */
 export function shouldSeedLocalIdentity(authConfigured: boolean): boolean {
   return !authConfigured;
+}
+
+/**
+ * Pool size for the `DATABASE_URL` path (`VALET_PG_POOL_MAX`, default 30).
+ * pg's own default of 10 saturates under the api's background pollers: the
+ * agents-dev incident of 2026-09-21 measured a steady ~9,000-deep pool wait
+ * queue (~4.6s per checkout), which turned every authenticated request into
+ * 15-40s of sequential queue waits. Zero, negative, or non-numeric values
+ * fall back to the default — a pool with no capacity cannot serve boot.
+ */
+export function resolvePgPoolMax(env: NodeJS.ProcessEnv): number {
+  const raw = env.VALET_PG_POOL_MAX;
+  if (raw === undefined || raw === "") return 30;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 1) return 30;
+  return Math.floor(n);
+}
+
+/**
+ * How long a query waits for a free pool client before it errors
+ * (`VALET_PG_POOL_CONNECT_TIMEOUT_MS`, default 30s, maps to pg's
+ * `connectionTimeoutMillis`). pg's default of 0 waits forever, so pool
+ * exhaustion presents as an unbounded silent hang instead of an error that
+ * names the cause. Zero, negative, or non-numeric → 0 (no timeout).
+ */
+export function resolvePgPoolConnectTimeoutMs(env: NodeJS.ProcessEnv): number {
+  const raw = env.VALET_PG_POOL_CONNECT_TIMEOUT_MS;
+  if (raw === undefined || raw === "") return 30_000;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.floor(n);
 }
 
 export const LOCAL_USER = {
@@ -238,7 +297,11 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
 
   let source: Pool | PGlite;
   if (opts.databaseUrl) {
-    source = new Pool({ connectionString: opts.databaseUrl });
+    source = new Pool({
+      connectionString: opts.databaseUrl,
+      max: resolvePgPoolMax(process.env),
+      connectionTimeoutMillis: resolvePgPoolConnectTimeoutMs(process.env),
+    });
   } else {
     mkdirSync(opts.pgDataDir, { recursive: true });
     // Bundled single-binary: PGlite's default `import.meta.url`-relative wasm
@@ -260,6 +323,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   await applyEngineMigrations(pgdb, pgDirHint);
 
   const db = buildAppDb(source);
+  await preserveLegacySandboxTokens(db);
 
   // Seed the local-dev identity. Idempotent. Skipped whenever real auth is
   // configured (`opts.seedLocalIdentity: false`, set by `main.ts` when
@@ -299,6 +363,16 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // so a long-lived dev stack would wedge every new create at the
   // ceiling — and those backends have no bounded pod budget to protect.
   const gateHostRef: { current: EngineHost | null } = { current: null };
+  // Called unconditionally regardless of `VALET_SANDBOX_BACKEND`. The
+  // contradictory-config boot check must fire on every backend, not only
+  // kubernetes.
+  const scratchCaps = resolveScratchCaps(process.env);
+  const wakeupLimits = resolveWakeupLimits(process.env);
+  // Boot checks: a bad log cap, or one above the scratch cap, stops the api
+  // here instead of failing every session build.
+  const jobLogMaxBytes = resolveJobLogMaxBytes(process.env);
+  const poolWarning = scratchPoolWarning(process.env);
+  if (poolWarning !== undefined) console.warn(`WARNING: ${poolWarning}`);
   const rawSandboxProvider = buildSandboxProvider(process.env);
   const sandboxProvider = rawSandboxProvider.capabilities().hibernation
     ? withSandboxCapacityGate(rawSandboxProvider, {
@@ -344,23 +418,37 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     description: "Agent-facing skill authoring actions.",
     actions: [skillsActionPlugin(db)],
   };
-  // Assistant-profile actions (the tool mirror of routes/assistants.ts).
-  // A persona write must evict the cached session, and the EngineHost does
-  // not exist yet — same one-slot indirection as the workflows deps above.
-  const evictRef: { current: ((sessionId: string) => void) | null } = { current: null };
-  const assistantsActions: ValetPlugin = {
-    name: "assistants-actions",
-    version: "0.1.0",
-    description: "Agent-facing assistant profile management actions.",
-    actions: [
-      assistantsActionPlugin(db, (sessionId) => {
-        if (!evictRef.current) {
-          throw new Error("assistants actions invoked before provider wiring completed");
-        }
-        evictRef.current(sessionId);
-      }),
-    ],
+  const settingsActions: ValetPlugin = {
+    name: "settings-actions", version: "0.1.0", description: "Authorized conversational Valet settings.",
+    actions: [settingsActionPlugin(db, () => engineCredentials)],
   };
+  const avatarActions: ValetPlugin = {
+    name: "profile-picture-actions",
+    version: "0.1.0",
+    actions: [profilePictureActions(engineStore, blobs, () => publicUrlFromEnv(process.env) ?? process.env.BETTER_AUTH_URL)],
+  };
+  const eventsActions: ValetPlugin = {
+    name: "events-actions",
+    version: "0.1.0",
+    description: "Agent-facing received event diagnostics.",
+    actions: [eventsActionPlugin(db, () => plugins)],
+  };
+  const diagnosticsActions: ValetPlugin = {
+    name: "diagnostics-actions",
+    version: "0.1.0",
+    description: "Agent-facing tool failure, thread outcome, request latency, server error, and API health diagnostics.",
+    actions: [diagnosticsActionPlugin(db, () => ({
+      engineCredentials, onePassword, publicUrl: publicUrlFromEnv(process.env) ?? process.env.BETTER_AUTH_URL,
+    }), {
+      sandboxBackend: parseSandboxBackend(process.env.VALET_SANDBOX_BACKEND),
+      ...(parseSandboxBackend(process.env.VALET_SANDBOX_BACKEND) === "kubernetes" ? { podHealth: podHealthTargetFromEnv(process.env) } : {}),
+    })],
+    templates: diagnosticsTemplates,
+  };
+
+  // Same both-set guard as the plugin filter below: env and file together fail boot.
+  const tutorialVersion = resolveTutorialVersion(opts.instanceConfig ?? null, process.env);
+
   // Plugin filter: config file `plugins` block takes precedence over
   // VALET_PLUGINS env var. Both set simultaneously is a configuration error —
   // the operator must remove one to avoid ambiguity.
@@ -374,22 +462,29 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   const { allowlist, denylist } = configHasPlugins
     ? { allowlist: configPlugins!.allow, denylist: configPlugins!.deny }
     : parseValetPluginsEnv(process.env.VALET_PLUGINS);
+  const nodeModulesResult = opts.plugins
+    ? { plugins: [], quarantined: [] }
+    : await loadNodeModulesPlugins({
+        searchPaths: [resolve(apiPkgRoot, "node_modules"), resolve(repoRoot, "node_modules")],
+        allowlist,
+        denylist,
+      });
   const { plugins, actionPluginByService } = opts.plugins
     ? assemblePlugins([[...opts.plugins]])
     : assemblePlugins([
         bundledPlugins,
-        (
-          await loadNodeModulesPlugins({
-            searchPaths: [resolve(apiPkgRoot, "node_modules"), resolve(repoRoot, "node_modules")],
-            allowlist,
-            denylist,
-          })
-        ).plugins,
+        nodeModulesResult.plugins,
         // Config-declared MCP servers (instance config `mcpServers`). A
         // service collision with a bundled plugin throws in assemblePlugins.
         configMcpPlugins(opts.instanceConfig?.mcpServers, process.env),
-        [workflowsActions, skillsActions, assistantsActions],
+        [workflowsActions, skillsActions, eventsActions, diagnosticsActions, avatarActions, settingsActions],
       ]);
+  const pluginLoadFailures = nodeModulesResult.quarantined.map(({ pkg, reason }) => ({
+    service: pkg.replace(/^@valet\/plugin-/, "").replace(/^plugin-/, ""),
+    state: "load_failed" as const,
+    reason,
+    fix: "Ask an admin to repair or remove the plugin package.",
+  }));
 
   // Declared plugin-store expression indexes (plugin-store design). Idempotent
   // `CREATE INDEX IF NOT EXISTS`, run once per boot after the plugin set is
@@ -405,11 +500,13 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     plugins,
     env: process.env,
   });
-  // Team references wrap outside refresh: a followed user row refreshes
-  // under that user, a direct team row refreshes under the team.
-  const engineCredentials = new TeamCredentialStore(refreshingCredentials, {
-    isMember: (teamId, userId) => isTeamMember(db, teamId, userId),
-  });
+  // The org Linear connection's client_credentials token has no refresh
+  // token; this layer mints a replacement before it expires.
+  const linearAppCredentials = new LinearAppTokenStore(refreshingCredentials, { env: process.env });
+  const engineCredentials = new TeamCredentialStore(linearAppCredentials);
+  // One cache of dynamic (MCP) tool listings, shared by `/api/plugins`, the
+  // policy routes, and the engine host's policy resolver.
+  const serviceProbes = new ServiceProbes({ credentials: engineCredentials });
 
   // 1Password reference-credential service (1Password credential provider
   // plan, Task 1/2) — the same instance is threaded into `EngineHost`'s
@@ -417,7 +514,6 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // `/api/onepassword` routes.
   const onePassword = createOnePasswordService({
     credentials: engineCredentials,
-    getAllowPersonal: (orgId) => getAllowPersonalOnePassword(db, orgId),
   });
 
   // Circular construction: EngineHost needs the ChildSpawner at construction
@@ -431,12 +527,17 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   let readerRef: ChildReader | undefined;
   let senderRef: ChildSender | undefined;
   let statusRef: ChildStatusReader | undefined;
+  let stopperRef: ChildStopper | undefined;
+  let homeDepsRef: HomeDeps | undefined;
   const engineHost = new EngineHost({
     engineStore,
     sandboxProvider,
     eventStream,
     engineCredentials,
     blobs,
+    scratchCaps,
+    wakeupLimits,
+    jobLogMaxBytes,
     anthropicApiKey: opts.anthropicApiKey,
     defaultImage: resolveDefaultImage(process.env),
     // Single image lineage: one stock image for every session shape.
@@ -449,9 +550,12 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     db,
     apiBaseUrl: opts.apiBaseUrl,
     sandboxJwtMaster: opts.sandboxJwtMaster,
+    sandboxTokenMaster: opts.encryptionKey,
     sandboxApiUrl: opts.sandboxApiUrl,
     plugins,
+    pluginLoadFailures,
     actionPluginByService,
+    serviceProbes,
     // GH-T10 fix: session `github` actions resolve through the token service
     // (same `key` `engineCredentials`/the workflow invoker/the sandbox
     // credential route derive theirs from) instead of a raw credential read.
@@ -473,11 +577,23 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       if (!statusRef) throw new Error("childStatusReader invoked before provider wiring completed");
       return statusRef(req, ctx);
     },
+    childStopper: (req, ctx) => {
+      if (!stopperRef) throw new Error("childStopper invoked before provider wiring completed");
+      return stopperRef(req, ctx);
+    },
+    homeTools: () => buildHomeTools(() => {
+      if (!homeDepsRef) throw new Error("home tools invoked before provider wiring completed");
+      return homeDepsRef;
+    }),
+    threadLinkTools: () => buildThreadLinkTools(() => {
+      if (!homeDepsRef) throw new Error("thread link tools invoked before provider wiring completed");
+      return homeDepsRef;
+    }),
   });
+  homeDepsRef = { db, engineHost, engineStore, engineCredentials, onePassword };
   // Arm the capacity gate now that the host exists — creates admitted
   // before this line (none happen during construction) pass ungated.
   gateHostRef.current = engineHost;
-  evictRef.current = (sessionId) => engineHost.evictCache(sessionId);
 
   // Naming listens to the engine's origin-neutral settlement event. Start it
   // in main before boot restore, because restored work can settle there.
@@ -494,6 +610,8 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     githubTokenDeps: { db, credentials: engineCredentials, key: deriveSecretKey(opts.encryptionKey) },
   });
 
+  engineHost.setImageFallbackHandler((event) => prebuildService.handleImageFallback(event));
+
   const childrenDeps = {
     sandboxBacked: sandboxProvider.capabilities().isolated === true,
     db,
@@ -501,13 +619,17 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engineStore,
     prebuildService,
     retentionMs: resolveChildRetentionMs(process.env),
+    idleGraceMs: resolveIdleMinutes(process.env) * 60_000,
     orgSessionCeiling: resolveOrgSessionCeiling(process.env),
+    scratchCaps,
+    nudgeChildEvents: (ids: string[]) => wakeWatcher.nudge(ids),
   };
   const childWatcher = new ChildWatcher(childrenDeps);
   spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
   readerRef = buildChildReader(childrenDeps);
   senderRef = buildChildSender(childrenDeps, childWatcher);
   statusRef = buildChildStatusReader(childrenDeps);
+  stopperRef = buildChildStopper(childrenDeps);
 
   // Destroys sandboxes hibernated past the retention window; `start()`/
   // `stop()` are called from `main.ts`, next to the child retention sweep.
@@ -542,6 +664,28 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     idleMs: resolveIdleMinutes(process.env) * 60_000,
   });
 
+  // Owns every wakeup and lease: probes due wakeups, delivers their signals,
+  // expires hold leases, and keeps leased pods out of autoscaler eviction
+  // (spec 2026-10-08, B5, C5). `start()`/`stop()` are called from `main.ts`.
+  const wakeWatcher = new WakeWatcher({
+    childEvents: { active: (row) => childWatcher.subscriptionActive(row), deliver: (row, digest) => childWatcher.deliverEvent(row, digest), close: (row) => childWatcher.closeSubscription(row), finish: (row, blocked) => childWatcher.finishDeliveryPass(row, blocked) },
+    db,
+    engineStore,
+    engineHost,
+    provider: sandboxProvider,
+    limits: wakeupLimits,
+    deriveEvent: productionEventWaiterDeriver({
+      db,
+      plugins,
+      githubTokenDeps: { db, credentials: engineCredentials, key: deriveSecretKey(opts.encryptionKey) },
+    }),
+    // Kubernetes keeps detached logs on disk in the pod, so exit signals
+    // can name the file. Docker keeps them in api memory (no path).
+    ...(parseSandboxBackend(process.env.VALET_SANDBOX_BACKEND) === "kubernetes"
+      ? { jobLogDir: "/tmp/valet-jobs" }
+      : {}),
+  });
+
   // Autonomy nudge sweep (valet-security spec §Autonomy). Re-drives an idle
   // security runner that stopped with work remaining; a stall cap alerts the
   // user after N no-progress nudges instead of looping. Nudges through the
@@ -550,7 +694,20 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   const securityRunnerDriver = new SecurityRunnerDriver({
     db,
     engineStore,
-    submit: (row, text) => submitSessionPrompt({ db, engineHost }, row, text),
+    submit: (row, text, toolScope) => submitSessionPrompt({ db, engineHost }, row, text, { recordUserActivity: false, toolScope, inheritToolScope: true }),
+    // Runs only from a sweep, after `channelHost` below is built.
+    alert: (row, event) => routeAttention(
+      { db, channels: channelHost.attentionDeliverers(), access: { engineCredentials, onePassword } },
+      {
+        kind: "escalation",
+        owner: sessionOwner(row),
+        sessionId: row.id,
+        title: event.title,
+        body: event.body,
+        href: attentionHref(row.id, undefined, sessionOwner(row)),
+        dedupeKey: event.dedupeKey,
+      },
+    ),
     sweepIntervalMs: resolveSecurityNudgeIntervalMs(process.env),
     maxStalls: resolveSecurityNudgeMaxStalls(process.env),
   });
@@ -563,22 +720,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       try {
         await prebuildService.seedDefaultBasesIfMissing(id);
       } catch (err) {
-        console.error(`seedDefaultBasesIfMissing(${id}) failed:`, err);
+        reportError({ area: "sandbox", reason: "seed_default_bases" }, `seedDefaultBasesIfMissing(${id}) failed`, err);
       }
     }
   })();
-
-  const channelHost = new ChannelHost({
-    db,
-    engineHost,
-    engineStore,
-    eventStream,
-    engineCredentials,
-    plugins,
-    publicUrl: publicUrlFromEnv(process.env),
-    resolveOrgId: () => resolveOrgId(db),
-    onePassword,
-  });
 
   // Workflow run host (Phase 5 plan Task 10). `workflowStore` is the same
   // `WorkflowStore` port `buildWorkflowEngineDeps`'s session executors and
@@ -588,6 +733,20 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // spans nest inside the interpreter's `workflow.drive`/`workflow.node.*`.
   const rawWorkflowStore = new PgWorkflowStore(pgdb);
   const workflowStore = telemetryEnabled ? tracedWorkflowStore(rawWorkflowStore) : rawWorkflowStore;
+
+  const channelHost = new ChannelHost({
+    db,
+    engineHost,
+    engineStore,
+    eventStream,
+    engineCredentials,
+    plugins,
+    workflowStore,
+    actionPluginByService,
+    publicUrl: publicUrlFromEnv(process.env),
+    resolveOrgId: () => resolveOrgId(db),
+    onePassword,
+  });
   const workflowEngineDeps = buildWorkflowEngineDeps({
     host: engineHost,
     store: workflowStore,
@@ -603,40 +762,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     onePassword,
   });
 
-  // Approval attention (decision 12): the FIRST park on an approval node
-  // routes through the Phase 4 notification system. `onApprovalPending`
-  // only receives `{runId, nodeId, prompt, summary?, details?}` — no owner
-  // — so it re-resolves the run's owner from the store itself.
-  const onApprovalPending: OnApprovalPending = async (info) => {
-    // Contained: the executor awaits this AFTER persisting the approval
-    // intent, so a throw here would abort the drive AND permanently skip the
-    // notification on the re-drive (intent already exists). A lost
-    // notification must degrade to log-only — the run stays resolvable via
-    // the API either way.
-    try {
-      const run = await workflowStore.getRun(info.runId);
-      const owner = principalFromOwner(run?.owner);
-      if (!owner) return; // no recorded owner: nothing to notify
-      const isPolicyGate = info.kind === "policy_gate";
-      await routeAttention(
-        { db },
-        {
-          kind: "approval",
-          owner,
-          title: info.summary ?? info.prompt ?? `Approval needed: ${info.service ?? "?"}.${info.action ?? "?"}`,
-          body: isPolicyGate
-            ? `Workflow run ${info.runId} is paused on ${info.nodeId}.`
-            : info.summary
-              ? info.prompt
-              : undefined,
-          href: `/workflows/runs/${info.runId}`,
-          dedupeKey: `${info.runId}:${info.nodeId}${info.iteration !== undefined && info.iteration > 0 ? `:${info.iteration}` : ""}`,
-        },
-      );
-    } catch (err) {
-      console.error(`workflow approval notification failed for ${info.runId}:${info.nodeId}`, err);
-    }
-  };
+  const onApprovalPending = buildRunApprovalAttention({
+    db, store: workflowStore, channels: channelHost.attentionDeliverers(),
+    access: { engineCredentials, onePassword },
+  });
 
   // "Grant the rest of this run" (action-policies plan, Task 3): an approval
   // resolved with `grantActions` writes one exec-scoped runtime grant per
@@ -665,7 +794,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
         });
       }
     } catch (err) {
-      console.error(`workflow approval grant write failed for run ${info.runId}:`, err);
+      reportError({ area: "workflows", reason: "approval_grant_write" }, `workflow approval grant write failed for run ${info.runId}`, err);
     }
   };
 
@@ -685,10 +814,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
         db,
         `pol:wf:workflow:${info.runId}:${info.nodeId}${suffix}`,
         orgId,
-        { status: info.outcome, resolvedBy: info.resolvedBy },
+        { status: info.outcome, resolvedBy: info.resolvedBy, error: info.error },
       );
     } catch (err) {
-      console.error(`workflow gate resolved callback failed for ${info.runId}:${info.nodeId}`, err);
+      reportError({ area: "workflows", reason: "gate_resolved_callback" }, `workflow gate resolved callback failed for ${info.runId}:${info.nodeId}`, err);
     }
   };
 
@@ -701,13 +830,20 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engineStore,
     store: workflowStore,
   });
-  const runSettledAttention = buildRunSettledAttention({ db, store: workflowStore });
+  const runSettledAttention = buildRunSettledAttention({ db, store: workflowStore, channels: channelHost.attentionDeliverers(), access: { engineCredentials, onePassword } });
+  const runThreadArchive = buildRunThreadArchive({ db, store: workflowStore, engineStore, engineHost });
+  const runOriginReport = buildRunOriginReport({ db, engineHost, store: workflowStore });
 
   const workflowRunHost = new LocalRunHost({
     store: workflowStore,
     engine: workflowEngineDeps,
+    build: valetBuildSha(),
     executors: createDefaultNodeExecutors(),
     onApprovalPending,
+    // The thread that started the run hears about it too, once the run
+    // parks, so Valet can say which steps wait instead of staying silent
+    // until the run settles.
+    onApprovalParked: buildRunApprovalReport({ db, engineHost, store: workflowStore }),
     onApprovalGrant,
     onGateResolved,
     // Settle attention (batch-fanout design decision 4): a failed top-level
@@ -717,6 +853,12 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     // failure in either never abandons the drive lease.
     onRunSettled: async (info) => {
       await runSettledAttention(info);
+      // The run's own assistant thread leaves the sidebar here, and only
+      // here: no sweep archives it later (`run-attention.ts`).
+      await runThreadArchive(info);
+      // A run a thread started reports back to it, so the thread continues
+      // from the result instead of waiting for someone to ask.
+      await runOriginReport(info);
       await workflowSandboxReclaimer.reclaimRun(info.runId);
     },
     crashAt: opts.workflowCrashAt,
@@ -729,17 +871,21 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     actionPluginByService,
     plugins,
     credentials: engineCredentials,
+    // Run-origin validation probes the engine store for the origin thread
+    // (`activeWorkflowOrigin`).
+    engineStore,
   };
 
   // Workflow schedule loop — cron-driven run starts (time-based counterpart
   // of the event dispatcher's workflow targets). `start()`/`stop()` from
   // main.ts alongside the dispatcher.
-  const deliverToOrchestrator = buildOrchestratorTarget({
+  const deliverToAssistant = buildAssistantTarget({
     db,
     engineHost,
     fetchThreadContext: channelThreadContextFetcher(channelHost),
+    slackAccess: { engineCredentials, onePassword },
   });
-  const workflowScheduler = new WorkflowScheduler({ db, workflowStore, workflowRunHost, deliverToOrchestrator });
+  const workflowScheduler = new WorkflowScheduler({ db, workflowStore, workflowRunHost, deliverToAssistant });
 
   // Coarse per-workflow cap for the public webhook-trigger route — bounds
   // what an unauthenticated caller holding a leaked/guessed URL can force
@@ -747,15 +893,66 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   const webhookRateLimiter = new WorkflowWebhookRateLimiter({ limit: 30, windowMs: 60_000 });
 
   // Event dispatcher (event-system plan Task 6): drains event_deliveries
-  // into workflow/orchestrator/signal targets. `start()`/`stop()` are called
+  // into workflow/assistant/signal targets. `start()`/`stop()` are called
   // from main.ts; ingest routes pass `eventDispatcher.nudge` as `onIngest`.
+  // Polled source of the slack.user_online event (Slack sends no webhook for it).
+  // `start()`/`stop()` are called from `main.ts`.
+  const onlineStatusWatcher = new OnlineStatusWatcher({ db, plugins, credentials: engineCredentials, onIngest: () => eventDispatcher.nudge() });
+
   const eventDispatcher = new EventDispatcher({
     db,
+    retainExternalUsage: externalUsageRetention(db),
+    drainTagging: taggingDrain(db, engineCredentials),
+    drainAttention: () => drainAttentionDeliveries({ db, channels: channelHost.attentionDeliverers(), access: { engineCredentials, onePassword } }),
     workflowRunHost,
     workflowStore,
-    deliverToOrchestrator,
+    deliverToAssistant,
     resolveChannelOrigin: channelOriginResolver(channelHost),
     normalizeChannelMessage: channelMessageNormalizer(channelHost),
+    // The catalog a subscription's `{{payload.<field>}}` variable resolves
+    // through. It is the same merged catalog the write validator uses.
+    plugins,
+    // A claim redirect to a once-mode waiter ends that waiter after the
+    // delivery lands, with one terminal signal.
+    endMatchedWaiter: (args) => wakeWatcher.endDeliveredWaiter(args),
+    // The follow router's predicate and the Slack twin need the bot id.
+    slackBotUserId: (orgId) => waiterMatchDeps({ db, engineStore, engineCredentials, plugins, onePassword, channelHost }).slackBotUserId(orgId),
+    // A claimed waiter gets its digest back when its claim delivery is
+    // skipped after ingest (`events/claim-recovery.ts`).
+    recoverClaimedDigest: (args) => appendClaimedWaiterDigest(
+      waiterMatchDeps({ db, engineStore, engineCredentials, plugins, onePassword, channelHost }, { nudge: (ids) => wakeWatcher.nudge(ids) }), args),
+    // Plugin event handlers run AI work as threads and children of the
+    // subscription owner's assistant (`plugins/plugin-threads.ts`).
+    pluginHandlers: {
+      threads: (scope) => buildPluginThreads({
+        db,
+        engineHost,
+        engineStore,
+        childSpawner: (req, ctx) => {
+          if (!spawnerRef) throw new Error("childSpawner invoked before provider wiring completed");
+          return spawnerRef(req, ctx);
+        },
+        childStopper: (req, ctx) => {
+          if (!stopperRef) throw new Error("childStopper invoked before provider wiring completed");
+          return stopperRef(req, ctx);
+        },
+      }, scope),
+      stopDeliveryChildren: async (deliveryIds) => {
+        await stopPluginDeliveryChildren({
+          db,
+          childStopper: (req, ctx) => {
+            if (!stopperRef) throw new Error("childStopper invoked before provider wiring completed");
+            return stopperRef(req, ctx);
+          },
+        }, deliveryIds);
+      },
+      appToken: (() => {
+        const githubToken = githubInstallationTokenFor({ db, credentials: engineCredentials, key: deriveSecretKey(opts.encryptionKey) });
+        // Only GitHub has an app credential a handler can borrow today.
+        return async (orgId: string, service: string, scope?: { owner?: string }) =>
+          service === "github" ? githubToken(orgId, scope?.owner) : null;
+      })(),
+    },
   });
 
   // Repository content sync. `readerFor` gives each source the GitHub
@@ -828,17 +1025,22 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     workflowSandboxReclaimer,
     sandboxReconcileSweep,
     idleHibernationSweep,
+    wakeWatcher,
     securityRunnerDriver,
     channelHost,
     workflowStore,
     workflowRunHost,
     workflowScheduler,
+    onlineStatusWatcher,
     webhookRateLimiter,
     eventDispatcher,
     contentSync,
     plugins,
+    configMcpServers: opts.instanceConfig?.mcpServers ?? [],
+    tutorialVersion,
     actionPluginByService,
-    dynamicToolCounts: new DynamicToolCounts({ credentials: engineCredentials }),
+    serviceProbes,
     prebuildService,
+    scratchCaps,
   };
 }

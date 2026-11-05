@@ -13,6 +13,11 @@
  * target in the request body (no per-row id exists in the URL to delete
  * by) — see `wire/types.ts`'s `DeletePolicyOverrideRequest` doc comment.
  *
+ * `GET /api/me/tool-permissions` reads each catalog action's effective mode
+ * for the caller, with its source and the modes the caller may set, so the
+ * Integrations panel shows what a session would do and not a raw default.
+ * Writes go through `PUT`/`DELETE .../policy-overrides`.
+ *
  * `DELETE .../grants` similarly addresses by scope (`sessionId` XOR
  * `workflowExecutionId`) + `service`/`actionId` rather than by id, and
  * soft-revokes (`revokedAt` stamp) rather than row-deleting — matching
@@ -26,12 +31,14 @@ import {
   isApprovalMode,
   isRiskLevel,
   listMyGrants,
+  listToolPermissions,
   listMyOverrides,
   revokeMyGrant,
   upsertOverride,
   validateTarget,
 } from "../policies/admin.js";
 import { validateParamMatchers } from "../policies/matchers.js";
+import { canViewTeam, getTeamInOrg } from "../services/teams.js";
 import type { ActionPolicyOverrideRow, RuntimeGrantRow } from "../schema/index.js";
 import type {
   ActionPolicyOverrideWire,
@@ -41,6 +48,7 @@ import type {
   DeletePolicyOverrideResponse,
   ListGrantsResponse,
   ListPolicyOverridesResponse,
+  ListToolPermissionsResponse,
   PutPolicyOverrideRequest,
   PutPolicyOverrideResponse,
   RuntimeGrantWire,
@@ -48,6 +56,7 @@ import type {
 
 export const mePolicyOverridesRouter = new Hono<AppEnv>();
 export const meGrantsRouter = new Hono<AppEnv>();
+export const meToolPermissionsRouter = new Hono<AppEnv>();
 
 function toOverrideWire(row: ActionPolicyOverrideRow): ActionPolicyOverrideWire {
   return {
@@ -56,6 +65,7 @@ function toOverrideWire(row: ActionPolicyOverrideRow): ActionPolicyOverrideWire 
     actionId: row.actionId,
     riskLevel: row.riskLevel,
     mode: row.mode,
+    ...(row.legacyUnscoped ? { legacyUnscoped: true } : {}),
     paramMatchers: row.paramMatchers,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -86,7 +96,7 @@ mePolicyOverridesRouter.get("/", async (c) => {
 // ── PUT /api/me/policy-overrides — upsert by target ──────────────────────
 
 mePolicyOverridesRouter.put("/", async (c) => {
-  const { db, actionPluginByService } = c.var.providers;
+  const { db, actionPluginByService, serviceProbes } = c.var.providers;
   const user = c.var.user;
 
   let body: PutPolicyOverrideRequest;
@@ -130,7 +140,9 @@ mePolicyOverridesRouter.put("/", async (c) => {
       paramMatchers,
       now: Date.now(),
     },
-    actionPluginByService,
+    // The caller's own listing verifies a dynamic (MCP) tool: the tools
+    // their credential gets are the tools a session of theirs would call.
+    { actionPluginByService, dynamicActions: serviceProbes.listedActionsFor({ type: "user", id: user.id }) },
   );
   if (!result.ok) return c.json({ error: result.error }, 400);
 
@@ -212,5 +224,34 @@ meGrantsRouter.delete("/", async (c) => {
   if (!revoked) return c.json({ error: "grant not found" }, 404);
 
   const resp: DeleteGrantResponse = { ok: true };
+  return c.json(resp);
+});
+
+// ── GET /api/me/tool-permissions — effective mode per catalog action ─────
+
+meToolPermissionsRouter.get("/", async (c) => {
+  const { db, actionPluginByService, serviceProbes } = c.var.providers;
+  const user = c.var.user;
+  const service = c.req.query("service");
+  const teamId = c.req.query("teamId");
+  if (teamId !== undefined && (!(await getTeamInOrg(db, user.orgId, teamId)) || !(await canViewTeam(db, teamId, user.id)))) {
+    return c.json({ error: "Team not found. Choose a team you belong to." }, 404);
+  }
+  const entries = service === undefined ? [...actionPluginByService.values()] : [actionPluginByService.get(service)];
+  const actionPlugins = entries.flatMap((entry) => (entry ? [entry.actionPlugin] : []));
+  if (service !== undefined && actionPlugins.length === 0) {
+    return c.json({ error: `No tools for service "${service}". Check the service name in /api/plugins.` }, 404);
+  }
+  // A dynamic service's tools are the ones its listing returns for the
+  // account the rows belong to: the team's for a team read, else the caller's.
+  const owner = teamId ? { type: "team" as const, id: teamId } : { type: "user" as const, id: user.id };
+  const tools = await listToolPermissions(
+    db,
+    { orgId: user.orgId, userId: user.id, ...(teamId ? { teamId } : {}) },
+    actionPlugins,
+    Date.now(),
+    serviceProbes.listedActionsFor(owner),
+  );
+  const resp: ListToolPermissionsResponse = { tools };
   return c.json(resp);
 });

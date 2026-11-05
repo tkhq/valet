@@ -74,6 +74,7 @@ describe("PUT /api/credentials/slack?scope=org", () => {
       teamId: "T0FIXTURE",
       teamName: "Fixture Workspace",
       botUserId: "U0BOTFIXTURE",
+      botId: "B0FIXTURE",
     });
     expect(stored?.scopes).toContain("assistant:write");
     expect(slack?.calls).toEqual(["Bearer xoxb-test-token"]);

@@ -3,6 +3,7 @@ import { Type } from "typebox";
 import {
   DecisionGateExpiredError,
   pluginCatalogTools,
+  toolApprovalGateContext,
   type ActionPlugin,
   type Credential,
   type CredentialProvider,
@@ -16,7 +17,9 @@ import {
   type Sandbox,
   type SessionEntry,
   type ToolContext,
+  UNATTENDED_WORKFLOW_DECISION,
 } from "../src/index.js";
+import { askApprovalTool } from "../src/builtin-tools/index.js";
 
 // ── Fixtures ───────────────────────────────────────────────────────
 
@@ -162,7 +165,7 @@ describe("policyResolver seam: resolve()", () => {
     const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction())] });
     await callTool.execute(
       { tool_id: "github.get_issue", params: { n: 7 }, summary: "s" },
-      makeCtx({ policyResolver: resolver, userId: "U", orgId: "O", sessionId: "S", threadId: "T" }),
+      makeCtx({ policyResolver: resolver, userId: "U", orgId: "O", sessionId: "S", threadId: "T", queueItemId: "Q" }),
     );
     expect(resolveInputs).toHaveLength(1);
     expect(resolveInputs[0]).toEqual({
@@ -174,6 +177,8 @@ describe("policyResolver seam: resolve()", () => {
       orgId: "O",
       sessionId: "S",
       threadId: "T",
+      // The host reads the running submission's workflow step from it.
+      queueItemId: "Q",
       appliesIn: "session",
     });
   });
@@ -229,6 +234,16 @@ describe("policyResolver seam: resolve()", () => {
     expect(typeof invocations[0].durationMs).toBe("number");
   });
 
+  it("marks only a call that ran because the thread runs without asking", async () => {
+    const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction())] });
+    const run = (source: PolicyDecision["provenance"]["source"]) => callTool.execute(
+      { tool_id: "github.get_issue", params: { n: 1 }, summary: "read" },
+      makeCtx({ policyResolver: makeResolver({ decision: { mode: "allow", provenance: { baseMode: "require_approval", source } } }).resolver }),
+    );
+    expect((await run("thread_bypass")).approval).toBe("automatic");
+    expect((await run("override")).approval).toBeUndefined();
+  });
+
   it("deny → refusal text + one denied record, execute never runs", async () => {
     let executed = false;
     const { resolver, invocations } = makeResolver({
@@ -277,10 +292,12 @@ describe("policyResolver seam: require_approval gate", () => {
       baseMode: "require_approval",
       source: "risk_high",
     });
+    // Plain "approve" allows this one call: the gate says so for bulk answers.
+    expect((gateReq?.context as Record<string, unknown>)?.oneShot).toBe(true);
     // Default approve/deny plus the extra. `approves` rides along so the
     // gate row can classify host actions for denial stickiness.
     expect(gateReq?.actions).toEqual([
-      { id: "approve", label: "Approve", style: "primary" },
+      { id: "approve", label: "Approve once", style: "primary" },
       { id: "deny", label: "Deny", style: "danger" },
       { id: "approve_always", label: "Always allow", style: "primary", approves: true },
     ]);
@@ -374,6 +391,169 @@ describe("policyResolver seam: require_approval gate", () => {
     expect(result.text.toLowerCase()).toContain("approval");
     expect(invocations).toHaveLength(1);
     expect(invocations[0].status).toBe("rejected");
+  });
+});
+
+describe("policyResolver seam: another member's shared account", () => {
+  it.each([["s1", "thread"], ["wf:run-1:node-1", "workflow run"]])("names the full borrow scope for %s and asks only that member", async (sessionId, scope) => {
+    let gateReq: DecisionGateRequest | undefined;
+    const { resolver } = makeResolver({
+      decision: {
+        mode: "require_approval",
+        provenance: { baseMode: "allow", source: "shared_account" },
+        approver: { userId: "bea", name: "Bea" },
+        extraGateActions: [{ id: "approve_always", label: "Always allow", approves: true }],
+      },
+    });
+    const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction())] });
+    await callTool.execute(
+      { tool_id: "github.get_issue", params: { n: 1 }, summary: "s" },
+      makeCtx({ sessionId, policyResolver: resolver, requestDecision: async (req) => { gateReq = req; return { actionId: "deny", resolvedBy: "bea", resolvedAt: Date.now() }; } }),
+    );
+    expect(gateReq?.title).toBe("Let a teammate use your github account?");
+    expect(gateReq?.body).toContain(`later github actions in this ${scope} can use it too`);
+    expect(gateReq?.body).toContain("including ones other teammates ask for");
+    expect(gateReq?.actions?.map((a) => a.id)).toEqual(["approve", "deny"]);
+    expect((gateReq?.context as Record<string, unknown>)?.approver).toEqual({ userId: "bea", name: "Bea" });
+    // Allowing a borrow also covers later calls, so it is not one-shot.
+    expect((gateReq?.context as Record<string, unknown>)?.oneShot).toBeUndefined();
+  });
+
+  it("offers lasting account consent explicitly and still asks for action approval", async () => {
+    const gates: DecisionGateRequest[] = [];
+    let consent = false;
+    const { resolver } = makeResolver({
+      resolve: async () => consent
+        ? { mode: "require_approval", provenance: { baseMode: "require_approval", source: "org_policy" } }
+        : { mode: "require_approval", provenance: { baseMode: "require_approval", source: "shared_account" }, approver: { userId: "bea", shareGeneration: "generation", allowTeamConsent: true },
+          extraGateActions: [{ id: "always_allow_account", label: "Always allow for this team", approves: true }] },
+      onResolution: async (_input, _decision, resolution) => { if (resolution.actionId === "always_allow_account") consent = true; },
+    });
+    const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction())] });
+    const result = await callTool.execute({ tool_id: "github.get_issue", params: { n: 1 }, summary: "s" }, makeCtx({
+      policyResolver: resolver, requestDecision: async req => {
+        gates.push(req);
+        return { actionId: gates.length === 1 ? "always_allow_account" : "deny", resolvedBy: "bea", resolvedAt: 1 };
+      },
+    }));
+    expect(gates[0]?.actions?.map(a => a.id)).toEqual(["approve", "deny", "always_allow_account"]);
+    expect(gates[0]?.body).toContain("Stop sharing");
+    expect(gates).toHaveLength(2);
+    expect(gates[1]?.context).not.toHaveProperty("approver");
+    expect(result).toMatchObject({ text: expect.stringContaining("denied: user did not approve") });
+  });
+
+  // The card names the product a person knows, not the service id.
+  it("names the plugin's display name in the borrow card", async () => {
+    let gateReq: DecisionGateRequest | undefined;
+    const { resolver } = makeResolver({
+      decision: { mode: "require_approval", provenance: { baseMode: "allow", source: "shared_account" }, approver: { userId: "bea", name: "Bea" } },
+    });
+    const [, callTool] = pluginCatalogTools({ plugins: [{ ...makePlugin(makeAction()), displayName: "GitHub" }] });
+    await callTool.execute(
+      { tool_id: "github.get_issue", params: { n: 1 }, summary: "s" },
+      makeCtx({ policyResolver: resolver, requestDecision: async (req) => { gateReq = req; return { actionId: "deny", resolvedBy: "bea", resolvedAt: Date.now() }; } }),
+    );
+    expect(gateReq?.title).toBe("Let a teammate use your GitHub account?");
+    expect(gateReq?.body).toContain("Valet would use your GitHub account for");
+    expect(gateReq?.body).not.toMatch(/\bgithub\b/);
+  });
+});
+
+describe("no policy resolver: risk-derived approval gate", () => {
+  it("marks the gate one-shot, and the typed reader exposes it", async () => {
+    let gateReq: DecisionGateRequest | undefined;
+    const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction({ riskLevel: "high" }))] });
+    await callTool.execute(
+      { tool_id: "github.get_issue", params: { n: 1 }, summary: "s" },
+      makeCtx({ requestDecision: async (req) => { gateReq = req; return { actionId: "deny", resolvedBy: "u1", resolvedAt: Date.now() }; } }),
+    );
+    expect(gateReq?.type).toBe("approval");
+    expect(toolApprovalGateContext(gateReq?.context)?.oneShot).toBe(true);
+    expect(toolApprovalGateContext({ tool_id: "github.get_issue" })?.oneShot).toBe(false);
+  });
+});
+
+describe("policyResolver seam: sender with no Valet account", () => {
+  it("refuses an action that needs approval without opening a gate", async () => {
+    let executed = false;
+    let gateOpened = false;
+    const { resolver, invocations } = makeResolver({
+      decision: { mode: "require_approval", provenance: { baseMode: "require_approval", source: "risk_high" } },
+    });
+    const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction({ execute: async () => { executed = true; return { success: true }; } }))] });
+    const result = await callTool.execute(
+      { tool_id: "github.get_issue", params: { n: 1 }, summary: "s" },
+      makeCtx({
+        externalSender: true,
+        policyResolver: resolver,
+        requestDecision: async () => { gateOpened = true; return { actionId: "approve", resolvedBy: "u1", resolvedAt: Date.now() }; },
+      }),
+    );
+    expect(result.text).toContain("no Valet account");
+    expect(executed).toBe(false);
+    expect(gateOpened).toBe(false);
+    expect(invocations.map((r) => r.status)).toEqual(["denied"]);
+  });
+
+  it("still runs an action its policy allows", async () => {
+    const { resolver } = makeResolver();
+    const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction())] });
+    const result = await callTool.execute({ tool_id: "github.get_issue", params: { n: 1 }, summary: "s" }, makeCtx({ externalSender: true, policyResolver: resolver }));
+    expect(result.text).not.toContain("denied");
+  });
+});
+
+describe("policyResolver seam: unattended workflow task", () => {
+  // `Thread.requestDecision` refuses before a gate opens; the mock returns that refusal.
+  const refused = async (): Promise<DecisionResolution> => ({ actionId: "deny", resolvedBy: UNATTENDED_WORKFLOW_DECISION, resolvedAt: Date.now() });
+
+  it("denies an action that needs approval, audits it, and runs no host resolution", async () => {
+    let executed = false;
+    const { resolver, invocations, onResolutionCalls } = makeResolver({
+      decision: { mode: "require_approval", provenance: { baseMode: "require_approval", source: "risk_high" } },
+    });
+    const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction({ execute: async () => { executed = true; return { success: true }; } }))] });
+    const result = await callTool.execute(
+      { tool_id: "github.get_issue", params: { n: 1 }, summary: "s" },
+      makeCtx({ unattendedWorkflow: true, policyResolver: resolver, requestDecision: refused }),
+    );
+    expect(result.text).toContain("Valet sent no approval request");
+    expect(executed).toBe(false);
+    expect(onResolutionCalls).toEqual([]);
+    expect(invocations.map((r) => r.status)).toEqual(["denied"]);
+  });
+
+  // A model told to "say what it needs" wrote "waiting for your approval", so
+  // the owner looked for a request that never existed.
+  it("tells the model that no request was sent and names the fixes that work", async () => {
+    const { resolver } = makeResolver({
+      decision: { mode: "require_approval", provenance: { baseMode: "require_approval", source: "risk_high" } },
+    });
+    const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction())] });
+    const result = await callTool.execute(
+      { tool_id: "github.get_issue", params: { n: 1 }, summary: "s" },
+      makeCtx({ unattendedWorkflow: true, policyResolver: resolver, requestDecision: refused }),
+    );
+    expect(result.text).toContain("Do not say that you asked for approval or that approval is pending");
+    // A Tool step asks for approval on each run by itself, so an Approval step
+    // before it would ask twice.
+    expect(result.text).toContain("move github.get_issue to a Tool step, which asks for approval on each run");
+    expect(result.text).not.toContain("Approval step");
+    expect(result.text).toContain("Review permissions");
+    // The engine cannot tell who started the run, so the result names the
+    // case where saved permissions do not apply.
+    expect(result.text).toContain("Saved permissions do not apply to a run that an agent started or retried.");
+    // Since build-time approval, saving a workflow allows nothing.
+    expect(result.text).not.toContain("saving the workflow approves");
+  });
+
+  it("gives ask_approval a fail-closed answer that names the Approval step", async () => {
+    const result = await askApprovalTool.execute({ title: "Delete the branch?" }, makeCtx({ unattendedWorkflow: true, requestDecision: refused }));
+    expect(result.text).toContain("Valet sent no approval request");
+    expect(result.text).toContain("Do not do the action");
+    expect(result.text).toContain("Do not say that you asked for approval or that approval is pending");
+    expect(result.text).toContain("add an Approval step before this step");
   });
 });
 
@@ -697,5 +877,17 @@ describe("policyResolver seam: reserved extraGateActions ids", () => {
     // through the tool/command path, never an opened gate.
     expect(result.text).toMatch(/reserved/i);
     expect(result.text).toContain("policy misconfiguration");
+  });
+});
+
+describe("ask_approval gate", () => {
+  it("is not one-shot: the model describes what the approval covers", async () => {
+    let gateReq: DecisionGateRequest | undefined;
+    await askApprovalTool.execute(
+      { title: "Delete the staging database?" },
+      makeCtx({ requestDecision: async (req) => { gateReq = req; return { actionId: "approve", resolvedBy: "u1", resolvedAt: Date.now() }; } }),
+    );
+    expect(gateReq?.type).toBe("approval");
+    expect(toolApprovalGateContext(gateReq?.context)?.oneShot ?? false).toBe(false);
   });
 });

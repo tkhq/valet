@@ -1,23 +1,33 @@
+import { UNATTENDED_DELIVERY_KEY, type Appearance } from "@valet/shared";
 /**
  * The one way an event or a followed message is delivered to an assistant:
  * resolve the session, assert its org against the delivery's org (the
  * second-layer defense `admitSignal` would have provided — an event has no
  * sender session, so there is no edge to authorize), then submit the signal on
- * the named thread. Both the dispatcher's orchestrator target
- * (`orchestrator-target.ts`) and the follow-router (`channels/follow-router.ts`)
+ * its destination thread. The dispatcher's assistant target
+ * (`assistant-target.ts`), the scheduler, and the follow-router
+ * (`channels/follow-router.ts`)
  * go through here, so the org check and delivery shape can never drift between
  * them.
  *
- * `assistantId` picks ONE of the owner's assistants; without it the owner's
- * default answers, which is what every rule written before the field did.
+ * The workspace owner determines the assistant.
  */
-import type { ChannelOrigin, Principal, SignalContent } from "@valet/engine";
-import type { AppDb } from "../lib/drizzle.js";
+import { isDeepStrictEqual } from "node:util";
+import { isSlackStopRequest } from "@valet/engine";
+import type { ChannelOrigin, Principal, PromptAuthor, Session, SignalContent, Thread } from "@valet/engine";
+import { ensureAssistantExecution, loadAssistantBySessionId } from "../assistants/service.js";
 import type { EngineHost } from "../engine/host.js";
-import type { Session } from "@valet/engine";
-import { ensureAssistantSession, ensureDefaultAssistantSession, loadAssistant } from "../assistants/service.js";
-import type { AssistantRow } from "../schema/index.js";
+import { and, eq, sql } from "drizzle-orm";
+import { agentSessions, assistantExecutions, assistants, type AssistantRow } from "../schema/index.js";
+import { recordedSlackChannels, recordingNarrowsThread, SLACK_CHANNELS_METADATA_KEY, type AccessDeps } from "../services/thread-access.js";
+import { loadSessionMeta } from "../engine/session-meta.js";
+import type { AppDb } from "../lib/drizzle.js";
 import { writeDropLog } from "../orchestrator/signals.js";
+import { recordChannelMessage, type InboundChannelMessage } from "../services/channel-messages.js";
+import type { DestinationReason } from "./destination.js";
+import { reopenThread, seedThreadTitle } from "./delivery-thread.js";
+import { CONVERSATIONAL_THREAD_KEY, isAutomatedThreadKey } from "./automated-threads.js";
+import { answerOpenQuestion } from "../channels/open-question-reply.js";
 
 /**
  * Per-thread delivery serialization (TKAI-284 item 3). The first-turn seed
@@ -36,45 +46,214 @@ export interface AssistantDeliveryDeps {
   engineHost: EngineHost;
   /**
    * Seed a channel thread's earlier messages on the assistant's FIRST turn in
-   * it. Wired only on the mention path (`orchestrator-target`); the follow
+   * it. Wired only on the mention path (`assistant-target`); the follow
    * path never delivers first, so it leaves this unset.
    */
   fetchThreadContext?: (origin: ChannelOrigin) => Promise<string | null>;
+  /**
+   * The org's Slack credential, to classify a channel that a delivery would
+   * record on a pinned thread. Without it, every such channel counts as
+   * private, and a delivery that would record a new one on a shared pinned
+   * thread dead-letters.
+   */
+  slackAccess?: Omit<AccessDeps, "db">;
+}
+
+/**
+ * Where one delivery lands. A `key` resolves to a thread only at delivery
+ * time, and creates it with `title` when it is new (spec Part B step 3). A
+ * `target` names a thread that already exists. A resolver `Destination`
+ * other than a skip fits this type.
+ */
+export type DeliveryDestination =
+  | { kind: "key"; key: string; title?: string }
+  | { kind: "target"; sessionId: string; threadId: string; reason?: DestinationReason };
+
+/** The dead-letter text for an `existing` pin that cannot receive a delivery (spec Part B step 4). */
+export const PIN_UNAVAILABLE_MESSAGE = "Pick another thread in Presence.";
+
+/** The pin text before `PIN_UNAVAILABLE_MESSAGE`. Rows dead-lettered then
+ * keep it, so the problem query still matches it. Nothing writes it now. */
+// Stored text: the problem query matches it, so its words stay as written.
+// copy-lint: allow rule
+export const PIN_UNAVAILABLE_LEGACY_MESSAGE = "Pick another thread for this rule in Presence.";
+
+/** Whether a stored dead-letter text is the pin text, current or legacy. */
+export function isPinUnavailableMessage(text: string | null): boolean {
+  return text === PIN_UNAVAILABLE_MESSAGE || text === PIN_UNAVAILABLE_LEGACY_MESSAGE;
+}
+
+/** The dead-letter text for a delivery that would hide a shared pinned thread from readers outside a private channel. */
+export function pinNarrowsMessage(channel: string): string {
+  return `This thread is shared with people who cannot see #${channel}. Pick another thread in Presence.`;
+}
+
+/** A rule's pinned thread cannot take this delivery: it is archived, deleted,
+ * or outside the owner's live runtime, or the delivery's private channel
+ * would narrow who can read it. The message is the dead-letter text. */
+export class PinUnavailableError extends Error {
+  constructor(message: string = PIN_UNAVAILABLE_MESSAGE) {
+    super(message);
+    this.name = "PinUnavailableError";
+  }
+}
+
+/** The thread a delivery landed in. `recovered` marks a retry that found
+ * the delivery already admitted and submitted nothing new. */
+export interface DeliveredThread {
+  sessionId: string;
+  threadId: string;
+  /** The queue item the delivery admitted, or recovered. The dispatcher
+   * records it, and the item's settled outcome is the turn's. */
+  queueItemId?: string;
+  recovered?: true;
 }
 
 export interface AssistantDeliveryArgs {
   orgId: string;
   owner: Principal;
   actorUserId: string;
-  threadKey: string;
+  destination: DeliveryDestination;
   signal: SignalContent;
+  /** The rule's reply identity. The queue item carries it as `metadata.presence`, the engine's name. */
+  appearance?: Appearance;
+  /**
+   * No person waits on this delivery: an automated event or a schedule. Its
+   * turn refuses questions and approvals at once instead of parking the
+   * thread, so one stuck delivery cannot hold back the ones queued after it.
+   */
+  unattended?: boolean;
   dispatchId: string;
-  /** Which of the owner's assistants answers. Absent → the owner's default. */
-  assistantId?: string;
   /** Drop-log reason if the resolved assistant belongs to another org. */
   mismatchReason: string;
+  /** The channel message this delivery carries, recorded once it lands. */
+  inbound?: InboundChannelMessage;
+  /** Who wrote the message, when that is not `actorUserId` (`newcomerAuthor`). */
+  author?: PromptAuthor;
+  /**
+   * A person's reply in the channel thread. It answers the thread's open
+   * question, when one waits, instead of queueing behind the turn that asked
+   * it (`channels/open-question-reply.ts`). Automated deliveries never set it.
+   */
+  answer?: { userId: string; text: string; channelType: string; channelId: string };
+  /** The Slack channel this delivery's content came from. The thread records
+   * it, so the channel's privacy gates reads of the thread whatever its key
+   * (`services/thread-access.ts`). */
+  slackChannel?: string;
+  /**
+   * Record the signal for the model without a model call, after any running
+   * turn (`Thread.recordSignal`). A Slack edit uses it: the model reads the
+   * change on its next turn and does not reply to the edit.
+   */
+  recordOnly?: boolean;
 }
 
+/** The assistant row of `sessionId` for `orgId` and `owner`, when it is live
+ * and not archived. `deliverToAssistantThread`'s explicit-target check and
+ * `isDeliverableTarget` below share it. */
+async function resolveLiveAssistant(
+  db: AppDb,
+  orgId: string,
+  owner: Principal,
+  sessionId: string,
+): Promise<AssistantRow | undefined> {
+  const assistant = await loadAssistantBySessionId(db, sessionId);
+  if (!assistant || assistant.archivedAt !== null || assistant.orgId !== orgId
+    || assistant.ownerType !== owner.type || assistant.ownerId !== owner.id) {
+    return undefined;
+  }
+  return assistant;
+}
+
+/** True when `target`'s thread is live. The session is not deleted and the
+ * thread is not archived. For an execution session, its assistant and
+ * governing thread are not archived either. `deliverToAssistantThread`'s
+ * pre-submit check and `isDeliverableTarget` below share it. */
+async function isTargetThreadLive(
+  db: AppDb,
+  orgId: string,
+  owner: Principal,
+  target: { sessionId: string; threadId: string },
+): Promise<boolean> {
+  const result = await db.execute(sql`
+      SELECT s.id FROM agent_sessions s
+      JOIN engine_threads t ON t.session_id = s.id AND t.id = ${target.threadId}
+      LEFT JOIN session_threads m ON m.session_id = s.id AND m.id = t.id
+      LEFT JOIN assistant_executions x ON x.session_id = s.id
+      LEFT JOIN assistants a ON a.id = x.assistant_id
+      LEFT JOIN engine_threads g ON g.session_id = a.session_id AND g.id = x.governing_thread_id
+      LEFT JOIN session_threads gm ON gm.session_id = a.session_id AND gm.id = g.id
+      WHERE s.id = ${target.sessionId} AND s.org_id = ${orgId} AND s.status <> 'deleted'
+        AND s.owner_type = ${owner.type} AND s.owner_id = ${owner.id} AND m.archived_at IS NULL
+        AND (x.session_id IS NULL OR (a.archived_at IS NULL AND g.id IS NOT NULL AND gm.archived_at IS NULL))
+      LIMIT 1`) as { rows: Array<{ id: string }> };
+  return result.rows.length > 0;
+}
+
+/**
+ * True when `target` would resolve for `deliverToAssistantThread`. The
+ * session names a live, non-archived assistant or execution of `owner` in
+ * `orgId`, and its thread is not archived. Claim resolution
+ * (`claims.ts`) reuses this gate, so it never chooses a waiter thread that
+ * would dead-letter here.
+ */
+export async function isDeliverableTarget(
+  deps: { db: AppDb },
+  orgId: string,
+  owner: Principal,
+  target: { sessionId: string; threadId: string },
+): Promise<boolean> {
+  if (!(await resolveLiveAssistant(deps.db, orgId, owner, target.sessionId))) return false;
+  return isTargetThreadLive(deps.db, orgId, owner, target);
+}
+
+/**
+ * Deliver `args.signal` to its destination and return the thread it landed
+ * in. A pinned `existing` target that fails `isDeliverableTarget` throws
+ * `PinUnavailableError` before any thread is resolved, so a dead-letter
+ * creates no thread (INV-D3).
+ */
 export async function deliverToAssistantThread(
   deps: AssistantDeliveryDeps,
   args: AssistantDeliveryArgs,
-): Promise<void> {
-  // Resolve BEFORE keying. The chain must be keyed on the SESSION, not on the
-  // requested assistant id: an id that names the owner's default and an absent
-  // id mean the same session, and keying on the raw value would put them on
-  // separate chains and let them race the seed window this chain exists to
-  // close. One Slack mention on a followed thread produces exactly that pair
-  // (the dispatcher passes the rule's id, the follow-router passes the row's,
-  // which is null on a follow bound before the column).
-  const session = await resolveDeliverySession(deps, args);
-  const key = `${session.id}:${args.threadKey}`;
+): Promise<DeliveredThread> {
+  // A delivery can outlive a routing upgrade or a thread policy edit. The
+  // admitted dispatch belongs to its original runtime, even if today's route
+  // selects another one. Event and schedule ids are unique per owner, so one
+  // admission per id holds across every session of the owner. A team routine
+  // admitted under `own` and retried under `new` must not run its slot twice.
+  if (args.dispatchId.startsWith("event:") || args.dispatchId.startsWith("schedule:")) {
+    const recovered = await recoverAdmittedEvent(deps, args);
+    if (recovered) return recovered;
+  }
+  const destination = args.destination;
+  // Serialize by runtime session and thread so delivery paths share one queue.
+  let session: Session;
+  if (destination.kind === "target") {
+    // A pin never falls back to another mode (spec Part B step 4).
+    if (destination.reason === "policy_existing" && !(await isDeliverableTarget(deps, args.orgId, args.owner, destination))) {
+      throw new PinUnavailableError();
+    }
+    if (!(await resolveLiveAssistant(deps.db, args.orgId, args.owner, destination.sessionId))) {
+      throw new Error("The original conversation is unavailable. Restore its owner, then redeliver the event.");
+    }
+    const [row] = await deps.db.select().from(agentSessions).where(and(eq(agentSessions.id, destination.sessionId),
+      eq(agentSessions.orgId, args.orgId), eq(agentSessions.ownerType, args.owner.type), eq(agentSessions.ownerId, args.owner.id))).limit(1);
+    if (!row || row.status === "deleted") throw new Error("The original session is unavailable. Start a new conversation.");
+    session = await deps.engineHost.sessionFor(row.id, await loadSessionMeta(deps.db, row));
+  } else {
+    ({ session } = await ensureAssistantExecution(deps, args.owner, {
+      actorUserId: args.actorUserId, orgId: args.orgId,
+    }, destination.key, newThreadInit(destination.title, args.slackChannel)));
+  }
+  const key = `${session.id}:${destination.kind === "key" ? destination.key : `thread:${destination.threadId}`}`;
   const prior = deliveryChains.get(key) ?? Promise.resolve();
   const run = prior.then(() => deliverToAssistantThreadInner(deps, args, session));
   // The stored tail swallows the failure (the caller gets it from `run`) and
   // removes itself once it is still the tail, so the map does not keep one
   // settled promise per thread ever delivered to.
   const tail: Promise<void> = run
-    .catch(() => undefined)
+    .then(() => undefined, () => undefined)
     .then(() => {
       if (deliveryChains.get(key) === tail) deliveryChains.delete(key);
     });
@@ -82,83 +261,170 @@ export async function deliverToAssistantThread(
   return run;
 }
 
-/**
- * Whether this assistant may take the delivery. A discriminated result rather
- * than a nullable message, so the good arm carries the narrowed row and the
- * caller needs no cast to use it.
- */
-function checkDeliveryAssistant(
-  row: AssistantRow | undefined,
-  orgId: string,
-  owner: Principal,
-): { ok: true; row: AssistantRow } | { ok: false; why: string } {
-  if (row === undefined) return { ok: false, why: "no such assistant" };
-  if (row.orgId !== orgId) return { ok: false, why: `assistant belongs to org ${row.orgId}` };
-  if (row.ownerType !== owner.type || row.ownerId !== owner.id) {
-    return { ok: false, why: `assistant is owned by ${row.ownerType}:${row.ownerId}` };
+/** A routine fire's dispatch id, `schedule:<id>:<slot>`, read back with the
+ * routine's name from the signal. Null for every other dispatch id. */
+function routineDispatch(args: AssistantDeliveryArgs): { id: string; slot: string; name: string } | null {
+  const match = /^schedule:(.+):([^:]+)$/.exec(args.dispatchId);
+  if (!match) return null;
+  const scheduleName = args.signal.attributes?.scheduleName;
+  const name = typeof scheduleName === "string" && scheduleName.trim() !== "" ? scheduleName : match[1]!;
+  return { id: match[1]!, slot: match[2]!, name };
+}
+
+/** How recovery texts name what the delivery carries, and how to send it again. */
+function recoveryWords(routine: { name: string } | null): { item: string; again: string } {
+  return routine
+    ? { item: `the routine "${routine.name}"`, again: `run the routine "${routine.name}" again` }
+    : { item: "this event", again: "redeliver the event" };
+}
+
+/** Recover an existing admission without resubmitting or replaying its tools.
+ * Returns the thread the admission landed in, or null when none exists.
+ * A routine slot is admitted once whatever its prompt: a retry after a
+ * prompt edit recovers the first admission (INV-D4). */
+async function recoverAdmittedEvent(deps: AssistantDeliveryDeps, args: AssistantDeliveryArgs): Promise<DeliveredThread | null> {
+  const result = await deps.db.execute(sql`
+    SELECT q.id, q.session_id, q.thread_id, q.content, q.status, s.owner_type, s.owner_id
+    FROM engine_queue_items q JOIN agent_sessions s ON s.id = q.session_id
+    WHERE q.dispatch_id = ${args.dispatchId} AND s.org_id = ${args.orgId}
+    LIMIT 2`) as { rows: Array<{ id: string; session_id: string; thread_id: string; content: unknown; status: string; owner_type: string; owner_id: string }> };
+  if (result.rows.length === 0) return null;
+  const routine = routineDispatch(args);
+  const words = recoveryWords(routine);
+  if (result.rows.length !== 1) {
+    throw new Error(routine
+      ? `The routine "${routine.name}" reached its thread more than once for one fire. Check the thread's messages, then ${words.again} if one is missing.`
+      : "This event reached its thread more than once. Check the thread's messages, then redeliver the event if one is missing.");
   }
-  if (row.archivedAt !== null) return { ok: false, why: "assistant is archived" };
-  return { ok: true, row };
+  const prior = result.rows[0]!;
+  if (prior.owner_type !== args.owner.type || prior.owner_id !== args.owner.id) {
+    throw new Error(routine
+      ? `The routine "${routine.name}" first ran under another owner. Check who owns the routine, then ${words.again}.`
+      : "The event's first owner is not this line's owner. Check who owns the line, then redeliver the event.");
+  }
+  if (!admittedContentMatches(prior.content, args.signal)) {
+    if (!routine) {
+      throw new Error("The thread already holds this event with other content. Check the thread's messages, then redeliver the event.");
+    }
+    // The routine's prompt changed between the failed fire and this retry.
+    // The slot already ran once, so the first admission stands.
+    console.info(`assistant delivery: routine ${routine.id} ("${routine.name}") slot ${routine.slot} was admitted with an earlier prompt; recovered the first admission.`);
+  }
+  if (prior.status !== "settled") {
+    const [row] = await deps.db.select().from(agentSessions).where(and(eq(agentSessions.id, prior.session_id), eq(agentSessions.orgId, args.orgId))).limit(1);
+    if (!row || row.status === "deleted") {
+      throw new Error(`The session that first took ${words.item} was deleted. Pick another thread in Presence, then ${words.again}.`);
+    }
+    // Session recovery already owns queued, interrupted, and approval-blocked
+    // work. Restoring it never requires another prompt admission here.
+    await deps.engineHost.sessionFor(row.id, await loadSessionMeta(deps.db, row));
+  }
+  if (args.inbound) await recordChannelMessage(deps.db, {
+    ...args.inbound, orgId: args.orgId, sessionId: prior.session_id, threadId: prior.thread_id, direction: "in",
+  });
+  return { sessionId: prior.session_id, threadId: prior.thread_id, queueItemId: prior.id, recovered: true };
+}
+
+/** True when a stored admission's content is `signal`. A first channel
+ * admission includes fetched history, so the check compares the original
+ * signal beneath that known wrapper without fetching mutable history again. */
+function admittedContentMatches(stored: unknown, signal: SignalContent): boolean {
+  const content: unknown = typeof stored === "string" ? JSON.parse(stored) : stored;
+  if (typeof content !== "object" || content === null || !("body" in content) || typeof content.body !== "string") return false;
+  const body = content.body === signal.body ? content.body
+    : content.body.startsWith("Conversation so far in this thread:\n") && content.body.endsWith(`\n\n---\n\n${signal.body}`)
+      ? signal.body : content.body;
+  const expected: unknown = JSON.parse(JSON.stringify(withoutSenderBot({ ...signal, tagName: signal.tagName ?? "signal" })));
+  const tagName = "tagName" in content ? content.tagName ?? "signal" : "signal";
+  return isDeepStrictEqual(withoutSenderBot({ ...content, body, tagName }), expected);
+}
+
+/** Rows admitted before the dispatcher set `senderBot` lack it, and a retry
+ * of the same event after the deploy carries it. The flag is derived from the
+ * event, so it does not tell two events apart. */
+function withoutSenderBot<T extends object>(value: T): T {
+  if (!("attributes" in value) || typeof value.attributes !== "object" || value.attributes === null) return value;
+  const { senderBot: _senderBot, ...attributes } = value.attributes as Record<string, unknown>;
+  return { ...value, attributes };
 }
 
 /**
- * The session the signal lands on: the named assistant's, or the owner's
- * default when the rule named none.
- *
- * A named assistant is re-checked against the rule's owner at DELIVERY time,
- * not only at write time. The two can drift — an assistant is archived, or the
- * rule outlives it — and a stale id must never reach an assistant the rule's
- * owner does not own. A drop-logged throw sends the delivery down the
- * dispatcher's retry/dead-letter path, which is the same outcome the org
- * mismatch below produces.
+ * Record a Slack channel on the delivery thread and, for a team execution
+ * session, on its governing thread in the assistant's root session. The
+ * team's thread list shows the governing thread, so it needs the same gate.
  */
-async function resolveDeliverySession(
-  deps: { db: AppDb; engineHost: EngineHost },
-  args: { orgId: string; owner: Principal; actorUserId: string; assistantId?: string; dispatchId: string },
-): Promise<Session> {
-  const meta = { actorUserId: args.actorUserId, orgId: args.orgId };
-  if (args.assistantId === undefined) {
-    const { session } = await ensureDefaultAssistantSession(deps, args.owner, meta);
-    return session;
-  }
+async function recordSlackChannel(deps: AssistantDeliveryDeps, session: Session, thread: Thread, channel: string): Promise<void> {
+  await thread.addToMetadataList(SLACK_CHANNELS_METADATA_KEY, channel);
+  const [governing] = await deps.db.select({ sessionId: assistants.sessionId, threadId: assistantExecutions.governingThreadId })
+    .from(assistantExecutions).innerJoin(assistants, eq(assistants.id, assistantExecutions.assistantId))
+    .where(eq(assistantExecutions.sessionId, session.id)).limit(1);
+  if (!governing) return;
+  const [row] = await deps.db.select().from(agentSessions).where(eq(agentSessions.id, governing.sessionId)).limit(1);
+  if (!row) return;
+  const root = await deps.engineHost.sessionFor(row.id, await loadSessionMeta(deps.db, row));
+  await root.threadById(governing.threadId)?.addToMetadataList(SLACK_CHANNELS_METADATA_KEY, channel);
+}
 
-  const checked = checkDeliveryAssistant(await loadAssistant(deps.db, args.assistantId), args.orgId, args.owner);
-  if (!checked.ok) {
-    await writeDropLog(deps.db, {
-      orgId: args.orgId,
-      reason: "event_target_assistant_invalid",
-      conversationKey: args.dispatchId,
-      detail:
-        `subscription names assistant ${args.assistantId} for owner ` +
-        `${args.owner.type}:${args.owner.id}, but ${checked.why}`,
-    });
-    throw new Error(`delivery refused: ${checked.why} (${args.assistantId})`);
-  }
-
-  const { session } = await ensureAssistantSession(deps, checked.row, meta);
-  return session;
+/**
+ * What a thread this delivery creates starts with: its policy title and the
+ * content's Slack channel, in the one write that creates it. A team
+ * execution's governing thread gets the same. So a title never lists before
+ * its read gate holds (thread-access.ts).
+ */
+function newThreadInit(title: string | undefined, slackChannel: string | undefined): { title?: string; metadata?: Record<string, unknown> } {
+  return {
+    ...(title ? { title } : {}),
+    ...(slackChannel ? { metadata: { [SLACK_CHANNELS_METADATA_KEY]: [slackChannel] } } : {}),
+  };
 }
 
 async function deliverToAssistantThreadInner(
   deps: AssistantDeliveryDeps,
   args: AssistantDeliveryArgs,
   session: Session,
-): Promise<void> {
+): Promise<DeliveredThread> {
   const data = await session.toData();
   if (data.orgId !== args.orgId) {
     await writeDropLog(deps.db, {
       orgId: args.orgId,
       reason: args.mismatchReason,
       conversationKey: args.dispatchId,
-      detail: `assistant session ${session.id} belongs to org ${data.orgId}, delivery belongs to org ${args.orgId}`,
+      detail: `The assistant session ${session.id} belongs to organization ${data.orgId}, and the event belongs to organization ${args.orgId}. Check the line's workspace.`,
     });
-    throw new Error(`delivery refused: assistant org mismatch (${data.orgId} != ${args.orgId})`);
+    throw new Error(`The assistant belongs to another organization (${data.orgId}, not ${args.orgId}). Check the line's workspace.`);
   }
-  const thread = await deps.engineHost.ensureFreshThread(session, args.threadKey, {
+  const destination = args.destination;
+  const thread = destination.kind === "target" ? session.threadById(destination.threadId) : await deps.engineHost.ensureFreshThread(session, destination.key, {
     userId: data.userId,
     orgId: data.orgId,
     workspace: data.workspace,
-  }, args.actorUserId);
+  }, args.actorUserId, newThreadInit(destination.title, args.slackChannel));
+  if (!thread) throw new Error("The original thread is unavailable. Restore it, then redeliver the event.");
+  // A pinned thread is not this rule's own thread, and other people may read
+  // it. A private channel recorded on it would hide it from every reader
+  // outside that channel, so the delivery dead-letters instead (spec
+  // Deviations, "Channel privacy follows content"). The write-time check
+  // (`thread-policy-write.ts`) covers channels the rule's filters name; this
+  // covers the rest, such as an any-channel rule.
+  if (args.slackChannel && destination.kind === "target" && destination.reason === "policy_existing") {
+    const data = thread.toThreadData();
+    const narrows = await recordingNarrowsThread({ db: deps.db, ...deps.slackAccess },
+      args.orgId, { ownerType: args.owner.type, sessionId: session.id, threadId: thread.id, key: data.key ?? null, recorded: recordedSlackChannels(data.metadata) },
+      args.slackChannel);
+    if (narrows) throw new PinUnavailableError(pinNarrowsMessage(args.slackChannel));
+  }
+  // Record the channel on a thread that already existed, and on a team
+  // execution's governing thread, before the title seed and the context
+  // fetch, so a reader outside a private channel never sees the content.
+  if (args.slackChannel) await recordSlackChannel(deps, session, thread, args.slackChannel);
+  if (destination.kind === "key") {
+    // A thread found by key reopens on delivery (spec Part B step 4), and a
+    // new one shows its policy title in the thread list.
+    if (destination.title) {
+      await seedThreadTitle(deps.db, { sessionId: session.id, threadId: thread.id, createdAt: thread.toThreadData().createdAt }, destination.title);
+    }
+    await reopenThread(deps.db, session.id, thread.id);
+  }
   let signal = args.signal;
   // On the assistant's FIRST turn in a channel thread, prepend the thread's
   // earlier messages so it participates in the group conversation with full
@@ -171,7 +437,8 @@ async function deliverToAssistantThreadInner(
   // submission check covers an api restart between admit and claim.)
   if (deps.fetchThreadContext && signal.origin) {
     const store = session.providers.store;
-    const existing = await store.getEntries(session.id, thread.id);
+    // Only whether the thread is empty: one entry answers it.
+    const existing = await store.getEntries(session.id, thread.id, { limit: 1 });
     if (existing.length === 0) {
       const unsettled = await store.listUnsettledSubmissions(session.id);
       if (!unsettled.some((item) => item.threadId === thread.id)) {
@@ -182,8 +449,51 @@ async function deliverToAssistantThreadInner(
       }
     }
   }
-  await thread.submitPrompt(signal, {
-    dispatchId: args.dispatchId,
-    author: { id: args.actorUserId },
-  });
+  if (destination.kind === "target") {
+    if (!(await isTargetThreadLive(deps.db, args.orgId, args.owner, destination))) {
+      throw new Error("The original conversation was archived or deleted. Restore it, then redeliver the event.");
+    }
+  }
+  // A person waits on an attended delivery, so its thread is a conversation
+  // from now on, even if an unattended delivery opened it
+  // (`isAutomatedDeliveryThread`). Record it before the turn is admitted.
+  // Only a key the automated-thread rule covers reads the flag, so a pinned
+  // or `slack:` thread gets no metadata write.
+  if (!args.unattended && isAutomatedThreadKey(thread.toThreadData().key ?? "")) {
+    await thread.setMetadataFlag(CONVERSATIONAL_THREAD_KEY);
+  }
+  const metadata = {
+    ...(args.appearance ? { presence: args.appearance } : {}),
+    ...(args.unattended ? { [UNATTENDED_DELIVERY_KEY]: true } : {}),
+  };
+  if (args.answer && await answerOpenQuestion(deps.db, {
+    session, thread, ...args.answer, dispatchId: args.dispatchId, now: Date.now(),
+  })) {
+    if (args.inbound) {
+      await recordChannelMessage(deps.db, {
+        ...args.inbound, orgId: args.orgId, sessionId: session.id, threadId: thread.id, direction: "in",
+      });
+    }
+    return { sessionId: session.id, threadId: thread.id };
+  }
+  // Every delivery waits for the running turn. Only a stop phrase in a
+  // mention can interrupt, and the store checks it came from the turn's own
+  // sender. A channel subscription delivers every message with reply "auto",
+  // so a plain channel message never interrupts.
+  const interrupts = !args.unattended && signal.signalType !== "slack.message" && isSlackStopRequest(signal);
+  const receipt = args.recordOnly
+    ? await thread.recordSignal(signal, { dispatchId: args.dispatchId, author: args.author ?? { id: args.actorUserId } })
+    : await thread.submitPrompt(signal, {
+      dispatchId: args.dispatchId,
+      queueMode: interrupts ? "steer" : "inject",
+      ...(interrupts ? { steerScope: "active-origin" as const } : {}),
+      ...(Object.keys(metadata).length ? { metadata } : {}),
+      author: args.author ?? { id: args.actorUserId },
+    });
+  if (args.inbound) {
+    await recordChannelMessage(deps.db, {
+      ...args.inbound, orgId: args.orgId, sessionId: session.id, threadId: thread.id, direction: "in",
+    });
+  }
+  return { sessionId: session.id, threadId: thread.id, queueItemId: receipt.queueItemId };
 }

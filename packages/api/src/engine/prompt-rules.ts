@@ -14,7 +14,12 @@ export const TOOL_USE_RULES =
   "is not possible, call list_tools (with a query when you have one) and " +
   "check for a matching action. If the needed integration is not " +
   "connected, say so and name the fix (connect it in Settings) — never " +
-  "present a missing connection as a missing capability.";
+  "present a missing connection as a missing capability. " +
+  "For slide or presentation edits, load the matching installed skill and " +
+  "discover dedicated editing actions first. Use those actions when available. " +
+  "Use browser editing only if the user requests it or the dedicated tools " +
+  "cannot perform the required operation. Explain that limitation before " +
+  "using the browser. Do not create a tunnel just to edit a hosted slide deck.";
 
 /**
  * Cheap and strong models both treat a prose promise as work unless the
@@ -110,7 +115,9 @@ Run valet-secrets run --env NAME=op://vault/item/field -- your-command. Quote a 
 
 If it reports that nothing resolved, name the failing reference to the user and ask them to check that item. Do not fall back to a pasted value.
 
-valet-secrets is the only way to reach a secret here. Never invent a reference to test access: a guessed op:// path fails exactly like a real one you cannot reach, so the result tells you nothing. If you do not have the vault, item, and field names, ask for them.`;
+Run valet-secrets find <name> when you know what the credential is called but not where it lives. It searches the vaults the session can read and prints matching references, one per line, tagged with the scope each came from. It never prints a value. Use a hit from find as the reference for run.
+
+valet-secrets is the only way to reach a secret here. Never invent a reference to test access: a guessed op:// path fails exactly like a real one you cannot reach, so the result tells you nothing. Ask for the vault, item, and field names only after find has come back with nothing.`;
 
 export const SECRETS_RULES_NO_CLI = `## Secrets
 
@@ -120,12 +127,67 @@ This sandbox has no secrets command. Do not run one to find out. Never print a c
 export const SECRETS_RULES = SECRETS_RULES_WITH_CLI;
 
 /**
- * System prompt for sandbox coding sessions. `secretsCli` says whether this
- * build runs sandbox prep, which installs valet-secrets; a workflow session
- * node does not, and telling it about a command it lacks produced a
- * command-not-found with no scripted response.
+ * Multi-step work: keep a plan with `update_plan`. The engine shows the open
+ * plan at the start of each turn, so the plan survives compaction.
  */
-export function codingSystemPrompt(opts: { secretsCli: boolean }): string {
+export const PLAN_RULE = "For work with three or more steps, call `update_plan` before you start, and update it when each step finishes. Keep exactly one item `in_progress`, and mark an item `done` only when it is done.";
+
+/**
+ * Background work (spec 2026-10-08: sandbox scratch, wakeups, and leases;
+ * spec 2026-10-15: event waiters). Tells the model to use the
+ * background-work tools instead of blocking a turn on a long command or
+ * polling a running process. A model told only how to check progress loops
+ * on process_read, so the rules say to end the turn after a start (fix wave
+ * 3, UX prompts 1 and 9). The final sentence (event-wakeups spec, Part I, quoted
+ * verbatim) tells the model to arm an event waiter instead of polling an
+ * external service with `watch` or `curl`.
+ */
+export const BACKGROUND_WORK_RULES = `## Background work
+
+For a command longer than an hour, run \`bash\` with \`background: true\`, a \`deadline_hours\`, and a \`reason\`. After the start, end your turn with a one-line status. You receive a \`process.exited\` signal when it ends, and that signal starts your next turn; do not poll it. Call \`process_read\` with \`tail: true\` only when someone asks for progress. To follow a log or an external system, use \`watch\`, and print only the lines you will act on: each \`watch.event\` signal starts a turn. \`watch\` runs its own command and cannot attach to a process that \`bash\` already started. If you need a command's output lines as they arrive, start the command with \`watch\`, not with \`bash\`. For a process \`bash\` already started, read its output with \`process_read\`; do not guess a log path to tail. To pause for more than 5 minutes, call \`wake_at\` and end your turn; do not \`sleep\`. To keep the sandbox running while nothing runs in it, for example for a person in the terminal, use \`hold_sandbox\`. To stop work you started, call \`wakeup_cancel\` with its id; \`wakeup_list\` shows the ids. Your own cancel sends no signal, so do not wait for one. A child notifies its parent whenever a turn ends. The update lists outstanding background work. Later signal turns send new updates. Cancelling a child-updates waiter stops its notifications, not the child. When a signal reports a cause other than \`exit\`, tell the person before you run the work again. To wait for something in GitHub, Slack, or Linear, such as CI, a review, a reply, or a new ticket, call \`wait_for_event\` with its URL and end your turn. Do not poll with \`watch\` or \`sleep\`. Arm it before the action that triggers it, for example before \`git push\`. ${PLAN_RULE}`;
+
+/**
+ * The thread link sentence (Part I of the event-wakeups spec, quoted
+ * verbatim). It is per-thread, not per-session, so it cannot live in
+ * {@link BACKGROUND_WORK_RULES} or {@link codingSystemPrompt}, both of which
+ * build once per session: `host.ts` wires it in through the engine's
+ * `threadSystemContext` hook instead, which runs once per thread. Returns
+ * undefined when the deployment has no public URL (`publicUrlFromEnv`),
+ * so the sentence never names an address nobody outside the sandbox can
+ * reach.
+ */
+export function threadLinkContext(threadId: string, publicUrl: string | undefined): string | undefined {
+  if (!publicUrl) return undefined;
+  return `This thread's link is ${publicUrl}/threads/${threadId}. Post it when you announce work in a channel, so people can follow the thread.`;
+}
+
+/**
+ * The `/scratch` sentence. Only a session whose sandbox has `/scratch`
+ * gets it: a session without one was told a directory exists that does
+ * not (fix wave 3, UX prompt 8).
+ */
+export const SCRATCH_RULE =
+  "`/scratch` is wiped when the sandbox stops; keep anything you need in /workspace or push it.";
+
+/**
+ * System prompt for sandbox coding sessions. `secretsCli` says whether this
+ * build runs sandbox prep, which installs valet-secrets. An unbound build
+ * on a non-isolated provider does not, and telling it about a command it
+ * lacks produced a command-not-found with no scripted response.
+ * `scratchEnabled` says whether the session's sandbox has `/scratch`;
+ * absent means no, so the prompt never names a directory that may not
+ * exist.
+ */
+/**
+ * A child session's rule for a blocking question. A child has no question
+ * tool (`CHILD_EXCLUDED_TOOL_NAMES` in the engine): its parent agent answers
+ * from the brief and the thread, or asks the person, then continues it.
+ */
+export const CHILD_QUESTION_RULES = `## Questions
+
+You work for a parent agent. No person reads this conversation while you work, so do not ask a person anything. If a missing fact or a decision blocks you, end your turn with the question as your result. Say what you need, why it blocks you, and the choices you see, and say what you finished before you stopped. The parent answers from its brief or asks the person, then sends you the answer. Do not guess on a step that is hard to reverse. When a guess is safe, go ahead and say in one line what you assumed.`;
+
+export function codingSystemPrompt(opts: { secretsCli: boolean; scratchEnabled?: boolean; child?: boolean }): string {
   return `You are a coding assistant running inside a Docker sandbox. Your workspace is /workspace (the only mounted directory). All read/write/edit/bash tools operate against /workspace — use absolute paths under /workspace or relative paths (which resolve there).
 
 ${TOOL_USE_RULES}
@@ -142,7 +204,9 @@ ${CHILD_MODEL_RULES}
 
 ${opts.secretsCli ? SECRETS_RULES_WITH_CLI : SECRETS_RULES_NO_CLI}
 
-${CODING_PERSISTENCE_RULES}`;
+${BACKGROUND_WORK_RULES}${opts.scratchEnabled ? ` ${SCRATCH_RULE}` : ""}
+
+${CODING_PERSISTENCE_RULES}${opts.child ? `\n\n${CHILD_QUESTION_RULES}` : ""}`;
 }
 
 /** The prepped-sandbox prompt, for callers and tests that want the constant. */

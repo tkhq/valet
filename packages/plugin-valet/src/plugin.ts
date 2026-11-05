@@ -7,10 +7,18 @@ const productKnowledgeMd = readFileSync(
   "utf8",
 );
 
+const approvalsMd = readFileSync(
+  fileURLToPath(new URL("../skills/approvals/SKILL.md", import.meta.url)),
+  "utf8",
+);
+
 const plugin: ValetPlugin = {
   name: "valet",
   version: "0.1.0",
-  skills: [loadSkillFromMarkdown(productKnowledgeMd, "plugin", "using-valet")],
+  skills: [
+    loadSkillFromMarkdown(productKnowledgeMd, "plugin", "using-valet"),
+    loadSkillFromMarkdown(approvalsMd, "plugin", "approvals"),
+  ],
 };
 
 export default plugin;

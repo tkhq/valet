@@ -46,7 +46,7 @@
  * so it ran anyway."
  */
 import type { ApprovalMode, PolicyProvenanceSource, RiskLevel } from "@valet/engine";
-import { evaluateMatchers, type ParamMatcher } from "./matchers.js";
+import { evaluateMatchers, readPath, type ParamMatcher } from "./matchers.js";
 
 export type PolicyAppliesIn = "any" | "workflow" | "session";
 
@@ -92,6 +92,7 @@ export interface ActionPolicyOverrideRow {
 }
 
 export interface PolicyResolutionRows {
+  workflowGrants?: { id: string; actionId: string }[];
   policies: ActionPolicyRow[];
   grants: RuntimeGrantRow[];
   overrides: ActionPolicyOverrideRow[];
@@ -115,6 +116,16 @@ export interface PolicyResolutionInput {
   /** Caller-supplied clock reading (ms) — kept explicit so expiry edge cases
    *  are deterministic in tests; this module never calls `Date.now()`. */
   now: number;
+  /**
+   * `params` lists only the values known before the action runs, as for a
+   * hosted provider tool whose prompt the model writes later. A matcher on
+   * an absent path may match a deny or approval row, so the row applies and
+   * fails closed. It never matches an allow row, which would widen access.
+   */
+  partialParams?: boolean;
+  /** A workflow agent step that declares this exact action
+   * (`workflows/step-grants.ts`). Its saved workflow grant applies. */
+  agentStep?: boolean;
 }
 
 export interface PolicyDecisionProvenance {
@@ -198,17 +209,53 @@ function matchesTarget(
   return false;
 }
 
+/**
+ * Under `partialParams`, a matcher is unresolved when its path is absent or
+ * resolves to an object: the root object and nested objects can still gain
+ * fields when the action runs, so a whole-object `eq` or `in` cannot be
+ * decided yet. Scalar paths that are present evaluate exactly.
+ */
+function unresolvedUnderPartial(matcher: ParamMatcher, params: unknown): boolean {
+  const actual = readPath(params, matcher.path);
+  return actual === undefined || (typeof actual === "object" && actual !== null);
+}
+
+/**
+ * Apply a row's matchers. With `partialParams`, an unresolved matcher might
+ * match once the action runs: a deny or approval row then counts as
+ * matching, an allow row does not.
+ */
+function matchesParams(row: { mode: ApprovalMode; paramMatchers: ParamMatcher[] }, input: PolicyResolutionInput): boolean {
+  if (!input.partialParams) return evaluateMatchers(row.paramMatchers, input.params);
+  const resolved = row.paramMatchers.filter((matcher) => !unresolvedUnderPartial(matcher, input.params));
+  if (resolved.length !== row.paramMatchers.length && row.mode === "allow") return false;
+  return evaluateMatchers(resolved, input.params);
+}
+
 function matchesPolicyRow(row: ActionPolicyRow, input: PolicyResolutionInput): boolean {
   if (row.revokedAt !== null) return false;
   if (row.expiresAt !== null && row.expiresAt <= input.now) return false;
   if (row.appliesIn !== "any" && row.appliesIn !== input.appliesIn) return false;
   if (!matchesTarget(row, input)) return false;
-  return evaluateMatchers(row.paramMatchers, input.params);
+  return matchesParams(row, input);
+}
+
+/** An explicit org or team rule that denies or requires approval for this
+ * call, whatever `appliesIn` it names. An agent step resolves as `session`,
+ * so a rule scoped to workflows is otherwise invisible to it. */
+export function restrictivePolicyAnywhere(rows: PolicyResolutionRows, input: PolicyResolutionInput): ActionPolicyRow | undefined {
+  return rows.policies.find((row) => row.mode !== "allow"
+    && matchesPolicyRow(row, { ...input, appliesIn: row.appliesIn === "any" ? input.appliesIn : row.appliesIn }));
 }
 
 function matchesOverrideRow(row: ActionPolicyOverrideRow, input: PolicyResolutionInput): boolean {
   if (!matchesTarget(row, input)) return false;
-  return evaluateMatchers(row.paramMatchers, input.params);
+  return matchesParams(row, input);
+}
+
+/** The personal override that decides this call at rung 2, if one matches. */
+export function winningOverride(rows: PolicyResolutionRows, input: PolicyResolutionInput): ActionPolicyOverrideRow | undefined {
+  return mostSpecific(rows.overrides.filter((r) => matchesOverrideRow(r, input)));
 }
 
 function matchesGrantRow(row: RuntimeGrantRow, input: PolicyResolutionInput): boolean {
@@ -297,7 +344,7 @@ export function resolvePolicyDecision(
   }
 
   // Rung 2: per-user override (any mode).
-  const override = mostSpecific(rows.overrides.filter((r) => matchesOverrideRow(r, input)));
+  const override = winningOverride(rows, input);
   if (override) {
     return {
       mode: override.mode,
@@ -309,6 +356,14 @@ export function resolvePolicyDecision(
       },
     };
   }
+
+  // Durable workflow permission never weakens an explicit org/team rule,
+  // including, for an agent step, one scoped to workflows.
+  const workflowGrant = !match && (input.appliesIn === "workflow" || (input.agentStep === true && !restrictivePolicyAnywhere(rows, input)))
+    ? rows.workflowGrants?.find((row) => row.actionId === input.actionId) : undefined;
+  if (workflowGrant) return { mode: "allow", provenance: {
+    baseMode, matchedGrantId: workflowGrant.id, source: "workflow_grant",
+  } };
 
   // Rungs 3-5.
   return {

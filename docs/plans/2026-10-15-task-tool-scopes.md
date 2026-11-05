@@ -1,0 +1,58 @@
+# Task Tool Scopes Implementation Plan
+
+> **For agentic workers:** Use superpowers:executing-plans to implement this plan task by task.
+
+**Goal:** Limit task tools and give workflow troubleshooting a repeatable evidence and repair procedure.
+
+**Architecture:** Shared scope helpers intersect allowlists. The engine applies scopes per session, submission, and thread. The API carries ceilings into children and workflow runs.
+
+**Tech Stack:** TypeScript, TypeBox, Hono, existing metadata stores, Vitest.
+
+**Spec:** docs/specs/2026-10-15-task-tool-scopes-design.md
+
+## Global Constraints
+
+- New branches use `xbalbinus/*`.
+- Keep upstream PR prose focused on the product.
+- Preserve tenant authorization and existing action approvals.
+- Use existing metadata columns. Add no schema migration.
+- Preserve behavior when no scope is set.
+
+## Review Focus
+
+- Two concurrent threads in one cached team session keep separate focus.
+- Restored children retain the parent ceiling.
+- A stale or guessed tool call cannot bypass filtering.
+- Nested workflow runs and sandbox scripts cannot escape the starting scope.
+- Validation distinguishes missing evidence, unavailable data, and a successful side effect.
+
+## Tasks
+
+- [x] Add scope parsing, matching, and intersection. Test explicit empty scopes, wildcards, invalid persisted values, and incompatible intersections.
+- [x] Enforce scopes in engine visibility, execution, and discovery. Test pinned calls, dynamic actions, same-batch focus changes, and restore.
+- [x] Add workflow focus profiles and child inheritance. Test personal and team owners with concurrent threads.
+- [x] Carry scopes through workflow runs, agent nodes, nested runs, and sandbox actions. Test restart and no-side-effect refusals.
+- [x] Update workflow prompts and skills. Add a troubleshooting reference with evidence, clarification, repair, and validation steps.
+- [x] Run targeted checks, full E2E, and an independent readonly review. Fix concrete findings.
+- [x] File the product PR, deploy a branch preserving current customizations, and run live personal and team checks.
+
+
+## Execution record
+
+- Shared parsing, engine enforcement, focus profiles, inheritance, prompts, and skills are implemented.
+- Independent review found scope loss in child steering, combined queues, image permission caches, and completion signals. Regression checks cover these paths.
+- Dynamic team discovery retains its account approval. Canonical action IDs retain service aliases.
+- PostgreSQL thread saves now persist focus changes. The shared store contract reproduced the former failure.
+- Checks: 193 focused engine tests, 258 focused API tests, 122 inheritance tests, and 161 store tests passed.
+- Full E2E: the final complete run passed 21 suites with zero failures and 16 environment skips.
+- Live checks passed diagnosis, repair, preview, and run output for personal/team assistants with Haiku 4.5 and Opus 5.5. Restricted tasks refused writes. Both assistants asked for missing staff-meeting details without edits or runs.
+- Live team continuations exposed missing member authority for private run reads. The regression failed before the fix and passed after it. Other members and machine turns remain denied.
+- Live repair exposed an unsupported patch format accepted as an unchanged save. Strict patch parameters now reject it. Schema-recovery advice explicitly requests schemas.
+- The follow-up API checks passed 927 tests. These fixes were deployed for live rechecks.
+- The live rechecks passed all 12 personal/team-model checks, including private team result reads.
+- Adversarial review then demonstrated three missing scope paths: object-shaped foreach bodies, child gate notifications, and security dispatch/handoff. Five regression failures reproduced them. All 40 targeted tests pass after the fixes.
+- Full E2E after the adversarial fixes passed 21 suites with zero failures and 16 environment skips. Live rechecks of this last revision remain pending.
+- A final deterministic review reproduced an unscoped security driver nudge executing a formerly excluded write. Thread metadata now retains continuation ceilings, and driver submissions carry their intersection. The regression fails before the fix and passes after it.
+- Continuation claims now atomically intersect current thread ceilings in both stores. Shared contract tests reproduce limits added on the same or another thread after a stale snapshot.
+- The final targeted checks passed 265 tests, including both store contracts, crash recovery, and the actual driver. Independent review confirmed the stale-snapshot reproduction now refuses the write.
+- The full suite hit one local content-sync timeout. That test passed on rerun. A complete unit rerun with fewer workers and the final deployment are in progress.

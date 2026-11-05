@@ -1,18 +1,28 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import type { SandboxCreateOpts } from "@valet/engine";
 import {
   CREDS_MOUNT_PATH,
   CREDS_VOLUME_NAME,
   DOCKER_LABEL_KEY,
+  NESTED_KUBERNETES_LABEL_KEY,
   DOCKER_STATE_MOUNT_PATH,
   DOCKER_STATE_VOLUME_NAME,
   DOCKER_WORKLOAD_FS_GROUP,
   IMAGE_FINGERPRINT_ENV,
   imageFingerprint,
+  SANDBOX_CONTAINER_NAME,
   SANDBOX_CR_API_VERSION,
   SANDBOX_POD_LABEL_KEY,
+  SCRATCH_MOUNT_PATH,
+  SCRATCH_INIT_NAME,
+  SCRATCH_PLACEHOLDER_COMMAND,
+  SCRATCH_VOLUME_NAME,
   buildSandboxManifest,
   credsSecretName,
+  ephemeralStorageSums,
   sandboxCrName,
   SESSION_ANNOTATION_KEY,
   SESSION_LABEL_KEY,
@@ -20,6 +30,10 @@ import {
   WORKSPACE_VOLUME_NAME,
 } from "../src/index.js";
 import type { K8sProviderConfig } from "../src/index.js";
+import { HOME_LAYOUT_VERSION } from "../src/home-persistence.js";
+import { scratchSizeLimit } from "../src/manifest.js";
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "../../..");
 
 const RFC1123_LABEL = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
 
@@ -143,7 +157,7 @@ describe("buildSandboxManifest", () => {
     expect(manifest.spec.podTemplate.spec.containers[0]?.env).toEqual([
       { name: "VALET_SANDBOX_TOKEN", value: "tok-123" },
       { name: "VALET_API_URL", value: "http://valet-api.valet.svc.cluster.local" },
-      { name: "VALET_HOME_LAYOUT_VERSION", value: "1" },
+      { name: "VALET_HOME_LAYOUT_VERSION", value: HOME_LAYOUT_VERSION },
       { name: IMAGE_FINGERPRINT_ENV, value: imageFingerprint(baseConfig.defaultImage) },
     ]);
   });
@@ -151,7 +165,7 @@ describe("buildSandboxManifest", () => {
   it("emits image and home-layout fingerprints when opts.env is not provided", () => {
     const manifest = buildSandboxManifest(baseConfig, "sess-1", {});
     expect(manifest.spec.podTemplate.spec.containers[0]?.env).toEqual([
-      { name: "VALET_HOME_LAYOUT_VERSION", value: "1" },
+      { name: "VALET_HOME_LAYOUT_VERSION", value: HOME_LAYOUT_VERSION },
       { name: IMAGE_FINGERPRINT_ENV, value: imageFingerprint(baseConfig.defaultImage) },
     ]);
   });
@@ -162,12 +176,37 @@ describe("buildSandboxManifest", () => {
     );
   });
 
-  it("maps opts.resources cpu (number) and memory (string) to requests/limits", () => {
+  it("maps opts.resources cpu (number) and memory (string) to requests/limits, with the memory limit at 3x the request", () => {
     const manifest = buildSandboxManifest(baseConfig, "sess-1", opts);
     const container = manifest.spec.podTemplate.spec.containers[0];
     expect(container?.resources).toEqual({
       requests: { cpu: "2", memory: "4Gi" },
-      limits: { cpu: "2", memory: "4Gi" },
+      limits: { cpu: "2", memory: "12Gi" },
+    });
+  });
+
+  it.each([
+    // The burst limit scales the parsed byte count, so decimal and
+    // non-power-of-two requests stay exact instead of round-tripping
+    // through a lossy suffix multiply.
+    ["512Mi", "1536Mi"],
+    ["1.5Gi", "4608Mi"],
+    ["3G", "9000000000"],
+  ])("memory request %s gets limit %s (3x, largest even binary suffix)", (request, limit) => {
+    const manifest = buildSandboxManifest(baseConfig, "sess-1", { resources: { memory: request } });
+    const container = manifest.spec.podTemplate.spec.containers[0];
+    expect(container?.resources).toEqual({
+      requests: { memory: request },
+      limits: { memory: limit },
+    });
+  });
+
+  it("keeps limit = request for a memory quantity it cannot parse, so admission still rejects it", () => {
+    const manifest = buildSandboxManifest(baseConfig, "sess-1", { resources: { memory: "lots" } });
+    const container = manifest.spec.podTemplate.spec.containers[0];
+    expect(container?.resources).toEqual({
+      requests: { memory: "lots" },
+      limits: { memory: "lots" },
     });
   });
 
@@ -180,7 +219,7 @@ describe("buildSandboxManifest", () => {
     const container = manifest.spec.podTemplate.spec.containers[0];
     expect(container?.resources).toEqual({
       requests: { cpu: "1", memory: "1Gi" },
-      limits: { cpu: "1", memory: "1Gi" },
+      limits: { cpu: "1", memory: "3Gi" },
     });
   });
 
@@ -198,7 +237,7 @@ describe("buildSandboxManifest", () => {
     const container = manifest.spec.podTemplate.spec.containers[0];
     expect(container?.resources).toEqual({
       requests: { cpu: "2.5", memory: "2Gi", "ephemeral-storage": "2Gi" },
-      limits: { cpu: "2.5", memory: "2Gi", "ephemeral-storage": "8Gi" },
+      limits: { cpu: "2.5", memory: "6Gi", "ephemeral-storage": "8Gi" },
     });
   });
 
@@ -253,7 +292,7 @@ describe("buildSandboxManifest", () => {
       const container = manifest.spec.podTemplate.spec.containers[0];
       expect(container?.resources).toEqual({
         requests: { cpu: "2", memory: "4Gi", "ephemeral-storage": "2Gi" },
-        limits: { cpu: "2", memory: "4Gi", "ephemeral-storage": "8Gi" },
+        limits: { cpu: "2", memory: "12Gi", "ephemeral-storage": "8Gi" },
       });
     });
 
@@ -290,6 +329,137 @@ describe("buildSandboxManifest", () => {
         name: DOCKER_STATE_VOLUME_NAME,
         emptyDir: {},
       });
+    });
+  });
+
+  describe("scratch", () => {
+    it("adds the emptyDir, mount, TMPDIR, and the ephemeral sums", () => {
+      const cfg: K8sProviderConfig = {
+        ...baseConfig,
+        defaultResources: { ephemeralStorage: "2Gi", ephemeralStorageLimit: "30Gi" },
+      };
+      const manifest = buildSandboxManifest(cfg, "sess-1", { resources: { scratch: "800Gi" } });
+      const container = manifest.spec.podTemplate.spec.containers[0];
+      expect(manifest.spec.podTemplate.spec.volumes).toContainEqual({
+        name: SCRATCH_VOLUME_NAME,
+        emptyDir: { sizeLimit: "800Gi" },
+      });
+      expect(container?.volumeMounts).toContainEqual({ name: SCRATCH_VOLUME_NAME, mountPath: SCRATCH_MOUNT_PATH });
+      expect(container?.env).toContainEqual({ name: "TMPDIR", value: "/scratch/tmp" });
+      expect(container?.resources?.requests?.["ephemeral-storage"]).toBe("802Gi");
+      expect(container?.resources?.limits?.["ephemeral-storage"]).toBe("830Gi");
+    });
+
+    it("uses scratch alone when a deploy knob is disabled", () => {
+      const cfg: K8sProviderConfig = {
+        ...baseConfig,
+        defaultResources: { ephemeralStorage: "2Gi" },
+      };
+      const manifest = buildSandboxManifest(cfg, "sess-1", { resources: { scratch: "100Gi" } });
+      const container = manifest.spec.podTemplate.spec.containers[0];
+      expect(container?.resources?.requests?.["ephemeral-storage"]).toBe("102Gi");
+      expect(container?.resources?.limits?.["ephemeral-storage"]).toBe("100Gi");
+    });
+
+    it("is byte-identical to today without scratch", () => {
+      const a = buildSandboxManifest(baseConfig, "sess-1", {});
+      const b = buildSandboxManifest(baseConfig, "sess-1", { resources: { cpu: 1 } });
+      expect(JSON.stringify(a)).not.toContain("scratch");
+      expect(JSON.stringify(b)).not.toContain("scratch");
+    });
+
+    it("ephemeralStorageSums adds quantities", () => {
+      expect(ephemeralStorageSums("800Gi", "2Gi", "30Gi")).toEqual({ request: "802Gi", limit: "830Gi" });
+      expect(ephemeralStorageSums(undefined, "2Gi", "30Gi")).toEqual({ request: "2Gi", limit: "30Gi" });
+      expect(ephemeralStorageSums("1Ti", undefined, undefined)).toEqual({ request: "1Ti", limit: "1Ti" });
+      expect(ephemeralStorageSums(undefined, undefined, undefined)).toEqual({});
+    });
+
+    it("bootstraps /scratch on a plain headless pod (no docker, no full profile)", () => {
+      // The bare `tail -f /dev/null` placeholder runs no start script, so
+      // nothing else creates /scratch/tmp before TMPDIR points at it.
+      const manifest = buildSandboxManifest(baseConfig, "sess-1", { resources: { scratch: "100Gi" } });
+      const container = manifest.spec.podTemplate.spec.containers[0];
+      expect(container?.command?.slice(4)).toEqual(SCRATCH_PLACEHOLDER_COMMAND);
+    });
+
+    it("keeps the full-profile command unchanged when scratch is set", () => {
+      // start-full.sh already creates /scratch/tmp — no placeholder swap needed.
+      const manifest = buildSandboxManifest(baseConfig, "sess-1", { profile: "full", resources: { scratch: "100Gi" } });
+      const container = manifest.spec.podTemplate.spec.containers[0];
+      expect(container?.command?.slice(4)).toEqual([
+        "sh",
+        "-c",
+        "[ -f /start-full.sh ] && { [ -x /usr/bin/tini ] && exec /usr/bin/tini -g -- /bin/bash /start-full.sh || exec /bin/bash /start-full.sh; } || exec tail -f /dev/null",
+      ]);
+    });
+
+    it("keeps the docker start-headless probe command unchanged when scratch is set", () => {
+      // start-headless.sh already creates /scratch/tmp — no placeholder swap needed.
+      const manifest = buildSandboxManifest(baseConfig, "sess-1", { docker: true, resources: { scratch: "100Gi" } });
+      const container = manifest.spec.podTemplate.spec.containers[0];
+      expect(container?.command?.slice(4)).toEqual([
+        "sh",
+        "-c",
+        "[ -f /start-headless.sh ] && { [ -x /usr/bin/tini ] && exec /usr/bin/tini -g -- /bin/bash /start-headless.sh || exec /bin/bash /start-headless.sh; } || exec tail -f /dev/null",
+      ]);
+    });
+
+    it.each([
+      { name: "plain headless", opts: {} },
+      { name: "full profile", opts: { profile: "full" as const } },
+      { name: "docker", opts: { docker: true } },
+    ])("bootstraps the scratch dirs in an init container on a $name pod (H12)", ({ opts }) => {
+      const manifest = buildSandboxManifest(baseConfig, "sess-1", { ...opts, resources: { scratch: "100Gi" } });
+      const inits = manifest.spec.podTemplate.spec.initContainers ?? [];
+      expect(inits.map((c) => c.name)).toEqual(["valet-home-init", SCRATCH_INIT_NAME]);
+      const init = inits.find((c) => c.name === SCRATCH_INIT_NAME);
+      expect(init?.image).toBe(baseConfig.defaultImage);
+      expect(init?.volumeMounts).toEqual([{ name: SCRATCH_VOLUME_NAME, mountPath: SCRATCH_MOUNT_PATH }]);
+      expect(init?.command?.[2]).toContain('chmod 1777 "$scratch"');
+      expect(init?.command?.[2]).toContain('chmod 1777 "$scratch/tmp" "$scratch/valet-jobs"');
+      expect(init?.command?.[2]).toContain('chmod 700 "$scratch/tmp-root"');
+    });
+
+    it("adds no scratch init container without scratch", () => {
+      const manifest = buildSandboxManifest(baseConfig, "sess-1", {});
+      expect((manifest.spec.podTemplate.spec.initContainers ?? []).map((c) => c.name)).toEqual(["valet-home-init"]);
+    });
+
+    it("makes /scratch/valet-jobs writable by the workload user in every bootstrap (B6)", () => {
+      expect(SCRATCH_PLACEHOLDER_COMMAND[2]).toContain('chmod 1777 "$scratch/tmp" "$scratch/valet-jobs"');
+      for (const script of ["start-headless.sh", "start-full.sh"]) {
+        const text = readFileSync(join(REPO_ROOT, "docker", script), "utf8");
+        expect(text, script).toContain("chmod 1777 /scratch/tmp /scratch/valet-jobs");
+      }
+    });
+
+    it("makes the /scratch root sticky in the start scripts too (fix wave 3, H-1)", () => {
+      for (const script of ["start-headless.sh", "start-full.sh"]) {
+        const text = readFileSync(join(REPO_ROOT, "docker", script), "utf8");
+        expect(text, script).toContain("chmod 1777 /scratch\n");
+        expect(text, script).not.toMatch(/chmod 0?777 \/scratch/);
+      }
+    });
+
+    it("gives root services a root-only TMPDIR and keeps the container env on /scratch/tmp (fix wave 3, H-2)", () => {
+      const manifest = buildSandboxManifest(baseConfig, "sess-1", { profile: "full", resources: { scratch: "100Gi" } });
+      const env = manifest.spec.podTemplate.spec.containers[0]?.env ?? [];
+      expect(env.filter((entry) => entry.name === "TMPDIR")).toEqual([{ name: "TMPDIR", value: "/scratch/tmp" }]);
+      for (const script of ["start-headless.sh", "start-full.sh"]) {
+        const text = readFileSync(join(REPO_ROOT, "docker", script), "utf8");
+        expect(text, script).toContain("export TMPDIR=/scratch/tmp-root");
+        expect(text, script).toContain("[ -O /scratch/tmp-root ]");
+      }
+      const full = readFileSync(join(REPO_ROOT, "docker", "start-full.sh"), "utf8");
+      expect(full).toContain("TMPDIR=/scratch/tmp");
+      expect(full.indexOf("export TMPDIR=/scratch/tmp-root")).toBeLessThan(full.indexOf("code-server --bind-addr"));
+    });
+
+    it("keeps the bare placeholder command when scratch is absent", () => {
+      const manifest = buildSandboxManifest(baseConfig, "sess-1", {});
+      const container = manifest.spec.podTemplate.spec.containers[0];
+      expect(container?.command?.slice(4)).toEqual(["sh", "-c", "tail -f /dev/null"]);
     });
   });
 
@@ -419,6 +589,24 @@ describe("buildSandboxManifest", () => {
     });
   });
 
+  describe("browser-enabled headless command", () => {
+    it("guards tini so an image without /usr/bin/tini still starts", () => {
+      const manifest = buildSandboxManifest(baseConfig, "sess-browser", {
+        profile: "headless",
+        sessionId: "session-browser",
+        browser: { enabled: true, viewer: true },
+      });
+      const container = manifest.spec.podTemplate.spec.containers.find((c) => c.name === SANDBOX_CONTAINER_NAME);
+      // The first four entries are the valet-home-start wrapper; slice them
+      // off the way the scratch tests do.
+      expect(container?.command?.slice(4)).toEqual([
+        "sh",
+        "-c",
+        "[ -f /start-headless.sh ] && { [ -x /usr/bin/tini ] && exec /usr/bin/tini -g -- /bin/bash /start-headless.sh || exec /bin/bash /start-headless.sh; } || exec tail -f /dev/null",
+      ]);
+    });
+  });
+
   describe("credsFiles", () => {
     it("adds the valet-creds volume and mount when credsFiles is provided", () => {
       const manifest = buildSandboxManifest(baseConfig, "sess-1", {
@@ -460,6 +648,12 @@ describe("buildSandboxManifest", () => {
       expect(without).toEqual(alsoWithout);
     });
   });
+
+  it("asks the kubelet to copy the log tail into the termination message", () => {
+    const manifest = buildSandboxManifest(baseConfig, "sess-tm", {});
+    const container = manifest.spec.podTemplate.spec.containers.find((c) => c.name === SANDBOX_CONTAINER_NAME);
+    expect(container?.terminationMessagePolicy).toBe("FallbackToLogsOnError");
+  });
 });
 
 describe("docker flag (rootless DinD)", () => {
@@ -472,6 +666,7 @@ describe("docker flag (rootless DinD)", () => {
       "container.apparmor.security.beta.kubernetes.io/sandbox"
     ]).toBe("unconfined");
     const c = pod.spec.containers[0]!;
+    expect(c.securityContext?.privileged).toBeUndefined();
     expect(c.securityContext?.seccompProfile?.type).toBe("Unconfined");
     expect(c.securityContext?.capabilities?.add).toEqual(["SYS_ADMIN", "NET_ADMIN"]);
     expect(c.securityContext?.procMount).toBe("Unmasked");
@@ -495,7 +690,7 @@ describe("docker flag (rootless DinD)", () => {
     expect(json).not.toContain("dev-fuse");
     expect(json).not.toContain("dev-tun");
     expect(json).not.toContain("hostPath");
-    expect(json).not.toContain("privileged");
+    expect(cr.spec.podTemplate.spec.containers[0]?.securityContext?.privileged).toBeUndefined();
   });
 
   it("sets pod-level fsGroup 1500 so the workspace PVC is group-writable by dockerd", () => {
@@ -545,6 +740,11 @@ describe("docker flag (rootless DinD)", () => {
   it("labels the CR docker-enabled so restore() can re-derive the flag", () => {
     const cr = buildSandboxManifest(cfg, "sb-docker", { docker: true });
     expect(cr.metadata.labels[DOCKER_LABEL_KEY]).toBe("true");
+  });
+
+  it("labels nested Kubernetes so restore re-derives its workload user", () => {
+    const cr = buildSandboxManifest(cfg, "sb-kubernetes", { nestedKubernetes: true });
+    expect(cr.metadata.labels[NESTED_KUBERNETES_LABEL_KEY]).toBe("true");
   });
 
   it("headless+docker uses the start-headless probe wrapper command", () => {
@@ -645,5 +845,67 @@ describe("workspace storage sizing (TKAI-385: repo-declared size)", () => {
     );
     expect(workspaceStorage(cr)).toBe("1Gi");
     errSpy.mockRestore();
+  });
+});
+
+describe("nested Kubernetes security profile", () => {
+  it("uses exactly the existing bounded Docker grants", () => {
+    const cr = buildSandboxManifest(
+      { ...baseConfig, dockerRuntimeClassName: "valet-docker" },
+      "nested",
+      { nestedKubernetes: true },
+    );
+    const pod = cr.spec.podTemplate.spec;
+    const container = pod.containers[0]!;
+    expect(pod.hostUsers).toBe(false);
+    expect(pod.runtimeClassName).toBe("valet-docker");
+    expect(container.securityContext).toEqual({
+      privileged: false,
+      seccompProfile: { type: "Unconfined" },
+      capabilities: { add: ["SYS_ADMIN", "NET_ADMIN"] },
+      procMount: "Unmasked",
+    });
+    const podJson = JSON.stringify(pod);
+    expect(podJson).not.toContain("hostNetwork");
+    expect(podJson).not.toContain("hostPID");
+    expect(podJson).not.toContain("hostIPC");
+    expect(pod.volumes?.some((volume) => "hostPath" in volume)).not.toBe(true);
+    expect(container.env).toEqual(expect.arrayContaining([
+      { name: "VALET_SANDBOX_KUBERNETES", value: "1" },
+      { name: "KUBECONFIG", value: "/home/dockerd/.local/state/valet/kubernetes/kubeconfig.yaml" },
+      { name: "VALET_SANDBOX_EPOCH", valueFrom: { fieldRef: { fieldPath: "metadata.uid" } } },
+    ]));
+    expect(container.env).not.toContainEqual({ name: "VALET_SANDBOX_DOCKER", value: "1" });
+  });
+
+  it("leaves ordinary sandbox environment and security unchanged", () => {
+    const cr = buildSandboxManifest(baseConfig, "ordinary", {});
+    const container = cr.spec.podTemplate.spec.containers[0]!;
+    expect(container.securityContext).toBeUndefined();
+    expect(container.env?.some(({ name }) => name === "KUBECONFIG" || name === "VALET_SANDBOX_KUBERNETES")).toBe(false);
+    expect(cr.spec.podTemplate.spec.hostUsers).toBeUndefined();
+  });
+});
+
+describe("scratchSizeLimit (fix wave 4, security N2)", () => {
+  it("passes the api's accepted forms through unchanged", () => {
+    for (const ok of ["200Gi", "1Ti", "512Mi", "1024Ki", "107374182400"]) {
+      expect(scratchSizeLimit(ok)).toBe(ok);
+    }
+  });
+
+  it("refuses a form the CRD rejects or the api never accepts", () => {
+    for (const bad of ["200G", "1.5Ti", "2000000K", "1e12", "", " 200Gi", "200Gi; rm -rf /"]) {
+      expect(() => scratchSizeLimit(bad), bad).toThrow("is not a supported quantity");
+    }
+  });
+});
+
+describe("image runtime contract constants", () => {
+  it("pins the current and minimum contract", async () => {
+    const { SANDBOX_IMAGE_CONTRACT, MIN_IMAGE_CONTRACT } = await import("../src/index.js");
+    expect(SANDBOX_IMAGE_CONTRACT).toBe(3);
+    expect(MIN_IMAGE_CONTRACT).toBe(3);
+    expect(MIN_IMAGE_CONTRACT).toBeLessThanOrEqual(SANDBOX_IMAGE_CONTRACT);
   });
 });

@@ -1,7 +1,6 @@
 /**
- * 1Password service module — the ONLY file in this codebase that imports
- * `@1password/sdk` (mirrors the isolation in the legacy
- * `packages/runner/src/onepassword-provider.ts`). Owns:
+ * 1Password service module, the ONLY file in this codebase that imports
+ * `@1password/sdk`. Owns:
  *
  *   - SDK client construction + adaptation into the narrow `OpClient` shape
  *     this module needs (`defaultCreateClient`), with per-token memoization.
@@ -17,8 +16,8 @@
  *     Rows without `metadata.onepassword` pass through unchanged (same
  *     object, no clone) — byte-identical to today for non-1Password rows.
  *
- * Known `OnePasswordAuthError` cases (missing token, personal toggle off)
- * carry a typed hint. SDK/network failures never interpolate `err.message`
+ * A known `OnePasswordAuthError` case, such as a missing token, carries a
+ * typed hint. SDK/network failures never interpolate `err.message`
  * or the secret reference into that message — the client sees a fixed
  * `"1Password request failed"`; logs contain fixed operation labels only.
  */
@@ -30,18 +29,11 @@ import type { CredentialOwner, CredentialStore, StoredCredential } from "@valet/
 export const ONEPASSWORD_SERVICE = "onepassword";
 
 /**
- * The one `op://` grammar. `op://vault/item/field` or
- * `op://vault/item/section/field`, the two forms the SDK resolves. Segments
- * may contain spaces ("ProDex Labs" is an ordinary vault name) but not a
- * slash or a control character. The prefix and the segment count keep this
- * from becoming a general read primitive: a path, an env var name, or a URL
- * does not match. Credential writes and the sandbox broker share this grammar.
+ * The one `op://` grammar, re-exported under the name this service has always
+ * used for it. Credential writes, the sandbox broker, the security credential
+ * vocabulary, and the setup form all match against this same expression.
  */
-export const OP_REFERENCE = /^op:\/\/[^/\u0000-\u001f]+\/[^/\u0000-\u001f]+(?:\/[^/\u0000-\u001f]+){1,2}$/;
-
-export function isOnePasswordReference(value: string): boolean {
-  return OP_REFERENCE.test(value);
-}
+export { OP_REFERENCE_RE as OP_REFERENCE, isOnePasswordReference } from "@valet/shared";
 
 const RESOLVE_TTL_MS = 5 * 60_000;
 
@@ -101,7 +93,7 @@ export interface OnePasswordCtx {
  * the token worked and THIS reference did not resolve: a typo, or an item the
  * service account cannot read. The two are different corrective actions, so
  * a caller must not report one as the other. */
-export type OnePasswordErrorKind = "no_token" | "disabled" | "sdk" | "scope" | "reference" | "ambiguous";
+export type OnePasswordErrorKind = "no_token" | "sdk" | "scope" | "reference" | "ambiguous";
 
 export class OnePasswordAuthError extends Error {
   constructor(message: string, readonly kind: OnePasswordErrorKind = "sdk") {
@@ -111,7 +103,6 @@ export class OnePasswordAuthError extends Error {
 
 export interface OnePasswordDeps {
   credentials: CredentialStore;
-  getAllowPersonal: (orgId: string) => Promise<boolean>;
   /** Default: real SDK (lazy import), adapted into `OpClient`. */
   createClient?: (token: string) => Promise<OpClient>;
   /** Default: `Date.now`. Injectable for cache-TTL tests. */
@@ -266,8 +257,8 @@ const SDK_REQUEST_FAILED = "1Password request failed";
 
 /**
  * Wraps any SDK rejection as `OnePasswordAuthError` with a fixed client
- * message. Already-typed errors (missing token, disabled toggle, a prior
- * wrap) pass through unchanged. Logs contain a fixed operation label only;
+ * message. An already-typed error (a missing token, a prior wrap) passes
+ * through unchanged. Logs contain a fixed operation label only;
  * upstream errors can contain secrets and must not be logged.
  */
 function wrapSdkError(
@@ -319,15 +310,6 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
     scope: OnePasswordScope,
     ctx: OnePasswordCtx,
   ): Promise<{ client: OpClient; token: string }> {
-    if (scope === "personal") {
-      const allowed = await deps.getAllowPersonal(ctx.orgId);
-      if (!allowed) {
-        throw new OnePasswordAuthError(
-          "Personal 1Password tokens are disabled by your organization.",
-          "disabled",
-        );
-      }
-    }
     const token = await requireToken(scope, ctx);
     let pending = clientCache.get(token);
     if (!pending) {
@@ -472,9 +454,9 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
     resolveCredential,
 
     async findCredentialForService(scope, ctx, service) {
-      // The gate runs before the cache, as in `resolveReference`: a hit must
-      // not outlive the personal toggle or the token row that allowed it. A
-      // scope with no token throws here, before any vault is touched.
+      // The token lookup runs before the cache, as in `resolveReference`: a
+      // hit must not outlive the token row that allowed it. A scope with no
+      // token throws here, before any vault is touched.
       const { client, token } = await clientFor(scope, ctx);
       const owner = tokenOwner(scope, ctx);
       const cacheKey = `${ctx.orgId}:${scope}:${owner.id}:${tokenTag(token)}:${service}`;

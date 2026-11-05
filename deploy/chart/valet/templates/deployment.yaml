@@ -9,6 +9,14 @@ spec:
   # Pinned to 1 — see values.yaml's api.replicas comment. The engine is a
   # stateful singleton (in-memory submission claim loop); do not scale.
   replicas: {{ .Values.api.replicas }}
+  # Stop the old API before the new process applies one-way schema repairs.
+  # No pod serves traffic between the old pod's exit and the new pod's
+  # listener; the README's "Upgrade downtime" section lists what RollingUpdate
+  # still needs (leader lock, schema repair Job).
+  strategy:
+    type: Recreate
+    rollingUpdate: null
+  progressDeadlineSeconds: {{ .Values.api.progressDeadlineSeconds | default 2100 }}
   selector:
     matchLabels:
       {{- include "valet.selectorLabels" . | nindent 6 }}
@@ -38,6 +46,11 @@ spec:
         app.kubernetes.io/component: api
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name }}
+      # SIGTERM starts the api's drain: /api/ready goes 503, claim loops stop,
+      # requests in flight get up to 10s, then sessions are evicted. The api
+      # exits on its own after at most 20s (SHUTDOWN_HARD_EXIT_MS in main.ts),
+      # so this grace period must stay above 20.
+      terminationGracePeriodSeconds: {{ .Values.api.terminationGracePeriodSeconds | default 30 }}
       {{- with .Values.api.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -140,41 +153,47 @@ spec:
           {{- end }}
           resources:
             {{- toYaml .Values.api.resources | nindent 12 }}
-          # Probe split (boot-ordering fix, chart 0.10.2):
+          # Probe split (boot-ordering fix, chart 0.10.2; drain fix 0.10.32):
           #
-          # /api/health answers as soon as the port binds — the api binds
-          # the listener BEFORE boot-restore/reconcile work, which runs in
-          # a background chain. /api/ready stays 503 until the chain's
-          # traffic-protecting steps (session restore, config reconcile)
-          # finish; best-effort service starts run after the ready flip.
+          # The api binds a boot listener before database upgrades. It
+          # answers every path, /api/health included, with 503 + Retry-After.
+          # The real app takes the port once providers are built. From then
+          # on /api/health is 200 while the process is up. /api/ready stays
+          # 503 until the boot chain's traffic-protecting steps (session
+          # restore, config reconcile) finish, and goes 503 again on SIGTERM.
           #
-          #   startup + liveness → /api/health ("port bound, event loop
-          #     alive"). Pre-bind work is only DB connect + migrations +
-          #     provider construction, so 90s covers a slow disk with
-          #     room. The old 300s window existed because restore work ran
-          #     in front of the port; keeping it would mask the next
-          #     boot-ordering regression.
-          #   readiness → /api/ready. A pod still restoring stays NotReady
-          #     (the old pod keeps serving) — it is never killed for slow
-          #     boot work, and a bad instance config exits before ready,
-          #     so traffic never moves to it.
+          # Startup uses /api/health, so its budget covers database upgrades.
+          # Readiness uses /api/ready. Under Recreate there is no old pod to
+          # serve traffic during a rollout: the old pod stops first. The
+          # Service publishes not-ready addresses (service.yaml), so callers
+          # reach this pod during boot and drain and get its 503 + Retry-After.
+          #
+          # Startup and readiness poll every second. failureThreshold for
+          # startup stays in 5-second units (values.yaml), so it is scaled by 5.
           startupProbe:
             httpGet:
               path: /api/health
               port: http
-            periodSeconds: 5
-            failureThreshold: 18
+            periodSeconds: 1
+            failureThreshold: {{ mul 5 ((.Values.api.startupProbe | default dict).failureThreshold | default 360) }}
+          # After the boot chain, a readiness failure means a stalled event
+          # loop. 15 x 1s keeps the earlier 15s tolerance.
           readinessProbe:
             httpGet:
               path: /api/ready
               port: http
-            initialDelaySeconds: 5
-            periodSeconds: 5
+            periodSeconds: 1
+            failureThreshold: 15
+          # Liveness shares the event loop with request handling. A busy loop
+          # must not kill the only replica: 6 misses of a 5s timeout at a 10s
+          # period means the loop answered nothing for about a minute.
           livenessProbe:
             httpGet:
               path: /api/health
               port: http
             periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
       {{- if .Values.api.instanceConfig }}
       volumes:
         - name: instance-config

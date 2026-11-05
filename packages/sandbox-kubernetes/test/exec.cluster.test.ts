@@ -29,6 +29,7 @@ import {
   resolvePodName,
   sandboxStatus,
 } from "../src/lifecycle.js";
+import { openCommandChannelInPod } from "../src/command-channel.js";
 import { execInPod, podExecApiAdapter, type ExecDeps } from "../src/exec.js";
 import {
   mkdirInPod,
@@ -144,12 +145,34 @@ describe.skipIf(!isClusterReady)("exec/files/jobs (live rancher-desktop cluster)
     expect(Date.now() - start).toBeLessThan(5000);
   }, 10_000);
 
+  it("keeps a command channel open across writes and closes it explicitly", async () => {
+    let output = "";
+    let closes = 0;
+    const channel = await openCommandChannelInPod(
+      deps, podName, 'while IFS= read -r line; do printf "%s\\n" "$line"; done',
+      { onData: (data) => { output += data; }, onClose: () => { closes++; } },
+    );
+    try {
+      await channel.write("first\n");
+      await expect.poll(() => output).toBe("first\n");
+      const large = "browser-✓".repeat(12_000);
+      await channel.write(large + "\n");
+      await channel.write("last\n");
+      await expect.poll(() => output).toBe("first\n" + large + "\nlast\n");
+      expect(closes).toBe(0);
+    } finally { channel.close(); }
+    expect(closes).toBe(1);
+    await expect(channel.write("later\n")).rejects.toThrow(/closed/);
+  });
+
   // ── files ──────────────────────────────────────────────────────────
 
   it("binary round-trip: random 1MB buffer is byte-identical after write -> read", async () => {
     const original = randomBytes(1024 * 1024);
     await writeBinaryInPod(deps, podName, "/workspace/random.bin", new Uint8Array(original));
     const readBack = await readBinaryInPod(deps, podName, "/workspace/random.bin");
+    expect((await execInPod(deps, podName, "wc -c < /workspace/random.bin")).stdout.trim()).toBe(String(original.length));
+    expect(readBack.byteLength).toBe(original.byteLength);
     expect(Buffer.from(readBack).equals(original)).toBe(true);
   }, 30_000);
 
@@ -316,7 +339,7 @@ describe.skipIf(!isClusterReady)("exec/files/jobs (live rancher-desktop cluster)
       deps,
       podName,
       execId,
-      "printf hi; printf '\\xf0\\x9f'; sleep 0.3; printf '\\x9a\\x80'; printf END",
+      "printf hi; printf '\\360\\237'; sleep 0.3; printf '\\232\\200'; printf END",
     );
 
     let offset = 0;

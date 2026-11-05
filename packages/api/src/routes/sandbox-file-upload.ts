@@ -39,15 +39,23 @@ import {
 } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { resolveUploadDest } from "../services/path-validation.js";
+import { ensureDefaultThreadWhereOwned } from "../services/default-thread.js";
 import { extractPdf, pdfStubMarkdown } from "../services/pdf-extract.js";
 import { extractZip } from "../services/archive-extract.js";
 import { getAttachmentRefStore, type AttachmentInfo } from "../services/attachment-refs.js";
+import { canAccessSessionResources } from "../services/session-access.js";
 import { loadOwnedSession } from "./messages.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import type {
   PostSessionFileUploadResponse,
   PostSessionFileUploadPdfInfo,
 } from "../wire/types.js";
+import { readGeneratedFile } from "../services/generated-files.js";
+import { threadsVisibleTo, viewerOf } from "./_thread-access.js";
+import { workflowSessionOwner } from "../workflows/session-owner.js";
+import { parseWorkflowSessionId } from "../workflows/engine-deps.js";
+import { isAuthorizedForOwner } from "../workflows/service.js";
+import { runEventVisible, runOriginVisible, threadRef } from "../services/thread-access.js";
 
 export const fileUploadRouter = new Hono<AppEnv>();
 
@@ -104,6 +112,11 @@ function isNotFoundError(err: unknown): boolean {
 }
 
 /** stat() that returns null for a missing path and rethrows everything else. */
+/** Whether this upload unpacks (zip) or converts (PDF sidecar) the file. */
+function shouldExtractUpload(type: ReturnType<typeof detectFileType>, shouldExtract: boolean): boolean {
+  return shouldExtract && (type === "zip" || type === "pdf");
+}
+
 async function statIfExists(
   sandbox: Sandbox,
   path: string,
@@ -146,7 +159,7 @@ export function sandboxReadyError(err: unknown, state: AttachmentState, aborted:
 
 fileUploadRouter.post("/:id/files", async (c) => {
   const row = await loadOwnedSession(c);
-  if (!row) return c.json({ error: "session not found" }, 404);
+  if (!row || !await canAccessSessionResources(c.var.providers, row, c.var.principal)) return c.json({ error: "session not found" }, 404);
 
   const { engineHost, db } = c.var.providers;
 
@@ -297,9 +310,19 @@ fileUploadRouter.post("/:id/files", async (c) => {
   // not exist": that would silently bypass the 409 contract.
   const sidecarPath = `${uploadPath}.md`;
   let skipSidecar = false;
+  // A person who attaches the same file twice sends the same bytes to the
+  // same path. That is already uploaded, so the request succeeds with a new
+  // ref and writes nothing. Only plain files qualify: an extracting upload
+  // would skip the extraction a caller may expect to run again.
+  let alreadyUploaded = false;
   if (!overwrite) {
     try {
-      if ((await statIfExists(sandbox, uploadPath)) !== null) {
+      const existing = await statIfExists(sandbox, uploadPath);
+      if (existing !== null && existing.isFile && existing.size === fileBytes && !shouldExtractUpload(detectedType, shouldExtract)) {
+        const stored = await sandbox.readBinary(uploadPath);
+        alreadyUploaded = createHash("sha256").update(stored).digest("hex") === sha256Hex;
+      }
+      if (existing !== null && !alreadyUploaded) {
         return c.json(
           { error: "File already exists", corrective: "Retry with overwrite=true, or choose a different dest." },
           409,
@@ -329,7 +352,7 @@ fileUploadRouter.post("/:id/files", async (c) => {
   // Create parent directory
   try {
     const parentDir = dirname(uploadPath);
-    if (parentDir && parentDir !== "/workspace") {
+    if (!alreadyUploaded && parentDir && parentDir !== "/workspace") {
       await sandbox.mkdir(parentDir);
     }
   } catch (err) {
@@ -340,7 +363,7 @@ fileUploadRouter.post("/:id/files", async (c) => {
   }
 
   try {
-    await sandbox.writeBinary(uploadPath, totalBytes);
+    if (!alreadyUploaded) await sandbox.writeBinary(uploadPath, totalBytes);
   } catch (err) {
     return c.json(
       { error: "Failed to write file to sandbox", corrective: "Try uploading again." },
@@ -464,4 +487,91 @@ fileUploadRouter.post("/:id/files", async (c) => {
   }
 
   return c.json(response, 200);
+});
+
+/**
+ * `GET /api/sessions/:id/threads/:threadId/files?path=` downloads a file that
+ * a person attached to a message in the thread. A caller who can read the
+ * thread's messages can read its attachments. The path must match a file
+ * attachment of that thread, so the route never serves other sandbox files.
+ */
+fileUploadRouter.get("/:id/threads/:threadId/files", async (c) => {
+  const row = await loadOwnedSession(c);
+  if (!row || !await canAccessSessionResources(c.var.providers, row, c.var.principal)) return c.json({ error: "session not found" }, 404);
+  const { engineHost, db } = c.var.providers;
+  const engineSession = await engineHost.sessionFor(row.id, await loadSessionMeta(db, row));
+  await ensureDefaultThreadWhereOwned(row.id, engineSession);
+  const found = engineSession.threadById(c.req.param("threadId"));
+  const thread = found && await threadsVisibleTo(c, row)(threadRef(found)) ? found : undefined;
+  const path = c.req.query("path");
+  // Every branch: an attachment on a version an edit left stays downloadable.
+  const entries = thread && path ? await thread.readEntries({ allBranches: true }) : [];
+  const file = entries
+    .flatMap((entry) => (entry.type === "message" ? entry.attachments ?? [] : []))
+    .find((att) => att.type === "file" && att.path === path);
+  if (!file || file.type !== "file") {
+    return c.json({ error: "file not found", corrective: "Attach the file to the thread again." }, 404);
+  }
+
+  let bytes: Uint8Array;
+  try {
+    const { sandbox } = await engineSession.attachment.ensureReady({ timeoutMs: SANDBOX_READY_TIMEOUT_MS, signal: c.req.raw.signal });
+    bytes = await sandbox.readBinary(file.path);
+  } catch (err) {
+    if (isNotFoundError(err)) {
+      return c.json({ error: "file is no longer in the sandbox", corrective: "Attach the file to the thread again." }, 404);
+    }
+    return c.json({ error: "could not read the file from the sandbox", corrective: "Try the download again in a few seconds." }, 409);
+  }
+  const encoded = encodeURIComponent(file.name).replace(/[!'()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+  return c.body(new Uint8Array(bytes), 200, {
+    "content-type": file.mimeType ?? "application/octet-stream",
+    "content-disposition": `attachment; filename="${file.name.replace(/[^a-zA-Z0-9._-]/g, "_")}"; filename*=UTF-8''${encoded}`,
+    "cache-control": "private, no-store",
+    "x-content-type-options": "nosniff",
+    "content-security-policy": "sandbox; default-src 'none'",
+  });
+});
+
+/** Generated downloads use durable bytes and the current thread access policy. */
+fileUploadRouter.get("/:id/threads/:threadId/files/:fileId", async (c) => {
+  const { engineStore, blobs, db, workflowStore } = c.var.providers;
+  const sessionId = c.req.param("id");
+  const ordinary = await loadOwnedSession(c);
+  let row: { id: string; orgId: string; ownerType: string };
+  if (ordinary) {
+    row = ordinary;
+    if (!await canAccessSessionResources(c.var.providers, ordinary, c.var.principal)) return c.json({ error: "file not found" }, 404);
+  } else {
+    // Workflow engine sessions intentionally have no agent_sessions row.
+    // The helper checks the tenant; HTTP access uses the raw run owner, as ownedRun does.
+    const owner = await workflowSessionOwner(db, sessionId, c.var.user.orgId);
+    if (!owner) return c.json({ error: "file not found" }, 404);
+    const run = await workflowStore.getRun(parseWorkflowSessionId(sessionId).runId);
+    const viewer = viewerOf(c);
+    if (!run?.owner || !await isAuthorizedForOwner(db, {
+      orgId: c.var.user.orgId,
+      userId: c.var.principal?.type === "team" ? `team:${c.var.principal.id}` : c.var.user.id,
+      principal: c.var.principal,
+    }, run.owner)
+      || !await runOriginVisible(c.var.providers, viewer, { ownerType: run.owner.ownerType, origin: run.params.origin, actorUserId: run.actorUserId })
+      || !await runEventVisible(c.var.providers, viewer, run.params)) return c.json({ error: "file not found" }, 404);
+    row = { id: sessionId, orgId: c.var.user.orgId, ownerType: run.owner.ownerType };
+  }
+  const thread = await engineStore.getThread(row.id, c.req.param("threadId"));
+  const fileId = c.req.param("fileId");
+  if (!thread || !await threadsVisibleTo(c, row)(thread) || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(fileId)) {
+    return c.json({ error: "file not found" }, 404);
+  }
+  const file = await readGeneratedFile(db, blobs, { orgId: row.orgId, sessionId: row.id, threadId: thread.id }, fileId);
+  if (!file) return c.json({ error: "file not found", corrective: "Ask the assistant to attach the file again." }, 404);
+  const encoded = encodeURIComponent(file.name).replace(/[!'()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+  return new Response(file.data, { headers: {
+    "content-type": file.mimeType,
+    "content-length": String(file.bytes),
+    "content-disposition": `attachment; filename="${file.name.replace(/[^a-zA-Z0-9._-]/g, "_")}"; filename*=UTF-8''${encoded}`,
+    "cache-control": "private, no-store",
+    "x-content-type-options": "nosniff",
+    "content-security-policy": "sandbox; default-src 'none'",
+  } });
 });

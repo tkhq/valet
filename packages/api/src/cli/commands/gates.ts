@@ -12,14 +12,16 @@ import { resolveInstance } from "../resolve.js";
 import type { CliContext } from "../types.js";
 import type {
   DecisionGate,
-  EnsureOrchestratorResponse,
+  EnsureWorkspaceRuntimeResponse,
   ListDecisionsResponse,
   ResolveDecisionRequest,
 } from "../../wire/types.js";
 
 /** The subset of `InstanceClient` the `gates` command needs. */
 export interface GatesClient {
-  ensureOrchestrator(): Promise<EnsureOrchestratorResponse>;
+  listThreadDecisions(id: string): Promise<ListDecisionsResponse>;
+  resolveThreadDecision(id: string, gateId: string, body: ResolveDecisionRequest): Promise<void>;
+  ensureOrchestrator(): Promise<EnsureWorkspaceRuntimeResponse>;
   listDecisions(id: string): Promise<ListDecisionsResponse>;
   resolveDecision(id: string, gateId: string, body: ResolveDecisionRequest): Promise<void>;
 }
@@ -40,8 +42,7 @@ async function targetSession(client: GatesClient, flags: ParsedFlags): Promise<s
 }
 
 async function gatesList(client: GatesClient, flags: ParsedFlags): Promise<number> {
-  const id = await targetSession(client, flags);
-  const { gates } = await client.listDecisions(id);
+  const { gates } = typeof flags.flags.thread === "string" ? await client.listThreadDecisions(flags.flags.thread) : await client.listDecisions(await targetSession(client, flags));
   const pending = gates.filter((g) => g.status === "pending");
 
   if (flags.json) {
@@ -76,8 +77,8 @@ async function gatesResolve(client: GatesClient, flags: ParsedFlags): Promise<nu
   if (actionId !== undefined) body.actionId = actionId;
   if (value !== undefined) body.value = value;
 
-  const id = await targetSession(client, flags);
-  await client.resolveDecision(id, gateId, body);
+  if (typeof flags.flags.thread === "string") await client.resolveThreadDecision(flags.flags.thread, gateId, body);
+  else await client.resolveDecision(await targetSession(client, flags), gateId, body);
 
   if (flags.json) printJson({ ok: true, gateId });
   else printLine(`resolved gate ${gateId}`);
@@ -86,6 +87,14 @@ async function gatesResolve(client: GatesClient, flags: ParsedFlags): Promise<nu
 
 /** Pure dispatch over the `gates` subcommands, testable with a stub client. */
 export async function runGates(client: GatesClient, flags: ParsedFlags): Promise<number> {
+  if (flags.flags.thread === true || flags.flags.session === true || flags.flags.thread === "" || flags.flags.session === "") {
+    printErr("Provide an id after --thread or --session.");
+    return ExitCode.Usage;
+  }
+  if (flags.flags.thread !== undefined && flags.flags.session !== undefined) {
+    printErr("Use --thread or the legacy --session selector, not both.");
+    return ExitCode.Usage;
+  }
   switch (flags.rest[0]) {
     case "list":
       return gatesList(client, flags);

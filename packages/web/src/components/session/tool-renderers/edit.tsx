@@ -73,7 +73,7 @@ export const editRenderer: ToolRenderer = {
         {/* MarkdownDiffBody carries the header itself; render the plain
             strip only while running or for non-markdown diffs. */}
         {(status === "running" || !markdown) && (path || failed) && (
-          <div className="px-3 py-1.5 border-b border-[--border]/60 bg-neutral-50 dark:bg-neutral-900/60 text-[11px]">
+          <div className="px-3 py-1.5 border-b border-line/60 bg-neutral-50 dark:bg-neutral-900/60 text-[11px]">
             {header}
           </div>
         )}

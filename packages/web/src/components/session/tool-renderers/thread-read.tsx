@@ -1,6 +1,7 @@
 import { MessagesSquare } from "lucide-react";
 import { useState } from "react";
 import { cn } from "~/lib/cn";
+import { relativeTime } from "~/lib/relative-time";
 import { ToolBody } from "./tool-shell";
 import { resultText, type ToolRenderer } from "./types";
 
@@ -53,24 +54,16 @@ function parseThreadDump(text: string): ParsedMessage[] | null {
     const paren = left.indexOf(" (");
     const role = paren >= 0 ? left.slice(0, paren).trim() : left;
     const author = paren >= 0 ? left.slice(paren).trim() : "";
-    const meta = [author, ts && relativeTime(ts)].filter(Boolean).join(" · ");
+    const meta = [author, ts && isoRelativeTime(ts)].filter(Boolean).join(" · ");
     messages.push({ role, meta, content });
   }
   return messages;
 }
 
-function relativeTime(iso: string): string {
+/** The dump writes ISO times. A time that does not parse shows as written. */
+function isoRelativeTime(iso: string): string {
   const t = Date.parse(iso);
-  if (!Number.isFinite(t)) return iso;
-  const diff = Date.now() - t;
-  const s = Math.round(diff / 1000);
-  if (s < 60) return `${s}s ago`;
-  const m = Math.round(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.round(m / 60);
-  if (h < 24) return `${h}h ago`;
-  const d = Math.round(h / 24);
-  return `${d}d ago`;
+  return Number.isFinite(t) ? relativeTime(t) : iso;
 }
 
 const ROLE_TONE: Record<string, string> = {
@@ -107,9 +100,9 @@ export const threadReadRenderer: ToolRenderer = {
     return (
       <ToolBody className="px-0 py-0">
         {key && (
-          <div className="px-3 py-1.5 border-b border-[--border]/60 bg-neutral-50 dark:bg-neutral-900/60 text-[11px] flex items-center gap-2">
+          <div className="px-3 py-1.5 border-b border-line/60 bg-neutral-50 dark:bg-neutral-900/60 text-[11px] flex items-center gap-2">
             <span className="text-muted">reading from</span>
-            <span className="font-mono text-[--fg]/95">{key}</span>
+            <span className="font-mono text-ink/95">{key}</span>
           </div>
         )}
         {status === "running" ? (
@@ -121,7 +114,7 @@ export const threadReadRenderer: ToolRenderer = {
             (thread is empty)
           </div>
         ) : (
-          <pre className="px-3 py-2 font-mono text-[12px] whitespace-pre-wrap text-[--fg]/85">
+          <pre className="px-3 py-2 font-mono text-[12px] whitespace-pre-wrap text-ink/85">
             {text}
           </pre>
         )}
@@ -169,7 +162,7 @@ function ThreadExcerpts({ messages }: { messages: ParsedMessage[] }) {
                 <span className="text-[10px] text-muted/80">{m.meta}</span>
               )}
             </div>
-            <div className="text-[12px] text-[--fg]/90 leading-snug whitespace-pre-wrap line-clamp-4">
+            <div className="text-[12px] text-ink/90 leading-snug whitespace-pre-wrap line-clamp-4">
               {m.content || (
                 <span className="italic text-muted">(empty)</span>
               )}

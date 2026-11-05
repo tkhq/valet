@@ -447,3 +447,74 @@ describe("team action policies", () => {
     expect(resolvePolicyDecision(rows({ policies }), baseInput({ appliesIn: "workflow" }), "allow").mode).toBe("allow");
   });
 });
+
+
+describe("durable workflow grants", () => {
+  const workflowGrants = [{ id: "wf-grant", actionId: "gmail.send_email" }];
+  it("never applies to a chat", () => {
+    expect(resolvePolicyDecision(rows({ workflowGrants }), baseInput(), undefined).mode).toBe("require_approval");
+    expect(resolvePolicyDecision(rows({ workflowGrants }), baseInput({ appliesIn: "workflow" }), undefined).mode).toBe("allow");
+  });
+  it.each(["deny", "require_approval"] as const)("preserves explicit %s policy", (mode) => {
+    expect(resolvePolicyDecision(rows({ workflowGrants, policies: [orgPolicy({ actionId: "gmail.send_email", mode })] }), baseInput({ appliesIn: "workflow" }), undefined).mode).toBe(mode);
+  });
+  it("preserves a personal deny", () => {
+    expect(resolvePolicyDecision(rows({ workflowGrants, overrides: [override({ actionId: "gmail.send_email", mode: "deny" })] }), baseInput({ appliesIn: "workflow" }), undefined).mode).toBe("deny");
+  });
+  it("applies to an agent step that declares the action", () => {
+    const decision = resolvePolicyDecision(rows({ workflowGrants }), baseInput({ agentStep: true }), undefined);
+    expect(decision).toMatchObject({ mode: "allow", provenance: { source: "workflow_grant", matchedGrantId: "wf-grant", baseMode: "require_approval" } });
+  });
+  it.each(["workflow", "session", "any"] as const)("yields an agent step to an explicit rule that applies in %s", (appliesIn) => {
+    const policies = [orgPolicy({ actionId: "gmail.send_email", mode: "require_approval", appliesIn })];
+    expect(resolvePolicyDecision(rows({ workflowGrants, policies }), baseInput({ agentStep: true }), undefined).mode).toBe("require_approval");
+  });
+  it("yields an agent step to a team rule scoped to workflows", () => {
+    const policies = [orgPolicy({ principalType: "team", actionId: "gmail.send_email", mode: "require_approval", appliesIn: "workflow" })];
+    expect(resolvePolicyDecision(rows({ workflowGrants, policies }), baseInput({ agentStep: true }), undefined).mode).toBe("require_approval");
+  });
+});
+
+describe("resolvePolicyDecision — partialParams (hosted provider tools)", () => {
+  const action = "openai.generate_image";
+  const promptDeny = orgPolicy({ id: "pol-prompt", actionId: action, mode: "deny", paramMatchers: [{ path: "prompt", op: "regex", value: "confidential" }] });
+  const promptAllow = orgPolicy({ id: "pol-allow", actionId: action, mode: "allow", paramMatchers: [{ path: "prompt", op: "regex", value: "marketing" }] });
+  const modelDeny = orgPolicy({ id: "pol-model", actionId: action, mode: "deny", paramMatchers: [{ path: "model", op: "eq", value: "sunburst" }] });
+  const hosted = (overrides: Partial<PolicyResolutionInput>) => baseInput({ actionId: action, service: "openai", riskLevel: "low", params: { model: "sunburst" }, ...overrides });
+
+  it("lets a deny matcher on an absent path apply, so the hosted check fails closed", () => {
+    expect(resolvePolicyDecision(rows({ policies: [promptDeny] }), hosted({}), undefined).mode).toBe("allow");
+    const partial = resolvePolicyDecision(rows({ policies: [promptDeny] }), hosted({ partialParams: true }), undefined);
+    expect(partial).toMatchObject({ mode: "deny", provenance: { matchedPolicyId: "pol-prompt" } });
+  });
+
+  it("never lets an allow matcher on an absent path widen access", () => {
+    const partial = resolvePolicyDecision(rows({ policies: [promptAllow] }), hosted({ riskLevel: "high", partialParams: true }), undefined);
+    expect(partial.mode).toBe("require_approval");
+    expect(partial.provenance.matchedPolicyId).toBeUndefined();
+  });
+
+  it("evaluates matchers on known paths exactly", () => {
+    expect(resolvePolicyDecision(rows({ policies: [modelDeny] }), hosted({ partialParams: true }), undefined).mode).toBe("deny");
+    expect(resolvePolicyDecision(rows({ policies: [modelDeny] }), hosted({ params: { model: "flare" }, partialParams: true }), undefined).mode).toBe("allow");
+  });
+
+  it("treats whole-object matchers as unresolved, so a root deny applies and a root allow does not", () => {
+    const full = { prompt: "a fox", model: "sunburst", output_format: "png", quality: "auto" };
+    const rootEqDeny = orgPolicy({ id: "pol-root-eq", actionId: action, mode: "deny", paramMatchers: [{ path: "", op: "eq", value: full }] });
+    const rootInDeny = orgPolicy({ id: "pol-root-in", actionId: action, mode: "deny", paramMatchers: [{ path: "", op: "in", value: [full] }] });
+    const rootAllow = orgPolicy({ id: "pol-root-allow", actionId: action, mode: "allow", paramMatchers: [{ path: "", op: "eq", value: { model: "sunburst" } }] });
+    const nestedDeny = orgPolicy({ id: "pol-nested", actionId: action, mode: "deny", paramMatchers: [{ path: "options", op: "eq", value: { safe: false } }] });
+    // The full invocation decides exactly.
+    expect(resolvePolicyDecision(rows({ policies: [rootEqDeny] }), hosted({ params: full }), undefined).mode).toBe("deny");
+    expect(resolvePolicyDecision(rows({ policies: [rootEqDeny] }), hosted({ params: { model: "sunburst" } }), undefined).mode).toBe("allow");
+    // The hosted check cannot complete the object, so deny and approval rows apply and allow rows do not.
+    for (const policy of [rootEqDeny, rootInDeny]) {
+      expect(resolvePolicyDecision(rows({ policies: [policy] }), hosted({ params: { model: "sunburst" }, partialParams: true }), undefined)).toMatchObject({ mode: "deny", provenance: { matchedPolicyId: policy.id } });
+    }
+    expect(resolvePolicyDecision(rows({ policies: [nestedDeny] }), hosted({ params: { model: "sunburst", options: {} }, partialParams: true }), undefined).mode).toBe("deny");
+    const allow = resolvePolicyDecision(rows({ policies: [rootAllow] }), hosted({ riskLevel: "high", params: { model: "sunburst" }, partialParams: true }), undefined);
+    expect(allow.mode).toBe("require_approval");
+    expect(allow.provenance.matchedPolicyId).toBeUndefined();
+  });
+});

@@ -5,6 +5,10 @@
     "rootDir": ".",
     "types": ["node"]
   },
-  "references": [{ "path": "../engine" }],
+  "references": [
+    { "path": "../engine" },
+    { "path": "../plugin-browser" },
+    { "path": "../shared" }
+  ],
   "include": ["src/**/*", "test/**/*"]
 }

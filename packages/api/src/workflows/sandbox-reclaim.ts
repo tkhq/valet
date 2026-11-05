@@ -22,7 +22,7 @@
  * only the sandbox and its tokens go.
  */
 import { and, eq, isNull, lte } from "drizzle-orm";
-import { recordSandboxDestroyed, type AttachmentState, type SandboxStatus } from "@valet/engine";
+import { recordSandboxDestroyed, type AttachmentState, type SandboxStatus, reportError } from "@valet/engine";
 import type { WorkflowStore } from "@valet/workflow";
 import type { AppDb } from "../lib/drizzle.js";
 import { workflowRuns } from "../schema/index.js";
@@ -80,7 +80,7 @@ export class WorkflowSandboxReclaimer {
       let allReclaimed = true;
       for (const sessionId of sessionIds) {
         const ok = await this.reclaimSession(sessionId).catch((err) => {
-          console.error(`WorkflowSandboxReclaimer: reclaim failed for session ${sessionId}:`, err);
+          reportError({ area: "workflows", reason: "sandbox_reclaim" }, `WorkflowSandboxReclaimer: reclaim failed for session ${sessionId}`, err);
           return false;
         });
         if (!ok) allReclaimed = false;
@@ -110,7 +110,7 @@ export class WorkflowSandboxReclaimer {
           ),
         );
     } catch (err) {
-      console.error(`WorkflowSandboxReclaimer: reclaim failed for run ${runId}:`, err);
+      reportError({ area: "workflows", reason: "sandbox_reclaim" }, `WorkflowSandboxReclaimer: reclaim failed for run ${runId}`, err);
     }
   }
 

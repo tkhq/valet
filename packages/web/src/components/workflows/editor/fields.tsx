@@ -10,7 +10,7 @@
  * nesting would produce invalid, doubly-wrapped markup.
  */
 import { useId, useState } from "react";
-import { Input, Label, Textarea } from "~/components/primitives";
+import { Input, Label, Select, Textarea } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 
 // ─── text / textarea ──────────────────────────────────────────────────────
@@ -102,22 +102,18 @@ export interface SelectFieldProps {
   options: SelectOption[];
 }
 
-const SELECT_CLASS =
-  "h-12 w-full rounded border border-line bg-paper px-3 text-base sm:h-9 sm:text-sm text-ink transition-colors " +
-  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss";
-
 export function SelectField({ label, value, onChange, options }: SelectFieldProps) {
   const id = useId();
   return (
     <div className="flex flex-col gap-1">
       <Label htmlFor={id}>{label}</Label>
-      <select id={id} className={SELECT_CLASS} value={value} onChange={(e) => onChange(e.target.value)}>
+      <Select id={id} className="w-full" value={value} onChange={(e) => onChange(e.target.value)}>
         {options.map((option) => (
           <option key={option.value} value={option.value}>
             {option.label}
           </option>
         ))}
-      </select>
+      </Select>
     </div>
   );
 }

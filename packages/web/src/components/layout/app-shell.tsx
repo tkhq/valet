@@ -8,9 +8,14 @@ import {
   type ReactNode,
   type MouseEvent,
 } from "react";
-import { Dialog, DialogContent, DialogTitle } from "~/components/primitives/dialog";
+import { X } from "lucide-react";
+import { Dialog, DialogClose, DialogContent, DialogTitle } from "~/components/primitives/dialog";
 import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
+import { useMobileLayout } from "~/hooks/use-mobile-layout";
+import { useMobileAppViewport } from "~/hooks/use-mobile-app-viewport";
+import { useSwipeDismiss } from "~/hooks/use-swipe-dismiss";
 import { cn } from "~/lib/cn";
+import { useResizablePane } from "~/lib/use-resizable-pane";
 
 const COLLAPSED_KEY = "valet:sidebar-collapsed";
 
@@ -40,6 +45,9 @@ export interface SidebarControls {
   toggleCollapsed(): void;
   /** Mobile only: the sidebar is out of the flow and opens as a drawer. */
   openDrawer(): void;
+  /** Closes the mobile drawer, such as after a navigation that started in a
+   * menu the drawer does not contain. */
+  closeDrawer(): void;
 }
 
 const SidebarControlsContext = createContext<SidebarControls | null>(null);
@@ -48,11 +56,12 @@ export function useSidebarControls(): SidebarControls | null {
   return useContext(SidebarControlsContext);
 }
 
-function loadStoredCollapsed(): boolean {
+function loadStoredCollapsed(key: string, fallback: boolean): boolean {
   try {
-    return window.localStorage.getItem(COLLAPSED_KEY) === "1";
+    const value = window.localStorage.getItem(key);
+    return value === null ? fallback : value === "1";
   } catch {
-    return false;
+    return fallback;
   }
 }
 
@@ -60,15 +69,13 @@ function loadStoredCollapsed(): boolean {
  * Three-zone app shell: a top nav, a left sidebar, and the main content
  * outlet.
  *
- * Desktop (`md`+): the sidebar sizes to its content (widest thread title)
- * between a 200px floor and a 320px cap, so a list of short titles doesn't
- * waste horizontal space and a long title truncates instead of pushing
- * `<main>` off-screen. The collapsed state persists to localStorage.
+ * Desktop (`md`+): drag the divider or use its arrow keys to resize the
+ * sidebar. Width and collapsed state persist to localStorage.
  *
- * Mobile: collapses out of the flow and opens as a full-height overlay
- * drawer (paper bg, hairline right border). The drawer closes on backdrop
- * tap, the ✕ button, or clicking any link inside it (thread selection) —
- * the latter via one delegated click handler rather than threading a close
+ * Mobile: collapses out of the flow and opens as a full-screen thread list
+ * with a "Threads" header that holds its close button. It closes on the
+ * close button, Escape, or any link inside it (thread selection) — the
+ * latter via one delegated click handler rather than threading a close
  * callback through `ThreadTree`.
  *
  * The shell owns this state but draws none of the controls that change it.
@@ -79,23 +86,46 @@ function loadStoredCollapsed(): boolean {
 export function AppShell({
   topNav,
   sidebar,
+  rail,
+  collapseScope,
+  rightPanel,
   children,
   className,
 }: {
   topNav: ReactNode;
+  /** The collapsed sidebar: a 44px icon rail shown in its place on desktop. */
+  rail?: ReactNode;
+  /**
+   * A page with its own panes, such as the workflow editor, keeps its own
+   * collapsed state under this name and starts collapsed.
+   */
+  collapseScope?: string;
   /**
    * `null`/`undefined` hides the sidebar entirely (no `<aside>` at all,
    * and no mobile toggle) — used by standalone session views (decision 14:
    * "no thread sidebar").
    */
   sidebar?: ReactNode;
+  rightPanel?: ReactNode;
   children: ReactNode;
   className?: string;
 }) {
+  const mobile = useMobileLayout();
+  const shellRef = useRef<HTMLDivElement>(null);
+  useMobileAppViewport(shellRef, mobile);
   const { open: mobileOpen, setOpen: setMobileOpen } = useResponsiveOverlay("md");
+  // The phone drawer slides in from the left, so a swipe left closes it.
+  const drawerSwipe = useSwipeDismiss("left", () => setMobileOpen(false));
+  const sidebarPane = useResizablePane({
+    storageKey: "valet:sidebar-width", cssVar: "--sidebar-width",
+    defaultWidth: 288, min: 200, max: 480, side: "left",
+    ariaLabel: "Resize thread sidebar",
+  });
   const drawerOpener = useRef<HTMLElement | null>(null);
   const drawer = useRef<HTMLDivElement>(null);
-  const [collapsed, setCollapsed] = useState<boolean>(() => loadStoredCollapsed());
+  const collapseKey = collapseScope ? `${COLLAPSED_KEY}:${collapseScope}` : COLLAPSED_KEY;
+  const [collapsedByKey, setCollapsedByKey] = useState<Record<string, boolean>>({});
+  const collapsed = collapsedByKey[collapseKey] ?? loadStoredCollapsed(collapseKey, collapseScope !== undefined);
 
   // Closes the drawer when a link inside it is clicked (thread/child
   // selection) without requiring `ThreadTree` to know about the drawer.
@@ -105,14 +135,17 @@ export function AppShell({
   }
 
   const setAndStoreCollapsed = useCallback((next: boolean) => {
-    setCollapsed(next);
+    setCollapsedByKey((current) => ({ ...current, [collapseKey]: next }));
     try {
-      window.localStorage.setItem(COLLAPSED_KEY, next ? "1" : "0");
+      window.localStorage.setItem(collapseKey, next ? "1" : "0");
     } catch {
       // Non-persistent environments still get the in-session behavior.
     }
-  }, []);
+  }, [collapseKey]);
 
+  // Stable, so a consumer can close the drawer from an effect without
+  // re-running it on every shell render.
+  const closeDrawer = useCallback(() => setMobileOpen(false), [setMobileOpen]);
   const controls = useMemo<SidebarControls>(
     () => ({
       present: sidebar != null,
@@ -122,15 +155,16 @@ export function AppShell({
         drawerOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
         setMobileOpen(true);
       },
+      closeDrawer,
     }),
-    [sidebar, collapsed, setAndStoreCollapsed, setMobileOpen],
+    [sidebar, collapsed, setAndStoreCollapsed, setMobileOpen, closeDrawer],
   );
 
   return (
     <SidebarControlsContext.Provider value={controls}>
-      <div className={cn("h-dvh w-full min-w-0 overflow-hidden flex flex-col bg-[--bg] text-[--fg]", className)}>
+      <div ref={shellRef} data-mobile-app-shell={mobile ? "" : undefined} className={cn("h-dvh w-full min-w-0 overflow-hidden flex flex-col bg-[--bg] text-[--fg]", className)}>
         {topNav}
-        <div className="flex-1 flex min-h-0 relative">
+        <div className="flex-1 flex min-h-0 relative" style={sidebarPane.containerStyle}>
           {sidebar != null && (
             <>
               {/* Collapsed HIDES the aside rather than unmounting it. The
@@ -139,13 +173,20 @@ export function AppShell({
                   silently dead for anyone whose collapsed state persisted. */}
               <aside
                 className={cn(
-                  "shrink-0 flex-col w-max min-w-[200px] max-w-[320px] border-r border-line",
+                  "shrink-0 flex-col w-[var(--sidebar-width)] max-w-[45%] min-w-0",
                   collapsed ? "hidden" : "hidden md:flex",
                 )}
                 aria-hidden={collapsed}
               >
                 <div className="flex-1 min-h-0 flex flex-col">{sidebar}</div>
               </aside>
+              {collapsed && rail != null && <aside aria-label="Sidebar rail" className="hidden w-11 shrink-0 flex-col border-r border-line md:flex">{rail}</aside>}
+              {!collapsed && <div
+                {...sidebarPane.handleProps}
+                title="Drag to resize; use arrow keys when focused"
+                // A 1px hairline like every other divider; the wider ::after strip keeps it easy to grab.
+                className="hidden md:block relative z-10 w-px shrink-0 touch-none cursor-col-resize bg-line hover:bg-moss/50 focus:bg-moss focus:outline-none after:absolute after:inset-y-0 after:-inset-x-1.5"
+              />}
               <Dialog open={mobileOpen} onOpenChange={setMobileOpen}>
                 <DialogContent
                   ref={drawer}
@@ -154,20 +195,31 @@ export function AppShell({
                     drawer.current?.focus();
                   }}
                   aria-describedby={undefined}
-                  className="left-0 top-0 h-dvh max-h-none w-80 max-w-[calc(100%-3rem)] translate-x-0 translate-y-0 rounded-none border-y-0 border-l-0 bg-paper p-0 pt-[max(3.5rem,env(safe-area-inset-top))] pb-[env(safe-area-inset-bottom)] flex flex-col gap-0"
+                  hideClose
+                  className="left-0 top-0 h-dvh max-h-none w-full max-w-none translate-x-0 translate-y-0 rounded-none border-0 bg-paper p-0 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] flex flex-col gap-0 data-[state=open]:animate-in data-[state=open]:slide-in-from-left motion-reduce:animate-none"
+                  {...drawerSwipe}
                   onClick={onDrawerClick}
                   onCloseAutoFocus={(event) => {
                     event.preventDefault();
                     drawerOpener.current?.focus();
                   }}
                 >
-                  <DialogTitle className="sr-only">Threads</DialogTitle>
+                  <div className="flex h-12 shrink-0 items-center justify-between border-b border-line pl-4 pr-1">
+                    <DialogTitle className="font-display text-base text-ink">Valet</DialogTitle>
+                    <DialogClose
+                      aria-label="Close menu"
+                      className="inline-flex h-11 w-11 items-center justify-center rounded text-muted hover:bg-ink-wash hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss/40"
+                    >
+                      <X className="h-4 w-4" aria-hidden />
+                    </DialogClose>
+                  </div>
                   <div className="flex-1 min-h-0 flex flex-col">{sidebar}</div>
                 </DialogContent>
               </Dialog>
             </>
           )}
           <main className="flex-1 min-w-0 min-h-0 flex flex-col">{children}</main>
+          {rightPanel}
         </div>
       </div>
     </SidebarControlsContext.Provider>

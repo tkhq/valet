@@ -146,32 +146,11 @@ vi.mock("@tanstack/react-router", () => ({
   Link: RouterLinkStub,
 }));
 
-// The teams panel links to each team's DEFAULT assistant, whose id only the
-// assistants list carries.
-vi.mock("~/api/assistants", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("~/api/assistants")>();
-  return {
-    ...actual,
-    useAssistants: () => ({
-      data: {
-        assistants: [
-          {
-            id: "asst_team_1",
-            owner: { type: "team" as const, id: "team_1" },
-            sessionId: "assistant:asst_team_1",
-            isDefault: true,
-            createdAt: 1,
-          },
-        ],
-      },
-      isLoading: false,
-      error: null,
-    }),
-  };
-});
-
-// importOriginal: see -new-session-dialog.test.tsx (packages/web root) for
-// why a bare replacement here is unsafe under vitest.config.ts's isolate:false.
+// importOriginal keeps the module's other exports real (see vitest.config.ts).
+// Team credential rows let a member request removal through this hook.
+vi.mock("~/api/team-deletion-requests", () => ({
+  useSubmitTeamDeletionRequest: () => ({ mutate: vi.fn(), reset: vi.fn(), isPending: false, error: null }),
+}));
 vi.mock("~/components/settings/team-deletion-requests", () => ({
   TeamDeletionRequests: ({ teamId, canManage }: { teamId: string; canManage: boolean }) =>
     <section aria-label="Deletion requests" data-team-id={teamId} data-can-manage={canManage} />,
@@ -221,6 +200,10 @@ vi.mock("~/api/settings", async (importOriginal) => {
   };
 });
 
+const resetTourMutate = vi.fn((_: undefined, options: { onSuccess: () => void }) => options.onSuccess());
+vi.mock("~/api/tutorial", () => ({
+  useResetTutorialForEveryone: () => ({ mutate: resetTourMutate, isPending: false, error: null }),
+}));
 vi.mock("~/api/invites", () => ({
   useInvites: () => ({ data: invitesData, isLoading: false, error: null }),
   useCreateInvite: () => ({ mutate: createInviteMutate, isPending: false, error: null }),
@@ -245,6 +228,7 @@ vi.mock("~/api/integrations", async (importOriginal) => {
     ...actual,
     useCredentials: () => ({ data: { credentials: [] }, isLoading: false, error: null }),
     useDisconnectCredential: () => ({ mutateAsync: vi.fn(), isPending: false, error: null , reset: vi.fn() }),
+    useRevokeDelegation: () => ({ mutate: vi.fn(), isPending: false, error: null, reset: vi.fn() }),
   };
 });
 
@@ -354,6 +338,21 @@ describe("OrganizationGeneralPage", () => {
       expect(patchOrgMutateAsync).toHaveBeenCalledWith({ features: { organizations: false } }),
     );
     await waitFor(() => expect(navigateMock).toHaveBeenCalledWith({ to: "/settings/profile" }));
+  });
+
+  it("an admin shows the tour to everyone again after a confirm", async () => {
+    render(<OrganizationGeneralPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Show the tour to everyone again" }));
+    expect(resetTourMutate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Show the tour" }));
+    expect(resetTourMutate).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.getByText(/Done. Each member sees the tour/)).toBeTruthy());
+  });
+
+  it("does not offer the tour reset to a member", () => {
+    orgData = { ...orgData, callerRole: "member" };
+    render(<OrganizationGeneralPage />);
+    expect(screen.queryByRole("button", { name: "Show the tour to everyone again" })).toBeNull();
   });
 });
 
@@ -484,6 +483,19 @@ describe("OrganizationTeamsPage", () => {
     render(<OrganizationTeamsPage />);
     expect(screen.getByText("Platform")).toBeTruthy();
     expect(screen.getByText("1 member")).toBeTruthy();
+  });
+
+  it("does not link multi-team organization rows to the active workspace assistants", () => {
+    teamsData = {
+      teams: [
+        ...teamsData.teams,
+        { id: "team_2", orgId: "org_1", name: "Support", origin: "local", externalId: null, createdAt: 1, memberCount: 2, callerRole: "member", defaultModel: null },
+      ],
+    };
+    render(<OrganizationTeamsPage />);
+    expect(screen.getByText("Platform")).toBeTruthy();
+    expect(screen.getByText("Support")).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "Assistant" })).toBeNull();
   });
 
   it("creating a team fires the create mutation", () => {

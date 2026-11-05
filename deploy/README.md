@@ -95,6 +95,10 @@ Postgres StatefulSet's readiness, because the api runs migrations at boot.
 `helm upgrade --install --wait` therefore returns only once the api pod is
 `Running` and `Ready`.
 
+Database upgrades run before the API binds its HTTP listener. The chart allows 30 minutes for startup and 35 minutes for rollout progress.
+For the first usage-rollup upgrade, use `helm upgrade --install --wait --timeout 40m` with the existing context and release values.
+The Helm timeout must be at least 35 minutes. See [database upgrade budgets](chart/valet/README.md#database-upgrade-startup-budget) for the configurable limits.
+
 ## Pre-deploy DDL — sandbox-reconcile schema restructure
 
 Run this DDL ONCE against the live database before you roll the api to the
@@ -173,8 +177,15 @@ silently fails. To use the ingress:
 2. Open `https://valet.localdev` and accept the self-signed certificate
    warning once per browser profile.
 
-Real auth is on in the cluster — there is no dev bypass. The first sign-up
+Real auth is on in the cluster — there is no dev bypass. `make k8s-up`
+turns on password sign-in (`api.auth.methods=password`). The first sign-up
 becomes the org admin.
+
+Sign-in methods are off by default. Set `api.auth.methods` to a comma list
+of `password`, `oidc`, `google`, and `github`. If `methods` is empty and
+`api.auth.oidcIssuer` is set, the api turns on `oidc` alone: SSO with no
+password. Set `api.auth.primaryMethod` to choose the method the login page
+shows first.
 
 ## Observability (Grafana + OpenTelemetry)
 

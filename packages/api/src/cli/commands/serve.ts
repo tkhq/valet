@@ -3,8 +3,7 @@
  * server) with sensible packaged defaults.
  *
  * Design (single-binary CLI plan, T5, spec decision 2):
- * - Serve default port is **8788** (distinct from `main.ts`'s own 8787
- *   fallback — the serve command owns the 8788 default and sets `PORT`).
+ * - Serve default port is **8788**. It matches `main.ts` and sets `PORT`.
  * - Sandbox backend auto-detects: with no explicit choice, `docker` if a
  *   reachable daemon is found, else `local`.
  * - Auth defaults to the stub (`VALET_LOCAL_AUTH=1`) unless a real
@@ -28,7 +27,7 @@ import { detectDockerDaemon } from "../docker-detect.js";
 import type { CliContext } from "../types.js";
 import type { ServerHandle } from "../../main.js";
 
-/** Serve default port (spec decision 2) — NOT main.ts's 8787 fallback. */
+/** Serve default port (spec decision 2). */
 const SERVE_DEFAULT_PORT = 8788;
 
 const SANDBOX_KINDS: readonly SandboxKind[] = ["docker", "local", "kubernetes"];
@@ -344,8 +343,10 @@ export async function run(args: string[], ctx: CliContext): Promise<number> {
   // boot throws, drop the lock we just claimed so a failed boot leaves no stale
   // lock we own.
   let handle: ServerHandle;
+  let hardExitMs: number;
   try {
-    const { startServer } = await import("../../main.js");
+    const { startServer, SHUTDOWN_HARD_EXIT_MS } = await import("../../main.js");
+    hardExitMs = SHUTDOWN_HARD_EXIT_MS;
     handle = await startServer();
   } catch (err) {
     removeLock();
@@ -375,11 +376,13 @@ export async function run(args: string[], ctx: CliContext): Promise<number> {
         .close()
         .then(removeLock)
         .finally(() => resolveExit(ExitCode.OK));
-      // Hard-exit if close() hangs (containers can be slow to stop).
+      // Hard-exit if close() hangs (containers can be slow to stop). The
+      // deadline is main.ts's, so a WakeWatcher pass gets the same time to
+      // finish its row and send its signal here as under the api entry.
       setTimeout(() => {
         removeLock();
         process.exit(1);
-      }, 5_000).unref();
+      }, hardExitMs).unref();
     };
     process.on("SIGINT", () => onSignal("SIGINT"));
     process.on("SIGTERM", () => onSignal("SIGTERM"));

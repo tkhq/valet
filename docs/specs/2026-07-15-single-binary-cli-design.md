@@ -82,3 +82,20 @@ Implemented on branch `feat/single-binary-cli` (PR against `dev-v2`). Plan: `doc
 **`valet serve` default backend flip.** `serve` auto-detects `docker` if a reachable daemon is found, else `local` (decision 2). The api Docker image's ENTRYPOINT is now `cli.ts serve`, so an *unconfigured* container auto-detects `local` (no in-container daemon) rather than the prior explicit default — real deployments (the k8s chart) always set `VALET_SANDBOX_BACKEND` explicitly, so they are unaffected.
 
 **Owed test coverage (recorded, not silently dropped).** The CLI e2e suite (`packages/api/src/integration/cli.e2e.test.ts`, opt-in via `VALET_CLI_E2E=1`) covers status / session CRUD / exit-code matrix / keyless login-logout against a real spawned `valet serve`. Deferred: (1) real-auth login e2e (needs a logged-in better-auth session to mint a key); (2) the `gates resolve` round-trip and human-mode `send` (both need a real agent turn, gated on `ANTHROPIC_API_KEY`); (3) native-binary CI release (the `.github/workflows/release-cli.yml` workflow ships the Node bundle on tag; native binaries are owed with the compile decision above).
+
+### CLI integration test launcher
+
+The integration suite resolves the tsx loader through the workspace dependency graph. It starts the loader with the current Node executable. A missing package-local binary no longer prevents server startup. Spawn errors fail immediately and remove the test data directory.
+
+### Output before exit
+
+The dispatcher (`cli.ts`) exits only through `exitAfterOutput` in `cli/output.ts`. That function waits for the last write that the output helpers queued on stdout and stderr, then calls `process.exit`. Node and Bun write to a pipe asynchronously, and an exit that does not wait drops the queued data. A `--json` result piped to `jq` then stops at 65,536 bytes, the pipe buffer size. Command modules therefore write through the `output.ts` helpers. The readline prompts of `chat`, `login`, and `reset` are the exception, because they are interactive. If the reader closes the pipe early (`valet … | head`), the CLI ignores the EPIPE error and keeps the exit code of the command. `src/cli/pipe-output.test.ts` runs the real CLI with a pipe on stdout.
+
+
+## CLI release memory budget
+
+The CLI release job sets `NODE_OPTIONS=--max-old-space-size=4096` on both build runners.
+This avoids the observed 2 GB default heap limit on macOS and leaves memory for native allocations.
+Required CI checks the source commit before publishing. Packaging emits workspace outputs with `tsc --build --noCheck`.
+The web build retains its typecheck. Both platform jobs retain compilation and native health and SPA smoke tests.
+Publishing still requires both platform jobs to succeed.

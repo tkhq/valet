@@ -1,3 +1,4 @@
+import { stripNul } from "./wakeups/digest.js";
 import type {
   DecisionGate,
   DecisionGateRequest,
@@ -40,6 +41,14 @@ export class DecisionGateWithdrawnError extends Error {
   }
 }
 
+/** `DecisionResolution.resolvedBy` when an unattended workflow task asked for a
+ * decision. Nobody watches the task, so no gate opened (`Thread.requestDecision`). */
+export const UNATTENDED_WORKFLOW_DECISION = "unattended-workflow";
+
+export function isUnattendedWorkflowRefusal(resolution: { resolvedBy?: string }): boolean {
+  return resolution.resolvedBy === UNATTENDED_WORKFLOW_DECISION;
+}
+
 export class DecisionGateExpiredError extends Error {
   /**
    * `ordinal` is the expired gate's ordinal, carried so audit records can
@@ -63,6 +72,9 @@ interface PendingGate {
   resolve: (resolution: DecisionResolution) => void;
   reject: (err: Error) => void;
 }
+
+/** An in-memory waiter relinquished a durable gate to a rebuilt config owner, without resolving it. */
+export class DecisionGateHandoffError extends Error {}
 
 export class GateManager {
   private pending = new Map<string, PendingGate>();
@@ -114,6 +126,15 @@ export class GateManager {
     this.cleanup(gateId);
     this.pending.delete(gateId);
     p.reject(new DecisionGateExpiredError(gateId, p.gate.ordinal));
+    return true;
+  }
+
+  handoff(gateId: string): boolean {
+    const pending = this.pending.get(gateId);
+    if (!pending) return false;
+    this.cleanup(gateId);
+    this.pending.delete(gateId);
+    pending.reject(new DecisionGateHandoffError("Durable gate handed to rebuilt session"));
     return true;
   }
 
@@ -362,6 +383,7 @@ export function fromRequest(
     type: req.type,
     title: req.title,
     body: req.body,
+    agentReason: req.agentReason === undefined ? undefined : stripNul(req.agentReason),
     actions:
       req.actions ??
       (req.type === "approval"

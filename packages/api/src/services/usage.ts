@@ -5,10 +5,16 @@
  * raw `llm_proxy_requests` for the proxy harness drill-down), so the dashboard
  * and Grafana cannot drift.
  */
-import { eq, inArray, sql, type SQL } from "drizzle-orm";
+import { and, eq, inArray, sql, type SQL } from "drizzle-orm";
+import { parsePrincipal } from "@valet/engine";
+import { usageRead } from "./usage-read.js";
+import { getMemberAgentDays, scopedAgentActivity } from "./usage-member-activity.js";
+import { getActionToolCalls, getActionOutcomes, getSkillBreakdown } from "./usage-aux-rollups.js";
+import { proxyPeriodRows, usagePeriodRows, HOURLY_BUCKET_COLS } from "./usage-hourly.js";
 import type { AppDb } from "../lib/drizzle.js";
-import { orgs, users } from "../schema/index.js";
+import { orgs, teamMembers, teams, users } from "../schema/index.js";
 import { isOrgAdmin } from "./org.js";
+import type { ResolvedUsagePeriod } from "./usage-period.js";
 import { canAdministerTeam, getTeamInOrg, isTeamMember } from "./teams.js";
 import type {
   UsageBreakdownResponse,
@@ -16,36 +22,41 @@ import type {
   UsageBucket,
   UsageDrillItem,
   UsageSessionRow,
-  SkillUsageBreakdown,
   UsageSummaryResponse,
+  UsageOutcomesResponse,
+  UsageOutcomeKind,
+  UsageToolEfficiencyResponse,
   UsageUseCase,
   UsageWindow,
 } from "../wire/types.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-export const USAGE_WINDOWS: Record<string, number> = {
-  "24h": DAY_MS,
-  "7d": 7 * DAY_MS,
-  "30d": 30 * DAY_MS,
-  "90d": 90 * DAY_MS,
-};
-export function windowMsFrom(q: string | undefined): number {
-  return USAGE_WINDOWS[q ?? "30d"] ?? 30 * DAY_MS;
-}
-/** The canonical window key for labels (e.g. the CSV filename), so an unknown
- * `?window=` doesn't mislabel a file as a range it doesn't cover. */
-export function windowLabelFrom(q: string | undefined): string {
-  return q && q in USAGE_WINDOWS ? q : "30d";
-}
-
-const USE_CASES: readonly UsageUseCase[] = ["orchestrator", "session", "workflow", "proxy"];
+const USE_CASES: readonly UsageUseCase[] = ["orchestrator", "session", "workflow", "proxy", "tagging"];
 export function isUsageUseCase(v: string): v is UsageUseCase {
   return (USE_CASES as readonly string[]).includes(v);
 }
 
 function toNum(v: unknown): number {
   return Number(v ?? 0);
+}
+
+type UsagePeriodOpts =
+  | { period: ResolvedUsagePeriod }
+  | { windowMs: number; now?: number };
+
+function periodFromOpts(opts: UsagePeriodOpts): ResolvedUsagePeriod {
+  if ("period" in opts) return opts.period;
+  const now = opts.now ?? Date.now();
+  return {
+    startMs: now - opts.windowMs,
+    endMs: now + 1,
+    windowMs: opts.windowMs,
+    activityStartMs: Math.floor(now / DAY_MS) * DAY_MS - opts.windowMs + DAY_MS,
+    activityDays: opts.windowMs / DAY_MS,
+    label: `${opts.windowMs}ms`,
+    kind: "lookback",
+  };
 }
 
 // ── Scope ──────────────────────────────────────────────────────────────────
@@ -115,9 +126,9 @@ export async function resolveUsageScope(
  * view carries — do not apply a team scope to `llm_proxy_requests` directly
  * (see the proxy branch of `getUsageDrillItems`).
  */
-function scopeWhere(prefix: "" | "ce.", since: number, s: UsageScope): SQL {
+function scopeWhere(prefix: "" | "ce.", period: ResolvedUsagePeriod, s: UsageScope): SQL {
   const col = (name: string): SQL => sql.raw(`${prefix}${name}`);
-  const base = sql`${col("created_at")} >= ${since} AND ${col("org_id")} = ${s.orgId}`;
+  const base = sql`${col("created_at")} >= ${period.startMs} AND ${col("created_at")} < ${period.endMs} AND ${col("org_id")} = ${s.orgId}`;
   switch (s.scope) {
     case "team":
       return sql`${base} AND ${col("owner_type")} = 'team' AND ${col("owner_id")} = ${s.teamId}`;
@@ -128,17 +139,70 @@ function scopeWhere(prefix: "" | "ce.", since: number, s: UsageScope): SQL {
   }
 }
 
-// ── Buckets (token-type split + unpriced, shared by every aggregate) ─────────
+// ── Member labels ────────────────────────────────────────────────────────────
 
-const BUCKET_COLS = sql`
-  COALESCE(SUM(cost_total),0)            AS cost_usd,
-  COALESCE(SUM(total_tokens),0)         AS total_tokens,
-  COALESCE(SUM(input_tokens),0)         AS input_tokens,
-  COALESCE(SUM(output_tokens),0)        AS output_tokens,
-  COALESCE(SUM(cache_read_tokens),0)    AS cache_read_tokens,
-  COALESCE(SUM(cache_write_tokens),0)   AS cache_write_tokens,
-  COUNT(*)                              AS turns,
-  COUNT(*) FILTER (WHERE NOT priced)    AS unpriced_turns`;
+/** The label of a team the viewer cannot name: a deleted team, or one the
+ * viewer is not on. One label for both keeps a hidden team
+ * indistinguishable from a deleted one. The channel list uses the same words. */
+const UNNAMED_TEAM = "Another team";
+/** The label of a member row whose user record is gone. */
+const FORMER_MEMBER = "Former member";
+
+interface MemberLabel { name: string; isTeam: boolean }
+
+/** Which teams a member row may name: every team of the org (an org scope,
+ * read by an org admin), only the team of a team scope, or the teams a
+ * viewer can see (an org admin sees all of them, anyone else their own). */
+type TeamNaming =
+  | { kind: "org" }
+  | { kind: "team"; teamId: string }
+  | { kind: "viewer"; userId: string };
+
+async function nameableTeams(
+  db: AppDb, orgId: string, teamIds: string[], naming: TeamNaming,
+): Promise<{ id: string; name: string }[]> {
+  const where = [eq(teams.orgId, orgId), inArray(teams.id, teamIds)];
+  if (naming.kind === "team") where.push(eq(teams.id, naming.teamId));
+  if (naming.kind === "viewer" && !(await isOrgAdmin(db, orgId, naming.userId))) {
+    where.push(inArray(teams.id, db.select({ id: teamMembers.teamId }).from(teamMembers)
+      .where(eq(teamMembers.userId, naming.userId))));
+  }
+  return db.select({ id: teams.id, name: teams.name }).from(teams).where(and(...where));
+}
+
+/**
+ * Labels for member rows, by actor id. Unattended work (a schedule, an event
+ * subscription, a team API key) runs as its workspace principal, so an actor
+ * id can be `team:{teamId}` or `org:{orgId}` instead of a person's id. A
+ * label never shows a raw id: a team reads as its name or `UNNAMED_TEAM`,
+ * the org as "Organization", and a person as their name or email, or
+ * `FORMER_MEMBER` once the user record is gone.
+ */
+async function memberLabels(
+  db: AppDb, orgId: string, ids: readonly string[], naming: TeamNaming,
+): Promise<(id: string) => MemberLabel> {
+  const userIds: string[] = [];
+  const teamIds: string[] = [];
+  for (const id of ids) {
+    const principal = parsePrincipal(id);
+    if (principal === null || principal.type === "user") userIds.push(principal?.id ?? id);
+    else if (principal.type === "team") teamIds.push(principal.id);
+  }
+  const [userRows, teamRows] = await Promise.all([
+    userIds.length === 0 ? [] : db.select({ id: users.id, name: users.name, email: users.email }).from(users).where(inArray(users.id, userIds)),
+    teamIds.length === 0 ? [] : nameableTeams(db, orgId, teamIds, naming),
+  ]);
+  const userNames = new Map(userRows.map((u) => [u.id, u.name || u.email] as const));
+  const teamNames = new Map(teamRows.map((t) => [t.id, t.name] as const));
+  return (id) => {
+    const principal = parsePrincipal(id);
+    if (principal?.type === "team") return { name: teamNames.get(principal.id) ?? UNNAMED_TEAM, isTeam: true };
+    if (principal?.type === "org") return { name: "Organization", isTeam: false };
+    return { name: userNames.get(principal?.id ?? id) ?? FORMER_MEMBER, isTeam: false };
+  };
+}
+
+// ── Buckets (token-type split + unpriced, shared by every aggregate) ─────────
 
 interface BucketRow {
   cost_usd: unknown; total_tokens: unknown; input_tokens: unknown; output_tokens: unknown;
@@ -157,111 +221,142 @@ function toBucket(r: BucketRow | undefined): UsageBucket {
   };
 }
 
-function skillScopeWhere(scope: UsageScope): SQL {
-  const orgId = sql`COALESCE(s.org_id, d.org_id)`;
-  const ownerType = sql`COALESCE(s.owner_type, r.owner_type)`;
-  const ownerId = sql`COALESCE(s.owner_id, r.owner_id)`;
-  const userId = sql`CASE
-    WHEN s.id IS NOT NULL THEN s.user_id
-    WHEN r.owner_type = 'user' THEN NULLIF(r.owner_id, '')
-  END`;
-  const base = sql`${orgId} = ${scope.orgId}`;
-  switch (scope.scope) {
-    case "team":
-      return sql`${base} AND ${ownerType} = 'team' AND ${ownerId} = ${scope.teamId}`;
-    case "me":
-      return sql`${base} AND ${userId} = ${scope.userId}`;
-    case "org":
-      return base;
-  }
-}
-
-interface SkillBreakdownRow {
-  skill_key: string;
-  skill_name: string;
-  origin: "plugin" | "local" | "repo";
-  plugin_name: string | null;
-  invocations: unknown;
-  unique_invokers: unknown;
-  unassigned_invocations: unknown;
-  attributed_context_tokens: unknown;
-  carrying_calls: unknown;
-}
-
-async function getSkillBreakdown(
+/** Settled assistant tool calls and workflow tool nodes executed without a model. */
+async function queryUsageToolEfficiency(
   db: AppDb,
-  since: number,
-  scope: UsageScope,
-): Promise<SkillUsageBreakdown[]> {
-  const where = skillScopeWhere(scope);
-  const result = (await db.execute(sql`
-    SELECT si.skill_key, si.skill_name, si.origin, si.plugin_name,
-           COUNT(DISTINCT si.id) FILTER (WHERE si.created_at >= ${since}) AS invocations,
-           COUNT(DISTINCT si.invoker_user_id) FILTER (WHERE si.created_at >= ${since}) AS unique_invokers,
-           COUNT(DISTINCT si.id) FILTER (
-             WHERE si.created_at >= ${since} AND si.invoker_user_id IS NULL
-           ) AS unassigned_invocations,
-           COALESCE(SUM(sca.estimated_skill_tokens) FILTER (WHERE sca.created_at >= ${since}), 0)
-             AS attributed_context_tokens,
-           COUNT(DISTINCT sca.llm_request_id) FILTER (WHERE sca.created_at >= ${since})
-             AS carrying_calls
-    FROM skill_invocations si
-    LEFT JOIN skill_context_attributions sca ON sca.skill_invocation_id = si.id
-    LEFT JOIN agent_sessions s ON s.id = si.session_id
-    LEFT JOIN workflow_runs r
-      ON si.session_id LIKE 'wf:%' AND r.id = split_part(si.session_id, ':', 2)
-    LEFT JOIN workflow_definitions d ON d.id = r.workflow_id
-    WHERE ${where} AND (si.created_at >= ${since} OR sca.created_at >= ${since})
-    GROUP BY si.skill_key, si.skill_name, si.origin, si.plugin_name
-    ORDER BY invocations DESC, si.skill_name ASC
-  `)) as { rows: SkillBreakdownRow[] };
-  return result.rows.map((row) => ({
-    skillKey: row.skill_key,
-    name: row.skill_name,
-    origin: row.origin,
-    ...(row.plugin_name ? { pluginName: row.plugin_name } : {}),
-    invocations: toNum(row.invocations),
-    uniqueInvokers: toNum(row.unique_invokers),
-    unassignedInvocations: toNum(row.unassigned_invocations),
-    attributedContextTokens: toNum(row.attributed_context_tokens),
-    carryingCalls: toNum(row.carrying_calls),
-  }));
+  opts: UsagePeriodOpts & { scope: UsageScope },
+): Promise<UsageToolEfficiencyResponse> {
+  const period = periodFromOpts(opts);
+  const scope = opts.scope;
+  const engineScope = scopeWhere("ce.", period, scope);
+  interface CountRow { use_case: string; calls: unknown }
+  const [engine, workflow] = await Promise.all([
+    db.execute(sql`
+      SELECT ce.use_case, SUM(ce.tool_calls) AS calls
+      FROM ${usagePeriodRows(period, true)} ce
+      WHERE ${engineScope} AND ce.tool_calls > 0
+      GROUP BY ce.use_case`) as Promise<{ rows: CountRow[] }>,
+    getActionToolCalls(db, period, scope),
+  ]);
+  const directed = new Map(engine.rows.filter((r) => isUsageUseCase(r.use_case)).map((r) => [r.use_case as UsageUseCase, toNum(r.calls)]));
+  return {
+    windowMs: period.windowMs ?? period.endMs - period.startMs,
+    scope: scope.scope,
+    byUseCase: USE_CASES.map((useCase) => ({
+      useCase,
+      modelDirectedCalls: directed.get(useCase) ?? 0,
+      modelFreeActions: useCase === "workflow" ? workflow : 0,
+    })),
+  };
+}
+
+const OUTCOME_KINDS: readonly UsageOutcomeKind[] = [
+  "pull_request_created", "review_submitted", "slack_message_sent", "slack_dm_sent",
+];
+
+/** Count confirmed writes, then allocate each parent's observed model cost
+ * across its outcomes in the selected period. This is a cost estimate. */
+async function queryUsageOutcomes(
+  db: AppDb,
+  opts: UsagePeriodOpts & { scope: UsageScope },
+): Promise<UsageOutcomesResponse> {
+  const period = periodFromOpts(opts);
+  const { scope } = opts;
+  const costScope = scopeWhere("", period, scope);
+  interface OutcomeRow { parent: string; kind: string; count: unknown }
+  interface CostRow { parent: string; cost_usd: unknown; unpriced_turns: unknown }
+  const [actions, terminal] = await Promise.all([
+    getActionOutcomes(db, period, scope),
+    db.execute(sql`
+      SELECT CASE WHEN ce.workflow_run_id IS NOT NULL THEN 'w:' || ce.workflow_run_id
+        ELSE 's:' || ce.session_id END AS parent,
+        outcome.kind, SUM(outcome.count) AS count
+      FROM ${usagePeriodRows(period, true)} ce
+      CROSS JOIN LATERAL (VALUES
+        ('pull_request_created', ce.pull_requests), ('review_submitted', ce.reviews)
+      ) outcome(kind, count)
+      WHERE ${scopeWhere("ce.", period, scope)} AND outcome.count > 0
+        AND (ce.pull_requests > 0 OR ce.reviews > 0)
+      GROUP BY 1, 2`) as Promise<{ rows: OutcomeRow[] }>,
+  ]);
+
+  const byParent = new Map<string, Map<UsageOutcomeKind, number>>();
+  for (const row of [...actions, ...terminal.rows]) {
+    if (!OUTCOME_KINDS.includes(row.kind as UsageOutcomeKind)) continue;
+    const kind = row.kind as UsageOutcomeKind;
+    const counts = byParent.get(row.parent) ?? new Map<UsageOutcomeKind, number>();
+    counts.set(kind, (counts.get(kind) ?? 0) + toNum(row.count));
+    byParent.set(row.parent, counts);
+  }
+  // Parents without outcomes need no cost allocation. Keep this query bounded
+  // to confirmed parents instead of aggregating every session in the org.
+  const sessions = [...byParent.keys()].filter((p) => p.startsWith("s:")).map((p) => p.slice(2));
+  const workflows = [...byParent.keys()].filter((p) => p.startsWith("w:")).map((p) => p.slice(2));
+  const parentFilters: SQL[] = [];
+  if (sessions.length) parentFilters.push(sql`(workflow_run_id IS NULL AND session_id IN (SELECT jsonb_array_elements_text(${JSON.stringify(sessions)}::jsonb)))`);
+  if (workflows.length) parentFilters.push(sql`workflow_run_id IN (SELECT jsonb_array_elements_text(${JSON.stringify(workflows)}::jsonb))`);
+  const costs = parentFilters.length ? await db.execute(sql`
+    SELECT CASE WHEN workflow_run_id IS NOT NULL THEN 'w:' || workflow_run_id
+      ELSE 's:' || session_id END AS parent,
+      COALESCE(SUM(cost_total), 0) AS cost_usd,
+      COALESCE(SUM(unpriced_turns),0) AS unpriced_turns
+    FROM ${usagePeriodRows(period)} ce
+    WHERE ${costScope} AND (${sql.join(parentFilters, sql` OR `)})
+    GROUP BY 1`) as { rows: CostRow[] } : { rows: [] };
+  const costByParent = new Map(costs.rows.map((row) => [row.parent, row]));
+  const totals = new Map<UsageOutcomeKind, { count: number; cost: number }>(
+    OUTCOME_KINDS.map((kind) => [kind, { count: 0, cost: 0 }]),
+  );
+  let unpricedTurns = 0;
+  for (const [parent, counts] of byParent) {
+    const parentCount = [...counts.values()].reduce((sum, count) => sum + count, 0);
+    const cost = costByParent.get(parent);
+    unpricedTurns += toNum(cost?.unpriced_turns);
+    for (const [kind, count] of counts) {
+      const total = totals.get(kind);
+      if (!total) continue;
+      total.count += count;
+      total.cost += toNum(cost?.cost_usd) * count / parentCount;
+    }
+  }
+  return {
+    scope: scope.scope,
+    byOutcome: OUTCOME_KINDS.map((kind) => {
+      const { count, cost } = totals.get(kind) ?? { count: 0, cost: 0 };
+      return { kind, count, estimatedCostUsd: cost, estimatedCostPerOutcomeUsd: count ? cost / count : null };
+    }),
+    unpricedTurns,
+  };
 }
 
 /** Distinct sessions with positive token usage, grouped into UTC calendar days.
  * Reads retained usage; page views, idle sessions and proxy calls do not count.
  */
-export async function getDailyAgentActivity(
+async function queryDailyAgentActivity(
   db: AppDb,
-  opts: { windowMs: number; scope: UsageScope; now?: number },
+  opts: UsagePeriodOpts & { scope: UsageScope },
 ): Promise<DailyAgentActivityResponse> {
-  const now = opts.now ?? Date.now();
-  const since = Math.floor(now / DAY_MS) * DAY_MS - opts.windowMs + DAY_MS;
-  const where = scopeWhere("ce.", since, opts.scope);
+  const period = periodFromOpts(opts);
+  const activityPeriod = period.activityStartMs === undefined ? period : { ...period, startMs: period.activityStartMs };
   type ActivityRow = {
     day_ms: unknown; team_id: string | null; team_name: string | null;
     kind: "assistant" | "child" | "workflow" | "session"; active_agents: unknown;
   };
   // AppDb abstracts Postgres and PGlite; the selected columns define this result.
+  // Keyed by the session that made each call, as every active-agent count is.
   const rows = await db.execute(sql`
-    SELECT (floor(ce.created_at / ${DAY_MS}) * ${DAY_MS})::bigint AS day_ms,
-      CASE WHEN ce.owner_type = 'team' THEN ce.owner_id END AS team_id,
+    SELECT (floor(x.created_at / ${DAY_MS}) * ${DAY_MS})::bigint AS day_ms,
+      CASE WHEN x.owner_type = 'team' THEN x.owner_id END AS team_id,
       t.name AS team_name,
       CASE
-        WHEN ce.use_case = 'workflow' THEN 'workflow'
-        WHEN ce.session_id LIKE 'orchestrator:%' OR EXISTS (
-          SELECT 1 FROM assistants a WHERE a.session_id = ce.session_id AND a.org_id = ce.org_id
-        ) THEN 'assistant'
-        WHEN EXISTS (
-          SELECT 1 FROM child_watches w WHERE w.child_session_id = ce.session_id AND w.org_id = ce.org_id
-        ) THEN 'child'
+        WHEN x.session_id LIKE 'wf:%' THEN 'workflow'
+        WHEN x.assistant THEN 'assistant'
+        WHEN x.child THEN 'child'
         ELSE 'session'
       END AS kind,
-      COUNT(DISTINCT ce.session_id) AS active_agents
-    FROM cost_entries ce
-    LEFT JOIN teams t ON ce.owner_type = 'team' AND t.id = ce.owner_id AND t.org_id = ce.org_id
-    WHERE ${where} AND ce.created_at <= ${now}
-      AND ce.session_id IS NOT NULL AND ce.total_tokens > 0
+      COUNT(DISTINCT x.session_id) AS active_agents
+    FROM ${scopedAgentActivity(opts.scope, activityPeriod)} x
+    LEFT JOIN teams t ON x.owner_type = 'team' AND t.id = x.owner_id AND t.org_id = x.org_id
     GROUP BY 1, 2, 3, 4 ORDER BY 1, 2 NULLS FIRST, 4
   `) as { rows: ActivityRow[] };
   return {
@@ -276,98 +371,83 @@ export async function getDailyAgentActivity(
 
 // ── Breakdown ────────────────────────────────────────────────────────────────
 
-/** Count session-days per actor, not turns or distinct sessions over the range.
- * Shared assistants must not be credited to the first member who opened them.
- * A session used by two members on one day counts once for each member.
- */
-async function getMemberAgentDays(db: AppDb, scope: UsageScope, since: number, now: number) {
-  // The raw query result type describes columns selected below on both DB backends.
-  const result = await db.execute(sql`
-    WITH active AS (
-      SELECT (floor(ce.created_at / ${DAY_MS}) * ${DAY_MS})::bigint AS day_ms,
-        ce.session_id,
-        COALESCE(NULLIF(q.author::jsonb->>'id', ''), NULLIF(cw.actor_user_id, ''),
-          CASE WHEN a.id IS NULL AND ce.session_id NOT LIKE 'orchestrator:%'
-            THEN ce.user_id END) AS actor_id
-      FROM cost_entries ce
-      JOIN engine_entries e ON e.id = ce.entry_id AND e.session_id = ce.session_id
-      LEFT JOIN engine_queue_items q ON q.id = e.queue_item_id AND q.session_id = e.session_id
-      LEFT JOIN child_watches cw ON cw.child_session_id = ce.session_id AND cw.org_id = ce.org_id
-      LEFT JOIN assistants a ON a.session_id = ce.session_id AND a.org_id = ce.org_id
-      WHERE ${scopeWhere("ce.", since, scope)} AND ce.created_at <= ${now}
-        AND ce.session_id IS NOT NULL AND ce.total_tokens > 0
-    ), daily AS (
-      SELECT actor_id, day_ms, COUNT(DISTINCT session_id) AS active_agents
-      FROM active GROUP BY actor_id, day_ms
-    )
-    SELECT actor_id, SUM(active_agents) AS agent_days FROM daily GROUP BY actor_id
-  `) as { rows: { actor_id: string | null; agent_days: unknown }[] };
-  return result.rows;
-}
-
 /** All-use-case spend for a window: totals, by use case, by model, by day, and
  * (org scope) by member. */
-export async function getUsageBreakdown(
+async function queryUsageBreakdown(
   db: AppDb,
-  opts: { windowMs: number; scope: UsageScope; now?: number },
+  opts: UsagePeriodOpts & { scope: UsageScope },
 ): Promise<UsageBreakdownResponse> {
-  const now = opts.now ?? Date.now();
-  const since = now - opts.windowMs;
-  const where = scopeWhere("", since, opts.scope);
+  const period = periodFromOpts(opts);
+  const where = scopeWhere("", period, opts.scope);
   const agentWindow = opts.scope.scope === "team" && opts.scope.byMember
     ? {
-        days: opts.windowMs / DAY_MS,
-        sinceMs: Math.floor(now / DAY_MS) * DAY_MS - opts.windowMs + DAY_MS,
-        untilMs: now,
+        days: period.activityDays ?? Math.max(1, Math.ceil((period.endMs - period.startMs) / DAY_MS)),
+        sinceMs: period.activityStartMs ?? period.startMs,
+        untilMs: period.endMs,
         timezone: "UTC" as const,
       }
     : undefined;
 
-  const [byUseCase, byModel, byDay, totals, byUser, skillBreakdown, agentDays] = await Promise.all([
-    db.execute(sql`SELECT use_case, ${BUCKET_COLS} FROM cost_entries WHERE ${where} GROUP BY use_case`) as Promise<{ rows: (BucketRow & { use_case: string })[] }>,
-    db.execute(sql`SELECT model, ${BUCKET_COLS} FROM cost_entries WHERE ${where} GROUP BY model ORDER BY cost_usd DESC`) as Promise<{ rows: (BucketRow & { model: string | null })[] }>,
-    // `floor` truncates the day index deterministically whether Postgres infers
-    // the `${DAY_MS}` parameter as integer or float (a plain `bigint / param`
-    // could do float division on real Postgres → one bucket per row).
-    db.execute(sql`SELECT (floor(created_at / ${DAY_MS}) * ${DAY_MS})::bigint AS day_ms, COALESCE(SUM(cost_total),0) AS cost_usd, COALESCE(SUM(total_tokens),0) AS total_tokens FROM cost_entries WHERE ${where} GROUP BY 1 ORDER BY 1 ASC`) as Promise<{ rows: { day_ms: unknown; cost_usd: unknown; total_tokens: unknown }[] }>,
-    // Only the engine branch of cost_entries carries session_id. Count across
-    // the whole rolling window, not member/day buckets; unpriced usage counts.
-    db.execute(sql`SELECT ${BUCKET_COLS}, COUNT(DISTINCT session_id) FILTER (
-      WHERE session_id IS NOT NULL AND total_tokens > 0 AND created_at <= ${now}
-    ) AS active_agents FROM cost_entries WHERE ${where}`) as Promise<{ rows: (BucketRow & { active_agents: unknown })[] }>,
-    opts.scope.scope === "org" || (opts.scope.scope === "team" && opts.scope.byMember)
-      ? // Keep the NULL user_id group (team-/org-owned turns, e.g. team-owned
-        // workflow runs) so the per-member sum reconciles with the total —
-        // dropping it made Σ byUser < totalCostUsd.
-        (db.execute(sql`SELECT user_id, ${BUCKET_COLS} FROM cost_entries WHERE ${where} GROUP BY user_id ORDER BY cost_usd DESC`) as Promise<{ rows: (BucketRow & { user_id: string | null })[] }>)
-      : Promise.resolve({ rows: [] as (BucketRow & { user_id: string | null })[] }),
-    getSkillBreakdown(db, since, opts.scope),
-    agentWindow ? getMemberAgentDays(db, opts.scope, agentWindow.sinceMs, now) : Promise.resolve([]),
+  interface GroupRow extends BucketRow {
+    grouping_key: unknown; use_case: string | null; model: string | null;
+    day_ms: unknown; user_id: string | null;
+  }
+  // One cost view scan produces the use-case, model, day, member, and total
+  // buckets. GROUPING distinguishes a real NULL value from an omitted column.
+  const [grouped, agents, skillBreakdown, agentDays] = await Promise.all([
+    db.execute(sql`
+      WITH scoped AS MATERIALIZED (
+        SELECT use_case, model, user_id, session_id,
+          (floor(created_at / ${DAY_MS}) * ${DAY_MS})::bigint AS day_ms,
+          cost_total, total_tokens, input_tokens, output_tokens,
+          cache_read_tokens, cache_write_tokens, turns, unpriced_turns, positive_turns
+        FROM ${usagePeriodRows(period)} ce WHERE ${where}
+      ), grouped AS (
+      SELECT GROUPING(use_case, model, day_ms, user_id) AS grouping_key,
+        use_case, model, day_ms, user_id, ${HOURLY_BUCKET_COLS}
+      FROM scoped
+      GROUP BY GROUPING SETS ((use_case), (model), (day_ms), (user_id), ())
+      ) SELECT grouped.* FROM grouped
+    `) as Promise<{ rows: GroupRow[] }>,
+    // Agents are the sessions that made the calls, not the billing keys.
+    db.execute(sql`SELECT COUNT(DISTINCT x.session_id) AS active_agents
+      FROM ${scopedAgentActivity(opts.scope, period)} x`) as Promise<{ rows: { active_agents: unknown }[] }>,
+    getSkillBreakdown(db, period, opts.scope),
+    agentWindow ? getMemberAgentDays(db, opts.scope, { ...period, startMs: agentWindow.sinceMs }) : Promise.resolve([]),
   ]);
 
-  const total = toBucket(totals.rows[0]);
+  const groups = (key: number) => grouped.rows.filter((r) => toNum(r.grouping_key) === key);
+  const totals = groups(15)[0];
+  const total = toBucket(totals);
   let byUserOut: UsageBreakdownResponse["byUser"];
-  if (opts.scope.scope === "org" || (opts.scope.scope === "team" && opts.scope.byMember)) {
-    const memberBuckets = new Map(byUser.rows.map((r) => [r.user_id, toBucket(r)]));
+  const scope = opts.scope;
+  if (scope.scope === "org" || (scope.scope === "team" && scope.byMember)) {
+    const memberBuckets = new Map(groups(14).map((r) => [r.user_id, toBucket(r)]));
     const agentDaysByUser = new Map(agentDays.map((r) => [r.actor_id, toNum(r.agent_days)]));
     // Prompt actors can differ from the member billed for a shared session.
     // Keep their activity even when they have no attributed spend.
     for (const r of agentDays) if (!memberBuckets.has(r.actor_id)) memberBuckets.set(r.actor_id, toBucket(undefined));
     const ids = [...memberBuckets.keys()].filter((id): id is string => id !== null);
-    const userRows = ids.length === 0 ? [] : await db.select({ id: users.id, name: users.name, email: users.email }).from(users).where(inArray(users.id, ids));
-    const nameById = new Map(userRows.map((u) => [u.id, u.name || u.email] as const));
-    byUserOut = [...memberBuckets].map(([userId, bucket]) => ({
-      userId: userId ?? "shared",
-      name: userId === null ? "Team / shared" : (nameById.get(userId) ?? userId),
-      ...bucket,
-      ...(agentWindow ? { avgDailyActiveAgents: (agentDaysByUser.get(userId) ?? 0) / agentWindow.days } : {}),
-    }));
+    // A team view names only its own team: naming another team would depend
+    // on the viewer's access to it, which a team scope does not carry.
+    const label = await memberLabels(db, scope.orgId, ids,
+      scope.scope === "team" ? { kind: "team", teamId: scope.teamId } : { kind: "org" });
+    byUserOut = [...memberBuckets].map(([userId, bucket]) => {
+      const actor = userId === null ? { name: "Team / shared", isTeam: false } : label(userId);
+      return {
+        userId: userId ?? "shared",
+        name: actor.name,
+        ...(actor.isTeam ? { isTeam: true } : {}),
+        ...bucket,
+        ...(agentWindow ? { avgDailyActiveAgents: (agentDaysByUser.get(userId) ?? 0) / agentWindow.days } : {}),
+      };
+    }).sort((a, b) => b.costUsd - a.costUsd || a.userId.localeCompare(b.userId));
   }
 
   return {
-    windowMs: opts.windowMs,
+    windowMs: period.windowMs ?? period.endMs - period.startMs,
     scope: opts.scope.scope,
-    activeAgents: toNum(totals.rows[0]?.active_agents),
+    activeAgents: toNum(agents.rows[0]?.active_agents),
     totalCostUsd: total.costUsd,
     totalTokens: total.totalTokens,
     totalInputTokens: total.inputTokens,
@@ -377,11 +457,11 @@ export async function getUsageBreakdown(
     totalTurns: total.turns,
     unpricedTurns: total.unpricedTurns,
     skillBreakdown,
-    byUseCase: byUseCase.rows.filter((r) => isUsageUseCase(r.use_case)).map((r) => ({ useCase: r.use_case as UsageUseCase, ...toBucket(r) })).sort((a, b) => b.costUsd - a.costUsd),
-    byModel: byModel.rows.map((r) => ({ model: r.model, ...toBucket(r) })),
+    byUseCase: groups(7).filter((r): r is GroupRow & { use_case: UsageUseCase } => r.use_case !== null && isUsageUseCase(r.use_case)).map((r) => ({ useCase: r.use_case, ...toBucket(r) })).sort((a, b) => b.costUsd - a.costUsd),
+    byModel: groups(11).map((r) => ({ model: r.model, ...toBucket(r) })).sort((a, b) => b.costUsd - a.costUsd),
     byUser: byUserOut,
     dailyAgentWindow: agentWindow,
-    byDay: byDay.rows.map((r) => ({ dayMs: toNum(r.day_ms), costUsd: toNum(r.cost_usd), totalTokens: toNum(r.total_tokens) })),
+    byDay: groups(13).map((r) => ({ dayMs: toNum(r.day_ms), costUsd: toNum(r.cost_usd), totalTokens: toNum(r.total_tokens) })).sort((a, b) => a.dayMs - b.dayMs),
   };
 }
 
@@ -389,20 +469,20 @@ export async function getUsageBreakdown(
 
 /** Drill-down rows for ONE use case: sessions (title + child nesting), workflow
  * runs (workflow name), or proxy (by harness). */
-export async function getUsageDrillItems(
+async function queryUsageDrillItems(
   db: AppDb,
-  opts: { windowMs: number; scope: UsageScope; useCase: UsageUseCase },
+  opts: UsagePeriodOpts & { scope: UsageScope; useCase: UsageUseCase },
 ): Promise<UsageDrillItem[]> {
-  const since = Date.now() - opts.windowMs;
+  const period = periodFromOpts(opts);
   const { useCase, scope } = opts;
 
   if (useCase === "session" || useCase === "orchestrator") {
-    const whereCe = scopeWhere("ce.", since, scope);
+    const whereCe = scopeWhere("ce.", period, scope);
     interface Row { session_id: string; title: string | null; parent_session_id: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown }
     const r = (await db.execute(sql`
       SELECT ce.session_id, s.title, cw.parent_session_id,
-             COALESCE(SUM(ce.cost_total),0) AS cost_usd, COALESCE(SUM(ce.total_tokens),0) AS total_tokens, COUNT(*) AS turns
-      FROM cost_entries ce
+             COALESCE(SUM(ce.cost_total),0) AS cost_usd, COALESCE(SUM(ce.total_tokens),0) AS total_tokens, COALESCE(SUM(ce.turns),0) AS turns
+      FROM ${usagePeriodRows(period)} ce
       LEFT JOIN agent_sessions s ON s.id = ce.session_id
       LEFT JOIN child_watches cw ON cw.child_session_id = ce.session_id
       WHERE ${whereCe} AND ce.session_id IS NOT NULL AND ce.use_case = ${useCase}
@@ -414,30 +494,47 @@ export async function getUsageDrillItems(
     }));
   }
   if (useCase === "workflow") {
-    const whereCe = scopeWhere("ce.", since, scope);
-    interface Row { workflow_run_id: string | null; name: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown }
+    // One row per workflow, then its steps. Every model call a workflow makes
+    // bills to `wf:{runId}:{nodeId}[:{iteration}]`, so the step is the third
+    // part of the session id; foreach iterations of one step add up.
+    const whereCe = scopeWhere("ce.", period, scope);
+    interface Row { workflow_id: string; name: string | null; node_id: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown; runs: unknown }
     const r = (await db.execute(sql`
-      SELECT ce.workflow_run_id, wd.name,
-             COALESCE(SUM(ce.cost_total),0) AS cost_usd, COALESCE(SUM(ce.total_tokens),0) AS total_tokens, COUNT(*) AS turns
-      FROM cost_entries ce
-      LEFT JOIN workflow_definitions wd ON wd.id = ce.workflow_id
-      WHERE ${whereCe} AND ce.use_case = 'workflow' AND ce.workflow_run_id IS NOT NULL
-      GROUP BY ce.workflow_run_id, wd.name
-      ORDER BY cost_usd DESC LIMIT 200`)) as { rows: Row[] };
-    return r.rows.map((x) => ({
-      id: x.workflow_run_id ?? "", label: x.name ?? `run ${x.workflow_run_id}`, useCase, isChild: false,
-      parentId: null, sessionId: null, costUsd: toNum(x.cost_usd), totalTokens: toNum(x.total_tokens), turns: toNum(x.turns),
-    }));
+      WITH spend AS (
+        SELECT ce.workflow_id, split_part(ce.session_id, ':', 3) AS node_id, ce.workflow_run_id,
+               ce.cost_total, ce.total_tokens, ce.turns
+        FROM ${usagePeriodRows(period)} ce
+        WHERE ${whereCe} AND ce.use_case = 'workflow' AND ce.workflow_id IS NOT NULL
+      ), workflows AS (
+        SELECT workflow_id, SUM(cost_total) AS cost_usd FROM spend
+        GROUP BY workflow_id ORDER BY cost_usd DESC LIMIT 200
+      )
+      SELECT s.workflow_id, wd.name, CASE WHEN GROUPING(s.node_id) = 0 THEN s.node_id END AS node_id,
+             COALESCE(SUM(s.cost_total),0) AS cost_usd, COALESCE(SUM(s.total_tokens),0) AS total_tokens,
+             COALESCE(SUM(s.turns),0) AS turns, COUNT(DISTINCT s.workflow_run_id) AS runs
+      FROM spend s JOIN workflows w ON w.workflow_id = s.workflow_id
+      LEFT JOIN workflow_definitions wd ON wd.id = s.workflow_id
+      GROUP BY GROUPING SETS ((s.workflow_id, wd.name), (s.workflow_id, wd.name, s.node_id))
+      ORDER BY cost_usd DESC`)) as { rows: Row[] };
+    return r.rows.map((x) => {
+      const common = {
+        useCase, sessionId: null, workflowId: x.workflow_id, runs: toNum(x.runs),
+        costUsd: toNum(x.cost_usd), totalTokens: toNum(x.total_tokens), turns: toNum(x.turns),
+      };
+      return x.node_id === null
+        ? { ...common, id: x.workflow_id, label: x.name ?? x.workflow_id, isChild: false, parentId: null }
+        : { ...common, id: `${x.workflow_id}/${x.node_id}`, label: x.node_id, isChild: true, parentId: x.workflow_id };
+    });
   }
-  // proxy — group the raw proxy rows by harness (cost_entries has no harness).
+  // Proxy hours retain harness identity; partial hours retain exact timestamps.
   const whereProxy = scope.scope === "team"
-    ? sql`created_at >= ${since} AND org_id = ${scope.orgId} AND team_id = ${scope.teamId}`
-    : scopeWhere("", since, scope);
+    ? sql`created_at >= ${period.startMs} AND created_at < ${period.endMs} AND org_id = ${scope.orgId} AND team_id = ${scope.teamId}`
+    : scopeWhere("", period, scope);
   interface Row { harness: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown }
   const r = (await db.execute(sql`
-    SELECT harness, COALESCE(SUM(cost_usd),0) AS cost_usd, COALESCE(SUM(total_tokens),0) AS total_tokens, COUNT(*) AS turns
-    FROM llm_proxy_requests
-    WHERE ${whereProxy} AND total_tokens > 0
+    SELECT harness, COALESCE(SUM(cost_usd),0) AS cost_usd, COALESCE(SUM(total_tokens),0) AS total_tokens, COALESCE(SUM(turns),0) AS turns
+    FROM ${proxyPeriodRows(period)} proxy_usage
+    WHERE ${whereProxy} AND total_tokens > 0 AND ${useCase === "tagging" ? sql`provider_kind = 'tagging'` : sql`provider_kind <> 'tagging'`}
     GROUP BY harness ORDER BY cost_usd DESC LIMIT 200`)) as { rows: Row[] };
   return r.rows.map((x) => ({
     id: x.harness ?? "unknown", label: x.harness ?? "unknown", useCase, isChild: false,
@@ -448,11 +545,11 @@ export async function getUsageDrillItems(
 /** Superseded by `getUsageDrillItems` (which covers all use cases); kept while
  * the dashboard migrates. Per-session spend for the agent-session use cases,
  * child-nested via `child_watches`, scoped to the caller. */
-export async function getUsageSessions(
+async function queryUsageSessions(
   db: AppDb,
-  opts: { windowMs: number; orgId: string; userId: string; useCase?: string },
+  opts: UsagePeriodOpts & { orgId: string; userId: string; useCase?: string },
 ): Promise<UsageSessionRow[]> {
-  const since = Date.now() - opts.windowMs;
+  const period = periodFromOpts(opts);
   // This endpoint only covers the two agent-session use cases; a workflow/proxy
   // filter would contradict the `IN ('orchestrator','session')` clause and
   // silently return nothing, so ignore any other value.
@@ -460,11 +557,11 @@ export async function getUsageSessions(
   interface Row { session_id: string; title: string | null; use_case: string; parent_session_id: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown }
   const result = (await db.execute(sql`
     SELECT ce.session_id, s.title, ce.use_case, cw.parent_session_id,
-           COALESCE(SUM(ce.cost_total),0) AS cost_usd, COALESCE(SUM(ce.total_tokens),0) AS total_tokens, COUNT(*) AS turns
-    FROM cost_entries ce
+           COALESCE(SUM(ce.cost_total),0) AS cost_usd, COALESCE(SUM(ce.total_tokens),0) AS total_tokens, COALESCE(SUM(ce.turns),0) AS turns
+    FROM ${usagePeriodRows(period)} ce
     LEFT JOIN agent_sessions s ON s.id = ce.session_id
     LEFT JOIN child_watches cw ON cw.child_session_id = ce.session_id
-    WHERE ce.created_at >= ${since} AND ce.org_id = ${opts.orgId} AND ce.user_id = ${opts.userId}
+    WHERE ce.created_at >= ${period.startMs} AND ce.created_at < ${period.endMs} AND ce.org_id = ${opts.orgId} AND ce.user_id = ${opts.userId}
       AND ce.session_id IS NOT NULL AND ce.use_case IN ('orchestrator','session')
       ${useCaseFilter}
     GROUP BY ce.session_id, s.title, ce.use_case, cw.parent_session_id
@@ -483,43 +580,180 @@ export async function getUsageSessions(
 
 // ── CSV export ───────────────────────────────────────────────────────────────
 
-const CSV_HEADER = "timestamp,use_case,model,session_id,workflow_run_id,user_id,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_usd,priced";
+const TURN_EXPORT_BATCH_SIZE = 5_000;
+
+const TURN_CSV_HEADER = "timestamp,use_case,model,session_id,workflow_run_id,user_id,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_usd,priced,employee_name,employee_email,repository,channel_type,channel_id";
+const AGGREGATE_CSV_HEADER = "bucket_start,use_case,provider,model,owner_type,owner_id,user_id,employee_name,employee_email,turns,unpriced_turns,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_usd";
 
 function csvEscape(v: unknown): string {
-  const s = v === null || v === undefined ? "" : String(v);
-  // Quote on comma, quote, newline OR carriage return — a lone \r in a title
-  // would otherwise break a CSV row boundary.
-  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  const value = v === null || v === undefined ? "" : String(v);
+  const formulaPrefix = /^[-=+@\t\r]/.test(value);
+  const safe = formulaPrefix ? `'${value}` : value;
+  return formulaPrefix || /[",\n\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
 }
 
-/** One CSV row per billable turn for the window/scope, capped at 100k rows.
- * A plain member's team export blanks `user_id`: per-member attribution
- * follows the breakdown's byUser rule (org scope, or a team scope whose
- * caller administers the team), and the CSV must not let a plain team
- * member reconstruct it with one GROUP BY. */
-export async function getUsageExportCsv(db: AppDb, opts: { windowMs: number; scope: UsageScope }): Promise<string> {
-  const since = Date.now() - opts.windowMs;
-  const withholdUserId = opts.scope.scope === "team" && !opts.scope.byMember;
-  interface Row {
-    created_at: unknown; use_case: string; model: string | null; session_id: string | null; workflow_run_id: string | null;
-    user_id: string | null; input_tokens: unknown; output_tokens: unknown; cache_read_tokens: unknown; cache_write_tokens: unknown;
-    total_tokens: unknown; cost_total: unknown; priced: unknown;
-  }
-  const result = (await db.execute(sql`
-    SELECT created_at, use_case, model, session_id, workflow_run_id, user_id,
-           input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, cost_total, priced
-    FROM cost_entries
-    WHERE ${scopeWhere("", since, opts.scope)}
-    ORDER BY created_at DESC LIMIT 100000`)) as { rows: Row[] };
+interface AggregateExportRow {
+  bucket_start: unknown; use_case: string; provider: string | null; model: string | null;
+  owner_type: string | null; owner_id: string | null; user_id: string | null;
+  employee_name: string | null; employee_email: string | null; turns: unknown;
+  unpriced_turns: unknown; input_tokens: unknown; output_tokens: unknown;
+  cache_read_tokens: unknown; cache_write_tokens: unknown; total_tokens: unknown; cost_usd: unknown;
+}
 
-  const lines = result.rows.map((r) =>
-    [
-      new Date(toNum(r.created_at)).toISOString(), r.use_case, r.model, r.session_id, r.workflow_run_id, withholdUserId ? "" : r.user_id,
-      toNum(r.input_tokens), toNum(r.output_tokens), toNum(r.cache_read_tokens), toNum(r.cache_write_tokens), toNum(r.total_tokens),
-      r.cost_total === null ? "" : toNum(r.cost_total), r.priced,
-    ].map(csvEscape).join(","),
-  );
-  return `${CSV_HEADER}\n${lines.join("\n")}\n`;
+/** Aggregate CSV rows use UTC epoch buckets and the same ledger sums as the
+ * dashboard. A plain team member gets one aggregate across users: the query
+ * does not group by stable or human user identity. */
+async function queryUsageAggregateExportCsv(
+  db: AppDb,
+  opts: UsagePeriodOpts & { scope: UsageScope; granularity: "day" | "hour" },
+): Promise<string> {
+  const period = periodFromOpts(opts);
+  const bucketMs = opts.granularity === "day" ? DAY_MS : 60 * 60 * 1000;
+  const withholdIdentity = opts.scope.scope === "team" && !opts.scope.byMember;
+  const identitySelect = withholdIdentity
+    ? sql`NULL::text AS user_id, NULL::text AS employee_name, NULL::text AS employee_email`
+    : sql`ce.user_id, u.name AS employee_name, u.email AS employee_email`;
+  const groupColumns = withholdIdentity ? sql`1,2,3,4,5,6` : sql`1,2,3,4,5,6,7,8,9`;
+  const result = (await db.execute(sql`
+    SELECT (floor(ce.created_at / ${bucketMs}) * ${bucketMs})::bigint AS bucket_start,
+           ce.use_case, ce.provider, ce.model, ce.owner_type, ce.owner_id,
+           ${identitySelect},
+           COALESCE(SUM(ce.turns),0) AS turns, COALESCE(SUM(ce.unpriced_turns),0) AS unpriced_turns,
+           COALESCE(SUM(ce.input_tokens), 0) AS input_tokens,
+           COALESCE(SUM(ce.output_tokens), 0) AS output_tokens,
+           COALESCE(SUM(ce.cache_read_tokens), 0) AS cache_read_tokens,
+           COALESCE(SUM(ce.cache_write_tokens), 0) AS cache_write_tokens,
+           COALESCE(SUM(ce.total_tokens), 0) AS total_tokens,
+           COALESCE(SUM(ce.cost_total), 0) AS cost_usd
+    FROM ${usagePeriodRows(period, false, opts.granularity === "day")} ce
+    LEFT JOIN "user" u ON u.id = ce.user_id
+    WHERE ${scopeWhere("ce.", period, opts.scope)}
+    GROUP BY ${groupColumns}
+    ORDER BY 1 DESC, 2, 3 NULLS FIRST, 4 NULLS FIRST, 5 NULLS FIRST, 6 NULLS FIRST,
+             7 NULLS FIRST, 8 NULLS FIRST, 9 NULLS FIRST
+  `)) as { rows: AggregateExportRow[] };
+
+  const lines = result.rows.map((row) => [
+    new Date(toNum(row.bucket_start)).toISOString(), row.use_case, row.provider, row.model,
+    row.owner_type, row.owner_id, row.user_id, row.employee_name, row.employee_email,
+    toNum(row.turns), toNum(row.unpriced_turns), toNum(row.input_tokens), toNum(row.output_tokens),
+    toNum(row.cache_read_tokens), toNum(row.cache_write_tokens), toNum(row.total_tokens), toNum(row.cost_usd),
+  ].map(csvEscape).join(","));
+  return `${AGGREGATE_CSV_HEADER}\n${lines.join("\n")}${lines.length > 0 ? "\n" : ""}`;
+}
+
+interface TurnExportRow {
+  entry_id: string; created_at: unknown; use_case: string; model: string | null;
+  session_id: string | null; workflow_run_id: string | null; user_id: string | null;
+  employee_name: string | null; employee_email: string | null; repository: string | null;
+  channel_type: string | null; channel_id: string | null; input_tokens: unknown;
+  output_tokens: unknown; cache_read_tokens: unknown; cache_write_tokens: unknown;
+  total_tokens: unknown; cost_total: unknown; priced: unknown;
+}
+
+function turnExportLine(row: TurnExportRow, withholdIdentity: boolean): string {
+  return [
+    new Date(toNum(row.created_at)).toISOString(), row.use_case, row.model, row.session_id, row.workflow_run_id,
+    withholdIdentity ? "" : row.user_id, toNum(row.input_tokens), toNum(row.output_tokens),
+    toNum(row.cache_read_tokens), toNum(row.cache_write_tokens), toNum(row.total_tokens),
+    row.cost_total === null ? "" : toNum(row.cost_total), row.priced,
+    withholdIdentity ? "" : row.employee_name, withholdIdentity ? "" : row.employee_email,
+    row.repository, row.channel_type, row.channel_id,
+  ].map(csvEscape).join(",");
+}
+
+/** Stream one CSV row per billable turn. Each pull loads one keyset page, so
+ * memory is bounded by the page size. The `(created_at, use_case, entry_id)`
+ * order is total across both ledger branches. A query error errors the stream;
+ * it never closes a truncated CSV as a successful response. */
+export function createUsageTurnExportStream(
+  db: AppDb,
+  opts: UsagePeriodOpts & { scope: UsageScope },
+): ReadableStream<Uint8Array> {
+  const period = periodFromOpts(opts);
+  const withholdIdentity = opts.scope.scope === "team" && !opts.scope.byMember;
+  const encoder = new TextEncoder();
+  let cursor: { createdAt: number; useCase: string; entryId: string } | undefined;
+  let finished = false;
+
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode(`${TURN_CSV_HEADER}\n`));
+    },
+    async pull(controller) {
+      if (finished) return;
+      try {
+        const cursorWhere = cursor === undefined ? sql`` : sql`AND (
+          ce.created_at < ${cursor.createdAt}
+          OR (ce.created_at = ${cursor.createdAt} AND ce.use_case < ${cursor.useCase})
+          OR (ce.created_at = ${cursor.createdAt} AND ce.use_case = ${cursor.useCase} AND ce.entry_id < ${cursor.entryId})
+        )`;
+        const result = (await db.execute(sql`
+          WITH page AS (
+            SELECT ce.entry_id, ce.created_at, ce.use_case, ce.model, ce.session_id,
+                   ce.workflow_run_id, ce.user_id, ce.input_tokens, ce.output_tokens,
+                   ce.cache_read_tokens, ce.cache_write_tokens, ce.total_tokens,
+                   ce.cost_total, ce.priced
+            FROM cost_entries ce
+            WHERE ${scopeWhere("ce.", period, opts.scope)} ${cursorWhere}
+            ORDER BY ce.created_at DESC, ce.use_case DESC, ce.entry_id DESC
+            LIMIT ${TURN_EXPORT_BATCH_SIZE}
+          )
+          SELECT page.*, u.name AS employee_name, u.email AS employee_email,
+                 pr.repository, q.channel::jsonb->>'channelType' AS channel_type,
+                 q.channel::jsonb->>'channelId' AS channel_id
+          FROM page
+          LEFT JOIN "user" u ON u.id = page.user_id
+          -- By entry id alone: a Thread step's turn bills to its step's id,
+          -- but the assistant session ran it and holds its channel and repos.
+          -- That session's context is exported only when the session itself
+          -- passes this export's scope: a team run can report through a
+          -- member's personal assistant, whose context the team cannot see.
+          LEFT JOIN engine_entries e ON page.use_case <> 'proxy' AND e.id = page.entry_id
+            AND (e.session_id = page.session_id OR EXISTS (
+              SELECT 1 FROM agent_sessions run_src WHERE run_src.id = e.session_id
+                AND ${sourceSessionInScope(sql`run_src`, opts.scope)}))
+          LEFT JOIN LATERAL (
+            SELECT string_agg(sr.full_name, ';' ORDER BY sr.position) AS repository
+            FROM session_repos sr WHERE sr.session_id = e.session_id
+          ) pr ON true
+          LEFT JOIN engine_queue_items q ON q.id = e.queue_item_id AND q.session_id = e.session_id
+          ORDER BY page.created_at DESC, page.use_case DESC, page.entry_id DESC
+        `)) as { rows: TurnExportRow[] };
+
+        if (result.rows.length === 0) {
+          finished = true;
+          controller.close();
+          return;
+        }
+        const last = result.rows[result.rows.length - 1];
+        if (!last) throw new Error("Usage export page was unexpectedly empty.");
+        cursor = { createdAt: toNum(last.created_at), useCase: last.use_case, entryId: last.entry_id };
+        controller.enqueue(encoder.encode(`${result.rows.map((row) => turnExportLine(row, withholdIdentity)).join("\n")}\n`));
+        if (result.rows.length < TURN_EXPORT_BATCH_SIZE) {
+          finished = true;
+          controller.close();
+        }
+      } catch (error) {
+        finished = true;
+        controller.error(error);
+      }
+    },
+  });
+}
+
+/** A session row passes the usage scope, by the rule `cost_entries` applies
+ * to a session's own spend. `alias` is a hardcoded table alias. */
+function sourceSessionInScope(alias: SQL, s: UsageScope): SQL {
+  const base = sql`${alias}.org_id = ${s.orgId}`;
+  switch (s.scope) {
+    case "team":
+      return sql`${base} AND ${alias}.owner_type = 'team' AND ${alias}.owner_id = ${s.teamId}`;
+    case "me":
+      return sql`${base} AND ${alias}.user_id = ${s.userId}`;
+    case "org":
+      return base;
+  }
 }
 
 // ── Per-user windows (home card + /summary) ──────────────────────────────────
@@ -543,12 +777,14 @@ function toWindow(row: WindowAggRow | undefined): UsageWindow {
 }
 
 /** Per-user token/cost aggregate since a cutoff, one row per user. `onlyUserId`
- * scopes to a single user; omit it for the org-wide member list. */
+ * scopes to a single user; omit it for the org-wide member list.
+ * Home dashboard windows and rankings count only Valet activity. */
 async function windowAggregate(db: AppDb, orgId: string, sinceMs: number, onlyUserId?: string): Promise<WindowAggRow[]> {
   const result = (await db.execute(sql`
-    SELECT user_id, ${BUCKET_COLS}
-    FROM cost_entries
+    SELECT user_id, ${HOURLY_BUCKET_COLS}
+    FROM ${usagePeriodRows({startMs:sinceMs,endMs:8640000000000000,kind:"lookback",label:"home"})} ce
     WHERE created_at >= ${sinceMs} AND org_id = ${orgId} AND user_id IS NOT NULL
+      AND use_case <> 'proxy'
       ${onlyUserId ? sql`AND user_id = ${onlyUserId}` : sql``}
     GROUP BY user_id`)) as { rows: WindowAggRow[] };
   return result.rows;
@@ -556,7 +792,7 @@ async function windowAggregate(db: AppDb, orgId: string, sinceMs: number, onlyUs
 
 /** The `/api/usage/summary` body: the caller's day/week/month windows, plus an
  * org-wide member comparison when the organizations feature is on. */
-export async function getUsageSummary(db: AppDb, opts: { orgId: string; userId: string; now: number }): Promise<UsageSummaryResponse> {
+async function queryUsageSummary(db: AppDb, opts: { orgId: string; userId: string; now: number }): Promise<UsageSummaryResponse> {
   const { orgId, userId, now } = opts;
   const [day, week, month] = await Promise.all([
     windowAggregate(db, orgId, now - DAY_MS, userId),
@@ -571,15 +807,34 @@ export async function getUsageSummary(db: AppDb, opts: { orgId: string; userId: 
     const memberAgg = await windowAggregate(db, orgId, now - 30 * DAY_MS);
     // Look up exactly the ids the aggregate returned — bounded (not every user
     // in the deployment) AND complete (keeps a since-left member's name).
-    const spenderIds = memberAgg.map((row) => row.user_id);
-    const userRows = spenderIds.length === 0 ? [] : await db.select({ id: users.id, name: users.name, email: users.email }).from(users).where(inArray(users.id, spenderIds));
-    const nameById = new Map(userRows.map((u) => [u.id, u.name || u.email] as const));
+    // Every org member reads this ranking, so a team is named only for a
+    // viewer who can see it.
+    const label = await memberLabels(db, orgId, memberAgg.map((row) => row.user_id), { kind: "viewer", userId });
     body.org = {
       windowDays: 30,
       members: memberAgg
-        .map((row) => ({ userId: row.user_id, name: nameById.get(row.user_id) ?? row.user_id, ...toWindow(row) }))
+        .map((row) => {
+          const actor = label(row.user_id);
+          return { userId: row.user_id, name: actor.name, ...(actor.isTeam ? { isTeam: true } : {}), ...toWindow(row) };
+        })
         .sort((a, b) => b.costUsd - a.costUsd || b.totalTokens - a.totalTokens),
     };
   }
   return body;
 }
+
+export const getUsageToolEfficiency = usageRead(queryUsageToolEfficiency);
+
+export const getUsageOutcomes = usageRead(queryUsageOutcomes);
+
+export const getDailyAgentActivity = usageRead(queryDailyAgentActivity);
+
+export const getUsageBreakdown = usageRead(queryUsageBreakdown);
+
+export const getUsageDrillItems = usageRead(queryUsageDrillItems);
+
+export const getUsageSessions = usageRead(queryUsageSessions);
+
+export const getUsageAggregateExportCsv = usageRead(queryUsageAggregateExportCsv);
+
+export const getUsageSummary = usageRead(queryUsageSummary);

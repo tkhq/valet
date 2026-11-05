@@ -172,7 +172,7 @@ describe("team reference writes and vault probe", () => {
     await put(id);
     const calls: string[] = [];
     api.providers.onePassword = createOnePasswordService({
-      credentials: api.providers.engineCredentials, getAllowPersonal: async () => true,
+      credentials: api.providers.engineCredentials,
       createClient: async (token) => {
         calls.push(token);
         return {

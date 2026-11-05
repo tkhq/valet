@@ -18,6 +18,8 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { TooltipProvider } from "~/components/primitives";
 import { SandboxTabs, type SandboxTabsProps } from "./sandbox-tabs";
 
+vi.mock("./browser/browser-pane", () => ({ BrowserPane: ({ sessionId }: { sessionId: string }) => <section aria-label="Sandbox browser">Browser for {sessionId}</section> }));
+
 function renderTabs(props: SandboxTabsProps) {
   return render(
     <TooltipProvider>
@@ -27,8 +29,7 @@ function renderTabs(props: SandboxTabsProps) {
 }
 
 const mintSandboxJwt = vi.fn();
-// importOriginal: see -new-session-dialog.test.tsx for why a bare
-// replacement here is unsafe under vitest.config.ts's isolate:false.
+// importOriginal keeps the module's other exports real (see vitest.config.ts).
 vi.mock("~/api/queries", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/queries")>();
   return {
@@ -43,15 +44,23 @@ afterEach(() => {
 });
 
 describe("SandboxTabs", () => {
-  it("renders nothing for a headless session", () => {
-    const { container } = renderTabs({
+  it("offers Chat and Browser for a headless session", () => {
+    renderTabs({
       sessionId: "sess-1",
       profile: "headless",
       activeTab: "chat",
       onTabChange: () => {},
       sandbox: { state: "ready", epoch: 1 },
     });
-    expect(container.textContent).toBe("");
+    expect(screen.getByRole("tab", { name: "Chat" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Browser" })).toBeTruthy();
+    expect(screen.queryByRole("tab", { name: "Terminal" })).toBeNull();
+  });
+
+  it("opens the browser pane without minting a terminal gateway token", () => {
+    renderTabs({ sessionId: "sess-1", profile: "headless", activeTab: "browser", onTabChange: () => {}, sandbox: { state: "ready", epoch: 1 } });
+    expect(screen.getByRole("region", { name: "Sandbox browser" }).textContent).toContain("sess-1");
+    expect(mintSandboxJwt).not.toHaveBeenCalled();
   });
 
   it("full session: shows the tab bar", () => {
@@ -81,6 +90,21 @@ describe("SandboxTabs", () => {
     const root = container.firstElementChild as HTMLElement;
     expect(root.className).toContain("shrink-0");
     expect(root.className).not.toContain("flex-1");
+  });
+
+  it("hides the strip on a phone on Chat only when the thread menu lists the views", () => {
+    const strip = (props: Partial<SandboxTabsProps>) => {
+      const { container, unmount } = renderTabs({ sessionId: "sess-1", profile: "headless", activeTab: "chat", onTabChange: () => {}, viewsInMenu: true, ...props });
+      const className = (container.firstElementChild?.firstElementChild as HTMLElement).className;
+      unmount();
+      return className;
+    };
+    expect(strip({})).toContain("max-sm:hidden");
+    // A header without the views in its menu (a child panel) keeps the strip.
+    expect(strip({ viewsInMenu: false })).not.toContain("max-sm:hidden");
+    // The Browser view keeps the strip: it is the way back to Chat.
+    expect(strip({ activeTab: "browser" })).not.toContain("max-sm:hidden");
+    expect(strip({ notice: "Shared with the team" })).not.toContain("max-sm:hidden");
   });
 
   it("terminal tab: the root grows (flex-1) to host the iframe", () => {

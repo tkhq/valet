@@ -8,7 +8,7 @@ import {
   useArtifactVersions,
   useShareArtifact,
 } from "~/api/artifacts";
-import { Button, Popover, PopoverContent, PopoverTrigger, Switch } from "~/components/primitives";
+import { Button, Input, Popover, PopoverContent, PopoverTrigger, Select, Switch } from "~/components/primitives";
 import { useCopyToClipboard } from "~/lib/use-copy";
 
 /**
@@ -54,11 +54,12 @@ export function ShareControls({ path }: { path: string }) {
         {artifact ? (
           <>
             <div className="flex items-center gap-1.5">
-              <input
+              <Input
                 readOnly
+                size="sm"
                 value={artifact.url}
                 onFocus={(e) => e.currentTarget.select()}
-                className="min-w-0 flex-1 rounded border border-line bg-transparent px-2 py-1 font-mono text-[11px] max-sm:min-h-11 max-sm:text-base"
+                className="min-w-0 flex-1 font-mono"
                 aria-label="Share link"
               />
               <button
@@ -98,7 +99,8 @@ export function ShareControls({ path }: { path: string }) {
                 <label htmlFor="artifact-shared-version" className="text-muted">
                   Viewers see
                 </label>
-                <select
+                <Select
+                  size="sm"
                   id="artifact-shared-version"
                   value={artifact.sharedVersion === null ? "latest" : String(artifact.sharedVersion)}
                   disabled={busy}
@@ -108,7 +110,6 @@ export function ShareControls({ path }: { path: string }) {
                       sharedVersion: e.target.value === "latest" ? null : Number(e.target.value),
                     })
                   }
-                  className="rounded border border-line bg-transparent px-1.5 py-1 text-xs"
                 >
                   <option value="latest">Latest (v{artifact.version})</option>
                   {versions.map((v) => (
@@ -116,7 +117,7 @@ export function ShareControls({ path }: { path: string }) {
                       v{v.version}
                     </option>
                   ))}
-                </select>
+                </Select>
               </div>
             )}
             <div className="flex items-center justify-between">

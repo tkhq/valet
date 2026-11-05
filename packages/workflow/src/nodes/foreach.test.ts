@@ -108,12 +108,12 @@ interface Submission {
 function makeSessionEngine(): {
   engine: WorkflowEngineDeps;
   promptCalls: Array<{ dispatchId: string; sessionId: string }>;
-  abortCalls: Array<{ sessionId: string; threadId: string }>;
+  abortCalls: Array<{ sessionId: string; threadId: string; queueItemId?: string }>;
   settle: (queueItemId: string, result: Omit<SubmissionResult, 'queueItemId'>) => void;
 } {
   const subsByDispatch = new Map<string, Submission>();
   const promptCalls: Array<{ dispatchId: string; sessionId: string }> = [];
-  const abortCalls: Array<{ sessionId: string; threadId: string }> = [];
+  const abortCalls: Array<{ sessionId: string; threadId: string; queueItemId?: string }> = [];
   let counter = 0;
 
   function findByQueueItem(queueItemId: string): Submission | undefined {
@@ -143,8 +143,8 @@ function makeSessionEngine(): {
       return { ...sub.result, queueItemId };
     },
     isSettled: async (_sessionId, queueItemId) => findByQueueItem(queueItemId)?.settled ?? false,
-    abort: async (sessionId, threadId) => {
-      abortCalls.push({ sessionId, threadId });
+    abort: async (sessionId, threadId, queueItemId) => {
+      abortCalls.push({ sessionId, threadId, queueItemId });
     },
     llmComplete: async () => {
       throw new Error('llmComplete not exercised by this fixture');
@@ -367,7 +367,7 @@ describe('executeForeach: onItemError "fail"', () => {
     // foreach itself aborted the orphaned in-flight submission best-effort before failing.
     const bodyCps = new Map((await store.getCheckpoints('run-6')).filter((cp) => cp.nodeId === 'body').map((cp) => [cp.iteration, cp]));
     expect(bodyCps.get(0)?.status).toBe('intent');
-    expect(abortCalls).toEqual([{ sessionId: 'wf:run-6:body', threadId: 'thread-1' }]);
+    expect(abortCalls).toEqual([{ sessionId: 'wf:run-6:body', threadId: 'thread-1', queueItemId: 'queue-1' }]);
   });
 });
 

@@ -29,7 +29,7 @@
  *   - source handle(s) (right): `if`/`approval` nodes carry
  *     `data.sourceOutputs: ['true', 'false']` and render two labeled
  *     handles whose `id` becomes the edge's `sourceHandle` (mapped to
- *     `fromOutput` by `flowEdgeToWorkflowEdge`); every other node except
+ *     `fromOutput` by the connection reducer); every other node except
  *     `stop` renders one unlabeled source handle; `stop` renders none.
  */
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
@@ -234,7 +234,7 @@ export function FlowNode({ data, selected }: NodeProps<FlowXyNode>) {
       data-wave={parallel?.wave}
       style={{ width: NODE_CARD_WIDTH }}
       className={cn(
-        "flow-node-card rounded-md border bg-paper px-3 py-2 shadow-sm",
+        "flow-node-card min-h-[84px] rounded-md border bg-paper px-3 py-2 shadow-sm",
         nodeShellClasses(runStatus, !!selected),
         entering && "flow-node-enter",
       )}
@@ -347,6 +347,8 @@ export function FlowNode({ data, selected }: NodeProps<FlowXyNode>) {
             position={Position.Right}
             id={output}
             data-testid={`handle-source-${output}`}
+            aria-label={`${output} branch connector`}
+            title={`${output} branch`}
             style={{ top: `${35 + index * 30}%` }}
           >
             {/* The word is an authoring affordance. A read-only surface

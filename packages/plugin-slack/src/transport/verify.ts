@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import type { RawChannelUpdate } from "@valet/engine";
 
 /**
  * Verify Slack request signature using HMAC-SHA256.
@@ -9,6 +10,7 @@ export async function verifySlackSignature(
   rawHeaders: Record<string, string>,
   rawBody: string,
   signingSecret: string,
+  receivedAt = Date.now(),
 ): Promise<boolean> {
   const timestamp = rawHeaders["x-slack-request-timestamp"];
   const signature = rawHeaders["x-slack-signature"];
@@ -20,8 +22,8 @@ export async function verifySlackSignature(
   // NaN is false, so a non-numeric timestamp would slip past a bare `> 300`
   // with no window applied at all.
   const sent = Number(timestamp);
-  const now = Math.floor(Date.now() / 1000);
-  if (!Number.isFinite(sent) || Math.abs(now - sent) > 300) return false;
+  const now = Math.floor(receivedAt / 1000);
+  if (!Number.isFinite(sent) || !Number.isFinite(now) || Math.abs(now - sent) > 300) return false;
 
   // Compute HMAC-SHA256
   const baseString = `v0:${timestamp}:${rawBody}`;
@@ -82,7 +84,7 @@ export function verifySlackSignatureSync(
   // against every bound, which would leave the replay window unenforced.
   const sent = Number(timestamp);
   const now = Math.floor(Date.now() / 1000);
-  if (!Number.isFinite(sent) || Math.abs(now - sent) > 300) return false;
+  if (!Number.isFinite(sent) || !Number.isFinite(now) || Math.abs(now - sent) > 300) return false;
 
   const digest = createHmac("sha256", signingSecret).update(`v0:${timestamp}:${rawBody}`).digest("hex");
   const expected = `v0=${digest}`;
@@ -97,4 +99,30 @@ export function verifySlackSignatureSync(
   const signatureBytes = encoder.encode(signature);
   if (expectedBytes.length !== signatureBytes.length) return false;
   return timingSafeEqual(expectedBytes, signatureBytes);
+}
+
+/**
+ * Verifies one Slack delivery over its exact bytes and returns its updates.
+ * Events API bodies are JSON. Interactivity bodies are form-encoded with one
+ * `payload` JSON field. Returns `null` for a bad signature, a stale
+ * timestamp, or a body that does not parse. `headers` must use lowercase
+ * names. The events route and the channel transport share this function.
+ */
+export function verifySlackDelivery(
+  headers: Record<string, string>,
+  rawBody: Uint8Array,
+  signingSecret: string,
+): RawChannelUpdate[] | null {
+  const bodyText = new TextDecoder().decode(rawBody);
+  if (!verifySlackSignatureSync(headers, bodyText, signingSecret)) return null;
+  try {
+    if (bodyText.startsWith("payload=")) {
+      const payload = new URLSearchParams(bodyText).get("payload");
+      if (payload === null) return null;
+      return [JSON.parse(payload) as unknown];
+    }
+    return [JSON.parse(bodyText) as unknown];
+  } catch {
+    return null;
+  }
 }

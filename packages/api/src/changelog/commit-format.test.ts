@@ -55,6 +55,48 @@ describe("changelog commit format", () => {
     },
   );
 
+  it.each(["none", "None", "n/a", "NA", "-", "skip", "internal"])(
+    "accepts %s as an opt-out and keeps the commit out of the changelog",
+    (value) => {
+      // Authors write "Changelog: none" to mean "this does not belong in the
+      // changelog". The pipeline used to read it as the user impact and
+      // publish the literal word.
+      const message = { commitSha: sha, subject: "fix(slack): pin the channel name case", body: `Changelog: ${value}` };
+      expect(validateCommitMessage(message)).toEqual([]);
+      expect(parseCommitMessage(message)).toMatchObject({
+        ok: true,
+        userFacing: true,
+        metadataValid: true,
+        changelog: null,
+        changelogOptOut: true,
+      });
+      expect(shouldIncludeCommit({ ...message, files: ["packages/api/src/app.ts"] })).toBe(false);
+    },
+  );
+
+  it("keeps an opt-out out of the changelog even with the explicit marker", () => {
+    // Two conflicting signals. The trailer is the one that speaks about the
+    // changelog entry, so it decides.
+    const message = {
+      commitSha: sha,
+      subject: "fix(slack): pin the channel name case [user-visible]",
+      body: "Changelog: none",
+    };
+    expect(validateCommitMessage(message)).toEqual([]);
+    expect(shouldIncludeCommit({ ...message, files: ["packages/api/src/app.ts"] })).toBe(false);
+  });
+
+  it("does not mistake a real impact line for an opt-out", () => {
+    const message = {
+      commitSha: sha,
+      subject: "fix(slack): read PDFs sent over Slack",
+      body: "Changelog: Valet can now read a PDF that none of the chat surfaces could open before.",
+    };
+    expect(validateCommitMessage(message)).toEqual([]);
+    expect(parseCommitMessage(message)).toMatchObject({ changelogOptOut: false });
+    expect(shouldIncludeCommit({ ...message, files: ["packages/api/src/app.ts"] })).toBe(true);
+  });
+
   it("reports the SHA and exact subject correction for a malformed subject", () => {
     expect(validateCommitMessage({ commitSha: sha, subject: "Add export", body: "" })).toEqual([
       `${sha}: Change the subject to "<type>: <summary>" with a lowercase accepted type and a non-empty summary.`,

@@ -102,6 +102,70 @@ describe("connection guard", () => {
   });
 });
 
+// ─── get_status ────────────────────────────────────────────────────────────
+
+describe("slack_user.get_status", () => {
+  it("reads the connected user's status with the xoxp token", async () => {
+    mocks.slackGet.mockResolvedValueOnce(
+      slackOk({
+        profile: {
+          status_text: "In a meeting",
+          status_emoji: ":spiral_calendar_pad:",
+          status_expiration: 1_800_000_000,
+        },
+      }),
+    );
+
+    const result = await run("slack_user.get_status", {}, ctxWithToken());
+
+    expect(result).toEqual({
+      success: true,
+      data: {
+        status_text: "In a meeting",
+        status_emoji: ":spiral_calendar_pad:",
+        status_expiration: 1_800_000_000,
+      },
+    });
+    expect(mocks.slackGet).toHaveBeenCalledWith("users.profile.get", "xoxp-fake");
+  });
+
+  it("returns empty status defaults when Slack omits profile fields", async () => {
+    mocks.slackGet.mockResolvedValueOnce(slackOk({ profile: {} }));
+
+    const result = await run("slack_user.get_status", {}, ctxWithToken());
+
+    expect(result).toEqual({
+      success: true,
+      data: { status_text: "", status_emoji: "", status_expiration: 0 },
+    });
+  });
+
+  it('returns a "Connect Slack (personal)" error when no token is present', async () => {
+    const result = await run("slack_user.get_status", {}, ctxWithoutToken());
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/connect slack \(personal\)/i);
+    expect(mocks.slackGet).not.toHaveBeenCalled();
+  });
+
+  it("returns a reconnect error when Slack rejects a revoked token", async () => {
+    mocks.slackGet.mockResolvedValueOnce(slackErr("token_revoked"));
+
+    const result = await run("slack_user.get_status", {}, ctxWithToken());
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/reconnect/i);
+  });
+
+  it("returns a Slack API error from the response body", async () => {
+    mocks.slackGet.mockResolvedValueOnce(slackErr("missing_scope"));
+
+    const result = await run("slack_user.get_status", {}, ctxWithToken());
+
+    expect(result).toEqual({ success: false, error: "Slack API error: missing_scope" });
+  });
+});
+
 // ─── search_messages ───────────────────────────────────────────────────────
 
 describe("slack_user.search_messages", () => {
@@ -365,11 +429,12 @@ describe("action surface metadata", () => {
 
   // Message-reading actions default to `medium` (require_approval) — a
   // shared/agent-driven session with the owner's xoxp token shouldn't be
-  // able to exfiltrate DMs without a human tap. Only list_channels (which
-  // just enumerates channel membership metadata) stays `low`.
-  it("marks message-reading actions medium-risk and channel listing low-risk", () => {
+  // able to exfiltrate DMs without a human tap. The reads that return no
+  // message content stay `low`: list_channels enumerates channel membership
+  // metadata, and get_status returns the workspace-public custom status.
+  it("marks message-reading actions medium-risk and metadata reads low-risk", () => {
     const mediumIds = ["slack_user.search_messages", "slack_user.read_history", "slack_user.read_thread"];
-    const lowIds = ["slack_user.list_channels"];
+    const lowIds = ["slack_user.list_channels", "slack_user.get_status"];
     const actions = slackUserActionPlugin.actions;
     for (const id of mediumIds) {
       const a = actions.find((x) => x.id === id);

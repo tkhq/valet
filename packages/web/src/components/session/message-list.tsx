@@ -1,10 +1,20 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, startTransition, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { cn } from "~/lib/cn";
+import { useScrollHeader } from "~/hooks/use-scroll-header";
 import { ArrowDown } from "lucide-react";
 import type { StreamMessage } from "~/stores/stream";
+import type { MessageReplyReference } from "@valet/api/wire";
 import { MessageItem } from "./message-item";
-import { SignalCard } from "./signal-card";
+import { SignalCard, WatchEventsCard, groupWatchEvents, type TranscriptItem } from "./signal-card";
+import { endsWithToolResult } from "./transcript-cards";
+import { isContinuation, planTranscript } from "./transcript-plan";
 import { CommandResult } from "./command-result";
 import { CompactionDivider } from "./compaction-divider";
+import { BranchNoteDivider } from "./branch-note-divider";
+import { NewSinceDivider } from "./thread-recap";
+
+/** Transcript rows a thread's first paint shows. */
+const FIRST_PAINT_ROWS = 16;
 
 /**
  * Scrolling message list. Auto-scrolls to bottom when new messages arrive
@@ -31,7 +41,32 @@ export function MessageList({
   agentBusy = false,
   pendingIds,
   viewerId,
+  header,
+  onReply,
+  onEdit,
+  onBranch,
+  onBranchPrivately,
+  onReturnToBranch,
+  onOpenThread,
+  editingId,
+  hiddenIds,
+  ratings = true,
+  newSince,
+  emptyState,
+  footer,
+  loading = false,
+  onShowEarlier,
+  loadingEarlier = false,
 }: {
+  /** The transcript has not arrived yet: placeholder rows, not the empty line. */
+  loading?: boolean;
+  /** Older messages exist; called once when the top of the list scrolls into view. */
+  onShowEarlier?: () => void;
+  loadingEarlier?: boolean;
+  /** Shown after the last message, such as the agents this thread is running. */
+  footer?: ReactNode;
+  /** Shown in place of the default line when the thread has no messages. */
+  emptyState?: ReactNode;
   messages: StreamMessage[];
   threadId?: string;
   /**
@@ -46,7 +81,7 @@ export function MessageList({
    * token, and must not flash as a failure.
    */
   agentBusy?: boolean;
-  /** Engine queue item ids still waiting. Marks those user bubbles Queued. */
+  /** Engine queue item ids still waiting. These messages render above the composer. */
   pendingIds?: string[];
   /**
    * The signed-in user's id. A user message from someone else (a teammate
@@ -55,43 +90,139 @@ export function MessageList({
    * by name, which is accurate, just not "You"-ified.
    */
   viewerId?: string;
+  /** Full-page chat controls share the transcript sticky layer. */
+  header?: ReactNode;
+  onReply?: (target: MessageReplyReference) => void;
+  /** Edits one of the viewer's own messages. The list offers it only where the edit is allowed. */
+  onEdit?: (message: StreamMessage) => void;
+  /** Branches a message into a new thread. */
+  onBranch?: (message: StreamMessage) => void;
+  /** Branches a message into the viewer's private threads (team threads only). */
+  onBranchPrivately?: (message: StreamMessage) => void;
+  /** Goes back to the version a branch note left. */
+  onReturnToBranch?: (noteEntryId: string, opts: { restoreFiles: boolean }) => Promise<void>;
+  /** Opens another thread, for a fork note's source thread. */
+  onOpenThread?: (threadId: string) => void;
+  /** The message being edited: it and every row after it are dimmed. */
+  editingId?: string;
+  /** Rows a sent edit replaces, hidden until the server moves the thread. */
+  hiddenIds?: ReadonlySet<string>;
+  /**
+   * Shows the per-reply rating buttons. A shared-thread guest passes false:
+   * ratings are session-addressed, so they belong to the session's viewers.
+   */
+  ratings?: boolean;
+  /** The "new" line before the first message other people added since the reader's last visit. */
+  newSince?: { anchorId: string; label: string };
 }) {
+  // Callers pass inline handlers. Kept stable here, so a parent render does
+  // not re-render (and re-parse the Markdown of) every memoized row.
+  const replyHandler = useStableHandler(onReply);
+  const editHandler = useStableHandler(onEdit);
+  const branchHandler = useStableHandler(onBranch);
+  const branchPrivatelyHandler = useStableHandler(onBranchPrivately);
   const containerRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
+  const observedHeightRef = useRef<number | null>(null);
+  const scrollHeader = useScrollHeader(containerRef, threadId);
   // The ref above drives the auto-scroll effect and must stay a ref: the
-  // effect reads it in the same tick a message lands. This mirror exists
-  // only so the button can render, and it flips at the same threshold.
+  // effect reads it in the same tick a message lands. Latest follows the real
+  // position, which a resize can change without changing the reader's pin.
   const [scrolledAway, setScrolledAway] = useState(false);
 
   const visible = useMemo(() => {
-    if (!threadId) return messages;
-    return messages.filter((m) => m.threadId === threadId);
-  }, [messages, threadId]);
+    const pending = new Set(pendingIds ?? []);
+    return messages.filter(
+      (message) =>
+        (!threadId || message.threadId === threadId) &&
+        (!message.queueItemId || !pending.has(message.queueItemId)) &&
+        !hiddenIds?.has(message.id),
+    );
+  }, [messages, pendingIds, threadId, hiddenIds]);
+  const editable = useMemo(() => editableMessageIds(visible, viewerId), [visible, viewerId]);
+  const dimFrom = editingId ? visible.findIndex((message) => message.id === editingId) : -1;
+
+  // Each turn's tool calls fold into as few work lines as its text allows.
+  const transcript = useMemo(() => {
+    const items = groupBranchNotes(groupWatchEvents(visible));
+    return { items, plans: planTranscript(items, agentBusy) };
+  }, [visible, agentBusy]);
+
+  // A thread opens with its last rows only, and the rows above follow in a
+  // transition after that first paint. Parsing a long transcript's Markdown
+  // in one render held the first paint of a thread for half a second.
+  const threadKey = threadId ?? "";
+  const [completeFor, setCompleteFor] = useState<string | undefined>(undefined);
+  const complete = completeFor === threadKey || transcript.items.length <= FIRST_PAINT_ROWS;
+  useEffect(() => {
+    if (!complete) startTransition(() => setCompleteFor(threadKey));
+  }, [complete, threadKey]);
+  const firstRow = complete ? 0 : transcript.items.length - FIRST_PAINT_ROWS;
 
   // A thread switch starts at the bottom: the previous thread's scroll
   // position must not decide whether the new thread auto-scrolls or shows
   // the "Latest" button. Reset only — `visible` recomputes on the same
   // threadId change, so the effect below (declared after this one, runs
   // after it) does the single scroll write.
-  useEffect(() => {
+  useLayoutEffect(() => {
     stickToBottomRef.current = true;
     setScrolledAway(false);
   }, [threadId]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = containerRef.current;
     if (!el) return;
     if (stickToBottomRef.current) {
       el.scrollTop = el.scrollHeight;
+      scrollHeader.syncPosition();
     }
-  }, [visible]);
+  }, [visible, complete, scrollHeader.syncPosition]);
+
+  // Pinned readers intentionally follow every resize. The browser handles
+  // unpinned positions; a collapse that reaches the end can pin the reader.
+  const hasContent = visible.length > 0;
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) => {
+      if (
+        !el.clientHeight ||
+        entries.some((entry) => entry.target === el && !entry.contentRect.height)
+      ) {
+        return;
+      }
+      observedHeightRef.current = el.clientHeight;
+      if (stickToBottomRef.current) {
+        el.scrollTop = el.scrollHeight;
+        scrollHeader.syncPosition();
+      }
+      // Content grows on every streamed chunk; keep the state when the side did not flip.
+      const away = el.scrollHeight - el.scrollTop - el.clientHeight >= 80;
+      setScrolledAway((prev) => (prev === away ? prev : away));
+    });
+    observer.observe(el);
+    if (contentRef.current) observer.observe(contentRef.current);
+    return () => observer.disconnect();
+  }, [hasContent, scrollHeader.syncPosition]);
 
   function onScroll() {
     const el = containerRef.current;
-    if (!el) return;
+    if (!el?.clientHeight) return;
+    scrollHeader.onScroll();
     const distanceFromBottom = el.scrollHeight - (el.scrollTop + el.clientHeight);
     const nearBottom = distanceFromBottom < 80; // "near bottom"
-    stickToBottomRef.current = nearBottom;
+    const oldHeight = observedHeightRef.current;
+    if (
+      stickToBottomRef.current && oldHeight !== null &&
+      Math.abs(el.clientHeight - oldHeight) > 2
+    ) {
+      // Anchoring stays near the end at the old or new height. A same-frame
+      // reader scroll can leave both, and must unpin before the resize report.
+      stickToBottomRef.current = nearBottom || el.scrollHeight - el.scrollTop - oldHeight < 80;
+    } else {
+      stickToBottomRef.current = nearBottom;
+    }
     // Return `prev` unchanged when the side did not flip. Scroll fires on
     // every wheel tick, and React skips the re-render on an equal value.
     setScrolledAway((prev) => (prev === !nearBottom ? prev : !nearBottom));
@@ -101,6 +232,7 @@ export function MessageList({
     const el = containerRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
+    scrollHeader.syncPosition();
     // Set both here rather than waiting for the scroll event. A programmatic
     // scroll to an already-bottom list fires no event, which would leave the
     // button on screen with nothing left to do.
@@ -108,47 +240,103 @@ export function MessageList({
     setScrolledAway(false);
   }
 
-  if (visible.length === 0) {
-    return (
-      <div className="flex-1 grid place-items-center text-sm text-muted">
-        No messages yet — try sending a prompt below.
-      </div>
-    );
-  }
 
   return (
-    <div className="flex-1 relative min-h-0">
+    <div className="flex-1 relative min-h-0 min-w-0">
       <div
         ref={containerRef}
         onScroll={onScroll}
-        className="h-full overflow-y-auto divide-y divide-[--border]"
+        onWheelCapture={(event) => scrollHeader.recordIntent(event.target)}
+        onTouchMove={(event) => scrollHeader.recordIntent(event.target)}
+        onPointerDown={(event) => scrollHeader.recordIntent(event.target)}
+        onPointerMove={(event) => { if (event.buttons) scrollHeader.recordIntent(event.target); }}
+        onKeyDown={(event) => {
+          if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) {
+            scrollHeader.recordIntent(event.target);
+          }
+        }}
+        tabIndex={0}
+        aria-label="Conversation"
+        data-testid="message-list"
+        className="flex h-full w-full min-w-0 flex-col overflow-x-hidden overflow-y-auto overscroll-y-contain"
       >
-        {visible.map((m, i) =>
-          m.compaction ? (
-            <CompactionDivider key={m.id} message={m} />
-          ) : m.signal ? (
-            <SignalCard key={m.id} message={m} onOpenChild={onOpenChild} />
-          ) : m.command ? (
-            <CommandResult key={m.id} message={m} />
-          ) : (
-            <MessageItem
-              key={m.id}
-              message={m}
-              suppressEmptyPlaceholder={agentBusy && i === visible.length - 1}
-              queued={!!m.queueItemId && (pendingIds?.includes(m.queueItemId) ?? false)}
-              viewerId={viewerId}
-            />
-          ),
+        {header && (
+          <div
+            ref={scrollHeader.headerRef}
+            data-testid="thread-header"
+            data-hidden={scrollHeader.hidden}
+            onFocusCapture={scrollHeader.onFocus}
+            onBlurCapture={scrollHeader.onBlur}
+            className={cn(
+              "sticky top-0 z-20 shrink-0 bg-paper transition-transform duration-200 ease-out motion-reduce:transition-none sm:transform-none",
+              scrollHeader.hidden ? "-translate-y-full" : "translate-y-0",
+            )}
+          >
+            {header}
+          </div>
+        )}
+        {visible.length === 0 && loading ? (
+          <TranscriptPlaceholder />
+        ) : visible.length === 0 ? (
+          emptyState ?? <div className="flex-1 grid place-items-center text-sm text-muted">
+            No messages yet — try sending a prompt below.
+          </div>
+        ) : (
+          <div ref={contentRef} className="shrink-0 space-y-2 py-4">
+            {onShowEarlier && <ShowEarlier onShow={onShowEarlier} loading={loadingEarlier} />}
+            {transcript.items.map((item, i, items) => {
+              if (i < firstRow) return null;
+              const plan = transcript.plans[i]!;
+              if (item.kind === "watch") {
+                return <WatchEventsCard key={item.events[0]?.id ?? i} events={item.events} />;
+              }
+              if (item.kind === "branch") {
+                return <BranchNoteDivider key={item.notes[0]!.id} notes={item.notes} onReturn={onReturnToBranch} onOpenThread={onOpenThread} />;
+              }
+              const m = item.message;
+              // Every part of this message shows in the work line above it.
+              if (plan.hidden) return newSince?.anchorId === m.id ? <NewSinceDivider key={m.id} label={newSince.label} /> : null;
+              const row = m.compaction ? (
+                <CompactionDivider key={m.id} message={m} />
+              ) : m.signal ? (
+                <SignalCard key={m.id} message={m} onOpenChild={onOpenChild} />
+              ) : m.command ? (
+                <CommandResult key={m.id} message={m} />
+              ) : (
+                <MessageItem
+                  key={m.id}
+                  message={m}
+                  continuation={isContinuation(m, previousMessage(items[i - 1]))}
+                  suppressEmptyPlaceholder={(agentBusy && i === items.length - 1) || (endsWithToolResult(previousMessage(items[i - 1])) && !m.errorMessage)}
+                  absorbedLeading={plan.absorbedLeading}
+                  extraWork={plan.extraWork.length ? plan.extraWork : undefined}
+                  extraWorkLive={plan.extraWorkLive}
+                  workedForMs={plan.workedForMs}
+                  viewerId={viewerId}
+                  onReply={replyHandler}
+                  onEdit={editHandler && editable.has(m.id) ? editHandler : undefined}
+                  onBranch={branchHandler && branchable(m) ? branchHandler : undefined}
+                  onBranchPrivately={branchHandler && branchable(m) ? branchPrivatelyHandler : undefined}
+                  dimmed={dimFrom >= 0 && visible.indexOf(m) >= dimFrom}
+                  ratings={ratings}
+                />
+              );
+              return newSince && m.id === newSince.anchorId
+                ? <Fragment key={m.id}><NewSinceDivider label={newSince.label} />{row}</Fragment>
+                : row;
+            })}
+            {footer}
+          </div>
         )}
       </div>
       {/* Only while the reader is away from the bottom. At the bottom the
           list already follows the agent, so the control has no job. */}
-      {scrolledAway && (
+      {visible.length > 0 && scrolledAway && (
         <button
           type="button"
           onClick={scrollToBottom}
           aria-label="Jump to latest message"
-          className="absolute bottom-3 left-1/2 z-10 -translate-x-1/2 flex items-center gap-1.5 rounded-full border border-line bg-paper/90 px-3 py-1 text-xs text-muted shadow-sm backdrop-blur transition-colors hover:text-[--fg] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40"
+          className="absolute bottom-3 left-1/2 z-10 -translate-x-1/2 flex items-center gap-1.5 rounded-full border border-line bg-paper max-sm:min-h-11 px-3 py-1 text-xs text-muted shadow-sm transition-colors hover:text-[--fg] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss/40"
         >
           <ArrowDown className="h-3 w-3" aria-hidden />
           Latest
@@ -156,4 +344,113 @@ export function MessageList({
       )}
     </div>
   );
+}
+
+/**
+ * The viewer's own typed messages that an edit may replace
+ * (docs/specs/2026-10-22-thread-edit-fork-design.md): persisted, not from a
+ * channel such as Slack, and with no message from another person after it.
+ * The server checks the same rules. Exported for tests.
+ */
+export function editableMessageIds(messages: readonly StreamMessage[], viewerId: string | undefined): Set<string> {
+  const ids = new Set<string>();
+  if (!viewerId) return ids;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message.role !== "user") continue;
+    if (message.author && message.author.id !== viewerId) break;
+    if (message.signal || message.command || !message.author || message.author.externalSender) continue;
+    if (message.persistence === undefined && !message.channelType) ids.add(message.id);
+  }
+  return ids;
+}
+
+/** A persisted typed message or finished reply: a point a new thread can branch from. */
+function branchable(message: StreamMessage): boolean {
+  if (message.persistence !== undefined || message.signal || message.command) return false;
+  return message.role === "user" || (message.role === "assistant" && message.completed === true);
+}
+
+type ListRow = TranscriptItem | { kind: "branch"; notes: StreamMessage[] };
+
+/**
+ * One row per branch note, except that consecutive edit and return notes,
+ * as repeated edits of one message leave, share a row. A fork note stays
+ * on its own. Exported for tests.
+ */
+export function groupBranchNotes(items: readonly TranscriptItem[]): ListRow[] {
+  const out: ListRow[] = [];
+  for (const item of items) {
+    const branch = item.kind === "message" ? item.message.branch : undefined;
+    if (item.kind !== "message" || !branch) {
+      out.push(item);
+      continue;
+    }
+    const last = out[out.length - 1];
+    if (branch.kind !== "fork" && last?.kind === "branch" && last.notes[0]?.branch?.kind !== "fork") {
+      last.notes.push(item.message);
+    } else {
+      out.push({ kind: "branch", notes: [item.message] });
+    }
+  }
+  return out;
+}
+
+/** The message of the transcript row before this one, if that row is a
+ * message. A grouped watch card or a branch note is not a message, so it
+ * ends a turn. */
+function previousMessage(item: ListRow | undefined): StreamMessage | undefined {
+  return item?.kind === "message" ? item.message : undefined;
+}
+
+/** The thread page's layout while the thread loads: a header line,
+ * transcript rows, and the composer, so the page does not jump when it fills.
+ * A panel draws its own header. */
+export function ThreadShell({ header = true }: { header?: boolean }) {
+  return <div role="status" aria-label="Opening the thread" className="flex min-h-0 flex-1 flex-col">
+    {header && <div className="h-12 shrink-0 border-b border-line px-4 py-3"><div className="h-4 w-48 rounded bg-ink-wash motion-safe:animate-pulse" /></div>}
+    <TranscriptPlaceholder />
+    <div className="mx-auto w-full max-w-[52rem] px-5 pb-4 sm:px-8"><div className="h-24 rounded-2xl border border-line" /></div>
+  </div>;
+}
+
+/** Rows in the shape of a transcript, while it loads. */
+export function TranscriptPlaceholder() {
+  return <div role="status" aria-label="Loading messages" className="mx-auto w-full max-w-3xl flex-1 space-y-6 px-5 py-6 sm:px-8">
+    {[0.55, 0.85, 0.7].map((width, index) => <div key={index} className="space-y-2">
+      <div className="h-3 w-24 rounded bg-ink-wash motion-safe:animate-pulse" />
+      <div className="h-3 rounded bg-ink-wash motion-safe:animate-pulse" style={{ width: `${width * 100}%` }} />
+      <div className="h-3 w-1/2 rounded bg-ink-wash motion-safe:animate-pulse" />
+    </div>)}
+  </div>;
+}
+
+/** Loads older messages when the reader reaches the top, with a button for the same. */
+function ShowEarlier({ onShow, loading }: { onShow: () => void; loading: boolean }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const node = ref.current;
+    if (!node || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) onShow();
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [onShow]);
+  return <div ref={ref} className="flex justify-center px-5 py-1 sm:px-8">
+    <button type="button" disabled={loading} onClick={onShow} className="text-xs text-muted hover:text-ink disabled:opacity-60">
+      {loading ? "Loading earlier messages…" : "Show earlier messages"}
+    </button>
+  </div>;
+}
+
+/** A function with a stable identity that calls the latest `handler`, or
+ * undefined while `handler` is undefined. */
+function useStableHandler<A extends unknown[]>(handler: ((...args: A) => void) | undefined): ((...args: A) => void) | undefined {
+  const latest = useRef(handler);
+  useLayoutEffect(() => {
+    latest.current = handler;
+  });
+  const stable = useCallback((...args: A) => latest.current?.(...args), []);
+  return handler ? stable : undefined;
 }

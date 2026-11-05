@@ -1,0 +1,200 @@
+[
+  {
+    "name": "a conversation binding wins over a claim and the policy (follow)",
+    "input": {
+      "rule": { "id": "rule-1", "kind": "subscription", "name": "CI alerts", "policy": { "mode": "own" } },
+      "event": { "deliveryId": "del-1", "summary": "Build failed", "naturalSubject": null, "conversational": true },
+      "binding": { "sessionId": "sess-bind", "threadId": "thread-bind", "via": "follow" },
+      "claim": { "sessionId": "sess-claim", "threadId": "thread-claim", "waiterId": "wk-1" }
+    },
+    "expected": { "kind": "target", "sessionId": "sess-bind", "threadId": "thread-bind", "reason": "conversation_follow" }
+  },
+  {
+    "name": "a conversation binding wins over a claim and the policy (pull request)",
+    "input": {
+      "rule": { "id": "rule-2", "kind": "subscription", "name": "PR reviews", "policy": { "mode": "new" } },
+      "event": { "deliveryId": "del-2", "summary": "Review requested", "naturalSubject": null, "conversational": true },
+      "binding": { "sessionId": "sess-pr", "threadId": "thread-pr", "via": "pull_request" },
+      "claim": { "sessionId": "sess-claim2", "threadId": "thread-claim2", "waiterId": "wk-2" }
+    },
+    "expected": { "kind": "target", "sessionId": "sess-pr", "threadId": "thread-pr", "reason": "conversation_pull_request" }
+  },
+  {
+    "name": "a claim on an ambient event skips with the claiming thread's id",
+    "input": {
+      "rule": { "id": "rule-3", "kind": "subscription", "name": "Linear updates", "policy": { "mode": "own" } },
+      "event": { "deliveryId": "del-3", "summary": "Issue updated", "naturalSubject": null, "conversational": false },
+      "binding": null,
+      "claim": { "sessionId": "sess-tri", "threadId": "thread-tri", "waiterId": "wk-3" }
+    },
+    "expected": { "kind": "skip", "reason": "claimed by thread thread-tri" }
+  },
+  {
+    "name": "a claim on a conversational event redirects the delivery to the claiming thread",
+    "input": {
+      "rule": { "id": "rule-4", "kind": "subscription", "name": "Slack messages", "policy": { "mode": "subject" } },
+      "event": {
+        "deliveryId": "del-4",
+        "summary": "Status update",
+        "naturalSubject": { "subject": "slack:T001/C900", "label": "#incidents" },
+        "conversational": true
+      },
+      "binding": null,
+      "claim": { "sessionId": "sess-inc", "threadId": "thread-inc", "waiterId": "wk-4" }
+    },
+    "expected": { "kind": "target", "sessionId": "sess-inc", "threadId": "thread-inc", "reason": "claim_redirect" }
+  },
+  {
+    "name": "policy new on a subscription keys by the rule and the delivery, titled by the summary",
+    "input": {
+      "rule": { "id": "rule-5", "kind": "subscription", "name": "CI failures", "policy": { "mode": "new" } },
+      "event": {
+        "deliveryId": "del-5",
+        "summary": "check_run completed with status failure",
+        "naturalSubject": null,
+        "conversational": false
+      },
+      "binding": null,
+      "claim": null
+    },
+    "expected": {
+      "kind": "key",
+      "key": "sub:rule-5:del-5",
+      "title": "check_run completed with status failure",
+      "reason": "policy_new"
+    }
+  },
+  {
+    "name": "policy new trims a summary over 80 characters at a word boundary",
+    "input": {
+      "rule": { "id": "rule-6", "kind": "subscription", "name": "Long summaries", "policy": { "mode": "new" } },
+      "event": {
+        "deliveryId": "del-6",
+        "summary": "word word word word word word word word word word word word word word word word word word word word",
+        "naturalSubject": null,
+        "conversational": false
+      },
+      "binding": null,
+      "claim": null
+    },
+    "expected": {
+      "kind": "key",
+      "key": "sub:rule-6:del-6",
+      "title": "word word word word word word word word word word word word word word word word",
+      "reason": "policy_new"
+    }
+  },
+  {
+    "name": "policy new titles an empty summary Event",
+    "input": {
+      "rule": { "id": "rule-7", "kind": "subscription", "name": "Empty summaries", "policy": { "mode": "new" } },
+      "event": { "deliveryId": "del-7", "summary": "", "naturalSubject": null, "conversational": false },
+      "binding": null,
+      "claim": null
+    },
+    "expected": { "kind": "key", "key": "sub:rule-7:del-7", "title": "Event", "reason": "policy_new" }
+  },
+  {
+    "name": "policy new on a schedule keys by the rule and the fire time, titled by the name and the UTC date",
+    "input": {
+      "rule": { "id": "sched-1", "kind": "schedule", "name": "Morning summary", "policy": { "mode": "new" } },
+      "binding": null,
+      "claim": null,
+      "fireAt": 1792161000000
+    },
+    "expected": {
+      "kind": "key",
+      "key": "schedule:sched-1:1792161000000",
+      "title": "Morning summary · 2026-10-16",
+      "reason": "policy_new"
+    }
+  },
+  {
+    "name": "policy subject with a natural subject keys and titles by it",
+    "input": {
+      "rule": { "id": "rule-9", "kind": "subscription", "name": "PR reviews grouped", "policy": { "mode": "subject" } },
+      "event": {
+        "deliveryId": "del-9",
+        "summary": "Review submitted",
+        "naturalSubject": { "subject": "github:acme/api#12", "label": "acme/api#12" },
+        "conversational": false
+      },
+      "binding": null,
+      "claim": null
+    },
+    "expected": { "kind": "key", "key": "subject:github:acme/api#12", "title": "acme/api#12", "reason": "policy_subject" }
+  },
+  {
+    "name": "policy subject with no natural subject falls back to own and notes it",
+    "input": {
+      "rule": { "id": "rule-10", "kind": "subscription", "name": "Channel watch", "policy": { "mode": "subject" } },
+      "event": { "deliveryId": "del-10", "summary": "Team joined", "naturalSubject": null, "conversational": false },
+      "binding": null,
+      "claim": null
+    },
+    "expected": {
+      "kind": "key",
+      "key": "sub:rule-10",
+      "title": "Channel watch",
+      "reason": "policy_own",
+      "note": "subject mode with no natural subject"
+    }
+  },
+  {
+    "name": "policy own on a subscription keys by the rule, titled by the rule name",
+    "input": {
+      "rule": { "id": "rule-11", "kind": "subscription", "name": "ENG triage", "policy": { "mode": "own" } },
+      "event": { "deliveryId": "del-11", "summary": "Issue updated", "naturalSubject": null, "conversational": false },
+      "binding": null,
+      "claim": null
+    },
+    "expected": { "kind": "key", "key": "sub:rule-11", "title": "ENG triage", "reason": "policy_own" }
+  },
+  {
+    "name": "policy own on a schedule keys by the rule, titled by the schedule name",
+    "input": {
+      "rule": { "id": "sched-2", "kind": "schedule", "name": "Evening digest", "policy": { "mode": "own" } },
+      "binding": null,
+      "claim": null
+    },
+    "expected": { "kind": "key", "key": "schedule:sched-2", "title": "Evening digest", "reason": "policy_own" }
+  },
+  {
+    "name": "policy existing targets the pinned thread unchanged",
+    "input": {
+      "rule": {
+        "id": "rule-13",
+        "kind": "subscription",
+        "name": "Platform CI",
+        "policy": { "mode": "existing", "sessionId": "sess-fixed", "threadId": "thread-fixed" }
+      },
+      "event": { "deliveryId": "del-13", "summary": "check_run failed", "naturalSubject": null, "conversational": false },
+      "binding": null,
+      "claim": null
+    },
+    "expected": { "kind": "target", "sessionId": "sess-fixed", "threadId": "thread-fixed", "reason": "policy_existing" }
+  },
+  {
+    "name": "policy existing on a schedule rule targets the pinned thread unchanged",
+    "input": {
+      "rule": {
+        "id": "sched-3",
+        "kind": "schedule",
+        "name": "Weekly digest",
+        "policy": { "mode": "existing", "sessionId": "sess-sched-fixed", "threadId": "thread-sched-fixed" }
+      },
+      "binding": null,
+      "claim": null
+    },
+    "expected": { "kind": "target", "sessionId": "sess-sched-fixed", "threadId": "thread-sched-fixed", "reason": "policy_existing" }
+  },
+  {
+    "name": "a claim paired with a schedule (no event) skips, reachable only by type",
+    "input": {
+      "rule": { "id": "sched-4", "kind": "schedule", "name": "No-event claim", "policy": { "mode": "own" } },
+      "binding": null,
+      "claim": { "sessionId": "sess-sched-claim", "threadId": "thread-sched-claim", "waiterId": "wk-5" }
+    },
+    "expected": { "kind": "skip", "reason": "claimed by thread thread-sched-claim" }
+  }
+]

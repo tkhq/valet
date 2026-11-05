@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { Type } from "typebox";
 import type { ActionPlugin, PluginAction, SkillSource, ValetPlugin } from "@valet/engine";
-import { assemblePlugins, partitionByName, pluginSessionExtras, withCredentialRequirement } from "./assemble.js";
+import { buildToolIndex } from "./action-id.js";
+import { assemblePlugins, partitionByName, pluginSessionExtras, withCredentialRequirement, withServiceDisplayName } from "./assemble.js";
+import { bundledPlugins } from "./registry.gen.js";
 
 function makeAction(id: string): PluginAction {
   return {
@@ -65,26 +67,55 @@ describe("assemblePlugins", () => {
     expect(actionPluginByService.get("service-a")?.plugin.name).toBe("plugin-a");
     expect(actionPluginByService.get("service-b")?.plugin.name).toBe("plugin-b");
   });
+
+  // A plugin can declare ids with its own prefix (google_workspace ships
+  // `drive.search_files`). The broker resolves those through the tool index.
+  it("indexes an action id that does not start with its service", () => {
+    const suite = makePlugin("suite", { actions: [{ service: "suite", actions: [makeAction("docs.open"), makeAction("find")] }] });
+    const index = buildToolIndex(assemblePlugins([[suite]]).actionPluginByService);
+
+    expect(index.get("docs.open")).toEqual({ service: "suite", actionId: "docs.open" });
+    expect(index.get("suite.find")).toEqual({ service: "suite", actionId: "find" });
+  });
+
+  it("throws when an action id starts with another service's name", () => {
+    const suite = makePlugin("suite", { actions: [{ service: "suite", actions: [makeAction("files.find")] }] });
+    const files = makePlugin("files-mcp", { actions: [makeActionPlugin("files")] });
+
+    expect(() => assemblePlugins([[suite, files]])).toThrowError(/"files\.find" from "suite" starts with the service name "files" of "files-mcp"/);
+  });
+
+  it("throws when two services declare the same tool id", () => {
+    const a = makePlugin("plugin-a", { actions: [{ service: "service-a", actions: [makeAction("shared.run")] }] });
+    const b = makePlugin("plugin-b", { actions: [{ service: "service-b", actions: [makeAction("shared.run")] }] });
+
+    expect(() => assemblePlugins([[a, b]])).toThrowError(/"shared\.run" is declared by both "plugin-a" and "plugin-b"/);
+  });
+
+  it("gives every bundled tool id one service", () => {
+    const index = buildToolIndex(assemblePlugins([bundledPlugins]).actionPluginByService);
+
+    expect(index.get("drive.search_files")).toEqual({ service: "google_workspace", actionId: "drive.search_files" });
+    expect(index.get("calendar.list_events")).toEqual({ service: "google_calendar", actionId: "calendar.list_events" });
+  });
 });
 
 describe("pluginSessionExtras", () => {
-  it("returns no catalog tools when there are zero action plugins", () => {
+  it("keeps catalog tools when there are zero action plugins", () => {
     const plugins = [makePlugin("skills-only", { skills: [{ name: "s", content: "c" }] })];
     const { tools } = pluginSessionExtras(plugins);
-    // The `skill` tool still ships — a skills-only plugin set has something
-    // to reach — but neither catalog tool does.
-    expect(tools.map((t) => t.name)).toEqual(["skill"]);
+    expect(tools.map((t) => t.name)).toEqual(["list_tools", "call_tool", "skill", "skill_script"]);
   });
 
-  it("returns no tools at all for a plugin set with neither actions nor skills", () => {
+  it("keeps catalog tools for an inert plugin set", () => {
     const { tools } = pluginSessionExtras([makePlugin("inert")]);
-    expect(tools).toEqual([]);
+    expect(tools.map((tool) => tool.name)).toEqual(["list_tools", "call_tool", "skill", "skill_script"]);
   });
 
-  it("returns exactly [list_tools, call_tool] when action plugins exist", () => {
+  it("keeps catalog and skill discovery when action plugins exist", () => {
     const plugins = [makePlugin("github", { actions: [makeActionPlugin("github")] })];
     const { tools } = pluginSessionExtras(plugins);
-    expect(tools.map((t) => t.name).sort()).toEqual(["call_tool", "list_tools"]);
+    expect(tools.map((t) => t.name).sort()).toEqual(["call_tool", "list_tools", "skill", "skill_script"]);
   });
 
   it("concatenates skills and roles across plugins", () => {
@@ -143,10 +174,10 @@ describe("pluginSessionExtras", () => {
     expect(skillTool?.description).toContain("workflows");
   });
 
-  it("adds no `skill` tool when no plugin ships a skill", () => {
+  it("keeps a bindable `skill` tool when no plugin ships a skill", () => {
     const plugins = [makePlugin("github", { actions: [makeActionPlugin("github")] })];
     const { tools } = pluginSessionExtras(plugins);
-    expect(tools.map((t) => t.name)).not.toContain("skill");
+    expect(tools.map((t) => t.name)).toContain("skill");
   });
 
   it("builds a fresh tools array on every call (no module-scope caching)", () => {
@@ -249,6 +280,15 @@ describe("partitionByName", () => {
 
     expect(kept.map((c) => c.id)).toEqual(["1"]);
     expect(shadowed.map((c) => c.id)).toEqual(["2"]);
+  });
+});
+
+describe("withServiceDisplayName", () => {
+  // A borrow approval read "Let a teammate use your linear account?".
+  it("names the product, and keeps a name the plugin sets", () => {
+    expect(withServiceDisplayName({ service: "linear", actions: [] }).displayName).toBe("Linear");
+    expect(withServiceDisplayName({ service: "github", actions: [] }).displayName).toBe("GitHub");
+    expect(withServiceDisplayName({ service: "linear", displayName: "Linear (EU)", actions: [] }).displayName).toBe("Linear (EU)");
   });
 });
 

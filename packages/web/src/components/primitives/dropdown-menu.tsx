@@ -6,6 +6,7 @@ import {
   type ElementRef,
 } from "react";
 import { cn } from "~/lib/cn";
+import { quietCloseAutoFocus } from "./close-focus";
 
 export const DropdownMenu = RDropdown.Root;
 export const DropdownMenuTrigger = RDropdown.Trigger;
@@ -21,20 +22,21 @@ const MENU_BASE =
   "data-[state=open]:fade-in-0 data-[state=closed]:fade-out-0";
 
 const ITEM_BASE =
-  "relative flex max-sm:min-h-11 select-none items-center gap-2 rounded px-2 py-1.5 outline-none touch-manipulation " +
+  "relative flex max-sm:min-h-11 select-none items-center gap-2 [&>svg]:mr-0 [&>svg]:size-4 [&>svg]:shrink-0 rounded px-2 py-1.5 outline-none touch-manipulation " +
   "data-[highlighted]:bg-neutral-100 dark:data-[highlighted]:bg-neutral-800 " +
   "data-[disabled]:pointer-events-none data-[disabled]:opacity-50";
 
 export const DropdownMenuContent = forwardRef<
   ElementRef<typeof RDropdown.Content>,
   ComponentPropsWithoutRef<typeof RDropdown.Content>
->(function DropdownMenuContent({ className, sideOffset = 4, ...rest }, ref) {
+>(function DropdownMenuContent({ className, sideOffset = 4, onCloseAutoFocus, ...rest }, ref) {
   return (
     <RDropdown.Portal>
       <RDropdown.Content
         ref={ref}
         sideOffset={sideOffset}
         className={cn(MENU_BASE, className)}
+        onCloseAutoFocus={(event) => quietCloseAutoFocus(event, onCloseAutoFocus)}
         {...rest}
       />
     </RDropdown.Portal>

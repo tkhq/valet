@@ -21,6 +21,7 @@ describe("VirtualSandboxProvider: spec-aligned contract", () => {
       warmPool: false,
       hibernation: false,
       customImage: false,
+      nestedKubernetes: false,
       coldStartEstimateMs: 0,
     });
   });

@@ -8,9 +8,12 @@ CREATE TABLE "orgs" (
 	"allow_public_artifacts" boolean NOT NULL DEFAULT false,
 	"allow_anonymous_image_bakes" boolean NOT NULL DEFAULT false,
 	"allow_personal_installations" boolean NOT NULL DEFAULT true,
+	"compaction_window_tokens" integer,
 	"model_tiers" jsonb,
 	"approved_models" jsonb,
-	"reasoning_settings" jsonb
+	"reasoning_settings" jsonb,
+	"default_tier" text,
+	"tutorial_version" integer NOT NULL DEFAULT 0
 );
 --> statement-breakpoint
 CREATE TABLE "user" (
@@ -24,7 +27,9 @@ CREATE TABLE "user" (
 	"role" text DEFAULT 'member' NOT NULL,
 	"default_model" text,
 	"default_reasoning" text,
-	"new_thread_behavior" text DEFAULT 'keep_current' NOT NULL
+	"new_thread_behavior" text DEFAULT 'keep_current' NOT NULL,
+	"timezone" text,
+	"timezone_report_done" boolean DEFAULT false NOT NULL
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "user_email_unique" ON "user" ("email");
@@ -182,6 +187,32 @@ CREATE INDEX "oauthConsent_clientId_idx" ON "oauth_consent" ("client_id");
 --> statement-breakpoint
 CREATE INDEX "oauthConsent_userId_idx" ON "oauth_consent" ("user_id");
 --> statement-breakpoint
+CREATE TABLE "mcp_registrations" (
+	"id" text PRIMARY KEY NOT NULL,
+	"address" text NOT NULL,
+	"pending" boolean NOT NULL,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "mcp_registrations_address_idx" ON "mcp_registrations" ("address", "created_at");
+--> statement-breakpoint
+CREATE TABLE "admin_audit_events" (
+	"id" text PRIMARY KEY NOT NULL,
+	"org_id" text NOT NULL,
+	"actor_user_id" text,
+	"actor_email" text,
+	"action" text NOT NULL,
+	"target_type" text NOT NULL,
+	"target_id" text,
+	"target_name" text,
+	"changes" jsonb,
+	"ip" text,
+	"user_agent" text,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "admin_audit_events_org_created" ON "admin_audit_events" ("org_id", "created_at" DESC, "id" DESC);
+--> statement-breakpoint
 CREATE TABLE "invites" (
 	"id" text PRIMARY KEY NOT NULL,
 	"code_hash" text NOT NULL,
@@ -233,9 +264,11 @@ CREATE TABLE "agent_sessions" (
 	"credential_owner_mode" text,
 	"profile" text DEFAULT 'headless' NOT NULL,
 	"docker" boolean DEFAULT false NOT NULL,
+	"kubernetes" boolean DEFAULT false NOT NULL,
 	"sandbox_resource_overrides" jsonb,
 	"kind" text DEFAULT 'code' NOT NULL,
 	"bake_id" text,
+	"image_fallback" jsonb,
 	"hibernated_sandbox_id" text,
 	"sandbox_reclaimed_at" bigint,
 	"created_at" bigint NOT NULL,
@@ -252,7 +285,11 @@ CREATE TABLE "session_threads" (
 	"session_id" text NOT NULL,
 	"title" text,
 	"created_at" bigint NOT NULL,
-	"archived_at" bigint
+	"last_user_activity_at" bigint,
+	"archived_at" bigint,
+	"share_mode" text,
+	"approval_bypass_by" text,
+	"approval_bypass_at" bigint
 );
 --> statement-breakpoint
 CREATE INDEX "session_threads_session" ON "session_threads" ("session_id");
@@ -278,6 +315,7 @@ CREATE TABLE "teams" (
 	"id" text PRIMARY KEY NOT NULL,
 	"org_id" text NOT NULL,
 	"name" text NOT NULL,
+	"slack_home_channel_id" text,
 	"origin" text DEFAULT 'local' NOT NULL,
 	"external_id" text,
 	"created_at" bigint NOT NULL,
@@ -288,6 +326,8 @@ CREATE TABLE "teams" (
 CREATE UNIQUE INDEX "teams_org_name" ON "teams" ("org_id","name");
 --> statement-breakpoint
 CREATE UNIQUE INDEX "teams_org_external" ON "teams" ("org_id","origin","external_id");
+--> statement-breakpoint
+CREATE UNIQUE INDEX "teams_org_slack_home" ON "teams" ("org_id","slack_home_channel_id") WHERE "slack_home_channel_id" IS NOT NULL;
 --> statement-breakpoint
 CREATE TABLE "team_members" (
 	"team_id" text NOT NULL,
@@ -312,33 +352,41 @@ CREATE TABLE "assistants" (
 	"org_id" text NOT NULL,
 	"owner_type" text NOT NULL,
 	"owner_id" text NOT NULL,
-	"name" text,
-	"avatar_url" text,
-	"personality" text,
+	-- An integration allow-list carried over from before one assistant per
+	-- workspace (`assistants/integration-limit.ts`).
 	"behavior" text,
-	"model" text,
-	"reasoning" text,
+	-- `name`, `avatar_url`, and `personality` are reserved legacy names. A
+	-- database upgraded from before one assistant per workspace still holds
+	-- them, and `assistants/legacy-profile.ts` reads them by name. Do not add
+	-- a column with any of these names.
 	"session_id" text NOT NULL,
-	"is_default" boolean DEFAULT false NOT NULL,
 	"created_at" bigint NOT NULL,
 	"archived_at" bigint
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "assistants_session" ON "assistants" ("session_id");
 --> statement-breakpoint
--- Exactly one default per principal. PARTIAL, not a plain unique: every
--- non-default assistant shares the same (org, owner_type, owner_id), so a
--- full unique index would allow only one assistant per principal — the very
--- rule this table exists to remove.
-CREATE UNIQUE INDEX "assistants_default_owner" ON "assistants" ("org_id","owner_type","owner_id") WHERE "is_default";
+CREATE UNIQUE INDEX "assistants_workspace" ON "assistants" ("org_id","owner_type","owner_id");
 --> statement-breakpoint
 CREATE INDEX "assistants_owner" ON "assistants" ("org_id","owner_type","owner_id");
 --> statement-breakpoint
+CREATE TABLE "assistant_executions" (
+  "session_id" text PRIMARY KEY, "assistant_id" text NOT NULL,
+  "conversation_key" text NOT NULL, "governing_thread_id" text NOT NULL, "created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "assistant_executions_conversation" ON "assistant_executions" ("assistant_id", "conversation_key");
+--> statement-breakpoint
 CREATE TABLE "child_watches" (
+ "delivery_active" boolean NOT NULL DEFAULT false,
+ "pending_cap_incident" text,
+	"events_started_at" bigint,
 	"child_session_id" text PRIMARY KEY NOT NULL,
 	"queue_item_id" text NOT NULL,
 	"parent_session_id" text NOT NULL,
 	"parent_thread_id" text NOT NULL,
+	"parent_queue_item_id" text,
+	"report_queue_item_id" text,
 	"actor_user_id" text NOT NULL,
 	"org_id" text NOT NULL,
 	"settled" boolean DEFAULT false NOT NULL,
@@ -347,14 +395,37 @@ CREATE TABLE "child_watches" (
 	"settled_at" bigint,
 	"sandbox_reclaimed_at" bigint,
 	"parked_sandbox_id" text,
-	"origin_json" text
+	"origin_json" text,
+	"reply_route" text,
+	"batch_key" text,
+	"batch_held_json" text,
+	"report_to_parent" boolean DEFAULT true NOT NULL,
+	"plugin_delivery_id" text
 );
 --> statement-breakpoint
+CREATE INDEX "child_watches_delivery" ON "child_watches" ("child_session_id") WHERE "delivery_active" = true OR "settled" = false;
+--> statement-breakpoint
 CREATE INDEX "child_watches_parent" ON "child_watches" ("parent_session_id");
+--> statement-breakpoint
+CREATE INDEX "child_watches_plugin_delivery" ON "child_watches" ("plugin_delivery_id") WHERE "plugin_delivery_id" IS NOT NULL;
 --> statement-breakpoint
 CREATE INDEX "child_watches_settled" ON "child_watches" ("settled");
 --> statement-breakpoint
 CREATE INDEX "child_watches_retention" ON "child_watches" ("settled_at") WHERE "settled" = true AND "sandbox_reclaimed_at" IS NULL;
+--> statement-breakpoint
+CREATE TABLE "session_config_invalidations" (
+  "session_id" text PRIMARY KEY NOT NULL,
+  "token" text NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "child_event_outbox" (
+  "id" text PRIMARY KEY NOT NULL,
+  "child_session_id" text NOT NULL,
+  "event" jsonb NOT NULL,
+  "created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "child_event_outbox_child" ON "child_event_outbox" ("child_session_id", "created_at");
 --> statement-breakpoint
 CREATE TABLE "notifications" (
 	"id" text PRIMARY KEY NOT NULL,
@@ -375,19 +446,50 @@ CREATE TABLE "user_notification_preferences" (
 	"user_id" text NOT NULL,
 	"kind" text NOT NULL,
 	"web" boolean DEFAULT true NOT NULL,
+	"team_dm" boolean DEFAULT false NOT NULL,
+	"channel_grace_seconds" integer,
 	PRIMARY KEY("user_id", "kind")
 );
+--> statement-breakpoint
+CREATE TABLE "pending_channel_deliveries" (
+	"id" text PRIMARY KEY NOT NULL,
+	"user_id" text NOT NULL,
+	"tier_id" text NOT NULL,
+	"notification_id" text,
+	"event" jsonb NOT NULL,
+	"created_at" bigint NOT NULL DEFAULT (extract(epoch FROM clock_timestamp()) * 1000)::bigint,
+	"deliver_after" bigint NOT NULL,
+	"status" text NOT NULL DEFAULT 'pending',
+	"sending_at" bigint,
+	"first_sending_at" bigint,
+	"delivery_token" text NOT NULL DEFAULT gen_random_uuid()::text,
+	"attempts" integer NOT NULL DEFAULT 0,
+	"message_refs" jsonb,
+	"last_error" text
+);
+--> statement-breakpoint
+CREATE INDEX "pending_channel_deliveries_age" ON "pending_channel_deliveries" ("created_at") WHERE "status" IN ('pending', 'sending');
+--> statement-breakpoint
+CREATE INDEX "pending_channel_deliveries_due" ON "pending_channel_deliveries" ("deliver_after") WHERE "status" IN ('pending', 'sending');
+--> statement-breakpoint
+CREATE INDEX "pending_channel_deliveries_notification" ON "pending_channel_deliveries" ("notification_id") WHERE "notification_id" IS NOT NULL;
 --> statement-breakpoint
 CREATE TABLE "event_drop_log" (
 	"id" text PRIMARY KEY NOT NULL,
 	"org_id" text NOT NULL,
 	"reason" text NOT NULL,
 	"conversation_key" text,
+	"event_key" text,
+	"event_metadata" jsonb,
 	"detail" text NOT NULL,
 	"created_at" bigint NOT NULL
 );
 --> statement-breakpoint
 CREATE INDEX "event_drop_log_org" ON "event_drop_log" ("org_id");
+--> statement-breakpoint
+CREATE INDEX "event_drop_log_page" ON "event_drop_log" ("org_id","created_at","id");
+--> statement-breakpoint
+CREATE INDEX "event_drop_log_event_key" ON "event_drop_log" ("org_id","event_key","created_at");
 --> statement-breakpoint
 CREATE TABLE "channel_bindings" (
 	"id" text PRIMARY KEY NOT NULL,
@@ -406,6 +508,17 @@ CREATE TABLE "channel_bindings" (
 --> statement-breakpoint
 CREATE UNIQUE INDEX "channel_bindings_conversation" ON "channel_bindings" ("org_id","channel_type","conversation_key");
 --> statement-breakpoint
+CREATE TABLE "channel_conversation_bindings" (
+  "org_id" text NOT NULL,
+  "user_id" text NOT NULL,
+  "session_id" text NOT NULL,
+  "channel_type" text NOT NULL,
+  "conversation_key" text NOT NULL,
+  "thread_id" text NOT NULL,
+  "created_at" bigint NOT NULL,
+  PRIMARY KEY ("org_id", "user_id", "session_id", "channel_type", "conversation_key")
+);
+--> statement-breakpoint
 CREATE TABLE "user_identity_links" (
 	"id" text PRIMARY KEY NOT NULL,
 	"provider" text NOT NULL,
@@ -423,7 +536,10 @@ CREATE TABLE "identity_link_codes" (
 	"provider" text NOT NULL,
 	"code_hash" text NOT NULL,
 	"expires_at" bigint NOT NULL,
-	"created_at" bigint NOT NULL
+	"created_at" bigint NOT NULL,
+	-- Set for a code the bot DMed to one provider account. Only the minting
+	-- user can redeem it, in the web app, and it links that account.
+	"external_id" text
 );
 --> statement-breakpoint
 CREATE INDEX "identity_link_codes_provider" ON "identity_link_codes" ("provider","code_hash");
@@ -455,6 +571,7 @@ CREATE INDEX "channel_active_streams_started" ON "channel_active_streams" ("star
 CREATE TABLE "memory_files" (
 	"owner_type" text NOT NULL,
 	"owner_id" text NOT NULL,
+	"namespace" text DEFAULT '' NOT NULL,
 	"path" text NOT NULL,
 	"title" text DEFAULT '' NOT NULL,
 	"content" text NOT NULL,
@@ -481,7 +598,7 @@ CREATE TABLE "memory_files" (
 	"content_sha" text,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL,
-	PRIMARY KEY("owner_type", "owner_id", "path")
+	PRIMARY KEY("owner_type", "owner_id", "namespace", "path")
 );
 --> statement-breakpoint
 -- `search_vector` generated column (spec decision 9): weighted tsvector,
@@ -512,6 +629,36 @@ ALTER TABLE "memory_files" ADD COLUMN "search_vector" tsvector GENERATED ALWAYS 
 --> statement-breakpoint
 CREATE INDEX "memory_files_search_vector_idx" ON "memory_files" USING gin ("search_vector");
 --> statement-breakpoint
+-- How agents use each memory file (brain spec, "Usage"). A table of its own,
+-- not columns on `memory_files`: an update there rewrites the row and
+-- recomputes `search_vector`, and reads far outnumber writes. Counts arrive
+-- in batches from `services/memory-usage.ts`, which only inserts a row for a
+-- file that exists. `read` is a file the agent chose to open, `inject` a
+-- file the memory snapshot put in the prompt, `cite` a principle a turn named.
+CREATE TABLE "memory_file_usage" (
+	"owner_type" text NOT NULL,
+	"owner_id" text NOT NULL,
+	"namespace" text DEFAULT '' NOT NULL,
+	"path" text NOT NULL,
+	"read_count" integer DEFAULT 0 NOT NULL,
+	"last_read_at" bigint,
+	"inject_count" integer DEFAULT 0 NOT NULL,
+	"last_injected_at" bigint,
+	"cite_count" integer DEFAULT 0 NOT NULL,
+	"last_cited_at" bigint,
+	PRIMARY KEY("owner_type", "owner_id", "namespace", "path")
+);
+--> statement-breakpoint
+-- When usage tracking started. One row. Before this time, "never used" only
+-- means "not seen", so the memory page calls no file stale until tracking
+-- has run for 30 days.
+CREATE TABLE "memory_usage_tracking" (
+	"id" boolean PRIMARY KEY DEFAULT true NOT NULL CHECK ("id"),
+	"started_at" bigint NOT NULL
+);
+--> statement-breakpoint
+INSERT INTO "memory_usage_tracking" ("started_at") VALUES ((extract(epoch from clock_timestamp()) * 1000)::bigint);
+--> statement-breakpoint
 CREATE TABLE "artifacts" (
 	"id" text PRIMARY KEY NOT NULL,
 	"token" text NOT NULL,
@@ -520,6 +667,7 @@ CREATE TABLE "artifacts" (
 	"org_id" text NOT NULL,
 	"actor_user_id" text NOT NULL,
 	"source_session_id" text DEFAULT '' NOT NULL,
+	"source_thread_id" text,
 	"source_memory_path" text NOT NULL,
 	"title" text DEFAULT '' NOT NULL,
 	"content" text NOT NULL,
@@ -559,6 +707,7 @@ CREATE TABLE "artifact_comments" (
 	"artifact_id" text NOT NULL,
 	"version" bigint NOT NULL,
 	"vdid" text,
+	"anchor_label" text,
 	"parent_id" text,
 	"body" text NOT NULL,
 	"author_user_id" text NOT NULL,
@@ -583,6 +732,7 @@ CREATE TABLE "skills" (
 	"frontmatter" jsonb DEFAULT '{}'::jsonb NOT NULL,
 	"content_sha" text NOT NULL,
 	"upstream_path" text,
+    "upstream_blob_sha" text,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL
 );
@@ -590,6 +740,16 @@ CREATE TABLE "skills" (
 CREATE INDEX "skills_owner" ON "skills" ("org_id","owner_type","owner_id");
 --> statement-breakpoint
 CREATE UNIQUE INDEX "skills_owner_name" ON "skills" ("org_id","owner_type","owner_id","name");
+--> statement-breakpoint
+CREATE TABLE "skill_files" (
+  "skill_id" text NOT NULL REFERENCES "skills"("id") ON DELETE CASCADE,
+  "path" text NOT NULL,
+  "blob_sha" text NOT NULL,
+  "size" integer NOT NULL,
+  "mode" text NOT NULL,
+  "bytes" bytea NOT NULL,
+  PRIMARY KEY ("skill_id", "path")
+);
 --> statement-breakpoint
 CREATE TABLE "skill_invocations" (
   "id" text PRIMARY KEY NOT NULL,
@@ -644,6 +804,7 @@ CREATE TABLE "skill_sources" (
 	"last_sha" text,
 	"last_manifest_hash" text,
 	"discovery_scan" text,
+    "skill_walk_cache" jsonb DEFAULT '{}'::jsonb NOT NULL,
 	"sync_revision" bigint DEFAULT 0 NOT NULL,
 	"last_synced_at" bigint,
 	"last_error" text,
@@ -743,6 +904,7 @@ CREATE TABLE "workflow_runs" (
 	"owner_id" text DEFAULT '' NOT NULL,
 	"actor_user_id" text,
 	"sandbox_reclaimed_at" bigint,
+	"org_id" text,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL
 );
@@ -750,6 +912,26 @@ CREATE TABLE "workflow_runs" (
 CREATE INDEX "workflow_runs_status_updated" ON "workflow_runs" ("status","updated_at");
 --> statement-breakpoint
 CREATE INDEX "workflow_runs_workflow" ON "workflow_runs" ("workflow_id");
+--> statement-breakpoint
+DO $run_org$ BEGIN
+  -- workflow run org begin
+  -- The org a run belongs to, copied from its workflow when the run starts.
+  -- Deleting a workflow removes its definition and keeps its runs, so usage
+  -- reads the org from the run: the run's spend stays in the org's totals.
+  -- The trigger, not each caller, writes it, so every insert path (and an
+  -- older release during a rolling update) records it.
+  ALTER TABLE workflow_runs ADD COLUMN IF NOT EXISTS org_id text;
+  CREATE OR REPLACE FUNCTION valet_workflow_run_org() RETURNS trigger LANGUAGE plpgsql AS $org$
+  BEGIN
+    IF NEW.org_id IS NULL THEN
+      SELECT d.org_id INTO NEW.org_id FROM workflow_definitions d WHERE d.id = NEW.workflow_id;
+    END IF;
+    RETURN NEW;
+  END $org$;
+  CREATE OR REPLACE TRIGGER workflow_runs_org BEFORE INSERT ON workflow_runs
+    FOR EACH ROW EXECUTE FUNCTION valet_workflow_run_org();
+  -- workflow run org end
+END $run_org$;
 --> statement-breakpoint
 CREATE TABLE "workflow_checkpoints" (
 	"run_id" text NOT NULL,
@@ -761,6 +943,7 @@ CREATE TABLE "workflow_checkpoints" (
 	"effects" jsonb,
 	"error" text,
 	"created_at" bigint NOT NULL,
+	"started_at" bigint,
 	PRIMARY KEY("run_id", "node_id", "iteration")
 );
 --> statement-breakpoint
@@ -796,6 +979,18 @@ CREATE TABLE "credentials" (
 	"updated_at" bigint NOT NULL,
 	PRIMARY KEY("owner_type", "owner_id", "service")
 );
+--> statement-breakpoint
+CREATE TABLE "credential_shares" (
+	"team_id" text NOT NULL,
+	"service" text NOT NULL,
+	"user_id" text NOT NULL,
+	"created_at" bigint NOT NULL,
+	"generation" text NOT NULL DEFAULT gen_random_uuid()::text,
+	"borrow_consent_at" bigint,
+	PRIMARY KEY("team_id", "service", "user_id")
+);
+--> statement-breakpoint
+CREATE INDEX "credential_shares_user" ON "credential_shares" USING btree ("user_id","service");
 --> statement-breakpoint
 CREATE TABLE "mcp_oauth_clients" (
 	"service" text PRIMARY KEY NOT NULL,
@@ -858,6 +1053,7 @@ CREATE TABLE "action_policy_overrides" (
 	"action_id" text,
 	"risk_level" text,
 	"mode" text NOT NULL,
+	"legacy_unscoped" boolean NOT NULL DEFAULT false,
 	"param_matchers" jsonb DEFAULT '[]'::jsonb NOT NULL,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL,
@@ -881,6 +1077,7 @@ CREATE TABLE "action_invocations" (
 	"matched_override_id" text,
 	"status" text,
 	"session_id" text,
+	"thread_id" text,
 	"workflow_execution_id" text,
 	"user_id" text,
 	"org_id" text,
@@ -889,7 +1086,9 @@ CREATE TABLE "action_invocations" (
 	"duration_ms" bigint,
 	"error" text,
 	"started_at" bigint,
-	"resolved_by" text
+	"resolved_by" text,
+	"caller" text,
+	"queue_item_id" text
 );
 --> statement-breakpoint
 CREATE INDEX "action_invocations_session" ON "action_invocations" ("session_id");
@@ -926,6 +1125,7 @@ CREATE TABLE "session_repos" (
 	"full_name" text NOT NULL,
 	"clone_url" text NOT NULL,
 	"ref" text,
+	"resolved_ref" text,
 	"auth" text DEFAULT 'auto' NOT NULL,
 	"position" integer NOT NULL,
 	"target_dir" text
@@ -971,6 +1171,10 @@ CREATE TABLE "image_sources" (
 	"schedule" text NOT NULL DEFAULT 'nightly' CHECK (schedule IN ('nightly','off')),
 	"enabled" boolean NOT NULL DEFAULT TRUE,
 	"last_bound_at" bigint,
+	"health" text NOT NULL DEFAULT 'healthy' CHECK (health IN ('healthy','stale','incompatible','failing','unbaked')),
+	"health_reason" text NOT NULL DEFAULT 'ok',
+	"health_detail" text,
+	"health_checked_at" bigint,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL
 );
@@ -993,6 +1197,10 @@ CREATE TABLE "bakes" (
 	"started_at" bigint,
 	"finished_at" bigint,
 	"size_bytes" BIGINT,
+	"contract_version" integer,
+	"contract_source" text CHECK (contract_source IS NULL OR contract_source IN ('label','missing','override')),
+	"parent_bake_id" text,
+	"base_image_ref" text,
 	"created_at" bigint NOT NULL
 );
 --> statement-breakpoint
@@ -1009,7 +1217,8 @@ CREATE TABLE "events" (
 	"summary" text NOT NULL,
 	"payload" jsonb NOT NULL,
 	"occurred_at" bigint NOT NULL,
-	"received_at" bigint NOT NULL
+	"received_at" bigint NOT NULL,
+	"subjects" text[]
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "events_service_dedupe" ON "events" ("service","dedupe_key");
@@ -1028,6 +1237,11 @@ CREATE TABLE "event_subscriptions" (
 	"filters" jsonb DEFAULT '[]'::jsonb NOT NULL,
 	"target" jsonb NOT NULL,
 	"enabled" boolean DEFAULT true NOT NULL,
+	-- Who may invoke a team assistant by mention: 'team' (the owning team's
+	-- current members) or 'organization' (any current member of the
+	-- organization). NULL reads as 'team', so every row written before this
+	-- column keeps its meaning. Only a team assistant target may set it.
+	"audience" text,
 	-- `repo` rows are armed from a mirrored workflow file. The sync updates
 	-- and deletes only these, so a trigger a person armed on the same
 	-- workflow is never touched.
@@ -1051,7 +1265,16 @@ CREATE TABLE "followed_threads" (
 	"created_at" bigint NOT NULL,
 	"last_activity_at" bigint NOT NULL,
 	"last_seen_ts" text,
-	"assistant_id" text
+	-- The mention rule that bound this thread. The follow router reads that
+	-- rule's CURRENT invocation audience, so a rule narrowed back to the team
+	-- narrows the threads it opened, and a disabled or deleted rule narrows
+	-- them too. NULL, like a rule that is gone, reads as team-only.
+	"subscription_id" text,
+	-- The assistant thread the binding mention landed in. Later messages in
+	-- the Slack thread go to this thread. NULL on a follow bound before the
+	-- columns: the router keeps the Slack thread key for those.
+	"session_id" text,
+	"thread_id" text
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "followed_threads_key" ON "followed_threads" ("org_id","channel_type","channel_id","thread_ts");
@@ -1064,17 +1287,25 @@ CREATE TABLE "workflow_schedules" (
 	"target_kind" text DEFAULT 'workflow' NOT NULL,
 	"workflow_id" text,
 	"prompt" text,
-	"assistant_id" text,
+	-- An AssistantThreadPolicy for an assistant-prompt schedule. NULL reads as own.
+	"thread_policy" jsonb,
 	"name" text NOT NULL,
 	"cron" text NOT NULL,
 	"timezone" text DEFAULT 'UTC' NOT NULL,
 	"input" jsonb,
 	"enabled" boolean DEFAULT true NOT NULL,
+	-- Why the scheduler disabled this schedule: the pin text when its
+	-- `existing` thread cannot receive deliveries. NULL otherwise.
+	"disabled_reason" text,
 	-- `repo` rows are armed from a mirrored workflow file. The sync updates
 	-- and deletes only these, so a schedule a person armed on the same
 	-- workflow is never touched.
 	"origin" text DEFAULT 'local' NOT NULL,
 	"last_fired_at" bigint,
+	-- The assistant thread the latest assistant-prompt firing landed on.
+	-- NULL for a workflow schedule and before the first firing.
+	"last_fired_session_id" text,
+	"last_fired_thread_id" text,
 	"next_fire_at" bigint NOT NULL,
 	"created_by" text NOT NULL,
 	"created_at" bigint NOT NULL,
@@ -1104,12 +1335,22 @@ CREATE TABLE "event_deliveries" (
 	"next_attempt_at" bigint NOT NULL,
 	"last_error" text,
 	"delivered_at" bigint,
-	"created_at" bigint NOT NULL
+	"created_at" bigint NOT NULL,
+	-- The Destination resolved at ingest (spec 2026-10-16: delivery threads
+	-- and claims, Part C step 6). NULL means resolve at dispatch from the
+	-- binding and the policy only (no waiter consult, Part C step 7).
+	"destination" jsonb,
+	"queue_item_id" text
 );
 --> statement-breakpoint
 CREATE INDEX "event_deliveries_due" ON "event_deliveries" ("status","next_attempt_at");
 --> statement-breakpoint
+CREATE INDEX "event_deliveries_delivered" ON "event_deliveries" ("delivered_at") WHERE "status" = 'delivered';
+--> statement-breakpoint
 CREATE INDEX "event_deliveries_event" ON "event_deliveries" ("event_id");
+--> statement-breakpoint
+-- The rule list reads each rule's latest delivery for its problem state.
+CREATE INDEX "event_deliveries_subscription" ON "event_deliveries" ("subscription_id","created_at");
 --> statement-breakpoint
 CREATE TABLE "linear_installations" (
 	"id" text PRIMARY KEY NOT NULL,
@@ -1212,7 +1453,8 @@ CREATE TABLE "security_engagements" (
 	"report_json" text,
 	"report_generated_at" bigint,
 	"created_at" bigint NOT NULL,
-	"updated_at" bigint NOT NULL
+	"updated_at" bigint NOT NULL,
+	"credentials_json" jsonb
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "security_engagements_session_unique" ON "security_engagements" ("session_id");
@@ -1305,6 +1547,9 @@ CREATE INDEX "security_handoffs_engagement" ON "security_handoffs" ("engagement_
 --> statement-breakpoint
 CREATE INDEX "security_handoffs_finding" ON "security_handoffs" ("finding_id");
 --> statement-breakpoint
+-- The broker classifies a sandbox caller by its handoff row on every resolve and find.
+CREATE INDEX "security_handoffs_child_session" ON "security_handoffs" ("child_session_id");
+--> statement-breakpoint
 -- One row per human note on a finding (spec §Re-scan / iterate). No unique
 -- constraint — a finding may carry a thread of many comments. author_user_id
 -- is always a user id: commenting is a human action, never the runner's.
@@ -1355,7 +1600,9 @@ CREATE TABLE "security_needs" (
 	"status" text DEFAULT 'open' NOT NULL,
 	"resolution" text,
 	"created_at" bigint NOT NULL,
-	"resolved_at" bigint
+	"resolved_at" bigint,
+	"credential_label" text,
+	CONSTRAINT "security_needs_credential_resolution_null" CHECK ("kind" <> 'credential' OR "resolution" IS NULL)
 );
 --> statement-breakpoint
 CREATE INDEX "security_needs_engagement" ON "security_needs" ("engagement_id");
@@ -1423,7 +1670,8 @@ SELECT
 		WHEN e."session_id" LIKE 'orchestrator:%' THEN 'orchestrator'
 		WHEN e."session_id" LIKE 'wf:%'           THEN 'workflow'
 		ELSE 'session'
-	END                                                        AS "use_case"
+	END                                                        AS "use_case",
+	NULL::text                                                  AS "provider"
 FROM "engine_entries" e
 LEFT JOIN "agent_sessions" s
 	ON s."id" = e."session_id"
@@ -1442,7 +1690,7 @@ SELECT
         COALESCE(p."team_id", p."user_id") AS "owner_id",
 	NULL AS "workflow_id", NULL AS "workflow_run_id",
 	p."input_tokens", p."output_tokens", p."cache_read_tokens", p."cache_write_tokens", p."total_tokens",
-	p."cost_usd" AS "cost_total", (p."cost_usd" IS NOT NULL) AS "priced", 'proxy' AS "use_case"
+	p."cost_usd" AS "cost_total", (p."cost_usd" IS NOT NULL) AS "priced", CASE WHEN p.provider_kind = 'tagging' THEN 'tagging' ELSE 'proxy' END AS "use_case", p."provider_kind" AS "provider"
 FROM "llm_proxy_requests" p
 -- Only rows that carry usage count as billable turns — mirrors the engine
 -- side's `WHERE e."usage" IS NOT NULL`. Excludes failed/4xx proxy calls and
@@ -1480,3 +1728,1319 @@ CREATE TABLE IF NOT EXISTS "team_deletion_requests" (
 CREATE UNIQUE INDEX IF NOT EXISTS "team_deletion_requests_pending" ON "team_deletion_requests" ("team_id", "resource_type", "resource_id") WHERE "status" = 'pending';
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "team_deletion_requests_team_status" ON "team_deletion_requests" ("team_id", "status");
+
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "image_source_change_requests" (
+  "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "target_key" text NOT NULL,
+  "source_id" text, "source_name" text NOT NULL, "action" text NOT NULL, "payload" jsonb NOT NULL,
+  "base_updated_at" bigint, "requested_by" text NOT NULL, "requested_at" bigint NOT NULL,
+  "expires_at" bigint NOT NULL, "status" text NOT NULL DEFAULT 'pending',
+  "decided_by" text, "decided_at" bigint, "decision_note" text
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "image_source_change_requests_pending" ON "image_source_change_requests" ("org_id", "target_key") WHERE "status" = 'pending';
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "image_source_change_requests_org_status" ON "image_source_change_requests" ("org_id", "status", "requested_at");
+
+--> statement-breakpoint
+-- usage analytics projection v1
+DO $migration$
+BEGIN
+  -- usage analytics install
+  -- Fresh databases are empty. Existing databases use the batched repair.
+  LOCK TABLE engine_entries IN SHARE ROW EXCLUSIVE MODE;
+  CREATE TABLE IF NOT EXISTS usage_entry_facts (
+    entry_id text PRIMARY KEY REFERENCES engine_entries(id) ON DELETE CASCADE,
+    session_id text NOT NULL,
+    workflow_run_id text,
+    created_at bigint NOT NULL,
+    model text,
+    usage jsonb,
+    cost jsonb,
+    tool_calls bigint NOT NULL,
+    pull_requests bigint NOT NULL,
+    reviews bigint NOT NULL,
+    hourly_accounted boolean NOT NULL DEFAULT false
+  );
+  ALTER TABLE usage_entry_facts ADD COLUMN IF NOT EXISTS hourly_accounted boolean NOT NULL DEFAULT false;
+  CREATE INDEX IF NOT EXISTS usage_entry_facts_window ON usage_entry_facts(created_at, session_id);
+  CREATE INDEX IF NOT EXISTS usage_entry_facts_session_window ON usage_entry_facts(session_id, created_at);
+  CREATE INDEX IF NOT EXISTS usage_entry_facts_workflow_window ON usage_entry_facts(workflow_run_id, created_at)
+    WHERE workflow_run_id IS NOT NULL;
+
+  CREATE INDEX IF NOT EXISTS usage_entry_facts_cost_window ON usage_entry_facts(created_at, session_id) WHERE usage IS NOT NULL;
+  CREATE INDEX IF NOT EXISTS usage_entry_facts_tools_window ON usage_entry_facts(created_at, session_id) WHERE tool_calls > 0;
+  CREATE INDEX IF NOT EXISTS usage_entry_facts_outcomes_window ON usage_entry_facts(created_at, session_id) WHERE pull_requests > 0 OR reviews > 0;
+
+  -- usage step attribution begin
+  -- `session_id` of a fact is the session id the entry bills to. A Thread
+  -- workflow step prompts the workspace assistant, so its turns are written
+  -- to the assistant session. The queue item carries the step's dispatch id
+  -- (`workflow:{runId}:{nodeId}[:{iteration}][:repair]`), and the turn bills
+  -- to that step's id (`wf:{runId}:{nodeId}[:{iteration}]`), the key a
+  -- session step already uses. Every rollup then attributes the turn to the
+  -- workflow run and the step, not to the assistant. A run with no org (its
+  -- workflow was deleted before runs kept their org) cannot be scoped to a
+  -- tenant, so its turns stay on the assistant and keep counting there.
+  -- The step id of a turn or action from a queue item, or NULL. Indexed probes of the queue
+  -- item, its source, and the run. A queued prompt that send-now promoted is
+  -- a new item without the dispatch id, which is unique per session; it
+  -- names its source in `promotedFromItemId`, and the source carries the id.
+  -- usage step session begin
+  CREATE OR REPLACE FUNCTION valet_usage_step_session(session_id text, queue_item_id text) RETURNS text
+  LANGUAGE sql STABLE AS $step$
+    -- `:repair` marks the repair turn only after a complete step id
+    -- (`{run}:{node}[:{iteration}]`); a node may itself be named `repair`.
+    SELECT 'wf:' || regexp_replace(substr(src.dispatch_id, 10), '^([^:]+:[^:]+(:[0-9]+)?):repair$', '\1')
+    FROM engine_queue_items src JOIN workflow_runs r ON r.id = split_part(src.dispatch_id, ':', 2)
+    WHERE src.session_id = valet_usage_step_session.session_id AND src.dispatch_id LIKE 'workflow:%' AND r.org_id IS NOT NULL
+      -- A scalar source id keeps this a primary-key probe. The id is read
+      -- from the metadata text, never through a jsonb cast: the metadata
+      -- copies prompt arguments, and text jsonb rejects (a lone surrogate
+      -- escape) would make the cast throw and fail the entry's write. The
+      -- engine writes the key at the top level; a copy nested in a string
+      -- value is escaped (\") and does not match.
+      AND src.id = (SELECT CASE WHEN q.dispatch_id IS NULL
+          THEN substring(q.metadata FROM '"promotedFromItemId":"([^"\\]+)"') ELSE q.id END
+        FROM engine_queue_items q WHERE q.id = valet_usage_step_session.queue_item_id
+          AND q.session_id = valet_usage_step_session.session_id)
+  $step$;
+  -- usage step session end
+
+  -- The fact of an entry billed to `billing_session`.
+  CREATE OR REPLACE FUNCTION valet_usage_fact_for(e engine_entries, billing_session text) RETURNS usage_entry_facts
+  LANGUAGE sql IMMUTABLE AS $fact$
+    SELECT e.id, billing_session,
+      CASE WHEN billing_session LIKE 'wf:%' THEN split_part(billing_session, ':', 2) END,
+      e.created_at, e.model, e.usage::jsonb, e.cost::jsonb,
+      COUNT(*) FILTER (WHERE p->>'type' = 'tool_call' AND p->>'status' IN ('completed', 'error')),
+      COUNT(*) FILTER (WHERE p->>'type' = 'tool_call' AND p->>'toolName' = 'bash'
+        AND p->>'status' = 'completed' AND p->'result'->'details'->'outcome'->>'kind' = 'pull_request_created'),
+      COUNT(*) FILTER (WHERE p->>'type' = 'tool_call' AND p->>'toolName' = 'bash'
+        AND p->>'status' = 'completed' AND p->'result'->'details'->'outcome'->>'kind' = 'review_submitted'), false
+    FROM jsonb_array_elements(CASE WHEN e.entry_type = 'message' AND e.role = 'assistant'
+      THEN COALESCE(replace(e.parts, chr(92) || 'u0000', chr(92) || 'uFFFD')::jsonb, '[]'::jsonb)
+      ELSE '[]'::jsonb END) p
+  $fact$;
+
+  -- Only an assistant message with a queue item can be a Thread-step turn
+  -- (it alone carries usage or tool calls), so every other entry skips the
+  -- probe, and a Thread-step turn probes once.
+  CREATE OR REPLACE FUNCTION valet_usage_fact(e engine_entries) RETURNS usage_entry_facts
+  LANGUAGE sql STABLE AS $fact$
+    SELECT valet_usage_fact_for(e, CASE WHEN e.queue_item_id IS NOT NULL AND e.entry_type = 'message'
+        AND e.role = 'assistant' AND e.session_id NOT LIKE 'wf:%'
+      THEN COALESCE(valet_usage_step_session(e.session_id, e.queue_item_id), e.session_id) ELSE e.session_id END)
+  $fact$;
+  -- usage step attribution end
+
+  DROP TRIGGER IF EXISTS engine_entries_usage_fact ON engine_entries;
+  CREATE OR REPLACE FUNCTION valet_sync_usage_fact() RETURNS trigger LANGUAGE plpgsql AS $sync$
+  BEGIN
+    INSERT INTO usage_entry_facts SELECT f.* FROM new_entries e CROSS JOIN LATERAL valet_usage_fact(e) f
+    ON CONFLICT (entry_id) DO UPDATE SET
+      session_id = EXCLUDED.session_id, workflow_run_id = EXCLUDED.workflow_run_id,
+      created_at = EXCLUDED.created_at, model = EXCLUDED.model, usage = EXCLUDED.usage,
+      cost = EXCLUDED.cost, tool_calls = EXCLUDED.tool_calls,
+      pull_requests = EXCLUDED.pull_requests, reviews = EXCLUDED.reviews;
+    RETURN NULL;
+  END $sync$;
+  CREATE OR REPLACE TRIGGER engine_entries_usage_fact
+    AFTER INSERT ON engine_entries REFERENCING NEW TABLE AS new_entries
+    FOR EACH STATEMENT EXECUTE FUNCTION valet_sync_usage_fact();
+  CREATE OR REPLACE TRIGGER engine_entries_usage_fact_update
+    AFTER UPDATE ON engine_entries REFERENCING NEW TABLE AS new_entries
+    FOR EACH STATEMENT EXECUTE FUNCTION valet_sync_usage_fact();
+
+  -- usage analytics backfill
+  INSERT INTO usage_entry_facts SELECT f.* FROM engine_entries e
+    CROSS JOIN LATERAL valet_usage_fact(e) f ON CONFLICT (entry_id) DO NOTHING;
+
+  -- usage analytics publish
+  -- Separate ownership branches let PostgreSQL push scope filters into each join.
+  CREATE OR REPLACE VIEW usage_entries AS
+    SELECT f.entry_id, f.session_id, r.id AS workflow_run_id, f.created_at, f.model, f.usage, f.cost,
+      f.tool_calls, f.pull_requests, f.reviews, s.org_id, s.user_id, s.owner_type, NULLIF(s.owner_id, '') AS owner_id,
+      r.workflow_id,
+      CASE WHEN f.session_id LIKE 'orchestrator:%' THEN 'orchestrator'
+        WHEN f.session_id LIKE 'wf:%' THEN 'workflow' ELSE 'session' END AS use_case
+    FROM usage_entry_facts f JOIN agent_sessions s ON s.id = f.session_id
+    LEFT JOIN workflow_runs r ON r.id = f.workflow_run_id
+    UNION ALL
+    -- The run carries its org, so a deleted workflow's spend still counts.
+    SELECT f.entry_id, f.session_id, r.id, f.created_at, f.model, f.usage, f.cost,
+      f.tool_calls, f.pull_requests, f.reviews, r.org_id, CASE WHEN r.owner_type = 'user' THEN NULLIF(r.owner_id, '') END,
+      r.owner_type, NULLIF(r.owner_id, ''), r.workflow_id, 'workflow'::text
+    FROM usage_entry_facts f JOIN workflow_runs r ON r.id = f.workflow_run_id
+    WHERE r.org_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM agent_sessions s WHERE s.id = f.session_id);
+
+  CREATE OR REPLACE VIEW cost_entries AS
+    SELECT entry_id, session_id, created_at, model, org_id, user_id, owner_type, owner_id,
+      workflow_id, workflow_run_id,
+      COALESCE((usage->>'input')::bigint,0) AS input_tokens,
+      COALESCE((usage->>'output')::bigint,0) AS output_tokens,
+      COALESCE((usage->>'cacheRead')::bigint,0) AS cache_read_tokens,
+      COALESCE((usage->>'cacheWrite')::bigint,0) AS cache_write_tokens,
+      COALESCE((usage->>'total')::bigint,0) AS total_tokens,
+      (cost->>'total')::float8 AS cost_total, (cost->>'total') IS NOT NULL AS priced,
+      use_case, NULL::text AS provider
+    FROM usage_entries WHERE usage IS NOT NULL
+    UNION ALL
+    SELECT id, NULL, created_at, model, org_id, user_id,
+      CASE WHEN team_id IS NOT NULL THEN 'team' ELSE 'user' END,
+      COALESCE(team_id,user_id), NULL, NULL,
+      input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens,
+      cost_usd, cost_usd IS NOT NULL, CASE WHEN provider_kind = 'tagging' THEN 'tagging' ELSE 'proxy' END, provider_kind
+    FROM llm_proxy_requests p WHERE total_tokens > 0;
+
+  -- usage analytics indexes
+  CREATE INDEX IF NOT EXISTS action_invocations_usage_time
+    ON action_invocations(org_id, (COALESCE(started_at, created_at)))
+    WHERE status IN ('completed', 'error') AND duration_ms IS NOT NULL;
+  CREATE INDEX IF NOT EXISTS skill_context_attributions_window
+    ON skill_context_attributions(created_at, skill_invocation_id);
+  CREATE INDEX IF NOT EXISTS agent_sessions_usage_scope
+    ON agent_sessions(org_id, user_id, id);
+  CREATE INDEX IF NOT EXISTS skill_invocations_usage_window ON skill_invocations(created_at, session_id);
+  CREATE INDEX IF NOT EXISTS action_invocations_outcome_time
+    ON action_invocations(org_id, (COALESCE(started_at, created_at)))
+    WHERE status = 'completed' AND duration_ms IS NOT NULL
+      AND action_id IN ('github.create_pull_request', 'github.create_review', 'slack.send_message',
+        'slack.reply_to_origin', 'slack.dm_owner', 'slack.dm_user');
+  ANALYZE usage_entry_facts;
+END $migration$;
+
+--> statement-breakpoint
+DO $hourly$ BEGIN
+-- usage hourly install
+ALTER TABLE llm_proxy_requests ADD COLUMN IF NOT EXISTS hourly_accounted boolean NOT NULL DEFAULT false;
+CREATE TABLE IF NOT EXISTS usage_hourly (
+ dimensions jsonb NOT NULL, source_kind text NOT NULL, session_id text,
+ org_id text, user_id text, team_id text, model text, provider text, created_at bigint NOT NULL,
+ turns bigint NOT NULL,
+ unpriced_turns bigint NOT NULL,
+ positive_turns bigint NOT NULL,
+ input_tokens bigint NOT NULL,
+ output_tokens bigint NOT NULL,
+ cache_read_tokens bigint NOT NULL,
+ cache_write_tokens bigint NOT NULL,
+ total_tokens bigint NOT NULL,
+ cost_total numeric NOT NULL,
+ tool_calls bigint NOT NULL,
+ pull_requests bigint NOT NULL,
+ reviews bigint NOT NULL, PRIMARY KEY (dimensions,created_at)
+);
+CREATE TABLE IF NOT EXISTS usage_hourly_progress(source_kind text PRIMARY KEY, watermark text NOT NULL);
+INSERT INTO usage_hourly_progress VALUES ('engine',''),('proxy','') ON CONFLICT DO NOTHING;
+CREATE INDEX IF NOT EXISTS usage_hourly_window ON usage_hourly(created_at,session_id);
+CREATE INDEX IF NOT EXISTS usage_hourly_session_window ON usage_hourly(session_id,created_at);
+CREATE INDEX IF NOT EXISTS usage_hourly_org_window ON usage_hourly(org_id,created_at);
+
+CREATE OR REPLACE FUNCTION valet_entry_hour(e usage_entry_facts) RETURNS usage_hourly LANGUAGE sql IMMUTABLE AS $entry$
+ SELECT jsonb_build_array('engine',e.session_id,e.model), 'engine'::text,e.session_id,
+ NULL::text,NULL::text,NULL::text,e.model,NULL::text,(floor(e.created_at::numeric/3600000)*3600000)::bigint,
+ (e.usage IS NOT NULL)::int::bigint,
+ (e.usage IS NOT NULL AND (e.cost->>'total') IS NULL)::int::bigint,
+ (e.usage IS NOT NULL AND COALESCE((e.usage->>'total')::bigint,0)>0)::int::bigint,
+ COALESCE((e.usage->>'input')::bigint,0),
+ COALESCE((e.usage->>'output')::bigint,0),
+ COALESCE((e.usage->>'cacheRead')::bigint,0),
+ COALESCE((e.usage->>'cacheWrite')::bigint,0),
+ COALESCE((e.usage->>'total')::bigint,0), CASE WHEN e.usage IS NOT NULL THEN COALESCE((e.cost->>'total')::numeric,0) ELSE 0 END,
+ e.tool_calls,e.pull_requests,e.reviews
+$entry$;
+CREATE OR REPLACE FUNCTION valet_proxy_hour(p llm_proxy_requests) RETURNS usage_hourly LANGUAGE sql IMMUTABLE AS $proxy$
+ SELECT jsonb_build_array('proxy',p.org_id,p.user_id,p.team_id,p.model,p.provider_kind,p.harness), 'proxy'::text,NULL::text,
+ p.org_id,p.user_id,p.team_id,p.model,p.provider_kind,(floor(p.created_at::numeric/3600000)*3600000)::bigint,
+ (p.total_tokens>0)::int::bigint,(p.total_tokens>0 AND p.cost_usd IS NULL)::int::bigint,0::bigint,
+ CASE WHEN p.total_tokens>0 THEN COALESCE(p.input_tokens,0) ELSE 0 END,
+ CASE WHEN p.total_tokens>0 THEN COALESCE(p.output_tokens,0) ELSE 0 END,
+ CASE WHEN p.total_tokens>0 THEN COALESCE(p.cache_read_tokens,0) ELSE 0 END,
+ CASE WHEN p.total_tokens>0 THEN COALESCE(p.cache_write_tokens,0) ELSE 0 END,
+ CASE WHEN p.total_tokens>0 THEN COALESCE(p.total_tokens,0) ELSE 0 END,CASE WHEN p.total_tokens>0 THEN COALESCE(p.cost_usd::numeric,0) ELSE 0 END,
+ 0::bigint,0::bigint,0::bigint
+$proxy$;
+
+CREATE OR REPLACE FUNCTION valet_mark_usage_hour() RETURNS trigger LANGUAGE plpgsql AS $mark$
+BEGIN
+ IF TG_OP <> 'INSERT' AND NOT OLD.hourly_accounted
+   AND current_setting('transaction_isolation') <> 'read committed' THEN
+  RAISE EXCEPTION 'Usage backfill accounting requires READ COMMITTED. Retry this transaction with READ COMMITTED isolation.'
+    USING ERRCODE='40001';
+ END IF;
+ IF TG_OP='DELETE' THEN RETURN OLD; END IF;
+ NEW.hourly_accounted := true; RETURN NEW;
+END $mark$;
+CREATE INDEX IF NOT EXISTS usage_hourly_empty ON usage_hourly(created_at) WHERE turns=0 AND tool_calls=0 AND pull_requests=0 AND reviews=0;
+CREATE INDEX IF NOT EXISTS usage_hourly_outcomes ON usage_hourly(created_at,session_id) WHERE pull_requests>0 OR reviews>0;
+DROP TRIGGER IF EXISTS usage_entry_facts_hourly ON usage_entry_facts;
+CREATE OR REPLACE TRIGGER usage_entry_facts_hourly_mark BEFORE INSERT OR UPDATE OR DELETE ON usage_entry_facts
+ FOR EACH ROW EXECUTE FUNCTION valet_mark_usage_hour();
+CREATE OR REPLACE FUNCTION valet_sync_entry_hour_insert() RETURNS trigger LANGUAGE plpgsql AS $sync$
+BEGIN
+ WITH changes AS MATERIALIZED (SELECT h.*, 1 AS direction FROM new_rows n CROSS JOIN LATERAL valet_entry_hour(n) h), deltas AS (
+ SELECT dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider,created_at,SUM(direction*turns) AS turns,SUM(direction*unpriced_turns) AS unpriced_turns,SUM(direction*positive_turns) AS positive_turns,SUM(direction*input_tokens) AS input_tokens,SUM(direction*output_tokens) AS output_tokens,SUM(direction*cache_read_tokens) AS cache_read_tokens,SUM(direction*cache_write_tokens) AS cache_write_tokens,SUM(direction*total_tokens) AS total_tokens,SUM(direction*cost_total) AS cost_total,SUM(direction*tool_calls) AS tool_calls,SUM(direction*pull_requests) AS pull_requests,SUM(direction*reviews) AS reviews
+ FROM changes GROUP BY dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider,created_at)
+ INSERT INTO usage_hourly(dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider,created_at,turns,unpriced_turns,positive_turns,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_total,tool_calls,pull_requests,reviews) SELECT dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider,created_at,turns,unpriced_turns,positive_turns,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_total,tool_calls,pull_requests,reviews FROM deltas
+ WHERE turns<>0 OR tool_calls<>0 OR pull_requests<>0 OR reviews<>0 OR positive_turns<>0 OR total_tokens<>0 OR cost_total<>0 OR unpriced_turns<>0 OR input_tokens<>0 OR output_tokens<>0 OR cache_read_tokens<>0 OR cache_write_tokens<>0
+ ORDER BY dimensions,created_at
+ ON CONFLICT(dimensions,created_at) DO UPDATE SET
+ turns=usage_hourly.turns+EXCLUDED.turns,
+ unpriced_turns=usage_hourly.unpriced_turns+EXCLUDED.unpriced_turns,
+ positive_turns=usage_hourly.positive_turns+EXCLUDED.positive_turns,
+ input_tokens=usage_hourly.input_tokens+EXCLUDED.input_tokens,
+ output_tokens=usage_hourly.output_tokens+EXCLUDED.output_tokens,
+ cache_read_tokens=usage_hourly.cache_read_tokens+EXCLUDED.cache_read_tokens,
+ cache_write_tokens=usage_hourly.cache_write_tokens+EXCLUDED.cache_write_tokens,
+ total_tokens=usage_hourly.total_tokens+EXCLUDED.total_tokens,
+ cost_total=usage_hourly.cost_total+EXCLUDED.cost_total,
+ tool_calls=usage_hourly.tool_calls+EXCLUDED.tool_calls,
+ pull_requests=usage_hourly.pull_requests+EXCLUDED.pull_requests,
+ reviews=usage_hourly.reviews+EXCLUDED.reviews;
+ DELETE FROM usage_hourly WHERE turns=0 AND tool_calls=0 AND pull_requests=0 AND reviews=0;
+ RETURN NULL;
+END $sync$;
+CREATE OR REPLACE TRIGGER usage_entry_facts_hourly_insert AFTER INSERT ON usage_entry_facts
+ REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION valet_sync_entry_hour_insert();
+CREATE OR REPLACE FUNCTION valet_sync_entry_hour_update() RETURNS trigger LANGUAGE plpgsql AS $sync$
+BEGIN
+ WITH changes AS MATERIALIZED (SELECT h.*, -1 AS direction FROM old_rows o CROSS JOIN LATERAL valet_entry_hour(o) h WHERE o.hourly_accounted OR o.entry_id <= (SELECT watermark FROM usage_hourly_progress WHERE source_kind='engine') UNION ALL SELECT h.*, 1 AS direction FROM new_rows n CROSS JOIN LATERAL valet_entry_hour(n) h), deltas AS (
+ SELECT dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider,created_at,SUM(direction*turns) AS turns,SUM(direction*unpriced_turns) AS unpriced_turns,SUM(direction*positive_turns) AS positive_turns,SUM(direction*input_tokens) AS input_tokens,SUM(direction*output_tokens) AS output_tokens,SUM(direction*cache_read_tokens) AS cache_read_tokens,SUM(direction*cache_write_tokens) AS cache_write_tokens,SUM(direction*total_tokens) AS total_tokens,SUM(direction*cost_total) AS cost_total,SUM(direction*tool_calls) AS tool_calls,SUM(direction*pull_requests) AS pull_requests,SUM(direction*reviews) AS reviews
+ FROM changes GROUP BY dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider,created_at)
+ INSERT INTO usage_hourly(dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider,created_at,turns,unpriced_turns,positive_turns,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_total,tool_calls,pull_requests,reviews) SELECT dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider,created_at,turns,unpriced_turns,positive_turns,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_total,tool_calls,pull_requests,reviews FROM deltas
+ WHERE turns<>0 OR tool_calls<>0 OR pull_requests<>0 OR reviews<>0 OR positive_turns<>0 OR total_tokens<>0 OR cost_total<>0 OR unpriced_turns<>0 OR input_tokens<>0 OR output_tokens<>0 OR cache_read_tokens<>0 OR cache_write_tokens<>0
+ ORDER BY dimensions,created_at
+ ON CONFLICT(dimensions,created_at) DO UPDATE SET
+ turns=usage_hourly.turns+EXCLUDED.turns,
+ unpriced_turns=usage_hourly.unpriced_turns+EXCLUDED.unpriced_turns,
+ positive_turns=usage_hourly.positive_turns+EXCLUDED.positive_turns,
+ input_tokens=usage_hourly.input_tokens+EXCLUDED.input_tokens,
+ output_tokens=usage_hourly.output_tokens+EXCLUDED.output_tokens,
+ cache_read_tokens=usage_hourly.cache_read_tokens+EXCLUDED.cache_read_tokens,
+ cache_write_tokens=usage_hourly.cache_write_tokens+EXCLUDED.cache_write_tokens,
+ total_tokens=usage_hourly.total_tokens+EXCLUDED.total_tokens,
+ cost_total=usage_hourly.cost_total+EXCLUDED.cost_total,
+ tool_calls=usage_hourly.tool_calls+EXCLUDED.tool_calls,
+ pull_requests=usage_hourly.pull_requests+EXCLUDED.pull_requests,
+ reviews=usage_hourly.reviews+EXCLUDED.reviews;
+ DELETE FROM usage_hourly WHERE turns=0 AND tool_calls=0 AND pull_requests=0 AND reviews=0;
+ RETURN NULL;
+END $sync$;
+CREATE OR REPLACE TRIGGER usage_entry_facts_hourly_update AFTER UPDATE ON usage_entry_facts
+ REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION valet_sync_entry_hour_update();
+CREATE OR REPLACE FUNCTION valet_sync_entry_hour_delete() RETURNS trigger LANGUAGE plpgsql AS $sync$
+BEGIN
+ WITH changes AS MATERIALIZED (SELECT h.*, -1 AS direction FROM old_rows o CROSS JOIN LATERAL valet_entry_hour(o) h WHERE o.hourly_accounted OR o.entry_id <= (SELECT watermark FROM usage_hourly_progress WHERE source_kind='engine')), deltas AS (
+ SELECT dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider,created_at,SUM(direction*turns) AS turns,SUM(direction*unpriced_turns) AS unpriced_turns,SUM(direction*positive_turns) AS positive_turns,SUM(direction*input_tokens) AS input_tokens,SUM(direction*output_tokens) AS output_tokens,SUM(direction*cache_read_tokens) AS cache_read_tokens,SUM(direction*cache_write_tokens) AS cache_write_tokens,SUM(direction*total_tokens) AS total_tokens,SUM(direction*cost_total) AS cost_total,SUM(direction*tool_calls) AS tool_calls,SUM(direction*pull_requests) AS pull_requests,SUM(direction*reviews) AS reviews
+ FROM changes GROUP BY dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider,created_at)
+ INSERT INTO usage_hourly(dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider,created_at,turns,unpriced_turns,positive_turns,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_total,tool_calls,pull_requests,reviews) SELECT dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider,created_at,turns,unpriced_turns,positive_turns,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_total,tool_calls,pull_requests,reviews FROM deltas
+ WHERE turns<>0 OR tool_calls<>0 OR pull_requests<>0 OR reviews<>0 OR positive_turns<>0 OR total_tokens<>0 OR cost_total<>0 OR unpriced_turns<>0 OR input_tokens<>0 OR output_tokens<>0 OR cache_read_tokens<>0 OR cache_write_tokens<>0
+ ORDER BY dimensions,created_at
+ ON CONFLICT(dimensions,created_at) DO UPDATE SET
+ turns=usage_hourly.turns+EXCLUDED.turns,
+ unpriced_turns=usage_hourly.unpriced_turns+EXCLUDED.unpriced_turns,
+ positive_turns=usage_hourly.positive_turns+EXCLUDED.positive_turns,
+ input_tokens=usage_hourly.input_tokens+EXCLUDED.input_tokens,
+ output_tokens=usage_hourly.output_tokens+EXCLUDED.output_tokens,
+ cache_read_tokens=usage_hourly.cache_read_tokens+EXCLUDED.cache_read_tokens,
+ cache_write_tokens=usage_hourly.cache_write_tokens+EXCLUDED.cache_write_tokens,
+ total_tokens=usage_hourly.total_tokens+EXCLUDED.total_tokens,
+ cost_total=usage_hourly.cost_total+EXCLUDED.cost_total,
+ tool_calls=usage_hourly.tool_calls+EXCLUDED.tool_calls,
+ pull_requests=usage_hourly.pull_requests+EXCLUDED.pull_requests,
+ reviews=usage_hourly.reviews+EXCLUDED.reviews;
+ DELETE FROM usage_hourly WHERE turns=0 AND tool_calls=0 AND pull_requests=0 AND reviews=0;
+ RETURN NULL;
+END $sync$;
+CREATE OR REPLACE TRIGGER usage_entry_facts_hourly_delete AFTER DELETE ON usage_entry_facts
+ REFERENCING OLD TABLE AS old_rows  FOR EACH STATEMENT EXECUTE FUNCTION valet_sync_entry_hour_delete();
+DROP TRIGGER IF EXISTS llm_proxy_requests_hourly ON llm_proxy_requests;
+CREATE OR REPLACE TRIGGER llm_proxy_requests_hourly_mark BEFORE INSERT OR UPDATE OR DELETE ON llm_proxy_requests
+ FOR EACH ROW EXECUTE FUNCTION valet_mark_usage_hour();
+CREATE OR REPLACE FUNCTION valet_sync_proxy_hour_insert() RETURNS trigger LANGUAGE plpgsql AS $sync$
+BEGIN
+ WITH changes AS MATERIALIZED (SELECT h.*, 1 AS direction FROM new_rows n CROSS JOIN LATERAL valet_proxy_hour(n) h), deltas AS (
+ SELECT dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider,created_at,SUM(direction*turns) AS turns,SUM(direction*unpriced_turns) AS unpriced_turns,SUM(direction*positive_turns) AS positive_turns,SUM(direction*input_tokens) AS input_tokens,SUM(direction*output_tokens) AS output_tokens,SUM(direction*cache_read_tokens) AS cache_read_tokens,SUM(direction*cache_write_tokens) AS cache_write_tokens,SUM(direction*total_tokens) AS total_tokens,SUM(direction*cost_total) AS cost_total,SUM(direction*tool_calls) AS tool_calls,SUM(direction*pull_requests) AS pull_requests,SUM(direction*reviews) AS reviews
+ FROM changes GROUP BY dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider,created_at)
+ INSERT INTO usage_hourly(dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider,created_at,turns,unpriced_turns,positive_turns,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_total,tool_calls,pull_requests,reviews) SELECT dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider,created_at,turns,unpriced_turns,positive_turns,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_total,tool_calls,pull_requests,reviews FROM deltas
+ WHERE turns<>0 OR tool_calls<>0 OR pull_requests<>0 OR reviews<>0 OR positive_turns<>0 OR total_tokens<>0 OR cost_total<>0 OR unpriced_turns<>0 OR input_tokens<>0 OR output_tokens<>0 OR cache_read_tokens<>0 OR cache_write_tokens<>0
+ ORDER BY dimensions,created_at
+ ON CONFLICT(dimensions,created_at) DO UPDATE SET
+ turns=usage_hourly.turns+EXCLUDED.turns,
+ unpriced_turns=usage_hourly.unpriced_turns+EXCLUDED.unpriced_turns,
+ positive_turns=usage_hourly.positive_turns+EXCLUDED.positive_turns,
+ input_tokens=usage_hourly.input_tokens+EXCLUDED.input_tokens,
+ output_tokens=usage_hourly.output_tokens+EXCLUDED.output_tokens,
+ cache_read_tokens=usage_hourly.cache_read_tokens+EXCLUDED.cache_read_tokens,
+ cache_write_tokens=usage_hourly.cache_write_tokens+EXCLUDED.cache_write_tokens,
+ total_tokens=usage_hourly.total_tokens+EXCLUDED.total_tokens,
+ cost_total=usage_hourly.cost_total+EXCLUDED.cost_total,
+ tool_calls=usage_hourly.tool_calls+EXCLUDED.tool_calls,
+ pull_requests=usage_hourly.pull_requests+EXCLUDED.pull_requests,
+ reviews=usage_hourly.reviews+EXCLUDED.reviews;
+ DELETE FROM usage_hourly WHERE turns=0 AND tool_calls=0 AND pull_requests=0 AND reviews=0;
+ RETURN NULL;
+END $sync$;
+CREATE OR REPLACE TRIGGER llm_proxy_requests_hourly_insert AFTER INSERT ON llm_proxy_requests
+ REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION valet_sync_proxy_hour_insert();
+CREATE OR REPLACE FUNCTION valet_sync_proxy_hour_update() RETURNS trigger LANGUAGE plpgsql AS $sync$
+BEGIN
+ WITH changes AS MATERIALIZED (SELECT h.*, -1 AS direction FROM old_rows o CROSS JOIN LATERAL valet_proxy_hour(o) h WHERE o.hourly_accounted OR o.id <= (SELECT watermark FROM usage_hourly_progress WHERE source_kind='proxy') UNION ALL SELECT h.*, 1 AS direction FROM new_rows n CROSS JOIN LATERAL valet_proxy_hour(n) h), deltas AS (
+ SELECT dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider,created_at,SUM(direction*turns) AS turns,SUM(direction*unpriced_turns) AS unpriced_turns,SUM(direction*positive_turns) AS positive_turns,SUM(direction*input_tokens) AS input_tokens,SUM(direction*output_tokens) AS output_tokens,SUM(direction*cache_read_tokens) AS cache_read_tokens,SUM(direction*cache_write_tokens) AS cache_write_tokens,SUM(direction*total_tokens) AS total_tokens,SUM(direction*cost_total) AS cost_total,SUM(direction*tool_calls) AS tool_calls,SUM(direction*pull_requests) AS pull_requests,SUM(direction*reviews) AS reviews
+ FROM changes GROUP BY dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider,created_at)
+ INSERT INTO usage_hourly(dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider,created_at,turns,unpriced_turns,positive_turns,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_total,tool_calls,pull_requests,reviews) SELECT dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider,created_at,turns,unpriced_turns,positive_turns,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_total,tool_calls,pull_requests,reviews FROM deltas
+ WHERE turns<>0 OR tool_calls<>0 OR pull_requests<>0 OR reviews<>0 OR positive_turns<>0 OR total_tokens<>0 OR cost_total<>0 OR unpriced_turns<>0 OR input_tokens<>0 OR output_tokens<>0 OR cache_read_tokens<>0 OR cache_write_tokens<>0
+ ORDER BY dimensions,created_at
+ ON CONFLICT(dimensions,created_at) DO UPDATE SET
+ turns=usage_hourly.turns+EXCLUDED.turns,
+ unpriced_turns=usage_hourly.unpriced_turns+EXCLUDED.unpriced_turns,
+ positive_turns=usage_hourly.positive_turns+EXCLUDED.positive_turns,
+ input_tokens=usage_hourly.input_tokens+EXCLUDED.input_tokens,
+ output_tokens=usage_hourly.output_tokens+EXCLUDED.output_tokens,
+ cache_read_tokens=usage_hourly.cache_read_tokens+EXCLUDED.cache_read_tokens,
+ cache_write_tokens=usage_hourly.cache_write_tokens+EXCLUDED.cache_write_tokens,
+ total_tokens=usage_hourly.total_tokens+EXCLUDED.total_tokens,
+ cost_total=usage_hourly.cost_total+EXCLUDED.cost_total,
+ tool_calls=usage_hourly.tool_calls+EXCLUDED.tool_calls,
+ pull_requests=usage_hourly.pull_requests+EXCLUDED.pull_requests,
+ reviews=usage_hourly.reviews+EXCLUDED.reviews;
+ DELETE FROM usage_hourly WHERE turns=0 AND tool_calls=0 AND pull_requests=0 AND reviews=0;
+ RETURN NULL;
+END $sync$;
+CREATE OR REPLACE TRIGGER llm_proxy_requests_hourly_update AFTER UPDATE ON llm_proxy_requests
+ REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION valet_sync_proxy_hour_update();
+CREATE OR REPLACE FUNCTION valet_sync_proxy_hour_delete() RETURNS trigger LANGUAGE plpgsql AS $sync$
+BEGIN
+ WITH changes AS MATERIALIZED (SELECT h.*, -1 AS direction FROM old_rows o CROSS JOIN LATERAL valet_proxy_hour(o) h WHERE o.hourly_accounted OR o.id <= (SELECT watermark FROM usage_hourly_progress WHERE source_kind='proxy')), deltas AS (
+ SELECT dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider,created_at,SUM(direction*turns) AS turns,SUM(direction*unpriced_turns) AS unpriced_turns,SUM(direction*positive_turns) AS positive_turns,SUM(direction*input_tokens) AS input_tokens,SUM(direction*output_tokens) AS output_tokens,SUM(direction*cache_read_tokens) AS cache_read_tokens,SUM(direction*cache_write_tokens) AS cache_write_tokens,SUM(direction*total_tokens) AS total_tokens,SUM(direction*cost_total) AS cost_total,SUM(direction*tool_calls) AS tool_calls,SUM(direction*pull_requests) AS pull_requests,SUM(direction*reviews) AS reviews
+ FROM changes GROUP BY dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider,created_at)
+ INSERT INTO usage_hourly(dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider,created_at,turns,unpriced_turns,positive_turns,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_total,tool_calls,pull_requests,reviews) SELECT dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider,created_at,turns,unpriced_turns,positive_turns,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_total,tool_calls,pull_requests,reviews FROM deltas
+ WHERE turns<>0 OR tool_calls<>0 OR pull_requests<>0 OR reviews<>0 OR positive_turns<>0 OR total_tokens<>0 OR cost_total<>0 OR unpriced_turns<>0 OR input_tokens<>0 OR output_tokens<>0 OR cache_read_tokens<>0 OR cache_write_tokens<>0
+ ORDER BY dimensions,created_at
+ ON CONFLICT(dimensions,created_at) DO UPDATE SET
+ turns=usage_hourly.turns+EXCLUDED.turns,
+ unpriced_turns=usage_hourly.unpriced_turns+EXCLUDED.unpriced_turns,
+ positive_turns=usage_hourly.positive_turns+EXCLUDED.positive_turns,
+ input_tokens=usage_hourly.input_tokens+EXCLUDED.input_tokens,
+ output_tokens=usage_hourly.output_tokens+EXCLUDED.output_tokens,
+ cache_read_tokens=usage_hourly.cache_read_tokens+EXCLUDED.cache_read_tokens,
+ cache_write_tokens=usage_hourly.cache_write_tokens+EXCLUDED.cache_write_tokens,
+ total_tokens=usage_hourly.total_tokens+EXCLUDED.total_tokens,
+ cost_total=usage_hourly.cost_total+EXCLUDED.cost_total,
+ tool_calls=usage_hourly.tool_calls+EXCLUDED.tool_calls,
+ pull_requests=usage_hourly.pull_requests+EXCLUDED.pull_requests,
+ reviews=usage_hourly.reviews+EXCLUDED.reviews;
+ DELETE FROM usage_hourly WHERE turns=0 AND tool_calls=0 AND pull_requests=0 AND reviews=0;
+ RETURN NULL;
+END $sync$;
+CREATE OR REPLACE TRIGGER llm_proxy_requests_hourly_delete AFTER DELETE ON llm_proxy_requests
+ REFERENCING OLD TABLE AS old_rows  FOR EACH STATEMENT EXECUTE FUNCTION valet_sync_proxy_hour_delete();
+-- usage daily install
+LOCK TABLE usage_hourly IN SHARE ROW EXCLUSIVE MODE;
+CREATE TABLE IF NOT EXISTS usage_daily (LIKE usage_hourly INCLUDING DEFAULTS, PRIMARY KEY(dimensions,created_at));
+CREATE INDEX IF NOT EXISTS usage_daily_window ON usage_daily(created_at,session_id);
+CREATE INDEX IF NOT EXISTS usage_daily_session_window ON usage_daily(session_id,created_at);
+CREATE INDEX IF NOT EXISTS usage_daily_org_window ON usage_daily(org_id,created_at);
+CREATE INDEX IF NOT EXISTS usage_daily_empty ON usage_daily(created_at) WHERE turns=0 AND tool_calls=0 AND pull_requests=0 AND reviews=0;
+CREATE INDEX IF NOT EXISTS usage_daily_outcomes ON usage_daily(created_at,session_id) WHERE pull_requests>0 OR reviews>0;
+IF to_regclass('usage_daily_ready') IS NULL THEN
+ IF EXISTS(SELECT 1 FROM usage_daily) THEN
+  RAISE EXCEPTION 'Daily usage readiness is missing for an existing projection. Restore its readiness view from backup before restarting the API.';
+ END IF;
+ INSERT INTO usage_daily (dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider,created_at,turns,unpriced_turns,positive_turns,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_total,tool_calls,pull_requests,reviews) SELECT dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider, (floor(created_at::numeric/86400000)*86400000)::bigint,SUM(turns),SUM(unpriced_turns),SUM(positive_turns),SUM(input_tokens),SUM(output_tokens),SUM(cache_read_tokens),SUM(cache_write_tokens),SUM(total_tokens),SUM(cost_total),SUM(tool_calls),SUM(pull_requests),SUM(reviews)
+ FROM usage_hourly GROUP BY 1,2,3,4,5,6,7,8,9;
+END IF;
+CREATE OR REPLACE FUNCTION valet_daily_insert() RETURNS trigger LANGUAGE plpgsql AS $daily$
+BEGIN
+ WITH changes AS (SELECT n.*,1 AS direction FROM new_hours n), deltas AS (
+ SELECT dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider,(floor(created_at::numeric/86400000)*86400000)::bigint AS created_at,
+ SUM(direction*turns) AS turns,SUM(direction*unpriced_turns) AS unpriced_turns,SUM(direction*positive_turns) AS positive_turns,SUM(direction*input_tokens) AS input_tokens,SUM(direction*output_tokens) AS output_tokens,SUM(direction*cache_read_tokens) AS cache_read_tokens,SUM(direction*cache_write_tokens) AS cache_write_tokens,SUM(direction*total_tokens) AS total_tokens,SUM(direction*cost_total) AS cost_total,SUM(direction*tool_calls) AS tool_calls,SUM(direction*pull_requests) AS pull_requests,SUM(direction*reviews) AS reviews
+ FROM changes GROUP BY 1,2,3,4,5,6,7,8,9)
+ INSERT INTO usage_daily(dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider,created_at,turns,unpriced_turns,positive_turns,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_total,tool_calls,pull_requests,reviews) SELECT dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider,created_at,turns,unpriced_turns,positive_turns,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_total,tool_calls,pull_requests,reviews FROM deltas WHERE turns<>0 OR unpriced_turns<>0 OR positive_turns<>0 OR input_tokens<>0 OR output_tokens<>0 OR cache_read_tokens<>0 OR cache_write_tokens<>0 OR total_tokens<>0 OR cost_total<>0 OR tool_calls<>0 OR pull_requests<>0 OR reviews<>0
+ ORDER BY dimensions,created_at ON CONFLICT(dimensions,created_at) DO UPDATE SET
+ turns=usage_daily.turns+EXCLUDED.turns,unpriced_turns=usage_daily.unpriced_turns+EXCLUDED.unpriced_turns,positive_turns=usage_daily.positive_turns+EXCLUDED.positive_turns,input_tokens=usage_daily.input_tokens+EXCLUDED.input_tokens,output_tokens=usage_daily.output_tokens+EXCLUDED.output_tokens,cache_read_tokens=usage_daily.cache_read_tokens+EXCLUDED.cache_read_tokens,cache_write_tokens=usage_daily.cache_write_tokens+EXCLUDED.cache_write_tokens,total_tokens=usage_daily.total_tokens+EXCLUDED.total_tokens,cost_total=usage_daily.cost_total+EXCLUDED.cost_total,tool_calls=usage_daily.tool_calls+EXCLUDED.tool_calls,pull_requests=usage_daily.pull_requests+EXCLUDED.pull_requests,reviews=usage_daily.reviews+EXCLUDED.reviews;
+ DELETE FROM usage_daily WHERE turns=0 AND tool_calls=0 AND pull_requests=0 AND reviews=0;
+ RETURN NULL;
+END $daily$;
+CREATE OR REPLACE TRIGGER usage_hourly_daily_insert AFTER INSERT ON usage_hourly
+ REFERENCING NEW TABLE AS new_hours FOR EACH STATEMENT EXECUTE FUNCTION valet_daily_insert();
+CREATE OR REPLACE FUNCTION valet_daily_update() RETURNS trigger LANGUAGE plpgsql AS $daily$
+BEGIN
+ WITH changes AS (SELECT o.*,-1 AS direction FROM old_hours o UNION ALL SELECT n.*,1 AS direction FROM new_hours n), deltas AS (
+ SELECT dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider,(floor(created_at::numeric/86400000)*86400000)::bigint AS created_at,
+ SUM(direction*turns) AS turns,SUM(direction*unpriced_turns) AS unpriced_turns,SUM(direction*positive_turns) AS positive_turns,SUM(direction*input_tokens) AS input_tokens,SUM(direction*output_tokens) AS output_tokens,SUM(direction*cache_read_tokens) AS cache_read_tokens,SUM(direction*cache_write_tokens) AS cache_write_tokens,SUM(direction*total_tokens) AS total_tokens,SUM(direction*cost_total) AS cost_total,SUM(direction*tool_calls) AS tool_calls,SUM(direction*pull_requests) AS pull_requests,SUM(direction*reviews) AS reviews
+ FROM changes GROUP BY 1,2,3,4,5,6,7,8,9)
+ INSERT INTO usage_daily(dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider,created_at,turns,unpriced_turns,positive_turns,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_total,tool_calls,pull_requests,reviews) SELECT dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider,created_at,turns,unpriced_turns,positive_turns,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_total,tool_calls,pull_requests,reviews FROM deltas WHERE turns<>0 OR unpriced_turns<>0 OR positive_turns<>0 OR input_tokens<>0 OR output_tokens<>0 OR cache_read_tokens<>0 OR cache_write_tokens<>0 OR total_tokens<>0 OR cost_total<>0 OR tool_calls<>0 OR pull_requests<>0 OR reviews<>0
+ ORDER BY dimensions,created_at ON CONFLICT(dimensions,created_at) DO UPDATE SET
+ turns=usage_daily.turns+EXCLUDED.turns,unpriced_turns=usage_daily.unpriced_turns+EXCLUDED.unpriced_turns,positive_turns=usage_daily.positive_turns+EXCLUDED.positive_turns,input_tokens=usage_daily.input_tokens+EXCLUDED.input_tokens,output_tokens=usage_daily.output_tokens+EXCLUDED.output_tokens,cache_read_tokens=usage_daily.cache_read_tokens+EXCLUDED.cache_read_tokens,cache_write_tokens=usage_daily.cache_write_tokens+EXCLUDED.cache_write_tokens,total_tokens=usage_daily.total_tokens+EXCLUDED.total_tokens,cost_total=usage_daily.cost_total+EXCLUDED.cost_total,tool_calls=usage_daily.tool_calls+EXCLUDED.tool_calls,pull_requests=usage_daily.pull_requests+EXCLUDED.pull_requests,reviews=usage_daily.reviews+EXCLUDED.reviews;
+ DELETE FROM usage_daily WHERE turns=0 AND tool_calls=0 AND pull_requests=0 AND reviews=0;
+ RETURN NULL;
+END $daily$;
+CREATE OR REPLACE TRIGGER usage_hourly_daily_update AFTER UPDATE ON usage_hourly
+ REFERENCING OLD TABLE AS old_hours NEW TABLE AS new_hours FOR EACH STATEMENT EXECUTE FUNCTION valet_daily_update();
+CREATE OR REPLACE FUNCTION valet_daily_delete() RETURNS trigger LANGUAGE plpgsql AS $daily$
+BEGIN
+ WITH changes AS (SELECT o.*,-1 AS direction FROM old_hours o), deltas AS (
+ SELECT dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider,(floor(created_at::numeric/86400000)*86400000)::bigint AS created_at,
+ SUM(direction*turns) AS turns,SUM(direction*unpriced_turns) AS unpriced_turns,SUM(direction*positive_turns) AS positive_turns,SUM(direction*input_tokens) AS input_tokens,SUM(direction*output_tokens) AS output_tokens,SUM(direction*cache_read_tokens) AS cache_read_tokens,SUM(direction*cache_write_tokens) AS cache_write_tokens,SUM(direction*total_tokens) AS total_tokens,SUM(direction*cost_total) AS cost_total,SUM(direction*tool_calls) AS tool_calls,SUM(direction*pull_requests) AS pull_requests,SUM(direction*reviews) AS reviews
+ FROM changes GROUP BY 1,2,3,4,5,6,7,8,9)
+ INSERT INTO usage_daily(dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider,created_at,turns,unpriced_turns,positive_turns,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_total,tool_calls,pull_requests,reviews) SELECT dimensions,source_kind,session_id,org_id,user_id,team_id,model,provider,created_at,turns,unpriced_turns,positive_turns,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_total,tool_calls,pull_requests,reviews FROM deltas WHERE turns<>0 OR unpriced_turns<>0 OR positive_turns<>0 OR input_tokens<>0 OR output_tokens<>0 OR cache_read_tokens<>0 OR cache_write_tokens<>0 OR total_tokens<>0 OR cost_total<>0 OR tool_calls<>0 OR pull_requests<>0 OR reviews<>0
+ ORDER BY dimensions,created_at ON CONFLICT(dimensions,created_at) DO UPDATE SET
+ turns=usage_daily.turns+EXCLUDED.turns,unpriced_turns=usage_daily.unpriced_turns+EXCLUDED.unpriced_turns,positive_turns=usage_daily.positive_turns+EXCLUDED.positive_turns,input_tokens=usage_daily.input_tokens+EXCLUDED.input_tokens,output_tokens=usage_daily.output_tokens+EXCLUDED.output_tokens,cache_read_tokens=usage_daily.cache_read_tokens+EXCLUDED.cache_read_tokens,cache_write_tokens=usage_daily.cache_write_tokens+EXCLUDED.cache_write_tokens,total_tokens=usage_daily.total_tokens+EXCLUDED.total_tokens,cost_total=usage_daily.cost_total+EXCLUDED.cost_total,tool_calls=usage_daily.tool_calls+EXCLUDED.tool_calls,pull_requests=usage_daily.pull_requests+EXCLUDED.pull_requests,reviews=usage_daily.reviews+EXCLUDED.reviews;
+ DELETE FROM usage_daily WHERE turns=0 AND tool_calls=0 AND pull_requests=0 AND reviews=0;
+ RETURN NULL;
+END $daily$;
+CREATE OR REPLACE TRIGGER usage_hourly_daily_delete AFTER DELETE ON usage_hourly
+ REFERENCING OLD TABLE AS old_hours  FOR EACH STATEMENT EXECUTE FUNCTION valet_daily_delete();
+CREATE OR REPLACE VIEW usage_daily_entries AS
+ SELECT h.*, s.org_id AS scope_org_id,s.user_id AS scope_user_id,s.owner_type,NULLIF(s.owner_id,'') AS owner_id,
+ r.id AS workflow_run_id,r.workflow_id,
+ CASE WHEN h.session_id LIKE 'orchestrator:%' THEN 'orchestrator'
+ WHEN h.session_id LIKE 'wf:%' THEN 'workflow' ELSE 'session' END AS use_case
+ FROM usage_daily h JOIN agent_sessions s ON s.id=h.session_id
+ LEFT JOIN workflow_runs r ON h.session_id LIKE 'wf:%' AND r.id=split_part(h.session_id,':',2)
+ WHERE h.source_kind='engine'
+ UNION ALL
+ SELECT h.*,r.org_id,CASE WHEN r.owner_type='user' THEN NULLIF(r.owner_id,'') END,r.owner_type,NULLIF(r.owner_id,''),
+ r.id,r.workflow_id,'workflow'::text
+ FROM usage_daily h JOIN workflow_runs r ON h.session_id LIKE 'wf:%' AND r.id=split_part(h.session_id,':',2)
+ WHERE h.source_kind='engine' AND r.org_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM agent_sessions s WHERE s.id=h.session_id)
+ UNION ALL
+ SELECT h.*,h.org_id,h.user_id,CASE WHEN h.team_id IS NOT NULL THEN 'team' ELSE 'user' END,
+ COALESCE(h.team_id,h.user_id),NULL,NULL,CASE WHEN h.provider = 'tagging' THEN 'tagging' ELSE 'proxy' END
+ FROM usage_daily h WHERE h.source_kind='proxy';
+CREATE OR REPLACE VIEW usage_daily_ready AS SELECT 1 AS version FROM usage_daily WHERE false;
+ANALYZE usage_daily;
+-- usage daily end
+
+-- usage hourly backfill
+UPDATE usage_entry_facts SET hourly_accounted=true WHERE NOT hourly_accounted;
+UPDATE llm_proxy_requests SET hourly_accounted=true WHERE NOT hourly_accounted;
+-- usage hourly publish
+CREATE OR REPLACE VIEW usage_hourly_entries AS
+ SELECT h.*, s.org_id AS scope_org_id,s.user_id AS scope_user_id,s.owner_type,NULLIF(s.owner_id,'') AS owner_id,
+ r.id AS workflow_run_id,r.workflow_id,
+ CASE WHEN h.session_id LIKE 'orchestrator:%' THEN 'orchestrator'
+ WHEN h.session_id LIKE 'wf:%' THEN 'workflow' ELSE 'session' END AS use_case
+ FROM usage_hourly h JOIN agent_sessions s ON s.id=h.session_id
+ LEFT JOIN workflow_runs r ON h.session_id LIKE 'wf:%' AND r.id=split_part(h.session_id,':',2)
+ WHERE h.source_kind='engine'
+ UNION ALL
+ SELECT h.*,r.org_id,CASE WHEN r.owner_type='user' THEN NULLIF(r.owner_id,'') END,r.owner_type,NULLIF(r.owner_id,''),
+ r.id,r.workflow_id,'workflow'::text
+ FROM usage_hourly h JOIN workflow_runs r ON h.session_id LIKE 'wf:%' AND r.id=split_part(h.session_id,':',2)
+ WHERE h.source_kind='engine' AND r.org_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM agent_sessions s WHERE s.id=h.session_id)
+ UNION ALL
+ SELECT h.*,h.org_id,h.user_id,CASE WHEN h.team_id IS NOT NULL THEN 'team' ELSE 'user' END,
+ COALESCE(h.team_id,h.user_id),NULL,NULL,CASE WHEN h.provider = 'tagging' THEN 'tagging' ELSE 'proxy' END
+ FROM usage_hourly h WHERE h.source_kind='proxy';
+CREATE OR REPLACE VIEW usage_hourly_ready AS
+ SELECT 1 AS version FROM usage_entry_facts f,llm_proxy_requests p,usage_hourly h,usage_hourly_progress progress
+ WHERE false AND f.hourly_accounted AND p.hourly_accounted;
+END $hourly$;
+
+--> statement-breakpoint
+DO $aux_install$ BEGIN
+-- usage auxiliary install
+-- Install before the bounded action backfill. Each fact insert updates its hour.
+CREATE TABLE IF NOT EXISTS usage_action_facts (
+  invocation_id text PRIMARY KEY REFERENCES action_invocations(invocation_id) ON DELETE CASCADE,
+  created_at bigint NOT NULL,
+  org_id text,
+  session_id text,
+  workflow_execution_id text,
+  tool_calls bigint NOT NULL,
+  outcome_kind text
+);
+CREATE INDEX IF NOT EXISTS usage_action_facts_window ON usage_action_facts(org_id, created_at);
+CREATE TABLE IF NOT EXISTS usage_action_hourly (
+  dimension_key text NOT NULL,
+  hour_ms bigint NOT NULL,
+  org_id text,
+  session_id text,
+  workflow_execution_id text,
+  outcome_kind text,
+  tool_calls bigint NOT NULL,
+  outcomes bigint NOT NULL,
+  facts bigint NOT NULL,
+  PRIMARY KEY (dimension_key, hour_ms)
+);
+CREATE INDEX IF NOT EXISTS usage_action_hourly_window ON usage_action_hourly(org_id, hour_ms);
+-- usage action fact begin
+-- `session_id` of an action fact is the session id the action bills to. A
+-- model-directed action from a Thread step's turn names its queue item and
+-- bills to the step, as the turn's model spend does, so cost per outcome
+-- pairs them. The audit row keeps the session that ran it.
+CREATE OR REPLACE FUNCTION valet_action_fact(a action_invocations)
+RETURNS usage_action_facts LANGUAGE sql STABLE AS $function$
+  SELECT a.invocation_id, COALESCE(a.started_at, a.created_at), a.org_id,
+    CASE WHEN a.queue_item_id IS NOT NULL AND a.session_id NOT LIKE 'wf:%'
+      THEN COALESCE(valet_usage_step_session(a.session_id, a.queue_item_id), a.session_id)
+      ELSE a.session_id END,
+    a.workflow_execution_id,
+    CASE WHEN a.service IS NOT NULL AND a.action_id IS NOT NULL
+      AND a.status IN ('completed', 'error') AND a.duration_ms IS NOT NULL THEN 1 ELSE 0 END::bigint,
+    CASE WHEN a.status = 'completed' AND a.duration_ms IS NOT NULL
+      AND a.result->>'success' = 'true'
+      AND (a.session_id IS NOT NULL OR a.workflow_execution_id IS NOT NULL)
+    THEN CASE
+      WHEN a.action_id = 'github.create_pull_request' THEN 'pull_request_created'
+      WHEN a.action_id = 'github.create_review' AND a.result->'data'->>'state'
+        IN ('APPROVED', 'CHANGES_REQUESTED', 'COMMENTED') THEN 'review_submitted'
+      WHEN a.action_id IN ('slack.dm_owner', 'slack.dm_user') THEN 'slack_dm_sent'
+      WHEN a.action_id IN ('slack.send_message', 'slack.reply_to_origin') THEN
+        CASE WHEN a.result->'data'->>'channel' LIKE 'D%' THEN 'slack_dm_sent' ELSE 'slack_message_sent' END
+    END END;
+$function$;
+-- usage action fact end
+CREATE TABLE IF NOT EXISTS usage_skill_facts (
+  fact_key text PRIMARY KEY,
+  invocation_id text NOT NULL REFERENCES skill_invocations(id) ON DELETE CASCADE,
+  request_id text,
+  created_at bigint NOT NULL,
+  session_id text NOT NULL,
+  skill_key text NOT NULL,
+  skill_name text NOT NULL,
+  origin text NOT NULL,
+  plugin_name text,
+  invoker_user_id text,
+  tokens bigint NOT NULL,
+  invoked bigint NOT NULL
+);
+CREATE INDEX IF NOT EXISTS usage_skill_facts_window ON usage_skill_facts(created_at);
+CREATE INDEX IF NOT EXISTS usage_skill_facts_session_window ON usage_skill_facts(session_id,created_at);
+CREATE INDEX IF NOT EXISTS usage_skill_facts_invocation ON usage_skill_facts(invocation_id);
+CREATE TABLE IF NOT EXISTS usage_skill_hourly (
+  dimension_key text NOT NULL,
+  hour_ms bigint NOT NULL,
+  session_id text NOT NULL,
+  skill_key text NOT NULL,
+  skill_name text NOT NULL,
+  origin text NOT NULL,
+  plugin_name text,
+  invoker_user_id text,
+  tokens bigint NOT NULL,
+  invocations bigint NOT NULL,
+  carrying_calls bigint NOT NULL,
+  facts bigint NOT NULL,
+  PRIMARY KEY(dimension_key,hour_ms)
+);
+CREATE INDEX IF NOT EXISTS usage_skill_hourly_window ON usage_skill_hourly(hour_ms,session_id);
+CREATE INDEX IF NOT EXISTS usage_skill_hourly_session_window ON usage_skill_hourly(session_id,hour_ms);
+CREATE TABLE IF NOT EXISTS usage_skill_request_memberships (
+  dimension_key text NOT NULL,
+  hour_ms bigint NOT NULL,
+  request_key text NOT NULL,
+  request_id text NOT NULL,
+  refs bigint NOT NULL,
+  PRIMARY KEY(dimension_key,hour_ms,request_key)
+);
+CREATE INDEX IF NOT EXISTS usage_skill_membership_request ON usage_skill_request_memberships(request_key);
+CREATE TABLE IF NOT EXISTS usage_skill_requests (
+  request_key text PRIMARY KEY,
+  memberships bigint NOT NULL
+);
+CREATE INDEX IF NOT EXISTS usage_skill_requests_duplicates ON usage_skill_requests(request_key) WHERE memberships > 1;
+CREATE OR REPLACE FUNCTION valet_skill_invocation_fact(i skill_invocations)
+RETURNS usage_skill_facts LANGUAGE sql IMMUTABLE AS $function$
+ SELECT jsonb_build_array(i.id)::text,i.id,NULL::text,i.created_at,i.session_id,i.skill_key,i.skill_name,
+   i.origin,i.plugin_name,i.invoker_user_id,0::bigint,
+   CASE WHEN i.path IN ('model_tool','host_thread_skill','slash_context','slash_prompt') THEN 1 ELSE 0 END::bigint;
+$function$;
+CREATE OR REPLACE FUNCTION valet_skill_context_fact(c skill_context_attributions,i skill_invocations)
+RETURNS usage_skill_facts LANGUAGE sql IMMUTABLE AS $function$
+ SELECT jsonb_build_array(i.id,c.llm_request_id)::text,i.id,
+   CASE WHEN i.path IN ('model_tool','host_thread_skill','slash_context','slash_prompt') THEN c.llm_request_id ELSE NULL END,c.created_at,i.session_id,i.skill_key,i.skill_name,
+   i.origin,i.plugin_name,NULL::text,
+   CASE WHEN i.path IN ('model_tool','host_thread_skill','slash_context','slash_prompt') THEN c.estimated_skill_tokens ELSE 0 END::bigint,0::bigint;
+$function$;
+CREATE OR REPLACE FUNCTION valet_action_hour_sync()
+RETURNS trigger LANGUAGE plpgsql AS $function$
+DECLARE source_query text;
+BEGIN
+  -- Apply one net change per group. Stable order avoids cross-group lock inversion.
+  source_query := CASE TG_OP
+    WHEN 'INSERT' THEN 'SELECT *,1::bigint AS direction FROM new_action_facts'
+    WHEN 'DELETE' THEN 'SELECT *,-1::bigint AS direction FROM old_action_facts'
+    ELSE 'SELECT *,-1::bigint AS direction FROM old_action_facts UNION ALL SELECT *,1::bigint AS direction FROM new_action_facts'
+  END;
+  EXECUTE format($query$
+    INSERT INTO usage_action_hourly AS h
+    SELECT jsonb_build_array(org_id,session_id,workflow_execution_id,outcome_kind)::text,
+      floor(created_at::numeric/3600000)::bigint*3600000,
+      org_id,session_id,workflow_execution_id,outcome_kind,
+      SUM(direction*tool_calls),COALESCE(SUM(direction) FILTER (WHERE outcome_kind IS NOT NULL),0),SUM(direction)
+    FROM (%s) changes GROUP BY 1,2,3,4,5,6 ORDER BY 1,2
+    ON CONFLICT (dimension_key,hour_ms) DO UPDATE SET tool_calls=h.tool_calls+EXCLUDED.tool_calls,
+      outcomes=h.outcomes+EXCLUDED.outcomes,facts=h.facts+EXCLUDED.facts
+  $query$,source_query);
+  EXECUTE format($query$
+    DELETE FROM usage_action_hourly h USING (%s) f
+    WHERE h.dimension_key=jsonb_build_array(f.org_id,f.session_id,f.workflow_execution_id,f.outcome_kind)::text
+      AND h.hour_ms=floor(f.created_at::numeric/3600000)::bigint*3600000 AND h.facts=0
+  $query$,source_query);
+  RETURN NULL;
+END;
+$function$;
+DROP TRIGGER IF EXISTS usage_action_facts_hourly ON usage_action_facts;
+DROP TRIGGER IF EXISTS usage_action_facts_hourly_insert ON usage_action_facts;
+DROP TRIGGER IF EXISTS usage_action_facts_hourly_update ON usage_action_facts;
+DROP TRIGGER IF EXISTS usage_action_facts_hourly_delete ON usage_action_facts;
+CREATE TRIGGER usage_action_facts_hourly_insert AFTER INSERT ON usage_action_facts
+REFERENCING NEW TABLE AS new_action_facts FOR EACH STATEMENT EXECUTE FUNCTION valet_action_hour_sync();
+CREATE TRIGGER usage_action_facts_hourly_update AFTER UPDATE ON usage_action_facts
+REFERENCING OLD TABLE AS old_action_facts NEW TABLE AS new_action_facts FOR EACH STATEMENT EXECUTE FUNCTION valet_action_hour_sync();
+CREATE TRIGGER usage_action_facts_hourly_delete AFTER DELETE ON usage_action_facts
+REFERENCING OLD TABLE AS old_action_facts FOR EACH STATEMENT EXECUTE FUNCTION valet_action_hour_sync();
+CREATE OR REPLACE FUNCTION valet_action_fact_sync()
+RETURNS trigger LANGUAGE plpgsql AS $function$
+BEGIN
+  INSERT INTO usage_action_facts SELECT f.* FROM new_actions a CROSS JOIN LATERAL valet_action_fact(a::action_invocations) f
+  ON CONFLICT (invocation_id) DO UPDATE SET created_at=EXCLUDED.created_at,org_id=EXCLUDED.org_id,
+    session_id=EXCLUDED.session_id,workflow_execution_id=EXCLUDED.workflow_execution_id,
+    tool_calls=EXCLUDED.tool_calls,outcome_kind=EXCLUDED.outcome_kind;
+  RETURN NULL;
+END;
+$function$;
+DROP TRIGGER IF EXISTS action_invocations_usage_fact ON action_invocations;
+DROP TRIGGER IF EXISTS action_invocations_usage_fact_update ON action_invocations;
+CREATE TRIGGER action_invocations_usage_fact AFTER INSERT ON action_invocations
+REFERENCING NEW TABLE AS new_actions FOR EACH STATEMENT EXECUTE FUNCTION valet_action_fact_sync();
+CREATE TRIGGER action_invocations_usage_fact_update AFTER UPDATE ON action_invocations
+REFERENCING NEW TABLE AS new_actions FOR EACH STATEMENT EXECUTE FUNCTION valet_action_fact_sync();
+CREATE OR REPLACE FUNCTION valet_skill_hour_sync()
+RETURNS trigger LANGUAGE plpgsql AS $function$
+DECLARE source_query text;
+BEGIN
+  -- Apply one net change per group. Stable order avoids cross-group lock inversion.
+  source_query := CASE TG_OP
+    WHEN 'INSERT' THEN 'SELECT *,1::bigint AS direction FROM new_skill_facts'
+    WHEN 'DELETE' THEN 'SELECT *,-1::bigint AS direction FROM old_skill_facts'
+    ELSE 'SELECT *,-1::bigint AS direction FROM old_skill_facts UNION ALL SELECT *,1::bigint AS direction FROM new_skill_facts'
+  END;
+  EXECUTE format($query$
+    INSERT INTO usage_skill_hourly AS h
+    SELECT jsonb_build_array(session_id,skill_key,skill_name,origin,plugin_name,invoker_user_id)::text,
+      floor(created_at::numeric/3600000)::bigint*3600000,
+      session_id,skill_key,skill_name,origin,plugin_name,invoker_user_id,
+      SUM(direction*tokens),SUM(direction*invoked),0,SUM(direction)
+    FROM (%s) changes GROUP BY 1,2,3,4,5,6,7,8 ORDER BY 1,2
+    ON CONFLICT(dimension_key,hour_ms) DO UPDATE SET tokens=h.tokens+EXCLUDED.tokens,
+      invocations=h.invocations+EXCLUDED.invocations,facts=h.facts+EXCLUDED.facts
+  $query$,source_query);
+  EXECUTE format($query$
+    WITH deltas AS MATERIALIZED (
+      SELECT jsonb_build_array(session_id,skill_key,skill_name,origin,plugin_name,invoker_user_id)::text AS dimension_key,
+        floor(created_at::numeric/3600000)::bigint*3600000 AS hour_ms,
+        jsonb_build_array(skill_key,skill_name,origin,plugin_name,request_id)::text AS request_key,
+        request_id,SUM(direction) AS refs
+      FROM (%s) changes WHERE request_id IS NOT NULL GROUP BY 1,2,3,4
+    ), changed AS (
+      INSERT INTO usage_skill_request_memberships AS m SELECT * FROM deltas ORDER BY dimension_key,hour_ms,request_key
+      ON CONFLICT(dimension_key,hour_ms,request_key) DO UPDATE SET refs=m.refs+EXCLUDED.refs
+      RETURNING dimension_key,hour_ms,request_key,refs
+    ), membership_changes AS MATERIALIZED (
+      SELECT c.dimension_key,c.hour_ms,c.request_key,
+        CASE WHEN c.refs>0 AND c.refs-d.refs=0 THEN 1 WHEN c.refs=0 AND c.refs-d.refs>0 THEN -1 ELSE 0 END AS delta
+      FROM changed c JOIN deltas d USING(dimension_key,hour_ms,request_key)
+    ), global_changes AS (
+      INSERT INTO usage_skill_requests AS r
+      SELECT request_key,SUM(delta) FROM membership_changes WHERE delta<>0 GROUP BY request_key ORDER BY request_key
+      ON CONFLICT(request_key) DO UPDATE SET memberships=r.memberships+EXCLUDED.memberships
+    )
+    UPDATE usage_skill_hourly h SET carrying_calls=h.carrying_calls+c.delta
+    FROM (SELECT dimension_key,hour_ms,SUM(delta) AS delta FROM membership_changes GROUP BY 1,2) c
+    WHERE h.dimension_key=c.dimension_key AND h.hour_ms=c.hour_ms AND c.delta<>0
+  $query$,source_query);
+  EXECUTE format($query$
+    DELETE FROM usage_skill_request_memberships m USING (%s) f
+    WHERE m.dimension_key=jsonb_build_array(f.session_id,f.skill_key,f.skill_name,f.origin,f.plugin_name,f.invoker_user_id)::text
+      AND m.hour_ms=floor(f.created_at::numeric/3600000)::bigint*3600000
+      AND m.request_key=jsonb_build_array(f.skill_key,f.skill_name,f.origin,f.plugin_name,f.request_id)::text AND m.refs=0
+  $query$,source_query);
+  EXECUTE format($query$
+    DELETE FROM usage_skill_requests r USING (%s) f
+    WHERE r.request_key=jsonb_build_array(f.skill_key,f.skill_name,f.origin,f.plugin_name,f.request_id)::text AND r.memberships=0
+  $query$,source_query);
+  EXECUTE format($query$
+    DELETE FROM usage_skill_hourly h USING (%s) f
+    WHERE h.dimension_key=jsonb_build_array(f.session_id,f.skill_key,f.skill_name,f.origin,f.plugin_name,f.invoker_user_id)::text
+      AND h.hour_ms=floor(f.created_at::numeric/3600000)::bigint*3600000 AND h.facts=0
+  $query$,source_query);
+  RETURN NULL;
+END;
+$function$;
+DROP TRIGGER IF EXISTS usage_skill_facts_hourly ON usage_skill_facts;
+DROP TRIGGER IF EXISTS usage_skill_facts_hourly_insert ON usage_skill_facts;
+DROP TRIGGER IF EXISTS usage_skill_facts_hourly_update ON usage_skill_facts;
+DROP TRIGGER IF EXISTS usage_skill_facts_hourly_delete ON usage_skill_facts;
+CREATE TRIGGER usage_skill_facts_hourly_insert AFTER INSERT ON usage_skill_facts
+REFERENCING NEW TABLE AS new_skill_facts FOR EACH STATEMENT EXECUTE FUNCTION valet_skill_hour_sync();
+CREATE TRIGGER usage_skill_facts_hourly_update AFTER UPDATE ON usage_skill_facts
+REFERENCING OLD TABLE AS old_skill_facts NEW TABLE AS new_skill_facts FOR EACH STATEMENT EXECUTE FUNCTION valet_skill_hour_sync();
+CREATE TRIGGER usage_skill_facts_hourly_delete AFTER DELETE ON usage_skill_facts
+REFERENCING OLD TABLE AS old_skill_facts FOR EACH STATEMENT EXECUTE FUNCTION valet_skill_hour_sync();
+-- Related-row lookups need a fresh snapshot after the invocation lock wait.
+CREATE OR REPLACE FUNCTION valet_skill_lock_invocation(invocation text)
+RETURNS void LANGUAGE plpgsql AS $function$
+BEGIN
+  IF current_setting('transaction_isolation') <> 'read committed' THEN
+    RAISE EXCEPTION USING ERRCODE='40001',
+      MESSAGE='Skill usage updates require READ COMMITTED isolation. Retry the transaction with READ COMMITTED isolation.';
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended(invocation,72401));
+END;
+$function$;
+CREATE OR REPLACE FUNCTION valet_skill_invocation_sync()
+RETURNS trigger LANGUAGE plpgsql AS $function$
+DECLARE invocation text;
+BEGIN
+  -- Related sources share one lock. Ordered acquisition also supports bulk writes.
+  FOR invocation IN SELECT id FROM new_skill_invocations ORDER BY id LOOP
+    PERFORM valet_skill_lock_invocation(invocation);
+  END LOOP;
+  INSERT INTO usage_skill_facts SELECT f.* FROM new_skill_invocations i CROSS JOIN LATERAL valet_skill_invocation_fact(i::skill_invocations) f
+  ON CONFLICT (fact_key) DO UPDATE SET created_at=EXCLUDED.created_at,session_id=EXCLUDED.session_id,
+    skill_key=EXCLUDED.skill_key,skill_name=EXCLUDED.skill_name,origin=EXCLUDED.origin,
+    plugin_name=EXCLUDED.plugin_name,invoker_user_id=EXCLUDED.invoker_user_id,invoked=EXCLUDED.invoked;
+  INSERT INTO usage_skill_facts SELECT f.*
+    FROM new_skill_invocations i JOIN skill_context_attributions c ON c.skill_invocation_id=i.id
+    CROSS JOIN LATERAL valet_skill_context_fact(c,i::skill_invocations) f
+  ON CONFLICT (fact_key) DO UPDATE SET created_at=EXCLUDED.created_at,session_id=EXCLUDED.session_id,
+    skill_key=EXCLUDED.skill_key,skill_name=EXCLUDED.skill_name,origin=EXCLUDED.origin,
+    plugin_name=EXCLUDED.plugin_name,tokens=EXCLUDED.tokens,request_id=EXCLUDED.request_id;
+  RETURN NULL;
+END;
+$function$;
+DROP TRIGGER IF EXISTS skill_invocations_usage_fact ON skill_invocations;
+DROP TRIGGER IF EXISTS skill_invocations_usage_fact_update ON skill_invocations;
+CREATE TRIGGER skill_invocations_usage_fact AFTER INSERT ON skill_invocations
+REFERENCING NEW TABLE AS new_skill_invocations FOR EACH STATEMENT EXECUTE FUNCTION valet_skill_invocation_sync();
+CREATE TRIGGER skill_invocations_usage_fact_update AFTER UPDATE ON skill_invocations
+REFERENCING NEW TABLE AS new_skill_invocations FOR EACH STATEMENT EXECUTE FUNCTION valet_skill_invocation_sync();
+CREATE OR REPLACE FUNCTION valet_skill_context_sync()
+RETURNS trigger LANGUAGE plpgsql AS $function$
+DECLARE invocation text;
+BEGIN
+  -- Serialize related sources before reading metadata, including moved contexts.
+  IF TG_OP = 'UPDATE' THEN
+    FOR invocation IN SELECT skill_invocation_id FROM old_skill_context
+      UNION SELECT skill_invocation_id FROM new_skill_context ORDER BY 1 LOOP
+      PERFORM valet_skill_lock_invocation(invocation);
+    END LOOP;
+    DELETE FROM usage_skill_facts f USING old_skill_context c
+      WHERE f.fact_key=jsonb_build_array(c.skill_invocation_id,c.llm_request_id)::text
+        AND NOT EXISTS (SELECT 1 FROM new_skill_context n
+          WHERE n.skill_invocation_id=c.skill_invocation_id AND n.llm_request_id=c.llm_request_id);
+  ELSIF TG_OP = 'DELETE' THEN
+    FOR invocation IN SELECT DISTINCT skill_invocation_id FROM old_skill_context ORDER BY 1 LOOP
+      PERFORM valet_skill_lock_invocation(invocation);
+    END LOOP;
+    DELETE FROM usage_skill_facts f USING old_skill_context c
+      WHERE f.fact_key=jsonb_build_array(c.skill_invocation_id,c.llm_request_id)::text;
+  ELSE
+    FOR invocation IN SELECT DISTINCT skill_invocation_id FROM new_skill_context ORDER BY 1 LOOP
+      PERFORM valet_skill_lock_invocation(invocation);
+    END LOOP;
+  END IF;
+  IF TG_OP <> 'DELETE' THEN
+    INSERT INTO usage_skill_facts SELECT f.*
+      FROM new_skill_context c JOIN skill_invocations i ON i.id=c.skill_invocation_id
+      CROSS JOIN LATERAL valet_skill_context_fact(c::skill_context_attributions,i) f
+    ORDER BY f.fact_key
+    ON CONFLICT (fact_key) DO UPDATE SET created_at=EXCLUDED.created_at,session_id=EXCLUDED.session_id,
+      skill_key=EXCLUDED.skill_key,skill_name=EXCLUDED.skill_name,origin=EXCLUDED.origin,
+      plugin_name=EXCLUDED.plugin_name,tokens=EXCLUDED.tokens,request_id=EXCLUDED.request_id;
+  END IF;
+  RETURN NULL;
+END;
+$function$;
+DROP TRIGGER IF EXISTS skill_context_usage_fact ON skill_context_attributions;
+DROP TRIGGER IF EXISTS skill_context_usage_fact_update ON skill_context_attributions;
+DROP TRIGGER IF EXISTS skill_context_usage_fact_delete ON skill_context_attributions;
+CREATE TRIGGER skill_context_usage_fact AFTER INSERT ON skill_context_attributions
+REFERENCING NEW TABLE AS new_skill_context FOR EACH STATEMENT EXECUTE FUNCTION valet_skill_context_sync();
+CREATE TRIGGER skill_context_usage_fact_update AFTER UPDATE ON skill_context_attributions
+REFERENCING OLD TABLE AS old_skill_context NEW TABLE AS new_skill_context FOR EACH STATEMENT EXECUTE FUNCTION valet_skill_context_sync();
+CREATE TRIGGER skill_context_usage_fact_delete AFTER DELETE ON skill_context_attributions
+REFERENCING OLD TABLE AS old_skill_context FOR EACH STATEMENT EXECUTE FUNCTION valet_skill_context_sync();
+-- usage auxiliary end
+END $aux_install$;
+
+--> statement-breakpoint
+DO $member$ BEGIN
+-- usage member install
+CREATE TABLE IF NOT EXISTS usage_member_facts (
+  entry_id text PRIMARY KEY, session_id text NOT NULL, queue_item_id text,
+  created_at bigint NOT NULL, actor_id text NOT NULL
+);
+CREATE INDEX IF NOT EXISTS usage_member_facts_queue ON usage_member_facts(queue_item_id,session_id);
+CREATE INDEX IF NOT EXISTS usage_member_facts_window ON usage_member_facts(created_at,session_id);
+CREATE INDEX IF NOT EXISTS usage_member_facts_session_window ON usage_member_facts(session_id,created_at);
+CREATE TABLE IF NOT EXISTS usage_member_hourly (
+  session_id text NOT NULL, actor_id text NOT NULL, created_at bigint NOT NULL,
+  positive_turns bigint NOT NULL, PRIMARY KEY(session_id,actor_id,created_at)
+);
+CREATE INDEX IF NOT EXISTS usage_member_hourly_window ON usage_member_hourly(created_at,session_id);
+
+DROP TRIGGER IF EXISTS usage_member_facts_hourly ON usage_member_facts;
+CREATE INDEX IF NOT EXISTS usage_member_hourly_empty ON usage_member_hourly(created_at) WHERE positive_turns=0;
+CREATE OR REPLACE FUNCTION valet_member_fact_insert() RETURNS trigger LANGUAGE plpgsql AS $changed$
+BEGIN
+  WITH changes AS (SELECT session_id,actor_id,created_at,1 AS direction FROM new_facts)
+  INSERT INTO usage_member_hourly
+    SELECT session_id,actor_id,(floor(created_at::numeric/3600000)*3600000)::bigint,SUM(direction)
+    FROM changes GROUP BY 1,2,3 HAVING SUM(direction)<>0 ORDER BY 1,2,3
+  ON CONFLICT(session_id,actor_id,created_at) DO UPDATE
+    SET positive_turns=usage_member_hourly.positive_turns+EXCLUDED.positive_turns;
+  DELETE FROM usage_member_hourly WHERE positive_turns=0;
+  RETURN NULL;
+END $changed$;
+CREATE OR REPLACE TRIGGER usage_member_facts_insert AFTER INSERT ON usage_member_facts
+  REFERENCING NEW TABLE AS new_facts FOR EACH STATEMENT EXECUTE FUNCTION valet_member_fact_insert();
+CREATE OR REPLACE FUNCTION valet_member_fact_update() RETURNS trigger LANGUAGE plpgsql AS $changed$
+BEGIN
+  WITH changes AS (SELECT session_id,actor_id,created_at,-1 AS direction FROM old_facts UNION ALL SELECT session_id,actor_id,created_at,1 AS direction FROM new_facts)
+  INSERT INTO usage_member_hourly
+    SELECT session_id,actor_id,(floor(created_at::numeric/3600000)*3600000)::bigint,SUM(direction)
+    FROM changes GROUP BY 1,2,3 HAVING SUM(direction)<>0 ORDER BY 1,2,3
+  ON CONFLICT(session_id,actor_id,created_at) DO UPDATE
+    SET positive_turns=usage_member_hourly.positive_turns+EXCLUDED.positive_turns;
+  DELETE FROM usage_member_hourly WHERE positive_turns=0;
+  RETURN NULL;
+END $changed$;
+CREATE OR REPLACE TRIGGER usage_member_facts_update AFTER UPDATE ON usage_member_facts
+  REFERENCING OLD TABLE AS old_facts NEW TABLE AS new_facts FOR EACH STATEMENT EXECUTE FUNCTION valet_member_fact_update();
+CREATE OR REPLACE FUNCTION valet_member_fact_delete() RETURNS trigger LANGUAGE plpgsql AS $changed$
+BEGIN
+  WITH changes AS (SELECT session_id,actor_id,created_at,-1 AS direction FROM old_facts)
+  INSERT INTO usage_member_hourly
+    SELECT session_id,actor_id,(floor(created_at::numeric/3600000)*3600000)::bigint,SUM(direction)
+    FROM changes GROUP BY 1,2,3 HAVING SUM(direction)<>0 ORDER BY 1,2,3
+  ON CONFLICT(session_id,actor_id,created_at) DO UPDATE
+    SET positive_turns=usage_member_hourly.positive_turns+EXCLUDED.positive_turns;
+  DELETE FROM usage_member_hourly WHERE positive_turns=0;
+  RETURN NULL;
+END $changed$;
+CREATE OR REPLACE TRIGGER usage_member_facts_delete AFTER DELETE ON usage_member_facts
+  REFERENCING OLD TABLE AS old_facts  FOR EACH STATEMENT EXECUTE FUNCTION valet_member_fact_delete();
+-- Queue locks serialize actor lookup with corrections to a queue author's identity.
+-- Separate namespaces avoid collisions with other application advisory locks.
+CREATE OR REPLACE FUNCTION valet_member_lock_queue(queue_id text) RETURNS void LANGUAGE plpgsql AS $lock$
+BEGIN
+  IF queue_id IS NOT NULL THEN
+    IF current_setting('transaction_isolation') <> 'read committed' THEN
+      RAISE EXCEPTION 'Retry member activity writes at READ COMMITTED isolation.' USING ERRCODE='40001';
+    END IF;
+    PERFORM pg_advisory_xact_lock(194731,hashtext(queue_id));
+  END IF;
+END $lock$;
+CREATE OR REPLACE FUNCTION valet_member_sync_entry(e engine_entries) RETURNS void LANGUAGE plpgsql AS $entry$
+DECLARE actor text;
+BEGIN
+  PERFORM valet_member_lock_queue(e.queue_item_id);
+  IF e.usage IS NULL OR COALESCE((e.usage::jsonb->>'total')::bigint,0)<=0 THEN
+    DELETE FROM usage_member_facts WHERE entry_id=e.id;
+    RETURN;
+  END IF;
+  SELECT NULLIF(q.author::jsonb->>'id','') INTO actor FROM engine_queue_items q
+    WHERE q.id=e.queue_item_id AND q.session_id=e.session_id;
+  INSERT INTO usage_member_facts VALUES(e.id,e.session_id,e.queue_item_id,e.created_at,COALESCE(actor,''))
+  ON CONFLICT(entry_id) DO UPDATE SET session_id=EXCLUDED.session_id,queue_item_id=EXCLUDED.queue_item_id,
+    created_at=EXCLUDED.created_at,actor_id=EXCLUDED.actor_id;
+END $entry$;
+DROP TRIGGER IF EXISTS engine_entries_member_activity ON engine_entries;
+CREATE OR REPLACE FUNCTION valet_member_entry_insert() RETURNS trigger LANGUAGE plpgsql AS $changed$
+DECLARE queue_id text;
+BEGIN
+  FOR queue_id IN SELECT DISTINCT queue_item_id FROM (SELECT queue_item_id FROM new_entries) ids
+    WHERE queue_item_id IS NOT NULL ORDER BY queue_item_id
+  LOOP PERFORM valet_member_lock_queue(queue_id); END LOOP;
+  INSERT INTO usage_member_facts
+    SELECT e.id,e.session_id,e.queue_item_id,e.created_at,COALESCE(NULLIF(q.author::jsonb->>'id',''),'')
+    FROM new_entries e LEFT JOIN engine_queue_items q ON q.id=e.queue_item_id AND q.session_id=e.session_id
+    WHERE e.usage IS NOT NULL AND COALESCE((e.usage::jsonb->>'total')::bigint,0)>0
+    ORDER BY e.id
+  ON CONFLICT(entry_id) DO UPDATE SET session_id=EXCLUDED.session_id,queue_item_id=EXCLUDED.queue_item_id,
+    created_at=EXCLUDED.created_at,actor_id=EXCLUDED.actor_id;
+  RETURN NULL;
+END $changed$;
+CREATE OR REPLACE TRIGGER engine_entries_member_insert AFTER INSERT ON engine_entries
+  REFERENCING NEW TABLE AS new_entries FOR EACH STATEMENT EXECUTE FUNCTION valet_member_entry_insert();
+CREATE OR REPLACE FUNCTION valet_member_entry_update() RETURNS trigger LANGUAGE plpgsql AS $changed$
+DECLARE queue_id text;
+BEGIN
+  FOR queue_id IN SELECT DISTINCT queue_item_id FROM (SELECT queue_item_id FROM old_entries UNION ALL SELECT queue_item_id FROM new_entries) ids
+    WHERE queue_item_id IS NOT NULL ORDER BY queue_item_id
+  LOOP PERFORM valet_member_lock_queue(queue_id); END LOOP;
+  DELETE FROM usage_member_facts f USING old_entries o WHERE f.entry_id=o.id AND NOT EXISTS (SELECT 1 FROM new_entries n WHERE n.id=o.id AND n.usage IS NOT NULL AND COALESCE((n.usage::jsonb->>'total')::bigint,0)>0);
+  INSERT INTO usage_member_facts
+    SELECT e.id,e.session_id,e.queue_item_id,e.created_at,COALESCE(NULLIF(q.author::jsonb->>'id',''),'')
+    FROM new_entries e LEFT JOIN engine_queue_items q ON q.id=e.queue_item_id AND q.session_id=e.session_id
+    WHERE e.usage IS NOT NULL AND COALESCE((e.usage::jsonb->>'total')::bigint,0)>0
+    ORDER BY e.id
+  ON CONFLICT(entry_id) DO UPDATE SET session_id=EXCLUDED.session_id,queue_item_id=EXCLUDED.queue_item_id,
+    created_at=EXCLUDED.created_at,actor_id=EXCLUDED.actor_id;
+  RETURN NULL;
+END $changed$;
+CREATE OR REPLACE TRIGGER engine_entries_member_update AFTER UPDATE ON engine_entries
+  REFERENCING OLD TABLE AS old_entries NEW TABLE AS new_entries FOR EACH STATEMENT EXECUTE FUNCTION valet_member_entry_update();
+CREATE OR REPLACE FUNCTION valet_member_entry_delete() RETURNS trigger LANGUAGE plpgsql AS $changed$
+DECLARE queue_id text;
+BEGIN
+  FOR queue_id IN SELECT DISTINCT queue_item_id FROM (SELECT queue_item_id FROM old_entries) ids
+    WHERE queue_item_id IS NOT NULL ORDER BY queue_item_id
+  LOOP PERFORM valet_member_lock_queue(queue_id); END LOOP;
+  DELETE FROM usage_member_facts f USING old_entries o WHERE f.entry_id=o.id ;
+  RETURN NULL;
+END $changed$;
+CREATE OR REPLACE TRIGGER engine_entries_member_delete AFTER DELETE ON engine_entries
+  REFERENCING OLD TABLE AS old_entries  FOR EACH STATEMENT EXECUTE FUNCTION valet_member_entry_delete();
+CREATE OR REPLACE FUNCTION valet_member_queue_changed() RETURNS trigger LANGUAGE plpgsql AS $changed$
+DECLARE queue_id text;
+BEGIN
+  FOR queue_id IN SELECT DISTINCT id FROM (VALUES
+    (CASE WHEN TG_OP <> 'INSERT' THEN OLD.id END),
+    (CASE WHEN TG_OP <> 'DELETE' THEN NEW.id END)) ids(id)
+    WHERE id IS NOT NULL ORDER BY id
+  LOOP PERFORM valet_member_lock_queue(queue_id); END LOOP;
+  IF TG_OP <> 'INSERT' THEN
+    UPDATE usage_member_facts SET actor_id=''
+      WHERE queue_item_id=OLD.id AND session_id=OLD.session_id AND actor_id<>'';
+  END IF;
+  IF TG_OP <> 'DELETE' THEN
+    UPDATE usage_member_facts SET actor_id=COALESCE(NULLIF(NEW.author::jsonb->>'id',''),'')
+      WHERE queue_item_id=NEW.id AND session_id=NEW.session_id
+      AND actor_id IS DISTINCT FROM COALESCE(NULLIF(NEW.author::jsonb->>'id',''),'');
+    RETURN NEW;
+  END IF;
+  RETURN OLD;
+END $changed$;
+CREATE OR REPLACE TRIGGER engine_queue_items_member_activity AFTER INSERT OR DELETE OR UPDATE OF id,session_id,author
+  ON engine_queue_items FOR EACH ROW EXECUTE FUNCTION valet_member_queue_changed();
+CREATE OR REPLACE FUNCTION valet_member_backfill_batch(after_id text, batch_size integer) RETURNS text
+LANGUAGE plpgsql AS $batch$
+DECLARE entry_ids text[]; queue_id text; last_id text;
+BEGIN
+  -- Keep only ids in memory; source rows can contain large transcripts.
+  SELECT array_agg(id) INTO entry_ids FROM (
+    SELECT e.id FROM engine_entries e WHERE id>after_id AND usage IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM usage_member_facts f WHERE f.entry_id=e.id)
+    ORDER BY id LIMIT batch_size FOR UPDATE
+  ) batch;
+  IF entry_ids IS NULL THEN RETURN NULL; END IF;
+  FOR queue_id IN SELECT DISTINCT e.queue_item_id FROM engine_entries e
+    WHERE e.id=ANY(entry_ids) AND e.queue_item_id IS NOT NULL ORDER BY e.queue_item_id
+  LOOP PERFORM valet_member_lock_queue(queue_id); END LOOP;
+  INSERT INTO usage_member_facts
+    SELECT e.id,e.session_id,e.queue_item_id,e.created_at,COALESCE(NULLIF(q.author::jsonb->>'id',''),'')
+    FROM engine_entries e LEFT JOIN engine_queue_items q ON q.id=e.queue_item_id AND q.session_id=e.session_id
+    WHERE e.id=ANY(entry_ids) AND COALESCE((e.usage::jsonb->>'total')::bigint,0)>0 ORDER BY e.id
+    ON CONFLICT(entry_id) DO NOTHING;
+  SELECT max(id) INTO last_id FROM unnest(entry_ids) id;
+  RETURN last_id;
+END $batch$;
+-- usage member install end
+-- usage member backfill
+INSERT INTO usage_member_facts
+  SELECT e.id,e.session_id,e.queue_item_id,e.created_at,COALESCE(NULLIF(q.author::jsonb->>'id',''),'')
+  FROM engine_entries e LEFT JOIN engine_queue_items q ON q.id=e.queue_item_id AND q.session_id=e.session_id
+  WHERE e.usage IS NOT NULL AND COALESCE((e.usage::jsonb->>'total')::bigint,0)>0
+  ON CONFLICT(entry_id) DO NOTHING;
+-- usage member publish
+CREATE OR REPLACE VIEW usage_member_activity_ready AS SELECT 1 AS version FROM usage_member_facts,usage_member_hourly WHERE false;
+
+END $member$;
+
+--> statement-breakpoint
+-- A fresh database has no Thread-step turns to move, so it is ready here.
+-- A deployed database gets this view only from the completed repair
+-- (lib/usage-step-attribution.ts): no install section other repairs run
+-- creates it, so an interrupted backfill stays pending until it finishes.
+CREATE OR REPLACE VIEW usage_step_attribution_ready AS SELECT 1 AS version WHERE false;
+
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "event_receipts" (
+  "id" text PRIMARY KEY, "org_id" text NOT NULL, "service" text NOT NULL,
+  "external_id" text, "metadata" jsonb NOT NULL DEFAULT '{}',
+  "stages" jsonb NOT NULL DEFAULT '[]', "event_key" text, "event_id" text,
+  "subscriptions" jsonb NOT NULL DEFAULT '[]',
+  "created_at" bigint NOT NULL, "updated_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "event_receipts_page" ON "event_receipts" ("org_id", "created_at", "id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "event_receipts_event" ON "event_receipts" ("org_id", "event_id");
+
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "workspace_briefing_cache" (
+  "org_id" text NOT NULL, "owner_type" text NOT NULL, "owner_id" text NOT NULL,
+  "version" text NOT NULL, "evidence_hash" text, "response" jsonb,
+  "checked_at" bigint, "next_check_at" bigint NOT NULL DEFAULT 0,
+  "lease_token" text, "lease_until" bigint NOT NULL DEFAULT 0,
+  PRIMARY KEY ("org_id", "owner_type", "owner_id")
+);
+
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "workflow_action_grants" (
+  "id" text PRIMARY KEY, "org_id" text NOT NULL, "workflow_id" text NOT NULL,
+  "owner_type" text NOT NULL, "owner_id" text NOT NULL, "action_id" text NOT NULL,
+  "granted_by" text NOT NULL, "created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "workflow_action_grants_workflow" ON "workflow_action_grants" ("org_id", "workflow_id");
+
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "briefing_dismissals" (
+  "user_id" text NOT NULL, "org_id" text NOT NULL, "owner_type" text NOT NULL, "owner_id" text NOT NULL,
+  "briefing_id" text NOT NULL, "dismissed_at" bigint NOT NULL,
+  PRIMARY KEY ("user_id", "owner_type", "owner_id", "briefing_id")
+);
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "thread_reads" (
+  "user_id" text NOT NULL, "session_id" text NOT NULL, "thread_id" text NOT NULL, "read_at" bigint NOT NULL,
+  PRIMARY KEY ("user_id", "thread_id")
+);
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "thread_pull_requests" (
+  "session_id" text NOT NULL, "thread_id" text NOT NULL, "url" text NOT NULL, "repo" text NOT NULL,
+  "number" bigint NOT NULL, "state" text NOT NULL, "created_at" bigint NOT NULL, "updated_at" bigint NOT NULL,
+  "checked_at" bigint NOT NULL, "opened_session_id" text, "opened_thread_id" text,
+  PRIMARY KEY ("session_id", "thread_id", "url")
+);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "thread_pull_requests_url" ON "thread_pull_requests" ("url");
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "channel_messages" (
+  "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "session_id" text NOT NULL, "thread_id" text NOT NULL,
+  "channel_key" text NOT NULL, "conversation_key" text NOT NULL, "provider_message_id" text NOT NULL,
+  "direction" text NOT NULL, "author" text, "text" text, "url" text, "created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "channel_messages_session_message" ON "channel_messages" ("org_id", "session_id", "channel_key", "provider_message_id", "direction");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "channel_messages_channel" ON "channel_messages" ("org_id", "channel_key", "created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "channel_messages_thread" ON "channel_messages" ("session_id", "thread_id", "created_at");
+--> statement-breakpoint
+-- Whether a Slack channel is private, as the bot last saw it. Thread access
+-- reads this when Slack cannot answer, so a known private channel stays hidden
+-- and a public one stays readable after a disconnect.
+CREATE TABLE IF NOT EXISTS "slack_channel_privacy" (
+	"org_id" text NOT NULL,
+	"channel_id" text NOT NULL,
+	"is_private" boolean NOT NULL,
+	"checked_at" bigint NOT NULL,
+	PRIMARY KEY("org_id","channel_id")
+);
+
+--> statement-breakpoint
+CREATE TABLE "slack_webhook_inbox" ("id" text PRIMARY KEY, "org_id" text NOT NULL, "payload" text NOT NULL, "created_at" bigint NOT NULL, "next_attempt_at" bigint NOT NULL, "attempts" integer NOT NULL DEFAULT 0, "failed_at" bigint);
+--> statement-breakpoint
+CREATE INDEX "slack_webhook_inbox_due" ON "slack_webhook_inbox" ("next_attempt_at");
+
+--> statement-breakpoint
+CREATE TABLE "legacy_assistant_runtimes" (session_id text PRIMARY KEY, org_id text NOT NULL, assistant_id text, owner_type text, owner_id text);
+--> statement-breakpoint
+CREATE TABLE "legacy_assistant_conversations" (thread_id text PRIMARY KEY, session_id text NOT NULL, conversation_key text NOT NULL);
+--> statement-breakpoint
+CREATE TABLE "legacy_workflow_runtimes" (workflow_id text PRIMARY KEY, session_id text NOT NULL, org_id text NOT NULL);
+
+--> statement-breakpoint
+CREATE TABLE "legacy_workflow_admissions" (queue_item_id text PRIMARY KEY, session_id text NOT NULL, thread_id text NOT NULL, dispatch_id text NOT NULL, org_id text NOT NULL);
+
+--> statement-breakpoint
+CREATE TABLE "legacy_workflow_run_runtimes" (run_id text PRIMARY KEY, session_id text NOT NULL, org_id text NOT NULL);
+
+--> statement-breakpoint
+CREATE TABLE "legacy_artifact_publications" (artifact_id text PRIMARY KEY, org_id text NOT NULL, owner_type text NOT NULL, owner_id text NOT NULL, source_session_id text NOT NULL);
+
+--> statement-breakpoint
+CREATE TABLE "user_tutorial" (
+  "user_id" text PRIMARY KEY REFERENCES "user"("id") ON DELETE CASCADE,
+  "seen_version" integer NOT NULL DEFAULT 0, "seen_org_version" integer NOT NULL DEFAULT 0,
+  "outcome" text, "step" text, "updated_at" bigint NOT NULL
+);
+
+--> statement-breakpoint
+CREATE TABLE "generated_files" (
+  "id" text PRIMARY KEY, "org_id" text NOT NULL, "session_id" text NOT NULL,
+  "thread_id" text NOT NULL, "digest" text NOT NULL, "name" text NOT NULL,
+  "mime_type" text NOT NULL, "bytes" bigint NOT NULL, "ready" boolean NOT NULL DEFAULT false,
+  "created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX generated_files_scope_digest ON generated_files (org_id, session_id, thread_id, digest);
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "cli_device_requests" (
+  "device_code_hash" text PRIMARY KEY NOT NULL, "user_code" text NOT NULL, "device" text NOT NULL,
+  "status" text NOT NULL DEFAULT 'pending', "user_id" text REFERENCES "user"("id") ON DELETE cascade,
+  "created_at" bigint NOT NULL, "expires_at" bigint NOT NULL, "last_poll_at" bigint,
+  "purpose" text NOT NULL DEFAULT 'login', "key_name" text,
+  "requested_by" text REFERENCES "user"("id") ON DELETE cascade
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "cli_device_requests_user_code" ON "cli_device_requests" ("user_code");
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "cli_tokens" (
+  "id" text PRIMARY KEY NOT NULL, "user_id" text NOT NULL REFERENCES "user"("id") ON DELETE cascade,
+  "device" text NOT NULL, "access_hash" text NOT NULL, "refresh_hash" text NOT NULL,
+  "access_expires_at" bigint NOT NULL, "refresh_expires_at" bigint NOT NULL,
+  "created_at" bigint NOT NULL, "last_used_at" bigint,
+  "prev_access_hash" text, "prev_refresh_hash" text, "rotated_at" bigint
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "cli_tokens_access" ON "cli_tokens" ("access_hash");
+--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "cli_tokens_refresh" ON "cli_tokens" ("refresh_hash");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "cli_tokens_user" ON "cli_tokens" ("user_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "cli_device_requests_expires" ON "cli_device_requests" ("expires_at");
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "child_reply_deliveries" (
+  "id" text PRIMARY KEY NOT NULL,
+  "org_id" text NOT NULL,
+  "session_id" text NOT NULL,
+  "thread_id" text NOT NULL,
+  "queue_item_id" text,
+  "next_attempt_at" bigint NOT NULL,
+  "completed_at" bigint,
+  "attempts" integer DEFAULT 0 NOT NULL,
+  "last_error" text,
+  "failed_at" bigint,
+  "created_at" bigint,
+  "child_session_id" text,
+  "child_queue_item_id" text
+);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "child_reply_deliveries_due" ON "child_reply_deliveries" ("org_id", "completed_at", "next_attempt_at");
+
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "workflow_account_grants" (
+  "org_id" text NOT NULL, "workflow_id" text NOT NULL, "team_id" text NOT NULL,
+  "service" text NOT NULL, "member_id" text NOT NULL, "share_generation" text NOT NULL,
+  "created_at" bigint NOT NULL,
+  PRIMARY KEY ("org_id", "workflow_id", "team_id", "service", "member_id")
+);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "workflow_account_grants_share" ON "workflow_account_grants" ("team_id", "service", "member_id");
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "home_tasks" (
+  "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "user_id" text NOT NULL,
+  "owner_type" text NOT NULL, "owner_id" text NOT NULL, "session_id" text NOT NULL, "thread_id" text NOT NULL,
+  "title" text NOT NULL, "queue_item_id" text, "created_at" bigint NOT NULL, "reported_at" bigint, "done_at" bigint
+);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "home_tasks_user" ON "home_tasks" ("user_id", "created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "home_tasks_thread" ON "home_tasks" ("session_id", "thread_id");
+
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "channel_progress_deliveries" (
+  "id" text PRIMARY KEY,
+  "org_id" text NOT NULL,
+  "session_id" text NOT NULL,
+  "thread_id" text NOT NULL,
+  "turn_id" text NOT NULL,
+  "channel_type" text NOT NULL,
+  "conversation_key" text NOT NULL,
+  "thread_ts" text,
+  "message_id" text,
+  "last_revision" text,
+  "create_started" boolean NOT NULL DEFAULT false,
+  "attempts" integer NOT NULL DEFAULT 0,
+  "next_attempt_at" bigint NOT NULL DEFAULT 0,
+  "lease_token" text,
+  "lease_until" bigint NOT NULL DEFAULT 0,
+  "completed_at" bigint,
+  "failed_at" bigint,
+  "last_error" text
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "channel_progress_scope" ON "channel_progress_deliveries" ("org_id", "session_id", "thread_id", "turn_id", "channel_type", "conversation_key");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "channel_progress_pending_due" ON "channel_progress_deliveries" ("org_id", "next_attempt_at") WHERE "completed_at" IS NULL AND "failed_at" IS NULL;
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "external_calls" (
+  "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "user_id" text,
+  "surface" text NOT NULL, "name" text NOT NULL, "client_name" text, "client_version" text,
+  "session_id" text, "persona" text, "thread_id" text, "owner_type" text NOT NULL, "owner_id" text NOT NULL,
+  "outcome" text NOT NULL, "error_code" text, "duration_ms" integer NOT NULL,
+  "intent" text, "intent_cleared_at" bigint, "created_at" bigint NOT NULL,
+  CONSTRAINT "external_calls_intent_length" CHECK (length("intent") <= 500)
+);
+
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "external_calls_org_created" ON "external_calls" ("org_id", "created_at", "id");
+
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "external_calls_user_created" ON "external_calls" ("org_id", "user_id", "created_at");
+
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "mcp_client_info" (
+  "org_id" text NOT NULL, "user_id" text NOT NULL, "client_id" text NOT NULL,
+  "name" text NOT NULL, "version" text NOT NULL, PRIMARY KEY ("org_id", "user_id", "client_id")
+);
+
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS external_calls_owner_created ON external_calls (org_id, owner_type, owner_id, created_at);
+
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS external_calls_intent_retention ON external_calls (created_at) WHERE intent IS NOT NULL;
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS tag_keys (
+ org_id text NOT NULL, dimension text NOT NULL, key text NOT NULL CHECK (key ~ '^[a-z][a-z0-9_]{0,31}$'),
+ label text NOT NULL, definition text NOT NULL, examples jsonb NOT NULL DEFAULT '[]',
+ origin text NOT NULL, status text NOT NULL, edited_at bigint, merged_into text, created_at bigint NOT NULL, updated_at bigint NOT NULL,
+ PRIMARY KEY (org_id, dimension, key)
+);
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS tag_labels (
+ org_id text NOT NULL, subject_type text NOT NULL, subject_id text NOT NULL, dimension text NOT NULL, key text NOT NULL,
+ mode text NOT NULL, confidence float8 NOT NULL CHECK (confidence >= 0 AND confidence <= 1), model text NOT NULL,
+ input_hash text NOT NULL, classified_at bigint NOT NULL,
+ PRIMARY KEY (org_id, subject_type, subject_id, dimension, key)
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS tag_labels_single ON tag_labels (org_id, subject_type, subject_id, dimension) WHERE mode = 'single';
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS tag_labels_aggregate ON tag_labels (org_id, dimension, key, classified_at);
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS tag_subjects (
+ session_id text, thread_id text,
+ org_id text NOT NULL, dimension text NOT NULL, subject_type text NOT NULL, subject_id text NOT NULL, user_id text, owner_type text, owner_id text,
+ retag_day bigint NOT NULL DEFAULT 0, retag_count integer NOT NULL DEFAULT 0, input_hash text NOT NULL, other_retried boolean NOT NULL DEFAULT false,
+ PRIMARY KEY (org_id, dimension, subject_type, subject_id)
+);
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS tag_jobs (
+ session_id text, thread_id text,
+ org_id text NOT NULL, dimension text NOT NULL, subject_type text NOT NULL, subject_id text NOT NULL,
+ version integer NOT NULL DEFAULT 1, attempts integer NOT NULL DEFAULT 0, force boolean NOT NULL DEFAULT false, next_attempt_at bigint NOT NULL,
+ PRIMARY KEY (org_id, dimension, subject_type, subject_id)
+);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS tag_jobs_retry_due ON tag_jobs (next_attempt_at) WHERE attempts < 5;
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS tag_dimension_state (
+ org_id text NOT NULL, dimension text NOT NULL, lease_token text, lease_until bigint NOT NULL DEFAULT 0,
+ retry_other boolean NOT NULL DEFAULT false, key_limit integer NOT NULL DEFAULT 100, consolidation_due boolean NOT NULL DEFAULT false, PRIMARY KEY (org_id, dimension)
+);
+--> statement-breakpoint
+
+CREATE OR REPLACE VIEW tag_resolved_labels AS
+WITH RECURSIVE resolved AS (
+ SELECT org_id, dimension, key AS original_key, key, status, merged_into, 0 AS depth FROM tag_keys
+ UNION ALL
+ SELECT r.org_id, r.dimension, r.original_key, k.key, k.status, k.merged_into, r.depth + 1
+ FROM resolved r JOIN tag_keys k ON k.org_id = r.org_id AND k.dimension = r.dimension AND k.key = r.merged_into
+ WHERE r.status = 'merged' AND r.depth < 1000
+)
+SELECT DISTINCT ON (l.org_id, l.subject_type, l.subject_id, l.dimension, r.key) l.org_id, l.subject_type, l.subject_id, l.dimension, r.key, l.key AS original_key,
+ l.confidence, l.model, l.input_hash, l.classified_at
+FROM tag_labels l JOIN resolved r ON r.org_id = l.org_id AND r.dimension = l.dimension AND r.original_key = l.key
+WHERE r.status <> 'merged' ORDER BY l.org_id, l.subject_type, l.subject_id, l.dimension, r.key, l.classified_at DESC, l.confidence DESC;
+
+--> statement-breakpoint
+CREATE OR REPLACE VIEW tagging_accounting_ready AS SELECT 1 AS version WHERE false;

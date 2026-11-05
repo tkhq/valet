@@ -5,6 +5,7 @@
  * methods, mirroring `settings.ts`/`workflows.ts` conventions.
  */
 import {
+  useInfiniteQuery,
   useMutation,
   useQuery,
   useQueryClient,
@@ -16,14 +17,14 @@ import type {
   FilterOptionsResponse,
   GetEventCatalogResponse,
   GetEventResponse,
-  ListEventDropsResponse,
-  ListEventsResponse,
+  ListEventReceiptsResponse,
   ListEventSubscriptionsResponse,
   PatchEventSubscriptionRequest,
   PatchEventSubscriptionResponse,
   RedeliverEventResponse,
 } from "@valet/api/wire";
 import { api, type OwnerFilter } from "./client";
+import { qkPresence } from "./presence";
 
 /** Key marker for a scoped query whose owner has not resolved. Not a valid
  * `ownerType`, so it can never collide with a real owner pair. */
@@ -51,10 +52,9 @@ export const qkEvents = {
   catalog: () => ["events", "catalog"] as const,
   filterOptions: (source: string, q: string, deps: Record<string, string>) =>
     filterOptionsKey(source, q, deps),
-  feed: (service?: string, key?: string, owner?: OwnerFilter, held = false) =>
-    ["events", "feed", service ?? "", key ?? "", ...ownerKey(owner, held)] as const,
+  log: (owner: OwnerFilter | undefined, problems: boolean, q?: string, diagnostics = false, place?: string) =>
+    ["events", "log", owner?.ownerType ?? "", owner?.ownerId ?? "", problems ? "problems" : "all", q ?? "", diagnostics, place ?? ""] as const,
   detail: (id: string) => ["events", "detail", id] as const,
-  drops: () => ["events", "drops"] as const,
   subscriptions: (owner?: OwnerFilter, held = false) =>
     ["events", "subscriptions", ...ownerKey(owner, held)] as const,
 };
@@ -90,26 +90,6 @@ export function useFilterOptions(
   });
 }
 
-/** `owner` narrows the feed to events delivered to that owner's
- * subscriptions. Undefined keeps the whole org's feed, unless the caller
- * also disabled the query, which means "one workspace, owner still
- * unknown". */
-export function useEvents(
-  params?: { service?: string; key?: string },
-  owner?: OwnerFilter,
-  opts?: Partial<UseQueryOptions<ListEventsResponse>>,
-) {
-  // Held for a missing owner, not unscoped on purpose — see `ownerKey`.
-  const held = owner === undefined && opts?.enabled === false;
-  return useQuery<ListEventsResponse>({
-    queryKey: qkEvents.feed(params?.service, params?.key, owner, held),
-    queryFn: () => api.listEvents(params, owner),
-    // New events arrive from external webhooks at any time.
-    refetchInterval: 30_000,
-    ...opts,
-  });
-}
-
 export function useEvent(id: string, opts?: Partial<UseQueryOptions<GetEventResponse>>) {
   return useQuery<GetEventResponse>({
     queryKey: qkEvents.detail(id),
@@ -121,15 +101,23 @@ export function useEvent(id: string, opts?: Partial<UseQueryOptions<GetEventResp
   });
 }
 
-/** Recent reasons an event arrived but did not become a feed row, plus the
- * last time any event reached ingest. Polls like the feed — new drops land
- * from external webhooks at any time. */
-export function useEventDrops(opts?: Partial<UseQueryOptions<ListEventDropsResponse>>) {
-  return useQuery<ListEventDropsResponse>({
-    queryKey: qkEvents.drops(),
-    queryFn: () => api.listEventDrops(),
-    refetchInterval: 30_000,
-    ...opts,
+/** The Log: stored events and recorded problems, newest first, one page at a
+ * time. Polls the first page while nothing is searched. */
+export function useEventLog(params: { owner: OwnerFilter | undefined; problems: boolean; diagnostics?: boolean; q?: string; place?: string }) {
+  const { owner } = params;
+  return useInfiniteQuery({
+    queryKey: qkEvents.log(owner, params.problems, params.q, params.diagnostics, params.place),
+    initialPageParam: undefined as string | undefined,
+    queryFn: ({ pageParam }) => owner
+      ? api.getEventLog({
+        owner, problems: params.problems, diagnostics: params.diagnostics,
+        ...(params.q ? { q: params.q } : {}), ...(params.place ? { place: params.place } : {}), ...(pageParam ? { cursor: pageParam } : {}),
+      })
+      : Promise.reject(new Error("No workspace selected.")),
+    // An owner-less request names no workspace, so the Log waits for the owner.
+    enabled: owner !== undefined,
+    getNextPageParam: (page) => page.nextCursor ?? undefined,
+    refetchInterval: params.q ? false : 30_000,
   });
 }
 
@@ -143,9 +131,15 @@ export function useRedeliverEvent(id: string) {
     mutationFn: () => api.redeliverEvent(id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkEvents.detail(id) });
+      qc.invalidateQueries({ queryKey: ["events", "log"] });
+      // A line's Activity lists the redelivered entries too.
+      qc.invalidateQueries({ queryKey: LINE_ACTIVITY_PREFIX });
     },
   });
 }
+
+/** The prefix of every line's Activity query (`qkLineActivity.line` in `api/line-activity.ts`). */
+const LINE_ACTIVITY_PREFIX = ["events", "line-activity"] as const;
 
 /** `owner` scopes the list to one workspace plus every org-owned
  * subscription. Undefined lists every subscription in the org; an undefined
@@ -164,11 +158,16 @@ export function useEventSubscriptions(
 
 /** A workflow-target subscription is the same row the workflow page lists as
  * an event trigger (`["workflows", "triggers", …]`), so every subscription
- * mutation invalidates that key too — else the trigger list serves a stale
- * snapshot after an edit here. Raw prefix, matching `api/workflows.ts`. */
-function invalidateSubscriptionReaders(qc: ReturnType<typeof useQueryClient>) {
-  void qc.invalidateQueries({ queryKey: qkEvents.subscriptions() });
+ * mutation invalidates that key too. Otherwise the trigger list serves a stale
+ * snapshot after an edit here. Raw prefix, matching `api/workflows.ts`.
+ * The Presence reads (places, a place page) list the same rules, so a
+ * listener added from a place page shows there at once. A line's Activity
+ * and health strip read the line too, so an edit refreshes them. */
+function invalidateSubscriptionReaders(qc: ReturnType<typeof useQueryClient>): Promise<void> {
+  void qc.invalidateQueries({ queryKey: LINE_ACTIVITY_PREFIX });
   void qc.invalidateQueries({ queryKey: ["workflows", "triggers"] });
+  void qc.invalidateQueries({ queryKey: qkPresence.all });
+  return qc.invalidateQueries({ queryKey: qkEvents.subscriptions() });
 }
 
 export function useCreateEventSubscription() {
@@ -189,9 +188,10 @@ export function usePatchEventSubscription() {
     { id: string; body: PatchEventSubscriptionRequest }
   >({
     mutationFn: ({ id, body }) => api.patchEventSubscription(id, body),
-    onSuccess: () => {
-      invalidateSubscriptionReaders(qc);
-    },
+    // Pending lasts until the line list is read again, so the line page's
+    // inline form stays locked until it can read the saved line. An edit
+    // made before that would diff against a row the next refetch replaces.
+    onSuccess: () => invalidateSubscriptionReaders(qc),
   });
 }
 
@@ -202,5 +202,15 @@ export function useDeleteEventSubscription() {
     onSuccess: () => {
       invalidateSubscriptionReaders(qc);
     },
+  });
+}
+
+/** Receipt logs are org-wide and admin-only. No placeholder data crosses a search or page boundary. */
+export function useEventReceipts(orgId: string | undefined, params: { q?: string; cursor?: string; limit?: number }, enabled: boolean) {
+  return useQuery<ListEventReceiptsResponse>({
+    queryKey: ["events", "receipts", orgId, params.q ?? "", params.cursor ?? "", params.limit ?? 25],
+    queryFn: () => api.listEventReceipts(params),
+    enabled: enabled && !!orgId,
+    refetchInterval: params.q || params.cursor ? false : 30_000,
   });
 }

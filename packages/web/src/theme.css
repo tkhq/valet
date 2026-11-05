@@ -61,18 +61,13 @@
 /**
  * Hover/press washes — `--ink-wash` and `--moss-wash`.
  *
- * OPACITY-MODIFIER TRAP: Tailwind's `bg-ink/10` slash-opacity syntax only
- * works when a theme color is registered as a function that receives an
- * `<alpha-value>` placeholder (e.g. `rgb(var(--x) / <alpha-value>)`). Our
- * tokens (`ink`, `paper`, `moss`, …) are plain color strings pointing at CSS
- * variables (`var(--ink)` etc, see `tailwind.config.ts`), so `bg-ink/10`,
- * `hover:bg-moss/20`, and friends silently no-op — Tailwind can't inject an
- * alpha channel into an opaque custom property. This is why earlier
- * surfaces reached for hardcoded `hover:bg-neutral-100 dark:hover:bg-neutral-900`
- * stopgaps instead of a token-based wash. Don't repeat that: use these
- * pre-mixed wash variables (exposed as the `ink-wash` / `moss-wash`
- * Tailwind colors below) for hover/press states instead of opacity
- * modifiers on `ink`/`moss`/`paper`.
+ * Opacity modifiers: the variable tokens (`ink`, `paper`, `moss`, …) are
+ * registered through `varColor` in `tailwind.config.ts`, so `bg-ink/10`
+ * emits a `color-mix(...)` rule, and the fixed OKLCH scales (`neutral`,
+ * `accent`, `danger`, `success`) carry `<alpha-value>`. Before both, slash
+ * classes silently emitted no CSS. Prefer these pre-mixed wash variables
+ * (the `ink-wash` / `moss-wash` Tailwind colors) for hover and press states:
+ * they keep one tuned alpha per theme.
  *
  * Built with native `oklch(... / <alpha>)` syntax at the SAME lightness/
  * chroma/hue as the base token they wash, rather than a separately
@@ -144,9 +139,8 @@
   --moss-wash: oklch(53.5% 0.190 264 / 0.1);
   --moss-wash-strong: oklch(53.5% 0.190 264 / 0.18);
   /* Mid-strength neutral fill for data marks — chart bars, idle dots —
-     that must read against an `--ink-wash` track. Same L/C/H as `--muted`;
-     the alpha lives in the token because a `/50` slash modifier on these
-     `var()` colors emits no rule at all (the trap above). */
+     that must read against an `--ink-wash` track. Same L/C/H as `--muted`,
+     with the alpha in the token. */
   --muted-wash: oklch(55.4% 0.015 247 / 0.5);
 
   /* Status washes. These exist for the same reason as the washes above,
@@ -455,56 +449,4 @@
   --danger-wash: oklch(68.0% 0.200 27 / 0.20);
   --warning-wash: oklch(80.0% 0.130 75 / 0.20);
   --warning-fg: oklch(85.0% 0.110 75);
-}
-
-/**
- * Presence mark (decision 10) — the single place this theme spends
- * boldness. Idle breathes slowly in the brand blue (`--moss`, see the
- * top-of-file note on why the variable keeps its old name), thinking
- * breathes quicker in amber (the palette's "waiting" color), working is
- * steady. Reduced motion collapses all three to a static dot, enforced
- * twice: the JS component adds `presence-dot--static` (see
- * presence-mark.tsx), and this `@media` block is a CSS-only backstop in
- * case a consumer renders the dot without going through the component.
- */
-.presence-dot {
-  display: inline-block;
-  border-radius: 9999px;
-}
-
-.presence-dot--idle {
-  background: var(--moss);
-  animation: presence-breathe-idle 2.4s ease-in-out infinite;
-}
-
-.presence-dot--thinking {
-  background: var(--amber);
-  animation: presence-breathe-thinking 1.2s ease-in-out infinite;
-}
-
-.presence-dot--working {
-  background: var(--moss);
-  opacity: 1;
-}
-
-.presence-dot--static {
-  animation: none !important;
-  opacity: 1;
-}
-
-@keyframes presence-breathe-idle {
-  0%, 100% { opacity: 0.35; }
-  50% { opacity: 1; }
-}
-
-@keyframes presence-breathe-thinking {
-  0%, 100% { opacity: 0.4; }
-  50% { opacity: 1; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .presence-dot {
-    animation: none !important;
-    opacity: 1;
-  }
 }

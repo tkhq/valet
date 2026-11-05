@@ -1,157 +1,115 @@
-import { useEffect, useRef, useState } from "react";
-import { Bell } from "lucide-react";
-import type { NotificationKind, NotificationSummary } from "@valet/api/wire";
-import {
-  useMarkAllNotificationsRead,
-  useMarkNotificationRead,
-  useNotifications,
-} from "~/api/queries";
-import {
-  Badge,
-  Button,
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "~/components/primitives";
-import { useLivePendingGates } from "~/hooks/use-live-pending-gates";
+import { useState } from "react";
+import { ArrowUpRight, Bell, X } from "lucide-react";
+import type { NotificationSummary } from "@valet/api/wire";
+import { useMarkAllNotificationsRead, useMarkNotificationRead, useNotifications, useNotificationDecisions } from "~/api/queries";
+import { useWorkflowActionRequired } from "~/api/workflows";
+import { Badge, Button, LoadingRow, Popover, PopoverContent, PopoverTrigger, StatusDot, Time, textLinkClass } from "~/components/primitives";
+import { WorkflowApprovalItem } from "~/components/workflows/workflow-approval-item";
+import { DecisionGateCard } from "~/components/session/decision-gate-card";
 import { cn } from "~/lib/cn";
-import { attentionSessionIds, isActionable } from "~/lib/use-attention-ping";
-import { relativeTime } from "~/lib/relative-time";
+import { listedKeys } from "~/components/home/bulk-answers";
+import { NeedsActionHeader, useBulkAnswerRun } from "~/components/home/needs-action-header";
 
-const KIND_LABEL: Record<NotificationKind, string> = {
-  notification: "Notification",
-  question: "Question",
-  escalation: "Escalation",
-  approval: "Approval",
-  review: "Review",
-};
-
-export interface BellState {
-  unreadCount: number;
-  needsAttention: boolean;
-}
-
-/** Derive bell state from the poll and the live gate store. */
-export function deriveBellState(
-  notifications: NotificationSummary[] | undefined,
-  livePendingGates: Readonly<Record<string, boolean>>,
-): BellState {
-  const items = notifications ?? [];
-  const hasUnscopedAction = items.some((n) => isActionable(n) && n.sessionId === undefined);
-  return {
-    unreadCount: items.filter((n) => n.readAt === undefined).length,
-    needsAttention: hasUnscopedAction || attentionSessionIds(items, livePendingGates).size > 0,
-  };
-}
-
-/** Keep actionable notifications above general updates without changing recency within either group. */
-export function sortNotifications(notifications: readonly NotificationSummary[]): NotificationSummary[] {
-  return [...notifications].sort((a, b) => Number(isActionable(b)) - Number(isActionable(a)));
-}
-
-/**
- * Pure `onOpenChange` handler, extracted so the open-refetch behavior is
- * unit-testable without rendering the Radix dropdown.
- */
-export function makeOpenChangeHandler(refetch: () => void): (open: boolean) => void {
-  return (open) => {
-    if (open) refetch();
-  };
-}
-
-export function NotificationsBell() {
-  const { data, refetch } = useNotifications();
-  const markRead = useMarkNotificationRead();
-  const markAllRead = useMarkAllNotificationsRead();
-  const livePendingGates = useLivePendingGates();
-  const { unreadCount, needsAttention } = deriveBellState(data?.notifications, livePendingGates);
-  const items = sortNotifications(data?.notifications ?? []);
-  const wasAttention = useRef(needsAttention);
-  const [pulse, setPulse] = useState(false);
-
-  useEffect(() => {
-    if (needsAttention && !wasAttention.current) setPulse(true);
-    if (!needsAttention) setPulse(false);
-    wasAttention.current = needsAttention;
-  }, [needsAttention]);
-
-  async function onSelectItem(n: NotificationSummary) {
-    try {
-      if (!n.readAt) await markRead.mutateAsync(n.id);
-    } finally {
-      if (n.href) window.location.assign(n.href);
+/** Unread updates, newest first, one row per title: a workflow that fails
+ * every few minutes is one row with a count, not a list. Read updates leave
+ * the list, so "Mark all read" clears it. */
+export function groupUpdates(updates: readonly NotificationSummary[]): Array<{ latest: NotificationSummary; ids: string[] }> {
+  const groups = new Map<string, { latest: NotificationSummary; ids: string[] }>();
+  for (const n of updates) {
+    if (n.readAt !== undefined) continue;
+    const group = groups.get(n.title);
+    if (!group) groups.set(n.title, { latest: n, ids: [n.id] });
+    else {
+      group.ids.push(n.id);
+      if (n.createdAt > group.latest.createdAt) group.latest = n;
     }
   }
+  return [...groups.values()].sort((a, b) => b.latest.createdAt - a.latest.createdAt);
+}
 
-  const ariaLabel = needsAttention
-    ? unreadCount > 0
-      ? `${unreadCount} unread notifications. A decision is required.`
-      : "A decision is required."
-    : unreadCount > 0
-      ? `${unreadCount} unread notifications`
-      : "Notifications";
-
+/** `defaultOpen` opens the panel on mount without a refetch. The UI stress
+ * gallery (`/dev/ui-stress`) uses it to show the panel open. */
+export function NotificationsBell({ defaultOpen = false }: { defaultOpen?: boolean }) {
+  const [open, setOpen] = useState(defaultOpen);
+  const notifications = useNotifications();
+  const workflows = useWorkflowActionRequired();
+  const [decisionCursor, setDecisionCursor] = useState<string>();
+  const summary = useNotificationDecisions();
+  const page = useNotificationDecisions(decisionCursor, open && !!decisionCursor);
+  const decisions = decisionCursor ? page : summary;
+  const moreDecisions = decisions.data?.nextCursor;
+  const partialCount = !!summary.data?.nextCursor;
+  const markRead = useMarkNotificationRead();
+  const markAllRead = useMarkAllNotificationsRead();
+  const pendingCount = (workflows.data?.count ?? 0) + (summary.data?.items.length ?? 0);
+  // Approval state comes from gates. Historical notification copies do not create another inbox item.
+  const updates = groupUpdates((notifications.data?.notifications ?? []).filter(n => n.kind !== "approval"));
+  const unread = updates.length;
+  const loading = workflows.isLoading || decisions.isLoading;
+  const failed = workflows.isError || decisions.isError;
+  // After a bulk run, refetch the lists it covered. An item still listed was
+  // not answered, whatever its response said.
+  const bulkRun = useBulkAnswerRun(async () => {
+    const [w, d] = await Promise.all([workflows.refetch(), decisionCursor ? page.refetch() : summary.refetch()]);
+    if (decisionCursor) void summary.refetch();
+    if (w.isError || d.isError) return undefined;
+    return listedKeys(w.data?.items ?? [], d.data?.items ?? []);
+  });
+  function changeOpen(value: boolean) {
+    setOpen(value);
+    if (!value) { setDecisionCursor(undefined); bulkRun.dismiss(); }
+    if (value) { void notifications.refetch(); void workflows.refetch(); void decisions.refetch(); }
+  }
+  async function openUpdate({ latest, ids }: { latest: NotificationSummary; ids: string[] }) {
+    try { await Promise.all(ids.map(id => markRead.mutateAsync(id))); }
+    finally { if (latest.href) window.location.assign(latest.href); }
+  }
   return (
-    <DropdownMenu onOpenChange={makeOpenChangeHandler(refetch)}>
-      <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="sm" className="relative px-2" aria-label={ariaLabel}>
-          <Bell
-            className={cn(
-              "h-4 w-4",
-              needsAttention && "text-amber-700 dark:text-amber-300",
-              pulse && "animate-[pulse_700ms_ease-out_1] motion-reduce:animate-none",
-            )}
-            aria-hidden
-            onAnimationEnd={() => setPulse(false)}
-          />
-          {unreadCount > 0 && (
-            <Badge
-              variant={needsAttention ? "warning" : "accent"}
-              className="absolute -top-1 -right-1 min-w-[16px] justify-center px-1 py-0 text-[10px] leading-4"
-            >
-              {unreadCount > 99 ? "99+" : unreadCount}
-            </Badge>
-          )}
+    <Popover open={open} onOpenChange={changeOpen}>
+      <PopoverTrigger asChild>
+        <Button variant="ghost" size="sm" className="relative px-2" aria-label={pendingCount || partialCount ? `Notifications: ${pendingCount}${partialCount ? "+" : ""} pending approvals` : "Notifications"}>
+          <Bell className={`h-4 w-4 ${pendingCount ? "text-warning-fg" : ""}`} aria-hidden />
+          {pendingCount > 0 || partialCount ? <Badge variant="warning" className="absolute -right-1 -top-1 px-1 py-0 text-[10px]">{pendingCount}{partialCount ? "+" : ""}</Badge>
+            : unread > 0 && <StatusDot tone="accent" size="sm" className="absolute right-1 top-1" />}
         </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-[340px] min-w-0 max-h-[min(420px,var(--radix-dropdown-menu-content-available-height))] overflow-y-auto">
-        <DropdownMenuLabel className="flex items-center justify-between gap-2">
-          <span>Notifications</span>
-          {unreadCount > 0 && (
-            <button
-              type="button"
-              className="text-xs font-normal text-muted hover:text-[--fg] hover:underline"
-              onClick={(e) => {
-                e.stopPropagation();
-                markAllRead.mutate();
-              }}
-            >
-              Mark all read
-            </button>
-          )}
-        </DropdownMenuLabel>
-        <DropdownMenuSeparator />
-        {items.length === 0 && (
-          <div className="px-2 py-3 text-sm text-muted">No notifications yet.</div>
-        )}
-        {items.map((n) => (
-          <DropdownMenuItem
-            key={n.id}
-            onSelect={() => onSelectItem(n)}
-            className={cn("flex flex-col items-stretch gap-0.5", !n.readAt && "bg-accent-100/40 dark:bg-accent-700/10")}
-          >
-            <span className="flex items-center gap-1.5">
-              {!n.readAt && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent-600" aria-hidden />}
-              <span className="min-w-0 flex-1 text-sm font-medium truncate">{n.title}</span>
-              {isActionable(n) && <Badge variant="warning">{KIND_LABEL[n.kind]}</Badge>}
-            </span>
-            <span className="text-xs text-muted">{relativeTime(n.createdAt)}</span>
-          </DropdownMenuItem>
-        ))}
-      </DropdownMenuContent>
-    </DropdownMenu>
+      </PopoverTrigger>
+      <PopoverContent align="end" aria-label="Notifications" className="w-[520px] max-h-[min(720px,calc(100dvh-6rem))] bg-paper p-0">
+        <div className="sticky top-0 z-10 flex items-center justify-between border-b border-line bg-paper px-4 py-3">
+          <h2 className="font-semibold">Notifications</h2>
+          <Button variant="ghost" size="sm" aria-label="Close notifications" onClick={() => changeOpen(false)}><X className="h-4 w-4" /></Button>
+        </div>
+        <section aria-label="Needs action" className="space-y-3 p-4">
+          <NeedsActionHeader compact pendingCount={pendingCount} partialCount={partialCount} workflows={workflows.data?.items ?? []}
+            decisions={decisions.data?.items ?? []} partial={!!moreDecisions || !!decisionCursor} run={bulkRun} />
+          {loading && <LoadingRow label="Loading approvals…" className="py-0" />}
+          {failed && <div role="alert" className="text-sm text-danger-500">Could not load all approvals. <button type="button" className={textLinkClass} onClick={() => { void workflows.refetch(); void decisions.refetch(); }}>Retry</button></div>}
+          {!loading && !failed && pendingCount === 0 && !moreDecisions && !decisionCursor && <p className="text-sm text-muted">You're all caught up. No decisions are waiting.</p>}
+          <ul className="space-y-3">{workflows.data?.items.map(item => <WorkflowApprovalItem key={item.id} item={item} />)}</ul>
+          {decisionCursor && <button type="button" className={cn(textLinkClass, "text-sm")} onClick={() => setDecisionCursor(undefined)}>First approvals</button>}
+          {moreDecisions && <button type="button" className={cn(textLinkClass, "text-sm")} onClick={() => setDecisionCursor(moreDecisions)}>Next approvals</button>}
+          {decisions.data?.items.map(item => <article key={item.gate.id} className="min-w-0 rounded-lg border border-line bg-paper">
+            <div className="flex min-w-0 items-start justify-between gap-3 px-4 pt-3">
+              <span className="min-w-0 break-words text-xs text-muted [overflow-wrap:anywhere]">{item.title}</span>
+              {item.canOpenThread !== false && <a className="inline-flex shrink-0 items-center gap-1 text-xs text-muted hover:text-ink hover:underline" href={`/threads/${encodeURIComponent(item.gate.threadId)}`}>
+                Open thread <ArrowUpRight aria-hidden className="h-3 w-3" />
+              </a>}
+            </div>
+            <DecisionGateCard sessionId={item.sessionId} gate={item.gate} placement="notification" />
+          </article>)}
+        </section>
+        <section aria-label="Updates" className="border-t border-line p-4 space-y-3">
+          <div className="flex items-center justify-between"><h3 className="text-xs font-semibold uppercase tracking-wide text-muted">Updates</h3>
+            {unread > 0 && <button type="button" className={cn(textLinkClass, "text-xs")} onClick={() => markAllRead.mutate()}>Mark all read</button>}
+          </div>
+          {notifications.isError && <p role="alert" className="text-sm text-danger-500">Could not load updates. <button type="button" className={textLinkClass} onClick={() => void notifications.refetch()}>Retry</button></p>}
+          {!notifications.isError && updates.length === 0 && <p className="text-sm text-muted">No new updates.</p>}
+          {updates.map(group => <button type="button" key={group.latest.id} onClick={() => void openUpdate(group)} className="block w-full rounded-md p-2 text-left hover:bg-ink-wash">
+            <span className="flex items-center gap-2"><StatusDot tone="info" size="sm" /><span className="min-w-0 truncate text-sm font-medium" title={group.latest.title}>{group.latest.title}</span>
+              {group.ids.length > 1 && <Badge variant="neutral">{group.ids.length}</Badge>}</span>
+            <Time ts={group.latest.createdAt} className="text-xs text-muted" />
+          </button>)}
+        </section>
+      </PopoverContent>
+    </Popover>
   );
 }

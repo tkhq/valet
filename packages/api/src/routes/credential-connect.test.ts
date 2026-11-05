@@ -5,20 +5,23 @@
  * fake authorization server.
  */
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import { Pool } from "pg";
-import type { ValetPlugin } from "@valet/engine";
+import type { StoredCredential, ValetPlugin } from "@valet/engine";
 import { OAuthInterpretError, type TokenInterpretation } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { startFakeOAuthServer, type FakeOAuthServer } from "../test-helpers/oauth-fixture.js";
 import type { ListCredentialsResponse } from "../wire/types.js";
-import { verifyOAuthConnectState } from "./credential-connect.js";
+import { parseAddScopes, verifyOAuthConnectState } from "./credential-connect.js";
 import { createTeam, addMember, removeMember, setRole, deleteTeam } from "../services/teams.js";
 import { and, eq } from "drizzle-orm";
-import { teams, credentials, orgMembers } from "../schema/index.js";
+import { teams, credentials, orgMembers, mcpOauthClients } from "../schema/index.js";
 import { signState } from "../lib/oauth-state.js";
+import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { buildAppDb } from "../lib/drizzle.js";
-import { insertCredentialIfAbsent, lockTeamCredentialAuthority } from "../services/credential-insert.js";
+import { insertCredentialIfAbsent, lockTeamCredentialRole } from "../services/credential-insert.js";
+import { OAuthRefreshingCredentialStore } from "../plugins/oauth-refreshing-credential-store.js";
+import { ensureMcpOAuthClient, getMcpOAuthClient } from "../services/integration-oauth.js";
 import {
   identityForExternal,
   identityForUser,
@@ -136,6 +139,81 @@ describe("GET /api/credentials/:service/connect", () => {
     expect(location.searchParams.get("state")).toBeTruthy();
   });
 
+  it("mcp mode: the authorize request names only the declared scopes", async () => {
+    // The server advertises more, but Valet never grants a scope the entry
+    // does not declare.
+    fake.resourceScopesSupported = ["agent:content:read", "agent:query:run"];
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url, ["agent:query:run", "agent:search"])] });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const res = await fetch(`${api.baseUrl}/api/credentials/linear/connect`, { redirect: "manual" });
+      expect(res.status).toBe(302);
+      const location = new URL(res.headers.get("location") ?? "");
+      expect(location.searchParams.get("scope")).toBe("agent:query:run agent:search");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("step-up: the authorize request asks for the declared scopes plus the added ones", async () => {
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url, ["agent:query:run"])] });
+    const res = await fetch(`${api.baseUrl}/api/credentials/linear/connect?addScopes=agent%3Acontent%3Aread+agent%3Aquery%3Arun`, { redirect: "manual" });
+    expect(res.status).toBe(302);
+    expect(new URL(res.headers.get("location") ?? "").searchParams.get("scope")).toBe("agent:content:read agent:query:run");
+  });
+
+  it("step-up: refuses malformed scopes, and any scopes for a team connection", async () => {
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url, ["read"])] });
+    const bad = await fetch(`${api.baseUrl}/api/credentials/linear/connect?addScopes=${encodeURIComponent('read "quoted"')}`, { redirect: "manual" });
+    expect(bad.status).toBe(400);
+    // A team connection is shared: a member's sign-in would make the team act as that member.
+    const team = await fetch(`${api.baseUrl}/api/credentials/linear/connect?scope=team&teamId=any-team&addScopes=write`, { redirect: "manual" });
+    expect(team.status).toBe(400);
+    expect(parseAddScopes(" b a  b ")).toEqual(["a", "b"]);
+  });
+
+  it("step-up: a token response without scope stores the requested set on the caller's connection", async () => {
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url, ["read"])] });
+    const started = await fetch(`${api.baseUrl}/api/credentials/linear/connect?addScopes=read+write`, { redirect: "manual" });
+    const state = new URL(started.headers.get("location") ?? "").searchParams.get("state") ?? "";
+    fake.tokenResponse = { access_token: "stepped-up", expires_in: 3600 };
+    await fetch(`${api.baseUrl}/api/credentials/oauth/callback?code=c&state=${encodeURIComponent(state)}`, { redirect: "manual" });
+    expect(await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "linear")).toMatchObject({
+      accessToken: "stepped-up", scopes: ["read", "write"],
+    });
+  });
+
+  async function startStepUpConnect(baseUrl: string, addScopes: string) {
+    const started = await fetch(`${baseUrl}/api/credentials/linear/connect?addScopes=${encodeURIComponent(addScopes)}`, { redirect: "manual" });
+    return new URL(started.headers.get("location") ?? "").searchParams.get("state") ?? "";
+  }
+
+  async function finishWith(baseUrl: string, state: string, scope: string, token: string) {
+    fake.tokenResponse = { access_token: token, expires_in: 3600, scope };
+    const res = await fetch(`${baseUrl}/api/credentials/oauth/callback?code=c&state=${encodeURIComponent(state)}`, { redirect: "manual" });
+    return res.headers.get("location") ?? "";
+  }
+
+  it("step-up: keeps a working connection when the provider grants less than it holds", async () => {
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url, ["read"])] });
+    const owner = { type: "user" as const, id: "local-user" };
+    await api.providers.engineCredentials.save(owner, "linear", { type: "oauth2", accessToken: "working", scopes: ["read", "write"] });
+    const state = await startStepUpConnect(api.baseUrl, "read write extra");
+    expect(await finishWith(api.baseUrl, state, "read", "narrow")).toContain("error=step_up_not_granted");
+    expect(await api.providers.engineCredentials.get(owner, "linear")).toMatchObject({ accessToken: "working", scopes: ["read", "write"] });
+  });
+
+  it("step-up: an older sign-in does not roll back a newer, wider grant", async () => {
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url, ["read"])] });
+    const owner = { type: "user" as const, id: "local-user" };
+    await api.providers.engineCredentials.save(owner, "linear", { type: "oauth2", accessToken: "start", scopes: ["read"] });
+    const older = await startStepUpConnect(api.baseUrl, "read extra");
+    const newer = await startStepUpConnect(api.baseUrl, "read extra write");
+    expect(await finishWith(api.baseUrl, newer, "read extra write", "newer")).toContain("connected=linear");
+    expect(await finishWith(api.baseUrl, older, "read extra", "older")).toContain("error=step_up_not_granted");
+    expect(await api.providers.engineCredentials.get(owner, "linear")).toMatchObject({ accessToken: "newer", scopes: ["read", "extra", "write"] });
+  });
+
   it("authorization_code mode: 503s with the missing env var names when unconfigured", async () => {
     api = await bootTestApi({ plugins: [authCodePlugin(fake.url)] });
     const res = await fetch(`${api.baseUrl}/api/credentials/gmail/connect`, { redirect: "manual" });
@@ -202,11 +280,32 @@ describe("GET /api/credentials/:service/connect", () => {
 });
 
 describe("GET /api/credentials/oauth/callback", () => {
-  async function startConnect(baseUrl: string, service: string): Promise<URL> {
-    const res = await fetch(`${baseUrl}/api/credentials/${service}/connect`, { redirect: "manual" });
+  async function startConnect(baseUrl: string, service: string, query = ""): Promise<URL> {
+    const res = await fetch(`${baseUrl}/api/credentials/${service}/connect${query}`, { redirect: "manual" });
     expect(res.status).toBe(302);
     return new URL(res.headers.get("location") ?? "");
   }
+
+  // Integrations holds every connection, so an old link that still asks
+  // for Connected accounts lands there too.
+  it("lands a connect on Integrations even when an old link names Connected accounts", async () => {
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url)] });
+    const state = (await startConnect(api.baseUrl, "linear", "?landing=connected-accounts")).searchParams.get("state") ?? "";
+
+    const ok = await fetch(`${api.baseUrl}/api/credentials/oauth/callback?code=code-1&state=${encodeURIComponent(state)}`, { redirect: "manual" });
+    expect(ok.headers.get("location")).toBe("/integrations?connected=linear");
+
+    const state2 = (await startConnect(api.baseUrl, "linear", "?landing=connected-accounts")).searchParams.get("state") ?? "";
+    const failed = await fetch(`${api.baseUrl}/api/credentials/oauth/callback?error=access_denied&state=${encodeURIComponent(state2)}`, { redirect: "manual" });
+    expect(failed.headers.get("location")).toBe("/integrations?error=access_denied");
+  });
+
+  it("ignores a landing parameter, so a link cannot steer the callback", async () => {
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url)] });
+    const state = (await startConnect(api.baseUrl, "linear", "?landing=https://evil.example")).searchParams.get("state") ?? "";
+    const ok = await fetch(`${api.baseUrl}/api/credentials/oauth/callback?code=code-1&state=${encodeURIComponent(state)}`, { redirect: "manual" });
+    expect(ok.headers.get("location")).toBe("/integrations?connected=linear");
+  });
 
   it("mcp mode: exchanges the code with the stored PKCE verifier and persists the credential", async () => {
     api = await bootTestApi({ plugins: [mcpPlugin(fake.url)] });
@@ -273,6 +372,69 @@ describe("GET /api/credentials/oauth/callback", () => {
 
     const stored = await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "linear");
     expect(stored?.scopes).toEqual(["agent:query"]);
+  });
+
+  it("mcp mode: the callback refuses a code when another connect replaced the client", async () => {
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url, ["agent:query:run"])] });
+    const first = (await startConnect(api.baseUrl, "linear")).searchParams.get("state") ?? "";
+
+    // Another connect re-registered the client after this authorize.
+    await api.providers.db
+      .update(mcpOauthClients)
+      .set({ clientId: "client-2" })
+      .where(eq(mcpOauthClients.service, "linear"));
+
+    const cb = await fetch(`${api.baseUrl}/api/credentials/oauth/callback?code=c&state=${encodeURIComponent(first)}`, {
+      redirect: "manual",
+    });
+    expect(cb.headers.get("location")).toBe("/integrations?error=oauth_client_changed");
+    expect(fake.tokenRequests).toHaveLength(0);
+  });
+
+  it("mcp mode: a connection keeps refreshing with its own client after a scope change re-registers", async () => {
+    const plugins = [mcpPlugin(fake.url, ["agent:query"])];
+    api = await bootTestApi({ plugins });
+    const state = (await startConnect(api.baseUrl, "linear")).searchParams.get("state") ?? "";
+    await fetch(`${api.baseUrl}/api/credentials/oauth/callback?code=c&state=${encodeURIComponent(state)}`, { redirect: "manual" });
+    const owner = { type: "user" as const, id: "local-user" };
+    const connected = await api.providers.engineCredentials.get(owner, "linear");
+    if (!connected) throw new Error("connect saved no credential");
+    expect(connected.metadata).toEqual({
+      connectedVia: "oauth", oauthClientId: "client-1", oauthTokenEndpoint: `${fake.url}/token`,
+    });
+
+    // The declared scopes change: the next connect registers client-2 and
+    // stores it in place of client-1. The fake server bound rt-1 to client-1.
+    await ensureMcpOAuthClient({ db: api.providers.db }, "linear", fake.url, "http://localhost/cb", ["agent:query", "agent:write"]);
+    expect((await getMcpOAuthClient({ db: api.providers.db }, "linear")).clientId).toBe("client-2");
+    // The access token expires.
+    await api.providers.engineCredentials.save(owner, "linear", { ...connected, expiresAt: Date.now() });
+    fake.tokenResponse = { access_token: "at-2", refresh_token: "rt-2", expires_in: 3600 };
+
+    // The test API's store has no refresh layer; production wraps it the same way.
+    const refreshing = new OAuthRefreshingCredentialStore(api.providers.engineCredentials, { db: api.providers.db, plugins, env: {} });
+    const refreshed = await refreshing.get(owner, "linear");
+    expect(fake.tokenRequests.at(-1)).toMatchObject({ grant_type: "refresh_token", refresh_token: "rt-1", client_id: "client-1" });
+    expect(refreshed?.accessToken).toBe("at-2");
+    expect(refreshed?.metadata).not.toHaveProperty("refreshRefused");
+    expect(refreshed?.metadata).not.toHaveProperty("refreshFailedAt");
+  });
+
+  it("mcp mode: a state minted before client binding still completes", async () => {
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url)] });
+    const key = deriveSecretKey(api.providers.encryptionKey);
+    const minted = (await startConnect(api.baseUrl, "linear")).searchParams.get("state") ?? "";
+    const verified = verifyOAuthConnectState(minted, key, Date.now());
+    if (!verified) throw new Error("connect state did not verify");
+    // A connect started before this deploy signed no client id.
+    const { clientId: _bound, ...legacy } = verified;
+    const state = signState("integration-connect", legacy, key);
+
+    const cb = await fetch(`${api.baseUrl}/api/credentials/oauth/callback?code=c&state=${encodeURIComponent(state)}`, {
+      redirect: "manual",
+    });
+    expect(cb.headers.get("location")).toBe("/integrations?connected=linear");
+    expect(fake.tokenRequests[0]?.client_id).toBe("client-1");
   });
 
   it("provider error param redirects to /integrations with the error code", async () => {
@@ -686,15 +848,38 @@ describe("identity auto-link (slackish plugin)", () => {
 describe("verifyOAuthConnectState", () => {
   const key = Buffer.from("test-key-material-32-bytes-long");
 
+  /** Built per test: an `exp` fixed at collection time expires on a slow run. */
+  function payload(expInMs = 60_000) {
+    return { userId: "u1", orgId: "o1", teamId: "t1", service: "linear", nonce: "n1", exp: Date.now() + expInMs };
+  }
+
+  it("keeps reconnect only as true, and only on a team state", () => {
+    expect(verifyOAuthConnectState(signState("integration-connect", { ...payload(), reconnect: true }, key), key, Date.now()))
+      .toMatchObject({ teamId: "t1", reconnect: true });
+    expect(verifyOAuthConnectState(signState("integration-connect", { ...payload(), reconnect: "yes" }, key), key, Date.now())).toBeNull();
+    const { teamId: _teamId, orgId: _orgId, ...personal } = payload();
+    expect(verifyOAuthConnectState(signState("integration-connect", { ...personal, reconnect: true }, key), key, Date.now())).toBeNull();
+  });
+
   it("accepts a validly signed, unexpired payload", () => {
-    const state = signState({ userId: "u1", service: "linear", nonce: "n1", exp: Date.now() + 10_000 }, key);
+    const state = signState("integration-connect", payload(), key);
     const verified = verifyOAuthConnectState(state, key, Date.now());
     expect(verified).toMatchObject({ userId: "u1", service: "linear" });
   });
 
   it("rejects an expired payload", () => {
-    const state = signState({ userId: "u1", service: "linear", nonce: "n1", exp: Date.now() - 1000 }, key);
+    const state = signState("integration-connect", payload(-1000), key);
     expect(verifyOAuthConnectState(state, key, Date.now())).toBeNull();
+  });
+
+  it.each(["github-app-setup", "github-connect"] as const)("rejects a %s state with a matching payload", (purpose) => {
+    expect(verifyOAuthConnectState(signState(purpose, payload(), key), key, Date.now())).toBeNull();
+  });
+
+  it("rejects a state signed without a purpose, as states were before purpose keys", () => {
+    const payloadB64 = Buffer.from(JSON.stringify(payload()), "utf8").toString("base64url");
+    const unpurposed = `${payloadB64}.${createHmac("sha256", key).update(payloadB64).digest("base64url")}`;
+    expect(verifyOAuthConnectState(unpurposed, key, Date.now())).toBeNull();
   });
 });
 
@@ -739,7 +924,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("team credential authority row l
       const locked = new Promise<void>((resolve) => { signalLocked = resolve; });
       const released = new Promise<void>((resolve) => { release = resolve; });
       insertion = db.transaction(async (tx) => {
-        expect(await lockTeamCredentialAuthority(tx, { orgId: "org", userId: "actor", teamId: schema })).toBe(true);
+        expect(await lockTeamCredentialRole(tx, { orgId: "org", userId: "actor", teamId: schema })).toBe("admin");
         signalLocked();
         await released;
         return insertCredentialIfAbsent(tx, "test-key", { type: "team", id: schema }, "demo", {
@@ -814,9 +999,17 @@ describe("team OAuth connections", () => {
     expect(publicOutput).not.toContain("team-refresh");
   });
 
-  it("refuses non-admins and missing teams before contacting the provider", async () => {
+  it("lets a team member connect a team account", async () => {
     const { app, team } = await setup();
     await addMember(app.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
+    fake.tokenResponse = { access_token: "member-team-access", refresh_token: "member-team-refresh", expires_in: 3600, scope: "read" };
+    const response = await finish(app.baseUrl, await start(app.baseUrl, team.id, "test-member"), "test-member");
+    expect(response.headers.get("location")).toBe(`/integrations?teamId=${team.id}&connected=linear`);
+    expect(await app.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toMatchObject({ accessToken: "member-team-access" });
+  });
+
+  it("refuses someone outside the team and missing teams before contacting the provider", async () => {
+    const { app, team } = await setup();
     for (const id of [team.id, "missing-team"]) {
       const response = await fetch(`${app.baseUrl}/api/credentials/linear/connect?scope=team&teamId=${id}`, {
         redirect: "manual", headers: { "x-valet-test-user-id": "test-member" },
@@ -856,7 +1049,9 @@ describe("team OAuth connections", () => {
     expect(fake.tokenRequests).toHaveLength(0);
   });
 
-  it.each(["remove", "demote", "org-demote", "org-remove", "delete-team"])(
+  // A demotion to member keeps the right to add a team connection, so only a
+  // change that ends team access refuses the callback.
+  it.each(["remove", "org-demote", "org-remove", "delete-team"])(
     "refuses a callback when %s occurs during token exchange", async (change) => {
       const { app, team } = await setup();
       const orgAdmin = change.startsWith("org-");
@@ -937,6 +1132,64 @@ describe("team OAuth connections", () => {
     } finally {
       resync.mockRestore();
     }
+  });
+
+  describe("reconnect", () => {
+    const dead = { type: "oauth2" as const, accessToken: "dead", refreshToken: "dead-refresh", expiresAt: 1, metadata: { refreshFailedAt: 2, refreshRefused: true } };
+    const startReconnect = (baseUrl: string, teamId: string, userId: string) =>
+      fetch(`${baseUrl}/api/credentials/linear/connect?scope=team&teamId=${teamId}&reconnect=1`, {
+        redirect: "manual", headers: { "x-valet-test-user-id": userId },
+      });
+    const stateOf = (response: Response) => new URL(response.headers.get("location") ?? "").searchParams.get("state") ?? "";
+    // Saved straight to the store, so no refresh runs on the dead row.
+    const saveTeamRow = (app: TestApi, teamId: string, row: StoredCredential) =>
+      app.providers.engineCredentials.save({ type: "team", id: teamId }, "linear", row);
+
+    it("lets any team member replace a dead team connection", async () => {
+      const { app, team } = await setup();
+      await addMember(app.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
+      await saveTeamRow(app, team.id, dead);
+      fake.tokenResponse = { access_token: "member-access", refresh_token: "member-refresh", expires_in: 3600, scope: "read" };
+      const started = await startReconnect(app.baseUrl, team.id, "test-member");
+      expect(started.status).toBe(302);
+      const response = await finish(app.baseUrl, stateOf(started), "test-member");
+      expect(response.headers.get("location")).toBe(`/integrations?teamId=${team.id}&connected=linear`);
+      expect(await app.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toMatchObject({
+        accessToken: "member-access", refreshToken: "member-refresh",
+      });
+    });
+
+    it("refuses someone outside the team, and sends a member back when the connection is not dead", async () => {
+      const { app, team } = await setup();
+      await saveTeamRow(app, team.id, dead);
+      // An organization member who is not on the team.
+      expect((await startReconnect(app.baseUrl, team.id, "test-member")).status).toBe(404);
+      await addMember(app.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
+      const unneeded = `/integrations?teamId=${team.id}&error=team_reconnect_unneeded`;
+      // A working connection, and one whose last refresh failed only temporarily.
+      for (const row of [
+        { type: "oauth2" as const, accessToken: "live", refreshToken: "rt", expiresAt: Date.now() + 3_600_000 },
+        { type: "oauth2" as const, accessToken: "blip", refreshToken: "rt", expiresAt: 1, metadata: { refreshFailedAt: 2 } },
+      ]) {
+        await saveTeamRow(app, team.id, row);
+        const response = await startReconnect(app.baseUrl, team.id, "test-member");
+        expect(response.status).toBe(302);
+        expect(response.headers.get("location")).toBe(unneeded);
+      }
+      expect(fake.registrations).toHaveLength(0);
+    });
+
+    it("keeps a connection that someone repaired while the member signed in", async () => {
+      const { app, team } = await setup();
+      await addMember(app.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
+      await saveTeamRow(app, team.id, dead);
+      const started = await startReconnect(app.baseUrl, team.id, "test-member");
+      await saveTeamRow(app, team.id, { type: "oauth2", accessToken: "repaired", refreshToken: "rt", expiresAt: Date.now() + 3_600_000 });
+      const response = await finish(app.baseUrl, stateOf(started), "test-member");
+      expect(response.headers.get("location")).toBe(`/integrations?teamId=${team.id}&error=team_reconnect_unneeded`);
+      expect(await app.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toMatchObject({ accessToken: "repaired" });
+    });
+
   });
 
   it("keeps an occupied team slot when two OAuth callbacks complete", async () => {

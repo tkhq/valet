@@ -22,10 +22,14 @@ export interface WorkflowCreateSessionOptions {
 }
 
 export interface WorkflowPromptOptions {
+  /** Original submission whose task must survive compaction during schema repair. */
+  taskSourceQueueItemId?: string;
   /** Idempotent admission key: `workflow:{runId}:{nodeId}[:{iteration}][:repair]`. */
   dispatchId: string;
   model?: string;
   queueMode?: QueueMode;
+  /** The most model calls the submission may make (`MODEL_CALL_LIMIT_KEY`). */
+  modelCallLimit?: number;
 }
 
 export interface WorkflowPromptReceipt {
@@ -38,11 +42,19 @@ export interface WorkflowAwaitResultOptions {
 }
 
 export interface WorkflowLlmCompleteRequest {
+  /** Identifies the run whose org model catalog resolves the model spec. */
+  runId: string;
+  /** The step and foreach iteration the call bills to. The host records the
+   * call's usage under the step, so Usage can show what each step cost. */
+  nodeId: string;
+  iteration: number;
   model: string;
   system?: string;
   prompt: string;
   temperature?: number;
   maxOutputTokens?: number;
+  /** The node's reasoning level; omitted means the run owner's default. */
+  reasoning?: string;
 }
 
 /**
@@ -70,6 +82,8 @@ export interface WorkflowLlmCompleteResult {
 }
 
 export interface WorkflowPromptOrchestratorOptions {
+  /** Original submission whose task must survive compaction during schema repair. */
+  taskSourceQueueItemId?: string;
   /** Idempotent admission key: `workflow:{runId}:{nodeId}[:{iteration}][:repair]`. */
   dispatchId: string;
   /**
@@ -80,6 +94,15 @@ export interface WorkflowPromptOrchestratorOptions {
    */
   queueMode: 'followup';
   ownerHint: { ownerType: string; ownerId: string };
+  /** The most model calls the submission may make (`MODEL_CALL_LIMIT_KEY`). */
+  modelCallLimit?: number;
+  /**
+   * Set for a step with `thread: "step"`: the submission goes to that
+   * step's own thread, not the run's thread. The host derives the thread
+   * key from the run, `nodeId` and `iteration`, so a re-issued dispatch
+   * (crash recovery, or the repair turn) finds the same thread.
+   */
+  stepThread?: { nodeId: string; iteration: number };
 }
 
 export interface WorkflowPromptOrchestratorResult {
@@ -110,8 +133,10 @@ export interface WorkflowInvokeActionRequest {
 
 export type WorkflowInvokeActionResult =
   | { ok: true; result: unknown }
-  | { ok: false; error: string }
-  | { ok: false; requiresApproval: true; riskLevel?: string; provenance?: string };
+  | { ok: false; error: string; errorCode?: "policy_denied" }
+  /** `approver`: the one member who may answer, because the action would use
+   * their shared account. */
+  | { ok: false; requiresApproval: true; riskLevel?: string; provenance?: string; approver?: { userId: string; name?: string; shareGeneration?: string; allowTeamConsent?: true } };
 
 /**
  * Engine surface available to node executors and the interpreter's cancel
@@ -135,7 +160,7 @@ export interface WorkflowEngineDeps {
   ): Promise<SubmissionResult>;
 
   /** Withdraws in-flight engine work for a run being cancelled. */
-  abort(sessionId: string, threadId: string): Promise<void>;
+  abort(sessionId: string, threadId: string, queueItemId?: string): Promise<void>;
 
   /** Non-blocking settlement check, used by the lost-wake sweep (Task 8). */
   isSettled(sessionId: string, queueItemId: string): Promise<boolean>;
@@ -154,7 +179,7 @@ export interface WorkflowEngineDeps {
   llmComplete(req: WorkflowLlmCompleteRequest): Promise<WorkflowLlmCompleteResult>;
 
   /**
-   * The `orchestrator` node's (Task 5) dispatch primitive — resolves
+   * The `orchestrator` (Thread) node's (Task 5) dispatch primitive — resolves
    * `opts.ownerHint`'s orchestrator session and submits `prompt` as a
    * followup (internal signals must never steer-abort the assistant's live
    * turn). Idempotent by `opts.dispatchId`, exactly like `prompt`: a

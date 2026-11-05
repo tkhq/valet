@@ -14,16 +14,25 @@ Phase 4 added the orchestrator, memory, signals, and child sessions to the engin
 4. **Memory is browse + read + search** this pass. Writes stay agent-mediated ("ask the assistant to edit it"); no UI editing.
 5. **The assistant is named and given a personality on first visit**, and users are actively encouraged to do both: one step, suggested name + reroll, plus a personality field seeded by selectable trait chips ("warm and direct", "dry wit", "meticulous planner", "cheerful hype-person") that compose into editable free text. Skippable (defaults to a neutral persona), editable later from the dashboard identity header. No avatar/handle ceremony.
 6. **Org visibility is deferred** to a future `/org` page; the dashboard stays personal, with the activity feed shaped to accept org events later.
-7. **Aesthetic: calm companion** — warm, quiet, personal; one signature element (the presence mark); everything else disciplined.
+7. **Aesthetic: calm companion** — warm, quiet, personal; consistent chat and dashboard components.
 
 ## Information Architecture
+
+### List query costs
+
+Session lists exclude child sessions and assistants with SQL existence checks. They fetch submission state only for the authorized sessions in the response.
+They do not load deployment-wide child IDs, assistant IDs, or unsettled submissions into application memory.
+This preserves the existing response and workspace visibility rules; it does not add pagination to the session list.
+
+Team lists aggregate member counts and the caller's role in batches of at most 1,000 authorized team IDs.
+Each aggregate is also scoped to the authenticated organization. The list does not load every member record for each team.
 
 Top nav: `◈ {name}` (→ `/`) · `Sessions` (→ `/sessions`) · notifications bell. "New session" moves into the Sessions page.
 
 ### `/` — Assistant dashboard
 
 - **First visit** (no `assistants.name` on the caller's default assistant): an inline identity step — "Meet your assistant". A suggested name (Atlas/Wren/… pool) with 🎲 reroll and an editable field, then a **personality** field: 3–4 trait chips ("warm and direct", "dry wit", "meticulous planner", "cheerful hype-person") that append composable phrases into an editable textarea, or write your own. Copy encourages it ("Give them a voice — you can change this anytime"). Start = `PATCH /api/orchestrator/info { name, personality }` + ensure. Skipping personality yields the neutral persona.
-- **Identity header**: name set in the display face, presence mark beneath (see Visual Language), one-line status ("idle" / "thinking" / "working on 2 tasks") derived from live agent status + unsettled children. An edit affordance on the header reopens the identity step inline for renaming / re-personality.
+- **Identity header**: name set in the display face, one-line status ("idle" / "thinking" / "working on 2 tasks") derived from live agent status + unsettled children. An edit affordance on the header reopens the identity step inline for renaming / re-personality.
 - **Chat card**: the last ~3 exchanges of the active thread, live via the existing stream store; a composer at its foot — sending admits the prompt and navigates to `/chat`.
 - **Memory card**: pinned files (📌) + today's journal excerpt (first lines, rendered), each linking into `/memory/$path`.
 - **Your work card**: recent **standalone** sessions (status dot, title, relative time) linking to `/sessions/$id`, plus a count line for active children ("2 tasks running under today's thread") linking to `/chat`. Children are NOT listed flat here — they live in the chat's thread tree.
@@ -33,7 +42,7 @@ Top nav: `◈ {name}` (→ `/`) · `Sessions` (→ `/sessions`) · notifications
 
 The existing session view re-mounted for the assistant session id (threads, gates, tool cards, WS resume — not a rebuild), with three changes:
 
-1. **Thread tree sidebar.** Threads list children nested beneath the thread that spawned them:
+1. **Thread tree sidebar.** Thread titles take priority over compact status indicators. Model names and size badges appear in the open thread’s header, not sidebar rows. Threads list children nested beneath the thread that spawned them:
 
    ```
    THREADS
@@ -63,9 +72,60 @@ The existing session view re-mounted for the assistant session id (threads, gate
 
    Amended 2026-08-17: **"busy" covers the whole turn, not just live transitions.** The Stop button, the Escape interrupt, the header status badge, and the transcript busy indicator all derive from two signals: the live `status` events AND the thread's durable `queue.state` (`queueBusy` in `~/stores/stream` — running, gate-blocked, or waiting submissions; everything it reports is abortable via `Thread.abort`). Server-side, the WS handshake seeds one `queue.state` frame per thread plus a `status` frame for a mid-turn thread (`Thread.currentAgentStatus`) right after `init`. Before this, a client that connected mid-turn (page load or reconnect during a long tool call) read the thread as idle — no Stop, Escape inert — until the next transition event.
 
+   Added 2026-10-20: **Up and Down recall earlier prompts.** In an empty composer, Up shows the person's newest prompt in the thread, and more presses step older. Down steps newer, and past the newest it empties the composer. The history is the person's own user messages in the live transcript (`promptHistory` in `prompt-history.ts`): a teammate's message, a channel sender's message, a signal card, and a message an agent wrote are left out. History needs the author's `interactive` flag, which the server projects for a signed-in browser send; a delegated task's brief has no author, and a parent's `child_send` carries the person's id without the flag. The composer's own optimistic copy of a just-sent prompt stays in. A skill invocation recalls as `/skill:<name> <args>` (`/skill:review fix the bug`), the form every organization registers, not the skill body the server stored. A recall never replaces typed text: an edit to a recalled prompt and a send both end the recall, so text typed later that matches an earlier prompt stays a draft. The recalled index lives in the thread's draft slot, which the page composer and the Ask Valet dock share, so an edit or a send in either composer ends the recall in both. A refetch that rewrites the recalled row, such as an optimistic `/review` that persists as a skill invocation, does not end the recall. Up acts on the first line and Down on the last line, so the arrows still move the caret in a long prompt. Lines are the prompt's own line breaks; a prompt that only wraps on screen counts as one line, so Up anywhere in it steps to an older prompt. A recalled slash command opens no command popup until the person edits it, so the arrows keep stepping and Enter sends it. Enter sends a recalled prompt as a new message: the earlier turn stays in the transcript and in the model context. With Stop, this gives an edit-and-resend path: stop the turn, press Up, change the prompt, and send it. The empty composer's hint and the shortcuts dialog name the keys.
+
+   Added 2026-10-20: **The composer shows how full the context is.** A ring and a percentage beside the send button show the thread's context against the budget at which the assistant compacts the thread. The popover has a Compact now button that sends `/compact`. The thread pinning and compaction spec (`2026-08-24-thread-model-pinning-and-compaction-design.md`, decision 8) owns the measurement and the route.
+
+   Amended 2026-09-20: Pending user messages render in admission order as a compact stack above the composer, not in the transcript. Each hydrated item has a **Send now** button that aborts the active turn and runs that item next while preserving every other queued message. Amended 2026-10-21: the `queue.state` frame carries each pending item's text (`WireQueueState.pending`, cut to 2,000 characters, with an attachment count and never the files). After a reload, in another tab, and for a wake-up, the stack therefore shows the text, and every row except a guest's has **Send now** and **Cancel**. A wake-up reads "Wake-up" before its text. Amended 2026-10-26: a signal row (an event, a wake-up, a child's result) shows "Runs next" and **Cancel**, with no **Send now**. A signal is not the person's message: it joins the running turn or runs after it, and Send now would only stop that turn. Send now stays on the person's own queued messages. A child's result reads "Task result" before its text. The queued item's wire `signal.type` is the signal's tag when the tag names a kind (such as `wakeup`); for the engine's default tag `signal` it is the `signalType`, such as `child.settled`. A mid-turn Enter sends `queueMode: "inject"`: the message joins the running turn at its next step, after the current tool calls, like a message typed into a coding agent while it works. It never aborts the turn. If it cannot join, or the turn ends first, it runs next. **Send now** and a second empty Enter still stop the turn and run the message at once. The empty-Enter promotion shortcut remains available. Amended 2026-10-20: every queued item, including one with no text after a reload, has its own row with **Cancel**. Cancel calls `POST /api/threads/:threadId/queue/:itemId/cancel`. `Thread.cancelQueuedItem` settles a `queued` item `aborted` in one store CAS (`settleUnclaimed` with `onlyIfUnsuperseded`) only while it is unclaimed and no Send now superseded it. It runs on the thread's overheard-digest chain, so it never lands between a digest's admission and the merge of its constituents. It also refuses an item that an unsettled digest lists in `constituentIds`, because that item can still read `queued` after a failed merge settlement. It leaves the other queued messages and the running turn alone. If a claim or a Send now wins, the route answers 409 and the composer shows the server's corrective text: use Stop for a started message. Guests of a shared thread see no Cancel, and the route refuses them. A row without text reads "Queued message. It runs when the current turn ends." The count line stays only for a view without the live queue state. The stream store badges a message only by its queue item id. A settlement that arrives before `POST /messages` links the message waits in `unmatchedSettlements` and applies when the link lands.
+
+#### Collapsible docked requests
+
+Question, approval, and credential request cards can collapse only when docked above the composer.
+Inline cards and notification cards do not have this toggle.
+The collapsed row shows the request type and title. Expanding restores the controls.
+When a deadline exists, the collapsed row keeps its countdown outside the button, with an absolute, locale-formatted expiry time linked through aria-describedby alongside any error hint.
+Same-day deadlines use time only; other deadlines include the date. Focus and return to a visible page refresh the countdown after sleep.
+The description does not tick; at expiry it changes to "Expired". The visual countdown is aria-hidden to prevent duplicate reading.
+The timer is not part of the button name. Phones omit the visible "Expires in" prefix; at expiry, the timer and dot become muted and the dot stops pulsing.
+Both toggles report their expanded state and control the card region. Focus moves to the other toggle after each change.
+
+One sessionStorage entry keeps the 50 most recently collapsed gate IDs for the current browser tab.
+Expanding removes that gate ID. A new gate starts expanded unless its ID is in this entry.
+Unavailable storage does not block the toggle.
+Collapse does not answer or dismiss a request. Unanswered requests remain pending, and the mounted card keeps its draft and images.
+
+After a failed action, the collapsed row shows a red dot and a Failed label.
+After an attachment rejection, the label shows Attachment rejected (Rejected on phones).
+One hidden description asks the user to expand and retry, or expand and fix the attachment.
+Expanding shows the full error. The error label uses at most half the row; the title gets the remaining width.
+On phones, rows with an error or timer hide the visible type badge but keep the type before the title in the accessible name.
+Error rows show Failed or Rejected without truncation.
+The accessible name includes the visible label and title as one phrase. A hidden description gives the corrective action without adding a separate reading-order item. The title has a full-text tooltip.
+
+A pointer expand, collapse, Not now, or Show records the click position and time, then arms document capture listeners.
+They cover pointerdown, pointerup, mousedown, mouseup, click, and dblclick.
+They swallow repeat events with detail greater than 1, including events over attachments, other controls, and the transcript.
+For 600ms, they also swallow separate presses near the old toggle position: within 24px for mouse and 48px for touch.
+A deliberate tap there is ignored by design, so a moved decision cannot receive it. A tap elsewhere works immediately.
+The guard decides at pointerdown or mousedown, then keeps that decision through pointerup, mouseup, click, and dblclick.
+A swallowed press stays swallowed even if release is after 600ms. A new press resets the decision.
+Pointer events stop propagation but keep their default behavior, so compatibility mouse events still reach the guard.
+A new mouse press outside that radius or after 600ms removes the listeners and passes through.
+A keyboard click also removes them and passes through. Unmount removes them too.
+OS repeat clicks have no time limit, and keyboard toggles do not arm the listeners.
+
+Each scroll sets the pin from the current distance to the end, using the existing 80-pixel threshold.
+Reveal, focus, find-in-page, keyboard, and scrollbar movement follow the same rule. No input timer gates the pin.
+During a pending viewport height change greater than two pixels, a pinned reader stays pinned if near the old or new end.
+A same-frame scroll away from both ends unpins before the resize report.
+Pinned readers stay at the bottom through viewport and content resizes. This trade-off applies to every container resize, not only gate toggles.
+A collapse scroll that brings a reader near the end pins them. On expansion they stay at the bottom, rather than returning to the pre-collapse offset.
+Otherwise the browser keeps an unpinned reader's place. The transcript does not write that reader's scroll position.
+The Latest button uses the actual distance from the end. A hidden mounted transcript ignores zero-height resize reports and scroll events.
+
 ### `/memory` and `/memory/$` — memory explorer
 
-Two panes:
+Two panes. The Files/Graph tabs keep their width; long workspace names truncate to one line, with the full name in the existing tooltip.
 
 - **Tree** (left): directories collapsed/expandable, pinned files marked 📌, `journal/` sorted newest-first with "today" highlighted. Data from the new JSON tree endpoint. A search field above the tree runs FTS (`GET /api/memory/search`) and swaps the tree for a result list (path, type badge, description) while active.
 - **Document** (right): the rendered OKF doc — title in the display face, `type`/`tags`/`sensitivity`/`origin` as quiet badges, body as book-like rendered markdown (Newsreader). Frontmatter never shown raw. Footer affordance: **"Ask {name} to update this"** → navigates to `/chat` with the composer pre-filled (`Update memory file {path}: …`).
@@ -111,6 +171,7 @@ This prevents an old completion from navigating away from a newly opened file.
 | `GET /api/memory/tree` | `{ entries: [{ path, title, type, pinned, updatedAt, dir: boolean }] }` | JSON listing for the explorer; the markdown virtual index stays for agents. Own-scope (+ read-union later; this pass own-scope is fine). |
 | Wire `Message.signal?` | `{ signalType, attributes?, senderSessionId? }` | bridge + REST (`entryToMessage`) stop dropping `entry.signal`. Closes the Phase 4 minor; **full persistence round-trip checklist applies** (engine entry → wire → REST → renderer). |
 | Wire `Message.attachments?` | `PromptImageAttachment[]` (`{ kind: "image", url, mimeType, name }`) | Added 2026-08-18. REST (`entryToMessage`) projects `MessageEntry.attachments` — an existing `data:` URL passes through, raw bytes synthesize one, entries with neither are dropped. User messages only in practice. Persistence: `engine_entries.attachments` (JSON text column; byte-backed attachments normalize to a `data:` URL at write). The live WS plane does NOT carry attachments — REST refetch is the source of truth for user messages. The web session view adds a whole-viewport drop zone (`PageDropTarget` + `ComposerDropContext`) feeding the composer's existing image intake; each mounted SessionView only ingests drops inside its own subtree. |
+| Wire `Message.errorMessage?` | `string` | Added 2026-10-14. When a turn ends with `stopReason: "error"`, the engine writes the provider error to the assistant entry's `metadata.turnError` (`MESSAGE_TURN_ERROR_KEY`) at `message_end`, truncated to 1000 characters. REST (`entryToMessage`) projects it on assistant messages only. On an empty assistant reply, the web shows "This turn failed: {error}" instead of the generic "No response" line. The live WS plane does not carry the field. While the page is open, the live `error` event shows the failure as a banner. |
 
 Also in scope: fix the notifications bell's stale-dropdown (refetch on open) while restyling it.
 
@@ -119,15 +180,14 @@ Also in scope: fix the notifications bell's stale-dropdown (refetch on open) whi
 Deliberately NOT the stock cream-and-terracotta AI look.
 
 - **Palette (light):** paper `#FAF9F7`, ink `#1F1D1A`, muted `#6E6A63`, hairline `#E7E4DE`; accent **moss** `#3E6B4F` (actions, links, live presence); **amber** `#B98A2F` reserved for waiting states (thinking, pending gates); error red unchanged. **Dark:** ground `#171614`, ink `#ECE9E4`, moss `#7FAE8F`, hairline `#2A2825`. Delivered as CSS variables consumed by Tailwind config; both themes supported from day one.
-- **Type:** UI remains the existing sans (Inter) — quiet and disciplined. **Newsreader** (self-hosted via fontsource) is the assistant's voice: the name in the presence header, dashboard section headings, and memory document rendering (title + body) — the explorer reads like a notebook. Mono only for ids/paths.
-- **Signature element — the presence mark.** The assistant's name with a small living indicator beneath: slow breath (≈2.4s ease) while idle, quicker while thinking, steady while children run. It shrinks into the nav on other pages so the assistant feels present app-wide. This is the single place the design spends boldness. `prefers-reduced-motion` → static dot.
+- **Type:** UI remains the existing sans (Inter) — quiet and disciplined. **Newsreader** (self-hosted via fontsource) is the assistant's voice: dashboard section headings, and memory document rendering (title + body) — the explorer reads like a notebook. Mono only for ids/paths.
 - **Signal cards** carry a soft moss left rail — events from the world look categorically different from typed messages.
 - Everything else: quiet cards on paper, hairline borders, generous spacing, gentle hover lift, no gradients, no numbered decorations.
 
 ## Component/unit boundaries
 
 - `packages/web/src/api/`: `orchestrator.ts` (info/children queries), `memory.ts` (tree/doc/search queries) — query-key factories per house pattern.
-- `components/assistant/`: `presence-mark.tsx`, `identity-header.tsx`, `naming-step.tsx`, dashboard cards (`chat-card`, `memory-card`, `work-card`, `activity-strip`).
+- `components/assistant/`: `identity-header.tsx`, `naming-step.tsx`, dashboard cards (`chat-card`, `memory-card`, `work-card`, `activity-strip`).
 - `components/session/`: gains `signal-card.tsx` (+ child card), `thread-tree.tsx` (replaces the flat thread list when children exist), `child-panel.tsx` (slide-over), and a `variant` prop threaded through the existing view for panel/standalone modes.
 - `components/memory/`: `memory-tree.tsx`, `memory-doc.tsx`, `memory-search.tsx`.
 - Theme tokens in one `theme.css` (CSS variables) + Tailwind config mapping; no per-component color literals.
@@ -145,3 +205,70 @@ Empty states direct, in-voice: dashboard before first message ("Say hello — {n
 ## Explicitly out of scope
 
 Org page and org activity; memory editing/graph/import UI; avatars and handles beyond the name; team management UI; channel/schedule thread origins (render when Phase 6 delivers them); mobile-app polish beyond responsive-that-works; legacy client changes.
+
+The thread summary stays closed until the user opens it, at every width. It is a popover over the transcript, so opening a chat never covers messages. Amended 2026-10-20: it opened by itself at 768 px and wider, where it covered the right side of the conversation.
+
+On phones, Ask Valet and available plugins live inside the navigation menu. The thread summary popover is bounded by the viewport width and available height.
+
+Amended 2026-10-19: the Ask Valet panel docks beside every page, including `/chat`, so it stays open beside the open thread. It is 440 px wide on large screens and covers the page below that width. A workflow page still opens the workflow's own conversation in Threads. A personal helper thread lives in the same session as the person's threads, so two views can show one session. `useSessionWebSocket` shares one socket for each session, counted by mounted views, and closes it when the last view unmounts. `text_delta` frames carry no offset, so a second socket would apply each delta twice. The dock marks its root with `data-ask-valet-dock`. A page request, such as the New thread focus or a memory prefill, goes to the page's composer and not to the dock. Escape stops the turn of the area that holds focus: the dock or the page. With focus on the page body, the page's turn stops first, and the dock's turn stops only when the page has no running turn, also while the page's stop request is in flight. On a page without a composer, Escape stops the dock's turn from anywhere on the page. A "Send now" on a queued message also marks its composer as used last. After a send settles, only the composer the person focused or sent from last takes focus back, and only from the page body. A failed send restores its text and attachments ahead of any newer content that the other composer of the same thread wrote.
+
+Amended 2026-10-19: each Ask Valet conversation has its own thread key, `app-assistant:<user>:<conversation>`. A thread with the older `app-assistant:<user>` key stays that person's conversation. Ownership checks read the person from the segment after `app-assistant:`. In a team, a person's conversations share their private helper execution, keyed `app-assistant:<user>`, so memory and working files carry across conversations. After an upgrade, that key can resolve to a shared session, the root or a retained older runtime, which holds the person's older conversation. Their newer conversations then use a private execution keyed `app-assistant:<user>:private`, and no new conversation lands on the shared root. If the person deletes that execution, the next fresh open allocates a new one, as for the plain helper key. Recent returns each conversation with its own session id.
+
+- Opening the panel from closed starts a new conversation. If the latest conversation runs or queues a turn, waits for an approval, or has work it started that is still open (a child session, timer, process, watch, event wait, or hold), the panel reopens that conversation instead, so a pending settings change or background result stays in view.
+- An archived conversation is left out of the latest choice, empty reuse, and Recent. If the archived one is the older per-person conversation, a plain open starts a new one.
+- A conversation starts with its first message, or with any entry when its activity was not recorded. The latest conversation is the most recently used one that started. Reopening the panel reuses an empty conversation, with any unsent draft, so opening it without a message saves no new thread. New chat and a contextual prompt always start a new thread. A team never reuses an empty conversation on a shared session.
+- A contextual prompt starts a new conversation. If the panel is open, the prompt goes to the open conversation.
+- The panel header has New chat and a Recent menu. Recent lists every started Ask Valet conversation of the viewer, the most recently used first, in a menu that scrolls. The Threads list still leaves them out, so Recent is the way back to an older one.
+- If the panel gets a second request while the first is in flight, each body gets its own request, and the latest one decides the conversation the panel shows. A plain open while the panel opens keeps the request in flight, so it cannot hide a contextual prompt's conversation. When two contextual prompts share one request, only the later prompt fills the draft.
+- `POST /api/workspaces/:workspace/conversation` takes `{ fresh, unlessBusy }`. With no body it returns the latest conversation. `GET /api/workspaces/:workspace/conversations` lists the viewer's conversations.
+
+Amended 2026-10-16: personal and team home dashboards show workspace activity directly. Generated briefings, their loading states, polling, and dismissal actions are removed.
+The briefing API routes, evidence collection, model generation, and refresh leases are removed. Home visits do not start briefing work.
+Questions, approvals, failed workflow runs, conversation updates, active work, and recent results retain their existing behavior. Memory, usage, and team Slack setup remain available.
+Existing briefing cache and dismissal records remain in the database. Workflow failure dismissal still uses the existing dismissal table.
+
+Workflow-owned run conversations are listed under Automations, with Conversation and Run details views sharing the existing chat components. The normal Threads list retains human-origin and workflow-editor conversations. Run links keep their existing session/thread IDs and access checks. Switching run views retains the mounted composer and draft, while suppressing hidden summary overlays. A reply continues the conversation; retrying a workflow remains a separate Run details action.
+
+On phones, work-list actions sit below the title and details. Long identifiers wrap within the row. Section tabs scroll horizontally within their own strip. Event review fields, workflow status controls, and integration connection actions wrap or stack without reducing the text to a narrow column. Desktop rows retain their horizontal layout.
+
+On desktop, drag the thread sidebar divider to resize it from 200 to 480 pixels. Focus the divider and use arrow keys for keyboard resizing. Width persists across reloads and collapse. The mobile drawer keeps its existing width.
+
+On narrow screens, conversation sharing details open from an information button beside the thread tabs. The full notice stays visible on wide screens.
+
+### Draft synchronization across browser tabs
+
+Remote draft updates change only in-memory state. They must not write back to browser storage. Ignore queued storage events whose values no longer match storage, including events queued before a successful send cleared the draft. This prevents stale text from cycling between tabs.
+
+### Artifacts navigation
+
+Artifacts is one desktop navigation link with an inline chevron. Clicking it opens Artifacts. Hover opens a list containing Artifacts and Memory. Arrow Down opens the same list for keyboard users. Mobile navigation keeps both destinations as separate menu entries.
+
+The thread summary's Outputs list what the thread produced: its files and sites, and the pull requests it opened. Delegated work produces outputs too. A pull request is recorded on the thread that opened it and on each thread that delegated that work (`thread_pull_requests`), and every copy keeps the opening session and thread (`opened_session_id`, `opened_thread_id`). A thread lists its own pull requests with its files and sites, and lists the copies a child opened in a separate "From delegated work" group, each named by the child's title. A child's inputs stay on the child. Sources list only files and links shared with this thread, so the links in a child's completion report (`child.*` signals) do not appear there. Rows recorded before the opening thread was kept read as the thread's own.
+
+### Composer processing visibility
+
+SessionView shows a persistent Valet status above the composer on phones and desktop.
+The status uses the active thread's live state and durable queue snapshot.
+It covers thinking before the first token, tool work, streaming, queued work, pauses, and pending responses.
+This includes work submitted from Slack or restored after a reconnect.
+A polite live region announces state changes. The status dot respects reduced motion.
+Human typing stays on its own line and never represents agent work.
+The cue clears when the thread has no active or queued work.
+
+### Thread loading (2026-10-26)
+
+A thread used to open after a chain of dependent requests (who you are, the workspace, the thread list, the session). Then it downloaded the last 200 entries with every tool result whole: 2 to 5 MB for long threads. Nothing showed until both had finished. The server answers these requests in milliseconds, so the wait was the chain and the payload.
+
+- The transcript starts early. Its cache is keyed by thread alone (`prefetchTranscript`, `usePrefetchTranscript` in `api/queries.ts`). The `/chat` route starts it from `?thread=` beside the workspace requests. A sidebar row starts it on hover (after 80 ms), press, or focus. `useMessages` shares a request still in flight and shows a finished one at once.
+- The newest page comes first. A thread opens with `TRANSCRIPT_TAIL` (50) entries. When older entries exist, a control at the top of the list loads `TRANSCRIPT_FULL` (200), on its own when it scrolls into view or on click. The newest page stays on screen while the rest loads. The store's partial-tail merge keeps the order.
+- Large tool output ships trimmed. `GET /api/threads/:id/messages` sends any tool result over 16,384 characters as its first 6,000 and last 2,000 characters, with `resultTrimmed: { chars, entryId, threadId }` on the part (`services/transcript-trim.ts`). A step's card loads the full result when it renders: `GET /api/threads/:id/tool-output?entryId=&callId=` reads that one entry. The live socket and the stored entries are unchanged.
+- The page shows its layout at once. While the workspace resolves, `/chat` shows a header line, placeholder transcript rows, and the composer outline. While a transcript loads, the list shows placeholder rows instead of "No messages yet".
+- Socket events refresh the thread lists and the context meter with `cancelRefetch: false`. A burst of events joins the refresh already on its way instead of restarting it.
+
+Measured with 115 ms of added latency on a 154-entry, 2.4 MB thread: a cold open went from 1.9 s to 1.5 s with the layout visible at once, a thread switch from 1.1 s to 0.6 s, and a switch after a 300 ms hover to 0.2 s.
+
+### Plan and working line (2026-10-26)
+
+The thread shows its `update_plan` plan the way Claude Code shows its to-do list. Every step is listed above the composer, with no header or collapsed state. A step shows a check when done, a spinner while running, and a dashed circle until it starts. The list shows while the plan has a step left and leaves once every step is done. A thread without a plan shows no card. The `update_plan` tool card uses the same rows.
+
+The working line under it shows the Valet mascot, the plan step in progress (or "Valet is thinking…" / "Valet is working…"), and the turn's elapsed time. Only the label is in the live region, so a screen reader does not hear the clock. The clock starts when this view first sees the turn running.

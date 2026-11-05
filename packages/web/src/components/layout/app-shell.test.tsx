@@ -9,10 +9,14 @@
  * a button the shell no longer has, and assert the drawer still closes on
  * the backdrop, the ✕, and any link inside it (thread selection).
  */
-import { describe, expect, it } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { describe, expect, it, vi, afterEach } from "vitest";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AppShell, useSidebarControls } from "./app-shell";
+
+let phoneLayout = false;
+vi.mock("~/hooks/use-mobile-layout", () => ({ useMobileLayout: () => phoneLayout }));
+afterEach(() => { phoneLayout = false; vi.unstubAllGlobals(); });
 
 /** Stands in for the real nav: the shell publishes the controls, something
  * else renders them. Also reports what it was given, so the "no sidebar"
@@ -90,10 +94,21 @@ describe("AppShell — mobile sidebar drawer", () => {
     renderShell();
     const opener = screen.getByRole("button", { name: /open threads/i });
     await userEvent.click(opener);
-    expect(document.activeElement).toBe(screen.getByRole("dialog", { name: "Threads" }));
+    expect(document.activeElement).toBe(screen.getByRole("dialog", { name: "Valet" }));
     await userEvent.keyboard("{Escape}");
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(document.activeElement).toBe(opener);
+  });
+
+  it("shows a Valet header whose close button closes the drawer", async () => {
+    renderShell();
+    await userEvent.click(screen.getByRole("button", { name: /open threads/i }));
+    const dialog = screen.getByRole("dialog", { name: "Valet" });
+    expect(within(dialog).getByText("Valet").className).not.toContain("sr-only");
+    // One close control, in the header row; no floating corner X.
+    expect(within(dialog).getAllByRole("button", { name: /close/i })).toHaveLength(1);
+    await userEvent.click(within(dialog).getByRole("button", { name: "Close menu" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   it("opens the drawer via the published control, closed by default", async () => {
@@ -126,5 +141,83 @@ describe("AppShell — mobile sidebar drawer", () => {
     const dialog = screen.getByRole("dialog");
     await userEvent.click(within(dialog).getByRole("link", { name: /thread one/i }));
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+});
+
+ it("remembers the resized sidebar width across collapse and remount", async () => {
+  localStorage.removeItem("valet:sidebar-collapsed");
+  localStorage.removeItem("valet:sidebar-width");
+  const first = renderShell();
+  const handle = screen.getByRole("separator", { name: "Resize thread sidebar" });
+  fireEvent.keyDown(handle, { key: "ArrowRight" });
+  expect(handle.getAttribute("aria-valuenow")).toBe("312");
+  await userEvent.click(screen.getByRole("button", { name: "toggle" }));
+  expect(screen.queryByRole("separator")).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "toggle" }));
+  first.unmount();
+  renderShell();
+  expect(screen.getByRole("separator").getAttribute("aria-valuenow")).toBe("312");
+  localStorage.removeItem("valet:sidebar-width");
+ });
+
+
+describe("AppShell — phone visual viewport", () => {
+  it("tracks keyboard height and viewport offset, then releases the phone viewport on desktop", () => {
+    phoneLayout = true;
+    const viewport = Object.assign(new EventTarget(), { height: 520, offsetTop: 48, scale: 1 });
+    vi.stubGlobal("visualViewport", viewport);
+    const { container, rerender } = render(<AppShell topNav={<NavProbe />}>content</AppShell>);
+    const shell = container.querySelector<HTMLElement>("[data-mobile-app-shell]");
+    expect(shell).not.toBeNull();
+    expect(shell?.style.getPropertyValue("--app-viewport-height")).toBe("520px");
+    expect(shell?.style.getPropertyValue("--app-viewport-top")).toBe("48px");
+    expect(document.documentElement.style.getPropertyValue("--app-viewport-height")).toBe("520px");
+    viewport.height = 800;
+    viewport.offsetTop = 0;
+    viewport.dispatchEvent(new Event("resize"));
+    expect(shell?.style.getPropertyValue("--app-viewport-height")).toBe("800px");
+    expect(shell?.style.getPropertyValue("--app-viewport-top")).toBe("0px");
+    phoneLayout = false;
+    rerender(<AppShell topNav={<NavProbe />}>content</AppShell>);
+    expect(container.querySelector("[data-mobile-app-shell]")).toBeNull();
+    expect(shell?.style.getPropertyValue("--app-viewport-height")).toBe("");
+    expect(document.documentElement.style.getPropertyValue("--app-viewport-height")).toBe("");
+  });
+});
+
+describe("AppShell — icon rail", () => {
+  afterEach(() => localStorage.clear());
+
+  function renderRail(collapseScope?: string) {
+    return render(
+      <AppShell topNav={<NavProbe />} sidebar={<nav>full sidebar</nav>} rail={<nav>icon rail</nav>} collapseScope={collapseScope}>
+        <div>content</div>
+      </AppShell>,
+    );
+  }
+
+  it("shows the 44px rail in place of the sidebar while collapsed, and remembers it", async () => {
+    const view = renderRail();
+    expect(screen.queryByRole("complementary", { name: "Sidebar rail" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "toggle" }));
+    const rail = screen.getByRole("complementary", { name: "Sidebar rail" });
+    expect(rail.className).toContain("w-11");
+    expect(within(rail).getByText("icon rail")).toBeTruthy();
+    expect(localStorage.getItem("valet:sidebar-collapsed")).toBe("1");
+    view.unmount();
+    renderRail();
+    expect(screen.getByTestId("collapsed").textContent).toBe("true");
+  });
+
+  it("starts a scoped page, such as the workflow editor, collapsed under its own key", async () => {
+    localStorage.setItem("valet:sidebar-collapsed", "0");
+    const view = renderRail("workflow-editor");
+    expect(screen.getByTestId("collapsed").textContent).toBe("true");
+    await userEvent.click(screen.getByRole("button", { name: "toggle" }));
+    expect(localStorage.getItem("valet:sidebar-collapsed:workflow-editor")).toBe("0");
+    expect(localStorage.getItem("valet:sidebar-collapsed")).toBe("0");
+    view.unmount();
+    renderRail();
+    expect(screen.getByTestId("collapsed").textContent).toBe("false");
   });
 });

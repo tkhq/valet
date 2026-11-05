@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { errorText } from "~/lib/error-text";
+import { ApiError } from "~/api/client";
 import { Trash2 } from "lucide-react";
 import type { LlmProviderKindWire, LlmProviderModelWire, LlmProviderSummary } from "@valet/api/wire";
 import {
@@ -9,33 +11,46 @@ import {
   DialogFooter,
   Input,
   Label,
+  Select,
   Spinner,
   Switch,
 } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
-import { ApiError } from "~/api/client";
 import {
   useCreateLlmProvider,
   useDeleteLlmProvider,
   useDeleteLlmProviderKey,
   useLlmProviders,
-  useOpenrouterRegistry,
+  useProviderModelCatalog,
   usePatchLlmProvider,
   useProbeLlmProvider,
   usePutLlmProviderKey,
   useTestLlmProvider,
 } from "~/api/settings";
 import { matchesNeedle } from "~/lib/text-match";
+import { formatPerMillion } from "~/lib/format-usage";
 
-type KnownKind = "anthropic" | "openai" | "google" | "openrouter";
+type KnownKind = "anthropic" | "openai" | "google" | "openrouter" | "amazon-bedrock";
 
-const KNOWN_KINDS: readonly LlmProviderKindWire[] = ["anthropic", "openai", "google", "openrouter"];
+const KNOWN_KINDS: readonly LlmProviderKindWire[] = ["anthropic", "openai", "google", "openrouter", "amazon-bedrock"];
 
 const KNOWN_LABEL: Record<KnownKind, string> = {
   anthropic: "Anthropic",
   openai: "OpenAI",
   google: "Google",
   openrouter: "OpenRouter",
+  "amazon-bedrock": "Amazon Bedrock",
+};
+
+/** Per-kind copy for the key field and the deployment-credential badge.
+ * Bedrock's "key" is a Bedrock API key (bearer token), and its deployment
+ * fallback is the pod's AWS credential chain, not an API-key env var. */
+const KIND_COPY: Record<KnownKind, { placeholder: string; deploymentBadge: string }> = {
+  anthropic: { placeholder: "sk-…", deploymentBadge: "using deployment key" },
+  openai: { placeholder: "sk-…", deploymentBadge: "using deployment key" },
+  google: { placeholder: "sk-…", deploymentBadge: "using deployment key" },
+  openrouter: { placeholder: "sk-…", deploymentBadge: "using deployment key" },
+  "amazon-bedrock": { placeholder: "Bedrock API key (bearer token)", deploymentBadge: "using deployment AWS credentials" },
 };
 
 /**
@@ -50,6 +65,7 @@ const KNOWN_LABEL: Record<KnownKind, string> = {
 export function LlmProvidersSection() {
   const providersQ = useLlmProviders();
   const providers = providersQ.data?.providers ?? [];
+  const envFallbackKinds = providersQ.data?.envFallbackKinds ?? [];
   const knownRows = new Map(
     providers.filter((p) => p.kind !== "openai_compatible").map((p) => [p.kind, p]),
   );
@@ -73,6 +89,7 @@ export function LlmProvidersSection() {
               key={kind}
               kind={kind as KnownKind}
               row={knownRows.get(kind)}
+              envFallback={envFallbackKinds.includes(kind)}
             />
           ))}
           {customRows.map((row) => (
@@ -90,9 +107,12 @@ export function LlmProvidersSection() {
 function KnownProviderCard({
   kind,
   row,
+  envFallback,
 }: {
   kind: KnownKind;
   row: LlmProviderSummary | undefined;
+  /** Deployment env can authenticate this kind even with no row (server `envFallbackKinds`). */
+  envFallback: boolean;
 }) {
   const createProvider = useCreateLlmProvider();
   const patchProvider = usePatchLlmProvider();
@@ -116,7 +136,7 @@ function KnownProviderCard({
       await putKey.mutateAsync({ id, body: { apiKey: trimmed } });
       setApiKey("");
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorText(err));
     }
   }
 
@@ -130,7 +150,7 @@ function KnownProviderCard({
       const id = await ensureRowId();
       await patchProvider.mutateAsync({ id, body: { enabled: checked } });
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorText(err));
     }
   }
 
@@ -139,15 +159,15 @@ function KnownProviderCard({
     deleteKey.mutate(row.id);
   }
 
-  const placeholder = row?.hasKey ? `••••${row.keyLast4}` : "sk-…";
-  const showDeploymentBadge = Boolean(row?.envFallback && !row.hasKey);
+  const placeholder = row?.hasKey ? `••••${row.keyLast4}` : KIND_COPY[kind].placeholder;
+  const showDeploymentBadge = row ? Boolean(row.envFallback && !row.hasKey) : envFallback;
 
   return (
     <div className="space-y-3 py-4">
       <div className="flex items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-sm font-medium text-ink">{KNOWN_LABEL[kind]}</span>
-          {showDeploymentBadge && <Badge variant="neutral">using deployment key</Badge>}
+          {showDeploymentBadge && <Badge variant="neutral">{KIND_COPY[kind].deploymentBadge}</Badge>}
         </div>
         <Switch
           checked={row?.enabled ?? true}
@@ -181,9 +201,9 @@ function KnownProviderCard({
           </Button>
         )}
       </div>
-      {kind === "openrouter" &&
+      {(kind === "openrouter" || kind === "amazon-bedrock") &&
         (row ? (
-          <OpenrouterModelsEditor provider={row} />
+          <CuratedModelsEditor provider={row} kind={kind} />
         ) : (
           // Zero-config (env key, no row): the selection editor needs a row
           // to persist to. Materialize one — the server seeds it with the
@@ -195,7 +215,7 @@ function KnownProviderCard({
             disabled={createProvider.isPending}
             onClick={() =>
               void ensureRowId().catch((err) =>
-                setError(err instanceof Error ? err.message : String(err)),
+                setError(errorText(err)),
               )
             }
           >
@@ -216,11 +236,29 @@ function KnownProviderCard({
  * the current selection with per-model remove, and an "Add models" panel
  * with a client-side filter over the full registry (fetched lazily).
  */
-function OpenrouterModelsEditor({ provider }: { provider: LlmProviderSummary }) {
+type CuratedKind = "openrouter" | "amazon-bedrock";
+
+/** Per-kind copy for the curated model picker. The OpenRouter strings are
+ * unchanged from before the picker was shared. */
+const PICKER_COPY: Record<CuratedKind, { filterLabel: string; placeholder: string; offline: string }> = {
+  openrouter: {
+    filterLabel: "Filter OpenRouter models",
+    placeholder: "Search all OpenRouter models — e.g. kimi-k3, deepseek, grok…",
+    offline: "Couldn't reach OpenRouter — showing the built-in list (may lag behind new releases).",
+  },
+  "amazon-bedrock": {
+    filterLabel: "Filter Amazon Bedrock models",
+    placeholder: "Search models available in your AWS account — e.g. qwen3-coder, deepseek, llama…",
+    offline: "Couldn't reach Amazon Bedrock — showing the built-in registry, which may include models this account cannot invoke.",
+  },
+};
+
+function CuratedModelsEditor({ provider, kind }: { provider: LlmProviderSummary; kind: CuratedKind }) {
+  const copy = PICKER_COPY[kind];
   const patchProvider = usePatchLlmProvider();
   const [pickerOpen, setPickerOpen] = useState(false);
   const [filter, setFilter] = useState("");
-  const registryQ = useOpenrouterRegistry({ enabled: pickerOpen });
+  const registryQ = useProviderModelCatalog(kind, { enabled: pickerOpen });
 
   const selectedIds = new Set(provider.models.map((m) => m.id));
 
@@ -262,6 +300,11 @@ function OpenrouterModelsEditor({ provider }: { provider: LlmProviderSummary }) 
             className="inline-flex items-center gap-1 rounded-full border border-line px-2 py-0.5 text-xs text-ink"
           >
             {m.id}
+            {formatPerMillion(m.pricing, "short") && (
+              <span className="text-muted" title={formatPerMillion(m.pricing)}>
+                {formatPerMillion(m.pricing, "short")}
+              </span>
+            )}
             <button
               type="button"
               aria-label={`Remove ${m.id}`}
@@ -277,7 +320,7 @@ function OpenrouterModelsEditor({ provider }: { provider: LlmProviderSummary }) 
       {pickerOpen && (
         <div className="space-y-2 rounded border border-line p-2">
           <Input
-            aria-label="Filter OpenRouter models"
+            aria-label={copy.filterLabel}
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
             onKeyDown={(e) => {
@@ -288,12 +331,12 @@ function OpenrouterModelsEditor({ provider }: { provider: LlmProviderSummary }) 
                 setPickerOpen(false);
               }
             }}
-            placeholder="Search all OpenRouter models — e.g. kimi-k3, deepseek, grok…"
+            placeholder={copy.placeholder}
             autoFocus
           />
           {registryQ.data && !registryQ.data.live && (
             <p className="text-xs text-muted">
-              Couldn't reach OpenRouter — showing the built-in list (may lag behind new releases).
+              {copy.offline}
             </p>
           )}
           {registryQ.isLoading && (
@@ -313,7 +356,10 @@ function OpenrouterModelsEditor({ provider }: { provider: LlmProviderSummary }) 
                 className="flex min-h-11 w-full flex-wrap items-center justify-between gap-2 rounded sm:min-h-0 px-2 py-1 text-left text-sm text-ink hover:bg-ink-wash"
               >
                 <span className="truncate">{m.id}</span>
-                <span className="ml-2 shrink-0 text-xs text-muted">{m.name}</span>
+                <span className="ml-2 flex shrink-0 flex-col items-end text-xs text-muted">
+                  <span>{m.name}</span>
+                  {formatPerMillion(m.pricing) && <span>{formatPerMillion(m.pricing)}</span>}
+                </span>
               </button>
             ))}
             {registryQ.data && filtered.length === 0 && (
@@ -370,7 +416,7 @@ function CustomProviderCard({ provider }: { provider: LlmProviderSummary }) {
       await putKey.mutateAsync({ id: provider.id, body: { apiKey: trimmed } });
       setApiKey("");
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorText(err));
     }
   }
 
@@ -378,7 +424,7 @@ function CustomProviderCard({ provider }: { provider: LlmProviderSummary }) {
     setError(null);
     probe.mutate(provider.id, {
       onSuccess: (resp) => setProbedIds(resp.models.map((m) => m.id)),
-      onError: (err) => setError(err.message),
+      onError: (err) => setError(errorText(err)),
     });
   }
 
@@ -407,7 +453,7 @@ function CustomProviderCard({ provider }: { provider: LlmProviderSummary }) {
       {
         onSuccess: (resp) =>
           setTestResult(resp.ok ? `OK — ${resp.latencyMs}ms` : resp.error),
-        onError: (err) => setTestResult(err.message),
+        onError: (err) => setTestResult(errorText(err)),
       },
     );
   }
@@ -497,18 +543,19 @@ function CustomProviderCard({ provider }: { provider: LlmProviderSummary }) {
 
       {provider.models.length > 0 && (
         <div className="flex flex-wrap items-center gap-2">
-          <select
+          <Select
+            size="sm"
             aria-label={`Test model for ${provider.name}`}
             value={testModelId}
             onChange={(e) => setTestModelId(e.target.value)}
-            className="h-12 max-w-full rounded border border-[--border] bg-[--bg] px-2 text-base sm:h-8 sm:text-sm text-[--fg]"
+            className="max-w-full"
           >
             {provider.models.map((m) => (
               <option key={m.id} value={m.id}>
                 {m.name}
               </option>
             ))}
-          </select>
+          </Select>
           <Button type="button" variant="secondary" size="sm" onClick={handleTest} disabled={test.isPending}>
             {test.isPending ? "Testing…" : "Test"}
           </Button>
@@ -536,12 +583,7 @@ function CustomProviderCard({ provider }: { provider: LlmProviderSummary }) {
                   onSuccess: () => setConfirmDelete(false),
                   onError: (err) => {
                     setConfirmDelete(false);
-                    if (err instanceof ApiError && typeof err.payload === "object" && err.payload !== null) {
-                      const payload = err.payload as { error?: string };
-                      setError(payload.error ?? err.message);
-                    } else {
-                      setError(err.message);
-                    }
+                    setError(err instanceof ApiError ? errorText(err) : err.message);
                   },
                 });
               }}
@@ -575,7 +617,7 @@ function CreateCustomProviderRow() {
           setBaseUrl("");
           setOpen(false);
         },
-        onError: (err) => setError(err.message),
+        onError: (err) => setError(errorText(err)),
       },
     );
   }

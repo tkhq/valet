@@ -115,6 +115,27 @@
 
 /* ── Edge states ───────────────────────────────────────────────────────
  *
+ * `FlowEdge` puts labels in the viewport portal. This keeps a label out of
+ * the SVG path, lets sibling labels offset independently, and prevents long
+ * expressions from expanding the graph. The title and aria-label retain the
+ * complete condition when the visible label is shortened.
+ */
+:root .workflow-edge-label {
+  max-width: 18rem;
+  overflow: hidden;
+  pointer-events: all;
+  border: 1px solid var(--line);
+  border-radius: 0.25rem;
+  background: var(--paper);
+  padding: 0.125rem 0.25rem;
+  color: var(--ink);
+  font-size: 11px;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
  * At rest an edge is a muted line with an arrowhead (`canvas.tsx` sets
  * the marker). Pointing at one is how a reader finds where it goes in a
  * dense graph, so it answers with the strongest tone the palette has.

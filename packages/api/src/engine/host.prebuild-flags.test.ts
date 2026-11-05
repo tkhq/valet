@@ -11,7 +11,9 @@
  * drift apart again.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { eq } from "drizzle-orm";
 import { generateKeyPairSync } from "node:crypto";
+import { buildSandboxManifest, SANDBOX_CR_API_VERSION } from "@valet/sandbox-kubernetes";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { RecordingSandboxProvider } from "../test-helpers/recording-sandbox.js";
@@ -22,8 +24,34 @@ import { clearRepoPrebuildFlagsCache } from "../bakes/source-service.js";
 import { saveAppConfig, type GithubAppConfig } from "../services/github-app.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { loadSessionMeta } from "./session-meta.js";
-import { primaryGitHubRepoTarget } from "./host.js";
+import { codingPromptOptions, primaryGitHubRepoTarget, sessionScratchBytes, wakeupsSeamDeps } from "./host.js";
+import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import type { RepoBinding } from "../wire/types.js";
+import { InMemorySessionStore, type Sandbox, type SandboxCapabilities, type SandboxCreateOpts } from "@valet/engine";
+import { resolveWakeupLimits } from "../providers/sandbox-backend.js";
+
+class NestedRecordingSandboxProvider extends RecordingSandboxProvider {
+  override capabilities(): SandboxCapabilities {
+    return { ...super.capabilities(), nestedKubernetes: "v1" };
+  }
+}
+
+class BrowserRecordingSandboxProvider extends NestedRecordingSandboxProvider {
+  override capabilities(): SandboxCapabilities {
+    return { ...super.capabilities(), browserAutomation: true, browserViewer: true };
+  }
+  override async create(opts: SandboxCreateOpts): Promise<Sandbox> {
+    const sandbox = await super.create(opts);
+    const exec = sandbox.exec.bind(sandbox);
+    sandbox.exec = async (command, options) => {
+      if (command.startsWith("test -") && command.includes("/var/lib/valet/browser/")) {
+        return { exitCode: 1, stdout: "", stderr: "" };
+      }
+      return exec(command, options);
+    };
+    return sandbox;
+  }
+}
 
 function binding(overrides: Partial<RepoBinding> = {}): RepoBinding & { targetDir: string } {
   return {
@@ -34,6 +62,41 @@ function binding(overrides: Partial<RepoBinding> = {}): RepoBinding & { targetDi
     ...overrides,
   };
 }
+
+describe("session wiring for scratch and job logs (fix wave 3)", () => {
+  it("passes the boot-resolved job log cap to the wakeups seam (data M3)", () => {
+    const base = {
+      engineStore: new InMemorySessionStore(),
+      wakeupLimits: resolveWakeupLimits({}),
+      sandboxProvider: new RecordingSandboxProvider(),
+    };
+    expect(wakeupsSeamDeps({ ...base, jobLogMaxBytes: 1234 }).jobLogMaxBytes).toBe(1234);
+    expect(wakeupsSeamDeps(base)).not.toHaveProperty("jobLogMaxBytes");
+    expect(wakeupsSeamDeps(base).limits).toBe(base.wakeupLimits);
+  });
+
+  it("reads the session's scratch bytes from the attachment's observation (k8s M-B)", () => {
+    const session = (resources: { scratch?: string } | null | undefined) => ({
+      attachment: {
+        sandboxId: "sb-1",
+        current: () => null,
+        ...(resources === undefined ? {} : { observedResources: () => resources }),
+      },
+    });
+    expect(sessionScratchBytes(() => session({ scratch: "1Gi" }))).toBe(1024 ** 3);
+    expect(sessionScratchBytes(() => session({}))).toBeUndefined();
+    expect(sessionScratchBytes(() => session(null))).toBeUndefined();
+    expect(sessionScratchBytes(() => session(undefined))).toBeUndefined();
+    expect(sessionScratchBytes(() => undefined)).toBeUndefined();
+  });
+
+  it("tells the prompt builder whether the session has scratch (ux L-5)", () => {
+    expect(codingPromptOptions(true, { resources: { scratch: "100Gi" } })).toEqual({ secretsCli: true, scratchEnabled: true });
+    expect(codingPromptOptions(false, { initialResources: { scratch: "100Gi" } })).toEqual({ secretsCli: false, scratchEnabled: true });
+    expect(codingPromptOptions(true, { resources: {} })).toEqual({ secretsCli: true, scratchEnabled: false });
+    expect(codingPromptOptions(true, {})).toEqual({ secretsCli: true, scratchEnabled: false });
+  });
+});
 
 describe("primaryGitHubRepoTarget", () => {
   it('host "github" (the session_repos schema default) resolves — the TKAI-385 regression', () => {
@@ -162,17 +225,17 @@ describe("childSessionFor repo prebuild flags", () => {
     clearRepoPrebuildFlagsCache();
   });
 
-  it("a child resource override wins for initial creation and desired reconciliation", async () => {
+  it("a repository child keeps Docker, nested Kubernetes, browser access, and resource overrides", async () => {
     fixture = startGithubFixture({
       createInstallationToken: (id) => ({
         body: { token: `inst-${id}`, expires_at: new Date(Date.now() + 3600_000).toISOString() },
       }),
       getContents: (_owner, _repo, path) =>
         path === ".valet/prebuild.yaml"
-          ? contentsBody('workspaceStorage: "8Gi"\ndocker: true\nresources:\n  cpu: 4\n  memory: 8Gi\n', "blob1")
+          ? contentsBody('workspaceStorage: "8Gi"\ndocker: true\nkubernetes: true\nresources:\n  cpu: 4\n  memory: 8Gi\n', "blob1")
           : { status: 404, body: { message: "Not Found" } },
     });
-    const recorder = new RecordingSandboxProvider();
+    const recorder = new BrowserRecordingSandboxProvider();
     api = await bootTestApi({
       sandboxProvider: recorder,
       githubTokenDeps: {
@@ -199,6 +262,11 @@ describe("childSessionFor repo prebuild flags", () => {
     });
 
     const childId = "child-prebuild-flags";
+    await db.insert(agentSessions).values({
+      id: childId, userId: "local-user", orgId: "local-org", workspace: `/tmp/${childId}`,
+      status: "active", ownerType: "user", ownerId: "local-user", profile: "headless",
+      createdAt: now, updatedAt: now,
+    });
     // The binding row lands BEFORE the build, same order as the spawner
     // (`orchestrator/children.ts`).
     await db.insert(sessionRepos).values({
@@ -233,6 +301,9 @@ describe("childSessionFor repo prebuild flags", () => {
     expect(call).toBeDefined();
     expect(call?.workspaceStorage).toBe("8Gi");
     expect(call?.docker).toBe(true);
+    expect(call?.nestedKubernetes).toBe(true);
+    expect(call?.browser).toEqual({ enabled: true, viewer: true });
+    expect((await db.select({ kubernetes: agentSessions.kubernetes }).from(agentSessions).where(eq(agentSessions.id, childId)).limit(1))[0]?.kubernetes).toBe(true);
     expect(call?.resources).toEqual({ cpu: 2, memory: "8Gi" });
     expect((await child.options.specProvider?.())?.resources).toEqual({ cpu: 2, memory: "8Gi" });
 
@@ -242,6 +313,281 @@ describe("childSessionFor repo prebuild flags", () => {
     const contentsCall = fixture.calls.find((c) => c.path.includes("/contents/"));
     expect(contentsCall?.authHeader).toBe("Bearer inst-111");
     expect(fixture.calls.filter((c) => c.path.includes("/contents/.valet/prebuild.yaml"))).toHaveLength(1);
+  });
+
+  /**
+   * Scratch caps (sandbox-scratch-wakeups plan, Task 14): a repo that
+   * declares a `scratch` above the deploy cap gets it DROPPED, not clamped.
+   * The rest of `.valet/prebuild.yaml` is still honored, and the drop
+   * surfaces as a `startupWarnings` entry on the child instead of silently
+   * shrinking the request.
+   */
+  it("drops a repo-declared scratch above the deploy cap and warns", async () => {
+    const prevScratchMax = process.env.VALET_SANDBOX_SCRATCH_MAX;
+    process.env.VALET_SANDBOX_SCRATCH_MAX = "1Ti";
+    try {
+      fixture = startGithubFixture({
+        createInstallationToken: (id) => ({
+          body: { token: `inst-${id}`, expires_at: new Date(Date.now() + 3600_000).toISOString() },
+        }),
+        getContents: (_owner, _repo, path) =>
+          path === ".valet/prebuild.yaml"
+            ? contentsBody("resources:\n  scratch: 2Ti\n", "blob-scratch-cap")
+            : { status: 404, body: { message: "Not Found" } },
+      });
+      const recorder = new RecordingSandboxProvider();
+      api = await bootTestApi({
+        sandboxProvider: recorder,
+        githubTokenDeps: {
+          key: deriveSecretKey("test-key"),
+          apiUrl: fixture.url,
+          githubUrl: fixture.url,
+        },
+      });
+      const { engineHost, db, engineCredentials } = api.providers;
+      await saveAppConfig({ credentials: engineCredentials }, "local-org", appConfig);
+      const now = Date.now();
+      await db.insert(githubInstallations).values({
+        id: "ghi_scratch_cap",
+        orgId: "local-org",
+        installationId: 444,
+        accountLogin: "tkhq",
+        accountType: "Organization",
+        repositorySelection: "all",
+        suspended: false,
+        cachedToken: null,
+        cachedTokenExpiresAt: null,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      const childId = "child-scratch-cap";
+      await db.insert(agentSessions).values({
+        id: childId, userId: "local-user", orgId: "local-org", workspace: `/tmp/${childId}`,
+        status: "active", ownerType: "user", ownerId: "local-user", profile: "headless",
+        createdAt: now, updatedAt: now,
+      });
+      await db.insert(sessionRepos).values({
+        sessionId: childId,
+        host: "github",
+        fullName: "tkhq/mono",
+        cloneUrl: "https://github.com/tkhq/mono.git",
+        ref: null,
+        auth: "auto",
+        position: 0,
+        targetDir: "mono",
+      });
+
+      const parent = await engineHost.sessionFor("parent-scratch-cap", {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/tmp/parent-scratch-cap",
+      });
+      const parentThread = parent.thread("web:default");
+      const startupWarnings: string[] = [];
+      const child = await engineHost.childSessionFor(childId, {
+        parentSessionId: "parent-scratch-cap",
+        parentThreadId: parentThread.id,
+        actorUserId: "local-user",
+        orgId: "local-org",
+        owner: { type: "user", id: "local-user" },
+        workspace: `/tmp/${childId}`,
+        startupWarnings,
+      });
+      await child.attachment.ensureReady({ timeoutMs: 5_000 });
+
+      expect(startupWarnings).toEqual([
+        "Valet did not apply resources.scratch from .valet/prebuild.yaml. scratch 2Ti exceeds the 1Ti deploy cap (sandbox.scratchMax). Request at most 1Ti, or set a higher sandbox.scratchMax in the Valet chart (an admin task).",
+      ]);
+      const call = recorder.createCalls.find((c) => c.sessionId === childId);
+      expect(call?.resources).toEqual({});
+    } finally {
+      if (prevScratchMax === undefined) delete process.env.VALET_SANDBOX_SCRATCH_MAX;
+      else process.env.VALET_SANDBOX_SCRATCH_MAX = prevScratchMax;
+    }
+  });
+
+  /**
+   * The dropped-scratch console warning is logged once per repo, the same
+   * way `resourcesWithheld` is deduplicated. A repo reconciled on every
+   * run-start window must not spam the log. `startupWarnings` carries the
+   * same warning text to every child regardless; only the console log
+   * dedups.
+   */
+  it("logs the dropped-scratch warning once per repo but still warns every child", async () => {
+    const prevScratchMax = process.env.VALET_SANDBOX_SCRATCH_MAX;
+    process.env.VALET_SANDBOX_SCRATCH_MAX = "1Ti";
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      fixture = startGithubFixture({
+        createInstallationToken: (id) => ({
+          body: { token: `inst-${id}`, expires_at: new Date(Date.now() + 3600_000).toISOString() },
+        }),
+        getContents: (_owner, _repo, path) =>
+          path === ".valet/prebuild.yaml"
+            ? contentsBody("resources:\n  scratch: 2Ti\n", "blob-scratch-cap-dedup")
+            : { status: 404, body: { message: "Not Found" } },
+      });
+      const recorder = new RecordingSandboxProvider();
+      api = await bootTestApi({
+        sandboxProvider: recorder,
+        githubTokenDeps: {
+          key: deriveSecretKey("test-key"),
+          apiUrl: fixture.url,
+          githubUrl: fixture.url,
+        },
+      });
+      const { engineHost, db, engineCredentials } = api.providers;
+      await saveAppConfig({ credentials: engineCredentials }, "local-org", appConfig);
+      const now = Date.now();
+      await db.insert(githubInstallations).values({
+        id: "ghi_scratch_cap_dedup",
+        orgId: "local-org",
+        installationId: 445,
+        accountLogin: "tkhq",
+        accountType: "Organization",
+        repositorySelection: "all",
+        suspended: false,
+        cachedToken: null,
+        cachedTokenExpiresAt: null,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      const parent = await engineHost.sessionFor("parent-scratch-cap-dedup", {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/tmp/parent-scratch-cap-dedup",
+      });
+      const parentThread = parent.thread("web:default");
+
+      const warningText =
+        "Valet did not apply resources.scratch from .valet/prebuild.yaml. scratch 2Ti exceeds the 1Ti deploy cap (sandbox.scratchMax). Request at most 1Ti, or set a higher sandbox.scratchMax in the Valet chart (an admin task).";
+      for (const childId of ["child-scratch-cap-dedup-1", "child-scratch-cap-dedup-2"]) {
+        await db.insert(agentSessions).values({
+          id: childId, userId: "local-user", orgId: "local-org", workspace: `/tmp/${childId}`,
+          status: "active", ownerType: "user", ownerId: "local-user", profile: "headless",
+          createdAt: now, updatedAt: now,
+        });
+        await db.insert(sessionRepos).values({
+          sessionId: childId,
+          host: "github",
+          fullName: "tkhq/dedup-mono",
+          cloneUrl: "https://github.com/tkhq/dedup-mono.git",
+          ref: null,
+          auth: "auto",
+          position: 0,
+          targetDir: "dedup-mono",
+        });
+        const startupWarnings: string[] = [];
+        const child = await engineHost.childSessionFor(childId, {
+          parentSessionId: "parent-scratch-cap-dedup",
+          parentThreadId: parentThread.id,
+          actorUserId: "local-user",
+          orgId: "local-org",
+          owner: { type: "user", id: "local-user" },
+          workspace: `/tmp/${childId}`,
+          startupWarnings,
+        });
+        await child.attachment.ensureReady({ timeoutMs: 5_000 });
+        // startupWarnings carries the warning to EVERY child. Only the
+        // console log is deduplicated.
+        expect(startupWarnings).toEqual([warningText]);
+      }
+
+      const scratchCapLogs = warnSpy.mock.calls.filter(
+        ([message]) => typeof message === "string" && message.includes("did not apply resources.scratch from .valet/prebuild.yaml"),
+      );
+      expect(scratchCapLogs).toHaveLength(1);
+    } finally {
+      warnSpy.mockRestore();
+      if (prevScratchMax === undefined) delete process.env.VALET_SANDBOX_SCRATCH_MAX;
+      else process.env.VALET_SANDBOX_SCRATCH_MAX = prevScratchMax;
+    }
+  });
+
+  it("pins mutable private-repo flags and checkout to one authenticated commit", async () => {
+    const oldSha = "9ae8720066b8af545eec68ad64789dd75b014687";
+    const newSha = "afbbbca285b504f6f43781f77c68817522c4bd4d";
+    const branch = "valet-arm64-solana-test-validator";
+    const movedYaml = "kubernetes: true\nresources:\n  memory: 8Gi\n";
+    let branchHead = oldSha;
+    fixture = startGithubFixture({
+      createInstallationToken: (id) => ({
+        body: { token: `inst-${id}`, expires_at: new Date(Date.now() + 3600_000).toISOString() },
+      }),
+      getCommit: (_owner, _repo, ref) => ({ body: { sha: ref === branch ? branchHead : ref } }),
+      getContents: (_owner, _repo, path, ref) => {
+        if (path !== ".valet/prebuild.yaml") return { status: 404, body: { message: "Not Found" } };
+        return contentsBody(ref === newSha ? movedYaml : "kubernetes: false\n", `blob-${ref}`);
+      },
+    });
+    const recorder = new NestedRecordingSandboxProvider();
+    api = await bootTestApi({
+      sandboxProvider: recorder,
+      githubTokenDeps: { key: deriveSecretKey("test-key"), apiUrl: fixture.url, githubUrl: fixture.url },
+    });
+    const { engineHost, db, engineCredentials } = api.providers;
+    await saveAppConfig({ credentials: engineCredentials }, "local-org", appConfig);
+    const now = Date.now();
+    await db.insert(githubInstallations).values({
+      id: "ghi_mutable_flags", orgId: "local-org", installationId: 333, accountLogin: "tkhq",
+      accountType: "Organization", repositorySelection: "all", suspended: false,
+      cachedToken: null, cachedTokenExpiresAt: null, createdAt: now, updatedAt: now,
+    });
+    const parent = await engineHost.sessionFor("parent-mutable-flags", {
+      userId: "local-user", orgId: "local-org", workspace: "/tmp/parent-mutable-flags",
+    });
+    const deps = {
+      db, engineHost, engineStore: api.providers.engineStore,
+      prebuildService: api.providers.prebuildService, workspaceRoot: "/tmp",
+      scratchCaps: {},
+    };
+    const spawn = buildChildSpawner(deps, new ChildWatcher(deps));
+    const childIds: string[] = [];
+    for (const docker of [false, true]) {
+      const result = await spawn({
+        prompt: "test", repo: "tkhq/mono", branch, docker,
+        ...(docker ? { resources: { cpu: 2 } } : {}),
+      }, {
+        parentSessionId: parent.id, parentThreadId: parent.thread("web:default").id,
+        actorUserId: "local-user", owner: { type: "user", id: "local-user" },
+      });
+      childIds.push(result.childSessionId);
+      await engineHost.liveSession(result.childSessionId)?.attachment.ensureReady({ timeoutMs: 5_000 });
+      branchHead = newSha;
+    }
+    const [firstId, secondId] = childIds;
+    const secondCall = recorder.createCalls.find((call) => call.sessionId === secondId);
+    expect(secondCall?.nestedKubernetes).toBe(true);
+    expect(secondCall?.resources).toEqual({ cpu: 2, memory: "8Gi" });
+    expect((await db.select({
+      kubernetes: agentSessions.kubernetes,
+      resources: agentSessions.sandboxResourceOverrides,
+    }).from(agentSessions).where(eq(agentSessions.id, secondId!)))[0]).toEqual({
+      kubernetes: true,
+      resources: { cpu: 2 },
+    });
+    const refs = await db.select({
+      sessionId: sessionRepos.sessionId, ref: sessionRepos.ref, resolvedRef: sessionRepos.resolvedRef,
+    }).from(sessionRepos);
+    expect(refs).toEqual(expect.arrayContaining([
+      { sessionId: firstId, ref: branch, resolvedRef: oldSha },
+      { sessionId: secondId, ref: branch, resolvedRef: newSha },
+    ]));
+    const contentsCalls = fixture.calls.filter((call) => call.path.includes("/contents/.valet/prebuild.yaml"));
+    expect(contentsCalls.map((call) => call.query.ref)).toEqual([oldSha, newSha]);
+    expect(contentsCalls.every((call) => call.authHeader === "Bearer inst-333")).toBe(true);
+    expect(fixture.calls.filter((call) => call.path.includes("/access_tokens"))).toHaveLength(1);
+
+    const manifest = buildSandboxManifest({
+      namespace: "test", defaultImage: "sandbox:test", apiVersion: SANDBOX_CR_API_VERSION,
+      dockerRuntimeClassName: "valet-docker",
+    }, secondId!, secondCall!);
+    expect(manifest.spec.podTemplate.spec.containers[0]?.env).toEqual(expect.arrayContaining([
+      { name: "VALET_SANDBOX_KUBERNETES", value: "1" },
+      { name: "KUBECONFIG", value: "/home/dockerd/.local/state/valet/kubernetes/kubeconfig.yaml" },
+    ]));
   });
 
   it.each([null, { cpu: 2, memory: "4Gi" }])("an authenticated missing file applies saved defaults %j authoritatively", async (sandboxResources) => {
@@ -371,6 +717,130 @@ describe("childSessionFor repo prebuild flags", () => {
       cpu: 4,
       memory: "8Gi",
     });
+  });
+
+  it("shows a dropped scratch request on a REST session's thread once (fix wave 1, I5)", async () => {
+    const prevScratchMax = process.env.VALET_SANDBOX_SCRATCH_MAX;
+    process.env.VALET_SANDBOX_SCRATCH_MAX = "1Ti";
+    try {
+      fixture = startGithubFixture({
+        getContents: (_owner, _repo, path) =>
+          path === ".valet/prebuild.yaml"
+            ? contentsBody("resources:\n  scratch: 2Ti\n", "blob-rest-scratch")
+            : { status: 404, body: { message: "Not Found" } },
+      });
+      api = await bootTestApi({
+        sandboxProvider: new RecordingSandboxProvider(),
+        githubTokenDeps: { key: deriveSecretKey("test-key"), apiUrl: fixture.url, githubUrl: fixture.url },
+      });
+      const { engineHost, engineStore, db } = api.providers;
+      const sessionId = "rest-scratch-refused";
+      const now = Date.now();
+      await db.insert(agentSessions).values({
+        id: sessionId, userId: "local-user", orgId: "local-org", workspace: `/tmp/${sessionId}`,
+        status: "active", ownerType: "user", ownerId: "local-user", profile: "headless", createdAt: now, updatedAt: now,
+      });
+      await db.insert(sessionRepos).values({
+        sessionId, host: "github", fullName: "acme/open-widgets", cloneUrl: "https://github.com/acme/open-widgets.git",
+        ref: null, auth: "auto", position: 0, targetDir: "open-widgets",
+      });
+      const meta = {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: `/tmp/${sessionId}`,
+        repos: [binding({ fullName: "acme/open-widgets" })],
+      };
+      const warning =
+        "Valet did not apply resources.scratch from .valet/prebuild.yaml. scratch 2Ti exceeds the 1Ti deploy cap (sandbox.scratchMax). Request at most 1Ti, or set a higher sandbox.scratchMax in the Valet chart (an admin task).";
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const session = await engineHost.sessionFor(sessionId, meta);
+      // A rebuild (api restart or cache eviction) must not repeat the entry.
+      engineHost.evictCache(sessionId);
+      await engineHost.sessionFor(sessionId, meta);
+      warnSpy.mockRestore();
+
+      const thread = session.thread("web:default");
+      const entries = await engineStore.getEntries(sessionId, thread.id);
+      const notices = entries.filter((e) => e.type === "message" && e.role === "system" && e.content === warning);
+      expect(notices).toHaveLength(1);
+      // The model does not read `system` entries, so the system prompt
+      // carries the same warning (M13).
+      expect(session.options.systemPrompt).toContain(`This session has no /scratch. ${warning}`);
+    } finally {
+      if (prevScratchMax === undefined) delete process.env.VALET_SANDBOX_SCRATCH_MAX;
+      else process.env.VALET_SANDBOX_SCRATCH_MAX = prevScratchMax;
+    }
+  });
+
+  it("puts the scratch warning on the thread that triggered the build (M13)", async () => {
+    const prevScratchMax = process.env.VALET_SANDBOX_SCRATCH_MAX;
+    delete process.env.VALET_SANDBOX_SCRATCH_MAX;
+    try {
+      fixture = startGithubFixture({
+        getContents: (_owner, _repo, path) =>
+          path === ".valet/prebuild.yaml"
+            ? contentsBody("resources:\n  scratch: 200Gi\n", "blob-rest-scratch-thread")
+            : { status: 404, body: { message: "Not Found" } },
+      });
+      api = await bootTestApi({
+        sandboxProvider: new RecordingSandboxProvider(),
+        githubTokenDeps: { key: deriveSecretKey("test-key"), apiUrl: fixture.url, githubUrl: fixture.url },
+      });
+      const { engineHost, engineStore, db } = api.providers;
+      const sessionId = "rest-scratch-thread";
+      const now = Date.now();
+      await db.insert(agentSessions).values({
+        id: sessionId, userId: "local-user", orgId: "local-org", workspace: `/tmp/${sessionId}`,
+        status: "active", ownerType: "user", ownerId: "local-user", profile: "headless", createdAt: now, updatedAt: now,
+      });
+      await db.insert(sessionRepos).values({
+        sessionId, host: "github", fullName: "acme/open-widgets", cloneUrl: "https://github.com/acme/open-widgets.git",
+        ref: null, auth: "auto", position: 0, targetDir: "open-widgets",
+      });
+      const warning =
+        "Valet did not apply resources.scratch from .valet/prebuild.yaml. scratch is not enabled on this deployment. " +
+        "Set sandbox.scratchMax in the Valet chart (an admin task), or VALET_SANDBOX_SCRATCH_MAX in a dev stack.";
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const session = await engineHost.sessionFor(sessionId, {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: `/tmp/${sessionId}`,
+        repos: [binding({ fullName: "acme/open-widgets" })],
+        warningThreadKey: "web:trigger",
+      });
+      warnSpy.mockRestore();
+
+      const trigger = await session.threadByKey("web:trigger");
+      const onTrigger = trigger === null ? [] : await engineStore.getEntries(sessionId, trigger.id);
+      expect(onTrigger.filter((e) => e.type === "message" && e.role === "system" && e.content === warning)).toHaveLength(1);
+      const defaultThread = await session.threadByKey("web:default");
+      const onDefault = defaultThread === null ? [] : await engineStore.getEntries(sessionId, defaultThread.id);
+      expect(onDefault.filter((e) => e.type === "message" && e.role === "system" && e.content === warning)).toHaveLength(0);
+    } finally {
+      if (prevScratchMax === undefined) delete process.env.VALET_SANDBOX_SCRATCH_MAX;
+      else process.env.VALET_SANDBOX_SCRATCH_MAX = prevScratchMax;
+    }
+  });
+
+  it("preserves persisted Kubernetes when the repository read fails", async () => {
+    fixture = startGithubFixture({ getContents: () => ({ status: 500, body: { message: "failed" } }) });
+    const recorder = new NestedRecordingSandboxProvider();
+    api = await bootTestApi({ sandboxProvider: recorder, githubTokenDeps: {
+      key: deriveSecretKey("test-key"), apiUrl: fixture.url, githubUrl: fixture.url,
+    } });
+    const { engineHost, db } = api.providers;
+    const id = "persisted-kubernetes"; const now = Date.now();
+    await db.insert(agentSessions).values({ id, userId: "local-user", orgId: "local-org", workspace: `/tmp/${id}`,
+      status: "active", ownerType: "user", ownerId: "local-user", profile: "headless", kubernetes: true,
+      createdAt: now, updatedAt: now });
+    await db.insert(sessionRepos).values({ sessionId: id, host: "github", fullName: "acme/failing",
+      cloneUrl: "https://github.com/acme/failing.git", ref: null, auth: "auto", position: 0, targetDir: "failing" });
+    const session = await engineHost.sessionFor(id, await loadSessionMeta(db, (await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1))[0]!));
+    await session.attachment.ensureReady({ timeoutMs: 5_000 });
+    expect(recorder.createCalls.find((call) => call.sessionId === id)?.nestedKubernetes).toBe(true);
+    expect((await db.select({ kubernetes: agentSessions.kubernetes }).from(agentSessions).where(eq(agentSessions.id, id)).limit(1))[0]?.kubernetes).toBe(true);
   });
 
   it.each([null, { cpu: 2, memory: "4Gi" }])("a tokenless missing file preserves adoption and uses saved defaults %j for fresh compute", async (sandboxResources) => {
@@ -713,9 +1183,13 @@ describe("childSessionFor repo prebuild flags", () => {
 
   it("a timed-out read is evicted so the next child retries", async () => {
     let contentReads = 0;
-    const fetchImpl: typeof fetch = (_input, init) => {
-      contentReads++;
+    const fetchImpl: typeof fetch = (input, init) => {
       expect(init?.signal).toBeInstanceOf(AbortSignal);
+      const url = new URL(String(input));
+      if (url.pathname.includes("/commits/")) {
+        return Promise.resolve(Response.json({ sha: "3".repeat(40) }));
+      }
+      contentReads++;
       if (contentReads === 1) return new Promise<Response>(() => {});
       return Promise.resolve(
         new Response(
@@ -763,9 +1237,11 @@ describe("childSessionFor repo prebuild flags", () => {
       owner: { type: "user" as const, id: "local-user" },
     };
 
+    const firstWarnings: string[] = [];
     const first = await engineHost.childSessionFor("child-timeout-one", {
       ...childOpts,
       workspace: "/tmp/child-timeout-one",
+      startupWarnings: firstWarnings,
     });
     await first.attachment.ensureReady({ timeoutMs: 5_000 });
     const second = await engineHost.childSessionFor("child-timeout-two", {
@@ -775,6 +1251,9 @@ describe("childSessionFor repo prebuild flags", () => {
     await second.attachment.ensureReady({ timeoutMs: 5_000 });
 
     expect(contentReads).toBe(2);
+    expect(firstWarnings).toEqual([
+      "Valet could not read the repository sandbox settings. Check GitHub access, then retry the task.",
+    ]);
     expect(recorder.createCalls.find((call) => call.sessionId === "child-timeout-one")?.workspaceStorage).toBeUndefined();
     expect(recorder.createCalls.find((call) => call.sessionId === "child-timeout-two")?.workspaceStorage).toBe("8Gi");
     errorSpy.mockRestore();

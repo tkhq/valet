@@ -10,9 +10,13 @@
  *
  * Pure and symbolic — no IO, no event payloads. Overlap is decided from the
  * filter shapes alone, with a "filter A implies filter B" relation over the
- * common ops (`eq`, `in`, `prefix`, `contains`). A `regex` filter is
- * undecidable here: it can prove nothing, so it never yields containment
- * (blocking), only possible overlap (a warning). The check is advisory, not
+ * common ops (`eq`, `in`, `prefix`, `contains`) and the exclusion ops
+ * (`not_in`, `not_prefix`). An exclusion's set also holds every event with
+ * no value for the field (`filtersMatch`), so a positive filter never
+ * contains one, and two exclusions are never disjoint. A `regex` or
+ * `not_regex` filter is undecidable here: it can prove nothing, so it never
+ * yields containment (blocking), only possible overlap (a warning). The
+ * check is advisory, not
  * an invariant: a collision that slips past it means double delivery, which
  * the feed makes visible, not corruption.
  *
@@ -25,12 +29,13 @@
  *   (the write commits; the response carries the warning).
  * - Two workflow targets pointing at DIFFERENT workflows never collide —
  *   running two distinct workflows off one event is intentional fan-out.
- * - A workflow target never blocks an orchestrator target (or the reverse);
+ * - A workflow target never blocks an assistant target (or the reverse);
  *   the pair is at most a warning. Blocking is reserved for rules that would
  *   race the same kind of consumer.
  */
 import type { EventCatalogEntry } from "@valet/engine";
-import { eventKeyMatches, type SubscriptionFilter } from "./match.js";
+import { eventKeyMatches, isExclusionOp, type SubscriptionFilter } from "./match.js";
+import { assistantScopeOf, isAssistantKind } from "./target-names.js";
 
 // Duplicated from mention-scope.ts so this module stays pure (mention-scope
 // does IO). `subscriptionMatchesEvent` fails closed on a mention subscription
@@ -42,9 +47,8 @@ const SLACK_MENTION_KEY = "slack.app_mention";
 export interface CollisionTarget {
   kind: string;
   workflowId?: string;
-  assistantId?: string;
   follow?: boolean;
-  orchestrator?: "user" | "team" | "org";
+  assistant?: "user" | "team" | "org";
 }
 
 export interface CollisionCandidate {
@@ -89,10 +93,34 @@ function filterImplies(a: SubscriptionFilter, b: SubscriptionFilter): boolean {
       case "contains":
         return typeof b.value === "string" && aValues.every((v) => v.includes(b.value as string));
       case "regex":
+      case "not_regex":
         return false;
+      case "not_in":
+        return Array.isArray(b.value) && aValues.every((v) => !(b.value as string[]).includes(v));
+      case "not_prefix":
+        return typeof b.value === "string" && aValues.every((v) => !v.startsWith(b.value as string));
     }
   }
+  // An exclusion is the complement of a positive set, so b's exclusion
+  // contains a when a and b's excluded set share no member.
+  if (b.op === "not_in" && Array.isArray(b.value) && typeof a.value === "string") {
+    const excluded = b.value;
+    if (a.op === "prefix") return !excluded.some((v) => v.startsWith(a.value as string));
+    if (a.op === "contains") return !excluded.some((v) => v.includes(a.value as string));
+    if (a.op === "not_prefix") return excluded.every((v) => v.startsWith(a.value as string));
+    return false;
+  }
+  if (a.op === "not_in" && b.op === "not_in" && Array.isArray(a.value) && Array.isArray(b.value)) {
+    // Excluding more is narrower: a ⊆ b when a excludes every value b excludes.
+    return b.value.every((v) => (a.value as string[]).includes(v));
+  }
   if (typeof a.value !== "string" || typeof b.value !== "string") return false;
+  if (b.op === "not_prefix") {
+    // A string that starts with a.value avoids b.value when neither prefix extends the other.
+    if (a.op === "prefix") return !a.value.startsWith(b.value) && !b.value.startsWith(a.value);
+    if (a.op === "not_prefix") return b.value.startsWith(a.value);
+    return false;
+  }
   if (a.op === "prefix") {
     // Every string starting with a.value also starts with b.value / contains it.
     if (b.op === "prefix") return a.value.startsWith(b.value);
@@ -116,6 +144,24 @@ function filtersDisjoint(a: SubscriptionFilter, b: SubscriptionFilter): boolean 
   const av = values(a);
   const bv = values(b);
   if (av !== null && bv !== null) return !av.some((v) => bv.includes(v));
+  // Both sets hold the events with no value for the field, so two
+  // exclusions always overlap. Against a positive filter, an exclusion is
+  // disjoint when it excludes every value the positive filter can match.
+  if (isExclusionOp(a.op) && isExclusionOp(b.op)) return false;
+  const exclusion = isExclusionOp(a.op) ? a : isExclusionOp(b.op) ? b : null;
+  if (exclusion !== null) {
+    const other = exclusion === a ? b : a;
+    const finiteOther = exclusion === a ? bv : av;
+    if (exclusion.op === "not_in" && Array.isArray(exclusion.value)) {
+      const excluded = exclusion.value;
+      return finiteOther !== null && finiteOther.every((v) => excluded.includes(v));
+    }
+    // not_regex is undecidable, so it may overlap anything.
+    if (exclusion.op !== "not_prefix" || typeof exclusion.value !== "string") return false;
+    const excludedPrefix = exclusion.value;
+    if (finiteOther !== null) return finiteOther.every((v) => v.startsWith(excludedPrefix));
+    return other.op === "prefix" && typeof other.value === "string" && other.value.startsWith(excludedPrefix);
+  }
   // One side is a finite set, the other a prefix/contains predicate.
   const finite = av ?? bv;
   const pred = av !== null ? b : a;
@@ -192,7 +238,9 @@ function effectiveSharedKeys(
     if (filters.some((f) => f.op === "in" && Array.isArray(f.value) && f.value.length === 0)) {
       return false;
     }
-    if (!filters.every((f) => entry.filters.some((cf) => cf.field === f.field))) return false;
+    // An exclusion on a field the key does not declare still passes (the
+    // value is absent), so only a positive filter stops the key here.
+    if (!filters.every((f) => isExclusionOp(f.op) || entry.filters.some((cf) => cf.field === f.field))) return false;
     if (entry.key === SLACK_MENTION_KEY && !teamMention(sub) && !sub.filters.some((f) => f.field === "user")) {
       return false;
     }
@@ -214,24 +262,8 @@ function severity(
 ): "blocking" | "overlapping" | null {
   if (cand.kind === "workflow" && exist.kind === "workflow") {
     if (cand.workflowId !== exist.workflowId) return null;
-  } else if (cand.kind === "orchestrator" && exist.kind === "orchestrator") {
-    // Same rule as two distinct workflows: telling two named assistants about
-    // one event is fan-out, not a clobber. Only when BOTH name one — an absent
-    // id means "the owner's default", which may well BE the other's assistant,
-    // so an unnamed side keeps the blocking treatment.
-    if (
-      cand.assistantId !== undefined &&
-      exist.assistantId !== undefined &&
-      cand.assistantId !== exist.assistantId
-    ) {
-      // ...but a FOLLOWING pair cannot both hold the thread. `followed_threads`
-      // is unique on (org, channel, thread) with one `assistant_id`, so the
-      // later delivery overwrites the earlier one's and that assistant stops
-      // hearing the thread with nothing said. Fan-out of the mention itself
-      // still works, so this is a warning rather than a block.
-      return cand.follow === true || exist.follow === true ? "overlapping" : null;
-    }
-  } else if (cand.kind !== exist.kind) {
+  } else if (isAssistantKind(cand.kind) !== isAssistantKind(exist.kind)) {
+    // Either spelling of the assistant kind is one kind (`target-names.ts`).
     return "overlapping";
   }
   return relation === "equal" || relation === "superset" ? "blocking" : "overlapping";
@@ -239,8 +271,8 @@ function severity(
 
 /** Team membership replaces stored creator filters, including interim rows. */
 function teamMention(sub: CollisionCandidate): boolean {
-  return sub.target.kind === "orchestrator" &&
-    (sub.ownerType === "team" || (sub.ownerType === undefined && sub.target.orchestrator === "team")) &&
+  return isAssistantKind(sub.target.kind) &&
+    (sub.ownerType === "team" || (sub.ownerType === undefined && assistantScopeOf(sub.target) === "team")) &&
     eventKeyMatches(SLACK_MENTION_KEY, sub.eventKeys);
 }
 

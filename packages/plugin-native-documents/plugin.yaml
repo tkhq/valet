@@ -1,0 +1,4 @@
+name: native-documents
+version: 0.0.1
+description: Read, create, edit, and verify native DOCX, XLSX, PPTX, and PDF files
+v2: true

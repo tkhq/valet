@@ -28,13 +28,13 @@
  *                                                 → verified/refuted (review cells only)
  *
  * Human triage routes (M6 — Decision 10: human-only, the internal token is
- * REFUSED on all four):
+ * REFUSED on each):
  *   POST /api/sessions/:id/security/findings/:findingId/status
  *                                                 → human verify/refute (canAdministerSession)
  *   GET  /api/sessions/:id/security/export        → md | sarif | json (canViewSession)
- *   POST /api/sessions/:id/security/findings/:findingId/issues
- *                                                 → file one GitHub/Linear issue (canViewSession)
- *   POST /api/sessions/:id/security/issues/digest → one digest issue (canViewSession)
+ * Issue filing (`findings/:findingId/issues` and `issues/digest`) moved to
+ * the Security plugin. The host keeps both URLs as aliases
+ * (plugins/http-security.ts, docs/plans/2026-10-09-security-plugin-adoption.md).
  *
  * Dual auth, the memory-routes ladder: a valid `x-valet-internal` token is
  * the `sec_*` engine tools' path; otherwise the caller is the session user.
@@ -53,9 +53,9 @@
  * The persona routes never take the user path; M6 adds the human review
  * surface separately.
  */
-import { randomUUID } from "node:crypto";
-import { Hono, type Context } from "hono";
-import { and, asc, count, desc, eq, inArray } from "drizzle-orm";
+import { cancelChildDelivery } from "../orchestrator/child-delivery.js";
+import { intersectToolScopes, readToolScope } from "@valet/shared";
+import type { PlanCell } from "@valet/plugin-security";
 import {
   bundledPersonaIds,
   cellDir,
@@ -67,16 +67,33 @@ import {
   SECURITY_PRESETS,
   serializePlan,
 } from "@valet/plugin-security";
-import type { PlanCell } from "@valet/plugin-security";
-import { seedSecurityReview } from "../services/security-seed.js";
-import type { Principal } from "@valet/engine";
+import { and, asc, count, desc, eq, inArray } from "drizzle-orm";
+import { Hono, type Context } from "hono";
+import { randomUUID } from "node:crypto";
+import { resolveApiTokenOrNull, resolveChangedFiles, resolveRefSha } from "../bakes/source-service.js";
+import { declaredMcpServices, parseConfigToolDecls } from "../engine/security-provisioning.js";
+import { loadSessionMeta } from "../engine/session-meta.js";
+import { cancelAllWorkAsHuman, openBackgroundWork } from "../engine/wakeups-admin.js";
+import {
+  assertNoSecurityCredentialOutput,
+  clearSecurityCredentialSession,
+  SECURITY_CREDENTIAL_OUTPUT_BLOCKED,
+} from "../services/security-credential-tripwire.js";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { isValidInternalToken } from "../lib/internal-auth.js";
+import { resolveCreateOwner } from "../lib/request-principal.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { requirePrincipal, requireUser, type AuthUser } from "../middleware/auth.js";
-import { publicUrlFromEnv } from "../channels/host.js";
-import { buildActionInvoker } from "../plugins/action-invoker.js";
+import { attentionHref } from "../orchestrator/attention-wiring.js";
+import { markAttentionNotificationsRead, routeAttention, type AttentionDeps } from "../orchestrator/attention.js";
+import { personaToolScope, reservedToolServices } from "../services/security-persona-scope.js";
+import { sessionOwner } from "../services/session-owner.js";
+import {
+  buildChildStatusReader,
+  ChildLimitError,
+  resolveChildSettlement,
+} from "../orchestrator/children.js";
 import { persistInvocationAudit } from "../policies/service.js";
 import {
   agentSessions,
@@ -96,22 +113,16 @@ import {
   type SecurityNeedRow,
 } from "../schema/index.js";
 import { canAdministerSession, canViewSession } from "../services/session-access.js";
-import { routeAttention, type AttentionDeps } from "../orchestrator/attention.js";
-import { attentionHref } from "../orchestrator/attention-wiring.js";
-import { loadSessionMeta } from "../engine/session-meta.js";
-import { resolveApiTokenOrNull, resolveChangedFiles, resolveRefSha } from "../bakes/source-service.js";
-import {
-  buildChildStatusReader,
-  ChildLimitError,
-  resolveChildSettlement,
-} from "../orchestrator/children.js";
+import { isTeamMember } from "../services/teams.js";
 import {
   createSecurityEngagementService,
+  declaredCredentialLabels,
+  CREDENTIAL_NEED_TAKES_A_LABEL,
   type CellProgress,
   type FindingSeverity,
   type FindingStatus,
-  type SecurityReport,
   type NeedKind,
+  type SecurityReport,
   type SpawnCellChild,
 } from "../services/security-engagements.js";
 import {
@@ -120,46 +131,37 @@ import {
   buildSarif,
   type SecurityExportInput,
 } from "../services/security-export.js";
-import {
-  fileDigestIssue,
-  fileFindingIssue,
-  IssueRequestError,
-  MissingIntegrationError,
-  type IssueProvider,
-  type SecurityIssuesDeps,
-} from "../services/security-issues.js";
+import { SECURITY_HUMAN_ONLY as HUMAN_ONLY } from "../plugins/http-security.js";
+import { seedSecurityReview } from "../services/security-seed.js";
 import type {
+  GetSecurityReportResponse,
   GetSecurityStatusResponse,
   GetSessionSecurityResponse,
   ListSecurityCoverageResponse,
   ListSecurityFilesResponse,
   ListSecurityFindingsResponse,
-  SecurityCellWire,
-  SecurityCoverageWire,
-  SecurityReportCoverageResponse,
-  SecurityNeedWire,
-  SecurityReportNeedResponse,
   ListSecurityNeedsResponse,
-  SecurityResolveNeedsResponse,
+  SecurityAddFindingCommentResponse,
+  SecurityCellWire,
   SecurityCloseResponse,
   SecurityCompleteCellResponse,
-  SecurityDigestIssueResponse,
+  SecurityCoverageWire,
   SecurityDispatchResponse,
   SecurityEngagementWire,
-  SecurityAddFindingCommentResponse,
   SecurityFailCellResponse,
-  SecurityFileIssueResponse,
   SecurityFindingCommentWire,
   SecurityFindingLinkWire,
   SecurityFindingWire,
   SecurityHandoffResponse,
   SecurityHandoffWire,
-  SecurityReportFindingResponse,
-  SecurityReportWire,
-  GetSecurityReportResponse,
-  SecurityWriteReportResponse,
+  SecurityNeedWire,
   SecurityPlanCellWire,
   SecurityPreviewResponse,
+  SecurityReportCoverageResponse,
+  SecurityReportFindingResponse,
+  SecurityReportNeedResponse,
+  SecurityReportWire,
+  SecurityResolveNeedsResponse,
   SecurityReviewFindingResponse,
   SecuritySetConfigResponse,
   SecuritySetPlanResponse,
@@ -167,6 +169,7 @@ import type {
   SecurityToolDeclWire,
   SecurityTreeFileResponse,
   SecurityWriteFileResponse,
+  SecurityWriteReportResponse,
 } from "../wire/types.js";
 
 export const securityRouter = new Hono<AppEnv>();
@@ -224,6 +227,7 @@ function engagementToWire(e: SecurityEngagementRow): SecurityEngagementWire {
     configPersonas: parseJsonStringRecord(e.configPersonas),
     configTools: parseConfigTools(e.configTools),
     authorizedScope: parseAuthorizedScope(e.authorizedScope),
+    credentialLabels: declaredCredentialLabels(e.credentialsJson),
     createdAt: e.createdAt,
     updatedAt: e.updatedAt,
   };
@@ -487,6 +491,7 @@ function needToWire(row: SecurityNeedRow): SecurityNeedWire {
     description: row.description,
     status: row.status,
     resolution: row.resolution,
+    credentialLabel: row.credentialLabel,
     createdAt: row.createdAt,
     resolvedAt: row.resolvedAt,
   };
@@ -782,6 +787,27 @@ securityRouter.post("/security/preview", async (c) => {
 
   const { db, engineCredentials, encryptionKey } = c.var.providers;
   const tokenDeps = { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) };
+  // Who would own the review decides which 1Password scopes its credentials
+  // resolve through, so the preview asks the same question create does, and
+  // through the same door: `resolveCreateOwner` refuses a team the caller is
+  // not a member of. Without that check, naming someone else's team here
+  // would resolve references against that team's vault token.
+  const principal = requirePrincipal(c);
+  if (!principal) return c.json({ error: "unauthorized" }, 401);
+  const previewOwner = await resolveCreateOwner({
+    principal,
+    authVia: c.var.authVia,
+    bodyTeamId: body.teamId,
+    userId: user.id,
+    isTeamMember: (teamId) => isTeamMember(db, teamId, user.id),
+  });
+  if (!previewOwner.ok) return c.json({ error: previewOwner.error }, previewOwner.status);
+  const owner = previewOwner.owner;
+
+  // A declared credential is preflighted here too, so the wizard reports a
+  // bad reference while the user can still fix it. The preview REPORTS and
+  // never refuses: it is a read-only page, and blocking it would leave the
+  // user with no way to see the rest of the seeded config. Create is the gate.
   const seeded = await seedSecurityReview({
     owner: parsed.owner,
     repo: parsed.repo,
@@ -791,6 +817,13 @@ securityRouter.post("/security/preview", async (c) => {
     ...(includeReport !== undefined ? { includeReport } : {}),
     tokenDeps,
     orgId: user.orgId,
+    onePassword: c.var.providers.onePassword,
+    userId: user.id,
+    ownerType: owner.type,
+    ...(owner.type === "team" ? { teamId: owner.id } : {}),
+    credentialPreflight: "report",
+    reservedServices: reservedToolServices(c.var.providers.actionPluginByService),
+    adoptRepoCredentials: true,
   });
 
   const personaKeys = seeded.personas ? Object.keys(seeded.personas) : [];
@@ -810,9 +843,12 @@ securityRouter.post("/security/preview", async (c) => {
             }
           : null,
       configTools: seeded.tools && seeded.tools.length > 0 ? seeded.tools : null,
+      credentials: seeded.credentialsJson ?? [],
       hasRepoConfig: seeded.hasRepoConfig,
+      configError: seeded.configError,
     },
     planCells: planYamlToWire(seeded.planYaml, [...bundledPersonaIds(), ...personaKeys]),
+    credentialWarnings: seeded.credentialWarnings,
   };
   return c.json(response);
 });
@@ -905,21 +941,14 @@ async function resolveToolSession(
   return { ok: row };
 }
 
-/** The engagement session's owner principal, from the app row. Legacy rows
- * default `owner_id` to "" — fall back to the creating user. */
-function sessionOwner(row: SessionRow): Principal {
-  const type = row.ownerType === "team" || row.ownerType === "org" ? row.ownerType : "user";
-  return { type, id: row.ownerId !== "" ? row.ownerId : row.userId };
-}
-
 /**
  * The completion notification's AttentionDeps: the same db + channel deliverer
  * the boot-time `wireAttentionRouter` uses (main.ts), so a close/cancel ping
  * reaches web and any wired channel by the one router path.
  */
 function attentionDepsFrom(c: Context<AppEnv>): AttentionDeps {
-  const { db, channelHost } = c.var.providers;
-  return { db, channels: [channelHost.attentionDeliverer()] };
+  const { providers } = c.var;
+  return { db: providers.db, channels: providers.channelHost.attentionDeliverers(), access: providers };
 }
 
 /** A short severity roll-up for the completion body, e.g. "12 findings — 2
@@ -960,6 +989,7 @@ async function runnerModel(
 function serviceError(c: Context<AppEnv>, err: unknown): Response {
   const message = err instanceof Error ? err.message : String(err);
   if (err instanceof ChildLimitError) return c.json({ error: message }, 429);
+  if (message === SECURITY_CREDENTIAL_OUTPUT_BLOCKED) return c.json({ error: message }, 400);
   return c.json({ error: message }, 409);
 }
 
@@ -972,6 +1002,19 @@ async function readJsonBody(c: Context<AppEnv>): Promise<Record<string, unknown>
   } catch {
     return {};
   }
+}
+
+/**
+ * The body of a persona write route, refused when any field carries a
+ * credential the tripwire holds for the acting persona child. It scans the
+ * whole body, so a field added to a route later cannot skip the check. The
+ * key is the child, never the URL `:id`, which may name the runner. Call it
+ * inside the route's `try`: `serviceError` turns the throw into a 400.
+ */
+async function readPersonaBody(c: Context<AppEnv>, actor: PersonaActor): Promise<Record<string, unknown>> {
+  const body = await readJsonBody(c);
+  assertNoSecurityCredentialOutput(actor.childSessionId, body);
+  return body;
 }
 
 async function loadEngagementOr404(c: Context<AppEnv>, sessionId: string) {
@@ -1020,6 +1063,8 @@ interface PersonaActor {
   security: ReturnType<typeof createSecurityEngagementService>;
   engagement: SecurityEngagementRow;
   cell: SecurityCellRow;
+  /** The acting persona child: the session the tripwire holds values for. */
+  childSessionId: string;
 }
 
 type ResolvePersonaActorResult = { ok: PersonaActor } | { failure: Response };
@@ -1065,7 +1110,7 @@ async function resolvePersonaActor(
       ),
     };
   }
-  return { ok: { security, engagement: result.engagement, cell } };
+  return { ok: { security, engagement: result.engagement, cell, childSessionId: acting } };
 }
 
 const HEX_SHA_RE = /^[0-9a-f]{40}$/i;
@@ -1078,7 +1123,7 @@ securityRouter.get("/:id/security/status", async (c) => {
   const loaded = await loadEngagementOr404(c, sessionId);
   if ("failure" in loaded) return loaded.failure;
   const { security, result } = loaded;
-  const { db, engineHost, engineStore, prebuildService } = c.var.providers;
+  const { db, engineHost, engineStore, prebuildService, scratchCaps } = c.var.providers;
 
   const progress = await security.getRunningCellProgress(result.engagement.id);
 
@@ -1105,7 +1150,7 @@ securityRouter.get("/:id/security/status", async (c) => {
   let runningChild: GetSecurityStatusResponse["runningChild"] = null;
   const running = result.cells.find((cell) => cell.status === "running");
   if (running?.childSessionId) {
-    const statusReader = buildChildStatusReader({ db, engineHost, engineStore, prebuildService });
+    const statusReader = buildChildStatusReader({ db, engineHost, engineStore, prebuildService, scratchCaps });
     const status = await statusReader(
       { childSessionId: running.childSessionId },
       { parentSessionId: sessionId },
@@ -1115,6 +1160,7 @@ securityRouter.get("/:id/security/status", async (c) => {
       childSessionId: running.childSessionId,
       settled: status?.settled ?? false,
       lastActivityAt: status?.lastActivityAt ?? null,
+      backgroundWork: await openBackgroundWork(engineStore, running.childSessionId),
       // `null` from the reader means the child session is gone (deleted or
       // missing) — the runner should sec_cell_fail and re-dispatch.
       childGone: status === null,
@@ -1593,14 +1639,35 @@ securityRouter.post("/:id/security/dispatch", async (c) => {
   // The spawn seam: the SAME children.ts machinery the task tool uses —
   // limits, agent_sessions row, child_watches row, armed watcher — so the
   // child's settlement signals the runner thread. Never bypass it.
-  const { childSpawner } = c.var.providers;
+  const { childSpawner, engineHost } = c.var.providers;
   // Personas inherit the runner's model, so a capable security default reaches
   // the sessions that do the actual review.
   const model = await runnerModel(c, row);
+
+  // The repo's `.valet/credentials.yaml` commands, resolved the same
+  // best-effort way `EngineHost` resolves them for any repo-bound session.
+  // `dispatchCell` merges these with the engagement's declared credentials
+  // and refuses on a label collision, before spawning the child.
+  const [repoOwner, repoName] = result.engagement.repoFullName.split("/");
+  const repoCredentialCommands =
+    repoOwner && repoName
+      ? await engineHost.resolveRepoCredentialCommandsForTarget(
+          row.orgId,
+          repoOwner,
+          repoName,
+          result.engagement.repoRef || "HEAD",
+        )
+      : [];
+
+  // A persona reads attacker-controlled code, so it gets only its own tools
+  // and the engagement's declared MCP services (INV-32).
+  const mcpServices = declaredMcpServices(parseConfigToolDecls(result.engagement.configTools));
+  const reservedServices = reservedToolServices(c.var.providers.actionPluginByService);
   const spawn: SpawnCellChild = async (req) => {
     const spawned = await childSpawner(
       {
         prompt: req.message,
+        toolScope: intersectToolScopes(readToolScope(body.toolScope), personaToolScope({ persona: req.role, review: req.review }, mcpServices, reservedServices)),
         title: req.title,
         repo: req.repo,
         // The engagement's pinned commit SHA — every persona reads an
@@ -1629,6 +1696,7 @@ securityRouter.post("/:id/security/dispatch", async (c) => {
       cellId,
       mode,
       spawn,
+      repoCredentialCommands,
     });
     // Fix 6 — tear down the child the re-dispatch abandoned. A re-dispatch of a
     // yielded/failed cell overwrites the cell's child_session_id with the new
@@ -1644,6 +1712,7 @@ securityRouter.post("/:id/security/dispatch", async (c) => {
           .update(agentSessions)
           .set({ status: "deleted", updatedAt: Date.now() })
           .where(eq(agentSessions.id, replacedChildSessionId));
+        await cancelChildDelivery(teardownDb, c.var.providers.engineStore, replacedChildSessionId, "The security child was replaced.");
       } catch (err) {
         console.error(
           `security dispatch: replaced child ${replacedChildSessionId} teardown failed:`,
@@ -1667,7 +1736,7 @@ securityRouter.post("/:id/security/cells/:cellId/complete", async (c) => {
   const loaded = await loadEngagementOr404(c, sessionId);
   if ("failure" in loaded) return loaded.failure;
   const { security, result } = loaded;
-  const { db, engineHost, engineStore, prebuildService } = c.var.providers;
+  const { db, engineHost, engineStore, prebuildService, scratchCaps } = c.var.providers;
 
   // `settled` comes from the SAME durable settlement definition the
   // `child_status` reader uses — `resolveChildSettlement` — not a raw read of
@@ -1681,17 +1750,24 @@ securityRouter.post("/:id/security/cells/:cellId/complete", async (c) => {
     return c.json({ error: `No cell ${cellId} in this engagement. Check the id with sec_status.` }, 404);
   }
   let settled = false;
+  let backgroundWork = 0;
   if (cell.childSessionId) {
     const resolved = await resolveChildSettlement(
-      { db, engineHost, engineStore, prebuildService },
+      { db, engineHost, engineStore, prebuildService, scratchCaps },
       cell.childSessionId,
       sessionId,
     );
     settled = resolved?.settled === true;
+    // `child.settled` does not wait for background work (spec C4), so a
+    // settled child can still run a process, a timer, or a lease.
+    backgroundWork = await openBackgroundWork(engineStore, cell.childSessionId);
   }
 
   try {
-    const ruling = await security.completeCell(result.engagement.id, cellId, { settled });
+    const ruling = await security.completeCell(result.engagement.id, cellId, {
+      settled,
+      openBackgroundWork: backgroundWork,
+    });
     const response: SecurityCompleteCellResponse =
       ruling.outcome === "violation"
         ? { outcome: "violation", violation: ruling.violation }
@@ -1701,6 +1777,21 @@ securityRouter.post("/:id/security/cells/:cellId/complete", async (c) => {
     return serviceError(c, err);
   }
 });
+
+/** Cancel every open wakeup and hold of a failed cell's child. A child that is
+ * gone, or a cancel that throws, must not stop the fail: log and go on. */
+async function cancelChildWork(c: Context<AppEnv>, childSessionId: string, actorUserId: string): Promise<void> {
+  const { db, engineHost, engineStore } = c.var.providers;
+  try {
+    if ((await openBackgroundWork(engineStore, childSessionId)) === 0) return;
+    const [childRow] = await db.select().from(agentSessions).where(eq(agentSessions.id, childSessionId)).limit(1);
+    if (!childRow) return;
+    const live = await engineHost.sessionFor(childSessionId, await loadSessionMeta(db, childRow));
+    await cancelAllWorkAsHuman(engineStore, live, childSessionId, {}, { actorUserId, signal: "suppress" });
+  } catch (err) {
+    console.error(`security cell fail: cancelling background work of ${childSessionId} failed:`, err);
+  }
+}
 
 securityRouter.post("/:id/security/cells/:cellId/fail", async (c) => {
   const sessionId = c.req.param("id");
@@ -1717,7 +1808,14 @@ securityRouter.post("/:id/security/cells/:cellId/fail", async (c) => {
     return c.json({ error: "Send { reason } naming why the cell failed." }, 400);
   }
 
+  const cell = result.cells.find((candidate) => candidate.id === cellId);
+  const childSessionId = cell?.childSessionId;
   try {
+    // `failCell` leaves the child's background work running. Cancel it with
+    // no terminal signal, so the persona starts no new turn.
+    if (cell?.status === "running" && childSessionId) {
+      await cancelChildWork(c, childSessionId, resolved.ok.userId);
+    }
     const failed = await security.failCell(result.engagement.id, cellId, body.reason);
     const response: SecurityFailCellResponse = {
       cell: cellToWire(failed.cell, null),
@@ -1728,6 +1826,14 @@ securityRouter.post("/:id/security/cells/:cellId/fail", async (c) => {
     return serviceError(c, err);
   }
 });
+
+/** Drop the tripwire entry of every cell's child. A settled child is not
+ * destroyed, so the end of its engagement is the last owner of the entry. */
+function clearEngagementTripwire(cells: readonly { childSessionId: string | null }[]): void {
+  for (const { childSessionId } of cells) {
+    if (childSessionId) clearSecurityCredentialSession(childSessionId);
+  }
+}
 
 securityRouter.post("/:id/security/close", async (c) => {
   const sessionId = c.req.param("id");
@@ -1741,6 +1847,7 @@ securityRouter.post("/:id/security/close", async (c) => {
 
   try {
     const manifest = await security.closeEngagement(result.engagement.id);
+    clearEngagementTripwire(result.cells);
     // Completion ping: the human OR the runner (via sec_close) closes, so the
     // owner learns the review ended either way. The dedupe key makes a re-close
     // or retry a no-op — routeAttention inserts once per engagement close.
@@ -1751,7 +1858,7 @@ securityRouter.post("/:id/security/close", async (c) => {
       sessionId,
       title: manifest.status === "completed" ? "Security review complete" : "Security review ended",
       body: `${manifest.repoFullName} review ${ended}. ${findingSummary(manifest.findings.distinctBySeverity)}`,
-      href: attentionHref(sessionId),
+      href: attentionHref(sessionId, undefined, sessionOwner(row)),
       dedupeKey: `security-close:${result.engagement.id}`,
     }).catch((err) => {
       // Best-effort: a notification failure must not fail the close.
@@ -1826,6 +1933,7 @@ securityRouter.post("/:id/security/handoff", async (c) => {
     const spawned = await childSpawner(
       {
         prompt: brief,
+        toolScope: readToolScope(body.toolScope),
         title,
         repo: result.engagement.repoFullName,
         ...(result.engagement.repoRef !== "" ? { branch: result.engagement.repoRef } : {}),
@@ -1840,8 +1948,8 @@ securityRouter.post("/:id/security/handoff", async (c) => {
       },
     );
     // Record the link so the finding can surface and open its fix session.
-    // The child already exists; a lost link row must not 500 the tool, so a
-    // failed insert logs and still returns the child id.
+    // The child already exists, and without the row the broker refuses its
+    // credential calls, so a failed insert logs and tells the caller.
     try {
       await security.recordHandoff({
         engagementId: result.engagement.id,
@@ -1855,6 +1963,13 @@ securityRouter.post("/:id/security/handoff", async (c) => {
       console.error(
         `security handoff: spawned ${spawned.childSessionId} for finding ${body.findingId} but link insert failed:`,
         recordErr,
+      );
+      return c.json(
+        {
+          error:
+            "The fix session was started but could not be linked to the finding. Open the session from the children list.",
+        },
+        500,
       );
     }
     const response: SecurityHandoffResponse = { childSessionId: spawned.childSessionId, title };
@@ -1872,15 +1987,14 @@ securityRouter.post("/:id/security/files", async (c) => {
   if ("failure" in resolved) return resolved.failure;
   const { security, engagement, cell } = resolved.ok;
 
-  const body = await readJsonBody(c);
-  if (typeof body.path !== "string" || body.path === "") {
-    return c.json({ error: "Send { path } with the tree path to write." }, 400);
-  }
-  if (typeof body.content !== "string") {
-    return c.json({ error: "Send { content } with the file content." }, 400);
-  }
-
   try {
+    const body = await readPersonaBody(c, resolved.ok);
+    if (typeof body.path !== "string" || body.path === "") {
+      return c.json({ error: "Send { path } with the tree path to write." }, 400);
+    }
+    if (typeof body.content !== "string") {
+      return c.json({ error: "Send { content } with the file content." }, 400);
+    }
     // The service enforces the write claim (the path prefix IS the claim)
     // and the state.yml validation; its messages are corrective — relay
     // them verbatim.
@@ -1902,70 +2016,69 @@ securityRouter.post("/:id/security/findings", async (c) => {
   if ("failure" in resolved) return resolved.failure;
   const { security, engagement, cell } = resolved.ok;
 
-  const body = await readJsonBody(c);
-  const severity = body.severity;
-  if (typeof severity !== "string" || !SEVERITIES.has(severity)) {
-    return c.json({ error: "severity must be critical, high, medium, low, or info." }, 400);
-  }
-  if (typeof body.title !== "string" || body.title.trim() === "") {
-    return c.json({ error: "Send { title } naming the finding." }, 400);
-  }
-  if (typeof body.body !== "string") {
-    return c.json({ error: "Send { body } with the finding's evidence." }, 400);
-  }
-  if (body.file !== undefined && typeof body.file !== "string") {
-    return c.json({ error: "file must be a repo path string." }, 400);
-  }
-  if (body.line !== undefined && (typeof body.line !== "number" || !Number.isInteger(body.line) || body.line < 1)) {
-    return c.json({ error: "line must be a positive integer." }, 400);
-  }
-
-  // Guardrail 4 (finding location verification): verify a cited file:line against
-  // the persona cell's cloned sandbox BEFORE the service records it. The acting
-  // session IS the persona child (resolvePersonaActor bound `sessionId` to the
-  // cell claim), and that child has the target repo cloned at the pinned commit.
-  //
-  // Fail-CLOSED only on a CONFIRMED-absent file or an out-of-range line: the
-  // sandbox read succeeded and the path is not there, or the file has fewer
-  // lines than the cited line. Fail-OPEN on ANY indeterminacy — `null` from
-  // `readSandboxFileMeta` (no live/ready sandbox, no clone, read error) — so a
-  // sandbox hiccup never blocks a real finding. Only applies when the finding
-  // carries a `file`; `line` is checked only when both are present.
-  if (typeof body.file === "string" && body.file.trim() !== "") {
-    let meta: { exists: boolean; lines: number } | null = null;
-    try {
-      const { engineHost } = c.var.providers;
-      meta = await engineHost.readSandboxFileMeta(sessionId, body.file);
-    } catch {
-      // The host method never throws, but stay best-effort: a thrown host call
-      // is itself indeterminate — proceed (fail open).
-      meta = null;
-    }
-    if (meta !== null) {
-      if (!meta.exists) {
-        return c.json(
-          {
-            error:
-              `Finding refused: "${body.file}" does not exist in the repository at the reviewed commit. ` +
-              "Cite a real repo-relative path (check with the Read tool before reporting).",
-          },
-          400,
-        );
-      }
-      if (typeof body.line === "number" && body.line > meta.lines) {
-        return c.json(
-          {
-            error:
-              `Finding refused: "${body.file}" has ${meta.lines} lines; line ${body.line} is past the end. ` +
-              "Cite the real line.",
-          },
-          400,
-        );
-      }
-    }
-  }
-
   try {
+    const body = await readPersonaBody(c, resolved.ok);
+    const severity = body.severity;
+    if (typeof severity !== "string" || !SEVERITIES.has(severity)) {
+      return c.json({ error: "severity must be critical, high, medium, low, or info." }, 400);
+    }
+    if (typeof body.title !== "string" || body.title.trim() === "") {
+      return c.json({ error: "Send { title } naming the finding." }, 400);
+    }
+    if (typeof body.body !== "string") {
+      return c.json({ error: "Send { body } with the finding's evidence." }, 400);
+    }
+    if (body.file !== undefined && typeof body.file !== "string") {
+      return c.json({ error: "file must be a repo path string." }, 400);
+    }
+    if (body.line !== undefined && (typeof body.line !== "number" || !Number.isInteger(body.line) || body.line < 1)) {
+      return c.json({ error: "line must be a positive integer." }, 400);
+    }
+
+    // Guardrail 4 (finding location verification): verify a cited file:line against
+    // the persona cell's cloned sandbox BEFORE the service records it. The acting
+    // session IS the persona child (resolvePersonaActor bound `sessionId` to the
+    // cell claim), and that child has the target repo cloned at the pinned commit.
+    //
+    // Fail-CLOSED only on a CONFIRMED-absent file or an out-of-range line: the
+    // sandbox read succeeded and the path is not there, or the file has fewer
+    // lines than the cited line. Fail-OPEN on ANY indeterminacy, such as `null` from
+    // `readSandboxFileMeta` (no live/ready sandbox, no clone, read error), so a
+    // sandbox hiccup never blocks a real finding. Only applies when the finding
+    // carries a `file`; `line` is checked only when both are present.
+    if (typeof body.file === "string" && body.file.trim() !== "") {
+      let meta: { exists: boolean; lines: number } | null = null;
+      try {
+        const { engineHost } = c.var.providers;
+        meta = await engineHost.readSandboxFileMeta(sessionId, body.file);
+      } catch {
+        // The host method never throws, but stay best-effort: a thrown host call
+        // is itself indeterminate, so proceed (fail open).
+        meta = null;
+      }
+      if (meta !== null) {
+        if (!meta.exists) {
+          return c.json(
+            {
+              error:
+                `Finding refused: "${body.file}" does not exist in the repository at the reviewed commit. ` +
+                "Cite a real repo-relative path (check with the Read tool before reporting).",
+            },
+            400,
+          );
+        }
+        if (typeof body.line === "number" && body.line > meta.lines) {
+          return c.json(
+            {
+              error:
+                `Finding refused: "${body.file}" has ${meta.lines} lines; line ${body.line} is past the end. ` +
+                "Cite the real line.",
+            },
+            400,
+          );
+        }
+      }
+    }
     const reported = await security.reportFinding(engagement.id, {
       cellId: cell.id,
       // The set membership above proved the narrow type.
@@ -1993,17 +2106,16 @@ securityRouter.post("/:id/security/findings/:findingId/review", async (c) => {
   if ("failure" in resolved) return resolved.failure;
   const { security, engagement, cell } = resolved.ok;
 
-  const body = await readJsonBody(c);
-  // Re-scan v2: a reconcile cell (or a review cell) may set 'fixed'. The service
-  // gates which cell may set which verdict.
-  if (body.status !== "verified" && body.status !== "refuted" && body.status !== "fixed") {
-    return c.json({ error: "status must be 'verified', 'refuted', or 'fixed'." }, 400);
-  }
-  if (typeof body.reason !== "string" || body.reason.trim() === "") {
-    return c.json({ error: "Send { reason } naming what the evidence shows or what it missed." }, 400);
-  }
-
   try {
+    const body = await readPersonaBody(c, resolved.ok);
+    // Re-scan v2: a reconcile cell (or a review cell) may set 'fixed'. The service
+    // gates which cell may set which verdict.
+    if (body.status !== "verified" && body.status !== "refuted" && body.status !== "fixed") {
+      return c.json({ error: "status must be 'verified', 'refuted', or 'fixed'." }, 400);
+    }
+    if (typeof body.reason !== "string" || body.reason.trim() === "") {
+      return c.json({ error: "Send { reason } naming what the evidence shows or what it missed." }, 400);
+    }
     // Actor = the claiming CELL id: the service enforces verdict gating (review
     // cells flip verified/refuted; a reconcile or review cell may set fixed) and
     // forward-only transitions.
@@ -2034,21 +2146,20 @@ securityRouter.post("/:id/security/coverage", async (c) => {
   if ("failure" in resolved) return resolved.failure;
   const { security, engagement, cell } = resolved.ok;
 
-  const body = await readJsonBody(c);
-  if (typeof body.area !== "string" || body.area.trim() === "") {
-    return c.json({ error: "Send { area } naming the scope, e.g. 'secrets scan'." }, 400);
-  }
-  if (body.status !== "assessed" && body.status !== "not_assessed") {
-    return c.json({ error: "status must be 'assessed' or 'not_assessed'." }, 400);
-  }
-  if (body.tool !== undefined && body.tool !== null && typeof body.tool !== "string") {
-    return c.json({ error: "tool must be a string or omitted." }, 400);
-  }
-  if (body.reason !== undefined && body.reason !== null && typeof body.reason !== "string") {
-    return c.json({ error: "reason must be a string or omitted." }, 400);
-  }
-
   try {
+    const body = await readPersonaBody(c, resolved.ok);
+    if (typeof body.area !== "string" || body.area.trim() === "") {
+      return c.json({ error: "Send { area } naming the scope, e.g. 'secrets scan'." }, 400);
+    }
+    if (body.status !== "assessed" && body.status !== "not_assessed") {
+      return c.json({ error: "status must be 'assessed' or 'not_assessed'." }, 400);
+    }
+    if (body.tool !== undefined && body.tool !== null && typeof body.tool !== "string") {
+      return c.json({ error: "tool must be a string or omitted." }, 400);
+    }
+    if (body.reason !== undefined && body.reason !== null && typeof body.reason !== "string") {
+      return c.json({ error: "reason must be a string or omitted." }, 400);
+    }
     const coverage = await security.reportCoverage(engagement.id, {
       cellId: cell.id,
       area: body.area,
@@ -2085,18 +2196,17 @@ securityRouter.post("/:id/security/report", async (c) => {
     );
   }
 
-  const body = await readJsonBody(c);
-  if (typeof body.markdown !== "string" || body.markdown.trim() === "") {
-    return c.json({ error: "Send { markdown } — the report body. It must be non-empty." }, 400);
-  }
-  if (typeof body.json !== "object" || body.json === null || Array.isArray(body.json)) {
-    return c.json(
-      { error: "json must be an object (the machine-readable snapshot), not an array or scalar." },
-      400,
-    );
-  }
-
   try {
+    const body = await readPersonaBody(c, resolved.ok);
+    if (typeof body.markdown !== "string" || body.markdown.trim() === "") {
+      return c.json({ error: "Send { markdown } with the report body. It must be non-empty." }, 400);
+    }
+    if (typeof body.json !== "object" || body.json === null || Array.isArray(body.json)) {
+      return c.json(
+        { error: "json must be an object (the machine-readable snapshot), not an array or scalar." },
+        400,
+      );
+    }
     const report = await security.writeReport(engagement.id, {
       markdown: body.markdown,
       json: body.json,
@@ -2124,15 +2234,14 @@ securityRouter.post("/:id/security/needs", async (c) => {
   if ("failure" in resolved) return resolved.failure;
   const { security, engagement, cell } = resolved.ok;
 
-  const body = await readJsonBody(c);
-  if (typeof body.kind !== "string" || !NEED_KINDS.has(body.kind)) {
-    return c.json({ error: "kind must be credential, dependency, scope, decision, or tool." }, 400);
-  }
-  if (typeof body.description !== "string" || body.description.trim() === "") {
-    return c.json({ error: "Send { description } naming the blocked item." }, 400);
-  }
-
   try {
+    const body = await readPersonaBody(c, resolved.ok);
+    if (typeof body.kind !== "string" || !NEED_KINDS.has(body.kind)) {
+      return c.json({ error: "kind must be credential, dependency, scope, decision, or tool." }, 400);
+    }
+    if (typeof body.description !== "string" || body.description.trim() === "") {
+      return c.json({ error: "Send { description } naming the blocked item." }, 400);
+    }
     const need = await security.reportNeed(engagement.id, {
       cellId: cell.id,
       // The set membership above proved the narrow type.
@@ -2144,6 +2253,35 @@ securityRouter.post("/:id/security/needs", async (c) => {
     const swept = await security.resolveNeeds(engagement.id);
     // Re-read this need's post-sweep row so the response reflects its ruling.
     const settled = [...swept.autoResolved, ...swept.needsHuman].find((n) => n.id === need.id) ?? need;
+    // Every need this sweep moved to needs_human pings the owner, including an
+    // earlier need left open. The dedupe key makes a replay a no-op, so each
+    // need pings once.
+    if (swept.needsHuman.length > 0) {
+      const { db } = c.var.providers;
+      const [row] = await db.select().from(agentSessions).where(eq(agentSessions.id, engagement.sessionId)).limit(1);
+      if (row) {
+        const cellRows = await db
+          .select({ id: securityCells.id, ordinal: securityCells.ordinal })
+          .from(securityCells)
+          .where(eq(securityCells.engagementId, engagement.id));
+        const ordinals = new Map(cellRows.map((r) => [r.id, r.ordinal]));
+        // Not awaited: a channel send that never returns must not hang the report.
+        for (const pending of swept.needsHuman) {
+          void routeAttention(attentionDepsFrom(c), {
+            kind: "question",
+            owner: sessionOwner(row),
+            sessionId: engagement.sessionId,
+            title: "Security review needs an answer",
+            body: `${engagement.repoFullName}: ${pending.kind} need from cell ${ordinals.get(pending.cellId) ?? "?"}. ${pending.description.slice(0, 200)}`,
+            href: attentionHref(engagement.sessionId, undefined, sessionOwner(row)),
+            dedupeKey: `security-need:${pending.id}`,
+          }).catch((err) => {
+            // Best-effort: one failed ping must not fail the report or skip the others.
+            console.error(`security need: attention route failed for ${pending.id}:`, err);
+          });
+        }
+      }
+    }
     const response: SecurityReportNeedResponse = {
       need: needToWire(settled),
       autoResolved: swept.autoResolved.map(needToWire),
@@ -2259,11 +2397,10 @@ securityRouter.get("/:id/security/needs", async (c) => {
 //
 // Decision 10 (spec §Filing issues, threat 11): review, export, and issue
 // filing are HUMAN actions. A valid internal token — the runner's and the
-// personas' path — is refused outright on all four routes, so content
-// derived from hostile code leaves Valet only on a person's click.
-
-const HUMAN_ONLY =
-  "This is a human action. Sign in and call it as a user — the internal token is refused here.";
+// personas' path — is refused outright on these routes, so content derived
+// from hostile code leaves Valet only on a person's click. The Security
+// plugin serves issue filing; the host refuses the internal token there with
+// the same message (plugins/http-security.ts).
 
 type HumanAccess = "view" | "administer";
 
@@ -2418,7 +2555,16 @@ securityRouter.post("/:id/security/findings/:findingId/comments", async (c) => {
  * re-run (pivot-coordinator + needs loop, M-P4c, spec §Pivot-coordinator).
  * HUMAN action: `resolveHumanSession(.., "administer")` refuses the internal
  * token (the runner and personas never answer their own needs) and gates on
- * `canAdministerSession`. Takes `{ answers: [{ needId, resolution, dismiss? }] }`.
+ * `canAdministerSession`. Takes `{ answers: [{ needId, resolution, dismiss? }] }`
+ * for most kinds, or `{ answers: [{ needId, credentialLabel, dismiss? }] }` for a
+ * `kind: "credential"` need (Part 12, INV-39): the CHECK constraint on
+ * `security_needs` refuses a non-null `resolution` on that kind, so a
+ * credential answer names a label already declared on the engagement instead.
+ * A `resolution` sent on a credential need answers 400: the service refuses it
+ * rather than drop it, so a caller who put a secret in the free-text field
+ * learns the value went nowhere.
+ * This route validates only the request shape; the service enforces which
+ * field a given need's kind requires.
  * The service marks each answered and resets ONLY the cell that recorded it to
  * pending — a delta re-run, not a whole-engagement re-run. The runner picks the
  * reset cell up and re-dispatches it; the answer rides into its dispatch prompt.
@@ -2434,30 +2580,49 @@ securityRouter.post("/:id/security/needs/resolve", async (c) => {
 
   const body = await readJsonBody(c);
   if (!Array.isArray(body.answers) || body.answers.length === 0) {
-    return c.json({ error: "Send { answers: [{ needId, resolution }] } with at least one answer." }, 400);
+    return c.json(
+      { error: "Send { answers: [{ needId, resolution }] } with at least one answer." },
+      400,
+    );
   }
-  const answers: { needId: string; resolution: string; dismiss?: boolean }[] = [];
+  const answers: { needId: string; resolution?: string; credentialLabel?: string; dismiss?: boolean }[] =
+    [];
   for (const raw of body.answers) {
     if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-      return c.json({ error: "Each answer is { needId, resolution, dismiss? }." }, 400);
+      return c.json(
+        { error: "Each answer is { needId, resolution, dismiss? } or { needId, credentialLabel, dismiss? }." },
+        400,
+      );
     }
     const rec = raw as Record<string, unknown>;
     if (typeof rec.needId !== "string" || rec.needId === "") {
       return c.json({ error: "Each answer needs a needId." }, 400);
     }
     const dismiss = rec.dismiss === true;
-    if (!dismiss && (typeof rec.resolution !== "string" || rec.resolution.trim() === "")) {
-      return c.json({ error: `Answer for ${rec.needId} needs a resolution, or set dismiss: true.` }, 400);
+    const hasResolution = typeof rec.resolution === "string" && rec.resolution.trim() !== "";
+    const hasCredentialLabel = typeof rec.credentialLabel === "string" && rec.credentialLabel.trim() !== "";
+    if (!dismiss && !hasResolution && !hasCredentialLabel) {
+      return c.json(
+        { error: `Answer for ${rec.needId} needs a resolution or a credentialLabel, or set dismiss: true.` },
+        400,
+      );
     }
     answers.push({
       needId: rec.needId,
-      resolution: typeof rec.resolution === "string" ? rec.resolution : "",
+      ...(typeof rec.resolution === "string" ? { resolution: rec.resolution } : {}),
+      ...(typeof rec.credentialLabel === "string" ? { credentialLabel: rec.credentialLabel } : {}),
       dismiss,
     });
   }
 
   try {
     const outcome = await security.resolveEngagementNeeds(result.engagement.id, answers);
+    for (const need of outcome.answered) {
+      await markAttentionNotificationsRead(c.var.providers.db, "question", `security-need:${need.id}`).catch((err) => {
+        // Best-effort: the answer is already applied, so a stale ping must not fail it.
+        console.error(`security need: mark read failed for ${need.id}:`, err);
+      });
+    }
     const response: SecurityResolveNeedsResponse = {
       answered: outcome.answered.map(needToWire),
       resetCellIds: outcome.resetCells.map((cell) => cell.id),
@@ -2467,6 +2632,9 @@ securityRouter.post("/:id/security/needs/resolve", async (c) => {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (message.startsWith("No need")) return c.json({ error: message }, 404);
+    // A resolution on a credential need is a bad request, not a state
+    // conflict: the caller sent the wrong field (INV-39).
+    if (message === CREDENTIAL_NEED_TAKES_A_LABEL) return c.json({ error: message }, 400);
     return c.json({ error: message }, 409);
   }
 });
@@ -2511,10 +2679,12 @@ securityRouter.post("/:id/security/cancel", async (c) => {
         .update(agentSessions)
         .set({ status: "deleted", updatedAt: Date.now() })
         .where(eq(agentSessions.id, childId));
+      await cancelChildDelivery(db, c.var.providers.engineStore, childId, "The security child was cancelled.");
     } catch (err) {
       console.error(`security cancel: child ${childId} teardown failed:`, err);
     }
   }
+  clearEngagementTripwire(result.cells);
 
   // Cancellation ping: the owner learns the review ended (spec §Cancel). Dedupe
   // shares the close key — a review ends once, whether closed or cancelled.
@@ -2524,7 +2694,7 @@ securityRouter.post("/:id/security/cancel", async (c) => {
     sessionId,
     title: "Security review cancelled",
     body: `${result.engagement.repoFullName} review cancelled.`,
-    href: attentionHref(sessionId),
+    href: attentionHref(sessionId, undefined, sessionOwner(row)),
     dedupeKey: `security-close:${result.engagement.id}`,
   }).catch((err) => {
     console.error(`security cancel: attention route failed for ${result.engagement.id}:`, err);
@@ -2680,184 +2850,4 @@ securityRouter.get("/:id/security/export", async (c) => {
     `attachment; filename="valet-security-${result.engagement.id}.${meta.ext}"`,
   );
   return c.body(payload);
-});
-
-/** The invoker seam issue filing rides (Decision 11): the SAME
- * `buildActionInvoker` a workflow tool node dispatches through, scoped to
- * the acting user's credentials. `webBaseUrl` prefers the configured public
- * URL (the channels' rule); dev and tests fall back to the request origin. */
-function buildIssuesDeps(c: Context<AppEnv>): SecurityIssuesDeps {
-  const { db, engineCredentials, actionPluginByService, plugins, encryptionKey } = c.var.providers;
-  const invokeAction = buildActionInvoker({
-    db,
-    credentials: engineCredentials,
-    actionPluginByService,
-    plugins,
-    githubTokenDeps: { key: deriveSecretKey(encryptionKey) },
-  });
-  const webBaseUrl = publicUrlFromEnv(process.env) ?? new URL(c.req.url).origin;
-  return { db, invokeAction, webBaseUrl };
-}
-
-/** Filing failures → HTTP: corrective 400s for a missing integration or a
- * bad request shape; 502 for a provider-side failure. */
-function issueError(c: Context<AppEnv>, err: unknown): Response {
-  if (err instanceof MissingIntegrationError || err instanceof IssueRequestError) {
-    return c.json({ error: err.message }, 400);
-  }
-  return c.json({ error: err instanceof Error ? err.message : String(err) }, 502);
-}
-
-function parseIssueProvider(value: unknown): IssueProvider | null {
-  return value === "github" || value === "linear" ? value : null;
-}
-
-/**
- * POST /:id/security/findings/:findingId/issues { provider, repo?, teamId? }
- * — file ONE issue for ONE finding (spec §Filing issues). Idempotent by the
- * `(finding, provider)` unique index: a repeat answers 200 with the
- * existing link and `created: false`.
- */
-securityRouter.post("/:id/security/findings/:findingId/issues", async (c) => {
-  const sessionId = c.req.param("id");
-  const findingId = c.req.param("findingId");
-  // Issue filing resolves GitHub or Linear from the acting user's own rows.
-  // For a team key that user is the minting admin, kept for audit only, so
-  // filing would spend a credential nobody chose to use. Refuse up front.
-  if (requirePrincipal(c)?.type === "team") {
-    return c.json(
-      { error: "A team API key cannot file issues. Sign in and file them from the session." },
-      403,
-    );
-  }
-  // View-gated (spec §Filing issues): the named check is canViewSession,
-  // inside resolveHumanSession.
-  const resolved = await resolveHumanSession(c, sessionId, "view");
-  if ("failure" in resolved) return resolved.failure;
-  const { user } = resolved.ok;
-
-  const loaded = await loadEngagementOr404(c, sessionId);
-  if ("failure" in loaded) return loaded.failure;
-  const { result } = loaded;
-  const { db } = c.var.providers;
-
-  const body = await readJsonBody(c);
-  const provider = parseIssueProvider(body.provider);
-  if (!provider) return c.json({ error: "provider must be 'github' or 'linear'." }, 400);
-  if (body.repo !== undefined && typeof body.repo !== "string") {
-    return c.json({ error: "repo must be an owner/name string." }, 400);
-  }
-  if (body.teamId !== undefined && typeof body.teamId !== "string") {
-    return c.json({ error: "teamId must be a Linear team id string." }, 400);
-  }
-
-  // Scoped to THIS engagement: a finding id from another engagement is not
-  // reachable here.
-  const findingRows = await db
-    .select()
-    .from(securityFindings)
-    .where(
-      and(eq(securityFindings.engagementId, result.engagement.id), eq(securityFindings.id, findingId)),
-    )
-    .limit(1);
-  const finding = findingRows[0];
-  if (!finding) {
-    return c.json({ error: `No finding ${findingId} in this engagement.` }, 404);
-  }
-
-  try {
-    const filed = await fileFindingIssue(buildIssuesDeps(c), {
-      engagement: result.engagement,
-      finding,
-      provider,
-      actor: { userId: user.id, orgId: user.orgId },
-      repo: typeof body.repo === "string" ? body.repo : undefined,
-      teamId: typeof body.teamId === "string" ? body.teamId : undefined,
-    });
-    const response: SecurityFileIssueResponse = {
-      link: linkToWire(filed.link),
-      created: filed.created,
-    };
-    return c.json(response);
-  } catch (err) {
-    return issueError(c, err);
-  }
-});
-
-/**
- * POST /:id/security/issues/digest { provider, findingIds, repo?, teamId? }
- * — ONE digest issue from many findings (spec §Filing issues: a tracker
- * flooded with forty auto-filed tickets is worse than no integration).
- * Writes no link rows.
- */
-securityRouter.post("/:id/security/issues/digest", async (c) => {
-  const sessionId = c.req.param("id");
-  // Issue filing resolves GitHub or Linear from the acting user's own rows.
-  // For a team key that user is the minting admin, kept for audit only, so
-  // filing would spend a credential nobody chose to use. Refuse up front.
-  if (requirePrincipal(c)?.type === "team") {
-    return c.json(
-      { error: "A team API key cannot file issues. Sign in and file them from the session." },
-      403,
-    );
-  }
-  // View-gated (spec §Filing issues): the named check is canViewSession,
-  // inside resolveHumanSession.
-  const resolved = await resolveHumanSession(c, sessionId, "view");
-  if ("failure" in resolved) return resolved.failure;
-  const { user } = resolved.ok;
-
-  const loaded = await loadEngagementOr404(c, sessionId);
-  if ("failure" in loaded) return loaded.failure;
-  const { result } = loaded;
-  const { db } = c.var.providers;
-
-  const body = await readJsonBody(c);
-  const provider = parseIssueProvider(body.provider);
-  if (!provider) return c.json({ error: "provider must be 'github' or 'linear'." }, 400);
-  if (
-    !Array.isArray(body.findingIds) ||
-    body.findingIds.length === 0 ||
-    !body.findingIds.every((id): id is string => typeof id === "string")
-  ) {
-    return c.json({ error: "Send { findingIds } with at least one finding id." }, 400);
-  }
-  if (body.repo !== undefined && typeof body.repo !== "string") {
-    return c.json({ error: "repo must be an owner/name string." }, 400);
-  }
-  if (body.teamId !== undefined && typeof body.teamId !== "string") {
-    return c.json({ error: "teamId must be a Linear team id string." }, 400);
-  }
-
-  const requestedIds = [...new Set(body.findingIds)];
-  const findings = await db
-    .select()
-    .from(securityFindings)
-    .where(
-      and(
-        eq(securityFindings.engagementId, result.engagement.id),
-        inArray(securityFindings.id, requestedIds),
-      ),
-    );
-  if (findings.length !== requestedIds.length) {
-    return c.json(
-      { error: "Every finding in { findingIds } must belong to this engagement." },
-      400,
-    );
-  }
-
-  try {
-    const digest = await fileDigestIssue(buildIssuesDeps(c), {
-      engagement: result.engagement,
-      findings,
-      provider,
-      actor: { userId: user.id, orgId: user.orgId },
-      repo: typeof body.repo === "string" ? body.repo : undefined,
-      teamId: typeof body.teamId === "string" ? body.teamId : undefined,
-    });
-    const response: SecurityDigestIssueResponse = { url: digest.url };
-    return c.json(response);
-  } catch (err) {
-    return issueError(c, err);
-  }
 });

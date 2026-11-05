@@ -1,3 +1,4 @@
+import { budgetedReader } from "./read-budget.js";
 /**
  * Repository content sync — mirrors what a GitHub repository holds into
  * Valet's own tables, and keeps mirroring as the repository moves.
@@ -393,7 +394,8 @@ export class ContentSyncService {
 
   private async run(source: ContentSourceRow): Promise<ContentSyncOutcome> {
     // Resolved once per sync, so every read of one commit uses one identity.
-    const reader = this.deps.readerFor ? await this.deps.readerFor(source) : this.deps.reader;
+    const bodyReader = this.deps.readerFor ? await this.deps.readerFor(source) : this.deps.reader;
+    const reader = budgetedReader(bodyReader);
 
     // Both compares below leave the row's report where it is, which is only
     // sound when that report describes a sync that finished. After a failure
@@ -424,7 +426,7 @@ export class ContentSyncService {
     }
 
     // Everything below reads at `head`, never at the moving ref.
-    const scan = await this.readManifest(source, head, reader);
+    const scan = await this.readManifest(source, head, reader, bodyReader);
 
     // Compare 2 — the files that commit holds, keyed by blob sha from the tree
     // read, so this runs before any file is read.
@@ -452,9 +454,12 @@ export class ContentSyncService {
       }));
     }
 
+    for (const pass of scan.passes) {
+      await pass.hydrateBodies?.({ db: this.deps.db, reader, source, commitSha: head.sha, text: pass.text, discovery: scan.discovery, now: this.now });
+    }
     const read = await this.readContents(source, head.sha, reader, scan);
     const writers = await Promise.all(scan.passes.map(async (pass) => {
-      const ctx = { db: this.deps.db, source, commitSha: head.sha, text: read.text, discovery: scan.discovery, now: this.now };
+      const ctx = { db: this.deps.db, reader, source, commitSha: head.sha, text: read.text, discovery: scan.discovery, now: this.now };
       const write = pass.prepareReconcile
         ? await pass.prepareReconcile(ctx)
         : (db: AppDb) => pass.reconcile({ ...ctx, db });
@@ -539,6 +544,7 @@ export class ContentSyncService {
     source: ContentSourceRow,
     head: SkillRepoHead,
     reader: SkillRepoReader,
+    bodyReader: SkillRepoReader,
   ): Promise<SyncScan> {
     const collectors = this.collectorsFor(source);
     const tree = await reader.listTree(source.repoFullName, head.treeSha);
@@ -566,7 +572,7 @@ export class ContentSyncService {
     const passes: CollectorPass[] = [];
     for (const collector of collectors) {
       if (collector.walkDirectory === undefined) continue;
-      passes.push(await collector.walkDirectory({ source, headSha: head.sha, reader }));
+      passes.push(await collector.walkDirectory({ db: this.deps.db, source, headSha: head.sha, reader, bodyReader }));
     }
     const scan: SyncScan = { passes, discovery: "directory-walk" };
     this.assertCandidateBudget(source, scan);
@@ -645,7 +651,7 @@ export class ContentSyncService {
         // compare 2 forever, leaving the rows the incomplete pass never wrote
         // permanently missing.
         lastManifestHash: result.complete ? result.manifestHash : null,
-        discoveryScan: result.complete ? discoveryScanMark(result.headSha, source.kinds) : source.discoveryScan,
+        discoveryScan: result.complete ? discoveryScanMark(result.headSha, source.kinds) : null,
         lastSyncedAt: now,
         lastError: message,
         updatedAt: now,

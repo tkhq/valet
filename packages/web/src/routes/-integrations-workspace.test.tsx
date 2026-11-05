@@ -1,29 +1,37 @@
 // @vitest-environment jsdom
+import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { CredentialSummary, GetGithubOrgStatusResponse, ListCredentialsResponse, ListPluginsResponse, TeamSummary } from "@valet/api/wire";
+import type { CredentialSummary, ListCredentialsResponse, ListPluginsResponse, TeamSummary } from "@valet/api/wire";
 import { api, ApiError } from "~/api/client";
 import { qkIntegrations } from "~/api/integrations";
-import { qkRepos } from "~/api/repos";
 import { qkSettings } from "~/api/settings";
 
 let teamId: string | undefined;
 let realWorkspace = false;
 const setKey = vi.fn();
+vi.mock("~/api/commit-signing", () => ({
+  useCommitSigning: () => ({ data: { configured: false, enrolled: false, keys: [] }, isLoading: false, error: null }),
+  useEnrollCommitSigning: () => ({ mutateAsync: vi.fn(), isPending: false }),
+}));
+
 vi.mock("~/lib/workspace-scope", async (importOriginal) => {
   const original = await importOriginal<typeof import("~/lib/workspace-scope")>();
   return { ...original, useWorkspaceScope: () => realWorkspace ? original.useWorkspaceScope() : { teamId, setKey } };
 });
-vi.mock("~/api/assistants", async (importOriginal) => ({
-  ...await importOriginal<typeof import("~/api/assistants")>(),
-  useAssistants: () => ({ data: { assistants: [] } }),
-}));
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
-  useSearch: () => ({}),
+  useSearch: () => searchState,
   useNavigate: () => vi.fn(),
+  useRouter: () => ({ history: { back: vi.fn() } }),
+  // The header's space control reads the path to decide where a switch goes.
+  useRouterState: ({ select }: { select: (state: { location: { pathname: string } }) => unknown }) => select({ location: { pathname: "/integrations" } }),
+  Link: ({ to, children, className }: { to: string; children: ReactNode; className?: string }) => <a href={to} className={className}>{children}</a>,
 }));
+
+/** The personal page's open detail panel (`?service=`). */
+let searchState: Record<string, string> = {};
 
 function team(id: string, name: string, callerRole: TeamSummary["callerRole"]): TeamSummary {
   return { id, name, callerRole, orgId: "org", origin: "local", externalId: null,
@@ -63,10 +71,18 @@ const PERSONAL_PLUGINS: ListPluginsResponse = { plugins: [{
 }] };
 const A: CredentialSummary = { service: "linear", type: "oauth2", connectedAt: "2026-09-10", delegatedFrom: "u1" };
 const B: CredentialSummary = { service: "sentry", type: "api_key", connectedAt: "2026-09-10" };
-const ORG_PLUGINS: ListPluginsResponse = { plugins: [{ name: "org-apps", version: "1", actionCount: 0, services: [
-  { service: "slack", type: "bot_token", configKeys: ["accessToken"], connected: false, connect: "org", actions: [] },
-  { service: "github", type: "oauth2", configKeys: ["accessToken"], connected: true, connect: "manual", actions: [] },
-] }] };
+
+/** True when one of `elements` has no ancestor that Tailwind hides below
+ * `sm`. jsdom applies no CSS, so the classes are the only evidence. */
+function shownOnPhones(elements: HTMLElement[]): boolean {
+  return elements.some((element) => {
+    for (let node: HTMLElement | null = element; node; node = node.parentElement) {
+      const classes = node.className.split(" ");
+      if (classes.includes("hidden") || classes.includes("max-sm:hidden")) return false;
+    }
+    return true;
+  });
+}
 
 function mount() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
@@ -84,11 +100,12 @@ function mount() {
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  searchState = {};
   window.history.replaceState(null, "", "/integrations");
   setKey.mockClear();
   teamId = undefined;
   realWorkspace = false;
-  window.localStorage.clear();
+  window.sessionStorage.clear();
   orgRole = "member";
   teams = [team("a", "Team A", "admin"), team("b", "Team B", "admin")];
   teamsError = null;
@@ -105,6 +122,7 @@ beforeEach(() => {
 
 describe("Integrations workspace isolation", () => {
   it("switches Personal -> team A -> team B -> Personal without retaining forms or team dialogs", async () => {
+    searchState = { service: "typefully" };
     const view = mount();
     fireEvent.click(await screen.findByRole("button", { name: "Connect Typefully" }));
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
@@ -116,21 +134,22 @@ describe("Integrations workspace isolation", () => {
     expect(screen.queryByDisplayValue("personal-token-draft")).toBeNull();
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(await screen.findByText("Shared by Alice")).toBeTruthy();
-    expect(screen.getByText("Shared by members")).toBeTruthy();
-    expect(screen.getByText(/Team actions use Alice’s account/)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Stop sharing Linear with Team A" }));
+    expect(screen.getByText(/Using another member's account asks them first/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Stop sharing Alice's Linear with Team A" }));
 
     view.switchTo("b");
     expect(screen.queryByRole("dialog")).toBeNull();
-    expect(screen.queryByText("Linear")).toBeNull();
+    expect(screen.queryByText("Linear MCP")).toBeNull();
     expect(await screen.findByText("Sentry")).toBeTruthy();
-    expect(screen.getByText("Stored on the team")).toBeTruthy();
+    expect(screen.getAllByText("Team connection").length).toBeGreaterThan(0);
     expect(api.listCredentials).toHaveBeenCalledWith("team", "a");
     expect(api.listCredentials).toHaveBeenCalledWith("team", "b");
-    expect(api.listPlugins).toHaveBeenCalledTimes(1);
+    expect(api.listPlugins).toHaveBeenCalledWith("a");
+    expect(api.listPlugins).toHaveBeenCalledWith("b");
 
+    searchState = {};
     view.switchTo();
-    expect(await screen.findByRole("button", { name: "Connect Typefully" })).toBeTruthy();
+    expect(await screen.findByRole("link", { name: /Typefully/ })).toBeTruthy();
     expect(screen.queryByText("Sentry")).toBeNull();
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(api.deleteCredential).not.toHaveBeenCalled();
@@ -139,29 +158,61 @@ describe("Integrations workspace isolation", () => {
   it("does not show cached personal or team A data while team B loads or fails", async () => {
     teamId = "a";
     const view = mount();
-    await screen.findByText("Linear");
+    await screen.findByText("Linear MCP");
     let rejectRead: (error: Error) => void = () => {};
-    vi.mocked(api.listCredentials).mockReturnValueOnce(new Promise((_resolve, reject) => { rejectRead = reject; }));
+    // Hold team B's read by its arguments, not by call order: the share
+    // control above the list reads credentials too, and it renders first.
+    const readCredentials = vi.mocked(api.listCredentials).getMockImplementation();
+    vi.mocked(api.listCredentials).mockImplementation((scope, id) =>
+      scope === "team" && id === "b"
+        ? new Promise((_resolve, reject) => { rejectRead = reject; })
+        : readCredentials ? readCredentials(scope, id) : Promise.reject(new Error("No credential mock")));
     view.switchTo("b");
     expect(screen.getByText("Loading credentials…")).toBeTruthy();
-    expect(screen.queryByText("Linear")).toBeNull();
+    expect(screen.queryByText("Linear MCP")).toBeNull();
     await act(async () => rejectRead(new Error("Forbidden")));
     expect(await screen.findByText("Could not load credentials. Reload the page.")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /Disconnect|Stop sharing/ })).toBeNull();
+    // Credential-row controls name their service and their team, so this
+    // matches every one of them and no other resource's. The team 1Password
+    // token has its own query and its own failure state, so it is not part
+    // of what a failed credential read must hide.
+    expect(
+      screen.queryByRole("button", { name: /(Disconnect|Stop sharing) .+ (from|with) / }),
+    ).toBeNull();
     expect(screen.queryByRole("button", { name: "Share with a team" })).toBeNull();
   });
 
-  it("keeps members read-only and explains empty teams", async () => {
+  it("lets a member request removal of a team connection, not of another member's share", async () => {
     teamId = "a";
     teams = [team("a", "Team A", "member")];
     const view = mount();
     await screen.findByText("Shared by Alice");
-    expect(screen.getByText("Only team or organization admins can remove team connections.")).toBeTruthy();
+    expect(screen.getByText("A team admin removes team connections. Request removal to ask one.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Disconnect|Stop sharing|Request removal/ })).toBeNull();
+    act(() => view.client.setQueryData<ListCredentialsResponse>(qkIntegrations.credentials("team", "a"), { credentials: [A, B] }));
+    expect(await screen.findByRole("button", { name: /^Request removal of .+ from Team A$/ })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Disconnect|Stop sharing/ })).toBeNull();
     act(() => view.client.setQueryData<ListCredentialsResponse>(qkIntegrations.credentials("team", "a"), { credentials: [] }));
     expect(await screen.findByText(/No connections added to this team yet/)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Switch to Personal" }));
-    expect(setKey).toHaveBeenCalledWith("user");
+    // A plain member may not remove a team connection, but sharing one of
+    // their OWN is the same write the personal page already allows, so the
+    // team page offers it here rather than sending them elsewhere.
+    expect(
+      screen.getByRole("button", { name: "Share one of your connections with Team A" }),
+    ).toBeTruthy();
+  });
+
+  // The generic create-only dialog cannot host a service-account token: the
+  // team list skips reserved rows so a live token never reads as occupied,
+  // and the team write upserts, so the dialog would replace it with no 409.
+  it("keeps 1Password out of the connect picker and offers the team token control instead", async () => {
+    teamId = "a";
+    teams = [team("a", "Team A", "admin")];
+    orgRole = "admin";
+    mount();
+    expect(await screen.findByText("A service account for this team. Valet finds credentials in the vaults it can access.")).toBeTruthy();
+    // One 1Password card, the team token; the service picker does not list it again.
+    expect(screen.getAllByText("1Password")).toHaveLength(1);
   });
 
   it("lets an org admin manage a team they are not on and reports delete errors", async () => {
@@ -209,11 +260,11 @@ describe("Integrations workspace isolation", () => {
   it("hides stale credentials and an open dialog when a refetch loses access", async () => {
     teamId = "a";
     const view = mount();
-    fireEvent.click(await screen.findByRole("button", { name: "Stop sharing Linear with Team A" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Stop sharing Alice's Linear with Team A" }));
     vi.mocked(api.listCredentials).mockRejectedValue(new Error("Forbidden"));
     await act(async () => { await view.client.invalidateQueries({ queryKey: qkIntegrations.credentials("team", "a") }); });
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-    expect(screen.queryByText("Linear")).toBeNull();
+    expect(screen.queryByText("Linear MCP")).toBeNull();
     expect(screen.getByText("Could not load credentials. Reload the page.")).toBeTruthy();
   });
 });
@@ -223,6 +274,7 @@ describe("Team account connection", () => {
   it("discards the open form after a failed credential read and does not reopen it on recovery", async () => {
     teamId = "a";
     const put = vi.spyOn(api, "putCredential").mockResolvedValue({ ok: true });
+    searchState = { service: "typefully" };
     const view = mount();
     fireEvent.click(await screen.findByRole("button", { name: "Connect Typefully" }));
     expect(screen.getByText("Paste a token for the account intended for this team. Everyone on this team can use its permissions.")).toBeTruthy();
@@ -252,13 +304,14 @@ describe("Team account connection", () => {
     expect(dialog.getByText(/Team Integrations cannot recreate this connection/)).toBeTruthy();
     expect(dialog.getByText(/organization admin manages organization access in Organization settings/)).toBeTruthy();
     expect(dialog.queryByText(/again from Integrations/)).toBeNull();
-    expect(screen.queryByText("Shared by members")).toBeNull();
+    expect(screen.queryByText("Shared by Alice")).toBeNull();
     expect(api.deleteCredential).not.toHaveBeenCalled();
   });
 
   it("requires confirmation and writes only to the selected team's empty slot", async () => {
     teamId = "a";
     const put = vi.spyOn(api, "putCredential").mockResolvedValue({ ok: true });
+    searchState = { service: "typefully" };
     const view = mount();
     fireEvent.click(await screen.findByRole("button", { name: "Connect Typefully" }));
     fireEvent.change(screen.getByLabelText("Team account token"), { target: { value: "team-test-token" } });
@@ -293,23 +346,23 @@ describe("Team account connection", () => {
     window.history.replaceState(null, "", "/integrations?teamId=a&connected=linear");
     teamId = "a";
     const view = mount();
-    expect(await screen.findByRole("status")).toHaveProperty("textContent", "Connected linear.");
+    expect(await screen.findByRole("status")).toHaveProperty("textContent", "Connected Linear via MCP.");
     expect(setKey).toHaveBeenCalledWith("a");
     setKey.mockClear();
     view.switchTo("b");
     await screen.findByText("Sentry");
     expect(setKey).not.toHaveBeenCalled();
-    expect(screen.queryByText("Connected linear.")).toBeNull();
+    expect(screen.queryByText("Connected Linear via MCP.")).toBeNull();
   });
 
   it("adopts an accessible callback team with the real workspace provider", async () => {
     realWorkspace = true;
     window.history.replaceState(null, "", "/integrations?teamId=a&connected=linear");
     mount();
-    expect(await screen.findByText("Connected linear.")).toBeTruthy();
-    expect(await screen.findByText("Linear")).toBeTruthy();
-    expect(window.localStorage.getItem("valet:workspace")).toBe("a");
-    expect(screen.getByRole("button", { name: "Stop sharing Linear with Team A" })).toBeTruthy();
+    expect(await screen.findByText("Connected Linear via MCP.")).toBeTruthy();
+    expect(await screen.findByText("Linear MCP")).toBeTruthy();
+    expect(window.sessionStorage.getItem("valet:workspace")).toBe("a");
+    expect(screen.getByRole("button", { name: "Stop sharing Alice's Linear with Team A" })).toBeTruthy();
     expect(api.listCredentials).toHaveBeenCalledWith("team", "a");
   });
 
@@ -318,10 +371,66 @@ describe("Team account connection", () => {
     window.history.replaceState(null, "", "/integrations?teamId=gone&error=team_access_changed");
     mount();
     expect(await screen.findByText("Team access changed. Ask a team admin to restart the connection.")).toBeTruthy();
-    expect(await screen.findByRole("button", { name: "Connect Typefully" })).toBeTruthy();
-    expect(window.localStorage.getItem("valet:workspace")).toBe("user");
+    expect(await screen.findByRole("link", { name: /Typefully/ })).toBeTruthy();
+    expect(window.sessionStorage.getItem("valet:workspace")).toBe("user");
     expect(screen.queryByText("Team unavailable")).toBeNull();
-    expect(api.listCredentials).not.toHaveBeenCalled();
+    // Only the personal list (for saved credentials no row covers) loads.
+    expect(api.listCredentials).not.toHaveBeenCalledWith("team", expect.anything());
+  });
+
+  it("names a blocked team service's visible label and states the reason at every width", async () => {
+    teamId = "a";
+    vi.mocked(api.listPlugins).mockResolvedValue({ plugins: [{ name: "gmail", version: "1", actionCount: 0,
+      services: [{ service: "gmail", type: "oauth2", configKeys: ["accessToken"], connected: false, connect: "unconfigured", connectBlockedBy: "deployment", actions: [] }],
+    }] });
+    mount();
+    // WCAG 2.5.3: the accessible name starts with the label a reader sees.
+    const button = await screen.findByRole("button", { name: "Set up Gmail" });
+    expect(button.textContent).toBe("Set up");
+    expect(button.hasAttribute("disabled")).toBe(true);
+    expect(shownOnPhones(screen.getAllByText("Ask an organization admin to configure OAuth for this service."))).toBe(true);
+  });
+
+  it("lets a plain team member connect a team account", async () => {
+    teamId = "a";
+    teams = [team("a", "Team A", "member")];
+    mount();
+    expect((await screen.findByRole("button", { name: "Connect Typefully" })).hasAttribute("disabled")).toBe(false);
+    expect(screen.queryByText("Team member required")).toBeNull();
+  });
+
+  it("shows the team 1Password fallback status on phones", async () => {
+    teamId = "a";
+    vi.spyOn(api, "getTeamOnePasswordStatus").mockResolvedValue({ tokenConnected: false });
+    mount();
+    expect(shownOnPhones(await screen.findAllByText("Uses the organization token"))).toBe(true);
+  });
+
+  it("lists a connected team 1Password with the team's connections, not under Available", async () => {
+    teamId = "a";
+    vi.spyOn(api, "getTeamOnePasswordStatus").mockResolvedValue({ tokenConnected: true });
+    mount();
+    const connected = await screen.findByRole("list", { name: "Team connections" });
+    expect(await within(connected).findByText("1Password")).toBeTruthy();
+    expect(within(screen.getByRole("list", { name: "Available" })).queryByText("1Password")).toBeNull();
+  });
+
+  it("offers an unconnected team 1Password under Available", async () => {
+    teamId = "a";
+    vi.spyOn(api, "getTeamOnePasswordStatus").mockResolvedValue({ tokenConnected: false });
+    mount();
+    const available = await screen.findByRole("list", { name: "Available" });
+    expect(await within(available).findByText("1Password")).toBeTruthy();
+    expect(within(screen.getByRole("list", { name: "Team connections" })).queryByText("1Password")).toBeNull();
+  });
+
+  it("ignores a personal ?service= panel link in the team view", async () => {
+    teamId = "a";
+    searchState = { service: "typefully" };
+    mount();
+    expect(await screen.findByRole("list", { name: "Available" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Connect Typefully" })).toBeTruthy();
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   it("keeps Slack organization-managed while blocking missing OAuth configuration", async () => {
@@ -334,82 +443,10 @@ describe("Team account connection", () => {
       ],
     }] });
     mount();
-    expect((await screen.findByRole("button", { name: "Connect Gmail" })).hasAttribute("disabled")).toBe(true);
-    expect(screen.getByText("Ask an organization admin to configure OAuth for this service.")).toBeTruthy();
+    expect((await screen.findByRole("button", { name: "Set up Gmail" })).hasAttribute("disabled")).toBe(true);
+    expect(screen.getAllByText("Ask an organization admin to configure OAuth for this service.").length).toBeGreaterThan(0);
     expect(screen.queryByRole("button", { name: "Connect Slack" })).toBeNull();
-    expect(screen.getByText("Slack")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Connect GitHub" })).toBeNull();
   });
 
-  it("keeps connection controls disabled for ordinary team members", async () => {
-    teamId = "a";
-    teams = [team("a", "Team A", "member")];
-    mount();
-    expect((await screen.findByRole("button", { name: "Connect Typefully" })).hasAttribute("disabled")).toBe(true);
-  });
-});
-
-describe("Organization access status", () => {
-  it.each([
-    { configured: false, installationCount: 0, suspendedCount: 0, label: "" },
-    { configured: true, installationCount: 0, suspendedCount: 0, label: "" },
-    { configured: true, installationCount: 2, suspendedCount: 1, label: "Installed" },
-    { configured: true, installationCount: 2, suspendedCount: 2, label: "Suspended" },
-  ])("shows $label for the org GitHub state ($installationCount installations, $suspendedCount suspended)", async ({ label, ...status }) => {
-    teamId = "a";
-    orgRole = "admin";
-    vi.mocked(api.listPlugins).mockResolvedValue(ORG_PLUGINS);
-    vi.mocked(api.getGithubOrgStatus).mockResolvedValue(status);
-    mount();
-    expect(await screen.findByText(`GitHub App${label ? ` · ${label}` : ""}`)).toBeTruthy();
-    expect(screen.getByText("Slack · Organization connection")).toBeTruthy();
-    expect(screen.getByRole("link", { name: "Organization settings" }).getAttribute("href")).toBe("/settings/organization");
-    expect(screen.queryByRole("button", { name: "Connect GitHub" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Connect Slack" })).toBeNull();
-  });
-
-  it("keeps pending org status unknown despite a personally connected GitHub account", async () => {
-    teamId = "a";
-    vi.mocked(api.listPlugins).mockResolvedValue(ORG_PLUGINS);
-    let resolveStatus: (status: GetGithubOrgStatusResponse) => void = () => {};
-    vi.mocked(api.getGithubOrgStatus).mockReturnValue(new Promise((resolve) => { resolveStatus = resolve; }));
-    mount();
-    await screen.findByText("Slack · Organization connection");
-    expect(screen.getByText("Loading organization access…")).toBeTruthy();
-    expect(screen.queryByText(/GitHub App ·/)).toBeNull();
-    expect(screen.queryByRole("link", { name: "Organization settings" })).toBeNull();
-    await act(async () => resolveStatus({ configured: false, installationCount: 0, suspendedCount: 0 }));
-    expect(await screen.findByText("GitHub App")).toBeTruthy();
-  });
-
-  it("suppresses stale org status during refetch and after failure", async () => {
-    teamId = "a";
-    vi.mocked(api.listPlugins).mockResolvedValue(ORG_PLUGINS);
-    vi.mocked(api.getGithubOrgStatus).mockResolvedValue({ configured: true, installationCount: 1, suspendedCount: 0 });
-    const view = mount();
-    await screen.findByText("GitHub App · Installed");
-    let rejectStatus: (error: Error) => void = () => {};
-    vi.mocked(api.getGithubOrgStatus).mockReturnValue(new Promise((_resolve, reject) => { rejectStatus = reject; }));
-    vi.mocked(api.listPlugins).mockRejectedValue(new Error("Personal catalog unavailable"));
-    await act(async () => {
-      void view.client.invalidateQueries({ queryKey: qkRepos.githubOrgStatus() });
-      await view.client.invalidateQueries({ queryKey: qkIntegrations.plugins() });
-    });
-    await waitFor(() => expect(screen.queryByText("GitHub App · Installed")).toBeNull());
-    await waitFor(() => expect(screen.queryByText("Slack · Organization connection")).toBeNull());
-    await act(async () => rejectStatus(new Error("Unavailable")));
-    expect(await screen.findByText("Could not load GitHub App status. Reload the page.")).toBeTruthy();
-    expect(screen.getByText("Could not load organization access. Reload the page.")).toBeTruthy();
-    expect(screen.queryByText(/· (Installed|Organization connection|Setup required)/)).toBeNull();
-  });
-
-  it("does not turn a personal Slack connection into organization access", async () => {
-    teamId = "a";
-    vi.mocked(api.listPlugins).mockResolvedValue({ plugins: [{ name: "slack", version: "1", actionCount: 0, services: [
-      { service: "slack", type: "bot_token", configKeys: ["accessToken"], connected: true, connect: "unconfigured", connectBlockedBy: "org", actions: [] },
-    ] }] });
-    mount();
-    expect(await screen.findByText("Slack")).toBeTruthy();
-    expect(screen.queryByText("Slack · Organization connection")).toBeNull();
-  });
 });

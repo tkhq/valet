@@ -1,142 +1,219 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import type { CredentialSummary, OrgDirectoryUserWire, TeamSummary } from "@valet/api/wire";
-import { useCredentials, useDisconnectCredential } from "~/api/integrations";
+import { useCredentials, useDisconnectCredential, useRevokeDelegation } from "~/api/integrations";
+import { useSubmitTeamDeletionRequest } from "~/api/team-deletion-requests";
 import { Badge, Button, ConfirmDialog, EmptyRow, ErrorRow, LoadingRow } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
 import { CardHeading } from "./integration-card";
 import { displayName } from "./display-name";
+import { credentialRowHealth, healthBadge, healthNote, isTeamOwnConnection, needsReauth, type ServiceHealth } from "./service-health";
+import { TeamConnectionDialog } from "./team-connection-setup";
 
 /**
- * The verb for a removal control. One route serves both rows
- * (`DELETE /api/credentials/:service?scope=team`), but they cost different
- * things. A delegated row is a secretless reference that follows a member's
- * live credential, so dropping it cuts the team's link and leaves that member
- * connected, which is what the Integrations share menu already calls "Stop
- * sharing". A direct row holds the team's own secret, and dropping it deletes
- * that secret. Calling both "Disconnect" read as though it would take a
- * member's personal connection away with it.
+ * The verb for a removal control. A share is a member's own account, so
+ * ending it cuts the team's link and leaves that member connected, which is
+ * what the Integrations share menu calls "Stop sharing". The team's own
+ * connection holds the team's secret, and removing it deletes that secret.
  *
- * Both targets name the service through `displayName`. `row.service` is the
- * wire id, and spelling it raw made one credential read "Linear" on
- * Integrations and in every API refusal, and "linear" here.
+ * Both targets name the service through `displayName`: `row.service` is the
+ * wire id, and the API refusals and Integrations spell it the product way.
  */
 function removalLabels(
   row: CredentialSummary,
   teamName: string,
+  nameFor: (userId: string) => string,
+  canMutate: boolean,
 ): { action: string; pending: string; target: string } {
   const service = displayName(row.service);
-  return row.delegatedFrom
-    ? { action: "Stop sharing", pending: "Stopping…", target: `${service} with ${teamName}` }
-    : { action: "Disconnect", pending: "Disconnecting…", target: `${service} from ${teamName}` };
+  if (row.delegatedFrom) {
+    return { action: "Stop sharing", pending: "Stopping…", target: `${nameFor(row.delegatedFrom)}'s ${service} with ${teamName}` };
+  }
+  return canMutate
+    ? { action: "Disconnect", pending: "Disconnecting…", target: `${service} from ${teamName}` }
+    // A member asks a team admin (team resource deletion requests).
+    : { action: "Request removal", pending: "Sending…", target: `of ${service} from ${teamName}` };
 }
 
 /**
- * Credentials this team can act as, shared by Settings and Integrations.
- * Direct rows and delegated rows share the list because ownership varies
- * inside it, so each row names how it arrived.
+ * The repair for a row that cannot act. Any member may reconnect a dead team
+ * connection (`CredentialSummary.dead`). For a team connection in another broken
+ * state, an admin removes it and connects again. A shared account belongs to
+ * its member, so only that member can repair it.
+ */
+function repairNote(
+  row: CredentialSummary,
+  health: ServiceHealth,
+  canMutate: boolean,
+  nameFor: (userId: string) => string,
+): string {
+  const service = displayName(row.service);
+  const problem = health === "identity-only" ? "This connection gives sign-in only." : "The last token refresh failed.";
+  if (row.delegatedFrom) return `${problem} ${nameFor(row.delegatedFrom)} must reconnect ${service} in their own Integrations.`;
+  if (row.dead === true) return healthNote(health) ?? problem;
+  return canMutate
+    ? `${problem} Disconnect it, then connect ${service} again under Available.`
+    : `${problem} Ask a team admin to connect ${service} again.`;
+}
+
+/** The rows grouped by integration, in the order the API lists them. */
+function byService(rows: CredentialSummary[]): Array<{ service: string; rows: CredentialSummary[] }> {
+  const groups = new Map<string, CredentialSummary[]>();
+  for (const row of rows) groups.set(row.service, [...(groups.get(row.service) ?? []), row]);
+  return [...groups].map(([service, grouped]) => ({ service, rows: grouped }));
+}
+
+/**
+ * Every account this team can act as, one entry per integration, shared by
+ * Settings and Integrations. An integration lists the team's own connection
+ * and each member's shared account. A team action uses the acting member's
+ * own share first, then the team's connection, and asks before it uses
+ * another member's account.
  */
 export function TeamCredentials({
   team,
   orgMembers,
   canMutate,
   cards = false,
+  children,
 }: {
   team: TeamSummary;
   orgMembers: OrgDirectoryUserWire[];
   canMutate: boolean;
   cards?: boolean;
+  /** Connected team rows that own their controls, such as 1Password, listed first. */
+  children?: ReactNode;
 }) {
   const credsQ = useCredentials("team", { teamId: team.id });
   const disconnect = useDisconnectCredential();
-  // One row at a time, so the list renders ONE dialog. A single boolean would
-  // open it for every row and remove whichever service was last in scope.
+  const revoke = useRevokeDelegation();
+  const requestRemoval = useSubmitTeamDeletionRequest(team.id);
+  // One row at a time, so the list renders ONE dialog.
   const [removing, setRemoving] = useState<CredentialSummary | null>(null);
+  const [reconnecting, setReconnecting] = useState<string | null>(null);
   const nameFor = (userId: string) => orgMembers.find((m) => m.userId === userId)?.name ?? userId;
   const rows = credsQ.error ? [] : credsQ.data?.credentials ?? [];
-  const dialogLabels = removing ? removalLabels(removing, team.name) : null;
+  const dialogLabels = removing ? removalLabels(removing, team.name, nameFor, canMutate) : null;
+  const pending = disconnect.isPending || revoke.isPending || requestRemoval.isPending;
+  const failure = removing?.delegatedFrom ? revoke.error : canMutate ? disconnect.error : requestRemoval.error;
 
   function removalNote(row: CredentialSummary): string {
     const service = displayName(row.service);
-    if (!row.delegatedFrom && (row.service === "slack" || row.service === "github")) {
+    if (!canMutate) {
+      return `A team admin approves or declines the request. Team actions keep using ${service} until then.`;
+    }
+    if (row.delegatedFrom) {
+      const kept = `Team actions stop using ${nameFor(row.delegatedFrom)}'s ${service} account. They keep their own ${service} connection.`;
+      // The delegate route refuses a new share beside the team's own connection.
+      return rows.some((other) => other.service === row.service && isTeamOwnConnection(other))
+        ? `${kept} While ${team.name} has its own ${service} connection, they cannot share theirs again.`
+        : `${kept} They can share it with the team again from Integrations.`;
+    }
+    if (row.service === "slack" || row.service === "github") {
       return `This deletes the ${service} credential stored on ${team.name}. Team Integrations cannot recreate this connection. ` +
         "An organization admin manages organization access in Organization settings. Its permissions can differ from this stored connection.";
     }
-    const loss = `Sessions and workflows that run as ${team.name} lose access to ${service}.`;
-    return row.delegatedFrom
-      ? `${loss} This removes the team's link only. ${nameFor(row.delegatedFrom)} keeps their own ` +
-          `${service} connection and can share it with the team again from Integrations.`
-      : `${loss} This deletes the credential stored on the team. Connect ${service} again from ` +
-          `Integrations to give the team access back.`;
+    return `Runtimes and workflows that run as ${team.name} lose the team's own ${service} connection. ` +
+      `Members' shared accounts stay. Connect ${service} again from Integrations to restore it.`;
   }
 
   return (
     <div>
-      <h4 className="text-xs font-medium uppercase tracking-wide text-muted">{cards ? "Team connections" : "Credentials"}</h4>
       {credsQ.isLoading && <LoadingRow label="Loading credentials…" className="py-2 text-xs" />}
       {credsQ.error && <ErrorRow>Could not load credentials. Reload the page.</ErrorRow>}
-      {!credsQ.isLoading && !credsQ.error && rows.length === 0 && (
+      {!cards && rows.length > 0 && (
+        <p className="mt-1 text-xs text-muted">
+          Team actions use the acting member's own account first, then the team connection. Using another member's account asks them first.
+        </p>
+      )}
+      {!credsQ.isLoading && !credsQ.error && rows.length === 0 && !children && (
         <EmptyRow>
           No connections added to this team yet. Connect an account for this team.
         </EmptyRow>
       )}
-      {(cards ? [
-        { title: null, rows: rows.filter((row) => !row.delegatedFrom) },
-        { title: "Shared by members", rows: rows.filter((row) => row.delegatedFrom) },
-      ] : [{ title: null, rows }]).filter((group) => group.rows.length > 0).map((group) => <div key={group.title ?? "direct"}>
-      {group.title && group.rows.length > 0 && <h4 className="mt-6 text-xs font-medium uppercase tracking-wide text-muted">{group.title}</h4>}
-      <ul className={cards ? "grid gap-3 pt-4 sm:grid-cols-2" : "mt-1 space-y-3"}>
-        {group.rows.map((row) => {
-          const removal = removalLabels(row, team.name);
-          return (
-            <li key={row.service}>
-              <div className={cards ? "flex h-full flex-col rounded-lg border border-line bg-paper p-4" : "flex items-center justify-between gap-4 py-2"}>
-              <div className="min-w-0">
-                {cards ? <CardHeading title={displayName(row.service)} slug={row.service} /> : <p className="truncate text-sm text-ink">{displayName(row.service)}</p>}
-                <p className="text-xs text-muted">
-                  {row.delegatedFrom
-                    ? `Shared by ${nameFor(row.delegatedFrom)}`
-                    : "Stored on the team"}
-                  {row.referenceBroken ? " · broken" : ""}
-                </p>
-                <p className="text-xs text-muted">
-                  {row.delegatedFrom
-                    ? `Team actions use ${nameFor(row.delegatedFrom)}’s account. Access ends if they stop sharing or leave the team.`
-                    : "Used by team sessions and workflows."}
-                </p>
-                {row.referenceBroken && (
-                  <p className="text-xs text-danger-500">
-                    The source credential is gone or the member left. Re-share it, or store a
-                    direct team credential.
-                  </p>
-                )}
-              </div>
-              <div className={cards ? "mt-auto flex items-center justify-end gap-2 pt-4" : "flex shrink-0 items-center gap-2 whitespace-nowrap"}>
-                {row.referenceBroken && <Badge variant="danger">Broken</Badge>}
-                {canMutate && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={disconnect.isPending}
-                    aria-label={`${removal.action} ${removal.target}`}
-                    onClick={() => {
-                      // Clear the previous attempt's refusal as the dialog
-                      // opens: React Query holds `error` until the next mutate.
-                      disconnect.reset();
-                      setRemoving(row);
-                    }}
-                  >
-                    {removal.action}
-                  </Button>
-                )}
-              </div>
-              </div>
-            </li>
-          );
-        })}
+      <ul aria-label="Team connections" className={cards ? "divide-y divide-line" : "mt-1 space-y-3"}>
+        {children}
+        {byService(rows).map((group) => (
+          <li key={group.service} className={cards ? "py-3.5 first:pt-0.5 last:pb-0.5" : undefined}>
+            <div className={cards ? undefined : "py-2"}>
+              <CardHeading
+                title={group.service === "linear" ? "Linear MCP" : displayName(group.service)}
+                slug={group.service}
+                description={group.rows.length === 1 ? "1 account" : `${group.rows.length} accounts`}
+              />
+              {/* pl-12 starts these lines under the title, past the 36px icon and its gap. */}
+              <ul className="mt-2 space-y-3 text-xs sm:pl-12">
+                {group.rows.map((row) => {
+                  const removal = removalLabels(row, team.name, nameFor, canMutate);
+                  // A member may ask to remove the team's own connection, not another member's share.
+                  const canRemove = canMutate || !row.delegatedFrom;
+                  const health = credentialRowHealth(row);
+                  const badge = needsReauth(health) ? healthBadge(health) : null;
+                  const canReconnect = !row.delegatedFrom && row.type === "oauth2" && row.dead === true;
+                  return (
+                    <li key={row.delegatedFrom ?? "team"} className="flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
+                      <div className="min-w-0 max-w-full">
+                        <p className="flex min-w-0 items-center gap-2 text-ink">
+                          <span className="truncate">{row.delegatedFrom ? `Shared by ${nameFor(row.delegatedFrom)}` : "Team connection"}</span>
+                          {row.referenceBroken && <Badge variant="danger">Broken</Badge>}
+                          {!row.referenceBroken && badge && <Badge variant={badge.variant}>{badge.label}</Badge>}
+                        </p>
+                        {row.borrowConsentAt != null && !row.referenceBroken && <p className="text-muted">Account use stays allowed for this team. Stop sharing revokes it. Action approvals still apply.</p>}
+                        {row.referenceBroken && (
+                          <p className="text-danger-500">Their account is gone or they left the team. They can share it again.</p>
+                        )}
+                        {!row.referenceBroken && badge && (
+                          <p className="text-danger-500">{repairNote(row, health, canMutate, nameFor)}</p>
+                        )}
+                        {!row.referenceBroken && badge && row.refreshError && (
+                          <p className="break-words text-muted">{displayName(row.service)} replied: {row.refreshError}</p>
+                        )}
+                      </div>
+                      <div className="flex shrink-0 gap-2">
+                      {canReconnect && (
+                        <Button size="sm" variant="primary" aria-label={`Reconnect ${displayName(row.service)} for ${team.name}`}
+                          onClick={() => setReconnecting(row.service)}>
+                          Reconnect
+                        </Button>
+                      )}
+                      {canRemove && (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          className="shrink-0"
+                          disabled={pending}
+                          aria-label={`${removal.action} ${removal.target}`}
+                          onClick={() => {
+                            // Clear the previous attempt's refusal as the dialog
+                            // opens: React Query holds `error` until the next mutate.
+                            disconnect.reset();
+                            revoke.reset();
+                            requestRemoval.reset();
+                            setRemoving(row);
+                          }}
+                        >
+                          {removal.action}
+                        </Button>
+                      )}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          </li>
+        ))}
       </ul>
-      </div>)}
 
-      {canMutate && !credsQ.error && removing && dialogLabels && (
+      {reconnecting && (
+        <TeamConnectionDialog
+          key={reconnecting}
+          teamId={team.id}
+          service={{ service: reconnecting, type: "oauth2", connect: "oauth" }}
+          reconnect
+          onClose={() => setReconnecting(null)}
+        />
+      )}
+      {!credsQ.error && removing && dialogLabels && (canMutate || !removing.delegatedFrom) && (
         <ConfirmDialog
           open
           onOpenChange={(next) => {
@@ -146,20 +223,18 @@ export function TeamCredentials({
           description={removalNote(removing)}
           confirmLabel={dialogLabels.action}
           pendingLabel={dialogLabels.pending}
-          pending={disconnect.isPending}
-          // One mutation serves every row, so opening a second row's dialog
-          // would otherwise show the first row's refusal before any click.
-          error={
-            disconnect.error != null && disconnect.variables?.service === removing.service
-              ? errorText(disconnect.error)
-              : undefined
-          }
-          onConfirm={() =>
-            disconnect.mutate(
-              { service: removing.service, scope: "team", teamId: team.id },
-              { onSuccess: () => setRemoving(null) },
-            )
-          }
+          pending={pending}
+          error={failure != null ? errorText(failure) : undefined}
+          onConfirm={() => {
+            const done = { onSuccess: () => setRemoving(null) };
+            if (!canMutate) {
+              requestRemoval.mutate({ resourceType: "credential", resourceId: removing.service }, done);
+            } else if (removing.delegatedFrom) {
+              revoke.mutate({ service: removing.service, teamId: team.id, userId: removing.delegatedFrom }, done);
+            } else {
+              disconnect.mutate({ service: removing.service, scope: "team", teamId: team.id }, done);
+            }
+          }}
         />
       )}
     </div>

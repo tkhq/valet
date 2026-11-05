@@ -1,0 +1,53 @@
+# Compaction recall: decisions given early, one of them corrected later,
+# must survive compaction between turns. The small budget compacts the
+# thread after the filler turns, so the first decision turn reaches the
+# final answer only through the summary. min_compactions keeps the case
+# honest: a run that never compacts fails instead of passing on the full
+# transcript.
+id: compaction-recall-decisions
+description: Decisions and a later correction survive compaction.
+context_budget_tokens: 1500
+# No tools: recall must come from the summary and the verbatim tail, not
+# from memory writes or files the agent saved earlier.
+tools: []
+turns:
+  - role: user
+    content: >-
+      Record these cache-rollout decisions for later: the codename is
+      "Halyard", the cache TTL is 45 minutes, the rollout order is
+      eu-west, then us-east, then ap-south, and we rejected per-tenant
+      caches because they use too much memory. Reply in one line.
+  - role: user
+    content: >-
+      Unrelated: write about 500 words on how TCP congestion control
+      works (slow start, AIMD, fast recovery).
+  - role: user
+    content: >-
+      Correction to the rollout: us-east goes first now, then eu-west,
+      then ap-south. Reply in one line.
+  - role: user
+    content: >-
+      Unrelated: write about 500 words comparing B-trees and LSM-trees
+      for a storage engine.
+  - role: user
+    content: >-
+      Unrelated: write about 500 words on optimistic versus pessimistic
+      locking.
+  - role: user
+    content: >-
+      Write the final rollout note for the team: the codename, the TTL,
+      the rollout order, and the option we rejected and why.
+timeout_ms: 300000
+checks:
+  - type: min_compactions
+    value: 1
+  - type: output_contains
+    value: Halyard
+  - type: output_contains
+    value: "45"
+  - type: output_contains
+    pattern: 'us-east[\s\S]*eu-west[\s\S]*ap-south'
+  - type: output_contains
+    pattern: '[Pp]er-tenant'
+  - type: output_contains
+    pattern: '[Mm]emory'

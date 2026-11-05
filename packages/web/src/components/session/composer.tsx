@@ -1,20 +1,35 @@
+import { AppPageHintContext, inAskValetDock } from "~/lib/app-page-hint";
+import { useNavigate } from "@tanstack/react-router";
+import { announceTyping } from "~/api/ws";
 import {
   useCallback,
+  useContext,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type ChangeEvent,
   type ClipboardEvent,
   type DragEvent,
   type KeyboardEvent,
+  type ReactNode,
 } from "react";
-import { ArrowUp, Paperclip, Square } from "lucide-react";
+import { ArrowUp, Paperclip, Pencil, Play, Square, X } from "lucide-react";
 import { Button, Textarea } from "~/components/primitives";
-import { useAbortThread, useSendPrompt } from "~/api/queries";
+import { useAbortThread, useCancelQueuedItem, useEditPreview, useResumeThread, useSendPrompt } from "~/api/queries";
+import { FileChangeChoice } from "./file-change-choice";
 import { ApiError } from "~/api/client";
-import { queueBusy, useStreamStore, useQueueStateForThread, type AgentStatus } from "~/stores/stream";
+import { isServerUnavailable } from "~/api/connection";
+import { errorText } from "~/lib/error-text";
+import {
+  queueBusy,
+  useStreamStore,
+  useQueueStateForThread,
+  type AgentStatus,
+  type StreamMessage,
+} from "~/stores/stream";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
-import { draftKey, useComposerDraft, useComposerDraftStore } from "~/stores/composer-drafts";
+import { draftKey, reusableSendKey, useComposerDraft, useComposerDraftStore } from "~/stores/composer-drafts";
 import { useCommands } from "~/hooks/use-commands";
 import { cn } from "~/lib/cn";
 import { useAutosizeTextarea } from "~/hooks/use-autosize-textarea";
@@ -27,6 +42,8 @@ import { CommandPopup, commandsToItems, type PopupItem } from "./command-popup";
 import { ComposerImageErrors, ComposerImageStrip } from "./composer-image-strip";
 import { ComposerFileErrors, ComposerFileStrip } from "./composer-file-strip";
 import { useComposerDrop } from "./composer-drop-context";
+import { stepHistory, usePromptHistory } from "./prompt-history";
+import { ContextMeter } from "./context-meter";
 import {
   acceptImages,
   filesFromClipboard,
@@ -51,14 +68,16 @@ import {
   type ComposerFile,
 } from "./composer-files";
 import { useFileUpload } from "~/hooks/use-file-upload";
+import type { MessageReplyReference, WireQueuedItem } from "@valet/api/wire";
 
 /**
  * What the submit button does with the text in the composer.
  *
- * Mid-turn Enter queues (`followup`) even on a user orchestrator whose
+ * Mid-turn Enter queues the message with `inject`: it joins the running
+ * turn at its next step, after the current tool calls, or runs next when it
+ * cannot join. It never aborts the turn, even on a user assistant whose
  * thread default is `steer`. A second Enter on an empty composer promotes
- * that queued item into a steer. The engine thread default is left alone
- * so Slack and other channels can still steer on first submit.
+ * that queued item: the turn stops and the message runs now.
  */
 type SubmitAction = "send" | "steer" | "queue";
 
@@ -69,17 +88,18 @@ const ACTION_LABEL: Record<SubmitAction, string> = {
 };
 
 /**
- * One line of copy that tells the user what happens to the message. Shown
- * only while the agent works — while it is idle, "Send" needs no gloss.
+ * One line of copy for the action that needs a gloss. "Send" and "Queue"
+ * explain themselves, so only the steer prompt has one.
  *
- * Mid-turn the first Enter queues. A second empty Enter promotes that
- * queued item into a steer (`Thread.promoteQueuedItem`) so the same
- * bubble becomes the new prompt. It does not POST the text again.
+ * Mid-turn the first Enter queues the message for the turn's next step. A
+ * second empty Enter promotes that queued item (`Thread.promoteQueuedItem`):
+ * the turn stops and the same bubble runs now. It does not POST the text
+ * again.
  */
 const ACTION_HINT: Record<SubmitAction, string> = {
   send: "",
-  steer: "Queued. Press Enter again to interrupt the current turn.",
-  queue: "The agent completes the current turn. Then it reads your message.",
+  steer: "Queued for the next step. Press Enter again, or select Send now, to send it now.",
+  queue: "",
 };
 
 const ACTION_PLACEHOLDER: Record<SubmitAction, string> = {
@@ -92,7 +112,36 @@ export function Composer({
   sessionId,
   threadId,
   agentStatus,
+  queuedMessages = [],
+  queuedItemCount = 0,
+  replyTarget,
+  onCancelReply,
+  editTarget,
+  onCancelEdit,
+  onEditSubmit,
+  onEditResult,
+  beforeSend,
+  submissionLock,
+  onSent,
+  guest = false,
+  active = true,
+  modelControlRef,
+  statusLine,
 }: {
+  /** A quiet one-line strip under the input box, such as the background
+   * work status line. It renders as given and owns its own spacing. */
+  statusLine?: ReactNode;
+  /** Hidden conversation panels keep their draft without handling keyboard shortcuts. */
+  active?: boolean;
+  /** The thread header renders its model and thinking control in this slot. */
+  modelControlRef?: (target: HTMLDivElement | null) => void;
+  /** The sender opens a shared thread as a guest: no file or image intake
+   * (uploads land in the owner's working directory) and no slash commands
+   * (commands change the owner's thread). */
+  guest?: boolean;
+  submissionLock?: { current: boolean };
+  beforeSend?: (text: string) => Promise<{ text: string; threadId: string }>;
+  onSent?: () => void;
   sessionId: string;
   /**
    * Active thread id. Required for sending — when undefined (threads still
@@ -102,6 +151,23 @@ export function Composer({
    */
   threadId?: string;
   agentStatus: AgentStatus;
+  /** Pending user messages whose text is available, ordered by queue admission. */
+  queuedMessages?: StreamMessage[];
+  /** Durable pending item count. It can exceed queuedMessages after reload. */
+  queuedItemCount?: number;
+  replyTarget?: MessageReplyReference;
+  onCancelReply?: () => void;
+  /**
+   * One of the viewer's own messages, back in the composer to edit
+   * (docs/specs/2026-10-22-thread-edit-fork-design.md). Send replaces it and
+   * everything after it; the draft typed before Edit comes back afterwards.
+   */
+  editTarget?: ComposerEditTarget;
+  onCancelEdit?: () => void;
+  /** Called as an edit is sent, before the server answers. */
+  onEditSubmit?: (messageId: string) => void;
+  /** Called when the server accepted (true) or refused (false) the edit. */
+  onEditResult?: (ok: boolean) => void;
 }) {
   // The draft (text, images, files, intake errors) lives in the per-thread
   // draft store, NOT component state: a draft typed for one thread must not
@@ -110,10 +176,78 @@ export function Composer({
   // Store actions are reached through `getState()` inside handlers so
   // callback identities do not churn per keystroke.
   const key = draftKey(sessionId, threadId);
-  const { text, images, files, imageErrors, fileErrors } = useComposerDraft(key);
+  const { text, images, files, imageErrors, fileErrors, recall } = useComposerDraft(key);
   const setText = (value: string) => useComposerDraftStore.getState().setText(key, value);
+  const localSubmissionLock = useRef(false);
+  const submitting = submissionLock ?? localSubmissionLock;
+  const [preparing, setPreparing] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const [selected, setSelected] = useState(false);
+  // True from a pointer press outside the composer that took focus from it
+  // until that press's click has fired. See `onBlurCapture`.
+  const [holdOpen, setHoldOpen] = useState(false);
+  const pointerPressed = useRef(false);
+  useEffect(() => {
+    const press = () => { pointerPressed.current = true; };
+    const release = () => { pointerPressed.current = false; };
+    window.addEventListener("pointerdown", press, true);
+    window.addEventListener("pointerup", release, true);
+    window.addEventListener("pointercancel", release, true);
+    return () => {
+      window.removeEventListener("pointerdown", press, true);
+      window.removeEventListener("pointerup", release, true);
+      window.removeEventListener("pointercancel", release, true);
+    };
+  }, []);
   useAutosizeTextarea(inputRef, text);
+  // Up and Down step through the person's earlier prompts in this thread
+  // (`stepHistory`). The recalled index lives in the draft slot, which the
+  // Ask Valet dock shares, so typing or sending in either composer ends it.
+  const history = usePromptHistory(sessionId, threadId);
+  const caretToEnd = useRef(false);
+  useLayoutEffect(() => {
+    const field = inputRef.current;
+    if (!caretToEnd.current || !field) return;
+    caretToEnd.current = false;
+    field.setSelectionRange(field.value.length, field.value.length);
+  }, [text]);
+  useEffect(() => {
+    if (active && replyTarget) inputRef.current?.focus();
+  }, [replyTarget, active]);
+  // Edit swaps the draft for the message's text and images. Leaving edit
+  // mode (Cancel, a sent edit, a thread switch) gives the earlier draft back.
+  const editingId = editTarget?.messageId;
+  useEffect(() => {
+    if (!editTarget) return;
+    const drafts = useComposerDraftStore.getState();
+    const slot = key;
+    const stash = { text: drafts.byKey[slot]?.text ?? "", images: drafts.byKey[slot]?.images ?? [] };
+    drafts.setText(slot, editTarget.text);
+    drafts.setImages(slot, editTarget.images);
+    caretToEnd.current = true;
+    inputRef.current?.focus();
+    return () => {
+      const store = useComposerDraftStore.getState();
+      store.setText(slot, stash.text);
+      store.setImages(slot, stash.images);
+    };
+    // Keyed by the message id: a new target object for the same message
+    // must not stash the edited text as the earlier draft.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingId, key]);
+  // What the edit replaces, before Send. File undo defaults on unless the
+  // replaced turns pushed commits; a person's own choice wins.
+  const preview = useEditPreview(editingId ? threadId : undefined, editingId);
+  const [undoFiles, setUndoFiles] = useState(false);
+  const undoTouched = useRef(false);
+  useEffect(() => {
+    undoTouched.current = false;
+    setUndoFiles(false);
+  }, [editingId]);
+  useEffect(() => {
+    if (!undoTouched.current && preview.data) setUndoFiles(preview.data.files.length > 0 && !preview.data.pushed);
+  }, [preview.data]);
+  const editRefusal = editingId ? preview.data?.refusal : undefined;
 
   // Composer-prefill handoff (decision 17): memory doc's "Ask {name} to
   // update this" sets this store then navigates to `/chat`; the next
@@ -123,7 +257,7 @@ export function Composer({
   // draft out from under whatever the user is typing.
   const prefillSeeded = useRef(false);
   useEffect(() => {
-    if (prefillSeeded.current) return;
+    if (prefillSeeded.current || inAskValetDock(inputRef.current)) return;
     prefillSeeded.current = true;
     const pending = useComposerPrefillStore.getState().consume();
     if (pending !== null) useComposerDraftStore.getState().setText(key, pending);
@@ -156,7 +290,7 @@ export function Composer({
   // sends text unchanged.
   const commandQuery = /^\/(\S*)$/.exec(text)?.[1] ?? null;
   const argMatch = /^\/(\S+) (\S*)$/.exec(text);
-  const { data: commandsData } = useCommands(sessionId);
+  const { data: commandsData } = useCommands(sessionId, !guest);
   const allCommands = commandsData?.commands ?? [];
   // Per-browser last-used ranking for the command popup. Loaded once per
   // mount; `submit` records each sent slash command and refreshes it.
@@ -206,8 +340,14 @@ export function Composer({
       : undefined;
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [dismissed, setDismissed] = useState(false);
-  const popupOpen = !dismissed && popupItems.length > 0;
-  const noticeOpen = !dismissed && !popupOpen && argNotice !== undefined;
+  // A recalled prompt reads as already written: its slash command opens no
+  // popup, so Up and Down keep stepping and Enter sends it, until an edit.
+  // The slot keeps the recall when a refetch rewrites the history row, such
+  // as an optimistic `/review` that persists as `/skill:review`.
+  const recalledIndex = recall ?? null;
+  const showingRecall = recalledIndex !== null;
+  const popupOpen = !dismissed && !showingRecall && popupItems.length > 0;
+  const noticeOpen = !dismissed && !showingRecall && !popupOpen && argNotice !== undefined;
   // Reset selection and dismissed flag when the query changes (user typed new chars).
   useEffect(() => {
     setSelectedIndex(0);
@@ -215,10 +355,11 @@ export function Composer({
   }, [popupItems.length, commandQuery, argPrefix]);
   // Focus-on-request (New thread button): reactive on purpose, unlike the
   // prefill text — the Composer is usually already mounted when the
-  // request fires, so a mount-time consume would miss it.
+  // request fires, so a mount-time consume would miss it. The request
+  // belongs to the page's composer, not the Ask Valet dock beside it.
   const focusNonce = useComposerPrefillStore((s) => s.focusNonce);
   useEffect(() => {
-    if (focusNonce > 0) inputRef.current?.focus();
+    if (focusNonce > 0 && !inAskValetDock(inputRef.current)) inputRef.current?.focus();
   }, [focusNonce]);
   // Prefill for a Composer that is ALREADY mounted (the workflow editor's
   // assistant panel sits open beside the canvas, so its suggestions never
@@ -227,20 +368,30 @@ export function Composer({
   // here to read, so this effect no-ops on mount instead of double-seeding.
   const prefillNonce = useComposerPrefillStore((s) => s.prefillNonce);
   useEffect(() => {
-    if (prefillNonce === 0) return;
+    if (prefillNonce === 0 || inAskValetDock(inputRef.current)) return;
     const pending = useComposerPrefillStore.getState().consume();
     if (pending === null) return;
     setText(pending);
     inputRef.current?.focus();
   }, [prefillNonce]);
   const send = useSendPrompt(sessionId);
+  const navigate = useNavigate();
+  const appPageHint = useContext(AppPageHintContext);
   const abort = useAbortThread(sessionId);
+  const resume = useResumeThread(sessionId);
+  const cancelQueued = useCancelQueuedItem();
   // The textarea disables while a send is in flight, which drops focus to
   // <body>. Refocus when the send settles so the user can type the next
   // message or command immediately (covers Enter sends and Send clicks).
   const sendWasPending = useRef(false);
+  // With the Ask Valet dock beside the page, only the composer used last
+  // takes focus back, and only from the body, so overlapping sends end
+  // where the person typed last.
+  const identity = useRef({});
   useEffect(() => {
-    if (sendWasPending.current && !send.isPending) inputRef.current?.focus();
+    const active = document.activeElement;
+    if (sendWasPending.current && !send.isPending && lastUsedComposer === identity.current
+      && (!active || active === document.body || active === inputRef.current)) inputRef.current?.focus();
     sendWasPending.current = send.isPending;
   }, [send.isPending]);
   const addUserMessage = useStreamStore((s) => s.addUserMessage);
@@ -256,7 +407,23 @@ export function Composer({
   // Item ids we have seen in `pendingIds`. Used so a lagging queue.state
   // (empty pending after POST) does not disarm Steer before the item lands.
   const followupSeenPendingRef = useRef<Record<string, string>>({});
-  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [submitErrors, setSubmitErrors] = useState<Record<string, string | null>>({});
+  const submitError = submitErrors[key] ?? null;
+  // Async responses belong to the thread where the request started.
+  const setSubmitError = useCallback((error: string | null) => {
+    setSubmitErrors((current) => ({ ...current, [key]: error }));
+  }, [key]);
+  const [promotingItemId, setPromotingItemId] = useState<string | null>(null);
+  // Pending items this window has no bubble for: queued before a reload,
+  // from another tab, or by a timer. The queue state carries their text, so
+  // each gets a full row. Without the live queue state, only the count is
+  // known.
+  const knownQueuedIds = new Set(queuedMessages.map((message) => message.queueItemId));
+  const unresolvedQueuedIds = (queueState?.pendingIds ?? []).filter((itemId) => !knownQueuedIds.has(itemId));
+  const queuedItemById = new Map((queueState?.pending ?? []).map((item) => [item.id, item]));
+  const unresolvedQueuedCount = queueState
+    ? unresolvedQueuedIds.length
+    : Math.max(0, queuedItemCount - queuedMessages.length);
 
   // A mid-turn message is allowed — the engine admits it either way. Only
   // an in-flight POST or an unknown thread id blocks submit, and the thread
@@ -292,12 +459,17 @@ export function Composer({
       if (claimed || leftQueue) return drop();
       return prev;
     });
-  }, [working, queueState, threadId]);
+    // The followup id is a dependency: the queue update that lists the item
+    // usually arrives before `POST /messages` resolves, so the item must be
+    // checked against the current pending ids when the followup is armed.
+    // Otherwise a Cancel leaves Steer armed on an item that is gone.
+  }, [working, queueState, threadId, queuedFollowup?.itemId]);
   // Mid-turn: first Enter queues. After a self-queued item, an empty
   // composer steers that item in place. New text queues another followup.
-  const action: SubmitAction = !working
+  // An edit always sends: it stops a running turn rather than queueing.
+  const action: SubmitAction = !working || editTarget
     ? "send"
-    : queuedFollowup && text.trim().length === 0
+    : queuedFollowup && text.trim().length === 0 && images.length === 0 && files.length === 0
       ? "steer"
       : "queue";
   // A send with a still-uploading file would drop it (the ref does not
@@ -308,21 +480,13 @@ export function Composer({
     !send.isPending &&
     !!threadId &&
     !uploadsPending &&
-    (action === "steer" || text.trim().length > 0);
-  // An attachment alone cannot go out: the route requires text on the
-  // prompt. Say so on the disabled button instead of leaving the user
-  // guessing.
-  const sendTitle = working
-    ? ACTION_HINT[action]
-    : uploadsPending
-      ? "Wait for the file uploads to finish."
-      : (images.length > 0 || files.length > 0) && text.trim().length === 0
-        ? "Add a message to send with the attachments."
-        : undefined;
+    !editRefusal &&
+    (action === "steer" || text.trim().length > 0 || images.length > 0 || toFileRefs(files).length > 0);
+  const sendTitle = working ? ACTION_HINT[action] || undefined : uploadsPending ? "Wait for the file uploads to finish." : undefined;
 
   /** True while the composer refuses new files. */
   const intakeBlocked =
-    (!IMAGE_ATTACHMENTS_ENABLED && !FILE_UPLOADS_ENABLED) || send.isPending || !threadId;
+    guest || (!IMAGE_ATTACHMENTS_ENABLED && !FILE_UPLOADS_ENABLED) || send.isPending || !threadId;
 
   /**
    * Take files from a paste, a drop, or the picker. Refused files leave a
@@ -467,43 +631,60 @@ export function Composer({
     startUpload(key, reset);
   }
 
-  async function submit() {
-    if (send.isPending || !threadId || uploadsPending) return;
+  async function cancelQueuedItem(itemId: string) {
+    if (!threadId || cancelQueued.isPending) return;
+    setSubmitError(null);
+    try {
+      await cancelQueued.mutateAsync({ threadId, itemId });
+    } catch (err) {
+      setSubmitError(errorText(err, "Could not cancel the queued message. Try again."));
+    }
+  }
 
-    // Empty Enter after a self-queued followup promotes that item. Do not
-    // POST the same text again — that would write a second user entry.
-    if (action === "steer" && queuedFollowup) {
-      setSubmitError(null);
-      try {
-        const res = await send.mutateAsync({
-          text: "",
-          threadId,
-          promoteItemId: queuedFollowup.itemId,
-        });
-        if (res.messageId && res.messageId !== queuedFollowup.itemId) {
-          setMessageQueueItemId(sessionId, queuedFollowup.localId, res.messageId);
-        }
+  async function promoteQueuedItem(itemId: string, messageId?: string) {
+    if (send.isPending || !threadId) return;
+    lastUsedComposer = identity.current;
+    setSubmitError(null);
+    setPromotingItemId(itemId);
+    try {
+      const res = await send.mutateAsync({ text: "", threadId, promoteItemId: itemId });
+      if (messageId && res.messageId && res.messageId !== itemId) {
+        setMessageQueueItemId(sessionId, messageId, res.messageId);
+      }
+      if (queuedFollowup?.itemId === itemId) {
         setQueuedFollowupByThread((prev) => {
           if (!(threadId in prev)) return prev;
           const { [threadId]: _, ...rest } = prev;
           return rest;
         });
         delete followupSeenPendingRef.current[threadId];
-      } catch (err) {
-        // The optimistic bubble stays. Name the corrective action from
-        // the API so the user knows to send again or wait.
-        setSubmitError(
-          apiErrorDetail(
-            err,
-            "The promote did not complete. Send a new message, or wait for the current turn to finish.",
-          ),
-        );
       }
+    } catch (err) {
+      setSubmitError(
+        errorText(
+          err,
+          "The message was not sent. Send a new message, or wait for the current turn to finish.",
+        ),
+      );
+    } finally {
+      setPromotingItemId(null);
+    }
+  }
+
+  async function submit() {
+    if (submitting.current || send.isPending || !threadId || uploadsPending) return;
+    // A send uses this composer even when its text came from a prefill.
+    lastUsedComposer = identity.current;
+
+    // Empty Enter after a self-queued followup promotes that item. Do not
+    // POST the same text again — that would write a second user entry.
+    if (action === "steer" && queuedFollowup && !editTarget) {
+      await promoteQueuedItem(queuedFollowup.itemId, queuedFollowup.localId);
       return;
     }
 
     const t = text.trim();
-    if (!t) return;
+    if (!t && images.length === 0 && toFileRefs(files).length === 0) return;
     setSubmitError(null);
     // Capture the draft slot at send time: the failure path below must
     // restore into the thread the message was written for, even if the
@@ -517,45 +698,74 @@ export function Composer({
     // (its chip showed the error and offered a retry before send).
     const pendingFiles = files;
     const fileRefs = toFileRefs(pendingFiles);
+    // One key per queued message (`ComposerDraft.sendKey`). The draft keeps
+    // it from before the request until a 2xx or a definite 4xx, so a reload
+    // or a closed tab mid-send cannot lose it. An edit or a slash command
+    // the registry knows runs without a queue item, so it has no key.
+    const typedName = /^\/(\S+)/.exec(t)?.[1]?.toLowerCase();
+    const canonical = typedName
+      ? allCommands.find((c) => c.name.toLowerCase() === typedName)?.name
+      : undefined;
+    const attachmentIds = [...pendingImages.map((i) => i.id), ...pendingFiles.flatMap((f) => (f.attachmentRef ? [f.id] : []))];
+    const clientMessageId = editTarget || canonical
+      ? undefined
+      : reusableSendKey(useComposerDraftStore.getState().byKey[slot]?.sendKey, t, attachmentIds) ?? crypto.randomUUID();
+    const sendKey = clientMessageId ? { id: clientMessageId, text: t, attachments: attachmentIds } : undefined;
     useComposerDraftStore.getState().clear(slot);
+    if (sendKey) useComposerDraftStore.getState().setSendKey(slot, sendKey);
+    announceTyping(sessionId, threadId, false);
     // Optimistic local add — the engine doesn't emit a wire event for the
     // user's own message, so without this the prompt would only appear after
     // the next WS init (page reload). The next init replaces this row with
     // the server's persisted copy. File chips are not rendered optimistically
     // — the server owns their sandbox paths; they appear on the next init.
-    const localId = addUserMessage(sessionId, t, threadId, attachments);
+    submitting.current = true;
+    setPreparing(true);
     try {
+      const target = beforeSend ? await beforeSend(t) : { text: t, threadId };
+      if (editTarget) onEditSubmit?.(editTarget.messageId);
+      const localId = addUserMessage(sessionId, t, target.threadId, attachments, editTarget ? undefined : replyTarget);
       const res = await send.mutateAsync({
-        text: t,
-        threadId,
+        text: target.text,
+        ...(appPageHint ? { appPageHint } : {}),
+        threadId: target.threadId,
         attachments,
         fileRefs: fileRefs.length > 0 ? fileRefs : undefined,
-        ...(working ? { queueMode: "followup" as const } : {}),
+        ...(editTarget
+          ? { editEntryId: editTarget.messageId, ...(preview.data?.files.length ? { undoFiles } : {}) }
+          : {
+              ...(replyTarget ? { replyToMessageId: replyTarget.messageId } : {}),
+              ...(working ? { queueMode: "inject" as const } : {}),
+              ...(clientMessageId ? { clientMessageId } : {}),
+            }),
       });
+      if (sendKey) useComposerDraftStore.getState().settleSendKey(slot, sendKey.id);
+      if (editTarget) onEditResult?.(true);
       // `messageId` on the response is the engine's queue item id (see
       // POST /:id/messages). Stamping it closes the linkage so
       // `submission.settled` can match this exact message instead of
       // falling back to a recency heuristic. Null for slash commands —
       // they never queue, so there is nothing to link.
+      onCancelReply?.();
       if (res.messageId) {
         const itemId = res.messageId;
         setMessageQueueItemId(sessionId, localId, itemId);
-        if (working) {
+        if (working && !editTarget) {
           setQueuedFollowupByThread((prev) => ({
             ...prev,
             [threadId]: { localId, itemId },
           }));
         }
       }
+      onSent?.();
+      if (res.fork) {
+        await navigate({ to: "/threads/$threadId", params: { threadId: res.fork.id } });
+      }
       // Recency ranking for the command popup. Recorded only for a name the
       // registry knows, and only after the send succeeded — a typo or a
       // failed send is not a "use". Matched case-insensitively (dispatch
       // is too) and recorded under the canonical name so the recency key
       // always lines up with the popup's names.
-      const typedName = /^\/(\S+)/.exec(t)?.[1]?.toLowerCase();
-      const canonical = typedName
-        ? allCommands.find((c) => c.name.toLowerCase() === typedName)?.name
-        : undefined;
       if (canonical) {
         setCommandRecency(recordCommandUse(canonical));
       }
@@ -566,9 +776,13 @@ export function Composer({
       // it'll be reconciled against server truth. The server restores
       // consumed refs when a submit fails, so restored chips stay sendable
       // — EXCEPT when the failure is the refs themselves.
+      // Another composer on this thread, such as the Ask Valet dock, can
+      // write newer content while the POST is in flight. Keep both: the
+      // failed message first, then the newer content.
       const drafts = useComposerDraftStore.getState();
-      drafts.setText(slot, t);
-      drafts.setImages(slot, pendingImages);
+      const newer = drafts.byKey[slot]?.text ?? "";
+      drafts.setText(slot, newer.trim() ? `${t}\n\n${newer}` : t);
+      drafts.setImages(slot, (prev) => [...pendingImages, ...prev]);
       const payload =
         err instanceof ApiError && typeof err.payload === "object" && err.payload !== null
           ? (err.payload as Record<string, unknown>)
@@ -582,37 +796,54 @@ export function Composer({
         err.status === 400 &&
         typeof payload?.error === "string" &&
         payload.error.startsWith("unknown attachment");
-      drafts.setFiles(
-        slot,
-        refsDead
-          ? pendingFiles.map((f) =>
-              f.attachmentRef !== undefined
-                ? { ...f, attachmentRef: undefined, error: "Upload expired. Retry to upload again." }
-                : f,
-            )
-          : pendingFiles,
-      );
+      const restored = refsDead
+        ? pendingFiles.map((f) =>
+            f.attachmentRef !== undefined
+              ? { ...f, attachmentRef: undefined, error: "Upload expired. Retry to upload again." }
+              : f,
+          )
+        : pendingFiles;
+      drafts.setFiles(slot, (prev) => [...restored, ...prev]);
       // The failure must be visible — a console-only error reads as a dead
-      // send button.
-      const detail =
-        typeof payload?.corrective === "string"
-          ? payload.corrective
-          : typeof payload?.error === "string"
-            ? payload.error
-            : err instanceof Error
-              ? err.message
-              : "Unknown error.";
-      drafts.setFileErrors(slot, [`The message did not send. ${detail}`]);
+      // send button. Only a definite 4xx means nothing was queued, so the
+      // next send gets a new key. Any other failure may have landed, and
+      // only the kept key makes a resend safe.
+      const unanswered = isServerUnavailable(err);
+      if (sendKey) {
+        if (err instanceof ApiError && err.status >= 400 && err.status < 500) drafts.settleSendKey(slot, sendKey.id);
+        else drafts.setSendKey(slot, sendKey);
+      }
+      drafts.setFileErrors(slot, [!unanswered
+        ? `The message did not send. ${errorText(err, "Unknown error.")}`
+        : clientMessageId
+          ? "Valet did not respond, so your message is back in the box. Send it again after Valet reconnects. Valet does not post it twice."
+          : "Valet did not respond, so your message is back in the box. After Valet reconnects, check the thread before you send it again."]);
+      if (editTarget) onEditResult?.(false);
       console.error("send failed:", err);
+    } finally {
+      submitting.current = false;
+      setPreparing(false);
     }
   }
 
   async function stop() {
-    if (!threadId || abort.isPending) return;
+    const targetItemId = queueState?.activeItemId;
+    if (!threadId || !targetItemId || abort.isPending) return;
     try {
-      await abort.mutateAsync({ threadId });
+      setSubmitError(null);
+      await abort.mutateAsync({ threadId, targetItemId });
     } catch (err) {
-      console.error("abort failed:", err);
+      setSubmitError(errorText(err, "Could not stop the agent. Try Stop again."));
+    }
+  }
+
+  async function runQueue() {
+    if (!threadId || resume.isPending) return;
+    setSubmitError(null);
+    try {
+      await resume.mutateAsync({ threadId });
+    } catch (err) {
+      setSubmitError(errorText(err, "The queue did not start. Try again."));
     }
   }
 
@@ -625,18 +856,44 @@ export function Composer({
   const abortMutate = abort.mutate;
   const abortPending = abort.isPending;
   useEffect(() => {
+    if (!active) return;
     function onEscape(e: globalThis.KeyboardEvent) {
       if (e.key !== "Escape" || e.defaultPrevented || e.isComposing) return;
-      if (!working || !threadId || abortPending) return;
+      // Focus picks the area: the Ask Valet dock or the page beside it. A
+      // page without a composer leaves Escape to the dock.
+      const inDock = inAskValetDock(inputRef.current);
+      if (e.target instanceof Element && e.target !== document.body && inAskValetDock(e.target) !== inDock
+        && !(inDock && pageComposers === 0)) return;
+      // An edit in progress takes Escape first: it cancels the edit, not the turn.
+      if (editingId && onCancelEdit) {
+        e.preventDefault();
+        onCancelEdit();
+        return;
+      }
+      const targetItemId = queueState?.activeItemId;
+      if (!working || !threadId) return;
+      // A running turn keeps Escape while its stop is pending or before its
+      // item id arrives, so the event never falls through to the dock.
       e.preventDefault();
+      if (!targetItemId || abortPending) return;
+      setSubmitError(null);
       abortMutate(
-        { threadId },
-        { onError: (err) => console.error("abort failed:", err) },
+        { threadId, targetItemId },
+        { onError: (err) => setSubmitError(errorText(err, "Could not stop the agent. Try Stop again.")) },
       );
     }
-    window.addEventListener("keydown", onEscape);
-    return () => window.removeEventListener("keydown", onEscape);
-  }, [working, threadId, abortPending, abortMutate]);
+    // With focus on the body, the page's turn stops first: a page composer
+    // listens on document, which the event reaches before window, where the
+    // dock listens. The dock stops its turn only when the page claims nothing.
+    const target: Document | Window = inAskValetDock(inputRef.current) ? window : document;
+    target.addEventListener("keydown", onEscape as EventListener);
+    return () => target.removeEventListener("keydown", onEscape as EventListener);
+  }, [active, working, threadId, queueState?.activeItemId, abortPending, abortMutate, setSubmitError, editingId, onCancelEdit]);
+  useEffect(() => {
+    if (!active || inAskValetDock(inputRef.current)) return;
+    pageComposers += 1;
+    return () => { pageComposers -= 1; };
+  }, [active]);
 
   function insertSelection(id: string) {
     if (commandQuery !== null) {
@@ -684,6 +941,22 @@ export function Composer({
       }
     }
 
+    if ((e.key === "ArrowUp" || e.key === "ArrowDown") && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && !e.nativeEvent.isComposing) {
+      const field = e.currentTarget;
+      const step = stepHistory(
+        history,
+        { index: recalledIndex, text },
+        e.key === "ArrowUp" ? "older" : "newer",
+        { start: field.selectionStart, end: field.selectionEnd },
+      );
+      if (step) {
+        e.preventDefault();
+        caretToEnd.current = true;
+        useComposerDraftStore.getState().recallText(key, step.index, step.text);
+        return;
+      }
+    }
+
     // Enter submits; Shift+Enter inserts a newline. Skip while an IME
     // composition is active so Enter confirms the composition instead of
     // sending a half-finished message.
@@ -708,9 +981,62 @@ export function Composer({
     return () => dropChannel.publish(null);
   }, [dropChannel, addFiles, intakeBlocked]);
 
+  // Removing a focused attachment action does not emit blur in every browser.
+  // Reconcile selection after DOM updates and the submission focus restoration.
+  useEffect(() => {
+    if (selected && !send.isPending && !formRef.current?.contains(document.activeElement)) {
+      setSelected(false);
+    }
+  });
+
+  const expanded =
+    selected ||
+    holdOpen ||
+    text.length > 0 ||
+    images.length > 0 ||
+    files.length > 0 ||
+    !!replyTarget ||
+    !!editTarget ||
+    imageErrors.length > 0 ||
+    fileErrors.length > 0 ||
+    Boolean(submitError) ||
+    dragActive ||
+    send.isPending;
+
   return (
     <form
       ref={formRef}
+      data-expanded={expanded}
+      onMouseDownCapture={(event) => {
+        // Safari does not focus buttons on pointer activation. Focus them before
+        // the textarea blurs, so its action row cannot move during the click.
+        const button = event.target instanceof Element ? event.target.closest("button") : null;
+        if (button && !button.disabled && event.button === 0) {
+          event.preventDefault();
+          button.focus({ preventScroll: true });
+        }
+      }}
+      onBlurCapture={(event) => {
+        // Keep action targets in place while focus moves within the composer.
+        // Submission temporarily disables the input before restoring its focus.
+        if (!event.currentTarget.contains(event.relatedTarget) && !send.isPending) {
+          setSelected(false);
+          // A press outside blurs the composer on pointerdown. Collapsing then
+          // moves everything that rests on it, such as a decision card, so the
+          // release lands off the target and its click never fires. Stay open
+          // until the press ends; the click fires in the same task as pointerup.
+          if (pointerPressed.current) {
+            setHoldOpen(true);
+            const release = () => {
+              window.removeEventListener("pointerup", release, true);
+              window.removeEventListener("pointercancel", release, true);
+              setTimeout(() => setHoldOpen(false), 0);
+            };
+            window.addEventListener("pointerup", release, true);
+            window.addEventListener("pointercancel", release, true);
+          }
+        }
+      }}
       onSubmit={(e) => {
         e.preventDefault();
         void submit();
@@ -720,14 +1046,124 @@ export function Composer({
       onDragLeave={onDragLeave}
       onDrop={onDrop}
       className={cn(
-        "flex min-h-0 flex-col p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] bg-paper",
+        "mx-auto w-full max-w-[52rem] flex min-h-0 flex-col px-5 pt-3 sm:px-8 pb-[max(0.75rem,env(safe-area-inset-bottom))] bg-paper",
         dragActive && "ring-2 ring-inset ring-moss",
       )}
     >
-      <div className="flex min-h-0 flex-col rounded-2xl border border-line bg-paper p-2 shadow-sm transition-[border-color,box-shadow] duration-150 focus-within:border-moss focus-within:ring-4 focus-within:ring-moss-wash motion-reduce:transition-none">
+      {(queuedMessages.length > 0 || unresolvedQueuedCount > 0) && (
+        <div className="mb-2 space-y-1.5" aria-label="Queued messages">
+          {queuedMessages.map((message) => {
+            const itemId = message.queueItemId;
+            if (!itemId) return null;
+            return (
+              <QueuedRow
+                key={itemId}
+                cancel={guest ? undefined : () => void cancelQueuedItem(itemId)}
+                canceling={cancelQueued.isPending}
+                sendNow={guest ? undefined : () => void promoteQueuedItem(itemId, message.id)}
+                sending={promotingItemId === itemId}
+                sendDisabled={send.isPending}
+              >
+                <p className="min-w-0 flex-1 line-clamp-2 text-ink">{message.content}</p>
+              </QueuedRow>
+            );
+          })}
+          {queueState ? unresolvedQueuedIds.map((itemId) => {
+            const item = queuedItemById.get(itemId);
+            // A signal (an event, a wake-up, a child's result) is not the
+            // person's message. It runs by itself: it joins the running turn
+            // or runs after it. Send now would only stop that turn.
+            const signal = item?.signal !== undefined;
+            return (
+              <QueuedRow
+                key={itemId}
+                cancel={guest ? undefined : () => void cancelQueuedItem(itemId)}
+                canceling={cancelQueued.isPending}
+                sendNow={guest || !item || signal ? undefined : () => void promoteQueuedItem(itemId)}
+                sending={promotingItemId === itemId}
+                sendDisabled={send.isPending}
+              >
+                <QueuedItemText item={item} />
+                {signal && <span className="shrink-0 text-muted">Runs next</span>}
+              </QueuedRow>
+            );
+          }) : unresolvedQueuedCount > 0 && (
+            <p className="px-1 text-xs text-muted" role="status">
+              {unresolvedQueuedCount} queued{" "}
+              {unresolvedQueuedCount === 1 ? "message is" : "messages are"} waiting.
+            </p>
+          )}
+        </div>
+      )}
+      <div
+        onMouseDown={(event) => {
+          // A press on the box's padding or hint text moved focus to the page
+          // and collapsed the box, so the next keystrokes went nowhere. Keep
+          // focus in the message field unless the press is on a control.
+          const target = event.target instanceof Element ? event.target : null;
+          if (event.button !== 0 || target?.closest("button, a, input, textarea, select, label, [role=button], [contenteditable]")) return;
+          event.preventDefault();
+          inputRef.current?.focus({ preventScroll: true });
+        }}
+        className={cn(
+          "flex min-h-0 flex-col rounded-2xl border border-line bg-paper shadow-sm [container-type:inline-size] transition-[border-color,box-shadow] duration-150 focus-within:border-moss focus-within:ring-4 focus-within:ring-moss-wash motion-reduce:transition-none",
+          expanded ? "p-2" : "p-1",
+        )}
+      >
         <QueueIndicator queueState={queueState} />
+        {editTarget && (
+          <div className="mb-2 flex items-start gap-2 rounded-xl border border-line bg-moss-wash px-3 py-2 text-xs">
+            <Pencil className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted" aria-hidden />
+            <div className="min-w-0 flex-1">
+              <p className="font-medium text-ink">Editing your message</p>
+              <p className="mt-0.5 text-muted">
+                {working ? "Send stops the current reply, then replaces" : "Send replaces"} {replacedText(preview.data?.turns)}. The earlier version is kept.
+                {editTarget.droppedFiles > 0 && ` Attach ${editTarget.droppedFiles === 1 ? "its file" : "its files"} again if the edit needs ${editTarget.droppedFiles === 1 ? "it" : "them"}.`}
+              </p>
+              {editRefusal && <p role="alert" className="mt-1 text-danger-500">{editRefusal}</p>}
+              {preview.data && !editRefusal && stillStanding(preview.data).length > 0 && (
+                <p className="mt-1 text-muted [overflow-wrap:anywhere]">Still standing after the edit: {listShort(stillStanding(preview.data))}.</p>
+              )}
+              {preview.data && !editRefusal && preview.data.files.length > 0 && (
+                <div className="mt-1.5">
+                  <FileChangeChoice
+                    label={`Also undo file changes (${preview.data.files.length} ${preview.data.files.length === 1 ? "file" : "files"})`}
+                    files={preview.data.files}
+                    checked={undoFiles}
+                    onCheckedChange={(checked) => { undoTouched.current = true; setUndoFiles(checked); }}
+                    hint={preview.data.pushed ? "These turns pushed commits or opened a pull request. Undoing files here does not change those." : undefined}
+                  />
+                </div>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={onCancelEdit}
+              className="rounded p-1 text-muted hover:text-ink max-sm:min-h-11 max-sm:min-w-11"
+              aria-label="Cancel edit"
+            >
+              <X className="h-3.5 w-3.5" aria-hidden />
+            </button>
+          </div>
+        )}
+        {replyTarget && (
+          <div className="mb-2 flex items-start gap-2 rounded-xl border border-line bg-moss-wash px-3 py-2 text-xs">
+            <div className="min-w-0 flex-1">
+              <p className="font-medium text-ink">Replying to Assistant</p>
+              <p className="mt-0.5 line-clamp-2 text-muted">{replyTarget.excerpt}</p>
+            </div>
+            <button
+              type="button"
+              onClick={onCancelReply}
+              className="rounded p-1 text-muted hover:text-ink"
+              aria-label="Cancel reply"
+            >
+              <X className="h-3.5 w-3.5" aria-hidden />
+            </button>
+          </div>
+        )}
         {dragActive && (
-          <p className="mb-2 text-xs text-muted">
+          <p className="mb-2 px-3 pt-1 text-xs leading-5 text-muted">
             {FILE_UPLOADS_ENABLED ? "Drop the files to attach them." : "Drop the images to attach them."}
           </p>
         )}
@@ -745,10 +1181,10 @@ export function Composer({
           onDismiss={() => setSubmitError(null)}
         />
         <ComposerFileStrip files={files} onRemove={removeFile} onRetry={retryFile} />
-        {working && <p className="mb-2 text-xs text-muted">{ACTION_HINT[action]}</p>}
+        {working && ACTION_HINT[action] && <p className="mb-2 px-3 pt-1 text-xs leading-5 text-muted">{ACTION_HINT[action]}</p>}
         {/* `relative` anchors the command popup to the input row, so the hint
             above it never moves the popup. */}
-        <div className="relative flex min-h-0 flex-col">
+        <div className={cn("relative flex min-h-0 max-md:flex-col max-md:items-stretch", expanded ? "flex-col" : "items-end")}>
           {(popupOpen || noticeOpen) && (
             <CommandPopup
               items={popupOpen ? popupItems : []}
@@ -766,17 +1202,29 @@ export function Composer({
           <Textarea
             ref={inputRef}
             value={text}
-            onChange={(e) => setText(e.target.value)}
+            onChange={(e) => {
+              // Typing ends a recall (`setText`): text that matches an earlier
+              // prompt by hand is the person's draft, and Up must not replace it.
+              setText(e.target.value);
+              // The people in the thread see "typing"; the text never leaves.
+              if (threadId) announceTyping(sessionId, threadId, e.target.value.trim().length > 0);
+            }}
+            onFocus={() => { lastUsedComposer = identity.current; setSelected(true); }}
             onKeyDown={onKeyDown}
             onPaste={onPaste}
             placeholder={threadId ? ACTION_PLACEHOLDER[action] : "Loading thread…"}
             aria-label="Message"
             rows={1}
-            className="block min-h-14 w-full min-w-0 max-h-[min(14rem,35dvh)] resize-none overflow-y-auto overscroll-contain rounded-none border-0 bg-transparent px-3 py-3 text-base leading-6 shadow-none caret-moss focus-visible:border-transparent focus-visible:ring-0 max-sm:rounded-none max-sm:px-3 max-sm:py-3 max-sm:shadow-none max-sm:focus-visible:ring-0"
-            disabled={send.isPending || !threadId}
+            className={cn(
+              "block w-full min-w-0 resize-none overflow-y-auto overscroll-contain rounded-none border-0 bg-transparent px-3 text-base leading-6 shadow-none caret-moss focus-visible:border-transparent focus-visible:ring-0 max-sm:rounded-none max-sm:px-3 max-sm:shadow-none max-sm:focus-visible:ring-0",
+              expanded
+                ? "min-h-20 max-md:min-h-11 max-h-[min(14rem,35dvh)] py-3 max-sm:py-3"
+                : "min-h-11 max-h-11 flex-1 py-2.5 max-sm:py-2.5 max-md:flex-none",
+            )}
+            disabled={preparing || send.isPending || !threadId}
           />
-          <div className="flex shrink-0 items-center gap-2 px-1 pb-1 pt-1">
-            {(IMAGE_ATTACHMENTS_ENABLED || FILE_UPLOADS_ENABLED) && (
+          <div className={cn("flex shrink-0 items-center gap-2 max-md:px-1 max-md:pb-1 max-md:pt-1", expanded && "px-1 pb-1 pt-1")}>
+            {!guest && (IMAGE_ATTACHMENTS_ENABLED || FILE_UPLOADS_ENABLED) && (
               <>
                 <input
                   ref={fileInputRef}
@@ -803,56 +1251,79 @@ export function Composer({
                 </Button>
               </>
             )}
-            <span className="min-w-0 flex-1 text-xs text-muted">
-              <span className="hidden sm:inline">
+            {/* The box's width decides, not the viewport's: the Ask Valet dock
+                is narrow on a wide screen, and a wrapped hint stacked one word
+                per line between the buttons. */}
+            <span className={cn("min-w-0 flex-1 truncate text-xs text-muted", !expanded && "hidden max-md:block", modelControlRef && "max-md:hidden")}>
+              <span className="hidden [@container(min-width:34rem)]:inline">
                 Enter to {ACTION_LABEL[action].toLowerCase()} · Shift+Enter for a new line
+                {text === "" && history.length > 0 && " · ↑ for earlier messages"}
               </span>
             </span>
-            {working && (
+            {/* The model and thinking control. A phone gives it the row; a
+                wider screen keeps it beside Send. */}
+            {modelControlRef && <div ref={modelControlRef} className="min-w-0 max-md:flex-1 md:ml-auto md:max-w-64" />}
+            {active && !guest && threadId && <div className={modelControlRef ? "max-md:hidden" : "contents"}><ContextMeter sessionId={sessionId} threadId={threadId} working={working} /></div>}
+            {working && queueState?.activeItemId && (
               <Button
                 type="button"
                 variant="secondary"
                 size="lg"
-                className="h-11 shrink-0 rounded-full px-3 text-danger-600 hover:text-danger-500 dark:text-danger-500"
+                className={cn(
+                  "h-11 shrink-0 rounded-full text-danger-600 hover:text-danger-500 dark:text-danger-500",
+                  expanded ? "px-3 max-md:w-11 max-md:p-0" : "w-11 p-0",
+                )}
                 onClick={() => void stop()}
                 disabled={!threadId || abort.isPending}
                 aria-label="Stop"
                 title="Stop (Esc)"
               >
                 <Square className="h-3.5 w-3.5 fill-current" />
-                <span>Stop</span>
+                <span className={cn("max-md:sr-only", !expanded && "sr-only")}>Stop</span>
+              </Button>
+            )}
+            {working && !queueState?.activeItemId && (queueState?.pendingIds.length ?? 0) > 0 && (
+              <Button
+                type="button"
+                variant="secondary"
+                size="lg"
+                className={cn("h-11 shrink-0 rounded-full", expanded ? "px-3 max-md:w-11 max-md:p-0" : "w-11 p-0")}
+                onClick={() => void runQueue()}
+                disabled={!threadId || resume.isPending}
+                aria-label="Run queued messages"
+                title="Run queued messages"
+              >
+                <Play className="h-3.5 w-3.5 fill-current" aria-hidden />
+                <span className={cn("max-md:sr-only", !expanded && "sr-only")}>Run queue</span>
               </Button>
             )}
             <Button
               type="submit"
-              disabled={!canSend}
+              data-perf-flow="message.send"
+              disabled={preparing || !canSend}
               size="lg"
               title={sendTitle}
               className={cn(
-                "h-11 shrink-0 rounded-full px-4 transition-colors motion-reduce:transition-none",
+                "h-11 shrink-0 rounded-full transition-colors motion-reduce:transition-none",
+                expanded ? "px-4 max-md:w-11 max-md:p-0" : "w-11 p-0",
                 !canSend && "bg-ink-wash text-muted disabled:opacity-100",
               )}
             >
               <ArrowUp className="h-4 w-4" aria-hidden />
-              <span>{ACTION_LABEL[action]}</span>
+              <span className={cn("max-md:sr-only", !expanded && "sr-only")}>{ACTION_LABEL[action]}</span>
             </Button>
           </div>
         </div>
       </div>
+      {statusLine}
     </form>
   );
 }
 
-function apiErrorDetail(err: unknown, fallback: string): string {
-  const payload =
-    err instanceof ApiError && typeof err.payload === "object" && err.payload !== null
-      ? (err.payload as Record<string, unknown>)
-      : undefined;
-  if (typeof payload?.corrective === "string") return payload.corrective;
-  if (typeof payload?.error === "string") return payload.error;
-  if (err instanceof Error && err.message.length > 0) return err.message;
-  return fallback;
-}
+/** The composer the person focused or sent from last. See the send-settle focus effect. */
+let lastUsedComposer: object | undefined;
+/** Mounted composers outside the Ask Valet dock. See the Escape effect. */
+let pageComposers = 0;
 
 /**
  * Small text indicator above the composer for the thread's submission
@@ -865,16 +1336,115 @@ function QueueIndicator({
 }: {
   queueState: ReturnType<typeof useQueueStateForThread>;
 }) {
+  const collecting = (queueState?.collectingIds.length ?? 0) > 0;
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!collecting) return;
+    setNow(Date.now());
+    const interval = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(interval);
+  }, [collecting]);
+
   if (!queueState) return null;
   const parts: string[] = [];
-  if (queueState.pendingIds.length > 0) {
-    parts.push(`${queueState.pendingIds.length} queued`);
+  if (collecting) {
+    const count = queueState.collectingIds.length;
+    const messages = count === 1 ? "message" : "messages";
+    const deadline = queueState.collectDeadline;
+    const seconds = deadline === undefined ? undefined : Math.max(0, Math.ceil((deadline - now) / 1_000));
+    const wait = seconds === undefined ? "when the collection window ends" : `in about ${seconds} seconds`;
+    const canStopActive = queueState.activeItemId !== undefined;
+    parts.push(
+      canStopActive
+        ? `Collecting ${count} ${messages}; they run together ${wait}. Stop affects only the active message.`
+        : `Collecting ${count} ${messages}; they run together ${wait}. The collection cannot be stopped.`,
+    );
   }
   if (queueState.status === "paused") {
-    parts.push("paused");
+    parts.push("Paused");
   }
   if (parts.length === 0) return null;
   return (
-    <div className="mb-2 text-xs text-muted">{parts.join(" • ")}</div>
+    <div role="status" className="mb-2 px-3 pt-1 text-xs leading-5 text-muted">{parts.join(" • ")}</div>
   );
+}
+
+/** One queued message above the composer: its content and actions, then
+ * Cancel, which removes it before it starts. */
+/**
+ * A queued item with no bubble in this window, from the queue state. A
+ * signal reads with its kind first, such as "Wake-up". An item from an
+ * older server has no text and reads as a plain queued message.
+ */
+function QueuedItemText({ item }: { item: WireQueuedItem | undefined }) {
+  if (!item) return <p className="min-w-0 flex-1 text-muted">Queued message. It runs when the current turn ends.</p>;
+  const files = item.attachments ? `${item.attachments} ${item.attachments === 1 ? "attachment" : "attachments"}` : undefined;
+  const text = item.text.trim() || files || "Queued message";
+  return (
+    <p className="min-w-0 flex-1 line-clamp-2 text-ink">
+      {item.signal && <span className="mr-1.5 font-medium text-muted">{signalLabel(item.signal.type)}</span>}
+      {text}
+      {item.text.trim() && files && <span className="ml-1.5 text-muted">({files})</span>}
+    </p>
+  );
+}
+
+/** A short name for a queued signal's kind. */
+function signalLabel(type: string): string {
+  if (type === "wakeup" || type.startsWith("wakeup.")) return "Wake-up";
+  if (type.startsWith("child.")) return "Task result";
+  return "Event";
+}
+
+function QueuedRow({ cancel, canceling, sendNow, sending, sendDisabled, children }: {
+  cancel?: () => void;
+  canceling: boolean;
+  /** Stops the running turn and runs this item now. */
+  sendNow?: () => void;
+  sending: boolean;
+  sendDisabled: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex items-center gap-2 rounded-xl border border-line bg-ink-wash px-3 py-2 text-xs">
+      {children}
+      {sendNow && (
+        <Button type="button" variant="secondary" size="sm" className="shrink-0" disabled={sendDisabled} onClick={sendNow}>
+          {sending ? "Sending…" : "Send now"}
+        </Button>
+      )}
+      {cancel && (
+        <Button type="button" variant="ghost" size="sm" className="shrink-0" disabled={canceling} onClick={cancel}>
+          Cancel
+        </Button>
+      )}
+    </div>
+  );
+}
+
+/** A message back in the composer for an edit. */
+export interface ComposerEditTarget {
+  messageId: string;
+  text: string;
+  /** The message's images, back in the image strip. */
+  images: ComposerImage[];
+  /** Files the message had. An edit cannot carry them, so the bar says so. */
+  droppedFiles: number;
+}
+
+/** "this message and the 2 later turns" for the edit bar. */
+function replacedText(turns: number | undefined): string {
+  if (turns === undefined) return "this message and everything after it";
+  if (turns <= 1) return "this message and its reply";
+  return `this message and the ${turns - 1} later ${turns - 1 === 1 ? "turn" : "turns"}`;
+}
+
+/** What still stands after an edit: actions outside the chat, then approval choices. */
+function stillStanding(preview: { actions: Array<{ label: string }>; moreActions: number; grants: string[] }): string[] {
+  return [...preview.actions.map((action) => action.label), ...preview.grants, ...(preview.moreActions > 0 ? [`${preview.moreActions} more calls`] : [])];
+}
+
+function listShort(items: string[]): string {
+  return items.length > 3 ? `${items.slice(0, 3).join(", ")}, and ${items.length - 3} more` : items.join(", ");
 }

@@ -60,3 +60,46 @@ describe("nodeServerAdapter.createWebSocket", () => {
     }
   });
 });
+
+describe("nodeServerAdapter close", () => {
+  it("close() resolves while a WebSocket client stays connected", async () => {
+    const app = new Hono<AppEnv>();
+    const binding = nodeServerAdapter.createWebSocket(app);
+    app.get("/ws", binding.upgradeWebSocket(() => ({})));
+    const server = await new Promise<ReturnType<typeof binding.serve>>((resolve) => {
+      const handle = binding.serve({ port: 0, onListen: () => resolve(handle) });
+    });
+    const client = new WebSocket(`ws://localhost:${server.port}/ws`);
+    await new Promise<void>((resolve, reject) => {
+      client.onopen = () => resolve();
+      client.onerror = () => reject(new Error("WebSocket did not open"));
+    });
+    const closedClient = new Promise<void>((resolve) => { client.onclose = () => resolve(); });
+    const started = Date.now();
+    await server.close();
+    await closedClient;
+    // Before, server.close() waited on the open WebSocket forever.
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+});
+
+describe("bunServerAdapter", () => {
+  it("raises Bun's idle timeout above the longest MCP wait", async () => {
+    // Bun's 10-second default closed a 45-second MCP wait mid-response.
+    const g = globalThis as { Bun?: unknown };
+    const seen: Array<Record<string, unknown>> = [];
+    g.Bun = { serve: (options: Record<string, unknown>) => {
+      seen.push(options);
+      return { port: 1234, stop: async () => undefined };
+    } };
+    try {
+      const { bunServerAdapter } = await import("./server-adapter.bun.js");
+      const { Hono } = await import("hono");
+      const binding = bunServerAdapter.createWebSocket(new Hono());
+      binding.serve({ port: 0 });
+      expect(seen[0]?.idleTimeout).toBe(255);
+    } finally {
+      delete g.Bun;
+    }
+  });
+});

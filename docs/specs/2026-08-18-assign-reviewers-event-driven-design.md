@@ -17,6 +17,19 @@ original request asked for, because Slack was marked not-ready in the
 template gallery at the time it shipped. Slack readiness has since landed
 (`dev-v2` identity-linking, PR #321), so that gap can close.
 
+## Reviewer request action
+
+`github.request_reviewers` requests review from GitHub users, organization
+team slugs, or both. It requires at least one nonempty list. It sends `POST
+/repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers` with
+`reviewers` and optional `team_reviewers` fields. The action adds reviewer
+requests. It does not change PR assignees.
+
+The action is medium risk. It requires the GitHub App `pull_requests:write`
+permission. A 403 response identifies that permission. This action lets an
+agent or a workflow apply reviewer choices from CODEOWNERS, workstream, or
+topic logic. It does not change this template definition.
+
 ## What changes
 
 ### Trigger
@@ -109,8 +122,10 @@ CODEOWNERS-matching and calendar-checking shape.
 exists and `trigger.data.payload.action` is `opened` or `ready_for_review`.
 Reads owner/repo/pull number from `trigger.data.payload.repository.*` /
 `trigger.data.payload.pull_request.number`. The rest is today's shape: read
-CODEOWNERS and the roster, read the pull request, shortlist candidates,
-check calendars, select, write `assignees`, read it back, report.
+CODEOWNERS and the roster, then read the pull request. A draft, a pull request
+with assignees, or a pull request with individual or team reviewer requests
+stops before shortlist and writes nothing. Otherwise, shortlist candidates,
+check calendars, select, write `assignees`, read it back, and report.
 
 **Branch B — decline swap.** Gate: `trigger.data.payload.comment` and
 `trigger.data.payload.issue.pull_request` both exist (the second is how a

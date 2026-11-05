@@ -1,7 +1,7 @@
 /** Integration coverage for sandbox file upload, including attachment
  * readiness, extraction, limits, overwrite safety, and ref handling. */
 
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { request as httpRequest } from "node:http";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
@@ -99,7 +99,9 @@ describe("POST /api/sessions/:id/files", () => {
     expect(provider.resumeCalls).toBe(1);
   });
 
-  it("recovers a provider-backed error on the next upload", async () => {
+  it("fails fast inside the startup backoff window, then recovers once it has elapsed", async () => {
+    // Mirrors STARTUP_BACKOFF_BASE_MS in the engine's sandbox/attachment.ts (not exported from the package).
+    const startupBackoffBaseMs = 15_000;
     const provider = new UploadSandboxProvider();
     provider.failNext = true;
     api = await bootTestApi({ sandboxProvider: provider });
@@ -108,21 +110,49 @@ describe("POST /api/sessions/:id/files", () => {
     const failed = await upload(api.baseUrl, sessionId, "failed.txt");
     expect(failed.status).toBe(500);
     expect(await failed.json()).toMatchObject({ error: "sandbox failed to start" });
-    expect((await upload(api.baseUrl, sessionId, "recovered.txt")).status).toBe(200);
-    expect(provider.createCalls).toBe(2);
+
+    // Inside the window the attachment rejects at once and does not re-create.
+    // The route's body is static, so the " (retry in Ns)" suffix is not surfaced here.
+    const blocked = await upload(api.baseUrl, sessionId, "blocked.txt");
+    expect(blocked.status).toBe(500);
+    expect(await blocked.json()).toMatchObject({ error: "sandbox failed to start" });
+    expect(provider.createCalls).toBe(1);
+
+    // Past the window. Fake Date only so the HTTP stack keeps its real timers.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.now() + startupBackoffBaseMs + 1000);
+      expect((await upload(api.baseUrl, sessionId, "recovered.txt")).status).toBe(200);
+      expect(provider.createCalls).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
-  it("does not try to restart a released attachment", async () => {
+  it("rebuilds a released cached session without restarting its terminal attachment", async () => {
     const provider = new UploadSandboxProvider();
     api = await bootTestApi({ sandboxProvider: provider });
     const sessionId = await createSession(api.baseUrl, "");
     expect((await upload(api.baseUrl, sessionId, "before.txt")).status).toBe(200);
-    await api.providers.engineHost.liveSession(sessionId)?.attachment.destroy();
+    const original = api.providers.engineHost.liveSession(sessionId);
+    if (!original) throw new Error("the upload session was not cached");
+    await original.attachment.destroy();
 
-    const released = await upload(api.baseUrl, sessionId, "after.txt");
-    expect(released.status).toBe(409);
-    expect(await released.json()).toMatchObject({ error: "sandbox was released" });
-    expect(provider.createCalls).toBe(1);
+    const recovered = await upload(api.baseUrl, sessionId, "after.txt");
+    expect(recovered.status).toBe(200);
+    const result = await recovered.json() as PostSessionFileUploadResponse;
+    const replacement = api.providers.engineHost.liveSession(sessionId);
+    expect(replacement).not.toBe(original);
+    if (!replacement) throw new Error("the replacement upload session was not cached");
+    expect(await replacement.sandbox.readFile(result.path)).toBe("after.txt");
+    expect(original.attachment.state).toBe("released");
+    await expect(original.attachment.ensureReady({ timeoutMs: 1000 })).rejects.toBeInstanceOf(SandboxUnavailableError);
+    expect(provider.createCalls).toBe(2);
+
+    const deleted = await fetch(`${api.baseUrl}/api/sessions/${sessionId}`, { method: "DELETE" });
+    expect(deleted.status).toBe(200);
+    expect((await upload(api.baseUrl, sessionId, "deleted.txt")).status).toBe(404);
+    expect(provider.createCalls).toBe(2);
   });
   it("accepts a plain text file and returns correct response shape", async () => {
     api = await bootTestApi();
@@ -370,6 +400,29 @@ describe("POST /api/sessions/:id/files", () => {
     expect(replay.status).toBe(400);
   });
 
+  it("treats a byte-identical re-upload as uploaded and still refuses different content", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+    const send = (text: string) => {
+      const form = new FormData();
+      form.append("file", new Blob([text], { type: "application/yaml" }), "workflow.yaml");
+      return fetch(`${api!.baseUrl}/api/sessions/${sessionId}/files`, { method: "POST", body: form });
+    };
+    const first = await send("name: review\n");
+    expect(first.status).toBe(200);
+    const firstBody = (await first.json()) as { attachmentRef: string; sha256: string };
+
+    // The composer re-sends a file when a person attaches it again. The same
+    // bytes are already there, so this is a success with a fresh ref.
+    const again = await send("name: review\n");
+    expect(again.status).toBe(200);
+    const againBody = (await again.json()) as { attachmentRef: string; sha256: string };
+    expect(againBody.sha256).toBe(firstBody.sha256);
+    expect(againBody.attachmentRef).not.toBe(firstBody.attachmentRef);
+
+    expect((await send("name: other\n")).status).toBe(409);
+  });
+
   it("refuses to clobber an existing PDF sidecar with extract=true and overwrite unset", async () => {
     api = await bootTestApi();
     const sessionId = await createSession(api.baseUrl);
@@ -430,6 +483,72 @@ describe("POST /api/sessions/:id/files", () => {
   // MessageEntry type:"file" → agent note) is covered by
   // packages/engine/test/prompt-file-attachments.test.ts — this harness
   // runs keyless, so no turn ever starts and no user entry persists here.
+});
+
+describe("GET /api/sessions/:id/threads/:threadId/files", () => {
+  it("downloads a file attached to the thread and nothing else", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl, "");
+    const form = new FormData();
+    form.append("file", new Blob(["quarterly numbers"], { type: "text/plain" }), "Q3 report.txt");
+    const uploaded = (await (await fetch(`${api.baseUrl}/api/sessions/${sessionId}/files`, { method: "POST", body: form })).json()) as PostSessionFileUploadResponse;
+    // A stray sandbox file that no message attaches.
+    const stray = new FormData();
+    stray.append("file", new Blob(["secret"]), "stray.txt");
+    expect((await fetch(`${api.baseUrl}/api/sessions/${sessionId}/files`, { method: "POST", body: stray })).status).toBe(200);
+
+    // This harness runs keyless, so seed the user entry the send would write.
+    const engineSession = await api.providers.engineHost.sessionFor(sessionId, { userId: "local-user", orgId: "local-org", workspace: "/tmp" });
+    const thread = await engineSession.ensureDefaultThread();
+    await api.providers.engineStore.appendEntries(sessionId, thread.id, [{
+      id: "m1", sessionId, threadId: thread.id, parentId: null, type: "message", role: "user", content: "read this", createdAt: 1,
+      attachments: [{ type: "file", path: uploaded.path, bytes: uploaded.bytes, sha256: uploaded.sha256, mimeType: "text/plain", name: "Q3 report.txt" }],
+    }]);
+    const download = (path: string, threadId = thread.id) =>
+      fetch(`${api!.baseUrl}/api/sessions/${sessionId}/threads/${threadId}/files?path=${encodeURIComponent(path)}`);
+
+    const res = await download(uploaded.path);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("quarterly numbers");
+    expect(res.headers.get("content-type")).toBe("text/plain");
+    expect(res.headers.get("content-disposition")).toBe(`attachment; filename="Q3_report.txt"; filename*=UTF-8''Q3%20report.txt`);
+    expect((await download("/workspace/uploads/stray.txt")).status).toBe(404);
+    expect((await download(uploaded.path, "no-such-thread")).status).toBe(404);
+  });
+
+  it("still downloads a file attached to a version an edit left", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl, "");
+    const form = new FormData();
+    form.append("file", new Blob(["draft one"], { type: "text/plain" }), "draft.txt");
+    const uploaded = (await (await fetch(`${api.baseUrl}/api/sessions/${sessionId}/files`, { method: "POST", body: form })).json()) as PostSessionFileUploadResponse;
+    const engineSession = await api.providers.engineHost.sessionFor(sessionId, { userId: "local-user", orgId: "local-org", workspace: "/tmp" });
+    const thread = await engineSession.ensureDefaultThread();
+    await thread.pause();
+    await api.providers.engineStore.appendEntries(sessionId, thread.id, [{
+      id: "m1", sessionId, threadId: thread.id, parentId: null, type: "message", role: "user", content: "read this", createdAt: 1,
+      author: { id: "local-user", name: "Local Dev" },
+      attachments: [{ type: "file", path: uploaded.path, bytes: uploaded.bytes, sha256: uploaded.sha256, mimeType: "text/plain", name: "draft.txt" }],
+    }]);
+    // The edit moves the thread before its turn fails at model resolution
+    // in this keyless harness, which leaves m1 on the earlier version.
+    const sent = await fetch(`${api.baseUrl}/api/threads/${thread.id}/messages`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: "never mind", editEntryId: "m1" }),
+    });
+    expect(sent.status).toBe(202);
+    const { messageId } = (await sent.json()) as { messageId: string };
+    await thread.resume();
+    const deadline = Date.now() + 5000;
+    while ((await api.providers.engineStore.getQueueItem(sessionId, messageId))?.status !== "settled") {
+      if (Date.now() > deadline) throw new Error("edit did not settle");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect((await thread.readEntries()).some((e) => e.id === "m1")).toBe(false);
+
+    const res = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/threads/${thread.id}/files?path=${encodeURIComponent(uploaded.path)}`);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("draft one");
+  });
 });
 
 describe("sandboxReadyError", () => {

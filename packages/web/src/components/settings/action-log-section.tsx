@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import type { ActionLogEntryWire, ApprovalModeWire } from "@valet/api/wire";
-import { Badge, Button, Input } from "~/components/primitives";
+import { Badge, Button, Input, Select, Time } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
 import { useActionLog } from "~/api/policies";
 
@@ -123,11 +123,11 @@ export function ActionLogSection({
           <label className="block text-xs font-medium text-muted" htmlFor="log-filter-mode">
             Resolved mode
           </label>
-          <select
+          <Select
             id="log-filter-mode"
             value={draftResolvedMode}
             onChange={(e) => setDraftResolvedMode(e.target.value)}
-            className="mt-1 h-12 w-full rounded border border-[--border] bg-[--bg] px-2 text-base sm:h-9 sm:w-auto sm:text-sm text-[--fg]"
+            className="mt-1 w-full sm:w-auto"
           >
             <option value="">Any</option>
             {RESOLVED_MODES.map((m) => (
@@ -135,17 +135,17 @@ export function ActionLogSection({
                 {m}
               </option>
             ))}
-          </select>
+          </Select>
         </div>
         <div>
           <label className="block text-xs font-medium text-muted" htmlFor="log-filter-status">
             Status
           </label>
-          <select
+          <Select
             id="log-filter-status"
             value={draftStatus}
             onChange={(e) => setDraftStatus(e.target.value)}
-            className="mt-1 h-12 w-full rounded border border-[--border] bg-[--bg] px-2 text-base sm:h-9 sm:w-auto sm:text-sm text-[--fg]"
+            className="mt-1 w-full sm:w-auto"
           >
             <option value="">Any</option>
             {STATUSES.map((s) => (
@@ -153,7 +153,7 @@ export function ActionLogSection({
                 {s}
               </option>
             ))}
-          </select>
+          </Select>
         </div>
         <Button type="button" variant="secondary" onClick={applyFilters}>
           Apply filters
@@ -218,7 +218,7 @@ function LogRow({
           aria-label={`Toggle details for ${entry.invocationId}`}
           className="flex min-h-11 min-w-0 flex-wrap items-center gap-2 text-left sm:min-h-0"
         >
-          <span className="text-xs text-muted">{new Date(entry.createdAt).toLocaleString()}</span>
+          <Time ts={entry.createdAt} format="absolute" className="text-xs text-muted" />
           <span className="min-w-0 break-all text-sm font-medium text-[--fg]">
             {entry.service ?? "—"}
             {entry.actionId ? ` / ${entry.actionId}` : ""}

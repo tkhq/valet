@@ -67,7 +67,8 @@ export function MemorySearchPane({ activePath, onSelect }: MemorySearchPaneProps
           onKeyDown={onKeyDown}
           placeholder="Search memory…"
           aria-label="Search memory"
-          className="h-8 pl-8 pr-12 text-sm"
+          size="sm"
+          className="pl-8 pr-12"
         />
         {query.length > 0 && (
           <button

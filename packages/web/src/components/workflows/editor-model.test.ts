@@ -12,8 +12,6 @@ import {
   createNodeId,
   duplicateNode,
   estimateEdgeLabelWidth,
-  flowEdgeToWorkflowEdge,
-  fromFlow,
   graphSignature,
   isWorkflowDefinitionShape,
   positionNewNodes,
@@ -120,7 +118,7 @@ describe('NODE_META default nodes', () => {
     });
   });
 
-  it('orchestrator default node fails validation on empty prompt only', () => {
+  it('thread default node fails validation on empty prompt only', () => {
     const definition: WorkflowDefinition = {
       version: 'dag/v1',
       nodes: [{ id: 'trigger', type: 'trigger' }, NODE_META.orchestrator.defaultNode('x')],
@@ -162,7 +160,7 @@ describe('NODE_META default nodes', () => {
   });
 });
 
-describe('toFlow / fromFlow round trip', () => {
+describe('toFlow', () => {
   it('converts a dag/v1 definition to flow nodes and edges with saved positions and viewport', () => {
     const definition = baseDefinition();
     const flow = toFlow(definition);
@@ -226,23 +224,9 @@ describe('toFlow / fromFlow round trip', () => {
     expect(flow.nodes.find((n) => n.id === 'start')!.position).toEqual({ x: LAYOUT_COLUMN_GAP, y: 0 });
   });
 
-  it('round-trips flow state back to a dag/v1 definition preserving node payloads and ui', () => {
-    const definition = baseDefinition();
-    const flow = toFlow(definition);
-    const roundTripped = fromFlow(flow);
-
-    expect(roundTripped.version).toBe('dag/v1');
-    expect(roundTripped.nodes).toEqual(definition.nodes);
-    expect(new Set(roundTripped.edges)).toEqual(new Set(definition.edges));
-    expect(roundTripped.ui?.viewport).toEqual(definition.ui?.viewport);
-    for (const node of definition.nodes) {
-      expect(roundTripped.ui?.nodes[node.id]?.position).toEqual(definition.ui?.nodes[node.id]?.position);
-    }
-  });
-
-  it('workflowEdgeToFlowEdge / flowEdgeToWorkflowEdge are inverses', () => {
+  it('projects edge branching and conditions into the canvas', () => {
     const edge = { from: 'a', to: 'b', fromOutput: 'false' as const, when: '{{true}}' };
-    expect(flowEdgeToWorkflowEdge(workflowEdgeToFlowEdge(edge))).toEqual(edge);
+    expect(workflowEdgeToFlowEdge(edge)).toEqual({ id: 'a:false->b', source: 'a', sourceHandle: 'false', target: 'b', data: { fromOutput: 'false', when: '{{true}}' } });
   });
 
   it('createEdgeId includes the fromOutput branch when present', () => {
@@ -319,6 +303,17 @@ describe('addNode / removeNode / duplicateNode / updateNode', () => {
     expect(nodeId).toBe('llm-1');
     expect(next.nodes.find((n) => n.id === nodeId)).toEqual({ id: 'llm-1', type: 'llm', model: '', prompt: '' });
     expect(next.ui?.nodes[nodeId]).toBeDefined();
+  });
+
+  it('uses the persisted creation model for new llm and session nodes', () => {
+    const definition: WorkflowDefinition = {
+      ...baseDefinition(),
+      ui: { ...baseDefinition().ui!, defaultModel: 's' },
+    };
+    const llm = addNode(definition, 'llm').definition.nodes.at(-1);
+    const session = addNode(definition, 'session').definition.nodes.at(-1);
+    expect(llm).toEqual({ id: 'llm-1', type: 'llm', model: 's', prompt: '' });
+    expect(session).toEqual({ id: 'session-1', type: 'session', mode: 'start', model: 's', prompt: '' });
   });
 
   it('does not offer trigger as an addable type', () => {
@@ -421,6 +416,22 @@ describe('position and viewport persistence', () => {
   it('writes the viewport into definition.ui.viewport', () => {
     const definition = baseDefinition();
     const next = setViewport(definition, { x: 5, y: 6, zoom: 2 });
+    expect(next.ui?.viewport).toEqual({ x: 5, y: 6, zoom: 2 });
+    expect(next.ui?.nodes).toEqual(definition.ui?.nodes);
+  });
+
+  // A pan or a zoom writes the camera through this helper on every gesture,
+  // and the editor re-applies the stored camera when it adopts a refetch. A
+  // rebuilt `ui` would drop the editor default the server just wrote, and
+  // the next save would persist the loss.
+  it('keeps the rest of definition.ui when it writes the viewport', () => {
+    const definition = baseDefinition();
+    const withDefault: WorkflowDefinition = {
+      ...definition,
+      ui: { ...definition.ui, nodes: definition.ui?.nodes ?? {}, defaultModel: 'm' },
+    };
+    const next = setViewport(withDefault, { x: 5, y: 6, zoom: 2 });
+    expect(next.ui?.defaultModel).toBe('m');
     expect(next.ui?.viewport).toEqual({ x: 5, y: 6, zoom: 2 });
     expect(next.ui?.nodes).toEqual(definition.ui?.nodes);
   });
@@ -686,8 +697,10 @@ describe('positionNewNodes', () => {
   });
 });
 
-it('preserves explicit assistant routing through canvas saves and detects external routing changes', () => {
-  const definition = { ...baseDefinition(), assistantId: 'chosen' };
-  expect(fromFlow(toFlow(definition), definition).assistantId).toBe('chosen');
-  expect(graphSignature(definition)).not.toBe(graphSignature({ ...definition, assistantId: 'other' }));
+
+it('includes the appearance in the signature used for server refresh and conflict detection', () => {
+  const definition = baseDefinition();
+  expect(graphSignature({ ...definition, presence: { displayName: 'Bot' } })).not.toBe(graphSignature(definition));
+  expect(graphSignature({ ...definition, presence: { displayName: 'Bot', avatarUrl: 'https://example.com/a.png' } }))
+    .toBe(graphSignature({ ...definition, presence: { avatarUrl: 'https://example.com/a.png', displayName: 'Bot' } }));
 });

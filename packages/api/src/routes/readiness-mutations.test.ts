@@ -1,8 +1,10 @@
 /** Readiness mutations persist a full pass at an unchanged repository head. */
+import { listTeamShares, shareCredential } from "../services/credential-shares.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHmac, generateKeyPairSync } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import githubPlugin from "@valet/plugin-github/plugin";
 import { contentSources, credentials, githubInstallations, teams, teamMembers, teamJoinEligibilities } from "../schema/index.js";
 import { addMember, createTeam, removeMember } from "../services/teams.js";
 import { refreshTeamJoinEligibility } from "../services/team-join-eligibility.js";
@@ -32,7 +34,7 @@ let api: TestApi;
 let fixture: GithubFixture | undefined;
 
 beforeEach(async () => {
-  api = await bootTestApi();
+  api = await bootTestApi({ plugins: [githubPlugin] });
   await api.providers.contentSync.stop();
 });
 afterEach(async () => {
@@ -287,13 +289,11 @@ describe("readiness refresh paths", () => {
     expect(await row("joined")).toMatchObject({ syncRevision: 2, status: "ok" });
   });
 
-  it("refreshes delegated teams on a personal credential replacement and GitHub disconnect", async () => {
+  it("refreshes the teams a member shares with on a personal credential replacement and GitHub disconnect", async () => {
     await source("delegated");
     await source("unrelated", { ownerId: "team-b" });
     await api.providers.engineCredentials.save({ type: "user", id: "local-user" }, "github", { type: "oauth2", accessToken: "old" });
-    await api.providers.engineCredentials.save({ type: "team", id: "team-a" }, "github", {
-      type: "oauth2", metadata: { delegatedFrom: "local-user" },
-    });
+    await shareCredential(api.providers.db, { teamId: "team-a", service: "github", userId: "local-user", createdAt: 1 });
     const put = await fetch(`${api.baseUrl}/api/credentials/github`, {
       method: "PUT", headers: HEADERS, body: JSON.stringify({ type: "oauth2", accessToken: "new" }),
     });
@@ -304,7 +304,7 @@ describe("readiness refresh paths", () => {
     expect(disconnect.status).toBe(204);
     await expectDirty("delegated");
     expect((await row("unrelated")).syncRevision).toBe(0);
-    expect(await api.providers.db.select().from(credentials).where(eq(credentials.ownerId, "team-a"))).toHaveLength(0);
+    expect(await listTeamShares(api.providers.db, "team-a")).toHaveLength(0);
   });
 
   it("refreshes all org teams for installation changes, but not a timestamp-only discovery", async () => {

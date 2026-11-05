@@ -25,15 +25,30 @@ export async function sheetsFetch(
   });
 }
 
-/** Build a descriptive error from a failed Sheets API response. */
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Keep Google's cause and remediation available to both agents and people. */
 export async function sheetsError(res: Response): Promise<{ success: false; error: string }> {
-  let detail = '';
+  let detail = res.statusText;
+  let payload: unknown;
   try {
     const body = await res.text();
-    const json = JSON.parse(body);
-    detail = json?.error?.message || body.slice(0, 200);
-  } catch {
-    detail = res.statusText;
+    detail = body.slice(0, 200) || res.statusText;
+    payload = JSON.parse(body);
+  } catch { /* Non-JSON errors retain their bounded response text. */ }
+  const error = isObject(payload) && isObject(payload.error) ? payload.error : undefined;
+  if (typeof error?.message === 'string') detail = error.message.slice(0, 2000);
+  const disabledInfo = Array.isArray(error?.details) ? error.details.find((entry: unknown) =>
+    isObject(entry) && entry.reason === 'SERVICE_DISABLED' &&
+    isObject(entry.metadata) && entry.metadata.service === 'sheets.googleapis.com') : undefined;
+  const legacyProject = detail.match(/Google Sheets API has not been used in project (\d+) before or it is disabled/i)?.[1];
+  if (res.status === 403 && (disabledInfo || legacyProject)) {
+    const consumer = isObject(disabledInfo) && isObject(disabledInfo.metadata) ? disabledInfo.metadata.consumer : undefined;
+    const project = typeof consumer === 'string' ? consumer.match(/^projects\/([a-z0-9-]+)$/)?.[1] : legacyProject;
+    const link = 'https://console.cloud.google.com/apis/library/sheets.googleapis.com' + (project ? `?project=${encodeURIComponent(project)}` : '');
+    return { success: false, error: `Sheets API 403 (SERVICE_DISABLED): Google Sheets API is disabled${project ? ` for Google Cloud project ${project}` : ''}. Ask the project administrator to enable it: ${link}. Retry after enabling the API. For read-only tasks, an authorized Drive export may work without Sheets. This is an API configuration error, not a missing spreadsheet permission.` };
   }
   return { success: false, error: `Sheets API ${res.status}: ${detail}` };
 }
@@ -221,7 +236,7 @@ export async function resolveSheetId(
 ): Promise<number> {
   const qs = new URLSearchParams({ fields: 'sheets.properties' });
   const res = await sheetsFetch(`/${encodeURIComponent(spreadsheetId)}?${qs}`, token);
-  if (!res.ok) throw new Error(`Failed to resolve sheet ID: ${res.status}`);
+  if (!res.ok) throw new Error((await sheetsError(res)).error);
 
   const data = (await res.json()) as {
     sheets: Array<{ properties: { sheetId: number; title: string } }>;
@@ -254,7 +269,7 @@ export async function readRange(
     `/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}?${qs}`,
     token,
   );
-  if (!res.ok) throw new Error(`Failed to read range: ${res.status}`);
+  if (!res.ok) throw new Error((await sheetsError(res)).error);
   const data = (await res.json()) as { range: string; values?: unknown[][] };
   return { range: data.range, values: data.values || [] };
 }
@@ -276,7 +291,7 @@ export async function writeRange(
       body: JSON.stringify({ range, majorDimension: 'ROWS', values }),
     },
   );
-  if (!res.ok) throw new Error(`Failed to write range: ${res.status}`);
+  if (!res.ok) throw new Error((await sheetsError(res)).error);
   return (await res.json()) as Record<string, unknown>;
 }
 
@@ -297,7 +312,7 @@ export async function appendValues(
       body: JSON.stringify({ majorDimension: 'ROWS', values }),
     },
   );
-  if (!res.ok) throw new Error(`Failed to append values: ${res.status}`);
+  if (!res.ok) throw new Error((await sheetsError(res)).error);
   return (await res.json()) as Record<string, unknown>;
 }
 
@@ -312,7 +327,7 @@ export async function clearRange(
     token,
     { method: 'POST', body: JSON.stringify({}) },
   );
-  if (!res.ok) throw new Error(`Failed to clear range: ${res.status}`);
+  if (!res.ok) throw new Error((await sheetsError(res)).error);
   return (await res.json()) as Record<string, unknown>;
 }
 
@@ -323,7 +338,7 @@ export async function getSpreadsheetMetadata(
 ): Promise<Record<string, unknown>> {
   const qs = new URLSearchParams({ includeGridData: 'false' });
   const res = await sheetsFetch(`/${encodeURIComponent(spreadsheetId)}?${qs}`, token);
-  if (!res.ok) throw new Error(`Failed to get spreadsheet metadata: ${res.status}`);
+  if (!res.ok) throw new Error((await sheetsError(res)).error);
   return (await res.json()) as Record<string, unknown>;
 }
 
@@ -341,16 +356,8 @@ export async function sheetsBatchUpdate(
       body: JSON.stringify({ requests }),
     },
   );
-  if (!res.ok) {
-    let detail = '';
-    try {
-      const body = await res.json() as { error?: { message?: string; status?: string } };
-      detail = body.error?.message || JSON.stringify(body);
-    } catch {
-      detail = await res.text().catch(() => '');
-    }
-    throw new Error(`Batch update failed: ${res.status}${detail ? ` — ${detail}` : ''}`);
-  }
+  if (!res.ok) throw new Error((await sheetsError(res)).error);
+
   return (await res.json()) as Record<string, unknown>;
 }
 

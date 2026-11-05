@@ -1,23 +1,41 @@
 import type { SessionNode } from "@valet/workflow";
+import { StepBudgetField } from "./step-budget-field";
 import { JsonTextarea, LabeledInput, LabeledTextarea, SelectField } from "../fields";
+import { Label } from "~/components/primitives";
+import { ModelCombobox } from "~/components/settings/model-combobox";
+import { LastRunModel } from "./last-run-model";
 
 export function SessionForm({
   node,
   onChange,
+  lastRunModels,
 }: {
   node: SessionNode;
   onChange: (patch: Record<string, unknown>) => void;
+  /** The models this step called in the workflow's last run. */
+  lastRunModels?: string[];
 }) {
   return (
     <div className="flex flex-col gap-3">
       <LabeledTextarea label="Prompt" value={node.prompt} onChange={(value) => onChange({ prompt: value })} />
       <LabeledInput label="Title" value={node.title ?? ""} onChange={(value) => onChange({ title: value || undefined })} />
-      <LabeledInput label="Model" value={node.model ?? ""} onChange={(value) => onChange({ model: value || undefined })} />
+      <div className="grid gap-1">
+        <Label>Model</Label>
+        <ModelCombobox
+          value={node.model ?? null}
+          onSelect={(model) => onChange({ model })}
+          onClear={() => onChange({ model: undefined })}
+          emptyLabel="Use the runtime default"
+          ariaLabel="Model"
+        />
+        <LastRunModel models={lastRunModels} />
+      </div>
       <JsonTextarea
         label="Output schema (JSON)"
         value={node.outputSchema}
         onChange={(value) => onChange({ outputSchema: value })}
       />
+      <StepBudgetField node={node} onChange={onChange} />
       <SelectField
         label="Wait mode"
         value={node.wait?.mode ?? "none"}
