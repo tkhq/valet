@@ -26,6 +26,7 @@ import {
 import { ReviewSchema, type Finding, type Review } from "./types.js";
 import { anchorProblems, lineCount } from "./review.js";
 import { buildVerifierPrompt, decideFinding, VerdictSchema, type Verdict } from "./verify.js";
+import type { ReviewRound } from "./state.js";
 
 export const REVIEWER_ROLE = "pr-reviewer";
 export const VERIFIER_ROLE = "pr-verifier";
@@ -83,6 +84,8 @@ export interface PullPointers {
   lastReviewedHead?: string;
   findings: FindingPointer[];
   nextId: number;
+  /** The latest 100 completed reviews, oldest first. */
+  rounds?: ReviewRound[];
 }
 
 export const POINTERS_COLLECTION = "pulls";
@@ -164,7 +167,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
     const reviewId = prior?.reviewId !== undefined && (await gh.review(prior.reviewId))
       ? (await gh.updateReview(prior.reviewId, notice)).id
       : (await gh.createReview({ commitId: head, body: notice, comments: [] })).id;
-    await save({ version: 1, reviewId, lastReviewedHead: head, findings: prior?.findings ?? [], nextId: prior?.nextId ?? 1 });
+    await save({ version: 1, reviewId, lastReviewedHead: head, findings: prior?.findings ?? [], nextId: prior?.nextId ?? 1, ...(prior?.rounds ? { rounds: prior.rounds } : {}) });
     return log(slug, "skipped: pull request from a fork");
   }
 
@@ -350,7 +353,14 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   for (const { finding } of fixed) byId.set(finding.id, { ...pointer(finding, "resolved", finding.commentId), fixedIn: head });
   for (const f of inline) byId.set(f.id, pointer(f, "open", commentIds.get(f.id)));
   for (const f of outside) byId.set(f.id, pointer(f, "open", undefined));
-  await save({ version: 1, reviewId, lastReviewedHead: head, findings: [...byId.values()], nextId });
+  const round: ReviewRound = {
+    head,
+    mode: from !== undefined ? "incremental" : "full",
+    at: new Date().toISOString(),
+    newFindings: posted.map(f => f.id),
+    resolved: fixed.map(({ finding }) => finding.id),
+  };
+  await save({ version: 1, reviewId, lastReviewedHead: head, findings: [...byId.values()], nextId, rounds: [...(prior?.rounds ?? []), round].slice(-100) });
   log(slug, `reviewed ${head.slice(0, 7)} (${from ? "follow-up" : "full"}): ${posted.length} new, ${fixed.length} fixed, ${stillOpen.length} still open`);
 }
 

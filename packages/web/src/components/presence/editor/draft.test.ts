@@ -23,6 +23,7 @@ import {
   saveBlocker,
   scheduleCron,
   scheduleFromCron,
+  setHandler,
   setService,
   setThreadLink,
   suggestedName,
@@ -517,5 +518,57 @@ describe("plugin line settings", () => {
     const limited = line("l-limited", { target: { kind: "plugin", plugin: "reviewer", handler: "review", oncePerHours: 6 } });
     expect(applyLinePatch(limited, { name: "renamed" }).target).toMatchObject({ oncePerHours: 6 });
     expect(applyLinePatch(limited, { oncePerHours: null }).target).not.toHaveProperty("oncePerHours");
+  });
+});
+
+describe("plugin handler lines", () => {
+  const sub = line("l-review", {
+    name: "Code review",
+    eventKeys: ["github.pull_request.opened"],
+    filters: [{ field: "repo", op: "eq", value: "acme/site" }],
+    target: { kind: "plugin", plugin: "reviewer", handler: "review", config: { instructions: "Check auth." } },
+  });
+  const catalog: CatalogService[] = [
+    { service: "github", entries: [{ key: "github.pull_request.opened", description: "Opened", filters: [{ field: "repo" }] }] },
+  ];
+  const handler = { plugin: "reviewer", id: "review", events: ["github.pull_request.opened"] };
+
+  it("returns an organization assistant selection to personal scope when choosing a plugin", () => {
+    const draft = setHandler({ ...newDraft({ timezone: "UTC" }), name: "Review changes", assistant: "org" }, handler, catalog);
+    expect(draft.assistant).toBe("user");
+    expect(saveBlocker(draft, { kind: "create" }, { connected: true })).toBeNull();
+    const operation = bodyFromDraft(draft, { kind: "create" });
+    expect(operation.kind === "create-line" ? operation.body.target : undefined).toEqual({ kind: "plugin", plugin: "reviewer", handler: "review" });
+  });
+
+  it("opens a stored plugin line on its handler and settings, with no Where to pick", () => {
+    const draft = draftFromLine(sub);
+    expect(draft).toMatchObject({ doKind: "plugin", handler: { plugin: "reviewer", handler: "review" }, handlerConfig: { instructions: "Check auth." } });
+    expect(saveBlocker(draft, { kind: "edit", line: sub }, { connected: true })).toBeNull();
+  });
+
+  it("patches only the settings that changed, and clears them with null", () => {
+    const mode: EditorMode = { kind: "edit", line: sub };
+    const draft = draftFromLine(sub);
+    expect(bodyFromDraft(draft, mode)).toEqual({ kind: "patch-line", id: "l-review", body: {} });
+    expect(bodyFromDraft({ ...draft, handlerConfig: { instructions: "Check SQL." } }, mode).body).toEqual({ config: { instructions: "Check SQL." } });
+    expect(bodyFromDraft({ ...draft, handlerConfig: {} }, mode).body).toEqual({ config: null });
+  });
+
+  it("creates a plugin target for the picked handler, for the team it acts for", () => {
+    const picked = setHandler(newDraft({ timezone: "UTC", teamId: "team-1" }), handler, catalog);
+    expect(picked.service).toBe("github");
+    const body = bodyFromDraft({ ...picked, handlerConfig: { reviewDrafts: true }, name: "Code review" }, { kind: "create" });
+    expect(body.kind === "create-line" && body.body).toMatchObject({
+      eventKeys: ["github.pull_request.opened"],
+      target: { kind: "plugin", plugin: "reviewer", handler: "review", teamId: "team-1", config: { reviewDrafts: true } },
+    });
+  });
+
+  it("refuses a plugin line with no handler or for the organization's assistant", () => {
+    const base = { ...toggleEvent(setService(newDraft({ timezone: "UTC" }), "github"), "github.pull_request.opened", catalog), name: "Code review" };
+    expect(saveBlocker({ ...base, doKind: "plugin" }, { kind: "create" }, { connected: true })).toBe("Pick a plugin handler.");
+    const org = { ...setHandler(base, handler, catalog), assistant: "org" as const };
+    expect(saveBlocker(org, { kind: "create" }, { connected: true })).toMatch(/acts for you or a team/);
   });
 });

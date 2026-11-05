@@ -3727,10 +3727,64 @@ export interface PluginSummary {
    * populate the integrations allowlist. Present on all responses from v2+
    * servers; absent on responses from older servers or test stubs. */
   actionServices?: PluginActionServiceSummary[];
+  /** The plugin's event handlers (`ValetPlugin.eventHandlers`). A line with
+   * a `plugin` target names one of them. Absent when it declares none. */
+  eventHandlers?: PluginEventHandlerSummary[];
+}
+
+/** One plugin event handler, for the line editor's handler picker and settings form. */
+export interface PluginEventHandlerSummary {
+  id: string;
+  description: string;
+  /** Event keys the handler accepts. A trailing `.*` accepts a family. */
+  events: string[];
+  /** JSON Schema of the settings a line passes as `target.config`. Absent:
+   * the handler takes no settings. */
+  configSchema?: Record<string, unknown>;
 }
 
 export interface ListPluginsResponse {
   plugins: PluginSummary[];
+}
+
+// ── REST: code review ────────────────────────────────────────────────────
+
+export interface CodeReviewRoundWire {
+  head: string;
+  mode: "full" | "incremental";
+  /** ISO timestamp of the completed review. */
+  at: string;
+  newFindings: number;
+  resolved: number;
+}
+
+/** One open pull request with a review chain for a workspace. */
+export interface CodeReviewWire {
+  /** `owner/repo`. */
+  repo: string;
+  number: number;
+  title: string;
+  url: string;
+  state: "open";
+  /** Running includes queued deliveries and retries. Failed means retries ended. */
+  status: "running" | "complete" | "failed";
+  /** The latest 100 completed review rounds, oldest first. */
+  rounds: CodeReviewRoundWire[];
+  /** The GitHub review that Valet edits in place. Absent until the first post. */
+  reviewId?: number;
+  /** The last head commit Valet reviewed. */
+  head?: string;
+  openFindings: number;
+  resolvedFindings: number;
+  /** When the plugin last wrote its record for this pull request (epoch ms). */
+  updatedAt: number;
+  /** The plugin thread that holds the review work. Absent when it is gone. */
+  threadId?: string;
+}
+
+/** `GET /api/code-review/reviews` — newest first. */
+export interface ListCodeReviewsResponse {
+  reviews: CodeReviewWire[];
 }
 
 // ── REST: skills ─────────────────────────────────────────────────────────
