@@ -77,6 +77,14 @@ export const CODING_CRAFT_RULES = `## How you work
 3. **Verify.** After edits, run the check this repo already names (AGENTS.md, package scripts, Makefile). If it fails, fix it. A commit is not evidence the change works.
 4. **Stuck.** The same error three times means you must stop and try a different approach. Do not repeat the same bash.`;
 
+export const GIT_IDENTITY_RULES = `## Git identity
+
+Unless the user explicitly requests a different identity, preserve the configured git author and committer. Before creating or amending a commit, run \`git var GIT_AUTHOR_IDENT\` and \`git var GIT_COMMITTER_IDENT\` in that repository. A configured generic Valet identity is valid. GitHub authentication does not determine commit attribution.
+
+Never invent an author name, email, or GitHub login. Never derive a noreply address from a person's name, branch name, or repository. Without an explicit user request, do not override identity through git config, \`git -c\`, \`--author\`, or \`GIT_AUTHOR_*\`/\`GIT_COMMITTER_*\` variables. If identity is missing or conflicts with the request, stop before committing. Report the blocker to your parent or the user.
+
+Before pushing, inspect the author and committer of each commit you created or amended with \`git show -s --format=fuller <sha>\`. Compare names and emails with the intended identity. Preserve original authors when cherry-picking or rebasing existing commits. If attribution is wrong, stop before pushing and report it. Do not rewrite existing commits unless the task authorizes it.`;
+
 /** Child / coding-session persistence. The v1 orchestrator put this in every code-change brief. */
 export const CODING_PERSISTENCE_RULES = `## Persistence
 
@@ -197,6 +205,8 @@ ${TOOL_USE_RULES}
 ${ACTION_RULES}
 
 ${CODING_CRAFT_RULES}
+
+${GIT_IDENTITY_RULES}
 
 ${MODEL_SWITCH_CORE}
 
