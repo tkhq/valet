@@ -133,6 +133,91 @@ The provider also adapts the shared sandbox memory contract at this boundary.
 converts it to a decimal byte count for `docker run --memory`. The desired spec
 and applied metadata keep the configured quantity string unchanged.
 
+### Docker host resource containment
+
+`DockerSandboxProviderOptions.cgroupParent` optionally selects an operator-provisioned
+parent on the configured Docker host. The provider passes `--cgroup-parent` to
+workloads, browser companions, ownership-repair helpers, and retained-audit readers.
+Browser upgrades apply the same parent to both replacement owners.
+
+The operator must provision and verify finite parent limits on the Docker host.
+The provider does not configure systemd or inspect the API host for remote-daemon limits.
+API, database, Docker, and administration services must remain outside that parent.
+
+`defaultResources` uses the shared `SandboxResources` type. Creation resources
+override each defined field. Missing fields retain provider defaults, including
+scratch mount selection. Docker converts memory quantities to bytes at creation.
+Browser companions retain their separate CPU and memory limits.
+Without either option, the existing Docker arguments and resource behavior remain unchanged.
+
+Adoption checks the actual `HostConfig.CgroupParent` of every running owner against
+the configured parent. A mismatch fails before adoption and preserves inventory and state.
+Release the execution environment before creating a replacement with retained state.
+Cleanup validates ownership without applying the adoption policy, so legacy owners remain releasable.
+Resource defaults apply to new containers. They do not change existing running limits.
+Stopped owners still require replacement. Docker hibernation remains disabled.
+
+#### API deployment configuration
+
+The Docker backend reads three optional environment variables:
+
+| Variable | Provider option | Validation |
+| --- | --- | --- |
+| `VALET_DOCKER_CGROUP_PARENT` | `cgroupParent` | Trim surrounding spaces; reject explicit blank values and control characters. |
+| `VALET_SANDBOX_CPU` | `defaultResources.cpu` | Shared CPU range: greater than zero and at most 64. |
+| `VALET_SANDBOX_MEMORY` | `defaultResources.memory` | Positive Kubernetes quantity, such as `2Gi`. |
+
+Unset options remain absent. Empty CPU and memory values also remain absent.
+Invalid configured values stop API startup with corrective guidance.
+Explicit session or repository resources override each CPU or memory default separately.
+Kubernetes-only ephemeral-storage defaults and validation do not apply to Docker.
+Local and Kubernetes backends ignore the Docker cgroup parent variable.
+
+#### Operator provisioning and verification
+
+This example reserves sandbox memory headroom on a 16 GiB Linux host with cgroup v2 and a systemd Docker cgroup driver.
+Choose limits that leave enough memory for the API, database, Docker daemon, SSH, and other host services.
+`MemoryHigh` starts reclaim and throttling before the hard `MemoryMax` boundary.
+`MemoryMax` can trigger an out-of-memory kill inside the slice.
+The shared boundary contains overload; it does not queue work or refuse admission before exhaustion.
+
+1. On the actual Docker host, check the driver with `docker info --format '{{.CgroupDriver}} {{.CgroupVersion}}'`.
+2. For a systemd driver, create `/etc/systemd/system/valet-sandboxes.slice` with the following limits.
+
+   ```ini
+   [Unit]
+   Description=Valet sandbox resource boundary
+
+   [Slice]
+   MemoryHigh=6G
+   MemoryMax=8G
+   MemorySwapMax=0
+   TasksMax=4096
+   CPUQuota=600%
+   ```
+
+3. On that host, run `sudo systemctl daemon-reload`.
+4. Run `sudo systemctl start valet-sandboxes.slice`.
+5. Inspect the loaded limits with the following command.
+
+   ```sh
+   systemctl show valet-sandboxes.slice \
+     -p ControlGroup -p MemoryHigh -p MemoryMax -p MemorySwapMax \
+     -p TasksMax -p CPUQuotaPerSecUSec
+   ```
+
+6. Under `/sys/fs/cgroup`, inspect the reported control group's `memory.high`, `memory.max`, `memory.swap.max`, `pids.max`, and `cpu.max` files.
+7. Verify finite limits match the intended budget before configuring the API.
+8. Verify the API, database, Docker daemon, and administration services remain outside the slice.
+9. Set `VALET_DOCKER_CGROUP_PARENT=valet-sandboxes.slice`, `VALET_SANDBOX_MEMORY=2Gi`, and `VALET_SANDBOX_CPU=2` in the API deployment.
+10. After restarting the API, verify new managed containers report the expected `HostConfig.CgroupParent` with `docker inspect`.
+
+For a cgroupfs driver, provision a finite cgroup using that host's management tools and configure its Docker parent path.
+The API never runs `systemctl` or verifies host limits; its Docker daemon can run on another host.
+An existing running owner under another parent fails adoption without changing its limits or deleting retained state.
+Before replacement, release that execution environment through its normal lifecycle.
+Then recreate it from retained state under the configured parent.
+
 ### sandbox-kubernetes
 
 `ContainerSecurityContext`
