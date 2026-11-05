@@ -22,7 +22,7 @@ export function OngoingReviews({ reviews, loading, error }: {
         : error ? <ErrorRow>{errorText(error)}</ErrorRow>
         : !reviews?.length ? (
           <div className="px-4 py-6 text-sm text-muted sm:px-5">
-            No ongoing reviews. Open pull requests appear here when Valet starts reviewing them.
+            No ongoing reviews in this workspace. Open pull requests appear here when Valet starts reviewing them.
           </div>
         )
         : reviews.map((review) => <ReviewChain key={`${review.repo}#${review.number}`} review={review} />)}

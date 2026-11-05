@@ -44,4 +44,16 @@
 - The fresh final unit sweep under Node 24 has 15,660 passed, 9 failed, and 78 skipped tests. All changed suites pass. The remaining failures are in unchanged OIDC, skill-file publishing, skill collection, and credential-scanning performance tests. Skill publishing fails on macOS `chmod --`; OIDC expects an API configuration path that the deployment now rejects.
 - The isolated engine checkpoint suite has 35 passed tests and one timeout. The full engine run had two other checkpoint timeouts under concurrent load.
 - Conventions reports three existing double casts in `source-service.test.ts`, Kubernetes `provider.test.ts`, and workflow `validate.test.ts`.
-- No deployment, review subscription change, or pull request review was performed. The existing personal review configuration remains active.
+- Verification did not change review subscriptions or post pull request reviews.
+
+## Release preparation
+
+The release branch starts from current `dev-v2` and preserves its newer reviewer
+validation. Installed repositories now appear in the main inventory, with
+configured repositories first and a filter for large installations. Shared
+configurations use read-only repository switches and link to their full rule.
+Changing workspaces remounts settings for the incoming rule.
+
+Fresh checks on the release branch pass: 58 targeted frontend tests, 51 review
+API and plugin-metadata tests, 39 reviewer-plugin tests, and 71 Presence editor
+tests. Web typecheck passes. Independent review findings have regression tests.

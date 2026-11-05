@@ -100,8 +100,8 @@ describe("AddRepositoryDialog", () => {
   it("matches an in condition without case sensitivity", () => {
     const line = reviewLine("multi-line", "acme/site", { filters: [{ field: "repo", op: "in", value: ["ACME/SITE", "acme/api"] }] });
     render(dialog([line]));
-    fireEvent.click(screen.getByRole("button", { name: /acme\/api.*Manage/ }));
-    expect(onExisting).toHaveBeenCalledWith("multi-line");
+    expect(screen.getByRole("link", { name: /acme\/api.*Open configuration/ }).getAttribute("href")).toBe("/presence/rules/multi-line");
+    expect(onExisting).not.toHaveBeenCalled();
     expect(create).not.toHaveBeenCalled();
   });
 
@@ -116,8 +116,8 @@ describe("AddRepositoryDialog", () => {
   ])("opens the existing configuration when $name filters cover the repository", ({ filters }) => {
     const line = reviewLine("matching-line", "acme/api", { filters });
     render(dialog([line]));
-    fireEvent.click(screen.getByRole("button", { name: /acme\/api.*Manage/ }));
-    expect(onExisting).toHaveBeenCalledWith("matching-line");
+    expect(screen.getByRole("link", { name: /acme\/api.*Open configuration/ }).getAttribute("href")).toBe("/presence/rules/matching-line");
+    expect(onExisting).not.toHaveBeenCalled();
     expect(create).not.toHaveBeenCalled();
   });
 
@@ -139,8 +139,8 @@ describe("AddRepositoryDialog", () => {
   it("uses a broad review line for each covered repository", () => {
     const line = reviewLine("all-repos", "all", { filters: [] });
     render(dialog([line]));
-    fireEvent.click(screen.getByRole("button", { name: /acme\/api.*Manage/ }));
-    expect(onExisting).toHaveBeenCalledWith("all-repos");
+    expect(screen.getByRole("link", { name: /acme\/api.*Open configuration/ }).getAttribute("href")).toBe("/presence/rules/all-repos");
+    expect(onExisting).not.toHaveBeenCalled();
     expect(create).not.toHaveBeenCalled();
   });
 
@@ -153,13 +153,13 @@ describe("AddRepositoryDialog", () => {
     expect(create).not.toHaveBeenCalled();
   });
 
-  it("allows review here when another workspace's configuration is off", () => {
+  it("opens another workspace's disabled configuration without creating a duplicate", () => {
     subscriptions = [reviewLine("personal-line", "acme/site", { enabled: false })];
     render(dialog([], "team-1"));
     expect(screen.getByText("Reviews off in another workspace")).toBeTruthy();
-    expect(screen.getByRole("link", { name: "Open configuration" }).getAttribute("href")).toBe("/presence/rules/personal-line");
-    fireEvent.click(screen.getByRole("button", { name: /acme\/site.*Add/ }));
-    expect(create).toHaveBeenCalledOnce();
+    expect(screen.getByRole("link", { name: /acme\/site.*Open configuration/ }).getAttribute("href")).toBe("/presence/rules/personal-line");
+    expect(screen.queryByRole("button", { name: /acme\/site.*Add/ })).toBeNull();
+    expect(create).not.toHaveBeenCalled();
   });
 
   it("does not treat a nonmatching regex as covering every repository", () => {

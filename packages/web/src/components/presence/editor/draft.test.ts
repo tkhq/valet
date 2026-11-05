@@ -533,6 +533,14 @@ describe("plugin handler lines", () => {
   ];
   const handler = { plugin: "reviewer", id: "review", events: ["github.pull_request.opened"] };
 
+  it("returns an organization assistant selection to personal scope when choosing a plugin", () => {
+    const draft = setHandler({ ...newDraft({ timezone: "UTC" }), name: "Review changes", assistant: "org" }, handler, catalog);
+    expect(draft.assistant).toBe("user");
+    expect(saveBlocker(draft, { kind: "create" }, { connected: true })).toBeNull();
+    const operation = bodyFromDraft(draft, { kind: "create" });
+    expect(operation.kind === "create-line" ? operation.body.target : undefined).toEqual({ kind: "plugin", plugin: "reviewer", handler: "review" });
+  });
+
   it("opens a stored plugin line on its handler and settings, with no Where to pick", () => {
     const draft = draftFromLine(sub);
     expect(draft).toMatchObject({ doKind: "plugin", handler: { plugin: "reviewer", handler: "review" }, handlerConfig: { instructions: "Check auth." } });

@@ -16,13 +16,16 @@ function storedConfig(line: EventSubscriptionWire): HandlerConfig {
   return line.target.kind === "plugin" ? line.target.config ?? {} : {};
 }
 
-export function RepositoryRow({ line, handler, initiallyOpen = false, openRequest }: {
+export function RepositoryRow({ line, handler, initiallyOpen = false, openRequest, repository, installed = false }: {
   line: EventSubscriptionWire;
   handler: HandlerOption | undefined;
   /** True for a line the reader just added, so its settings show at once. */
   initiallyOpen?: boolean;
   /** A new request opens settings even when the row already exists. */
   openRequest?: number;
+  /** One repository represented by a line that may cover several. */
+  repository?: string;
+  installed?: boolean;
 }) {
   const patch = usePatchEventSubscription();
   const remove = useDeleteEventSubscription();
@@ -40,7 +43,8 @@ export function RepositoryRow({ line, handler, initiallyOpen = false, openReques
   }, [line.updatedAt]);
 
   const repos = lineRepos(line);
-  const title = repos === null ? "Every repository" : repos.join(", ");
+  const coveredRepositories = repos === null ? (line.filters.some((filter) => filter.field === "repo") ? line.name : "Every repository") : repos.join(", ");
+  const title = repository ?? coveredRepositories;
 
   function save() {
     setError(null);
@@ -54,7 +58,7 @@ export function RepositoryRow({ line, handler, initiallyOpen = false, openReques
     <div>
       <WorkRow
         title={title}
-        detail={line.enabled ? "Reviews each push to an open pull request." : "Off. Pull requests are not reviewed."}
+        detail={`${installed ? "GitHub App installed. " : ""}${line.enabled ? "Reviews each push to an open pull request." : "Code review is off."}`}
         actions={(
           <>
             <Button variant="ghost" size="sm" aria-expanded={open} onClick={() => setOpen(!open)}>
@@ -87,7 +91,7 @@ export function RepositoryRow({ line, handler, initiallyOpen = false, openReques
         open={confirming}
         onOpenChange={setConfirming}
         title="Stop code review here?"
-        description={`Valet stops reviewing pull requests in ${title}. Reviews it already posted stay on GitHub.`}
+        description={`Valet stops reviewing pull requests in ${coveredRepositories}. Reviews it already posted stay on GitHub.`}
         confirmLabel="Remove"
         pendingLabel="Removing…"
         pending={remove.isPending}

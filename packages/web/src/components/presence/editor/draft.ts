@@ -542,6 +542,7 @@ export function setHandler(draft: Draft, handler: { plugin: string; id: string; 
   return {
     ...draft,
     doKind: "plugin",
+    assistant: draft.assistant === "org" ? "user" : draft.assistant,
     handler: { plugin: handler.plugin, handler: handler.id },
     handlerConfig: {},
     service,

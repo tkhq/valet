@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
-import type { EventSubscriptionFilterWire, EventSubscriptionWire } from "@valet/api/wire";
+import type { EventSubscriptionWire } from "@valet/api/wire";
 import { ApiError } from "~/api/api-error";
 import { useCreateEventSubscription, useEventSubscriptions } from "~/api/events";
 import { useRepos } from "~/api/repos";
@@ -8,7 +8,7 @@ import { collisionsFromError } from "~/components/events/collision-notice";
 import type { HandlerOption } from "~/components/plugins/handler-settings";
 import { Button, Dialog, DialogContent, Input, LoadingRow, textLinkClass } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
-import { isReviewLine, reviewLineBody } from "./review-lines";
+import { coversRepository, isSingleRepositoryLine, reviewLineBody } from "./review-lines";
 
 interface AddRepositoryDialogProps {
   open: boolean;
@@ -32,41 +32,6 @@ export function AddRepositoryDialog(props: AddRepositoryDialogProps) {
       </DialogContent>
     </Dialog>
   );
-}
-
-function coversRepository(line: EventSubscriptionWire, repo: string): boolean {
-  return isReviewLine(line) && line.filters
-    .filter((filter) => filter.field === "repo")
-    .every((filter) => repositoryFilterMatches(repo, filter));
-}
-
-/** Mirrors events/match.ts, with case-insensitive GitHub repository identity for equality lists. */
-function repositoryFilterMatches(repo: string, filter: EventSubscriptionFilterWire): boolean {
-  const value = filter.value;
-  switch (filter.op) {
-    case "eq":
-      return typeof value === "string" && repo.toLowerCase() === value.toLowerCase();
-    case "in":
-    case "not_in": {
-      if (!Array.isArray(value)) return false;
-      const included = value.some((entry) => entry.toLowerCase() === repo.toLowerCase());
-      return included === (filter.op === "in");
-    }
-    case "prefix":
-      return typeof value === "string" && repo.startsWith(value);
-    case "contains":
-      return typeof value === "string" && repo.includes(value);
-    case "not_prefix":
-      return typeof value === "string" && !repo.startsWith(value);
-    case "regex":
-    case "not_regex":
-      if (typeof value !== "string") return false;
-      try {
-        return new RegExp(value).test(repo.slice(0, 2_000)) === (filter.op === "regex");
-      } catch {
-        return false;
-      }
-  }
 }
 
 function RepositoryChoices({ lines, handler, teamId, onAdded, onExisting }: AddRepositoryDialogProps) {
@@ -117,7 +82,8 @@ function RepositoryChoices({ lines, handler, teamId, onAdded, onExisting }: AddR
               const local = lines.find((line) => coversRepository(line, repo.fullName));
               const foreign = allLines.filter((line) => coversRepository(line, repo.fullName));
               const existing = local ?? foreign.find((line) => line.enabled) ?? foreign[0];
-              const foreignActive = existing !== undefined && !local && existing.enabled;
+              const editable = local !== undefined && isSingleRepositoryLine(local);
+              const fullConfiguration = existing !== undefined && !editable;
               const add = () => create.mutate(reviewLineBody(repo.fullName, handler, teamId), { onSuccess: (response) => onAdded(response.id) });
               const details = (
                 <span className="flex w-full min-w-0 items-center justify-between gap-3 py-2">
@@ -125,10 +91,10 @@ function RepositoryChoices({ lines, handler, teamId, onAdded, onExisting }: AddR
                     <span className="block break-words [overflow-wrap:anywhere]">{repo.fullName}</span>
                     {existing && <span className="block text-xs text-muted">{local ? (existing.enabled ? "Configured" : "Reviews off") : existing.enabled ? "Configured in another workspace" : "Reviews off in another workspace"}</span>}
                   </span>
-                  <span className="shrink-0 text-xs text-muted">{local ? "Manage" : foreignActive ? "Open configuration" : "Add"}</span>
+                  <span className="shrink-0 text-xs text-muted">{editable ? "Manage" : fullConfiguration ? "Open configuration" : "Add"}</span>
                 </span>
               );
-              if (foreignActive) {
+              if (fullConfiguration) {
                 return (
                   <Button key={repo.fullName} asChild size="md" variant="ghost" className={rowClass}>
                     <Link to="/presence/rules/$id" params={{ id: existing.id }} aria-disabled={create.isPending} tabIndex={create.isPending ? -1 : undefined} onClick={(event) => { if (create.isPending) event.preventDefault(); }}>{details}</Link>
@@ -146,11 +112,6 @@ function RepositoryChoices({ lines, handler, teamId, onAdded, onExisting }: AddR
                   >
                     {details}
                   </Button>
-                  {existing && !local && (
-                    <div className="px-3.5 pb-2 text-xs">
-                      <Link to="/presence/rules/$id" params={{ id: existing.id }} className={textLinkClass} aria-disabled={create.isPending} tabIndex={create.isPending ? -1 : undefined} onClick={(event) => { if (create.isPending) event.preventDefault(); }}>Open configuration</Link>
-                    </div>
-                  )}
                 </div>
               );
             })}

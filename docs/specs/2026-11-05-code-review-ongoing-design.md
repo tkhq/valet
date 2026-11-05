@@ -24,6 +24,16 @@ A configuration in another workspace states that scope and links to its rule.
 Loading, error, empty, and pending states remain visible. A server collision
 offers the existing configuration instead of an unavailable override action.
 
+The main repository list also includes repositories where the GitHub App is
+installed. Installation grants access; it does not silently enable reviews.
+An installed repository without a review rule shows an Off switch. Turning it
+on creates one rule in the active workspace. Existing accessible configurations
+appear with their owning workspace. Configurations in another workspace link
+to their existing rule and cannot be changed through the active workspace.
+
+Choosing a plugin handler in Presence resets an organization assistant selection
+to personal scope, because plugins can act only for a person or a team.
+
 The change does not move existing configurations between workspaces or create a
 second review subscription. Turnkey's monorepo pilot still requires the PR
 review plugin to be deployed there before its repository can be configured.
