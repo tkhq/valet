@@ -11,7 +11,7 @@
 import { Type, type Static, type TSchema } from "typebox";
 import type { PluginChild, PluginEvent, PluginEventContext, PluginEventHandler, PluginThreadRef } from "@valet/engine";
 import { cutPatch, type PullRequestDiff } from "./git.js";
-import { githubClient, GitHubError, type GitHubClient, type PullFile, type ReviewComment } from "./github.js";
+import { githubClient, GitHubError, type GitHubClient, type PullFile, type ReviewComment, type ReviewThread } from "./github.js";
 import { sameIssue } from "./incremental.js";
 import { commentableLines } from "./linemap.js";
 import { buildReviewPrompt } from "./prompt.js";
@@ -92,6 +92,12 @@ export interface PullPointers {
   nextId: number;
   /** The latest 100 completed reviews, oldest first. */
   rounds?: ReviewRound[];
+  /** Temporary retry journal, cleared after all GitHub comment/thread edits succeed. */
+  pending?: {
+    head: string;
+    round: ReviewRound;
+    updates: { pointer: FindingPointer & { commentId: number }; body: string }[];
+  };
 }
 
 export const POINTERS_COLLECTION = "pulls";
@@ -158,13 +164,14 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   if (pr.state !== "open") return log(slug, `skipped: the pull request is ${pr.state}`);
   if (pr.draft && !settings.reviewDrafts) return log(slug, "skipped: draft pull request");
 
-  const stored = await ctx.store.get<PullPointers>(POINTERS_COLLECTION, slug);
-  const prior = stored?.doc;
-  if (prior?.lastReviewedHead === head) return log(slug, `skipped: ${head.slice(0, 7)} is already reviewed`);
+  let stored = await ctx.store.get<PullPointers>(POINTERS_COLLECTION, slug);
+  let prior = stored?.doc;
 
   const save = async (next: PullPointers): Promise<void> => {
-    await ctx.store.put(POINTERS_COLLECTION, slug, next, stored ? { ifRevision: stored.revision } : undefined);
+    stored = await ctx.store.put(POINTERS_COLLECTION, slug, next, stored ? { ifRevision: stored.revision } : undefined);
   };
+  if (prior?.pending) prior = await finishPendingUpdates(gh, prior, save, ctx.signal);
+  if (prior?.lastReviewedHead === head) return log(slug, `skipped: ${head.slice(0, 7)} is already reviewed`);
 
   if (pr.head.repo?.full_name !== pr.base.repo.full_name) {
     // A child cannot check out a fork's head yet (refs/pull/N/head).
@@ -348,21 +355,19 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   }
 
   const commentIds = inlineReviewId !== undefined && inline.length > 0 ? await newCommentIds(gh, inlineReviewId) : new Map<string, number>();
-  const warn = (what: string) => (err: unknown): void => {
-    // The summary still carries the state; a failed thread edit must not fail the review.
-    console.warn(`pr-review ${slug}: ${what} failed`, err instanceof Error ? err.message : err);
-  };
+  const updates: NonNullable<PullPointers["pending"]>["updates"] = [];
   for (const { finding, reason } of fixed) {
     if (finding.commentId === undefined) continue;
     const comment = open.comments.get(finding.commentId);
     if (!comment) continue;
-    await gh.updateComment(finding.commentId, renderFixedComment(comment.body, head, reason)).catch(warn(`marking ${finding.id} fixed`));
-    if (finding.threadId) await gh.setThreadResolved(finding.threadId, true).catch(warn(`resolving the thread of ${finding.id}`));
+    updates.push({
+      pointer: { ...pointer(finding, "resolved", finding), commentId: finding.commentId, fixedIn: head },
+      body: renderFixedComment(comment.body, head, reason),
+    });
   }
   for (const f of reopened) {
     if (f.commentId === undefined) continue;
-    await gh.updateComment(f.commentId, renderInlineComment(f)).catch(warn(`reopening ${f.id}`));
-    if (f.threadId) await gh.setThreadResolved(f.threadId, false).catch(warn(`unresolving the thread of ${f.id}`));
+    updates.push({ pointer: { ...pointer(f, "open", f), commentId: f.commentId }, body: renderInlineComment(f) });
   }
 
   // 8. Save the new pointers.
@@ -372,8 +377,9 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
     if (p) byId.set(d.id, { ...p, status: "dismissed" });
   }
   for (const f of stillOpen) byId.set(f.id, pointer(f, "open", f));
-  for (const { finding } of fixed) byId.set(finding.id, { ...pointer(finding, "resolved", finding), fixedIn: head });
-  for (const f of reopened) byId.set(f.id, pointer(f, "open", f));
+  for (const { finding } of fixed) {
+    if (finding.commentId === undefined) byId.set(finding.id, { ...pointer(finding, "resolved", finding), fixedIn: head });
+  }
   for (const f of inline) {
     const commentId = commentIds.get(f.id);
     byId.set(f.id, pointer(f, "open", commentId !== undefined ? { commentId } : {}));
@@ -386,8 +392,71 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
     newFindings: posted.map(f => f.id),
     resolved: fixed.map(({ finding }) => finding.id),
   };
-  await save({ version: 1, reviewId, lastReviewedHead: head, findings: [...byId.values()], nextId, rounds: [...(prior?.rounds ?? []), round].slice(-100) });
+  const next: PullPointers = {
+    version: 1,
+    reviewId,
+    findings: [...byId.values()],
+    nextId,
+    ...(prior?.lastReviewedHead ? { lastReviewedHead: prior.lastReviewedHead } : {}),
+    ...(prior?.rounds ? { rounds: prior.rounds } : {}),
+    pending: { head, round, updates },
+  };
+  // External edits can partly succeed. Save their intent and newly posted ids
+  // first, so a retry neither posts duplicates nor mistakes our resolution for
+  // a person's dismissal. Pending bodies exist only until the batch completes.
+  await save(next);
+  await finishPendingUpdates(gh, next, save, ctx.signal);
   log(slug, `reviewed ${head.slice(0, 7)} (${from ? "follow-up" : "full"}): ${posted.length} new, ${fixed.length} fixed, ${reopened.length} reopened, ${stillOpen.length} still open`);
+}
+
+async function finishPendingUpdates(
+  gh: GitHubClient,
+  state: PullPointers,
+  save: (next: PullPointers) => Promise<void>,
+  signal: AbortSignal,
+): Promise<PullPointers> {
+  const pending = state.pending;
+  if (!pending) return state;
+  const byId = new Map(state.findings.map(p => [p.id, p]));
+  if (pending.updates.length > 0) {
+    const comments = new Map((await gh.reviewComments()).map(c => [c.id, c]));
+    const threads = await gh.reviewThreads();
+    for (const { pointer: desired, body } of pending.updates) {
+      signal.throwIfAborted();
+      const comment = comments.get(desired.commentId);
+      if (!comment) {
+        // External deletion is a normal dismissal, including during a retry.
+        byId.set(desired.id, { ...desired, status: "dismissed" });
+        continue;
+      }
+      const thread = threads.find(t => t.commentId === desired.commentId || t.id === desired.threadId);
+      const threadId = thread?.id ?? desired.threadId;
+      if (!threadId) throw new Error(`GitHub has not returned the review thread for ${desired.id}. Retry the delivery after GitHub finishes creating the thread.`);
+      if (resolvedByAnotherActor(thread)) {
+        byId.set(desired.id, { ...desired, status: "dismissed" });
+        continue;
+      }
+      if (comment.body !== body) await gh.updateComment(desired.commentId, body);
+      const resolved = desired.status === "resolved";
+      if (thread?.isResolved !== resolved) await gh.setThreadResolved(threadId, resolved);
+      byId.set(desired.id, { ...desired, threadId });
+    }
+  }
+  signal.throwIfAborted();
+  const next: PullPointers = {
+    ...state,
+    lastReviewedHead: pending.head,
+    findings: [...byId.values()],
+    rounds: [...(state.rounds ?? []), pending.round].slice(-100),
+  };
+  delete next.pending;
+  await save(next);
+  return next;
+}
+
+function resolvedByAnotherActor(thread: ReviewThread | undefined): boolean {
+  return thread?.isResolved === true && thread.author !== undefined && thread.resolvedBy !== undefined &&
+    thread.author.toLowerCase() !== thread.resolvedBy.toLowerCase();
 }
 
 type OpenFinding = PostedFinding & { commentId?: number; threadId?: string };
@@ -407,7 +476,7 @@ async function recoverFindings(
 ): Promise<{ live: OpenFinding[]; fixed: OpenFinding[]; dismissed: DismissedFinding[]; comments: Map<number, ReviewComment> }> {
   const pointers = prior?.findings ?? [];
   const comments = new Map<number, ReviewComment>();
-  const threads = new Map<number, { id: string; isResolved: boolean }>();
+  const threads = new Map<number, ReviewThread>();
   if (pointers.length === 0) return { live: [], fixed: [], dismissed: [], comments };
   if (pointers.some((p) => p.commentId !== undefined)) {
     for (const c of await gh.reviewComments()) comments.set(c.id, c);
@@ -424,7 +493,7 @@ async function recoverFindings(
     const gone = !text;
     // Valet resolves a thread only when it marks the finding fixed, so an
     // open finding in a resolved thread was resolved by a person.
-    if (p.status === "dismissed" || gone || (p.status === "open" && thread?.isResolved)) {
+    if (p.status === "dismissed" || gone || resolvedByAnotherActor(thread) || (p.status === "open" && thread?.isResolved)) {
       dismissed.push({ id: p.id, path: p.path, line: p.line, ...(text ? { title: text.title } : {}) });
     } else if (p.status === "open") {
       live.push({ ...text, ...where });

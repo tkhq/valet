@@ -62,6 +62,11 @@ class FakeGitHub {
   refuseInline = false;
   /** Thread state by first-comment id. Every comment is its own thread here. */
   resolved = new Set<number>();
+  resolvedBy = new Map<number, string>();
+  failCommentEdit = false;
+  failThreadEditFor?: number;
+  hideThreads = false;
+  onThreadEdit?: () => void;
   writes: string[] = [];
   private nextId = 100;
 
@@ -78,13 +83,26 @@ class FakeGitHub {
       const variables = body.variables as Record<string, unknown>;
       if (query.includes("reviewThreads")) {
         this.writes.pop(); // a read, not a write
-        const nodes = this.comments.map((c) => ({ id: `T_${c.id}`, isResolved: this.resolved.has(c.id), comments: { nodes: [{ databaseId: c.id }] } }));
+        const nodes = (this.hideThreads ? [] : this.comments).map((c) => ({
+          id: `T_${c.id}`,
+          isResolved: this.resolved.has(c.id),
+          resolvedBy: this.resolved.has(c.id) ? { login: this.resolvedBy.get(c.id) ?? "reviewer" } : null,
+          comments: { nodes: [{ databaseId: c.id, author: { login: "valet[bot]" } }] },
+        }));
         return ok({ data: { repository: { pullRequest: { reviewThreads: { nodes, pageInfo: { hasNextPage: false, endCursor: null } } } } } });
       }
       const commentId = Number(String(variables.id).replace("T_", ""));
+      if (this.failThreadEditFor === commentId) {
+        this.failThreadEditFor = undefined;
+        return new Response(JSON.stringify({ message: "Temporary thread failure" }), { status: 500 });
+      }
       if (query.includes("unresolveReviewThread")) this.resolved.delete(commentId);
-      else this.resolved.add(commentId);
+      else {
+        this.resolved.add(commentId);
+        this.resolvedBy.set(commentId, "valet[bot]");
+      }
       this.writes.push(`${query.includes("unresolveReviewThread") ? "unresolve" : "resolve"} ${commentId}`);
+      this.onThreadEdit?.();
       return ok({ data: {} });
     }
     if (method === "GET" && path === "/pulls/7") {
@@ -131,6 +149,10 @@ class FakeGitHub {
     }
     const commentMatch = /^\/pulls\/comments\/(\d+)$/.exec(path);
     if (method === "PATCH" && commentMatch) {
+      if (this.failCommentEdit) {
+        this.failCommentEdit = false;
+        return new Response(JSON.stringify({ message: "Temporary comment failure" }), { status: 500 });
+      }
       const comment = this.comments.find((c) => c.id === Number(commentMatch[1]));
       if (comment) comment.body = String(body.body);
       return ok({});
@@ -141,11 +163,16 @@ class FakeGitHub {
 
 class FakeStore implements ScopedPluginStore {
   docs = new Map<string, PluginStoreDoc<unknown>>();
+  failNextWrite = false;
   async get<T>(collection: string, key: string): Promise<PluginStoreDoc<T> | null> {
     // Test-only store: each key holds whatever the handler put there.
     return (this.docs.get(`${collection}/${key}`) as PluginStoreDoc<T> | undefined) ?? null;
   }
   async put<T>(collection: string, key: string, doc: T, opts?: { ifRevision?: number }): Promise<PluginStoreDoc<T>> {
+    if (this.failNextWrite) {
+      this.failNextWrite = false;
+      throw new Error("Store unavailable");
+    }
     const current = this.docs.get(`${collection}/${key}`);
     if (opts?.ifRevision !== undefined && current?.revision !== opts.ifRevision) throw new Error("revision moved");
     const now = Date.now();
@@ -412,6 +439,179 @@ describe("review-pull-request handler", () => {
     expect(gh.comments[0].body).not.toContain("Fixed in");
     expect(gh.writes).toContain(`unresolve ${commentId}`);
     expect(store.pointers()?.findings).toMatchObject([{ id: "f1", status: "open", line: 6, commentId }]);
+  });
+
+  it.each(["comment", "thread"])("retries a failed %s edit before recording a finding as resolved", async (failure) => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const handler = createReviewHandler({ fetch: gh.fetch });
+    await handler.handle(event("ev1"), context(new FakeThreads(scripted(reviewOf([finding({})]), {})), store));
+    const commentId = gh.comments[0].id;
+    gh.head = H2;
+    if (failure === "comment") gh.failCommentEdit = true;
+    else gh.failThreadEditFor = commentId;
+    const second = new FakeThreads(scripted(reviewOf([finding({ line: 12, title: "Leaked handle in close" })]), {
+      "Null deref in parse": verdict("refuted"),
+    }));
+
+    await expect(handler.handle(event("ev2"), context(second, store))).rejects.toThrow("Temporary");
+    expect(store.pointers()?.lastReviewedHead).toBe(H1);
+    expect(store.pointers()?.rounds).toHaveLength(1);
+    expect(store.pointers()?.findings[0].status).toBe("open");
+    expect(gh.resolved.has(commentId)).toBe(false);
+    const reviewCount = gh.reviews.size;
+    const retry = new FakeThreads(() => { throw new Error("A posting retry must not run another review"); });
+    await handler.handle(event("ev2-retry"), context(retry, store));
+
+    expect(gh.resolved.has(commentId)).toBe(true);
+    expect(gh.comments[0].body).toContain("**Fixed in `2222222`.**");
+    expect(store.pointers()?.lastReviewedHead).toBe(H2);
+    expect(store.pointers()?.rounds).toHaveLength(2);
+    expect(store.pointers()?.findings).toMatchObject([{ id: "f1", status: "resolved", fixedIn: H2 }, { id: "f2", status: "open" }]);
+    expect(gh.comments).toHaveLength(2);
+    expect(gh.reviews.size).toBe(reviewCount);
+  });
+
+  it.each(["comment", "thread"])("retries a failed %s edit when reopening a fixed finding", async (failure) => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const handler = createReviewHandler({ fetch: gh.fetch });
+    await handler.handle(event("ev1"), context(new FakeThreads(scripted(reviewOf([finding({})]), {})), store));
+    const commentId = gh.comments[0].id;
+    gh.head = H2;
+    await handler.handle(event("ev2"), context(new FakeThreads(scripted(reviewOf([]), { "Null deref in parse": verdict("refuted") })), store));
+    gh.head = "3".repeat(40);
+    if (failure === "comment") gh.failCommentEdit = true;
+    else gh.failThreadEditFor = commentId;
+    const back = finding({ line: 6, body: "The new branch reads input[0] without the earlier guard." });
+
+    await expect(handler.handle(event("ev3"), context(new FakeThreads(scripted(reviewOf([back]), {})), store))).rejects.toThrow("Temporary");
+    expect(store.pointers()?.lastReviewedHead).toBe(H2);
+    expect(store.pointers()?.findings[0].status).toBe("resolved");
+    expect(gh.resolved.has(commentId)).toBe(true);
+    await handler.handle(event("ev3-retry"), context(new FakeThreads(() => { throw new Error("A posting retry must not run another review"); }), store));
+
+    expect(gh.comments).toHaveLength(1);
+    expect(gh.resolved.has(commentId)).toBe(false);
+    expect(gh.comments[0].body).toContain(back.body);
+    expect(gh.comments[0].body).not.toContain("Fixed in");
+    expect(store.pointers()?.findings).toMatchObject([{ id: "f1", status: "open", line: 6 }]);
+    expect(store.pointers()?.rounds).toHaveLength(3);
+  });
+
+  it("retries a partially resolved batch without treating its first thread as a human dismissal", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const handler = createReviewHandler({ fetch: gh.fetch });
+    const findings = [finding({}), finding({ line: 12, title: "Leaked handle in close" })];
+    await handler.handle(event("ev1"), context(new FakeThreads(scripted(reviewOf(findings), {})), store));
+    gh.head = H2;
+    gh.failThreadEditFor = gh.comments[1].id;
+    const fixed = new FakeThreads(scripted(reviewOf([]), {
+      "Null deref in parse": verdict("refuted"), "Leaked handle in close": verdict("refuted"),
+    }));
+    await expect(handler.handle(event("ev2"), context(fixed, store))).rejects.toThrow("Temporary");
+    expect(gh.resolved.has(gh.comments[0].id)).toBe(true);
+    expect(gh.resolved.has(gh.comments[1].id)).toBe(false);
+
+    gh.head = "3".repeat(40);
+    const third = new FakeThreads(scripted(reviewOf([]), {}));
+    await handler.handle(event("ev3"), context(third, store));
+    expect(store.pointers()?.findings.map(f => f.status)).toEqual(["resolved", "resolved"]);
+    expect(store.pointers()?.rounds?.map(r => r.head)).toEqual([H1, H2, "3".repeat(40)]);
+    expect(third.spawned).toHaveLength(1);
+    expect(third.spawned[0].req.prompt).toContain(`already reviewed at commit ${H2}`);
+    expect(gh.comments).toHaveLength(2);
+    expect(gh.resolved.size).toBe(2);
+  });
+
+  it("retries the state commit after GitHub accepted the thread edit without resolving it twice", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const handler = createReviewHandler({ fetch: gh.fetch });
+    await handler.handle(event("ev1"), context(new FakeThreads(scripted(reviewOf([finding({})]), {})), store));
+    gh.head = H2;
+    gh.onThreadEdit = () => { store.failNextWrite = true; gh.onThreadEdit = undefined; };
+    const fixed = new FakeThreads(scripted(reviewOf([]), { "Null deref in parse": verdict("refuted") }));
+    await expect(handler.handle(event("ev2"), context(fixed, store))).rejects.toThrow("Store unavailable");
+    expect(store.pointers()?.lastReviewedHead).toBe(H1);
+    expect(gh.resolved.size).toBe(1);
+
+    await handler.handle(event("ev2-retry"), context(new FakeThreads(() => { throw new Error("A posting retry must not run another review"); }), store));
+    expect(store.pointers()?.lastReviewedHead).toBe(H2);
+    expect(store.pointers()?.findings[0].status).toBe("resolved");
+    expect(store.pointers()?.rounds).toHaveLength(2);
+    expect(gh.writes.filter(w => w === `resolve ${gh.comments[0].id}`)).toHaveLength(1);
+  });
+
+  it("honors a comment deletion during a failed thread update without blocking later reviews", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const handler = createReviewHandler({ fetch: gh.fetch });
+    await handler.handle(event("ev1"), context(new FakeThreads(scripted(reviewOf([finding({})]), {})), store));
+    gh.head = H2;
+    gh.failThreadEditFor = gh.comments[0].id;
+    const fixed = new FakeThreads(scripted(reviewOf([]), { "Null deref in parse": verdict("refuted") }));
+    await expect(handler.handle(event("ev2"), context(fixed, store))).rejects.toThrow("Temporary");
+    gh.comments = [];
+
+    await handler.handle(event("ev2-retry"), context(new FakeThreads(() => { throw new Error("A posting retry must not run another review"); }), store));
+    expect(store.pointers()?.lastReviewedHead).toBe(H2);
+    expect(store.pointers()?.findings[0].status).toBe("dismissed");
+    expect(gh.comments).toHaveLength(0);
+  });
+
+  it("waits for a missing GitHub thread before recording its finding as resolved", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const handler = createReviewHandler({ fetch: gh.fetch });
+    await handler.handle(event("ev1"), context(new FakeThreads(scripted(reviewOf([finding({})]), {})), store));
+    gh.head = H2;
+    gh.hideThreads = true;
+    const fixed = new FakeThreads(scripted(reviewOf([]), { "Null deref in parse": verdict("refuted") }));
+    await expect(handler.handle(event("ev2"), context(fixed, store))).rejects.toThrow("thread");
+    expect(store.pointers()?.lastReviewedHead).toBe(H1);
+    expect(store.pointers()?.findings[0].status).toBe("open");
+
+    gh.hideThreads = false;
+    await handler.handle(event("ev2-retry"), context(new FakeThreads(() => { throw new Error("A posting retry must not run another review"); }), store));
+    expect(store.pointers()?.findings[0].status).toBe("resolved");
+    expect(gh.resolved.size).toBe(1);
+  });
+
+  it("preserves a human dismissal after reopening succeeded but the state save failed", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const handler = createReviewHandler({ fetch: gh.fetch });
+    await handler.handle(event("ev1"), context(new FakeThreads(scripted(reviewOf([finding({})]), {})), store));
+    gh.head = H2;
+    await handler.handle(event("ev2"), context(new FakeThreads(scripted(reviewOf([]), { "Null deref in parse": verdict("refuted") })), store));
+    gh.head = "3".repeat(40);
+    gh.onThreadEdit = () => { store.failNextWrite = true; gh.onThreadEdit = undefined; };
+    await expect(handler.handle(event("ev3"), context(new FakeThreads(scripted(reviewOf([finding({})]), {})), store))).rejects.toThrow("Store unavailable");
+    const commentId = gh.comments[0].id;
+    gh.resolved.add(commentId);
+    gh.resolvedBy.set(commentId, "reviewer");
+
+    await handler.handle(event("ev3-retry"), context(new FakeThreads(() => { throw new Error("A posting retry must not run another review"); }), store));
+    expect(gh.resolved.has(commentId)).toBe(true);
+    expect(gh.resolvedBy.get(commentId)).toBe("reviewer");
+    expect(store.pointers()?.findings[0].status).toBe("dismissed");
+  });
+
+  it("does not reopen an automatically fixed finding that a person later resolved", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const handler = createReviewHandler({ fetch: gh.fetch });
+    await handler.handle(event("ev1"), context(new FakeThreads(scripted(reviewOf([finding({})]), {})), store));
+    gh.head = H2;
+    await handler.handle(event("ev2"), context(new FakeThreads(scripted(reviewOf([]), { "Null deref in parse": verdict("refuted") })), store));
+    gh.resolvedBy.set(gh.comments[0].id, "reviewer");
+    gh.head = "3".repeat(40);
+    await handler.handle(event("ev3"), context(new FakeThreads(scripted(reviewOf([finding({})]), {})), store));
+    expect(store.pointers()?.findings[0].status).toBe("dismissed");
+    expect(gh.resolved.has(gh.comments[0].id)).toBe(true);
+    expect(gh.comments).toHaveLength(1);
   });
 
   it("keeps an open finding in an unchanged file without a recheck", async () => {

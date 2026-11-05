@@ -54,6 +54,9 @@ export interface ReviewThread {
   isResolved: boolean;
   /** Database id of the thread's first comment. */
   commentId: number | null;
+  /** Logins distinguish a person's dismissal from the comment author's automatic resolution. */
+  author?: string;
+  resolvedBy?: string;
 }
 
 export class GitHubError extends Error {
@@ -192,14 +195,14 @@ export function githubClient(opts: { token: string; owner: string; repo: string;
       let after: string | null = null;
       for (let page = 0; page < MAX_PAGES; page++) {
         type Page = { repository: { pullRequest: { reviewThreads: {
-          nodes: { id: string; isResolved: boolean; comments: { nodes: { databaseId: number | null }[] } }[];
+          nodes: { id: string; isResolved: boolean; resolvedBy: { login: string } | null; comments: { nodes: { databaseId: number | null; author: { login: string } | null }[] } }[];
           pageInfo: { hasNextPage: boolean; endCursor: string | null };
         } } } };
         const data: Page = await graphql<Page>(
           `query($owner: String!, $repo: String!, $number: Int!, $after: String) {
             repository(owner: $owner, name: $repo) { pullRequest(number: $number) {
               reviewThreads(first: 100, after: $after) {
-                nodes { id isResolved comments(first: 1) { nodes { databaseId } } }
+                nodes { id isResolved resolvedBy { login } comments(first: 1) { nodes { databaseId author { login } } } }
                 pageInfo { hasNextPage endCursor }
               }
             } }
@@ -208,7 +211,16 @@ export function githubClient(opts: { token: string; owner: string; repo: string;
           "list review threads",
         );
         const conn = data.repository.pullRequest.reviewThreads;
-        for (const t of conn.nodes) threads.push({ id: t.id, isResolved: t.isResolved, commentId: t.comments.nodes[0]?.databaseId ?? null });
+        for (const t of conn.nodes) {
+          const first = t.comments.nodes[0];
+          threads.push({
+            id: t.id,
+            isResolved: t.isResolved,
+            commentId: first?.databaseId ?? null,
+            ...(first?.author ? { author: first.author.login } : {}),
+            ...(t.resolvedBy ? { resolvedBy: t.resolvedBy.login } : {}),
+          });
+        }
         if (!conn.pageInfo.hasNextPage) break;
         after = conn.pageInfo.endCursor;
       }
