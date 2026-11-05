@@ -59,6 +59,8 @@ class FakeGitHub {
   reviews = new Map<number, { id: number; body: string; commit_id: string }>();
   comments: GhComment[] = [];
   refuseInline = false;
+  /** Thread state by first-comment id. Every comment is its own thread here. */
+  resolved = new Set<number>();
   writes: string[] = [];
   private nextId = 100;
 
@@ -70,6 +72,20 @@ class FakeGitHub {
     const ok = (data: unknown): Response => new Response(typeof data === "string" ? data : JSON.stringify(data), { status: 200 });
     if (method !== "GET") this.writes.push(`${method} ${path}`);
 
+    if (method === "POST" && path === "/graphql") {
+      const query = String(body.query);
+      const variables = body.variables as Record<string, unknown>;
+      if (query.includes("reviewThreads")) {
+        this.writes.pop(); // a read, not a write
+        const nodes = this.comments.map((c) => ({ id: `T_${c.id}`, isResolved: this.resolved.has(c.id), comments: { nodes: [{ databaseId: c.id }] } }));
+        return ok({ data: { repository: { pullRequest: { reviewThreads: { nodes, pageInfo: { hasNextPage: false, endCursor: null } } } } } });
+      }
+      const commentId = Number(String(variables.id).replace("T_", ""));
+      if (query.includes("unresolveReviewThread")) this.resolved.delete(commentId);
+      else this.resolved.add(commentId);
+      this.writes.push(`${query.includes("unresolveReviewThread") ? "unresolve" : "resolve"} ${commentId}`);
+      return ok({ data: {} });
+    }
     if (method === "GET" && path === "/pulls/7") {
       return ok({
         number: 7,
@@ -305,24 +321,91 @@ describe("review-pull-request handler", () => {
     expect(reviewer?.req.prompt).toContain(`already reviewed at commit ${H1}`);
     expect(reviewer?.req.prompt).toContain("- a.ts:5 Null deref in parse");
 
-    // The summary review is the same one, edited; the new finding comes in a follow-up review.
+    // The summary review is the same one, edited. The new finding is a thread in a review with no body.
     expect(gh.writes).toContain(`PUT /pulls/7/reviews/${summaryId}`);
     const summary = gh.reviews.get(summaryId ?? -1);
     expect(summary?.body).toContain(`valet-pr-review:summary ${H2}`);
     expect(summary?.body).toContain("Fixed (1)");
     expect(summary?.body).toContain("Open findings (1)");
-    expect(gh.reviews.size).toBe(2);
+    expect([...gh.reviews.values()].map((r) => r.body === "")).toEqual([false, true]);
     expect(gh.comments.find((c) => c.id === commentId)?.body).toMatch(/^\*\*Fixed in `2222222`\.\*\* a\.ts:4 now returns early/);
+    expect(gh.resolved.has(commentId)).toBe(true);
 
     expect(store.pointers()).toMatchObject({
       reviewId: summaryId,
       lastReviewedHead: H2,
       nextId: 3,
       findings: [
-        { id: "f1", status: "resolved", fixedIn: H2, commentId },
+        { id: "f1", status: "resolved", fixedIn: H2, commentId, threadId: `T_${commentId}` },
         { id: "f2", path: "a.ts", line: 12, status: "open" },
       ],
     });
+  });
+
+  it("adds no review body after the first push: one empty review per push with new findings, none without", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const handler = createReviewHandler({ fetch: gh.fetch });
+    await handler.handle(event("ev1"), context(new FakeThreads(scripted(reviewOf([finding({})]), {})), store));
+    gh.head = H2;
+    await handler.handle(event("ev2"), context(new FakeThreads(scripted(reviewOf([finding({ line: 12, title: "Leaked handle in close" })]), {})), store));
+    gh.head = "3".repeat(40);
+    gh.incrementFiles = ["c.ts"];
+    await handler.handle(event("ev3"), context(new FakeThreads(scripted(reviewOf([]), {})), store));
+
+    const bodies = [...gh.reviews.values()].map((r) => r.body);
+    expect(bodies.filter((b) => b !== "")).toHaveLength(1);
+    expect(bodies).toHaveLength(2);
+    expect(gh.comments).toHaveLength(2);
+    expect(bodies[0]).toContain(`valet-pr-review:summary ${"3".repeat(40)}`);
+  });
+
+  it("never posts again a finding whose thread a person resolved", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const handler = createReviewHandler({ fetch: gh.fetch });
+    await handler.handle(event("ev1"), context(new FakeThreads(scripted(reviewOf([finding({})]), {})), store));
+    gh.resolved.add(gh.comments[0].id);
+    gh.head = H2;
+    gh.incrementFiles = ["c.ts"];
+    const second = new FakeThreads(scripted(reviewOf([finding({ line: 6 })]), {}));
+    await handler.handle(event("ev2"), context(second, store));
+
+    expect(gh.comments).toHaveLength(1);
+    expect(second.spawned.find((s) => s.req.role === "pr-reviewer")?.req.prompt).toContain("- a.ts:5 Null deref in parse");
+    expect(store.pointers()?.findings).toMatchObject([{ id: "f1", status: "dismissed" }]);
+    expect(gh.reviews.get(store.pointers()?.reviewId ?? -1)?.body).toContain("No open findings.");
+  });
+
+  it("never posts again a finding whose comment a person deleted", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const handler = createReviewHandler({ fetch: gh.fetch });
+    await handler.handle(event("ev1"), context(new FakeThreads(scripted(reviewOf([finding({})]), {})), store));
+    gh.comments = [];
+    gh.head = H2;
+    await handler.handle(event("ev2"), context(new FakeThreads(scripted(reviewOf([finding({ line: 7, title: "Different words, same spot" })]), {})), store));
+    expect(gh.comments).toHaveLength(0);
+    expect(store.pointers()?.findings).toMatchObject([{ id: "f1", status: "dismissed" }]);
+  });
+
+  it("reopens the thread of a fixed finding that comes back instead of posting a new one", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const handler = createReviewHandler({ fetch: gh.fetch });
+    await handler.handle(event("ev1"), context(new FakeThreads(scripted(reviewOf([finding({})]), {})), store));
+    const commentId = gh.comments[0].id;
+    gh.head = H2;
+    await handler.handle(event("ev2"), context(new FakeThreads(scripted(reviewOf([]), { "Null deref in parse": verdict("refuted") })), store));
+    expect(gh.resolved.has(commentId)).toBe(true);
+
+    gh.head = "3".repeat(40);
+    await handler.handle(event("ev3"), context(new FakeThreads(scripted(reviewOf([finding({ line: 6 })]), {})), store));
+    expect(gh.comments).toHaveLength(1);
+    expect(gh.resolved.has(commentId)).toBe(false);
+    expect(gh.comments[0].body).not.toContain("Fixed in");
+    expect(gh.writes).toContain(`unresolve ${commentId}`);
+    expect(store.pointers()?.findings).toMatchObject([{ id: "f1", status: "open", line: 6, commentId }]);
   });
 
   it("keeps an open finding in an unchanged file without a recheck", async () => {

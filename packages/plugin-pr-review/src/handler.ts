@@ -69,7 +69,13 @@ export interface FindingPointer {
   line: number;
   /** The inline review comment. Absent: the finding is in the summary review's body. */
   commentId?: number;
-  /** `dismissed`: a person deleted the comment that held it. */
+  /** The GraphQL id of the comment's review thread, once known. */
+  threadId?: string;
+  /**
+   * `resolved`: a later commit fixed it, and its thread is resolved.
+   * `dismissed`: a person resolved its thread or deleted its comment. It is
+   * never posted again.
+   */
   status: "open" | "resolved" | "dismissed";
   /** The head that fixed it. */
   fixedIn?: string;
@@ -186,7 +192,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
     }
   }
 
-  const open = await recoverOpenFindings(gh, prior);
+  const open = await recoverFindings(gh, prior);
   const thread = await ctx.threads.ensure(slug, { title: `Review ${slug}` });
   const dispatch = (label: string): string => `${event.id}:${head.slice(0, 12)}:${label}`;
   const prDiff = (await gh.compareDiff(mergeBase, head)) ?? undefined;
@@ -223,7 +229,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
             head,
             diff,
             ...(from !== undefined ? { increment: { from } } : {}),
-            knownFindings: open.live.map((f) => ({ path: f.path, line: f.line, title: f.title })),
+            knownFindings: [...open.live, ...open.dismissed.filter(hasTitle)].map((f) => ({ path: f.path, line: f.line, title: f.title })),
           }),
           instructions: settings.instructions,
           excludePaths: settings.excludePaths,
@@ -274,6 +280,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   const minRank = SEVERITY_ORDER.indexOf(settings.minSeverity);
   let nextId = prior?.nextId ?? 1;
   const posted: PostedFinding[] = [];
+  const reopened: OpenFinding[] = [];
   let hidden = draft.findings.length - candidates.length;
   for (const f of draft.findings.filter((x) => kept.includes(x))) {
     if (SEVERITY_ORDER.indexOf(f.severity) < minRank) {
@@ -281,6 +288,14 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
       continue;
     }
     if ([...stillOpen, ...posted].some((o) => sameIssue(o, f))) continue;
+    // A finding a person dismissed is never posted again.
+    if (open.dismissed.some((d) => (hasTitle(d) ? sameIssue(d, f) : d.path === f.path && Math.abs(d.line - f.line) <= 3))) continue;
+    // A fixed finding that came back reopens its own thread.
+    const back = open.fixed.find((o) => !reopened.some((r) => r.id === o.id) && sameIssue(o, f));
+    if (back) {
+      reopened.push({ ...f, id: back.id, line: f.line, ...(back.commentId !== undefined ? { commentId: back.commentId } : {}), ...(back.threadId !== undefined ? { threadId: back.threadId } : {}) });
+      continue;
+    }
     posted.push({ ...f, id: `f${nextId++}` });
   }
 
@@ -297,7 +312,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
       ...(from !== undefined ? { incrementFrom: from } : {}),
       summary: draft.summary,
       confidence: draft.confidence,
-      inline: [...stillOpen.filter((f) => f.commentId !== undefined), ...inline],
+      inline: [...stillOpen.filter((f) => f.commentId !== undefined), ...reopened, ...inline],
       outsideDiff: [...stillOpen.filter((f) => f.commentId === undefined), ...outside],
       fixed: fixed.map(({ finding }) => ({ finding, sha: head })),
       hidden,
@@ -306,77 +321,108 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   const summaryReview = prior?.reviewId !== undefined ? await gh.review(prior.reviewId) : null;
   let reviewId = summaryReview?.id;
   let inlineReviewId: number | undefined;
-  const postInline = async (body: string): Promise<number> => {
+  /** Post the inline findings in one review with `body`. A 422 (a line GitHub cannot resolve) moves them all to the summary. */
+  const postInline = async (body: string): Promise<number | undefined> => {
     try {
       return (await gh.createReview({ commitId: head, body, comments: inline.map((f) => ({ path: f.path, line: f.line, side: "RIGHT", body: renderInlineComment(f) })) })).id;
     } catch (err) {
-      // A line GitHub cannot resolve fails the whole review: keep every finding in the summary instead.
       if (!(err instanceof GitHubError) || err.status !== 422 || inline.length === 0) throw err;
       console.warn(`pr-review ${slug}: GitHub refused the inline comments, so the summary carries them`, err.message);
       outside = [...outside, ...inline];
       inline = [];
-      return (await gh.createReview({ commitId: head, body: summaryOf(), comments: [] })).id;
+      return undefined;
     }
   };
   if (reviewId === undefined) {
-    reviewId = await postInline(summaryOf());
-    inlineReviewId = reviewId;
-    // A 422 fallback already wrote the final summary; a success needs no edit.
+    inlineReviewId = await postInline(summaryOf());
+    reviewId = inlineReviewId ?? (await gh.createReview({ commitId: head, body: summaryOf(), comments: [] })).id;
   } else {
-    if (inline.length > 0) {
-      inlineReviewId = await postInline(`Follow-up review of \`${head.slice(0, 7)}\`: ${inline.length} new finding(s). The first Valet review on this pull request lists every open finding.`);
-    }
+    // New findings on a later push come as threads in a review with no
+    // body. GitHub wraps every inline comment in a review, so one review
+    // per push adds the fewest objects; the summary stays the only body.
+    if (inline.length > 0) inlineReviewId = await postInline("");
     await gh.updateReview(reviewId, summaryOf());
   }
 
   const commentIds = inlineReviewId !== undefined && inline.length > 0 ? await newCommentIds(gh, inlineReviewId) : new Map<string, number>();
+  const warn = (what: string) => (err: unknown): void => {
+    // The summary still carries the state; a failed thread edit must not fail the review.
+    console.warn(`pr-review ${slug}: ${what} failed`, err instanceof Error ? err.message : err);
+  };
   for (const { finding, reason } of fixed) {
     if (finding.commentId === undefined) continue;
     const comment = open.comments.get(finding.commentId);
     if (!comment) continue;
-    await gh.updateComment(finding.commentId, renderFixedComment(comment.body, head, reason)).catch((err: unknown) => {
-      // The comment can be gone; the summary still lists the fix.
-      console.warn(`pr-review ${slug}: marking ${finding.id} fixed failed`, err instanceof Error ? err.message : err);
-    });
+    await gh.updateComment(finding.commentId, renderFixedComment(comment.body, head, reason)).catch(warn(`marking ${finding.id} fixed`));
+    if (finding.threadId) await gh.setThreadResolved(finding.threadId, true).catch(warn(`resolving the thread of ${finding.id}`));
+  }
+  for (const f of reopened) {
+    if (f.commentId === undefined) continue;
+    await gh.updateComment(f.commentId, renderInlineComment(f)).catch(warn(`reopening ${f.id}`));
+    if (f.threadId) await gh.setThreadResolved(f.threadId, false).catch(warn(`unresolving the thread of ${f.id}`));
   }
 
   // 8. Save the new pointers.
   const byId = new Map<string, FindingPointer>((prior?.findings ?? []).map((p) => [p.id, p]));
-  for (const id of open.dismissed) {
-    const p = byId.get(id);
-    if (p) byId.set(id, { ...p, status: "dismissed" });
+  for (const d of open.dismissed) {
+    const p = byId.get(d.id);
+    if (p) byId.set(d.id, { ...p, status: "dismissed" });
   }
-  for (const f of stillOpen) byId.set(f.id, pointer(f, "open", f.commentId));
-  for (const { finding } of fixed) byId.set(finding.id, { ...pointer(finding, "resolved", finding.commentId), fixedIn: head });
-  for (const f of inline) byId.set(f.id, pointer(f, "open", commentIds.get(f.id)));
-  for (const f of outside) byId.set(f.id, pointer(f, "open", undefined));
+  for (const f of stillOpen) byId.set(f.id, pointer(f, "open", f));
+  for (const { finding } of fixed) byId.set(finding.id, { ...pointer(finding, "resolved", finding), fixedIn: head });
+  for (const f of reopened) byId.set(f.id, pointer(f, "open", f));
+  for (const f of inline) {
+    const commentId = commentIds.get(f.id);
+    byId.set(f.id, pointer(f, "open", commentId !== undefined ? { commentId } : {}));
+  }
+  for (const f of outside) byId.set(f.id, pointer(f, "open", {}));
   await save({ version: 1, reviewId, lastReviewedHead: head, findings: [...byId.values()], nextId });
-  log(slug, `reviewed ${head.slice(0, 7)} (${from ? "follow-up" : "full"}): ${posted.length} new, ${fixed.length} fixed, ${stillOpen.length} still open`);
+  log(slug, `reviewed ${head.slice(0, 7)} (${from ? "follow-up" : "full"}): ${posted.length} new, ${fixed.length} fixed, ${reopened.length} reopened, ${stillOpen.length} still open`);
 }
 
-type OpenFinding = PostedFinding & { commentId?: number };
+type OpenFinding = PostedFinding & { commentId?: number; threadId?: string };
+/** A finding a person dismissed. Its text is gone when they deleted the comment. */
+type DismissedFinding = Pick<FindingPointer, "id" | "path" | "line"> & { title?: string };
 
-/** The open findings' text, read back from GitHub, and the ids whose text a person deleted. */
-async function recoverOpenFindings(
+const hasTitle = (d: DismissedFinding): d is DismissedFinding & { title: string } => d.title !== undefined;
+
+/**
+ * The PR's findings, read back from GitHub: open ones with their text,
+ * fixed ones that a later finding can reopen, and the ones a person
+ * dismissed by resolving the thread or deleting the comment.
+ */
+async function recoverFindings(
   gh: GitHubClient,
   prior: PullPointers | undefined,
-): Promise<{ live: OpenFinding[]; dismissed: string[]; comments: Map<number, ReviewComment> }> {
-  const pointers = (prior?.findings ?? []).filter((p) => p.status === "open");
+): Promise<{ live: OpenFinding[]; fixed: OpenFinding[]; dismissed: DismissedFinding[]; comments: Map<number, ReviewComment> }> {
+  const pointers = prior?.findings ?? [];
   const comments = new Map<number, ReviewComment>();
-  if (pointers.length === 0) return { live: [], dismissed: [], comments };
-  if (pointers.some((p) => p.commentId !== undefined)) for (const c of await gh.reviewComments()) comments.set(c.id, c);
+  const threads = new Map<number, { id: string; isResolved: boolean }>();
+  if (pointers.length === 0) return { live: [], fixed: [], dismissed: [], comments };
+  if (pointers.some((p) => p.commentId !== undefined)) {
+    for (const c of await gh.reviewComments()) comments.set(c.id, c);
+    for (const t of await gh.reviewThreads()) if (t.commentId !== null) threads.set(t.commentId, t);
+  }
   const summary = prior?.reviewId !== undefined ? parseFindings((await gh.review(prior.reviewId))?.body ?? "") : new Map();
   const live: OpenFinding[] = [];
-  const dismissed: string[] = [];
+  const fixed: OpenFinding[] = [];
+  const dismissed: DismissedFinding[] = [];
   for (const p of pointers) {
     const text = p.commentId !== undefined ? parseFindings(comments.get(p.commentId)?.body ?? "").get(p.id) : summary.get(p.id);
-    if (!text) {
-      dismissed.push(p.id);
-      continue;
+    const thread = p.commentId !== undefined ? threads.get(p.commentId) : undefined;
+    const where = { path: p.path, line: p.line, ...(p.commentId !== undefined ? { commentId: p.commentId } : {}), ...((thread?.id ?? p.threadId) ? { threadId: thread?.id ?? p.threadId } : {}) };
+    const gone = !text;
+    // Valet resolves a thread only when it marks the finding fixed, so an
+    // open finding in a resolved thread was resolved by a person.
+    if (p.status === "dismissed" || gone || (p.status === "open" && thread?.isResolved)) {
+      dismissed.push({ id: p.id, path: p.path, line: p.line, ...(text ? { title: text.title } : {}) });
+    } else if (p.status === "open") {
+      live.push({ ...text, ...where });
+    } else if (p.commentId !== undefined) {
+      fixed.push({ ...text, ...where });
     }
-    live.push({ ...text, path: p.path, line: p.line, ...(p.commentId !== undefined ? { commentId: p.commentId } : {}) });
   }
-  return { live, dismissed, comments };
+  return { live, fixed, dismissed, comments };
 }
 
 /** Inline comment ids of one review, keyed by the finding id in each marker. */
@@ -389,8 +435,8 @@ async function newCommentIds(gh: GitHubClient, reviewId: number): Promise<Map<st
   return ids;
 }
 
-function pointer(f: Pick<PostedFinding, "id" | "path" | "line">, status: FindingPointer["status"], commentId: number | undefined): FindingPointer {
-  return { id: f.id, path: f.path, line: f.line, status, ...(commentId !== undefined ? { commentId } : {}) };
+function pointer(f: Pick<PostedFinding, "id" | "path" | "line">, status: FindingPointer["status"], ids: { commentId?: number; threadId?: string }): FindingPointer {
+  return { id: f.id, path: f.path, line: f.line, status, ...(ids.commentId !== undefined ? { commentId: ids.commentId } : {}), ...(ids.threadId !== undefined ? { threadId: ids.threadId } : {}) };
 }
 
 async function runVerifier(
