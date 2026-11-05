@@ -57,6 +57,7 @@ import { workflowTriggersRouter } from "./routes/workflow-triggers.js";
 import { workflowConversationRouter } from "./routes/workflow-conversation.js";
 import { workflowsRouter } from "./routes/workflows.js";
 import { pluginsRouter } from "./routes/plugins.js";
+import { codeReviewRouter } from "./routes/code-review.js";
 import { actionsRouter } from "./routes/actions.js";
 import { mcpAuthorizeGate, mcpTokenGate, oauthConsentRouter } from "./routes/oauth-consent.js";
 import { cliDevicePublicRouter, cliDeviceRouter } from "./routes/cli-device.js";
@@ -399,6 +400,7 @@ export function createApp(
   app.route("/api/workflows", workflowsRouter);
   app.route("/api/templates", templatesRouter);
   app.route("/api/plugins", pluginsRouter);
+  app.route("/api/code-review", codeReviewRouter);
   app.route("/api/skills", skillsRouter);
   app.route("/api/credentials", credentialConnectRouter);
   app.route("/api/credentials", credentialsRouter);

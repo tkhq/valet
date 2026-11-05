@@ -152,6 +152,7 @@ import type {
   ListNotificationsResponse,
   ListNotificationDecisionsResponse,
   ListModelsResponse,
+  ListCodeReviewsResponse,
   ListPluginsResponse,
   ListSessionsResponse,
   ListSkillsResponse,
@@ -1449,6 +1450,11 @@ export const api = {
     request<{ ok: true }>("DELETE", `/teams/${encodeURIComponent(id)}/api-keys/${encodeURIComponent(keyId)}`),
 
   // plugins + credentials (plugin-system-v2 plan Task 15 — connect surface)
+  listCodeReviews: (teamId?: string) =>
+    request<ListCodeReviewsResponse>(
+      "GET",
+      teamId === undefined ? "/code-review/reviews" : `/code-review/reviews?teamId=${encodeURIComponent(teamId)}`,
+    ),
   listPlugins: (teamId?: string) =>
     request<ListPluginsResponse>(
       "GET",
