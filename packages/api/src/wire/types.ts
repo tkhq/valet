@@ -2477,7 +2477,11 @@ export interface ListNotificationsResponse {
 
 export interface ListNotificationDecisionsResponse {
   nextCursor?: string | null;
-  items: Array<{ sessionId: string; title: string; gate: DecisionGate; canOpenThread?: boolean }>;
+  items: Array<{
+    sessionId: string; title: string; gate: DecisionGate; canOpenThread?: boolean;
+    /** The workspace that owns the work: a team, an org, or the caller's personal workspace. */
+    owner: { type: "user" | "team" | "org"; id: string };
+  }>;
 }
 
 export interface WebPresenceRequest {

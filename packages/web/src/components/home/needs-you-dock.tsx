@@ -6,17 +6,25 @@ import { Button } from "~/components/primitives";
 import { DecisionGateCard } from "~/components/session/decision-gate-card";
 import { ResolvedGateNotice, useResolvedGateNotice } from "~/components/session/gate-outcome";
 
+/** True when the caller's personal workspace owns the work. */
+function isPersonal(item: { owner: { type: "user" | "team" | "org" } }): boolean {
+  return item.owner.type === "user";
+}
+
 /**
  * Approvals from work in any workspace, docked above the home composer so
  * the person can answer without leaving home. It shows one card at a time
  * with "1 of 3", and folds to one line on "Not now". The home thread's own
  * gate docks through `SessionView`, so it is left out here.
+ *
+ * With `personalOnly`, only approvals from the personal workspace show; team and org approvals stay out of the dock: a phone answers
+ * them in the team's own thread, and Tasks still lists them.
  */
-export function NeedsYouDock({ homeThreadId, onOpenTasks, onQuestionExpandedChange }: { homeThreadId?: string; onOpenTasks: () => void; onQuestionExpandedChange?: (expanded: boolean) => void }) {
+export function NeedsYouDock({ homeThreadId, personalOnly = false, onOpenTasks, onQuestionExpandedChange }: { homeThreadId?: string; personalOnly?: boolean; onOpenTasks: () => void; onQuestionExpandedChange?: (expanded: boolean) => void }) {
   const decisions = useNotificationDecisions();
   const workflows = useWorkflowActionRequired();
-  const items = (decisions.data?.items ?? []).filter(item => item.gate.threadId !== homeThreadId);
-  const workflowCount = workflows.data?.count ?? 0;
+  const items = (decisions.data?.items ?? []).filter(item => item.gate.threadId !== homeThreadId && (!personalOnly || isPersonal(item)));
+  const workflowCount = personalOnly ? (workflows.data?.items ?? []).filter(isPersonal).length : workflows.data?.count ?? 0;
   const [index, setIndex] = useState(0);
   const [folded, setFolded] = useState(false);
   const total = items.length;

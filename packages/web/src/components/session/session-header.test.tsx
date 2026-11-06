@@ -1239,6 +1239,21 @@ describe("SessionHeader — team assistant", () => {
     await waitFor(() => expect(document.activeElement).toBe(menu));
   });
 
+  it("closes the phone settings dialog after a model pick but not after a thinking change", async () => {
+    mobileLayout = true;
+    withTeam("admin");
+    headerThreads = [{ id: "team-thread", sessionId: "assistant:asst_team", createdAt: 1, key: "web:shared" }];
+    renderHeader(undefined, "team-thread", teamSession(), null);
+    await userEvent.click(screen.getByRole("button", { name: "Thread menu" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Model and thinking" }));
+    const dialog = await screen.findByRole("dialog", { name: "Model and thinking" });
+    await userEvent.selectOptions(within(dialog).getByRole("combobox", { name: "Thinking level" }), "high");
+    expect(screen.queryByRole("dialog", { name: "Model and thinking" })).not.toBeNull();
+    await userEvent.click(within(dialog).getByRole("button", { name: "Small" }));
+    expect(setThreadModelMutate).toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Model and thinking" })).toBeNull());
+  });
+
   it("keeps the team and viewers visible in the compact phone header and moves models into the menu", async () => {
     mobileLayout = true;
     withTeam("admin");

@@ -94,6 +94,9 @@ export interface ModelPickerProps {
   /** Called when the user picks a model or a size tier. Returns the model
    * id, or the bare tier token ("xs"|"s"|"m"|"l"|"xl"). */
   onSelect: (id: string) => void;
+  /** Called after a model or size row is picked, so a host that wraps the
+   * picker in a dialog can close it. Not called for reasoning changes. */
+  onPicked?: () => void;
   /** Current reasoning/thinking level, or undefined for "Default". */
   currentReasoning?: string;
   /** Called when the user picks a reasoning level; `null` means "Default".
@@ -186,6 +189,7 @@ export function ModelPicker({
   displayId,
   ariaDescription,
   onSelect,
+  onPicked,
   currentReasoning,
   onSelectReasoning,
   disabled,
@@ -323,10 +327,15 @@ export function ModelPicker({
     return !activeThinkingLevels.includes(level);
   }
 
+  function pick(id: string) {
+    onSelect(id);
+    onPicked?.();
+  }
+
   function commitHighlighted() {
     const entry = flat[highlightIndex];
     if (!entry || disabled) return;
-    onSelect(entry.kind === "tier" ? entry.tier : entry.model.id);
+    pick(entry.kind === "tier" ? entry.tier : entry.model.id);
     setOpen(false);
   }
 
@@ -388,7 +397,7 @@ export function ModelPicker({
     <div className="min-w-0 space-y-4" role="group" aria-label="Model and thinking settings">
       {(modelsQ.isLoading || !approvalScopeResolved) && <p className="text-sm text-muted">Loading models…</p>}
       {(modelsQ.error || approvedModelsQ.error) && <p role="alert" className="text-sm text-muted">Could not load models. Close settings and try again.</p>}
-      <ModelSizeList selectedId={currentId} onSelect={onSelect} choices={SIZE_TIERS.map(tier => ({
+      <ModelSizeList selectedId={currentId} onSelect={pick} choices={SIZE_TIERS.map(tier => ({
         id: tier,
         label: TIER_LABELS[tier],
         description: tierSubtitle(tier, tierMapQ.data, models),
@@ -449,13 +458,13 @@ export function ModelPicker({
                     data-row-kind="tier"
                     onMouseEnter={() => setHighlightIndex(idx)}
                     disabled={disabled}
-                    onClick={panel ? () => onSelect(tier) : undefined}
+                    onClick={panel ? () => pick(tier) : undefined}
                     onMouseDown={(e) => {
                       if (panel) return;
                       // Prevent input blur from stealing focus before we
                       // commit — otherwise the click can race the close.
                       e.preventDefault();
-                      onSelect(tier);
+                      pick(tier);
                       setOpen(false);
                     }}
                     className={cn(
@@ -503,13 +512,13 @@ export function ModelPicker({
                     data-row-kind="model"
                     onMouseEnter={() => setHighlightIndex(idx)}
                     disabled={disabled}
-                    onClick={panel ? () => onSelect(m.id) : undefined}
+                    onClick={panel ? () => pick(m.id) : undefined}
                     onMouseDown={(e) => {
                       if (panel) return;
                       // Prevent input blur from stealing focus before we
                       // commit — otherwise the click can race the close.
                       e.preventDefault();
-                      onSelect(m.id);
+                      pick(m.id);
                       setOpen(false);
                     }}
                     className={cn(

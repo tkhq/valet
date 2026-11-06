@@ -47,7 +47,14 @@ Tasks collects work across accessible workspaces. Needs you appears before
 working tasks, unread replies, and finished tasks started from Home. Each
 row names its workspace and opens its thread. Task rows can show plan
 progress, pull requests, and shared files. Approvals live in Tasks and have
-a compact shortcut above the Home composer when action is needed.
+a compact shortcut above the Home composer when action is needed. On a phone,
+the shortcut shows only approvals from the person's personal workspace. Team and org
+approvals appear in the team's own threads and in Tasks.
+
+A swipe to the right opens the phone drawer, which sits at the left edge. A
+swipe to the left closes it. Mostly vertical moves, moves that start in a text
+field or a horizontally scrollable element, moves that start within 24px of
+the left edge, and moves under an open modal dialog are ignored.
 
 Make provides routes to workflows, skills, memory, and files. It also links
 to Presence and integrations. These browse the selected workspace. Settings

@@ -36,8 +36,8 @@ beforeEach(() => {
 });
 
 it("keeps approval controls but omits navigation into a private thread", async () => {
-  state.items = [false, true].map((canOpenThread, i) => ({
-    sessionId: "session", title: `Approval ${i}`, canOpenThread,
+  state.items = [false, true].map((canOpenThread, i): ListNotificationDecisionsResponse["items"][number] => ({
+    sessionId: "session", title: `Approval ${i}`, canOpenThread, owner: { type: "user", id: "requester" },
     gate: { id: `gate-${i}`, sessionId: "session", threadId: `thread-${i}`, type: "approval", title: "Allow?",
       status: "pending", createdAt: 1, updatedAt: 1, actions: [{ id: "approve", label: "Allow account use" }] },
   }));
@@ -50,7 +50,7 @@ it("keeps approval controls but omits navigation into a private thread", async (
 
 it("uses the real notification placement and submits its action", async () => {
   state.items = [{
-    sessionId: "private-session", title: "Private account request", canOpenThread: false,
+    sessionId: "private-session", title: "Private account request", canOpenThread: false, owner: { type: "user", id: "requester" },
     gate: { id: "private-gate", sessionId: "private-session", threadId: "private-thread", type: "approval", title: "Allow this account?",
       status: "pending", createdAt: 1, updatedAt: 1,
       actions: [{ id: "approve", label: "Allow account use" }, { id: "deny", label: "Deny" }] },
@@ -69,8 +69,8 @@ it("uses the real notification placement and submits its action", async () => {
 
 it("shows full private context names with distinguishing suffixes without hover", () => {
   const prefix = "Customer reports for the quarterly security and compliance review ";
-  state.items = ["North America", "Europe"].map((suffix, i) => ({
-    sessionId: `session-${i}`, title: `${prefix}${suffix}`, canOpenThread: false,
+  state.items = ["North America", "Europe"].map((suffix, i): ListNotificationDecisionsResponse["items"][number] => ({
+    sessionId: `session-${i}`, title: `${prefix}${suffix}`, canOpenThread: false, owner: { type: "user", id: "requester" },
     gate: { id: `gate-${i}`, sessionId: `session-${i}`, threadId: `thread-${i}`, type: "approval", title: "Send report?",
       status: "pending", createdAt: 1, updatedAt: 1, actions: [{ id: "approve", label: "Allow" }] },
   }));
@@ -95,7 +95,7 @@ it("allows paging past hidden approvals without claiming the inbox is empty", as
 });
 
 it("keeps the first-page count on later pages", async () => {
-  state.items = [{ sessionId: "session", title: "Approval", gate: { id: "gate", sessionId: "session", threadId: "thread",
+  state.items = [{ sessionId: "session", title: "Approval", owner: { type: "user", id: "me" }, gate: { id: "gate", sessionId: "session", threadId: "thread",
     type: "approval", title: "Allow?", status: "pending", createdAt: 1, updatedAt: 1, actions: [{ id: "approve", label: "Allow" }] } }];
   state.nextCursor = "sealed-cursor"; state.pageItems = [];
   render(<ApprovalsInbox />);
