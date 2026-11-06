@@ -1,0 +1,13 @@
+# AppArmor profile for Valet browser containers on the Docker backend.
+# Chromium sandboxing uses Bubblewrap, which needs mount and user namespaces.
+# Docker's default profile denies mount. Ubuntu 24.04 also removes capabilities
+# from user namespaces that unconfined processes create. This profile applies
+# no AppArmor rules and permits user namespaces, like Ubuntu's Chrome profile.
+# The reviewed seccomp profile stays the syscall boundary.
+# Install steps: deploy/browser.md, "Prepare AppArmor Docker hosts".
+abi <abi/4.0>,
+include <tunables/global>
+
+profile valet-browser flags=(unconfined) {
+  userns,
+}
