@@ -18,7 +18,8 @@ describe("flowForNavigation", () => {
   it("names a space's page by the page", () => {
     expect(flowForNavigation(at("/"), at("/workflows", { workspace: "team-a" }))).toBe("workflows.open");
     expect(flowForNavigation(at("/workflows"), at("/presence/"))).toBe("presence.open");
-    expect(flowForNavigation(at("/"), at("/integrations"))).toBe("integrations.open");
+    expect(flowForNavigation(at("/"), at("/settings/integrations"))).toBe("integrations.open");
+    expect(flowForNavigation(at("/settings/teams/t1"), at("/settings/teams/t1/integrations"))).toBe("integrations.open");
   });
 
   it("names the phone Tasks tab, and any other route by its path", () => {

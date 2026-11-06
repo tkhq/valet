@@ -83,7 +83,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     id: "integrations",
     icon: Plug,
     title: "Integrations",
-    body: "Each space has a Settings row with Integrations, Skills, Memory, and Usage. Connect your accounts in Integrations. You can share a connection with a team.",
+    body: "Each space has a Settings row. It opens that space's settings, where Integrations connects your accounts. You can share a connection with a team.",
     target: "space-settings",
     side: "right",
   },

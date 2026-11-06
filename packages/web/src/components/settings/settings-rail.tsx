@@ -8,6 +8,7 @@ import {
   Cpu,
   GitPullRequest,
   KeyRound,
+  Plug,
   Shield,
   ShieldCheck,
   SlidersHorizontal,
@@ -30,8 +31,8 @@ import { cn } from "~/lib/cn";
  * workspace switcher:
  *
  * - **Account**: you.
- * - **Personal workspace**: your own workspace's keys, proxy, agent access,
- *   and policies.
+ * - **Personal workspace**: your own workspace's integrations, usage, keys,
+ *   proxy, agent access, and policies.
  * - **Your teams**: one item per team you belong to, each opening its own
  *   `/settings/teams/$teamId` pages.
  * - **Plugins**: Valet Security, for a caller with the plugin, and Code
@@ -159,6 +160,8 @@ const ACCOUNT_ITEMS: RailItem[] = [
 ];
 
 const PERSONAL_ITEMS: RailItem[] = [
+  { to: "/settings/integrations", label: "Integrations", icon: Plug, active: exact("/settings/integrations") },
+  { to: "/settings/usage", label: "Usage", icon: BarChart3, active: exact("/settings/usage") },
   { to: "/settings/api-keys", label: "API keys and proxy", icon: KeyRound, active: exact("/settings/api-keys") },
   { to: "/settings/agent-access", label: "Agent access", icon: Bot, active: exact("/settings/agent-access") },
   { to: "/settings/policies", label: "Policies", icon: Shield, active: exact("/settings/policies") },

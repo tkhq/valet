@@ -155,8 +155,8 @@ export function TopNav() {
     { to: "/presence", label: "Presence" },
     { to: "/workflows", label: "Workflows" },
   ];
-  // Memory, Skills, Integrations and Usage belong to a space too: the
-  // sidebar lists them in each space's More. A phone's menu keeps them.
+  // Skills belong to a space too, and Integrations and Usage open the
+  // space's settings: the sidebar lists them per space. A phone's menu keeps them.
   const spaceMore: Array<{ to: string; label: string; active?: boolean }> = [
     { to: "/skills", label: "Skills" },
     { to: "/integrations", label: "Integrations" },

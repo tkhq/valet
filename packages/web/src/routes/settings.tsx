@@ -12,12 +12,13 @@ export const Route = createFileRoute("/settings")({
   component: SettingsLayout,
 });
 
-/** Routes whose content is a wide table rather than a settings form. */
-const WIDE_SETTINGS_ROUTES = ["/settings/model-comparison", "/settings/organization/model-comparison"];
+/** Routes whose content is a wide table or dashboard rather than a settings form. */
+const WIDE_SETTINGS_ROUTES = ["/settings/model-comparison", "/settings/organization/model-comparison", "/settings/usage"];
 
 export function SettingsLayout() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const wide = WIDE_SETTINGS_ROUTES.includes(normalizeSettingsPath(pathname));
+  const path = normalizeSettingsPath(pathname);
+  const wide = WIDE_SETTINGS_ROUTES.includes(path) || /^\/settings\/teams\/[^/]+\/usage$/.test(path);
   return (
     <div className="flex-1 overflow-y-auto">
       <div className={pageClass}>

@@ -21,7 +21,7 @@ The legacy stack's `users.onboardingCompleted` profile page (`packages/client`) 
 - **Missing targets.** If a step's element is not on the page, the step waits up to 1.5 seconds for a slow render, then the tour moves on. Back and Next skip steps whose elements are absent. The cause can be a collapsed sidebar, a feature that is off, or a page the person cannot open.
 - **Plugin gating.** The Slack step shows only when the `slack` plugin is on for the person.
 
-Targets: `home` (sidebar Home row), `tasks` (Home's Tasks button), `spaces` (the Spaces section), `projects` (the Projects header), `workflows` and `presence` (the open space's rows), `space-settings` (the open space's Settings row).
+Targets: `home` (sidebar Home row), `tasks` (Home's Tasks button), `spaces` (the Spaces section), `projects` (the Projects header), `workflows` and `presence` (the open space's rows), `space-settings` (the open space's Settings row, which opens the space's settings).
 
 ## When it shows
 

@@ -23,7 +23,7 @@ function mount(initial: string) {
   if (!component) throw new Error("route has no component");
   const tree = root.addChildren([
     createRoute({ getParentRoute: () => root, path: "settings/connected-accounts", component }),
-    createRoute({ getParentRoute: () => root, path: "integrations", component: () => <p>Integrations page</p> }),
+    createRoute({ getParentRoute: () => root, path: "settings/integrations", component: () => <p>Integrations page</p> }),
   ]);
   const router = createRouter({ routeTree: tree, history: createMemoryHistory({ initialEntries: [initial] }) });
   render(<RouterProvider router={router} />);
@@ -33,22 +33,22 @@ function mount(initial: string) {
 describe("/settings/connected-accounts", () => {
   it("opens personal Integrations and replaces the old entry", async () => {
     const router = mount("/settings/connected-accounts");
-    await waitFor(() => expect(router.state.location.pathname).toBe("/integrations"));
-    expect(router.state.location.search).toEqual({ workspace: "user" });
+    await waitFor(() => expect(router.state.location.pathname).toBe("/settings/integrations"));
+    expect(router.state.location.search).toEqual({});
     // Replace, not push: Back must not land on the redirect again.
     expect(router.history.length).toBe(1);
   });
 
   it("keeps a GitHub return as the result Integrations reads", async () => {
     const router = mount("/settings/connected-accounts?github=connected");
-    await waitFor(() => expect(router.state.location.pathname).toBe("/integrations"));
-    expect(router.state.location.search).toEqual({ workspace: "user", connected: "github" });
+    await waitFor(() => expect(router.state.location.pathname).toBe("/settings/integrations"));
+    expect(router.state.location.search).toEqual({ connected: "github" });
   });
 
   it("keeps an OAuth result and drops anything else", () => {
     expect(connectedAccountsTarget({ connected: "slack-user", next: "https://evil.example" }))
-      .toBe("/integrations?workspace=user&connected=slack-user");
+      .toBe("/settings/integrations?connected=slack-user");
     expect(connectedAccountsTarget({ error: "oauth_failed", detail: "Try again." }))
-      .toBe("/integrations?workspace=user&error=oauth_failed&detail=Try+again.");
+      .toBe("/settings/integrations?error=oauth_failed&detail=Try+again.");
   });
 });

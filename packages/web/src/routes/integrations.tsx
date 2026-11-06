@@ -1,17 +1,18 @@
-import { WorkspaceClause } from "~/components/workspace-clause";
 import { useEffect, useRef, useState } from "react";
-import { createFileRoute, useNavigate, useRouter, useSearch } from "@tanstack/react-router";
+import { Navigate, createFileRoute, useNavigate, useRouter, useRouterState, useSearch } from "@tanstack/react-router";
 import { usePlugins } from "~/api/integrations";
-import { Dialog, DialogContent, DialogTitle, PageHeader, Spinner, pageClass } from "~/components/primitives";
+import { useOrg, useTeams } from "~/api/settings";
+import { Dialog, DialogContent, DialogTitle, Spinner } from "~/components/primitives";
 import { SearchInput } from "~/components/search-input";
-import { Section } from "~/components/settings/section";
+import { Section, SectionHeading } from "~/components/settings/section";
 import { hasPanel, IntegrationDetail, IntegrationRow, integrationGroup } from "~/components/integrations/integration-row";
 import { IntegrationList } from "~/components/integrations/integration-card";
 import { OrphanCredentials } from "~/components/integrations/orphan-credentials";
 import { pluginDisplayName } from "~/components/integrations/display-name";
 import { matchesNeedle } from "~/lib/text-match";
 import { textParam } from "~/lib/search-params";
-import { useWorkspaceScope } from "~/lib/workspace-scope";
+import { PERSONAL, useWorkspaceScope } from "~/lib/workspace-scope";
+import { spaceSettingsHref } from "~/lib/space-settings";
 import { TeamIntegrations } from "~/components/integrations/team-integrations";
 import { IntegrationLimitNotice } from "~/components/integrations/integration-limit-notice";
 import { useListOwner } from "~/lib/use-list-owner";
@@ -21,7 +22,7 @@ import { useMyToolPermissions } from "~/api/policies";
 import { pluginTools } from "~/components/integrations/tool-permissions";
 
 /**
- * `/integrations` — the services a person can connect, as grouped lists in
+ * Integrations — the services a person can connect, as grouped lists in
  * the settings visual idiom: Connected first, then Available
  * (settings-redesign spec, "Integrations"). Built-in plugins, which need no
  * account, and content-only plugins are not listed: there is nothing to
@@ -31,10 +32,12 @@ import { pluginTools } from "~/components/integrations/tool-permissions";
  * `?connected=` or `?error=`; manual token entry remains the fallback for
  * everything else.
  *
- * Integrations is the one home for connections. A Slack or Telegram panel
- * pairs your chat account, the GitHub panel holds your GitHub connection,
- * and your own 1Password token is a row of its own, in Connected once set.
- * `/settings/connected-accounts` redirects here.
+ * Integrations is the one home for connections, and it lives in Settings:
+ * `/settings/integrations` for your own workspace, a team's Integrations tab
+ * for a team. A Slack or Telegram panel pairs your chat account, the GitHub
+ * panel holds your GitHub connection, and your own 1Password token is a row
+ * of its own, in Connected once set. `/integrations` and
+ * `/settings/connected-accounts` redirect here.
  *
  * The search box narrows the tiles IN the browser, unlike the catalog
  * search on `/skills`: `usePlugins` holds the whole plugin set, so a
@@ -45,23 +48,55 @@ interface IntegrationsSearch {
   q?: string;
   /** The plugin whose detail panel is open. */
   service?: string;
-  /** The workspace to show, as on `/chat`: `"user"` or a team id. The
-   * scope provider reads it, so a link from a personal settings page opens
-   * your own Integrations whatever the switcher holds. */
-  workspace?: string;
 }
 
 /** Reads the search params, keeping only strings. The OAuth round trip's
  * `?connected=`/`?error=` stay off this schema: `useConnectResult` reads
  * and clears them from `window.location` on mount. */
-function readIntegrationsSearch(raw: unknown): IntegrationsSearch {
-  return { q: textParam(raw, "q"), service: textParam(raw, "service"), workspace: textParam(raw, "workspace") };
+export function readIntegrationsSearch(raw: unknown): IntegrationsSearch {
+  return { q: textParam(raw, "q"), service: textParam(raw, "service") };
 }
 
+/**
+ * `/integrations` stays for old links, in-app links that follow the
+ * switcher, and the OAuth round trip, which the api sends here. It forwards
+ * the query to the space's Integrations in Settings.
+ */
 export const Route = createFileRoute("/integrations")({
-  component: IntegrationsPage,
-  validateSearch: readIntegrationsSearch,
+  component: IntegrationsRedirect,
 });
+
+function IntegrationsRedirect() {
+  const scope = useWorkspaceScope();
+  const teamsQ = useTeams();
+  const orgQ = useOrg();
+  const searchStr = useRouterState({ select: (s) => s.location.searchStr });
+  // Wait for membership, so a result for a team you have left lands on your
+  // own Integrations with its message instead of a page you cannot open.
+  if (teamsQ.isLoading || orgQ.isLoading) return null;
+  // A failed membership read proves nothing about the team: keep the named
+  // space, whose page reports the failure and keeps the query for a reload.
+  const membershipKnown = teamsQ.data !== undefined && orgQ.data !== undefined;
+  return <Navigate to="/settings/integrations" href={integrationsTarget(searchStr, scope.key, membershipKnown ? scope.available : undefined)} replace />;
+}
+
+/**
+ * Where an `/integrations` link lands. A team connect result names its team
+ * (`?teamId=`), and a result without one is personal. Otherwise
+ * `?workspace=` names the space, else the switcher's space stands. A team
+ * outside `available` falls back to your own workspace. `available` is
+ * `undefined` while membership is unknown, and then the named space stands.
+ */
+export function integrationsTarget(searchStr: string, scopeKey: string, available: readonly string[] | undefined): string {
+  const params = new URLSearchParams(searchStr);
+  const workspace = params.get("workspace");
+  params.delete("workspace");
+  const connectResult = params.has("connected") || params.has("error");
+  const named = params.get("teamId") ?? (connectResult ? PERSONAL : workspace ?? scopeKey);
+  const key = !available || available.includes(named) ? named : PERSONAL;
+  const rest = params.toString();
+  return `${spaceSettingsHref(key, "integrations")}${rest ? `?${rest}` : ""}`;
+}
 
 type ConnectResult = { kind: "connected" | "error"; value: string; detail?: string; teamId?: string } | null;
 
@@ -113,12 +148,10 @@ function useConnectResult(): ConnectResult {
   return result;
 }
 
+/** The pinned space's Integrations: Settings pins your own workspace or the team. */
 export function IntegrationsPage() {
-  const { teamId, setKey } = useWorkspaceScope();
+  const { teamId } = useWorkspaceScope();
   const connectResult = useConnectResult();
-  useEffect(() => {
-    if (connectResult?.teamId) setKey(connectResult.teamId);
-  }, [connectResult, setKey]);
   // Unmount personal forms and team dialogs when the workspace changes.
   if (teamId) {
     const notice = connectResult?.teamId === teamId
@@ -175,119 +208,117 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
     : undefined;
 
   return (
-    <div className="flex-1 overflow-y-auto">
-      <div className={pageClass}>
-        <PageHeader
-          title="Integrations"
-          clause={<WorkspaceClause />}
-          // The box stays up through an empty match — hiding it would leave
-          // the search with no box to clear it in.
-          actions={!isLoading && !error && showSearch && (
-            <div className="w-full sm:w-56">
-              <SearchInput
-                size="sm"
-                value={query}
-                onSettled={(next) =>
-                  void navigate({
-                    to: "/integrations",
-                    search: next.trim().length === 0 ? {} : { q: next },
-                  })
-                }
-                placeholder="Search integrations…"
-                aria-label="Search integrations"
-              />
-            </div>
-          )}
-        />
-        {owner && <IntegrationLimitNotice owner={owner} canClear />}
-
-        {/* The live region is on the page from the first paint, and stays
-            empty until the connect result arrives. A screen reader ignores a
-            region that appears together with its text. */}
-        <div role="status">
-          {connectResult?.kind === "connected" && (
-            <div className="mt-4 rounded border border-line bg-moss-wash px-3 py-2 text-sm text-ink">
-              Connected {connectResult.value === "linear" ? "Linear via MCP" : connectResult.value}.
-            </div>
-          )}
-          {connectResult?.kind === "error" && (
-            <div className="mt-4 rounded border border-line bg-danger-wash px-3 py-2 text-sm text-danger-600">
-              {connectResult.detail ?? ERROR_MESSAGES[connectResult.value] ?? (
-                <>
-                  Connection failed: {connectResult.value}. Select Connect on the service below to
-                  try again.
-                </>
-              )}
-            </div>
-          )}
-        </div>
-
-        <div className="mt-8 space-y-10">
-          {isLoading && (
-            <div className="flex items-center gap-2 text-sm text-muted">
-              <Spinner size={14} /> Loading integrations…
-            </div>
-          )}
-          {!isLoading && error && (
-            <div className="text-sm text-danger-500">
-              Couldn't load integrations. Check that the server is running, then reload.
-            </div>
-          )}
-          {!isLoading && !error && plugins.length === 0 && (
-            <div className="text-sm text-muted">No plugins installed.</div>
-          )}
-
-          {!isLoading && !error && showSearch && (
-            <div className="space-y-10">
-              {searching && connected.length + available.length === 0 && !onePassword && (
-                <div className="text-sm text-muted">No integrations match your search.</div>
-              )}
-
-              {(connected.length > 0 || onePassword === "connected") && (
-                <Section title="Connected" description="Services your assistant can reach now.">
-                  <IntegrationList label="Connected">
-                    {connected.map((plugin) => (
-                      <IntegrationRow key={plugin.name} plugin={plugin} tools={toolsFor(plugin)} search={rowSearch} onOpen={() => { pushedPanel.current = true; }} />
-                    ))}
-                    {onePassword === "connected" && <PersonalOnePasswordRow connected />}
-                  </IntegrationList>
-                </Section>
-              )}
-              {(available.length > 0 || onePassword === "available") && (
-                <Section title="Available" description="Connect a service to let your assistant use it.">
-                  <IntegrationList label="Available">
-                    {available.map((plugin) => (
-                      <IntegrationRow key={plugin.name} plugin={plugin} tools={toolsFor(plugin)} search={rowSearch} onOpen={() => { pushedPanel.current = true; }} />
-                    ))}
-                    {onePassword === "available" && <PersonalOnePasswordRow connected={false} />}
-                  </IntegrationList>
-                </Section>
-              )}
-            </div>
-          )}
-          {!isLoading && !error && <OrphanCredentials plugins={plugins} />}
-          <Dialog
-            open={detail !== undefined}
-            onOpenChange={(open) => {
-              if (open) return;
-              if (pushedPanel.current) {
-                pushedPanel.current = false;
-                router.history.back();
-                return;
+    <div>
+      <SectionHeading
+        title="Integrations"
+        description="Accounts and services your assistant can use in your own workspace."
+        // The box stays up through an empty match — hiding it would leave
+        // the search with no box to clear it in.
+        actions={!isLoading && !error && showSearch && (
+          <div className="w-full sm:w-56">
+            <SearchInput
+              size="sm"
+              value={query}
+              onSettled={(next) =>
+                void navigate({
+                  to: "/settings/integrations",
+                  search: next.trim().length === 0 ? {} : { q: next },
+                })
               }
-              // Replace, not push: a pushed close leaves the open panel one
-              // entry back, so Back would reopen what the reader just closed.
-              void navigate({ to: "/integrations", search: rowSearch, replace: true });
-            }}
-          >
-            {detail && (
-              <DialogContent className="max-w-xl" aria-describedby={undefined}>
-                <DialogTitle className="sr-only">{pluginDisplayName(detail)}</DialogTitle>
-                <IntegrationDetail plugin={detail} />
-              </DialogContent>
+              placeholder="Search integrations…"
+              aria-label="Search integrations"
+            />
+          </div>
+        )}
+      />
+      {owner && <IntegrationLimitNotice owner={owner} canClear />}
+
+      {/* The live region is on the page from the first paint, and stays
+          empty until the connect result arrives. A screen reader ignores a
+          region that appears together with its text. */}
+      <div role="status">
+        {connectResult?.kind === "connected" && (
+          <div className="mt-4 rounded border border-line bg-moss-wash px-3 py-2 text-sm text-ink">
+            Connected {connectResult.value === "linear" ? "Linear via MCP" : connectResult.value}.
+          </div>
+        )}
+        {connectResult?.kind === "error" && (
+          <div className="mt-4 rounded border border-line bg-danger-wash px-3 py-2 text-sm text-danger-600">
+            {connectResult.detail ?? ERROR_MESSAGES[connectResult.value] ?? (
+              <>
+                Connection failed: {connectResult.value}. Select Connect on the service below to
+                try again.
+              </>
             )}
-          </Dialog>
-        </div>
+          </div>
+        )}
+      </div>
+
+      <div className="mt-8 space-y-10">
+        {isLoading && (
+          <div className="flex items-center gap-2 text-sm text-muted">
+            <Spinner size={14} /> Loading integrations…
+          </div>
+        )}
+        {!isLoading && error && (
+          <div className="text-sm text-danger-500">
+            Couldn't load integrations. Check that the server is running, then reload.
+          </div>
+        )}
+        {!isLoading && !error && plugins.length === 0 && (
+          <div className="text-sm text-muted">No plugins installed.</div>
+        )}
+
+        {!isLoading && !error && showSearch && (
+          <div className="space-y-10">
+            {searching && connected.length + available.length === 0 && !onePassword && (
+              <div className="text-sm text-muted">No integrations match your search.</div>
+            )}
+
+            {(connected.length > 0 || onePassword === "connected") && (
+              <Section title="Connected" description="Services your assistant can reach now.">
+                <IntegrationList label="Connected">
+                  {connected.map((plugin) => (
+                    <IntegrationRow key={plugin.name} plugin={plugin} tools={toolsFor(plugin)} search={rowSearch} onOpen={() => { pushedPanel.current = true; }} />
+                  ))}
+                  {onePassword === "connected" && <PersonalOnePasswordRow connected />}
+                </IntegrationList>
+              </Section>
+            )}
+            {(available.length > 0 || onePassword === "available") && (
+              <Section title="Available" description="Connect a service to let your assistant use it.">
+                <IntegrationList label="Available">
+                  {available.map((plugin) => (
+                    <IntegrationRow key={plugin.name} plugin={plugin} tools={toolsFor(plugin)} search={rowSearch} onOpen={() => { pushedPanel.current = true; }} />
+                  ))}
+                  {onePassword === "available" && <PersonalOnePasswordRow connected={false} />}
+                </IntegrationList>
+              </Section>
+            )}
+          </div>
+        )}
+        {!isLoading && !error && <OrphanCredentials plugins={plugins} />}
+        <Dialog
+          open={detail !== undefined}
+          onOpenChange={(open) => {
+            if (open) return;
+            if (pushedPanel.current) {
+              pushedPanel.current = false;
+              router.history.back();
+              return;
+            }
+            // Replace, not push: a pushed close leaves the open panel one
+            // entry back, so Back would reopen what the reader just closed.
+            void navigate({ to: "/settings/integrations", search: rowSearch, replace: true });
+          }}
+        >
+          {detail && (
+            <DialogContent className="max-w-xl" aria-describedby={undefined}>
+              <DialogTitle className="sr-only">{pluginDisplayName(detail)}</DialogTitle>
+              <IntegrationDetail plugin={detail} />
+            </DialogContent>
+          )}
+        </Dialog>
       </div>
     </div>
   );

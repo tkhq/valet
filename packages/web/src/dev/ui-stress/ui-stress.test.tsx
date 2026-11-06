@@ -73,7 +73,8 @@ describe("/dev/ui-stress", () => {
   it("renders every section from fixtures, with no key left unseeded", async () => {
     mount();
     for (const section of UI_STRESS_SECTIONS) {
-      expect(await screen.findByRole("heading", { level: 2, name: section.title }, { timeout: RENDER_TIMEOUT_MS })).toBeTruthy();
+      // A settings page in a section (Usage, Integrations) carries its own heading of the same name.
+      expect((await screen.findAllByRole("heading", { level: 2, name: section.title }, { timeout: RENDER_TIMEOUT_MS })).length).toBeGreaterThan(0);
     }
     // The approvals inbox lists 20 workflow items and a first decision page
     // of 20 that has a next page.

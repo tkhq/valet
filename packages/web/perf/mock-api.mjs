@@ -134,6 +134,10 @@ const ROUTES = [
     ssoTeamGroups: [], allowPublicArtifacts: false, plugins: [], callerRole: "admin",
   })],
   ["GET", /^\/api\/teams$/, () => json({ teams: TEAMS.map(team) })],
+  // A team's settings page, which the Integrations flow opens first.
+  ["GET", /^\/api\/teams\/[^/]+\/members$/, () => json({ members: [{ userId: USER_ID, role: "admin" }] })],
+  ["GET", /^\/api\/teams\/[^/]+\/deletion-requests$/, () => json({ requests: [], nextCursor: null })],
+  ["GET", /^\/api\/teams\/[^/]+\/deletion-requests\/targets$/, () => json({ targets: [] })],
   ["GET", /^\/api\/notifications$/, () => json({ notifications: [] })],
   ["GET", /^\/api\/notifications\/decisions$/, () => json({ items: [] })],
   ["POST", /^\/api\/notifications\/presence$/, () => json({ ok: true })],
