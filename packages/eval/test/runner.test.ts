@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { getCurrentTools } from "@earendil-works/pi-ai/utils/transcript";
 import {
   fauxAssistantMessage,
   fauxToolCall,
@@ -149,7 +150,7 @@ describe("runCase", () => {
     let seenTools: string[] = [];
     faux.setResponses([
       (context) => {
-        seenTools = (context.tools ?? []).map((t) => t.name);
+        seenTools = getCurrentTools(context.messages).map((tool) => tool.name);
         return fauxAssistantMessage("ok");
       },
     ]);
