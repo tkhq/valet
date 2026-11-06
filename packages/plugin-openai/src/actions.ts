@@ -29,6 +29,7 @@ function action<TParams extends TSchema>(parameters: TParams) {
     name: string;
     description: string;
     riskLevel: PluginAction["riskLevel"];
+    label?: PluginAction<TParams>["label"];
     execute: (
       args: Static<TParams>,
       ctx: PluginActionContext,
@@ -169,6 +170,7 @@ const textToSpeech = action(
   id: "openai.text_to_speech",
   name: "Text to Speech",
   description: "Render text to spoken audio with OpenAI gpt-4o-mini-tts and save the file in the sandbox.",
+  label: () => "Generated speech with OpenAI",
   riskLevel: "low",
   execute: async (args, ctx) => {
     const key = await getApiKey(ctx);

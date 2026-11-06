@@ -1,9 +1,10 @@
 import { ThinkingTiming } from "./thinking-timing.js";
+import { filterSourceCitations, readSources, sourceCitationIds } from "@valet/shared";
 import { normalizeGatePath } from "./builtin-tools/index.js";
 import { skillFileManifest } from "./roles-skills/loader.js";
 import { failedToolResultText, toolResultText } from "./tool-result-text.js";
 import { renderAppPageHint } from "./app-page-hint.js";
-import { stripToolIntent, type ToolUsageFact, CONTINUATION_SOURCE_ITEM_KEY, actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, MODEL_CALL_LIMIT_KEY, readModelCallLimit, readThreadPlan, readTurnPlans, TURN_PLAN_HISTORY_KEY, TURN_PLAN_HISTORY_LIMIT, readToolScope, THREAD_PLAN_KEY, toolInScope, TOOL_SCOPE_KEY, UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY, type ThreadPlan, type ThreadPlanItem, type ToolScope } from "@valet/shared";
+import { stripToolIntent, type ToolUsageFact, CONTINUATION_SOURCE_ITEM_KEY, actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, MODEL_CALL_LIMIT_KEY, readModelCallLimit, readThreadPlan, readTurnPlans, TURN_PLAN_HISTORY_KEY, TURN_PLAN_HISTORY_LIMIT, readToolScope, THREAD_PLAN_KEY, toolInScope, TOOL_SCOPE_KEY, THREAD_SOURCE_SEQ_KEY, UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY, type ThreadPlan, type ThreadPlanItem, type ToolScope } from "@valet/shared";
 import { mergeAppearance, readAppearance, type Appearance } from "@valet/shared";
 import { classifyProviderFailure, isNonRetryableProviderFailure, isUsageLimitFailure, isRateLimitedProviderFailure } from "@valet/shared";
 import { Agent } from "@earendil-works/pi-agent-core";
@@ -754,6 +755,8 @@ export class Thread {
   /** Creation-time user timezone from persisted thread state (TKAI-584). */
   private readonly threadUserTimezone: string | undefined;
   private threadMetadata: Record<string, unknown> | undefined;
+  /** Highest id inherited through copied or imported history, loaded once before allocation. */
+  private sourceSequenceSeed?: Promise<number>;
   /** Tail of the metadata write queue. See `patchThreadMetadata`. */
   private metadataWrites: Promise<void> = Promise.resolve();
   /** Durable leaf used to link each new entry into the active transcript path. */
@@ -1787,12 +1790,12 @@ export class Thread {
     // rest-state repair doesn't later rewrite it to an interrupted-error: the
     // tool DID run to completion on replay (its result was pushed above), it
     // just didn't flow through the agent loop's tool_execution_end.
-    await this.persistReplayedToolResult(suspended.queueItemId, suspended.toolCallId, toolResult);
+    const replayedResult = await this.persistReplayedToolResult(suspended.queueItemId, suspended.toolCallId, toolResult);
     await this.fencedEmit({
       type: "tool_end", threadId: this.id, tool: suspended.toolName, callId: suspended.toolCallId,
-      result: toolResultText(toolResult), isError: false,
-      ...(toolResultImages(toolResult).length > 0 ? { resultData: toolResult } : {}),
-      ...toolOutcome(toolResult),
+      result: toolResultText(replayedResult), isError: false,
+      ...(toolResultNeedsData(replayedResult) ? { resultData: replayedResult } : {}),
+      ...toolOutcome(replayedResult),
     }, { queueItemId: suspended.queueItemId });
     await this.session.providers.store.clearSuspendedTurn(this.session.id, this.id, this.fence);
     this.blockedGateId = undefined;
@@ -1892,9 +1895,11 @@ export class Thread {
     queueItemId: string,
     toolCallId: string,
     result: { content?: unknown; details?: unknown },
-  ): Promise<void> {
+  ): Promise<Record<string, unknown>> {
     const store = this.session.providers.store;
     const safeResult = this.session.providers.sanitizeToolOutput?.(this.session.id, result) ?? result;
+    const structured = safeResult && typeof safeResult === "object" ? { ...safeResult } : {};
+    const persistedResult = { ...structured, text: toolResultText(safeResult) };
     // The suspended turn wrote the tool call, so its entries carry its queue item.
     const entries = await store.getEntries(this.session.id, this.id, { queueItemId });
     for (const e of entries) {
@@ -1904,15 +1909,14 @@ export class Thread {
       );
       if (part && part.type === "tool_call") {
         part.status = "completed";
-        const structured =
-          safeResult && typeof safeResult === "object" ? (safeResult as Record<string, unknown>) : {};
-        part.result = { ...structured, text: toolResultText(safeResult) };
+        part.result = persistedResult;
         await this.fencedWrite(() =>
           store.updateEntry(this.session.id, this.id, e, this.fence),
         );
-        return;
+        return persistedResult;
       }
     }
+    return persistedResult;
   }
 
   /** Only a durable, registered approval is transferable. Abort the old drive without settling or withdrawing it. */
@@ -2764,6 +2768,7 @@ export class Thread {
       }
       this.activeLeafEntryId = note.id;
       this.transcriptPending = true;
+      this.sourceSequenceSeed = undefined;
     });
     this.entryAppendTail = append.catch(() => undefined);
     await append;
@@ -6736,7 +6741,8 @@ export class Thread {
     // is byte-identical on every call and across restarts. It sits in the
     // stable prefix; a per-call clock would break the prompt cache.
     const threadStarted = threadStartedSection(this.threadCreatedAt, this.threadUserTimezone);
-    const base = [this.session.options.systemPrompt, threadContext, threadStarted].filter(Boolean).join("\n\n");
+    const citations = "## Source citations\nWhen a tool result provides Sources with [sN] ids, cite those ids immediately after factual claims supported by the source. Use only ids provided by tools in this thread. Never invent source ids or cite a source that does not support the claim. Keep citation tags out of code and Markdown links.";
+    const base = [this.session.options.systemPrompt, threadContext, threadStarted, citations].filter(Boolean).join("\n\n");
     const fragments = this.session.options.systemContext ?? [];
     if (fragments.length === 0) return base;
     const sorted = [...fragments].sort((a, b) => {
@@ -7074,6 +7080,43 @@ export class Thread {
   }
 
   /**
+   * Reserve `count` source ids for this thread ("s1", "s2", ...). The patch
+   * applies in memory at once, so parallel calls never share an id. A failed
+   * save keeps the number in memory, and the next save persists it.
+   */
+  async allocateSourceIds(count: number): Promise<string[]> {
+    // Forks, duplicates and imports can retain source records without the
+    // original sequence metadata. Include abandoned branches so returning
+    // to an older path cannot give one id two meanings.
+    this.sourceSequenceSeed ??= this.readEntries({ allBranches: true }).then(entries => {
+      let highest = 0;
+      for (const entry of entries) {
+        if (entry.type !== "message") continue;
+        for (const part of entry.parts ?? []) {
+          if (part.type !== "tool_call") continue;
+          for (const source of readSources(part.result)) {
+            const sequence = Number(source.id.slice(1));
+            if (Number.isSafeInteger(sequence)) highest = Math.max(highest, sequence);
+          }
+        }
+      }
+      return highest;
+    }).catch(error => {
+      this.sourceSequenceSeed = undefined;
+      throw error;
+    });
+    const inherited = await this.sourceSequenceSeed;
+    let first = 1;
+    await this.patchThreadMetadata((current) => {
+      const seq = current?.[THREAD_SOURCE_SEQ_KEY];
+      const last = Math.max(inherited, typeof seq === "number" && Number.isSafeInteger(seq) && seq > 0 ? seq : 0);
+      first = last + 1;
+      return { ...current, [THREAD_SOURCE_SEQ_KEY]: last + count };
+    }, "before-save");
+    return Array.from({ length: count }, (_, index) => `s${first + index}`);
+  }
+
+  /**
    * Seed the plan from a playbook's steps, so the model spends no tokens to
    * write it. An open plan (an item not `done`) stays: the person or the
    * model made it, and a playbook load must not erase it.
@@ -7083,7 +7126,7 @@ export class Thread {
     if (read.kind === "invalid") return read;
     const current = readThreadPlan(this.threadMetadata);
     if (current?.items.some((item) => item.status !== "done")) return { kind: "kept", steps: read.steps };
-    await this.setPlan(playbookPlanItems(read.steps));
+    await this.setPlan(playbookPlanItems(read.steps), skill.name);
     return { kind: "seeded", steps: read.steps };
   }
 
@@ -7117,6 +7160,7 @@ export class Thread {
       get toolScopeCeiling() { return thread.toolScopeCeiling(); },
       setToolFocus: (scope) => this.setToolFocus(scope),
       setThreadPlan: (items, title) => this.setPlan(items, title),
+      allocateSourceIds: (count) => this.allocateSourceIds(count),
       seedPlaybookPlan: (skill) => this.seedPlaybookPlan(skill),
       // Author is persisted with the submission; session credentials stay fixed.
       invocationId: toolCallId,
@@ -7581,7 +7625,7 @@ export class Thread {
             tool: event.toolName,
             callId: event.toolCallId,
             result: resultText,
-            ...(toolResultImages(safeResult).length > 0 ? { resultData: part?.type === "tool_call" ? part.result : safeResult } : {}),
+            ...(toolResultNeedsData(safeResult) ? { resultData: part?.type === "tool_call" ? part.result : safeResult } : {}),
             isError: event.isError,
             ...(event.isError ? {} : toolOutcome(safeResult)),
           },
@@ -8281,6 +8325,16 @@ function toolResultImages(result: unknown): ImageContent[] {
     images.push({ type: "image", data: block.data, mimeType: block.mimeType });
   }
   return images;
+}
+
+/** Text-only results still carry the label and source records the live UI needs. */
+function toolResultNeedsData(result: unknown): boolean {
+  if (toolResultImages(result).length > 0 || readSources(result).length > 0) return true;
+  if (typeof result !== "object" || result === null || !("details" in result)) return false;
+  const details = result.details;
+  if (typeof details !== "object" || details === null) return false;
+  return ("ok" in details && details.ok === false)
+    || ("label" in details && typeof details.label === "string" && details.label.trim().length > 0);
 }
 
 function findMostRecentCompaction(

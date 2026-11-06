@@ -392,6 +392,7 @@ describe('gmail actions', () => {
 
     expect(result).toEqual({
       success: true,
+      sources: [{ service: 'gmail', title: 'Hello', url: 'https://mail.google.com/mail/u/0/#all/t1', snippet: 'hi there' }],
       data: {
         messages: [
           {
@@ -409,6 +410,38 @@ describe('gmail actions', () => {
         nextPageToken: null,
       },
     });
+  });
+
+  it.each(['full', 'metadata', 'minimal'])('get_message includes the fetched message as a source for %s', async (format) => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, {
+      id: 'm1', threadId: 't1', snippet: 'The release is ready.',
+      payload: { headers: [{ name: 'Subject', value: 'Release status' }] },
+    }));
+
+    const result = await action('gmail.get_message').execute({ messageId: 'm1', format }, pluginCtx());
+
+    expect(result.sources).toEqual([{
+      service: 'gmail', title: 'Release status', url: 'https://mail.google.com/mail/u/0/#all/t1', snippet: 'The release is ready.',
+    }]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('list_messages omits failed metadata reads from sources', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { messages: [{ id: 'm1' }, { id: 'm2' }] }));
+    fetchMock.mockResolvedValueOnce(jsonResponse(404, { error: { message: 'Deleted' } }));
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { id: 'm2', threadId: 't2', snippet: 'Still available.' }));
+
+    const result = await action('gmail.list_messages').execute({}, pluginCtx());
+
+    expect(result.sources).toEqual([{
+      service: 'gmail', title: 'Gmail message', url: 'https://mail.google.com/mail/u/0/#all/t2', snippet: 'Still available.',
+    }]);
+  });
+
+  it('get_message does not cite an empty response snippet', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { id: 'm1', threadId: 't1', snippet: '  ' }));
+    const result = await action('gmail.get_message').execute({ messageId: 'm1' }, pluginCtx());
+    expect(result.sources ?? []).toEqual([]);
   });
 
   it('get_message decodes the plain-text body and lists attachments', async () => {

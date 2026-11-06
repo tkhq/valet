@@ -20,6 +20,7 @@ const replyToOrigin: PluginAction<typeof replyParameters> = {
   name: "Reply to Origin",
   description:
     "Reply in the Telegram chat this turn came from. Use it for later updates and final results. On an addressed turn, the first assistant text posts automatically unless this action sends the first reply.",
+  label: () => "Replied in the Telegram chat",
   riskLevel: "medium",
   parameters: replyParameters,
   execute: async (args, ctx) => {

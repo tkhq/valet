@@ -5,6 +5,7 @@ import { resolveLinkTarget } from "@valet/api/memory-links";
 import { cn } from "~/lib/cn";
 import { usePublicOrigin } from "~/lib/public-origin";
 import { CodeBlock } from "./code-block";
+import { Citation, remarkSourceCitations } from "./session/citations";
 import { MermaidDiagram } from "./mermaid-diagram";
 
 /** react-markdown wraps a fenced block's highlighted `code` in `pre`, with
@@ -128,6 +129,7 @@ export const Markdown = memo(function Markdown({
   className,
   memoryLinks,
   wideTables = false,
+  citations = false,
 }: {
   children: string;
   className?: string;
@@ -137,6 +139,8 @@ export const Markdown = memo(function Markdown({
    * caller must give that container room on both sides of a centered
    * column; without a container, `cqw` falls back to the viewport. */
   wideTables?: boolean;
+  /** Resolve thread source ids in assistant prose. Code and links stay literal. */
+  citations?: boolean;
 }) {
   const publicOrigin = usePublicOrigin();
   return (
@@ -182,8 +186,12 @@ export const Markdown = memo(function Markdown({
       )}
     >
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={citations ? [remarkGfm, remarkSourceCitations] : [remarkGfm]}
         components={{
+          cite: ({ node, children }) => {
+            const id = node?.properties["data-source-id"];
+            return typeof id === "string" ? <Citation id={id} /> : <cite>{children}</cite>;
+          },
           // Columns size to their content and wrap at spaces. A sentence
           // column can shrink to its floor, and a longer word or URL in it
           // breaks (see `tableCellClass`). Other columns keep their longest

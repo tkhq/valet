@@ -874,11 +874,41 @@ describe('slack actions', () => {
 
     // The access guard already read conversations.info, so the name needs no
     // second request.
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3); // includes one auth.test call for message links
     expect(result).toMatchObject({
       success: true,
       data: { channel: 'C1', channel_name: 'general', total: 1 },
     });
+  });
+
+  it('read_history and read_thread give each message a link from the workspace URL', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, messages: [{ text: 'hello', ts: '1700000000.123456' }, { subtype: 'x', text: '', ts: '1700000001.000000' }], has_more: false }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, url: 'https://acme.slack.com/' }));
+    const history = await action('slack.read_history').execute({ channel: 'C1' }, pluginCtx());
+    expect(history.sources).toEqual([
+      { service: 'slack', title: 'Message in #general', url: 'https://acme.slack.com/archives/C1/p1700000000123456', snippet: 'hello', location: '2023-11-14 22:13 UTC' },
+    ]);
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, messages: [{ text: 'parent', ts: '1700000000.000100', thread_ts: '1700000000.000100' }, { text: 'reply', ts: '1700000005.000200', thread_ts: '1700000000.000100' }], has_more: false }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, url: 'https://acme.slack.com/' }));
+    const thread = await action('slack.read_thread').execute({ channel: 'C1', thread_ts: '1700000000.000100' }, pluginCtx());
+    expect(thread.sources?.map((s) => [s.title, s.url])).toEqual([
+      ['Message in #general', 'https://acme.slack.com/archives/C1/p1700000000000100'],
+      ['Reply in #general', 'https://acme.slack.com/archives/C1/p1700000005000200?thread_ts=1700000000.000100&cid=C1'],
+    ]);
+  });
+
+  it('read_history returns no sources when Slack does not give the workspace URL', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, messages: [{ text: 'hello', ts: '1.1' }], has_more: false }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'invalid_auth' }));
+    const result = await action('slack.read_history').execute({ channel: 'C1' }, pluginCtx());
+    expect(result).toMatchObject({ success: true, data: { total: 1 } });
+    expect(result.sources).toBeUndefined();
   });
 
   it('read_thread names the channel it read', async () => {
@@ -889,7 +919,7 @@ describe('slack actions', () => {
 
     const result = await action('slack.read_thread').execute({ channel: 'C1', thread_ts: '1.1' }, pluginCtx());
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3); // includes one auth.test call for message links
     expect(result).toMatchObject({
       success: true,
       data: { channel: 'C1', channel_name: 'general', total: 1 },
@@ -910,7 +940,7 @@ describe('slack actions', () => {
 
     // The name comes from the guard, so an unnamed conversation costs no
     // second request.
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3); // includes one auth.test call for message links
     expect(result).toMatchObject({ success: true, data: { channel: 'C1', total: 1 } });
     expect(result).not.toHaveProperty('data.channel_name');
   });
@@ -967,7 +997,7 @@ describe('slack actions', () => {
     const result = await action('slack.read_history').execute({ channel: 'C1' }, pluginCtx());
 
     // A label costs no request, so the count stays at guard plus history.
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3); // includes one auth.test call for message links
     expect(result).toMatchObject({
       success: true,
       data: {
@@ -987,7 +1017,7 @@ describe('slack actions', () => {
     const first = await action('slack.read_history').execute({ channel: 'C1' }, pluginCtx());
 
     // The label labels this one message, and it makes no request.
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3); // includes one auth.test call for message links
     expect(first).toMatchObject({
       success: true,
       data: { messages: [{ text: 'see #payroll-public please' }] },
@@ -1009,8 +1039,8 @@ describe('slack actions', () => {
 
     // The second read asks Slack for the name of C2 instead of reusing the
     // label from the first read.
-    expect(fetchMock).toHaveBeenCalledTimes(5);
-    const [lookupUrl] = fetchMock.mock.calls[4] as [string, RequestInit];
+    expect(fetchMock).toHaveBeenCalledTimes(7); // includes two auth.test calls for message links
+    const [lookupUrl] = fetchMock.mock.calls[5] as [string, RequestInit];
     expect(lookupUrl).toContain('https://slack.com/api/conversations.info');
     expect(lookupUrl).toContain('channel=C2');
     expect(second).toMatchObject({
@@ -1068,7 +1098,7 @@ describe('slack actions', () => {
       pluginCtx({ credentials: makeCredentials({ accessToken: 'xoxb-other-workspace' }) }),
     );
 
-    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(fetchMock).toHaveBeenCalledTimes(7); // includes one auth.test call for message links
     expect(other).toMatchObject({
       success: true,
       data: { channel: 'C9', channel_name: 'ops', messages: [{ text: 'pasted #C1' }] },

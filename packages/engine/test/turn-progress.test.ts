@@ -67,6 +67,19 @@ describe("turn progress", () => {
     const action = { ...entry, parts: [{ type: "tool_call" as const, callId: "call", toolName: "call_tool", status: "completed" as const, args }] };
     expect(projectTurnProgress(item, [action], [])?.tasks[0]?.title).toBe("Run tool");
   });
+  it("lists the turn's call ids, planned or not, without changing the revision", () => {
+    const calls = (...ids: string[]) => ({ ...entry, parts: ids.map((callId) => ({ type: "tool_call" as const, callId, toolName: "exec", status: "completed" as const })) });
+    const other = { ...calls("elsewhere"), id: "other", queueItemId: "other-turn" };
+    expect(projectTurnProgress(item, [calls("a", "b"), other], [])?.callIds).toEqual(["a", "b"]);
+    const plan = { turnId: "turn", updatedAt: 2, items: [{ id: "step", text: "Step", status: "in_progress" as const }] };
+    const planned = projectTurnProgress(item, [calls("a", "b")], [], plan);
+    expect(planned?.callIds).toEqual(["a", "b"]);
+    expect(planned?.tasks.map((task) => task.id)).toEqual(["step"]);
+    expect(planned?.revision).toBe(projectTurnProgress(item, [calls("a")], [], plan)?.revision);
+    const plans = { ...entry, parts: [{ type: "tool_call" as const, callId: "p", toolName: "update_plan", status: "completed" as const }] };
+    expect(projectTurnProgress(item, [plans], [])?.callIds).toBeUndefined();
+    expect(projectTurnProgress(item, [calls(...Array.from({ length: 60 }, (_, i) => `c${i}`))], [])?.callIds).toHaveLength(50);
+  });
   it("keeps running and failed tasks visible after many completed calls", () => {
     const parts = Array.from({ length: 27 }, (_, index) => ({ type: "tool_call" as const, callId: String(index), toolName: "exec", status: index === 25 ? "running" as const : index === 26 ? "error" as const : "completed" as const }));
     const progress = projectTurnProgress(item, [{ ...entry, parts }], []);

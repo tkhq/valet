@@ -43,6 +43,45 @@ describe("loadCases", () => {
   });
 });
 
+describe("citation cases", () => {
+  it("loads each citation case with a citation_validity check; mock sources parse", async () => {
+    const cases = await loadCases(join(CASES_DIR, "citations"));
+    const ids = cases.map((c) => c.id).sort();
+    expect(ids).toEqual([
+      "drive-source-citations",
+      "github-source-citations",
+      "gmail-source-citations",
+      "memory-source-citations",
+      "multi-source-attribution",
+      "slack-source-citations",
+    ]);
+    for (const c of cases) expect(c.checks).toContainEqual({ type: "citation_validity" });
+    const slack = cases.find((c) => c.id === "slack-source-citations");
+    expect(slack?.mock_tools?.["slack.read_history"]?.sources?.[0]).toMatchObject({ service: "slack" });
+    const multi = cases.find(c => c.id === "multi-source-attribution");
+    expect(multi?.profile).toBe("mock");
+    expect(Object.keys(multi?.mock_tools ?? {}).sort()).toEqual(["github.get_issue", "slack.read_history"]);
+    expect(cases.some(c => c.profile === "integration")).toBe(false);
+    const unprompted = cases.find(c => c.id === "gmail-source-citations");
+    expect(unprompted?.turns[0]?.content).not.toMatch(/cit(?:e|ation)|source id/i);
+  });
+
+  it("rejects a mock source without a title", () => {
+    expect(() =>
+      parseEvalCase(
+        {
+          id: "a",
+          profile: "mock",
+          turns: [{ role: "user", content: "hi" }],
+          mock_tools: { "slack.read_history": { response: "x", sources: [{ service: "slack" }] } },
+          checks: [{ type: "no_errors" }],
+        },
+        "t.yaml",
+      ),
+    ).toThrow(/sources\[0\]/);
+  });
+});
+
 describe("parseEvalCase", () => {
   const minimal = {
     id: "a-case",
@@ -54,6 +93,11 @@ describe("parseEvalCase", () => {
     const c = parseEvalCase(minimal, "test.yaml");
     expect(c.id).toBe("a-case");
     expect(c.checks).toEqual([{ type: "no_errors" }]);
+  });
+
+  it("accepts the citation validity check", () => {
+    expect(parseEvalCase({ ...minimal, checks: [{ type: "citation_validity" }] }, "t.yaml").checks)
+      .toEqual([{ type: "citation_validity" }]);
   });
 
   it("accepts all optional fields", () => {

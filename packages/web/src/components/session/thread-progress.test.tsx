@@ -93,6 +93,27 @@ it("shows the Valet mascot, not a dot, while a task is in progress", () => {
   const mark = within(screen.getByRole("button")).getByRole("img", { name: "In progress" });
   expect(mark.getAttribute("src")).toBe("/icons/valet-mascot.webp");
 });
+it("shows the turn's calls as readable steps instead of generic task rows, planned or not", () => {
+  const search = { kind: "tool_call" as const, callId: "c1", toolName: "call_tool", status: "completed" as const,
+    args: { tool_id: "slack_user.search_messages", summary: "Find it", params: { query: "deploy" } }, result: { content: [], details: { ok: true, label: "Searched Slack for “deploy”" } } };
+  const reading = { kind: "tool_call" as const, callId: "c2", toolName: "read", status: "running" as const, args: { path: "api/src/home/service.ts" } };
+  const messages = [{ id: "m", sessionId: "s", threadId: "t", role: "assistant" as const, content: "", createdAt: 1, parts: [search, reading] }];
+  const unplanned: TurnProgress = { turnId: "turn1", title: "Task progress", status: "in_progress", revision: "1", updatedAt: 1, omittedTasks: 0, callIds: ["c1", "c2"],
+    tasks: [{ id: "tool:c1", title: "Run tool", status: "complete" }, { id: "tool:c2", title: "Read file", status: "in_progress" }, { id: "gate:g", title: "Approval required", status: "waiting" }] };
+  const { client } = setup(unplanned);
+  const view = render(<QueryClientProvider client={client}><PinnedPlan threadId="t" messages={messages} /></QueryClientProvider>);
+  expect(screen.getByRole("button", { expanded: false }).textContent).toContain("Reading api/src/home/service.ts · 1 of 3 done");
+  fireEvent.click(screen.getByRole("button", { expanded: false }));
+  expect(screen.getByText("Searched Slack for “deploy”")).toBeTruthy();
+  expect(screen.getByText("Approval required")).toBeTruthy();
+  expect(screen.queryByText("Run tool")).toBeNull();
+
+  client.setQueryData(["thread-progress", "t"], { progress: { ...unplanned, planned: true, title: "Ship it", tasks: [{ id: "step", title: "Find the thread", status: "complete" }] } });
+  // The same turn keeps the card open.
+  view.rerender(<QueryClientProvider client={client}><PinnedPlan threadId="t" messages={messages} /></QueryClientProvider>);
+  expect(screen.getByText("Find the thread")).toBeTruthy();
+  expect(screen.getByText("Searched Slack for “deploy”")).toBeTruthy();
+});
 
 // The thread view's wiring: the card carries the working line while it shows a running turn.
 function Rows({ live }: { live: WorkingLineInput }) {
@@ -112,7 +133,7 @@ it("shows one row with one mascot while a running turn has a task card", () => {
   expect(container.querySelectorAll('img[src="/icons/valet-mascot.webp"]')).toHaveLength(1);
   expect(screen.getByRole("button").textContent).toContain("Fix retry · 1 of 3 done");
   // The working line keeps only its announcement.
-  expect(screen.getByRole("status").classList.contains("sr-only")).toBe(true);
+  expect(screen.getByRole("status").closest(".sr-only")).toBeTruthy();
 });
 it("says it is wrapping up when every task is done but the turn still runs", () => {
   showRows({ ...running, tasks: running.tasks.map(task => ({ ...task, status: "complete" as const })) }, { status: "streaming" });

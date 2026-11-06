@@ -3,7 +3,7 @@ export * from "./types.js";
 export { toolScopeSchema } from "./tool-scope-schema.js";
 export { modelCallUsage, type ReportedUsage } from "./model-call-usage.js";
 export { parseResourceQuantity } from "@valet/shared";
-export { readThreadPlan, THREAD_PLAN_KEY, type ThreadPlan, type ThreadPlanItem, type ThreadPlanStatus, type TurnProgress, type ProgressTask, type ProgressStatus } from "@valet/shared";
+export { readThreadPlan, THREAD_PLAN_KEY, type ThreadPlan, type ThreadPlanItem, type ThreadPlanStatus, type TurnProgress, type ProgressTask, type ProgressStatus, type SourceInput, type SourceRecord } from "@valet/shared";
 export { subjectService } from "./events/subjects.js";
 export { boundEventDigest, cutUtf8, stripNul } from "./wakeups/digest.js";
 // pi-ai passthroughs, re-exported so downstream packages (e.g. @valet/eval)
@@ -282,6 +282,7 @@ export {
   toolApprovalGateContext,
   type ToolApprovalGateContext,
   pinnedToolName,
+  actionLabel,
   MAX_PINNED_ACTIONS,
   RESOLVE_TTL_MS,
   type ActionPlugin,

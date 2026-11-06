@@ -13,6 +13,7 @@ import type {
   PluginActionContext,
   PluginActionResult,
 } from '@valet/engine';
+import type { SourceInput } from '@valet/shared';
 import {
   sheetsFetch,
   sheetsError,
@@ -44,12 +45,23 @@ import {
  * the inference into two phases sidesteps TS's contextual-inference depth
  * limit, which otherwise gives up on `args: any` once the file gets long.
  */
+const SHEET_ID = /^[A-Za-z0-9_-]+$/;
+
+/** A range read as a source: the sheet name, the range, and the first rows as text. */
+function sheetSource(spreadsheetId: string, range: string, values: unknown[][]): { sources?: SourceInput[] } {
+  if (!SHEET_ID.test(spreadsheetId) || values.length === 0) return {};
+  const [sheet, cells] = range.includes('!') ? [range.slice(0, range.indexOf('!')).replace(/^'|'$/g, ''), range.slice(range.indexOf('!') + 1)] : ['Spreadsheet', range];
+  const snippet = values.slice(0, 3).map((row) => row.map((cell) => String(cell ?? '')).join(' | ')).join('\n').slice(0, 300);
+  return { sources: [{ service: 'google_sheets', title: sheet, url: `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`, snippet, location: cells }] };
+}
+
 function action<TParams extends TSchema>(parameters: TParams) {
   return (rest: {
     id: string;
     name: string;
     description: string;
     riskLevel: PluginAction['riskLevel'];
+    label?: PluginAction<TParams>["label"];
     execute: (
       args: Static<TParams>,
       ctx: PluginActionContext,
@@ -173,7 +185,7 @@ const readSpreadsheet = action(
     if (!token) return { success: false, error: 'Missing access token' };
     try {
       const data = await readRange(token, p.spreadsheetId, p.range, p.valueRenderOption);
-      return { success: true, data };
+      return { success: true, data, ...sheetSource(p.spreadsheetId, data.range, data.values) };
     } catch (error) {
       return { success: false, error: String(error) };
     }
@@ -304,6 +316,9 @@ const getSpreadsheetInfo = action(
       };
       return {
         success: true,
+        ...(data.properties?.title && SHEET_ID.test(data.spreadsheetId)
+          ? { sources: [{ service: 'google_sheets', title: data.properties.title, url: `https://docs.google.com/spreadsheets/d/${data.spreadsheetId}/edit`, location: `${data.sheets?.length ?? 0} ${data.sheets?.length === 1 ? 'sheet' : 'sheets'}` }] }
+          : {}),
         data: {
           title: data.properties?.title || 'Untitled',
           spreadsheetId: data.spreadsheetId,
@@ -412,6 +427,7 @@ const batchWrite = action(
   id: 'sheets.batch_write',
   name: 'Batch Write',
   description: 'Write data to multiple ranges in a single API call.',
+  label: () => 'Wrote several ranges in Google Sheets',
   riskLevel: 'medium',
   execute: async (args, ctx) => {
     const p = args;
@@ -586,6 +602,7 @@ const copySheetTo = action(
   id: 'sheets.copy_sheet_to',
   name: 'Copy Sheet To',
   description: 'Copy a sheet/tab from one spreadsheet to another.',
+  label: () => 'Copied a sheet to another Google Sheets file',
   riskLevel: 'medium',
   execute: async (args, ctx) => {
     const p = args;
@@ -892,6 +909,7 @@ const autoResizeColumns = action(
   name: 'Auto Resize Columns',
   description: 'Auto-resize columns to fit their content.',
   riskLevel: 'medium',
+  label: () => 'Resized Google Sheets columns to fit',
   execute: async (args, ctx) => {
     const p = args;
     const token = await getAccessToken(ctx);
@@ -927,6 +945,7 @@ const autoResizeRows = action(
   name: 'Auto Resize Rows',
   description: 'Auto-resize rows to fit their content.',
   riskLevel: 'medium',
+  label: () => 'Resized Google Sheets rows to fit',
   execute: async (args, ctx) => {
     const p = args;
     const token = await getAccessToken(ctx);
@@ -1021,6 +1040,7 @@ const freezeRowsAndColumnsDef = action(
   id: 'sheets.freeze_rows_and_columns',
   name: 'Freeze Rows and Columns',
   description: 'Pin rows and/or columns so they stay visible when scrolling.',
+  label: () => 'Froze Google Sheets rows and columns',
   riskLevel: 'medium',
   execute: async (args, ctx) => {
     const p = args;
@@ -1377,6 +1397,7 @@ const groupRows = action(
   id: 'sheets.group_rows',
   name: 'Group Rows',
   description: 'Create collapsible row groups.',
+  label: () => 'Grouped Google Sheets rows',
   riskLevel: 'medium',
   execute: async (args, ctx) => {
     const p = args;
@@ -1412,6 +1433,7 @@ const ungroupAllRows = action(
   id: 'sheets.ungroup_all_rows',
   name: 'Ungroup All Rows',
   description: 'Remove all row groupings from a sheet.',
+  label: () => 'Ungrouped all Google Sheets rows',
   riskLevel: 'medium',
   execute: async (args, ctx) => {
     const p = args;

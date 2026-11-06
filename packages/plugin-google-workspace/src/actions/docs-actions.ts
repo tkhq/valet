@@ -51,6 +51,7 @@ function action<TParams extends TSchema>(parameters: TParams) {
     name: string;
     description: string;
     riskLevel: PluginAction['riskLevel'];
+    label?: PluginAction<TParams>["label"];
     execute: (
       args: Static<TParams>,
       ctx: PluginActionContext,
@@ -652,6 +653,7 @@ const deleteRange = action(
   name: 'Delete Range',
   description: 'Delete content within a character range [startIndex, endIndex)',
   riskLevel: 'high',
+  label: () => 'Deleted a range in a Google Docs document',
   execute: async (args, ctx) => {
     const p = args;
     const token = await getAccessToken(ctx);
@@ -715,6 +717,7 @@ const findAndReplace = action(
   name: 'Find and Replace',
   description: 'Replace all occurrences of a text string throughout the document',
   riskLevel: 'medium',
+  label: () => 'Replaced text in a Google Docs document',
   execute: async (args, ctx) => {
     const p = args;
     const token = await getAccessToken(ctx);
@@ -2048,6 +2051,7 @@ const replyToComment = action(
   id: 'docs.reply_to_comment',
   name: 'Reply to Comment',
   description: 'Add a reply to an existing comment thread',
+  label: () => 'Replied to a Google Docs comment',
   riskLevel: 'medium',
   execute: async (args, ctx) => {
     const p = args;
@@ -2171,6 +2175,7 @@ const findTextIndex = action(
   description:
     'Find the character index of a text string in a document. Returns { startIndex, endIndex } for use with insert_text, modify_text, delete_range, and other index-based tools. Much lighter than reading the full document with format=json.',
   riskLevel: 'low',
+  label: () => 'Looked up text in a Google Docs document',
   execute: async (args, ctx) => {
     const p = args;
     const token = await getAccessToken(ctx);

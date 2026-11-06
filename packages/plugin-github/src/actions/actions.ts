@@ -12,6 +12,7 @@ import {
   type PluginAction,
   type PluginActionContext,
   type PluginActionResult,
+  type SourceInput,
 } from "@valet/engine";
 import type { Octokit } from "octokit";
 import { parseJobLog } from "./parse-job-log.js";
@@ -128,6 +129,7 @@ function action<TParams extends TSchema>(parameters: TParams) {
       args: Static<TParams>,
       ctx: PluginActionContext,
     ) => Promise<PluginActionResult>;
+    label?: (args: Static<TParams>) => string | undefined;
   }): PluginAction<TParams> => ({ ...rest, parameters });
 }
 
@@ -139,6 +141,18 @@ const KEPT_REPO_URLS = new Set(["html_url", "clone_url", "ssh_url", "git_url", "
  * `source` are full repositories, each with its own owner and link templates. */
 const NESTED_ACCOUNT = new Set(["owner", "organization"]);
 const NESTED_REPO = new Set(["parent", "source", "template_repository"]);
+
+/** An issue or pull request read as a source: its page, a title with the repo and number, and the start of its text. */
+function threadSource(data: unknown, owner: string, repo: string, kind: "issue" | "pull request"): { sources?: SourceInput[] } {
+  const item = typeof data === "object" && data !== null ? (data as Record<string, unknown>) : {};
+  const url = item.html_url;
+  const title = item.title;
+  if (typeof url !== "string" || typeof title !== "string") return {};
+  const number = typeof item.number === "number" ? ` #${item.number}` : "";
+  const body = typeof item.body === "string" ? item.body.trim() : "";
+  const state = typeof item.state === "string" ? item.state : undefined;
+  return { sources: [{ service: "github", title: `${owner}/${repo}${number} ${title}`, url, ...(body ? { snippet: body.slice(0, 300) } : {}), location: [kind, state].filter(Boolean).join(", ") }] };
+}
 
 function pickFields(value: unknown, fields: readonly string[]): unknown {
   if (typeof value !== "object" || value === null) return value;
@@ -305,7 +319,7 @@ const getIssue = action(Type.Object({
         "GET /repos/{owner}/{repo}/issues/{issue_number}",
         { owner, repo, issue_number: issueNumber },
       );
-      return { success: true, data };
+      return { success: true, data, ...threadSource(data, owner, repo, "issue") };
     } catch (err) {
       return handleOctokitError(err, "github.get_issue", "Get issue");
     }
@@ -354,7 +368,7 @@ const getPullRequest = action(Type.Object({
         "GET /repos/{owner}/{repo}/pulls/{pull_number}",
         { owner, repo, pull_number: pullNumber },
       );
-      return { success: true, data };
+      return { success: true, data, ...threadSource(data, owner, repo, "pull request") };
     } catch (err) {
       return handleOctokitError(err, "github.get_pull_request", "Get pull request");
     }
@@ -630,6 +644,7 @@ const inspectPullRequest = action(Type.Object({
     "Set includePatch to read the diff, and pathPrefixes to scope to a folder; " +
     "`matched_file_count` is a scalar a workflow if-node can compare against a number.",
   riskLevel: "low",
+  label: (args) => `Inspected GitHub pull request #${args.pullNumber} in ${args.owner}/${args.repo}`,
   execute: async (args, ctx) => {
     const octokit = await getOctokit(ctx);
     const filesLimit = Math.min(Math.max(args.filesLimit ?? 100, 1), 300);
@@ -1646,6 +1661,7 @@ const searchCode = action(Type.Object({
   name: "Search Code",
   description: "Search for code across GitHub repositories",
   riskLevel: "low",
+  label: (args) => `Searched GitHub code for “${args.q}”`,
   execute: async (args, ctx) => {
     const octokit = await getOctokit(ctx);
     const limit = Math.min(Math.max(args.limit ?? 30, 1), 100);
@@ -1765,6 +1781,7 @@ const searchIssues = action(Type.Object({
     "`-<n>d` or `-<n>w` to go back. `query` in the result shows the dates sent to GitHub. " +
     "`truncated` is true when more results match than the call returned.",
   riskLevel: "low",
+  label: (args) => `Searched GitHub issues for “${args.q}”`,
   execute: async (args, ctx) => {
     const octokit = await getOctokit(ctx);
     const limit = Math.min(Math.max(args.limit ?? 30, 1), GITHUB_SEARCH_MAX_RESULTS);
@@ -2344,6 +2361,38 @@ const triggerWorkflow = action(Type.Object({
   },
 });
 
+/** The commit a ref points at, so a link keeps showing the lines that were read. Undefined when GitHub does not say. */
+async function commitSha(octokit: Octokit, owner: string, repo: string, ref: string | undefined, signal: AbortSignal | undefined): Promise<string | undefined> {
+  if (ref && /^[0-9a-f]{40}$/i.test(ref)) return ref;
+  try {
+    const { data } = await octokit.request("GET /repos/{owner}/{repo}/commits/{ref}", {
+      owner, repo, ref: ref ?? "HEAD", mediaType: { format: "sha" }, request: { signal },
+    });
+    // The "sha" media type answers with the bare SHA; Octokit types it as a commit object.
+    const body: unknown = data;
+    const sha = typeof body === "string" ? body.trim() : "";
+    return /^[0-9a-f]{40}$/i.test(sha) ? sha : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** A file the action read, as a source: a link pinned to the commit and the lines read. */
+function fileSource(args: { owner: string; repo: string; ref?: string }, file: { path: string; htmlUrl?: string; content?: string }, sha: string | undefined): SourceInput {
+  const lines = file.content ? file.content.replace(/\n$/, "").split("\n").length : 0;
+  const range = lines > 0 ? `L1-L${lines}` : undefined;
+  // Keep the host GitHub gave (an Enterprise server has its own).
+  const base = file.htmlUrl?.split("/blob/")[0] ?? `https://github.com/${args.owner}/${args.repo}`;
+  const path = file.path.split("/").map(encodeURIComponent).join("/");
+  return {
+    service: "github",
+    title: `${args.owner}/${args.repo}/${file.path}`,
+    url: `${base}/blob/${sha ?? args.ref ?? "HEAD"}/${path}${range ? `#${range}` : ""}`,
+    ...(file.content ? { snippet: file.content.slice(0, 300) } : {}),
+    ...(range || sha ? { location: [range, sha ? `at ${sha.slice(0, 7)}` : undefined].filter(Boolean).join(" ") } : {}),
+  };
+}
+
 const readRepoFile = action(Type.Object({
     owner: Type.String({ description: "Repository owner" }),
     repo: Type.String({ description: "Repository name" }),
@@ -2356,17 +2405,23 @@ const readRepoFile = action(Type.Object({
   name: "Read Repository File",
   description: "Read a file from a GitHub repository without cloning it. A PDF comes back as extracted text.",
   riskLevel: "low",
+  label: (args) => `Read ${args.path} in ${args.owner}/${args.repo}`,
   execute: async (args, ctx) => {
     const octokit = await getOctokit(ctx);
     try {
+      // Resolve before reading: a branch can move between API requests.
+      // A source may claim a pinned commit only when that commit was read.
+      const sha = await commitSha(octokit, args.owner, args.repo, args.ref, ctx.signal);
       const { data } = await octokit.request(
         "GET /repos/{owner}/{repo}/contents/{path}",
-        { owner: args.owner, repo: args.repo, path: args.path, ref: args.ref, request: { signal: ctx.signal } },
+        { owner: args.owner, repo: args.repo, path: args.path, ref: sha ?? args.ref, request: { signal: ctx.signal } },
       );
       if (Array.isArray(data) || data.type !== "file") {
         return { success: false, error: wrongPathKindError(contentsKind(data), "file") };
       }
       const name = typeof data.path === "string" ? data.path : args.path;
+      const htmlUrl = typeof data.html_url === "string" ? data.html_url : undefined;
+      const source = (content: string | undefined) => fileSource(args, { path: name, htmlUrl, content }, sha);
       const raw = data.content ?? "";
       const bytes =
         data.encoding === "base64"
@@ -2379,7 +2434,7 @@ const readRepoFile = action(Type.Object({
         // Pin the raw request to the metadata blob. Without the SHA, a branch
         // can change between the Contents metadata request and the raw read.
         const blobSha = typeof data.sha === "string" ? data.sha : undefined;
-        const rawRef = blobSha ?? args.ref;
+        const rawRef = blobSha ?? sha ?? args.ref;
         const rawResponse = blobSha
           ? await octokit.request(
               "GET /repos/{owner}/{repo}/git/blobs/{file_sha}",
@@ -2440,6 +2495,8 @@ const readRepoFile = action(Type.Object({
               size: data.size,
               content: read.content,
             },
+            // A PDF's text has no line numbers that match the file.
+            sources: [await source(undefined)],
           };
         }
 
@@ -2451,6 +2508,7 @@ const readRepoFile = action(Type.Object({
           return {
             success: true,
             data: { path: data.path, repo: `${args.owner}/${args.repo}`, ref: args.ref, size: data.size, content: downloaded.text },
+            sources: [await source(downloaded.text)],
           };
         }
         return { success: false, error: `Cannot read binary file ${name}. Only text files and PDFs are supported.` };
@@ -2466,6 +2524,7 @@ const readRepoFile = action(Type.Object({
           size: data.size,
           content,
         },
+        sources: [await source(content)],
       };
     } catch (err) {
       if (isNotFound(err)) {

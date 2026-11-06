@@ -24,12 +24,12 @@
  *
  * The MONOGRAM fallback keeps the brand hue as a tile BACKGROUND with white
  * text, which holds contrast in both themes for the same reason a badge
- * does. It is the exception now: only a vendor the upstream set carries no
- * mark for lands here — Slack, DeepWiki, and Typefully at time of writing.
+ * does. It is the exception now: only a vendor with neither a mark nor a
+ * glyph lands here.
  * Do not reach for `siSlack`. `simple-icons` has no Slack mark, only
  * `siSlackware`, so Slack's letter tile is deliberate and not an oversight.
  */
-import { Cable, Drama, Globe, GraduationCap, Workflow, type LucideIcon } from "lucide-react";
+import { Brain, Cable, Drama, Globe, GraduationCap, Shield, Slack, Workflow, type LucideIcon } from "lucide-react";
 import {
   si1password,
   siCloudflare,
@@ -40,12 +40,14 @@ import {
   siGoogledocs,
   siGoogledrive,
   siGooglesheets,
+  siGoogleslides,
   siLinear,
   siNotion,
   siSentry,
   siStripe,
   siTelegram,
 } from "simple-icons";
+import type { ReactNode } from "react";
 import { cn } from "~/lib/cn";
 
 /** The two fields a mark needs to render. `simple-icons` entries carry more
@@ -70,9 +72,20 @@ const BRAND_MARKS: Record<string, BrandMark> = {
   gmail: siGmail,
   "google-calendar": siGooglecalendar,
   google_calendar: siGooglecalendar,
+  google_calendar_events: siGooglecalendar,
+  "google-calendar-events": siGooglecalendar,
   "google-docs": siGoogledocs,
+  google_docs: siGoogledocs,
+  docs: siGoogledocs,
   "google-drive": siGoogledrive,
+  google_drive: siGoogledrive,
+  drive: siGoogledrive,
   "google-sheets": siGooglesheets,
+  google_sheets: siGooglesheets,
+  sheets: siGooglesheets,
+  "google-slides": siGoogleslides,
+  google_slides: siGoogleslides,
+  slides: siGoogleslides,
   // The Google Workspace plugin reaches Drive, Docs, and Sheets through one
   // credential. Drive is the store the other two write into, so it stands
   // for the set.
@@ -115,6 +128,9 @@ const PLUGIN_GLYPHS: Record<string, LucideIcon> = {
   "skills-actions": GraduationCap,
   workflows: Workflow,
   "workflows-actions": Workflow,
+  // First-party memory and security services.
+  memory: Brain,
+  security: Shield,
 };
 
 /** The glyph for a first-party slug, or `undefined` when the slug names a
@@ -266,4 +282,14 @@ export function ServiceIcon({
       {label.charAt(0).toUpperCase()}
     </span>
   );
+}
+
+/** A service's mark or glyph alone, without a tile, for a line of text (a
+ * work step, a source). `fallback` shows when the service has neither. */
+export function ServiceGlyph({ service, fallback }: { service: string; fallback: ReactNode }) {
+  if (service === "slack" || service === "slack_user") return <Slack data-service={service} focusable="false" />;
+  const mark = brandMark(service);
+  if (mark) return <svg viewBox="0 0 24 24" fill="currentColor" focusable="false"><path d={mark.path} /></svg>;
+  const Glyph = pluginGlyph(service);
+  return Glyph ? <Glyph focusable="false" /> : <>{fallback}</>;
 }

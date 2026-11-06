@@ -2,7 +2,8 @@ import { decode as decodeToon } from '@toon-format/toon';
 import { Type } from 'typebox';
 import type { TSchema } from 'typebox';
 import type { ActionPlugin, CredentialProvider, CredentialSource, PluginAction, RiskLevel } from '@valet/engine';
-import { hasToonCollectionMarker } from '@valet/shared';
+import type { SourceInput } from '@valet/shared';
+import { deriveMcpToolLabel, hasToonCollectionMarker } from '@valet/shared';
 import { McpClient, McpHttpError } from './client.js';
 import { refusedListing, scopeGaps, type McpProbeResult } from './probe.js';
 import type { McpTool, McpToolResult } from './types.js';
@@ -56,6 +57,12 @@ export interface McpActionPluginOptions {
    */
   oauthOnly?: boolean;
   description?: string;
+  /**
+   * Turn a successful tool result into source records, so a reply can cite
+   * what the tool read. `data` is the parsed result. Return only items with a
+   * stable link. A throw drops the sources and keeps the result.
+   */
+  sources?: (toolName: string, data: unknown) => SourceInput[];
 }
 
 /** An `ActionPlugin` built by `mcpActionPlugin`, with its health probe. */
@@ -123,6 +130,7 @@ export function mcpActionPlugin(opts: McpActionPluginOptions): McpActionPlugin {
     oauthOnly: opts.oauthOnly,
   };
   const configScopes = opts.configScopes;
+  const sourcesFrom = opts.sources;
 
   return {
     service: serviceName,
@@ -140,7 +148,7 @@ export function mcpActionPlugin(opts: McpActionPluginOptions): McpActionPlugin {
         throw rejection ? new Error(rejection) : err;
       }
       return tools.map((tool) =>
-        mapToolToAction(tool, client, serviceName, defaultRiskLevel, noAuth, staticToken, appCredentialService, messages, configScopes),
+        mapToolToAction(tool, client, serviceName, defaultRiskLevel, noAuth, staticToken, appCredentialService, messages, configScopes, sourcesFrom),
       );
     },
     probe: async ({ credentials }) => {
@@ -154,7 +162,7 @@ export function mcpActionPlugin(opts: McpActionPluginOptions): McpActionPlugin {
         throw err;
       }
       const actions = tools.map((tool) =>
-        mapToolToAction(tool, client, serviceName, defaultRiskLevel, noAuth, staticToken, appCredentialService, messages, configScopes),
+        mapToolToAction(tool, client, serviceName, defaultRiskLevel, noAuth, staticToken, appCredentialService, messages, configScopes, sourcesFrom),
       );
       return { kind: 'listed', actions, ...scopeGaps(tools, scopes) };
     },
@@ -321,6 +329,7 @@ function mapToolToAction(
   appCredentialService: string | undefined,
   messages: RejectionText,
   configScopes: string[] | undefined,
+  sourcesFrom?: (toolName: string, data: unknown) => SourceInput[],
 ): PluginAction {
   // `tool.inputSchema` is a JSON-Schema-shaped object from the MCP server.
   // TypeBox's `TSchema` is declared as an empty interface
@@ -335,11 +344,12 @@ function mapToolToAction(
     description: tool.description || `${serviceName} tool: ${tool.name}`,
     riskLevel: deriveRiskLevel(tool, defaultRiskLevel),
     parameters,
+    label: (args) => deriveMcpToolLabel(serviceName, tool.name, args),
     execute: async (args, ctx) => {
       const resolved = await resolveToken(ctx.credentials, serviceName, noAuth, staticToken, appCredentialService);
       try {
         const result = await client.callTool(resolved.token, tool.name, args);
-        return mapToolResult(result);
+        return withSources(mapToolResult(result), tool.name, sourcesFrom);
       } catch (err) {
         const rejection = rejectionMessage(err, resolved, messages, configScopes, serviceName);
         if (rejection) return { success: false, error: rejection };
@@ -376,6 +386,20 @@ function deriveRiskLevel(tool: McpTool, defaultRiskLevel: RiskLevel): RiskLevel 
     if (hints.openWorldHint === true) return 'high';
   }
   return defaultRiskLevel;
+}
+
+function withSources<T extends { success: boolean; data?: unknown; sources?: SourceInput[] }>(
+  result: T,
+  toolName: string,
+  sourcesFrom?: (toolName: string, data: unknown) => SourceInput[],
+): T {
+  if (!sourcesFrom || !result.success) return result;
+  try {
+    const sources = sourcesFrom(toolName, result.data);
+    return sources.length ? { ...result, sources } : result;
+  } catch {
+    return result;
+  }
 }
 
 function mapToolResult(result: McpToolResult): { success: boolean; data?: unknown; error?: string } {

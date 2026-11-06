@@ -59,7 +59,7 @@ export function buildEvalMemoryTools(store: EvalMemoryStore): ToolDef[] {
       }
       const file = store.files.get(path);
       if (!file) return { text: `Not found: ${path}` };
-      return { text: file.content };
+      return { text: file.content, sources: [{ service: "memory", title: path, snippet: file.content.slice(0, 300) }] };
     },
   };
 

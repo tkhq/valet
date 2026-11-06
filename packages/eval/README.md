@@ -85,7 +85,28 @@ Check types: `tool_called`, `tool_not_called`, `tool_result_matches`,
 `output_not_contains`, `all_terminal`, `no_errors`, `max_turns`,
 `max_tokens`, `min_compactions`, `max_cost`, `max_duration`,
 `verify_command`, `workflow_definition`, `judge_output`,
-`judge_trajectory`, `judge_equivalence`. Field details: `src/types.ts`.
+`judge_trajectory`, `judge_equivalence`, `citation_validity`. Field details: `src/types.ts`.
+
+Citation cases live in `evals/cases/citations/`. Run them with
+`make eval EVAL_ARGS="--cases evals/cases/citations --model <provider/model>"`.
+`citation_validity` checks source existence and reports citation counts.
+A `profile: mock` case can give a mocked tool `sources` (`service`, `title`, and optional `url`, `snippet`, `location`).
+The engine numbers them `s1`, `s2`… in the tool result, as it does for a real tool:
+
+```yaml
+mock_tools:
+  slack.read_history:
+    response: '{"messages":[]}'
+    sources:
+      - service: slack
+        title: Message in #launch
+        url: https://acme.slack.com/archives/C1/p1
+```
+
+`multi-source-attribution.yaml` checks separate Slack and GitHub facts against their own sources. Its prompt and the Gmail prompt do not request citations.
+These cases mock real static actions. They do not test live integrations. The integration profile excludes dynamic MCP actions, including Linear.
+The case's judge checks whether each factual claim has supporting evidence.
+Compare the same case across models before drawing conclusions about citation reliability.
 
 Compaction recall cases live in `evals/cases/compaction/`. Each one sets
 a small `context_budget_tokens`, so the thread compacts between turns.

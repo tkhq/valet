@@ -66,6 +66,7 @@ import { ChildGateCards } from "./child-gate-cards";
 import { AgentsLine } from "./agents-line";
 import { ThreadReplyContext } from "./send-as-person";
 import { ChildTitlesContext } from "./work-group";
+import { ThreadSourcesProvider } from "./citations";
 import { MobileConversationLayout, MobileConversationToolbar, type MobileConversationView } from "~/components/home/mobile-conversation-layout";
 
 /**
@@ -474,6 +475,7 @@ export function SessionView({
   );
 
   const content = (
+    <ThreadSourcesProvider threadId={effectiveThreadId} messages={stream.messages}>
     <ComposerDropContext.Provider value={dropChannel}>
     <div ref={viewRef} className="flex-1 flex flex-col min-h-0 min-w-0">
       {mobileConversation && <MobileConversationToolbar>{sessionHeader}</MobileConversationToolbar>}
@@ -486,10 +488,10 @@ export function SessionView({
       {tab === "chat" ? (
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <ThreadReplyContext.Provider value={widgetReplyTarget}>
+        <ChildTitlesContext.Provider value={childTitles}>
         <PageDropTarget>
           <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-            <ThreadReplyContext.Provider value={widgetReplyTarget}>
-            <ChildTitlesContext.Provider value={childTitles}>
             {cover ? <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
               {!(panel || mobileNavigation) && <div className="sticky top-0 z-20 shrink-0 bg-paper">{sessionHeader}{sandboxTabs}</div>}
               {cover}
@@ -516,8 +518,6 @@ export function SessionView({
                 emptyState={emptyState}
               />
             )}
-            </ChildTitlesContext.Provider>
-            </ThreadReplyContext.Provider>
             {chatActive && !mobileBrowser && !hideBrowser && (browserWatch.mode === "open" || browserWatch.mode === "minimized") && (
               <BrowserOverlay
                 key={JSON.stringify([sessionId, effectiveThreadId])}
@@ -549,7 +549,7 @@ export function SessionView({
               over when the pending gate changes (e.g. a thread switch to a
               different pending gate). */}
           <ThreadRecapDock recap={recap} collapsed={Boolean(pendingGate)} />
-          <PinnedPlan threadId={effectiveThreadId} live={workingLine} />
+          <PinnedPlan threadId={effectiveThreadId} live={workingLine} messages={stream.messages} />
           {pendingGate && (
             <DecisionGateCard key={pendingGate.id} sessionId={sessionId} gate={pendingGate} collapsible />
           )}
@@ -587,12 +587,15 @@ export function SessionView({
           />}
           </div>
         </PageDropTarget>
+        </ChildTitlesContext.Provider>
+        </ThreadReplyContext.Provider>
         </div>
 
         </div>
       ) : null}
     </div>
     </ComposerDropContext.Provider>
+    </ThreadSourcesProvider>
   );
   return mobileNavigation
     ? <MobileConversationLayout view={mobileView} onViewChange={setMobileView}>{content}</MobileConversationLayout>

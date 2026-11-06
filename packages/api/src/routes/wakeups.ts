@@ -20,6 +20,7 @@ import { subjectService, type Lease, type ValetPlugin, type Wakeup } from "@vale
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import type { RequestPrincipal } from "../lib/request-principal.js";
+import { mapBounded } from "../lib/bounded-map.js";
 import { agentSessions } from "../schema/index.js";
 import { canAdministerSession, canViewSession, type SessionOwnerLike } from "../services/session-access.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
@@ -141,31 +142,53 @@ export async function gateBackgroundWork(
   return { kind: "refused", response: c.json(body, force && !mayCancel ? 403 : 409) };
 }
 
-/**
- * The label and link for an event waiter's subject (spec 2026-10-15, Part
- * H): the owning plugin's `eventSubjects`, found by the subject's service
- * prefix (`subjectService`). Absent when no plugin claims the service, or
- * for a subject the plugin's `url` does not resolve.
- */
-function eventSubjectFields(subject: string, plugins: readonly ValetPlugin[]): { subjectLabel: string; subjectUrl?: string } {
+const CHILD_SESSION_SUBJECT_PREFIX = "valet:session:";
+type EventSubjectFields = { subjectLabel: string; subjectUrl?: string };
+
+/** Resolve internal child tasks through their read gates; plugins label external subjects. */
+async function eventSubjectFields(
+  c: Context<AppEnv>,
+  subject: string,
+  plugins: readonly ValetPlugin[],
+): Promise<EventSubjectFields> {
+  if (subject.startsWith(CHILD_SESSION_SUBJECT_PREFIX)) {
+    const id = subject.slice(CHILD_SESSION_SUBJECT_PREFIX.length);
+    const { db } = c.var.providers;
+    const [child] = await db.select().from(agentSessions).where(and(
+      eq(agentSessions.id, id),
+      eq(agentSessions.orgId, c.var.user.orgId),
+      inArray(agentSessions.status, ["active", "hibernated", "archived"]),
+    )).limit(1);
+    if (!child || !await canViewSession(db, child, c.var.principal) || !await spawnedFromVisibleThread(c, child)) {
+      return { subjectLabel: "background task" };
+    }
+    return {
+      subjectLabel: child.title?.trim() || "background task",
+      subjectUrl: `/chat?child=${encodeURIComponent(child.id)}`,
+    };
+  }
   const plugin = plugins.find((p) => p.name === subjectService(subject));
   const subjectLabel = plugin?.eventSubjects?.label(subject) ?? subject;
   const subjectUrl = plugin?.eventSubjects?.url(subject) ?? undefined;
   return { subjectLabel, ...(subjectUrl !== undefined ? { subjectUrl } : {}) };
 }
 
-function wakeupToSummary(w: Wakeup, plugins: readonly ValetPlugin[]): WakeupSummary {
+async function wakeupToSummary(w: Wakeup, resolveSubject: (subject: string) => Promise<EventSubjectFields>): Promise<WakeupSummary> {
   const subject = w.kind === "event" ? w.subjects?.[0] : undefined;
+  const subjectFields = subject !== undefined ? await resolveSubject(subject) : undefined;
+  const reason = subjectFields && subject?.startsWith(CHILD_SESSION_SUBJECT_PREFIX)
+    && w.reason === `Child updates: ${subject.slice(CHILD_SESSION_SUBJECT_PREFIX.length)}`
+    ? `Waiting on ${subjectFields.subjectLabel}` : w.reason;
   return {
     id: w.id,
     threadId: w.threadId,
     kind: w.kind,
     // The listing reads only open rows.
     status: w.status === "pending" ? "pending" : "running",
-    reason: w.reason,
+    reason,
     ...(w.deadlineAt !== undefined ? { deadlineAt: w.deadlineAt } : {}),
     ...(w.fireAt !== undefined ? { fireAt: w.fireAt } : {}),
-    ...(subject !== undefined ? { subject, ...eventSubjectFields(subject, plugins) } : {}),
+    ...(subject !== undefined && subjectFields !== undefined ? { subject, ...subjectFields } : {}),
     ...(w.eventMatch !== undefined ? { clauseCount: w.eventMatch.clauses.length } : {}),
     createdAt: w.createdAt,
   };
@@ -203,9 +226,17 @@ wakeupsRouter.get("/:id/wakeups", async (c) => {
   }
   const work = await listBackgroundWork(engineStore, id);
   const mayCancel = await canCancelSessionWakeup(db, row, c.var.principal);
-  const plugins = c.var.providers.plugins;
+  const subjects = new Map<string, Promise<EventSubjectFields>>();
+  const resolveSubject = (subject: string): Promise<EventSubjectFields> => {
+    let fields = subjects.get(subject);
+    if (!fields) {
+      fields = eventSubjectFields(c, subject, c.var.providers.plugins);
+      subjects.set(subject, fields);
+    }
+    return fields;
+  };
   const body: ListSessionWakeupsResponse = {
-    wakeups: (await keepVisibleWork(c, row, work.wakeups, mayCancel)).map((w) => wakeupToSummary(w, plugins)),
+    wakeups: await mapBounded(await keepVisibleWork(c, row, work.wakeups, mayCancel), 4, (w) => wakeupToSummary(w, resolveSubject)),
     leases: (await keepVisibleWork(c, row, work.leases, mayCancel)).map(leaseToSummary),
   };
   return c.json(body);

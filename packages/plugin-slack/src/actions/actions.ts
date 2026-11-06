@@ -23,6 +23,7 @@ import {
 import { CHART_LIMITS, chartAsMarkdown, chartProblem, readChart, type Chart } from "@valet/shared";
 import { authorizeSlackFile } from "./file-access.js";
 import { slackFetch, slackGet, slackGetOnce } from "./api.js";
+import { messageSources, slackWorkspaceUrl } from "./message-sources.js";
 import { checkPrivateChannelAccess } from "./channel-access.js";
 import { cachedChannelName, rememberChannelName, resolveChannelName } from "./channel-names.js";
 import { buildContentBlocks, hasTableBlock, needsContentBlocks, slackEscapedText, splitTableMessage, truncateSlackText, SLACK_TEXT_LIMIT, SLACK_MAX_BLOCKS, SLACK_UPDATE_TEXT_BYTES } from "../message-chunking.js";
@@ -47,6 +48,7 @@ function action<TParams extends TSchema>(parameters: TParams) {
       args: Static<TParams>,
       ctx: PluginActionContext,
     ) => Promise<PluginActionResult>;
+    label?: (args: Static<TParams>) => string | undefined;
   }): PluginAction<TParams> => ({ ...rest, parameters });
 }
 
@@ -508,6 +510,7 @@ const dmOwner = action(Type.Object({
   id: 'slack.dm_owner',
   name: 'DM Owner',
   description: 'Send a direct message to a personal session or workflow owner with a linked Slack identity. For team or organization owners, use dm_user with an explicit recipient.',
+  label: () => 'Sent a Slack direct message to the owner',
   riskLevel: 'low',
   execute: async (args, ctx) => {
     const p = args;
@@ -531,6 +534,7 @@ const dmUser = action(Type.Object({
   id: 'slack.dm_user',
   name: 'DM User',
   description: 'Send a direct message to a Slack user by their user ID (U...). Use list_users to find IDs. This uses the bot token and does not require a personal Slack identity.',
+  label: () => 'Sent a Slack direct message',
   riskLevel: 'low',
   execute: async (args, ctx) => {
     const p = args;
@@ -780,8 +784,11 @@ const readHistory = action(Type.Object({
     // reach this name.
     const channelName = guard.name;
     // Put pagination metadata first — large message arrays may be truncated by tool output limits
+    const base = await slackWorkspaceUrl(token, ctx.signal);
+    const sources = base ? messageSources({ base, channel: p.channel, channelName, messages }) : [];
     return {
       success: true,
+      ...(sources.length ? { sources } : {}),
       data: {
         channel: p.channel,
         ...(channelName ? { channel_name: channelName } : {}),
@@ -832,8 +839,11 @@ const readThread = action(Type.Object({
     // The guard read conversations.info for this channel. Message text cannot
     // reach this name.
     const channelName = guard.name;
+    const base = await slackWorkspaceUrl(token, ctx.signal);
+    const sources = base ? messageSources({ base, channel: p.channel, channelName, messages }) : [];
     return {
       success: true,
+      ...(sources.length ? { sources } : {}),
       data: {
         channel: p.channel,
         ...(channelName ? { channel_name: channelName } : {}),
@@ -880,6 +890,7 @@ const searchChannels = action(Type.Object({
   name: 'Search Channels',
   description: 'Find accessible Slack channels by name with case-insensitive substring matching. Pass the user’s original name or keyword in query. Empty matches do not prove missing access. Resolve ambiguous matches before posting.',
   riskLevel: 'low',
+  label: (args) => `Searched Slack channels for “${args.query}”`,
   execute: (args, ctx) => listChannels.execute(args, ctx),
 });
 
@@ -897,6 +908,9 @@ const fetchFile = action(Type.Object({
     if (!cred?.accessToken) return { success: false, error: 'Connect Slack in Settings, then retry.' };
     const file = await authorizeSlackFile(args, cred, ctx);
     if ('error' in file) return { success: false, error: file.error };
+    const cite = (content: string): Pick<PluginActionResult, 'sources'> => file.permalink && content.trim()
+      ? { sources: [{ service: 'slack', title: file.name, url: file.permalink, snippet: content.trim().slice(0, 500) }] }
+      : {};
     const parsedUrl = file.url;
     let res: Response;
     try {
@@ -950,7 +964,7 @@ const fetchFile = action(Type.Object({
       if (!downloaded.ok) {
         return { success: false, error: `File too large for text extraction (${Math.round(downloaded.size / 1024)}KB). Max 1MB.` };
       }
-      return { success: true, data: { content: downloaded.text, mimetype: contentType } };
+      return { success: true, data: { content: downloaded.text, mimetype: contentType }, ...cite(downloaded.text) };
     }
 
     const documentFilename = file.name;
@@ -964,7 +978,7 @@ const fetchFile = action(Type.Object({
       }
       const read = await extractDownloadedDocx({ data: downloaded.data, name: documentFilename, extractDocument: ctx.extractDocument, signal: ctx.signal });
       if (!read.ok) return { success: false, error: read.error };
-      return { success: true, data: { content: read.content, mimetype: DOCX_DOCUMENT_MIME, filename: documentFilename } };
+      return { success: true, data: { content: read.content, mimetype: DOCX_DOCUMENT_MIME, filename: documentFilename }, ...cite(read.content) };
     }
 
     if (contentType === 'application/pdf' || contentType === 'application/octet-stream') {
@@ -986,7 +1000,7 @@ const fetchFile = action(Type.Object({
       if (data && isPdfDocument(data)) {
         const read = await extractDownloadedPdf({ data, name: filename, extractDocument: ctx.extractDocument, signal: ctx.signal });
         if (!read.ok) return { success: false, error: read.error };
-        return { success: true, data: { content: read.content, mimetype: 'application/pdf', filename } };
+        return { success: true, data: { content: read.content, mimetype: 'application/pdf', filename }, ...cite(read.content) };
       }
     }
 
@@ -1007,6 +1021,7 @@ const getPins = action(Type.Object({
   id: 'slack.get_pins',
   name: 'Get Pins',
   description: 'Get pinned messages in a channel. Returns messages in the same format as read_history. Useful for understanding what a channel considers important. The result names the channel in channel_name. Use that name when you write about the channel. Use the ID in tool arguments.',
+  label: () => 'Read the pins in a Slack channel',
   riskLevel: 'low',
   execute: async (args, ctx) => {
     const p = args;
@@ -1138,6 +1153,7 @@ const getReactions = action(Type.Object({
   id: 'slack.get_reactions',
   name: 'Get Reactions',
   description: 'Get reactions on a specific message with who reacted. Note: Slack may not return all reactors — count is always accurate but the users list can be truncated on popular messages.',
+  label: () => 'Read the reactions on a Slack message',
   riskLevel: 'low',
   execute: async (args, ctx) => {
     const p = args;
@@ -1380,6 +1396,7 @@ const replyToOrigin = action(Type.Object({
   name: 'Reply to Origin',
   description:
     'Reply in the Slack thread this turn came from. Use it for later updates and final results, and to post a chart: pass charts and Slack draws them natively. On an addressed turn, the first assistant text posts automatically unless this action sends the first reply. No channel or thread id is needed.',
+  label: () => 'Replied in the Slack thread',
   riskLevel: 'medium',
   execute: async (args, ctx) => {
     const charts: Chart[] = [];
@@ -1465,6 +1482,7 @@ const replyFileToOrigin = action(Type.Object({
   name: 'Reply with File to Origin',
   description:
     'Upload a file to the Slack thread this turn came from: a generated image, chart, or diagram, a rendered document, or any other file result. Pass a sandbox path, or the file_id that file_attach or render_diagram returned. PNG, JPEG, GIF, and WebP images show inline; send alt_text and title with them. No channel or thread id is needed.',
+  label: (args) => (typeof args.name === 'string' && args.name.trim() ? `Replied with file “${args.name.trim().slice(0, 80)}” in the Slack thread` : 'Replied with a file in the Slack thread'),
   riskLevel: 'medium',
   execute: async (args, ctx) => {
     if ((args.path === undefined) === (args.file_id === undefined)) {
@@ -1537,6 +1555,7 @@ const reactToOrigin = action(Type.Object({
   name: 'React to Origin',
   description:
     'Add an emoji reaction to the message this turn came from. A light way to acknowledge an overheard message without replying. No channel or timestamp is needed.',
+  label: () => 'Reacted to the Slack message',
   riskLevel: 'low',
   execute: async (args, ctx) => {
     const o = await resolveSlackOrigin(ctx);

@@ -1,11 +1,21 @@
 ---
 name: memory
-description: Playbooks for creating memories well and working on the memory store itself — write style, cross-linking, dedup/merge, journal distillation, reorganization, personal/team knowledge transfers, and expiry hygiene with the mem_* tools.
+description: Find and use what memory already holds about a person, project, client, repository or decision. Also playbooks for creating memories well and working on the memory store itself (write style, cross-linking, dedup/merge, journal distillation, reorganization, personal/team knowledge transfers, and expiry hygiene) with the mem_* tools.
 ---
 
-# Memory Creation & Curation
+# Memory
 
-Load this skill when the task is *about the memory store itself*: writing new memories well, linking related files, merging duplicates, distilling journals, reorganizing paths, or enriching metadata. Day-to-day remembering doesn't need this — the `mem_*` tool descriptions and your persona's memory rules cover that.
+Load this skill when the person wants you to use what you know, or when the task is *about the memory store itself*: writing new memories well, linking related files, merging duplicates, distilling journals, reorganizing paths, or enriching metadata.
+
+## Find and use what you know
+
+The snapshot holds pinned files, recent journal entries, and the root index. The rest of memory stays in the store until you open it.
+
+1. Search when a message names a person, project, client, repository, or earlier decision. Put two to four specific terms and their synonyms in one `mem_search` call. Positive terms match any of them.
+2. Read the hits. A result line is a path and a description, not the file. `mem_read` each file your answer depends on. When your own file and a `team:{id}/` file cover one subject, open yours first.
+3. Follow the links. A file's `## Related` section and `mem_links` lead to the rest of its cluster.
+4. Answer from what you read. When the person asks how you know, name the file.
+5. If memory has nothing, say so, then ask or look it up. Write what you learn, so the next search finds it.
 
 ## Mental model (30 seconds)
 

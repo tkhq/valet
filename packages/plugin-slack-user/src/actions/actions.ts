@@ -5,8 +5,9 @@ import type {
   PluginAction,
   PluginActionContext,
   PluginActionResult,
+  SourceInput,
 } from "@valet/engine";
-import { markdownToSlackMrkdwn, slimMessage } from "@valet/plugin-slack/actions";
+import { markdownToSlackMrkdwn, messageSources, slackWorkspaceUrl, slimMessage } from "@valet/plugin-slack/actions";
 import { isRevokedError, notConnectedError, reconnectError, slackFetch, slackGet } from "./api.js";
 
 /**
@@ -22,6 +23,7 @@ function action<TParams extends TSchema>(parameters: TParams) {
     description: string;
     riskLevel: PluginAction["riskLevel"];
     execute: (args: Static<TParams>, ctx: PluginActionContext) => Promise<PluginActionResult>;
+    label?: (args: Static<TParams>) => string | undefined;
   }): PluginAction<TParams> => ({ ...rest, parameters });
 }
 
@@ -90,6 +92,29 @@ function slimSearchMatch(m: Record<string, unknown>): Record<string, unknown> {
   };
 }
 
+/** Where a raw search match was posted, as a reader names it. Slack names a
+ * DM's channel with the other person's user id, which is not a channel name. */
+function matchPlace(m: Record<string, unknown>): string {
+  const channel = typeof m.channel === "object" && m.channel !== null ? { ...m.channel } : {};
+  const name = "name" in channel && typeof channel.name === "string" ? channel.name : "";
+  if (("is_im" in channel && channel.is_im === true) || /^[UW][A-Z0-9]{6,}$/.test(name)) return "Direct message";
+  if ("is_mpim" in channel && channel.is_mpim === true) return "Group message";
+  return name ? `Message in #${name}` : "Slack message";
+}
+
+/** A raw search match as a source: the message's permalink, where it was posted, and its text. */
+function matchSource(m: Record<string, unknown>): SourceInput[] {
+  if (typeof m.permalink !== "string") return [];
+  const seconds = typeof m.ts === "string" ? Number(m.ts) : NaN;
+  return [{
+    service: "slack",
+    title: matchPlace(m),
+    url: m.permalink,
+    ...(typeof m.text === "string" ? { snippet: m.text } : {}),
+    ...(Number.isFinite(seconds) ? { location: `${new Date(seconds * 1000).toISOString().slice(0, 16).replace("T", " ")} UTC` } : {}),
+  }];
+}
+
 // `slimMessage` is shared with plugin-slack — importing keeps file-attachment
 // and reaction extraction consistent across bot + user views.
 
@@ -147,6 +172,7 @@ const searchMessages = action(
   // another participant, a workflow node) could otherwise exfiltrate DMs
   // silently. `medium` → requires approval; orgs can loosen via policy override.
   riskLevel: "medium",
+  label: (p) => `Searched Slack for “${p.query}”`,
   execute: async (p, ctx) => {
     const token = await getUserToken(ctx);
     if (!token) return { success: false, error: notConnectedError() };
@@ -173,6 +199,7 @@ const searchMessages = action(
     return {
       success: true,
       data: { total: data.messages?.total ?? matches.length, next_cursor, matches },
+      sources: rawMatches.flatMap(matchSource),
     };
   },
 });
@@ -326,8 +353,11 @@ const readHistory = action(
     if (!data.ok) return slackDataError(data.error);
     const messages = (data.messages || []).map((m) => slimMessage(m as Record<string, unknown>));
     const next_cursor = data.response_metadata?.next_cursor || undefined;
+    const base = await slackWorkspaceUrl(token, ctx.signal, slackGet);
+    const sources = base ? messageSources({ base, channel: p.channel, messages }) : [];
     return {
       success: true,
+      ...(sources.length ? { sources } : {}),
       data: { has_more: data.has_more, next_cursor, total: messages.length, messages },
     };
   },
@@ -364,8 +394,11 @@ const readThread = action(
     if (!data.ok) return slackDataError(data.error);
     const messages = (data.messages || []).map((m) => slimMessage(m as Record<string, unknown>));
     const next_cursor = data.response_metadata?.next_cursor || undefined;
+    const base = await slackWorkspaceUrl(token, ctx.signal, slackGet);
+    const sources = base ? messageSources({ base, channel: p.channel, messages }) : [];
     return {
       success: true,
+      ...(sources.length ? { sources } : {}),
       data: { has_more: data.has_more, next_cursor, total: messages.length, messages },
     };
   },
@@ -421,6 +454,7 @@ const setDnd = action(
   id: "slack_user.set_dnd",
   name: "Snooze DND (as user)",
   description: "Turn on Do-Not-Disturb on YOUR Slack account for N minutes (dnd.setSnooze).",
+  label: () => "Turned on Slack Do Not Disturb",
   riskLevel: "high",
   execute: async (p, ctx) => {
     const token = await getUserToken(ctx);
@@ -437,6 +471,7 @@ const endDnd = action(Type.Object({}))({
   id: "slack_user.end_dnd",
   name: "End DND (as user)",
   description: "Turn off Do-Not-Disturb on YOUR Slack account (dnd.endDnd).",
+  label: () => "Turned off Slack Do Not Disturb",
   riskLevel: "high",
   execute: async (_p, ctx) => {
     const token = await getUserToken(ctx);
@@ -459,6 +494,7 @@ const sendDm = action(
   name: "Send DM (as user)",
   description:
     "Send a DM to a Slack user from YOUR account (chat.postMessage to a user DM). Use only for explicit user-delegated tasks; the agent's OWN outbound communication should continue to use the bot integration.",
+  label: () => "Sent a Slack direct message as you",
   riskLevel: "high",
   execute: async (p, ctx) => {
     const token = await getUserToken(ctx);

@@ -3,7 +3,8 @@ import { Type } from "typebox";
 import type { ActionPlugin, ValetPlugin } from "@valet/engine";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@valet/engine/test-helpers";
 import { bundledPlugins } from "@valet/api/plugins";
-import { buildMockCatalogTools, runCase, runChecks, toolResultText } from "../src/index.js";
+import { join } from "node:path";
+import { buildMockCatalogTools, loadCases, runCase, runChecks, toolResultText } from "../src/index.js";
 import type { EvalCase } from "../src/index.js";
 
 const githubActions: ActionPlugin = {
@@ -79,7 +80,69 @@ describe("buildMockCatalogTools", () => {
   });
 });
 
+describe("citation eval cases", () => {
+  it("name only real actions, so every mocked tool exists in the bundled plugins", async () => {
+    const cases = await loadCases(join(import.meta.dirname, "../../../evals/cases/citations"));
+    const mocked = cases.filter((c) => c.profile === "mock");
+    expect(mocked.map((c) => c.id).sort()).toEqual(["drive-source-citations", "github-source-citations", "gmail-source-citations", "multi-source-attribution", "slack-source-citations"]);
+    for (const c of mocked) expect(() => buildMockCatalogTools(c.mock_tools ?? {}, bundledPlugins), c.id).not.toThrow();
+  });
+});
+
 describe("runCase with profile: mock", () => {
+  it("numbers the sources a mocked tool returns so citation_validity passes", async () => {
+    const faux = registerFauxProvider({ provider: "mock-src" });
+    faux.setResponses([
+      fauxAssistantMessage(
+        [fauxToolCall("call_tool", { tool_id: "github.list_pull_requests", params: { owner: "acme", repo: "valet" }, summary: "list" }, { id: "tc1" })],
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage("PR 42 fixes the auth bug [s1]"),
+    ]);
+    const result = await runCase(
+      mockCase({
+        mock_tools: {
+          "github.list_pull_requests": {
+            response: CANNED,
+            sources: [{ service: "github", title: "acme/valet#42 Fix auth bug", url: "https://github.com/acme/valet/pull/42" }],
+          },
+        },
+        checks: [{ type: "citation_validity" }],
+      }),
+      { model: faux.getModel(), mockPlugins: [fakeGithubPlugin] },
+    );
+    const call = result.trajectory.toolCalls.find((c) => c.toolName === "call_tool");
+    expect(toolResultText(call?.result)).toContain("[s1] acme/valet#42 Fix auth bug");
+    const [check] = await runChecks([{ type: "citation_validity" }], result.trajectory);
+    expect(check?.pass).toBe(true);
+  });
+
+  it("assigns distinct ids across source tools for separate fact attribution", async () => {
+    const cases = await loadCases(join(import.meta.dirname, "../../../evals/cases/citations"));
+    const case_ = cases.find(c => c.id === "multi-source-attribution");
+    if (!case_) throw new Error("Missing multi-source attribution case");
+    const faux = registerFauxProvider({ provider: "mock-multi-src" });
+    faux.setResponses([
+      fauxAssistantMessage([
+        fauxToolCall("call_tool", { tool_id: "slack.read_history", params: { channel: "C0LAUNCH" }, summary: "read launch" }, { id: "slack" }),
+        fauxToolCall("call_tool", { tool_id: "github.get_issue", params: { owner: "acme", repo: "valet", issueNumber: 42 }, summary: "read blocker" }, { id: "github" }),
+      ], { stopReason: "toolUse" }),
+      fauxAssistantMessage("Launch is Tuesday, Nov 12 [s1]. Early cookie expiry blocks release [s2]."),
+    ]);
+    try {
+      const result = await runCase(case_, { model: faux.getModel(), mockPlugins: bundledPlugins });
+      expect(result.outcome).toBe("completed");
+      const slack = result.trajectory.toolCalls.find(c => c.actionId === "slack.read_history");
+      const github = result.trajectory.toolCalls.find(c => c.actionId === "github.get_issue");
+      expect(toolResultText(slack?.result)).toContain("[s1] Launch date");
+      expect(toolResultText(github?.result)).toContain("[s2] acme/valet#42 Release blocker");
+      const checks = await runChecks([{ type: "citation_validity" }], result.trajectory);
+      expect(checks[0]?.pass).toBe(true);
+    } finally {
+      faux.unregister();
+    }
+  });
+
   it("agent calls the mocked tool and gets the canned response; checks pass", async () => {
     const faux = registerFauxProvider({ provider: "mock-1" });
     faux.setResponses([

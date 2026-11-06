@@ -198,13 +198,14 @@ describe("mem_* tools: real HTTP round trip", () => {
     });
 
     const writeResult = await memWriteTool.execute(
-      { path: "notes/hello.md", content: "# Hello\n\nWorld.\n" },
+      { path: "notes/hello.md", content: "# Hello\n\nWorld.\n", description: "A short greeting." },
       ctx,
     );
     expect(writeResult.text).toBe("wrote notes/hello.md (v1)");
 
     const readResult = await memReadTool.execute({ path: "notes/hello.md" }, ctx);
     expect(readResult.text).toContain("World.");
+    expect(readResult.sources).toEqual([{ service: "memory", title: "Hello", url: "/memory/notes/hello.md", snippet: "A short greeting." }]);
   });
 
   it("save_principle writes a principle the Principles index lists", async () => {
@@ -317,6 +318,7 @@ describe("mem_* tools: real HTTP round trip", () => {
 
     const result = await memReadTool.execute({ path: "notes/" }, ctx);
     expect(result.text).toContain("one.md");
+    expect(result.sources).toBeUndefined();
   });
 
   it("mem_move renames a file, rewrites the referencer, and relays the type warning", async () => {
@@ -389,6 +391,9 @@ describe("mem_* tools: real HTTP round trip", () => {
 
     const result = await memSearchTool.execute({ query: "needle" }, ctx);
     expect(result.text).toContain("notes/searchable.md");
+    // A result line is a description, not the file. The next step says to
+    // open what the answer depends on, which is also what records a use.
+    expect(result.text).toContain("mem_read each file your answer depends on");
   });
 
   it("mem_search with no matches reports emptiness instead of an empty string", async () => {

@@ -2,6 +2,14 @@ import { describe, expect, it } from "vitest";
 import { buildEvalMemoryTools, EvalMemoryStore } from "../src/memory-tools.js";
 
 describe("eval mem_search", () => {
+  it("returns source records when a memory file is read", async () => {
+    const store = new EvalMemoryStore();
+    store.files.set("notes/deploy.md", { content: "Deploy Friday." });
+    const read = buildEvalMemoryTools(store).find(tool => tool.name === "mem_read");
+    if (!read) throw new Error("mem_read missing");
+    expect((await read.execute({ path: "notes/deploy.md" }, {} as never)).sources)
+      .toEqual([{ service: "memory", title: "notes/deploy.md", snippet: "Deploy Friday." }]);
+  });
   it("OR-matches local terms, preserves phrases, and ranks stronger matches first", async () => {
     const store = new EvalMemoryStore();
     store.files.set("notes/project.md", { content: "Project notes." });

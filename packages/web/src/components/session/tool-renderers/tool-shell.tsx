@@ -33,6 +33,8 @@ export function prettyToolName(toolName: string): string {
  */
 export interface ToolShellProps {
   toolName: string;
+  /** A citation request opens this call's input and output. */
+  revealKey?: number;
   category: ToolCategory;
   Icon: LucideIcon;
   /** Right-of-name primary identifier (path, command excerpt, key, etc.). */
@@ -106,6 +108,7 @@ export function ToolShell({
   summary,
   status,
   children,
+  revealKey,
 }: ToolShellProps) {
   // The user's default policy is read once at mount. A live preference
   // change never rewrites an already-mounted card — the Chat density
@@ -148,6 +151,13 @@ export function ToolShell({
       setExpanded(false);
     }
   }, [status, policy]);
+
+  useEffect(() => {
+    if (revealKey !== undefined) {
+      userTouchedRef.current = true;
+      setExpanded(true);
+    }
+  }, [revealKey]);
 
   const isError = status === "error";
 

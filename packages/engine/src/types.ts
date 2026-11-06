@@ -1,7 +1,7 @@
 import type { Session } from "./session.js";
 import type { TSchema, Static } from "typebox";
 import type { Model } from "@earendil-works/pi-ai/compat";
-import type { ThreadPlan, ThreadPlanItem, ToolUsageFact, ToolScope, BrowserAuditEntry, BrowserPolicyService, ProviderFailureKind } from "@valet/shared";
+import type { SourceInput, ThreadPlan, ThreadPlanItem, ToolUsageFact, ToolScope, BrowserAuditEntry, BrowserPolicyService, ProviderFailureKind } from "@valet/shared";
 // Type-only import — erased at runtime, so the plugin-catalog ↔ types cycle
 // exists only for the type checker (both directions are `import type`).
 import type { ApprovalMode } from "./plugin-catalog.js";
@@ -799,6 +799,12 @@ export interface ToolResult {
   /** "automatic" when the action needed approval and ran without a card
    * because the thread runs without asking. The UI names it on the step. */
   approval?: "automatic";
+  /** What the call did, in the action's own words ("Searched Slack for
+   * “deploy”"). Set by an action-backed tool when the action supplies one. */
+  label?: string;
+  /** Items the call read. The tool bridge gives each a thread-scoped id,
+   * lists the ids in the model's text, and stores the records on the event. */
+  sources?: SourceInput[];
 }
 
 export type ToolAttachment =
@@ -838,6 +844,8 @@ export interface ToolContext {
   setToolFocus?: (scope: ToolScope | undefined) => Promise<void>;
   /** Replace this thread's plan in thread metadata (`update_plan`). Absent on a context built by hand. */
   setThreadPlan?: (items: ThreadPlanItem[], title?: string) => Promise<ThreadPlan>;
+  /** Reserve `count` thread-scoped source ids ("s4", "s5"). Absent on a context built by hand. */
+  allocateSourceIds?: (count: number) => Promise<string[]>;
   /** Seed this thread's plan from a playbook skill, unless an open plan exists. Absent on a context built by hand. */
   seedPlaybookPlan?: (skill: SkillSource) => Promise<PlaybookSeedResult>;
   /** The current request offers native image generation; duplicate plugin actions are hidden. */

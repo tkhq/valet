@@ -1,0 +1,25 @@
+id: github-source-citations
+description: Cite the GitHub issue that states the bug cause.
+profile: mock
+turns:
+  - role: user
+    content: >-
+      Look at issue 42 in acme/valet and tell me what is causing the bug. Cite the returned source id after the fact.
+timeout_ms: 120000
+mock_tools:
+  github.get_issue:
+    response: '{"number":42,"title":"Login loops","state":"open","body":"The session cookie expires too early, so login loops."}'
+    sources:
+      - service: github
+        title: acme/valet#42 Login loops
+        url: https://github.com/acme/valet/issues/42
+        snippet: The session cookie expires too early, so login loops.
+        location: issue, open
+checks:
+  - type: tool_called
+    tool: github.get_issue
+  - type: citation_validity
+  - type: judge_output
+    rubric: >-
+      The reply says the session cookie expires too early and cites the GitHub issue source. Uncited facts score at most 2.
+  - type: no_errors

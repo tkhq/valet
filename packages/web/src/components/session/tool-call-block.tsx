@@ -12,18 +12,18 @@ export type ToolCallPart = Extract<MessagePart, { kind: "tool_call" }>;
  * `Preview` below when it has one. A `bare` renderer shows only its
  * preview once the call completes.
  */
-export function ToolCallBlock({ part, readOnly = false }: { part: ToolCallPart; readOnly?: boolean }) {
-  return part.resultTrimmed ? <TrimmedToolCallBlock part={part} readOnly={readOnly} /> : <ToolCallCard part={part} readOnly={readOnly} />;
+export function ToolCallBlock({ part, readOnly = false, revealKey }: { part: ToolCallPart; readOnly?: boolean; revealKey?: number }) {
+  return part.resultTrimmed ? <TrimmedToolCallBlock part={part} readOnly={readOnly} revealKey={revealKey} /> : <ToolCallCard part={part} readOnly={readOnly} revealKey={revealKey} />;
 }
 
 /** The transcript ships a large result trimmed. An open card loads all of it
  * and shows the trimmed start and end until it arrives. */
-function TrimmedToolCallBlock({ part, readOnly }: { part: ToolCallPart; readOnly: boolean }) {
+function TrimmedToolCallBlock({ part, readOnly, revealKey }: { part: ToolCallPart; readOnly: boolean; revealKey?: number }) {
   const full = useToolOutput(part.resultTrimmed, part.callId);
-  return <ToolCallCard part={full.data ? { ...part, result: full.data.result } : part} readOnly={readOnly} />;
+  return <ToolCallCard part={full.data ? { ...part, result: full.data.result } : part} readOnly={readOnly} revealKey={revealKey} />;
 }
 
-function ToolCallCard({ part, readOnly }: { part: ToolCallPart; readOnly: boolean }) {
+function ToolCallCard({ part, readOnly, revealKey }: { part: ToolCallPart; readOnly: boolean; revealKey?: number }) {
   const renderer = readOnly ? fallbackRenderer : pickRenderer(part.toolName, part.args);
   // A held renderer (streaming, no streamsArgs opt-in) gets a bare header:
   // formatTarget/formatSummary would compute from partial, jagged args
@@ -43,6 +43,7 @@ function ToolCallCard({ part, readOnly }: { part: ToolCallPart; readOnly: boolea
     <>
       <ToolShell
         toolName={part.toolName}
+        revealKey={revealKey}
         category={renderer.category}
         Icon={renderer.Icon}
         target={target}

@@ -7,6 +7,7 @@
  * without re-running the case.
  */
 import { aggregateUsage, toolResultText } from "../trajectory.js";
+import { readSources, sourceCitationIds } from "@valet/shared";
 import type { CheckResult, DeterministicCheck, Trajectory, TrajectoryToolCall } from "../types.js";
 import { runWorkflowDefinitionCheck } from "./workflow.js";
 
@@ -68,6 +69,18 @@ export function runDeterministicCheck(check: DeterministicCheck, trajectory: Tra
   const named = (tool: string): TrajectoryToolCall[] => calls.filter((c) => callMatches(c, tool));
 
   switch (check.type) {
+    case "citation_validity": {
+      const sources = new Set(calls.flatMap(call => readSources(call.result).map(source => source.id)));
+      const ids = sourceCitationIds(trajectory.finalOutput);
+      const invalid = ids.filter(id => !sources.has(id));
+      return {
+        check,
+        pass: ids.length > 0 && invalid.length === 0,
+        detail: ids.length === 0 ? "The reply has no source citations. Cite the tool sources in the answer."
+          : invalid.length > 0 ? `Unknown source citations: ${[...new Set(invalid)].join(", ")}.` : "Every citation has a tool source.",
+        metrics: { citations: ids.length, invalid_citations: invalid.length, cited_sources: new Set(ids.filter(id => sources.has(id))).size },
+      };
+    }
     case "tool_called": {
       let candidates = named(check.tool);
       let scope = "";

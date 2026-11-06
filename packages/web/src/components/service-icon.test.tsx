@@ -11,7 +11,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { render } from "@testing-library/react";
-import { ServiceIcon, brandHex, brandMark, pluginGlyph } from "./service-icon";
+import { ServiceGlyph, ServiceIcon, brandHex, brandMark, pluginGlyph } from "./service-icon";
 
 /** The `d` of the single path a mark draws, or null when the icon fell back
  * to the monogram. */
@@ -113,21 +113,37 @@ describe("ServiceIcon first-party glyphs", () => {
   });
 });
 
+describe("ServiceIcon for services that produce sources or labels", () => {
+  it("draws a real, distinct icon for each of them, not a letter", () => {
+    const slugs = ["google_drive", "google_docs", "google_sheets", "google_slides", "google_calendar", "memory", "security"];
+    const drawn = slugs.map((slug) => {
+      const { container } = render(<ServiceIcon slug={slug} label={slug} />);
+      expect(isMonogram(container), `${slug} fell back to a letter`).toBe(false);
+      return container.querySelector("svg")?.innerHTML;
+    });
+    expect(new Set(drawn).size).toBe(slugs.length);
+  });
+
+  it("draws the same mark inline through ServiceGlyph", () => {
+    const { container } = render(<ServiceGlyph service="google_slides" fallback="x" />);
+    expect(container.querySelector("svg path")?.getAttribute("d")).toBe(brandMark("google_slides")?.path);
+  });
+});
+
 describe("ServiceIcon monogram fallback", () => {
   it("falls back to the initial for a service the upstream set has no mark for", () => {
-    // These three are the whole fallback set on `/integrations`.
-    // `simple-icons` carries no Slack mark (only Slackware), and DeepWiki
-    // and Typefully are absent from it as well. Each is a vendor, so no
-    // lucide glyph stands in either — the letter is the honest answer.
-    for (const { slug, label } of [
-      { slug: "slack", label: "Slack" },
-      { slug: "deepwiki", label: "DeepWiki" },
-      { slug: "typefully", label: "Typefully" },
-    ]) {
+    // `simple-icons` carries no Slack mark (only Slackware) and Slack takes
+    // no glyph on a card, so the letter is the honest answer.
+    for (const { slug, label } of [{ slug: "slack", label: "Slack" }]) {
       const { container } = render(<ServiceIcon slug={slug} label={label} />);
       expect(isMonogram(container), `${slug} unexpectedly drew an icon`).toBe(true);
       expect(container.textContent).toBe(label.charAt(0));
     }
+  });
+
+  it.each(["openai", "deepwiki", "typefully"])("keeps the existing vendor tile for %s", slug => {
+    const { container } = render(<ServiceIcon slug={slug} label={slug} />);
+    expect(isMonogram(container)).toBe(true);
   });
 
   it("falls back for an unknown slug and for no slug at all", () => {
@@ -144,7 +160,7 @@ describe("ServiceIcon monogram fallback", () => {
     // jsdom reports the computed `rgb(...)`, so read the two tiles against
     // each other rather than against the source hex.
     const slack = render(<ServiceIcon slug="slack" label="Slack" />);
-    const typefully = render(<ServiceIcon slug="typefully" label="Typefully" />);
+    const typefully = render(<ServiceIcon slug="acme-tickets" label="Acme tickets" />);
     const hue = (root: HTMLElement) => root.querySelector("span")?.style.backgroundColor;
     expect(hue(slack.container)).toBeTruthy();
     expect(hue(slack.container)).not.toBe(hue(typefully.container));

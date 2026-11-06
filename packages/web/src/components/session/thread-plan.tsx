@@ -1,11 +1,15 @@
-import { useId, useState, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import { Check, ChevronDown, CircleCheck, CircleDashed, LoaderCircle } from "lucide-react";
+import type { Message } from "@valet/api/wire";
 import type { ThreadPlanItem, ThreadPlanStatus, TurnProgress } from "@valet/shared";
 import { useThreadProgress } from "~/api/thread-progress";
 import { useThreadPlan } from "~/api/thread-plan";
 import { Button, cardClass, StatusDot } from "~/components/primitives";
-import { useWorkingLine, type WorkingLineInput } from "~/components/session/processing-status";
 import { cn } from "~/lib/cn";
+import type { ToolCallPart } from "./tool-call-block";
+import { CallSteps, stepView } from "./work-group";
+import { useThreadSources } from "./citations";
+import { useWorkingLine, type WorkingLineInput } from "./processing-status";
 
 /** "2 of 5" with a thin bar. For a plan bar, a task row, or a card. */
 export function PlanProgress({ done, total, label, className }: { done: number; total: number; label?: string; className?: string }) {
@@ -54,25 +58,25 @@ function activeProgress(progress: TurnProgress): boolean {
   return progress.status === "pending" || progress.status === "in_progress" || progress.status === "waiting";
 }
 
-/** True while the task card shows a running turn, so the working line moves into it. */
+/** The working line moves into the card only while that card is visible. */
 export function useProgressCardActive(threadId?: string): boolean {
-  const progress = useThreadProgress(threadId).data?.progress;
-  return progress ? activeProgress(progress) : false;
+  const progress = useThreadProgress(threadId);
+  return progress.isSuccess && Boolean(progress.data.progress && activeProgress(progress.data.progress));
 }
 
 /**
  * One execution surface above the composer. A successful empty progress
  * snapshot preserves plans from threads created before execution tracking.
- * `live` is the working line's state: a running turn's card shows its step
- * and clock, so no second row stacks under the card.
+ * An active card carries the live status and clock instead of a second row.
+ * `messages` holds the tool calls the card shows as steps.
  */
-export function PinnedPlan({ threadId, live }: { threadId?: string; live?: WorkingLineInput }) {
+export function PinnedPlan({ threadId, live, messages = [], readOnly = false }: { threadId?: string; live?: WorkingLineInput; messages?: readonly Message[]; readOnly?: boolean }) {
   const progress = useThreadProgress(threadId);
   if (!threadId) return null;
   if (progress.isError) return <ProgressNotice>Progress unavailable. Refresh to retry.</ProgressNotice>;
   // Most threads have neither progress nor a plan, so nothing shows while it loads.
   if (progress.isPending) return null;
-  if (progress.data.progress) return <PinnedProgress key={`${threadId}:${progress.data.progress.turnId}`} progress={progress.data.progress} live={live} />;
+  if (progress.data.progress) return <PinnedProgress key={`${threadId}:${progress.data.progress.turnId}`} progress={progress.data.progress} live={live} messages={messages} readOnly={readOnly} />;
   return <LegacyPinnedPlan threadId={threadId} />;
 }
 
@@ -118,13 +122,26 @@ function ProgressMark({ status, small = false }: { status: TurnProgress["status"
   return <span className={cn(size, "flex shrink-0 items-center justify-center")}><StatusDot tone={PROGRESS_TONE[status]} label={PROGRESS_LABEL[status]} /></span>;
 }
 
+/** Pure: the turn's tool calls the loaded messages hold, in call order. */
+export function turnCalls(progress: TurnProgress, messages: readonly Message[]): ToolCallPart[] {
+  if (!progress.callIds?.length) return [];
+  const byId = new Map<string, ToolCallPart>();
+  for (const message of messages) {
+    for (const part of message.parts) if (part.kind === "tool_call") byId.set(part.callId, part);
+  }
+  return progress.callIds.flatMap(id => byId.get(id) ?? []);
+}
+
+const NO_CHILDREN: ReadonlyMap<string, string> = new Map();
 const IDLE_LINE: WorkingLineInput = { status: "idle" };
 
 /** The card's second line: what runs now, the count, and the clock. */
-function progressSummary(progress: TurnProgress, notice: string | undefined): string {
+function progressSummary(progress: TurnProgress, calls: readonly ToolCallPart[], notice: string | undefined): string {
   const done = progress.tasks.filter(task => task.status === "complete").length;
   const total = progress.tasks.length + progress.omittedTasks;
-  const current = progress.tasks.find(task => task.status === "in_progress")?.title;
+  const runningCall = [...calls].reverse().find(call => call.status === "running");
+  // A running call says what it does; a task title from the engine is generic.
+  const current = (runningCall && stepView(runningCall, NO_CHILDREN).title) ?? progress.tasks.find(task => task.status === "in_progress")?.title;
   const running = progress.status === "in_progress";
   // Every task is done but the turn has not settled: it is writing the answer.
   const wrappingUp = running && total > 0 && done === total;
@@ -132,11 +149,19 @@ function progressSummary(progress: TurnProgress, notice: string | undefined): st
   return total > 0 ? `${lead} · ${done} of ${total} done` : lead;
 }
 
-function PinnedProgress({ progress, live }: { progress: TurnProgress; live?: WorkingLineInput }) {
+function PinnedProgress({ progress, live, messages, readOnly }: { progress: TurnProgress; live?: WorkingLineInput; messages: readonly Message[]; readOnly: boolean }) {
   const [open, setOpen] = useState(false);
   const listId = useId();
   const active = Boolean(live) && activeProgress(progress);
   const line = useWorkingLine(active && live ? live : IDLE_LINE);
+  const calls = useMemo(() => turnCalls(progress, messages), [progress, messages]);
+  const { reveal } = useThreadSources();
+  const revealKey = reveal && calls.some(call => call.callId === reveal.callId) ? reveal.key : undefined;
+  useEffect(() => { if (revealKey !== undefined) setOpen(true); }, [revealKey]);
+  // A call the messages hold shows as its own step, so its generic task row goes.
+  const shown = new Set(calls.map(call => `tool:${call.callId}`));
+  const tasks = progress.tasks.filter(task => !shown.has(task.id));
+  const steps = calls.length > 0 && <CallSteps calls={calls} readOnly={readOnly} />;
   return (
     <section aria-label="Task progress" className="mx-auto mt-2 w-full min-w-0 max-w-[52rem] shrink-0 px-5 sm:px-8">
       <div className={cardClass}>
@@ -148,16 +173,16 @@ function PinnedProgress({ progress, live }: { progress: TurnProgress; live?: Wor
           <span className="min-w-0 flex-1">
             <span className="block truncate leading-5 text-ink">{progress.title}</span>
             <span className="mt-0.5 flex min-w-0 gap-2 text-xs leading-4 text-muted">
-              <span className="min-w-0 truncate">{progressSummary(progress, line.notice)}</span>
-              {/* Outside the label: the working line's live region announces status, not the clock. */}
+              <span className="min-w-0 truncate">{progressSummary(progress, calls, line.notice)}</span>
               {line.elapsed && <span aria-hidden className="shrink-0 tabular-nums">{line.elapsed}</span>}
             </span>
           </span>
           <ChevronDown aria-hidden className={cn("h-3.5 w-3.5 shrink-0 text-muted", open && "rotate-180")} />
         </Button>
         {open && <div id={listId} className="max-h-64 overflow-y-auto overscroll-contain border-t border-line px-4 py-3">
-          <ol className="space-y-3 text-[13px] leading-5">
-            {progress.tasks.map(task => <li key={task.id} className="min-w-0 [overflow-wrap:anywhere]">
+          {!progress.planned && steps}
+          {tasks.length > 0 && <ol className={cn("space-y-3 text-[13px] leading-5", !progress.planned && steps && "mt-3")}>
+            {tasks.map(task => <li key={task.id} className="min-w-0 [overflow-wrap:anywhere]">
               <div className="flex items-start gap-2.5">
                 <span className="mt-0.5"><ProgressMark status={task.status} small /></span>
                 <span className="min-w-0 flex-1">{task.title}<span className="block text-xs text-muted">{PROGRESS_LABEL[task.status]}</span></span>
@@ -166,9 +191,12 @@ function PinnedProgress({ progress, live }: { progress: TurnProgress; live?: Wor
               {task.output && <p className="mt-1 whitespace-pre-wrap">{task.output}</p>}
               {task.sources?.filter(source => /^https?:\/\//i.test(source.url)).map((source, index) => <a key={`${source.url}:${index}`} href={source.url} target="_blank" rel="noopener noreferrer" className="mt-1 block text-info underline">{source.title}</a>)}
             </li>)}
-          </ol>
-          {progress.omittedTasks > 0 && <p className="mt-2 text-xs text-muted">{progress.omittedTasks} more tasks</p>}
-          {progress.tasks.length === 0 && <p className="text-xs text-muted">No tasks yet.</p>}
+          </ol>}
+          {/* The plan says what the turn means to do; its calls show what it did. */}
+          {progress.planned && steps && <div className="mt-3 border-t border-line pt-3">{steps}</div>}
+          {/* The engine bounds its task rows; the calls above replace them. */}
+          {progress.omittedTasks > 0 && (progress.planned || calls.length === 0) && <p className="mt-2 text-xs text-muted">{progress.omittedTasks} more tasks</p>}
+          {progress.tasks.length === 0 && calls.length === 0 && <p className="text-xs text-muted">No tasks yet.</p>}
         </div>}
       </div>
     </section>

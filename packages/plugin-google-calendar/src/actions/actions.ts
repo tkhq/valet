@@ -55,6 +55,7 @@ function action<TParams extends TSchema>(parameters: TParams) {
     name: string;
     description: string;
     riskLevel: PluginAction["riskLevel"];
+    label?: PluginAction<TParams>["label"];
     execute: (
       args: Static<TParams>,
       ctx: PluginActionContext,
@@ -207,8 +208,20 @@ const listEvents = action(
         htmlLink: event.htmlLink ?? null,
         recurringEventId: event.recurringEventId ?? null,
       }));
+      const sources = (data.items ?? []).flatMap((event) => {
+        const title = event.summary?.trim();
+        if (!event.htmlLink || !title) return [];
+        const starts = event.start?.dateTime ?? event.start?.date;
+        return [{
+          service: "google_calendar",
+          title,
+          url: event.htmlLink,
+          ...(starts ? { location: starts.slice(0, 16).replace("T", " ") } : {}),
+        }];
+      });
       return {
         success: true,
+        ...(sources.length ? { sources } : {}),
         data: { events, count: events.length, nextPageToken: data.nextPageToken ?? null },
       };
     } catch (error) {
@@ -541,6 +554,7 @@ const quickAdd = action(
   name: "Quick Add Event",
   description:
     'Creates a calendar event from a natural-language string using Google Calendar\'s quick-add parser. Examples: "Lunch with Sarah tomorrow at 12pm", "Dentist appointment next Tuesday 3-4pm", "Team standup every weekday 9am". Faster than create_event when you don\'t need attendees, descriptions, or precise control over fields.',
+  label: () => "Added a Google Calendar event from text",
   riskLevel: "medium",
   execute: async (args, ctx) => {
     const p = args;
@@ -626,6 +640,7 @@ const queryFreeBusy = action(
   description:
     "Returns busy intervals for one or more calendars in a time window — including co-workers' calendars you are not subscribed to (query by their email address). Use this to find a common free slot before create_event. Returns busy blocks only, never event details. A calendar the user cannot see reports a per-calendar error instead of failing the query.",
   riskLevel: "low",
+  label: () => "Checked Google Calendar availability",
   execute: async (args, ctx) => {
     const p = args;
     const token = await getAccessToken(ctx);
