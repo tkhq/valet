@@ -2772,20 +2772,21 @@ describe("create() waits for its own cleanup and for orphans", () => {
     vi.useFakeTimers();
     try {
       const objectsApi = new ResourceAdoptingObjectsApi(buildSandboxManifest(providerCfg, "s-adopt", {}));
+      const liveness = new CountdownLivenessApi(Number.MAX_SAFE_INTEGER);
+      const pvc = new CountdownPvcApi(Number.MAX_SAFE_INTEGER);
       const provider = new KubernetesSandboxProvider(
         { objectsApi, podsApi: new FakePodsApi(), execApi: fakePodExecApi,
-          livenessApi: new CountdownLivenessApi(Number.MAX_SAFE_INTEGER),
-          pvcApi: new CountdownPvcApi(Number.MAX_SAFE_INTEGER), secretsApi: new FakeSecretsApi() },
+          livenessApi: liveness, pvcApi: pvc, secretsApi: new FakeSecretsApi() },
         providerCfg,
       );
-      const waitSpy = vi.spyOn(provider as unknown as { awaitSameNameResourcesGone: () => Promise<boolean> }, "awaitSameNameResourcesGone");
       let settled = false;
       const pending = provider.create({ workspace: "/w", sessionId: "s-adopt" }).then(() => { settled = true; });
       // No timer advance: a wrongly-running wait would sleep RESOURCE_GONE_POLL_MS and stay pending.
       await vi.advanceTimersByTimeAsync(0);
       expect(settled).toBe(true);
       await pending;
-      expect(waitSpy).not.toHaveBeenCalled();
+      expect(liveness.requests).toHaveLength(0);
+      expect(pvc.requests).toHaveLength(0);
     } finally {
       vi.useRealTimers();
     }
