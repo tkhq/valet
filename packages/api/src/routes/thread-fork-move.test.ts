@@ -10,6 +10,7 @@ import { ensureAssistantExecution, ensureDefaultAssistantSession } from "../assi
 import { buildThreadLinkTools } from "../home/thread-link-tools.js";
 import { orgMembers, sessionThreads, teamMembers, teams, users } from "../schema/index.js";
 import { FORK_OF_METADATA_KEY, MOVED_TO_METADATA_KEY } from "../services/thread-links.js";
+import { changeThreadProjects, readThreadProjects } from "../services/thread-projects.js";
 import type { ForkThreadResponse, ListMessagesResponse, ThreadAddress } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -128,6 +129,29 @@ describe("move", () => {
     expect(note?.content).not.toContain("/chat?");
   });
 
+  it("moves the conversation as it is, with no fork link and no branch divider", async () => {
+    await boot();
+    await api!.providers.db.insert(teams).values({ id: "other-team", orgId: "local-org", name: "Other", createdAt: 1 });
+    await api!.providers.db.insert(teamMembers).values({ teamId: "other-team", userId: "local-user", role: "member" });
+    const { thread, sessionId } = await teamThread();
+    await api!.providers.db.insert(sessionThreads).values({ id: thread.id, sessionId, createdAt: 1, title: "Plan" });
+    const first = (await (await post(`/threads/${thread.id}/move`, { to: "private" })).json()) as ForkThreadResponse;
+    // A second move carries the first one's note along, and still shows none.
+    const res = await post(`/threads/${first.thread.id}/move`, { to: { teamId: "other-team" }, confirm: true });
+    expect(res.status).toBe(201);
+    const moved = (await res.json()) as ForkThreadResponse;
+    expect(moved.thread.title).toBe("Plan");
+    const stored = await api!.providers.engineStore.getThread(moved.thread.sessionId, moved.thread.id);
+    expect(stored?.metadata?.[FORK_OF_METADATA_KEY]).toBeUndefined();
+    const messages = ((await (await read(moved.thread.id)).json()) as ListMessagesResponse).messages;
+    expect(messages.map((m) => m.content)).toEqual(["first", "first answer"]);
+    expect(messages.some((m) => m.branch)).toBe(false);
+    // The model still reads that the thread moved, and its files come along.
+    const notes = (await api!.providers.engineStore.getEntries(moved.thread.sessionId, moved.thread.id)).filter((e) => e.type === "branch_summary");
+    expect(notes.length).toBe(2);
+    expect(notes.at(-1)?.type === "branch_summary" && notes.at(-1)?.summary).toContain("moved here from another workspace");
+  });
+
   it("moves a private thread into a team only when the request confirms", async () => {
     await boot();
     const { thread } = await personalThread();
@@ -209,6 +233,39 @@ describe("duplicate", () => {
     expect(source?.metadata?.[MOVED_TO_METADATA_KEY]).toBeUndefined();
     const sourceMessages = ((await (await read(thread.id)).json()) as ListMessagesResponse).messages;
     expect(sourceMessages.map((m) => m.content)).toEqual(["first", "first answer"]);
+  });
+
+  it("puts the copy in the source's project folder for the person who made it", async () => {
+    await boot();
+    const { thread } = await teamThread();
+    const { sessionId: workspace } = await ensureDefaultAssistantSession(api!.providers, { type: "team", id: "fork-team" }, { orgId: "local-org", actorUserId: "local-user" });
+    const scope = { orgId: "local-org", userId: "local-user", sessionId: workspace };
+    await changeThreadProjects(api!.providers.db, scope, [
+      { type: "create", id: "p1", name: "Launch" },
+      { type: "assign", threadId: thread.id, projectId: "p1" },
+    ]);
+    const copy = (await (await post(`/threads/${thread.id}/duplicate`, {})).json()) as ForkThreadResponse;
+    const assignments = (await readThreadProjects(api!.providers.db, scope)).value.assignments;
+    expect(assignments[copy.thread.id]).toBe("p1");
+    expect(assignments[thread.id]).toBe("p1");
+    // A teammate's folders are their own; a copy they make of an unfiled thread stays unfiled.
+    const theirs = (await (await post(`/threads/${thread.id}/duplicate`, {}, MEMBER)).json()) as ForkThreadResponse;
+    expect((await readThreadProjects(api!.providers.db, { ...scope, userId: MEMBER })).value.assignments[theirs.thread.id]).toBeUndefined();
+  });
+
+  it("keeps a private copy in its folder, though the copy runs in its own execution session", async () => {
+    await boot();
+    const { thread, sessionId } = await personalThread();
+    const scope = { orgId: "local-org", userId: "local-user", sessionId };
+    await changeThreadProjects(api!.providers.db, scope, [
+      { type: "create", id: "p1", name: "Ideas" },
+      { type: "assign", threadId: thread.id, projectId: "p1" },
+    ]);
+    const copy = (await (await post(`/threads/${thread.id}/duplicate`, {})).json()) as ForkThreadResponse;
+    expect(copy.thread.sessionId).not.toBe(sessionId);
+    // The sidebar's read drops folder entries for threads it does not list; the copy stays.
+    const res = await fetch(`${api!.baseUrl}/api/me/thread-projects/${encodeURIComponent(sessionId)}`, { headers: { "x-valet-test-user-id": "local-user" } });
+    expect(((await res.json()) as { value: { assignments: Record<string, string> } }).value.assignments[copy.thread.id]).toBe("p1");
   });
 
   it("copies a private thread into the private threads and keeps one copy suffix", async () => {

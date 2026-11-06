@@ -32,13 +32,14 @@ async function activeThreads(c: Context<AppEnv>, session: typeof agentSessions.$
   const visible = new Set<string>();
   const checks = new Map<string, ReturnType<typeof threadsVisibleTo>>();
   const retained = new Map<string, Promise<boolean>>();
-  // A workspace sidebar includes execution and migration-retained histories.
+  // A workspace sidebar includes execution and migration-retained histories:
+  // team conversations and a person's copies run in execution sessions.
   // Resolve only the requested IDs, without loading every workspace thread.
-  const execution = session.ownerType === "team" ? sql`EXISTS (
+  const execution = sql`EXISTS (
     SELECT 1 FROM assistant_executions x JOIN assistants a ON a.id = x.assistant_id
     WHERE x.session_id = s.id AND a.session_id = ${session.id} AND a.org_id = ${session.orgId}
       AND a.owner_type = ${session.ownerType} AND a.owner_id = ${session.ownerId} AND a.archived_at IS NULL
-  )` : sql`false`;
+  )`;
   for (let offset = 0; offset < ids.length; offset += 100) {
     const batch = ids.slice(offset, offset + 100);
     // The thread's recorded Slack channels gate it with its key (`services/thread-access.ts`).

@@ -622,3 +622,9 @@ Safe restoration requires Python 3 and directory handles that refuse symlinks.
 If the sandbox lacks them, restoration leaves files unchanged and reports the missing requirement.
 Content and mode conflict checks are best effort against external writers; they do not provide a shared filesystem transaction.
 Shell and binary writes without an observed file-write receipt are not undone automatically.
+
+## Move and duplicate presentation
+
+A moved thread keeps the whole conversation without a fork link or branch divider. Its copied branch note records `moved` for the model and file history.
+
+A duplicate keeps the source thread’s personal project folder assignment. The client refreshes folders before thread lists so the copy appears in that folder.
