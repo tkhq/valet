@@ -155,6 +155,10 @@ const ROUTES = [
   }],
   ["POST", /^\/api\/home$/, () => json({ sessionId: sessionIdFor("user"), threadId: `${sessionIdFor("user")}-t0` })],
   ["GET", /^\/api\/sessions\/([^/]+)$/, (m) => json(sessionDetail(decodeURIComponent(m[1])))],
+  ["GET", /^\/api\/sessions\/([^/]+)\/thread-defaults$/, (m) => {
+    const scope = workspaceForSession(decodeURIComponent(m[1])) === "user" ? "personal" : "team";
+    return json({ model: "s", reasoning: "medium", scope, reasoningScope: scope });
+  }],
   ["GET", /^\/api\/sessions\/([^/]+)\/threads$/, (m, url) => {
     const sessionId = decodeURIComponent(m[1]);
     const limit = Number(url.searchParams.get("limit") ?? THREADS_PER_SPACE);
