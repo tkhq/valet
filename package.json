@@ -17,7 +17,8 @@
     "typecheck": "tsc --build",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:unit": "vitest run"
+    "test:unit": "vitest run",
+    "prepare": "git config core.hooksPath .githooks"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

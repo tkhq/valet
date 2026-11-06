@@ -18,6 +18,9 @@ jobs:
         with:
           node-version: 22
 
+      - name: Test local changelog commit hook
+        run: scripts/ci/changelog_commit_guard_test.sh
+
       - name: Validate changelog commit format
         run: >-
           node scripts/ci/changelog_commit_guard.mjs

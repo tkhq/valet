@@ -1,0 +1,25 @@
+#!/bin/sh
+
+if ! command -v node >/dev/null 2>&1 || ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)' >/dev/null 2>&1; then
+  printf '%s\n' "Warning: Node.js 22 is unavailable. Skipping changelog commit validation." >&2
+  exit 0
+fi
+
+repo=$(git rev-parse --show-toplevel 2>/dev/null) || {
+  printf '%s\n' "Warning: Git repository root is unavailable. Skipping changelog commit validation." >&2
+  exit 0
+}
+validator="$repo/scripts/ci/changelog_commit_guard.mjs"
+format="$repo/packages/api/src/changelog/commit-format.mjs"
+if [ ! -f "$validator" ] || [ ! -f "$format" ]; then
+  printf '%s\n' "Warning: Changelog commit validator is unavailable. Skipping validation." >&2
+  exit 0
+fi
+
+node "$validator" --message-file "$1"
+status=$?
+if [ "$status" -eq 2 ]; then
+  printf '%s\n' "Warning: Changelog commit validator could not run. Skipping validation." >&2
+  exit 0
+fi
+exit "$status"
