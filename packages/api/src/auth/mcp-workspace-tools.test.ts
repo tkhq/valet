@@ -11,7 +11,7 @@ import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { createPolicy } from "../policies/admin.js";
-import { artifacts, oauthAccessToken, orgMembers, orgs, skills, users, teams, teamMembers, workflowDefinitions, externalCalls } from "../schema/index.js";
+import { artifacts, oauthAccessToken, orgMembers, orgs, skills, users, teams, teamMembers, workflowDefinitions, workflowRuns, actionInvocations, externalCalls } from "../schema/index.js";
 import { addArtifactComment } from "../services/artifacts.js";
 import { eq } from "drizzle-orm";
 import { seedMcpConsent } from "../integration/_mcp-consent.js";
@@ -183,6 +183,66 @@ describe("MCP workspace tools", () => {
       }
       expect(rows.filter(row => row.userId === "bob" && row.ownerType === "team")).toEqual([]);
     });
+  });
+
+  it("confirms changed-step retries through MCP and refuses a stale preview before any run starts", async () => {
+    const { testApi, alice, bob } = await boot();
+    const p = testApi.providers;
+    const deps = { db: p.db, workflowStore: p.workflowStore, workflowRunHost: p.workflowRunHost,
+      actionPluginByService: p.actionPluginByService, credentials: p.engineCredentials, engineStore: p.engineStore };
+    const definition = (early: string, late: string) => ({
+      version: "dag/v1",
+      nodes: [
+        { id: "trigger", type: "trigger" }, { id: "fetch", type: "set", values: { text: early } },
+        { id: "call", type: "tool", service: "demo", action: "ping", params: {} },
+        { id: "summary", type: "set", values: { text: late } }, { id: "done", type: "stop" },
+      ],
+      edges: [{ from: "trigger", to: "fetch" }, { from: "fetch", to: "call" },
+        { from: "call", to: "summary" }, { from: "summary", to: "done" }],
+    });
+    const created = await createWorkflowDefinition(deps, { userId: "alice", orgId: ORG },
+      { name: "Confirmed rerun", definition: definition("v1", "v1") });
+    const done = await tool(testApi.baseUrl, alice, "run_workflow", { workflow_id: created.id, wait_seconds: 30 });
+    expect(done.data).toMatchObject({ status: "settled", outcome: "completed" });
+    const run_id = done.data.run_id;
+    await p.db.update(workflowDefinitions).set({ definition: definition("v1", "v2") }).where(eq(workflowDefinitions.id, created.id));
+    const preview = await tool(testApi.baseUrl, alice, "get_workflow_run", { run_id });
+    expect(preview.data).toMatchObject({
+      rerun_steps: [{ node_id: "summary" }, { node_id: "done" }],
+      rerun_definition_version_id: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    const confirmed = { run_id, from: "changed_steps", rerun_definition_version_id: preview.data.rerun_definition_version_id, wait_seconds: 30 };
+    const callsBefore = await p.db.select().from(actionInvocations);
+    expect(callsBefore.filter((row) => row.actionId === "demo.ping")).toHaveLength(1);
+    const retried = await tool(testApi.baseUrl, alice, "retry_workflow_run", confirmed);
+    expect(retried.isError).toBe(false);
+    expect(retried.data).toMatchObject({ status: "settled", outcome: "completed", rerun_steps: [{ node_id: "summary" }, { node_id: "done" }],
+      rerun_definition_version_id: preview.data.rerun_definition_version_id });
+    expect(await p.db.select().from(actionInvocations)).toHaveLength(callsBefore.length);
+
+    // Another edit adds an unconfirmed tool action to the still-open preview.
+    await p.db.update(workflowDefinitions).set({ definition: definition("v2", "v2") }).where(eq(workflowDefinitions.id, created.id));
+    const runsBefore = await p.db.select().from(workflowRuns);
+    const stale = await tool(testApi.baseUrl, alice, "retry_workflow_run", confirmed);
+    expect(stale.isError).toBe(true);
+    expect(stale.text).toContain("confirm its changed steps again");
+    const fresh = await tool(testApi.baseUrl, alice, "get_workflow_run", { run_id });
+    expect(fresh.data.rerun_steps).toEqual([
+      { node_id: "fetch" }, { node_id: "call", action: "demo.ping" }, { node_id: "summary" }, { node_id: "done" },
+    ]);
+    expect(fresh.data.rerun_definition_version_id).not.toBe(preview.data.rerun_definition_version_id);
+    expect((await tool(testApi.baseUrl, bob, "get_workflow_run", { run_id })).isError).toBe(true);
+    expect((await tool(testApi.baseUrl, bob, "retry_workflow_run", { ...confirmed,
+      rerun_definition_version_id: fresh.data.rerun_definition_version_id })).isError).toBe(true);
+    expect(await p.db.select().from(workflowRuns)).toHaveLength(runsBefore.length);
+    expect(await p.db.select().from(actionInvocations)).toHaveLength(callsBefore.length);
+    const refreshed = await tool(testApi.baseUrl, alice, "retry_workflow_run", { ...confirmed,
+      rerun_definition_version_id: fresh.data.rerun_definition_version_id });
+    expect(refreshed.data).toMatchObject({ status: "settled", outcome: "completed" });
+    // Each execution writes a policy audit row and a separate deduplication record.
+    const pingCalls = await p.db.select().from(actionInvocations).where(eq(actionInvocations.actionId, "demo.ping"));
+    expect(pingCalls).toHaveLength(2);
+    expect(pingCalls.find((row) => row.workflowExecutionId === refreshed.data.run_id)).toMatchObject({ status: "completed" });
   });
 
   it("lists a thread approval in the inbox but refuses to let an MCP agent approve it", async () => {

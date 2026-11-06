@@ -98,6 +98,8 @@ type RunView = {
   workflow_id: string;
   status: WorkflowRunStatus;
   outcome?: WorkflowRunOutcome;
+  rerun_steps?: Array<{ node_id: string; action?: string }>;
+  rerun_definition_version_id?: string;
   pending_approvals?: Array<{ node_id: string; kind: string; summary?: string; action?: string; risk_level?: string }>;
   /** The server build and saved workflow version the run used, and what is current now. */
   provenance?: { build?: string; server_build?: string; workflow_version?: number; latest_workflow_version?: number };
@@ -120,6 +122,8 @@ function runView(deps: McpToolDeps, detail: GetWorkflowRunResponse): RunView {
         })) }
       : {}),
     ...(detail.provenance ? { provenance: provenanceView(detail.provenance) } : {}),
+    ...(detail.rerunSteps ? { rerun_steps: detail.rerunSteps.map((step) => ({ node_id: step.nodeId, ...(step.action ? { action: step.action } : {}) })) } : {}),
+    ...(detail.rerunDefinitionVersionId ? { rerun_definition_version_id: detail.rerunDefinitionVersionId } : {}),
     url: `${deps.origin}/workflows/runs/${encodeURIComponent(r.runId)}`,
   };
 }
@@ -387,7 +391,7 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
   registerTool(server,
     "get_workflow_run",
     {
-      description: `Reads a workflow run's status, outcome, and pending approvals. With wait_seconds, it waits for the run to finish first. ${RUN_STATUSES}`,
+      description: `Reads a workflow run's status, outcome, and pending approvals. For a completed run, rerun_steps and rerun_definition_version_id describe its changed-step preview. With wait_seconds, it waits for the run to finish first. ${RUN_STATUSES}`,
       inputSchema: {
         run_id: z.string().min(1).describe("Run id from run_workflow or list_workflows."),
         wait_seconds: z.number().int().min(0).max(MAX_WAIT_SECONDS).optional().describe("Seconds to wait for the run to finish. Default: 0."),
@@ -419,22 +423,26 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
         "For a failed or cancelled run, from \"failed_step\" reuses the finished steps before the failure, so only the failed step and later steps run. " +
         "from \"start\" (default) runs every step; with it, input replaces some of the original inputs, for example a shorter date range. " +
         "For a completed run, from \"changed_steps\" reuses every step not edited since the run, so only the edited steps and later steps run. " +
-        "The result lists those steps as rerun_steps. A tool step in that list does its action again, for example it sends a message again. " +
+        "First call get_workflow_run and confirm its rerun_steps with the person. Pass its rerun_definition_version_id unchanged. " +
+        "If the definition changed, read and confirm a fresh preview. A tool step in the list does its action again, for example it sends a message again. " +
         RUN_STATUSES,
       inputSchema: {
         run_id: z.string().min(1).describe("Run id of a settled run."),
         from: z.enum(["start", "failed_step", "changed_steps"]).optional().describe("Where the retry starts. Default: start. A completed run takes only changed_steps."),
         input: z.record(z.string(), z.unknown()).optional().describe("Trigger inputs that replace the original values. Only with from \"start\"."),
+        rerun_definition_version_id: z.string().regex(/^[a-f0-9]{64}$/).optional()
+          .describe("Required with changed_steps: the version from the get_workflow_run preview confirmed by the person."),
         wait_seconds: z.number().int().min(0).max(MAX_WAIT_SECONDS).optional().describe(`Seconds to wait (0-${MAX_WAIT_SECONDS}). Default: ${DEFAULT_RUN_WAIT_SECONDS}.`),
       },
       annotations: { destructiveHint: true, openWorldHint: true },
     },
-    run(async ({ run_id, from, input, wait_seconds }: { run_id: string; from?: "start" | "failed_step" | "changed_steps"; input?: Record<string, unknown>; wait_seconds?: number }) => {
-      const body: RetryWorkflowRunRequest = { ...(from ? { from } : {}), ...(input ? { input } : {}) };
+    run(async ({ run_id, from, input, rerun_definition_version_id, wait_seconds }: { run_id: string; from?: "start" | "failed_step" | "changed_steps"; input?: Record<string, unknown>; rerun_definition_version_id?: string; wait_seconds?: number }) => {
+      const body: RetryWorkflowRunRequest = { ...(from ? { from } : {}), ...(input ? { input } : {}),
+        ...(rerun_definition_version_id ? { rerunDefinitionVersionId: rerun_definition_version_id } : {}) };
       const retried = await call<RetryWorkflowRunResponse>(deps, "POST", `/api/workflows/runs/${encodeURIComponent(run_id)}/retry`, "Workflow run", body);
       const view = await waitForRun(deps, retried.runId, wait_seconds ?? DEFAULT_RUN_WAIT_SECONDS);
       return retried.rerunSteps
-        ? { ...view, rerun_steps: retried.rerunSteps.map((step) => ({ node_id: step.nodeId, ...(step.action ? { action: step.action } : {}) })) }
+        ? { ...view, rerun_definition_version_id, rerun_steps: retried.rerunSteps.map((step) => ({ node_id: step.nodeId, ...(step.action ? { action: step.action } : {}) })) }
         : view;
     }),
   );
