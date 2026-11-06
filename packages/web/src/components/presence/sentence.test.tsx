@@ -5,9 +5,11 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
   ...await importOriginal<typeof import("@tanstack/react-router")>(),
-  Link: ({ to, params, children }: { to: string; params?: Record<string, string>; children: ReactNode }) => (
-    <a href={Object.entries(params ?? {}).reduce((path, [k, v]) => path.replace(`$${k}`, encodeURIComponent(v)), to)}>{children}</a>
-  ),
+  Link: ({ to, params, search, children }: { to: string; params?: Record<string, string>; search?: Record<string, string>; children: ReactNode }) => {
+    const path = Object.entries(params ?? {}).reduce((acc, [k, v]) => acc.replace(`$${k}`, encodeURIComponent(v)), to);
+    const query = new URLSearchParams(search ?? {}).toString();
+    return <a href={query.length > 0 ? `${path}?${query}` : path}>{children}</a>;
+  },
 }));
 
 import { GLUE_PULL, Sentence } from "./sentence";
@@ -30,6 +32,12 @@ const parts: SentencePart[] = [
 ];
 
 describe("Sentence", () => {
+  it("renders a place with no page as a token with no link", () => {
+    const { container } = render(<p><Sentence parts={[{ kind: "text", text: "in " }, { kind: "place", text: "acme/web", service: "github", subject: "github:acme/web", page: false }]} /></p>);
+    expect(screen.queryByRole("link")).toBeNull();
+    expect(container.querySelector('[data-ref="place"]')?.textContent).toBe("acme/web");
+  });
+
   it("reads as the joined text and links each thing to its page", () => {
     const { container } = render(<p><Sentence parts={parts} /></p>);
     expect(visibleText(container)).toBe("When Jack mentions Valet in #incidents, work in the Platform CI thread, then run Triage failures, as Unknown.");

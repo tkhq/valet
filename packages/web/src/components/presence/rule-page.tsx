@@ -17,7 +17,7 @@ import { MoreHorizontal } from "lucide-react";
 import type { EventSubscriptionWire, LineActivityEntryWire } from "@valet/api/wire";
 import { useEventSubscriptions, usePatchEventSubscription } from "~/api/events";
 import { useLineActivity } from "~/api/line-activity";
-import { placeOfSubject, usePlaceSubject } from "~/api/presence";
+import { placeOfSubject, usePlaceSubject, usePresencePlaces } from "~/api/presence";
 import { usePinnedThreadTitle } from "~/api/rule";
 import { useMe } from "~/api/settings";
 import { useTriggerCatalog, useWorkflows } from "~/api/workflows";
@@ -139,6 +139,13 @@ function RuleBody({ sub, subs }: { sub: EventSubscriptionWire; subs: readonly Ev
   const activityQ = useLineActivity(sub.id);
   const place = linePlace(sub, names);
   const placeKey = usePlaceSubject(place?.key ?? "");
+  // A skipped entry can name a place Valet is not in (an admin sees skips
+  // outside the line's places). Its page would answer 404, and Activity
+  // holds no event for it (an event no line matched leaves only a
+  // receipt), so such a token has no link. Until the list loads, every
+  // place links its page, as before.
+  const placesQ = usePresencePlaces({ staleTime: 5 * 60_000 });
+  const listedPlaces = placesQ.data?.places;
   const { readOnly, readOnlyText, teams } = useLineAccess(sub);
   // True while the review sheet is open (a proposal's Turn on).
   const [reviewing, setReviewing] = useState(false);
@@ -175,6 +182,9 @@ function RuleBody({ sub, subs }: { sub: EventSubscriptionWire; subs: readonly Ev
     ...(pinTitle !== undefined ? { pinTitle } : {}),
     isPinText: isPinProblem,
     replies: replies(sub),
+    ...(listedPlaces !== undefined
+      ? { placeHasPage: (key: string) => key === placeKey || listedPlaces.some((listed) => listed.subject === key) }
+      : {}),
   };
   const entries = pages.flatMap((page) => page.entries).map((entry) => lineTimelineEntry(entry, entryNames));
 

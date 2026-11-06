@@ -90,7 +90,7 @@ presenceRouter.get("/places/:subject", async (c) => {
   const subject = await resolvePlaceKey(c.req.param("subject"), () => resolveSlackTeam(c.var.providers.db, c.var.user.orgId, access.slackTeamId));
   if (!subject) return c.json({ error: CHANNEL_KEY_REFUSAL }, 404);
   const detail = await getPresencePlace(c.var.providers, c.var.user.orgId, owner, access, subject);
-  if (!detail) return c.json({ error: "Valet is not present in that place in this workspace. Open Places to see where it is." }, 404);
+  if (!detail) return c.json({ error: "Valet is not present in that place in this workspace. Open Presence to see where it is." }, 404);
   // Each listener carries its open problem, as the list route reads it, so
   // the place page shows the problem under the line (spec Part C step 5).
   const ids = detail.listeners.map((row) => row.id);
