@@ -5,7 +5,7 @@ import { focusManager, QueryClient, QueryClientProvider, type InfiniteData } fro
 import type { ListMessagesResponse, ListThreadsResponse } from "@valet/api/wire";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "./client";
-import { prefetchSession, prefetchTranscript, qk, TRANSCRIPT_FULL, TRANSCRIPT_TAIL, useMarkThreadsRead, useMessages, useNotifications, useSendPrompt, useSession, useSetThreadModel } from "./queries";
+import { prefetchSession, prefetchTranscript, qk, TRANSCRIPT_FULL, TRANSCRIPT_TAIL, useMarkThreadsRead, useMessages, useNotifications, useSendPrompt, useSession, useSetThreadModel, useSetThreadReasoning } from "./queries";
 
 const sessionId = "session-1";
 
@@ -116,6 +116,46 @@ describe("useSetThreadModel", () => {
     act(() => result.current.mutate({ threadId: "chosen", model: "l" }));
     await waitFor(() => expect(result.current.isError).toBe(true));
     expect(client.getQueryData<ListThreadsResponse>(qk.threads(sessionId))?.threads[0]?.model).toBe("s");
+  });
+});
+
+describe("useSetThreadReasoning", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each(["high", null])("applies confirmed reasoning %s without losing newer fields or accepting an older read", async (reasoning) => {
+    const thread = { id: "chosen", sessionId, createdAt: 1, lastUserActivityAt: 99, title: "New title", model: "l", reasoning: "low" };
+    vi.spyOn(api, "patchThread").mockResolvedValue({ ...thread, lastUserActivityAt: 1, title: "Old title", reasoning });
+    const client = new QueryClient();
+    client.setQueryData<ListThreadsResponse>(qk.threads(sessionId), { threads: [thread] });
+    client.setQueryData<InfiniteData<ListThreadsResponse>>(qk.threadPages("root"), { pages: [{ threads: [thread] }], pageParams: [undefined] });
+    let finishOldRead = () => {};
+    const oldRead = client.fetchQuery({
+      queryKey: qk.threads(sessionId),
+      queryFn: () => new Promise<ListThreadsResponse>((resolve) => { finishOldRead = () => resolve({ threads: [thread] }); }),
+    }).catch(() => undefined);
+    const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+    const { result } = renderHook(() => useSetThreadReasoning(sessionId), { wrapper });
+    await act(() => result.current.mutateAsync({ threadId: "chosen", reasoning }));
+    finishOldRead();
+    await oldRead;
+    expect(client.getQueryData<ListThreadsResponse>(qk.threads(sessionId))?.threads).toEqual([{ ...thread, reasoning }]);
+    expect(client.getQueryData<InfiniteData<ListThreadsResponse>>(qk.threadPages("root"))?.pages[0]?.threads).toEqual([{ ...thread, reasoning }]);
+    client.clear();
+  });
+
+  it("keeps the saved reasoning after the server rejects a change", async () => {
+    vi.spyOn(api, "patchThread").mockRejectedValue(new Error("Reasoning unavailable. Choose another level."));
+    const client = new QueryClient();
+    client.setQueryData<ListThreadsResponse>(qk.threads(sessionId), {
+      threads: [{ id: "chosen", sessionId, createdAt: 1, lastUserActivityAt: 1, reasoning: "low" }],
+    });
+    const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+    const { result } = renderHook(() => useSetThreadReasoning(sessionId), { wrapper });
+    act(() => result.current.mutate({ threadId: "chosen", reasoning: "high" }));
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(result.current.isPending).toBe(false);
+    expect(client.getQueryData<ListThreadsResponse>(qk.threads(sessionId))?.threads[0]?.reasoning).toBe("low");
+    client.clear();
   });
 });
 

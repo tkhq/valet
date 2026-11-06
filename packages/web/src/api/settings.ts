@@ -72,6 +72,7 @@ import type {
 import { api } from "./client";
 import { qkIntegrations } from "./integrations";
 import { qkRepos } from "./repos";
+import { qkThreadDefaults } from "./thread-defaults";
 
 /**
  * Whether a named plugin is enabled for the current caller, read from the org
@@ -326,6 +327,8 @@ export function usePatchMe() {
     },
     onSettled: () => {
       qc.invalidateQueries({ queryKey: qkSettings.me() });
+      // A personal default sets what new threads start with.
+      qc.invalidateQueries({ queryKey: qkThreadDefaults.all });
     },
   });
 }
@@ -574,6 +577,8 @@ export function usePatchTeam() {
     },
     onSettled: () => {
       qc.invalidateQueries({ queryKey: qkSettings.teams() });
+      // A team default sets what new team threads start with.
+      qc.invalidateQueries({ queryKey: qkThreadDefaults.all });
     },
   });
 }

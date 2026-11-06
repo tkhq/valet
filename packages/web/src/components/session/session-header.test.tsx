@@ -8,11 +8,12 @@
  * "a turn is running" / "sandbox is not ready to pause" bodies).
  */
 import { useState, type ReactNode } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterContextProvider, createMemoryHistory, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 import { act, render as renderUnrouted, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { BackgroundWorkConflict, ListTeamsResponse, SessionDetail } from "@valet/api/wire";
-import { ApiError } from "~/api/client";
+import type { BackgroundWorkConflict, ListTeamsResponse, ListThreadsResponse, SessionDetail, ThreadDefaultsResponse } from "@valet/api/wire";
+import { api, ApiError } from "~/api/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "~/components/primitives";
 import { useStreamStore } from "~/stores/stream";
@@ -25,6 +26,7 @@ let threadModelVariables: { threadId: string; model: string | null } | undefined
 let threadModelError: Error | null = null;
 const setReasoningMutate = vi.fn();
 const setThreadReasoningMutate = vi.fn();
+let realThreadReasoning = false;
 let mobileLayout = false;
 vi.mock("~/hooks/use-mobile-layout", () => ({ useMobileLayout: () => mobileLayout }));
 /** Threads for the header's thread-scoped model picker. Empty by default:
@@ -82,10 +84,14 @@ vi.mock("~/api/queries", async (importOriginal) => {
     useSetSessionModel: () => ({ isPending: false, mutate: setModelMutate }),
     useSetThreadModel: () => ({ isPending: threadModelPending, variables: threadModelVariables, error: threadModelError, mutate: setThreadModelMutate }),
     useSetSessionReasoning: () => ({ isPending: false, mutate: setReasoningMutate }),
-    useSetThreadReasoning: () => ({ isPending: false, mutate: setThreadReasoningMutate }),
+    useSetThreadReasoning: (sessionId: string) => realThreadReasoning
+      ? actual.useSetThreadReasoning(sessionId)
+      : { isPending: false, mutate: setThreadReasoningMutate },
     useSetThreadApprovalBypass: () => ({ isPending: false, mutate: setBypassMutate }),
     useDuplicateThread: () => ({ isPending: false, mutate: duplicateMutate }),
-    useThreads: () => ({ data: { threads: headerThreads }, isLoading: false, error: null }),
+    useThreads: (...args: Parameters<typeof actual.useThreads>) => realThreadReasoning
+      ? actual.useThreads(...args)
+      : { data: { threads: headerThreads }, isLoading: false, error: null },
     usePauseSession: () => ({ isPending: pauseIsPending, mutateAsync: pauseMutateAsync }),
     useReplaceSandbox: () => ({ isPending: false, mutateAsync: replaceMutateAsync }),
     useMarkThreadsRead: () => ({ mutate: markThreadsReadMutate, isPending: false }),
@@ -99,7 +105,17 @@ vi.mock("~/api/queries", async (importOriginal) => {
   };
 });
 
+let threadDefaultsData: ThreadDefaultsResponse | undefined;
+const patchMeMutate = vi.fn();
+const patchTeamMutate = vi.fn();
+vi.mock("~/api/thread-defaults", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("~/api/thread-defaults")>()),
+  useThreadDefaults: () => ({ data: threadDefaultsData }),
+}));
+
 vi.mock("~/api/settings", () => ({
+  usePatchMe: () => ({ mutate: patchMeMutate, isPending: false }),
+  usePatchTeam: () => ({ mutate: patchTeamMutate, isPending: false, reset: () => {}, error: null }),
   useModels: () => ({ data: { models: [] }, isLoading: false, error: null }),
   useMe: () => ({ data: meData, isLoading: false, error: null }),
   useOrg: () => ({ data: undefined, isLoading: false, error: null }),
@@ -230,6 +246,7 @@ beforeEach(() => {
   threadModelError = null;
   setReasoningMutate.mockClear();
   setThreadReasoningMutate.mockClear();
+  realThreadReasoning = false;
   headerThreads = [];
   pauseMutateAsync = vi.fn().mockResolvedValue({ status: "hibernated" });
   pauseIsPending = false;
@@ -239,6 +256,9 @@ beforeEach(() => {
   teamsData = { teams: [] };
   isWorkspaceRuntime = false;
   channelsData = undefined;
+  threadDefaultsData = undefined;
+  patchMeMutate.mockClear();
+  patchTeamMutate.mockClear();
 });
 
 describe("SessionHeader — phone thread menu", () => {
@@ -414,6 +434,115 @@ describe("SandboxChip — suspended state", () => {
 });
 
 describe("SessionHeader — thread-scoped model picker", () => {
+  it.each<{ scope: "personal" | "team" }>([{ scope: "personal" }, { scope: "team" }])("blocks the $scope default during a reasoning write, then saves the settled reasoning", async ({ scope }) => {
+    const user = userEvent.setup();
+    isWorkspaceRuntime = true;
+    realThreadReasoning = true;
+    teamsData = { teams: [{ id: "team_1", orgId: "org_1", name: "Platform", origin: "local", externalId: null, createdAt: 1, memberCount: 3, callerRole: "admin", defaultModel: null }] };
+    threadDefaultsData = { model: "s", reasoning: "medium", scope, reasoningScope: scope };
+    const savedThread = { id: "th-1", sessionId: "sess-1", createdAt: 1, lastUserActivityAt: 1, model: "claude-opus-4-7", reasoning: "low" };
+    let settle = () => {};
+    const request = new Promise<void>((resolve) => { settle = resolve; });
+    let settleRefetch = () => {};
+    const refetch = new Promise<ListThreadsResponse>((resolve) => {
+      settleRefetch = () => resolve({ threads: [{ ...savedThread, reasoning: "high" }] });
+    });
+    const listThreads = vi.spyOn(api, "listThreads")
+      .mockResolvedValueOnce({ threads: [savedThread] })
+      .mockImplementation(() => refetch);
+    const patchThread = vi.spyOn(api, "patchThread").mockImplementationOnce(async () => {
+      await request;
+      return { ...savedThread, reasoning: "high" };
+    });
+    const session: SessionDetail = { ...baseSession(), owner: scope === "team" ? { type: "team", id: "team_1" } : { type: "user", id: "u1" } };
+    const client = new QueryClient();
+    render(<QueryClientProvider client={client}>{headerElement(undefined, "th-1", session)}</QueryClientProvider>);
+    const name = scope === "team" ? "Make team default" : "Make my default";
+    try {
+      await waitFor(() => expect(screen.getByRole("button", { name: /^Choose model:/ })).toHaveProperty("disabled", false));
+      await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
+      await user.click(screen.getByRole("button", { name: "High reasoning" }));
+      await waitFor(() => expect(patchThread).toHaveBeenCalledWith("th-1", { reasoning: "high" }));
+      expect(screen.getByRole("button", { name: "Low reasoning" }).getAttribute("aria-pressed")).toBe("true");
+      const save = screen.getByRole("button", { name });
+      await user.click(save);
+      expect(patchMeMutate).not.toHaveBeenCalled();
+      expect(screen.queryByRole("dialog", { name: "Change the team default?" })).toBeNull();
+      expect(save).toHaveProperty("disabled", true);
+
+      await act(async () => { settle(); });
+      await waitFor(() => expect(screen.getByRole("button", { name })).toHaveProperty("disabled", false));
+      // Any refetch started after PATCH is still held. The acknowledged
+      // reasoning must be usable before that refresh completes.
+      await user.click(screen.getByRole("button", { name }));
+      if (scope === "team") {
+        const dialog = await screen.findByRole("dialog", { name: "Change the team default?" });
+        await user.click(within(dialog).getByRole("button", { name }));
+        expect(patchTeamMutate).toHaveBeenCalledWith({ id: "team_1", body: { defaultModel: "claude-opus-4-7", defaultReasoning: "high" } }, expect.anything());
+      } else {
+        expect(patchMeMutate).toHaveBeenCalledWith({ defaultModel: "claude-opus-4-7", defaultReasoning: "high" });
+      }
+    } finally {
+      await act(async () => { settle(); settleRefetch(); });
+      patchThread.mockRestore();
+      listThreads.mockRestore();
+      client.clear();
+    }
+  });
+
+  it("saves the thread's model and reasoning as the personal default for new threads", async () => {
+    const user = userEvent.setup();
+    isWorkspaceRuntime = true;
+    threadDefaultsData = { model: "s", reasoning: "medium", scope: "personal", reasoningScope: "personal" };
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-opus-4-7", reasoning: "high" }];
+    renderHeader(undefined, "th-1");
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
+    expect(screen.getByText(/New threads:/)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Make my default" }));
+    expect(patchMeMutate).toHaveBeenCalledWith({ defaultModel: "claude-opus-4-7", defaultReasoning: "high" });
+  });
+
+  it("saves only the model when the assistant carries its own reasoning", async () => {
+    const user = userEvent.setup();
+    isWorkspaceRuntime = true;
+    threadDefaultsData = { model: "s", reasoning: "high", scope: "personal", reasoningScope: null };
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-opus-4-7", reasoning: "low" }];
+    renderHeader(undefined, "th-1");
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
+    await user.click(screen.getByRole("button", { name: "Make my default" }));
+    expect(patchMeMutate).toHaveBeenCalledWith({ defaultModel: "claude-opus-4-7" });
+  });
+
+  it("offers no save when the assistant's own settings outrank the defaults", async () => {
+    const user = userEvent.setup();
+    isWorkspaceRuntime = true;
+    threadDefaultsData = { model: "s", reasoning: "medium", scope: null, reasoningScope: null };
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-opus-4-7" }];
+    renderHeader(undefined, "th-1");
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
+    expect(screen.getByText(/New threads:/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Make .*default$/ })).toBeNull();
+    expect(screen.getByText("The assistant's own model setting outranks defaults, so new threads keep it.")).toBeTruthy();
+  });
+
+  it("asks before it changes the team default for every member", async () => {
+    const user = userEvent.setup();
+    isWorkspaceRuntime = true;
+    teamsData = {
+      teams: [{ id: "team_1", orgId: "org_1", name: "Platform", origin: "local", externalId: null, createdAt: 1, memberCount: 3, callerRole: "admin", defaultModel: null }],
+    };
+    threadDefaultsData = { model: "s", reasoning: "medium", scope: "team", reasoningScope: "team" };
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-opus-4-7" }];
+    renderHeader(undefined, "th-1", { ...baseSession(), isWorkspaceRuntime: true, owner: { type: "team", id: "team_1" } });
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
+    await user.click(screen.getByRole("button", { name: "Make team default" }));
+    expect(patchTeamMutate).not.toHaveBeenCalled();
+    const dialog = await screen.findByRole("dialog", { name: "Change the team default?" });
+    expect(dialog.textContent).toContain("every member of Platform");
+    await user.click(within(dialog).getByRole("button", { name: "Make team default" }));
+    expect(patchTeamMutate).toHaveBeenCalledWith({ id: "team_1", body: { defaultModel: "claude-opus-4-7" } }, expect.anything());
+  });
+
   it("shows a pending selection immediately without changing the saved pin", () => {
     headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, model: "s" }];
     threadModelPending = true;
