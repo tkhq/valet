@@ -16,7 +16,7 @@
  * Skips (does not fail) when the Keycloak realm isn't reachable — `make e2e`
  * boots the container via its `keycloak` pre-hook.
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "./_setup.js";
 
 const KC_ISSUER = "http://localhost:8081/realms/valet";
@@ -60,24 +60,25 @@ describe.skipIf(!kcUp)("OIDC code flow against live Keycloak", () => {
   let api: TestApi;
 
   beforeAll(async () => {
-    process.env.AUTH_OIDC_ISSUER = KC_ISSUER;
-    process.env.AUTH_OIDC_CLIENT_ID = "valet";
-    process.env.AUTH_OIDC_CLIENT_SECRET = "valet-dev-secret";
+    // Deployment login methods must explicitly enable the configured provider.
+    vi.stubEnv("AUTH_METHODS", "oidc");
+    vi.stubEnv("AUTH_OIDC_ISSUER", KC_ISSUER);
+    vi.stubEnv("AUTH_OIDC_CLIENT_ID", "valet");
+    vi.stubEnv("AUTH_OIDC_CLIENT_SECRET", "valet-dev-secret");
     // The realm's seeded users live on valet.test; make that the SSO domain.
-    process.env.AUTH_OIDC_DOMAIN = "valet.test";
+    vi.stubEnv("AUTH_OIDC_DOMAIN", "valet.test");
     // better-auth refuses OIDC discovery against origins outside
     // trustedOrigins ("discovery_untrusted_origin") — trust the local issuer.
-    process.env.AUTH_TRUSTED_ORIGINS = "http://localhost:8081";
+    vi.stubEnv("AUTH_TRUSTED_ORIGINS", "http://localhost:8081");
     api = await bootTestApi({ auth: true });
   }, 60_000);
 
   afterAll(async () => {
-    delete process.env.AUTH_OIDC_ISSUER;
-    delete process.env.AUTH_OIDC_CLIENT_ID;
-    delete process.env.AUTH_OIDC_CLIENT_SECRET;
-    delete process.env.AUTH_OIDC_DOMAIN;
-    delete process.env.AUTH_TRUSTED_ORIGINS;
-    await api?.cleanup();
+    try {
+      await api?.cleanup();
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("signs alice in via the real authorization-code flow", async () => {

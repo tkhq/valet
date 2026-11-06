@@ -87,12 +87,6 @@ class K8sFakeImageBuilder extends FakeImageBuilder {
   override readonly backend = "kubernetes";
 }
 
-/** Waits until a service's off-path fallback work (bake request or contract
- * re-read) has settled. */
-async function fallbackSettled(svc: SourceService): Promise<void> {
-  await vi.waitFor(() => expect((svc as unknown as { fallbackWork: Map<string, unknown> }).fallbackWork.size).toBe(0));
-}
-
 class QueueImageBuilder extends FakeImageBuilder {
   running: string[] = [];
   queued: string[] = [];
@@ -419,13 +413,16 @@ describe("SourceService", () => {
       const src = await seedRepoSource(db);
       await seedBake(db, src, { id: "bad", contractVersion: 0, contractSource: "missing" });
       const svc = makeService();
+      const bakeRequest = vi.spyOn(svc, "startBake");
       const event = { sessionId: "s1", sourceId: src, bakeId: "bad", contract: 0, repoFullName: "acme/widgets" };
       await svc.handleImageFallback(event);
       await svc.handleImageFallback(event); // second sweep of the same session
       await svc.handleImageFallback({ ...event, sessionId: "s2" }); // another session on the same source
-      await fallbackSettled(svc);
+      await vi.waitFor(() => expect(builder.specs).toHaveLength(1));
       await svc.handleImageFallback(event); // a later sweep sees the active bake
-      await fallbackSettled(svc);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(bakeRequest).toHaveBeenCalledTimes(1);
+      bakeRequest.mockRestore();
       expect(builder.specs).toHaveLength(1);
       const row = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
       expect(row.health).toBe("incompatible");
@@ -437,14 +434,17 @@ describe("SourceService", () => {
       const src = await seedRepoSource(db);
       await seedBake(db, src, { id: "bad", contractVersion: 0, contractSource: "missing" });
       const svc = makeService();
+      const bakeRequest = vi.spyOn(svc, "startBake");
       const event = { sessionId: "s1", sourceId: src, bakeId: "bad", contract: 0, repoFullName: "acme/widgets" };
       await svc.handleImageFallback(event);
-      await fallbackSettled(svc);
+      await vi.waitFor(() => expect(builder.specs).toHaveLength(1));
       expect(builder.specs).toHaveLength(1);
       builder.setState(builder.buildIds[0], { state: "failed", error: "npm ci exploded" });
       await svc.syncActiveBuilds();
       await svc.handleImageFallback(event);
-      await fallbackSettled(svc);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(bakeRequest).toHaveBeenCalledTimes(1);
+      bakeRequest.mockRestore();
       expect(builder.specs).toHaveLength(1);
       const row = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
       expect(row.health).toBe("failing");
@@ -457,13 +457,14 @@ describe("SourceService", () => {
       await seedBake(db, src, { id: "bad", contractVersion: 0, contractSource: "missing" });
       let t = NOW;
       const svc = makeService({ now: () => t });
+      const bakeRequest = vi.spyOn(svc, "startBake");
       await svc.setSourceHealth(src, "failing", "credentials", "no org credential");
       t = NOW + 60_000;
       const event = { sessionId: "s1", sourceId: src, bakeId: "bad", contract: 0, repoFullName: "acme/widgets" };
       await svc.handleImageFallback(event);
       await svc.handleImageFallback(event);
       await new Promise((r) => setImmediate(r));
-      await fallbackSettled(svc);
+      expect(bakeRequest).not.toHaveBeenCalled();
       expect(builder.specs).toHaveLength(0);
       const failing = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
       expect(failing).toMatchObject({ health: "failing", healthReason: "credentials", healthCheckedAt: NOW });
@@ -474,7 +475,8 @@ describe("SourceService", () => {
       await svc.handleImageFallback(event);
       await svc.handleImageFallback(event);
       await new Promise((r) => setImmediate(r));
-      await fallbackSettled(svc);
+      await vi.waitFor(() => expect(bakeRequest.mock.settledResults[0]?.type).toBe("rejected"));
+      bakeRequest.mockRestore();
       expect(builder.specs).toHaveLength(0);
       expect((await db.select().from(bakes).where(eq(bakes.sourceId, src))).map((b) => b.id)).toEqual(["bad"]);
       const marked = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
@@ -486,14 +488,17 @@ describe("SourceService", () => {
       await seedBake(db, src, { id: "bad", contractVersion: 0, contractSource: "missing" });
       const svc = makeService();
       await svc.setSourceHealth(src, "stale", "waiting_for_base", null);
+      const bakeRequest = vi.spyOn(svc, "startBake");
       const event = { sessionId: "s1", sourceId: src, bakeId: "bad", contract: 0, repoFullName: "acme/widgets" };
       await svc.handleImageFallback(event);
-      await fallbackSettled(svc);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(bakeRequest).not.toHaveBeenCalled();
       expect(builder.specs).toHaveLength(0);
       expect((await db.select().from(imageSources).where(eq(imageSources.id, src)))[0]).toMatchObject({ health: "stale", healthReason: "waiting_for_base" });
       await svc.setSourceHealth(src, "incompatible", "contract", "scheduler detail");
       await svc.handleImageFallback(event);
-      await fallbackSettled(svc);
+      await vi.waitFor(() => expect(builder.specs).toHaveLength(1));
+      bakeRequest.mockRestore();
       expect((await db.select().from(imageSources).where(eq(imageSources.id, src)))[0]).toMatchObject({ health: "incompatible", healthDetail: "scheduler detail" });
     });
 
@@ -504,7 +509,7 @@ describe("SourceService", () => {
       let reads = 0;
       const svc = makeService({ contractReader: async () => { reads++; return { ok: true, version: 3 }; } });
       await svc.handleImageFallback({ sessionId: "s1", sourceId: src, bakeId: "unread", contract: null, repoFullName: "acme/widgets" });
-      await fallbackSettled(svc);
+      await vi.waitFor(async () => expect(await svc.currentBake(src)).toMatchObject({ contractVersion: 3, contractSource: "label" }));
       expect(reads).toBe(1);
       expect(builder.specs).toHaveLength(0);
       const stamped = (await db.select().from(bakes).where(eq(bakes.id, "unread")))[0];
@@ -518,7 +523,6 @@ describe("SourceService", () => {
       const svc = makeService();
       const before = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
       await svc.handleImageFallback({ sessionId: "s1", sourceId: src, bakeId: "bad", contract: 0, repoFullName: "acme/widgets" });
-      await fallbackSettled(svc);
       expect(builder.specs).toHaveLength(0);
       const after = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
       expect(after).toMatchObject({ health: before.health, healthReason: before.healthReason, healthCheckedAt: before.healthCheckedAt });
