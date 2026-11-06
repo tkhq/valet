@@ -6,6 +6,8 @@
  */
 import type { ProxySettingsResponse } from "../../../wire/types.js";
 import { claudeCodeAdapter } from "./claude-code.js";
+import { codexAdapter } from "./codex.js";
+import { opencodeAdapter } from "./opencode.js";
 
 export type ProxyMode = ProxySettingsResponse["mode"];
 
@@ -39,7 +41,9 @@ export interface HarnessPlan {
   /** One line per value that holds something setup did not write. `--force` replaces them. */
   conflicts: string[];
   /** Writes the planned config. With conflicts, writes only under `force`, after a backup. Returns report lines. */
-  apply(opts: { force: boolean }): string[];
+  apply(opts: { force: boolean; key?: string }): string[];
+  /** Check a separate credential file without printing its contents. */
+  checkKey?(key: string): boolean;
 }
 
 export interface HarnessUnapplyReport {
@@ -67,7 +71,7 @@ export interface HarnessAdapter {
   nextStep: string;
 }
 
-const ADAPTERS: readonly HarnessAdapter[] = [claudeCodeAdapter];
+const ADAPTERS: readonly HarnessAdapter[] = [claudeCodeAdapter, codexAdapter, opencodeAdapter];
 
 export function harnessAdapter(id: string | undefined): HarnessAdapter | undefined {
   return ADAPTERS.find((adapter) => adapter.id === id);

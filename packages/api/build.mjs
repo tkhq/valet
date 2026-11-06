@@ -71,6 +71,9 @@ await build({
     ].join("\n"),
   },
   external,
+  // The parser's UMD entry passes `require` through a factory, hiding its
+  // relative imports from the bundler. Its ESM entry keeps the binary complete.
+  alias: { "jsonc-parser": "jsonc-parser/lib/esm/main.js" },
   plugins: [inlineAssetsPlugin],
   logLevel: "info",
 });

@@ -17,6 +17,7 @@ import { readFileSync } from "node:fs";
 import type { Context, Hono } from "hono";
 import { publicUrlFromEnv } from "../channels/host.js";
 import type { AppEnv } from "../env.js";
+import { mountCliDownloadRoutes } from "./cli-downloads.js";
 
 const SETUP = readFileSync(new URL("./agent-setup.md", import.meta.url), "utf8");
 const SKILL = readFileSync(new URL("./valet-skill.md", import.meta.url), "utf8");
@@ -27,6 +28,7 @@ export function renderOnboardingPage(template: string, valetUrl: string): string
 }
 
 export function mountOnboardingRoutes(app: Hono<AppEnv>): void {
+  mountCliDownloadRoutes(app);
   const serve = (template: string) => (c: Context<AppEnv>) => {
     const configured = publicUrlFromEnv(process.env);
     const url = configured ?? new URL(c.req.url).origin;

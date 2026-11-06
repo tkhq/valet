@@ -206,6 +206,9 @@ importers:
       hono:
         specifier: ^4.3.0
         version: 4.11.4
+      jsonc-parser:
+        specifier: 3.3.1
+        version: 3.3.1
       marked:
         specifier: ^18.0.11
         version: 18.0.11
@@ -5945,6 +5948,9 @@ packages:
     resolution: {integrity: sha512-XmOWe7eyHYH14cLdVPoyg+GOH3rYX++KpzrylJwSW98t3Nk+U8XOl8FWKOgwtzdb8lXGf6zYwDUzeHMWfxasyg==}
     engines: {node: '>=6'}
     hasBin: true
+
+  jsonc-parser@3.3.1:
+    resolution: {integrity: sha512-HUgH65KyejrUFPvHFPbqOY0rsFip3Bo5wb4ngvdi1EpCYWUQDC5V+Y7mZws+DLkr4M//zQJoanu1SP+87Dv1oQ==}
 
   jsonpath-plus@10.4.0:
     resolution: {integrity: sha512-T92WWatJXmhBbKsgH/0hl+jxjdXrifi5IKeMY02DWggRxX0UElcbVzPlmgLTbvsPeW1PasQ6xE2Q75stkhGbsA==}
@@ -11929,6 +11935,8 @@ snapshots:
   json-with-bigint@3.5.8: {}
 
   json5@2.2.3: {}
+
+  jsonc-parser@3.3.1: {}
 
   jsonpath-plus@10.4.0:
     dependencies:

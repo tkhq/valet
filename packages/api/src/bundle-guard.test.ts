@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
@@ -8,6 +10,24 @@ const bundlePath = resolve(apiRoot, "dist/valet-api.mjs");
 const bundleExists = existsSync(bundlePath);
 
 describe.skipIf(!bundleExists)("built bundle guards", () => {
+  it("lists coding tools from a bare directory without installed dependencies", () => {
+    const dir = mkdtempSync(resolve(tmpdir(), "valet-proxy-bundle-"));
+    try {
+      const entry = resolve(dir, "valet-api.mjs");
+      copyFileSync(bundlePath, entry);
+      const result = spawnSync(process.execPath, [entry, "proxy", "list"], {
+        cwd: dir,
+        encoding: "utf8",
+        env: { ...process.env, VALET_DATA_DIR: resolve(dir, "state") },
+        timeout: 15_000,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      for (const tool of ["claude-code", "codex", "opencode"]) expect(result.stdout).toContain(tool);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("does not scan a migrations directory at runtime (assets are inlined)", () => {
     const src = readFileSync(bundlePath, "utf8");
     // A directory scan of migrations would defeat the inlining strategy.

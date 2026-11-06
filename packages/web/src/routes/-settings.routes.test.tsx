@@ -87,6 +87,7 @@ vi.mock("~/api/api-keys", () => ({
 }));
 vi.mock("~/api/proxy-usage", () => ({
   useProxySettings: () => ({ data: { enabled: true, mode: "centralized" }, isLoading: false, error: null }),
+  useProxyRequests: () => ({ data: undefined, isFetching: false, isError: false, refetch: vi.fn() }),
   useSetProxyEnabled: () => ({ mutate: vi.fn(), isPending: false, isError: false, error: null }),
   useSetProxyMode: () => ({ mutate: vi.fn(), isPending: false, isError: false, error: null }),
 }));
