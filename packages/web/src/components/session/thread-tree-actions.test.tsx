@@ -22,7 +22,6 @@ import type {
   GetModelTiersResponse,
   ModelInfo,
   ChildWorkSummary,
-  ListSessionWakeupsResponse,
   ThreadSummary,
   WorkflowDefinitionSummary,
 } from "@valet/api/wire";
@@ -48,7 +47,6 @@ let pendingGates: Record<string, DecisionGate> = {};
 let sessionModel: string | undefined;
 let models: ModelInfo[] = [];
 let tierMap: GetModelTiersResponse = { xs: [], s: [], m: [], l: [], xl: [] };
-let wakeups: ListSessionWakeupsResponse | undefined;
 /** The person's teams, which the Move to menu offers as workspaces. */
 let teamsData: ListTeamsResponse = { teams: [] };
 // The phone drawer and the web sidebar share this component. Most tests
@@ -118,7 +116,6 @@ vi.mock("~/api/queries", async (importOriginal) => {
     // The gate seed (usePendingGatesSeed) stays inert: with no data the
     // effect never touches the store. Gates enter through `pendingGates`.
     useDecisions: () => ({ data: undefined, isLoading: false, error: null }),
-    useSessionWakeups: () => ({ data: wakeups }),
   };
 });
 
@@ -234,7 +231,6 @@ beforeEach(() => {
   sessionModel = undefined;
   models = [];
   tierMap = { xs: [], s: [], m: [], l: [], xl: [] };
-  wakeups = undefined;
   teamsData = { teams: [] };
   workflows = [];
   artifacts = [];
@@ -1036,48 +1032,6 @@ it("keeps the selected search thread when content matches arrive", async () => {
   fireEvent.keyDown(input, { key: "Enter" });
   const navigateOptions = navigate.mock.calls.at(-1)?.[0];
   expect(navigateOptions.search({})).toMatchObject({ thread: "chosen" });
-});
-
-describe("ThreadTree: timer wait line", () => {
-  it("shows a quiet line on a thread with an active timer, and none on the others", () => {
-    threads = [thread({ id: "thread-1", title: "Plan the launch" }), thread({ id: "thread-2", title: "Fix the build" })];
-    const now = Date.now();
-    wakeups = {
-      wakeups: [
-        { id: "wk_1", threadId: "thread-1", kind: "timer", status: "pending", reason: "check CI", fireAt: now + 26 * 60_000 + 10_000, createdAt: now },
-        // A process gets no row line: only timers do.
-        { id: "wk_2", threadId: "thread-2", kind: "process", status: "running", reason: "build", deadlineAt: now + 3_600_000, createdAt: now },
-      ],
-      leases: [{ id: "ls_1", threadId: "thread-2", ownerKind: "hold", reason: "terminal", deadlineAt: now + 3_600_000, createdAt: now }],
-    };
-    renderTree();
-    const lines = screen.getAllByText(/^Waiting · next wakeup/);
-    expect(lines.map((l) => l.textContent)).toEqual(["Waiting · next wakeup in 26m"]);
-    // The line sits under its own thread's row.
-    const row = screen.getByText("Plan the launch").closest("a")?.parentElement?.parentElement;
-    expect(row?.contains(lines[0] ?? null)).toBe(true);
-  });
-
-  it("keeps the line inside the open row's highlight", () => {
-    // With no `thread` search param, the only thread is the open one.
-    threads = [thread({ id: "thread-1", title: "Plan the launch" })];
-    const now = Date.now();
-    wakeups = {
-      wakeups: [{ id: "wk_1", threadId: "thread-1", kind: "timer", status: "pending", reason: "check CI", fireAt: now + 5 * 60_000, createdAt: now }],
-      leases: [],
-    };
-    renderTree();
-    // The selected fill sits on one element that holds the title and the
-    // line, so the line does not hang below the row.
-    const highlighted = screen.getByText("Plan the launch").closest(".bg-ink-wash-strong");
-    expect(highlighted?.contains(screen.getByText("Waiting · next wakeup in 5m"))).toBe(true);
-  });
-
-  it("shows no line without timers", () => {
-    wakeups = { wakeups: [], leases: [] };
-    renderTree();
-    expect(screen.queryByText(/^Waiting · next wakeup/)).toBeNull();
-  });
 });
 
 /** Saves the sidebar document the projects hook reads at render. */

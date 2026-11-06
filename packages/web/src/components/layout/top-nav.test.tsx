@@ -10,7 +10,7 @@ import {
   createRouter,
   useBlocker,
 } from "@tanstack/react-router";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { OrgPluginWire, TeamSummary } from "@valet/api/wire";
 import { beforeEach, describe, expect, it, vi } from "vitest";

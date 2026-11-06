@@ -4,7 +4,7 @@ import type { LeaseSummary, ListSessionWakeupsResponse, ListThreadFeedersRespons
 import { ApiError } from "~/api/client";
 import { useCancelSessionWakeup, useSessionWakeups } from "~/api/queries";
 import { useThreadFeeders } from "~/api/presence-feeders";
-import { Button, ConfirmDialog, Popover, PopoverContent, PopoverTrigger, Tooltip } from "~/components/primitives";
+import { Button, ConfirmDialog, Popover, PopoverContent, PopoverTrigger } from "~/components/primitives";
 import { Ref } from "~/components/presence/ref";
 import { cn } from "~/lib/cn";
 import { formatWhen } from "~/lib/format-when";
@@ -301,40 +301,6 @@ export function itemTimeTitle(item: BackgroundItem): string | undefined {
   return undefined;
 }
 
-/** Pure: the soonest timer fire time of each thread. Only timers count; other kinds get no thread-list line. */
-export function threadTimerWaits(data: ListSessionWakeupsResponse | undefined): Map<string, number> {
-  const waits = new Map<string, number>();
-  for (const w of data?.wakeups ?? []) {
-    if (w.kind !== "timer" || w.fireAt === undefined) continue;
-    const current = waits.get(w.threadId);
-    if (current === undefined || w.fireAt < current) waits.set(w.threadId, w.fireAt);
-  }
-  return waits;
-}
-
-/** One thread's event waits for its list row: the oldest waiter's subject label and how many others wait. */
-export interface ThreadEventWait {
-  label: string;
-  moreCount: number;
-}
-
-/** Pure: each thread's event waits, named by the oldest waiter, like the composer line. */
-export function threadEventWaits(data: ListSessionWakeupsResponse | undefined): Map<string, ThreadEventWait> {
-  const byThread = new Map<string, Array<{ createdAt: number; label: string }>>();
-  for (const w of data?.wakeups ?? []) {
-    if (w.kind !== "event" || w.subjectLabel === undefined) continue;
-    const list = byThread.get(w.threadId) ?? [];
-    list.push({ createdAt: w.createdAt, label: w.subjectLabel });
-    byThread.set(w.threadId, list);
-  }
-  const waits = new Map<string, ThreadEventWait>();
-  for (const [threadId, list] of byThread) {
-    const oldest = list.reduce((a, b) => (b.createdAt < a.createdAt ? b : a));
-    waits.set(threadId, { label: oldest.label, moreCount: list.length - 1 });
-  }
-  return waits;
-}
-
 /** The current time, refreshed every 30 seconds while `active`, so relative times stay current between polls. */
 function useNow(active: boolean): number {
   const [now, setNow] = useState(() => Date.now());
@@ -587,33 +553,5 @@ export function BackgroundWorkSection({
       {feedById === undefined && <FeedByLine feeders={feeders.data} />}
       {dialog}
     </section>
-  );
-}
-
-/**
- * The thread list's quiet line under a thread that waits on a timer:
- * "Waiting · next wakeup in 26m". The exact fire time shows on hover.
- */
-export function ThreadTimerLine({ fireAt, className }: { fireAt: number; className?: string }) {
-  const now = useNow(true);
-  return (
-    <Tooltip content={`Fires ${formatWhen(fireAt)}`}>
-      <p className={cn("truncate text-[11px] leading-4 text-muted", className)}>
-        Waiting · next wakeup {timeUntil(fireAt, now)}
-      </p>
-    </Tooltip>
-  );
-}
-
-/**
- * The thread list's quiet line under a thread that waits on an event:
- * "Waiting on <subject label>", plus "+N more" when the thread has other
- * event waits (spec Part H).
- */
-export function ThreadEventLine({ label, moreCount = 0, className }: { label: string; moreCount?: number; className?: string }) {
-  return (
-    <p className={cn("truncate text-[11px] leading-4 text-muted", className)}>
-      {moreCount > 0 ? `Waiting on ${label} +${moreCount} more` : `Waiting on ${label}`}
-    </p>
   );
 }

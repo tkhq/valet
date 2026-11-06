@@ -70,7 +70,6 @@ import {
   useMarkThreadsRead,
   useMoveThread,
   useSetThreadArchived,
-  useSessionWakeups,
   useSidebarThreads,
   useThreadSearch,
 } from "~/api/queries";
@@ -81,7 +80,6 @@ import { projectThreadIds, removeArchivedProject, useThreadProjects } from "~/li
 import { backgroundWorkConflict } from "~/api/client";
 import { errorText } from "~/lib/error-text";
 import { useBackgroundWorkGuard, type GuardedAction } from "./background-work-confirm";
-import { ThreadEventLine, ThreadTimerLine, threadEventWaits, threadTimerWaits, type ThreadEventWait } from "./background-work";
 
 const STOP_AND_ARCHIVE: GuardedAction = {
   title: "Stop background work and archive?",
@@ -138,8 +136,6 @@ const THREAD_DRAG_TYPE = "application/x-valet-thread";
 
 /** A list action a phone leaves out: the drawer is for opening threads. */
 const PHONE_HIDDEN = "max-md:hidden";
-/** A thread row's wait line: a full-width item of the row's flex wrap, under the title (32px indent + 14px icon + 8px gap). */
-const WAIT_LINE_CLASS = "basis-full -mt-0.5 pb-1 pl-[3.375rem]";
 /** Recents rows a wider screen shows before "Show more". */
 const RECENTS_LIMIT = 5;
 /** A sub-conversation row action: left out on a phone, shown on hover or focus on a wider screen (`group/child`). */
@@ -468,11 +464,6 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
   // `refetch()` fires even on a disabled query, so gate the live-update
   // hook too rather than relying on `enabled` alone.
   useInvalidateChildrenOnQueueState(sessionId, showChildren ? childrenQ.refetch : NO_REFETCH);
-  // One query for the session, shared with the composer status line through
-  // the query cache: a row line never costs its own request.
-  const wakeupsData = useSessionWakeups(sessionId).data;
-  const timerWaits = threadTimerWaits(wakeupsData);
-  const eventWaits = threadEventWaits(wakeupsData);
   const createThread = useCreateThread(sessionId);
   const setArchived = useSetThreadArchived(sessionId);
   const renameThread = useRenameThread(sessionId);
@@ -788,8 +779,6 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
               isDefault={t.id === defaultId}
               active={t.id === openThreadId}
               hasPendingGate={gatedThreadIds.has(t.id)}
-              timerFireAt={timerWaits.get(t.id)}
-              eventWait={eventWaits.get(t.id)}
               childSessions={grouped.get(t.id) ?? []}
               activeChildId={search.child}
               projects={projects.value.projects}
@@ -1124,17 +1113,11 @@ function ThreadNode({
   pinned,
   onPin,
   organizingDisabled,
-  timerFireAt,
-  eventWait,
   viewers,
 }: {
   /** The other people with this thread open now. */
   viewers: ActiveViewer[];
   organizingDisabled: boolean;
-  /** When the thread's soonest timer fires. Only timers get a row line. */
-  timerFireAt?: number;
-  /** The thread's event waits, named by the oldest one, when it has any. */
-  eventWait?: ThreadEventWait;
   pinned: boolean;
   onPin: () => void;
   projects: Array<{ id: string; name: string }>;
@@ -1249,13 +1232,10 @@ function ThreadNode({
 
   return (
     <div>
-      {/* Row = link + context menu side by side; nesting the menu button
-          inside the Link would make it part of the navigation target. A
-          wait line wraps onto its own line inside the row, so the selected
-          tint, accent bar, and hover cover it too. */}
+      {/* Keep the context menu beside the link so its button does not navigate. */}
       <div
         className={cn(
-          "group mx-2 flex flex-wrap items-center rounded-md pr-1 transition-colors",
+          "group mx-2 flex items-center rounded-md pr-1 transition-colors",
           active ? "bg-ink-wash-strong" : "hover:bg-ink-wash",
         )}
       >
@@ -1405,8 +1385,6 @@ function ThreadNode({
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
-        {timerFireAt !== undefined && <ThreadTimerLine fireAt={timerFireAt} className={WAIT_LINE_CLASS} />}
-        {eventWait !== undefined && <ThreadEventLine label={eventWait.label} moreCount={eventWait.moreCount} className={WAIT_LINE_CLASS} />}
       </div>
       {childSessions.length > 0 && !collapsed && (
         <ul className={NESTED_LIST_CLASS}>
