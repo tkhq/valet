@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render as renderReact, screen } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import type { ListArtifactsResponse } from "@valet/api/wire";
 import type { OwnerFilter } from "~/api/client";
@@ -18,16 +19,21 @@ vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
   useNavigate: () => navigate,
   useSearch: () => search,
-  Link: ({ to, params, children }: { to: string; params?: { token: string }; children: ReactNode }) => <a href={params ? `/a/${params.token}` : to}>{children}</a>,
+  Link: ({ to, params, children, ...props }: { to: string; params?: { token?: string; id?: string }; children: ReactNode }) => <a {...props} href={params?.token ? `/a/${params.token}` : params?.id ? `/artifacts/${params.id}` : to}>{children}</a>,
 }));
 vi.mock("~/lib/use-list-owner", () => ({ useListOwner: () => owner }));
-vi.mock("~/api/settings", () => ({ useMe: () => ({ isError: identityFailed }) }));
+vi.mock("~/api/settings", () => ({ useMe: () => ({ isError: identityFailed, data: { id: "u1" } }) }));
 vi.mock("~/components/workspace-clause", () => ({ WorkspaceClause: () => <span>Personal</span> }));
 vi.mock("~/api/artifacts", () => ({ useArtifacts: (scope: unknown, options: unknown) => {
   request(scope, options);
   return { data, isPending: pending, isError: failed, refetch };
 } }));
 import { ArtifactsPage } from "./artifacts";
+
+function render(ui: ReactNode) {
+  const client = new QueryClient();
+  return renderReact(ui, { wrapper: ({ children }) => <QueryClientProvider client={client}>{children}</QueryClientProvider> });
+}
 
 describe("workspace artifacts", () => {
   beforeEach(() => {
@@ -45,12 +51,34 @@ describe("workspace artifacts", () => {
     expect(screen.getByRole("link", { name: "Memory" }).getAttribute("href")).toBe("/memory");
     expect(screen.getByText(/Page · Version 2/)).toBeTruthy();
   });
+  it("opens creation from the primary header action and the empty state", () => {
+    const view = render(<ArtifactsPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Create artifact" }));
+    expect(screen.getByRole("dialog", { name: "Create artifact" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    data = { artifacts: [] }; view.rerender(<ArtifactsPage />);
+    const buttons = screen.getAllByRole("button", { name: "Create artifact" });
+    expect(buttons).toHaveLength(2);
+    const emptyAction = buttons[1];
+    if (!emptyAction) throw new Error("Missing empty state action");
+    fireEvent.click(emptyAction);
+    expect(screen.getByRole("dialog", { name: "Create artifact" })).toBeTruthy();
+  });
+  it("offers an editor link for the publisher while shared readers keep the reader link", () => {
+    const view = render(<ArtifactsPage />);
+    expect(screen.getByRole("link", { name: "Edit Report" }).getAttribute("href")).toBe("/artifacts/a1");
+    data.artifacts = data.artifacts.map((artifact) => ({ ...artifact, actorUserId: "someone-else" }));
+    view.rerender(<ArtifactsPage />);
+    expect(screen.queryByRole("link", { name: "Edit Report" })).toBeNull();
+    expect(screen.getByRole("link", { name: "Report" }).getAttribute("href")).toBe("/a/capability");
+  });
   it("disables the list until the owner is known, including identity failure", () => {
     owner = undefined;
     const view = render(<ArtifactsPage />);
     expect(request).toHaveBeenLastCalledWith(undefined, { enabled: false, limit: 50, cursor: undefined });
     expect(screen.queryByRole("link", { name: "Report" })).toBeNull();
     expect(screen.getByText("Loading artifacts…")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Create artifact" }).hasAttribute("disabled")).toBe(true);
     identityFailed = true; view.rerender(<ArtifactsPage />);
     expect(screen.getByRole("alert").textContent).toContain("Reload this page");
   });

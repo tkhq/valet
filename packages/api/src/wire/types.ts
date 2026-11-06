@@ -4365,6 +4365,38 @@ export interface ArtifactListItem {
   updatedAt: number;
 }
 
+/** A preview selection, or an exact source range with UTF-16 offsets. */
+export interface ArtifactSelection {
+  kind?: "text" | "element";
+  text: string;
+  start?: number;
+  end?: number;
+  vdid?: string;
+}
+
+/** Latest metadata plus the selected working or historical snapshot. */
+export interface ArtifactEditorResponse {
+  artifact: ArtifactListItem;
+  version: number;
+  content: string;
+  rendered: string;
+  description: string;
+  icon: string;
+  canEdit: boolean;
+  sourceSessionId?: string;
+  sourceThreadId?: string;
+}
+
+export interface RequestArtifactEditRequest {
+  baseVersion: number;
+  instruction: string;
+  selection: ArtifactSelection;
+}
+
+export interface RequestArtifactEditResponse { requestId: string; sent: boolean }
+export interface ApplyArtifactEditRequest { requestId: string; replacement: string }
+export interface RestoreArtifactRequest { version: number; baseVersion: number }
+
 export interface ListArtifactsResponse {
   artifacts: ArtifactListItem[];
   /** Present for paged owner lists; null on the last page. */

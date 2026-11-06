@@ -786,3 +786,25 @@ that caller can access the artifact. The read API supplies this capability after
 the existing organization and team checks. Anonymous readers and other viewers
 receive no management capability. Revocation uses the existing endpoint and
 confirmation dialog; the reader then shows that the link is revoked.
+
+
+## Artifact authoring extension (2026-11-06)
+
+See `2026-11-06-artifact-authoring-design.md` for the managed editor, selection edits, and revision restore.
+
+The editor reads working and historical snapshots through manager and source-conversation access checks.
+Public reads still serve only the pinned revision, or the latest revision when no pin exists.
+Edit requests use structured comment rows. Ordinary comment reads exclude these rows because they contain protected working source.
+The source conversation receives the instruction and saved source range. Its edit turn can use only `artifact_edit`.
+The tool replaces that saved range after checking the actor, owner, source conversation, and base revision.
+HTML elements resolve through parser source locations and preview identifiers. Text selections must match source text within their preview anchor.
+Formatted Markdown and encoded or split HTML text require an explicit source selection when no exact mapping exists.
+Restore appends a saved snapshot as a new revision. Edits and restores preserve the audience, link, source, and shared revision pin.
+Revision operations lock the artifact row. Historical snapshot rows do not change.
+
+Historical versions do not store source-conversation metadata. The editor can read or restore an old body only for its recorded author.
+This rule also applies to org admins. It prevents a new team publisher from reading another publisher's previous private drafts.
+Current and pinned public reads keep their existing access rules. Per-version provenance can permit broader historical management in a later change.
+
+Selection authoring requires a linked source session and thread. Legacy artifacts without a source thread support managed preview and restore only.
+Create a new artifact to start selection edits beside a conversation.

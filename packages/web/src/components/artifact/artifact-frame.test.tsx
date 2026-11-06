@@ -20,6 +20,21 @@ import {
 } from "./artifact-frame";
 
 describe("ArtifactFrame", () => {
+  it("accepts bounded selections only from its own frame", () => {
+    const onSelect = vi.fn();
+    const { container } = render(<ArtifactFrame title="Report" rendered="<p>Selected words</p>" onSelect={onSelect} />);
+    const frame = container.querySelector("iframe");
+    if (!frame?.contentWindow) throw new Error("artifact iframe did not mount");
+    const data = { type: "valet-artifact:selection", text: "Selected words", vdid: "paragraph-1" };
+    window.dispatchEvent(new MessageEvent("message", { source: window, data }));
+    window.dispatchEvent(new MessageEvent("message", { source: frame.contentWindow, data: { ...data, text: "x".repeat(8193) } }));
+    window.dispatchEvent(new MessageEvent("message", { source: frame.contentWindow, data: { ...data, vdid: "invalid id" } }));
+    expect(onSelect).not.toHaveBeenCalled();
+    window.dispatchEvent(new MessageEvent("message", { source: frame.contentWindow, data }));
+    expect(onSelect).toHaveBeenCalledExactlyOnceWith({ text: "Selected words", vdid: "paragraph-1" });
+    expect(frame.getAttribute("sandbox")).not.toContain("allow-same-origin");
+  });
+
   it("does not change the iframe's srcDoc when only the theme prop changes", () => {
     const { container, rerender } = render(
       <ArtifactFrame title="Report" rendered="<h1>Hi</h1>" theme="light" />,

@@ -24,6 +24,7 @@
  * requires being its sharer or an org admin. Team ownership requires live
  * membership on reads, comments, lists, and management, regardless of visibility.
  */
+import { z } from "zod";
 import { Hono, type Context } from "hono";
 import { and, eq, inArray } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
@@ -36,7 +37,7 @@ import { requireActingUser, requirePrincipal, requireUser, resolveOptionalIdenti
 import { isAgentCaller, userPrincipal, type AuthVia } from "../lib/request-principal.js";
 import { publicUrlFromEnv } from "../channels/host.js";
 import { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
-import { isOrgAdmin } from "../services/org.js";
+import { isOrgAdmin, isOrgMember } from "../services/org.js";
 import { canViewSession } from "../services/session-access.js";
 import { isValidInternalToken } from "../lib/internal-auth.js";
 import { handleServiceError, resolveScope } from "./memory.js";
@@ -46,6 +47,11 @@ import { viewerOf } from "./_thread-access.js";
 import type { Providers } from "../providers/types.js";
 import {
   addArtifactComment,
+  applyArtifactEdit,
+  ArtifactVersionConflictError,
+  createArtifactEditRequest,
+  getArtifactSnapshot,
+  restoreArtifactVersion,
   copyArtifactToTeam,
   decideArtifactAccess,
   getAllowPublicArtifacts,
@@ -73,6 +79,8 @@ import {
   type ArtifactSummaryRow,
 } from "../services/artifacts.js";
 import type {
+  ArtifactEditorResponse,
+  RequestArtifactEditResponse,
   AddArtifactCommentRequest,
   AddArtifactCommentResponse,
   ArtifactCommentThreadWire,
@@ -252,7 +260,7 @@ async function loadCommentContext(
 async function canSendToSourceSession(
   providers: Providers,
   artifact: ArtifactRow,
-  user: AuthUser,
+  user: Pick<AuthUser, "id" | "orgId">,
 ): Promise<{ ok: false } | { ok: true; row: typeof agentSessions.$inferSelect }> {
   const { db } = providers;
   if (!artifact.sourceSessionId) return { ok: false };
@@ -262,7 +270,7 @@ async function canSendToSourceSession(
     .where(and(eq(agentSessions.id, artifact.sourceSessionId), eq(agentSessions.orgId, artifact.orgId)))
     .limit(1);
   const row = rows[0];
-  if (!row) return { ok: false };
+  if (!row || row.status === "deleted") return { ok: false };
   const retained = await hasRetainedArtifactSource(db, artifact);
   if (row.ownerType === "team" && !artifact.sourceThreadId && !retained) return { ok: false };
   if (!(await canViewSession(db, row, userPrincipal(user.id)))) return { ok: false };
@@ -809,14 +817,14 @@ artifactsRouter.get("/", async (c) => {
 
 /** Sharer-or-admin gate for managing one artifact. Wrong org or no row →
  * 404 (existence-hiding); right org but neither sharer nor admin → 403. */
-async function hasArtifactManagerRole(db: AppDb, row: ArtifactRow, user: AuthUser | undefined): Promise<boolean> {
+async function hasArtifactManagerRole(db: AppDb, row: ArtifactRow, user: Pick<AuthUser, "id" | "orgId"> | undefined): Promise<boolean> {
   return !!user && row.orgId === user.orgId &&
     (row.actorUserId === user.id || await isOrgAdmin(db, user.orgId, user.id));
 }
 
 async function loadManagedArtifact(
   c: Context<AppEnv>,
-  user: AuthUser,
+  user: Pick<AuthUser, "id" | "orgId">,
 ): Promise<{ row: ArtifactRow } | { error: Response }> {
   const { db } = c.var.providers;
   const row = await getArtifactById(db, c.req.param("id"));
@@ -828,6 +836,151 @@ async function loadManagedArtifact(
   }
   return { row };
 }
+
+const revisionNumber = z.number().int().positive();
+const editInputSchema = z.object({
+  baseVersion: revisionNumber,
+  instruction: z.string().min(1).max(4096),
+  selection: z.object({
+    kind: z.enum(["text", "element"]).optional(), text: z.string().max(8192),
+    start: z.number().int().nonnegative().optional(), end: z.number().int().positive().optional(),
+    vdid: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/).optional(),
+  }),
+});
+
+function authoringError(c: Context<AppEnv>, error: unknown): Response | undefined {
+  if (error instanceof ArtifactVersionConflictError) return c.json({ error: error.message, code: error.code }, 409);
+  const mapped = handleServiceError(error);
+  return mapped ? c.json(mapped.body, mapped.status) : undefined;
+}
+
+/** Managed source is visible only when the manager may also open its provenance. */
+async function loadAuthoringArtifact(c: Context<AppEnv>, user: Pick<AuthUser, "id" | "orgId">) {
+  const loaded = await loadManagedArtifact(c, user);
+  if ("error" in loaded) return loaded;
+  if (loaded.row.revokedAt !== null || (await keepVisibleSources(c, [loaded.row], { orgId: user.orgId, userId: user.id })).length === 0) {
+    return { error: c.json({ error: "Artifact not found. Open an artifact you can manage in this workspace." }, 404) };
+  }
+  const source = await canSendToSourceSession(c.var.providers, loaded.row, user);
+  if (loaded.row.sourceSessionId && !source.ok) {
+    return { error: c.json({ error: "Source conversation not found. Open an artifact from a conversation you can access." }, 404) };
+  }
+  return { row: loaded.row, source };
+}
+
+async function editorResponse(c: Context<AppEnv>, row: ArtifactRow, canEdit: boolean, actorUserId: string, version = row.version): Promise<ArtifactEditorResponse> {
+  const snapshot = await getArtifactSnapshot(c.var.providers.db, row, version, actorUserId);
+  const editable = canEdit && !!row.sourceSessionId && !!row.sourceThreadId;
+  return {
+    artifact: toListItem(c, row), version: snapshot.version, content: snapshot.content, rendered: snapshot.rendered,
+    description: row.description, icon: row.icon, canEdit: editable && version === row.version,
+    ...(editable && row.sourceSessionId ? { sourceSessionId: row.sourceSessionId } : {}),
+    ...(editable && row.sourceThreadId ? { sourceThreadId: row.sourceThreadId } : {}),
+  };
+}
+
+function revisionScope(row: ArtifactRow, actorUserId: string): ArtifactScope {
+  const type = row.ownerType;
+  if (type !== "user" && type !== "team" && type !== "org") throw new Error("Artifact owner type is invalid");
+  return { owner: { type, id: row.ownerId }, actorUserId };
+}
+
+artifactsRouter.get("/:id/editor", async c => {
+  const user = requireActingUser(c);
+  if (!user) return c.json({ error: "Sign in to open the artifact editor." }, 401);
+  const loaded = await loadAuthoringArtifact(c, user);
+  if ("error" in loaded) return loaded.error;
+  const selected = c.req.query("version");
+  if (selected !== undefined && !/^[1-9][0-9]*$/.test(selected)) return c.json({ error: "Choose a positive whole revision number." }, 400);
+  try {
+    return c.json(await editorResponse(c, loaded.row, loaded.source.ok, user.id, selected === undefined ? undefined : Number(selected)));
+  } catch (error) {
+    const mapped = authoringError(c, error);
+    if (mapped) return mapped;
+    throw error;
+  }
+});
+
+artifactsRouter.post("/:id/edit-requests", async c => {
+  const user = requireActingUser(c);
+  if (!user) return c.json({ error: "Sign in to request an artifact edit." }, 401);
+  const loaded = await loadAuthoringArtifact(c, user);
+  if ("error" in loaded) return loaded.error;
+  if (!loaded.source.ok || !loaded.row.sourceThreadId) return c.json({ error: "This artifact has no linked source thread. Create a new artifact to request edits beside a conversation." }, 400);
+  const parsed = editInputSchema.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json({ error: "Send a revision, an instruction, and a valid text or element selection." }, 400);
+  try {
+    const request = await createArtifactEditRequest(c.var.providers.db, revisionScope(loaded.row, user.id), user.orgId, loaded.row.id, parsed.data);
+    const label = parsed.data.selection.text.replace(/\s+/g, " ").trim().slice(0, 160);
+    const context = { artifactId: loaded.row.id, requestId: request.id, request: JSON.parse(request.body) };
+    const modelContext = JSON.stringify(`Saved artifact edit context: ${JSON.stringify(context)}. Apply the saved instruction only to its immutable source range with artifact_edit({artifactId, requestId, replacement}). For an element selection, return the full replacement element, including attributes. Preserve all other source bytes. Do not republish the artifact.`);
+    const text = `Edit the selection in **${loaded.row.title}** (version ${request.version}).\n\n> ${label || "Selected element"}\n\n${parsed.data.instruction}\n\n[valet-artifact-edit-context]: # ${modelContext}`;
+
+    let sent = false;
+    try {
+      const result = await submitSessionPrompt(c.var.providers, loaded.source.row, text, {
+        author: promptAuthorFromUser(user, userPrincipal(user.id), c.var.authVia),
+        threadId: loaded.row.sourceThreadId ?? undefined,
+        toolScope: { tools: ["artifact_edit"] },
+      });
+      if (result) {
+        await markArtifactCommentSent(c.var.providers.db, request.id, loaded.row.sourceSessionId);
+        sent = true;
+      }
+    } catch (error) {
+      console.error("Artifact edit request delivery failed", { artifactId: loaded.row.id, requestId: request.id, error });
+    }
+    const response: RequestArtifactEditResponse = { requestId: request.id, sent };
+    return c.json(response);
+  } catch (error) {
+    const mapped = authoringError(c, error);
+    if (mapped) return mapped;
+    throw error;
+  }
+});
+
+artifactsRouter.post("/:id/apply-edit", async c => {
+  if (!isValidInternalToken(c.req.header("x-valet-internal"))) {
+    return c.json({ error: "Apply artifact edits through the source conversation's artifact_edit tool." }, 403);
+  }
+  try {
+    const scope = await resolveScope(c, "read");
+    const orgId = await orgIdForShare(c, c.var.providers.db);
+    if (!await isOrgMember(c.var.providers.db, orgId, scope.actorUserId)) return c.json({ error: "Artifact not found. Use your current workspace." }, 404);
+    const loaded = await loadAuthoringArtifact(c, { id: scope.actorUserId, orgId });
+    if ("error" in loaded) return loaded.error;
+    if (!loaded.source.ok || !loaded.row.sourceThreadId || scope.owner.type !== loaded.row.ownerType || scope.owner.id !== loaded.row.ownerId ||
+        c.req.header("x-valet-session-id") !== loaded.row.sourceSessionId ||
+        c.req.header("x-valet-thread-id") !== loaded.row.sourceThreadId) {
+      return c.json({ error: "Source conversation not found. Apply the edit from the artifact's source conversation." }, 404);
+    }
+    const parsed = z.object({ requestId: z.string().min(1), replacement: z.string() }).safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: "Send a saved edit request id and replacement source." }, 400);
+    const row = await applyArtifactEdit(c.var.providers.db, scope, orgId, loaded.row.id, parsed.data);
+    return c.json(await editorResponse(c, row, true, scope.actorUserId));
+  } catch (error) {
+    const mapped = authoringError(c, error);
+    if (mapped) return mapped;
+    throw error;
+  }
+});
+
+artifactsRouter.post("/:id/restore", async c => {
+  const user = requireActingUser(c);
+  if (!user) return c.json({ error: "Sign in to restore an artifact revision." }, 401);
+  const loaded = await loadAuthoringArtifact(c, user);
+  if ("error" in loaded) return loaded.error;
+  const parsed = z.object({ version: revisionNumber, baseVersion: revisionNumber }).safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json({ error: "Send the revision to restore and the current revision number." }, 400);
+  try {
+    const row = await restoreArtifactVersion(c.var.providers.db, revisionScope(loaded.row, user.id), user.orgId, loaded.row.id, parsed.data);
+    return c.json(await editorResponse(c, row, loaded.source.ok, user.id));
+  } catch (error) {
+    const mapped = authoringError(c, error);
+    if (mapped) return mapped;
+    throw error;
+  }
+});
 
 artifactsRouter.get("/:id/versions", async (c) => {
   const user = requireActingUser(c);

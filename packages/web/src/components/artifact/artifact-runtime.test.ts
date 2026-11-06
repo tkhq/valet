@@ -81,6 +81,27 @@ describe("artifact comment runtime", () => {
     expect(divs[1]?.hasAttribute("data-vdid")).toBe(false);
   });
 
+  it("reports a selected text range only when selection editing is enabled", async () => {
+    const paragraph = document.querySelector("p");
+    if (!paragraph?.firstChild) throw new Error("paragraph did not mount");
+    const range = document.createRange();
+    range.setStart(paragraph.firstChild, 0);
+    range.setEnd(paragraph.firstChild, 16);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    paragraph.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    await flush();
+    expect(received.some((message) => message.type === "valet-artifact:selection")).toBe(false);
+    window.postMessage({ type: "valet-artifact:mode", picking: false, selecting: true }, "*");
+    await flush();
+    document.dispatchEvent(new Event("selectionchange"));
+    const selected = await waitFor("valet-artifact:selection");
+    expect(selected.text).toBe("Reasoning effort");
+    expect(selected.vdid).toBe(paragraph.getAttribute("data-vdid"));
+    selection?.removeAllRanges();
+  });
+
   it("reports rects for requested anchors that exist, and omits the rest", async () => {
     const vdid = document.querySelector("h1")?.getAttribute("data-vdid") ?? "";
     window.postMessage({ type: "valet-artifact:anchors", vdids: [vdid, "0000000000000000"] }, "*");

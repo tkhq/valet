@@ -484,13 +484,14 @@ export const ARTIFACT_DS_RUNTIME_JS = `
  */
 export type ArtifactFrameMessage =
   | { type: "valet-artifact:ready" }
-  | { type: "valet-artifact:pick"; vdid: string; rect: ArtifactAnchorRect; label: string }
+  | { type: "valet-artifact:pick"; vdid: string; rect: ArtifactAnchorRect; label: string; text?: string }
+  | { type: "valet-artifact:selection"; text: string; vdid?: string }
   | { type: "valet-artifact:rects"; rects: Record<string, ArtifactAnchorRect> }
   | { type: "valet-artifact:mermaid"; id: string; source: string };
 
 /** Messages the parent posts into the frame. */
 export type ArtifactParentMessage =
-  | { type: "valet-artifact:mode"; picking: boolean }
+  | { type: "valet-artifact:mode"; picking: boolean; selecting?: boolean }
   | { type: "valet-artifact:anchors"; vdids: string[] }
   | { type: "valet-artifact:theme"; theme: "light" | "dark" | null }
   | { type: "valet-artifact:mermaid-result"; id: string; svg?: string; error?: true };
@@ -523,8 +524,9 @@ export interface ArtifactAnchorRect {
 export const ARTIFACT_RUNTIME_JS = `
 (function () {
   "use strict";
-  var SELECTOR = "h1,h2,h3,h4,h5,h6,p,li,table,pre,blockquote,figure,img,svg,canvas,video,section,article,aside,div";
+  var SELECTOR = "h1,h2,h3,h4,h5,h6,p,li,table,pre,blockquote,figure,img,svg,canvas,video,section,article,aside,div,button,a";
   var picking = false;
+  var selecting = false;
   var tracked = [];
   var hovered = null;
   var mermaidBlocks = {};
@@ -674,14 +676,33 @@ export const ARTIFACT_RUNTIME_JS = `
       vdid: el.getAttribute("data-vdid"),
       rect: rectOf(el),
       label: labelOf(el),
+      text: (el.textContent || "").slice(0, 8192),
     });
   }, true);
+
+  function reportSelection() {
+    if (!selecting || picking) return;
+    var selection = window.getSelection();
+    if (!selection || selection.isCollapsed || !selection.rangeCount) return;
+    var range = selection.getRangeAt(0);
+    if (!document.body.contains(range.startContainer) || !document.body.contains(range.endContainer)) return;
+    var text = selection.toString();
+    if (!text.trim() || text.length > 8192) return;
+    var node = range.commonAncestorContainer;
+    var el = node.nodeType === 1 ? node : node.parentElement;
+    var anchor = el && el.closest ? el.closest("[data-vdid]") : null;
+    post({ type: "valet-artifact:selection", text: text, vdid: anchor ? anchor.getAttribute("data-vdid") : undefined });
+  }
+  document.addEventListener("mouseup", reportSelection);
+  document.addEventListener("keyup", reportSelection);
+  document.addEventListener("selectionchange", reportSelection);
 
   window.addEventListener("message", function (e) {
     var d = e.data;
     if (!d || typeof d.type !== "string") return;
     if (d.type === "valet-artifact:mode") {
       picking = d.picking === true;
+      selecting = d.selecting === true;
       if (!picking) clearHover();
       document.documentElement.style.cursor = picking ? "crosshair" : "";
     } else if (d.type === "valet-artifact:anchors") {

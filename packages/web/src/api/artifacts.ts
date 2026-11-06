@@ -5,10 +5,15 @@
  * The share/list/manage half is authed; `useArtifact` is the public
  * token-addressed read the `/a/$token` page uses.
  */
+import { useEffect } from "react";
 import { useMutation, useQuery, useQueryClient, type UseQueryOptions } from "@tanstack/react-query";
 import type {
   AddArtifactCommentRequest,
   AddArtifactCommentResponse,
+  ArtifactEditorResponse,
+  RequestArtifactEditRequest,
+  RequestArtifactEditResponse,
+  RestoreArtifactRequest,
   GetArtifactResponse,
   ListArtifactCommentsResponse,
   ListArtifactsResponse,
@@ -19,6 +24,7 @@ import type {
 import { api, ApiError, type OwnerFilter } from "./client";
 
 export const qkArtifacts = {
+  all: () => ["artifacts"] as const,
   // `mine` gets its own key segment (not folded into the owner tuple — it
   // composes with no owner) so the caller-scoped gallery view and an
   // unfiltered/team-owned list cache separately instead of colliding.
@@ -33,7 +39,42 @@ export const qkArtifacts = {
   byToken: (token: string) => ["artifacts", "token", token] as const,
   comments: (token: string) => ["artifacts", "comments", token] as const,
   versions: (id: string) => ["artifacts", "versions", id] as const,
+  editor: (id: string, version?: number) => ["artifacts", "editor", id, version ?? "latest"] as const,
 };
+
+export function useArtifactEditor(id: string, version?: number) {
+  const qc = useQueryClient();
+  const query = useQuery<ArtifactEditorResponse>({
+    queryKey: qkArtifacts.editor(id, version),
+    queryFn: () => api.getArtifactEditor(id, version),
+    enabled: !!id,
+    retry: retryUnlessGoneOrSignedOut,
+    refetchInterval: version === undefined ? 2_000 : false,
+  });
+  const workingVersion = query.data?.artifact.version;
+  useEffect(() => {
+    if (version === undefined && workingVersion !== undefined) {
+      void qc.invalidateQueries({ queryKey: qkArtifacts.versions(id) });
+    }
+  }, [id, version, workingVersion, qc]);
+  return query;
+}
+
+export function useRequestArtifactEdit(id: string) {
+  const qc = useQueryClient();
+  return useMutation<RequestArtifactEditResponse, Error, RequestArtifactEditRequest>({
+    mutationFn: (body) => api.requestArtifactEdit(id, body),
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: qkArtifacts.all() }); },
+  });
+}
+
+export function useRestoreArtifact(id: string) {
+  const qc = useQueryClient();
+  return useMutation<ArtifactEditorResponse, Error, RestoreArtifactRequest>({
+    mutationFn: (body) => api.restoreArtifact(id, body),
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: qkArtifacts.all() }); },
+  });
+}
 
 /** 404 (revoked or unknown) and 401 (sign-in required) are outcomes, not
  * transient failures. Anything else retries twice. */
