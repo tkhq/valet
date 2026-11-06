@@ -2738,6 +2738,8 @@ export class Thread {
       actorId?: string;
       /** Repositories whose files come along to this thread's own working directory (`exportForkSeed`). */
       seed?: { repos: ForkSeedRecord[] } | { skipped: string };
+      /** The copy is a move to another workspace: the note marks it so no branch divider shows. */
+      moved?: boolean;
     },
   ): Promise<void> {
     const store = this.session.providers.store;
@@ -2759,6 +2761,7 @@ export class Thread {
       source: { ...opts.source, sameWorkingDirectory: opts.source.sessionId === this.session.id },
       branchRootId: lastEntryId,
       branchLeafId: lastEntryId,
+      ...(opts.moved ? { moved: true } : {}),
       ...(opts.seed && "repos" in opts.seed ? { seed: opts.seed.repos } : {}),
       ...(opts.seed && "skipped" in opts.seed ? { seedSkipped: opts.seed.skipped } : {}),
     });
@@ -2800,6 +2803,7 @@ export class Thread {
     files?: BranchNoteRepoFiles[];
     seed?: ForkSeedRecord[];
     seedSkipped?: string;
+    moved?: boolean;
   }): BranchSummaryEntry {
     const ran = kind === "fork"
       ? { actions: [], moreActions: 0, filesChanged: false, grants: [] }
@@ -2813,6 +2817,7 @@ export class Thread {
       ...ran,
       ...(args.files && args.files.length > 0 ? { files: args.files } : {}),
       ...(args.actorId ? { actorId: args.actorId } : {}),
+      ...(args.moved ? { moved: true } : {}),
       ...(args.source ? { source: args.source } : {}),
       ...(args.seed && args.seed.length > 0 ? { seed: args.seed } : {}),
       ...(args.seedSkipped ? { seedSkipped: args.seedSkipped } : {}),
@@ -7455,6 +7460,22 @@ export class Thread {
             this.llmSpan = undefined;
           }
           this.llmRoundStartedAt = Date.now();
+          const citationIds = event.message.content.flatMap(block => block.type === "text" ? sourceCitationIds(block.text) : []);
+          if (citationIds.length > 0) {
+            // A reserved number is not proof. Only sources on stored tool
+            // results on this thread's active path can support a citation.
+            const sourceIds = new Set((await this.readEntries()).flatMap(entry => entry.type === "message"
+              ? (entry.parts ?? []).flatMap(part => part.type === "tool_call" ? readSources(part.result).map(source => source.id) : [])
+              : []));
+            const invalidCount = citationIds.filter(id => !sourceIds.has(id)).length;
+            if (invalidCount > 0) {
+              reportError({ area: "engine", reason: "source_citation_unknown", level: "warn", fields: { count: invalidCount } },
+                "Removed citation tags without a stored source. Check the model's source use.");
+              for (const block of event.message.content) {
+                if (block.type === "text") block.text = filterSourceCitations(block.text, sourceIds);
+              }
+            }
+          }
           const text = textOf(event.message);
           this.thinkingTiming.finish(Date.now());
           const parts: MessagePart[] = [];

@@ -905,8 +905,13 @@ export function useDuplicateThread() {
   const qc = useQueryClient();
   return useMutation<ForkThreadResponse, Error, { threadId: string }>({
     mutationFn: ({ threadId }) => api.duplicateThread(threadId),
-    // A team copy runs in its own execution session, so every thread list refetches.
-    onSuccess: () => void qc.invalidateQueries({ predicate: ({ queryKey }) => queryKey[0] === "sessions" && queryKey[2] === "threads" }),
+    // A team copy runs in its own execution session, so every thread list
+    // refetches. The server puts the copy in the source's project folder, so
+    // the folders load first and the copy never shows under Recents.
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["thread-projects"] });
+      void qc.invalidateQueries({ predicate: ({ queryKey }) => queryKey[0] === "sessions" && queryKey[2] === "threads" });
+    },
   });
 }
 
