@@ -43,7 +43,7 @@ export function ArtifactsPage() {
         className="mb-6"
         title="Artifacts"
         clause={<WorkspaceClause />}
-        description="Published documents and pages in this workspace, most recently updated first."
+        description="Documents and pages in this workspace."
         actions={<div className="flex flex-wrap gap-2">
           <Button size="sm" disabled={!owner} onClick={() => setCreating(true)}>Create artifact</Button>
           <Button asChild variant="secondary" size="sm"><Link to="/memory">Memory</Link></Button>
@@ -67,7 +67,7 @@ export function ArtifactsPage() {
               title={artifact.revoked ? artifact.title : <Link to="/a/$token" params={{ token: artifact.token }} className="[overflow-wrap:anywhere]">{artifact.title}</Link>}
               badge={<Badge>{artifact.revoked ? "Revoked" : artifact.ownerType === "team" ? "Team" : artifact.visibility === "public" ? "Public" : "Organization"}</Badge>}
               time={artifact.updatedAt}
-              detail={<span className="[overflow-wrap:anywhere]">{artifact.format === "html" ? "Page" : "Document"} · Version {artifact.sharedVersion ?? artifact.version} · {artifact.path}</span>}
+              detail={<span>{artifact.format === "html" ? "HTML Page" : "Document"} · Version {artifact.sharedVersion ?? artifact.version}</span>}
               actions={artifact.actorUserId === me.data?.id && <Button asChild variant="secondary" size="sm">
                 <Link to="/artifacts/$id" params={{ id: artifact.id }} aria-label={`Edit ${artifact.title}`}>Edit</Link>
               </Button>}

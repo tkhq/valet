@@ -7,6 +7,7 @@
  * mount/remount.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ComponentProps } from "react";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { EditPreviewResponse, WireQueueState } from "@valet/api/wire";
@@ -122,6 +123,272 @@ vi.mock("~/hooks/use-commands", () => ({
 }));
 
 import { Composer } from "./composer";
+
+describe("Composer prepared prompt retries", () => {
+  function renderPrepared(beforeSend: (text: string) => Promise<{ text: string; threadId: string }>) {
+    return render(<QueryClientProvider client={new QueryClient()}>
+      <Composer sessionId="prepared-session" threadId="original-thread" agentStatus="idle" beforeSend={beforeSend} />
+    </QueryClientProvider>);
+  }
+
+  it.each([false, true])("reuses the accepted prepared request after a lost response, reload=%s", async (reload) => {
+    const originalOwner = useComposerDraftStore.getState().owner;
+    useComposerDraftStore.setState({ owner: "prepared-retry-owner", byKey: {} });
+    let source = "Original source";
+    let targetThread = "created-thread";
+    const beforeSend = vi.fn(async (text: string) => ({ text: `${text}\n\n${source}`, threadId: targetThread }));
+    sendMutateAsync.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    let view = renderPrepared(beforeSend);
+    try {
+      const input = screen.getByRole("textbox", { name: "Message" });
+      fireEvent.change(input, { target: { value: "Shorten the report" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+      await screen.findByText(/Valet did not respond, so your message is back in the box/);
+      const firstKey = sendMutateAsync.mock.calls[0]?.[0].clientMessageId;
+      expect(firstKey).toEqual(expect.any(String));
+      source = "Changed source after the first request was accepted";
+      targetThread = "second-created-thread";
+      if (reload) {
+        view.unmount();
+        act(() => {
+          useComposerDraftStore.getState().activateOwner("");
+          useComposerDraftStore.getState().activateOwner("prepared-retry-owner");
+        });
+        view = renderPrepared(beforeSend);
+      }
+      expect(screen.getByRole("textbox", { name: "Message" })).toHaveProperty("value", "Shorten the report");
+      fireEvent.keyDown(screen.getByRole("textbox", { name: "Message" }), { key: "Enter" });
+      await waitFor(() => expect(sendMutateAsync).toHaveBeenCalledTimes(2));
+      expect(beforeSend).toHaveBeenCalledTimes(1);
+      expect(sendMutateAsync.mock.calls[1]?.[0]).toEqual(expect.objectContaining({
+        clientMessageId: firstKey, text: "Shorten the report\n\nOriginal source", threadId: "created-thread",
+      }));
+      await waitFor(() => expect(screen.getByRole("textbox", { name: "Message" })).toHaveProperty("value", ""));
+    } finally {
+      view.unmount();
+      useComposerDraftStore.getState().clear(draftKey("prepared-session", "original-thread"));
+      useComposerDraftStore.setState({ owner: originalOwner, byKey: {} });
+    }
+  });
+
+  it("prepares fresh context and a new key when the person changes the failed draft", async () => {
+    let source = "Original source";
+    const beforeSend = vi.fn(async (text: string) => ({ text: `${text}\n\n${source}`, threadId: "created-thread" }));
+    sendMutateAsync.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    renderPrepared(beforeSend);
+    const input = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.change(input, { target: { value: "Shorten the report" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await screen.findByText(/Valet did not respond, so your message is back in the box/);
+    const firstKey = sendMutateAsync.mock.calls[0]?.[0].clientMessageId;
+    source = "Current source";
+    fireEvent.change(input, { target: { value: "Expand the report" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(sendMutateAsync).toHaveBeenCalledTimes(2));
+    expect(beforeSend).toHaveBeenCalledTimes(2);
+    expect(sendMutateAsync.mock.calls[1]?.[0].clientMessageId).not.toBe(firstKey);
+    expect(sendMutateAsync.mock.calls[1]?.[0]).toEqual(expect.objectContaining({ text: "Expand the report\n\nCurrent source", threadId: "created-thread" }));
+  });
+});
+
+describe("Composer contextual submission", () => {
+  const slot = () => draftKey("assistant-context", "thread-1");
+  function setup(props: Partial<ComponentProps<typeof Composer>> = {}) {
+    const client = new QueryClient();
+    const tree = (next: Partial<ComponentProps<typeof Composer>>) => <QueryClientProvider client={client}>
+      <Composer sessionId="assistant-context" threadId="thread-1" agentStatus="streaming" {...next} />
+    </QueryClientProvider>;
+    const view = render(tree(props));
+    return { ...view, rerenderComposer: (next: Partial<ComponentProps<typeof Composer>>) => view.rerender(tree(next)) };
+  }
+  const input = () => screen.getByRole("textbox", { name: "Message" });
+  const enter = () => fireEvent.keyDown(input(), { key: "Enter", code: "Enter" });
+
+  it("sends selected context once without the general send or optimistic message", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(true);
+    const beforeSend = vi.fn();
+    setup({ beforeSend, context: { content: <span>Selected heading</span>, placeholder: "Ask about the heading…", onSubmit } });
+    expect(screen.getByText("Selected heading").closest(".border")?.contains(input())).toBe(true);
+    expect(input()).toHaveProperty("placeholder", "Ask about the heading…");
+    fireEvent.change(input(), { target: { value: "  Use a shorter heading  " } });
+    expect(screen.getByRole("button", { name: "Send" })).toBeTruthy();
+    enter();
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledExactlyOnceWith("Use a shorter heading"));
+    expect(sendMutateAsync).not.toHaveBeenCalled();
+    expect(beforeSend).not.toHaveBeenCalled();
+    expect(addUserMessage).not.toHaveBeenCalled();
+    await waitFor(() => expect(input()).toHaveProperty("value", ""));
+    expect(screen.getByText("Selected heading")).toBeTruthy();
+  });
+
+  it.each([false, new Error("Selection changed. Select the element again.")])("keeps the draft when contextual delivery returns %s", async (result) => {
+    const onSubmit = vi.fn(() => result instanceof Error ? Promise.reject(result) : Promise.resolve(result));
+    setup({ context: { content: "Selected heading", onSubmit } });
+    fireEvent.change(input(), { target: { value: "Keep my request" } });
+    enter();
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+    expect(input()).toHaveProperty("value", "Keep my request");
+    expect(sendMutateAsync).not.toHaveBeenCalled();
+    if (result instanceof Error) expect(await screen.findByRole("alert")).toHaveProperty("textContent", expect.stringContaining("Select the element again"));
+  });
+
+  it("guards repeated submissions and keeps a newer draft when contextual delivery completes", async () => {
+    let deliver: (ok: boolean) => void = () => {};
+    const onSubmit = vi.fn(() => new Promise<boolean>((resolve) => { deliver = resolve; }));
+    const lock = { current: false };
+    setup({ submissionLock: lock, context: { content: "Selected heading", onSubmit } });
+    fireEvent.change(input(), { target: { value: "Original request" } });
+    enter();
+    enter();
+    const form = input().closest("form");
+    if (!form) throw new Error("Composer form missing");
+    fireEvent.submit(form);
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(lock.current).toBe(true);
+    expect(input()).toHaveProperty("disabled", false);
+    fireEvent.change(input(), { target: { value: "Newer request" } });
+    await act(async () => deliver(true));
+    expect(input()).toHaveProperty("value", "Newer request");
+    expect(lock.current).toBe(false);
+    expect(sendMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("keeps a disabled context active and editable without sending to the conversation", () => {
+    const onSubmit = vi.fn();
+    const view = setup({ context: { content: "Selected heading", onSubmit } });
+    fireEvent.change(input(), { target: { value: "Keep this draft" } });
+    view.rerenderComposer({ context: { content: "Select the heading again", disabled: true, onSubmit } });
+    enter();
+    expect(input()).toHaveProperty("disabled", false);
+    expect(input()).toHaveProperty("value", "Keep this draft");
+    expect(screen.getByText("Select the heading again")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Send" })).toHaveProperty("disabled", true);
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(sendMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("never promotes an earlier follow-up from empty Enter while context is selected", async () => {
+    queueStateRef.current = queueState("followup");
+    const view = setup();
+    fireEvent.change(input(), { target: { value: "An ordinary follow-up" } });
+    enter();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Steer" })).toBeTruthy());
+    sendMutateAsync.mockClear();
+    const onSubmit = vi.fn();
+    view.rerenderComposer({ context: { content: "Selected heading", onSubmit } });
+    expect(screen.getByRole("button", { name: "Send" })).toHaveProperty("disabled", true);
+    enter();
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(sendMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("keeps an existing long draft and blocks over-limit submissions", () => {
+    useComposerDraftStore.getState().setText(slot(), "Keep all this text");
+    const onSubmit = vi.fn();
+    setup({ context: { content: "Selected heading", maxLength: 5, onSubmit } });
+    expect(input()).toHaveProperty("value", "Keep all this text");
+    expect(input()).toHaveProperty("maxLength", 5);
+    expect(screen.getByRole("alert")).toHaveProperty("textContent", expect.stringContaining("5"));
+    enter();
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(sendMutateAsync).not.toHaveBeenCalled();
+    fireEvent.change(input(), { target: { value: "Short" } });
+    expect(screen.getByRole("button", { name: "Send" })).toHaveProperty("disabled", false);
+  });
+
+  it("keeps attachments and blocks contextual delivery until they are removed", async () => {
+    const file = { id: "held-file", name: "report.csv", bytes: 3, file: new File(["a,b"], "report.csv"), attachmentRef: "ref-1" };
+    const image = { id: "held-image", name: "heading.png", mimeType: "image/png", bytes: 4, dataUrl: "data:image/png;base64,QQ==" };
+    useComposerDraftStore.getState().setFiles(slot(), [file]);
+    useComposerDraftStore.getState().setImages(slot(), [image]);
+    const onSubmit = vi.fn().mockResolvedValue(true);
+    setup({ context: { content: "Selected heading", onSubmit } });
+    fireEvent.change(input(), { target: { value: "Make this shorter" } });
+    expect(screen.getByRole("button", { name: /Attach (files|images)/ })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("alert")).toHaveProperty("textContent", expect.stringMatching(/Remove.*attachments.*clear.*selection/i));
+    enter();
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(sendMutateAsync).not.toHaveBeenCalled();
+    expect(useComposerDraftStore.getState().byKey[slot()]?.files).toEqual([file]);
+    expect(useComposerDraftStore.getState().byKey[slot()]?.images).toEqual([image]);
+    fireEvent.change(screen.getByTestId("composer-image-input"), { target: { files: [new File(["new"], "new.csv")] } });
+    expect(useComposerDraftStore.getState().byKey[slot()]?.files).toEqual([file]);
+    fireEvent.click(screen.getByRole("button", { name: "Remove file" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove heading.png" }));
+    enter();
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledExactlyOnceWith("Make this shorter"));
+    expect(sendMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("sends literal command-like selection instructions without opening command suggestions", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(true);
+    setup({ context: { content: "Selected heading", onSubmit } });
+    fireEvent.change(input(), { target: { value: "/status" } });
+    expect(screen.queryByRole("listbox")).toBeNull();
+    enter();
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledExactlyOnceWith("/status"));
+    expect(sendMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("clears only the originating thread when delivery finishes after a thread switch", async () => {
+    let deliver: (ok: boolean) => void = () => {};
+    const onSubmit = vi.fn(() => new Promise<boolean>((resolve) => { deliver = resolve; }));
+    const context = { content: "Selected heading", onSubmit };
+    const view = setup({ context });
+    fireEvent.change(input(), { target: { value: "Request for thread one" } });
+    enter();
+    view.rerenderComposer({ threadId: "thread-2", context });
+    act(() => useComposerDraftStore.getState().setText(draftKey("assistant-context", "thread-2"), "Draft for thread two"));
+    await act(async () => deliver(true));
+    expect(input()).toHaveProperty("value", "Draft for thread two");
+    expect(useComposerDraftStore.getState().byKey[slot()]?.text ?? "").toBe("");
+    expect(sendMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("suspends context while editing a transcript message and restores it after cancel", async () => {
+    useComposerDraftStore.getState().setText(slot(), "My selection request");
+    const onSubmit = vi.fn();
+    const context = { content: "Selected heading", disabled: true, maxLength: 5, onSubmit };
+    const editTarget = { messageId: "message-1", text: "Replace this earlier message", images: [], droppedFiles: 0 };
+    const view = setup({ context, editTarget });
+    expect(screen.queryByText("Selected heading")).toBeNull();
+    expect(input()).toHaveProperty("value", "Replace this earlier message");
+    expect(screen.getByRole("button", { name: "Send" })).toHaveProperty("disabled", false);
+    enter();
+    await waitFor(() => expect(sendMutateAsync).toHaveBeenCalledWith(expect.objectContaining({ editEntryId: "message-1", text: "Replace this earlier message" })));
+    expect(onSubmit).not.toHaveBeenCalled();
+    view.rerenderComposer({ context });
+    expect(screen.getByText("Selected heading")).toBeTruthy();
+    expect(input()).toHaveProperty("value", "My selection request");
+  });
+
+  it("does not steal focus when selected context content refreshes", () => {
+    const onSubmit = vi.fn().mockResolvedValue(true);
+    const view = setup({ context: { content: "Selected heading", onSubmit } });
+    const elsewhere = document.createElement("button");
+    document.body.append(elsewhere);
+    elsewhere.focus();
+    view.rerenderComposer({ context: { content: "Updated selected heading", onSubmit } });
+    expect(document.activeElement).toBe(elsewhere);
+    elsewhere.remove();
+  });
+
+  it("focuses each deliberately attached context once, after its composer becomes active", () => {
+    const onSubmit = vi.fn().mockResolvedValue(true);
+    const view = setup({ active: false, context: { content: "Selected heading", focusKey: "heading-1", onSubmit } });
+    expect(document.activeElement).not.toBe(input());
+    view.rerenderComposer({ context: { content: "Selected heading", focusKey: "heading-1", onSubmit } });
+    expect(document.activeElement).toBe(input());
+    const elsewhere = document.createElement("button");
+    document.body.append(elsewhere);
+    elsewhere.focus();
+    view.rerenderComposer({ context: { content: "Updated selected heading", focusKey: "heading-1", onSubmit } });
+    expect(document.activeElement).toBe(elsewhere);
+    view.rerenderComposer({ context: { content: "Another heading", focusKey: "heading-2", onSubmit } });
+    expect(document.activeElement).toBe(input());
+    elsewhere.remove();
+  });
+});
 
 function renderComposer(
   agentStatus: "idle" | "streaming" = "idle",

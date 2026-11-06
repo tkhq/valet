@@ -49,7 +49,9 @@ describe("workspace artifacts", () => {
     expect(request).toHaveBeenLastCalledWith(owner, { enabled: true, limit: 50, cursor: undefined });
     expect(screen.getByRole("link", { name: "Report" }).getAttribute("href")).toBe("/a/capability");
     expect(screen.getByRole("link", { name: "Memory" }).getAttribute("href")).toBe("/memory");
-    expect(screen.getByText(/Page · Version 2/)).toBeTruthy();
+    expect(screen.getByText("HTML Page · Version 2")).toBeTruthy();
+    expect(screen.queryByText(/reports\/result\.html/)).toBeNull();
+    expect(screen.getByRole("time").getAttribute("datetime")).toBe("1970-01-01T00:00:00.000Z");
   });
   it("opens creation from the primary header action and the empty state", () => {
     const view = render(<ArtifactsPage />);

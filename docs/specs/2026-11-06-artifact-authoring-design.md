@@ -6,11 +6,13 @@ Extends: `2026-09-02-artifact-pages-design.md`
 
 ## Product
 
-Create artifact opens a template chooser in the workspace gallery. Document starts a Markdown project brief. HTML Page starts a self-contained page. Creation uses the existing publisher, scoped to the selected workspace, and a fresh authorized conversation. The editor pairs the existing conversation with the sandboxed preview. Only these two formats appear as supported choices.
+Create artifact opens a template chooser in the workspace gallery. Document starts a Markdown project brief. HTML Page starts a self-contained page. Creation uses the existing publisher, scoped to the selected workspace, and a fresh authorized conversation. The editor keeps the existing team sidebar and pairs the linked conversation with a larger sandboxed preview. Conversation and artifact headers share the navigation height. The artifact title stays in one row, with preview/source and download actions in a quiet footer. Only these two formats appear as supported choices.
 
-Select preview text or pick an element, describe the change, and send it to Valet. The request identifies the artifact, base revision, and exact source fragment. Source selection is available when rendered text cannot map uniquely to source. The server rejects stale or ambiguous selections. A persisted edit request bounds the agent's replacement to that fragment. The agent uses an artifact edit tool; the server checks the base revision again and appends the result. Other source bytes stay unchanged. Polling refreshes the managed preview while the conversation runs.
+Select preview text or pick an element, choose Edit with Valet, and describe the change in the existing conversation input. Selection does not steal focus until the person chooses that action. The selected fragment appears as context above the same message field; failed delivery retains the fragment and draft. The request identifies the artifact, base revision, and exact source fragment. Source selection is available when rendered text cannot map uniquely to source. The server rejects stale or ambiguous selections. A persisted edit request bounds the agent's replacement to that fragment. The agent uses an artifact edit tool; the server checks the base revision again and appends the result. Other source bytes stay unchanged. Polling refreshes the managed preview while the conversation runs.
 
-Revision history previews previous source and rendered snapshots. Restore appends a copy as a new revision after checking the current revision. It preserves token, visibility, provenance, and the shared revision pin. The editor labels the latest working revision and the shared pin separately. Public readers continue to see only the served snapshot.
+Revision history previews previous source and rendered snapshots. Restore appends a copy as a new revision after checking the current revision. It preserves token, visibility, provenance, and the shared revision pin. The footer version menu opens revision history and explains whether the shared view follows the latest revision or a pin. Historical previews show Back to latest and an explicit restore action. Public readers continue to see only the served snapshot.
+
+Broad requests use the same conversation input and include the current source as agent context. The editor fetches a fresh authorized snapshot before sending and keeps its session/thread binding. Full-source requests are limited to 100,000 characters; larger artifacts direct the person to selection editing. This path can update the complete artifact. Only the selection path guarantees unchanged source outside the chosen fragment.
 
 ## Reuse and boundaries
 
@@ -33,4 +35,6 @@ Test creation scope, selection replacement boundaries, stale revisions, ambiguou
 - https://support.claude.com/en/articles/17153992-what-are-artifacts-and-how-do-i-use-them
 - https://support.claude.com/en/articles/14604416-get-started-with-claude-design
 
-The useful patterns are template-led creation, a conversation beside the artifact, and selection-based refinement. Valet retains its own access and snapshot semantics.
+The reference interaction is: start from chat or a template, open the artifact beside the conversation, highlight text, choose Edit with Claude, and type the change in chat. The revised editor follows that sequence with Edit with Valet and one composer. Broad requests use that same conversation. Version selection and recovery stay near the artifact rather than taking a permanent panel. The current Claude guides and public demo informed this flow; a signed-in Claude session was not part of browser validation.
+
+Valet retains its team sidebar, workspace navigation, agent execution controls, access rules, and snapshot semantics. This MVP does not implement Claude Docs direct editing or Claude Design's slides, design-system import, or integration-backed output.

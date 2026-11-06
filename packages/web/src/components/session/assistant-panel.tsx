@@ -3,9 +3,10 @@ import { ExternalLink, Sparkles, X } from "lucide-react";
 import { Link } from "@tanstack/react-router";
 import { Button, Spinner } from "~/components/primitives";
 import { SessionView } from "./session-view";
+import type { ComposerContext } from "./composer";
 
 /** Shared chrome; the host owns workspace or workflow conversation lifetime. */
-export function AssistantPanel({ title, sessionId, threadId, error, onRetry, onClose, onOpen, scopeNotice, actions, children }: {
+export function AssistantPanel({ title, sessionId, threadId, error, onRetry, onClose, onOpen, scopeNotice, actions, children, context, emptyState, beforeSend }: {
   title: string;
   sessionId?: string;
   threadId?: string;
@@ -17,9 +18,12 @@ export function AssistantPanel({ title, sessionId, threadId, error, onRetry, onC
   /** Header controls that belong to the host, such as New chat. */
   actions?: ReactNode;
   children?: ReactNode;
+  context?: ComposerContext;
+  emptyState?: ReactNode;
+  beforeSend?: (text: string) => Promise<{ text: string; threadId: string }>;
 }) {
   const header = (summary?: ReactNode) => <>
-    <header className="flex h-[60px] shrink-0 items-center gap-2 border-b border-line px-4">
+    <header className="flex h-[--nav-height] shrink-0 items-center gap-2 border-b border-line px-4">
       <Sparkles className="h-4 w-4 shrink-0 text-moss" aria-hidden />
       <span className="min-w-0 flex-1 truncate text-sm font-medium">{title}</span>
       {actions}
@@ -33,7 +37,7 @@ export function AssistantPanel({ title, sessionId, threadId, error, onRetry, onC
   </>;
   return <div className="flex min-h-0 min-w-0 flex-1 flex-col">
     {error ? <>{header()}<div role="alert" className="flex flex-1 flex-col items-center justify-center gap-3 p-4 text-center text-sm"><p>{error}</p><Button size="sm" variant="secondary" onClick={onRetry}>Retry</Button></div></> :
-      sessionId && threadId ? <SessionView key={`${sessionId}:${threadId}`} chatOnly panel renderPanelHeader={header} scopeNotice={scopeNotice} sessionId={sessionId} activeThreadId={threadId} /> :
+      sessionId && threadId ? <SessionView key={`${sessionId}:${threadId}`} chatOnly panel renderPanelHeader={header} scopeNotice={scopeNotice} sessionId={sessionId} activeThreadId={threadId} context={context} emptyState={emptyState} beforeSend={beforeSend} /> :
       <>{header()}<div role="status" className="flex flex-1 items-center justify-center gap-2 text-sm text-muted"><Spinner size={14} />Opening your conversation…</div></>}
   </div>;
 }
