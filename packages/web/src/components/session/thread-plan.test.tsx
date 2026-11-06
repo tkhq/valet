@@ -19,7 +19,10 @@ const PLAN: ThreadPlan = {
 
 function renderPlan(plans: Record<string, ThreadPlan | null>, threadId: string | undefined = "t1") {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  for (const [id, plan] of Object.entries(plans)) client.setQueryData<ThreadPlanResponse>(["thread-plan", id], { plan });
+  for (const [id, plan] of Object.entries(plans)) {
+    client.setQueryData<ThreadPlanResponse>(["thread-plan", id], { plan });
+    client.setQueryData(["thread-progress", id], { progress: null });
+  }
   const view = (id: string | undefined) => <QueryClientProvider client={client}><PinnedPlan threadId={id} /></QueryClientProvider>;
   const result = render(view(threadId));
   return { rerender: (id: string) => result.rerender(view(id)) };

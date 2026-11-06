@@ -9,6 +9,7 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { mintSandboxToken } from "../auth/sandbox-tokens.js";
 import { agentSessions, teams, users } from "../schema/index.js";
 import { internalToken } from "../lib/internal-auth.js";
+import { bootstrapAdminInviteCode } from "../test-helpers/bootstrap-admin-code.js";
 
 let api: TestApi | undefined;
 
@@ -128,7 +129,7 @@ describe("auth middleware ladder — real-auth boots", () => {
     const signUpRes = await fetch(`${api.baseUrl}/api/auth/sign-up/email`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "Ladder User", email: "ladder@nowhere.test", password: "correct-horse-battery" }),
+      body: JSON.stringify({ name: "Ladder User", email: "ladder@nowhere.test", password: "correct-horse-battery", inviteCode: await bootstrapAdminInviteCode(api.providers.db) }),
     });
     expect(signUpRes.status).toBe(200);
     const cookie = extractSessionCookie(signUpRes.headers.get("set-cookie"));
@@ -145,7 +146,7 @@ describe("auth middleware ladder — real-auth boots", () => {
     const signUpRes = await fetch(`${api.baseUrl}/api/auth/sign-up/email`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "Key User", email: "key@nowhere.test", password: "correct-horse-battery" }),
+      body: JSON.stringify({ name: "Key User", email: "key@nowhere.test", password: "correct-horse-battery", inviteCode: await bootstrapAdminInviteCode(api.providers.db) }),
     });
     expect(signUpRes.status).toBe(200);
     const cookie = extractSessionCookie(signUpRes.headers.get("set-cookie"));
@@ -188,7 +189,7 @@ describe("auth middleware ladder — real-auth boots", () => {
     const signUpRes = await fetch(`${api.baseUrl}/api/auth/sign-up/email`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "Org Admin", email: "org-admin@nowhere.test", password: "correct-horse-battery" }),
+      body: JSON.stringify({ name: "Org Admin", email: "org-admin@nowhere.test", password: "correct-horse-battery", inviteCode: await bootstrapAdminInviteCode(api.providers.db) }),
     });
     expect(signUpRes.status).toBe(200);
     const adminUserRows = await db.select().from(users).where(eq(users.email, "org-admin@nowhere.test")).limit(1);
@@ -245,7 +246,7 @@ describe("auth middleware ladder — real-auth boots", () => {
     const signUpRes = await fetch(`${api.baseUrl}/api/auth/sign-up/email`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "First Admin", email: "first-admin@nowhere.test", password: "correct-horse-battery" }),
+      body: JSON.stringify({ name: "First Admin", email: "first-admin@nowhere.test", password: "correct-horse-battery", inviteCode: await bootstrapAdminInviteCode(api.providers.db) }),
     });
     expect(signUpRes.status).toBe(200);
     const adminRows = await db.select().from(users).where(eq(users.email, "first-admin@nowhere.test")).limit(1);
@@ -284,7 +285,7 @@ describe("auth middleware ladder — real-auth boots", () => {
     const signUpRes = await fetch(`${api.baseUrl}/api/auth/sign-up/email`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "Key User", email: "team-key@nowhere.test", password: "correct-horse-battery" }),
+      body: JSON.stringify({ name: "Key User", email: "team-key@nowhere.test", password: "correct-horse-battery", inviteCode: await bootstrapAdminInviteCode(api.providers.db) }),
     });
     expect(signUpRes.status).toBe(200);
     const cookie = extractSessionCookie(signUpRes.headers.get("set-cookie"));

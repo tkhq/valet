@@ -12,7 +12,10 @@ import { parse } from "yaml";
 import {
   CHECK_TYPES,
   REASONING_LEVELS,
+  REVIEW_PROFILES,
   type Check,
+  type GoldenComment,
+  type PullRequestSpec,
   type EvalCase,
   type EvalTurn,
   type MockToolSpec,
@@ -265,9 +268,92 @@ function parseCheck(raw: unknown, i: number, source: string): Check {
         ...(judgeModel !== undefined ? { judge_model: judgeModel } : {}),
       };
     }
+    case "review_match": {
+      const golden = raw.golden;
+      if (!Array.isArray(golden) || golden.length === 0) {
+        throw new CaseValidationError(source, `\`${at}.golden\` must be a non-empty array of {comment, category}`);
+      }
+      const parsedGolden: GoldenComment[] = golden.map((g, gi) => {
+        if (!isRecord(g) || typeof g.comment !== "string" || typeof g.category !== "string") {
+          throw new CaseValidationError(source, `\`${at}.golden[${gi}]\` needs string \`comment\` and \`category\``);
+        }
+        return { comment: g.comment, category: g.category, ...(typeof g.severity === "string" ? { severity: g.severity } : {}) };
+      });
+      const profile = optString("profile");
+      if (profile !== undefined && !(REVIEW_PROFILES as readonly string[]).includes(profile)) {
+        throw new CaseValidationError(source, `\`${at}.profile\` must be one of: ${REVIEW_PROFILES.join(", ")}`);
+      }
+      const minRecall = optNumber("min_recall");
+      if (minRecall !== undefined && (minRecall < 0 || minRecall > 1)) {
+        throw new CaseValidationError(source, `\`${at}.min_recall\` must be in [0, 1]`);
+      }
+      const judgeModel = optString("judge_model");
+      const reference = parseReviewReference(raw.reference, `${at}.reference`, source);
+      return {
+        type,
+        golden: parsedGolden,
+        ...(profile !== undefined ? { profile: profile as ReviewProfileName } : {}),
+        ...(minRecall !== undefined ? { min_recall: minRecall } : {}),
+        ...(judgeModel !== undefined ? { judge_model: judgeModel } : {}),
+        ...(reference !== undefined ? { reference } : {}),
+      };
+    }
     default:
       throw new CaseValidationError(source, `unhandled check type ${type}`);
   }
+}
+
+type ReviewProfileName = (typeof REVIEW_PROFILES)[number];
+
+function parseReviewReference(
+  v: unknown,
+  at: string,
+  source: string,
+): Record<string, { matched: number[]; fp: number }> | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (!isRecord(v)) throw new CaseValidationError(source, `\`${at}\` must be a map of tool name to {matched, fp}`);
+  const out: Record<string, { matched: number[]; fp: number }> = {};
+  for (const [tool, r] of Object.entries(v)) {
+    if (
+      !isRecord(r) ||
+      !Array.isArray(r.matched) ||
+      r.matched.some((m) => !Number.isInteger(m)) ||
+      typeof r.fp !== "number"
+    ) {
+      throw new CaseValidationError(source, `\`${at}.${tool}\` needs integer array \`matched\` and number \`fp\``);
+    }
+    out[tool] = { matched: r.matched.filter((m): m is number => typeof m === "number"), fp: r.fp };
+  }
+  return out;
+}
+
+function parsePullRequest(raw: Record<string, unknown>, source: string): PullRequestSpec | undefined {
+  const v = raw.pull_request;
+  if (v === undefined || v === null) return undefined;
+  if (!isRecord(v)) throw new CaseValidationError(source, "`pull_request` must be a mapping");
+  const field = (key: string): string => {
+    const x = v[key];
+    if (typeof x !== "string" || x.length === 0) {
+      throw new CaseValidationError(source, `\`pull_request.${key}\` is required and must be a non-empty string`);
+    }
+    return x;
+  };
+  const spec: PullRequestSpec = {
+    repo: field("repo"),
+    remote: field("remote"),
+    base: field("base"),
+    head: field("head"),
+    title: field("title"),
+  };
+  if (!/^[a-z0-9][a-z0-9._-]*$/i.test(spec.repo)) {
+    throw new CaseValidationError(source, "`pull_request.repo` must be a simple name (letters, digits, . _ -)");
+  }
+  if (typeof v.body === "string") spec.body = v.body;
+  if (v.verify !== undefined) {
+    if (typeof v.verify !== "boolean") throw new CaseValidationError(source, "`pull_request.verify` must be true or false");
+    spec.verify = v.verify;
+  }
+  return spec;
 }
 
 function parseMockTools(
@@ -370,11 +456,25 @@ export function parseEvalCase(raw: unknown, source: string): EvalCase {
     throw new CaseValidationError(source, `\`profile\` must be one of: ${PROFILES.join(", ")}`);
   }
 
+  const pullRequest = parsePullRequest(raw, source);
   const evalCase: EvalCase = {
     id,
-    turns: parseTurns(raw, source),
+    // A pull_request case gets its prompt from the reviewer, not from turns.
+    turns: pullRequest !== undefined && raw.turns === undefined ? [] : parseTurns(raw, source),
     checks: checksRaw.map((c, i) => parseCheck(c, i, source)),
   };
+  if (pullRequest !== undefined) {
+    if (evalCase.turns.length > 0) {
+      throw new CaseValidationError(source, "`pull_request` cases take no `turns`; the reviewer builds its own prompt");
+    }
+    if (drive === "product" || sessionType === "orchestrator" || (profile !== undefined && profile !== "unit")) {
+      throw new CaseValidationError(source, "`pull_request` cases run the reviewer on the engine drive with the default profile");
+    }
+    evalCase.pull_request = pullRequest;
+  }
+  if (evalCase.checks.some((c) => c.type === "review_match") && pullRequest === undefined) {
+    throw new CaseValidationError(source, "`review_match` checks need `pull_request` (they score the submitted review)");
+  }
 
   // verify_command runs a real shell command in the case sandbox; the
   // virtual sandbox only simulates exec, and product-drive orchestrator

@@ -1,4 +1,4 @@
-import type { BlobStore, CreateSessionOptions, PluginStore, Sandbox, SandboxProvider, SessionStore } from '@valet/engine';
+import type { BlobStore, CreateSessionOptions, PluginStore, Sandbox, SandboxListing, SandboxProvider, SessionStore } from '@valet/engine';
 import type { BrowserAuditEntry, BrowserIdentity } from '@valet/shared';
 import { browserRequest } from '@valet/plugin-browser';
 import type { AppDb } from '../lib/drizzle.js';
@@ -50,6 +50,24 @@ async function exportAudit(sessionId: string, sandboxId: string, snapshot: { ent
  * hibernation reaper and child retention sweep retried that backlog nonstop,
  * which pinned the api event loop and tripped its liveness probe (2026-10-29).
  */
+/** One sandbox's listing row. Falls back to `list()` for a provider without `describe`. */
+async function describeSandbox(provider: SandboxProvider, sandboxId: string): Promise<SandboxListing | null> {
+  if (provider.describe) return provider.describe(sandboxId);
+  return (await provider.list?.() ?? []).find((item) => item.id === sandboxId) ?? null;
+}
+
+/**
+ * The session's sandboxes that hold retained browser state. Turn settlement
+ * and teardown call this, so it must not list the fleet when the provider
+ * can answer for one session (a fleet listing on every settle caused liveness
+ * kills on 2026-10-29).
+ */
+export async function browserSandboxesForSession(provider: SandboxProvider, sessionId: string): Promise<SandboxListing[]> {
+  if (provider.listBrowserForSession) return provider.listBrowserForSession(sessionId);
+  return (await provider.list?.() ?? []).filter((row) =>
+    row.sessionId === sessionId && (row.browserEnabled ?? provider.capabilities().browserAutomation));
+}
+
 export async function prepareBrowserSandboxStop(provider: SandboxProvider, sandboxId: string, reason: 'destroy' | 'suspend', sessions: SessionStore, blobs?: BlobStore, store?: PluginStore): Promise<void> {
   let state: Awaited<ReturnType<SandboxProvider['status']>> | undefined;
   if (!provider.readBrowserAudit) {
@@ -59,7 +77,7 @@ export async function prepareBrowserSandboxStop(provider: SandboxProvider, sandb
       return;
     }
   }
-  const row = (await provider.list?.() ?? []).find((item) => item.id === sandboxId);
+  const row = await describeSandbox(provider, sandboxId);
   if (!(row?.browserEnabled ?? provider.capabilities().browserAutomation)) return;
   if (!row?.sessionId) throw new Error('Browser sandbox ownership is missing. Restore its inventory before deleting retained state.');
   state ??= await provider.status(sandboxId);
@@ -109,10 +127,14 @@ export function browserSessionHooks(sessionId: string, sessions: SessionStore, b
     onTurnComplete: async ({ submissionId, sandbox, threadId, actorId, owner }) => {
       if (!scoped) throw new Error('Browser cleanup storage is unavailable. Configure the database before settling this turn.');
       if (!sandbox && provider) {
-        const rows = await provider.list?.() ?? [];
-        const retained = rows.some((row) =>
-          row.sessionId === sessionId &&
-          (row.browserEnabled ?? provider.capabilities().browserAutomation),
+        // A failed inventory read keeps the cleanup record: it drains at the
+        // next attachment, and the settle does not fail on a provider error.
+        const retained = await browserSandboxesForSession(provider, sessionId).then(
+          (rows) => rows.length > 0,
+          (error: unknown) => {
+            console.error('Browser inventory read failed at turn end. The cleanup record is kept for the next attachment.', error);
+            return true;
+          },
         );
         if (!retained) return;
       }

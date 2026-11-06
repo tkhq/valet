@@ -42,10 +42,41 @@ function turnMessage(i: number, fields: Pick<Message, "role" | "content" | "part
   return { ...message(i, fields), id: `turn-${i}`, createdAt: NOW - (40 - i) * MINUTE };
 }
 const done = "completed" as const;
+
+/** Two columns: short titles, then long prose. The prose column should take
+ * most of the width and wrap, with no side scroll. */
+const PROSE_TABLE = [
+  "| Key result | What we have |",
+  "| --- | --- |",
+  "| KR1: Complete the revenue, cost and staffing baseline by October 9 | Your figures show about $24K each month in known maintenance costs and about $31K in recurring revenue, but two contracts have no end date yet, so the baseline is still open. |",
+  "| KR2: Sign $30K of new committed contract value by October 31 | You confirmed one new signed deal at $22K total value. Two more proposals are out, and neither has a decision date. |",
+  "| KR3: Establish a credible path to $50K each month starting January | You expect the two largest clients to continue at least until January. Renewal terms after that are not agreed. |",
+  "| KR4: Allocate every new engagement without overbooking | One client takes full-time capacity and another takes 30 hours each week, which leaves about 10 hours for new work. |",
+].join("\n");
+
+/** Six columns, one an unbroken commit hash in code. Some side scroll is
+ * expected at phone width, never past the table's own box. */
+const WIDE_TABLE = [
+  "| PR | Title | Author | Status | Commit | Notes |",
+  "| --- | --- | --- | --- | --- | --- |",
+  `| #1102 | Follow Slack threads after a reply | member-1 | Ready | \`${HEX_300.slice(0, 40)}\` | Needs one more review before it can land on the base branch. |`,
+  `| #1109 | Code review research notes | member-2 | Draft | \`${HEX_300.slice(40, 80)}\` | Waiting on the benchmark run. |`,
+  `| #1110 | Tool parity spec | member-3 | Changes requested | \`${HEX_300.slice(80, 120)}\` | Two comments open about the approval card copy and one about naming. |`,
+].join("\n");
+
+/** An unbroken URL and an unbroken long word in prose cells. Both should
+ * break to fit at phone width, with no side scroll. */
+const LINK_TABLE = [
+  "| Item | Where it is |",
+  "| --- | --- |",
+  "| Pricing | https://docs.example.com/workspace/pricing/2026-q4/enterprise-and-team-plan-comparison |",
+  "| Build | The ConfigurationValidationPreflightCheckForDeployment step timed out after 30 minutes. |",
+].join("\n");
+
 export const workTurnMessages: Message[] = [
   turnMessage(0, { role: "user", content: "What did Teammate say about pricing, and is the retry fix ready?", parts: [], author: { id: stressMe.id, name: stressMe.name } }),
   turnMessage(1, { role: "assistant", content: "", parts: [
-    { kind: "thinking", text: "", startedAt: NOW - 39 * MINUTE, durationMs: 2400 },
+    { kind: "thinking", text: "", summary: "The staging migration needs the shared credentials rotated first, so check the secret store before running it.", startedAt: NOW - 39 * MINUTE, durationMs: 2400 },
     { kind: "tool_call", callId: "turn-ff", toolName: "call_tool", status: done, args: { tool_id: "fireflies.fireflies_search", summary: "Find last week's pricing calls", params: { query: "pricing" } }, result: { text: "2 meetings" } },
   ] }),
   turnMessage(2, { role: "assistant", content: "", parts: [
@@ -65,6 +96,9 @@ export const workTurnMessages: Message[] = [
   ] }),
   turnMessage(7, { role: "assistant", content: "", parts: [
     { kind: "text", text: "Teammate wants the starter plan generous and paid tiers to win on collaboration. The retry fix passes its tests, but the push failed: I don't have write access to the branch." },
+  ] }),
+  turnMessage(8, { role: "assistant", content: "", parts: [
+    { kind: "text", text: `Here is where each goal stands.\n\n${PROSE_TABLE}\n\nThe two open items:\n\n${LINK_TABLE}\n\nAnd the open pull requests:\n\n${WIDE_TABLE}` },
   ] }),
 ];
 

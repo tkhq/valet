@@ -4,11 +4,41 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WireQueueState } from "@valet/api/wire";
 import { TypingLine } from "./viewer-faces";
 import { formatElapsed, ProcessingStatus, retryLabel } from "./processing-status";
+import { useCompactingForThread, useStreamStore } from "~/stores/stream";
 
 afterEach(cleanup);
 const base: WireQueueState = { mode: "followup", status: "idle", pendingIds: [], collectingIds: [] };
 
 describe("ProcessingStatus", () => {
+  it("says Valet is compacting context in place of thinking, with the pulse and the clock", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000);
+    render(<ProcessingStatus status="thinking" startedAt={4_000} compacting />);
+    expect(screen.getByRole("status").textContent).toBe("Valet is compacting context…");
+    expect(document.querySelector("img")?.className).toContain("animate-pulse");
+    expect(screen.getByText("6s")).toBeTruthy();
+    vi.useRealTimers();
+  });
+
+  it("shows compaction between turns, and keeps a pending response first", () => {
+    const { rerender } = render(<ProcessingStatus status="idle" compacting />);
+    expect(screen.getByRole("status").textContent).toBe("Valet is compacting context…");
+    rerender(<ProcessingStatus status="idle" compacting needsResponse />);
+    expect(screen.getByRole("status").textContent).toBe("Valet is waiting for a response");
+  });
+
+  it("clears the compacting line on compaction_end", () => {
+    function Line() {
+      return <ProcessingStatus status="idle" compacting={useCompactingForThread("s1", "t1")} />;
+    }
+    render(<Line />);
+    expect(screen.getByRole("status").textContent).toBe("");
+    act(() => useStreamStore.getState().ingest("s1", { seq: 1, ts: 1, type: "compaction_start", threadId: "t1" }));
+    expect(screen.getByRole("status").textContent).toBe("Valet is compacting context…");
+    act(() => useStreamStore.getState().ingest("s1", { seq: 2, ts: 2, type: "compaction_end", threadId: "t1" }));
+    expect(screen.getByRole("status").textContent).toBe("");
+  });
+
   it.each([
     [{ ...base, status: "queued" }, "Valet is queued"],
     [{ ...base, pendingIds: ["external"] }, "Valet is queued"],

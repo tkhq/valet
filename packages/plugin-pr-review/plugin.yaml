@@ -1,0 +1,5 @@
+name: pr-review
+version: 0.0.1
+description: Reviews each push to a pull request and keeps one review per pull request, edited in place
+icon: "\U0001F50E"
+v2: true

@@ -23,7 +23,7 @@ import { reorderWaitingBuilds } from "./builder.js";
  * `service.ts`'s `DEFAULT_POLL_INTERVAL_MS`). `cancel()` deletes all three
  * resources immediately.
  */
-import type { V1Job } from "@kubernetes/client-node";
+import type { V1Job, V1Toleration } from "@kubernetes/client-node";
 import type { SandboxBatchJobsApi } from "@valet/sandbox-kubernetes";
 import type { BuildStatus, ImageBuilder, PrebuildSpec } from "./builder.js";
 import { generateBaseDockerfile, generateDockerfile } from "./recipe.js";
@@ -37,6 +37,12 @@ export const BUILDKIT_IMAGE = "moby/buildkit:v0.23.2-rootless";
  * pod-log tail in `status()` lists pods by this selector rather than
  * assuming a pod-name convention (a Job's pod name has a random suffix). */
 export const PREBUILD_LABEL_KEY = "valet.dev/prebuild";
+
+/** Stable label on every builder Job and pod. Bakes run setup commands that
+ * an org admin or a repo controls, so a build pod is untrusted code. A
+ * NetworkPolicy or admission policy selects build pods by this label. */
+export const WORKLOAD_LABEL_KEY = "valet.dev/workload";
+export const UNTRUSTED_BUILD_WORKLOAD = "untrusted-build";
 
 const GIT_TOKEN_SECRET_KEY = "token";
 const DOCKERFILE_CONFIGMAP_KEY = "Dockerfile";
@@ -143,6 +149,11 @@ export interface BuildKitJobSpec {
    * split (push == pull host), so the ref is pushed as-is. */
   registryPushHost?: string;
   resources?: BuildKitResources;
+  /** Pod `nodeSelector` that places builds on an isolated node pool.
+   * Undefined = no selector (the scheduler picks any node). */
+  nodeSelector?: Record<string, string>;
+  /** Pod tolerations that admit builds onto a tainted build pool. */
+  tolerations?: V1Toleration[];
 }
 
 /**
@@ -170,7 +181,7 @@ export function buildkitdToml(host: string): string {
  * — Kubernetes Jobs only accept `Never`/`OnFailure`).
  */
 export function buildKitJobManifest(spec: BuildKitJobSpec): V1Job {
-  const labels = { [PREBUILD_LABEL_KEY]: spec.id };
+  const labels = { [PREBUILD_LABEL_KEY]: spec.id, [WORKLOAD_LABEL_KEY]: UNTRUSTED_BUILD_WORKLOAD };
 
   const args = [
     "build",
@@ -270,6 +281,8 @@ export function buildKitJobManifest(spec: BuildKitJobSpec): V1Job {
           // Consolidated at pod level since it applies to the single
           // buildkit container.
           securityContext: { runAsUser: 1000, runAsGroup: 1000, seccompProfile: { type: "Unconfined" } },
+          ...(spec.nodeSelector ? { nodeSelector: spec.nodeSelector } : {}),
+          ...(spec.tolerations ? { tolerations: spec.tolerations } : {}),
           containers: [
             {
               name: BUILDKIT_CONTAINER_NAME,
@@ -362,6 +375,9 @@ export interface KubernetesImageBuilderOpts {
   buildkitImage?: string;
   activeDeadlineSeconds?: number;
   resources?: BuildKitResources;
+  /** See `BuildKitJobSpec.nodeSelector` / `.tolerations`. */
+  nodeSelector?: Record<string, string>;
+  tolerations?: V1Toleration[];
   /** Soft in-process cap on outstanding Jobs — extra `build()` calls queue
    * FIFO like `DockerImageBuilder`. Defaults to 1. */
   concurrency?: number;
@@ -381,6 +397,8 @@ export class KubernetesImageBuilder implements ImageBuilder {
   private readonly buildkitImage: string;
   private readonly activeDeadlineSeconds: number;
   private readonly resources?: BuildKitResources;
+  private readonly nodeSelector?: Record<string, string>;
+  private readonly tolerations?: V1Toleration[];
   private readonly concurrency: number;
   private readonly newId: () => string;
 
@@ -403,6 +421,8 @@ export class KubernetesImageBuilder implements ImageBuilder {
     this.buildkitImage = opts.buildkitImage ?? BUILDKIT_IMAGE;
     this.activeDeadlineSeconds = opts.activeDeadlineSeconds ?? DEFAULT_ACTIVE_DEADLINE_SECONDS;
     this.resources = opts.resources;
+    this.nodeSelector = opts.nodeSelector;
+    this.tolerations = opts.tolerations;
     this.concurrency = opts.concurrency ?? 1;
     this.newId = opts.newId ?? (() => String(this.nextId++));
   }
@@ -667,6 +687,8 @@ export class KubernetesImageBuilder implements ImageBuilder {
         registryInsecure: this.registryInsecure,
         registryPushHost: this.registryPushHost,
         resources: this.resources,
+        nodeSelector: this.nodeSelector,
+        tolerations: this.tolerations,
       });
       await this.jobsApi.createNamespacedJob({ namespace: this.namespace, body: manifest });
       // From this point on, a `status()` poll that sees a missing Job means

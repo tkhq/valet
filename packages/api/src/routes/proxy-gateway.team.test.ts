@@ -4,6 +4,7 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { apikey, llmProxyRequests, orgMembers, teams } from "../schema/index.js";
 import { createLlmProvider } from "../services/llm-providers.js";
 import { setProxySettings } from "../services/org.js";
+import { bootstrapAdminInviteCode } from "../test-helpers/bootstrap-admin-code.js";
 
 
 let api: TestApi | undefined;
@@ -19,7 +20,7 @@ describe("shared team proxy key", () => {
     const { baseUrl, providers } = api;
     const signup = await fetch(`${baseUrl}/api/auth/sign-up/email`, {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: "Admin", email: "proxy-admin@example.test", password: "correct-horse-battery" }),
+      body: JSON.stringify({ name: "Admin", email: "proxy-admin@example.test", password: "correct-horse-battery", inviteCode: await bootstrapAdminInviteCode(api.providers.db) }),
     });
     expect(signup.status).toBe(200);
     const cookie = signup.headers.get("set-cookie")?.match(/better-auth\.session_token=[^;]+/)?.[0];

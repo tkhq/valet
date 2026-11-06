@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 
 const treeEntries = [
-  { path: "a.md", title: "Alpha note", type: "note", pinned: false, updatedAt: 0, dir: false, sizeBytes: 10 },
+  { path: "a.md", title: "Alpha note", type: "note", pinned: false, updatedAt: 0, dir: false, sizeBytes: 10, lastUsedAt: null, useCount: 0, lastLoadedAt: null },
 ];
 let emptyTree = false;
 const searchResults = [

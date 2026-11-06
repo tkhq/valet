@@ -4,6 +4,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import type { PrebuildResources } from "../prebuilds/recipe.js";
 import { imageSources } from "../schema/index.js";
 import type { RepoBinding } from "../wire/types.js";
+import { reportError } from "@valet/engine";
 
 type ResourceField = keyof Pick<PrebuildResources, "cpu" | "memory" | "scratch">;
 const RESOURCE_FIELDS: readonly ResourceField[] = ["cpu", "memory", "scratch"];
@@ -77,7 +78,7 @@ export async function resolveRepoResources(
       const source = sources.find((candidate) => candidate.host === host) ?? sources[0];
       return { ok: true, resources: source?.resources ?? {} };
     } catch (error) {
-      console.error(`EngineHost: saved sandbox defaults lookup failed for ${orgId}/${primary.fullName}:`, error);
+      reportError({ area: "engine", reason: "sandbox_defaults_lookup" }, `EngineHost: saved sandbox defaults lookup failed for ${orgId}/${primary.fullName}`, error);
       return { ok: false };
     }
   };

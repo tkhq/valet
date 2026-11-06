@@ -1,8 +1,7 @@
 import { useMe, useOrgDirectory, useTeams } from "~/api/settings";
-import { ErrorRow, LoadingRow, PageHeader, pageClass } from "~/components/primitives";
-import { cn } from "~/lib/cn";
+import { ErrorRow, LoadingRow } from "~/components/primitives";
 import { IntegrationLimitNotice } from "./integration-limit-notice";
-import { Section } from "~/components/settings/section";
+import { Section, SectionHeading } from "~/components/settings/section";
 import { TeamConnectionSetup } from "./team-connection-setup";
 import { TeamCredentials } from "./team-credentials";
 import { PullFromPersonal } from "./pull-from-personal";
@@ -28,48 +27,46 @@ export function TeamIntegrations({ teamId, notice }: { teamId: string; notice?: 
   const onePassword = team && <TeamOnePasswordToken key={teamId} teamId={teamId} teamName={team.name} canMutate={canMutate} />;
 
   return (
-    <div className="flex-1 overflow-y-auto">
-      <div className={cn(pageClass, "max-w-3xl")}>
-        <PageHeader title="Integrations" description={team && `${team.name} workspace`} />
-        {notice && <p role="status" className="mt-4 text-sm text-ink">{notice}</p>}
-        <IntegrationLimitNotice owner={{ ownerType: "team", ownerId: teamId }} canClear={canMutate} />
-        <div className="mt-8 space-y-10">
-          {loading && <LoadingRow label="Loading team integrations…" />}
-          {!loading && failed && (
-            <ErrorRow>Could not load team integrations. Reload the page to try again.</ErrorRow>
-          )}
-          {!loading && !failed && !team && (
-            <ErrorRow>This team is unavailable. Select another workspace or ask a team admin to restore your access.</ErrorRow>
-          )}
-          {!loading && !failed && team && (
-            <>
-              <Section
-                title="Connected"
-                description="Team actions use the acting member's own account first, then the team connection. Using another member's account asks them first."
-                actions={<PullFromPersonal teamId={teamId} teamName={team.name} />}
+    <div>
+      <SectionHeading title="Integrations" />
+      {notice && <p role="status" className="mt-4 text-sm text-ink">{notice}</p>}
+      <IntegrationLimitNotice owner={{ ownerType: "team", ownerId: teamId }} canClear={canMutate} />
+      <div className="mt-8 space-y-10">
+        {loading && <LoadingRow label="Loading team integrations…" />}
+        {!loading && failed && (
+          <ErrorRow>Could not load team integrations. Reload the page to try again.</ErrorRow>
+        )}
+        {!loading && !failed && !team && (
+          <ErrorRow>This team is unavailable. Choose another team in Settings, or ask a team admin to restore your access.</ErrorRow>
+        )}
+        {!loading && !failed && team && (
+          <>
+            <Section
+              title="Connected"
+              description="Team actions use the acting member's own account first, then the team connection. Using another member's account asks them first."
+              actions={<PullFromPersonal teamId={teamId} teamName={team.name} />}
+            >
+              {!canMutate && (
+                <p className="pb-3 text-sm text-muted">A team admin removes team connections. Request removal to ask one.</p>
+              )}
+              {directoryQ.isLoading && <LoadingRow label="Loading member names…" />}
+              {directoryQ.error && (
+                <ErrorRow>Could not load member names. Member IDs are shown instead. Reload the page to try again.</ErrorRow>
+              )}
+              <TeamCredentials
+                cards
+                team={team}
+                orgMembers={directoryQ.error ? [] : directoryQ.data?.users ?? []}
+                canMutate={canMutate}
               >
-                {!canMutate && (
-                  <p className="pb-3 text-sm text-muted">A team admin removes team connections. Request removal to ask one.</p>
-                )}
-                {directoryQ.isLoading && <LoadingRow label="Loading member names…" />}
-                {directoryQ.error && (
-                  <ErrorRow>Could not load member names. Member IDs are shown instead. Reload the page to try again.</ErrorRow>
-                )}
-                <TeamCredentials
-                  cards
-                  team={team}
-                  orgMembers={directoryQ.error ? [] : directoryQ.data?.users ?? []}
-                  canMutate={canMutate}
-                >
-                  {onePasswordConnected && onePassword}
-                </TeamCredentials>
-              </Section>
-              <TeamConnectionSetup teamId={teamId} canManage={canConnect}>
-                {!onePasswordConnected && onePassword}
-              </TeamConnectionSetup>
-            </>
-          )}
-        </div>
+                {onePasswordConnected && onePassword}
+              </TeamCredentials>
+            </Section>
+            <TeamConnectionSetup teamId={teamId} canManage={canConnect}>
+              {!onePasswordConnected && onePassword}
+            </TeamConnectionSetup>
+          </>
+        )}
       </div>
     </div>
   );

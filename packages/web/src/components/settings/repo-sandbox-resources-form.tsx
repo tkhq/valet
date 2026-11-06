@@ -73,6 +73,8 @@ export function RepoSandboxResourcesForm({ source }: { source: SourceSummary }) 
       { id: source.id, body: { sandboxResources: bodyResources } },
       {
         onSuccess: (data) => {
+          // A resources-only patch applies at once; it never waits for approval.
+          if (!("source" in data)) return;
           const savedResources = data.source.sandboxResources;
           awaitingUpdatedAt.current = data.source.updatedAt;
           cpuTouched.current = false;

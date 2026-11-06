@@ -49,17 +49,25 @@ export async function resolveUpstream(
 
 /**
  * Boot step: for each kind, if the env key is set and the org has no
- * provider of that kind, seed one (name `env:{kind}`) with the env key in
- * CredentialStore, so the Settings UI shows a provider and the demo works
- * with zero setup. Idempotent.
+ * provider of that kind, seed one (name `env:{kind}`) so the Settings UI shows
+ * a provider and the demo works with zero setup. Idempotent.
+ *
+ * An `env:` provider stores no key: every key reader falls back to the env
+ * key when `llm:{id}` is empty, so rotating the env var and restarting the
+ * api changes the key Valet uses (TKAI-710). Earlier builds stored a copy of
+ * the env key here; that copy outlived every rotation, so this step deletes
+ * it. A key an admin saved in Settings carries `metadata.last4` and stays.
  */
 export async function ensureEnvProviders(db: AppDb, credentials: CredentialStore, orgId: string): Promise<void> {
+  const owner = { type: "org" as const, id: orgId };
   for (const kind of ["anthropic", "openai"] as const) {
-    const env = getEnvApiKey(kind);
-    if (!env) continue;
     const existing = (await listLlmProviders(db, orgId)).filter((r) => r.kind === kind);
-    if (existing.length > 0) continue;
-    const row = await createLlmProvider(db, { orgId, kind, name: `env:${kind}` });
-    await credentials.save({ type: "org", id: orgId }, `llm:${row.id}`, { type: "api_key", apiKey: env });
+    for (const row of existing) {
+      if (row.name !== `env:${kind}`) continue;
+      const stored = await credentials.get(owner, `llm:${row.id}`);
+      if (stored && stored.metadata?.last4 === undefined) await credentials.delete(owner, `llm:${row.id}`);
+    }
+    if (existing.length > 0 || !getEnvApiKey(kind)) continue;
+    await createLlmProvider(db, { orgId, kind, name: `env:${kind}` });
   }
 }

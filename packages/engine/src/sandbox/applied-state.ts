@@ -19,6 +19,7 @@
  */
 
 import type { Sandbox, SandboxResourceField, SandboxResources, PrepStep, DesiredSandboxSpec } from "../types.js";
+import { reportError } from "../error-report.js";
 
 /** Absolute path of the applied-state file inside the container filesystem. */
 export const APPLIED_PATH = "/etc/valet/applied.json";
@@ -199,9 +200,7 @@ export async function applyPlan(
         // Critical failure: caller wraps in SandboxPreparationError
         throw err;
       }
-      console.error(
-        `[applied-state] non-critical step "${step.id}" failed: ${(err as Error).message}`,
-      );
+      reportError({ area: "sandbox", reason: "prep_step_noncritical" }, `[applied-state] non-critical step "${step.id}" failed: ${(err as Error).message}`);
       // Do NOT record this step as applied; skip to the next one
       continue;
     }

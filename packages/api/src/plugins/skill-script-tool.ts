@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { posix } from "node:path";
 import { Type, type TSchema } from "typebox";
-import { bashTool, runForegroundExec, type SkillSource, type ToolDef, type ToolResult } from "@valet/engine";
+import { bashTool, runForegroundExec, type SkillSource, type ToolDef, type ToolResult, reportError } from "@valet/engine";
 import { skillWithFilesSha, validSkillPath } from "../services/content-sync/skill-files.js";
 import type { SkillToolSession } from "./skill-tool.js";
 
@@ -50,7 +50,7 @@ export function buildSkillScriptTool(
       const bound = session?.();
       if (bound && !bound.skills.has(args.name) && !refreshedUnknown) {
         refreshedUnknown = true;
-        try { await bound.refreshSkills(); } catch (err) { console.error("skill_script: skill refresh failed:", err); }
+        try { await bound.refreshSkills(); } catch (err) { reportError({ area: "plugins", reason: "skill_refresh" }, "skill_script: skill refresh failed", err); }
       }
       const skill = (bound?.skills ?? builtWith).get(args.name);
       if (!skill) return { text: "[skill_not_found] Choose an installed skill. Call skill to see its files." };

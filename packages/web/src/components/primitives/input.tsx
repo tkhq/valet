@@ -63,11 +63,12 @@ export interface SelectProps extends Omit<SelectHTMLAttributes<HTMLSelectElement
 /**
  * A native `<select>` with the field surface of `Input`. Use it for a form
  * field or a filter, and use `SelectMenu` when an option needs custom content.
- * It has no default width: pass `w-full` for a form field.
+ * It has no default width: pass `w-full` for a form field. It draws its own
+ * chevron (`.field-select` in globals.css), inset from the right border.
  */
 export const Select = forwardRef<HTMLSelectElement, SelectProps>(function Select(
   { className, size = "md", ...rest },
   ref,
 ) {
-  return <select ref={ref} className={cn(FIELD_BASE, FIELD_SIZE[size], className)} {...rest} />;
+  return <select ref={ref} className={cn(FIELD_BASE, FIELD_SIZE[size], "field-select pr-8", className)} {...rest} />;
 });

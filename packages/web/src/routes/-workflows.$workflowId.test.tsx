@@ -173,6 +173,9 @@ vi.mock("~/api/events", () => ({
 vi.mock("~/api/settings", () => ({
   useMe: () => ({ data: { id: "u-001" } }),
   useOrgDirectory: () => ({ data: { users: [] } }),
+  // The breadcrumb's space step: a solo caller shows none.
+  useTeams: () => ({ data: { teams: [] } }),
+  useOrg: () => ({ data: { features: { organizations: true } } }),
 }));
 vi.mock("~/api/rule", () => ({ usePinnedThreadTitles: () => ({}) }));
 vi.mock("~/api/presence", async (importOriginal) => ({

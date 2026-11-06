@@ -11,7 +11,8 @@ import {
   workflowDefinitions,
   workflowSchedules,
 } from "../schema/index.js";
-import { createWorkflowSchedule, deleteWorkflowSchedule, listWorkflowSchedules, nextFireAt } from "./schedule-service.js";
+import { createWorkflowSchedule, deleteWorkflowSchedule, listWorkflowSchedules } from "./schedule-service.js";
+import { nextFireAt } from "./next-fire.js";
 import { scheduledRunId } from "./scheduler.js";
 import { InMemoryCredentialStore } from "@valet/engine";
 import { deleteTeam, lockTeamForOwnership } from "../services/teams.js";

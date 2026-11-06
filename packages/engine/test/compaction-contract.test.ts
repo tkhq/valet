@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { fauxAssistantMessage, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
+import { createAssistantMessageEventStream, fauxAssistantMessage, registerApiProvider, registerFauxProvider, unregisterApiProviders, Type, type FauxResponseFactory } from "@earendil-works/pi-ai/compat";
 import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import { Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider, type MessageEntry, type SessionEntry } from "../src/index.js";
 import { entriesToSummaryMessages, summarize } from "../src/compaction.js";
@@ -29,6 +29,74 @@ function provider() {
 }
 
 describe("compaction summary acceptance", () => {
+  it("regenerates a malformed summary from the original history, anchor, and user instructions", async () => {
+    const faux = provider();
+    const source = "SOURCE_RULE: exclude internal repos.";
+    const anchor = "ANCHOR_RECEIPT: inspected record 42.";
+    const instructions = "USER_STEER: retain the URL and evidence columns.";
+    const malformed = "## Goal\n- INVALID_DRAFT " + "x".repeat(30_000);
+    const repaired = COMPLETE_SUMMARY.replace("- Prior successful work must not be repeated.", `- ${source}\n- ${anchor}\n- ${instructions}`);
+    const histories: string[] = [];
+    const prompts: string[] = [];
+    const controller = new AbortController();
+    const hostFetch: typeof fetch = async () => new Response("unused");
+    const response = (text: string): FauxResponseFactory => (context, options) => {
+      histories.push(JSON.stringify(context.messages.slice(0, -1)));
+      prompts.push(JSON.stringify(context.messages.at(-1)?.content));
+      expect(options?.apiKey).toBe("fixture-key");
+      expect(options?.signal).toBe(controller.signal);
+      expect(options?.fetch).toBe(hostFetch);
+      return fauxAssistantMessage(text);
+    };
+    faux.setResponses([response(malformed), response("<analysis>recheck facts</analysis>\n" + repaired)]);
+
+    const result = await summarize({ headEntries: [user("task", source)], model: modelFor(faux),
+      previousSummary: anchor, instructions, apiKey: "fixture-key", signal: controller.signal, fetch: hostFetch });
+
+    expect(result.summary).toBe(repaired);
+    expect(result.summary).toContain(source);
+    expect(result.summary).toContain(anchor);
+    expect(result.summary).toContain(instructions);
+    expect(histories).toHaveLength(2);
+    expect(histories[1]).toBe(histories[0]);
+    expect(histories[1]).toContain(source);
+    for (const prompt of prompts) {
+      expect(prompt).toContain(anchor);
+      expect(prompt).toContain(instructions);
+      expect(prompt).toContain("## Continuation Checkpoint");
+      expect(prompt).not.toContain("INVALID_DRAFT");
+    }
+    expect(prompts[1]).not.toBe(prompts[0]);
+    expect(prompts[1].length - prompts[0].length).toBeLessThan(1_500);
+    expect(faux.state.callCount).toBe(2);
+  });
+
+  it("counts input, cache-read, and output tokens from both completed summaries", async () => {
+    const faux = provider();
+    const first = fauxAssistantMessage("## Goal\n- Incomplete");
+    first.usage = { input: 11, output: 7, cacheRead: 5, cacheWrite: 0, totalTokens: 23,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+    const second = fauxAssistantMessage(COMPLETE_SUMMARY);
+    second.usage = { input: 17, output: 13, cacheRead: 3, cacheWrite: 0, totalTokens: 33,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+    const responses = [first, second];
+    const complete = () => {
+      const message = responses.shift();
+      if (!message) throw new Error("Unexpected extra summary completion");
+      const stream = createAssistantMessageEventStream();
+      stream.push({ type: "done", reason: "stop", message });
+      stream.end(message);
+      return stream;
+    };
+    const sourceId = `usage-${faux.provider}`;
+    registerApiProvider({ api: faux.api, stream: complete, streamSimple: complete }, sourceId);
+    cleanups.push(() => unregisterApiProviders(sourceId));
+
+    const result = await summarize({ headEntries: [user("task", "Inspect qualifying records")], model: modelFor(faux) });
+
+    expect(result).toEqual({ summary: COMPLETE_SUMMARY, inputTokens: 36, outputTokens: 20 });
+  });
+
   it.each([
     ["missing section", COMPLETE_SUMMARY.replace("## Constraints & Preferences\n- Keep the user's qualification rules and report layout.\n\n", "")],
     ["truncated final section", COMPLETE_SUMMARY.slice(0, COMPLETE_SUMMARY.indexOf("## Relevant Files"))],
@@ -39,9 +107,37 @@ describe("compaction summary acceptance", () => {
     ["unclosed code fence", COMPLETE_SUMMARY + "\n```text\nunfinished"],
   ])("rejects %s instead of committing a checkpoint", async (_name, text) => {
     const faux = provider();
-    faux.setResponses([fauxAssistantMessage(text)]);
-    await expect(summarize({ headEntries: [user("task", "Inspect qualifying records")], model: modelFor(faux) })).rejects.toThrow(/summary/i);
+    faux.setResponses([fauxAssistantMessage(text), fauxAssistantMessage(text), fauxAssistantMessage(COMPLETE_SUMMARY)]);
+    await expect(summarize({ headEntries: [user("task", "Inspect qualifying records")], model: modelFor(faux) })).rejects.toThrow(
+      "The summarizer returned an incomplete or malformed summary. Keep every required section in order with its content. Run /compact to retry.",
+    );
+    expect(faux.state.callCount).toBe(2);
+    expect(faux.getPendingResponseCount()).toBe(1);
+  });
+
+  it.each([
+    ["provider error", fauxAssistantMessage("", { stopReason: "error", errorMessage: "Invalid API key" })],
+    ["truncated output", fauxAssistantMessage("## Goal\n- Incomplete", { stopReason: "length" })],
+    ["blank output", fauxAssistantMessage("<analysis>notes only</analysis>")],
+    ["aborted output", fauxAssistantMessage("", { stopReason: "aborted", errorMessage: "Request was aborted" })],
+  ])("does not regenerate after %s", async (_name, response) => {
+    const faux = provider();
+    faux.setResponses([response, fauxAssistantMessage(COMPLETE_SUMMARY)]);
+    await expect(summarize({ headEntries: [user("task", "Inspect records")], model: modelFor(faux) })).rejects.toThrow();
     expect(faux.state.callCount).toBe(1);
+    expect(faux.getPendingResponseCount()).toBe(1);
+  });
+
+  it("does not regenerate when the caller aborts the summarizer", async () => {
+    const faux = provider();
+    const controller = new AbortController();
+    faux.setResponses([() => {
+      controller.abort();
+      return fauxAssistantMessage("## Goal\n- Incomplete");
+    }, fauxAssistantMessage(COMPLETE_SUMMARY)]);
+    await expect(summarize({ headEntries: [user("task", "Inspect records")], model: modelFor(faux), signal: controller.signal })).rejects.toThrow(/abort/i);
+    expect(faux.state.callCount).toBe(1);
+    expect(faux.getPendingResponseCount()).toBe(1);
   });
 
   it("rejects a nonterminal tool completion even when its text looks complete", async () => {
@@ -67,6 +163,7 @@ describe("compaction summary acceptance", () => {
     const faux = provider();
     faux.setResponses([fauxAssistantMessage(summary)]);
     expect((await summarize({ headEntries: [user("task", "Inspect records")], model: modelFor(faux) })).summary).toBe(summary);
+    expect(faux.state.callCount).toBe(1);
   });
 
   it.each([
@@ -74,7 +171,7 @@ describe("compaction summary acceptance", () => {
     ["only content in another section", COMPLETE_SUMMARY.replace("- Finish the requested inspection.", "## Commentary\n- Additional notes")],
   ])("rejects an empty required section containing %s", async (_name, summary) => {
     const faux = provider();
-    faux.setResponses([fauxAssistantMessage(summary)]);
+    faux.setResponses([fauxAssistantMessage(summary), fauxAssistantMessage(summary)]);
     await expect(summarize({ headEntries: [user("task", "Inspect records")], model: modelFor(faux) })).rejects.toThrow(/summary/i);
   });
 
@@ -151,7 +248,8 @@ describe("checkpoint replacement safety", () => {
   it("leaves the accepted checkpoint and unsummarized task usable after a malformed completion", async () => {
     const faux = registerFauxProvider({ provider: "contract-failed-checkpoint", models: [{ id: "tiny", name: "tiny", contextWindow: 20_000, maxTokens: 5 }] });
     cleanups.push(() => faux.unregister());
-    faux.setResponses([fauxAssistantMessage("## Goal\n- Interrupted handoff")]);
+    faux.setResponses([fauxAssistantMessage("## Goal\n- Interrupted handoff"),
+      fauxAssistantMessage("## Goal\n- Still incomplete"), fauxAssistantMessage(COMPLETE_SUMMARY)]);
     const store = new InMemorySessionStore();
     const stream = new InMemoryEventStream();
     const events: string[] = [];
@@ -179,7 +277,8 @@ describe("checkpoint replacement safety", () => {
     expect(context).not.toContain("Interrupted handoff");
     expect(events.filter(event => event === "compaction_start")).toHaveLength(1);
     expect(events.filter(event => event === "compaction_end")).toHaveLength(1);
-    expect(faux.state.callCount).toBe(1);
+    expect(faux.state.callCount).toBe(2);
+    expect(faux.getPendingResponseCount()).toBe(1);
   });
 });
 
@@ -303,7 +402,9 @@ it("does not resurrect a completed workflow contract in later ordinary context",
 });
 
 it("does not pin a large completed signal task into later ordinary requests", async () => {
-  const faux = registerFauxProvider({ provider: "expired-large-task", models: [{ id: "tiny", name: "tiny", contextWindow: 20_000, maxTokens: 5 }] });
+  // The window leaves room for the built-in tool schemas, which grow as tools
+  // are added; the 60k-character task still overflows it.
+  const faux = registerFauxProvider({ provider: "expired-large-task", models: [{ id: "tiny", name: "tiny", contextWindow: 24_000, maxTokens: 5 }] });
   cleanups.push(() => faux.unregister());
   let later = "";
   faux.setResponses([fauxAssistantMessage("Report posted"), fauxAssistantMessage(COMPLETE_SUMMARY), context => {

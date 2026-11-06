@@ -134,7 +134,7 @@ describe("model-tiers", () => {
         orgId,
         kind: "openai_compatible",
         name: "Dead",
-        baseUrl: "https://x/v1",
+        baseUrl: "https://x.example/v1",
         models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
       });
       await updateLlmProvider(db, orgId, row.id, { enabled: false });
@@ -153,7 +153,7 @@ describe("model-tiers", () => {
         orgId,
         kind: "openai_compatible",
         name: "Custom",
-        baseUrl: "https://x/v1",
+        baseUrl: "https://x.example/v1",
         models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
       });
       await updateLlmProvider(db, orgId, row.id, { enabled: false });
@@ -291,7 +291,7 @@ describe("model-tiers", () => {
         orgId,
         kind: "openai_compatible",
         name: "Custom",
-        baseUrl: "https://x/v1",
+        baseUrl: "https://x.example/v1",
         models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
       });
       await updateLlmProvider(db, orgId, row.id, { enabled: false });

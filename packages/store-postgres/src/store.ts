@@ -1,5 +1,10 @@
 import {
   boundEventDigest,
+  interruptibleBy,
+  isInteractiveSlackInput,
+  queuedOriginInputs,
+  carryInputMetadata,
+  withoutCarriedInputs,
   stripNul,
   ConflictError,
   EVENT_BUFFER_MAX_DIGESTS,
@@ -16,7 +21,7 @@ import {
   walkTranscriptDag,
   withSpan,
 } from "@valet/engine";
-import { CONTINUATION_SOURCE_ITEM_KEY, continuationToolScope, INHERIT_TOOL_SCOPE_KEY, TOOL_SCOPE_KEY } from "@valet/shared";
+import { CONTINUATION_SOURCE_ITEM_KEY, continuationToolScope, INHERIT_TOOL_SCOPE_KEY, steerKeepsSubmission, TOOL_SCOPE_KEY } from "@valet/shared";
 import type {
   DecisionGate,
   DecisionGateEntry,
@@ -57,6 +62,7 @@ import {
   jsonOrNull,
   parseJson,
   parseJsonRequired,
+  restorePromptBytes,
   rawToEntryRow,
   rawToGateRow,
   rawToLeaseRow,
@@ -85,7 +91,7 @@ function queueItemRowToItem(row: QueueItemRow): QueueItem {
     id: row.id,
     threadId: row.threadId,
     dispatchId: row.dispatchId ?? undefined,
-    content: parseJsonRequired<PromptContent>(row.content),
+    content: restorePromptBytes(parseJsonRequired<PromptContent>(row.content)),
     author: parseJson<PromptAuthor>(row.author),
     channel: parseJson(row.channel),
     replyTarget: parseJson(row.replyTarget),
@@ -184,7 +190,7 @@ const PROMOTION_PENDING_SQL = `
 `;
 
 const STEER_CANDIDATES_SQL = `
-  SELECT id FROM engine_queue_items
+  SELECT id, metadata FROM engine_queue_items
   WHERE session_id = $1 AND thread_id = $2 AND id != $3
     AND status != 'settled'
     AND superseded_by_item_id IS NULL
@@ -258,6 +264,14 @@ const PENDING_COUNT_SQL = `
     AND status != 'settled' AND superseded_by_item_id IS NULL
 `;
 
+// The same rows with metadata and admission time, for a full steer: it
+// counts only the items it keeps.
+const PENDING_METADATA_SQL = `
+  SELECT metadata, created_at FROM engine_queue_items
+  WHERE session_id = $1 AND thread_id = $2
+    AND status != 'settled' AND superseded_by_item_id IS NULL
+`;
+
 function rowId(raw: Record<string, unknown>): string {
   if (typeof raw.id !== "string") throw new Error(`expected string id, got ${typeof raw.id}`);
   return raw.id;
@@ -307,6 +321,21 @@ const STUB_SELECT = [...ENTRY_COLUMNS.map((column) => {
   const types = Object.keys(STUB_NULL_COLUMNS).filter((type) => STUB_NULL_COLUMNS[type]!.includes(column));
   return types.length === 0 ? column : `CASE WHEN entry_type IN (${types.map((type) => `'${type}'`).join(", ")}) THEN NULL ELSE ${column} END AS ${column}`;
 }), "seq"].join(", ");
+
+/** Rows above which a whole-thread read logs a warning. Hot paths read by
+ * queue item, tail, head or outline; a read this large is the shape that ran
+ * the api out of memory on 2026-10-28. */
+export const LARGE_THREAD_READ_ENTRIES = 2_000;
+const LARGE_READ_WARN_INTERVAL_MS = 60_000;
+let lastLargeReadWarnAt = 0;
+
+function noteWholeThreadRead(read: string, sessionId: string, threadId: string, rows: number): void {
+  if (rows <= LARGE_THREAD_READ_ENTRIES) return;
+  const now = Date.now();
+  if (now - lastLargeReadWarnAt < LARGE_READ_WARN_INTERVAL_MS) return;
+  lastLargeReadWarnAt = now;
+  console.warn(`store-postgres: ${read} loaded ${rows} entries with payloads for one thread. Scope the read by queue item, tail, head or outline.`, { sessionId, threadId });
+}
 
 const INSERT_ENTRY_SQL = `
   INSERT INTO engine_entries (${ENTRY_COLUMNS.join(", ")})
@@ -756,6 +785,7 @@ export class PgSessionStore implements SessionStore {
         "SELECT * FROM engine_entries WHERE session_id = $1 AND thread_id = $2 AND entry_type <> $3 ORDER BY created_at ASC, seq ASC",
         [sessionId, threadId, USAGE_ENTRY_TYPE],
       );
+      noteWholeThreadRead("getThreadSnapshot", sessionId, threadId, entryResult.rows.length);
       return {
         thread: rowToThread(rawToThreadRow(rawThread)),
         entries: entryResult.rows.map(rawToEntryRow).map(rowToEntry),
@@ -813,6 +843,28 @@ export class PgSessionStore implements SessionStore {
     );
   }
 
+  async getThreadOutline(
+    sessionId: string,
+    threadId: string,
+  ): Promise<{ thread: ThreadData; entries: SessionEntry[] } | null> {
+    return withSpan("store.thread_outline", { "valet.session.id": sessionId, "valet.thread.id": threadId }, (span) =>
+      this.db.transaction(async (tx) => {
+        const threadResult = await tx.query(
+          "SELECT * FROM engine_threads WHERE session_id = $1 AND id = $2 FOR SHARE",
+          [sessionId, threadId],
+        );
+        const rawThread = threadResult.rows[0];
+        if (!rawThread) return null;
+        const stubResult = await tx.query(
+          `SELECT ${STUB_SELECT} FROM engine_entries WHERE session_id = $1 AND thread_id = $2 AND entry_type <> $3 ORDER BY created_at ASC, seq ASC`,
+          [sessionId, threadId, USAGE_ENTRY_TYPE],
+        );
+        span.setAttribute("valet.entries.stubbed", stubResult.rows.length);
+        return { thread: rowToThread(rawToThreadRow(rawThread)), entries: stubResult.rows.map(rawToEntryRow).map(rowToEntry) };
+      }),
+    );
+  }
+
   async getThread(sessionId: string, threadId: string): Promise<ThreadData | null> {
     const result = await this.db.query("SELECT * FROM engine_threads WHERE session_id = $1 AND id = $2", [
       sessionId,
@@ -844,24 +896,36 @@ export class PgSessionStore implements SessionStore {
         // in any order, which surfaced as chat bubbles rendering out of sequence.
         const scoped = opts?.queueItemId !== undefined;
         const limit = opts?.limit && opts.limit > 0 ? opts.limit : undefined;
-        const newestFirst = scoped || limit !== undefined;
+        const headLimit = limit === undefined && opts?.headLimit && opts.headLimit > 0 ? opts.headLimit : undefined;
+        const newestFirst = (scoped && headLimit === undefined) || limit !== undefined;
         const conditions = ["session_id = $1", "thread_id = $2", "entry_type <> $3"];
         const params: unknown[] = [sessionId, threadId, USAGE_ENTRY_TYPE];
         if (scoped) {
           params.push(opts.queueItemId);
           conditions.push(`queue_item_id = $${params.length}`);
         }
+        if (opts?.entryIds !== undefined) {
+          params.push([...opts.entryIds]);
+          conditions.push(`id = ANY($${params.length}::text[])`);
+        }
+        if (opts?.entryTypes !== undefined) {
+          params.push([...opts.entryTypes]);
+          conditions.push(`entry_type = ANY($${params.length}::text[])`);
+        }
         if (opts?.includeCompacted === false) conditions.push("entry_type != 'compaction'");
-        // Select the tail in SQL so attachment payloads outside the window never load.
+        // Select the tail (or head) in SQL so payloads outside the window never load.
         let query = `SELECT * FROM engine_entries WHERE ${conditions.join(" AND ")} ORDER BY created_at ${newestFirst ? "DESC" : "ASC"}, seq ${newestFirst ? "DESC" : "ASC"}`;
-        if (limit !== undefined) {
-          params.push(limit);
+        if (limit !== undefined || headLimit !== undefined) {
+          params.push(limit ?? headLimit);
           query += ` LIMIT $${params.length}`;
         }
         const result = await this.db.query(query, params);
         const rows = result.rows.map(rawToEntryRow);
         if (newestFirst) rows.reverse();
         span.setAttribute("valet.entries.loaded", rows.length);
+        if (!scoped && limit === undefined && headLimit === undefined && opts?.entryIds === undefined) {
+          noteWholeThreadRead("getEntries", sessionId, threadId, rows.length);
+        }
         if (span.isRecording()) {
           span.setAttribute("valet.entries.parts_bytes", rows.reduce(
             (bytes, row) => bytes + (row.parts === null ? 0 : Buffer.byteLength(row.parts, "utf8")), 0,
@@ -978,6 +1042,7 @@ export class PgSessionStore implements SessionStore {
     item: QueueItem,
     opts?: SubmissionAdmissionOptions,
   ): Promise<{ item: QueueItem; admitted: boolean; supersededItemIds: string[] }> {
+    item = withoutCarriedInputs(item);
     let deduped: QueueItem | null;
     let admittedItem: QueueItem | null;
     let supersededItemIds: string[];
@@ -1012,9 +1077,16 @@ export class PgSessionStore implements SessionStore {
             }
           }
 
-          if (opts?.maxPending !== undefined) {
-            const countResult = await tx.query(PENDING_COUNT_SQL, [sessionId, threadId]);
-            const count = toNum(countResult.rows[0]?.count, "count");
+          if (opts?.maxPending !== undefined && opts.steerScope !== "active-origin") {
+            // Count every item the admission leaves live. A full steer
+            // supersedes the items admitted at or before it, except workflow
+            // items (STEER_CANDIDATES_SQL), so it keeps workflow items and
+            // later items. A scoped steer keeps queued siblings, so they all count.
+            const count = opts.steer === true && (opts.steerScope ?? "all") === "all"
+              ? (await tx.query(PENDING_METADATA_SQL, [sessionId, threadId])).rows
+                .filter((row) => toNum(row.created_at, "created_at") > item.createdAt
+                  || steerKeepsSubmission(parseJson<Record<string, unknown>>(typeof row.metadata === "string" ? row.metadata : null) ?? undefined)).length
+              : toNum((await tx.query(PENDING_COUNT_SQL, [sessionId, threadId])).rows[0]?.count, "count");
             if (count >= opts.maxPending) {
               throw new PendingCapError(threadId, opts.maxPending);
             }
@@ -1024,13 +1096,14 @@ export class PgSessionStore implements SessionStore {
           if (promotionScope && (!opts.steer || !opts.promoteFromItemId)) {
             throw new ValidationError("Promotion steering requires steer and promoteFromItemId.");
           }
-          const activeScope = opts?.steerScope === "active";
+          const originScope = opts?.steerScope === "active-origin";
+          const activeScope = opts?.steerScope === "active" || originScope;
           if (activeScope && (!opts.steer || opts.promoteFromItemId)) {
             throw new ValidationError("Active steering requires steer and takes no promoteFromItemId.");
           }
-          const headScope = promotionScope || activeScope;
+          const lockScope = promotionScope || activeScope;
           let lockedPending: QueueItem[] = [];
-          if (headScope) {
+          if (lockScope) {
             // Lock every runnable candidate before inserting the promoted
             // head. A claim that won first is observed as running and gets
             // superseded; a claim that lost waits, then sees the new head.
@@ -1040,6 +1113,25 @@ export class PgSessionStore implements SessionStore {
             );
           }
 
+          // An input must be in history before its turn can be interrupted.
+          // Otherwise a reply racing startup could erase the first message.
+          const entered = originScope ? await tx.query(
+            "SELECT queue_item_id FROM engine_entries WHERE session_id = $1 AND thread_id = $2 AND queue_item_id = ANY($3::text[]) AND entry_type = 'message' AND role = 'user'",
+            [sessionId, threadId, lockedPending.map(candidate => candidate.id)],
+          ) : { rows: [] };
+          const enteredIds = new Set(entered.rows.map(row => row.queue_item_id));
+          const carried = originScope ? queuedOriginInputs(lockedPending, item) : [];
+          const carriedIds = new Set(carried.map(candidate => candidate.id));
+          const matchingActive = !originScope || (isInteractiveSlackInput(item) && lockedPending.some(candidate =>
+            (candidate.status === "running" || candidate.status === "blocked_on_decision_gate") &&
+            interruptibleBy(candidate, item) && enteredIds.has(candidate.id)));
+          if (originScope && opts?.maxPending !== undefined) {
+            const remaining = lockedPending.length - (matchingActive ? 1 : 0) - carried.length;
+            if (remaining >= opts.maxPending) throw new PendingCapError(threadId, opts.maxPending);
+          }
+          const headScope = promotionScope || (activeScope && matchingActive);
+
+          let promotionSource: QueueItem | undefined;
           if (opts?.promoteFromItemId) {
             let srcItem: QueueItem | null | undefined;
             if (promotionScope) {
@@ -1064,6 +1156,7 @@ export class PgSessionStore implements SessionStore {
                 "That message is no longer queued. Send a new message, or wait for the current turn to finish.",
               );
             }
+            promotionSource = srcItem;
           }
 
           const queuedCreatedAt = headScope
@@ -1077,8 +1170,13 @@ export class PgSessionStore implements SessionStore {
           // sibling keeps its time.
           const promotedCreatedAt = headScope && queuedCreatedAt.length > 0
             ? Math.min(...queuedCreatedAt) - 1
+            // A correction that carries queued inputs takes the oldest one's
+            // place, so work queued after those inputs does not run first.
+            : carried.length > 0 ? Math.min(...carried.map((candidate) => candidate.createdAt))
             : item.createdAt;
-          const itemToInsert: QueueItem = { ...item, createdAt: promotedCreatedAt };
+          const itemToInsert: QueueItem = { ...item, createdAt: promotedCreatedAt,
+            ...((originScope || promotionSource) ? { metadata: carryInputMetadata(item, carried, promotionSource) } : {}),
+          };
           await tx.query(
             INSERT_QUEUE_ITEM_SQL,
             queueItemInsertParams(sessionId, threadId, itemToInsert),
@@ -1086,13 +1184,14 @@ export class PgSessionStore implements SessionStore {
 
           const superseded: string[] = [];
           if (opts?.steer) {
-            const ids = headScope
+            const ids = lockScope
               ? lockedPending
                   .filter(
                     (candidate) =>
-                      candidate.id === opts.promoteFromItemId ||
-                      candidate.status === "running" ||
-                      candidate.status === "blocked_on_decision_gate",
+                      (carriedIds.has(candidate.id) || candidate.id === opts.promoteFromItemId ||
+                      ((candidate.status === "running" ||
+                      candidate.status === "blocked_on_decision_gate") && !steerKeepsSubmission(candidate.metadata))) &&
+                      (!originScope || carriedIds.has(candidate.id) || (matchingActive && interruptibleBy(candidate, item))),
                   )
                   .map((candidate) => candidate.id)
               : (
@@ -1102,12 +1201,22 @@ export class PgSessionStore implements SessionStore {
                     itemToInsert.id,
                     itemToInsert.createdAt,
                   ])
-                ).rows.map(rowId);
+                ).rows
+                  .filter((row) => !steerKeepsSubmission(parseJson<Record<string, unknown>>(typeof row.metadata === "string" ? row.metadata : null) ?? undefined))
+                  .map(rowId);
             if (ids.length > 0) {
               await tx.query(
                 `UPDATE engine_queue_items SET superseded_by_item_id = $1, updated_at = $2 WHERE id = ANY($3::text[])`,
                 [item.id, Date.now(), ids],
               );
+              if (carried.length) {
+                await tx.query(
+                  `UPDATE engine_queue_items SET status = 'settled', outcome = 'superseded',
+                     settle_patch_status = 'skipped', settle_patch_reason = 'no_work'
+                   WHERE session_id = $1 AND thread_id = $2 AND id = ANY($3::text[])`,
+                  [sessionId, threadId, carried.map(candidate => candidate.id)],
+                );
+              }
               superseded.push(...ids);
             }
           }

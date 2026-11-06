@@ -72,6 +72,43 @@ export function requestTimingSummary(opts: { orgId: string; sinceMs: number; lim
   return { windowStart: Math.max(cutoff, startedAt), routes: routes.slice(0, opts.limit) };
 }
 
+export interface RouteServerErrors {
+  route: string;
+  requests: number;
+  serverErrors: number;
+  /** 5xx responses by status code, such as `{ "503": 4 }`. */
+  byStatus: Record<string, number>;
+  lastAt: number;
+}
+
+/**
+ * Routes that answered 5xx since `sinceMs`, most 5xx first. Same window and
+ * organization rule as `requestTimingSummary`. A 503 the load balancer
+ * returns while no API pod is ready never reaches this process, so it is
+ * not here: read the ingress or the pod restarts for those.
+ */
+export function serverErrorSummary(opts: { orgId: string; sinceMs: number; limit: number; now?: number }): { windowStart: number; routes: RouteServerErrors[] } {
+  const now = opts.now ?? Date.now();
+  const cutoff = Math.max(opts.sinceMs, now - REQUEST_TIMING_WINDOW_MS);
+  const routes: RouteServerErrors[] = [];
+  for (const [route, samples] of byRoute) {
+    let requests = 0;
+    let lastAt = 0;
+    const byStatus: Record<string, number> = {};
+    for (const sample of samples) {
+      if (sample.at < cutoff || (sample.orgId !== undefined && sample.orgId !== opts.orgId)) continue;
+      requests += 1;
+      if (sample.status < 500) continue;
+      byStatus[String(sample.status)] = (byStatus[String(sample.status)] ?? 0) + 1;
+      lastAt = Math.max(lastAt, sample.at);
+    }
+    const serverErrors = Object.values(byStatus).reduce((sum, count) => sum + count, 0);
+    if (serverErrors > 0) routes.push({ route, requests, serverErrors, byStatus, lastAt });
+  }
+  routes.sort((a, b) => b.serverErrors - a.serverErrors || b.lastAt - a.lastAt);
+  return { windowStart: Math.max(cutoff, startedAt), routes: routes.slice(0, opts.limit) };
+}
+
 /** Test seam: empty the window. */
 export function resetRequestTimings(): void {
   byRoute.clear();

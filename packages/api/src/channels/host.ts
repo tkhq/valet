@@ -1,7 +1,7 @@
 import { mergeAppearance, readAppearance } from "@valet/shared";
 import { HOME_THREAD_KEY } from "../home/context.js";
 import { slackEditSignal } from "./slack-edit.js";
-import { bindConversation, findConversationBinding, findPriorConversationThread } from "./conversation-bindings.js";
+import { bindConversation, findConversationBinding, findPriorConversationThread, type ConversationScope } from "./conversation-bindings.js";
 import { assistantSessionSender } from "../services/workspace-sender.js";
 /**
  * `ChannelHost` — inbound routing for channel transports (telegram etc,
@@ -20,6 +20,7 @@ import { assistantSessionSender } from "../services/workspace-sender.js";
 import { runEventVisible, runOriginVisible } from "../services/thread-access.js";
 import {
   ConflictError,
+  isSlackStopRequest,
   parseAssistantSessionId,
   SANDBOX_READY_TIMEOUT_MS,
   type ActionPlugin,
@@ -44,6 +45,7 @@ import {
   type Thread,
   type Unsubscribe,
   type ValetPlugin,
+  reportError,
 } from "@valet/engine";
 import type { WorkflowStore } from "@valet/workflow";
 import { and, asc, eq, gt, sql } from "drizzle-orm";
@@ -80,6 +82,7 @@ import { savedGatePrompts, deleteSavedGatePrompts } from "./gate-prompts.js";
 import { consumeLinkCode, identityForExternal, identityForUser, linkIdentity } from "./identity-links.js";
 import { ChildReplyDispatcher, type ChildReplyOutcome } from "./child-replies.js";
 import { ChannelStreamBridge } from "./stream-bridge.js";
+import { ChannelProgressPublisher } from "./channel-progress.js";
 import { ChannelProcessingStatus } from "./processing-status.js";
 import { restoreProcessingStatus, trackProcessingItem } from "./processing-status-recovery.js";
 import { recordChannelMessage, slackChannelKey, slackConversationFromThreadKey, slackMessageUrl } from "../services/channel-messages.js";
@@ -341,6 +344,17 @@ function hasGetMe(transport: ChannelTransport): transport is ChannelTransport & 
 /** Thread metadata: the last Slack message ts a group DM turn has read. */
 const GROUP_READ_THROUGH_KEY = "slackGroupReadThroughTs";
 
+/** Runs `work` after the earlier work queued on `key`. An entry is removed once its chain drains. */
+async function serializeOn<T>(chains: Map<string, Promise<unknown>>, key: string, work: () => Promise<T>): Promise<T> {
+  const next = (chains.get(key) ?? Promise.resolve()).catch(() => undefined).then(work);
+  chains.set(key, next);
+  try {
+    return await next;
+  } finally {
+    if (chains.get(key) === next) chains.delete(key);
+  }
+}
+
 function chatIdFromKey(conversationKey: string): string {
   const idx = conversationKey.lastIndexOf(":");
   return idx === -1 ? conversationKey : conversationKey.slice(idx + 1);
@@ -401,7 +415,10 @@ export class ChannelHost {
   private gatePrompts = new Map<string, GatePromptRef[]>();
   private gateActions = new Map<string, DecisionAction[]>();
   /** Serializes same-gate callbacks so only the first concurrent decision wins. */
-  private gateCallbackChains = new Map<string, Promise<void>>();
+  private gateCallbackChains = new Map<string, Promise<unknown>>();
+  /** Serializes one person's destination lookups per Slack conversation, so a
+   * follow-up waits for the mention that is still opening its chat. */
+  private destinationChains = new Map<string, Promise<unknown>>();
   /** Recent gate resolutions, bounded FIFO (cap `DEDUP_CAP`). A prompt can be
    * recorded AFTER its gate settled — `routeAttention` fires deliverers
    * without awaiting them, so a fast resolution legitimately beats an
@@ -442,6 +459,7 @@ export class ChannelHost {
    * whole start/append/stop triple ever reach it. */
   private readonly streamBridge: ChannelStreamBridge;
   private readonly processingStatus: ChannelProcessingStatus;
+  private readonly progressPublisher: ChannelProgressPublisher;
   private readonly childReplies: ChildReplyDispatcher;
 
   constructor(private readonly deps: ChannelHostDeps) {
@@ -458,6 +476,19 @@ export class ChannelHost {
       },
     });
     this.processingStatus = new ChannelProcessingStatus(deps.eventStream, channelType => this.transportFor(channelType));
+    this.progressPublisher = new ChannelProgressPublisher({
+      db: deps.db, engineStore: deps.engineStore, eventStream: deps.eventStream,
+      resolveOrgId: async () => this.orgId ?? await deps.resolveOrgId(),
+      transportFor: (channelType) => {
+        const transport = this.transportFor(channelType);
+        if (!transport?.publishProgress) return undefined;
+        return {
+          publishProgress: transport.publishProgress.bind(transport),
+          conversationKeyFromThreadKey: transport.conversationKeyFromThreadKey?.bind(transport),
+          threadKeyFromConversationKey: transport.threadKeyFromConversationKey?.bind(transport),
+        };
+      },
+    });
     this.streamBridge = new ChannelStreamBridge({
       eventStream: deps.eventStream,
       streams: deps.activeStreams ?? new DbActiveStreamStore(deps.db),
@@ -574,7 +605,7 @@ export class ChannelHost {
         source: { channelType, channelId: event.conversationKey, messageId: event.dispatchId },
       });
     } catch (err) {
-      console.warn(`[channels] reply could not answer question ${card.gateId}; it goes in as a message`, err);
+      reportError({ area: "channels", reason: "question_reply", level: "warn" }, `[channels] reply could not answer question ${card.gateId}; it goes in as a message`, err);
       return false;
     }
     // A gate another answer settled first resolves without an error.
@@ -621,7 +652,7 @@ export class ChannelHost {
           );
         } catch (err) {
           if (err instanceof OnePasswordAuthError) {
-            console.error(`[channels] ${factory.channelType}: bot token resolution failed: ${err.message}`);
+            reportError({ area: "channels", reason: "bot_token", provider: factory.channelType }, `[channels] ${factory.channelType}: bot token resolution failed: ${err.message}`);
             continue;
           }
           throw err;
@@ -643,7 +674,7 @@ export class ChannelHost {
           transport = factory.create({ credential, config: {} });
         } catch (err) {
           this.unconfiguredTransports.add(factory.channelType);
-          console.error(`[channels] ${factory.channelType}: transport not started`, err);
+          reportError({ area: "channels", reason: "transport_start", provider: factory.channelType }, `[channels] ${factory.channelType}: transport not started`, err);
           continue;
         }
         this.transports.set(factory.channelType, transport);
@@ -657,7 +688,7 @@ export class ChannelHost {
             const me = await transport.getMe();
             if (me.username) this.botUsernames.set(factory.channelType, me.username);
           } catch (err) {
-            console.error(`[channels] ${factory.channelType}: getMe probe failed`, err);
+            reportError({ area: "channels", reason: "transport_probe", provider: factory.channelType }, `[channels] ${factory.channelType}: getMe probe failed`, err);
           }
         }
         // Re-check after the getMe await for the same stop-mid-start race
@@ -685,7 +716,7 @@ export class ChannelHost {
         const closed = await this.streamBridge.sweepOnBoot(channelType, bootedAt);
         if (closed > 0) console.log(`[channels] ${channelType}: closed ${closed} stream(s) left open by a restart`);
       } catch (err) {
-        console.error(`[channels] ${channelType}: boot stream sweep failed`, err);
+        reportError({ area: "channels", reason: "boot_stream_sweep", provider: channelType }, `[channels] ${channelType}: boot stream sweep failed`, err);
       }
     }
   }
@@ -703,7 +734,7 @@ export class ChannelHost {
       try {
         await transport.registerWebhook?.(`${this.deps.publicUrl}/api/channels/${channelType}/webhook`, secret);
       } catch (err) {
-        console.error(`[channels] ${channelType}: registerWebhook failed`, err);
+        reportError({ area: "channels", reason: "register_webhook", provider: channelType }, `[channels] ${channelType}: registerWebhook failed`, err);
       }
       return;
     }
@@ -732,7 +763,7 @@ export class ChannelHost {
         if (signal.aborted) return;
       } catch (err) {
         if (signal.aborted) return;
-        console.error(`[channels] ${channelType}: poll loop error, retrying in 5s`, err);
+        reportError({ area: "channels", reason: "poll_loop", provider: channelType }, `[channels] ${channelType}: poll loop error, retrying in 5s`, err);
         await this.sleepOrAbort(5_000, signal);
       }
     }
@@ -765,6 +796,7 @@ export class ChannelHost {
     // Before the transports go away: a stream closed here is one the next
     // boot does not have to apologise for.
     await this.processingStatus.stop();
+    await this.progressPublisher.stop();
     await this.streamBridge.stop();
     this.stopOutbound();
     await this.childReplies.drain();
@@ -807,6 +839,7 @@ export class ChannelHost {
   startOutbound(): void {
     if (this.outboundUnsub) return;
     this.processingStatus.start();
+    this.progressPublisher.start();
     this.childReplies.start();
     this.outboundUnsub = this.deps.eventStream.subscribe(
       {
@@ -852,6 +885,7 @@ export class ChannelHost {
 
   stopOutbound(): void {
     void this.processingStatus.stop();
+    void this.progressPublisher.stop().catch(error => console.error("[channels] could not stop progress publishing", error));
     this.childReplies.stop();
     this.outboundUnsub?.();
     this.outboundUnsub = null;
@@ -900,7 +934,7 @@ export class ChannelHost {
         await this.deliverCommandResult(event.sessionId, e.threadId, e.entry);
       }
     } catch (err) {
-      console.error("[channels] outbound delivery failed", err);
+      reportError({ area: "channels", reason: "outbound_delivery" }, "[channels] outbound delivery failed", err);
     } finally {
       if ("threadId" in event.event && event.event.threadId !== undefined) {
         this.processingStatus.refresh(event.sessionId, event.event.threadId);
@@ -1038,12 +1072,12 @@ export class ChannelHost {
       // errors itself, so they bypass the live best-effort feedback below.
       if (trigger.durableChildReply) throw error;
       const reason = publicDeliveryReason(error);
-      console.error("[channels] addressed reply send failed", error);
+      reportError({ area: "channels", reason: "addressed_reply" }, "[channels] addressed reply send failed", error);
       try {
         const orgId = this.orgId ?? (await this.deps.resolveOrgId());
         await this.dropLog(orgId, "channel_reply_failed", target.conversationKey, reason);
       } catch (dropError) {
-        console.error("[channels] reply failure drop-log failed", dropError);
+        reportError({ area: "channels", reason: "reply_drop_log" }, "[channels] reply failure drop-log failed", dropError);
       }
       await this.retryFailedReplyFeedback(sessionId, thread.key, queueItemId, origin, reason);
       this.markDelivered(dedupeKey);
@@ -1157,7 +1191,7 @@ export class ChannelHost {
       ) {
         return "admitted";
       }
-      console.error("[channels] reply-dropped feedback failed", error);
+      reportError({ area: "channels", reason: "reply_dropped_feedback" }, "[channels] reply-dropped feedback failed", error);
       return "retryable";
     }
   }
@@ -1227,7 +1261,7 @@ export class ChannelHost {
       const [team] = await this.deps.db.select({ name: teams.name }).from(teams).where(eq(teams.id, teamId)).limit(1);
       return team ? `Only members of ${team.name} can approve.` : undefined;
     } catch (err) {
-      console.error("[channels] team name lookup failed", err);
+      reportError({ area: "channels", reason: "team_name_lookup" }, "[channels] team name lookup failed", err);
       return undefined;
     }
   }
@@ -1247,7 +1281,7 @@ export class ChannelHost {
     } catch (err) {
       signal?.throwIfAborted();
       // Identity is decoration on the post; the text must still land.
-      console.error("[channels] assistant identity lookup failed", err);
+      reportError({ area: "channels", reason: "assistant_identity_lookup" }, "[channels] assistant identity lookup failed", err);
       return undefined;
     }
   }
@@ -1419,7 +1453,7 @@ export class ChannelHost {
       : ended ? this.settleGatePrompts(prompt.gateId, ended.label, { resolvedAtMs: ended.resolvedAtMs, attention, signal }) : undefined;
     if (attention) {
       // The card is confirmed. A settlement edit must not hold the durable delivery batch open.
-      void settlement?.catch(err => console.error(`[channels] attention gate settlement failed for ${prompt.gateId}`, err));
+      void settlement?.catch(err => reportError({ area: "channels", reason: "attention_gate_settlement" }, `[channels] attention gate settlement failed for ${prompt.gateId}`, err));
     } else {
       await settlement;
     }
@@ -1488,7 +1522,7 @@ export class ChannelHost {
           // One stale message (deleted DM, revoked scope) must not keep the
           // other copies of the same prompt un-updated.
           allUpdated = false;
-          console.error(`[channels] ${channelType}: gate prompt update failed`, err);
+          reportError({ area: "channels", reason: "gate_prompt_update", provider: channelType }, `[channels] ${channelType}: gate prompt update failed`, err);
         }
       } else {
         allUpdated = false;
@@ -1518,7 +1552,7 @@ export class ChannelHost {
     } catch (err) {
       // Best-effort: the name is decoration on the edit. A lookup failure
       // must not stop the buttons from clearing on every prompt message.
-      console.error("[channels] resolver name lookup failed", err);
+      reportError({ area: "channels", reason: "resolver_name_lookup" }, "[channels] resolver name lookup failed", err);
       return undefined;
     }
   }
@@ -1544,7 +1578,7 @@ export class ChannelHost {
       await this.routeUpdate(channelType, event);
     } catch (err) {
       this.seenDispatchIds.delete(event.dispatchId);
-      console.error("[channels] update failed", err);
+      reportError({ area: "channels", reason: "message_update" }, "[channels] update failed", err);
       if (propagateErrors) throw err;
     }
   }
@@ -1567,8 +1601,10 @@ export class ChannelHost {
     }
 
     // A group conversation shared with another organization reaches people
-    // outside it, so the assistant does not answer there at all.
+    // outside it, so the assistant does not answer there at all. A reply
+    // without a mention asked nothing, so it gets no notice.
     if (event.group?.external) {
+      if (event.group.followUp) return;
       await this.dropLog(orgId, "external_group", event.conversationKey, `externalId=${event.sender.externalId}`);
       await transport?.send(event.conversationKey, {
         markdown: "I can't answer in a group conversation with people from another organization. Message me directly, or mention me in a channel of this workspace.",
@@ -1577,8 +1613,10 @@ export class ChannelHost {
     }
 
     // A rule that listens to this group DM answers there itself, as it does in
-    // a channel, so the sender's own assistant stays out of it.
-    if (event.group && await this.groupRuleAnswers(orgId, event)) {
+    // a channel, so the sender's own assistant stays out of it. A reply
+    // without a mention reaches only a chat that the sender's own mention
+    // opened, which a rule did not take, so it skips this check.
+    if (event.group && !event.group.followUp && await this.groupRuleAnswers(orgId, event)) {
       await this.dropLog(orgId, "group_rule_answers", event.conversationKey, `channel=${event.group.channelId}`);
       return;
     }
@@ -1586,6 +1624,9 @@ export class ChannelHost {
     // Rule 3: resolve sender identity for every other event kind.
     const identity = await identityForExternal(this.deps.db, channelType, event.sender.externalId);
     if (!identity) {
+      // Anyone can talk in a group DM thread. A reply without a mention from
+      // someone with no Valet account is not a request, so it gets no notice.
+      if (event.group?.followUp) return;
       await this.dropLog(orgId, "unlinked_sender", event.conversationKey, `externalId=${event.sender.externalId}`);
       await this.maybeReplyUnlinked(transport, event.conversationKey);
       return;
@@ -1690,7 +1731,7 @@ export class ChannelHost {
       });
       return stored ?? undefined;
     } catch (err) {
-      console.error("[channel-host] could not store a channel attachment", err);
+      reportError({ area: "channels", reason: "attachment_store" }, "[channel-host] could not store a channel attachment", err);
       return undefined;
     }
   }
@@ -1721,6 +1762,17 @@ export class ChannelHost {
         : session.threadByKey(threadKey);
     }
     const scope = { orgId, userId, sessionId: session.id, channelType, conversationKey };
+    return serializeOn(this.destinationChains, `${session.id}:${userId}:${conversationKey}`, () =>
+      this.resolveConversationThread(session, scope, threadKey, create));
+  }
+
+  private async resolveConversationThread(
+    session: Session,
+    scope: ConversationScope,
+    threadKey: string,
+    create: boolean,
+  ): Promise<Thread | null> {
+    const { orgId, userId } = scope;
     let threadId = await findConversationBinding(this.deps.db, scope);
     if (!threadId) {
       let candidateId = await findPriorConversationThread(this.deps.db, scope, threadKey);
@@ -1803,8 +1855,14 @@ export class ChannelHost {
     const threadKey =
       transport?.threadKeyFromConversationKey?.(event.conversationKey) ??
       `${channelType}:${chatIdFromKey(event.conversationKey)}`;
-    const thread = await this.directMessageThread(session, channelType, event.conversationKey, threadKey, userId, orgId, true);
-    if (!thread) throw new Error("A new direct message must resolve to a chat.");
+    // A group DM reply without a mention continues the sender's chat in that
+    // thread when their own mention opened one. It never opens a chat.
+    const followUp = event.group?.followUp === true;
+    const thread = await this.directMessageThread(session, channelType, event.conversationKey, threadKey, userId, orgId, !followUp);
+    if (!thread) {
+      if (followUp) return;
+      throw new Error("A new direct message must resolve to a chat.");
+    }
     // A text reply in this conversation answers the open question its thread
     // waits on, instead of queueing behind the turn that asked it.
     if (!event.media?.length && await answerOpenQuestion(this.deps.db, {
@@ -1812,7 +1870,8 @@ export class ChannelHost {
       channelId: event.conversationKey, dispatchId: event.dispatchId, now: this.now(),
     })) return;
 
-    const processing = event.threadTs ? this.processingStatus.begin({
+    // The assistant may stay silent on a follow-up, so it shows no status.
+    const processing = event.threadTs && !followUp ? this.processingStatus.begin({
       channelType, conversationKey: event.conversationKey, threadTs: event.threadTs,
       sessionId: session.id, threadId: thread.id,
     }) : undefined;
@@ -1853,7 +1912,10 @@ export class ChannelHost {
         kind: "signal",
         signalType: `${channelType}.message`,
         body,
-        origin: { channelType, threadKey },
+        // A follow-up is overheard, as in a followed channel thread: the
+        // assistant replies with reply_to_origin only when the message is
+        // for it, and stays silent when people talk to each other.
+        origin: { channelType, threadKey, ...(followUp && event.group ? { reply: "manual" as const, messageTs: event.group.messageTs } : { reply: "auto" as const }) },
         ...(attachments.length > 0 ? { attachments } : {}),
         ...(event.sender.displayName ? { attributes: { sender: event.sender.displayName } } : {}),
       };
@@ -1861,6 +1923,16 @@ export class ChannelHost {
         content,
         {
           dispatchId: event.dispatchId,
+          // A reply waits for a running turn. A stop phrase, or any reply
+          // while the turn waits on a decision, takes the turn's place, so a
+          // person who moves on does not leave the turn stuck on an approval.
+          // The store interrupts only a turn from the same sender.
+          ...(channelType === "slack"
+            // A group body leads with its safety note and transcript: check the sender's own words.
+            ? isSlackStopRequest(content, text) || thread.pendingDecisionGates().length > 0
+              ? { queueMode: "steer" as const, steerScope: "active-origin" as const }
+              : { queueMode: "inject" as const }
+            : {}),
           // A group message carries other people's words in its context, so it is
           // never the person's own direct channel message.
           author: { id: userId, name: event.sender.displayName, externalId: event.sender.externalId, interactive: true, directChannel: !event.group },
@@ -1870,6 +1942,9 @@ export class ChannelHost {
           // Gate and command-result delivery use this mark to distinguish a
           // channel turn from a web turn on the same bound thread (TKAI-323).
           channel: { channelType, channelId: event.conversationKey },
+          // An overheard follow-up waits behind a running turn and merges with
+          // other overheard lines; it never interrupts the turn.
+          ...(followUp ? { queueMode: "followup" as const } : {}),
         },
       );
       this.processingStatus.bind(processing, receipt.queueItemId);
@@ -1967,14 +2042,7 @@ export class ChannelHost {
   }
 
   private async serializeGateCallback(key: string, callback: () => Promise<void>): Promise<void> {
-    const previous = this.gateCallbackChains.get(key) ?? Promise.resolve();
-    const next = previous.catch(() => undefined).then(callback);
-    this.gateCallbackChains.set(key, next);
-    try {
-      await next;
-    } finally {
-      if (this.gateCallbackChains.get(key) === next) this.gateCallbackChains.delete(key);
-    }
+    await serializeOn(this.gateCallbackChains, key, callback);
   }
 
   /**
@@ -2110,7 +2178,7 @@ export class ChannelHost {
         ? await this.authorizeWorkflowGate(mapped.sessionId, orgId, userId, mapped.gateId)
         : null;
     } catch (err) {
-      console.error("[channels] workflow gate authorization failed", err);
+      reportError({ area: "channels", reason: "workflow_gate_auth" }, "[channels] workflow gate authorization failed", err);
       await transport?.answerCallback?.(
         gateCallback.callbackId,
         "Valet could not process this approval. Open the session in Valet to resolve it.",
@@ -2203,7 +2271,7 @@ export class ChannelHost {
         session = await this.gateSession(mapped.sessionId, sessionRow, userId, orgId);
       }
     } catch (err) {
-      console.error("[channels] gate resolve wake failed", err);
+      reportError({ area: "channels", reason: "gate_resolve_wake" }, "[channels] gate resolve wake failed", err);
       await transport?.answerCallback?.(
         gateCallback.callbackId,
         err instanceof ArchivedAssistantError
@@ -2233,7 +2301,7 @@ export class ChannelHost {
       // recipient can click after the first resolution settles the gate.
       // Every other rejection branch answers the callback — this one must
       // too, or the clicker's UI spins forever.
-      console.error("[channels] gate resolve failed (already settled?)", err);
+      reportError({ area: "channels", reason: "gate_resolve" }, "[channels] gate resolve failed (already settled?)", err);
       await transport?.answerCallback?.(
         gateCallback.callbackId,
         "This approval was already resolved. Open the session in Valet to see the outcome.",
@@ -2384,7 +2452,7 @@ export class ChannelHost {
             refs.push({ ...ref, channelType });
           } catch (err) {
             attempt?.signal?.throwIfAborted();
-            console.error(`[channels] ${channelType}: attention delivery failed`, err);
+            reportError({ area: "channels", reason: "attention_delivery", provider: channelType }, `[channels] ${channelType}: attention delivery failed`, err);
             failures.push(err);
           }
         }
@@ -2431,7 +2499,7 @@ export class ChannelHost {
       return workflow.ok;
     } catch (err) {
       signal?.throwIfAborted();
-      console.error("[channels] gate DM authorization failed", err);
+      reportError({ area: "channels", reason: "gate_dm_auth" }, "[channels] gate DM authorization failed", err);
       return false;
     }
   }

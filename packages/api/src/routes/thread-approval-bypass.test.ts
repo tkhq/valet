@@ -8,6 +8,7 @@ import { mintCliToken } from "../auth/cli-tokens.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { agentSessions, sessionThreads, teamMembers, teams, users } from "../schema/index.js";
 import type { ListThreadsResponse, ThreadSummary } from "../wire/types.js";
+import { bootstrapAdminInviteCode } from "../test-helpers/bootstrap-admin-code.js";
 
 let api: TestApi | undefined;
 afterEach(async () => { await api?.cleanup(); api = undefined; });
@@ -49,7 +50,7 @@ describe("run without asking", () => {
     api = booted;
     const signup = await fetch(`${booted.baseUrl}/api/auth/sign-up/email`, {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: "Person", email: "bypass-owner@example.test", password: "correct-horse-battery" }),
+      body: JSON.stringify({ name: "Person", email: "bypass-owner@example.test", password: "correct-horse-battery", inviteCode: await bootstrapAdminInviteCode(booted.providers.db) }),
     });
     expect(signup.status).toBe(200);
     const cookie = signup.headers.get("set-cookie")?.match(/better-auth\.session_token=[^;]+/)?.[0];

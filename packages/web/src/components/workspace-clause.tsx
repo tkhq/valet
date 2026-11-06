@@ -1,23 +1,19 @@
 /**
  * The workspace clause — one grammar for "where am I".
  *
- * The switcher beside the logo scopes every list under it, but a control
- * only orients you while you are looking at it. These components repeat its
- * answer where the reader's eyes actually are: a quiet clause beside a page
- * title (`WorkspaceClause`), and a scope line inside a create dialog
- * (`CreateScopeLine`). Same icons as the switcher rows, so the clause and
- * the control read as the same fact.
+ * The active space scopes every list on a page. These components name it
+ * where the reader's eyes are: the space step of a page's breadcrumb
+ * (`WorkspaceClause`), and a scope line inside a create dialog
+ * (`CreateScopeLine`). Same icons as the Spaces sidebar rows.
  *
  * All of it disappears for a caller with no teams: workspace furniture on a
- * solo account would name a choice that does not exist — the same rule that
- * hides the switcher itself (`WorkspaceSwitcher` renders nothing below two
- * options).
+ * solo account would name a choice that does not exist.
  */
 import { User, Users } from "lucide-react";
 import type { TeamSummary } from "@valet/api/wire";
 import { useOrg, useTeams } from "~/api/settings";
 import { eligibleTeams } from "~/components/session/assistant-rail";
-import { Tooltip } from "~/components/primitives";
+import { cn } from "~/lib/cn";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 
 export type ActiveWorkspace =
@@ -69,35 +65,31 @@ export function workspaceName(ws: ActiveWorkspace): string {
 }
 
 /**
- * A quiet clause beside a page title: the workspace's icon and name.
+ * The space step of a page's breadcrumb ("Engineering / Workflows"):
+ * plain text naming the active space. The sidebar switches space; this only
+ * says where the page is. `crumb` is the small size for a detail page's
+ * breadcrumb line.
  *
  * Renders nothing for a caller with no teams, and nothing while a
  * team-scoped clause cannot be named yet — a beat of absence beats a wrong
  * name (`resolveActiveWorkspace`).
  */
-export function WorkspaceClause() {
+export function WorkspaceClause({ size = "title" }: { size?: "title" | "crumb" }) {
   const ws = useActiveWorkspace();
   if (ws === undefined) return null;
-  if (ws.kind === "personal") {
-    if (!ws.hasTeams) return null;
-    return (
-      <Tooltip content="Your personal workspace. Only you can see these.">
-        <span className="inline-flex min-w-0 max-w-full items-center gap-1 text-sm font-normal text-muted">
-          <User className="h-3.5 w-3.5 shrink-0" aria-hidden />
-          <span className="truncate">Personal</span>
-        </span>
-      </Tooltip>
-    );
-  }
-  const count = ws.team.memberCount;
-  return (
-    <Tooltip content={`Shared with ${count} ${count === 1 ? "person" : "people"} on ${ws.team.name}.`}>
-      <span className="inline-flex min-w-0 max-w-full items-center gap-1 text-sm font-normal text-muted">
-        <Users className="h-3.5 w-3.5 shrink-0" aria-hidden />
-        <span className="truncate">{ws.team.name}</span>
-      </span>
-    </Tooltip>
-  );
+  if (ws.kind === "personal" && !ws.hasTeams) return null;
+  const count = ws.kind === "team" ? ws.team.memberCount : 0;
+  const note = ws.kind === "team"
+    ? `Shared with ${count} ${count === 1 ? "person" : "people"} on ${ws.team.name}.`
+    : "Your personal space. Only you can see these.";
+  const Icon = ws.kind === "team" ? Users : User;
+  // On a phone's one-line breadcrumb the space shrinks before the page title.
+  return <span title={note} className={cn("inline-flex min-w-0 max-w-full items-center gap-1.5 text-muted max-md:[flex-shrink:4]",
+    size === "title" ? "font-display text-2xl max-md:text-xl" : "text-xs")}>
+    <Icon className={size === "title" ? "h-5 w-5 shrink-0" : "h-3.5 w-3.5 shrink-0"} aria-hidden />
+    <span className="truncate">{ws.kind === "team" ? ws.team.name : "Personal"}</span>
+    <span aria-hidden>/</span>
+  </span>;
 }
 
 /**
@@ -116,7 +108,7 @@ export function CreateScopeLine({ what }: { what: string }) {
       <p className="flex items-center gap-2 rounded border border-line bg-ink-wash/40 px-3 py-2 text-xs text-muted">
         <User className="h-3.5 w-3.5 shrink-0" aria-hidden />
         <span>
-          This {what} stays in your personal workspace. Switch workspace in the top bar to
+          This {what} stays in your personal space. Open a team space in the sidebar to
           create it in a team.
         </span>
       </p>

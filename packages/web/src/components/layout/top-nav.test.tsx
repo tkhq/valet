@@ -33,6 +33,10 @@ let securityPlugins: OrgPluginWire[] = [
   },
 ];
 
+vi.mock("~/api/integrations", async (importOriginal) => ({
+  ...await importOriginal<typeof import("~/api/integrations")>(),
+  usePlugins: () => ({ data: { plugins: [] }, isLoading: false, error: null }),
+}));
 vi.mock("~/api/settings", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/settings")>();
   return {
@@ -131,79 +135,11 @@ describe("TopNav", () => {
     ];
   });
 
-  it.each([
-    ["/presence/places/slack%3AC123?workspace=t1", "/presence"],
-    ["/presence/rules/sub-old?workspace=t1", "/presence"],
-    ["/presence/events/ev-old?workspace=t1", "/presence/activity"],
-    ["/workflows/wf-old?workspace=t1", "/workflows"],
-    ["/workflows/runs/run-old?workspace=t1", "/workflows/runs"],
-    ["/workflows?run=old&gate=old&workspace=t1", "/workflows"],
-  ])("returns to the new workspace's Presence list from %s", async (path, list) => {
+  it("has no space control: Spaces live in the thread sidebar and page headers", async () => {
     navTeams = [{ id: "t1", name: "Platform", orgId: "org", createdAt: 1, memberCount: 1, callerRole: "member", origin: "local", externalId: null, defaultModel: null }];
-    const { router } = renderNav({path});
-    await userEvent.click(await screen.findByRole("button", {name: "Workspace: Platform. Change workspace"}));
-    await userEvent.click(screen.getByRole("menuitem", {name: "Personal"}));
-    await waitFor(() => expect(router.state.location.pathname).toBe(list));
-    expect(router.state.location.search).toEqual({workspace: "user"});
-    expect(await screen.findByRole("button", {name: "Workspace: Personal. Change workspace"})).toBeTruthy();
-  });
-
-  it.each(["user", "t2"])("opens the selected team's Workflows tab from %s", async (workspace) => {
-    const base: TeamSummary = { id: "t1", name: "Platform", orgId: "org", createdAt: 1, memberCount: 1, callerRole: "member", origin: "local", externalId: null, defaultModel: null };
-    navTeams = [base, {...base, id:"t2", name:"People"}];
-    const {router} = renderNav({path:`/workflows/wf-old?workspace=${workspace}`});
-    await userEvent.click(await screen.findByRole("button", {name:`Workspace: ${workspace === "user" ? "Personal" : "People"}. Change workspace`}));
-    await userEvent.click(screen.getByRole("menuitem", {name:"Platform"}));
-    await waitFor(() => expect(router.state.location.pathname).toBe("/workflows"));
-    expect(router.state.location.search).toEqual({workspace:"t1"});
-    expect(await screen.findByRole("button", {name:"Workspace: Platform. Change workspace"})).toBeTruthy();
-  });
-
-  it.each([
-    "/presence?workspace=t1",
-    "/presence/activity?workspace=t1&status=problems",
-    "/workflows/runs?workspace=t1",
-  ])("renames the workspace in place on a list page reached as %s", async (path) => {
-    navTeams = [{ id: "t1", name: "Platform", orgId: "org", createdAt: 1, memberCount: 1, callerRole: "member", origin: "local", externalId: null, defaultModel: null }];
-    const { router } = renderNav({ path });
-    const pathname = path.split("?")[0];
-    await userEvent.click(await screen.findByRole("button", { name: "Workspace: Platform. Change workspace" }));
-    await userEvent.click(screen.getByRole("menuitem", { name: "Personal" }));
-    await waitFor(() => expect(router.state.location.search).toMatchObject({ workspace: "user" }));
-    expect(router.state.location.pathname).toBe(pathname);
-    if (path.includes("status=")) expect(router.state.location.search).toEqual({ workspace: "user", status: "problems" });
-    expect(await screen.findByRole("button", { name: "Workspace: Personal. Change workspace" })).toBeTruthy();
-    expect(window.sessionStorage.getItem("valet:workspace")).toBe("user");
-  });
-
-  it("keeps a Presence tab in place when the workspace changes", async () => {
-    navTeams = [{ id: "t1", name: "Platform", orgId: "org", createdAt: 1, memberCount: 1, callerRole: "member", origin: "local", externalId: null, defaultModel: null }];
-    window.sessionStorage.setItem("valet:workspace", "t1");
-    const {router} = renderNav({path:"/presence/activity?status=problems"});
-    await userEvent.click(await screen.findByRole("button", {name:"Workspace: Platform. Change workspace"}));
-    await userEvent.click(screen.getByRole("menuitem", {name:"Personal"}));
-    expect(await screen.findByRole("button", {name:"Workspace: Personal. Change workspace"})).toBeTruthy();
-    expect(router.state.location.pathname).toBe("/presence/activity");
-    expect(router.state.location.search).toEqual({status: "problems"});
-  });
-
-  it("keeps the original workspace when unsaved edits block leaving", async () => {
-    navTeams = [{ id: "t1", name: "Platform", orgId: "org", createdAt: 1, memberCount: 1, callerRole: "member", origin: "local", externalId: null, defaultModel: null }];
-    window.sessionStorage.setItem("valet:workspace", "t1");
-    const {router} = renderNav({path:"/workflows/wf-old", blockNavigation:true});
-    await userEvent.click(await screen.findByRole("button", {name:"Workspace: Platform. Change workspace"}));
-    await userEvent.click(screen.getByRole("menuitem", {name:"Personal"}));
-    expect(router.state.location.pathname).toBe("/workflows/wf-old");
-    expect(screen.getByRole("button", {name:"Workspace: Platform. Change workspace"})).toBeTruthy();
-    expect(window.sessionStorage.getItem("valet:workspace")).toBe("t1");
-  });
-
-  it("keeps the detail open when reselecting the same workspace", async () => {
-    navTeams = [{ id: "t1", name: "Platform", orgId: "org", createdAt: 1, memberCount: 1, callerRole: "member", origin: "local", externalId: null, defaultModel: null }];
-    const {router} = renderNav({path:"/workflows/wf-old?workspace=t1"});
-    await userEvent.click(await screen.findByRole("button", {name:"Workspace: Platform. Change workspace"}));
-    await userEvent.click(screen.getByRole("menuitem", {name:"Platform"}));
-    expect(router.state.location.pathname).toBe("/workflows/wf-old");
+    renderNav({ path: "/workflows?workspace=t1" });
+    await screen.findByText("Valet");
+    expect(screen.queryByRole("button", { name: /Change space/ })).toBeNull();
   });
 
   it("opens a mobile navigation menu and closes after selecting a destination", async () => {
@@ -232,30 +168,21 @@ describe("TopNav", () => {
   // phone. They live in one scrollable landmark so the row can slide
   // sideways instead of pushing the settings icon off-screen; jsdom has no
   // layout, so this guards the STRUCTURE that makes the CSS fix possible.
-  it("keeps every destination inside one scrollable primary nav", async () => {
+  it("keeps only global items: the space pages live in the sidebar", async () => {
     renderNav();
     await screen.findByText("Valet");
-    expect(screen.getByRole("link", { name: "Threads" }).getAttribute("href")).toBe("/chat");
-    expect(screen.getByRole("link", { name: "Skills" }).getAttribute("href")).toBe("/skills");
-    expect(screen.queryByRole("link", { name: "Sessions" })).toBeNull();
-    expect(screen.getByRole("link", { name: "Artifacts" }).getAttribute("href")).toBe("/artifacts");
-    expect(screen.getByRole("link", { name: "Presence" }).getAttribute("href")).toBe("/presence");
-    expect(screen.getByRole("link", { name: "Workflows" }).getAttribute("href")).toBe("/workflows");
-    expect(screen.queryByRole("link", { name: "Events" })).toBeNull();
-    expect(screen.queryByRole("link", { name: "Automation" })).toBeNull();
-    const nav = screen.getByRole("navigation", { name: "Primary" });
-    const labels = within(nav)
-      .getAllByRole("link")
-      .map((el) => el.textContent);
-    expect(labels).toEqual([
-      "Threads",
-      "Artifacts",
-      "Presence",
-      "Workflows",
-      "Usage",
-      "Skills",
-      "Integrations",
-      "Changelog",
+    expect(screen.queryByRole("navigation", { name: "Primary" })).toBeNull();
+    for (const name of ["Threads", "Artifacts", "Presence", "Workflows"]) expect(screen.queryByRole("link", { name })).toBeNull();
+    expect(screen.getByRole("button", { name: "More" })).toBeTruthy();
+    expect(screen.getByLabelText("Settings")).toBeTruthy();
+  });
+
+  it("keeps only pages no space owns in the More menu", async () => {
+    renderNav();
+    await userEvent.click(await screen.findByRole("button", { name: "More" }));
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getAllByRole("menuitem").map((item) => [item.textContent, item.getAttribute("href")])).toEqual([
+      ["Changelog", "/changelog"], ["Model comparison", "/settings/model-comparison"],
     ]);
   });
 
@@ -315,15 +242,6 @@ describe("TopNav", () => {
   // The logo and the two icons sit OUTSIDE that scroller, so they stay put
   // while the links scroll. Regression guard: moving either inside the nav
   // would scroll them out of reach on a phone.
-  it("keeps the logo and the settings icon outside the scrolling nav", async () => {
-    renderNav();
-    await screen.findByText("Valet");
-    const nav = screen.getByRole("navigation", { name: "Primary" });
-    expect(within(nav).queryByLabelText("Valet — dashboard")).toBeNull();
-    expect(within(nav).queryByLabelText("Settings")).toBeNull();
-    expect(screen.getByLabelText("Settings")).toBeTruthy();
-  });
-
   it("does not render a New runtime button", async () => {
     renderNav();
     await screen.findByText("Valet");
@@ -375,24 +293,16 @@ describe("TopNav — sidebar toggle", () => {
   it("hides the logo on a phone, where the menu carries Home", async () => {
     renderNav({ withSidebar: true });
     await screen.findByText("Valet");
-    const logo = screen.getByRole("link", { name: "Valet — dashboard" });
+    const logo = screen.getByRole("link", { name: "Valet — Home" });
     expect(logo.className.split(" ")).toEqual(expect.arrayContaining(["hidden", "md:inline-flex"]));
     await userEvent.click(screen.getByRole("button", { name: "Open navigation" }));
     expect((await screen.findByRole("menuitem", { name: "Home" })).getAttribute("href")).toBe("/");
   });
 
-  it("offers to collapse an open sidebar, and to expand it once collapsed", async () => {
+  it("leaves the desktop collapse toggle to the sidebar's own top row", async () => {
     renderNav({ withSidebar: true });
     await screen.findByText("Valet");
-
-    const collapse = screen.getByRole("button", { name: "Collapse sidebar" });
-    expect(collapse.getAttribute("aria-expanded")).toBe("true");
-
-    await userEvent.click(collapse);
-
-    const expand = screen.getByRole("button", { name: "Expand sidebar" });
-    expect(expand.getAttribute("aria-expanded")).toBe("false");
-    expect(screen.queryByRole("button", { name: "Collapse sidebar" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /(Collapse|Expand) sidebar/ })).toBeNull();
   });
 
   it("keeps the mobile drawer control labelled for its own action", async () => {
@@ -416,42 +326,12 @@ describe("TopNav — sidebar toggle", () => {
       expect(control.className).toContain("max-md:min-h-11");
     }
   });
-
-  it("puts the toggle ahead of the logo, at the row's left edge", async () => {
-    renderNav({ withSidebar: true });
-    const logo = await screen.findByText("Valet");
-    const toggle = screen.getByRole("button", { name: "Collapse sidebar" });
-    // `compareDocumentPosition` is the only order check jsdom can make; the
-    // flex row does the rest.
-    expect(toggle.compareDocumentPosition(logo) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  });
 });
 
 const openAssistant = vi.fn();
 vi.mock("~/components/layout/workspace-assistant", () => ({ useWorkspaceAssistant: () => ({ open: openAssistant }) }));
 
-it("opens Memory on hover while Artifacts remains a direct link", async () => {
-  const user = userEvent.setup();
-  renderNav();
-  expect((await screen.findByRole("link", { name: "Artifacts" })).getAttribute("href")).toBe("/artifacts");
-  await user.hover(screen.getByRole("link", { name: "Artifacts" }));
-  expect(screen.getByRole("menuitem", { name: "Memory" }).getAttribute("href")).toBe("/memory");
-});
 
-it("navigates directly to Artifacts and opens the list with Arrow Down", async () => {
-  const user = userEvent.setup();
-  renderNav();
-  const link = await screen.findByRole("link", { name: "Artifacts" });
-  await user.click(link);
-  await waitFor(() => expect(link.getAttribute("aria-current")).toBe("page"));
-  expect(screen.queryByRole("menu")).toBeNull();
-  link.focus();
-  await user.keyboard("{ArrowDown}");
-  expect(screen.getByRole("menuitem", { name: "Memory" })).toBeTruthy();
-  await user.click(screen.getByRole("menuitem", { name: "Memory" }));
-  await waitFor(() => expect(link.getAttribute("aria-current")).toBeNull());
-  expect(screen.queryByRole("menu")).toBeNull();
-});
 
 it("opens Ask Valet from the bar", async () => {
   openAssistant.mockClear();

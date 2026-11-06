@@ -54,7 +54,7 @@
             "failureThreshold": {
               "type": "integer",
               "minimum": 1,
-              "description": "Positive number of failed startup probes allowed during database upgrades."
+              "description": "Startup budget in 5-second units. The probe polls every second, so the chart multiplies this value by 5."
             }
           }
         },
@@ -62,6 +62,23 @@
           "type": "integer",
           "minimum": 1,
           "description": "Positive rollout progress deadline in seconds. Allow more time than the startup probe budget."
+        },
+        "terminationGracePeriodSeconds": {
+          "type": "integer",
+          "minimum": 21,
+          "description": "Pod termination grace period. Keep it above the api's 20-second shutdown bound."
+        },
+        "publishNotReadyAddresses": {
+          "type": "boolean",
+          "description": "Route traffic to the api pod while it boots or drains. Set false for RollingUpdate."
+        },
+        "imagePrepull": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "replicas": { "type": "integer", "minimum": 1 },
+            "activeDeadlineSeconds": { "type": "integer", "minimum": 1 }
+          }
         }
       }
     }

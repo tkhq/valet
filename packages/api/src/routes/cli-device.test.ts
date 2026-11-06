@@ -16,6 +16,7 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { createPolicy } from "../policies/admin.js";
 import { clearDeviceStartLimits, clientKey } from "./cli-device.js";
 import { actionInvocations, cliDeviceRequests, oauthAccessToken, oauthApplication, workflowActionGrants } from "../schema/index.js";
+import { bootstrapAdminInviteCode } from "../test-helpers/bootstrap-admin-code.js";
 
 let api: TestApi | undefined;
 let faux: FauxProviderRegistration | undefined;
@@ -71,7 +72,7 @@ async function setup(opts: { plugins?: ValetPlugin[] } = {}) {
   const signUp = await fetch(`${testApi.baseUrl}/api/auth/sign-up/email`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: "CLI User", email: "cli@nowhere.test", password: "correct-horse-battery" }),
+    body: JSON.stringify({ name: "CLI User", email: "cli@nowhere.test", password: "correct-horse-battery", inviteCode: await bootstrapAdminInviteCode(testApi.providers.db) }),
   });
   expect(signUp.status).toBe(200);
   return { testApi, base: testApi.baseUrl, cookie: sessionCookie(signUp.headers.get("set-cookie")) };

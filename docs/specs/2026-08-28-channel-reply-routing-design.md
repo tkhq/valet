@@ -118,7 +118,7 @@ text. This message is the immediate reply or acknowledgement.
 
 **Later replies are explicit.** The host does not post later assistant messages
 or the final result. The agent uses `reply_to_origin` for progress updates
-and results. Slack also provides `reply_file_to_origin` for sandbox files.
+and results. Slack also provides `reply_file_to_origin` for sandbox files and saved thread files (`docs/specs/2026-11-03-images-in-replies-design.md`).
 The `react_to_origin` action remains the explicit reaction path.
 
 **One delivery.** The host evaluates text `reply_to_origin` calls across

@@ -204,7 +204,9 @@ summarizer prompt.
 
 - The session-header model picker becomes thread-scoped: it shows the active
   thread's effective model and PATCHes the thread. The session default stays
-  API-patchable and governs new threads.
+  API-patchable and governs new threads. Changed 2026-11-02: the picker
+  renders in the composer beside Send on every screen size, as a quiet
+  "Model · effort" control that opens upward. The header no longer shows it.
 - Thread rows show a pin chip when the thread's pin differs from the session
   default (full model id in the tooltip).
 - The message list renders a compaction divider for messages with
@@ -538,7 +540,7 @@ half would put earlier covered entries back into the context.
 Head entries outside the window are not claimed. They keep their place in live
 context, and the next pass sees a shorter pending head. A head larger than the
 summarizer input budget is compacted over several passes. On a 400-entry head
-worth about 403,000 summarizer tokens, 62 entries fit one window;
+worth about 404,000 summarizer tokens, 62 entries fit one window;
 `compaction-pure.test.ts` pins that measurement.
 
 The chain converges. Each written checkpoint covers at least one head entry that
@@ -628,7 +630,12 @@ After scratchpad removal, the summary must contain every required template secti
 Heading checks ignore case, repeated spaces, and a trailing colon. Additional subsections can organize a required section's content.
 An optional heading alone does not supply content, and a separate optional section cannot fill an empty required section.
 Headings inside code fences do not count. Unclosed fences, missing sections, duplicate sections, and empty sections fail acceptance.
-Failure keeps the accepted checkpoint and unsummarized messages. It does not add a retry loop or bypass the existing compaction failure limits.
+If a completed, nonblank summary fails these checks, the engine regenerates it once with a fixed format correction.
+The second call uses the original history, accepted summary, and user instructions. It does not include the rejected draft.
+Both completions contribute input, cache-read, and output tokens to the returned usage totals.
+Provider errors, tool calls, truncated output, blank output, and cancellation do not trigger this format repair.
+The second summary must pass the same checks. Failure keeps the accepted checkpoint and unsummarized messages.
+The existing overflow handling and compaction failure limits still apply.
 Existing checkpoints remain readable. These checks apply when accepting a new summary, not when loading history.
 A valid structure does not prove that every fact in the summary is correct.
 

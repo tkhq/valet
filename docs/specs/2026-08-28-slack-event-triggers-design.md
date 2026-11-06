@@ -480,3 +480,30 @@ Accepting subtype-less posts intentionally expands the events delivered to exist
 ### Receipt diagnostics and legacy bot identity
 
 Resolve the saved bot identity before classifying a bot message. Keep classification stages in the event receipt. If identity resolution fails, emit only the subscription-scoped identity diagnostic. Do not add a duplicate generic rejection to the drop log.
+
+## Online status (added 2026-11-03)
+
+"Online status" is the Slack `users.getPresence` value: `active` or `away`. The name avoids "Presence", which in Valet names the places Valet watches.
+
+### The tool
+
+`slack.get_user_status` reads `users.info` and then `users.getPresence` with the org bot token. Both methods need `users:read`, which the manifest already requests, so no new scope is added. The tool returns `presence`, `online`, the status text, emoji and expiry, the time zone, and optionally the local time. It refuses a user outside the connected workspace (`team_id` differs and no Enterprise Grid team matches, or `is_stranger`). Each Slack error maps to a message that names the fix (`plugin-slack/src/online-status.ts`).
+
+### The `slack.user_online` trigger
+
+The Events API does not deliver `presence_change`; that needs RTM or Socket Mode presence subscriptions. The trigger therefore polls:
+
+1. `OnlineStatusWatcher` (`api/src/services/online-status-watch.ts`) ticks every 15 s. It reads the enabled lines whose event keys include `slack.user_online` exactly, and collects the people their `user` conditions name (`eq` or `in`). A wildcard such as `slack.*` does not start polling.
+2. It reads each person at most once a minute, at most 25 people per org and 40 reads per tick. A failed read backs off from 1 to 15 minutes, or for Slack's `Retry-After`. A missing scope, a bad token or a user outside the workspace waits 15 minutes.
+3. The first read is the baseline. An `active` read fires only after the person was seen `away` for at least 5 minutes, so a short blip does not fire.
+4. A change ingests one `slack.user_online` event through `ingestEvent`, so receipts, matching and delivery are unchanged. The dedupe key is the start of the away period.
+
+The write validator refuses a `slack.user_online` line with no `user` condition. The catalog entry lives on a polled `TriggerDef` whose `verify` accepts nothing, and it is not part of `slackTriggerEventTypes`, so the manifest subscribes to no extra bot event.
+
+Privacy: the watcher keeps only the last presence and the current away start for each watched person, in memory. It drops a person when no enabled line names them. A restart loses the state, so a change across a restart is missed, not replayed.
+
+### Once every N hours
+
+Any line's target may carry `oncePerHours` (1 to 168). Ingest skips a matching line that made a non-skipped delivery inside the window, and the receipt records `rate_limited` (`api/src/events/once-per.ts`). The check reads the line's own `event_deliveries` rows and stores nothing new. The Presence editor offers the field for `slack.user_online`; the workflow trigger tools and `events.propose_subscription` accept `once_per_hours`.
+
+"Only run if X is online" for a schedule or another trigger needs no new trigger: a workflow `tool` step calls `slack.get_user_status` and an `if` step reads `online`.

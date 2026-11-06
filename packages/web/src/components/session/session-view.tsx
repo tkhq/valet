@@ -38,8 +38,8 @@ import {
 import { DecisionGateCard } from "~/components/session/decision-gate-card";
 import { MessageList, ThreadShell } from "~/components/session/message-list";
 import { ThreadRecapDock, useThreadRecap } from "~/components/session/thread-recap";
-import { PinnedPlan, useCurrentStep } from "~/components/session/thread-plan";
-import { ProcessingStatus } from "./processing-status";
+import { PinnedPlan, useCurrentStep, useProgressCardActive } from "~/components/session/thread-plan";
+import { ProcessingStatus, type WorkingLineInput } from "./processing-status";
 import { TypingLine } from "~/components/session/viewer-faces";
 import { useActiveViewers } from "~/api/active-viewers";
 import { PageDropTarget } from "~/components/session/page-drop-target";
@@ -57,7 +57,8 @@ import { useInvalidateSessionOnModelSwitch } from "~/hooks/use-invalidate-sessio
 import { useInvalidateMessagesOnCompaction } from "~/hooks/use-invalidate-messages-on-compaction";
 import { useInvalidateMessagesOnQueueState } from "~/hooks/use-invalidate-messages-on-queue-state";
 import { usePendingGatesSeed } from "~/hooks/use-pending-gates-seed";
-import { Button } from "~/components/primitives";
+import { Button, Dialog, DialogContent, DialogTitle } from "~/components/primitives";
+import { useSwipeDismiss } from "~/hooks/use-swipe-dismiss";
 import type { MessageReplyReference } from "@valet/api/wire";
 import { defaultThreadId, isAppAssistantThread } from "~/lib/thread-default";
 import { flattenChildWork, useChildWork } from "~/api/child-work";
@@ -105,6 +106,8 @@ export function SessionView({
   composerAccessory,
   suppressComposer = false,
   emptyState,
+  cover,
+  headerActions,
 }: {
   /** Shown above the composer, under the thread's own pending gate. Home
    * uses it for approvals from work in other threads. */
@@ -113,6 +116,11 @@ export function SessionView({
   suppressComposer?: boolean;
   /** Shown in place of the transcript while the thread has no messages. */
   emptyState?: ReactNode;
+  /** Shown in place of the transcript, under the header, while set. Desktop
+   * Home uses it for its idle view; the composer stays below. */
+  cover?: ReactNode;
+  /** Extra controls at the end of the thread header, before the summary. */
+  headerActions?: ReactNode;
   /** Hidden embedded views keep drafts/streams but suppress floating overlays. */
   active?: boolean;
   chatOnly?: boolean;
@@ -160,6 +168,11 @@ export function SessionView({
 }) {
   // The summary is a popover over the transcript, so it opens only on request.
   const [summaryOpen, setSummaryOpen] = useState(false);
+  const summarySwipe = useSwipeDismiss("down", () => setSummaryOpen(false));
+  // A summary action that targets the composer or the transcript waits for
+  // the phone sheet to close: the open modal would cover the composer and
+  // pull focus back into itself.
+  const afterSummaryClose = useRef<(() => void) | null>(null);
   const [composerModelTarget, setComposerModelTarget] = useState<HTMLDivElement | null>(null);
   const mobile = useMobileLayout();
   const mobileNavigation = mobile && !panel;
@@ -295,6 +308,9 @@ export function SessionView({
   }, [stream.messages, threadQueueState?.pendingIds]);
   const threadStatus = useThreadLiveStatus(sessionId, effectiveThreadId);
   const currentStep = useCurrentStep(effectiveThreadId);
+  const progressCardActive = useProgressCardActive(effectiveThreadId);
+  const workingLine: WorkingLineInput = { status: threadStatus.status, queue: threadQueueState, needsResponse: Boolean(pendingGate),
+    activity: currentStep, startedAt: threadStatus.turnStartedAt, retry: threadRetry, compacting };
   const agentBusy =
     (threadStatus.status !== "idle" && threadStatus.status !== "error") ||
     queueBusy(threadQueueState);
@@ -366,36 +382,66 @@ export function SessionView({
     );
   }
 
-  const summaryControl = effectiveThreadId ? (
+  const runAfterSummary = (action: () => void) => {
+    if (!mobileConversation || !summaryOpen) return action();
+    afterSummaryClose.current = action;
+    setSummaryOpen(false);
+  };
+  const summaryPanel = effectiveThreadId ? (
+    <ThreadContextPanel
+      key={`${sessionId}:${effectiveThreadId}`}
+      owner={{ ownerType: session.data.owner.type, ownerId: session.data.owner.id }}
+      sessionId={sessionId} threadId={effectiveThreadId} messages={stream.messages} busy={agentBusy}
+      canCancelWork={canCancelWork}
+      pullRequests={helperThread?.pullRequests}
+      onCreate={() => runAfterSummary(() => {
+        const key = draftKey(sessionId, effectiveThreadId);
+        const store = useComposerDraftStore.getState();
+        const text = store.byKey[key]?.text ?? "";
+        store.setText(key, text ? `${text}\nCreate a file or site: ` : "Create a file or site: ");
+        viewRef.current?.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')?.focus();
+      })}
+      onAttach={() => runAfterSummary(() => viewRef.current?.querySelector<HTMLButtonElement>('[aria-label="Attach files"], [aria-label="Attach images"]')?.click())}
+      onReveal={(messageId) => runAfterSummary(() => {
+        const row = [...(viewRef.current?.querySelectorAll<HTMLElement>('[data-message-id]') ?? [])].find((el) => el.dataset.messageId === messageId);
+        row?.scrollIntoView({ behavior: "smooth", block: "center" });
+      })}
+    />
+  ) : null;
+  const summaryIcon = <ListTree className="h-4 w-4" aria-hidden />;
+  // A phone opens the summary as a bottom sheet: a popover anchored to the
+  // tab row covers the transcript without a clear way out. A swipe down
+  // closes it.
+  const summaryControl = !effectiveThreadId ? null : mobileConversation ? <>
+    <Button variant="ghost" size="sm" aria-label="Toggle summary" title="Toggle summary" aria-expanded={chatActive && summaryOpen}
+      onClick={() => setSummaryOpen((open) => !open)} className="shrink-0 max-md:min-w-11">{summaryIcon}</Button>
+    <Dialog open={chatActive && summaryOpen} onOpenChange={setSummaryOpen}>
+      <DialogContent hideClose aria-describedby={undefined} onOpenAutoFocus={(event) => event.preventDefault()} {...summarySwipe}
+        onCloseAutoFocus={(event) => {
+          const action = afterSummaryClose.current;
+          if (!action) return;
+          afterSummaryClose.current = null;
+          event.preventDefault();
+          action();
+        }}
+        className="bottom-0 left-0 top-auto max-h-[85dvh] w-full max-w-none translate-x-0 translate-y-0 gap-0 rounded-b-none rounded-t-2xl border-x-0 border-b-0 p-0 pb-[env(safe-area-inset-bottom)] data-[state=open]:animate-in data-[state=open]:slide-in-from-bottom motion-reduce:animate-none [&>aside]:rounded-none [&>aside]:bg-transparent">
+        <DialogTitle className="sr-only">Thread summary</DialogTitle>
+        <div aria-hidden className="mx-auto mb-1 mt-2 h-1 w-9 shrink-0 rounded-full bg-line" />
+        {summaryPanel}
+      </DialogContent>
+    </Dialog>
+  </> : (
     <Popover key={`${sessionId}:${effectiveThreadId}`} open={chatActive && summaryOpen} onOpenChange={setSummaryOpen}>
       <PopoverTrigger asChild>
         <Button variant="ghost" size="sm" aria-label="Toggle summary" title="Toggle summary" className="shrink-0 data-[state=open]:bg-ink-wash">
-          <ListTree className="h-4 w-4" aria-hidden />
+          {summaryIcon}
         </Button>
       </PopoverTrigger>
       <PopoverContent aria-label="Thread summary" align="end" sideOffset={12} onOpenAutoFocus={(event) => event.preventDefault()} className="w-80 max-w-[calc(100vw-2rem)] max-h-[var(--radix-popover-content-available-height)] overflow-y-auto p-0 rounded-2xl">
-                <ThreadContextPanel
-                  key={`${sessionId}:${effectiveThreadId}`}
-                  owner={{ ownerType: session.data.owner.type, ownerId: session.data.owner.id }}
-                  sessionId={sessionId} threadId={effectiveThreadId} messages={stream.messages} busy={agentBusy}
-                  canCancelWork={canCancelWork}
-                  pullRequests={helperThread?.pullRequests}
-                  onCreate={() => {
-                    const key = draftKey(sessionId, effectiveThreadId);
-                    const store = useComposerDraftStore.getState();
-                    const text = store.byKey[key]?.text ?? "";
-                    store.setText(key, text ? `${text}\nCreate a file or site: ` : "Create a file or site: ");
-                    viewRef.current?.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')?.focus();
-                  }}
-                  onAttach={() => viewRef.current?.querySelector<HTMLButtonElement>('[aria-label="Attach files"], [aria-label="Attach images"]')?.click()}
-                  onReveal={(messageId) => {
-                    const row = [...(viewRef.current?.querySelectorAll<HTMLElement>('[data-message-id]') ?? [])].find((el) => el.dataset.messageId === messageId);
-                    row?.scrollIntoView({ behavior: "smooth", block: "center" });
-                  }}
-                />
+        {summaryPanel}
       </PopoverContent>
     </Popover>
-  ) : null;
+  );
 
   const sessionHeader = (
     <SessionHeader
@@ -405,12 +451,13 @@ export function SessionView({
       sandbox={stream.sandbox}
       threadId={effectiveThreadId}
       messages={stream.messages}
-      summaryControl={summaryControl}
+      summaryControl={headerActions ? <>{headerActions}{summaryControl}</> : summaryControl}
       onOpenView={hideBrowser && !mobileConversation ? undefined : changeTab}
       compact={mobileConversation}
-      modelControlTarget={mobileConversation ? composerModelTarget : null}
+      modelControlTarget={mobileConversation || !panel ? composerModelTarget : null}
       viewers={viewers}
       scopeNotice={scopeNotice}
+      onOpenThread={onOpenThread}
     />
   );
   const sandboxTabs = (!hideBrowser || mobileConversation) && (
@@ -443,27 +490,32 @@ export function SessionView({
           <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
             <ThreadReplyContext.Provider value={widgetReplyTarget}>
             <ChildTitlesContext.Provider value={childTitles}>
-            <MessageList
-              footer={<AgentsLine children={childWork} threadId={effectiveThreadId} onOpenChild={onOpenChild} />}
-              header={panel || mobileNavigation ? undefined : <>{sessionHeader}{sandboxTabs}</>}
-              messages={stream.messages}
-              threadId={effectiveThreadId}
-              loading={messagesQ.isPending}
-              onShowEarlier={messagesQ.data?.hasMore && !fullHistory ? showEarlier : undefined}
-              loadingEarlier={fullHistory && messagesQ.isPlaceholderData}
-              onOpenChild={onOpenChild}
-              agentBusy={agentBusy}
-              pendingIds={threadQueueState?.pendingIds}
-              viewerId={me.data?.id}
-              onReply={enableReplies ? (target) => { edit.cancelEdit(); setReplyTarget(target); } : undefined}
-              {...edit.list}
-              onEdit={edit.list.onEdit && ((message) => { setReplyTarget(undefined); setBranchError(undefined); edit.startEdit(message); })}
-              onBranch={onOpenThread ? (message) => void branch(message) : undefined}
-              onBranchPrivately={onOpenThread && session.data?.owner.type === "team" ? (message) => void branch(message, "private") : undefined}
-              onOpenThread={onOpenThread}
-              newSince={recap?.divider ? { anchorId: recap.anchorId, label: recap.divider } : undefined}
-              emptyState={emptyState}
-            />
+            {cover ? <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+              {!(panel || mobileNavigation) && <div className="sticky top-0 z-20 shrink-0 bg-paper">{sessionHeader}{sandboxTabs}</div>}
+              {cover}
+            </div> : (
+              <MessageList
+                footer={<AgentsLine children={childWork} threadId={effectiveThreadId} onOpenChild={onOpenChild} />}
+                header={panel || mobileNavigation ? undefined : <>{sessionHeader}{sandboxTabs}</>}
+                messages={stream.messages}
+                threadId={effectiveThreadId}
+                loading={messagesQ.isPending}
+                onShowEarlier={messagesQ.data?.hasMore && !fullHistory ? showEarlier : undefined}
+                loadingEarlier={fullHistory && messagesQ.isPlaceholderData}
+                onOpenChild={onOpenChild}
+                agentBusy={agentBusy}
+                pendingIds={threadQueueState?.pendingIds}
+                viewerId={me.data?.id}
+                onReply={enableReplies ? (target) => { edit.cancelEdit(); setReplyTarget(target); } : undefined}
+                {...edit.list}
+                onEdit={edit.list.onEdit && ((message) => { setReplyTarget(undefined); setBranchError(undefined); edit.startEdit(message); })}
+                onBranch={onOpenThread ? (message) => void branch(message) : undefined}
+                onBranchPrivately={onOpenThread && session.data?.owner.type === "team" ? (message) => void branch(message, "private") : undefined}
+                onOpenThread={onOpenThread}
+                newSince={recap?.divider ? { anchorId: recap.anchorId, label: recap.divider } : undefined}
+                emptyState={emptyState}
+              />
+            )}
             </ChildTitlesContext.Provider>
             </ThreadReplyContext.Provider>
             {chatActive && !mobileBrowser && !hideBrowser && (browserWatch.mode === "open" || browserWatch.mode === "minimized") && (
@@ -483,11 +535,6 @@ export function SessionView({
           {chatActive && mobileBrowser && browserWatch.hasActivity && (
             <MobileBrowser key={JSON.stringify([sessionId, effectiveThreadId])} sessionId={sessionId} threadId={effectiveThreadId} working={browserWatch.working} />
           )}
-          {compacting && (
-            <div className="border-t border-[--border] px-4 py-1.5 text-[11px] text-muted">
-              Compacting context…
-            </div>
-          )}
           {branchError && (
             <div role="alert" className="border-t border-danger-500/30 bg-danger-500/5 px-4 py-2 text-xs text-danger-600">
               {branchError}
@@ -502,7 +549,7 @@ export function SessionView({
               over when the pending gate changes (e.g. a thread switch to a
               different pending gate). */}
           <ThreadRecapDock recap={recap} collapsed={Boolean(pendingGate)} />
-          <PinnedPlan threadId={effectiveThreadId} />
+          <PinnedPlan threadId={effectiveThreadId} live={workingLine} />
           {pendingGate && (
             <DecisionGateCard key={pendingGate.id} sessionId={sessionId} gate={pendingGate} collapsible />
           )}
@@ -512,14 +559,14 @@ export function SessionView({
             disabled={Boolean(pendingGate) || threadStatus.status !== "idle" || Boolean(session.data?.readOnlyReason)} />}
           <div className={mobile && pendingGate ? "hidden" : "contents"} aria-hidden={mobile && pendingGate ? true : undefined}>{composerAccessory}</div>
           <TypingLine viewers={viewers} />
-          <ProcessingStatus status={threadStatus.status} queue={threadQueueState} needsResponse={Boolean(pendingGate)}
-            activity={currentStep} startedAt={threadStatus.turnStartedAt} retry={threadRetry} />
+          {/* While the task card shows a running turn, it carries this line: one row, one mascot. */}
+          <ProcessingStatus {...workingLine} inCard={progressCardActive} />
           {/* No key: drafts are per-thread in the composer-drafts store, so
               a thread switch swaps the draft without a remount (a remount
               would orphan in-flight uploads). */}
           <div className={responseFormActive ? "hidden" : "contents"} aria-hidden={responseFormActive || undefined}>
           {session.data?.readOnlyReason ? <p className="border-t border-border px-4 py-3 text-sm text-muted" role="status">{session.data.readOnlyReason}</p> : <Composer
-            modelControlRef={mobileConversation && canCancelWork ? setComposerModelTarget : undefined}
+            modelControlRef={(mobileConversation || !panel) && canCancelWork ? setComposerModelTarget : undefined}
             active={chatActive && !responseFormActive}
             sessionId={sessionId}
             threadId={effectiveThreadId}

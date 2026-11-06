@@ -10,6 +10,7 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { eventDropLog, slackWebhookInbox } from "../schema/index.js";
 import { __resetSlackWebhookThrottle } from "../channels/slack-inbox.js";
 import type { CreateTeamApiKeyResponse, CreateTeamResponse } from "../wire/types.js";
+import { bootstrapAdminInviteCode } from "../test-helpers/bootstrap-admin-code.js";
 
 const INGRESS_PATHS = ["/api/channels/slack/webhook", "/plugins/slack/http/events"];
 const SETUP_PATHS = ["/api/org/slack", "/api/plugins/slack/http/app"];
@@ -209,7 +210,7 @@ describe.each(SETUP_PATHS)("Slack setup at %s", (path) => {
     expect((await fetch(`${api.baseUrl}${path}`)).status).toBe(401);
     const signup = await fetch(`${api.baseUrl}/api/auth/sign-up/email`, {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ email: "slack-admin@nowhere.test", name: "Admin", password: "correct-horse-battery" }),
+      body: JSON.stringify({ email: "slack-admin@nowhere.test", name: "Admin", password: "correct-horse-battery", inviteCode: await bootstrapAdminInviteCode(api.providers.db) }),
     });
     const cookie = signup.headers.get("set-cookie")?.match(/better-auth\.session_token=[^;]+/)?.[0];
     if (!cookie) throw new Error("Missing session cookie");

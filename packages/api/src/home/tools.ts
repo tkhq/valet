@@ -36,7 +36,8 @@ export function buildHomeTools(getDeps: () => HomeDeps): ToolDef[] {
     description:
       "Start a piece of work in its own thread, in one of the person's workspaces (personal or a team). Use it for work with several steps or work that takes more than a minute, so this conversation stays short. " +
       "Answer quick questions here instead. The new thread runs on its own with the instructions as its first message, written as the person. " +
-      "A team thread is visible to the whole team. You get one report here when its first run ends. Returns JSON with the task and thread ids.",
+      "A team thread is visible to the whole team. The thread has no repository checkout or git credentials; for repository work it starts a child with the repository, so name the repository (owner/name) and branch in the instructions. " +
+      "You get one report here when its first run ends. Returns JSON with the task and thread ids.",
     parameters: Type.Object({
       workspace: Type.String({ description: "\"personal\", or a team name or team id from list_tasks. Pick the workspace whose tools, repos, and people the work needs. Ask when it is unclear." }),
       title: Type.String({ minLength: 1, maxLength: 120, description: "Short task title, 3 to 8 words." }),

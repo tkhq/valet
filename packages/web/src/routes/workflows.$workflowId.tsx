@@ -1,4 +1,5 @@
 import { createFileRoute, Link, useBlocker, useNavigate } from "@tanstack/react-router";
+import { WorkspaceClause } from "~/components/workspace-clause";
 import { formatRunDuration, runLabel } from "~/components/workflows/run-detail-helpers";
 import { RunStatusChip } from "~/components/workflows/run-status-chip";
 import type {
@@ -25,7 +26,6 @@ import {
   type UpdateWorkflowMutation,
 } from "~/api/workflows";
 import {
-  BackLink,
   Button,
   ConfirmDialog,
   Dialog,
@@ -384,7 +384,12 @@ function WorkflowEditorPane({
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       <div className="flex shrink-0 flex-col gap-2 border-b border-line px-3 py-3 lg:flex-row lg:items-center lg:justify-between lg:px-6 lg:py-4">
         <div className="flex min-w-0 flex-1 flex-col gap-1 lg:flex-row lg:items-center lg:gap-3">
-          <BackLink to="/workflows" className="shrink-0">Workflows</BackLink>
+          {/* Breadcrumb: Space / Workflows / the name field. */}
+          <span className="flex shrink-0 items-center gap-1.5 text-xs text-muted">
+            <WorkspaceClause size="crumb" />
+            <Link to="/workflows" className="inline-flex min-h-11 items-center hover:text-ink sm:min-h-0">Workflows</Link>
+            <span aria-hidden>/</span>
+          </span>
           <input
             value={name}
             onChange={(e) => setName(e.target.value)}

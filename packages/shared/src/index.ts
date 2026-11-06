@@ -1,5 +1,6 @@
 export { readAppPageHint, type AppPageHint } from "./app-page-hint.js";
 export * from './appearance.js';
+export * from './builtin-principles.js';
 export * from './types/index.js';
 export * from './types/message-parts.js';
 export * from './types/plugin-entitlements.js';
@@ -14,11 +15,13 @@ export * from './schedule-run-id.js';
 export * from './resource-quantity.js';
 export * from './search-query.js';
 export * from './model-benchmarks.js';
+export * from './prompt-template-limits.js';
 export * from './sandbox-resources.js';
 export * from './security-credentials.js';
 export * from './skill-block.js';
 export * from './thread-policy.js';
 export * from './thread-plan.js';
+export * from './chart.js';
 export * from './tool-scope.js';
 export * from './toon-syntax.js';
 export * from './upload-limits.js';
@@ -28,5 +31,6 @@ export * from './browser-policy.js';
 export * from './event-match.js';
 export * from './thread-projects.js';
 export * from './thread-recap.js';
+export * from './turn-progress.js';
 
 export * from "./tool-intent.js";

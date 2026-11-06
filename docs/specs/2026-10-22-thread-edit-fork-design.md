@@ -206,6 +206,13 @@ empty repository there and applies the bundle. If the bundle needs commits
 that the fork's copy does not have, the apply fails, the empty repository
 is removed, and the note gives that reason.
 
+The check for a pending seed runs before every turn, so it must not read
+the thread. A fork that brings files along sets `forkSeedPending` on the
+destination thread. The turn reads the transcript snapshot only when that
+flag is set, or once for a fork made before the flag existed (`forkOf`
+present). After the check, `forkSeedApplied` stops later reads. A thread
+that was never forked does no read here.
+
 ### 10. Rewind is cache-safe
 
 Call: a rewind keeps the system prompt and every message before the edit
@@ -247,17 +254,20 @@ metadata (`forkOf`).
 
 ### 14. Move is a fork of the whole thread plus an archive
 
-Call: the thread menu offers "Move to workspace". A move copies the whole
-conversation and its files into the destination as a fork does, archives the
-source, records the copy in the source's metadata (`movedTo`), and adds a
-note to the source.
+Call: the sidebar row menu offers one "Move to" submenu. Its Project group
+files the thread under a project in this sidebar. Its Workspace group lists
+Private and every other team the person is on (changed 2026-11-02; it was
+two submenus). A move copies the whole conversation and its files into the
+destination as a fork does, archives the source, records the copy in the
+source's metadata (`movedTo`), and adds a note to the source.
 
-- A team thread moves only to the mover's private threads. Teammates lose
-  it, so only a person who wrote every message in it, or a team admin, can
-  move it. The note says where it went, with no link that teammates cannot
-  open.
-- A private thread moves only into a team the person is on. The team then
-  reads it, so the request must confirm. Slack channel gates come along.
+- A team thread moves to the mover's private threads or to another team the
+  mover is on. Teammates lose it, so only a person who wrote every message in
+  it, or a team admin, can move it. The note says where it went, with no
+  link that teammates cannot open.
+- A private thread moves into a team the person is on.
+- A move into a team shows the thread to that team, so the request must
+  confirm. Slack channel gates come along.
 - Only a `web:` thread with no running turn, open approval, or background
   work moves. A Slack, workflow, or Home thread keeps its connection.
 
@@ -272,6 +282,19 @@ turn a person wrote can send, and the person must read the target. When a
 reader of the target cannot read the sending thread, the person approves the
 exact text first (`sendWidens`). A private fork that reports to its team
 thread asks; a team thread that sends to a member's private fork does not.
+
+### 16. Duplicate copies the whole thread in place
+
+Call: the sidebar row menu and the thread header menu offer "Duplicate
+thread". A duplicate is a fork of the whole thread into the same workspace,
+titled "<title> (copy)", or "Untitled thread (copy)" when the source has no
+title. A long title loses its end, never the suffix. The source stays as it is: no archive, no note, no
+`movedTo`. The copy records `forkOf` and opens. The fork rules apply: only
+the thread owner or a team member can duplicate, the copy keeps the source's
+audience (so a team thread private to one person, such as an Ask Valet or
+workflow editor thread, does not duplicate; its owner branches it privately), and a thread with a running turn or an open approval does not
+duplicate until it settles. Background work does not block it, because the
+source keeps running.
 
 ### Later
 
@@ -448,6 +471,9 @@ left, so the compaction drops it, returns `noop`, and sets
 - `POST /api/threads/:threadId/fork` with `{ entryId }`. Members only.
   Returns the new thread summary and, for a user message, the text for the
   composer.
+- `POST /api/threads/:threadId/duplicate` with no body copies the whole
+  thread into its workspace (decision 16). Members only. Returns the fork
+  response for the copy, or 409 while a turn runs or waits on an approval.
 - The REST message list projects a note as a system message with a
   `branch` field: `kind` (`edit`, `return`, or `fork`), the tool list, a
   files-changed flag, `canReturn`, the approval choices that still apply,

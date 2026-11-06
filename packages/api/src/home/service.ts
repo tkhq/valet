@@ -21,7 +21,7 @@ import { recordThreadUserActivity } from "../services/thread-activity.js";
 import { activeViewers, type ActiveViewers } from "../services/active-viewers.js";
 import type { HomeTaskItem, HomeTaskOutput, HomeTasksResponse, HomeWorkspaceRef } from "../wire/types.js";
 
-import { HOME_THREAD_KEY } from "./context.js";
+import { HOME_TASK_GIT_NOTE, HOME_THREAD_KEY } from "./context.js";
 
 export { HOME_THREAD_KEY };
 
@@ -147,7 +147,7 @@ export async function startHomeTask(deps: HomeDeps, user: HomeUser, input: {
   const createdAt = thread.toThreadData().createdAt;
   await deps.db.insert(sessionThreads).values({ id: thread.id, sessionId: target.sessionId, createdAt, title })
     .onConflictDoUpdate({ target: sessionThreads.id, set: { title } });
-  const receipt = await thread.submitPrompt(input.instructions, {
+  const receipt = await thread.submitPrompt(homeTaskPrompt(input.instructions), {
     author: { id: user.id, ...(input.authorName ? { name: input.authorName } : {}) },
     metadata: { [HOME_TASK_REPORT_KEY]: true },
   });
@@ -159,6 +159,11 @@ export async function startHomeTask(deps: HomeDeps, user: HomeUser, input: {
   await recordThreadUserActivity(deps.db, { sessionId: target.sessionId, threadId: thread.id, threadCreatedAt: createdAt,
     activityAt: Date.now(), emit: (event) => target.session.emit(event) });
   return { id, sessionId: target.sessionId, threadId: thread.id, title, workspace: { key: workspace.key, name: workspace.name } };
+}
+
+/** The first message of a task: the person's instructions, then the git note. */
+export function homeTaskPrompt(instructions: string): string {
+  return `${instructions.trimEnd()}\n\n${HOME_TASK_GIT_NOTE}`;
 }
 
 /** Sends a follow-up from the person into a task they started from home. */

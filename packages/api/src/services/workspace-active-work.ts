@@ -6,6 +6,7 @@ import { deriveRunState, type RunStateSubmission } from "../sessions/run-state.j
 import type { WorkspaceActiveWorkItem, WorkspaceActiveWorkResponse } from "../wire/types.js";
 import type { OutcomeCursor } from "./workspace-outcomes.js";
 import { sharedThreadKey } from "./thread-read-state.js";
+import { PLUGIN_CHILD_SESSION_PREFIX, PLUGIN_THREAD_KEY_PREFIX } from "../plugins/plugin-thread-key.js";
 
 interface ActiveWorkRow {
   id: string;
@@ -30,6 +31,9 @@ export async function listWorkspaceActiveWork(
     WHERE s.status<>'deleted' AND s.org_id=${orgId} AND s.owner_type=${owner.type}
       AND COALESCE(NULLIF(s.owner_id,''),CASE WHEN s.owner_type='user' THEN s.user_id END)=${owner.id}
       AND ${sharedThreadKey(sql`(SELECT et.key FROM engine_threads et WHERE et.session_id=q.session_id AND et.id=q.thread_id)`, viewerId)}
+      -- Plugin threads and plugin children are a plugin's working space, not Home work.
+      AND COALESCE((SELECT et.key FROM engine_threads et WHERE et.session_id=q.session_id AND et.id=q.thread_id),'') NOT LIKE ${PLUGIN_THREAD_KEY_PREFIX + "%"}
+      AND q.session_id NOT LIKE ${PLUGIN_CHILD_SESSION_PREFIX + "%"}
       AND t.archived_at IS NULL
       AND q.status<>'settled'
       AND (q.status IN ('blocked_on_decision_gate','collecting','queued','running') OR q.outcome='failed')

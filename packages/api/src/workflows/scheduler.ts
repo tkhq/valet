@@ -18,8 +18,8 @@
  * `start()`/`stop()` from main.ts.
  */
 import { scheduledTriggerData, type RunHost, type RunParams, type WorkflowStore, type WorkflowTriggerPayload } from "@valet/workflow";
-import { scheduledRunId } from "@valet/shared";
-import { and, eq, lte, sql, type SQL } from "drizzle-orm";
+import { scheduleRunPrefix, scheduledRunId } from "@valet/shared";
+import { and, desc, eq, lte, sql, type SQL } from "drizzle-orm";
 import { readThreadPolicy } from "@valet/shared";
 import { PinUnavailableError, type DeliveredThread } from "../events/assistant-delivery.js";
 import type { AssistantDeliverFn } from "../events/dispatcher.js";
@@ -34,8 +34,9 @@ import type { AppDb } from "../lib/drizzle.js";
 import { workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
 import { definitionVersionId } from "./definition-version.js";
 import {
-  accessibleScheduleRow, BAD_CRON_REASON, EMPTY_PROMPT_REASON, nextFireAt, WORKFLOW_DELETED_REASON,
+  accessibleScheduleRow, BAD_CRON_REASON, EMPTY_PROMPT_REASON, WORKFLOW_DELETED_REASON,
 } from "./schedule-service.js";
+import { nextFireAt } from "./next-fire.js";
 
 /** Reasons the poll loop records when it turns a schedule off. Each one
  * names the fix, because the routine page shows it as written. A manual
@@ -44,6 +45,7 @@ import {
 export { BAD_CRON_REASON, EMPTY_PROMPT_REASON, WORKFLOW_DELETED_REASON };
 import type { WorkflowOwner } from "./service.js";
 import { readScheduleTargetKind } from "../events/target-names.js";
+import { reportError } from "@valet/engine";
 
 
 const POLL_MS = 30_000;
@@ -93,6 +95,23 @@ function policyUnchanged(policy: unknown): SQL {
     : sql`${workflowSchedules.threadPolicy} = ${JSON.stringify(policy)}::jsonb`;
 }
 
+/** A previous fire time, for "since the last run" polling. Empty when there is none. */
+function previousFire(firedAt: number | null): { previousFiredAt?: string } {
+  return firedAt === null ? {} : { previousFiredAt: new Date(firedAt).toISOString() };
+}
+
+/** The slot of this schedule's newest workflow run that completed, read from its run id. */
+async function lastCompletedSlot(db: AppDb, workflowId: string, scheduleId: string): Promise<number | null> {
+  const prefix = scheduleRunPrefix(scheduleId);
+  const [row] = await db.select({ id: workflowRuns.id }).from(workflowRuns)
+    .where(and(eq(workflowRuns.workflowId, workflowId), eq(workflowRuns.outcome, "completed"),
+      sql`left(${workflowRuns.id}, ${prefix.length}) = ${prefix}`))
+    .orderBy(desc(workflowRuns.createdAt))
+    .limit(1);
+  const slot = row ? Number(row.id.slice(prefix.length)) : NaN;
+  return Number.isFinite(slot) ? slot : null;
+}
+
 export class WorkflowScheduler {
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false;
@@ -129,11 +148,11 @@ export class WorkflowScheduler {
         try {
           await this.fire(schedule, now);
         } catch (err) {
-          console.error(`workflow scheduler: fire failed for ${schedule.id} (will retry next tick):`, err);
+          reportError({ area: "workflows", reason: "schedule_fire" }, `workflow scheduler: fire failed for ${schedule.id} (will retry next tick)`, err);
         }
       }
     } catch (err) {
-      console.error("workflow scheduler: tick failed:", err);
+      reportError({ area: "workflows", reason: "scheduler_tick" }, "workflow scheduler: tick failed", err);
     } finally {
       this.ticking = false;
     }
@@ -180,6 +199,7 @@ export class WorkflowScheduler {
               scheduleName: schedule.name,
               cron: schedule.cron,
               firedAt: new Date(slotMs).toISOString(),
+              ...previousFire(schedule.lastFiredAt),
             },
           },
           dispatchId: `schedule:${schedule.id}:${slotMs}`,
@@ -222,7 +242,11 @@ export class WorkflowScheduler {
         triggerId: schedule.id,
         timestamp: new Date(slotMs).toISOString(),
         data: scheduledTriggerData(def.definition, { scheduleName: schedule.name, cron: schedule.cron, input: schedule.input ?? {} }),
-        metadata: { scheduleId: schedule.id, timezone: schedule.timezone },
+        // The slot of the last run that completed lets a polling step ask a
+        // source for "items since the last run". A failed or cancelled run
+        // does not move it, so its items are polled again. Absent until a
+        // run completes.
+        metadata: { scheduleId: schedule.id, timezone: schedule.timezone, ...previousFire(await lastCompletedSlot(db, schedule.workflowId, schedule.id)) },
       };
       const params: RunParams = {
         workflowId: schedule.workflowId,
@@ -251,7 +275,7 @@ export class WorkflowScheduler {
     const { db } = this.deps;
     const next = nextFireAt(schedule.cron, schedule.timezone, now);
     if (!next.ok) {
-      console.error(`workflow scheduler: disabling ${schedule.id} — ${next.error}`);
+      reportError({ area: "workflows", reason: "schedule_disabled" }, `workflow scheduler: disabling ${schedule.id} — ${next.error}`);
       await db.update(workflowSchedules)
         .set({ enabled: false, updatedAt: now, disabledReason: BAD_CRON_REASON })
         .where(eq(workflowSchedules.id, schedule.id));
@@ -259,7 +283,7 @@ export class WorkflowScheduler {
     }
     const result = await this.dispatch(schedule, schedule.nextFireAt);
     if (!result.ok) {
-      console.error(`workflow scheduler: disabling ${schedule.id}: ${result.error}`);
+      reportError({ area: "workflows", reason: "schedule_disabled" }, `workflow scheduler: disabling ${schedule.id}: ${result.error}`);
       // Every disable records its reason, so the routine page can name the fix.
       const disabled = await db.update(workflowSchedules)
         .set({ enabled: false, updatedAt: now, disabledReason: result.error })

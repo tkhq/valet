@@ -20,7 +20,8 @@ import type {
   ToolResult,
 } from "./types.js";
 import { isDecisionGateExpired, isUnattendedWorkflowRefusal } from "./decision-gate.js";
-import { encodeToolOutput } from "./tool-output.js";
+import { decodeToolOutput, encodeToolOutput } from "./tool-output.js";
+import { reportError } from "./error-report.js";
 
 /**
  * Plugin catalog: indirection layer that exposes plugin actions to the LLM
@@ -784,7 +785,7 @@ export async function invokeAction(
     // Log and keep the cause: without it, every team action fails with no
     // trace of why the policy check threw.
     const cause = innermostMessage(err);
-    console.error(`[policy] resolve failed for ${policyActionId} in ${ctx.sessionId}:`, err);
+    reportError({ area: "plugins", reason: "policy_resolution" }, `[policy] resolve failed for ${policyActionId} in ${ctx.sessionId}`, err);
     // A failed read cannot establish whether the team has an absolute deny.
     if (ctx.owner?.type === "team") {
       return { kind: "error", message: `Could not check this team's action policies (${cause.slice(0, 300)}). Retry the action when policy checks are available.` };
@@ -1237,7 +1238,7 @@ function makeListTool(
       : "",
     gatedServices.length > 0 ? ` Unavailable services: ${gatedServices.join(", ")}.` : "",
   ].join("");
-  return {
+  const listTool: ToolDef = {
     name: "list_tools",
     sideEffect: "none",
     description:
@@ -1421,8 +1422,29 @@ function makeListTool(
       });
 
       const total = entries.length;
+      // A focused thread (a workflow editor starts in one) sees only its focus.
+      // When nothing in focus matches, or the call searches, search the
+      // ceiling too and name what the focus hides. Otherwise an integration
+      // such as Granola reads as missing, and a diagnose focus answers
+      // "update schedule" with list_schedules alone.
+      const searched = query.hasInput || Boolean(a.service);
+      const outsideFocus = (total === 0 || searched) && !a.outside_focus && ctx.toolScope !== undefined && ctx.toolScope !== ctx.toolScopeCeiling
+        // Filter before the limit: focused matches must not fill the rows.
+        ? outsideFocusMatches(await listTool.execute({ ...a, outside_focus: true, limit: LIST_LIMIT_MAX }, ctx))
+          .filter((t) => !actionInScope(ctx.toolScope, t.tool_id))
+          .slice(0, limit)
+        : [];
       const nativeMatches = nativeToolMatches(a.query, opts.nativeToolNames ?? []);
-      if (total === 0) {
+      // An outside_focus listing names its own rows, so it needs the same
+      // next step.
+      const hidden = a.outside_focus ? tools.filter((t) => !actionInScope(ctx.toolScope, t.tool_id)) : outsideFocus;
+      if (hidden.length > 0) {
+        warnings.push({
+          service: "catalog",
+          reason: "these actions are outside this thread's focus. To use them, call focus_tools with your phase and actions: " +
+            JSON.stringify(hidden.map((t) => t.tool_id)) + ", then call list_tools again for their schemas.",
+        });
+      } else if (total === 0) {
         const matched = nativeMatches.length > 0 ? ` (matched: ${nativeMatches.join(", ")})` : "";
         warnings.push({
           service: "catalog",
@@ -1434,11 +1456,28 @@ function makeListTool(
           tools,
           total,
           ...(total > limit ? { truncated: total - limit } : {}),
+          ...(outsideFocus.length > 0 ? { outside_focus: outsideFocus } : {}),
           ...(warnings.length > 0 ? { warnings } : {}),
         }),
       };
     },
   };
+  return listTool;
+}
+
+/** The tool summaries from a list_tools result run with `outside_focus` (TOON or JSON text). */
+function outsideFocusMatches(result: ToolResult): Array<{ tool_id: string; name?: string; description?: string }> {
+  try {
+    const text = typeof result.text === "string" ? result.text : "";
+    const parsed: unknown = text.trimStart().startsWith("{") ? JSON.parse(text) : decodeToolOutput(text);
+    if (typeof parsed !== "object" || parsed === null || !("tools" in parsed) || !Array.isArray(parsed.tools)) return [];
+    return parsed.tools.flatMap((t: unknown) =>
+      typeof t === "object" && t !== null && "tool_id" in t && typeof t.tool_id === "string"
+        ? [{ tool_id: t.tool_id, ...("name" in t && typeof t.name === "string" ? { name: t.name } : {}), ...("description" in t && typeof t.description === "string" ? { description: t.description } : {}) }]
+        : []);
+  } catch {
+    return [];
+  }
 }
 
 function nativeToolMatches(query: string | undefined, names: readonly string[]): string[] {

@@ -26,7 +26,7 @@ import type * as k8s from "@kubernetes/client-node";
 import { Exec } from "@kubernetes/client-node";
 import { WebSocketHandler } from "@kubernetes/client-node/dist/web-socket-handler.js";
 import WebSocket from "ws";
-import { CappedOutputBuffer, SandboxConnectionError, formatSandboxErrorCause, type ExecOpts, type ExecResult } from "@valet/engine";
+import { CappedOutputBuffer, SandboxConnectionError, formatSandboxErrorCause, type ExecOpts, type ExecResult, reportError } from "@valet/engine";
 
 /** Directory the job-mode protocol (jobs.ts) writes its `{execId}.{out,exit,pid}`
  * files into. Exported here (rather than jobs.ts) since exec.ts's quoting
@@ -379,7 +379,7 @@ export async function execInPod(
     // api logs and Loki. A 403 here means the api ServiceAccount lacks `create`
     // on pods/exec — Kubernetes authorizes the exec *connect* subresource as
     // the `create` verb regardless of the client's HTTP method.
-    console.error("k8s pods/exec transport failed:", transportError.message);
+    reportError({ area: "sandbox", reason: "exec_transport", provider: "kubernetes" }, "k8s pods/exec transport failed", transportError.message);
     throw transportError;
   });
 

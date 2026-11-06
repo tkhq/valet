@@ -15,12 +15,12 @@ import type { ActionPlugin, PluginAction, ValetPlugin } from "@valet/engine";
 import type { WorkflowRunOrigin } from "@valet/workflow";
 import type { Usage } from "@earendil-works/pi-ai/compat";
 import * as piAi from "@earendil-works/pi-ai/compat";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@valet/engine/test-helpers";
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, type FauxResponseStep } from "@valet/engine/test-helpers";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { buildWorkflowEngineDeps, mapPiAiUsage, unattendedRefusalError, workflowRunThreadKey, workflowStepThreadKey } from "./engine-deps.js";
 import { isWorkflowRunThread } from "./editor-thread-context.js";
 import { eq, sql } from "drizzle-orm";
-import { legacyWorkflowAdmissions, assistants, orgs, workflowDefinitions } from "../schema/index.js";
+import { legacyWorkflowAdmissions, assistants, childWatches, orgs, workflowDefinitions } from "../schema/index.js";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
 import { createLlmProvider } from "../services/llm-providers.js";
 import { ensureDefaultAssistantSession, loadAssistantBySessionId, resolveDefaultAssistant } from "../assistants/service.js";
@@ -742,6 +742,57 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
       faux.unregister();
     }
   });
+
+  it("waits for a delegated child's report and returns the turn that the report starts", async () => {
+    // A Thread step's turn can hand the work to a child with `task` and end.
+    // The child's report starts the turn that finishes the step. Before the
+    // fix, the step settled on the first turn and the report was dropped.
+    const faux = registerFauxProvider({ api: "anthropic-messages", provider: "anthropic" });
+    vi.stubEnv("ANTHROPIC_API_KEY", "faux-key");
+    try {
+      let releaseChild: () => void = () => {};
+      const childMayAnswer = new Promise<void>((resolve) => { releaseChild = resolve; });
+      const route: Extract<FauxResponseStep, (...args: never[]) => unknown> = async (context) => {
+        const brief = JSON.stringify(context.messages.find((message) => message.role === "user"));
+        if (brief.includes("CHILD BRIEF")) {
+          await childMayAnswer;
+          return fauxAssistantMessage("Finding: the retry loop never stops.");
+        }
+        const last = context.messages.at(-1);
+        if (last?.role === "toolResult") return fauxAssistantMessage("I'm reviewing the pull request.");
+        if (JSON.stringify(last).includes("child.settled")) return fauxAssistantMessage("Posted the review with one finding.");
+        return fauxAssistantMessage([fauxToolCall("task", { prompt: "CHILD BRIEF: review the diff.", title: "review" }, { id: "task-1" })],
+          { stopReason: "toolUse" });
+      };
+      faux.setResponses(Array.from({ length: 6 }, () => route));
+      api = await bootTestApi();
+      const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+      const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore,
+        actionPluginByService, credentials: engineCredentials });
+      await seedRun(api, "run_delegates", "wf_delegates");
+      const receipt = await deps.promptOrchestrator("Review the pull request and post the result.", {
+        dispatchId: "workflow:run_delegates:review", queueMode: "followup",
+        ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id },
+      });
+
+      // The first turn ends while the child still works. The step is not done.
+      await vi.waitFor(async () => {
+        expect((await engineStore.getQueueItem(receipt.sessionId, receipt.queueItemId))?.status).toBe("settled");
+      }, { timeout: 15_000, interval: 50 });
+      expect(await db.select().from(childWatches).where(eq(childWatches.parentThreadId, receipt.threadId))).toHaveLength(1);
+      expect(await deps.isSettled(receipt.sessionId, receipt.queueItemId)).toBe(false);
+      const settled = deps.awaitResult(receipt.sessionId, receipt.threadId, receipt.queueItemId);
+
+      releaseChild();
+      // The test API runs no wake-watcher timer, so drive its delivery pass here.
+      const deliver = setInterval(() => { void api?.providers.wakeWatcher.sweep(); }, 200);
+      const result = await settled.finally(() => clearInterval(deliver));
+      expect(result).toMatchObject({ outcome: "completed", text: "Posted the review with one finding." });
+      expect(await deps.isSettled(receipt.sessionId, receipt.queueItemId)).toBe(true);
+    } finally {
+      faux.unregister();
+    }
+  }, 60_000);
 
   it.each(["", ":repair"])("retains the original upgrade admission when a rendered workflow prompt changes%s", async (suffix) => {
     api = await bootTestApi();

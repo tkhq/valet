@@ -62,6 +62,9 @@ it("the selected OpenAI model generates and edits natively with sandbox files, l
   const b64 = png.toString("base64");
   const nativeFetch = globalThis.fetch;
   const requests: Record<string, unknown>[] = [];
+  // The fixture answers through a global fetch stub, so this session uses
+  // pi-ai's default fetch. `lib/outbound-url.test.ts` covers the guarded fetch.
+  session.options.modelFetch = undefined;
   vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (url, init) => {
     if (String(url) === "https://api.openai.com/v1/responses") {
       const body: unknown = JSON.parse(String(init?.body));
@@ -158,6 +161,9 @@ it("an unsupported workflow agent model generates and edits through direct Image
   const b64 = png.toString("base64");
   const nativeFetch = globalThis.fetch;
   const requests: Record<string, unknown>[] = [];
+  // The fixture answers through a global fetch stub, so this session uses
+  // pi-ai's default fetch. `lib/outbound-url.test.ts` covers the guarded fetch.
+  session.options.modelFetch = undefined;
   vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (url, init) => {
     if (String(url).startsWith("https://api.openai.com/v1/images/")) {
       const body: unknown = init?.body instanceof FormData ? { model: init.body.get("model"), prompt: init.body.get("prompt"), image: init.body.get("image") } : JSON.parse(String(init?.body));

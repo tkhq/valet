@@ -23,6 +23,7 @@ import {
 } from "../schema/index.js";
 import { AUTH_SESSION_LIFETIME_SECONDS, type AuthConfig } from "./config.js";
 import type { buildAuthHooks } from "./provisioning.js";
+import { OIDC_PROVIDER_ID } from "./sso-hooks.js";
 
 export interface BuildAuthOpts {
   db: AppDb;
@@ -196,7 +197,9 @@ export function buildAuth(opts: BuildAuthOpts): ValetAuth {
     // Keep eligibility freshness tied to this explicit session lifetime.
     // This value is Better Auth's documented default, not a new duration.
     session: { expiresIn: AUTH_SESSION_LIFETIME_SECONDS },
-    emailAndPassword: { enabled: true },
+    // Off unless AUTH_METHODS lists `password`: better-auth then refuses
+    // email sign-in and sign-up at the endpoint, not only on the login page.
+    emailAndPassword: { enabled: cfg.methods.includes("password") },
     socialProviders: {
       ...(cfg.social.google
         ? { google: { ...cfg.social.google, accessType: "offline", prompt: "select_account consent" } }
@@ -233,7 +236,7 @@ export function buildAuth(opts: BuildAuthOpts): ValetAuth {
           ? {
               defaultSSO: [
                 {
-                  providerId: "oidc",
+                  providerId: OIDC_PROVIDER_ID,
                   domain: cfg.oidc.domain,
                   oidcConfig: {
                     clientId: cfg.oidc.clientId,

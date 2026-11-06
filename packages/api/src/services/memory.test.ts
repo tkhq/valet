@@ -1,7 +1,8 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { orgMembers, orgs, users } from "../schema/index.js";
+import { memoryFiles, orgMembers, orgs, users } from "../schema/index.js";
+import { BUILTIN_PRINCIPLES } from "@valet/shared";
 import { addMember, createTeam, removeMember } from "./teams.js";
 import { parseConcept } from "../lib/okf.js";
 import {
@@ -9,8 +10,11 @@ import {
   importFiles,
   linksForFile,
   listFiles,
+  listPrincipleFiles,
   moveFile,
+  MAX_PATCH_BATCH,
   patchFile,
+  patchFiles,
   readFile,
   removeFile,
   searchFiles,
@@ -160,6 +164,58 @@ describe("memory service", () => {
       await expect(
         patchFile(db, scope, { path: "notes/p.md", oldString: "nope", newString: "x" }),
       ).rejects.toThrow(/not found/);
+    });
+  });
+
+  describe("patchFiles", () => {
+    async function body(scope: MemoryScope, path: string): Promise<string> {
+      const result = await readFile(db, scope, path);
+      if (result.kind !== "file") throw new Error("expected file");
+      return result.file.content;
+    }
+
+    it("applies several patches across files in one call", async () => {
+      const scope = scopeFor("u1");
+      await writeFile(db, scope, { path: "notes/a.md", content: "alpha one\n" });
+      await writeFile(db, scope, { path: "notes/b.md", content: "beta one\n" });
+      const results = await patchFiles(db, scope, { patches: [
+        { path: "notes/a.md", oldString: "one", newString: "two" },
+        { path: "notes/b.md", oldString: "one", newString: "two" },
+        { path: "journal/2026-10-31.md", oldString: "", newString: "new\n" },
+      ] });
+      expect(results.map((r) => r.file.path)).toEqual(["notes/a.md", "notes/b.md", "journal/2026-10-31.md"]);
+      expect(await body(scope, "notes/a.md")).toBe("alpha two\n");
+      expect(await body(scope, "notes/b.md")).toBe("beta two\n");
+      expect(await body(scope, "journal/2026-10-31.md")).toBe("new\n");
+    });
+
+    it("applies patches to one file in order", async () => {
+      const scope = scopeFor("u1");
+      await writeFile(db, scope, { path: "notes/a.md", content: "one\n" });
+      await patchFiles(db, scope, { patches: [
+        { path: "notes/a.md", oldString: "one", newString: "two" },
+        { path: "notes/a.md", oldString: "two", newString: "three" },
+      ] });
+      expect(await body(scope, "notes/a.md")).toBe("three\n");
+    });
+
+    it("applies no patch when one fails, and names the one that failed", async () => {
+      const scope = scopeFor("u1");
+      await writeFile(db, scope, { path: "notes/a.md", content: "alpha one\n" });
+      await writeFile(db, scope, { path: "notes/b.md", content: "beta one\n" });
+      await expect(patchFiles(db, scope, { patches: [
+        { path: "notes/a.md", oldString: "one", newString: "two" },
+        { path: "notes/b.md", oldString: "missing", newString: "two" },
+      ] })).rejects.toThrow(/Patch 2 of 2 \(notes\/b\.md\).*No patch was applied/);
+      expect(await body(scope, "notes/a.md")).toBe("alpha one\n");
+      expect(await body(scope, "notes/b.md")).toBe("beta one\n");
+    });
+
+    it("refuses an empty batch and one past the limit", async () => {
+      const scope = scopeFor("u1");
+      await expect(patchFiles(db, scope, { patches: [] })).rejects.toThrow(/at least one patch/);
+      const many = Array.from({ length: MAX_PATCH_BATCH + 1 }, (_, i) => ({ path: `notes/${i}.md`, oldString: "", newString: "x" }));
+      await expect(patchFiles(db, scope, { patches: many })).rejects.toThrow(/at most 20 patches/);
     });
   });
 
@@ -409,6 +465,72 @@ describe("memory service", () => {
 
     it("throws NotFound for a path with no file behind it", async () => {
       await expect(linksForFile(db, scopeFor("u1"), "notes/nope.md")).rejects.toThrow(/not found/i);
+    });
+  });
+
+  describe("built-in and synced principles", () => {
+    const builtin = BUILTIN_PRINCIPLES[0];
+    const path = `principles/${builtin.name}.md`;
+
+    it("reads a built-in principle's text until the scope writes its own file", async () => {
+      const scope = scopeFor("u1");
+      const shipped = await readFile(db, scope, path);
+      expect(shipped.kind).toBe("file");
+      if (shipped.kind !== "file") return;
+      expect(shipped.rendered).toContain(`# ${builtin.rule}`);
+      expect(shipped.rendered).toContain(builtin.when);
+      expect(shipped.file.version).toBe(0);
+      expect(await listFiles(db, scope)).toEqual([]);
+
+      await writeFile(db, scope, { path, content: "# My rule\n\nMine.", type: "principle", description: "Always" });
+      const own = await readFile(db, scope, path);
+      expect(own.kind === "file" && own.rendered).toContain("# My rule");
+      // Another user still reads the shipped text.
+      const other = await readFile(db, scopeFor("u2"), path);
+      expect(other.kind === "file" && other.rendered).toContain(`# ${builtin.rule}`);
+    });
+
+    it("patches a built-in principle into an own file that keeps its rule metadata", async () => {
+      const scope = scopeFor("u1");
+      const firstLine = builtin.details.split("\n")[0];
+      const { file } = await patchFile(db, scope, { path, oldString: firstLine, newString: `${firstLine} Also attach the output.` });
+      expect(file.version).toBe(1);
+      expect(file.type).toBe("principle");
+      expect(file.description).toBe(builtin.when);
+      expect(file.title).toBe(builtin.rule);
+      expect(file.content).toContain("Also attach the output.");
+      const listed = await listPrincipleFiles(db, scope);
+      expect(listed.map((entry) => entry.path)).toEqual([path]);
+    });
+
+    it("lists a principle synced from a repository under lib/principles/", async () => {
+      const now = Date.now();
+      await db.insert(memoryFiles).values({
+        ownerType: "user", ownerId: "u1", path: "lib/principles/canonical-source-wins.md", title: "The canonical source wins",
+        content: "# The canonical source wins\n", type: "principle", description: "When two sources disagree.",
+        sourceId: "src1", upstreamPath: ".valet/memory/principles/canonical-source-wins.md", createdAt: now, updatedAt: now,
+      });
+      const listed = await listPrincipleFiles(db, scopeFor("u1"));
+      expect(listed.map((entry) => [entry.path, entry.title])).toEqual([["lib/principles/canonical-source-wins.md", "The canonical source wins"]]);
+      await expect(writeFile(db, scopeFor("u1"), { path: "lib/principles/canonical-source-wins.md", content: "# Changed\n" }))
+        .rejects.toThrow(/lib\/ is reserved/);
+    });
+
+    it("lets org members read what an org source mirrors, and nobody else", async () => {
+      const now = Date.now();
+      await db.insert(orgs).values({ id: "org2", name: "Other", createdAt: now });
+      await seedUser(db, "u3", "org2");
+      await db.insert(memoryFiles).values({
+        ownerType: "org", ownerId: orgId, path: "lib/principles/merge-bar.md", title: "Verify before merge",
+        content: "# Verify before merge\n", type: "principle", description: "Before a merge.", sourceId: "src-org", createdAt: now, updatedAt: now,
+      });
+      const listed = await listPrincipleFiles(db, scopeFor("u1"));
+      expect(listed.map((entry) => entry.path)).toEqual([`org:${orgId}/lib/principles/merge-bar.md`]);
+      const read = await readFile(db, scopeFor("u1"), `org:${orgId}/lib/principles/merge-bar.md`);
+      expect(read.kind === "file" && read.rendered).toContain("# Verify before merge");
+      expect(await listPrincipleFiles(db, scopeFor("u3"))).toEqual([]);
+      await expect(readFile(db, scopeFor("u3"), `org:${orgId}/lib/principles/merge-bar.md`)).rejects.toThrow();
+      await expect(writeFile(db, scopeFor("u1"), { path: `org:${orgId}/lib/principles/merge-bar.md`, content: "# Changed\n" })).rejects.toThrow();
     });
   });
 

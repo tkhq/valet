@@ -13,6 +13,7 @@ import { Dialog, DialogClose, DialogContent, DialogTitle } from "~/components/pr
 import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
 import { useMobileLayout } from "~/hooks/use-mobile-layout";
 import { useMobileAppViewport } from "~/hooks/use-mobile-app-viewport";
+import { useSwipeDismiss } from "~/hooks/use-swipe-dismiss";
 import { cn } from "~/lib/cn";
 import { useResizablePane } from "~/lib/use-resizable-pane";
 
@@ -55,11 +56,12 @@ export function useSidebarControls(): SidebarControls | null {
   return useContext(SidebarControlsContext);
 }
 
-function loadStoredCollapsed(): boolean {
+function loadStoredCollapsed(key: string, fallback: boolean): boolean {
   try {
-    return window.localStorage.getItem(COLLAPSED_KEY) === "1";
+    const value = window.localStorage.getItem(key);
+    return value === null ? fallback : value === "1";
   } catch {
-    return false;
+    return fallback;
   }
 }
 
@@ -84,11 +86,20 @@ function loadStoredCollapsed(): boolean {
 export function AppShell({
   topNav,
   sidebar,
+  rail,
+  collapseScope,
   rightPanel,
   children,
   className,
 }: {
   topNav: ReactNode;
+  /** The collapsed sidebar: a 44px icon rail shown in its place on desktop. */
+  rail?: ReactNode;
+  /**
+   * A page with its own panes, such as the workflow editor, keeps its own
+   * collapsed state under this name and starts collapsed.
+   */
+  collapseScope?: string;
   /**
    * `null`/`undefined` hides the sidebar entirely (no `<aside>` at all,
    * and no mobile toggle) — used by standalone session views (decision 14:
@@ -103,6 +114,8 @@ export function AppShell({
   const shellRef = useRef<HTMLDivElement>(null);
   useMobileAppViewport(shellRef, mobile);
   const { open: mobileOpen, setOpen: setMobileOpen } = useResponsiveOverlay("md");
+  // The phone drawer slides in from the left, so a swipe left closes it.
+  const drawerSwipe = useSwipeDismiss("left", () => setMobileOpen(false));
   const sidebarPane = useResizablePane({
     storageKey: "valet:sidebar-width", cssVar: "--sidebar-width",
     defaultWidth: 288, min: 200, max: 480, side: "left",
@@ -110,7 +123,9 @@ export function AppShell({
   });
   const drawerOpener = useRef<HTMLElement | null>(null);
   const drawer = useRef<HTMLDivElement>(null);
-  const [collapsed, setCollapsed] = useState<boolean>(() => loadStoredCollapsed());
+  const collapseKey = collapseScope ? `${COLLAPSED_KEY}:${collapseScope}` : COLLAPSED_KEY;
+  const [collapsedByKey, setCollapsedByKey] = useState<Record<string, boolean>>({});
+  const collapsed = collapsedByKey[collapseKey] ?? loadStoredCollapsed(collapseKey, collapseScope !== undefined);
 
   // Closes the drawer when a link inside it is clicked (thread/child
   // selection) without requiring `ThreadTree` to know about the drawer.
@@ -120,13 +135,13 @@ export function AppShell({
   }
 
   const setAndStoreCollapsed = useCallback((next: boolean) => {
-    setCollapsed(next);
+    setCollapsedByKey((current) => ({ ...current, [collapseKey]: next }));
     try {
-      window.localStorage.setItem(COLLAPSED_KEY, next ? "1" : "0");
+      window.localStorage.setItem(collapseKey, next ? "1" : "0");
     } catch {
       // Non-persistent environments still get the in-session behavior.
     }
-  }, []);
+  }, [collapseKey]);
 
   // Stable, so a consumer can close the drawer from an effect without
   // re-running it on every shell render.
@@ -165,10 +180,12 @@ export function AppShell({
               >
                 <div className="flex-1 min-h-0 flex flex-col">{sidebar}</div>
               </aside>
+              {collapsed && rail != null && <aside aria-label="Sidebar rail" className="hidden w-11 shrink-0 flex-col border-r border-line md:flex">{rail}</aside>}
               {!collapsed && <div
                 {...sidebarPane.handleProps}
                 title="Drag to resize; use arrow keys when focused"
-                className="hidden md:block relative z-10 w-1 shrink-0 touch-none cursor-col-resize bg-line hover:bg-moss/50 focus:bg-moss focus:outline-none after:absolute after:inset-y-0 after:-inset-x-1"
+                // A 1px hairline like every other divider; the wider ::after strip keeps it easy to grab.
+                className="hidden md:block relative z-10 w-px shrink-0 touch-none cursor-col-resize bg-line hover:bg-moss/50 focus:bg-moss focus:outline-none after:absolute after:inset-y-0 after:-inset-x-1.5"
               />}
               <Dialog open={mobileOpen} onOpenChange={setMobileOpen}>
                 <DialogContent
@@ -179,7 +196,8 @@ export function AppShell({
                   }}
                   aria-describedby={undefined}
                   hideClose
-                  className="left-0 top-0 h-dvh max-h-none w-full max-w-none translate-x-0 translate-y-0 rounded-none border-0 bg-paper p-0 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] flex flex-col gap-0"
+                  className="left-0 top-0 h-dvh max-h-none w-full max-w-none translate-x-0 translate-y-0 rounded-none border-0 bg-paper p-0 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] flex flex-col gap-0 data-[state=open]:animate-in data-[state=open]:slide-in-from-left motion-reduce:animate-none"
+                  {...drawerSwipe}
                   onClick={onDrawerClick}
                   onCloseAutoFocus={(event) => {
                     event.preventDefault();

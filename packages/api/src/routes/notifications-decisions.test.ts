@@ -9,6 +9,7 @@ import { mintCliToken } from "../auth/cli-tokens.js";
 import { ensureWorkflowSession } from "../workflows/engine-deps.js";
 import { getWorkflowRunDetail } from "../workflows/service.js";
 import type { ListNotificationDecisionsResponse } from "../wire/types.js";
+import { bootstrapAdminInviteCode } from "../test-helpers/bootstrap-admin-code.js";
 
 let api: TestApi | undefined;
 afterEach(async () => { await api?.cleanup(); api = undefined; });
@@ -262,7 +263,7 @@ it.each(["long question", "Unicode order"])("bounds inbox pages and roundtrips %
 it("requires a browser owner for lasting consent even when an API key names that owner", async () => {
   api = await bootTestApi({ auth: true });
   const signup = await fetch(`${api.baseUrl}/api/auth/sign-up/email`, { method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ name: "Lender", email: "lender@nowhere.test", password: "correct-horse-battery" }) });
+    body: JSON.stringify({ name: "Lender", email: "lender@nowhere.test", password: "correct-horse-battery", inviteCode: await bootstrapAdminInviteCode(api.providers.db) }) });
   const cookie = signup.headers.get("set-cookie")?.match(/better-auth\.session_token=[^;]+/)?.[0];
   if (!cookie) throw new Error("Missing session cookie");
   const me: unknown = await (await fetch(`${api.baseUrl}/api/me`, { headers: { cookie } })).json();

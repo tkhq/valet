@@ -355,7 +355,7 @@ describe("GitHub connection recovery", () => {
     reposData.connected = false;
     renderPage();
     expect(screen.getByRole("link", { name: "Connect GitHub" }).getAttribute("href"))
-      .toBe("/integrations?service=github&workspace=user");
+      .toBe("/settings/integrations?service=github");
   });
 
   it("takes team org admins directly to GitHub App settings", () => {

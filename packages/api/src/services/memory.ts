@@ -18,15 +18,16 @@
 import { and, asc, desc, eq, gt, isNull, or, sql, type SQL } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import type { Principal } from "@valet/engine";
-import { NotFoundError, parseSearchQuery, ValidationError } from "@valet/shared";
+import { builtinPrincipleAt, builtinPrincipleBody, NotFoundError, parseSearchQuery, ValidationError, type BuiltinPrinciple } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
 import { extractLinkTargets, isPathShaped, rewriteLinkTargets } from "../lib/memory-graph.js";
-import { memoryFiles, teamMembers, teams, orgMembers, type MemoryFileRow } from "../schema/index.js";
+import { memoryFileUsage, memoryFiles, teamMembers, teams, orgMembers, type MemoryFileRow } from "../schema/index.js";
 import { listTeamsForUser, canAdministerTeam, lockTeamForOwnership } from "./teams.js";
 import {
   assertWritablePath,
   normalizePath,
   parseConcept,
+  ReservedPathError,
   remapImportPath,
   renderConcept,
   type RenderableConcept,
@@ -38,6 +39,12 @@ export interface MemoryScope {
   /** Host-selected execution scope; empty means explicitly shared owner memory. */
   namespace?: string;
   actorUserId: string;
+  /**
+   * Limits the teams and orgs a read reaches to this org. Absent: a
+   * person's read reaches every team and org they belong to. A plugin
+   * handler sets it, so a line in one org never reads another org's memory.
+   */
+  orgId?: string;
 }
 
 // ─── Directory type defaults (OKF spec "Type vocabulary") ─────────────────
@@ -55,6 +62,23 @@ const DIRECTORY_DEFAULT_TYPE: Record<string, string> = {
 
 /** The memory directory that holds principles. */
 export const PRINCIPLES_DIR = "principles/";
+
+/** Where content sync mounts a repository's `.valet/memory/principles/`.
+ * The files there are principles too, and `lib/` keeps them read-only. */
+export const SYNCED_PRINCIPLES_DIR = "lib/principles/";
+
+/** The row a built-in principle reads as while the scope has no file at its
+ * path. Version 0 marks it: no write made it, and no table holds it. */
+export function builtinPrincipleRow(scope: MemoryScope, principle: BuiltinPrinciple): MemoryFileRow {
+  return {
+    ownerType: scope.owner.type, ownerId: scope.owner.id, namespace: scope.namespace ?? "",
+    path: `principles/${principle.name}.md`, title: principle.rule, content: builtinPrincipleBody(principle),
+    type: "principle", description: principle.when, tags: "[]", resource: "", extras: "{}",
+    sensitivity: "private", origin: "built-in", expires: null, pinned: false, actorUserId: "",
+    sourceSessionId: "", orgId: "", version: 0, sourceId: null, upstreamPath: null, contentSha: null,
+    createdAt: 0, updatedAt: 0,
+  };
+}
 
 /** True for a stored (own-scope, normalized) path at or under `principles/`. */
 export function isPrinciplePath(path: string): boolean {
@@ -172,10 +196,32 @@ async function resolveReadableOwners(db: AppDb, scope: MemoryScope): Promise<Rea
   if (scope.owner.type === "user") {
     const teams = await listTeamsForUser(db, scope.owner.id);
     for (const team of teams) {
+      if (scope.orgId !== undefined && team.orgId !== scope.orgId) continue;
       owners.push({ ownerType: "team", ownerId: team.id, namespace: "", prefix: `team:${team.id}/` });
     }
   }
+  for (const orgId of await readableOrgIds(db, scope)) {
+    owners.push({ ownerType: "org", ownerId: orgId, namespace: "", prefix: `org:${orgId}/` });
+  }
   return owners;
+}
+
+/**
+ * The orgs whose memory a scope reads: a user's orgs, or a team's org. Org
+ * memory holds what an org content source mirrors, such as a company brain's
+ * principles. No write path accepts an `org:{id}/` path, so it stays read-only
+ * to agents and members.
+ */
+async function readableOrgIds(db: AppDb, scope: MemoryScope): Promise<string[]> {
+  let orgIds: string[] = [];
+  if (scope.owner.type === "user") {
+    const rows = await db.select({ orgId: orgMembers.orgId }).from(orgMembers).where(eq(orgMembers.userId, scope.owner.id));
+    orgIds = rows.map((row) => row.orgId);
+  } else if (scope.owner.type === "team") {
+    const rows = await db.select({ orgId: teams.orgId }).from(teams).where(eq(teams.id, scope.owner.id)).limit(1);
+    orgIds = rows.map((row) => row.orgId);
+  }
+  return scope.orgId === undefined ? orgIds : orgIds.filter((id) => id === scope.orgId);
 }
 
 async function isTeamMember(db: AppDb, teamId: string, userId: string): Promise<boolean> {
@@ -188,6 +234,7 @@ async function isTeamMember(db: AppDb, teamId: string, userId: string): Promise<
 }
 
 const TEAM_PREFIX_RE = /^team:([^/]+)\/(.*)$/;
+const ORG_PREFIX_RE = /^org:([^/]+)\/(.*)$/;
 
 /** Resolves a caller-supplied path (which may carry a `team:{id}/` virtual
  * prefix) to the real `(ownerType, ownerId, realPath)` it maps to, for
@@ -200,6 +247,12 @@ async function resolveReadTarget(
   scope: MemoryScope,
   path: string,
 ): Promise<{ ownerType: string; ownerId: string; namespace: string; realPath: string } | null> {
+  const org = ORG_PREFIX_RE.exec(path);
+  if (org) {
+    const [, orgId, rest] = org;
+    if (!(await readableOrgIds(db, scope)).includes(orgId)) return null;
+    return { ownerType: "org", ownerId: orgId, namespace: "", realPath: rest };
+  }
   const m = TEAM_PREFIX_RE.exec(path);
   if (!m) {
     return { ownerType: scope.owner.type, ownerId: scope.owner.id, namespace: scope.namespace ?? "", realPath: path };
@@ -211,6 +264,10 @@ async function resolveReadTarget(
   if (scope.owner.type !== "user") return null;
   const member = await isTeamMember(db, teamId, scope.owner.id);
   if (!member) return null;
+  if (scope.orgId !== undefined) {
+    const [team] = await db.select({ orgId: teams.orgId }).from(teams).where(eq(teams.id, teamId)).limit(1);
+    if (team?.orgId !== scope.orgId) return null;
+  }
   return { ownerType: "team", ownerId: teamId, namespace: "", realPath: rest };
 }
 
@@ -354,7 +411,10 @@ export async function patchFile(db: AppDb, scope: MemoryScope, params: PatchFile
     .from(memoryFiles)
     .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? ""), eq(memoryFiles.path, path)))
     .limit(1);
-  const existing = existingRows[0];
+  // A built-in principle with no file yet patches from its shipped text. The
+  // write creates the file, which then replaces the built-in for this scope.
+  const builtin = existingRows[0] ? undefined : builtinPrincipleAt(path);
+  const existing = existingRows[0] ?? (builtin ? builtinPrincipleRow(scope, builtin) : undefined);
 
   if (!existing) {
     if (params.oldString !== "") {
@@ -375,7 +435,49 @@ export async function patchFile(db: AppDb, scope: MemoryScope, params: PatchFile
   const newContent =
     existing.content.slice(0, idx) + params.newString + existing.content.slice(idx + params.oldString.length);
 
-  return writeFile(db, scope, { path, content: newContent, source: params.source });
+  return writeFile(db, scope, {
+    path, content: newContent, source: params.source,
+    ...(builtin ? { type: existing.type, description: existing.description, origin: existing.origin } : {}),
+  });
+}
+
+// ─── patchFiles ────────────────────────────────────────────────────────
+
+/** Most patches one `patchFiles` call applies. */
+export const MAX_PATCH_BATCH = 20;
+
+export interface PatchFilesParams {
+  patches: Array<Omit<PatchFileParams, "source">>;
+  /** Passed through to every patch. */
+  source?: WriteSource;
+}
+
+/**
+ * A batched patch set: several exact-replace patches in one transaction.
+ * Every patch applies, or none does. Patches run in order, so a later patch
+ * to the same file sees the earlier one's edit. Each patch takes the same
+ * path and authority rules as `patchFile`.
+ */
+export async function patchFiles(db: AppDb, scope: MemoryScope, params: PatchFilesParams): Promise<WriteFileResult[]> {
+  const { patches } = params;
+  if (patches.length === 0) throw new ValidationError("Send at least one patch.");
+  if (patches.length > MAX_PATCH_BATCH) {
+    throw new ValidationError(`Send at most ${MAX_PATCH_BATCH} patches in one call. Put the rest in another call.`);
+  }
+  return db.transaction(async (tx) => {
+    const results: WriteFileResult[] = [];
+    for (const [i, patch] of patches.entries()) {
+      try {
+        results.push(await patchFile(tx, scope, { ...patch, source: params.source }));
+      } catch (err) {
+        if (err instanceof ValidationError || err instanceof NotFoundError || err instanceof ReservedPathError) {
+          throw new ValidationError(`Patch ${i + 1} of ${patches.length} (${patch.path}) failed: ${err.message.replace(/\.$/, "")}. No patch was applied.`);
+        }
+        throw err;
+      }
+    }
+    return results;
+  });
 }
 
 // ─── removeFile ────────────────────────────────────────────────────────
@@ -403,15 +505,29 @@ export async function removeFile(db: AppDb, scope: MemoryScope, path: string): P
   if (existingRows.length === 0) {
     throw new NotFoundError("memory file", normalized);
   }
-  await db
-    .delete(memoryFiles)
-    .where(
-      and(
-        eq(memoryFiles.ownerType, scope.owner.type),
-        eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? ""),
-        eq(memoryFiles.path, normalized),
-      ),
-    );
+  await db.transaction(async (tx) => {
+    await tx
+      .delete(memoryFiles)
+      .where(
+        and(
+          eq(memoryFiles.ownerType, scope.owner.type),
+          eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? ""),
+          eq(memoryFiles.path, normalized),
+        ),
+      );
+    // Usage belongs to the file. A later file at this path starts unused.
+    await tx.delete(memoryFileUsage).where(usageKey(scope, normalized));
+  });
+}
+
+/** The `memory_file_usage` row for one own-scope path. */
+function usageKey(scope: MemoryScope, path: string): SQL | undefined {
+  return and(
+    eq(memoryFileUsage.ownerType, scope.owner.type),
+    eq(memoryFileUsage.ownerId, scope.owner.id),
+    eq(memoryFileUsage.namespace, scope.namespace ?? ""),
+    eq(memoryFileUsage.path, path),
+  );
 }
 
 // ─── moveFile ──────────────────────────────────────────────────────────
@@ -478,6 +594,10 @@ export async function moveFile(db: AppDb, scope: MemoryScope, params: MoveFilePa
         actorUserId: scope.actorUserId,
       })
       .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? ""), eq(memoryFiles.path, from)));
+    // Usage moves with the file. A row left at `to` by a file that a
+    // repository sync removed would block the move, so it goes first.
+    await tx.delete(memoryFileUsage).where(usageKey(scope, to));
+    await tx.update(memoryFileUsage).set({ path: to }).where(usageKey(scope, from));
     for (const ref of referencers) {
       await tx
         .update(memoryFiles)
@@ -692,6 +812,15 @@ export async function readFile(
     .limit(1);
   const row = rowRows[0];
 
+  // An own-scope read of a built-in principle's path returns the shipped text
+  // until the scope writes a file there.
+  const builtin = !row && target.ownerType === scope.owner.type && target.ownerId === scope.owner.id
+    && target.namespace === (scope.namespace ?? "") ? builtinPrincipleAt(normalized) : undefined;
+  if (builtin) {
+    const file = builtinPrincipleRow(scope, builtin);
+    return { kind: "file", path, rendered: renderFile(file), file };
+  }
+
   if (!row) {
     // Fall back to a directory read: a path prefix that matches existing
     // files but has no exact-match row is treated as an implicit directory.
@@ -849,9 +978,19 @@ async function copyTeamFile(
 
 // ─── listFiles ─────────────────────────────────────────────────────────
 
+/** One stored memory file: its owner tuple and its real (unprefixed) path. */
+export interface MemoryFileKey {
+  ownerType: string;
+  ownerId: string;
+  namespace: string;
+  path: string;
+}
+
 export interface MemoryFileSummary {
   /** Caller-facing path, including any `team:{id}/` virtual prefix. */
   path: string;
+  /** The stored row this entry projects. */
+  key: MemoryFileKey;
   title: string;
   description: string;
   type: string;
@@ -875,6 +1014,7 @@ export async function listFiles(db: AppDb, scope: MemoryScope, opts?: { prefix?:
       if (opts?.prefix && !virtualPath.startsWith(opts.prefix)) continue;
       out.push({
         path: virtualPath,
+        key: { ownerType: row.ownerType, ownerId: row.ownerId, namespace: row.namespace, path: row.path },
         title: row.title,
         description: row.description,
         type: row.type,
@@ -884,6 +1024,40 @@ export async function listFiles(db: AppDb, scope: MemoryScope, opts?: { prefix?:
     }
   }
   out.sort((a, b) => a.path.localeCompare(b.path));
+  return out;
+}
+
+/** Most principle files `listPrincipleFiles` reads from each owner. More
+ * than the snapshot index lists, so a principle past the index cap still
+ * resolves, but bounded. */
+export const MAX_PRINCIPLE_FILES = 200;
+
+export type PrincipleFileSummary = Pick<MemoryFileSummary, "path" | "key" | "title" | "description">;
+
+/** The principle files `scope` can read across its read-union, projected
+ * like `listFiles`, without their bodies. */
+export async function listPrincipleFiles(db: AppDb, scope: MemoryScope): Promise<PrincipleFileSummary[]> {
+  const owners = await resolveReadableOwners(db, scope);
+  const out: PrincipleFileSummary[] = [];
+  for (const owner of owners) {
+    const rows = await db
+      .select({ path: memoryFiles.path, title: memoryFiles.title, description: memoryFiles.description })
+      .from(memoryFiles)
+      .where(and(
+        eq(memoryFiles.ownerType, owner.ownerType), eq(memoryFiles.ownerId, owner.ownerId), eq(memoryFiles.namespace, owner.namespace),
+        or(sql`${memoryFiles.path} LIKE ${`${PRINCIPLES_DIR}%`}`, sql`${memoryFiles.path} LIKE ${`${SYNCED_PRINCIPLES_DIR}%`}`),
+      ))
+      .orderBy(asc(memoryFiles.path))
+      .limit(MAX_PRINCIPLE_FILES);
+    for (const row of rows) {
+      out.push({
+        path: `${owner.prefix}${row.path}`,
+        key: { ownerType: owner.ownerType, ownerId: owner.ownerId, namespace: owner.namespace, path: row.path },
+        title: row.title,
+        description: row.description,
+      });
+    }
+  }
   return out;
 }
 

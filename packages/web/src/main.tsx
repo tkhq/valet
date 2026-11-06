@@ -9,6 +9,7 @@ import { registerServiceWorker } from "./pwa/register";
 import { api } from "./api/client";
 import { createQueryClient } from "./api/query-client";
 import { loadPublicOrigin } from "./lib/public-origin";
+import { perfMode } from "./lib/perf/flag";
 
 // Apply the persisted appearance choices (Settings → Appearance) before the
 // first React paint. The inline script in `index.html` has normally done
@@ -33,6 +34,11 @@ const router = createRouter({
   defaultPreload: "intent",
   context: { queryClient },
 });
+
+// Latency measurement, off unless `?perf=1` (lib/perf/flag.ts). The module
+// loads as its own chunk, so the app does not carry it otherwise.
+const perf = perfMode();
+if (perf !== "off") void import("./lib/perf/install").then(({ installPerf }) => installPerf(router, queryClient, perf));
 
 declare module "@tanstack/react-router" {
   interface Register {

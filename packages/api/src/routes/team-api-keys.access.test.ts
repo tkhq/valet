@@ -20,6 +20,7 @@ import type {
   EnsureWorkspaceRuntimeResponse,
   SessionDetail,
 } from "../wire/types.js";
+import { bootstrapAdminInviteCode } from "../test-helpers/bootstrap-admin-code.js";
 
 let api: TestApi | undefined;
 
@@ -35,11 +36,11 @@ function extractSessionCookie(setCookieHeader: string | null): string {
   return match![0];
 }
 
-async function signUp(baseUrl: string, email: string, name: string): Promise<string> {
+async function signUp(baseUrl: string, email: string, name: string, inviteCode?: string): Promise<string> {
   const res = await fetch(`${baseUrl}/api/auth/sign-up/email`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, email, password: "correct-horse-battery" }),
+    body: JSON.stringify({ name, email, password: "correct-horse-battery", ...(inviteCode ? { inviteCode } : {}) }),
   });
   expect(res.status).toBe(200);
   return extractSessionCookie(res.headers.get("set-cookie"));
@@ -89,7 +90,7 @@ interface Fixture {
 /** One admin, one team, one team key, and a session on each side of the line. */
 async function bootFixture(): Promise<Fixture> {
   api = await bootTestApi({ auth: true });
-  const cookie = await signUp(api.baseUrl, "admin@nowhere.test", "First Admin");
+  const cookie = await signUp(api.baseUrl, "admin@nowhere.test", "First Admin", await bootstrapAdminInviteCode(api.providers.db));
   const teamId = await createTeam(api.baseUrl, cookie, "Platform");
   const teamKey = await mintTeamKey(api.baseUrl, cookie, teamId);
   const personalSessionId = await createSession(api.baseUrl, { cookie });

@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ToolContext } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { homeTasks, sessionThreads, teamMembers, teams, threadPullRequests, workflowSchedules } from "../schema/index.js";
-import { HOME_THREAD_KEY, MORNING_BRIEF_PROMPT, ensureHomeThread, homeWorkspaces, matchWorkspace, messageHomeTask, readHomeTask, startHomeTask, wireHomeTaskReports } from "../home/service.js";
+import { HOME_THREAD_KEY, MORNING_BRIEF_PROMPT, ensureHomeThread, homeTaskPrompt, homeWorkspaces, matchWorkspace, messageHomeTask, readHomeTask, startHomeTask, wireHomeTaskReports } from "../home/service.js";
 import { buildHomeTools } from "../home/tools.js";
 import type { HomeConversationResponse, HomeTasksResponse, ListThreadsResponse } from "../wire/types.js";
 
@@ -165,6 +165,8 @@ describe("home tasks", () => {
     const submission = await test.providers.engineStore.getQueueItem(task.sessionId, row!.queueItemId!);
     expect(submission?.author?.id).toBe(USER.id);
     expect(submission?.threadId).toBe(task.threadId);
+    expect(submission?.content).toBe(homeTaskPrompt("Check whether the deploy finished."));
+    expect(submission?.content).toContain("start a child with the task tool and pass repo");
     const tasks = await (await fetch(`${test.baseUrl}/api/home/tasks`)).json() as HomeTasksResponse;
     const all = [...tasks.needsYou, ...tasks.working, ...tasks.updates, ...tasks.finished];
     const listed = all.find((item) => item.threadId === task.threadId);

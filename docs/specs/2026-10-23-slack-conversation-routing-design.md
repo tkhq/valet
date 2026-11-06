@@ -61,7 +61,27 @@ DM. The recipient travels with the turn (`StreamTurn.recipient`, passed to
 group turn sets the thread status like a DM turn. Slack accepts the status call
 outside the assistant view with the `chat:write` scope.
 
-Replies in the thread that do not mention the app reach no assistant.
+A reply in the thread that does not mention the app reaches the sender's
+assistant only when the sender's own mention opened a chat in that thread. The
+transport marks such a reply `group.followUp`. The host delivers it to that
+chat as an overheard message (`reply: "manual"`), as the follow router does in
+a followed channel thread: the assistant answers with `reply_to_origin` when
+the message is for it, and stays silent when people talk to each other. The
+reply queues as `followup`, so it does not interrupt a running turn, and it
+shows no thinking status. A follow-up never opens a chat, skips the rule
+check, and gets no notice when the sender has no linked account or the group
+DM is shared with another organization. Other replies without a mention reach
+no assistant. They reach the next turn through the thread window.
+
+The host serializes destination lookups for one person and conversation. A
+follow-up that arrives while that person's mention still opens the chat waits
+for it, and then continues that chat. The lock is in one process only. A
+follow-up that the host handles before the mention reaches it opens nothing.
+
+Slack sends no `app_mention` event when an edit adds the mention, and the
+transport reads edits only in a 1:1 DM. A mention that a person adds by
+editing a reply therefore starts no turn. Their follow-up already reached
+their chat as an overheard message when they had one.
 
 A rule that would answer the mention takes it, as in a channel. Before it
 resolves the sender, the host runs the event pipeline's matcher

@@ -12,11 +12,13 @@
  * See the "Channel transports" section below for the v2 ChannelTransport
  * contract (Telegram, Phase 7).
  */
+import type { TurnProgress } from "@valet/shared";
 import { validatePluginHttpRoutes, type PluginHttpRoute } from "./plugin-http.js";
 import type { ActionPlugin } from "./plugin-catalog.js";
 import type { RiskLevel, SkillSource, RoleSpec, StoredCredential } from "./types.js";
 import { BUILTIN_COMMAND_NAMES, type CommandDef } from "./commands/types.js";
 import type { WorkflowTemplate } from "./workflow-template.js";
+import type { PluginEventHandler } from "./plugin-agents.js";
 
 export interface OAuthIdentity {
   provider: string;
@@ -337,8 +339,11 @@ export interface InboundChannelEvent {
    * there, it reads the thread's messages before `messageTs` as context.
    * `external` is set when the conversation includes people from another
    * organization (Slack Connect); the host refuses such a conversation.
+   * `followUp` is set when the message is a thread reply that does not
+   * mention the app. The host delivers it, with no automatic reply, only to
+   * a chat that the sender's own mention opened in that thread.
    */
-  group?: { channelId: string; messageTs: string; external?: boolean };
+  group?: { channelId: string; messageTs: string; external?: boolean; followUp?: true };
   /**
    * Provider-side reply anchor for the turn this message starts (Slack's
    * `thread_ts`). The streaming bridge sends it back on `startStream` so the
@@ -455,6 +460,14 @@ export class ChannelDeliveryRejectedError extends Error {
   constructor(readonly channel: string, readonly reason: string) {
     super("The recipient cannot receive this message. Check the linked messaging account.");
     this.name = "ChannelDeliveryRejectedError";
+  }
+}
+
+/** A confirmed rejection created no progress message. Retrying creation is safe. */
+export class ChannelProgressRejectedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ChannelProgressRejectedError";
   }
 }
 
@@ -585,6 +598,12 @@ export interface ChannelTransport {
   appendStream?(ref: StreamRef, markdown: string): Promise<void>;
   /** Close a stream. `final` carries the last markdown and any trailing blocks. */
   stopStream?(ref: StreamRef, final?: { markdown?: string }): Promise<void>;
+  /** Create or update a durable task-progress message. Recovery only finds existing messages. */
+  publishProgress?(
+    conversationKey: string,
+    progress: TurnProgress,
+    options: { threadTs: string; idempotencyKey: string; messageId?: string; recoverOnly?: boolean },
+  ): Promise<{ messageId: string } | null>;
   /** Show a transient working indicator on a thread. */
   setStatus?(conversationKey: string, threadTs: string, status: string): Promise<void>;
   /** Offer starter prompts. `threadTs` omitted = the conversation's entry point. */
@@ -685,6 +704,11 @@ export interface ValetPlugin {
   triggers?: TriggerDef[];
   /** Portable HTTP handlers mounted and authorized by the host. */
   httpRoutes?: PluginHttpRoute[];
+  /**
+   * Handlers that plugin subscriptions route events to. A handler runs AI
+   * work through `ctx.threads` and keeps pointers in `ctx.store`.
+   */
+  eventHandlers?: PluginEventHandler[];
   skills?: SkillSource[];
   roles?: RoleSpec[];
   credentials?: CredentialDeclaration[];
@@ -1113,6 +1137,32 @@ export function validateValetPlugin(
       }
     }
   }
+
+  const handlerIds = new Set<string>();
+  checkArray(v.eventHandlers, "eventHandlers", issues, (h, path) => {
+    const record = asRecord(h, path, issues);
+    if (!record) return;
+    if (typeof record.id !== "string" || !NAME_RE.test(record.id)) {
+      issues.push({ path: `${path}.id`, message: "must match /^[a-z][a-z0-9-]*$/" });
+    } else if (handlerIds.has(record.id)) {
+      issues.push({ path: `${path}.id`, message: `duplicate handler id ${record.id}` });
+    } else {
+      handlerIds.add(record.id);
+    }
+    if (typeof record.description !== "string" || record.description === "") {
+      issues.push({ path: `${path}.description`, message: "required non-empty string" });
+    }
+    if (!Array.isArray(record.events) || record.events.length === 0 || record.events.some((e) => typeof e !== "string" || e === "")) {
+      issues.push({ path: `${path}.events`, message: "required non-empty array of event keys" });
+    }
+    if (typeof record.handle !== "function") issues.push({ path: `${path}.handle`, message: "required function" });
+    if (record.concurrency !== undefined && record.concurrency !== "parallel" && record.concurrency !== "supersede") {
+      issues.push({ path: `${path}.concurrency`, message: 'must be "parallel" or "supersede"' });
+    }
+    if (record.configSchema !== undefined && (typeof record.configSchema !== "object" || record.configSchema === null || Array.isArray(record.configSchema))) {
+      issues.push({ path: `${path}.configSchema`, message: "must be a JSON Schema object" });
+    }
+  });
 
   checkArray(v.storeIndexes, "storeIndexes", issues, (idx, path) => {
     const record = asRecord(idx, path, issues);

@@ -92,17 +92,24 @@ Settings matches the thread UI:
 - Integrations is the one home for connections (2026-10-13). Account →
   Connected accounts is removed, and its parts moved to Integrations: the
   Slack and Telegram identity links go to their detail panels, GitHub was
-  already there, and your 1Password token becomes a row. A link from a personal
-  page opens Integrations with `?workspace=user`, so it shows your personal
-  Integrations whatever the switcher holds. On Integrations the switcher
-  navigates with the workspace it chose, so the parameter cannot hold the page
-  on Personal.
-- `/settings/connected-accounts` stays as a redirect to
-  `/integrations?workspace=user` for old links, emails, and OAuth returns. It
+  already there, and your 1Password token becomes a row.
+- Each space has one settings home (2026-11-04, Linear's team settings). A
+  team's Integrations and Usage are tabs on `/settings/teams/$teamId`, beside
+  General, API keys and proxy, and Policies. Your own are
+  `/settings/integrations` and `/settings/usage` under Personal workspace. The
+  sidebar's Settings row under each space is one link to that home, and Skills
+  and Memory are ordinary space rows. The team General tab no longer repeats
+  the team's connections.
+- `/integrations` and `/usage` stay as redirects for old links, in-app links,
+  and OAuth returns. `/integrations` keeps the query. A `?teamId=` result opens
+  that team's tab, a result without one opens your own, and a team you are not
+  on falls back to your own with the message. Otherwise `?workspace=`, then the
+  switcher, names the space. Every OAuth connect still lands on
+  `/integrations`. The credential connect ignores the old `landing` parameter,
+  and the GitHub App connect takes no destination.
+- `/settings/connected-accounts` redirects to `/settings/integrations`. It
   keeps `?connected=`, `?error=`, and `?detail=`, and maps an older GitHub
-  return's `?github=connected` to `?connected=github`. Every OAuth connect now
-  lands on `/integrations`. The credential connect ignores the old `landing`
-  parameter, and the GitHub App connect takes no destination.
+  return's `?github=connected` to `?connected=github`.
 - User-facing copy names the place to act as "Integrations → <service>", for
   example "Link Slack in Integrations → Slack".
 - The unconfigured-channel copy names Settings → Organization, where the bot

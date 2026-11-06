@@ -2,6 +2,7 @@ import { failedToolResultText } from "./tool-result-text.js";
 import { completeSimple, isContextOverflow } from "@earendil-works/pi-ai/compat";
 import type { Message, Model } from "@earendil-works/pi-ai/compat";
 import { attributedAuthor, formatSenderLine, type AuthorAttribution } from "./submission.js";
+import { entryMessageTime, messageTimeLine } from "./model-context.js";
 import type { CompactionConfig, CreateSessionOptions, SessionEntry } from "./types.js";
 
 /**
@@ -862,6 +863,8 @@ export interface SummarizeOptions {
   instructions?: string;
   /** Optional API key override (forwarded to pi-ai). */
   apiKey?: string;
+  /** Optional fetch for the summarizer request (forwarded to pi-ai). */
+  fetch?: typeof fetch;
   /** Optional abort signal. */
   signal?: AbortSignal;
   /**
@@ -954,61 +957,78 @@ export async function summarize(opts: SummarizeOptions): Promise<SummarizeResult
     ? `\n\nThe user gave these instructions for this compaction — follow them when deciding what to keep:\n${opts.instructions}`
     : "";
   const prompt = `${anchor}\n\n${SUMMARY_TEMPLATE}${steer}`;
+  let inputTokens = 0;
+  let outputTokens = 0;
 
-  const result = await completeSimple(opts.model, {
-    systemPrompt:
-      "You are a session compaction summarizer. Produce a concise, structured summary that lets a coding agent resume work without the original transcript.",
-    messages: [
-      ...messages,
-      { role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() },
-    ],
-  }, {
-    apiKey: opts.apiKey,
-    signal: opts.signal,
-    // Side calls fail fast (TKAI-319): one transport retry, short delay
-    // cap. Nobody waits on a summarizer during a capacity event — the
-    // compaction failure paths (breaker, overflow retry) own recovery.
-    maxRetries: 1,
-    maxRetryDelayMs: 15_000,
-  });
+  const completeSummary = async (promptText: string): Promise<string> => {
+    const result = await completeSimple(opts.model, {
+      systemPrompt:
+        "You are a session compaction summarizer. Produce a concise, structured summary that lets a coding agent resume work without the original transcript.",
+      messages: [
+        ...messages,
+        { role: "user", content: [{ type: "text", text: promptText }], timestamp: Date.now() },
+      ],
+    }, {
+      apiKey: opts.apiKey,
+      signal: opts.signal,
+      ...(opts.fetch ? { fetch: opts.fetch } : {}),
+      // Side calls fail fast (TKAI-319): one transport retry, short delay
+      // cap. Nobody waits on a summarizer during a capacity event — the
+      // compaction failure paths (breaker, overflow retry) own recovery.
+      maxRetries: 1,
+      maxRetryDelayMs: 15_000,
+    });
 
-  // pi-ai returns API failures as an assistant message with stopReason
-  // "error", not a throw. Without this check an errored completion produced
-  // an empty summary that was silently persisted as the CompactionEntry.
-  // "length" fails too: a maxTokens-truncated summary is garbage (often an
-  // unclosed <analysis> block), and the caller can retry with less input.
-  // The contextWindow argument matches the reactive path's overflow check.
-  if (
-    result.stopReason !== "stop" || result.content.some(block => block.type === "toolCall")
-  ) {
-    if (isContextOverflow(result, opts.model.contextWindow)) {
-      throw new SummarizeOverflowError(result.errorMessage);
+    // pi-ai returns API failures as an assistant message with stopReason
+    // "error", not a throw. Without this check an errored completion produced
+    // an empty summary that was silently persisted as the CompactionEntry.
+    // "length" fails too: a maxTokens-truncated summary is garbage (often an
+    // unclosed <analysis> block), and the caller can retry with less input.
+    // The contextWindow argument matches the reactive path's overflow check.
+    if (
+      result.stopReason !== "stop" || result.content.some(block => block.type === "toolCall")
+    ) {
+      if (isContextOverflow(result, opts.model.contextWindow)) {
+        throw new SummarizeOverflowError(result.errorMessage);
+      }
+      throw new Error(
+        result.errorMessage ??
+          `The summarizer completion failed (${result.stopReason}). Run /compact to retry.`,
+      );
     }
-    throw new Error(
-      result.errorMessage ??
-        `The summarizer completion failed (${result.stopReason}). Run /compact to retry.`,
-    );
+    inputTokens += result.usage.input + result.usage.cacheRead;
+    outputTokens += result.usage.output;
+
+    const text = result.content
+      .filter((b): b is { type: "text"; text: string } => b.type === "text")
+      .map((b) => b.text)
+      .join("");
+
+    const summary = stripAnalysisScratchpad(text);
+    if (summary.length === 0) {
+      // A blank summary would silently replace the whole head with nothing.
+      throw new Error(
+        "The summarizer returned no summary text. Run /compact to retry.",
+      );
+    }
+    return summary;
+  };
+
+  let summary = await completeSummary(prompt);
+  try {
+    validateSummaryStructure(summary);
+  } catch {
+    opts.signal?.throwIfAborted();
+    // Completed model output can miss the template. Regenerate once from
+    // the same source, without adding the invalid draft to the input.
+    summary = await completeSummary(`${prompt}\n\nThe previous response did not match the required summary format. Generate the summary again from the original conversation and anchored summary above. Output every template section exactly once, in order, with content in every leaf section. Use "(none)" or "(unknown)" when appropriate. Do not omit, merge, or rename sections. Preserve the user's facts, constraints, and instructions.`);
+    validateSummaryStructure(summary);
   }
-
-  const text = result.content
-    .filter((b): b is { type: "text"; text: string } => b.type === "text")
-    .map((b) => b.text)
-    .join("");
-
-  const summary = stripAnalysisScratchpad(text);
-  if (summary.length === 0) {
-    // A blank summary would silently replace the whole head with nothing.
-    throw new Error(
-      "The summarizer returned no summary text. Run /compact to retry.",
-    );
-  }
-
-  validateSummaryStructure(summary);
 
   return {
     summary,
-    inputTokens: result.usage.input + result.usage.cacheRead,
-    outputTokens: result.usage.output,
+    inputTokens,
+    outputTokens,
   };
 }
 
@@ -1049,9 +1069,13 @@ export function entriesToSummaryMessages(
       // sender). Without it the summary loses who asked for what.
       const senderLine = e.signal ? undefined : formatSenderLine(attributedAuthor(opts.attributeAuthors, e.author));
       const content = capProse(e.content);
+      const body = senderLine ? `${senderLine}\n\n${content}` : content;
+      // The `[sent: …]` line lets the summary keep when each request was made.
+      // An entry with no text gets none, so it still adds nothing to the
+      // summarizer input (the coverage check counts on that).
       out.push({
         role: "user",
-        content: [{ type: "text", text: senderLine ? `${senderLine}\n\n${content}` : content }],
+        content: [{ type: "text", text: body ? `${messageTimeLine(entryMessageTime(e))}\n\n${body}` : body }],
         timestamp: e.createdAt,
       });
       continue;

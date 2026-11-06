@@ -7,15 +7,26 @@
  * newline setup command 400, PATCH kind-scoped field 400s.
  */
 import { RegistryCapacityError } from "../bakes/registry-health.js";
-import { describe, it, expect, afterEach, vi } from "vitest";
+import { describe, it, expect, afterEach, vi, afterAll, beforeAll } from "vitest";
 import { randomUUID } from "node:crypto";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { reorderWaitingBuilds } from "../prebuilds/builder.js";
 import type { BuildStatus, ImageBuilder, PrebuildSpec } from "../prebuilds/builder.js";
 import { MAX_SANDBOX_CPU } from "@valet/shared";
-import { bakes } from "../schema/index.js";
+import { eq } from "drizzle-orm";
+import { bakes, imageSources, type ImageSourceRow } from "../schema/index.js";
 import type { ListBakeQueueResponse, ListSourcesResponse } from "../wire/types.js";
+
+// These suites pin source CRUD itself. The second-admin gate has its own
+// suite (`sources.approval.test.ts`), so it is off here.
+beforeAll(() => {
+  vi.stubEnv("VALET_IMAGE_SOURCE_APPROVAL", "off");
+});
+afterAll(() => {
+  vi.unstubAllEnvs();
+});
+
 
 const HEADERS = { "Content-Type": "application/json" };
 const MEMBER_HEADERS = { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" };
@@ -88,22 +99,60 @@ async function createExternal(baseUrl: string, overrides: Record<string, unknown
   return body.source;
 }
 
-async function createBase(baseUrl: string, overrides: Record<string, unknown> = {}): Promise<SourceJson> {
-  const res = await fetch(`${baseUrl}/api/org/sources`, {
-    method: "POST",
-    headers: HEADERS,
-    body: JSON.stringify({ kind: "base", name: "Org Base", setupCommands: [], profile: "full", ...overrides }),
-  });
-  expect(res.status).toBe(201);
-  const body = (await res.json()) as { source: SourceJson };
-  return body.source;
+// Insert an admin-owned base row directly: POST refuses kind='base', and the
+// seeded full base is built-in. A legacy headless base is the admin-owned base
+// shape that still exists in deployed databases.
+async function createBase(apiInstance: TestApi): Promise<SourceJson> {
+  const now = Date.now();
+  const row = {
+    id: `base_${randomUUID()}`,
+    orgId: "local-org",
+    kind: "base" as const,
+    parentId: null,
+    name: "Org Base",
+    externalRef: null,
+    pullSecretName: null,
+    setupCommands: [],
+    profile: "headless" as const,
+    repoHost: null,
+    repoFullName: null,
+    cloneUrl: null,
+    schedule: "nightly" as const,
+    enabled: true,
+    lastBoundAt: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+  await apiInstance.providers.db.insert(imageSources).values(row);
+  const { lastBoundAt: _lastBoundAt, ...source } = row;
+  return source;
+}
+
+/** Seeds the org's built-in rows the way boot does and returns them by role. */
+async function seedBuiltIns(apiInstance: TestApi): Promise<{ stockFull: ImageSourceRow; defaultFull: ImageSourceRow; repoBase: ImageSourceRow }> {
+  await apiInstance.providers.prebuildService.seedDefaultBasesIfMissing("local-org");
+  const rows = await apiInstance.providers.db.select().from(imageSources);
+  const stockFull = rows.find((row) => row.kind === "external" && row.name === "stock-full");
+  const defaultFull = rows.find((row) => row.kind === "base" && row.profile === "full");
+  if (!stockFull || !defaultFull) throw new Error("seedDefaultBasesIfMissing did not seed the built-in rows");
+  const now = Date.now();
+  const repoBase = {
+    ...defaultFull,
+    id: `src_${randomUUID()}`,
+    parentId: defaultFull.id,
+    name: "repo-base:acme/widgets",
+    setupCommands: ["apt-get install -y jq"],
+    profile: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+  await apiInstance.providers.db.insert(imageSources).values(repoBase);
+  return { stockFull, defaultFull, repoBase };
 }
 
 // Insert a repo-kind source directly (since POST rejects kind='repo').
 async function seedRepoSource(apiInstance: TestApi): Promise<SourceJson> {
   const { db } = apiInstance.providers;
-  // Use the schema table directly via Drizzle
-  const { imageSources } = await import("../schema/index.js");
   const now = Date.now();
   const row = {
     id: `src_${randomUUID()}`,
@@ -177,7 +226,7 @@ describe("GET /api/org/sources", () => {
   it("lists all kinds for the caller's org", async () => {
     api = await bootTestApi();
     await createExternal(api.baseUrl);
-    await createBase(api.baseUrl);
+    await createBase(api);
     await seedRepoSource(api);
     const res = await fetch(`${api.baseUrl}/api/org/sources`, { headers: HEADERS });
     const body = (await res.json()) as { sources: SourceJson[] };
@@ -263,86 +312,24 @@ describe("POST /api/org/sources (kind=external)", () => {
 // ── POST /api/org/sources — kind='base' ───────────────────────────────────────
 
 describe("POST /api/org/sources (kind=base)", () => {
-  it("creates a base source", async () => {
+  it.each([
+    ["a full base", { profile: "full", setupCommands: [] }],
+    ["a headless base", { profile: "headless" }],
+    ["a base with setup commands", { profile: "full", setupCommands: ["curl -s https://example.com/x | sh"] }],
+  ])("403s %s: the only base is the built-in full base", async (_label, fields) => {
     api = await bootTestApi();
-    const source = await createBase(api.baseUrl);
-    expect(source.kind).toBe("base");
-    expect(source.setupCommands).toEqual([]);
-    expect(source.enabled).toBe(true);
-  });
-
-  it("409s on a second base source for the same (org, profile)", async () => {
-    api = await bootTestApi();
-    await createBase(api.baseUrl, { profile: "full" });
     const res = await fetch(`${api.baseUrl}/api/org/sources`, {
       method: "POST",
       headers: HEADERS,
-      body: JSON.stringify({ kind: "base", name: "Second Base", profile: "full" }),
+      body: JSON.stringify({ kind: "base", name: "Org Base", ...fields }),
     });
-    expect(res.status).toBe(409);
+    expect(res.status).toBe(403);
     const body = (await res.json()) as { error: string };
-    expect(body.error).toContain("already exists for this org and profile");
-  });
-
-  it("400s a new headless base source — single image lineage seeds only full bases", async () => {
-    // A fresh headless base would be inert (nothing resolves it) but would
-    // burn a nightly bake until the next boot disables it. Reject with the
-    // corrective action.
-    api = await bootTestApi();
-    const res = await fetch(`${api.baseUrl}/api/org/sources`, {
-      method: "POST",
-      headers: HEADERS,
-      body: JSON.stringify({ kind: "base", name: "Legacy Base", profile: "headless" }),
-    });
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as { error: string };
-    expect(body.error).toContain("full");
-  });
-
-  it("400s when profile is missing", async () => {
-    api = await bootTestApi();
-    const res = await fetch(`${api.baseUrl}/api/org/sources`, {
-      method: "POST",
-      headers: HEADERS,
-      body: JSON.stringify({ kind: "base", name: "Base", setupCommands: [] }),
-    });
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as { error: string };
-    expect(body.error).toContain("profile");
-  });
-
-  it("400s when profile is an invalid string", async () => {
-    api = await bootTestApi();
-    const res = await fetch(`${api.baseUrl}/api/org/sources`, {
-      method: "POST",
-      headers: HEADERS,
-      body: JSON.stringify({ kind: "base", name: "Base", profile: "agent", setupCommands: [] }),
-    });
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as { error: string };
-    expect(body.error).toContain("profile");
-  });
-
-  it("400s when a setup command contains a newline", async () => {
-    api = await bootTestApi();
-    const res = await fetch(`${api.baseUrl}/api/org/sources`, {
-      method: "POST",
-      headers: HEADERS,
-      body: JSON.stringify({ kind: "base", name: "Base", profile: "full", setupCommands: ["apt-get install\ngit"] }),
-    });
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as { error: string };
-    expect(body.error).toContain("single lines");
-  });
-
-  it("400s when a setup command contains a carriage return", async () => {
-    api = await bootTestApi();
-    const res = await fetch(`${api.baseUrl}/api/org/sources`, {
-      method: "POST",
-      headers: HEADERS,
-      body: JSON.stringify({ kind: "base", name: "Base", profile: "full", setupCommands: ["apt-get install\rgit"] }),
-    });
-    expect(res.status).toBe(400);
+    expect(body.error).toBe(
+      "The full base image is a built-in image source. Change it in code or the deploy configuration, not through the API.",
+    );
+    const list = (await (await fetch(`${api.baseUrl}/api/org/sources`, { headers: HEADERS })).json()) as ListSourcesResponse;
+    expect(list.sources).toEqual([]);
   });
 });
 
@@ -408,10 +395,8 @@ describe("PATCH /api/org/sources/:id", () => {
     expect((await patch(source.id, { cpu: 2 }, MEMBER_HEADERS)).status).toBe(403);
     const external = await createExternal(api.baseUrl);
     expect((await patch(external.id, { cpu: 2 })).status).toBe(400);
-    const base = await createBase(api.baseUrl);
+    const base = await createBase(api);
     expect((await patch(base.id, null)).status).toBe(400);
-    const { imageSources } = await import("../schema/index.js");
-    const { eq } = await import("drizzle-orm");
     await api.providers.db.update(imageSources).set({ orgId: "other-org" }).where(eq(imageSources.id, source.id));
     expect((await patch(source.id, { cpu: 2 })).status).toBe(404);
   });
@@ -510,7 +495,7 @@ describe("PATCH /api/org/sources/:id", () => {
 
   it("400s when setting externalRef on a non-external source (kind-scoped field)", async () => {
     api = await bootTestApi();
-    const source = await createBase(api.baseUrl);
+    const source = await createBase(api);
     const res = await fetch(`${api.baseUrl}/api/org/sources/${source.id}`, {
       method: "PATCH",
       headers: HEADERS,
@@ -536,7 +521,7 @@ describe("PATCH /api/org/sources/:id", () => {
 
   it("PATCHes setupCommands on a base source", async () => {
     api = await bootTestApi();
-    const source = await createBase(api.baseUrl);
+    const source = await createBase(api);
     const res = await fetch(`${api.baseUrl}/api/org/sources/${source.id}`, {
       method: "PATCH",
       headers: HEADERS,
@@ -549,7 +534,7 @@ describe("PATCH /api/org/sources/:id", () => {
 
   it("400s when patching setupCommands with a newline in a command", async () => {
     api = await bootTestApi();
-    const source = await createBase(api.baseUrl);
+    const source = await createBase(api);
     const res = await fetch(`${api.baseUrl}/api/org/sources/${source.id}`, {
       method: "PATCH",
       headers: HEADERS,
@@ -591,7 +576,7 @@ describe("PATCH /api/org/sources/:id", () => {
 
   it("400s when attempting to change profile (profile is immutable)", async () => {
     api = await bootTestApi();
-    const source = await createBase(api.baseUrl, { profile: "full" });
+    const source = await createBase(api);
     const res = await fetch(`${api.baseUrl}/api/org/sources/${source.id}`, {
       method: "PATCH",
       headers: HEADERS,
@@ -640,7 +625,7 @@ describe("DELETE /api/org/sources/:id", () => {
 
   it("deletes a base source", async () => {
     api = await bootTestApi();
-    const source = await createBase(api.baseUrl);
+    const source = await createBase(api);
     const delRes = await fetch(`${api.baseUrl}/api/org/sources/${source.id}`, {
       method: "DELETE",
       headers: HEADERS,
@@ -657,6 +642,92 @@ describe("DELETE /api/org/sources/:id", () => {
     });
     expect(delRes.status).toBe(200);
   });
+});
+
+// ── Built-in image sources ───────────────────────────────────────────────────
+
+const builtInMessage = (name: string) =>
+  `${name} is a built-in image source. Change it in code or the deploy configuration, not through the API.`;
+
+describe("built-in image sources", () => {
+  it("marks built-in rows on the list response and leaves admin-owned rows unmarked", async () => {
+    api = await bootTestApi();
+    const { stockFull, defaultFull, repoBase } = await seedBuiltIns(api);
+    const external = await createExternal(api.baseUrl);
+    const repo = await seedRepoSource(api);
+    const body = (await (await fetch(`${api.baseUrl}/api/org/sources`, { headers: HEADERS })).json()) as ListSourcesResponse;
+    const flags = Object.fromEntries(body.sources.map((source) => [source.id, source.builtIn]));
+    expect(flags).toEqual({
+      [stockFull.id]: true,
+      [defaultFull.id]: true,
+      [repoBase.id]: true,
+      [external.id]: false,
+      [repo.id]: false,
+    });
+  });
+
+  const contentPatches: [string, Record<string, unknown>][] = [
+    ["setupCommands", { setupCommands: ["echo aW1wbGFudA== | base64 -d | sh"] }],
+    ["externalRef", { externalRef: "registry.example.com/other:latest" }],
+    ["parentId", { parentId: null }],
+    ["name", { name: "renamed" }],
+    ["pullSecretName", { pullSecretName: "regcred" }],
+    ["sandboxResources", { sandboxResources: { cpu: 2 } }],
+    ["profile", { profile: "headless" }],
+    ["enabled: false", { enabled: false }],
+    ["schedule: off", { schedule: "off" }],
+  ];
+
+  for (const role of ["stockFull", "defaultFull", "repoBase"] as const) {
+    it.each(contentPatches)(`403s a PATCH of %s on ${role} and leaves the row unchanged`, async (_field, patch) => {
+      api = await bootTestApi();
+      const builtIns = await seedBuiltIns(api);
+      const target = builtIns[role];
+      const res = await fetch(`${api.baseUrl}/api/org/sources/${target.id}`, {
+        method: "PATCH",
+        headers: HEADERS,
+        body: JSON.stringify(patch),
+      });
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: string }).error).toBe(builtInMessage(target.name));
+      const [after] = await api.providers.db.select().from(imageSources).where(eq(imageSources.id, target.id));
+      expect(after).toMatchObject({
+        name: target.name,
+        setupCommands: target.setupCommands,
+        externalRef: target.externalRef,
+        parentId: target.parentId,
+        enabled: true,
+        schedule: "nightly",
+        updatedAt: target.updatedAt,
+      });
+    });
+
+    it(`403s a DELETE of ${role} and keeps the row`, async () => {
+      api = await bootTestApi();
+      const target = (await seedBuiltIns(api))[role];
+      const res = await fetch(`${api.baseUrl}/api/org/sources/${target.id}`, { method: "DELETE", headers: HEADERS });
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: string }).error).toBe(builtInMessage(target.name));
+      const body = (await (await fetch(`${api.baseUrl}/api/org/sources`, { headers: HEADERS })).json()) as ListSourcesResponse;
+      expect(body.sources.map((source) => source.id)).toContain(target.id);
+    });
+  }
+
+  it.each(["stock-full", " Stock-Full ", "default-full", "repo-base:acme/widgets"])(
+    "409s an external source named %j that would shadow a built-in row",
+    async (name) => {
+      api = await bootTestApi();
+      const res = await fetch(`${api.baseUrl}/api/org/sources`, {
+        method: "POST",
+        headers: HEADERS,
+        body: JSON.stringify({ kind: "external", name, externalRef: "registry.example.com/evil:latest" }),
+      });
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: string }).error).toBe(
+        `${name.trim()} is a reserved built-in image source name. Choose a different name.`,
+      );
+    },
+  );
 });
 
 // ── POST /api/org/sources/:id/bake ───────────────────────────────────────────
@@ -787,7 +858,7 @@ describe("GET /api/org/sources/:id/bakes", () => {
 describe("bake queue routes", () => {
   it("reads the real waiting order and accepts only a full valid permutation", async () => {
     api = await bootTestApi({ imageBuilder: new QueueImageBuilder() });
-    const source = await createBase(api.baseUrl);
+    const source = await createBase(api);
     const first = await api.providers.prebuildService.startBuild(source.id);
     const second = await api.providers.prebuildService.startBuild(source.id);
     const endpoint = `${api.baseUrl}/api/org/sources/queue`;
@@ -833,7 +904,7 @@ describe("registry health API", () => {
   });
   it("maps capacity rejection to actionable 503 with a stable code", async () => {
     api = await bootTestApi({ imageBuilder: new FakeImageBuilder() });
-    const source = await createBase(api.baseUrl);
+    const source = await createBase(api);
     vi.spyOn(api.providers.prebuildService, "assertRegistryCapacity").mockRejectedValue(new RegistryCapacityError("full"));
     const response = await fetch(`${api.baseUrl}/api/org/sources/${source.id}/bake`, { method: "POST", headers: HEADERS });
     expect(response.status).toBe(503);

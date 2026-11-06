@@ -29,7 +29,6 @@ import type {
   OnePasswordSettingsResponse,
   OrgDirectoryResponse,
   OrgResponse,
-  ProductAnnouncementsResponse,
   TeamOnePasswordStatusResponse,
   ThreadPlanResponse,
   SessionOutcomeUsage,
@@ -50,6 +49,7 @@ import { onePasswordKeys } from "~/api/onepassword";
 import { qkPolicies } from "~/api/policies";
 import { qk } from "~/api/queries";
 import { qkSettings } from "~/api/settings";
+import { qkThreadProgress } from "~/api/thread-progress";
 import { qkThreadPlan } from "~/api/thread-plan";
 import { qkUsage } from "~/api/usage";
 import { qkWorkflows } from "~/api/workflows";
@@ -88,9 +88,6 @@ function seedShell(client: QueryClient): void {
   // The drawer's Home row counts what needs the person.
   client.setQueryData<HomeConversationResponse>(qkHome.conversation, stressHomeConversation);
   client.setQueryData<HomeTasksResponse>(qkHome.tasks, stressHomeTasks);
-  // Inline key in `components/product-announcement.tsx`. Empty: the notice
-  // is fixed over the page, and its dismissal cannot save here.
-  client.setQueryData<ProductAnnouncementsResponse>(["product-announcements", stressMe.id], { announcements: [] });
 }
 
 /** The bell: updates, workflow approvals, and two decision pages. */
@@ -104,6 +101,7 @@ function seedApprovals(client: QueryClient): void {
 
 /** The thread view's pinned plan. */
 function seedThreadView(client: QueryClient): void {
+  client.setQueryData(qkThreadProgress(THREAD_ID), { progress: null });
   client.setQueryData<ThreadPlanResponse>(qkThreadPlan(THREAD_ID), { plan: stressThreadPlan });
 }
 

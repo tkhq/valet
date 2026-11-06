@@ -78,7 +78,9 @@ hour.
    snapshot would take the new session's sandbox down), and the k8s
    `list()` uses a lenient metadata-only lister that skips malformed or
    foreign CRs instead of failing the whole pass (the CRD schema admits
-   shapes the strict parser rejects).
+   shapes the strict parser rejects). `list()` reads every CR in the
+   namespace, so only this sweep calls it. Per-session paths use
+   `listBrowserForSession` and `describe` (see the sandbox browser spec).
 6. **No max-lifetime kill — alert, don't auto-repair.** The incident doc
    proposed a TTL cap. Rejected during implementation (and written into
    CLAUDE.md as a repo-wide rule): an age-based destroy masks whichever

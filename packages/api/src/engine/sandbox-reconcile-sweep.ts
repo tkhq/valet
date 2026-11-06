@@ -28,7 +28,7 @@
  */
 import { metrics } from "@opentelemetry/api";
 import { eq } from "drizzle-orm";
-import { recordSandboxDestroyed, recordSandboxFlagged, type SandboxProvider } from "@valet/engine";
+import { recordSandboxDestroyed, recordSandboxFlagged, type SandboxProvider, reportError } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions, assistants } from "../schema/index.js";
 import { revokeSandboxTokens } from "../auth/sandbox-tokens.js";
@@ -139,7 +139,7 @@ export class SandboxReconcileSweep {
           orphanCandidates.push({ id: sb.id, sessionId: sb.sessionId });
         }
       } catch (err) {
-        console.error(`SandboxReconcileSweep: reconcile failed for sandbox ${sb.id}:`, err);
+        reportError({ area: "sandbox", reason: "reconcile_sweep" }, `SandboxReconcileSweep: reconcile failed for sandbox ${sb.id}`, err);
       }
     }
     if (orphanCandidates.length > 0) {

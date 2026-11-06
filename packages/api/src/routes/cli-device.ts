@@ -125,7 +125,7 @@ function hashCode(code: string): string {
 const starts = new Map<string, { windowStart: number; count: number }>();
 
 /** The TCP peer address under `@hono/node-server` (`env.incoming`) or Bun (`env.requestIP`). */
-function peerAddress(c: Context<AppEnv>): string | undefined {
+export function peerAddress(c: Context<AppEnv>): string | undefined {
   const env: unknown = c.env;
   if (!env || typeof env !== "object") return undefined;
   const e = env as { incoming?: { socket?: { remoteAddress?: unknown } }; requestIP?: unknown };

@@ -18,6 +18,7 @@ import type { MessageEntry } from "../src/types.js";
 import { entriesToAgentMessages, userContentBlocks } from "../src/thread.js";
 import { formatSenderLine } from "../src/submission.js";
 import { entriesToSummaryMessages } from "../src/compaction.js";
+import { withoutSentLine } from "../src/test-helpers/sent-line.js";
 
 const MODEL = { api: "anthropic", provider: "anthropic", id: "claude-opus-4" };
 
@@ -35,7 +36,7 @@ function userEntry(overrides: Partial<MessageEntry> = {}): MessageEntry {
   };
 }
 
-/** Concatenated text of a user AgentMessage's blocks, via narrowing (no casts). */
+/** Concatenated text of a user AgentMessage's blocks without the `[sent: …]` line, via narrowing (no casts). */
 function textOf(content: unknown): string {
   if (!Array.isArray(content)) return "";
   const texts: string[] = [];
@@ -44,7 +45,7 @@ function textOf(content: unknown): string {
     if (!("text" in b) || typeof b.text !== "string") continue;
     texts.push(b.text);
   }
-  return texts.join("");
+  return withoutSentLine(texts.join(""));
 }
 
 describe("formatSenderLine", () => {
@@ -97,6 +98,14 @@ describe("userContentBlocks — sender line", () => {
     const blocks = userContentBlocks("ship the release", undefined);
     expect(blocks[0]).toEqual({ type: "text", text: "ship the release" });
   });
+
+  it("puts the sent time line above the sender line", () => {
+    const blocks = userContentBlocks("ship the release", undefined, { id: "u1", name: "Alice" }, { at: 1 });
+    expect(blocks[0]).toEqual({
+      type: "text",
+      text: "[sent: Thursday 1970-01-01 00:00 UTC]\n\n[from: Alice]\n\nship the release",
+    });
+  });
 });
 
 describe("entriesToAgentMessages — attributeAuthors", () => {
@@ -106,21 +115,21 @@ describe("entriesToAgentMessages — attributeAuthors", () => {
       userEntry({ id: "e2", author: { id: "u2", name: "Bob" }, content: "no, do Y" }),
     ];
     const msgs = entriesToAgentMessages(entries, MODEL, { attributeAuthors: true });
-    expect(msgs.map((m) => m.content)).toEqual([
-      [{ type: "text", text: "[from: Alice]\n\ndo X" }],
-      [{ type: "text", text: "[from: Bob]\n\nno, do Y" }],
+    expect(msgs.map((m) => textOf(m.content))).toEqual([
+      "[from: Alice]\n\ndo X",
+      "[from: Bob]\n\nno, do Y",
     ]);
   });
 
   it("leaves user text untouched when not opted in (personal sessions)", () => {
     const entries = [userEntry({ author: { id: "u1", name: "Alice" } })];
     const msgs = entriesToAgentMessages(entries, MODEL);
-    expect(msgs[0].content).toEqual([{ type: "text", text: "ship the release" }]);
+    expect(textOf(msgs[0].content)).toBe("ship the release");
   });
 
   it("leaves authorless entries untouched even when opted in", () => {
     const msgs = entriesToAgentMessages([userEntry()], MODEL, { attributeAuthors: true });
-    expect(msgs[0].content).toEqual([{ type: "text", text: "ship the release" }]);
+    expect(textOf(msgs[0].content)).toBe("ship the release");
   });
 
   it("exempts signal entries — their envelope already names the sender", () => {

@@ -6,7 +6,7 @@
  * reads its sentence from that body, so the sentence equals the stored
  * sentence (INV-H7).
  */
-import { type Appearance, type AssistantThreadPolicy, validateAppearance } from "@valet/shared";
+import { type Appearance, type AssistantThreadPolicy, MAX_PROMPT_TEMPLATE_CHARS, validateAppearance } from "@valet/shared";
 import type {
   CreateEventSubscriptionRequest,
   CreateWorkflowScheduleRequest,
@@ -24,6 +24,9 @@ import { buildSubscriptionPatch } from "~/components/events/subscription-patch";
 import { unionFilterFields, type CatalogService } from "~/components/events/subscription-match";
 import type { WhenService } from "~/components/events/wizard-preview";
 import { SLACK_APP_MENTION, selectsSlackMention, hasChannelScopeFilter, storedAnyChannel } from "~/lib/slack-mention";
+
+/** The "comes online" event (`plugin-slack/src/online-status.ts`). */
+export const USER_ONLINE = "slack.user_online";
 import { placeFilter, type PreselectedPlace } from "../place-filter";
 import type { SectionId } from "./section";
 import { parseSlackThreadLink, slackThreadFilterRows } from "./slack-thread-link";
@@ -48,8 +51,15 @@ import {
 /** The When choice: an event service, or a schedule. */
 export type EditorService = WhenService | "schedule";
 
-/** What Valet does: reply in the conversation, work on the event, or run a workflow. */
-export type DoKind = "reply" | "work" | "workflow";
+/** What Valet does: reply in the conversation, work on the event, run a
+ * workflow, or hand the event to a plugin's event handler. */
+export type DoKind = "reply" | "work" | "workflow" | "plugin";
+
+/** A plugin event handler a line names (`target.kind: "plugin"`). */
+export interface HandlerRef {
+  plugin: string;
+  handler: string;
+}
 
 /** Which assistant acts. */
 export type AssistantKind = "user" | "team" | "org";
@@ -109,6 +119,10 @@ export interface Draft {
   threadLink: string;
   doKind: DoKind;
   workflowId: string;
+  /** The plugin handler a `plugin` line runs. Null until the reader picks one. */
+  handler: HandlerRef | null;
+  /** The handler's settings that differ from its defaults (`target.config`). */
+  handlerConfig: Record<string, unknown>;
   assistant: AssistantKind;
   teamId: string | null;
   /** Who may mention a team assistant. Sent only for a team reply line. */
@@ -128,6 +142,9 @@ export interface Draft {
   deliveryPolicy: EventDeliveryPolicy;
   pauseOnOverlap: boolean;
   appearance: Appearance;
+  /** "Only once every N hours", as typed. Empty means every time. The When
+   * section offers it for `slack.user_online` (`events/once-per.ts`). */
+  oncePerHours: string;
   name: string;
   /** False while the name follows the suggestion. */
   nameEdited: boolean;
@@ -218,6 +235,8 @@ export function newDraft(options: {
     threadLink: "",
     doKind: workflowId !== undefined ? "workflow" : service === "slack" ? "reply" : "work",
     workflowId: workflowId ?? "",
+    handler: null,
+    handlerConfig: {},
     assistant: teamId !== undefined ? "team" : "user",
     teamId: teamId ?? null,
     audience: "organization",
@@ -229,6 +248,7 @@ export function newDraft(options: {
     deliveryPolicy: "always",
     pauseOnOverlap: true,
     appearance: {},
+    oncePerHours: "",
     name: "",
     nameEdited: false,
   };
@@ -258,8 +278,10 @@ export function draftFromLine(sub: EventSubscriptionWire, timezone = "UTC"): Dra
     anyChannel: storedAnyChannel(sub.eventKeys, sub.filters),
     threadFollow: followsSlackThread(sub),
     threadLink: "",
-    doKind: target.kind === "workflow" ? "workflow" : target.follow === true ? "reply" : "work",
+    doKind: target.kind === "plugin" ? "plugin" : target.kind === "workflow" ? "workflow" : target.kind === "assistant" && target.follow === true ? "reply" : "work",
     workflowId: target.kind === "workflow" ? target.workflowId : "",
+    handler: target.kind === "plugin" ? { plugin: target.plugin, handler: target.handler } : null,
+    handlerConfig: target.kind === "plugin" ? target.config ?? {} : {},
     assistant: assistant ? target.assistant ?? "user" : sub.ownerType === "team" ? "team" : sub.ownerType === "org" ? "org" : "user",
     teamId: assistant ? target.teamId ?? (sub.ownerType === "team" ? sub.ownerId : null) : null,
     audience: sub.audience ?? "organization",
@@ -273,6 +295,7 @@ export function draftFromLine(sub: EventSubscriptionWire, timezone = "UTC"): Dra
     // not `always`, so an untouched line sends no change.
     pauseOnOverlap: assistant ? target.pauseOnOverlap ?? deliveryPolicy === "always" : true,
     appearance: target.appearance ?? {},
+    oncePerHours: target.oncePerHours !== undefined ? String(target.oncePerHours) : "",
     name: sub.name,
     nameEdited: true,
   };
@@ -295,6 +318,8 @@ export function draftFromRoutine(routine: Routine): Draft {
     threadLink: "",
     doKind: workflow ? "workflow" : "work",
     workflowId: routine.workflowId ?? "",
+    handler: null,
+    handlerConfig: {},
     assistant: detail.ownerType === "team" ? "team" : "user",
     teamId: detail.ownerType === "team" ? detail.ownerId : null,
     audience: "organization",
@@ -306,6 +331,7 @@ export function draftFromRoutine(routine: Routine): Draft {
     deliveryPolicy: "always",
     pauseOnOverlap: true,
     appearance: {},
+    oncePerHours: "",
     name: routine.name,
     nameEdited: true,
   };
@@ -337,6 +363,8 @@ export function setService(draft: Draft, next: EditorService): Draft {
   let doKind = draft.doKind;
   if (doKind === "reply" && next !== "slack") doKind = "work";
   if (next === "slack" && draft.service === "schedule" && doKind === "work") doKind = "reply";
+  // A routine has no event to hand to a plugin handler.
+  if (next === "schedule" && doKind === "plugin") doKind = "work";
   return {
     ...draft,
     service: next,
@@ -418,7 +446,7 @@ export function setThreadFollow(draft: Draft, on: boolean): Draft {
     creatorScopeId: null,
     anyChannel: false,
     // A thread follow works on each reply; it never starts a conversation to follow.
-    doKind: draft.doKind === "workflow" ? "workflow" : on ? "work" : draft.doKind,
+    doKind: draft.doKind === "workflow" || draft.doKind === "plugin" ? draft.doKind : on ? "work" : draft.doKind,
     where: null,
     whereChosen: false,
     whereTitle: undefined,
@@ -497,9 +525,32 @@ export function effectiveWhere(draft: Draft): AssistantThreadPolicy | null {
   return draft.where;
 }
 
-/** True when the line works through an assistant, not a workflow. */
+/** True when the line works through an assistant, not a workflow or a plugin handler. */
 export function isAssistantDraft(draft: Draft): boolean {
-  return draft.doKind !== "workflow";
+  return draft.doKind === "reply" || draft.doKind === "work";
+}
+
+/**
+ * Picks the plugin handler a line runs. Its settings start from the
+ * defaults, and When starts on the handler's events that `services` lists,
+ * so a new line hears what the handler accepts.
+ */
+export function setHandler(draft: Draft, handler: { plugin: string; id: string; events: readonly string[] }, services: readonly CatalogService[]): Draft {
+  const listed = new Set(services.flatMap((s) => s.entries.map((e) => e.key)));
+  const events = handler.events.filter((key) => listed.has(key));
+  const service = events.length > 0 ? serviceOfKeys(events) : draft.service;
+  return {
+    ...draft,
+    doKind: "plugin",
+    assistant: draft.assistant === "org" ? "user" : draft.assistant,
+    handler: { plugin: handler.plugin, handler: handler.id },
+    handlerConfig: {},
+    service,
+    events: events.length > 0 ? new Set(events) : draft.events,
+    conditions: service === draft.service ? draft.conditions : [],
+    threadFollow: false,
+    threadLink: "",
+  };
 }
 
 /** True when a stored or created mention line hears only its creator.
@@ -544,9 +595,33 @@ function assistantFields(draft: Draft): AssistantTargetWire {
   return { kind: "assistant", assistant: draft.assistant === "team" ? "user" : draft.assistant };
 }
 
+/** The typed "once every N hours", or null for none or a value that is not a whole number. */
+export function oncePerHoursValue(draft: Draft): number | null {
+  const text = draft.oncePerHours.trim();
+  if (!/^\d+$/.test(text)) return null;
+  const hours = Number(text);
+  return hours >= 1 && hours <= MAX_ONCE_PER_HOURS ? hours : null;
+}
+
+export const MAX_ONCE_PER_HOURS = 168;
+
 function lineTarget(draft: Draft): EventSubscriptionTargetWire {
-  const appearance = Object.keys(draft.appearance).length > 0 ? { appearance: draft.appearance } : {};
+  const once = oncePerHoursValue(draft);
+  const appearance = {
+    ...(Object.keys(draft.appearance).length > 0 ? { appearance: draft.appearance } : {}),
+    ...(once !== null ? { oncePerHours: once } : {}),
+  };
   if (draft.doKind === "workflow") return { kind: "workflow", workflowId: draft.workflowId, ...appearance };
+  if (draft.doKind === "plugin") {
+    return {
+      kind: "plugin",
+      plugin: draft.handler?.plugin ?? "",
+      handler: draft.handler?.handler ?? "",
+      ...(draft.assistant === "team" && draft.teamId !== null ? { teamId: draft.teamId } : {}),
+      ...(Object.keys(draft.handlerConfig).length > 0 ? { config: draft.handlerConfig } : {}),
+      ...appearance,
+    };
+  }
   const where = effectiveWhere(draft);
   const thread = where !== null ? { thread: where } : {};
   const templates = promptFieldsToTarget({ systemPrompt: draft.instructions, userPromptTemplate: draft.promptTemplates.userPromptTemplate });
@@ -596,6 +671,8 @@ function patchLineBody(draft: Draft, sub: EventSubscriptionWire, review: boolean
     anyChannel: draft.anyChannel,
     prompts: { systemPrompt: draft.instructions, userPromptTemplate: draft.promptTemplates.userPromptTemplate },
     appearance: draft.appearance,
+    oncePerHours: oncePerHoursValue(draft),
+    config: draft.handlerConfig,
     ...(thread !== undefined ? { thread } : {}),
     ...(sub.ownerType === "user" && assistant
       ? { deliveryPreferences: { deliveryPolicy: draft.deliveryPolicy, pauseOnOverlap: draft.pauseOnOverlap } }
@@ -714,8 +791,21 @@ export function applyLinePatch(sub: EventSubscriptionWire, patch: PatchEventSubs
     if (appearance === undefined) delete next.appearance;
     else next.appearance = appearance;
     target = next;
-  } else {
+  } else if (sub.target.kind === "workflow") {
     target = { kind: "workflow", workflowId: sub.target.workflowId, ...(appearance !== undefined ? { appearance } : {}) };
+  } else {
+    // A plugin handler line: its appearance and handler settings. `null`
+    // clears the settings, as the server does.
+    const { plugin, handler, teamId } = sub.target;
+    const config = patch.config === undefined ? sub.target.config : patch.config ?? undefined;
+    const oncePerHours = patch.oncePerHours === undefined ? sub.target.oncePerHours : patch.oncePerHours ?? undefined;
+    target = {
+      kind: "plugin", plugin, handler,
+      ...(teamId !== undefined ? { teamId } : {}),
+      ...(config !== undefined ? { config } : {}),
+      ...(oncePerHours !== undefined ? { oncePerHours } : {}),
+      ...(appearance !== undefined ? { appearance } : {}),
+    };
   }
   return {
     ...sub,
@@ -834,6 +924,9 @@ export function exampleSteps(draft: Draft, words: { when: string; workflow?: str
   if (draft.doKind === "workflow") {
     return [first, second.replace(" and your instructions", ""), `It runs ${words.workflow ?? "the workflow"}${as}.`];
   }
+  if (draft.doKind === "plugin") {
+    return [first, `Valet gives ${what} to the ${draft.handler?.plugin ?? "picked"} plugin.`, `The plugin works on it with its settings${as}.`];
+  }
   const where = whereWords(effectiveWhere(draft), draftSubjectKind(draft), draft.whereTitle);
   const verb = draft.doKind === "reply" ? "replies" : "works";
   return [first, second, `It ${verb} in ${where}${as}.`];
@@ -842,7 +935,7 @@ export function exampleSteps(draft: Draft, words: { when: string; workflow?: str
 /** True when the line answers through a team's assistant: the server then
  * adds no creator scope (`enforceMentionScope`'s `teamAssistant`). */
 function teamAssistantDraft(draft: Draft): boolean {
-  return draft.doKind !== "workflow" && draft.assistant === "team" && draft.teamId !== null;
+  return isAssistantDraft(draft) && draft.assistant === "team" && draft.teamId !== null;
 }
 
 /**
@@ -875,12 +968,39 @@ function unknownVariable(name: string): string {
   return `{{${name}}} is not a variable. Use event.key, event.summary, event.body, refs.<name>, or payload.<field>.`;
 }
 
+/** A character count as the editor writes it: `4,512`. */
+export function characterCount(n: number): string {
+  return n.toLocaleString("en-US");
+}
+
+/** The instructions' length as the line stores it: `promptFieldsToTarget`
+ * trims the text before it sends it. */
+export function instructionsLength(draft: Draft): number {
+  return draft.instructions.trim().length;
+}
+
+/**
+ * The refusal for a line's instructions over the api's limit
+ * (`MAX_PROMPT_TEMPLATE_CHARS`), or null. The field and the footer both
+ * show it, so it names the field as the form labels it, the length, the
+ * limit, and what to do. A routine's instructions have no limit.
+ */
+export function instructionsTooLong(draft: Draft): string | null {
+  const length = instructionsLength(draft);
+  if (draft.service === "schedule" || length <= MAX_PROMPT_TEMPLATE_CHARS) return null;
+  return (
+    `Too long: ${characterCount(length)} of ${characterCount(MAX_PROMPT_TEMPLATE_CHARS)} characters. Shorten it or move details into a skill.`
+  );
+}
+
 /**
  * The refusal the server gives for the line's two templates, in the
  * editor's words (`validatePromptTemplate` in prompt-template.ts).
  * `services` is the event catalog; while it is empty, the payload check waits.
  */
 function templateBlocker(draft: Draft, services: readonly CatalogService[]): string | null {
+  const tooLong = instructionsTooLong(draft);
+  if (tooLong !== null) return tooLong;
   const instructions = draft.instructions.trim();
   if (instructions.length > 0) {
     const names = placeholderNames(instructions);
@@ -892,6 +1012,9 @@ function templateBlocker(draft: Draft, services: readonly CatalogService[]): str
     if (bad !== undefined) return `Instructions cannot use event variables. Move {{${bad}}} to the Event message.`;
   }
   const message = draft.promptTemplates.userPromptTemplate.trim();
+  if (message.length > MAX_PROMPT_TEMPLATE_CHARS) {
+    return `Event message too long: ${characterCount(message.length)} of ${characterCount(MAX_PROMPT_TEMPLATE_CHARS)} characters.`;
+  }
   if (message.length > 0) {
     const names = placeholderNames(message);
     if (names === null) return "The Event message has an unclosed or nested {{. Close each {{ with }}.";
@@ -939,6 +1062,13 @@ export function saveBlocker(
         ? "A channel name condition also matches new channels. Choose Any channel to keep it."
         : "Add a channel, or choose Any channel.";
     }
+    // The watcher checks only the people a line names (`online-status-watch.ts`).
+    if (draft.events.has(USER_ONLINE) && !filters.some((f) => f.field === "user" && (f.op === "eq" || f.op === "in"))) {
+      return "Pick the person to watch: add the condition user is <person>.";
+    }
+    if (draft.oncePerHours.trim().length > 0 && oncePerHoursValue(draft) === null) {
+      return `Enter a whole number of hours from 1 to ${MAX_ONCE_PER_HOURS}, or leave it empty.`;
+    }
     if (mention && !teamAssistantDraft(draft) && draft.conditions.some((row) => row.field === "user" && row.id !== draft.creatorScopeId)) {
       return "A personal mention line already listens for your own mentions. Remove the user condition.";
     }
@@ -952,10 +1082,12 @@ export function saveBlocker(
     }
   }
   if (draft.doKind === "workflow" && draft.workflowId.length === 0) return "Pick a workflow.";
+  if (draft.doKind === "plugin" && draft.handler === null) return "Pick a plugin handler.";
+  if (draft.doKind === "plugin" && draft.assistant === "org") return "A plugin handler acts for you or a team. Pick your assistant or a team's.";
   if (routine && draft.doKind === "workflow" && parseRunInput(draft.runInput).kind === "bad") return "The run input is not valid JSON.";
-  if (draft.doKind !== "workflow" && effectiveWhere(draft) === null) return "Pick a thread for Where, or choose another option.";
-  if (routine && draft.doKind !== "workflow" && draft.instructions.trim().length === 0) return "Give the routine instructions.";
-  if (!routine && draft.doKind !== "workflow") {
+  if (isAssistantDraft(draft) && effectiveWhere(draft) === null) return "Pick a thread for Where, or choose another option.";
+  if (routine && isAssistantDraft(draft) && draft.instructions.trim().length === 0) return "Give the routine instructions.";
+  if (!routine && isAssistantDraft(draft)) {
     const template = templateBlocker(draft, context.services ?? []);
     if (template !== null) return template;
   }

@@ -232,11 +232,17 @@ export function filtersMatch(
     const declared = entry?.filters.find((f) => f.field === filter.field);
     const actual = declared ? asString(resolvePath(payload, declared.path)) : undefined;
     if (actual === undefined) return isExclusionOp(filter.op);
+    // GitHub repository identity ignores case. Pattern operators still use
+    // the original payload text, as other catalog fields do.
+    const caseInsensitiveRepo = eventKey.startsWith("github.") &&
+      filter.field === "repo" && declared?.path === "repository.full_name";
+    const matchesValue = (expected: string) => actual === expected ||
+      (caseInsensitiveRepo && typeof expected === "string" && actual.toLowerCase() === expected.toLowerCase());
     switch (filter.op) {
       case "eq":
-        return actual === filter.value;
+        return typeof filter.value === "string" && matchesValue(filter.value);
       case "in":
-        return Array.isArray(filter.value) && filter.value.includes(actual);
+        return Array.isArray(filter.value) && filter.value.some(matchesValue);
       case "prefix":
         return typeof filter.value === "string" && actual.startsWith(filter.value);
       case "contains":
@@ -254,7 +260,7 @@ export function filtersMatch(
         return re.test(actual.slice(0, MAX_REGEX_INPUT_LENGTH)) === (filter.op === "regex");
       }
       case "not_in":
-        return Array.isArray(filter.value) && !filter.value.includes(actual);
+        return Array.isArray(filter.value) && !filter.value.some(matchesValue);
       case "not_prefix":
         return typeof filter.value === "string" && !actual.startsWith(filter.value);
     }

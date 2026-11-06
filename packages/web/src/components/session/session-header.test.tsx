@@ -42,6 +42,7 @@ let headerThreads: Array<{
 /** The signed-in viewer. Undefined by default; the bypass cases set the owner. */
 let meData: { id: string } | undefined;
 const setBypassMutate = vi.fn();
+const duplicateMutate = vi.fn();
 /** The workspace channel list `useWorkspaceChannels` reads, for resolving a
  * Slack subject thread's channel id to its name (spec Part G). Undefined by
  * default: the place label then falls back to the raw channel id. */
@@ -83,6 +84,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
     useSetSessionReasoning: () => ({ isPending: false, mutate: setReasoningMutate }),
     useSetThreadReasoning: () => ({ isPending: false, mutate: setThreadReasoningMutate }),
     useSetThreadApprovalBypass: () => ({ isPending: false, mutate: setBypassMutate }),
+    useDuplicateThread: () => ({ isPending: false, mutate: duplicateMutate }),
     useThreads: () => ({ data: { threads: headerThreads }, isLoading: false, error: null }),
     usePauseSession: () => ({ isPending: pauseIsPending, mutateAsync: pauseMutateAsync }),
     useReplaceSandbox: () => ({ isPending: false, mutateAsync: replaceMutateAsync }),
@@ -165,12 +167,21 @@ function renderHeader(
   return render(headerElement(sandbox, threadId, session, modelControlTarget));
 }
 
+/** The header with the composer slot that holds its model control, as the
+ * thread view wires them. */
+function HeaderWithComposerSlot({ sandbox, threadId, session }: { sandbox?: { state: string; epoch: number }; threadId?: string; session: SessionDetail }) {
+  const [target, setTarget] = useState<HTMLDivElement | null>(null);
+  return <>{headerElement(sandbox, threadId, session, target)}<div ref={setTarget} data-testid="composer-model" /></>;
+}
+
+/** Without a `modelControlTarget`, the header renders beside a composer slot. */
 function headerElement(
   sandbox?: { state: string; epoch: number },
   threadId?: string,
   session = baseSession(),
   modelControlTarget?: HTMLElement | null,
-) {
+): ReactNode {
+  if (modelControlTarget === undefined) return <HeaderWithComposerSlot sandbox={sandbox} threadId={threadId} session={session} />;
   return (
     <TooltipProvider>
       <SessionHeader
@@ -285,6 +296,101 @@ describe("SessionHeader: run without asking", () => {
     await userEvent.click(screen.getByRole("button", { name: "Thread menu" }));
     await screen.findByRole("menuitem", { name: /copy transcript/i });
     expect(screen.queryByRole("menuitemcheckbox", { name: "Run without asking" })).toBeNull();
+  });
+});
+
+describe("SessionHeader: duplicate", () => {
+  afterEach(() => { headerThreads = []; meData = undefined; duplicateMutate.mockReset(); });
+
+  function renderWithOpen(session: SessionDetail, threadId: string, onOpenThread?: (id: string) => void) {
+    return render(<TooltipProvider><SessionHeader session={session} threadId={threadId} agentStatus="idle" conn="open" onOpenThread={onOpenThread} /></TooltipProvider>);
+  }
+
+  it("copies the thread and opens the copy", async () => {
+    meData = { id: "u1" };
+    headerThreads = [{ id: "t1", sessionId: "sess-1", createdAt: 1, key: "web:t1" }];
+    duplicateMutate.mockImplementation((_vars: unknown, opts: { onSuccess: (result: { thread: { id: string }; workspace: string }) => void }) =>
+      opts.onSuccess({ thread: { id: "t1-copy" }, workspace: "user" }));
+    const onOpenThread = vi.fn();
+    renderWithOpen(baseSession(), "t1", onOpenThread);
+    await userEvent.click(screen.getByRole("button", { name: "Thread menu" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Duplicate thread" }));
+    expect(duplicateMutate).toHaveBeenCalledWith({ threadId: "t1" }, expect.anything());
+    expect(onOpenThread).toHaveBeenCalledWith("t1-copy");
+  });
+
+  it("shows the server's reason when the thread does not duplicate", async () => {
+    meData = { id: "u1" };
+    headerThreads = [{ id: "t1", sessionId: "sess-1", createdAt: 1, key: "web:t1" }];
+    const busy = "A turn is running or waiting on an approval in this thread. Let it finish, then duplicate it.";
+    duplicateMutate.mockImplementation((_vars: unknown, opts: { onError: (err: Error) => void }) =>
+      opts.onError(new ApiError(409, "POST → 409", { error: busy })));
+    renderWithOpen(baseSession(), "t1", vi.fn());
+    await userEvent.click(screen.getByRole("button", { name: "Thread menu" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Duplicate thread" }));
+    expect(screen.getAllByText(busy).length).toBeGreaterThan(0);
+  });
+
+  it("offers it to a team member, whose desktop menu then shows", async () => {
+    meData = { id: "u1" };
+    teamsData = { teams: [{ id: "team_1", orgId: "org_1", name: "Platform", origin: "local", externalId: null, createdAt: 1, memberCount: 3, callerRole: "member", defaultModel: null }] };
+    headerThreads = [{ id: "team-thread", sessionId: "assistant:asst_team", createdAt: 1, key: "web:shared" }];
+    const team: SessionDetail = { ...baseSession(), id: "assistant:asst_team", isWorkspaceRuntime: true, owner: { type: "team", id: "team_1" } };
+    renderWithOpen(team, "team-thread", vi.fn());
+    const trigger = screen.getByRole("button", { name: "Thread menu" });
+    expect(trigger.className).not.toContain("md:hidden");
+    await userEvent.click(trigger);
+    expect(await screen.findByRole("menuitem", { name: "Duplicate thread" })).toBeTruthy();
+  });
+
+  it("does not offer it to a viewer outside the workspace, or where no thread can open", async () => {
+    meData = { id: "someone-else" };
+    headerThreads = [{ id: "t1", sessionId: "sess-1", createdAt: 1, key: "web:t1" }];
+    const view = renderWithOpen(baseSession(), "t1", vi.fn());
+    await userEvent.click(screen.getByRole("button", { name: "Thread menu" }));
+    await screen.findByRole("menuitem", { name: /copy transcript/i });
+    expect(screen.queryByRole("menuitem", { name: "Duplicate thread" })).toBeNull();
+    view.unmount();
+
+    meData = { id: "u1" };
+    renderWithOpen(baseSession(), "t1");
+    await userEvent.click(screen.getByRole("button", { name: "Thread menu" }));
+    await screen.findByRole("menuitem", { name: /copy transcript/i });
+    expect(screen.queryByRole("menuitem", { name: "Duplicate thread" })).toBeNull();
+  });
+});
+
+describe("SessionHeader: desktop actions", () => {
+  afterEach(() => { headerThreads = []; meData = undefined; });
+
+  it("puts the model control in the composer slot and the thread actions in the menu", async () => {
+    meData = { id: "u1" };
+    headerThreads = [{ id: "t1", sessionId: "sess-1", createdAt: 1, key: "web:t1" }];
+    renderHeader(undefined, "t1");
+    const picker = screen.getByRole("button", { name: /^Choose model:/ });
+    expect(screen.getByTestId("composer-model").contains(picker)).toBe(true);
+    // Share and Copy transcript are menu items now, not header buttons.
+    expect(screen.queryByRole("button", { name: "Share thread" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Copy transcript" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Thread menu" }));
+    for (const name of ["Copy transcript", "Share thread"]) {
+      const item = await screen.findByRole("menuitem", { name });
+      expect(item.closest(".md\\:hidden")).toBeNull();
+    }
+  });
+
+  it("shows the menu on every screen to a team member who is not an admin", async () => {
+    meData = { id: "u1" };
+    teamsData = { teams: [{ id: "team_1", orgId: "org_1", name: "Platform", origin: "local", externalId: null, createdAt: 1, memberCount: 3, callerRole: "member", defaultModel: null }] };
+    headerThreads = [{ id: "team-thread", sessionId: "assistant:asst_team", createdAt: 1, key: "web:shared" }];
+    renderHeader(undefined, "team-thread", { ...baseSession(), id: "assistant:asst_team", isWorkspaceRuntime: true, owner: { type: "team", id: "team_1" } });
+    // Only an admin changes a team thread's model.
+    expect(screen.queryByRole("button", { name: /^Choose model:/ })).toBeNull();
+    const trigger = screen.getByRole("button", { name: "Thread menu" });
+    expect(trigger.className).not.toContain("md:hidden");
+    await userEvent.click(trigger);
+    expect(await screen.findByRole("menuitem", { name: "Copy transcript" })).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: "Share thread" })).toBeNull();
   });
 });
 
@@ -993,7 +1099,8 @@ describe("SessionHeader — team assistant", () => {
     headerThreads = [{ id: "team-thread", sessionId: "assistant:asst_team", createdAt: 1, key: "web:shared" }];
     threadModelVariables = { threadId: "team-thread", model: "test-model" };
     threadModelError = new Error("Model unavailable. Choose another model.");
-    renderHeader(undefined, "team-thread", teamSession());
+    // No composer slot: the phone menu offers the settings instead.
+    renderHeader(undefined, "team-thread", teamSession(), null);
     const menu = screen.getByRole("button", { name: "Thread menu" });
     await userEvent.click(menu);
     await userEvent.click(screen.getByRole("menuitem", { name: "Model and thinking" }));

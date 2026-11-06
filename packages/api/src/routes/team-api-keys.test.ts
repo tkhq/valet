@@ -21,6 +21,7 @@ import type {
   ListTeamApiKeysResponse,
   SessionDetail,
 } from "../wire/types.js";
+import { bootstrapAdminInviteCode } from "../test-helpers/bootstrap-admin-code.js";
 
 let api: TestApi | undefined;
 
@@ -37,11 +38,11 @@ function extractSessionCookie(setCookieHeader: string | null): string {
   return match![0];
 }
 
-async function signUp(baseUrl: string, email: string, name: string): Promise<string> {
+async function signUp(baseUrl: string, email: string, name: string, inviteCode?: string): Promise<string> {
   const res = await fetch(`${baseUrl}/api/auth/sign-up/email`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, email, password: "correct-horse-battery" }),
+    body: JSON.stringify({ name, email, password: "correct-horse-battery", ...(inviteCode ? { inviteCode } : {}) }),
   });
   expect(res.status).toBe(200);
   return extractSessionCookie(res.headers.get("set-cookie"));
@@ -103,7 +104,7 @@ function createTeamKey(baseUrl: string, cookie: string, teamId: string): Promise
 describe("team API keys", () => {
   it("a team key starts a team-owned session; a personal key cannot", async () => {
     api = await bootTestApi({ auth: true });
-    const cookie = await signUp(api.baseUrl, "admin@nowhere.test", "First Admin");
+    const cookie = await signUp(api.baseUrl, "admin@nowhere.test", "First Admin", await bootstrapAdminInviteCode(api.providers.db));
     const teamId = await createTeam(api.baseUrl, cookie, "Platform");
 
     const createRes = await fetch(`${api.baseUrl}/api/teams/${teamId}/api-keys`, {
@@ -155,7 +156,7 @@ describe("team API keys", () => {
 
   it("list and revoke are admin-gated; revoke stops the key", async () => {
     api = await bootTestApi({ auth: true });
-    const cookie = await signUp(api.baseUrl, "admin@nowhere.test", "First Admin");
+    const cookie = await signUp(api.baseUrl, "admin@nowhere.test", "First Admin", await bootstrapAdminInviteCode(api.providers.db));
     const teamId = await createTeam(api.baseUrl, cookie, "Platform");
 
     const created = (await (
@@ -188,7 +189,7 @@ describe("team API keys", () => {
   it("creation answers a team member with the admin rule, and admits both admin kinds", async () => {
     api = await bootTestApi({ auth: true });
     const { baseUrl, providers: { db } } = api;
-    const adminCookie = await signUp(baseUrl, "admin@nowhere.test", "First Admin");
+    const adminCookie = await signUp(baseUrl, "admin@nowhere.test", "First Admin", await bootstrapAdminInviteCode(api.providers.db));
     const teamId = await createTeam(baseUrl, adminCookie, "Platform");
 
     // 1. A plain org member who belongs to the team.
@@ -250,7 +251,7 @@ describe("team API keys", () => {
 
   it("the key still works after the creating admin leaves the team", async () => {
     api = await bootTestApi({ auth: true });
-    const cookie = await signUp(api.baseUrl, "admin@nowhere.test", "First Admin");
+    const cookie = await signUp(api.baseUrl, "admin@nowhere.test", "First Admin", await bootstrapAdminInviteCode(api.providers.db));
     const teamId = await createTeam(api.baseUrl, cookie, "Platform");
     const created = (await (
       await fetch(`${api.baseUrl}/api/teams/${teamId}/api-keys`, {
@@ -294,7 +295,7 @@ describe("team API keys", () => {
 
   it("GET /api/me for a team key answers with the team, not the creating admin", async () => {
     api = await bootTestApi({ auth: true });
-    const cookie = await signUp(api.baseUrl, "admin@nowhere.test", "First Admin");
+    const cookie = await signUp(api.baseUrl, "admin@nowhere.test", "First Admin", await bootstrapAdminInviteCode(api.providers.db));
     const teamId = await createTeam(api.baseUrl, cookie, "Platform");
     const created = (await (
       await fetch(`${api.baseUrl}/api/teams/${teamId}/api-keys`, {
@@ -321,7 +322,7 @@ describe("team API keys", () => {
 
   it("a gone team rejects the key", async () => {
     api = await bootTestApi({ auth: true });
-    const cookie = await signUp(api.baseUrl, "admin@nowhere.test", "First Admin");
+    const cookie = await signUp(api.baseUrl, "admin@nowhere.test", "First Admin", await bootstrapAdminInviteCode(api.providers.db));
     const teamId = await createTeam(api.baseUrl, cookie, "Platform");
 
     const created = (await (
@@ -341,7 +342,7 @@ describe("team API keys", () => {
 
   it("deleting the team through the route reaps its keys", async () => {
     api = await bootTestApi({ auth: true });
-    const cookie = await signUp(api.baseUrl, "admin@nowhere.test", "First Admin");
+    const cookie = await signUp(api.baseUrl, "admin@nowhere.test", "First Admin", await bootstrapAdminInviteCode(api.providers.db));
     const teamId = await createTeam(api.baseUrl, cookie, "Platform");
     const created = (await (
       await fetch(`${api.baseUrl}/api/teams/${teamId}/api-keys`, {
@@ -395,7 +396,7 @@ describe("team API keys", () => {
       });
       api = await bootTestApi({ auth: true });
       const { baseUrl, providers: { db } } = api;
-      const cookie = await signUp(baseUrl, "admin@nowhere.test", "First Admin");
+      const cookie = await signUp(baseUrl, "admin@nowhere.test", "First Admin", await bootstrapAdminInviteCode(api.providers.db));
       const teamId = await createTeam(baseUrl, cookie, "Platform");
       afterMint = async (keyId) => {
         const rows = await db.select().from(apikey).where(eq(apikey.id, keyId));
@@ -452,7 +453,7 @@ describe("team API keys", () => {
 
   it("personal create/update cannot stamp metadata.teamId", async () => {
     api = await bootTestApi({ auth: true });
-    const cookie = await signUp(api.baseUrl, "admin@nowhere.test", "First Admin");
+    const cookie = await signUp(api.baseUrl, "admin@nowhere.test", "First Admin", await bootstrapAdminInviteCode(api.providers.db));
     const teamId = await createTeam(api.baseUrl, cookie, "Platform");
 
     const stolen = await fetch(`${api.baseUrl}/api/auth/api-key/create`, {
@@ -489,7 +490,7 @@ describe("team API keys", () => {
 
   it("personal delete cannot revoke a team key; team key cannot create a personal assistant", async () => {
     api = await bootTestApi({ auth: true });
-    const cookie = await signUp(api.baseUrl, "admin@nowhere.test", "First Admin");
+    const cookie = await signUp(api.baseUrl, "admin@nowhere.test", "First Admin", await bootstrapAdminInviteCode(api.providers.db));
     const teamId = await createTeam(api.baseUrl, cookie, "Platform");
     const created = (await (
       await fetch(`${api.baseUrl}/api/teams/${teamId}/api-keys`, {

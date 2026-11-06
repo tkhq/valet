@@ -124,6 +124,19 @@ data:
   VALET_PREBUILD_BUILD_CPU_LIMIT: {{ .Values.build.resources.limits.cpu | quote }}
   VALET_PREBUILD_BUILD_MEMORY_REQUEST: {{ .Values.build.resources.requests.memory | quote }}
   VALET_PREBUILD_BUILD_MEMORY_LIMIT: {{ .Values.build.resources.limits.memory | quote }}
+  {{- with .Values.build.nodeSelector }}
+  # Places BuildKit Jobs on an isolated build pool (bakes run untrusted code).
+  VALET_PREBUILD_BUILD_NODE_SELECTOR: {{ toJson . | quote }}
+  {{- end }}
+  {{- with .Values.build.tolerations }}
+  VALET_PREBUILD_BUILD_TOLERATIONS: {{ toJson . | quote }}
+  {{- end }}
+  {{- if .Values.api.auth.methods }}
+  AUTH_METHODS: {{ .Values.api.auth.methods | quote }}
+  {{- end }}
+  {{- if .Values.api.auth.primaryMethod }}
+  AUTH_PRIMARY_METHOD: {{ .Values.api.auth.primaryMethod | quote }}
+  {{- end }}
   {{- if .Values.api.auth.oidcIssuer }}
   AUTH_OIDC_ISSUER: {{ .Values.api.auth.oidcIssuer | quote }}
   {{- end }}
@@ -147,6 +160,35 @@ data:
   {{- end }}
   {{- if .Values.api.auth.allowedEmailDomains }}
   AUTH_ALLOWED_EMAIL_DOMAINS: {{ .Values.api.auth.allowedEmailDomains | quote }}
+  {{- end }}
+  {{- if .Values.api.auth.adminEmails }}
+  AUTH_ADMIN_EMAILS: {{ .Values.api.auth.adminEmails | quote }}
+  {{- end }}
+  {{- with .Values.api.auth.mcp }}
+  {{- /* Rendered only when set. toString keeps a 0 limit, which a bare `if` would drop. */}}
+  {{- if ne (toString .registration) "" }}
+  AUTH_MCP_REGISTRATION: {{ .registration | quote }}
+  {{- end }}
+  {{- if ne (toString .registrationRatePerHour) "" }}
+  AUTH_MCP_REGISTRATION_RATE_PER_HOUR: {{ toString .registrationRatePerHour | quote }}
+  {{- end }}
+  {{- if ne (toString .unconsentedClientCap) "" }}
+  AUTH_MCP_UNCONSENTED_CLIENT_CAP: {{ toString .unconsentedClientCap | quote }}
+  {{- end }}
+  {{- if ne (toString .maxRedirectUris) "" }}
+  AUTH_MCP_MAX_REDIRECT_URIS: {{ toString .maxRedirectUris | quote }}
+  {{- end }}
+  {{- if ne (toString .appSchemes) "" }}
+  AUTH_MCP_APP_SCHEMES: {{ .appSchemes | quote }}
+  {{- end }}
+  {{- end }}
+  {{- with .Values.api.security }}
+  {{- if .outboundUrlAllowlist }}
+  VALET_OUTBOUND_URL_ALLOWLIST: {{ .outboundUrlAllowlist | quote }}
+  {{- end }}
+  {{- if .internalHosts }}
+  VALET_INTERNAL_HOSTS: {{ .internalHosts | quote }}
+  {{- end }}
   {{- end }}
   {{- if .Values.api.githubApp.appId }}
   GITHUB_APP_ID: {{ .Values.api.githubApp.appId | quote }}

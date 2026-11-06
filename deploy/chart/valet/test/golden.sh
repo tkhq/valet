@@ -117,6 +117,21 @@ grep -q 'VALET_WATCH_MIN_INTERVAL_MS: "30000"' "$TMP_DIR/scratch-pool.yaml" \
   || fail "sandbox.watchMinIntervalMs override was lost"
 pass "watch interval and scratch pool marker render"
 
+# Build pod placement (untrusted bakes): unset by default, JSON when set.
+if grep -q 'VALET_PREBUILD_BUILD_NODE_SELECTOR\|VALET_PREBUILD_BUILD_TOLERATIONS' "$TMP_DIR/bundled.yaml"; then
+  fail "default render must not set build pod placement"
+fi
+helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --set build.nodeSelector.pool=builds \
+  --set 'build.tolerations[0].key=valet.dev/build' \
+  --set 'build.tolerations[0].operator=Exists' \
+  --set 'build.tolerations[0].effect=NoSchedule' > "$TMP_DIR/build-placement.yaml"
+grep -q 'VALET_PREBUILD_BUILD_NODE_SELECTOR: "{\\"pool\\":\\"builds\\"}"' "$TMP_DIR/build-placement.yaml" \
+  || fail "build.nodeSelector must render as JSON in VALET_PREBUILD_BUILD_NODE_SELECTOR"
+grep -q 'VALET_PREBUILD_BUILD_TOLERATIONS: "\[{\\"effect\\":\\"NoSchedule\\",\\"key\\":\\"valet.dev/build\\",\\"operator\\":\\"Exists\\"}\]"' "$TMP_DIR/build-placement.yaml" \
+  || fail "build.tolerations must render as JSON in VALET_PREBUILD_BUILD_TOLERATIONS"
+pass "build pod placement renders"
+
 # --- sandbox namespace ownership -----------------------------------------
 [ "$(grep -c '^kind: Namespace$' "$TMP_DIR/bundled.yaml")" -eq 1 ] \
   || fail "default render must include exactly one sandbox Namespace"
@@ -289,17 +304,70 @@ pass "probe split: readiness /api/ready, startup+liveness /api/health"
 # Database upgrades run before the listener binds. Keep a separate rollout budget.
 echo "$API_DEPLOY_BLOCK" | grep -q '^  progressDeadlineSeconds: 2100$' \
   || fail "default api rollout must allow 35 minutes for database upgrades"
-echo "$API_DEPLOY_BLOCK" | grep -A6 'startupProbe:' | grep -q 'failureThreshold: 360' \
-  || fail "default startup probe must allow 30 minutes at its 5-second period"
+echo "$API_DEPLOY_BLOCK" | grep -A6 'startupProbe:' | grep -q 'failureThreshold: 1800' \
+  || fail "default startup probe must allow 30 minutes (360 five-second units, polled every 1s)"
+echo "$API_DEPLOY_BLOCK" | grep -A6 'startupProbe:' | grep -q 'periodSeconds: 1$' \
+  || fail "startup probe must poll every second; readiness waits on it during the Recreate gap"
+echo "$API_DEPLOY_BLOCK" | grep -A6 'readinessProbe:' | grep -q 'periodSeconds: 1$' \
+  || fail "readiness probe must poll every second"
+echo "$API_DEPLOY_BLOCK" | grep -A7 'livenessProbe:' | grep -q 'timeoutSeconds: 5$' \
+  || fail "liveness probe needs a 5s timeout; a busy event loop must not kill the only replica"
+echo "$API_DEPLOY_BLOCK" | grep -A7 'livenessProbe:' | grep -q 'failureThreshold: 6$' \
+  || fail "liveness probe needs failureThreshold 6 (about a minute of no answer before a restart)"
+echo "$API_DEPLOY_BLOCK" | grep -q 'terminationGracePeriodSeconds: 30$' \
+  || fail "api grace period must stay above the 20s shutdown bound in main.ts"
 helm --kube-context rancher-desktop template valet "$CHART_DIR" --kube-version 1.30.0 \
   --show-only templates/deployment.yaml \
   --set api.startupProbe.failureThreshold=480 --set api.progressDeadlineSeconds=2700 \
   > "$TMP_DIR/upgrade-budget.yaml"
 grep -q '^  progressDeadlineSeconds: 2700$' "$TMP_DIR/upgrade-budget.yaml" \
   || fail "api rollout deadline override was lost"
-grep -A6 'startupProbe:' "$TMP_DIR/upgrade-budget.yaml" | grep -q 'failureThreshold: 480' \
+grep -A6 'startupProbe:' "$TMP_DIR/upgrade-budget.yaml" | grep -q 'failureThreshold: 2400' \
   || fail "api startup probe threshold override was lost"
 pass "database upgrade startup and rollout budgets support overrides"
+
+# --- Recreate boot/drain: the Service routes to the not-ready api pod ------
+SERVICE=$(helm template valet "$CHART_DIR" --kube-version 1.30.0 --show-only templates/service.yaml)
+echo "$SERVICE" | grep -q 'publishNotReadyAddresses: true' \
+  || fail "api Service must publish not-ready addresses so callers get the api's 503 + Retry-After"
+helm template valet "$CHART_DIR" --kube-version 1.30.0 --show-only templates/service.yaml \
+  --set api.publishNotReadyAddresses=false | grep -q 'publishNotReadyAddresses' \
+  && fail "api.publishNotReadyAddresses=false must drop the field (RollingUpdate)"
+pass "api Service publishes not-ready addresses by default, with an opt-out"
+
+# --- api image pre-pull hook: no image pull inside the Recreate gap -------
+PREPULL=$(helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --show-only templates/api-image-prepull-job.yaml --set api.image.tag=sha-test)
+echo "$PREPULL" | grep -q '"helm.sh/hook": pre-upgrade' \
+  || fail "image pre-pull Job must be a pre-upgrade hook so Helm waits before Recreate"
+echo "$PREPULL" | grep -q 'image: ".*:sha-test"' \
+  || fail "image pre-pull Job must pull the same api image tag as the Deployment"
+echo "$PREPULL" | grep -q 'app.kubernetes.io/component: api-image-prepull' \
+  || fail "image pre-pull pods need their own component label"
+echo "$PREPULL" | grep -q 'app.kubernetes.io/component: api$' \
+  && fail "image pre-pull pods must not match the api Service selector"
+helm template valet "$CHART_DIR" --kube-version 1.30.0 --set api.imagePrepull.enabled=false \
+  | grep -q 'api-image-prepull' && fail "api.imagePrepull.enabled=false must not render the Job"
+pass "api image pre-pull hook renders as a pre-upgrade Job on the new image"
+AFFINITY_ARGS=(--set 'api.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].key=pool'
+  --set 'api.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].operator=In'
+  --set 'api.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].values[0]=api'
+  --set 'api.affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution[0].topologyKey=kubernetes.io/hostname'
+  --set 'api.affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution[0].labelSelector.matchLabels.app=other')
+PREPULL_AFFINITY=$(helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --show-only templates/api-image-prepull-job.yaml "${AFFINITY_ARGS[@]}")
+echo "$PREPULL_AFFINITY" | grep -A8 'nodeAffinity:' | grep -q 'key: pool' \
+  || fail "image pre-pull Job must copy api.affinity.nodeAffinity so it warms the api's nodes"
+echo "$PREPULL_AFFINITY" | grep -q '^ *podAntiAffinity:' \
+  && fail "image pre-pull Job must not copy api pod (anti-)affinity terms"
+echo "$PREPULL" | grep -A6 'topologySpreadConstraints:' | grep -q 'whenUnsatisfiable: DoNotSchedule' \
+  || fail "image pre-pull spread must be hard so each eligible node gets a pod"
+echo "$PREPULL" | grep -A6 'topologySpreadConstraints:' | grep -q 'nodeTaintsPolicy: Honor' \
+  || fail "image pre-pull spread must ignore cordoned/NotReady nodes (nodeTaintsPolicy: Honor)"
+echo "$PREPULL" | grep -q '^ *affinity:' \
+  && fail "image pre-pull Job must not render an empty affinity without api.affinity"
+pass "image pre-pull Job copies api node placement and spreads one pod per node"
+
 
 
 # --- lookup-retain helper present in Secret template ---------------------
@@ -659,5 +727,39 @@ if grep -qE 'registry-health|VALET_REGISTRY_HEALTH_URL:' <<<"$DISABLED_REGISTRY"
   fail "disabled registry must omit bundled health resources and URL"
 fi
 pass "registry health service, security, endpoint, and reserve wiring"
+
+echo "== sign-in methods =="
+if grep -q 'AUTH_METHODS:' "$TMP_DIR/bundled.yaml"; then
+  fail "default values must leave every sign-in method off"
+fi
+EXPLICIT=$(helm template valet "$CHART_DIR" --kube-version 1.30.0 --set api.auth.oidcIssuer=https://sso.example.com/realms/x \
+  --set 'api.auth.methods=oidc\,password' --set api.auth.primaryMethod=oidc)
+grep -q 'AUTH_METHODS: "oidc,password"' <<<"$EXPLICIT" || fail "explicit methods must override the SSO default"
+grep -q 'AUTH_PRIMARY_METHOD: "oidc"' <<<"$EXPLICIT" || fail "primaryMethod must render AUTH_PRIMARY_METHOD"
+pass "sign-in methods render only when listed"
+
+echo "== MCP registration settings =="
+if grep -q 'AUTH_MCP_' "$TMP_DIR/bundled.yaml"; then
+  fail "default values must leave every AUTH_MCP_ setting to the api default"
+fi
+MCP=$(helm template valet "$CHART_DIR" --kube-version 1.30.0 --set api.auth.mcp.registration=off \
+  --set api.auth.mcp.registrationRatePerHour=0 --set api.auth.mcp.unconsentedClientCap=50 \
+  --set api.auth.mcp.maxRedirectUris=2 --set 'api.auth.mcp.appSchemes=claude')
+grep -q 'AUTH_MCP_REGISTRATION: "off"' <<<"$MCP" || fail "mcp.registration must render AUTH_MCP_REGISTRATION"
+grep -q 'AUTH_MCP_REGISTRATION_RATE_PER_HOUR: "0"' <<<"$MCP" || fail "a 0 rate must still render"
+grep -q 'AUTH_MCP_UNCONSENTED_CLIENT_CAP: "50"' <<<"$MCP" || fail "mcp.unconsentedClientCap must render"
+grep -q 'AUTH_MCP_MAX_REDIRECT_URIS: "2"' <<<"$MCP" || fail "mcp.maxRedirectUris must render"
+grep -q 'AUTH_MCP_APP_SCHEMES: "claude"' <<<"$MCP" || fail "mcp.appSchemes must render"
+pass "MCP registration settings render only when set"
+
+echo "== outbound URL guard =="
+if grep -qE 'VALET_OUTBOUND_URL_ALLOWLIST|VALET_INTERNAL_HOSTS' "$TMP_DIR/bundled.yaml"; then
+  fail "default values must leave the outbound URL guard settings unset"
+fi
+GUARD=$(helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --set 'api.security.outboundUrlAllowlist=vllm.corp.example\,10.20.0.0/16' --set 'api.security.internalHosts=ecr-proxy.corp.example')
+grep -q 'VALET_OUTBOUND_URL_ALLOWLIST: "vllm.corp.example,10.20.0.0/16"' <<<"$GUARD" || fail "security.outboundUrlAllowlist must render"
+grep -q 'VALET_INTERNAL_HOSTS: "ecr-proxy.corp.example"' <<<"$GUARD" || fail "security.internalHosts must render"
+pass "outbound URL guard settings render only when set"
 
 echo "All golden assertions passed."

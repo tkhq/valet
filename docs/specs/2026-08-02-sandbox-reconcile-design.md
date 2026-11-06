@@ -267,3 +267,45 @@ Configure an operator alert when `valet.bake.cache.over_budget_all_protected` or
 Alert on `valet.registry.capacity_unknown` for configured production registries. Alert when `valet.bake.push_failures.recent` is greater than zero.
 OTel export requires the deployment's telemetry provider. Structured error logs remain available without it.
 Physical byte gauges retain their last sample during unknown capacity. Use the capacity-unknown gauge to exclude stale samples.
+
+### Built-in image sources (2026-11-03)
+
+Code owns three kinds of `image_sources` rows. `builtInSourceKind` in `bakes/source-service.ts` identifies them with the keys that seeding uses:
+
+- `stock-full`: the `kind='external'` row named `stock-full`. Its ref follows the deploy pin.
+- `default-full`: the `kind='base'`, `profile='full'` row. Its setup commands are empty, and its parent is `stock-full`.
+- `repo-base`: a `kind='base'` row named `repo-base:<fullName>`. Its commands come from the repository's `.valet/prebuild.yaml`.
+
+Their setup commands and image refs run in every later bake and sandbox. An org admin account is not enough to change them. The admin API refuses these writes:
+
+- `PATCH /api/org/sources/:id` with any field on a built-in row returns 403. This includes content fields, `enabled`, and `schedule`. Disabling `default-full` or `stock-full` breaks sandbox starts. `schedule: "off"` stops the nightly rebake that carries a pin change into the base image.
+- `DELETE /api/org/sources/:id` on a built-in row returns 403.
+- `POST /api/org/sources` with `kind='base'` returns 403. The one base an org has is the seeded full base.
+- `POST /api/org/sources` with a reserved name returns 409. The reserved names are `stock-full`, `default-full`, and any name that starts with `repo-base:`. The check ignores case and outer spaces.
+
+The 403 message is "`<name>` is a built-in image source. Change it in code or the deploy configuration, not through the API." The status is 403, not 409, because no change of state makes a retry succeed.
+
+`GET /api/org/sources` sets `builtIn: true` on these rows. Settings > Organization > Sandbox images shows a built-in base read-only, without Save. It shows built-in external images without Delete. Both show "Built-in. Managed in code."
+
+At boot, `seedDefaultBasesIfMissing` compares each built-in row with the code values. On `default-full` it checks `setupCommands`, `parentId`, `enabled`, and `schedule`. On `stock-full` it checks `pullSecretName`, `enabled`, and `schedule`. If a field drifted, the service writes the code value back. It logs the old and new values at error level and adds 1 to the counter `valet.image_source.builtin_repaired` for each field. A repair of `default-full` fails the queued, building, and pushed bakes of that base and of every source built from it, because each may carry the drifted commands. Sessions then fall back to the stock image. The repair starts a clean base bake, and the push cascade rebuilds the children. Drift means tampering or an edit made before the API refused it, so alert on any non-zero counter value. This repair is an exception to "alert, don't auto-repair": code owns this content, and keeping the drift runs unreviewed commands in every sandbox.
+
+A `stock-full` ref change still logs at info level, because a deploy pin change is normal operation. Bakes built from drifted commands stay in the registry until retention removes them.
+
+### Build pod isolation and cluster-side requirements (2026-11-03)
+
+A bake runs setup commands that an org admin or a repository controls. Treat every builder pod as untrusted code.
+
+The kubernetes builder labels every BuildKit Job and pod with `valet.dev/workload: untrusted-build`. A NetworkPolicy or admission policy can select build pods by this label. Two settings place build pods on an isolated node pool:
+
+- `VALET_PREBUILD_BUILD_NODE_SELECTOR`: a JSON object, or `key=value` pairs separated by commas. The chart sets it from `build.nodeSelector`.
+- `VALET_PREBUILD_BUILD_TOLERATIONS`: a JSON array of Kubernetes tolerations. The chart sets it from `build.tolerations`.
+
+If a setting is unset, the scheduler picks the node, as before. If a value does not parse, the api fails at boot and names the expected format.
+
+The api cannot isolate a build by itself. The cluster operator must also provide these items:
+
+1. A separate node pool for builds, with a taint that only build pods tolerate.
+2. Instance metadata (IMDS) blocked for that pool, or an IMDSv2 hop limit of 1.
+3. A NetworkPolicy that denies build pod egress to 169.254.169.254, the Kubernetes API, and the pod and service CIDRs.
+4. An egress allowlist for build pods: the image registry, the Git host, and the package mirrors the recipes use.
+5. A rootless builder (the default `moby/buildkit:rootless`) or a gVisor runtime class. Do not run builds privileged.

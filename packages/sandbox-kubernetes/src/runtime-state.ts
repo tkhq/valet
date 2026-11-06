@@ -164,6 +164,22 @@ export async function listRuntimeStateOwners(
   }
   return owners;
 }
+/** The session's own claim, read by name, with the ownership checks `listRuntimeStateOwners` applies. */
+export async function readRuntimeStateOwner(
+  api: RuntimeStateApi,
+  namespace: string,
+  sessionId: string,
+): Promise<{ sandboxId: string; sessionId: string } | undefined> {
+  const claim = await api.read(namespace, runtimeStateClaimName(sessionId));
+  if (!claim) return undefined;
+  const owner = claim.metadata.labels?.[SANDBOX_OWNER];
+  if (!owner || claim.metadata.annotations?.[SESSION_OWNER] !== sessionId || claim.metadata.ownerReferences?.length) {
+    throw new Error(
+      "Runtime state ownership is invalid. Inspect the claim before changing this session.",
+    );
+  }
+  return { sandboxId: owner, sessionId };
+}
 /** The final session deletion path is the only caller that removes private state. */
 export async function deleteRuntimeState(
   api: RuntimeStateApi,

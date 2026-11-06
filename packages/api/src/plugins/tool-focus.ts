@@ -14,7 +14,7 @@ export type WorkflowFocus = "diagnose" | "repair" | "validate" | "general";
 export function workflowToolFocus(phase: WorkflowFocus, actions: string[] = [], tools: string[] = []): ToolScope | undefined {
   if (phase === "general") return undefined;
   const workflowActions = phase === "repair" ? [...READS, ...REPAIRS] : phase === "validate" ? [...READS, ...RUNS] : READS;
-  return { tools: [...TOOLS, ...(phase === "validate" ? tools : [])], actions: [...workflowActions.map((id) => `workflows.${id}`), ...ORIGIN_REPLIES, ...(phase === "validate" ? actions : [])] };
+  return { tools: [...TOOLS, ...(phase === "validate" ? tools : [])], actions: [...workflowActions.map((id) => `workflows.${id}`), ...ORIGIN_REPLIES, ...(phase === "validate" || phase === "repair" ? actions : [])] };
 }
 
 export function buildToolFocusTool(): ToolDef {
@@ -26,7 +26,7 @@ export function buildToolFocusTool(): ToolDef {
   const tool: ToolDef<typeof parameters> = {
     name: "focus_tools",
     sideEffect: "none",
-    description: "Focus this thread's tools for workflow diagnosis, repair, or validation. Start troubleshooting with diagnose. Select repair before editing. Select validate only for an authorized test; include each integration action the run needs. General clears focus for another task. Inherited limits and approval policies always apply. Other threads keep their own focus, and a child task gets your limits, not this focus.",
+    description: "Focus this thread's tools for workflow diagnosis, repair, or validation. Start troubleshooting with diagnose. Select repair before editing; include each integration action the workflow's steps use, so you can read its schema. Select validate only for an authorized test; include each integration action the run needs. General clears focus for another task. Inherited limits and approval policies always apply. Other threads keep their own focus, and a child task gets your limits, not this focus.",
     parameters,
     riskLevel: "low",
     protectedFromPruning: true,

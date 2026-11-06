@@ -11,8 +11,8 @@
  *     client-side ordering. Durable frames also carry a persistent `offset`;
  *     clients resume after a gap by reconnecting with `?fromOffset=<offset>`.
  */
-import type { AssistantThreadPolicy, Appearance, ProviderFailureKind, ThreadPlan } from "@valet/shared";
-export type { Appearance, ThreadPlan, ThreadPlanItem, ThreadPlanStatus } from "@valet/shared";
+import type { AssistantThreadPolicy, Appearance, ProviderFailureKind, ThreadPlan, TurnProgress } from "@valet/shared";
+export type { TurnProgress, ProgressTask, Appearance, ThreadPlan, ThreadPlanItem, ThreadPlanStatus } from "@valet/shared";
 import type { RepoListItem } from "@valet/sdk/repos";
 import type { CommandInfo, RegistryDiagnostic } from "@valet/engine";
 import type { SecurityCredentialDecl } from "@valet/shared";
@@ -41,6 +41,10 @@ export interface ApiError {
  */
 export interface AuthConfigResponse {
   stub: boolean;
+  /** True when email and password sign-in is on (`AUTH_METHODS` lists `password`). */
+  password: boolean;
+  /** The method the login page shows first. Null when no method is on, or in stub mode. */
+  primary: "password" | "oidc" | "google" | "github" | null;
   social: ("google" | "github")[];
   sso: { name: string } | null;
   /** The configured public origin that generated file links use. Absent
@@ -1112,6 +1116,11 @@ export interface ThreadPlanResponse {
   plan: ThreadPlan | null;
 }
 
+/** Latest durable execution progress, or null for threads without an execution. */
+export interface ThreadProgressResponse {
+  progress: TurnProgress | null;
+}
+
 /** `GET /api/threads/:threadId/context` — how full the thread's model
  * context is. The engine measures it like the proactive compaction check
  * (`Thread.contextUsage`), so `tokens` at `limit` means the next turn
@@ -1451,7 +1460,8 @@ export type MessagePart =
        */
       resultTrimmed?: { chars: number; entryId: string; threadId: string };
     }
-  | { kind: "thinking"; text: string; startedAt?: number; durationMs?: number };
+  /** `summary`: the provider's reasoning summary, for display only. */
+  | { kind: "thinking"; text: string; summary?: string; startedAt?: number; durationMs?: number };
 
 /**
  * Trimmed projection of engine `MessageEntry.signal` (plan decision 2).
@@ -1714,7 +1724,7 @@ export interface ForkThreadResponse {
 
 /** `POST /api/threads/:threadId/move`. Answers with `ForkThreadResponse` for the copy. */
 export interface MoveThreadRequest {
-  /** "private": a team thread to the caller's private threads. A team: a private thread to that team. */
+  /** "private": a team thread to the caller's private threads. A team: a thread into that team, which the caller is on. */
   to: "private" | { teamId: string };
   /** Required to move into a team, which then reads the thread. */
   confirm?: true;
@@ -1800,7 +1810,7 @@ export interface SendPromptResponse {
 
 export type DecisionGateType = "approval" | "question" | "credential_request";
 export type DecisionGateStatus = "pending" | "resolved" | "expired" | "withdrawn";
-export type DecisionWithdrawReason = "steer" | "abort" | "cancel";
+export type DecisionWithdrawReason = "steer" | "abort" | "cancel" | "message";
 
 export interface DecisionAction {
   id: string;
@@ -2497,6 +2507,14 @@ export interface MemoryTreeEntry {
   /** Stored content length in UTF-16 code units — display-grade size, not
    * exact UTF-8 bytes. */
   sizeBytes: number;
+  /** The last time an agent chose to read the file or a turn cited it, in
+   * ms epoch. Null when no agent has used it. */
+  lastUsedAt: number | null;
+  /** Agent reads plus citations. */
+  useCount: number;
+  /** The last time the memory snapshot loaded the file into a prompt. A
+   * load is not a use: the agent did not choose it. */
+  lastLoadedAt: number | null;
 }
 
 // ── REST: workflows (engine v2 Phase 5) ──────────────────────────────────
@@ -3439,6 +3457,8 @@ export interface CreateWorkflowEventTriggerRequest {
   name: string;
   eventKeys: string[];
   filters?: unknown[];
+  /** Run at most once in this many hours (1 to 168). See `events/once-per.ts`. */
+  oncePerHours?: number;
   /** Explicit opt-out of the channel requirement on a `slack.app_mention`
    * subscription (see `events/mention-scope.ts`). Ignored for other keys.
    * Not persisted: a stored mention subscription with no channel filter is
@@ -3451,6 +3471,8 @@ export interface UpdateWorkflowEventTriggerRequest {
   eventKeys?: string[];
   filters?: unknown[];
   enabled?: boolean;
+  /** Run at most once in this many hours. Null removes the limit. */
+  oncePerHours?: number | null;
   /** See `CreateWorkflowEventTriggerRequest.anyChannel`. Only consulted when
    * the patch changes `filters` or `eventKeys`. */
   anyChannel?: boolean;
@@ -3465,6 +3487,7 @@ export interface WorkflowEventTriggerResponse {
     eventKeys: string[];
     filters: unknown[];
     enabled: boolean;
+    oncePerHours?: number;
   };
 }
 
@@ -3498,8 +3521,24 @@ export interface GetWorkflowTriggerCatalogResponse {
   catalog: { service: string; entries: WorkflowTriggerCatalogEntry[]; readiness?: EventIngressReadiness }[];
 }
 
+/** One principle file the scope reads, for the Principles view. */
+export interface MemoryPrincipleEntry {
+  /** The read path: own, `team:{id}/…`, or `org:{id}/…`. */
+  path: string;
+  title: string;
+  /** When the rule applies. */
+  description: string;
+}
+
+export interface GetMemoryPrinciplesResponse {
+  principles: MemoryPrincipleEntry[];
+}
+
 export interface GetMemoryTreeResponse {
   entries: MemoryTreeEntry[];
+  /** When Valet started to track memory use, in ms epoch. Before it, a
+   * file's "never used" only means "not seen". */
+  usageSince: number;
 }
 
 // ── REST: plugins + credentials (plugin-system-v2 plan Task 15) ───────────
@@ -3688,10 +3727,64 @@ export interface PluginSummary {
    * populate the integrations allowlist. Present on all responses from v2+
    * servers; absent on responses from older servers or test stubs. */
   actionServices?: PluginActionServiceSummary[];
+  /** The plugin's event handlers (`ValetPlugin.eventHandlers`). A line with
+   * a `plugin` target names one of them. Absent when it declares none. */
+  eventHandlers?: PluginEventHandlerSummary[];
+}
+
+/** One plugin event handler, for the line editor's handler picker and settings form. */
+export interface PluginEventHandlerSummary {
+  id: string;
+  description: string;
+  /** Event keys the handler accepts. A trailing `.*` accepts a family. */
+  events: string[];
+  /** JSON Schema of the settings a line passes as `target.config`. Absent:
+   * the handler takes no settings. */
+  configSchema?: Record<string, unknown>;
 }
 
 export interface ListPluginsResponse {
   plugins: PluginSummary[];
+}
+
+// ── REST: code review ────────────────────────────────────────────────────
+
+export interface CodeReviewRoundWire {
+  head: string;
+  mode: "full" | "incremental";
+  /** ISO timestamp of the completed review. */
+  at: string;
+  newFindings: number;
+  resolved: number;
+}
+
+/** One open pull request with a review chain for a workspace. */
+export interface CodeReviewWire {
+  /** `owner/repo`. */
+  repo: string;
+  number: number;
+  title: string;
+  url: string;
+  state: "open";
+  /** Running includes queued deliveries and retries. Failed means retries ended. */
+  status: "running" | "complete" | "failed";
+  /** The latest 100 completed review rounds, oldest first. */
+  rounds: CodeReviewRoundWire[];
+  /** The GitHub review that Valet edits in place. Absent until the first post. */
+  reviewId?: number;
+  /** The last head commit Valet reviewed. */
+  head?: string;
+  openFindings: number;
+  resolvedFindings: number;
+  /** When the plugin last wrote its record for this pull request (epoch ms). */
+  updatedAt: number;
+  /** The plugin thread that holds the review work. Absent when it is gone. */
+  threadId?: string;
+}
+
+/** `GET /api/code-review/reviews` — newest first. */
+export interface ListCodeReviewsResponse {
+  reviews: CodeReviewWire[];
 }
 
 // ── REST: skills ─────────────────────────────────────────────────────────
@@ -4794,6 +4887,30 @@ export interface OrgMcpServersResponse {
   servers: OrgMcpServerWire[];
 }
 
+/** One admin configuration change (`GET /api/org/audit-log`,
+ * docs/specs/2026-11-03-admin-audit-log-design.md). `actorUserId` is null
+ * when the system made the change. `changes` is a redacted field summary:
+ * it never holds a secret value. */
+export interface AdminAuditEventWire {
+  id: string;
+  createdAt: number;
+  actorUserId: string | null;
+  actorEmail: string | null;
+  action: string;
+  targetType: string;
+  targetId: string | null;
+  targetName: string | null;
+  changes: Record<string, unknown> | null;
+  ip: string | null;
+  userAgent: string | null;
+}
+
+/** `GET /api/org/audit-log` — newest first. `nextCursor` is null on the last page. */
+export interface ListAdminAuditResponse {
+  events: AdminAuditEventWire[];
+  nextCursor: string | null;
+}
+
 /** `PATCH /api/org/plugins/:name` body — org admin only. `teamIds` is required
  * for `teams` mode and ignored otherwise. */
 export interface PatchOrgPluginRequest {
@@ -5329,6 +5446,10 @@ export type PostSandboxGitCredentialResponse = SandboxGitCredential | SandboxGit
 export interface SourceSummary {
   /** Latest build summary on list responses. Older servers omit this field. */
   latestBake?: Pick<BakeSummary, "status" | "createdAt"> | null;
+  /** True for a source that code owns: stock-full, the full base, and a
+   * repo-declared base layer. The API refuses PATCH and DELETE on it. Set on
+   * list responses; older servers omit it. */
+  builtIn?: boolean;
   id: string;
   orgId: string;
   kind: "external" | "base" | "repo";
@@ -5337,6 +5458,9 @@ export interface SourceSummary {
   externalRef: string | null;
   pullSecretName: string | null;
   setupCommands: string[] | null;
+  /** `full` for the org's full base; null for other kinds and for a
+   * repository base layer. Optional because older servers omit it. */
+  profile?: "headless" | "full" | null;
   repoHost: string | null;
   repoFullName: string | null;
   cloneUrl: string | null;
@@ -5376,6 +5500,40 @@ export interface CreateSourceResponse {
 
 export interface PatchSourceResponse {
   source: SourceSummary;
+}
+
+/** An image-source create or content change that waits for a second org
+ * admin (`bakes/source-change-requests.ts`). `payload` is the row to create
+ * or the field patch to apply. */
+export interface SourceChangeSummary {
+  id: string;
+  action: "create" | "update";
+  sourceId: string | null;
+  sourceName: string;
+  payload: Record<string, unknown>;
+  requestedBy: string;
+  requestedAt: number;
+  expiresAt: number;
+  status: "pending" | "approved" | "rejected" | "withdrawn";
+  decidedBy: string | null;
+  decidedAt: number | null;
+}
+
+/** 202 from `POST /api/org/sources` or `PATCH /api/org/sources/:id` when the
+ * change waits for approval. Nothing changed yet. */
+export interface PendingSourceChangeResponse {
+  pendingChange: SourceChangeSummary;
+}
+
+export interface ListSourceChangesResponse {
+  changes: SourceChangeSummary[];
+  /** `off` when the operator turned the gate off with VALET_IMAGE_SOURCE_APPROVAL. */
+  approval: "required" | "off";
+}
+
+export interface ResolveSourceChangeResponse {
+  change: SourceChangeSummary;
+  source?: SourceSummary;
 }
 
 export interface ListBakesResponse {
@@ -5460,7 +5618,11 @@ export type EventDeliveryPolicy = "always" | "ignoreIfMyTeamSubscribed" | "ignor
  * that sends both names for one field is refused (`events/target-names.ts`).
  */
 export type EventSubscriptionTargetWire =
-  | { kind: "workflow"; workflowId: string; appearance?: Appearance }
+  | { kind: "workflow"; workflowId: string; appearance?: Appearance; oncePerHours?: number }
+  /** A plugin's event handler (`ValetPlugin.eventHandlers`). With `teamId`
+   * the handler acts for that team; without it, for the person who arms it.
+   * `config` holds the handler's settings, checked against its `configSchema`. */
+  | { kind: "plugin"; plugin: string; handler: string; teamId?: string; config?: Record<string, unknown>; appearance?: Appearance; oncePerHours?: number }
   /** `teamId` is required when `assistant` is `"team"`, and refused
    * otherwise. The two fields are one choice, and a `teamId` alongside
    * `"user"` would name a team the delivery never reaches. */
@@ -5470,6 +5632,8 @@ export type EventSubscriptionTargetWire =
       appearance?: Appearance;
       /** Which assistant receives the deliveries. Absent reads as `user`. */
       assistant?: "user" | "team" | "org";
+      /** Deliver at most once in this many hours (`events/once-per.ts`). */
+      oncePerHours?: number;
       teamId?: string;
       /** Follow the thread: after this rule delivers a channel mention, later
        * messages in that thread route to the assistant without a re-mention. */
@@ -5657,6 +5821,8 @@ export interface ListEventSubscriptionsResponse {
 export interface PatchEventSubscriptionRequest {
   /** Replace the reply identity. Null clears the override; omission preserves it. */
   appearance?: Appearance | null;
+  /** Act at most once in this many hours. Null removes the limit; omission preserves it. */
+  oncePerHours?: number | null;
   /** @deprecated Send `appearance`. Accepted for one release; a patch that sends both is refused. */
   presence?: Appearance | null;
   deliveryPolicy?: EventDeliveryPolicy;
@@ -5687,6 +5853,11 @@ export interface PatchEventSubscriptionRequest {
   systemPrompt?: string | null;
   /** See `systemPrompt`. */
   userPromptTemplate?: string | null;
+  /**
+   * Replace a plugin line's handler settings. `null` clears them. Absent
+   * leaves them alone. The handler's `configSchema` checks the new value.
+   */
+  config?: Record<string, unknown> | null;
   /** See `CreateEventSubscriptionRequest.audience`. Absent leaves the stored
    * audience alone. */
   audience?: EventSubscriptionAudienceWire;
@@ -6551,7 +6722,8 @@ export interface BrowserAnnotation {
 export interface ReceiptStage { stage: string; outcome: string; detail: string; at: number }
 export interface ReceiptSubscriptionDecision {
   id: string; name?: string; ownerType: string; ownerId: string; target: string; targetId?: string;
-  outcome: "matched" | "filter_excluded" | "authorization_denied" | "disabled" | "key_mismatch";
+  /** `rate_limited`: the line matched but is inside its "once every N hours" window. */
+  outcome: "matched" | "filter_excluded" | "authorization_denied" | "disabled" | "key_mismatch" | "rate_limited";
   failedFilters?: Array<{ field: string; op: string }>;
 }
 export interface EventReceiptWire {
@@ -6669,14 +6841,42 @@ export interface HomeTasksResponse {
   finished: HomeTaskItem[];
 }
 
-/** A release notice with a stable identity and an internal destination. */
-export interface ProductAnnouncement {
-  id: string;
-  title: string;
-  body: string;
-  action: { label: string; href: string };
+// ── In-app tour (`/api/tutorial`) ──
+
+/** How the person last left the tour. */
+export type TutorialOutcome = "completed" | "skipped";
+
+/**
+ * `GET /api/tutorial`. `version` comes from instance config
+ * (`org.tutorialVersion` or `VALET_TUTORIAL_VERSION`); `orgVersion` rises when
+ * an org admin shows the tour to everyone again. `due` is true when the
+ * person has no outcome yet, or their stored versions are below either one.
+ */
+export interface TutorialStateResponse {
+  version: number;
+  orgVersion: number;
+  seenVersion: number;
+  seenOrgVersion: number;
+  outcome: TutorialOutcome | null;
+  /** The step to resume at while the tour is in progress. */
+  step: string | null;
+  due: boolean;
 }
-export interface ProductAnnouncementsResponse { announcements: ProductAnnouncement[] }
+
+/**
+ * `PUT /api/tutorial`. Send `step` to save progress, or `outcome` to finish
+ * or skip, each with the `version` and `orgVersion` of the tour shown. A
+ * write for other than the current versions is ignored.
+ */
+export interface UpdateTutorialRequest {
+  step?: string | null;
+  outcome?: TutorialOutcome;
+  version: number;
+  orgVersion: number;
+}
+
+/** `POST /api/tutorial/reset` (org admin). */
+export interface ResetTutorialResponse { orgVersion: number }
 
 // ── Tool broker (`/api/actions`, docs/specs/2026-10-07-mcp-agent-tools-design.md) ──
 
@@ -6732,9 +6932,12 @@ export type ActionInvokeResponse =
 export interface OAuthConsentInfo {
   /** The name the app registered with. The app chooses it, so it is not proof of identity. */
   client_name: string;
-  /** Where the browser sends the authorization code after approval. */
+  /** Where the browser sends the authorization code after approval: the
+   * redirect URI's scheme and full host with port, such as
+   * `https://app.example.com:8443` or `claude://claude.ai`. */
   redirect_origin: string;
-  /** True when the code goes to this computer (localhost), as with Claude Code. */
+  /** True when the code goes to this computer (loopback or a native app
+   * scheme), as with Claude Code and the Claude app. */
   redirect_is_local: boolean;
   /** The signed-in Valet account the app would act as. */
   account: string;

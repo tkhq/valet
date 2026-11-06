@@ -28,6 +28,33 @@ export interface McpClientRow {
   scopes: string[];
 }
 
+/**
+ * The MCP client that issued a credential's tokens. The connect records it on
+ * the credential's metadata, and a refresh uses it, because a refresh token
+ * belongs to the client it was issued to: a later re-registration (a scope
+ * change) must not strand connections made before it.
+ */
+export interface IssuingClient {
+  clientId: string;
+  tokenEndpoint: string;
+}
+
+/** Metadata keys that hold the issuing client. Only the server writes them. */
+export const ISSUING_CLIENT_METADATA_KEYS = ["oauthClientId", "oauthTokenEndpoint"] as const;
+
+export function issuingClientMetadata(client: IssuingClient): { oauthClientId: string; oauthTokenEndpoint: string } {
+  return { oauthClientId: client.clientId, oauthTokenEndpoint: client.tokenEndpoint };
+}
+
+/** The recorded issuing client, or null for a credential connected before
+ * the connect recorded one. */
+export function readIssuingClient(metadata: Record<string, unknown> | undefined): IssuingClient | null {
+  const clientId = metadata?.oauthClientId;
+  const tokenEndpoint = metadata?.oauthTokenEndpoint;
+  if (typeof clientId !== "string" || typeof tokenEndpoint !== "string" || !clientId || !tokenEndpoint) return null;
+  return { clientId, tokenEndpoint };
+}
+
 /** The GitHub service keeps its dedicated App flow (the GitHub plugin's connection routes). */
 export const OAUTH_EXCLUDED_SERVICES = new Set(["github"]);
 
@@ -98,9 +125,12 @@ function warnUndeclaredResourceScopes(service: string, declared: string[], adver
  * a server that constrains grants to the registered set would otherwise
  * narrow or refuse authorize-time scopes (TKAI-243).
  *
- * Re-registration replaces the stored client_id, so refresh tokens issued
- * to the old client stop refreshing; users reconnect — the same remedy a
- * scope change already requires for the token itself.
+ * Re-registration replaces the stored client_id for NEW connections only.
+ * Each credential records the client that issued its tokens and refreshes
+ * with it, so existing connections keep working with their old scopes; a
+ * member reconnects (or steps up) only to get the new ones. A credential
+ * connected before that record existed refreshes with the stored client
+ * and records it on its first good refresh.
  */
 export async function ensureMcpOAuthClient(
   deps: OAuthDeps,
@@ -165,12 +195,13 @@ export async function ensureMcpOAuthClient(
     // writer wins on a concurrent scope change — both writers registered
     // with the same declared set, so either row works.
     await deps.db.update(mcpOauthClients).set(values).where(eq(mcpOauthClients.service, service));
-    // Refresh tokens were issued to the OLD client_id and stop refreshing
-    // now. Nothing repairs that automatically — connected users must
-    // disconnect and reconnect, so tell the operator while they are looking.
+    // Credentials that recorded their issuing client keep refreshing with
+    // it. One with no record still refreshes with the stored client, which
+    // is now the new one, and the provider refuses it: that member reconnects.
     console.warn(
       `MCP OAuth: "${service}" re-registered for scope change (client ${existing[0].clientId} → ${client.client_id}). ` +
-        `Existing ${service} credentials stop refreshing; users must disconnect and reconnect in Integrations.`,
+        `New connections get the new scopes. Existing ${service} connections keep their scopes until the member reconnects; ` +
+        `a connection that never recorded its client stops refreshing.`,
     );
   } else {
     await deps.db

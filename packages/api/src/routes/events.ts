@@ -39,6 +39,7 @@ import { GITHUB_CREDENTIAL_SERVICE, GitHubAuthError, resolveInstallationApiToken
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { eventChannelColumns, eventHeadColumns, type EventHead } from "../services/event-columns.js";
 import { isTeamMember, withAuthorizedTeamOwnership } from "../services/teams.js";
+import { orgAllowsPluginForOwner } from "../services/plugin-entitlements.js";
 import type {
   EventDeliveryThreadRef,
   EventDeliveryWire,
@@ -966,6 +967,19 @@ eventsRouter.post("/event-subscriptions", async (c) => {
       ownerType = "team";
       ownerId = owned.ownerId;
     }
+  } else if (body.target.kind === "plugin") {
+    // Like a team assistant line: a team handler acts for the team, so the
+    // caller must be on it.
+    if (body.target.teamId !== undefined) {
+      if (!(await isTeamMember(db, body.target.teamId, user.id))) {
+        return c.json({ error: "team not found" }, 404);
+      }
+      ownerType = "team";
+      ownerId = body.target.teamId;
+    }
+    if (!(await orgAllowsPluginForOwner(db, user.orgId, { type: ownerType === "team" ? "team" : "user", id: ownerId }, body.target.plugin))) {
+      return c.json({ error: `Plugin ${body.target.plugin} is off for this workspace. Ask an org admin to turn it on in Settings.` }, 403);
+    }
   } else if (body.target.kind === "assistant") {
     const who = body.target.assistant ?? "user";
     if (who === "org") {
@@ -1296,6 +1310,13 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   } else if (appearance !== undefined) {
     patchedTarget = { ...patchedTarget, appearance };
   }
+  // `null` removes the limit; the merged re-validation below checks a number.
+  if (body.oncePerHours === null) {
+    const { oncePerHours: _cleared, ...rest } = patchedTarget;
+    patchedTarget = rest;
+  } else if (body.oncePerHours !== undefined) {
+    patchedTarget = { ...patchedTarget, oncePerHours: body.oncePerHours };
+  }
   if (body.deliveryPolicy !== undefined || body.pauseOnOverlap !== undefined) {
     if (row.ownerType !== "user" || patchedTarget.kind !== "assistant") return c.json({ error: "Only a line for your personal assistant can choose what happens when a team also listens. Remove that choice, or point the line at your personal assistant." }, 400);
     patchedTarget = { ...patchedTarget,
@@ -1341,6 +1362,20 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
     }
   }
 
+  // A plugin line's handler settings. `null` clears them; the merged
+  // re-validation below checks a new value against the handler's schema.
+  if (body.config !== undefined) {
+    if (patchedTarget.kind !== "plugin") {
+      return c.json({ error: "config is only valid on a plugin line. Remove config, or point the line at a plugin handler." }, 400);
+    }
+    if (body.config === null) {
+      const { config: _cleared, ...rest } = patchedTarget;
+      patchedTarget = rest;
+    } else {
+      patchedTarget = { ...patchedTarget, config: body.config };
+    }
+  }
+
   // Re-validate the row as it would exist after the patch — provided fields
   // get full validation in the context of the untouched ones.
   const merged = {
@@ -1359,6 +1394,9 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   // validated jsonb, same as `rowToSubscription`.
   const write = await validateSubscriptionWrite(db, plugins, merged, {
     creatorUserId: row.createdBy,
+    // Only a patch that sets the settings re-checks them, as with the thread
+    // policy below.
+    checkPluginConfig: body.config !== undefined,
     ownerType: row.ownerType,
     anyChannel: body.anyChannel === true,
     matchChanged: body.filters !== undefined || body.eventKeys !== undefined,

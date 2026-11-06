@@ -3,7 +3,7 @@ import { normalizeGatePath } from "./builtin-tools/index.js";
 import { skillFileManifest } from "./roles-skills/loader.js";
 import { failedToolResultText, toolResultText } from "./tool-result-text.js";
 import { renderAppPageHint } from "./app-page-hint.js";
-import { stripToolIntent, type ToolUsageFact, CONTINUATION_SOURCE_ITEM_KEY, actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, MODEL_CALL_LIMIT_KEY, readModelCallLimit, readThreadPlan, readToolScope, THREAD_PLAN_KEY, toolInScope, TOOL_SCOPE_KEY, UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY, type ThreadPlan, type ThreadPlanItem, type ToolScope } from "@valet/shared";
+import { stripToolIntent, type ToolUsageFact, CONTINUATION_SOURCE_ITEM_KEY, actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, MODEL_CALL_LIMIT_KEY, readModelCallLimit, readThreadPlan, readTurnPlans, TURN_PLAN_HISTORY_KEY, TURN_PLAN_HISTORY_LIMIT, readToolScope, THREAD_PLAN_KEY, toolInScope, TOOL_SCOPE_KEY, UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY, type ThreadPlan, type ThreadPlanItem, type ToolScope } from "@valet/shared";
 import { mergeAppearance, readAppearance, type Appearance } from "@valet/shared";
 import { classifyProviderFailure, isNonRetryableProviderFailure, isUsageLimitFailure, isRateLimitedProviderFailure } from "@valet/shared";
 import { Agent } from "@earendil-works/pi-agent-core";
@@ -19,7 +19,7 @@ import { classifyCacheBreak, type CacheTurnSnapshot } from "./cache-telemetry.js
 import { NativeImageBridge, NATIVE_IMAGE_RESULT_TOOL, NATIVE_IMAGE_PLUGIN_ACTION, NATIVE_IMAGE_EDIT_ACTION, NATIVE_IMAGE_TOOL_PARAMS } from "./native-images.js";
 import { isToolDiscoveryApproval, recordHostedActionInvocation, resolveUngatedAction, type HostedActionGrant } from "./plugin-catalog.js";
 import { bundledModel } from "./model-catalog.js";
-import { appendRuntimeModelContext, threadStartedSection } from "./model-context.js";
+import { appendRuntimeModelContext, entryMessageTime, messageTimeLine, threadStartedSection, type MessageTime } from "./model-context.js";
 import { recordCacheBreak } from "./metrics.js";
 import type { Api, AssistantMessage, ImageContent, JsonObject, Message, Model, TextContent, ThinkingContent, ToolCall } from "@earendil-works/pi-ai/compat";
 
@@ -55,6 +55,12 @@ import {
   namespaceInternalDispatchId,
   overheardCoalesceKey,
   renderSignalEnvelope,
+  carriedInputIds,
+  carriedInputBridgeIds,
+  MAX_CARRIED_INPUTS,
+  isInteractiveSlackInput,
+  sameSubmissionOrigin,
+  sameSubmissionAuthor,
   resolvePartialSubmissionText,
   resolveSubmissionText,
   SIGNAL_HOP_BUDGET,
@@ -178,6 +184,7 @@ import type {
   QueueState,
   ResolvedModel,
   SessionEntry,
+  SessionStore,
   SignalContent,
   SkillContextAttributionFact,
   SkillInvocationFact,
@@ -195,8 +202,9 @@ import type {
   ToolResult,
   WriteFence,
 } from "./types.js";
-import { MESSAGE_TURN_ERROR_KEY, MID_TURN_DELIVERY_KEY, RECORD_ONLY_KEY, THREAD_USER_TIMEZONE_KEY } from "./types.js";
+import { ENTRY_USER_TIMEZONE_KEY, MESSAGE_TURN_ERROR_KEY, MID_TURN_DELIVERY_KEY, RECORD_ONLY_KEY, THREAD_USER_TIMEZONE_KEY } from "./types.js";
 import { correctImageBlocks } from "./image-media-type.js";
+import { reportError } from "./error-report.js";
 
 /** Bound on `awaitResult`'s merged-constituent delegation chain (Task 6). */
 const MAX_MERGE_DELEGATION_DEPTH = 5;
@@ -593,7 +601,7 @@ export class Thread {
       durationMs: Math.max(0, Date.now() - usage.createdAt - waitMs),
     };
     try { this.session.options.recordToolUsage?.(fact); }
-    catch { console.warn("Tool usage telemetry failed. Check the host telemetry sink."); }
+    catch { reportError({ area: "engine", reason: "tool_usage_telemetry", level: "warn" }, "Tool usage telemetry failed. Check the host telemetry sink."); }
   }
 
   private toolUsageStarts = new Map<string, Pick<ToolUsageFact, "createdAt" | "intent" | "name"> & { waitMs: number }>();
@@ -833,6 +841,31 @@ export class Thread {
     });
   }
 
+  /**
+   * A person who writes while the running turn waits on a question wants to
+   * talk first, for example to ask what an option means. Withdraw the
+   * question with reason `message`: the tool returns, the message joins the
+   * turn after the tool batch, and the model answers it and can ask again.
+   * Only a message that a person typed and that joins the turn at its next
+   * step does this: it must be in the run that `takeMidTurnItems` delivers
+   * (`midTurnRun`). An event, a token caller, or a message queued behind an
+   * item that cannot join leaves the question open.
+   *
+   * `submitPrompt` calls this after it admits a typed message. The gate
+   * cycle saves and announces a question before it registers the waiter, so
+   * it also calls this once the waiter exists, for a message admitted in
+   * between.
+   */
+  private async withdrawQuestionForMessage(): Promise<void> {
+    const running = this.runningItem;
+    if (!running || this.session.isThreadExecutionFenced(this.id)) return;
+    const questions = this.pendingDecisionGates().filter((gate) => gate.type === "question" && gate.queueItemId === running.id);
+    if (questions.length === 0) return;
+    const run = this.midTurnRun(await this.session.providers.store.listUnsettledSubmissions(this.session.id), running);
+    if (!run.some(typedByPerson)) return;
+    for (const gate of questions) this.withdrawDecision(gate.id, "message");
+  }
+
   withdrawDecision(gateId: string, reason: DecisionWithdrawReason): boolean {
     const ok = this.gates.withdraw(gateId, reason);
     if (ok) {
@@ -912,20 +945,20 @@ export class Thread {
       metadata: prepared.metadata,
     });
 
-    // Steer admissions are exempt from the pending cap: the same atomic
-    // `admitSubmission({ steer: true })` call supersedes every prior
-    // unsettled item on the thread in the same transaction, so the count
-    // they'd leave behind is always ~0-1 regardless of how many were pending
-    // beforehand. For every other mode, the cap is enforced by the store
-    // INSIDE the admission transaction (opts.maxPending) rather than via a
-    // separate pre-check, so concurrent admissions can't race past it.
+    // Unscoped steering replaces all pending work except workflow tasks and
+    // steps (`steerKeepsSubmission`), so the store counts what it keeps.
+    // Conversation steering preserves queued work, so the store checks the
+    // cap after excluding the active turn it will replace. Admission and the
+    // check are atomic.
     const store = this.session.providers.store;
     const cap = this.session.options.maxPendingPerThread ?? MAX_PENDING_PER_THREAD;
     const { item: admitted, admitted: wasAdmitted, supersededItemIds } = await store.admitSubmission(
       this.session.id,
       this.id,
       item,
-      effectiveMode === "steer" && !this.session.isThreadExecutionFenced(this.id) ? { steer: true } : { maxPending: cap },
+      effectiveMode === "steer" && !this.session.isThreadExecutionFenced(this.id)
+        ? { steer: true, ...(opts.steerScope ? { steerScope: opts.steerScope } : {}), maxPending: cap }
+        : { maxPending: cap },
     );
     if (skillFact && wasAdmitted) await this.persistSkillInvocation(skillFact);
     // A slash-invoked playbook sets the plan before its turn starts, so the
@@ -958,6 +991,7 @@ export class Thread {
         receiptItem = (await run) ?? admitted;
       }
     }
+    if (wasAdmitted && typedByPerson(admitted)) await this.withdrawQuestionForMessage();
     await this.emitQueueState();
     void this.kick();
     return {
@@ -1153,7 +1187,7 @@ export class Thread {
       this.agent.abort();
     }
     for (const g of this.pendingDecisionGates()) {
-      this.withdrawDecision(g.id, "steer");
+      if (supersededItemIds.includes(g.queueItemId)) this.withdrawDecision(g.id, "steer");
     }
     // A claimed item (the running turn) is not settled here. It settles, and
     // emits, when its turn ends. Emitting now told clients a turn had ended
@@ -1753,7 +1787,7 @@ export class Thread {
     // rest-state repair doesn't later rewrite it to an interrupted-error: the
     // tool DID run to completion on replay (its result was pushed above), it
     // just didn't flow through the agent loop's tool_execution_end.
-    await this.persistReplayedToolResult(suspended.toolCallId, toolResult);
+    await this.persistReplayedToolResult(suspended.queueItemId, suspended.toolCallId, toolResult);
     await this.fencedEmit({
       type: "tool_end", threadId: this.id, tool: suspended.toolName, callId: suspended.toolCallId,
       result: toolResultText(toolResult), isError: false,
@@ -1855,12 +1889,14 @@ export class Thread {
    * live tool_execution_end path.
    */
   private async persistReplayedToolResult(
+    queueItemId: string,
     toolCallId: string,
     result: { content?: unknown; details?: unknown },
   ): Promise<void> {
     const store = this.session.providers.store;
     const safeResult = this.session.providers.sanitizeToolOutput?.(this.session.id, result) ?? result;
-    const entries = await store.getEntries(this.session.id, this.id);
+    // The suspended turn wrote the tool call, so its entries carry its queue item.
+    const entries = await store.getEntries(this.session.id, this.id, { queueItemId });
     for (const e of entries) {
       if (e.type !== "message" || e.role !== "assistant" || !e.parts) continue;
       const part = e.parts.find(
@@ -2243,6 +2279,7 @@ export class Thread {
         );
       });
       if (this.session.isExecutionFenced) this.handoffParkedGate();
+      if (gate.type === "question") await this.withdrawQuestionForMessage();
       const rawResolution = await waiting;
       // Stamp the gate's ordinal onto the resolution before it is
       // persisted or handed back to the calling tool — the caller (e.g.
@@ -2730,6 +2767,9 @@ export class Thread {
     });
     this.entryAppendTail = append.catch(() => undefined);
     await append;
+    if (opts.seed && "repos" in opts.seed && opts.seed.repos.length > 0) {
+      await this.patchThreadMetadata((current) => ({ ...current, [FORK_SEED_PENDING_KEY]: true }), "before-save");
+    }
   }
 
   /** How a branch note sorts each tool by what its calls leave behind (`ToolDef.sideEffect`). */
@@ -2840,7 +2880,7 @@ export class Thread {
   /** Once per turn. A failed snapshot never blocks the tool: the turn just has no checkpoint. */
   private beginTurnCheckpoint(): Promise<PendingCheckpoint | undefined> {
     this.turnCheckpoint ??= this.takeBeforeSnapshots().catch((err: unknown) => {
-      console.error(`[engine] file checkpoint skipped session=${this.session.id} thread=${this.id}: ${err instanceof Error ? err.message : String(err)}`);
+      reportError({ area: "engine", reason: "file_checkpoint" }, `[engine] file checkpoint skipped session=${this.session.id} thread=${this.id}`, err);
       return undefined;
     });
     return this.turnCheckpoint;
@@ -2860,7 +2900,7 @@ export class Thread {
         repos.push({ repo, before: snapshot.commit, partial: snapshot.partial });
       } catch (err) {
         unavailable.push({ repo, reason: "The before snapshot failed or exceeded the file size limit." });
-        console.error(`[engine] file checkpoint skipped repo=${repo} thread=${this.id}: ${err instanceof Error ? err.message : String(err)}`);
+        reportError({ area: "engine", reason: "file_checkpoint" }, `[engine] file checkpoint skipped repo=${repo} thread=${this.id}`, err);
       }
     }
     return { entryId, repos, unavailable, discovered: found };
@@ -2898,7 +2938,7 @@ export class Thread {
           });
         } catch (err) {
           unavailable.push({ repo: repo.repo, reason: "The after snapshot failed or exceeded the file size limit." });
-          console.error(`[engine] file checkpoint not recorded repo=${repo.repo} thread=${this.id}: ${err instanceof Error ? err.message : String(err)}`);
+          reportError({ area: "engine", reason: "file_checkpoint" }, `[engine] file checkpoint not recorded repo=${repo.repo} thread=${this.id}`, err);
         }
       }
       for (const repo of await findRepos(sandbox, workspace)) {
@@ -2913,7 +2953,7 @@ export class Thread {
           });
         } catch (err) {
           unavailable.push({ repo, reason: "The new repository snapshot failed." });
-          console.error(`[engine] new repository checkpoint not recorded repo=${repo}: ${err instanceof Error ? err.message : String(err)}`);
+          reportError({ area: "engine", reason: "file_checkpoint" }, `[engine] new repository checkpoint not recorded repo=${repo}`, err);
         }
       }
       if (repos.length === 0 && unavailable.length === 0) return;
@@ -2925,7 +2965,7 @@ export class Thread {
       const updated: MessageEntry = { ...entry, metadata: { ...entry.metadata, [FILE_CHECKPOINT_KEY]: checkpoint } };
       await this.fencedWrite(() => store.updateEntry(this.session.id, this.id, updated, this.fence));
     } catch (err) {
-      console.error(`[engine] file checkpoint not recorded session=${this.session.id} thread=${this.id}: ${err instanceof Error ? err.message : String(err)}`);
+      reportError({ area: "engine", reason: "file_checkpoint" }, `[engine] file checkpoint not recorded session=${this.session.id} thread=${this.id}`, err);
     } finally {
       this.turnFileWrites.clear();
       this.turnFileWriteBytes = 0;
@@ -3047,16 +3087,23 @@ export class Thread {
    * along. Returns without work when there is no pending seed.
    */
   private async applyForkSeed(): Promise<void> {
-    if (this.threadMetadata?.[FORK_SEED_APPLIED_KEY] === true) return;
+    // This runs before every turn, so the common case must not read the
+    // thread: only a fork with files pending (or an older fork that has not
+    // checked yet) goes on.
+    const metadata = this.threadMetadata;
+    if (metadata?.[FORK_SEED_APPLIED_KEY] === true) return;
+    if (metadata?.[FORK_SEED_PENDING_KEY] !== true && metadata?.[LEGACY_FORK_OF_KEY] === undefined) return;
     const store = this.session.providers.store;
-    const snapshot = await store.getThreadSnapshot(this.session.id, this.id);
-    if (!snapshot) return;
+    const snapshot = await this.transcriptSnapshot();
     const note = walkTranscriptDag(snapshot.entries, snapshot.thread.activeLeafEntryId)
       // Copied history can contain completed forks. This destination owns
       // the newest fork note on its active path.
       .reverse().find((entry): entry is BranchSummaryEntry => entry.type === "branch_summary" && readBranchNote(entry.metadata)?.kind === "fork");
     const facts = note ? readBranchNote(note.metadata) : undefined;
-    if (!note || !facts?.seed || facts.seedResult) return;
+    if (!note || !facts?.seed || facts.seedResult) {
+      await this.patchThreadMetadata((current) => ({ ...current, [FORK_SEED_APPLIED_KEY]: true, [FORK_SEED_PENDING_KEY]: false }), "before-save");
+      return;
+    }
     const blobs = this.session.providers.blobs;
     const seedResult: NonNullable<BranchNote["seedResult"]> = [];
     for (const seed of facts.seed) {
@@ -3074,7 +3121,7 @@ export class Thread {
     const updatedFacts: BranchNote = { ...facts, seedResult };
     const updated: BranchSummaryEntry = { ...note, summary: branchNoteText(updatedFacts), metadata: { ...note.metadata, [BRANCH_NOTE_KEY]: updatedFacts } };
     await this.fencedWrite(() => store.updateEntry(this.session.id, this.id, updated, this.fence));
-    await this.patchThreadMetadata((current) => ({ ...current, [FORK_SEED_APPLIED_KEY]: true }), "before-save");
+    await this.patchThreadMetadata((current) => ({ ...current, [FORK_SEED_APPLIED_KEY]: true, [FORK_SEED_PENDING_KEY]: false }), "before-save");
     this.rehydrateTranscript(snapshot.entries.map((entry) => entry.id === note.id ? updated : entry));
   }
 
@@ -3791,7 +3838,7 @@ export class Thread {
       // place convergence may act. Idle = no other thread mid-run and no pending
       // exec jobs. Errors degrade to running stale — never fail the turn.
       if (!this.session.hasOtherActiveRuns(this.id) && this.session.pendingJobCount() === 0) {
-        try { await this.session.attachment.reconcile(); } catch (err) { console.error("[thread] reconcile failed, continuing:", err); }
+        try { await this.session.attachment.reconcile(); } catch (err) { reportError({ area: "sandbox", reason: "reconcile_pre_turn" }, "[thread] reconcile failed, continuing", err); }
       }
 
       // First load of repo AGENTS.md instructions (agents-md spec, decision 1):
@@ -3803,7 +3850,7 @@ export class Thread {
       try {
         await this.session.ensureRepoInstructions();
       } catch (err) {
-        console.error("[thread] repo-instructions load failed, continuing:", err);
+        reportError({ area: "engine", reason: "repo_instructions_load" }, "[thread] repo-instructions load failed, continuing", err);
       }
 
       let turnFailed = false;
@@ -4411,7 +4458,8 @@ export class Thread {
     if (mode === "rearm") {
       this.armPendingGateForRestart(gate, suspended);
     } else {
-      const entries = await store.getEntries(this.session.id, this.id);
+      // The gate entry carries the queue item of the turn that opened the gate.
+      const entries = await store.getEntries(this.session.id, this.id, { queueItemId: gate.queueItemId });
       const entry = entries.find(
         (e) => e.type === "decision_gate" && e.gate.id === gate.id,
       );
@@ -4636,6 +4684,42 @@ export class Thread {
     );
   }
 
+  /** Validate durable carry links before exposing original content or attachments. */
+  private async carriedInputs(item: QueueItem): Promise<QueueItem[]> {
+    const ids = carriedInputIds(item);
+    const bridgeIds = carriedInputBridgeIds(item);
+    const allIds = [...ids, ...bridgeIds];
+    if (!allIds.length) return [];
+    if (!isInteractiveSlackInput(item) || allIds.length > MAX_CARRIED_INPUTS || new Set(allIds).size !== allIds.length) {
+      throw new ValidationError("Invalid carried Slack inputs. Restore the original submission, then retry.");
+    }
+    const originals = new Map<string, QueueItem>();
+    for (const id of allIds) {
+      const original = await this.session.providers.store.getQueueItem(this.session.id, id);
+      const bridge = bridgeIds.includes(id);
+      const superseded = original?.status === "settled" && original.outcome?.outcome === "superseded";
+      if (!original || original.threadId !== this.id || !isInteractiveSlackInput(original) ||
+          !sameSubmissionOrigin(original.content, item.content) || !sameSubmissionAuthor(original, item) ||
+          (!superseded && !(bridge && original.status === "queued" && original.supersededByItemId))) {
+        throw new ValidationError("Carried input is unavailable. Restore the original submission, then retry.");
+      }
+      originals.set(id, original);
+    }
+    // Every reference must reach this correction. Bridges retain promotion provenance without repeating its body.
+    for (const id of allIds) {
+      let next: string | undefined = id;
+      const visited = new Set<string>();
+      while (next !== item.id) {
+        if (!next || visited.has(next)) {
+          throw new ValidationError("Invalid carried input relationship. Restore the original submission, then retry.");
+        }
+        visited.add(next);
+        next = originals.get(next)?.supersededByItemId;
+      }
+    }
+    return [...originals.values()].filter(original => ids.includes(original.id));
+  }
+
   /**
    * Build and persist the turn's user MessageEntry (signal envelope handling
    * included) under the current fence, and return the text the model actually
@@ -4647,7 +4731,7 @@ export class Thread {
    */
   private async appendUserEntry(
     item: QueueItem,
-  ): Promise<{ text: string; attachments: MessageEntry["attachments"] }> {
+  ): Promise<{ text: string; attachments: MessageEntry["attachments"]; time: MessageTime }> {
     // Every path that appends the user entry moves an edit's leaf first, the
     // claim loop's credential-cap path included. It runs once per item.
     await this.applyEdit(item);
@@ -4655,29 +4739,38 @@ export class Thread {
     // the model actually sees this turn is the same rendered XML envelope
     // `entriesToAgentMessages` would reconstruct on reload (single render
     // function, two call sites).
+    const originals = await this.carriedInputs(item);
     let signalMeta: MessageEntry["signal"];
     let text: string;
     let entryContent: string;
     if (isSignalContent(item.content)) {
       signalMeta = buildSignalMeta(item.content, item.metadata);
-      text = renderSignalEnvelope(signalMeta, item.content.body);
       entryContent = item.content.body;
+      if (originals.length) {
+        const quote = (value: string) => value.split(/\r?\n/).map(line => `> ${line}`).join("\n");
+        const blocks = [...originals, item].map(input => {
+          const author = input.author;
+          const label = [author?.name, author?.id].filter(Boolean).join(" · ") || "Unknown sender";
+          return quote(label) + "\n" + quote(isSignalContent(input.content) ? input.content.body : promptText(input.content));
+        });
+        entryContent = "Messages received while you worked, in order:\n\n" + blocks.join("\n\n");
+      }
+      text = renderSignalEnvelope(signalMeta, entryContent);
     } else {
       text = promptText(item.content);
       entryContent = text;
     }
 
-    // Extract attachments if the prompt content has them.
+    // Preserve carried images and files through the normal model attachment path.
+    const contentInputs = [...originals, item].map(input => input.content);
+    const inputAttachments = contentInputs.flatMap(content =>
+      typeof content === "object" && content !== null && "attachments" in content && Array.isArray(content.attachments)
+        ? content.attachments : []);
     let attachments: MessageEntry["attachments"];
-    if (
-      typeof item.content === "object" &&
-      item.content !== null &&
-      "attachments" in item.content &&
-      Array.isArray(item.content.attachments)
-    ) {
+    if (inputAttachments.length) {
       // Runtime validation of each attachment element to guard against malformed wire data
       const validated: MessageEntry["attachments"] = [];
-      for (const att of item.content.attachments) {
+      for (const att of inputAttachments) {
         if (typeof att !== "object" || att === null) continue;
         if (att.type === "file") {
           // Sandbox file (upload subsystem): persist path/size/hash so the
@@ -4753,6 +4846,7 @@ export class Thread {
       return {
         text: renderReplyContext(restoredText, existingUserEntry.metadata),
         attachments: existingUserEntry.attachments,
+        time: entryMessageTime(existingUserEntry),
       };
     }
 
@@ -4788,9 +4882,14 @@ export class Thread {
     // compaction_continue survive into the DAG for client UIs and for later
     // restoration.
     const baseMetadata = stripSignalStamp(item.metadata);
-    const metadata = spilledInputPath
-      ? { ...(baseMetadata ?? {}), [SPILLED_INPUT_PATH_KEY]: spilledInputPath }
-      : baseMetadata;
+    // The timezone read now, written once with `createdAt`: together they
+    // render this entry's `[sent: …]` line on every later call.
+    const userTimezone = await this.session.currentUserTimezone();
+    const metadata = {
+      ...(baseMetadata ?? {}),
+      ...(spilledInputPath ? { [SPILLED_INPUT_PATH_KEY]: spilledInputPath } : {}),
+      [ENTRY_USER_TIMEZONE_KEY]: userTimezone ?? null,
+    };
 
     text = renderReplyContext(text, metadata);
 
@@ -4819,7 +4918,7 @@ export class Thread {
       this.appendEntry(userEntry, this.fence),
     );
     this.turnUserEntryId ??= userEntry.id;
-    return { text, attachments };
+    return { text, attachments, time: entryMessageTime(userEntry) };
   }
 
   /**
@@ -5056,7 +5155,7 @@ export class Thread {
     // `attachments` through to `runAgent` is what keeps a turn-1 image in
     // `agent.state.messages` across subsequent turns: the LLM sees the image
     // on every downstream call, not just the turn it was uploaded on.
-    const { text, attachments } = await this.appendUserEntry(item);
+    const { text, attachments, time } = await this.appendUserEntry(item);
     const queuedSkillFact = item.metadata?.skillInvocation;
     if (isSkillInvocationFact(queuedSkillFact)) {
       this.activeSkillInvocations.set(queuedSkillFact.id, queuedSkillFact);
@@ -5068,7 +5167,7 @@ export class Thread {
     try {
       await this.session.refreshSkills();
     } catch (err) {
-      console.error(`skill refresh failed for session ${this.session.id}; the previous skills stay:`, err);
+      reportError({ area: "engine", reason: "skill_refresh" }, `skill refresh failed for session ${this.session.id}; the previous skills stay`, err);
     }
 
     // Build the AgentTool list with closures over this turn's ToolContext.
@@ -5104,7 +5203,7 @@ export class Thread {
       if (!(await this.publishActiveModelState(item.id, this.agent.state.model))) return;
 
       try {
-        await this.runAgent(text, attachments, sender);
+        await this.runAgent(text, attachments, sender, time);
       } catch (err) {
         // Record the throw for settlement: a stream failing before its first
         // message_start leaves no assistant message this turn, and
@@ -5322,11 +5421,12 @@ export class Thread {
    */
   private async runAgent(
     text: string,
-    attachments?: MessageEntry["attachments"],
-    sender?: PromptAuthor,
+    attachments: MessageEntry["attachments"] | undefined,
+    sender: PromptAuthor | undefined,
+    time: MessageTime,
   ): Promise<void> {
     if (!(await this.canRunCurrentSubmission())) return;
-    const content = userContentBlocks(text, attachments, sender);
+    const content = userContentBlocks(text, attachments, sender, time);
     // Delivery steers only inside finishTurn, just before the loop reads the
     // steered messages, so this queue is empty here. Clearing it keeps an
     // interrupted boundary from replaying a delivered message into a later
@@ -5627,13 +5727,13 @@ export class Thread {
       role: "user",
       content: prompt,
       channel: item.channel,
-      metadata: { compaction_continue: true, synthetic: true },
+      metadata: { compaction_continue: true, synthetic: true, [ENTRY_USER_TIMEZONE_KEY]: this.session.lastKnownUserTimezone ?? null },
       queueItemId: item.id,
       createdAt: Date.now(),
     };
     await this.fencedWrite(() => this.appendEntry(entry, this.fence));
     if (this.staleFenceDetected) return;
-    await this.runAgent(prompt);
+    await this.runAgent(prompt, undefined, undefined, entryMessageTime(entry));
   }
 
   /**
@@ -6171,6 +6271,7 @@ export class Thread {
             // when no resolver is wired (env-fallback path) — behavior unchanged.
             // The idle pass runs after that finally and passes its own key.
             apiKey: opts.turnModel ? opts.turnModel.apiKey : this.turnApiKey,
+            fetch: this.session.options.modelFetch?.(model),
           });
           break;
         } catch (err) {
@@ -6516,8 +6617,10 @@ export class Thread {
                 : message,
             ),
         };
+        const modelFetch = this.session.options.modelFetch?.(model);
         return this.nativeImages.stream(model, transcript, {
           ...options,
+          ...(modelFetch && !options?.fetch ? { fetch: modelFetch } : {}),
           onPayload: async (payload, requestModel) => {
             const transformed = (await options?.onPayload?.(payload, requestModel)) ?? payload;
             this.requestEvidence = modelRequestEvidence(transformed);
@@ -6680,7 +6783,7 @@ export class Thread {
     // first and the item is not delivered, or it finds the item settled.
     // An item is in `taken` once it settles `merged`, so a failure on a
     // later item still delivers the earlier ones; nothing else would run them.
-    const taken: Array<{ text: string; attachments: MessageEntry["attachments"]; sender?: PromptAuthor }> = [];
+    const taken: Array<{ text: string; attachments: MessageEntry["attachments"]; sender?: PromptAuthor; time: MessageTime }> = [];
     const run = this.overheardCoalesceChain.then(() => this.takeMidTurnItems(running, taken));
     this.overheardCoalesceChain = run.then(() => null, () => null);
     try {
@@ -6688,25 +6791,19 @@ export class Thread {
     } catch (err) {
       this.emitError("mid_turn_delivery_failed", err instanceof Error ? err.message : String(err));
     }
-    for (const { text, attachments, sender } of taken) {
-      this.agent.steer({ role: "user", content: userContentBlocks(text, attachments, sender), timestamp: Date.now() });
+    for (const { text, attachments, sender, time } of taken) {
+      this.agent.steer({ role: "user", content: userContentBlocks(text, attachments, sender, time), timestamp: Date.now() });
     }
   }
 
   /**
-   * Take the leading run of queued items that may join `running`, in
-   * admission order. The first item that cannot join stops the run, so
-   * delivery never reorders the queue. Each item's user entry is written
-   * first, after the entries of the turn so far, then the item settles
-   * `merged`. An item a claim or cancel settled first is not delivered.
+   * The leading run of this thread's queued items that may join `running`
+   * (`canDeliverMidTurn`), in admission order. The first item that cannot
+   * join ends the run, so delivery never reorders the queue. An item that a
+   * digest lists also ends it: the digest already carries its text (see
+   * settleCanceled).
    */
-  private async takeMidTurnItems(
-    running: QueueItem,
-    taken: Array<{ text: string; attachments: MessageEntry["attachments"]; sender?: PromptAuthor }>,
-  ): Promise<void> {
-    const store = this.session.providers.store;
-    const unsettled = await store.listUnsettledSubmissions(this.session.id);
-    // A digest that lists an item already carries its text (see settleCanceled).
+  private midTurnRun(unsettled: QueueItem[], running: QueueItem): QueueItem[] {
     const digested = new Set(unsettled.flatMap((d) => {
       const meta = d.metadata?.overheardDigest;
       return d.threadId === this.id && isOverheardDigestMeta(meta) ? meta.constituentIds : [];
@@ -6714,19 +6811,34 @@ export class Thread {
     const queued = unsettled
       .filter((i) => i.threadId === this.id && i.status === "queued" && !i.supersededByItemId)
       .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    const end = queued.findIndex((item) => digested.has(item.id) || !canDeliverMidTurn(item, running, this.defaultActorId()));
+    return end === -1 ? queued : queued.slice(0, end);
+  }
+
+  /**
+   * Take the run of queued items that may join `running` (`midTurnRun`).
+   * Each item's user entry is written first, after the entries of the turn
+   * so far, then the item settles `merged`. An item a claim or cancel
+   * settled first is not delivered.
+   */
+  private async takeMidTurnItems(
+    running: QueueItem,
+    taken: Array<{ text: string; attachments: MessageEntry["attachments"]; sender?: PromptAuthor; time: MessageTime }>,
+  ): Promise<void> {
+    const store = this.session.providers.store;
+    const run = this.midTurnRun(await store.listUnsettledSubmissions(this.session.id), running);
     const before = taken.length;
     // A Stop, an abort, or a successor attempt can land while an earlier item
     // is written. The item then stays queued and runs as a followup.
     const stopped = () => this.aborted || running.abortRequestedAt !== undefined || this.staleFenceDetected || this.runningItem !== running;
     try {
-      for (const item of queued) {
+      for (const item of run) {
         if (stopped()) break;
-        if (digested.has(item.id) || !canDeliverMidTurn(item, running, this.defaultActorId())) break;
         // An entry that an earlier process wrote before it crashed is already
         // in the transcript this turn was rebuilt from, so it is settled but
         // not steered again. An entry this process wrote is steered.
         const recovered = !this.midTurnAppended.has(item.id) && await this.hasUserEntry(item.id);
-        const { text, attachments } = await this.appendUserEntry(item);
+        const { text, attachments, time } = await this.appendUserEntry(item);
         if (stopped()) break;
         this.midTurnAppended.add(item.id);
         // `mergedIntoItemId` lets `awaitResult` on the item follow the turn
@@ -6742,6 +6854,7 @@ export class Thread {
           taken.push({
             text,
             attachments,
+            time,
             ...(isSignalContent(item.content) ? {} : { sender: attributedAuthor(this.attributeAuthors, item.author) }),
           });
         }
@@ -6938,9 +7051,25 @@ export class Thread {
   }
 
   /** Replace the thread's plan (`update_plan`). The next turn shows it to the model. */
-  async setPlan(items: ThreadPlanItem[]): Promise<ThreadPlan> {
-    const plan: ThreadPlan = { items, updatedAt: Date.now() };
-    await this.patchThreadMetadata((current) => ({ ...current, [THREAD_PLAN_KEY]: plan }), "after-save");
+  async setPlan(items: ThreadPlanItem[], title?: string): Promise<ThreadPlan> {
+    const turnId = this.runningItem?.id;
+    const safeTitle = title?.trim().slice(0, 200);
+    let plan: ThreadPlan = { items: [], updatedAt: Date.now(), ...(turnId ? { turnId } : {}), ...(safeTitle ? { title: safeTitle } : {}) };
+    await this.patchThreadMetadata((current) => {
+      if (plan.items.length === 0) {
+        const previous = readThreadPlan(current);
+        const retainedTitle = !safeTitle && turnId && previous?.turnId === turnId ? previous.title : undefined;
+        const available = [...(previous?.items ?? [])];
+        plan = { ...plan, ...(retainedTitle ? { title: retainedTitle } : {}), items: items.map((item) => {
+          const index = available.findIndex((step) => step.text === item.text);
+          const match = index >= 0 ? available.splice(index, 1)[0] : undefined;
+          return { text: item.text, status: item.status, id: match?.id ?? uid("plan") };
+        }) };
+      }
+      const history = readTurnPlans(current).filter((entry) => entry.turnId !== turnId);
+      if (turnId) history.push(plan);
+      return { ...current, [THREAD_PLAN_KEY]: plan, [TURN_PLAN_HISTORY_KEY]: history.slice(-TURN_PLAN_HISTORY_LIMIT) };
+    }, "after-save");
     return plan;
   }
 
@@ -6987,7 +7116,7 @@ export class Thread {
       get toolScope() { return thread.effectiveToolScope(); },
       get toolScopeCeiling() { return thread.toolScopeCeiling(); },
       setToolFocus: (scope) => this.setToolFocus(scope),
-      setThreadPlan: (items) => this.setPlan(items),
+      setThreadPlan: (items, title) => this.setPlan(items, title),
       seedPlaybookPlan: (skill) => this.seedPlaybookPlan(skill),
       // Author is persisted with the submission; session credentials stay fixed.
       invocationId: toolCallId,
@@ -7004,6 +7133,7 @@ export class Thread {
       sessionId: session.id,
       threadId: this.id,
       sessionPurpose: session.options.purpose,
+      currentUserTimezone: () => session.currentUserTimezone(),
       cwd: session.options.workspace,
       // The turn's author picks whose account a team read uses first. A
       // channel sender with no Valet account acts for nobody.
@@ -7027,6 +7157,7 @@ export class Thread {
       pluginStoreFactory: session.options.pluginStoreFactory,
       browserPolicy: session.options.browserPolicy,
       extractDocument: session.options.extractDocument,
+      threadFiles: session.options.threadFiles?.({ orgId: session.options.orgId, sessionId: session.id, threadId: this.id }),
       queueItemId: this.runningItem?.id,
       // The running submission's channel origin, when it came from a channel,
       // so reply_to_origin / react_to_origin answer the right conversation.
@@ -7206,10 +7337,14 @@ export class Thread {
           if (ev.type === "thinking_start") this.thinkingTiming.start(ev.contentIndex, Date.now());
           if (ev.type === "thinking_end") this.thinkingTiming.end(ev.contentIndex, Date.now());
           const block = ev.partial.content[ev.contentIndex];
+          if (block?.type === "thinking") this.thinkingTiming.summarize(ev.contentIndex, block);
           if (this.currentAssistantMessageId && block?.type === "thinking") {
+            // The summary rides the block's end, not every delta: a running
+            // summary resent per delta would grow the live stream quadratically.
+            const { summary, ...timing } = this.thinkingTiming.part(ev.contentIndex);
             await this.session.emit({
               type: "thinking_update", threadId: this.id, messageId: this.currentAssistantMessageId,
-              index: ev.contentIndex, part: this.thinkingTiming.part(ev.contentIndex),
+              index: ev.contentIndex, part: ev.type === "thinking_end" && summary !== undefined ? { ...timing, summary } : timing,
             });
           }
         } else if (ev.type === "text_delta") {
@@ -7281,7 +7416,10 @@ export class Thread {
           const parts: MessagePart[] = [];
           for (const [index, block] of event.message.content.entries()) {
             if (block.type === "text") parts.push({ type: "text", text: block.text });
-            else if (block.type === "thinking") parts.push(this.thinkingTiming.part(index));
+            else if (block.type === "thinking") {
+              this.thinkingTiming.summarize(index, block);
+              parts.push(this.thinkingTiming.part(index));
+            }
             else if (block.type === "toolCall") {
               const call = this.currentToolCalls.get(block.id);
               if (call) parts.push(call);
@@ -7757,7 +7895,7 @@ export class Thread {
     // Event delivery is best-effort (a dead WS drops it silently), so also
     // log to stderr — otherwise a failing turn (bad key, exhausted credits,
     // provider outage) leaves zero trace in the host process output.
-    console.error(`[engine] thread error session=${this.session.id} thread=${this.id} ${code}: ${message}`);
+    reportError({ area: "engine", reason: "thread_error" }, `[engine] thread error session=${this.session.id} thread=${this.id} ${code}: ${message}`);
     void this.session.emit({
       type: "error",
       threadId: this.id,
@@ -7824,22 +7962,7 @@ export class Thread {
       }
       return this.resolveResult(item.mergedIntoItemId, opts, depth + 1);
     }
-    // Every reader below looks at this submission only.
-    const entries = await this.session.providers.store.getEntries(this.session.id, item.threadId, { queueItemId: item.id });
-    const text =
-      outcome.outcome === "superseded"
-        ? resolvePartialSubmissionText(entries, item.id)
-        : resolveSubmissionText(entries, item.id);
-    // Check terminal semantics before applying the caller's optional output contract.
-    const validated = outcome.outcome === "completed" ? completedSubmissionOutcome(entries, item.id) : outcome;
-    const result: SubmissionResult = { queueItemId: item.id, outcome: validated.outcome, text };
-    if (validated.error !== undefined) result.error = validated.error;
-    if (opts.resultSchema && validated.outcome === "completed") {
-      const extracted = extractStructuredOutput(text ?? "", opts.resultSchema);
-      if (extracted.output !== undefined) result.output = extracted.output;
-      if (extracted.error !== undefined) result.error = extracted.error;
-    }
-    return result;
+    return settledSubmissionResult(this.session.providers.store, this.session.id, item, outcome, opts);
   }
 
   /**
@@ -8013,6 +8136,10 @@ export const THREAD_BRANCHED_KEY = "branched";
 
 /** Thread metadata key set once a fork's files were copied into its working directory. */
 export const FORK_SEED_APPLIED_KEY = "forkSeedApplied";
+/** Set by `copyPath` when a fork brings files along; `applyForkSeed` runs only then. */
+export const FORK_SEED_PENDING_KEY = "forkSeedPending";
+/** Forks made before `FORK_SEED_PENDING_KEY` carry only this marker (api `thread-links.ts`). */
+const LEGACY_FORK_OF_KEY = "forkOf";
 
 /** A turn's snapshots from before its first file change. */
 interface PendingCheckpoint {
@@ -8192,11 +8319,17 @@ function findMostRecentCompaction(
  * model can tell which person sent the message. Callers pass it only on
  * shared (team/org-owned) sessions — on a personal session every prompt has
  * the same author and the line would be noise.
+ *
+ * `time` renders as the first line, `[sent: …]` (`messageTimeLine`). Every
+ * engine caller passes the persisted entry's `entryMessageTime`, so the
+ * newest message tells the model the current time and older messages keep
+ * their bytes.
  */
 export function userContentBlocks(
   text: string,
   attachments: MessageEntry["attachments"] | undefined,
   sender?: PromptAuthor,
+  time?: MessageTime,
 ): Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> {
   const files = (attachments ?? []).filter(
     (a): a is Extract<NonNullable<MessageEntry["attachments"]>[number], { type: "file" }> =>
@@ -8204,7 +8337,8 @@ export function userContentBlocks(
   );
   const note = formatFileAttachmentsNote(files);
   const senderLine = formatSenderLine(sender);
-  const prefixed = [senderLine, note, text].filter((s) => s !== undefined && s !== "").join("\n\n");
+  const timeLine = time ? messageTimeLine(time) : undefined;
+  const prefixed = [timeLine, senderLine, note, text].filter((s) => s !== undefined && s !== "").join("\n\n");
   return [
     { type: "text" as const, text: prefixed },
     ...attachmentsToImageBlocks(attachments),
@@ -8246,6 +8380,16 @@ export function canDeliverMidTurn(item: QueueItem, running: QueueItem, defaultAc
   if (channelTargetKey(item.channel) !== channelTargetKey(running.channel)) return false;
   if (channelTargetKey(item.replyTarget) !== channelTargetKey(running.replyTarget)) return false;
   return (item.model === undefined || item.model === running.model) && item.role === running.role;
+}
+
+/**
+ * Whether a person typed `item`, in the web composer or a direct channel.
+ * Only such a message closes the person's open question
+ * (`Thread.withdrawQuestionForMessage`).
+ */
+function typedByPerson(item: QueueItem): boolean {
+  const author = item.author;
+  return author !== undefined && !author.externalSender && (author.interactive === true || author.directChannel === true);
 }
 
 /** Item metadata that sets how its turn runs. A joined item runs under the running item's values. */
@@ -8461,7 +8605,7 @@ export function entriesToAgentMessages(
           ? renderSignalEnvelope(e.signal, e.content)
           : renderReplyContext(e.content, e.metadata);
       const sender = e.signal ? undefined : attributedAuthor(opts?.attributeAuthors, e.author);
-      const contentBlocks = userContentBlocks(text, e.attachments, sender);
+      const contentBlocks = userContentBlocks(text, e.attachments, sender, entryMessageTime(e));
       out.push({
         role: "user",
         content: contentBlocks,
@@ -8609,4 +8753,34 @@ function readToolUsageOutcome(details: unknown, isError: boolean): Pick<ToolUsag
     if ("ok" in details && details.ok === false) return { outcome: "error", errorCode: "tool_error" };
   }
   return { outcome: isError ? "error" : "ok", errorCode: isError ? "tool_error" : null };
+}
+
+/**
+ * The result of a settled, non-merged submission, read from the store alone.
+ * `Thread.awaitResult` uses it after waiting; a host that only has the
+ * session id (a plugin reading its child's result) uses it directly.
+ */
+export async function settledSubmissionResult(
+  store: SessionStore,
+  sessionId: string,
+  item: QueueItem,
+  outcome: SubmissionOutcome,
+  opts: Pick<AwaitResultOptions, "resultSchema"> = {},
+): Promise<SubmissionResult> {
+  // Every reader below looks at this submission only.
+  const entries = await store.getEntries(sessionId, item.threadId, { queueItemId: item.id });
+  const text =
+    outcome.outcome === "superseded"
+      ? resolvePartialSubmissionText(entries, item.id)
+      : resolveSubmissionText(entries, item.id);
+  // Check terminal semantics before applying the caller's optional output contract.
+  const validated = outcome.outcome === "completed" ? completedSubmissionOutcome(entries, item.id) : outcome;
+  const result: SubmissionResult = { queueItemId: item.id, outcome: validated.outcome, text };
+  if (validated.error !== undefined) result.error = validated.error;
+  if (opts.resultSchema && validated.outcome === "completed") {
+    const extracted = extractStructuredOutput(text ?? "", opts.resultSchema);
+    if (extracted.output !== undefined) result.output = extracted.output;
+    if (extracted.error !== undefined) result.error = extracted.error;
+  }
+  return result;
 }

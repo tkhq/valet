@@ -9,6 +9,8 @@
  * only boots when this file is run as the direct entry (`tsx src/main.ts`), or
  * when a caller (e.g. the `valet serve` command) invokes `startServer()`.
  */
+import { imageSourceApprovalMode } from "./bakes/source-change-requests.js";
+import { currentOutboundPolicy } from "./lib/outbound-url.js";
 import { wireSessionOutcomeTagging } from "./tagging/session-outcome.js";
 import { configureSlackIngress } from "./channels/slack-inbox.js";
 import { eq } from "drizzle-orm";
@@ -34,6 +36,7 @@ import {
   type InstanceConfig,
 } from "./config/instance-config.js";
 import { reconcileInstanceConfig } from "./services/config-reconcile.js";
+import { AdminBootstrapError, ensureAdminAccess } from "./auth/bootstrap-admin.js";
 import { seedMissingTeamDefaults } from "./services/teams.js";
 import { ModelRegistry, getModelRegistry, setModelRegistry } from "./services/model-registry.js";
 import { syncAllAppWebhookUrls } from "./services/github-app.js";
@@ -43,9 +46,13 @@ import { wireHomeTaskReports } from "./home/service.js";
 import { wireChildGateReports } from "./orchestrator/children.js";
 import { wireThreadPullRequests, startPullRequestSweep } from "./services/thread-pull-requests.js";
 import { wireDeliveryTurnFailures } from "./events/delivery-turn.js";
+import { memoryUsageRecorder } from "./services/memory-usage.js";
+import { wirePrincipleCitations } from "./orchestrator/principle-citations.js";
 import { initTelemetry } from "./observability/otel.js";
 import { initImageFallbackMetrics } from "./observability/image-fallback-metrics.js";
-import { initSandboxMetrics } from "@valet/engine";
+import { initSandboxMetrics, reportError } from "@valet/engine";
+import { startProcessHealthSampler } from "./observability/process-health.js";
+import { Lifecycle, startBootListener } from "./lib/lifecycle.js";
 import { recordBootRestoreTimeout } from "./observability/security-metrics.js";
 import { ensureWorkflowSession } from "./workflows/engine-deps.js";
 import { restoreOneSession, runBoundedRestore, type RestoreSessionDeps } from "./boot-restore.js";
@@ -95,7 +102,7 @@ async function restoreUnsettledSessions(providers: Providers, shouldStop: () => 
   try {
     ids = await providers.engineStore.listSessionIdsWithUnsettledSubmissions();
   } catch (err) {
-    console.error("boot restore: failed to list unsettled sessions:", err);
+    reportError({ area: "boot", reason: "restore_list" }, "boot restore: failed to list unsettled sessions", err);
     return;
   }
   const deps: RestoreSessionDeps = {
@@ -200,6 +207,20 @@ if (authConflict) {
   process.exit(1);
 }
 
+if (imageSourceApprovalMode() === "off") {
+  console.warn("[security] VALET_IMAGE_SOURCE_APPROVAL=off: image-source changes apply without a second org admin.");
+}
+
+// The outbound URL guard reads its allowlist lazily; parse it now so a
+// malformed VALET_OUTBOUND_URL_ALLOWLIST stops boot instead of refusing
+// every custom provider at request time.
+try {
+  currentOutboundPolicy();
+} catch (e) {
+  console.error(e instanceof Error ? e.message : String(e));
+  process.exit(1);
+}
+
 const workflowCrashAt = process.env.WF_CRASH_AT === "terminalizing" ? "terminalizing" : undefined;
 
 // Instance config (`valet.yaml`): load and validate before anything else
@@ -288,7 +309,17 @@ const telemetry = initTelemetry();
 // Counters are zero-initialized at boot so increase() sees the first event after a restart.
 initImageFallbackMetrics();
 initSandboxMetrics();
+// Memory, heap, and event-loop samples for the process gauges and the
+// diagnostics.process_health tool. Stopped in close().
+const stopProcessHealthSampler = startProcessHealthSampler();
 if (telemetry) console.log(`otel: exporting traces to ${telemetry.endpoint}`);
+
+// Booting → ready → draining (`lib/lifecycle.ts`). The boot listener holds
+// the port through database upgrades and provider setup, so callers get 503 +
+// Retry-After instead of a refused connection; it hands the port to the real
+// app below. Port 0 (tests) has nothing to hold.
+const lifecycle = new Lifecycle();
+const bootListener = port === 0 ? null : await startBootListener(port);
 
 // `buildNodeProviders` can throw `InstanceConfigError` (e.g. the plugins
 // both-set guard). Fail boot with the corrective-action message only — no
@@ -306,7 +337,7 @@ try {
     sandboxJwtMaster: authConfig?.sandboxJwtMaster,
     sandboxApiUrl,
     // Real auth configured → skip seeding the local-dev identity so the
-    // "zero users → first signup becomes admin" provisioning rule can fire
+    // first admin comes from an invite (`auth/bootstrap-admin.ts`)
     // (see `NodeProviderOpts.seedLocalIdentity`). The stub rung cannot be on
     // here — the boot check above refuses that pair.
     seedLocalIdentity: shouldSeedLocalIdentity(!!authConfig),
@@ -339,6 +370,7 @@ wireAttentionRouter({
 // alone left the parent unaware of a blocked child until it finished.
 wireChildGateReports(providers.eventStream, providers.childWatcher);
 wireThreadPullRequests(providers.eventStream, providers.db);
+wirePrincipleCitations(providers.eventStream, providers.db);
 // A task started from home reports back to home when its first run ends.
 wireHomeTaskReports(providers.eventStream, providers);
 // An event delivery is marked failed when the turn it queued fails. Restored
@@ -388,7 +420,6 @@ getAttachmentRefStore().startSweep();
 // chain checks it between steps: a shutdown during boot must stop the chain
 // from starting more services.
 let closed = false;
-let bootReady = false;
 let installationSweep: InstallationSweepHandle | undefined;
 let pullRequestSweep: ReturnType<typeof startPullRequestSweep> | undefined;
 
@@ -400,7 +431,7 @@ let pullRequestSweep: ReturnType<typeof startPullRequestSweep> | undefined;
 const { startServer: startListening, webServed } = createApp(
   providers,
   authWiring,
-  { webDistDir, isReady: () => bootReady && !closed },
+  { webDistDir, isReady: () => lifecycle.isReady() && !closed, lifecycle },
   adapter,
 );
 // A set-but-unmounted dist means the bundled image shipped without a valid
@@ -413,6 +444,7 @@ if (webDistDir && !webServed) {
   process.exit(1);
 }
 
+await bootListener?.close();
 const server = startListening({
   port,
   onListen: (boundPort) => {
@@ -441,7 +473,7 @@ const server = startListening({
 // the port's critical path for exactly this reason; the whole chain now
 // follows it.
 //
-// The chain has two halves around the `bootReady` flip:
+// The chain has two halves around the `lifecycle.markReady()` flip:
 //   1. Traffic-protecting steps — session restore, the
 //      config reconcile (fail-fast `process.exit(1)`: a bad config dies
 //      while still NotReady and never takes traffic), team-sync report.
@@ -461,7 +493,7 @@ async function runBootChain(): Promise<void> {
   // `runBoundedRestore`) so one wedged sandbox exec can't hold readiness
   // forever.
   await restoreUnsettledSessions(providers, () => closed).catch((err) => {
-    console.error("boot restore: unexpected failure (continuing to serve):", err);
+    reportError({ area: "boot", reason: "restore_pass" }, "boot restore: unexpected failure (continuing to serve)", err);
   });
 
   if (closed) return;
@@ -542,6 +574,20 @@ async function runBootChain(): Promise<void> {
   if (seededTeams.length > 0) {
     console.log(`seeded a default assistant for ${seededTeams.length} team(s) without one: ${seededTeams.join(", ")}`);
   }
+  // With real auth, make sure an admin exists or can sign in: promote
+  // AUTH_ADMIN_EMAILS users, print the one-time admin link, or stop boot
+  // (SSO with no admin declared). After the reconcile, so config-declared
+  // admin invites count, and before the ready flip, so a bad setup never
+  // takes traffic.
+  if (authConfig) {
+    try {
+      await ensureAdminAccess(providers.db, authConfig, { publicUrl: publicUrlFromEnv(process.env), log: (line) => console.log(line) });
+    } catch (e) {
+      if (!(e instanceof AdminBootstrapError)) throw e;
+      console.error(e.message);
+      process.exit(1);
+    }
+  }
 
   if (closed) return;
 
@@ -551,14 +597,14 @@ async function runBootChain(): Promise<void> {
   // readiness on them bought no guarantee — but a HANGING one (a webhook
   // registration against a slow provider) would stall every rolling pod's
   // readiness for work the pod serves fine without.
-  bootReady = true;
+  lifecycle.markReady();
   console.log("boot chain: traffic-critical steps complete — /api/ready now reports ready");
 
   // Channel ingress (Task 8): resolves credentials into transports, then
   // starts webhook registration or the long-poll loop per transport. A
   // failure here must never block boot — channels are best-effort.
   await providers.channelHost.start().catch((err) => {
-    console.error("boot restore: channelHost.start failed (continuing to serve):", err);
+    reportError({ area: "boot", reason: "channel_host_start" }, "boot restore: channelHost.start failed (continuing to serve)", err);
   });
   console.log("channel host started");
 
@@ -592,6 +638,7 @@ async function runBootChain(): Promise<void> {
   // freshly-ingested ones between nudges) get delivered.
   configureSlackIngress(providers);
   providers.eventDispatcher.start();
+  providers.onlineStatusWatcher.start();
 
   // Repository content sync: re-reads every tracked repository on its own
   // schedule, and imports any source added while this process was down.
@@ -604,7 +651,7 @@ async function runBootChain(): Promise<void> {
   const modelRegistry = new ModelRegistry(providers.db);
   setModelRegistry(modelRegistry);
   await modelRegistry.start().catch((err) => {
-    console.error("modelRegistry.start failed:", err);
+    reportError({ area: "boot", reason: "model_registry_start" }, "modelRegistry.start failed", err);
   });
 
   // Prebuild orchestration (sandbox images v2 plan, Task 3): sweep any
@@ -613,7 +660,7 @@ async function runBootChain(): Promise<void> {
   // backend (`imageBuilder: null`) still starts harmlessly — every pass
   // short-circuits.
   await providers.prebuildService.start().catch((err) => {
-    console.error("prebuildService.start failed:", err);
+    reportError({ area: "boot", reason: "prebuild_service_start" }, "prebuildService.start failed", err);
   });
 
   // LLM proxy env-key bootstrap (llm-recording-gateway plan, Task 8): for each
@@ -621,7 +668,7 @@ async function runBootChain(): Promise<void> {
   // provider, seed one named `env:{kind}` so the recording proxy works with
   // zero setup. Idempotent; a failure must never block boot.
   await ensureEnvProviders(providers.db, providers.engineCredentials, await resolveOrgId(providers.db)).catch((err) => {
-    console.error("ensureEnvProviders failed (continuing to serve):", err);
+    reportError({ area: "boot", reason: "env_providers" }, "ensureEnvProviders failed (continuing to serve)", err);
   });
 
   if (closed) return;
@@ -687,11 +734,20 @@ async function close(): Promise<void> {
   // after this point stay unstarted, so the stops below can meet a service
   // that never ran — each one tolerates that.
   closed = true;
+  // Readiness goes 503 and new external API requests get 503 + Retry-After
+  // from here on; the stops below end the claim loops and schedulers.
+  const requestsDrained = lifecycle.beginDrain();
+  stopProcessHealthSampler();
   // The WakeWatcher's stop flag goes up first: the awaited stops below can
   // take most of the hard-exit budget, and a pass must not start new rows
   // meanwhile (fix wave 4, concurrency M6). It is awaited below, before
   // evictAll.
   const wakeWatcherStopped = startStop("wakeWatcher", () => providers.wakeWatcher.stop());
+  try {
+    await providers.onlineStatusWatcher.stop();
+  } catch (err) {
+    console.error("onlineStatusWatcher.stop failed:", err);
+  }
   try {
     providers.workflowScheduler.stop();
   } catch (err) {
@@ -781,6 +837,12 @@ async function close(): Promise<void> {
   } catch (err) {
     console.error("autoTitleHost.stop failed:", err);
   }
+  // Requests already in flight finish before their sessions are evicted.
+  // The wait started at beginDrain(), alongside the stops above, so a slow
+  // stop (an active workflow drive) does not use up the requests' window.
+  if (!(await requestsDrained)) {
+    console.warn(`shutdown: drain window ended with ${lifecycle.requestsInFlight} request(s) still in flight`);
+  }
   try {
     // Evict, never destroy: Session.destroy() deletes the session's durable
     // rows (threads, queue items, transcript). Shutdown must leave the store
@@ -789,6 +851,12 @@ async function close(): Promise<void> {
     providers.engineHost.evictAll();
   } catch (err) {
     console.error("evictAll failed:", err);
+  }
+  try {
+    // Write the memory reads and injections still in the buffer.
+    await memoryUsageRecorder(providers.db).stop();
+  } catch (err) {
+    console.error("memory usage flush failed:", err);
   }
   try {
     // Flush any batched spans before the process goes away.
@@ -804,10 +872,10 @@ async function close(): Promise<void> {
 // handler that's swallowing the error; these are belt-and-braces so the dev
 // experience doesn't get whiplashed when one slips through.
 process.on("unhandledRejection", (reason) => {
-  console.error("unhandledRejection:", reason);
+  reportError({ area: "api", reason: "unhandled_rejection" }, "unhandledRejection", reason);
 });
 process.on("uncaughtException", (err) => {
-  console.error("uncaughtException:", err);
+  reportError({ area: "api", reason: "uncaught_exception" }, "uncaughtException", err);
 });
 
   return { close, port, backend: parseSandboxBackend(process.env.VALET_SANDBOX_BACKEND) };

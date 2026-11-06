@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": ".",
+    "types": ["node"]
+  },
+  "include": ["src/**/*", "bin/**/*"],
+  "references": [{ "path": "../engine" }, { "path": "../sandbox-local" }]
+}

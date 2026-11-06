@@ -45,9 +45,14 @@ function useMembershipLoaded(): boolean {
   }, () => membershipLoaded);
 }
 
+vi.mock("~/api/integrations", async (importOriginal) => ({
+  ...await importOriginal<typeof import("~/api/integrations")>(),
+  usePlugins: () => ({ data: { plugins: [] }, isLoading: false, error: null }),
+}));
 vi.mock("~/api/settings", () => ({
+  pluginEnabledForCaller: () => false,
   useOrg: () => useMembershipLoaded()
-    ? { data: { callerRole: orgRole, features: { organizations: organizationsOn } }, isLoading: false, error: null }
+    ? { data: { callerRole: orgRole, features: { organizations: organizationsOn }, plugins: [] }, isLoading: false, error: null }
     : { data: undefined, isLoading: true, error: null },
   useTeams: () => useMembershipLoaded()
     ? { data: { teams }, isLoading: false, error: null }

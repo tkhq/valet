@@ -14,6 +14,7 @@ import { compatible } from "../prebuilds/image-contract.js";
 import { resolvePrebuildImage, contractGateApplies, type OnIncompatibleImage } from "../prebuilds/resolve.js";
 import { prebuildImagePullable, type PrebuildPreflightOpts } from "../prebuilds/registry.js";
 import { imageSources, bakes } from "../schema/index.js";
+import { reportError } from "@valet/engine";
 
 export interface ResolveSnapshotDeps {
   db?: AppDb;
@@ -98,7 +99,7 @@ async function resolveBaseImage(
 
     return { imageRef: bake.imageRef, sizeBytes: bake.sizeBytes ?? null };
   } catch (err) {
-    console.error(`base image resolution failed for org ${orgId}:`, err);
+    reportError({ area: "sandbox", reason: "base_image_resolve" }, `base image resolution failed for org ${orgId}`, err);
     return null;
   }
 }

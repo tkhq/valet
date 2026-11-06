@@ -522,6 +522,15 @@ skill example.
 A rerun follows once #997 merges, because its design warnings can change
 drafts.
 
+## The code-review suite
+
+`evals/cases/code-review/` measures the PR reviewer (`packages/plugin-pr-review`) against Martian Code Review Bench's offline set. The set has 50 PRs in 5 projects and 173 golden comments. `src/martian-import.ts` generates the cases from a pinned Martian commit.
+
+- **Case shape.** A `pull_request` block (repo cache key, remote, base, head, title, body) replaces `turns`. The runner (`src/pull-request.ts`) fetches both commits into a blobless bare repo and adds a worktree at head. It builds the session from `createReviewerSpec`, so the suite runs the same prompt and tools as the plugin. The submitted review lands in `trajectory.metadata.review`. Saved baselines trim tool results to 2,000 characters and drop the diff from the prompt.
+- **Scoring.** `review_match` (`src/checks/review-match.ts`) copies Martian's extract, dedup and judge prompts and its match rules. TP and FN count only golden comments in the profile (default `core`). FP counts extracted issues that match no golden comment. The default judge is Sonnet 4.5, the judge of Martian's published vendor results. Each case carries those results as `reference`, so the scorecard compares tools on the same PRs.
+- **Keys.** Code-review cases need the Valet LLM gateway (`src/gateway.ts`): `VALET_LLM_GATEWAY_URL` plus a `vlt_` key. The runner passes the key through the session `resolveModel` seam, and the judges get it as their API key. The CLI deletes provider keys from its environment, so no call falls back to a personal key.
+- **Concurrency.** `--concurrency` runs cases in parallel and keeps the scorecard in case order.
+
 ## Known limitations
 
 - `mem_*` tools in engine-drive sessions are Map-backed stand-ins;

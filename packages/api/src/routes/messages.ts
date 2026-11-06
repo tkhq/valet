@@ -18,6 +18,7 @@ import { threadPage } from "../services/thread-page.js";
 import { ensureDefaultThreadWhereOwned } from "../services/default-thread.js";
 import { isLegacyAssistantRuntime } from "../services/legacy-runtime.js";
 import { isWorkflowRunConversation } from "../workflows/run-conversations.js";
+import { isPluginThreadKey } from "../plugins/plugin-thread-key.js";
 import { ensureAssistantExecution, ensureDefaultAssistantSession, findDefaultAssistant, loadAssistantBySessionId } from "../assistants/service.js";
 import { FORK_OF_METADATA_KEY, MOVED_TO_METADATA_KEY, threadOwner, workspaceName } from "../services/thread-links.js";
 import { randomUUID } from "node:crypto";
@@ -565,7 +566,7 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
   const groups = await workspaceThreadGroups(c, session, selectedThreadId ? undefined : wantArchived);
   // Parse stored tokens: a legacy "off" row has no pin and shows the session
   // default, which is filled in for the returned page below.
-  const threads = groups.flatMap(group => group.threads.filter(t => t.id === selectedThreadId || !isWorkflowRunConversation(group.session.id, t.key))
+  const threads = groups.flatMap(group => group.threads.filter(t => t.id === selectedThreadId || (!isWorkflowRunConversation(group.session.id, t.key) && !isPluginThreadKey(t.key)))
     .map(t => ({ ...t, reasoning: parseReasoningLevel(t.reasoning) })));
 
   // Titles + archive state live in the app-side `session_threads` mirror
@@ -1887,12 +1888,13 @@ export async function forkThread(c: Context<AppEnv>, sessionId: string, threadId
 /**
  * Moves a thread to another workspace (docs/specs/2026-10-22-thread-edit-fork-design.md):
  * the whole conversation and its files are copied there, as a fork is, and
- * the source is archived with a pointer to the copy. A team thread moves to
- * the mover's private threads; teammates lose it, so only a person who wrote
- * every message in it, or a team admin, may move it. A private thread moves
- * to a team the mover is on; the team then reads it, so the request must
- * confirm. A thread with a running turn, an open approval, or background
- * work does not move, and nor does one bound to Slack, a workflow, or Home.
+ * the source is archived with a pointer to the copy. A thread moves to the
+ * mover's private threads or to any team the mover is on. When a team thread
+ * leaves its team, teammates lose it, so only a person who wrote every
+ * message in it, or a team admin, may move it. A move into a team shows the
+ * thread to that team, so the request must confirm. A thread with a running
+ * turn, an open approval, or background work does not move, and nor does one
+ * bound to Slack, a workflow, or Home.
  */
 export async function moveThread(c: Context<AppEnv>, sessionId: string, threadId: string) {
   const body = await readOptionalJsonObject(c);
@@ -1913,12 +1915,12 @@ export async function moveThread(c: Context<AppEnv>, sessionId: string, threadId
   const sourceTeam = loaded.session.ownerType === "team";
   if (destination === "private" && !sourceTeam) return c.json({ error: "This thread is already private to you." }, 400);
   if (typeof destination === "object") {
-    if (sourceTeam) return c.json({ error: "A team thread moves to your private threads only. Branch it to copy it into another team." }, 400);
+    if (sourceTeam && destination.teamId === loaded.session.ownerId) return c.json({ error: "This thread is already in that team." }, 400);
     if (body?.confirm !== true) {
       return c.json({ error: "Moving shows this thread's messages and files to everyone on the team. Send confirm: true to move it.", code: "confirm_required" }, 409);
     }
   }
-  if (destination === "private" && !await canAdministerTeam(db, loaded.session.ownerId, c.var.user.id)) {
+  if (sourceTeam && !await canAdministerTeam(db, loaded.session.ownerId, c.var.user.id)) {
     const others = (await thread.readEntries()).some((entry) => entry.type === "message" && entry.role === "user" && !entry.signal
       && entry.author?.id !== undefined && entry.author.id !== c.var.user.id);
     if (others) {
@@ -1940,7 +1942,7 @@ export async function moveThread(c: Context<AppEnv>, sessionId: string, threadId
   // open it: a private thread moved to a team. Teammates who lose a team
   // thread are told where it went, not given a link they cannot open.
   const owner = await threadOwner(db, result.thread.sessionId);
-  const where = sourceTeam ? "their private threads" : owner ? await workspaceName(db, owner) : "another workspace";
+  const where = destination === "private" ? "their private threads" : owner ? await workspaceName(db, owner) : "another workspace";
   const link = sourceTeam ? "" : ` [Open it](/chat?workspace=${encodeURIComponent(result.workspace)}&thread=${encodeURIComponent(result.thread.id)}).`;
   await thread.appendEntry({
     id: `e-${randomUUID()}`, sessionId, threadId, parentId: null, type: "message", role: "system",
@@ -1951,6 +1953,32 @@ export async function moveThread(c: Context<AppEnv>, sessionId: string, threadId
   await db.insert(sessionThreads).values({ id: threadId, sessionId, createdAt, archivedAt: Date.now() })
     .onConflictDoUpdate({ target: sessionThreads.id, set: { archivedAt: Date.now() } });
   return c.json(result, 201);
+}
+
+/**
+ * Copies a whole thread into a new thread in the same workspace, with its
+ * files, as a branch from the latest message does. The source stays as it
+ * is. The copy keeps the source's audience, and a thread with a running
+ * turn or an open approval does not duplicate until it settles.
+ */
+export async function duplicateThread(c: Context<AppEnv>, sessionId: string, threadId: string) {
+  const loaded = await loadEngineSession(c, sessionId);
+  if ("error" in loaded) return loaded.error;
+  const access = await threadEntry(c, loaded.session, threadId);
+  if (!access || access.as === "guest") return c.json({ error: "Only the thread owner or a team member can duplicate this thread." }, 403);
+  const { db, engineStore } = c.var.providers;
+  if ((await engineStore.listUnsettledSubmissions(sessionId)).some((item) => item.threadId === threadId)) {
+    return c.json({ error: "A turn is running or waiting on an approval in this thread. Let it finish, then duplicate it." }, 409);
+  }
+  const [titled] = await db.select({ title: sessionThreads.title }).from(sessionThreads)
+    .where(and(eq(sessionThreads.sessionId, sessionId), eq(sessionThreads.id, threadId))).limit(1);
+  // A copy of a copy keeps one suffix: "Plan (copy)", not "Plan (copy) (copy)".
+  // A long title gives up its end, never the suffix, and an untitled source
+  // gets a name, so the copy's title always differs from the source's.
+  const suffix = " (copy)";
+  const base = (titled?.title?.replace(/(?: \(copy\))+$/, "") || "Untitled thread").slice(0, MAX_THREAD_TITLE_CHARS - suffix.length).trimEnd();
+  const result = await forkThreadAt(c, sessionId, threadId, { whole: true }, { destination: "here", title: `${base}${suffix}` });
+  return result instanceof Response ? result : c.json(result, 201);
 }
 
 /** Where a fork lands: the source's workspace, the person's private threads, or a team (a move only). */
@@ -2010,7 +2038,7 @@ async function forkThreadAt(
   const sourceTeam = loaded.session.ownerType === "team";
   const audience = sourceTeam || typeof destination === "object" ? await threadAudience(db, sessionId, threadId) : undefined;
   if (destination === "here" && sourceTeam && audience?.privateTo !== undefined) {
-    return c.json({ error: "This thread is private to you, and a branch would show its history to your team. Branch it privately instead." }, 400);
+    return c.json({ error: "This thread is private to you, and a copy here would show its history to your team. Branch it privately instead." }, 400);
   }
   if (destination === "private" && !sourceTeam) {
     return c.json({ error: "This thread is already private to you. Use Branch to copy it here." }, 400);

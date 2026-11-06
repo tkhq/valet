@@ -788,6 +788,10 @@ export function useNotifications(opts?: UseQueryOptions<ListNotificationsRespons
     queryKey: qk.notifications(),
     queryFn: () => api.listNotifications(),
     refetchInterval: 30_000,
+    // The attention sound (`use-attention-ping.ts`) fires when this poll
+    // finds something new. TanStack pauses the interval in a hidden tab, so
+    // without this the sound waits until the person comes back to the tab.
+    refetchIntervalInBackground: true,
     ...opts,
   });
 }
@@ -887,6 +891,17 @@ export function useMoveThread() {
   return useMutation<ForkThreadResponse, Error, { threadId: string } & MoveThreadRequest>({
     mutationFn: ({ threadId, ...body }) => api.moveThread(threadId, body),
     // The copy joins another workspace's list, so every thread list refetches.
+    onSuccess: () => void qc.invalidateQueries({ predicate: ({ queryKey }) => queryKey[0] === "sessions" && queryKey[2] === "threads" }),
+  });
+}
+
+/** Copies a whole thread into a new thread in the same workspace. The source
+ * stays as it is; the caller opens the copy. */
+export function useDuplicateThread() {
+  const qc = useQueryClient();
+  return useMutation<ForkThreadResponse, Error, { threadId: string }>({
+    mutationFn: ({ threadId }) => api.duplicateThread(threadId),
+    // A team copy runs in its own execution session, so every thread list refetches.
     onSuccess: () => void qc.invalidateQueries({ predicate: ({ queryKey }) => queryKey[0] === "sessions" && queryKey[2] === "threads" }),
   });
 }

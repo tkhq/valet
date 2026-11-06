@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 import type { ReactNode } from "react";
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { QueryClient, QueryClientProvider, type InfiniteData } from "@tanstack/react-query";
+import { focusManager, QueryClient, QueryClientProvider, type InfiniteData } from "@tanstack/react-query";
 import type { ListMessagesResponse, ListThreadsResponse } from "@valet/api/wire";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "./client";
-import { prefetchSession, prefetchTranscript, qk, TRANSCRIPT_FULL, TRANSCRIPT_TAIL, useMarkThreadsRead, useMessages, useSendPrompt, useSession, useSetThreadModel } from "./queries";
+import { prefetchSession, prefetchTranscript, qk, TRANSCRIPT_FULL, TRANSCRIPT_TAIL, useMarkThreadsRead, useMessages, useNotifications, useSendPrompt, useSession, useSetThreadModel } from "./queries";
 
 const sessionId = "session-1";
 
@@ -36,6 +36,32 @@ describe("useSendPrompt", () => {
   });
 });
 
+describe("useNotifications", () => {
+  afterEach(() => {
+    focusManager.setFocused(undefined);
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  // The attention sound fires from this poll. A poll that waits for the tab
+  // to come back makes the sound arrive only when the person is already here.
+  it("keeps polling while the tab is in the background", async () => {
+    vi.useFakeTimers();
+    const list = vi.spyOn(api, "listNotifications").mockResolvedValue({ notifications: [] });
+    const client = new QueryClient();
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    renderHook(() => useNotifications(), { wrapper });
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(list).toHaveBeenCalledTimes(1);
+
+    act(() => focusManager.setFocused(false));
+    await act(() => vi.advanceTimersByTimeAsync(30_000));
+
+    expect(list).toHaveBeenCalledTimes(2);
+  });
+});
 
 describe("useSetThreadModel", () => {
   afterEach(() => vi.restoreAllMocks());

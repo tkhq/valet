@@ -11,6 +11,7 @@ import {
   type PluginAction,
   type PluginActionContext,
   type PluginActionResult,
+  reportError,
 } from "@valet/engine";
 import { TeamAdminRequiredError } from "../services/team-deletion-access.js";
 import { submitDeletionRequest } from "../services/team-deletion-requests.js";
@@ -200,6 +201,13 @@ function stepParams(definition: unknown, nodeId: string): unknown {
 function gatingActionIds(review: GetWorkflowPermissionsResponse): string[] {
   return [...new Set(review.nodes.flatMap((node) => needsGrant(node) && node.actionId ? [node.actionId] : []))];
 }
+
+const WEBHOOK_NEXT =
+  "Show the URL only to the workflow owner. Tell the person to register it in the source, and say that some " +
+  "services limit webhooks to certain plans or to admins. If the source is a connected integration, always end " +
+  "your reply with one sentence that offers a schedule instead: each run lists the items created since " +
+  "{{trigger.metadata.previousFiredAt}} (the previous run; empty on the first run, so look back one interval), it " +
+  "needs no setup in the source, and runs can start late while Valet is down.";
 
 /** What a saved workflow still needs a person to allow, for a save result. */
 async function approvalNeeded(deps: WorkflowServiceDeps, owner: WorkflowOwner, workflowId: string): Promise<{ needsApproval?: string[]; next?: string }> {
@@ -1040,7 +1048,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       } catch (err) {
         // The approval is already recorded. A failed read only loses the
         // still-waiting list; it must not turn a success into a failure.
-        console.warn(`resolve_approval: could not read run ${run_id} after the approval:`, err);
+        reportError({ area: "workflows", reason: "approval_run_read", level: "warn" }, `resolve_approval: could not read run ${run_id} after the approval`, err);
       }
       const next = stillWaiting === undefined
         ? "The gate is resolved, but the run's waiting state could not be read. Call get_run to check for remaining approvals."
@@ -1526,6 +1534,15 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
             "matches channels created later.",
         }),
       ),
+      once_per_hours: Type.Optional(
+        Type.Integer({
+          minimum: 1,
+          maximum: 168,
+          description:
+            "Run at most once in this many hours, however often the event happens. Use it with " +
+            "slack.user_online so a person who drifts between away and active is nudged once.",
+        }),
+      ),
     }),
   )({
     id: "workflows.create_trigger",
@@ -1539,14 +1556,14 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     // conversation ends, so a person approves it by default (risk default
     // for "high"). Agents can steer the assistant through threads.
     riskLevel: "high",
-    execute: async ({ workflow_id, name, event_keys, filters, any_channel, presence }, ctx) => {
+    execute: async ({ workflow_id, name, event_keys, filters, any_channel, presence, once_per_hours }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
       const deps = getDeps();
       const result = await createWorkflowTrigger(
         armDepsFrom(deps),
         owner,
-        { workflowId: workflow_id, name, eventKeys: event_keys, filters, anyChannel: any_channel, appearance: presence },
+        { workflowId: workflow_id, name, eventKeys: event_keys, filters, anyChannel: any_channel, appearance: presence, oncePerHours: once_per_hours },
       );
       if (!result.ok) return { success: false, error: result.error };
       return { success: true, data: result.trigger };
@@ -1634,16 +1651,17 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     name: "Propose workflow event trigger",
     description: "Save a disabled event trigger for human review. Returns a review link and the stored configuration. Repeated keys return the existing record without changing it. Ask the user to review and turn it on in Presence.",
     riskLevel: "low",
-    execute: async ({ workflow_id, name, event_keys, filters, any_channel, proposal_key, presence }, ctx) => {
+    execute: async ({ workflow_id, name, event_keys, filters, any_channel, proposal_key, presence, once_per_hours }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
       const result = await createWorkflowTrigger(armDepsFrom(getDeps()), owner, {
-        workflowId: workflow_id, name, eventKeys: event_keys, filters, anyChannel: any_channel, proposalKey: proposal_key, appearance: presence,
+        workflowId: workflow_id, name, eventKeys: event_keys, filters, anyChannel: any_channel, proposalKey: proposal_key, appearance: presence, oncePerHours: once_per_hours,
       });
       if (!result.ok) return { success: false, error: result.error };
       return { success: true, data: proposalResult("subscription", result.trigger.triggerId, result.trigger.enabled, {
         ...result.trigger, target: { kind: "workflow", workflowId: result.trigger.workflowId,
           ...(result.trigger.appearance ? { appearance: result.trigger.appearance } : {}),
+          ...(result.trigger.oncePerHours !== undefined ? { oncePerHours: result.trigger.oncePerHours } : {}),
         },
       }) };
     },
@@ -1787,6 +1805,11 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
             "matches channels created later.",
         }),
       ),
+      once_per_hours: Type.Optional(
+        Type.Union([Type.Integer({ minimum: 1, maximum: 168 }), Type.Null()], {
+          description: "Run at most once in this many hours. Null removes the limit.",
+        }),
+      ),
     }),
   )({
     id: "workflows.update_trigger",
@@ -1798,7 +1821,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     // conversation ends, so a person approves it by default (risk default
     // for "high"). Agents can steer the assistant through threads.
     riskLevel: "high",
-    execute: async ({ trigger_id, name, event_keys, filters, enabled, any_channel }, ctx) => {
+    execute: async ({ trigger_id, name, event_keys, filters, enabled, any_channel, once_per_hours }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
       const deps = getDeps();
@@ -1806,7 +1829,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
         armDepsFrom(deps),
         owner,
         trigger_id,
-        { name, eventKeys: event_keys, filters, enabled, anyChannel: any_channel },
+        { name, eventKeys: event_keys, filters, enabled, anyChannel: any_channel, oncePerHours: once_per_hours },
       );
       if (!result.ok) return { success: false, error: result.error };
       return { success: true, data: result.trigger };
@@ -1820,7 +1843,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       "Mint an arbitrary-URL trigger for a workflow: POST any JSON to the returned URL and a run " +
       "starts, no Valet auth required — the URL itself is the credential. Calling this again on the " +
       "same workflow ROTATES the secret: the old URL stops working immediately. Returns { workflowId, " +
-      "hookId, url }.",
+      "hookId, url, next }.",
     // high, not medium: this mints a bearer secret that is the ENTIRE auth
     // for triggering a run — equivalent in blast radius to granting a new
     // credential, which the plugin catalog's default policy (medium ==
@@ -1834,7 +1857,13 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       if (!result.ok) return { success: false, error: result.error };
       return {
         success: true,
-        data: { ...result.webhook, url: workflowWebhookUrl(result.webhook.workflowId, result.webhook.hookId) },
+        data: {
+          ...result.webhook,
+          url: workflowWebhookUrl(result.webhook.workflowId, result.webhook.hookId),
+          // In the result, not only the skill: this is the turn where the
+          // assistant hands the URL over and can still offer a schedule.
+          next: WEBHOOK_NEXT,
+        },
       };
     },
   });

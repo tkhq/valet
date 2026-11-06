@@ -101,6 +101,7 @@ interface Instruments {
   jobLogsPruned: Counter;
   dockerJobOutputDropped: Counter;
   leasesSettleOverDeadline: Counter;
+  errors: Counter;
 }
 
 let instruments: Instruments | null = null;
@@ -265,6 +266,10 @@ function inst(): Instruments {
     scratchRequestedBytes: meter.createObservableGauge("valet.sandbox.scratch.requested_bytes", {
       description:
         "Most recently requested /scratch volume size, by session class. Tracks demand for scratch capacity, not allocated size.",
+    }),
+    errors: meter.createCounter("valet.errors", {
+      description:
+        "Error paths that did not throw, by area, reason, and provider (see reportError in error-report.ts). Prometheus exports it as valet_errors_total. Each reason is one catch block or error branch; a sustained rate on one reason needs a human.",
     }),
     scratchRefused: meter.createCounter("valet.sandbox.scratch.refused", {
       description:
@@ -558,4 +563,10 @@ export function recordScratchRequested(sessionClass: string, bytes: number): voi
  * asked) and reason. */
 export function recordScratchRefused(source: string, reason: string): void {
   inst().scratchRefused.add(1, { source, reason });
+}
+
+/** One error path that did not throw. Call `reportError` instead: it also
+ * marks the span and logs. The labels are already bounded there. */
+export function recordError(area: string, reason: string, provider?: string): void {
+  inst().errors.add(1, { area, reason, ...(provider ? { provider } : {}) });
 }

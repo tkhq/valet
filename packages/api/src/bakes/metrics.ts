@@ -32,3 +32,13 @@ export function recordBakeHealth(orgId: string, health: Health): void {
     inst.reserve.record(health.registry.reserveBytes!);
   }
 }
+
+let builtInRepairs: ReturnType<ReturnType<typeof metrics.getMeter>["createCounter"]> | undefined;
+/** Counts boot repairs of a built-in image source that drifted from the code
+ * values. Any non-zero value means tampering or a legacy edit: alert on it. */
+export function recordBuiltInSourceRepair(orgId: string, source: string, field: string): void {
+  builtInRepairs ??= metrics.getMeter("@valet/api").createCounter("valet.image_source.builtin_repaired", {
+    description: "Built-in image source fields put back to code values at boot",
+  });
+  builtInRepairs.add(1, { orgId, source, field });
+}

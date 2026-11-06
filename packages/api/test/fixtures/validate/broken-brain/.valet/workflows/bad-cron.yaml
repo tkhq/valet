@@ -1,0 +1,15 @@
+valet: workflow/v1
+name: Bad cron
+definition:
+  version: dag/v1
+  nodes:
+    - id: trigger
+      type: trigger
+    - id: done
+      type: stop
+  edges:
+    - from: trigger
+      to: done
+schedule:
+  name: Hourly
+  cron: "0 * * *"

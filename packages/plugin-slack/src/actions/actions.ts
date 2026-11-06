@@ -13,12 +13,14 @@ import {
   readResponseBytes,
   readPdfCandidateResponse,
   readResponseText,
+  validatedImageMediaType,
   type ActionPlugin,
   type Credential,
   type PluginAction,
   type PluginActionContext,
   type PluginActionResult,
 } from "@valet/engine";
+import { CHART_LIMITS, chartAsMarkdown, chartProblem, readChart, type Chart } from "@valet/shared";
 import { authorizeSlackFile } from "./file-access.js";
 import { slackFetch, slackGet, slackGetOnce } from "./api.js";
 import { checkPrivateChannelAccess } from "./channel-access.js";
@@ -27,6 +29,7 @@ import { buildContentBlocks, hasTableBlock, needsContentBlocks, slackEscapedText
 import { SlackApi, SlackApiError } from "../transport/api.js";
 import { slackIdentityOverride } from "../sender-identity.js";
 import { markdownToSlackMrkdwn, stripCode } from "../transport/format.js";
+import { readOnlineStatus } from "../online-status.js";
 
 /**
  * Curried action builder. The first call binds T from the parameters
@@ -574,6 +577,29 @@ const lookupUserByEmail = action(Type.Object({
         error: `Slack recipient lookup failed: ${detail}. Check the Slack app connection, then try again.`,
       };
     }
+  },
+});
+
+const getUserStatus = action(Type.Object({
+    user: Type.String({ pattern: '^[UW][A-Z0-9]+$', description: 'Slack user ID (U...). Use list_users or lookup_user_by_email to find it.' }),
+    include_local_time: Type.Optional(Type.Boolean({ description: "Also return the user's local time and time zone." })),
+  }))({
+  id: 'slack.get_user_status',
+  name: 'Get User Online Status',
+  description: 'Check whether a Slack user is online now: presence active or away, plus their status text and emoji, and optionally their local time. Works only for members of the connected Slack workspace. For "when they come back online", create a workflow trigger on slack.user_online instead of checking in a loop.',
+  riskLevel: 'low',
+  execute: async (args, ctx) => {
+    const cred = await ctx.credentials.get();
+    const token = cred?.accessToken ?? '';
+    if (!token) return { success: false, error: 'Slack is not connected. Connect Slack in Settings → Organization → Slack.' };
+    const teamId = typeof cred?.metadata?.teamId === 'string' ? cred.metadata.teamId : undefined;
+    const result = await readOnlineStatus(token, args.user, {
+      ...(teamId ? { teamId } : {}),
+      includeLocalTime: args.include_local_time === true,
+      signal: ctx.signal,
+    });
+    if (!result.ok) return { success: false, error: result.error };
+    return { success: true, data: result.status };
   },
 });
 
@@ -1341,53 +1367,134 @@ async function resolveSlackOrigin(
 const replyToOrigin = action(Type.Object({
     ...senderParameters,
     text: Type.String({ description: 'Reply text in CommonMark. Valet converts it to Slack mrkdwn.' }),
+    charts: Type.Optional(Type.Array(Type.Record(Type.String(), Type.Any()), {
+      maxItems: CHART_LIMITS.perMessage,
+      description:
+        'Up to 2 native Slack charts, drawn below the text. Each is { title, chart } with chart one of ' +
+        '{ type: "pie", segments: [{ label, value }] } or { type: "bar" | "line" | "area", series: [{ name, data: [{ label, value }] }], ' +
+        'axis_config: { categories: [...], x_label?, y_label? } }. Labels, names, and categories are at most 20 characters; ' +
+        'at most 12 series or segments and 20 categories; every series has one point per category.',
+    })),
   }))({
   id: 'slack.reply_to_origin',
   name: 'Reply to Origin',
   description:
-    'Reply in the Slack thread this turn came from. Use it for later updates and final results. On an addressed turn, the first assistant text posts automatically unless this action sends the first reply. No channel or thread id is needed.',
+    'Reply in the Slack thread this turn came from. Use it for later updates and final results, and to post a chart: pass charts and Slack draws them natively. On an addressed turn, the first assistant text posts automatically unless this action sends the first reply. No channel or thread id is needed.',
   riskLevel: 'medium',
   execute: async (args, ctx) => {
+    const charts: Chart[] = [];
+    for (const [index, value] of (args.charts ?? []).entries()) {
+      const chart = readChart(value);
+      if (!chart) return { success: false, error: `Chart ${index + 1}: ${chartProblem(value)}` };
+      charts.push(chart);
+    }
     const o = await resolveSlackOrigin(ctx);
     if ('error' in o) return { success: false, error: o.error };
-    const body = {
+    const formattedText = markdownToSlackMrkdwn(args.text, { preserveSlackNativeSpans: true });
+    const body: Record<string, unknown> = {
       channel: o.channelId,
       thread_ts: o.threadTs,
-      text: markdownToSlackMrkdwn(args.text, { preserveSlackNativeSpans: true }),
+      text: formattedText,
       mrkdwn: true,
     };
-    const mentionError = await unknownMentionError(o.token, [body.text]);
+    // A workspace where Slack has not rolled out the chart block rejects it
+    // as invalid_blocks; the fallback posts each chart as a table instead.
+    let fallbackBlocks: Record<string, unknown>[] | undefined;
+    if (charts.length > 0) {
+      const textBudget = SLACK_MAX_BLOCKS - charts.length;
+      body.text = formattedText.slice(0, SLACK_TEXT_LIMIT);
+      body.blocks = [
+        ...buildContentBlocks(args.text, formattedText, textBudget, { preserveSlackNativeSpans: true }),
+        ...charts.map((chart) => ({ type: 'data_visualization', title: chart.title, chart: chart.chart })),
+      ];
+      const withTables = [args.text, ...charts.map(chartAsMarkdown)].join('\n\n');
+      fallbackBlocks = buildContentBlocks(withTables, markdownToSlackMrkdwn(withTables, { preserveSlackNativeSpans: true }),
+        SLACK_MAX_BLOCKS, { preserveSlackNativeSpans: true, nativeTables: false });
+    }
+    const mentionError = await unknownMentionError(o.token, [formattedText, body.blocks, fallbackBlocks]);
     if (mentionError) return mentionError;
-    const { res, data } = await postActionMessage(o.token, body, ctx, args);
+    const { res, data } = await postActionMessage(o.token, body, ctx, args, fallbackBlocks);
     if (!res.ok) return slackError(res);
     if (!data.ok) return slackError(res, data);
-    return { success: true, data: { channel: o.channelId, ts: data.ts } };
+    return { success: true, data: { channel: o.channelId, ts: data.ts, ...(charts.length > 0 ? { charts: charts.length } : {}) } };
   },
 });
 
+/** Slack's limit on an image's alt text. */
+const SLACK_ALT_TEXT_LIMIT = 1000;
+
+/**
+ * The upload's MIME type. Only bytes make a file an image: a raster signature,
+ * or a safe SVG. A declared or stored image type without image bytes uploads
+ * as a plain file, so Slack never gets a broken image.
+ */
+export function uploadMimeType(data: Uint8Array, name: string, declared?: string): string {
+  const image = validatedImageMediaType(data, name);
+  if (image) return image;
+  if (declared && !declared.toLowerCase().startsWith('image/')) return declared;
+  return 'application/octet-stream';
+}
+
 const replyFileToOrigin = action(Type.Object({
-    path: Type.String({ minLength: 1, description: 'Sandbox path of the file to upload.' }),
+    path: Type.Optional(Type.String({ minLength: 1, description: 'Sandbox path of the file to upload. Pass path or file_id.' })),
+    file_id: Type.Optional(Type.String({
+      minLength: 1,
+      description: 'id of a file this thread already saved, from file_attach or render_diagram. Pass path or file_id.',
+    })),
     name: Type.Optional(Type.String({
       minLength: 1,
-      description: 'Displayed filename. Defaults to the path basename.',
+      description: 'Displayed filename. Defaults to the path basename or the saved file name.',
+    })),
+    title: Type.Optional(Type.String({
+      minLength: 1,
+      maxLength: 255,
+      description: 'Title Slack shows above the file, such as "Weekly signups". Defaults to the filename.',
+    })),
+    alt_text: Type.Optional(Type.String({
+      minLength: 1,
+      maxLength: SLACK_ALT_TEXT_LIMIT,
+      description: 'What the image shows, for screen readers. Send it for every image, chart, and diagram.',
     })),
     mime_type: Type.Optional(Type.String({
       minLength: 1,
-      description: 'File MIME type. Defaults to application/octet-stream.',
+      description: 'File MIME type. Image bytes decide it for PNG, JPEG, GIF, and WebP. Defaults to application/octet-stream.',
     })),
     caption: Type.Optional(Type.String({ description: 'Optional message posted with the file.' })),
   }))({
   id: 'slack.reply_file_to_origin',
   name: 'Reply with File to Origin',
   description:
-    'Upload a sandbox file to the Slack thread this turn came from. Use it for generated images, documents, and other file results. No channel or thread id is needed.',
+    'Upload a file to the Slack thread this turn came from: a generated image, chart, or diagram, a rendered document, or any other file result. Pass a sandbox path, or the file_id that file_attach or render_diagram returned. PNG, JPEG, GIF, and WebP images show inline; send alt_text and title with them. No channel or thread id is needed.',
   riskLevel: 'medium',
   execute: async (args, ctx) => {
+    if ((args.path === undefined) === (args.file_id === undefined)) {
+      return { success: false, error: 'Pass exactly one of path or file_id, then retry.' };
+    }
     const o = await resolveSlackOrigin(ctx);
     if ('error' in o) return { success: false, error: o.error };
-    const stat = await ctx.sandbox.stat(args.path);
-    if (!stat.isFile) {
-      return { success: false, error: 'The upload path is not a file. Choose a file in the sandbox and retry.' };
+    let data: Uint8Array;
+    let defaultName: string;
+    let storedMime: string | undefined;
+    if (args.file_id !== undefined) {
+      if (!ctx.threadFiles) {
+        return { success: false, error: 'This run has no saved thread files. Pass the sandbox path instead.' };
+      }
+      // The store is bound to this thread, so an id from another thread reads as missing.
+      const saved = await ctx.threadFiles.read(args.file_id);
+      if (!saved) {
+        return { success: false, error: 'No file with that file_id is saved in this thread. Pass the id file_attach returned in this thread, or a sandbox path.' };
+      }
+      data = saved.data;
+      defaultName = saved.name;
+      storedMime = saved.mimeType;
+    } else {
+      const path = args.path ?? '';
+      const stat = await ctx.sandbox.stat(path);
+      if (!stat.isFile) {
+        return { success: false, error: 'The upload path is not a file. Choose a file in the sandbox and retry.' };
+      }
+      data = await ctx.sandbox.readBinary(path);
+      defaultName = path.split('/').filter(Boolean).at(-1) ?? 'file';
     }
     // completeUploadExternal posts this same conversion of the caption. The
     // check runs before the upload, so a refused caption leaves no file behind.
@@ -1396,19 +1503,30 @@ const replyFileToOrigin = action(Type.Object({
       : markdownToSlackMrkdwn(args.caption, { preserveSlackNativeSpans: true });
     const mentionError = await unknownMentionError(o.token, [caption]);
     if (mentionError) return mentionError;
-    const data = await ctx.sandbox.readBinary(args.path);
-    const name = args.name ?? args.path.split('/').filter(Boolean).at(-1) ?? 'file';
+    const name = args.name ?? defaultName;
+    const mimeType = uploadMimeType(data, name, args.mime_type ?? storedMime);
     const api = new SlackApi(o.token);
-    const { uploadUrl, fileId } = await api.getUploadUrlExternal(name, data.byteLength);
-    await api.uploadToUrl(uploadUrl, data, args.mime_type ?? 'application/octet-stream');
+    const { uploadUrl, fileId } = await api.getUploadUrlExternal(name, data.byteLength, args.alt_text);
+    await api.uploadToUrl(uploadUrl, data, mimeType);
     await api.completeUploadExternal({
       fileId,
+      title: args.title,
       channelId: o.channelId,
       threadTs: o.threadTs,
       initialComment: args.caption,
       preserveSlackNativeSpans: true,
     });
-    return { success: true, data: { channel: o.channelId, fileId } };
+    const inline = mimeType.startsWith('image/') && mimeType !== 'image/svg+xml';
+    return {
+      success: true,
+      data: {
+        channel: o.channelId,
+        fileId,
+        mime_type: mimeType,
+        ...(mimeType === 'image/svg+xml' ? { note: 'Slack shows no inline preview for SVG. Upload a PNG copy for an inline image.' } : {}),
+        ...(inline && !args.alt_text ? { note: 'Send alt_text with the next image so screen readers can describe it.' } : {}),
+      },
+    };
   },
 });
 
@@ -1564,6 +1682,7 @@ export const slackPlugin: ActionPlugin = {
     dmOwner,
     dmUser,
     lookupUserByEmail,
+    getUserStatus,
     addReaction,
     listChannels,
     searchChannels,

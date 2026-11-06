@@ -6,6 +6,7 @@ import {
   Check,
   ClipboardCopy,
   Code2,
+  Copy,
   FolderInput,
   Globe,
   Moon,
@@ -21,6 +22,7 @@ import { useWorkspaceChannels } from "~/api/channels";
 import { placeOfSubject } from "~/api/presence";
 import {
   useDeleteSession,
+  useDuplicateThread,
   usePauseSession,
   useRenameSession,
   useReplaceSandbox,
@@ -172,6 +174,7 @@ export function SessionHeader({
   scopeNotice,
   compact = false,
   modelControlTarget,
+  onOpenThread,
 }: {
   session: SessionDetail;
   agentStatus: AgentStatus;
@@ -192,6 +195,8 @@ export function SessionHeader({
   compact?: boolean;
   /** Place the mobile model pill in the active conversation composer. */
   modelControlTarget?: HTMLElement | null;
+  /** Opens a thread in this workspace. Omit it to hide Duplicate. */
+  onOpenThread?: (threadId: string) => void;
 }) {
   const navigate = useNavigate();
   const mobile = useMobileLayout();
@@ -417,6 +422,19 @@ export function SessionHeader({
   // Anyone who sees it on may turn it off.
   const canEnableBypass = activeThread !== undefined && (owner.type === "user" ? owner.id === me.data?.id : owner.type === "team" && canAdminister);
   const bypassOn = activeThread?.approvalBypass === true;
+  // The server's rule: the thread owner or a team member. A copy stays in
+  // this workspace, so the reader opens it here.
+  const duplicate = useDuplicateThread();
+  const canDuplicate = onOpenThread !== undefined && activeThread !== undefined && !isAppAssistantThread(activeThread)
+    && (owner.type === "user" ? owner.id === me.data?.id : team !== undefined && team.callerRole !== null);
+  function duplicateActive() {
+    if (!activeThread || !onOpenThread || duplicate.isPending) return;
+    setActionError(null);
+    duplicate.mutate({ threadId: activeThread.id }, {
+      onSuccess: (result) => onOpenThread(result.thread.id),
+      onError: (err) => setActionError(extractActionError(err, "Could not duplicate the thread. Try again.")),
+    });
+  }
   function setBypass(on: boolean) {
     if (!activeThread) return;
     setActionError(null);
@@ -586,39 +604,13 @@ export function SessionHeader({
             ? { owner: { ownerType: session.owner.type, ownerId: session.owner.id } } : {})}
         />
       )}
+      {/* The model picker sits in the composer; Share and Copy transcript are
+          in the thread menu. The sidebar row, the composer status line, and
+          the reconnecting banner show the thread's status. */}
       <div className="ml-auto flex min-w-0 max-w-56 shrink-0 items-center gap-1 sm:max-w-full sm:flex-wrap sm:gap-1.5">
-        {!mobile && <Tooltip content={modelHint}>{modelPicker()}</Tooltip>}
-        {modelSaving && (
-          <span role="status" className="text-xs text-neutral-500">Saving model…</span>
-        )}
-        {/* On a phone, Share is in the thread menu with the other actions. */}
-        {canShare && (
-          <Tooltip content="Share this thread with your organization">
-            <Button variant="ghost" size="sm" className="max-md:hidden" onClick={() => setSharing(true)} aria-label="Share thread">
-              <Share2 className="h-4 w-4" aria-hidden />
-            </Button>
-          </Tooltip>
-        )}
-        <div className="hidden md:contents">
-          <ThreadStatusIcon status={agentStatus} busy={threadBusy} needsApproval={Boolean(pendingGate)} conn={conn} />
-          <Tooltip content={copied ? "Copied to clipboard" : "Copy debug transcript (runtime/thread + raw tool calls + env)"}>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={copyTranscript}
-              aria-label="Copy transcript"
-            >
-              {copied ? (
-                <Check className="h-4 w-4 text-moss" />
-              ) : (
-                <ClipboardCopy className="h-4 w-4" />
-              )}
-            </Button>
-          </Tooltip>
-        </div>
         <DropdownMenu open={sessionMenu.open} onOpenChange={sessionMenu.setOpen}>
           <DropdownMenuTrigger asChild>
-            <Button ref={threadMenuTrigger} variant="ghost" size="sm" className={cn("shrink-0", !canAdminister && "md:hidden")} aria-label="Thread menu">
+            <Button ref={threadMenuTrigger} variant="ghost" size="sm" className="shrink-0 max-md:min-w-11" aria-label="Thread menu">
               {del.isPending || replace.isPending || setProfile.isPending ? (
                 <Spinner size={14} />
               ) : (
@@ -639,19 +631,6 @@ export function SessionHeader({
               <div className="flex max-w-64 flex-wrap items-center gap-2 px-2 py-1.5">
                 <ThreadStatusIcon status={agentStatus} busy={threadBusy} needsApproval={Boolean(pendingGate)} conn={conn} />
               </div>
-              <DropdownMenuItem
-                onSelect={(event) => {
-                  event.preventDefault();
-                  void copyTranscript();
-                }}
-              >
-                <ClipboardCopy className="h-4 w-4" aria-hidden />{copied ? "Transcript copied" : "Copy transcript"}
-              </DropdownMenuItem>
-              {canShare && (
-                <DropdownMenuItem onSelect={() => setSharing(true)}>
-                  <Share2 className="h-4 w-4" aria-hidden />Share thread
-                </DropdownMenuItem>
-              )}
               {onOpenView && (
                 <>
                   <DropdownMenuItem onSelect={() => onOpenView("browser")}>
@@ -671,6 +650,25 @@ export function SessionHeader({
               )}
               <DropdownMenuSeparator />
             </div>
+            <DropdownMenuItem
+              onSelect={(event) => {
+                event.preventDefault();
+                void copyTranscript();
+              }}
+            >
+              {copied ? <Check className="h-4 w-4 text-moss" aria-hidden /> : <ClipboardCopy className="h-4 w-4" aria-hidden />}{copied ? "Transcript copied" : "Copy transcript"}
+            </DropdownMenuItem>
+            {canShare && (
+              <DropdownMenuItem onSelect={() => setSharing(true)}>
+                <Share2 className="h-4 w-4" aria-hidden />Share thread
+              </DropdownMenuItem>
+            )}
+            {canDuplicate && (
+              <DropdownMenuItem disabled={duplicate.isPending} onSelect={duplicateActive}>
+                <Copy className="h-4 w-4" aria-hidden />{duplicate.isPending ? "Duplicating…" : "Duplicate thread"}
+              </DropdownMenuItem>
+            )}
+            {(bypassOn || canEnableBypass || canAdminister) && <DropdownMenuSeparator />}
             {(bypassOn || canEnableBypass) && (
               <>
                 <DropdownMenuCheckboxItem checked={bypassOn} disabled={bypass.isPending}
@@ -743,7 +741,12 @@ export function SessionHeader({
         <ShareThreadDialog sessionId={session.id} threadId={activeThread.id} share={activeThread.share} open={sharing} onOpenChange={setSharing} />
       )}
       {guard.dialog}
-      {mobile && canAdminister && modelControlTarget && createPortal(modelPicker("trigger"), modelControlTarget)}
+      {canAdminister && modelControlTarget && createPortal(<>
+        {/* No hover tooltip: it would cover the menu, which opens upward. The
+            picker announces the hint as its description. */}
+        {modelPicker(mobile ? "trigger" : "menu")}
+        {modelSaving && <span role="status" className="sr-only">Saving model…</span>}
+      </>, modelControlTarget)}
       <ConfirmDialog
         open={confirmBypass}
         onOpenChange={setConfirmBypass}

@@ -180,6 +180,14 @@ export interface ThreadData {
 /** Key in `ThreadData.metadata` that holds the creation-time user timezone. */
 export const THREAD_USER_TIMEZONE_KEY = "userTimezone";
 
+/**
+ * Key in a user `MessageEntry.metadata` that holds the user timezone (string,
+ * or null when unknown) read when the entry was written. With `createdAt` it
+ * renders the entry's `[sent: …]` line (`messageTimeLine`). Written once, so
+ * the line never changes.
+ */
+export const ENTRY_USER_TIMEZONE_KEY = "userTimezone";
+
 export interface QueueState {
   threadId: string;
   mode: QueueMode;
@@ -396,6 +404,8 @@ export interface PromptOptions {
   channel?: ChannelTarget;
   replyTarget?: ChannelTarget;
   queueMode?: QueueMode;
+  /** Stop only the sender's own active turn in the same external conversation. */
+  steerScope?: "active-origin";
   model?: string;
   role?: string;
   resultSchema?: TSchema;
@@ -453,7 +463,12 @@ export interface BaseEntry {
 
 export type MessagePart =
   | { type: "text"; text: string }
-  | { type: "thinking"; text: string; startedAt?: number; durationMs?: number }
+  /**
+   * `text` stays empty for new parts: it is what a rebuilt transcript sends
+   * back to the model. `summary` is the provider's reasoning summary, for
+   * display only; nothing that builds model input reads it.
+   */
+  | { type: "thinking"; text: string; summary?: string; startedAt?: number; durationMs?: number }
   | {
       type: "tool_call";
       callId: string;
@@ -629,7 +644,13 @@ export type SessionEntry =
 export interface MessageQuery {
   /** Exact submission filter, applied before the tail limit. */
   queueItemId?: string;
+  /** Exact entry ids. Reads only these rows. */
+  entryIds?: readonly string[];
   limit?: number;
+  /** The oldest N entries instead of the newest. Ignored when `limit` is set. */
+  headLimit?: number;
+  /** Only these entry types. Applied before `limit` or `headLimit`. */
+  entryTypes?: readonly SessionEntry["type"][];
   cursor?: string;
   afterEntryId?: string;
   beforeEntryId?: string;
@@ -790,13 +811,33 @@ export type ToolArtifact =
   | { type: "link"; url: string; title: string }
   | { type: "diff"; path?: string; content: string };
 
+/** One durable download saved in a thread (the `file_attach` store). */
+export interface ThreadFile {
+  id: string;
+  name: string;
+  mimeType: string;
+  bytes: number;
+  /** Absolute when the host has a public origin, else the same as `webUrl`. */
+  url: string;
+  /** Download path relative to the Valet web app. */
+  webUrl: string;
+}
+
+/** `ToolContext.threadFiles`, bound to the calling thread. */
+export interface ThreadFileStore {
+  /** Save bytes as a download in this thread. Throws an Error whose message names the fix. */
+  save(file: { name: string; mimeType: string; data: Uint8Array }): Promise<ThreadFile>;
+  /** Read a file saved in this thread. Null when no ready file of this thread has the id. */
+  read(id: string): Promise<(ThreadFile & { data: Uint8Array }) | null>;
+}
+
 export interface ToolContext {
   /** Effective session, submission, and thread restrictions. This may change after a focus call. */
   readonly toolScope?: ToolScope;
   readonly toolScopeCeiling?: ToolScope;
   setToolFocus?: (scope: ToolScope | undefined) => Promise<void>;
   /** Replace this thread's plan in thread metadata (`update_plan`). Absent on a context built by hand. */
-  setThreadPlan?: (items: ThreadPlanItem[]) => Promise<ThreadPlan>;
+  setThreadPlan?: (items: ThreadPlanItem[], title?: string) => Promise<ThreadPlan>;
   /** Seed this thread's plan from a playbook skill, unless an open plan exists. Absent on a context built by hand. */
   seedPlaybookPlan?: (skill: SkillSource) => Promise<PlaybookSeedResult>;
   /** The current request offers native image generation; duplicate plugin actions are hidden. */
@@ -819,6 +860,13 @@ export interface ToolContext {
   /** Nobody watches this workflow task. `requestDecision` refuses new gates,
    * and the decision tools return a fail-closed result instead of asking. */
   unattendedWorkflow?: boolean;
+  /**
+   * Read the user's current IANA timezone, as the `[sent: …]` line does. The
+   * decision tools use it for the `[answered: …]` line on their result.
+   * Absent on a context built by hand, and undefined when the timezone is
+   * not known.
+   */
+  currentUserTimezone?: () => Promise<string | undefined>;
   channelType?: string;
   channelId?: string;
   decisionGateId?: string;
@@ -899,6 +947,14 @@ export interface ToolContext {
     name?: string;
     signal?: AbortSignal;
   }) => Promise<{ markdown: string } | null>;
+  /**
+   * Host seam for this thread's durable downloads, the store `file_attach`
+   * writes. A plugin action saves bytes a person can download from the
+   * thread, and reads back a file saved earlier in the same thread. Absent
+   * on hosts that wire no blob store and in workflow tool nodes; callers
+   * must name that limit, not fail silently.
+   */
+  threadFiles?: ThreadFileStore;
   requestDecision: (gate: DecisionGateRequest) => Promise<DecisionResolution>;
   /** Host seam for wakeups and leases (spec 2026-10-08). Absent === the host
    * wires no wakeups, and tools that need it must degrade or refuse. */
@@ -1074,7 +1130,7 @@ export interface CredentialStore {
 
 export type DecisionGateType = "approval" | "question" | "credential_request";
 export type DecisionGateStatus = "pending" | "resolved" | "expired" | "withdrawn";
-export type DecisionWithdrawReason = "steer" | "abort" | "cancel";
+export type DecisionWithdrawReason = "steer" | "abort" | "cancel" | "message";
 
 export interface DecisionAction {
   id: string;
@@ -1807,6 +1863,14 @@ export interface SandboxProvider {
    */
   list?(): Promise<SandboxListing[]>;
   /**
+   * Optional: the sandboxes that hold this session's retained browser state,
+   * read without listing the fleet. Turn settlement and session teardown call
+   * it; `list()` stays for the reconcile sweep. Absent: callers filter `list()`.
+   */
+  listBrowserForSession?(sessionId: string): Promise<SandboxListing[]>;
+  /** Optional: one sandbox's listing row by id, or null. Absent: callers search `list()`. */
+  describe?(id: string): Promise<SandboxListing | null>;
+  /**
    * Optional hibernation seam (paired with `SandboxCapabilities.hibernation`).
    * `suspend` scales the sandbox to zero while retaining its workspace; `resume`
    * wakes it under the same id. When both are implemented (and capability true),
@@ -1877,6 +1941,17 @@ export type ModelStateEvent =
       queueItemId: null;
       model: null;
     };
+
+/** One principle a turn named. The host finds these after the submission
+ * settles (brain spec, "Usage"); the engine only carries them. */
+export interface PrincipleCitation {
+  /** The principle as its index line names it: `principles/x.md`,
+   * `team:{id}/principles/x.md`, or a built-in principle's name. */
+  path: string;
+  /** `path`: the answer or plan named the path. `title`: a heuristic match
+   * on the principle's title, which can be wrong. */
+  match: "path" | "title";
+}
 
 export type EngineEvent =
   | { type: "message_start"; threadId: string; messageId: string; role: "assistant" | "system" }
@@ -1999,6 +2074,16 @@ export type EngineEvent =
       mergedIntoItemId?: string;
     }
   | {
+      /**
+       * A settled turn's answer or plan named one or more principles. The
+       * host appends it once per submission (`principle_cited:{queueItemId}`)
+       * and counts a cite on each principle's memory file.
+       */
+      type: "principle_cited";
+      threadId: string;
+      citations: PrincipleCitation[];
+    }
+  | {
       /** Live cache-invalidation hint emitted after automatic title writes. */
       type: "title_updated";
       threadId: string;
@@ -2109,7 +2194,7 @@ export interface ListOpts {
 
 export interface SubmissionAdmissionOptions {
   steer?: boolean;
-  steerScope?: "all" | "active-and-source" | "active";
+  steerScope?: "all" | "active-and-source" | "active" | "active-origin";
   maxPending?: number;
   promoteFromItemId?: string;
 }
@@ -2138,6 +2223,17 @@ export interface SessionStore {
     sessionId: string,
     threadId: string,
     opts?: { keepQueueItemId?: string },
+  ): Promise<{ thread: ThreadData; entries: SessionEntry[] } | null>;
+  /**
+   * The thread row and every entry as a stub, in `getThreadSnapshot` order:
+   * the stub shape `getTranscriptSnapshot` uses for covered entries, for
+   * every message and compaction. Use it to walk links, types and queue items
+   * without loading payloads. Optional: `readThreadOutline` falls back to the
+   * full snapshot.
+   */
+  getThreadOutline?(
+    sessionId: string,
+    threadId: string,
   ): Promise<{ thread: ThreadData; entries: SessionEntry[] } | null>;
   // CHANGED: optional fence; store MUST reject with StaleAttemptError when a
   // fence is provided and does not name the item's current attempt.
@@ -2213,6 +2309,15 @@ export interface SessionStore {
    * inserts the promoted successor at the runnable head. "active" does the
    * same without a source item: a message edit stops the running turn and
    * runs next, and queued messages run after it.
+   * "active-origin" requires an explicit auto-reply human Slack signal.
+   * Callers send it only for a stop request. It interrupts only an active
+   * input from the same sender and conversation that is already in history.
+   * In the same transaction, it carries that sender's queued inputs from the
+   * conversation by durable, ordered IDs and settles them superseded.
+   * Caller metadata cannot create carry IDs.
+   * The successor keeps its own author, content, and authority metadata.
+   * Unrelated inputs retain their order and status. Carry overflow or an
+   * unsupported attachment rejects the entire admission without changing rows.
    *
    * opts.maxPending, when set, enforces the per-thread pending cap INSIDE
    * this call's own transaction: the store counts the thread's unsettled,
@@ -2220,7 +2325,8 @@ export interface SessionStore {
    * before the count) and throws PendingCapError when that count is already
    * >= maxPending. Doing the check and the insert in one transaction is what
    * closes the TOCTOU window a separate pre-check would leave open under
-   * concurrent admissions.
+   * concurrent admissions. A full steer (steer:true, scope "all") counts only the
+   * items it keeps (`steerKeepsSubmission`), since it supersedes the rest.
    *
    * opts.promoteFromItemId, when set, requires that item to still be queued
    * and not superseded on this thread. If it is not, the call throws
@@ -2845,6 +2951,14 @@ export interface CreateSessionOptions {
    */
   resolveModel?: (spec: string) => Promise<ResolvedModel | null>;
   /**
+   * Picks the fetch for a model request this session makes (turn stream and
+   * compaction summarizer). The host returns a fetch that refuses internal
+   * destinations, so an admin-configured provider URL cannot reach cloud
+   * metadata, loopback, or cluster services. Undefined, or an undefined
+   * result for a model: pi-ai's default fetch.
+   */
+  modelFetch?: (model: Model<any>) => typeof fetch | undefined;
+  /**
    * Select a configured, credentialed model on another approved provider.
    * The engine calls this after a transient provider or billing/quota failure,
    * including interactive turns. Return null when no candidate is available.
@@ -2929,6 +3043,11 @@ export interface CreateSessionOptions {
     name?: string;
     signal?: AbortSignal;
   }) => Promise<{ markdown: string } | null>;
+  /**
+   * Binds `ToolContext.threadFiles` to each thread in `buildToolContext`.
+   * Absent === tools and plugin actions get no thread file store.
+   */
+  threadFiles?: (scope: { orgId: string; sessionId: string; threadId: string }) => ThreadFileStore;
   /** Threaded onto `ToolContext.wakeups` via `buildToolContext`. Absent ===
    * plugin actions and tools get no wakeups seam. */
   wakeups?: WakeupsSeam;
@@ -3243,6 +3362,13 @@ export interface SpawnChildRequest {
   /** Role name applied to the spawn prompt's turn (`PromptOptions.role`
    * — the session must register the role in its `roles` option). */
   role?: string;
+  /**
+   * Batch name. Children one parent turn spawns with the same batch report
+   * together: the host holds each result until the last child in the batch
+   * settles, then admits one `child.settled` signal with all of them. A later
+   * turn that reuses the name starts a new batch.
+   */
+  batch?: string;
 }
 
 export interface SpawnChildResult {
@@ -3273,6 +3399,12 @@ export type ChildSpawner = (
      * signal can inherit it and the settlement turn can reach the channel
      * that asked. */
     origin?: ChannelOrigin;
+    /** False: the child's settlement does not wake the parent thread. A
+     * plugin that spawned the child reads its result itself. Default true. */
+    reportToParent?: boolean;
+    /** The plugin event delivery that started the child. Cancelling that
+     * delivery stops the child. Absent for every other child. */
+    pluginDeliveryId?: string;
   },
 ) => Promise<SpawnChildResult>;
 
@@ -3336,6 +3468,21 @@ export type ChildSender = (
   /** `origin`: the sending turn's channel origin, absent for a web or other non-channel turn. */
   ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; origin?: ChannelOrigin; toolScope?: ToolScope; unattendedWorkflow?: boolean; parentQueueItemId?: string },
 ) => Promise<{ queueItemId: string } | null>;
+
+/**
+ * Stops a child session on behalf of its parent: aborts the child's running
+ * turn and its queued work. The child's partial result still reaches the
+ * parent as a `child.settled` signal, alone or with the rest of its batch.
+ * A later `child_send` starts the child again.
+ *
+ * Returns `null` when `childSessionId` is not a child of `parentSessionId`,
+ * with the same "not yours" / "does not exist" ambiguity as `ChildReader`.
+ * `stopped` counts the submissions it aborted; 0 means the child was idle.
+ */
+export type ChildStopper = (
+  req: { childSessionId: string },
+  ctx: { parentSessionId: string; parentThreadId: string },
+) => Promise<{ stopped: number } | null>;
 
 /**
  * Options accepted by Engine.restoreSession. The host re-supplies tools,

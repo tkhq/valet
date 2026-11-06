@@ -3,6 +3,7 @@ import { eq, sql } from "drizzle-orm";
 import { agentSessions, teams, teamMembers } from "../schema/index.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { bootstrapAdminInviteCode } from "../test-helpers/bootstrap-admin-code.js";
 
 let api: TestApi | undefined;
 afterEach(async () => { await api?.cleanup(); api = undefined; });
@@ -112,7 +113,7 @@ describe("thread addressing compatibility", () => {
 
   it("keeps decisions inside their URL thread and denies team-key policy grants", async () => {
     api = await bootTestApi({ auth: true });
-    const signup = await fetch(`${api.baseUrl}/api/auth/sign-up/email`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "thread-key@nowhere.test", name: "Admin", password: "correct-horse-battery" }) });
+    const signup = await fetch(`${api.baseUrl}/api/auth/sign-up/email`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "thread-key@nowhere.test", name: "Admin", password: "correct-horse-battery", inviteCode: await bootstrapAdminInviteCode(api.providers.db) }) });
     const cookie = signup.headers.get("set-cookie")?.match(/better-auth\.session_token=[^;]+/)?.[0];
     if (!cookie) throw new Error("Missing session cookie");
     const team = await (await fetch(`${api.baseUrl}/api/teams`, { method: "POST", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify({ name: "Thread team" }) })).json() as CreateTeamResponse;

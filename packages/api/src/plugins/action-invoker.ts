@@ -44,6 +44,7 @@ import {
   type StoredCredential,
   type ValetPlugin,
   credentialSecret,
+  reportError,
 } from "@valet/engine";
 import type { WorkflowInvokeActionRequest, WorkflowInvokeActionResult } from "@valet/workflow";
 import type { Static } from "typebox";
@@ -757,7 +758,7 @@ async function enforceWorkflowPolicy(
       now,
     });
   } catch (err) {
-    console.error("action-invoker: policy resolution failed:", err);
+    reportError({ area: "plugins", reason: "policy_resolution" }, "action-invoker: policy resolution failed", err);
     if (req.approval && ctx.owner.type !== "team") {
       // Team actions must re-check team denies even after approval.
       // Human approval is the authorization — proceed even though the

@@ -17,6 +17,7 @@ import { usePinnedThreadTitle } from "~/api/rule";
 import { useOrg, useTeams } from "~/api/settings";
 import { useCreateSchedule, useUpdateSchedule, useWorkflows } from "~/api/workflows";
 import { collisionsFromError } from "~/components/events/collision-notice";
+import { handlerOptions } from "~/components/plugins/handler-settings";
 import { EVENT_SERVICES, connectedServices } from "~/components/events/when-do-step";
 import { wizardSentenceParts, wizardWhenParts } from "~/components/events/wizard-preview";
 import { useActiveWorkspace } from "~/components/workspace-clause";
@@ -48,6 +49,7 @@ import {
   draftThread,
   draftWorkspace,
   exampleSteps,
+  isAssistantDraft,
   isEmptyBody,
   lineFromCreate,
   routineFromCreate,
@@ -113,7 +115,7 @@ function overlapTeamName(
   subs: readonly EventSubscriptionWire[],
   teams: readonly TeamLike[] | undefined,
 ): string | undefined {
-  if (draft.service === "schedule" || draft.doKind === "workflow" || draft.assistant !== "user") return undefined;
+  if (draft.service === "schedule" || !isAssistantDraft(draft) || draft.assistant !== "user") return undefined;
   if ((mode.kind === "edit" || mode.kind === "review") && mode.line.ownerType !== "user") return undefined;
   const mine = new Set((teams ?? []).filter((t) => t.callerRole !== null).map((t) => t.id));
   const self = mode.kind === "edit" || mode.kind === "review" ? mode.line.id : undefined;
@@ -164,6 +166,7 @@ export function useEditorForm(openedMode: EditorMode, { onSaved, onFinish, inlin
   const services = catalogQ.data?.services ?? [];
   const pluginsQ = usePlugins();
   const connected = connectedServices(pluginsQ.isError ? undefined : pluginsQ.data?.plugins);
+  const handlers = handlerOptions(pluginsQ.data?.plugins);
   const workflowsQ = useWorkflows();
   const workflows = workflowsQ.data?.workflows ?? [];
   const names = useSentenceNames();
@@ -391,7 +394,11 @@ export function useEditorForm(openedMode: EditorMode, { onSaved, onFinish, inlin
 
   const heading = mode.kind === "edit" || mode.kind === "review" ? mode.line.name : mode.kind === "edit-routine" ? mode.routine.name : nameValue.trim() || "New";
   const appears = appearsSummary(draft.appearance);
-  const doSummary = draft.doKind === "reply" ? "reply" : draft.doKind === "work" ? "work on it" : workflowName !== undefined ? `run ${workflowName}` : "run a workflow";
+  const handlerLabel = handlers.find((h) => h.plugin === draft.handler?.plugin && h.id === draft.handler?.handler)?.label;
+  const doSummary = draft.doKind === "reply" ? "reply"
+    : draft.doKind === "work" ? "work on it"
+    : draft.doKind === "plugin" ? handlerLabel ?? "run a plugin"
+    : workflowName !== undefined ? `run ${workflowName}` : "run a workflow";
 
   const sideProps: SidePaneProps = {
     title: routine ? "This routine reads" : "This line reads",
@@ -455,11 +462,12 @@ export function useEditorForm(openedMode: EditorMode, { onSaved, onFinish, inlin
             services={services}
             workflows={workflows}
             assistants={assistants}
+            handlers={handlers}
             teamName={scopedTeam?.name}
           />
         </Section>
-        {draft.doKind === "workflow" ? (
-          <Section id="where" name="Where" summary="Set by the workflow" muted fixed open={false} />
+        {!isAssistantDraft(draft) ? (
+          <Section id="where" name="Where" summary={draft.doKind === "plugin" ? "Set by the plugin" : "Set by the workflow"} muted fixed open={false} />
         ) : (
           <Section
             id="where"

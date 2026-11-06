@@ -89,6 +89,7 @@ vi.mock("~/api/settings", async (importOriginal) => {
 });
 
 import { LlmProvidersSection } from "~/components/settings/llm-providers-section";
+import { ApiError } from "~/api/api-error";
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -423,5 +424,22 @@ describe("LlmProvidersSection — custom provider", () => {
     await user.click(screen.getByRole("button", { name: "Delete provider" }));
 
     expect(await screen.findByText("failed to delete provider: request timed out")).toBeTruthy();
+  });
+});
+
+describe("LlmProvidersSection — custom provider refusals", () => {
+  it("shows the server's reason when the base URL is refused", async () => {
+    const user = userEvent.setup();
+    const reason =
+      "baseUrl is refused. The URL points at 169.254.169.254, a private, loopback, link-local, or internal address. Use a public endpoint, or ask the instance operator to add the host to VALET_OUTBOUND_URL_ALLOWLIST.";
+    createLlmProviderMutate.mockImplementation((_vars: unknown, opts: { onError: (err: Error) => void }) => {
+      opts.onError(new ApiError(400, "POST /org/llm-providers -> 400", { error: reason }));
+    });
+    renderWithTooltip(<LlmProvidersSection />);
+    await user.click(screen.getByRole("button", { name: "Add custom provider" }));
+    await user.type(screen.getByLabelText("Name"), "metadata");
+    await user.type(screen.getByLabelText("Base URL"), "http://169.254.169.254/latest/");
+    await user.click(screen.getByRole("button", { name: "Create" }));
+    expect(await screen.findByText(reason)).toBeTruthy();
   });
 });

@@ -3,8 +3,9 @@ import { HOME_THREAD_KEY } from "../home/context.js";
 import { readFileSync } from "node:fs";
 import { and, eq } from "drizzle-orm";
 import slackPlugin from "@valet/plugin-slack/plugin";
-import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
 import {
+  MID_TURN_DELIVERY_KEY,
   VirtualSandboxProvider,
   type ChannelTransport,
   type FetchedChannelMedia,
@@ -379,6 +380,24 @@ describe("ChannelHost.handleUpdate", () => {
     expect((await session.threadByKey("fake:99"))?.id).toBe(threads[0]?.id);
   });
 
+  it("publishes a planned turn's progress through a capable non-Slack transport", async () => {
+    // Only a turn with a plan gets a progress card. The question keeps the
+    // turn open: a turn that settles before the first post gets no card.
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("update_plan", { items: [{ text: "Check the change", status: "in_progress" }], intent: "Plan the check." }),
+        fauxToolCall("ask_question", { question: "Which change?", intent: "Ask the person a question before continuing." })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("Checked."),
+    ]);
+    const publish = vi.fn(async () => ({ messageId: "progress-1" }));
+    Object.assign(keyedTransport, { publishProgress: publish });
+    await linkIdentity(testDb.appDb, { provider: "keyed", externalId: "77", userId: USER_ID });
+    await host.handleUpdate("keyed", inbound({ conversationKey: "keyed:R1:99", text: "Check the change" }));
+    await vi.waitFor(() => expect(publish).toHaveBeenCalledWith(
+      "keyed:R1:99", expect.objectContaining({ turnId: expect.any(String), revision: expect.any(String), planned: true, tasks: [expect.objectContaining({ title: "Check the change" })] }),
+      expect.objectContaining({ idempotencyKey: expect.any(String), threadTs: "99" }),
+    ), { timeout: 5000 });
+  });
+
   it("preserves origin, sender, and attachments on direct-message ingress", async () => {
     await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
     fakeTransport.fetchedMedia = {
@@ -461,6 +480,7 @@ describe("ChannelHost.handleUpdate", () => {
       // Every per-event and per-turn read must name a submission or a tail. A
       // whole-thread read here parses the full transcript at tool-call rate.
       const reads = vi.spyOn(engineStore, "getEntries");
+      const snapshots = vi.spyOn(engineStore, "getThreadSnapshot");
       await slackHost.handleUpdate("slack", inbound({ dispatchId: "slack:read-2", conversationKey: key, text: "second question" }));
       await vi.waitFor(async () => {
         const entries = await engineStore.getEntries(session.id, thread.id, { limit: 50 });
@@ -468,9 +488,15 @@ describe("ChannelHost.handleUpdate", () => {
         expect(await engineStore.listUnsettledSubmissions(session.id)).toHaveLength(0);
       });
       const wholeThread = reads.mock.calls.filter(([, threadId, opts]) =>
-        threadId === thread.id && opts?.queueItemId === undefined && opts?.limit === undefined);
+        threadId === thread.id && opts?.queueItemId === undefined && opts?.limit === undefined
+        && opts?.headLimit === undefined && opts?.entryIds === undefined);
+      // getThreadSnapshot loads every entry with its payload. The 2026-10-28
+      // outage came from one of these on every turn (applyForkSeed).
+      const snapshotReads = snapshots.mock.calls.filter(([, threadId]) => threadId === thread.id);
       reads.mockRestore();
+      snapshots.mockRestore();
       expect(wholeThread).toEqual([]);
+      expect(snapshotReads).toEqual([]);
     } finally {
       await slackHost.stop();
     }
@@ -479,7 +505,10 @@ describe("ChannelHost.handleUpdate", () => {
   it("creates a native Slack DM thread without Home and records edits there without replying", async () => {
     const { slackHost } = await startSlackHost();
     try {
+      const admission = vi.spyOn(engineStore, "admitSubmission");
       await slackHost.handleUpdate("slack", inbound({ dispatchId: "slack:new", conversationKey: "slack:T1:D1:111.1", text: "what is on today?" }));
+      // A reply waits for the running turn. It never cancels it.
+      expect(admission.mock.calls[0][3]?.steer).toBeUndefined();
       const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
       expect(await session.threadByKey(HOME_THREAD_KEY)).toBeNull();
       const thread = await session.threadByKey("slack:D1:111.1");
@@ -504,6 +533,10 @@ describe("ChannelHost.handleUpdate", () => {
       });
       const after = await engineStore.getEntries(session.id, thread.id);
       expect(after.filter(e => e.type === "message" && e.role === "assistant")).toHaveLength(replies);
+      // Only a whole-message stop phrase asks to interrupt the sender's turn.
+      await slackHost.handleUpdate("slack", inbound({ conversationKey: "slack:T1:D1:111.1", text: "Stop.", dispatchId: "slack:new-stop" }));
+      expect(admission.mock.calls.at(-1)?.[3]).toMatchObject({ steer: true, steerScope: "active-origin" });
+      await vi.waitFor(async () => expect(await engineStore.listUnsettledSubmissions(session.id)).toHaveLength(0));
       expect(await session.threadByKey(HOME_THREAD_KEY)).toBeNull();
     } finally {
       await slackHost.stop();
@@ -555,7 +588,100 @@ describe("ChannelHost.handleUpdate", () => {
       expect(second).toContain("New messages in this thread since your last reply:\n[Grace] it did, thanks");
       expect(second).toContain("[Valet (answering someone else)] The deploy finished at 3pm.");
       expect(fetchThreadWindow).toHaveBeenCalledTimes(2);
+
+      // A group body leads with the safety note, but a sender's own "stop" still asks to interrupt.
+      const admission = vi.spyOn(engineStore, "admitSubmission");
+      await slackHost.handleUpdate("slack", inbound({
+        dispatchId: "slack:group-stop", conversationKey: key, text: "stop", threadTs: "111.1",
+        group: { channelId: "C0GROUP", messageTs: "112.0" },
+      }));
+      expect(admission.mock.calls.at(-1)?.[3]).toMatchObject({ steer: true, steerScope: "active-origin" });
+      await vi.waitFor(async () => expect(await engineStore.listUnsettledSubmissions(session.id)).toHaveLength(0));
     } finally {
+      await slackHost.stop();
+    }
+  });
+
+  it("delivers a group DM reply without a mention to the chat its sender opened there, overheard", async () => {
+    const fetchThreadWindow = vi.fn(async () => null);
+    const setStatus = vi.fn(async () => {});
+    const { slackHost, slack } = await startSlackHost({ fetchThreadWindow, setStatus });
+    try {
+      const key = "slack:T1:C0FOLLOW:444.1";
+      await slackHost.handleUpdate("slack", inbound({
+        dispatchId: "slack:follow-1", conversationKey: key, text: "can you see this", threadTs: "444.1",
+        group: { channelId: "C0FOLLOW", messageTs: "444.1" },
+      }));
+      const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+      const thread = await session.threadByKey("slack:C0FOLLOW:444.1");
+      if (!thread) throw new Error("Expected the group conversation's thread");
+      await vi.waitFor(async () => expect(await engineStore.listUnsettledSubmissions(session.id)).toHaveLength(0));
+      setStatus.mockClear();
+
+      await slackHost.handleUpdate("slack", inbound({
+        dispatchId: "slack:follow-2", conversationKey: key, text: "link me to the thread for this", threadTs: "444.1",
+        group: { channelId: "C0FOLLOW", messageTs: "444.7", followUp: true },
+      }));
+      const followUp = async () => (await engineStore.getEntries(session.id, thread.id)).find((e) =>
+        e.type === "message" && e.role === "user" && e.content.includes("link me to the thread for this"));
+      await vi.waitFor(async () => expect(await followUp()).toBeDefined());
+      const entry = await followUp();
+      // Overheard, as in a followed channel thread: the assistant replies
+      // with reply_to_origin only when the message is for it.
+      expect(entry?.type === "message" ? entry.signal?.origin : undefined)
+        .toEqual({ channelType: "slack", threadKey: "slack:C0FOLLOW:444.1", reply: "manual", messageTs: "444.7" });
+      expect(setStatus).not.toHaveBeenCalled();
+
+      // Another person's reply, and a reply in a thread with no chat, open nothing.
+      await slackHost.handleUpdate("slack", inbound({
+        dispatchId: "slack:follow-3", conversationKey: key, sender: { externalId: "U-NOT-LINKED" }, text: "tracing logs", threadTs: "444.1",
+        group: { channelId: "C0FOLLOW", messageTs: "444.8", followUp: true },
+      }));
+      await slackHost.handleUpdate("slack", inbound({
+        dispatchId: "slack:follow-4", conversationKey: "slack:T1:C0FOLLOW:555.1", text: "lunch?", threadTs: "555.1",
+        group: { channelId: "C0FOLLOW", messageTs: "555.2", followUp: true },
+      }));
+      expect(await session.threadByKey("slack:C0FOLLOW:555.1")).toBeNull();
+      expect(slack.send).not.toHaveBeenCalledWith(key, { markdown: expect.stringContaining("Link your Valet account") });
+      const drops = await testDb.appDb.select().from(eventDropLog);
+      expect(drops.filter((d) => d.conversationKey === key || d.conversationKey === "slack:T1:C0FOLLOW:555.1")).toHaveLength(0);
+    } finally {
+      await slackHost.stop();
+    }
+  });
+
+  it("holds a group DM follow-up until the sender's mention has opened its chat", async () => {
+    const fetchThreadWindow = vi.fn(async () => null);
+    const { slackHost } = await startSlackHost({ fetchThreadWindow });
+    const ensureFreshThread = engineHost.ensureFreshThread.bind(engineHost);
+    let release!: () => void;
+    const opened = new Promise<void>((resolve) => { release = resolve; });
+    const creating = vi.spyOn(engineHost, "ensureFreshThread").mockImplementationOnce(async (...args) => {
+      await opened;
+      return ensureFreshThread(...args);
+    });
+    try {
+      const key = "slack:T1:C0RACE:666.1";
+      const mention = slackHost.handleUpdate("slack", inbound({
+        dispatchId: "slack:race-1", conversationKey: key, text: "can you see this", threadTs: "666.1",
+        group: { channelId: "C0RACE", messageTs: "666.1" },
+      }));
+      await vi.waitFor(() => expect(creating).toHaveBeenCalled());
+      const followUp = slackHost.handleUpdate("slack", inbound({
+        dispatchId: "slack:race-2", conversationKey: key, text: "and the logs too", threadTs: "666.1",
+        group: { channelId: "C0RACE", messageTs: "666.2", followUp: true },
+      }));
+      release();
+      await Promise.all([mention, followUp]);
+      const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+      const thread = await session.threadByKey("slack:C0RACE:666.1");
+      if (!thread) throw new Error("Expected the group conversation's thread");
+      const queued = await engineStore.listUnsettledSubmissions(session.id);
+      const entries = await engineStore.getEntries(session.id, thread.id);
+      const text = JSON.stringify([...queued.map((q) => q.content), ...entries.map((e) => e.type === "message" ? e.content : "")]);
+      expect(text).toContain("and the logs too");
+    } finally {
+      creating.mockRestore();
       await slackHost.stop();
     }
   });

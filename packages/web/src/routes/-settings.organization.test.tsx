@@ -200,6 +200,10 @@ vi.mock("~/api/settings", async (importOriginal) => {
   };
 });
 
+const resetTourMutate = vi.fn((_: undefined, options: { onSuccess: () => void }) => options.onSuccess());
+vi.mock("~/api/tutorial", () => ({
+  useResetTutorialForEveryone: () => ({ mutate: resetTourMutate, isPending: false, error: null }),
+}));
 vi.mock("~/api/invites", () => ({
   useInvites: () => ({ data: invitesData, isLoading: false, error: null }),
   useCreateInvite: () => ({ mutate: createInviteMutate, isPending: false, error: null }),
@@ -334,6 +338,21 @@ describe("OrganizationGeneralPage", () => {
       expect(patchOrgMutateAsync).toHaveBeenCalledWith({ features: { organizations: false } }),
     );
     await waitFor(() => expect(navigateMock).toHaveBeenCalledWith({ to: "/settings/profile" }));
+  });
+
+  it("an admin shows the tour to everyone again after a confirm", async () => {
+    render(<OrganizationGeneralPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Show the tour to everyone again" }));
+    expect(resetTourMutate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Show the tour" }));
+    expect(resetTourMutate).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.getByText(/Done. Each member sees the tour/)).toBeTruthy());
+  });
+
+  it("does not offer the tour reset to a member", () => {
+    orgData = { ...orgData, callerRole: "member" };
+    render(<OrganizationGeneralPage />);
+    expect(screen.queryByRole("button", { name: "Show the tour to everyone again" })).toBeNull();
   });
 });
 

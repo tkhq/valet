@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { Settings, ShieldCheck } from "lucide-react";
+import { Compass, Settings, ShieldCheck } from "lucide-react";
 import { useChangelog } from "~/api/changelog";
 import { pluginEnabledForCaller, useMe, useOrg } from "~/api/settings";
 import {
@@ -7,11 +7,12 @@ import {
   DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger, StatusDot,
 } from "~/components/primitives";
 import { useLastSeenCheckpoint } from "~/lib/changelog-read-state";
+import { useFeatureTour } from "~/components/tour/feature-tour";
 
 /**
  * The person's avatar at the top bar's right edge, on every screen size. It
  * opens Settings and the pages about the account: Usage, Valet Security when
- * the org enables it, and the Changelog. A dot on the avatar marks a release
+ * the org enables it, the Changelog, and a replay of the tour. A dot on the avatar marks a release
  * the person has not read.
  */
 export function AccountMenu() {
@@ -22,6 +23,7 @@ export function AccountMenu() {
   const newest = changelogQ.data?.manifest.checkpoints[0];
   const changelogUnread = !!meQ.data && !!newest && seenCheckpoint !== newest.id;
   const securityEnabled = pluginEnabledForCaller(orgQ.data, "security") === true;
+  const tour = useFeatureTour();
   const me = meQ.data;
   const initial = (me?.name.trim() || me?.email || "?")[0]!.toUpperCase();
   return <DropdownMenu>
@@ -50,6 +52,7 @@ export function AccountMenu() {
           {changelogUnread && <StatusDot tone="accent" size="sm" label="New releases" />}
         </Link>
       </DropdownMenuItem>
+      {tour && <DropdownMenuItem onSelect={tour.start}><Compass className="h-4 w-4" aria-hidden />Take the tour</DropdownMenuItem>}
     </DropdownMenuContent>
   </DropdownMenu>;
 }

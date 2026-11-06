@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import type { CreateTeamApiKeyResponse, CreateTeamResponse, SessionDetail } from "../wire/types.js";
+import { bootstrapAdminInviteCode } from "../test-helpers/bootstrap-admin-code.js";
 
 let api: TestApi | undefined;
 afterEach(async () => { await api?.cleanup(); api = undefined; });
@@ -15,7 +16,7 @@ it("refuses a team API key on a workflow permission card and accepts the person 
   api = await bootTestApi({ auth: true });
   const signUp = await fetch(`${api.baseUrl}/api/auth/sign-up/email`, {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: "Admin", email: "admin@nowhere.test", password: "correct-horse-battery" }),
+    body: JSON.stringify({ name: "Admin", email: "admin@nowhere.test", password: "correct-horse-battery", inviteCode: await bootstrapAdminInviteCode(api.providers.db) }),
   });
   const cookie = signUp.headers.get("set-cookie")?.match(/better-auth\.session_token=[^;]+/)?.[0];
   if (!cookie) throw new Error("Missing session cookie.");

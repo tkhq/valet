@@ -6,7 +6,7 @@ import { eq, and, sql } from "drizzle-orm";
 import { agentSessions, orgs, generatedFiles, workflowDefinitions, workflowRuns, teams, teamMembers } from "../schema/index.js";
 import { DEFAULT_MAX_UPLOAD_BYTES } from "@valet/shared";
 import { VirtualSandboxProvider, type Principal, type Sandbox, type ToolContext } from "@valet/engine";
-import { buildFileAttachTool, generatedFileKey, generatedFileOrigin, readGeneratedFile } from "./generated-files.js";
+import { buildFileAttachTool, generatedFileKey, generatedFileOrigin, generatedFileStore, readGeneratedFile } from "./generated-files.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { FsBlobStore } from "../providers/blob-fs.js";
 import { PGlite } from "@electric-sql/pglite";
@@ -58,6 +58,27 @@ describe("file_attach", () => {
     expect(fallback.text).toContain("configure VALET_PUBLIC_URL");
   });
 
+  it("lets plugin actions save and read files scoped to one thread", async () => {
+    if (!api) throw new Error("missing fixture");
+    const { db, blobs } = api.providers;
+    const store = generatedFileStore(db, blobs, "https://valet.example");
+    const scope = { orgId: "local-org", sessionId: "session", threadId: "thread" };
+    const saved = await store(scope).save({ name: "Agreement.pdf", mimeType: "application/pdf", data: bytes });
+    expect(saved).toMatchObject({ name: "Agreement.pdf", mimeType: "application/pdf", bytes: bytes.length, webUrl: `/api/sessions/session/threads/thread/files/${saved.id}` });
+    expect(saved.url).toBe(`https://valet.example${saved.webUrl}`);
+    const read = await store(scope).read(saved.id);
+    expect(read?.data).toEqual(bytes);
+    expect(read?.name).toBe("Agreement.pdf");
+    expect(await store({ ...scope, threadId: "other-thread" }).read(saved.id)).toBeNull();
+    expect(await store(scope).read("not-a-file-id")).toBeNull();
+    await expect(store(scope).save({ name: "../escape.pdf", mimeType: "application/pdf", data: bytes })).rejects.toThrow("without slashes");
+    const sandbox = await testSandbox();
+    await sandbox.writeBinary("/workspace/Agreement.pdf", bytes);
+    const attached = await buildFileAttachTool(db, blobs).execute({ path: "/workspace/Agreement.pdf" }, context(sandbox));
+    const output: unknown = JSON.parse(attached.text);
+    expect(output).toMatchObject({ id: saved.id });
+  });
+
   it.each(["javascript:alert(1)", "//other.example", "https://user:secret@other.example", "invalid"])("rejects unsafe configured origins: %s", value => {
     expect(generatedFileOrigin(value)).toBeUndefined();
   });
@@ -81,6 +102,54 @@ describe("file_attach", () => {
     expect(file?.name).toBe("revised résumé.docx");
     expect(new Uint8Array(await new Response(file?.data).arrayBuffer())).toEqual(bytes);
     expect(await readGeneratedFile(api!.providers.db, reopened, { orgId: "other-org", sessionId: "session", threadId: "thread" }, id)).toBeNull();
+  });
+
+  it("stores a chart image as an inline image with its alt text, and names the Slack post in a Slack turn", async () => {
+    directory = await mkdtemp(join(tmpdir(), "generated-files-"));
+    const tool = buildFileAttachTool(api!.providers.db, new FsBlobStore(directory), "https://valet.example");
+    const sandbox = await testSandbox();
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+    // The extension is wrong; the bytes decide the stored type.
+    await sandbox.writeBinary("/workspace/charts/signups.dat", png);
+    const web = await tool.execute({ path: "/workspace/charts/signups.dat", alt: "Signups by week", title: "Signups" }, context(sandbox));
+    expect(JSON.parse(web.text)).toMatchObject({ mimeType: "image/png", alt: "Signups by week", title: "Signups", shown: expect.stringContaining("inline") });
+    const slackTurn = { ...context(sandbox, "session", "thread-slack"), origin: { channelType: "slack", threadKey: "slack:C1:1.2" } };
+    const slack = JSON.parse((await tool.execute({ path: "/workspace/charts/signups.dat", alt: "Signups by week" }, slackTurn)).text);
+    expect(slack.slack).toBe(`This chat preview does not reach Slack. Post the image with call_tool slack.reply_file_to_origin { file_id: "${slack.id}", alt_text, title }.`);
+    expect(slack.shown).toBeUndefined();
+  });
+
+  it.each([
+    ["HTML named like a PNG", "/workspace/report.png", "<html>not an image</html>"],
+    ["an SVG with a script", "/workspace/chart.svg", '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'],
+  ])("stores %s as a plain download, not an inline image", async (_label, path, text) => {
+    directory = await mkdtemp(join(tmpdir(), "generated-files-"));
+    const sandbox = await testSandbox();
+    await sandbox.writeFile(path, text);
+    const result = await buildFileAttachTool(api!.providers.db, new FsBlobStore(directory)).execute({ path, alt: "A chart" }, context(sandbox));
+    const output = JSON.parse(result.text);
+    expect(output.mimeType).toBe("application/octet-stream");
+    expect(output.alt).toBeUndefined();
+    expect(output.shown).toBeUndefined();
+  });
+
+  it("stores a well-formed SVG as an inline image", async () => {
+    directory = await mkdtemp(join(tmpdir(), "generated-files-"));
+    const sandbox = await testSandbox();
+    await sandbox.writeFile("/workspace/flow.svg", '<svg xmlns="http://www.w3.org/2000/svg"><rect width="4" height="4"/></svg>');
+    const result = await buildFileAttachTool(api!.providers.db, new FsBlobStore(directory)).execute({ path: "/workspace/flow.svg", alt: "Flow" }, context(sandbox));
+    expect(JSON.parse(result.text)).toMatchObject({ mimeType: "image/svg+xml", alt: "Flow" });
+  });
+
+  it("keeps the alt text off a file that is not an image", async () => {
+    directory = await mkdtemp(join(tmpdir(), "generated-files-"));
+    const sandbox = await testSandbox();
+    await sandbox.writeBinary("/workspace/report.pdf", bytes);
+    const result = await buildFileAttachTool(api!.providers.db, new FsBlobStore(directory)).execute({ path: "/workspace/report.pdf", alt: "ignored" }, context(sandbox));
+    const output = JSON.parse(result.text);
+    expect(output).toMatchObject({ mimeType: "application/pdf" });
+    expect(output.alt).toBeUndefined();
+    expect(output.shown).toBeUndefined();
   });
 
   it("rejects oversized files before reading and checks the bytes after a file changes", async () => {

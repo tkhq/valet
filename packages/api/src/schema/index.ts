@@ -86,6 +86,9 @@ export const orgs = pgTable("orgs", {
   /** Tier token (xs|s|m|l|xl) for new sessions that no personal or team
    * default covers. Null = the engine's "s" fallback. */
   defaultTier: text("default_tier"),
+  /** Raised by an org admin's "Show the tour to everyone again". A member
+   * whose stored org version is lower sees the tour on next load. */
+  tutorialVersion: integer("tutorial_version").notNull().default(0),
 });
 
 // better-auth's default model name for the user table is "user" (singular);
@@ -309,6 +312,50 @@ export const oauthConsent = pgTable(
     index("oauthConsent_userId_idx").on(t.userId),
   ],
 );
+
+/**
+ * MCP client registrations the gate admitted (`auth/mcp-registration.ts`).
+ * Every api replica reads and writes these rows under one advisory lock, so
+ * the per-address hourly limit and the unapproved cap hold across replicas.
+ * `pending` marks an admission whose better-auth insert has not finished.
+ */
+export const mcpRegistrations = pgTable(
+  "mcp_registrations",
+  {
+    id: text("id").primaryKey(),
+    address: text("address").notNull(),
+    pending: boolean("pending").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [index("mcp_registrations_address_idx").on(t.address, t.createdAt)],
+);
+
+// `admin_audit_events` — one row per successful admin configuration change
+// (docs/specs/2026-11-03-admin-audit-log-design.md). Written only by
+// `services/admin-audit.ts`. `changes` holds a redacted field summary and
+// never holds a secret value. Reads are keyset-paginated on
+// (org_id, created_at desc, id desc).
+export const adminAuditEvents = pgTable(
+  "admin_audit_events",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    /** Null when the system made the change (for example a boot promotion). */
+    actorUserId: text("actor_user_id"),
+    actorEmail: text("actor_email"),
+    action: text("action").notNull(),
+    targetType: text("target_type").notNull(),
+    targetId: text("target_id"),
+    targetName: text("target_name"),
+    changes: jsonb("changes").$type<Record<string, unknown>>(),
+    ip: text("ip"),
+    userAgent: text("user_agent"),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [index("admin_audit_events_org_created").on(t.orgId, t.createdAt.desc(), t.id.desc())],
+);
+
+export type AdminAuditEventRow = typeof adminAuditEvents.$inferSelect;
 
 // ─── Valet-owned auth adjuncts ──────────────────────────────────────────────
 //
@@ -631,6 +678,13 @@ export const childWatches = pgTable(
     queueItemId: text("queue_item_id").notNull(),
     parentSessionId: text("parent_session_id").notNull(),
     parentThreadId: text("parent_thread_id").notNull(),
+    // The parent's queue item whose turn spawned this child. A workflow step
+    // waits only for children its own turns spawned. Null for rows from
+    // before this column.
+    parentQueueItemId: text("parent_queue_item_id"),
+    // The parent-thread queue item that this child's latest report started.
+    // A workflow step returns the result of its newest report turn.
+    reportQueueItemId: text("report_queue_item_id"),
     actorUserId: text("actor_user_id").notNull(),
     orgId: text("org_id").notNull(),
     deliveryActive: boolean("delivery_active").notNull().default(false),
@@ -642,6 +696,12 @@ export const childWatches = pgTable(
     // child.settled signal so the settlement turn can reach the channel
     // that asked. Null for spawns from non-channel turns.
     originJson: text("origin_json"),
+    // False for a plugin's child: its settlement does not wake the parent
+    // thread, because the plugin reads the result itself (plugin-threads.ts).
+    reportToParent: boolean("report_to_parent").notNull().default(true),
+    /** The plugin event delivery whose run started or adopted this child.
+     * Cancelling that delivery (line off, superseded) stops the child. */
+    pluginDeliveryId: text("plugin_delivery_id"),
     // Reply-route state, kept apart from the origin above, which never
     // changes and also decides transcript sharing. "origin": the origin's
     // own reply policy, written only at spawn. "manual": explicit replies
@@ -665,6 +725,12 @@ export const childWatches = pgTable(
     // engine session row's sandbox_id is only written at creation, before
     // any sandbox provisions, so it cannot serve as the handle.
     parkedSandboxId: text("parked_sandbox_id"),
+    // The `task` batch this child reports with. Children of one parent
+    // thread with the same batch report together, after the last settles.
+    batchKey: text("batch_key"),
+    // A settled batch member's report, held as JSON until the last member
+    // settles and one signal carries every report. Null when nothing is held.
+    batchHeldJson: text("batch_held_json"),
   },
   (t) => [
     index("child_watches_delivery").on(t.childSessionId).where(sql`${t.deliveryActive} = true OR ${t.settled} = false`),
@@ -971,6 +1037,37 @@ export const memoryFiles = pgTable(
   },
   (t) => [primaryKey({ columns: [t.ownerType, t.ownerId, t.namespace, t.path] })],
 );
+
+// How agents use each memory file (brain spec, "Usage"). Keyed like
+// `memory_files`, but a separate table: an update there recomputes the
+// generated `search_vector`. `services/memory-usage.ts` writes it in
+// batches. Times are ms epoch, null until the first use of that kind.
+export const memoryFileUsage = pgTable(
+  "memory_file_usage",
+  {
+    ownerType: text("owner_type").notNull(),
+    ownerId: text("owner_id").notNull(),
+    namespace: text("namespace").notNull().default(""),
+    path: text("path").notNull(),
+    /** Reads the agent chose: `mem_read`, an MCP or CLI read. */
+    readCount: integer("read_count").notNull().default(0),
+    lastReadAt: bigint("last_read_at", { mode: "number" }),
+    /** Times the memory snapshot put the file, or its principle index line, in a prompt. */
+    injectCount: integer("inject_count").notNull().default(0),
+    lastInjectedAt: bigint("last_injected_at", { mode: "number" }),
+    /** Turns whose answer or plan named the principle. */
+    citeCount: integer("cite_count").notNull().default(0),
+    lastCitedAt: bigint("last_cited_at", { mode: "number" }),
+  },
+  (t) => [primaryKey({ columns: [t.ownerType, t.ownerId, t.namespace, t.path] })],
+);
+
+// When memory usage tracking started: one row, set when the table is
+// created. The memory page calls no file stale before 30 days of tracking.
+export const memoryUsageTracking = pgTable("memory_usage_tracking", {
+  id: boolean("id").primaryKey().default(true),
+  startedAt: bigint("started_at", { mode: "number" }).notNull(),
+});
 
 // ─── Artifacts ──────────────────────────────────────────────────────────────
 //
@@ -2321,6 +2418,7 @@ export type UserIdentityLinkRow = typeof userIdentityLinks.$inferSelect;
 export type IdentityLinkCodeRow = typeof identityLinkCodes.$inferSelect;
 export type ChannelActiveStreamRow = typeof channelActiveStreams.$inferSelect;
 export type MemoryFileRow = typeof memoryFiles.$inferSelect;
+export type MemoryFileUsageRow = typeof memoryFileUsage.$inferSelect;
 export type SkillRow = typeof skills.$inferSelect;
 /** One tracked repository. Not the engine's `SkillSource`. */
 export type ContentSourceRow = typeof contentSources.$inferSelect;
@@ -2731,6 +2829,31 @@ export const teamDeletionRequests = pgTable("team_deletion_requests", {
 ]);
 
 /**
+ * Image-source changes that wait for a second org admin
+ * (`bakes/source-change-requests.ts`). `payload` holds the validated row to
+ * insert (`create`) or the field patch to apply (`update`). `target_key` is
+ * the source id, or `new:<name>` for a create, so one target has at most one
+ * pending request. `base_updated_at` is the source's `updated_at` when the
+ * request was made; approval refuses a request whose source moved since.
+ */
+export const imageSourceChangeRequests = pgTable("image_source_change_requests", {
+  id: text("id").primaryKey(), orgId: text("org_id").notNull(), targetKey: text("target_key").notNull(),
+  sourceId: text("source_id"), sourceName: text("source_name").notNull(),
+  action: text("action").$type<"create" | "update">().notNull(),
+  payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
+  baseUpdatedAt: bigint("base_updated_at", { mode: "number" }),
+  requestedBy: text("requested_by").notNull(),
+  requestedAt: bigint("requested_at", { mode: "number" }).notNull(),
+  expiresAt: bigint("expires_at", { mode: "number" }).notNull(),
+  status: text("status").$type<"pending" | "approved" | "rejected" | "withdrawn">().notNull().default("pending"),
+  decidedBy: text("decided_by"), decidedAt: bigint("decided_at", { mode: "number" }),
+  decisionNote: text("decision_note"),
+}, (t) => [
+  uniqueIndex("image_source_change_requests_pending").on(t.orgId, t.targetKey).where(sql`${t.status} = 'pending'`),
+  index("image_source_change_requests_org_status").on(t.orgId, t.status, t.requestedAt),
+]);
+
+/**
  * `valet login` device sign-in (`routes/cli-device.ts`). A request waits
  * here until the person enters its user code on `/cli/device` and allows
  * it. Only a hash of the device code is stored.
@@ -3123,17 +3246,21 @@ export const legacyArtifactPublications = pgTable("legacy_artifact_publications"
   sourceSessionId: text("source_session_id").notNull(),
 });
 
-// Release activation is seeded once; acknowledgements belong to the signed-in user.
-export const productAnnouncements = pgTable("product_announcements", {
-  id: text("id").primaryKey(),
-  activatedAt: bigint("activated_at", { mode: "number" }).notNull(),
+/**
+ * One row per user who started, finished, or skipped the in-app tour. The
+ * tour shows again when `seen_version` is below the instance version or
+ * `seen_org_version` is below `orgs.tutorial_version`. `outcome` null means
+ * the tour is in progress at `step`, and the seen versions then name the tour
+ * that step belongs to.
+ */
+export const userTutorial = pgTable("user_tutorial", {
+  userId: text("user_id").primaryKey().references(() => users.id, { onDelete: "cascade" }),
+  seenVersion: integer("seen_version").notNull().default(0),
+  seenOrgVersion: integer("seen_org_version").notNull().default(0),
+  outcome: text("outcome", { enum: ["completed", "skipped"] }),
+  step: text("step"),
+  updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
 });
-export const productAnnouncementAcknowledgements = pgTable("product_announcement_acknowledgements", {
-  announcementId: text("announcement_id").notNull(),
-  userId: text("user_id").notNull(),
-  acknowledgedAt: bigint("acknowledged_at", { mode: "number" }).notNull(),
-}, (t) => [primaryKey({ columns: [t.announcementId, t.userId] })]);
-
 
 /** Charged before BlobStore writes; pending rows also consume retention capacity. */
 export const generatedFiles = pgTable("generated_files", {
@@ -3186,6 +3313,33 @@ export const homeTasks = pgTable("home_tasks", {
   reportedAt: bigint("reported_at", { mode: "number" }),
   doneAt: bigint("done_at", { mode: "number" }),
 }, (t) => [index("home_tasks_user").on(t.userId, t.createdAt), index("home_tasks_thread").on(t.sessionId, t.threadId)]);
+
+/** Durable progress intent; create_started survives an uncertain provider outcome. */
+export const channelProgressDeliveries = pgTable("channel_progress_deliveries", {
+  id: text("id").primaryKey(),
+  orgId: text("org_id").notNull(),
+  sessionId: text("session_id").notNull(),
+  threadId: text("thread_id").notNull(),
+  turnId: text("turn_id").notNull(),
+  channelType: text("channel_type").notNull(),
+  conversationKey: text("conversation_key").notNull(),
+  threadTs: text("thread_ts"),
+  messageId: text("message_id"),
+  lastRevision: text("last_revision"),
+  createStarted: boolean("create_started").notNull().default(false),
+  attempts: integer("attempts").notNull().default(0),
+  nextAttemptAt: bigint("next_attempt_at", { mode: "number" }).notNull().default(0),
+  leaseToken: text("lease_token"),
+  leaseUntil: bigint("lease_until", { mode: "number" }).notNull().default(0),
+  completedAt: bigint("completed_at", { mode: "number" }),
+  failedAt: bigint("failed_at", { mode: "number" }),
+  lastError: text("last_error"),
+}, t => [
+  uniqueIndex("channel_progress_scope").on(t.orgId, t.sessionId, t.threadId, t.turnId, t.channelType, t.conversationKey),
+  index("channel_progress_pending_due").on(t.orgId, t.nextAttemptAt)
+    .where(sql`${t.completedAt} IS NULL AND ${t.failedAt} IS NULL`),
+]);
+export type ChannelProgressDeliveryRow = typeof channelProgressDeliveries.$inferSelect;
 // Hosted, MCP, and CLI usage facts. Never add arguments or results.
 export const externalCalls = pgTable("external_calls", {
   id: text("id").primaryKey(),

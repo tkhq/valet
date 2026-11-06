@@ -1,5 +1,5 @@
 import { AlertCircle, Braces, ChevronRight, FileText, GitBranch, Lock, Pencil, Reply } from "lucide-react";
-import { memo, useMemo, useState } from "react";
+import { memo, useMemo, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { classifyProviderFailure, providerFailureSummary } from "@valet/shared";
 import type {
   MessagePart,
@@ -170,10 +170,11 @@ export const MessageItem = memo(function MessageItem({
     <article
       data-message-id={message.id}
       aria-disabled={dimmed || undefined}
-      className={cn("group min-w-0 px-5 sm:px-8 transition-opacity", continuation ? "pb-3" : "py-3", dimmed && "pointer-events-none opacity-40")}
+      className={cn("group min-w-0 px-5 sm:px-8 [container-type:inline-size] transition-opacity", continuation ? "pb-3" : "py-3", dimmed && "pointer-events-none opacity-40")}
     >
       {/* Row background spans full width; the content column is capped at a
-          readable measure and centered — prose and tool cards both benefit. */}
+          readable measure and centered — prose and tool cards both benefit.
+          The row is the size container a wide table measures. */}
       <div className={cn(
         "mx-auto flex w-full min-w-0 max-w-3xl justify-end"
       )}>
@@ -186,7 +187,7 @@ export const MessageItem = memo(function MessageItem({
                   {isUser ? teammate ?? "You" : message.role === "assistant" ? "Assistant" : message.role}
                 </span>
                 <span>•</span>
-                <span title={new Date(message.createdAt).toLocaleString()}>{formatTime(message.createdAt)}</span>
+                <span onPointerEnter={showFullTime(message.createdAt)}>{formatTime(message.createdAt)}</span>
                 {isUser && message.editOf && <span className="text-muted/80">edited</span>}
                 {message.role === "assistant" && message.model && (
                   <span
@@ -270,7 +271,7 @@ function FyiLine({ id, text, createdAt }: { id: string; text: string; createdAt:
       <p className="mx-auto flex w-full min-w-0 max-w-3xl items-baseline gap-2 text-sm text-muted">
         <span className="shrink-0 text-xs font-medium uppercase tracking-wide">FYI</span>
         <span className="min-w-0 [overflow-wrap:anywhere]">{text}</span>
-        <span className="ml-auto shrink-0 text-xs" title={new Date(createdAt).toLocaleString()}>{formatTime(createdAt)}</span>
+        <span className="ml-auto shrink-0 text-xs" onPointerEnter={showFullTime(createdAt)}>{formatTime(createdAt)}</span>
       </p>
     </article>
   );
@@ -430,7 +431,9 @@ function TextBlock({
       </>
     );
   }
-  return <Markdown>{text}</Markdown>;
+  // Assistant text fills a centered column, so its tables may grow past
+  // it. A user message sits in a bubble at one side.
+  return <Markdown wideTables={!detectSkill}>{text}</Markdown>;
 }
 
 interface StructuredText {
@@ -593,7 +596,28 @@ function SettledBadge({ outcome }: { outcome: SettledOutcome }) {
   );
 }
 
+// `toLocale*String` builds a new formatter on every call, which shows up
+// when a long transcript renders. One formatter each serves every row.
+let timeFormat: Intl.DateTimeFormat | undefined;
+let fullFormat: Intl.DateTimeFormat | undefined;
+
 function formatTime(ts: number): string {
-  const d = new Date(ts);
-  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  timeFormat ??= new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" });
+  return timeFormat.format(ts);
+}
+
+/** Same output as `Date.prototype.toLocaleString()` with no arguments. */
+function formatFull(ts: number): string {
+  fullFormat ??= new Intl.DateTimeFormat(undefined, {
+    year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric", second: "numeric",
+  });
+  return fullFormat.format(ts);
+}
+
+/** Sets the full date as the hover title when the pointer arrives. Formatting
+ * it for every row up front was a visible part of opening a thread. */
+function showFullTime(ts: number) {
+  return (event: ReactPointerEvent<HTMLElement>) => {
+    event.currentTarget.title = formatFull(ts);
+  };
 }

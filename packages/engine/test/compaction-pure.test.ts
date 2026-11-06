@@ -441,7 +441,7 @@ describe("compaction: summary checkpoint tail", () => {
     }
     const sizeOf = (entry: SessionEntry): number => estimateSummaryEntryTokens(entry);
     const headTokens = head.reduce((total, entry) => total + sizeOf(entry), 0);
-    expect(headTokens).toBe(403_663);
+    expect(headTokens).toBe(404_161);
 
     const sent = selectSummaryCheckpointTail(head, 64_000, { sizeOf });
     expect(sent).toHaveLength(62);

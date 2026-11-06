@@ -10,14 +10,14 @@ import { Link, Outlet, createRootRouteWithContext, useRouterState } from "@tanst
 import type { QueryClient } from "@tanstack/react-query";
 import { TooltipProvider } from "~/components/primitives/tooltip";
 import { ErrorRow, LoadingRow } from "~/components/primitives/query-state";
-import { ProductAnnouncement } from "~/components/product-announcement";
+import { FeatureTourProvider } from "~/components/tour/feature-tour";
 import { AppShell } from "~/components/layout/app-shell";
 import { ReconnectingBanner } from "~/components/layout/reconnecting-banner";
 import { TopNav } from "~/components/layout/top-nav";
 import { MobileTopNav } from "~/components/layout/mobile-top-nav";
 import { WorkspaceScopeProvider } from "~/lib/workspace-scope";
 import { AppDrawer } from "~/components/layout/app-drawer";
-import { AssistantRail } from "~/components/session/assistant-rail";
+import { AssistantRail, AssistantRailCollapsed } from "~/components/session/assistant-rail";
 import { useMobileLayout } from "~/hooks/use-mobile-layout";
 import { KeyboardShortcutsDialog } from "~/components/session/keyboard-shortcuts-dialog";
 import { useChatKeybindings } from "~/hooks/use-chat-keybindings";
@@ -41,17 +41,16 @@ export const Route = createRootRouteWithContext<RouterContext>()({
  * (via `RootLayout`'s `<Outlet/>` boundary), so it isn't a bare white page.
  */
 function NotFound() {
-  const mobile = useMobileLayout();
   return (
     <div className="flex-1 grid place-items-center p-8 text-center">
       <div className="max-w-sm space-y-3">
         <h1 className="font-display text-2xl text-ink">This page doesn’t exist.</h1>
-        <p className="text-sm text-muted">{mobile ? "Valet is on Home." : "The dashboard does."}</p>
+        <p className="text-sm text-muted">Valet is on Home.</p>
         <Link
           to="/"
           className="inline-flex rounded px-3 py-1.5 text-sm text-moss hover:underline"
         >
-          {mobile ? "Back to Home" : "Back to the dashboard"}
+          Back to Home
         </Link>
       </div>
     </div>
@@ -59,24 +58,22 @@ function NotFound() {
 }
 
 /**
- * Which sidebar (if any) a route gets on a wider screen, per assistant-centered
- * web UI decisions 12/14. This is a root-layout concern rather than
- * something each route/`SessionView` renders itself, because the sidebar
- * lives in the app shell's `<aside>`, outside the routed `<main>` content.
- *
- * - `/chat` — the nested thread-tree (children grouped under their
- *   spawning thread), replacing the flat thread list.
- * - everything else (`/`, `/sessions/$sessionId`,
- *   `/memory` and `/memory/*`, …) — no app sidebar. Standalone sessions
- *   have no thread UI (decision 14); the memory explorer renders its own
- *   tree pane inside the route (Task 6); the dashboard and session list
- *   have no thread concept at all.
- *
- * A phone gets the drawer (`AppDrawer`) on every page instead.
+ * Which sidebar a route gets on a wider screen. Every signed-in page shows
+ * the app-wide sidebar (New thread, Home, and Spaces with their pages); on
+ * `/` and `/chat` it also lists the open space's Projects and threads.
+ * Settings keeps its own rail and pinned scope, so it has none. This is a
+ * root-layout concern because the sidebar lives in the shell's `<aside>`,
+ * outside the routed `<main>` content. A phone gets the drawer
+ * (`AppDrawer`) on every page instead.
  */
 function sidebarForPath(pathname: string) {
-  if (pathname === "/chat" || isUiStressPath(pathname)) return <AssistantRail />;
-  return null;
+  if (pathname === "/settings" || pathname.startsWith("/settings/")) return null;
+  return <AssistantRail />;
+}
+
+/** The workflow editor has its own panes: it keeps its own collapsed state and starts collapsed. */
+function collapseScopeForPath(pathname: string): string | undefined {
+  return /^\/workflows\/(?!runs(\/|$))[^/]+$/.test(pathname) ? "workflow-editor" : undefined;
 }
 
 /** The development-only UI stress gallery, in any letter case, with or
@@ -133,7 +130,8 @@ function RootLayout() {
       <ChatKeybindingsHost />
       <Outlet />
     </AppShell>
-    : <AppShell topNav={<TopNav />} sidebar={sidebarForPath(pathname)} rightPanel={<WorkspaceAssistantDock />}>
+    : <AppShell topNav={<TopNav />} sidebar={sidebarForPath(pathname)} rail={<AssistantRailCollapsed />}
+      collapseScope={collapseScopeForPath(pathname)} rightPanel={<WorkspaceAssistantDock />}>
       <ChatKeybindingsHost />
       <Outlet />
     </AppShell>;
@@ -141,8 +139,8 @@ function RootLayout() {
     <WorkspaceScopeProvider persist={!gallery}>
       <WorkspaceAssistantProvider>
         <SignedInEffects />
-        <ProductAnnouncement />
-        {shell}
+        {/* The gallery's fixture account takes no tour. */}
+        <FeatureTourProvider enabled={!gallery}>{shell}</FeatureTourProvider>
       </WorkspaceAssistantProvider>
     </WorkspaceScopeProvider>
   );

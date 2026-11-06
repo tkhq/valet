@@ -442,6 +442,6 @@ describe("Session.commandRegistry — skills provider", () => {
     await session.prompt("hello");
     await vi.waitFor(() => expect(replied).toBe(true));
     expect(session.skills.get("kept")?.content).toBe("KEPT");
-    expect(error).toHaveBeenCalledWith(expect.stringContaining("skill refresh failed"), expect.any(Error));
+    expect(error).toHaveBeenCalledWith(expect.stringMatching(/"error_class":"Error".*skill refresh failed/));
   });
 });
