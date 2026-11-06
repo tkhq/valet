@@ -296,7 +296,13 @@ The first handler is `pr-review/review-pull-request` (`packages/plugin-pr-review
 3. Starts a `pr-reviewer` child at the head sha with the diff in its prompt, and reads the findings JSON through `resultSchema`. A later push gets a diff of only the new commits; a force-push gets the whole PR again.
 4. Drops a finding on a line that does not exist at the head. With the line's `verify` setting on, starts one `pr-verifier` child per new finding. It always starts one per open finding in a file the new commits changed; a refuted recheck marks the finding fixed.
 5. Posts one summary review per PR and edits it in place. New findings on diff lines become inline comments. Findings on other lines stay in the summary.
-6. Saves the review id, the reviewed head, and each finding's id, path, line and comment id. The finding text stays in the GitHub comments, and the next run reads it back from their markers.
+   - The first push puts the summary and its inline comments in one review.
+   - A later push with new findings posts their threads in one review with no body. GitHub wraps every inline comment in a review, so this adds the fewest objects. A standalone comment adds a review of its own.
+   - A push with no new findings adds nothing; it only edits the summary.
+6. Edits the comment of a fixed finding to "Fixed in <sha>" and resolves its thread (GraphQL `resolveReviewThread`). A fixed finding that comes back reopens its own thread (`unresolveReviewThread`) instead of a new comment.
+7. Marks a finding dismissed when a person resolves its thread or deletes its comment. Resolver and comment-author logins distinguish a person's resolution from an automatic one, including during retries. Missing actor metadata falls back to the saved status. The handler never posts dismissed findings again; the reviewer prompt lists them with open findings as already reported.
+8. Saves the review id and new comment ids before editing fixed or reopened findings. A temporary pending batch holds the exact comment edits and target pointers. A failed edit fails the delivery. Its retry completes this batch before checking the reviewed head or starting another review. This prevents duplicate findings and distinguishes a partial automatic resolution from a person's dismissal. A deleted comment dismisses its pending finding.
+9. Advances the reviewed head, records the review round, and updates finding statuses only after the pending edits succeed. The pending batch is then removed. Completed state keeps only pointers; finding text stays in GitHub comments.
 
 Line settings: `instructions`, `excludePaths`, `minSeverity`, `reviewDrafts`, `verify` (off by default) and `model`.
 

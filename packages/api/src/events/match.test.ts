@@ -6,6 +6,7 @@ import {
   SUBJECT_FILTER_FIELD,
   subscriptionMatchesEvent,
   subscriptionNamesKey,
+  type SubscriptionFilter,
   validateRegexPattern,
   withSubjectFilter,
 } from "./match.js";
@@ -88,6 +89,44 @@ describe("filtersMatch", () => {
 
   it("empty filter list always matches", () => {
     expect(filtersMatch(payload, "github.pull_request.opened", [], CATALOG)).toBe(true);
+  });
+});
+
+describe("GitHub repository identity filters", () => {
+  const payload = { repository: { full_name: "Acme/Valet" }, sender: { login: "Alice" } };
+  const equalityCases: (SubscriptionFilter & { expected: boolean })[] = [
+    { field: "repo", op: "eq", value: "acme/valet", expected: true },
+    { field: "repo", op: "eq", value: "ACME/VALET", expected: true },
+    { field: "repo", op: "eq", value: "other/valet", expected: false },
+    { field: "repo", op: "in", value: ["other/repo", "acme/valet"], expected: true },
+    { field: "repo", op: "in", value: ["other/repo"], expected: false },
+    { field: "repo", op: "not_in", value: ["other/repo", "ACME/VALET"], expected: false },
+    { field: "repo", op: "not_in", value: ["other/repo"], expected: true },
+  ];
+
+  it.each(equalityCases)("$op $value matches repository identity: $expected", ({ expected, ...filter }) => {
+    expect(filtersMatch(payload, "github.pull_request.opened", [filter], CATALOG)).toBe(expected);
+  });
+
+  const caseSensitiveCases: (SubscriptionFilter & { expected: boolean })[] = [
+    { field: "sender", op: "eq", value: "alice", expected: false },
+    { field: "sender", op: "in", value: ["alice"], expected: false },
+    { field: "sender", op: "not_in", value: ["alice"], expected: true },
+    { field: "repo", op: "prefix", value: "acme/", expected: false },
+    { field: "repo", op: "contains", value: "valet", expected: false },
+    { field: "repo", op: "regex", value: "^acme/valet$", expected: false },
+    { field: "repo", op: "not_prefix", value: "acme/", expected: true },
+    { field: "repo", op: "not_regex", value: "^acme/valet$", expected: true },
+  ];
+
+  it.each(caseSensitiveCases)("keeps $field $op case-sensitive", ({ expected, ...filter }) => {
+    expect(filtersMatch(payload, "github.pull_request.opened", [filter], CATALOG)).toBe(expected);
+  });
+
+  it("keeps repository equality case-sensitive for other event services", () => {
+    const key = "custom.pull_request.opened";
+    const catalog: EventCatalogEntry[] = [{ ...CATALOG[0], key }];
+    expect(filtersMatch(payload, key, [{ field: "repo", op: "eq", value: "acme/valet" }], catalog)).toBe(false);
   });
 });
 

@@ -47,6 +47,18 @@ export interface NewReviewComment {
   body: string;
 }
 
+/** A review thread on the pull request, keyed to its first comment. */
+export interface ReviewThread {
+  /** GraphQL node id, for resolveReviewThread. */
+  id: string;
+  isResolved: boolean;
+  /** Database id of the thread's first comment. */
+  commentId: number | null;
+  /** Logins distinguish a person's dismissal from the comment author's automatic resolution. */
+  author?: string;
+  resolvedBy?: string;
+}
+
 export class GitHubError extends Error {
   constructor(
     readonly status: number,
@@ -70,6 +82,9 @@ export interface GitHubClient {
   updateReview(id: number, body: string): Promise<Review>;
   reviewComments(): Promise<ReviewComment[]>;
   updateComment(id: number, body: string): Promise<void>;
+  reviewThreads(): Promise<ReviewThread[]>;
+  /** Resolve or unresolve a review thread. Needs the App's pull requests write permission. */
+  setThreadResolved(threadId: string, resolved: boolean): Promise<void>;
 }
 
 const API = "https://api.github.com";
@@ -111,6 +126,17 @@ export function githubClient(opts: { token: string; owner: string; repo: string;
     const res = await call(method, path, body !== undefined ? { body } : {});
     if (!res.ok) throw await failed(res, what);
     return (await res.json()) as T;
+  };
+  const graphql = async <T>(query: string, variables: Record<string, unknown>, what: string): Promise<T> => {
+    const res = await call("POST", "/graphql", { body: { query, variables } });
+    if (!res.ok) throw await failed(res, what);
+    const out = (await res.json()) as { data?: T; errors?: { type?: string; message: string }[] };
+    if (out.errors?.length) {
+      const first = out.errors[0];
+      throw new GitHubError(first.type === "FORBIDDEN" ? 403 : 422, `GitHub ${what} failed: ${first.message}`);
+    }
+    if (!out.data) throw new GitHubError(502, `GitHub ${what} returned no data.`);
+    return out.data;
   };
   const pages = async <T>(path: string, what: string): Promise<T[]> => {
     const all: T[] = [];
@@ -163,6 +189,48 @@ export function githubClient(opts: { token: string; owner: string; repo: string;
     reviewComments: () => pages<ReviewComment>(`${pullPath}/comments`, "list review comments"),
     async updateComment(id, body) {
       await json<unknown>("PATCH", `${repoPath}/pulls/comments/${id}`, "update review comment", { body });
+    },
+    async reviewThreads() {
+      const threads: ReviewThread[] = [];
+      let after: string | null = null;
+      for (let page = 0; page < MAX_PAGES; page++) {
+        type Page = { repository: { pullRequest: { reviewThreads: {
+          nodes: { id: string; isResolved: boolean; resolvedBy: { login: string } | null; comments: { nodes: { databaseId: number | null; author: { login: string } | null }[] } }[];
+          pageInfo: { hasNextPage: boolean; endCursor: string | null };
+        } } } };
+        const data: Page = await graphql<Page>(
+          `query($owner: String!, $repo: String!, $number: Int!, $after: String) {
+            repository(owner: $owner, name: $repo) { pullRequest(number: $number) {
+              reviewThreads(first: 100, after: $after) {
+                nodes { id isResolved resolvedBy { login } comments(first: 1) { nodes { databaseId author { login } } } }
+                pageInfo { hasNextPage endCursor }
+              }
+            } }
+          }`,
+          { owner: opts.owner, repo: opts.repo, number: opts.number, after },
+          "list review threads",
+        );
+        const conn = data.repository.pullRequest.reviewThreads;
+        for (const t of conn.nodes) {
+          const first = t.comments.nodes[0];
+          threads.push({
+            id: t.id,
+            isResolved: t.isResolved,
+            commentId: first?.databaseId ?? null,
+            ...(first?.author ? { author: first.author.login } : {}),
+            ...(t.resolvedBy ? { resolvedBy: t.resolvedBy.login } : {}),
+          });
+        }
+        if (!conn.pageInfo.hasNextPage) break;
+        after = conn.pageInfo.endCursor;
+      }
+      return threads;
+    },
+    async setThreadResolved(threadId, resolved) {
+      const mutation = resolved
+        ? "mutation($id: ID!) { resolveReviewThread(input: { threadId: $id }) { thread { id } } }"
+        : "mutation($id: ID!) { unresolveReviewThread(input: { threadId: $id }) { thread { id } } }";
+      await graphql<unknown>(mutation, { id: threadId }, resolved ? "resolve review thread" : "unresolve review thread");
     },
   };
 }
