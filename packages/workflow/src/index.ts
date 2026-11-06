@@ -145,5 +145,6 @@ export { driveUntilPark } from './interpreter.js';
 export type { InterpreterDeps, OnRunSettled, RunSettledInfo } from './interpreter.js';
 
 export { LocalRunHost } from './local-host.js';
-export { retrySeedCheckpoints } from './retry-seed.js';
+export { retryRerunSteps, retrySeedCheckpoints } from './retry-seed.js';
+export type { RetrySeedOptions } from './retry-seed.js';
 export type { ApprovalParkedInfo, LocalRunHostDeps, OnApprovalParked, RunHost, RunStartOptions } from './local-host.js';
