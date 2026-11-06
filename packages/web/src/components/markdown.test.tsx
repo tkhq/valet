@@ -34,6 +34,14 @@ describe("Markdown", () => {
     expect(screen.getByText("world")).toBeTruthy();
   });
 
+  it("shows artifact edit instructions without model context reference definitions", () => {
+    const context = JSON.stringify('Saved artifact edit context: {"requestId":"private-request","oldText":"<h1 class=\"old\">Title</h1>"}. Apply the saved selection with artifact_edit.');
+    render(<Markdown>{`Edit the selection in **Project brief** (version 2).\n\n> Title\n\nMake this heading italic.\n\n[valet-artifact-edit-context]: # ${context}`}</Markdown>);
+    expect(screen.getByText("Make this heading italic.")).toBeTruthy();
+    expect(screen.queryByText(/private-request/)).toBeNull();
+    expect(screen.queryByText(/artifact_edit/)).toBeNull();
+  });
+
   it("keeps wide table contents intact in a keyboard-accessible region", () => {
     const hash = "14827038440abcee14b0ede8020ef0bd4117d510".repeat(3);
     render(<Markdown>{`| Commit | Status |\n| --- | --- |\n| ${hash} | Ready |`}</Markdown>);

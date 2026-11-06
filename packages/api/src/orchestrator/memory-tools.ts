@@ -882,6 +882,33 @@ export const artifactPublishTool = defineTool({
   },
 });
 
+// ─── artifact_edit ─────────────────────────────────────────────────────
+
+export const artifactEditTool = defineTool({
+  name: "artifact_edit",
+  ownerOnly: true,
+  description: "Apply a replacement to a saved artifact edit request. Use only for a request id supplied by Valet. The server replaces that request's immutable source range and rejects stale revisions. Include complete markup when the request selected an element. Do not republish the whole artifact for a selection edit.",
+  parameters: Type.Object({
+    artifactId: Type.String({ description: "The artifact id from the edit request." }),
+    requestId: Type.String({ description: "The saved edit request id supplied by Valet." }),
+    replacement: Type.String({ description: "The complete replacement source for only the saved selection. Empty text removes it." }),
+  }),
+  async execute(args, ctx) {
+    const cfg = resolveMemoryConfig(ctx);
+    if (!cfg) return { text: UNAVAILABLE_TEXT, ok: false };
+    if (cfg.workflowStep) return { text: "[artifact_error] Apply this edit from the artifact's source conversation.", ok: false };
+    const url = new URL(`/api/artifacts/${encodeURIComponent(args.artifactId)}/apply-edit`, cfg.apiBaseUrl);
+    return memoryRequest(url, {
+      method: "POST", headers: memoryHeaders(cfg, resolveOwner(ctx), ctx, true),
+      body: JSON.stringify({ requestId: args.requestId, replacement: args.replacement }),
+    }, async res => {
+      const body = await parseJsonBody(res);
+      if (!isRecord(body) || typeof body.version !== "number") return { text: "[artifact_error] The edit response is invalid. Refresh the artifact before trying again.", ok: false };
+      return { text: `Updated artifact ${args.artifactId} (version ${body.version}).` };
+    });
+  },
+});
+
 // ─── artifact_comments ─────────────────────────────────────────────────
 
 export const artifactCommentsTool = defineTool({
@@ -980,6 +1007,7 @@ export function buildMemoryTools(): ToolDef[] {
     memLinksTool,
     memShareTool,
     artifactPublishTool,
+    artifactEditTool,
     artifactCommentsTool,
     memRmTool,
   ];

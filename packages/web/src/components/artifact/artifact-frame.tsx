@@ -24,6 +24,12 @@ export interface ArtifactPick {
   vdid: string;
   rect: ArtifactAnchorRect;
   label: string;
+  text?: string;
+}
+
+export interface ArtifactSelection {
+  text: string;
+  vdid?: string;
 }
 
 interface ArtifactFrameProps {
@@ -37,6 +43,7 @@ interface ArtifactFrameProps {
   /** vdids whose rects the frame should keep reporting (comment pins). */
   anchors?: string[];
   onPick?: (pick: ArtifactPick) => void;
+  onSelect?: (selection: ArtifactSelection) => void;
   onRects?: (rects: Record<string, ArtifactAnchorRect>) => void;
   className?: string;
   /** Viewer theme stamped into the page: explicit choice, or null/undefined for system. */
@@ -189,6 +196,7 @@ export function ArtifactFrame({
   picking = false,
   anchors,
   onPick,
+  onSelect,
   onRects,
   className,
   theme,
@@ -209,8 +217,10 @@ export function ArtifactFrame({
   // Live refs so the message listener never rebinds mid-load (rebinding can
   // drop the `ready` handshake and strand the bridge).
   const onPickRef = useRef(onPick);
+  const onSelectRef = useRef(onSelect);
   const onRectsRef = useRef(onRects);
   onPickRef.current = onPick;
+  onSelectRef.current = onSelect;
   onRectsRef.current = onRects;
   const pickingRef = useRef(picking);
   const anchorsRef = useRef(anchors);
@@ -257,7 +267,7 @@ export function ArtifactFrame({
       const msg = data as Record<string, unknown>;
       if (msg.type === "valet-artifact:ready") {
         readyRef.current = true;
-        post({ type: "valet-artifact:mode", picking: pickingRef.current });
+        post({ type: "valet-artifact:mode", picking: pickingRef.current, selecting: !!onSelectRef.current });
         if (anchorsRef.current && anchorsRef.current.length > 0) {
           post({ type: "valet-artifact:anchors", vdids: anchorsRef.current });
         }
@@ -280,7 +290,14 @@ export function ArtifactFrame({
         const rect = asRect(msg.rect);
         if (typeof msg.vdid !== "string" || !VDID_RE.test(msg.vdid) || !rect) return;
         const label = typeof msg.label === "string" ? msg.label.slice(0, 80) : "";
-        onPickRef.current?.({ vdid: msg.vdid, rect, label });
+        const text = typeof msg.text === "string" && msg.text.length <= 8192 ? msg.text : undefined;
+        onPickRef.current?.({ vdid: msg.vdid, rect, label, ...(text !== undefined ? { text } : {}) });
+        return;
+      }
+      if (msg.type === "valet-artifact:selection") {
+        if (typeof msg.text !== "string" || !msg.text.trim() || msg.text.length > 8192) return;
+        if (msg.vdid !== undefined && (typeof msg.vdid !== "string" || !VDID_RE.test(msg.vdid))) return;
+        onSelectRef.current?.({ text: msg.text, ...(typeof msg.vdid === "string" ? { vdid: msg.vdid } : {}) });
         return;
       }
       if (msg.type === "valet-artifact:rects") {
@@ -300,8 +317,8 @@ export function ArtifactFrame({
 
   useEffect(() => {
     pickingRef.current = picking;
-    if (readyRef.current) post({ type: "valet-artifact:mode", picking });
-  }, [picking]);
+    if (readyRef.current) post({ type: "valet-artifact:mode", picking, selecting: !!onSelect });
+  }, [picking, !!onSelect]);
 
   const anchorsKey = (anchors ?? []).join(",");
   useEffect(() => {

@@ -212,6 +212,9 @@ importers:
       marked:
         specifier: ^18.0.11
         version: 18.0.11
+      parse5:
+        specifier: 7.3.0
+        version: 7.3.0
       pg:
         specifier: ^8.22.0
         version: 8.22.0
