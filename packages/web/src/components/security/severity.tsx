@@ -10,7 +10,10 @@ import { cn } from "~/lib/cn";
  * The palette maps to the theme's tokens, not the raw Tailwind rainbow:
  * critical rides the danger tokens, high/medium the amber scale (the only
  * warm full ramp the theme ships — see `tailwind.config.ts`; there is no
- * orange scale), low the accent (brand blue), info neutral.
+ * orange scale), low a fixed blue, info neutral. Low does not use the
+ * `accent` scale, because `accent` follows the palette: under Ember it is
+ * rust orange, between critical red and high amber. The blue is the one
+ * `StatusDot`'s `info` tone uses.
  */
 
 export const SEVERITY_ORDER: readonly SecurityFindingSeverity[] = [
@@ -31,7 +34,7 @@ const SEVERITY_CLASS: Record<SecurityFindingSeverity, string> = {
   critical: "bg-danger-wash text-danger-600 dark:text-danger-500",
   high: "bg-amber-100 text-amber-800 dark:bg-amber-900/60 dark:text-amber-300",
   medium: "bg-warning-wash text-warning-fg",
-  low: "bg-accent-100 text-accent-700 dark:bg-accent-700 dark:text-accent-50",
+  low: "bg-blue-100 text-blue-700 dark:bg-blue-700 dark:text-blue-50",
   info: "bg-neutral-100 text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300",
 };
 
@@ -56,13 +59,13 @@ export function SeverityBadge({
 }
 
 /** Solid severity fills for the distribution bar and legend dots. Critical rides
- * danger; high/medium step down the amber ramp; low is the brand accent; info is
+ * danger; high/medium step down the amber ramp; low is the fixed blue; info is
  * neutral. One spelling with `SEVERITY_CLASS` above. */
 export const SEVERITY_FILL: Record<SecurityFindingSeverity, string> = {
   critical: "bg-danger-500",
   high: "bg-amber-500",
   medium: "bg-amber-300",
-  low: "bg-accent-400 dark:bg-accent-500",
+  low: "bg-blue-400 dark:bg-blue-500",
   info: "bg-neutral-300 dark:bg-neutral-600",
 };
 

@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode, type Ref } from "react";
 import { ChevronRight } from "lucide-react";
 import { cn } from "~/lib/cn";
 
@@ -26,8 +26,11 @@ const STATUS_TEXT: Record<TraceStatus, string> = {
  * that shows them beneath it; with `onSelect` it is a button that does
  * something else, such as opening a page. Otherwise it is plain text.
  */
-export function TraceLine({ icon, title, detail, keepDetail = false, status = "done", defaultOpen = false, label, className, iconClassName, onSelect, children }: {
+export function TraceLine({ icon, title, detail, keepDetail = false, status = "done", defaultOpen = false, label, className, iconClassName, onSelect, children, revealKey, buttonRef }: {
   icon: ReactNode;
+  /** A new request opens this line, including when it mounts beneath a closed parent. */
+  revealKey?: number;
+  buttonRef?: Ref<HTMLButtonElement>;
   /** The detail stays whole when the line is short of room, such as a failure count. */
   keepDetail?: boolean;
   iconClassName?: string;
@@ -41,7 +44,8 @@ export function TraceLine({ icon, title, detail, keepDetail = false, status = "d
   onSelect?: () => void;
   children?: ReactNode;
 }) {
-  const [open, setOpen] = useState(defaultOpen);
+  const [open, setOpen] = useState(defaultOpen || revealKey !== undefined);
+  useEffect(() => { if (revealKey !== undefined) setOpen(true); }, [revealKey]);
   const body = <>
     <span aria-hidden className={cn("flex h-4 w-4 shrink-0 items-center justify-center [&_svg]:h-3.5 [&_svg]:w-3.5", iconClassName)}>{icon}</span>
     <span className={cn("min-w-0 truncate", status === "running" && SHIMMER_TEXT)}>{title}</span>
@@ -53,7 +57,7 @@ export function TraceLine({ icon, title, detail, keepDetail = false, status = "d
   if (!children && onSelect) return <button type="button" aria-label={label} onClick={onSelect} className={cn(line, button, className)}>{body}</button>;
   if (!children) return <div className={cn(line, className)}>{body}</div>;
   return <div className={cn("min-w-0", className)}>
-    <button type="button" aria-expanded={open} aria-label={label} onClick={() => setOpen(o => !o)}
+    <button ref={buttonRef} type="button" aria-expanded={open} aria-label={label} onClick={() => setOpen(o => !o)}
       className={cn(line, button)}>
       {body}
       <ChevronRight aria-hidden className={cn("h-3.5 w-3.5 shrink-0 transition-transform", open ? "rotate-90" : "opacity-0 group-hover/trace:opacity-100 group-focus-visible/trace:opacity-100 max-md:opacity-100")} />

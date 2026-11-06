@@ -95,3 +95,25 @@ and `index.html` meta tags. Manually verified live against the dev stack,
 light and dark, on three component-dense pages (Events activity feed +
 subscriptions, the workflow editor's node canvas + Triggers drawer, the
 Teams settings panel) — no contrast or legibility regressions.
+
+## Contrast pairs and palette scales (2026-10-30)
+
+The token layer had five defects that every palette shared or that the default palette carried:
+
+- White text on the dark-mode moss measured 2.82:1, so every primary button failed in dark mode.
+- An unchecked checkbox and an off switch were drawn with `--line` or a light grey, far under the 3:1 floor for a control's outline (WCAG 1.4.11).
+- The grey focus ring on secondary and ghost buttons measured 2.49:1.
+- The default `--muted` measured about 4.0:1 in light mode and 3.6:1 in dark mode on an `--ink-wash` row.
+- 32 classes named a `danger` or `success` step that the two-step ramps did not define, so they painted no color. Examples are tool-renderer errors, the validation banner, and composer file errors.
+
+Decisions:
+
+- **Contrast pairs.** Every `theme.css` block adds `--on-moss` (text on a moss fill), `--moss-text` (moss-colored text), `--control-border` (the outline of an unchecked control), and `--danger-text` (error text). Light blocks use white for `--on-moss`. Dark blocks use their own `--paper`. `--moss-text` is `var(--moss)` where the moss holds 4.5:1 on `--paper` and on `--moss-wash`, the fill of a selected `RadioCard`. The default and Tide light blocks give it a darker value (52.5% and 49% lightness), because their moss measured 4.496:1 and 4.34:1 on the wash. For the same wash, the Ember, Tide and Orchid light `--muted` is 51.5%, not 52.5%. `theme.tokens.test.ts` measures each pair, and `--muted` on `--paper`, `--ink-wash` and `--moss-wash`, with the WCAG 2.2 contrast ratio.
+- **Dark control border.** Dark `--control-border` is 57% lightness, not the planned 55%. At 55%, the thumb of an off `Switch` measured 2.88:1 to 2.99:1 on its `--ink-wash-strong` track. The test measures that pair at 3:1.
+- **Default muted.** Light `--muted` is `oklch(50% 0.015 247)`. Dark `--muted` is `oklch(62% 0.015 247)`. This repaints secondary text on an untouched install, on purpose. `--muted-wash` keeps the L/C/H of `--muted`.
+- **Primitives.** The primary `Button` is `bg-moss text-on-moss`. `textLinkClass` is `text-moss-text`. An unchecked `Checkbox` has a `control-border` outline. An off `Switch` has a faint track, a 1px `control-border` outline, and a `control-border` thumb. An on `Switch` has a moss track and an `on-moss` thumb. The `FieldRow` and `ConfirmDialog` errors use `text-danger-text`. The `StatusDot` success tone is `bg-success-500`, because `bg-moss` is blue on the default palette.
+- **One focus ring.** `FOCUS_RING` in `primitives/control.ts` is a 2px moss ring with a 2px gap in the page color. Every `Button` variant, `Switch`, `Checkbox`, and `RadioCard` use it. Tabs draw a 2px moss ring inset, because the tab strip clips. A selected `RadioCard` is a moss border on a moss wash, with no ring. `:root` sets `accent-color: var(--moss)` for native checkboxes and radios.
+- **Palette scales.** Each block sets `--neutral-h`/`--neutral-c` and `--accent-h`/`--accent-c`. Each `neutral` and `accent` step keeps its lightness and takes chroma `var(--*-c)` times its default chroma divided by the default base (0.015 for `neutral`, 0.19 for `accent`). The default palette's values give the same colors as before. The `danger` and `success` ramps stay fixed in every palette and now run from 50 to 900. `tailwind.config.test.ts` fails if a class in `src` names a step that a scale does not define. Status colors do not use `accent`, because under Ember it is rust orange. The `low` security severity uses Tailwind's fixed `blue`, as the `StatusDot` `info` tone does.
+- **`iconSm`.** `Button size="iconSm"` is a 32px square that grows to 44px below `md` and under a coarse pointer.
+
+References: shadcn's fill and `-foreground` token pairs (https://github.com/shadcn-ui/ui/tree/main/apps/v4/registry/new-york-v4/ui), Radix color roles (https://www.radix-ui.com/themes/docs/theme/color), WCAG 1.4.11 (https://www.w3.org/WAI/WCAG22/Understanding/non-text-contrast.html), and the Material 3 switch (https://m3.material.io/components/switch/specs).

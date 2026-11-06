@@ -20,9 +20,10 @@ import {
 
 /**
  * `/settings/appearance` — You · Appearance. Three independent choices,
- * each a row of `RadioCard`s (moss ring when selected): the light/dark
- * polarity, the color palette, and the chat density. `~/lib/theme.ts` owns
- * the first two mechanisms. `~/lib/preferences.ts` owns the third.
+ * each a row of `RadioCard`s (moss border and wash when selected): the
+ * light/dark polarity, the color palette, and the chat density.
+ * `~/lib/theme.ts` owns the first two mechanisms. `~/lib/preferences.ts`
+ * owns the third.
  *
  * The polarity and the palette are deliberately not merged into one list of
  * six or more cards. Every palette has a light and a dark form, so a single

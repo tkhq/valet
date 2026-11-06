@@ -22,6 +22,28 @@ describe("Switch", () => {
     expect(thumbOf(control).classList.contains("translate-x-[18px]")).toBe(true);
   });
 
+  it("outlines the off track and thumb in control-border, and fills the on track with moss", () => {
+    render(
+      <>
+        <Switch checked={false} onCheckedChange={() => {}} aria-label="Digest off" />
+        <Switch checked onCheckedChange={() => {}} aria-label="Digest on" />
+      </>,
+    );
+    const off = screen.getByRole("switch", { name: "Digest off" });
+    expect(off.getAttribute("aria-checked")).toBe("false");
+    expect(off.className).toContain("bg-ink-wash-strong");
+    expect(off.className).toContain("shadow-[inset_0_0_0_1px_var(--control-border)]");
+    expect(off.className).not.toContain("bg-neutral-300");
+    expect(thumbOf(off).className).toContain("bg-control-border");
+    expect(thumbOf(off).className).not.toContain("bg-white");
+
+    const on = screen.getByRole("switch", { name: "Digest on" });
+    expect(on.getAttribute("aria-checked")).toBe("true");
+    expect(on.classList.contains("bg-moss")).toBe(true);
+    expect(on.className).not.toContain("control-border");
+    expect(thumbOf(on).classList.contains("bg-on-moss")).toBe(true);
+  });
+
   it("draws the small size at 28 by 16 with a 12px thumb", () => {
     render(
       <>

@@ -1,6 +1,7 @@
 import { forwardRef, type ButtonHTMLAttributes } from "react";
 import { Check } from "lucide-react";
 import { cn } from "~/lib/cn";
+import { FOCUS_RING } from "./control.js";
 
 export interface CheckboxProps
   extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, "onChange" | "type"> {
@@ -28,9 +29,11 @@ export const Checkbox = forwardRef<HTMLButtonElement, CheckboxProps>(function Ch
       onClick={() => onCheckedChange(!checked)}
       className={cn(
         "grid h-4 w-4 shrink-0 place-items-center rounded border transition-colors touch-manipulation",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss focus-visible:ring-offset-2 focus-visible:ring-offset-[--bg]",
+        FOCUS_RING,
         "disabled:pointer-events-none disabled:opacity-50",
-        checked ? "border-moss bg-moss text-paper" : "border-line bg-paper hover:border-ink-wash-strong",
+        // An unchecked box needs a 3:1 outline to be seen at all (WCAG
+        // 1.4.11); `--line` was about 1.2:1. Hover darkens it to `muted`.
+        checked ? "border-moss bg-moss text-on-moss" : "border-control-border bg-paper hover:border-muted",
         className,
       )}
       {...rest}

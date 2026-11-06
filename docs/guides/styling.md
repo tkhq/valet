@@ -96,6 +96,8 @@ Check unused locals with `pnpm --filter @valet/web exec tsc --noEmit -p . --noUn
 Use these primitives instead of hand-written classes:
 
 - `Button`, `Input`, `Select`, `FilterChips`, and `TabBar` take their height from `CONTROL_SIZE` (`primitives/control.ts`). `sm` is 32px with `text-xs`. Use it in toolbars, filter rows, and row actions. `md` is 36px with `text-sm`. Use it in forms and dialogs. Below the `sm` breakpoint, every control is at least 44px tall with 16px text, so a field does not trigger iOS zoom and a row keeps one text size. Give every control in one row the same `size`. Do not set `h-*`, `py-*`, or a text size in a control's `className`. `control.test.ts` fails on that, and on a raw `<select>`, text `<input>`, `role="tab"`, or `role="radio"` outside `primitives/`.
+- `Button size="iconSm"` is a 32px square for an icon button in a row or a card header. It grows to 44px below `md` and under a coarse pointer. Give it an `aria-label`.
+- `FOCUS_RING` (`primitives/control.ts`) is the one keyboard focus ring: a 2px moss ring with a 2px gap in the page color. `Button`, `Switch`, `Checkbox`, and `RadioCard` use it. Use it on a new control instead of a grey or translucent ring. A tab draws the same ring inset, because its strip clips.
 - `TabBar` is the strip for panels inside one page. A tab can be `disabled`, show a `badge` such as a `StatusDot`, and carry an `action` outside its button, such as a close button. If the strip can show more than once on a page, pass a `useId()` value as `id`. `LinkTabs` is the strip for tabs that are routes.
 - `RadioCard` is the selectable card in a `role="radiogroup"`. Put extra content, such as a list of passes, in `children`.
 - `Select` is a native `<select>` with the field surface and focus ring of `Input`. It has no default width, so pass `w-full` for a form field.
@@ -192,10 +194,28 @@ exposes the tokens as Tailwind colors (`paper`, `ink`, `muted`, `line`, `moss`,
 `accent`, and the `*-wash` variants). Use the token colors rather than raw
 Tailwind palette values, so a brand change reaches every surface at once.
 
+### Contrast pairs
+
+Some tokens exist to pass a contrast floor. `theme.tokens.test.ts` measures each one in every palette and polarity:
+
+| Token | Use it for | Floor |
+| --- | --- | --- |
+| `on-moss` | Text and icons on a `bg-moss` fill | 4.5:1 on `moss` |
+| `moss-text` | Moss-colored text, such as `textLinkClass` | 4.5:1 on `paper` and `moss-wash` |
+| `control-border` | The outline of an unchecked checkbox or an off switch, and the off switch's thumb | 3:1 on `paper` and `ink-wash-strong` |
+| `danger-text` | Error text under a field or in a dialog | 4.5:1 on `paper` |
+| `muted` | Secondary text | 4.5:1 on `paper`, `ink-wash` and `moss-wash` |
+
+Do not put `text-white` on `bg-moss`. White on the dark-mode moss is 2.82:1. Do not use `text-moss` for text. Use `text-moss-text`.
+
+### Palette scales
+
+The `neutral` and `accent` scales follow the palette. Each step keeps its lightness and reads its hue and chroma from `--neutral-h`/`--neutral-c` and `--accent-h`/`--accent-c` in the active `theme.css` block. Under Ember, `bg-neutral-100` is warm sand and `text-accent-600` is burnt orange. The `danger` and `success` ramps are the same in every palette, because status is semantics, not brand. Each one has every step from 50 to 900. Do not use `accent` for a status color, such as a severity: under Ember it is orange. `tailwind.config.test.ts` fails if a class in `src` names a step that a scale does not define, because such a class emits no CSS.
+
 ### Opacity modifiers
 
 Slash opacity (`bg-ink/10`, `bg-danger-500/10`) works on every theme color.
-The fixed OKLCH scales (`neutral`, `accent`, `danger`, `success`) carry an
+The OKLCH scales (`neutral`, `accent`, `danger`, `success`) carry an
 `<alpha-value>` placeholder. The CSS-variable tokens (`paper`, `ink`,
 `muted`, `line`, `moss`, and the `*-wash` colors) go through `varColor` in
 `tailwind.config.ts`, which emits `color-mix(...)` only when a class names an

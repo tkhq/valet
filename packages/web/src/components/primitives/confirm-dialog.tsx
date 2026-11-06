@@ -51,7 +51,7 @@ export function ConfirmDialog({
             {pending ? (pendingLabel ?? confirmLabel) : confirmLabel}
           </Button>
         </DialogFooter>
-        {error != null && <p className="text-xs text-danger-500">{error}</p>}
+        {error != null && <p className="text-xs text-danger-text">{error}</p>}
       </DialogContent>
     </Dialog>
   );
