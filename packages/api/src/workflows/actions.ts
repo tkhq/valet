@@ -39,6 +39,7 @@ import {
   addAggregateNode,
   canReadWorkflowRun,
   cancelWorkflowRun,
+  changedStepsToRerun,
   retryWorkflowRun,
   copyWorkflowDefinition,
   createWorkflowDefinition,
@@ -815,12 +816,14 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       const detail = await getWorkflowRunDetail(deps, owner, run_id);
       if (!detail) return { success: false, error: `run not found: ${run_id}` };
       const provenance = await workflowRunProvenance(deps.db, detail.run);
+      const rerunPreview = await changedStepsToRerun(deps, owner, detail.run, detail.checkpoints);
       return {
         success: true,
         data: {
           runId: detail.run.runId,
           workflowId: detail.run.workflowId,
           provenance,
+          ...rerunPreview,
           status: detail.run.status,
           outcome: detail.run.outcome,
           waitingOn: detail.run.waitingOn,
@@ -930,6 +933,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       run_id: Type.String(),
       from: Type.Union([Type.Literal("failed_step"), Type.Literal("start"), Type.Literal("changed_steps")]),
       input: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+      rerun_definition_version_id: Type.Optional(Type.String()),
     }),
   )({
     id: "workflows.retry_run",
@@ -940,22 +944,24 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       "a foreach keeps its finished items. A step edited since the run, and every step after it, runs again. " +
       "from \"start\" runs every step; with it, `input` replaces some trigger inputs, for example a shorter date range for a test run. " +
       "For a completed run, from \"changed_steps\" reuses every step not edited since the run, so only the edited steps and the steps after them run. " +
-      "The result lists those steps as rerunSteps. A tool step in that list does its action again, for example it sends a message again. " +
+      "First call get_run and confirm its rerunSteps with the person. Pass its rerunDefinitionVersionId as rerun_definition_version_id. " +
+      "A tool step in that list does its action again, for example it sends a message again. " +
       "The retry keeps the old run's audience and follow-up conversation. Returns { runId, rerunSteps? }; check the result with get_run.",
     riskLevel: "medium",
-    execute: async ({ run_id, from, input }, ctx) => {
+    execute: async ({ run_id, from, input, rerun_definition_version_id }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
       const sessionId = (ctx as { sessionId?: unknown }).sessionId;
       if (typeof sessionId === "string" && sessionId.startsWith("wf:invoke:")) {
         return { success: false, error: "A workflow cannot retry runs. Retry the run from the run page or an assistant conversation." };
       }
-      const result = await retryWorkflowRun(getDeps(), owner, run_id, { from, input });
+      const result = await retryWorkflowRun(getDeps(), owner, run_id, { from, input, rerunDefinitionVersionId: rerun_definition_version_id });
       if (result === "not_found") return { success: false, error: `run not found: ${run_id}` };
       if (result === "workflow_deleted") return { success: false, error: "This run's workflow was deleted. Create the workflow again, then start a new run." };
       if (result === "not_retryable") return { success: false, error: "This run is still in progress. Wait for the run to settle, or cancel it first." };
       if (result === "run_completed") return { success: false, error: "This run completed. To run the steps you edited since this run, retry with from \"changed_steps\"." };
       if (result === "run_not_completed") return { success: false, error: "Only a completed run can re-run its changed steps. To retry this run, use from \"failed_step\" or \"start\"." };
+      if (result === "stale_preview") return { success: false, error: "The workflow changed or its preview is missing. Call get_run and confirm its changed steps again." };
       if (result === "nothing_changed") return { success: false, error: "No step changed since this run, so no step would run again. Edit the workflow first, or start a new run." };
       if (result === "input_needs_start") {
         return { success: false, error: from === "changed_steps"

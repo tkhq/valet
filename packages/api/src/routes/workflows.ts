@@ -895,11 +895,11 @@ workflowsRouter.get("/runs/:runId", async (c) => {
     workflowRunStepCosts(deps.db, deps.workflowStore, runId),
     workflowRunProvenance(deps.db, resp.run),
   ]);
-  const [modelChanges, rerunSteps] = await Promise.all([
+  const [modelChanges, rerunPreview] = await Promise.all([
     workflowRunModelChanges(deps.db, deps.workflowStore, resp.run, stepCosts, (id) => canReadWorkflowRun(deps, owner, id)),
     changedStepsToRerun(deps, owner, resp.run, resp.checkpoints),
   ]);
-  return c.json({ ...resp, conversations, stepCosts, modelChanges, provenance, ...(rerunSteps ? { rerunSteps } : {}) });
+  return c.json({ ...resp, conversations, stepCosts, modelChanges, provenance, ...rerunPreview });
 });
 
 workflowsRouter.post("/runs/:runId/approvals/:nodeId", async (c) => {
@@ -994,7 +994,13 @@ workflowsRouter.post("/runs/:runId/retry", async (c) => {
     return c.json({ error: "input must be an object of run input values. Send a JSON object." }, 400);
   }
 
-  const result = await retryWorkflowRun(deps, owner, runId, { from: body.from, input: body.input });
+  if (body.rerunDefinitionVersionId !== undefined && (typeof body.rerunDefinitionVersionId !== "string" || !/^[a-f0-9]{64}$/.test(body.rerunDefinitionVersionId))) {
+    return c.json({ error: "Invalid rerun definition version. Refresh the run and confirm its changed steps again." }, 400);
+  }
+  const result = await retryWorkflowRun(deps, owner, runId, body);
+  if (result === "stale_preview") {
+    return c.json({ error: "The workflow changed or its preview is missing. Refresh the run and confirm its changed steps again." }, 409);
+  }
   if (result === "not_found") return c.json({ error: "run not found" }, 404);
   if (result === "input_needs_start") {
     return c.json({ error: body.from === "changed_steps"

@@ -3,6 +3,7 @@
  * web surface). House pattern: a query-key factory per resource file,
  * mirroring `~/api/memory` / `~/api/workspace-runtime`.
  */
+import { useEffect } from "react";
 import {
   useMutation,
   useQuery,
@@ -220,7 +221,7 @@ export function useRunDetail(
   runId: string,
   opts?: Partial<UseQueryOptions<GetWorkflowRunResponse>>,
 ) {
-  return useQuery<GetWorkflowRunResponse>({
+  const query = useQuery<GetWorkflowRunResponse>({
     queryKey: qkWorkflows.run(runId),
     queryFn: () => api.getWorkflowRun(runId),
     enabled: !!runId,
@@ -234,6 +235,17 @@ export function useRunDetail(
     },
     ...opts,
   });
+  const completed = query.data?.run.status === "settled" && query.data.run.outcome === "completed";
+  const refetch = query.refetch;
+  useEffect(() => {
+    if (!completed) return;
+    // Separate Tabs cards have separate caches. Entering a card refreshes
+    // its completed run preview without polling settled histories.
+    const refresh = () => { void refetch(); };
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
+  }, [completed, refetch]);
+  return query;
 }
 
 /** `owner` scopes the flat hub Triggers tab to one workspace; the
@@ -435,6 +447,7 @@ export function useRetryRun(runId: string) {
   const qc = useQueryClient();
   return useMutation<RetryWorkflowRunResponse, Error, RetryWorkflowRunRequest | void>({
     mutationFn: (body) => api.retryWorkflowRun(runId, body ?? undefined),
+    onError: () => { void qc.invalidateQueries({ queryKey: qkWorkflows.run(runId) }); },
     onSuccess: () => {
       const detail = qc.getQueryData<GetWorkflowRunResponse>(qkWorkflows.run(runId));
       if (detail) {

@@ -2842,6 +2842,8 @@ export interface WorkflowRunDetail {
    * (`from: "changed_steps"`) runs, from the current saved workflow.
    * Empty when no step changed since the run. Absent for other runs. */
   rerunSteps?: WorkflowRerunStep[];
+  /** Saved definition used by rerunSteps. Send it when confirming changed_steps. */
+  rerunDefinitionVersionId?: string;
   run: WorkflowRunSummary & {
     waitingOn: unknown[];
     definition: unknown;
@@ -2893,6 +2895,8 @@ export interface RetryWorkflowRunRequest {
   from?: "start" | "failed_step" | "changed_steps";
   /** Trigger input values that replace the original ones. Only with `from: "start"`. */
   input?: Record<string, unknown>;
+  /** Required for changed_steps: the version returned with the confirmed rerunSteps preview. */
+  rerunDefinitionVersionId?: string;
 }
 
 export interface RetryWorkflowRunResponse {
