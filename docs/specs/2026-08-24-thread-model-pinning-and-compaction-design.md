@@ -630,7 +630,12 @@ After scratchpad removal, the summary must contain every required template secti
 Heading checks ignore case, repeated spaces, and a trailing colon. Additional subsections can organize a required section's content.
 An optional heading alone does not supply content, and a separate optional section cannot fill an empty required section.
 Headings inside code fences do not count. Unclosed fences, missing sections, duplicate sections, and empty sections fail acceptance.
-Failure keeps the accepted checkpoint and unsummarized messages. It does not add a retry loop or bypass the existing compaction failure limits.
+If a completed, nonblank summary fails these checks, the engine regenerates it once with a fixed format correction.
+The second call uses the original history, accepted summary, and user instructions. It does not include the rejected draft.
+Both completions contribute input, cache-read, and output tokens to the returned usage totals.
+Provider errors, tool calls, truncated output, blank output, and cancellation do not trigger this format repair.
+The second summary must pass the same checks. Failure keeps the accepted checkpoint and unsummarized messages.
+The existing overflow handling and compaction failure limits still apply.
 Existing checkpoints remain readable. These checks apply when accepting a new summary, not when loading history.
 A valid structure does not prove that every fact in the summary is correct.
 
