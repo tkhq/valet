@@ -42,8 +42,10 @@ permissions:
   contents: read
   packages: write
 
+# CI can finish out of commit order. Different source commits must not cancel
+# each other's immutable images; tag releases keep their shared tag group.
 concurrency:
-  group: docker-images-${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+  group: docker-images-${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || (startsWith(github.ref, 'refs/heads/') && format('{0}-{1}', github.ref, github.sha) || github.ref) }}
   cancel-in-progress: ${{ inputs.release_tag == '' && startsWith(github.ref, 'refs/heads/') }}
 
 jobs:
