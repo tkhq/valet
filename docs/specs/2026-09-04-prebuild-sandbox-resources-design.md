@@ -78,9 +78,14 @@ a time. A repository can therefore override CPU and keep the deployment memory
 default, or override memory and keep the deployment CPU default. Existing
 ephemeral-storage defaults remain in the same object and survive this merge.
 
-Docker has no chart-driven deployment default because the chart uses the
-Kubernetes backend. Repository values still reach the Docker provider in local
-and test deployments.
+The Docker backend also reads `VALET_SANDBOX_CPU` and `VALET_SANDBOX_MEMORY`
+into `DockerSandboxProviderOptions.defaultResources`. It uses the same CPU and
+memory validation and per-field precedence. Unconfigured fields remain absent.
+Kubernetes-only ephemeral-storage defaults and validation do not apply to Docker.
+The chart still selects the Kubernetes backend. Docker operators configure these
+variables directly in the API deployment. See the
+[Docker resource containment configuration](2026-08-15-sandbox-docker-design.md#api-deployment-configuration)
+for the optional shared cgroup parent and host provisioning procedure.
 
 ## Resolution and precedence
 

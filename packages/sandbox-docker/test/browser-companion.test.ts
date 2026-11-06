@@ -12,6 +12,14 @@ function record(root = '/private'): DockerInventoryRecord {
 }
 
 describe('browser companion arguments and ownership', () => {
+  it('places the companion under the configured parent and keeps its own finite limits', () => {
+    const options = { owner: record(), seccompProfile: '/profiles/browser.json', uid: 501, gid: 20 };
+    const args = buildBrowserCompanionArgs({ ...options, cgroupParent: 'sandbox.slice' });
+    expect(args.slice(args.indexOf('--cgroup-parent'), args.indexOf('--cgroup-parent') + 2)).toEqual(['--cgroup-parent', 'sandbox.slice']);
+    expect(args.slice(args.indexOf('--memory'), args.indexOf('--memory') + 2)).toEqual(['--memory', '2147483648']);
+    expect(buildBrowserCompanionArgs(options)).not.toContain('--cgroup-parent');
+  });
+
   it('shares the workload network and a read-only upload view with a confined stock browser container', async () => {
     const args = buildBrowserCompanionArgs({ owner: record(), seccompProfile: '/profiles/browser.json', uid: 501, gid: 20 });
     expect(args).toEqual(expect.arrayContaining(['--network', 'container:workload-id', '--security-opt', 'seccomp=/profiles/browser.json', '-v', '/private/state/dsb-session:/var/lib/valet']));

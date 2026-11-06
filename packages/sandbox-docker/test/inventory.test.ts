@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import {
   DockerInventory,
+  parseDockerInspection,
   type DockerInventoryRecord,
   validateDockerOwner,
 } from "../src/inventory.js";
@@ -93,4 +94,11 @@ it("reserves each owner once across independent provider instances", async () =>
   ]);
   expect(outcomes.filter(Boolean)).toHaveLength(1);
   expect(await new DockerInventory(root).read("dsb-session")).toEqual(record());
+});
+
+it("reads the actual Docker cgroup parent and rejects malformed metadata", () => {
+  const owner = { Id: "container", Image: "sha256:image", Config: { Labels: {} }, State: { Running: true }, Mounts: [] };
+  expect(parseDockerInspection([{ ...owner, HostConfig: { CgroupParent: "sandbox.slice" } }])).toMatchObject({ cgroupParent: "sandbox.slice" });
+  expect(parseDockerInspection([owner]).cgroupParent).toBeUndefined();
+  expect(() => parseDockerInspection([{ ...owner, HostConfig: { CgroupParent: 7 } }])).toThrow(/inventory/i);
 });

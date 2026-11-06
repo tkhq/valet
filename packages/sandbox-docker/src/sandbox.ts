@@ -15,6 +15,7 @@ import type {
   SandboxCapabilities,
   SandboxCreateOpts,
   SandboxProvider,
+  SandboxResources,
   SandboxStatus,
   SandboxListing,
   SandboxCommandChannel,
@@ -411,7 +412,9 @@ export interface BuildDockerRunArgsOpts {
   workspaceHostPath: string;
   network: string;
   env?: Record<string, string>;
-  resources?: { cpu?: number; memory?: string };
+  resources?: SandboxResources;
+  /** Operator-provisioned parent on the configured Docker host. */
+  cgroupParent?: string;
   /** Interactive-service profile. Default "headless" — no ports published.
    * "full" additionally publishes the gateway port to an ephemeral loopback
    * port so `DockerSandbox.gatewayEndpoint()` can resolve it via `docker
@@ -454,6 +457,7 @@ function bindMount(source: string, target: string, readonly = false): string[] {
 
 export function buildDockerRunArgs(opts: BuildDockerRunArgsOpts): string[] {
   const runArgs: string[] = ["run", "-d", "--name", opts.containerName];
+  if (opts.cgroupParent) runArgs.push("--cgroup-parent", opts.cgroupParent);
   runArgs.push("--workdir", CONTAINER_WORKSPACE);
   runArgs.push(...bindMount(opts.workspaceHostPath, CONTAINER_WORKSPACE));
   if (opts.runtimeStateDir) runArgs.push(...bindMount(opts.runtimeStateDir, "/var/lib/valet"));
@@ -1360,6 +1364,10 @@ async function awaitCredsPropagation(
 }
 
 export interface DockerSandboxProviderOptions {
+  /** Operator-provisioned parent on the Docker host. Its limits cover all managed containers. */
+  cgroupParent?: string;
+  /** Workload defaults. Explicit creation resources override each defined field. */
+  defaultResources?: SandboxResources;
   /** Durable inventory and private state. Keep this outside every working directory. */
   inventoryRoot?: string;
   /** Reviewed Docker seccomp JSON. The bundled profile is the default. */
@@ -1375,7 +1383,11 @@ export class DockerSandboxProvider implements SandboxProvider {
   private readonly browserSeccompProfile: string;
   private readonly browserEnabled: boolean;
   private readonly browserImage?: string;
+  private readonly cgroupParent?: string;
+  private readonly defaultResources?: SandboxResources;
   constructor(options: DockerSandboxProviderOptions = {}) {
+    this.cgroupParent = options.cgroupParent;
+    this.defaultResources = options.defaultResources;
     this.browserEnabled = options.browserEnabled === true;
     this.browserImage = options.browserImage;
     this.inventory = new DockerInventory(resolve(options.inventoryRoot ?? join(homedir(), ".valet", "docker-runtime")));
@@ -1458,7 +1470,7 @@ export class DockerSandboxProvider implements SandboxProvider {
       const identity = `${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0}`;
       const args = workload.running
         ? ["exec", "--user", "0", workload.id, "chown", "-Rh", identity, "/workspace"]
-        : ["run", "--rm", "--network", "none", "--user", "0", "--cap-drop", "ALL", "--cap-add", "CHOWN", "--cap-add", "DAC_OVERRIDE", "--entrypoint", "chown", ...bindMount(value.workspace, "/workspace"), value.imageId ?? value.image, "-Rh", identity, "/workspace"];
+        : ["run", "--rm", ...(this.cgroupParent ? ["--cgroup-parent", this.cgroupParent] : []), "--network", "none", "--user", "0", "--cap-drop", "ALL", "--cap-add", "CHOWN", "--cap-add", "DAC_OVERRIDE", "--entrypoint", "chown", ...bindMount(value.workspace, "/workspace"), value.imageId ?? value.image, "-Rh", identity, "/workspace"];
       const restored = await execProcess("docker", args, {});
       if (restored.exitCode !== 0) throw new Error(`Cannot restore working-directory ownership. Restore Docker connectivity before deleting this sandbox. ${restored.stderr.trim()}`);
     }
@@ -1507,13 +1519,20 @@ export class DockerSandboxProvider implements SandboxProvider {
     await fs.access(value.runtimeStateDir);
     try { await fs.access(join(value.runtimeStateDir, "browser/journal.sqlite")); }
     catch (error) { if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return { entries: [], total: 0 }; throw error; }
-    const result = await execProcess("docker", ["run", "--rm", "--network", "none", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", `${process.getuid?.() || 1501}:${process.getgid?.() || 1501}`, "--env", "NODE_OPTIONS=", "--entrypoint", "/usr/bin/flock", ...bindMount(value.runtimeStateDir, "/var/lib/valet", true), owner?.imageId ?? value.browserCompanion?.imageId ?? value.browserCompanion?.image ?? value.imageId ?? value.image, "--shared", "--nonblock", "/var/lib/valet/browser/owner.lock", "/usr/local/bin/node", "-e", READ_RETAINED_BROWSER_AUDIT], { timeout: 30_000, maxOutputBytes: 8 * 1024 * 1024 });
+    const result = await execProcess("docker", ["run", "--rm", ...(this.cgroupParent ? ["--cgroup-parent", this.cgroupParent] : []), "--network", "none", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", `${process.getuid?.() || 1501}:${process.getgid?.() || 1501}`, "--env", "NODE_OPTIONS=", "--entrypoint", "/usr/bin/flock", ...bindMount(value.runtimeStateDir, "/var/lib/valet", true), owner?.imageId ?? value.browserCompanion?.imageId ?? value.browserCompanion?.image ?? value.imageId ?? value.image, "--shared", "--nonblock", "/var/lib/valet/browser/owner.lock", "/usr/local/bin/node", "-e", READ_RETAINED_BROWSER_AUDIT], { timeout: 30_000, maxOutputBytes: 8 * 1024 * 1024 });
     if (result.exitCode !== 0 || result.truncated) throw new Error(`Cannot read the retained browser audit. Restore the runtime image and private state before deleting this session. ${result.stderr.trim()}`);
     return parseRetainedBrowserAudit(JSON.parse(result.stdout), value.sessionId);
   }
 
   async create(opts: SandboxCreateOpts): Promise<Sandbox> {
     const dockerOpts = opts as DockerSandboxCreateOpts;
+    const resources: SandboxResources = {
+      cpu: opts.resources?.cpu ?? this.defaultResources?.cpu,
+      memory: opts.resources?.memory ?? this.defaultResources?.memory,
+      scratch: opts.resources?.scratch ?? this.defaultResources?.scratch,
+      ephemeralStorage: opts.resources?.ephemeralStorage ?? this.defaultResources?.ephemeralStorage,
+      ephemeralStorageLimit: opts.resources?.ephemeralStorageLimit ?? this.defaultResources?.ephemeralStorageLimit,
+    };
     if (!dockerOpts.workspace) throw new Error("A Docker working directory is required. Configure an absolute working-directory path.");
     const workspace = await fs.realpath(resolve(dockerOpts.workspace));
     if (!(await fs.stat(workspace)).isDirectory()) throw new Error("The Docker working directory is not a directory. Select an existing directory.");
@@ -1556,7 +1575,7 @@ export class DockerSandboxProvider implements SandboxProvider {
     const workloadStateDir = browserUpgrade ? existing?.runtimeStateDir : existing?.workloadStateDir;
     const runtimeStateDir = browserUpgrade ? join(this.inventory.root, "browser-state", id) : existing?.runtimeStateDir ?? join(this.inventory.root, "state", id);
     if (!existing || browserUpgrade) await fs.mkdir(runtimeStateDir, { recursive: true, mode: 0o700 });
-    const value: DockerInventoryRecord = { version: 1, id, sessionId: opts.sessionId ?? id, providerId, containerName: `${CONTAINER_PREFIX}${id}`, workspace, runtimeStateDir, ...(workloadStateDir ? { workloadStateDir } : {}), image, docker: Boolean(opts.docker), state: "creating", ...(opts.browser ? { browser: opts.browser } : {}), ...(companion ? { browserCompanion: { containerName: `${CONTAINER_PREFIX}${id}-browser`, image: this.browserImage! } } : {}), ...(opts.credsFiles && Object.keys(opts.credsFiles).length ? { credsHostDir: join(this.inventory.root, "creds", id) } : {}), ...(opts.resources?.scratch ? { scratchHostDir: join(this.inventory.root, "scratch", id) } : {}) };
+    const value: DockerInventoryRecord = { version: 1, id, sessionId: opts.sessionId ?? id, providerId, containerName: `${CONTAINER_PREFIX}${id}`, workspace, runtimeStateDir, ...(workloadStateDir ? { workloadStateDir } : {}), image, docker: Boolean(opts.docker), state: "creating", ...(opts.browser ? { browser: opts.browser } : {}), ...(companion ? { browserCompanion: { containerName: `${CONTAINER_PREFIX}${id}-browser`, image: this.browserImage! } } : {}), ...(opts.credsFiles && Object.keys(opts.credsFiles).length ? { credsHostDir: join(this.inventory.root, "creds", id) } : {}), ...(resources.scratch ? { scratchHostDir: join(this.inventory.root, "scratch", id) } : {}) };
     if (existing) await this.inventory.write(value);
     else if (!await this.inventory.reserve(value)) return this.restore(id);
     if (value.credsHostDir && opts.credsFiles) await writeCredsFiles(value.credsHostDir, opts.credsFiles, { docker: Boolean(opts.docker || opts.browser?.enabled) });
@@ -1580,7 +1599,7 @@ export class DockerSandboxProvider implements SandboxProvider {
     }
     const uid = process.getuid?.() || 1501;
     const gid = process.getgid?.() || 1501;
-    const runArgs = buildDockerRunArgs({ containerName: value.containerName, image, workspaceHostPath: workspace, network: dockerOpts.network ?? "bridge", env: { ...(companion ? Object.fromEntries(Object.entries(dockerOpts.env ?? {}).filter(([key]) => !key.startsWith("VALET_BROWSER_"))) : dockerOpts.env), VALET_SESSION_ID: value.sessionId, ...(opts.browser?.enabled && !companion ? { VALET_BROWSER_UID: String(uid), VALET_BROWSER_GID: String(gid) } : {}) }, resources: opts.resources, profile: opts.profile, credsHostDir: value.credsHostDir, scratchHostDir: value.scratchHostDir, docker: opts.docker, runtimeStateDir: companion ? undefined : runtimeStateDir, browser: companion ? undefined : opts.browser, browserSeccompProfile: this.browserSeccompProfile, labels: dockerOwnerLabels(value) });
+    const runArgs = buildDockerRunArgs({ containerName: value.containerName, image, workspaceHostPath: workspace, network: dockerOpts.network ?? "bridge", env: { ...(companion ? Object.fromEntries(Object.entries(dockerOpts.env ?? {}).filter(([key]) => !key.startsWith("VALET_BROWSER_"))) : dockerOpts.env), VALET_SESSION_ID: value.sessionId, ...(opts.browser?.enabled && !companion ? { VALET_BROWSER_UID: String(uid), VALET_BROWSER_GID: String(gid) } : {}) }, resources, cgroupParent: this.cgroupParent, profile: opts.profile, credsHostDir: value.credsHostDir, scratchHostDir: value.scratchHostDir, docker: opts.docker, runtimeStateDir: companion ? undefined : runtimeStateDir, browser: companion ? undefined : opts.browser, browserSeccompProfile: this.browserSeccompProfile, labels: dockerOwnerLabels(value) });
     const started = await execProcess("docker", runArgs, {});
     if (started.exitCode !== 0) {
       // Keep the reservation and state: a competing creator or transport loss can leave a live owner.
@@ -1596,7 +1615,7 @@ export class DockerSandboxProvider implements SandboxProvider {
     if (value.browserCompanion) {
       // Persist each role before starting the next one. A failed create remains reserved for explicit release.
       await verifyWorkspaceMount(value.containerId, workspace, image);
-      const browserStarted = await execProcess("docker", buildBrowserCompanionArgs({ owner: value, seccompProfile: this.browserSeccompProfile, uid, gid, devPorts: dockerOpts.env?.VALET_BROWSER_DEV_PORTS }), {});
+      const browserStarted = await execProcess("docker", buildBrowserCompanionArgs({ owner: value, seccompProfile: this.browserSeccompProfile, uid, gid, devPorts: dockerOpts.env?.VALET_BROWSER_DEV_PORTS, cgroupParent: this.cgroupParent }), {});
       if (browserStarted.exitCode !== 0) throw new Error(`Docker browser companion creation failed. Release the pending runtime before retrying. ${browserStarted.stderr.trim() || browserStarted.stdout.trim()}`);
       value.browserCompanion.containerId = browserStarted.stdout.trim();
       await this.inventory.write(value);
@@ -1629,6 +1648,9 @@ export class DockerSandboxProvider implements SandboxProvider {
     const browserOwner = value.browserCompanion ? await this.inspectOwner(value, true) : undefined;
     if (value.browserCompanion && !browserOwner) throw new Error("The recorded Docker browser companion is missing. Release the runtime before creating a replacement.");
     if (browserOwner && !browserOwner.running) throw new Error("The recorded Docker browser companion is stopped. Release the runtime before creating a replacement.");
+    // Adoption enforces current policy. Cleanup still validates ownership for legacy parents.
+    if (this.cgroupParent && [owner, ...(browserOwner ? [browserOwner] : [])].some(actual => actual.cgroupParent !== this.cgroupParent))
+      throw new Error("Docker sandbox cgroup parent differs from the configured parent. Release the execution environment before creating a replacement with retained state.");
     await this.validateOwnerSet(value, [owner.id, ...(browserOwner ? [browserOwner.id] : [])]);
     if (value.browser?.enabled) await verifyBrowserPreflight(browserOwner?.id ?? owner.id);
     value.containerId = owner.id; value.imageId = owner.imageId; value.state = "running";
