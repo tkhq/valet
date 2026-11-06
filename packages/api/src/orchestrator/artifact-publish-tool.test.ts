@@ -281,3 +281,31 @@ it("rejects native binary documents before reading or publishing them", async ()
   expect(sandbox.readFile).not.toHaveBeenCalled();
   expect(fetchMock).not.toHaveBeenCalled();
 });
+
+describe("artifact_edit: bounded request transport", () => {
+  it("sends only an immutable request id and replacement with verified source headers", async () => {
+    const tool = buildMemoryTools().find(tool => tool.name === "artifact_edit");
+    expect(tool?.ownerOnly).toBe(true);
+    const { fetchMock } = stubFetchOk({ version: 2, artifact: { url: "https://x/a/token" } });
+    if (!tool) throw new Error("artifact_edit is missing");
+    const result = await tool.execute({ artifactId: "artifact-id", requestId: "request-id", replacement: '<p class="new">Updated</p>' }, makeCtx(stubSandbox({})));
+    expect(result.text).toContain("version 2");
+    const [requestUrl, init] = fetchMock.mock.calls[0];
+    expect(String(requestUrl)).toBe("http://127.0.0.1:9999/api/artifacts/artifact-id/apply-edit");
+    expect(await capturedBody(fetchMock)).toEqual({ requestId: "request-id", replacement: '<p class="new">Updated</p>' });
+    expect(init?.headers).toMatchObject({ "x-valet-owner": "user:u1", "x-valet-actor": "u1", "x-valet-session-id": "s1", "x-valet-thread-id": "t1" });
+  });
+
+  it("reports stale edits and refuses workflow contexts without sending a request", async () => {
+    const tool = buildMemoryTools().find(tool => tool.name === "artifact_edit");
+    if (!tool) throw new Error("artifact_edit is missing");
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ error: "Refresh the artifact." }), { status: 409 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const args = { artifactId: "artifact-id", requestId: "request-id", replacement: "Updated" };
+    expect((await tool.execute(args, makeCtx(stubSandbox({})))).text).toContain("Refresh the artifact.");
+    fetchMock.mockClear();
+    const result = await tool.execute(args, makeCtx(stubSandbox({}), { config: { apiBaseUrl: "http://api", internalToken: "token", workflowStep: true } }));
+    expect(result.ok).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});

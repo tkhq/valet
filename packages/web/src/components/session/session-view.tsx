@@ -27,7 +27,7 @@ import {
   useCompactingForThread,
   type StreamMessage,
 } from "~/stores/stream";
-import { Composer } from "~/components/session/composer";
+import { Composer, type ComposerContext } from "~/components/session/composer";
 import { useThreadEdit } from "~/components/session/use-thread-edit";
 import { errorText } from "~/lib/error-text";
 import {
@@ -108,7 +108,13 @@ export function SessionView({
   emptyState,
   cover,
   headerActions,
+  context,
+  beforeSend,
+  composerLayout,
 }: {
+  context?: ComposerContext;
+  beforeSend?: (text: string) => Promise<{ text: string; threadId: string }>;
+  composerLayout?: "stacked";
   /** Shown above the composer, under the thread's own pending gate. Home
    * uses it for approvals from work in other threads. */
   composerAccessory?: ReactNode;
@@ -571,6 +577,9 @@ export function SessionView({
             sessionId={sessionId}
             threadId={effectiveThreadId}
             agentStatus={threadStatus.status}
+            context={context}
+            beforeSend={beforeSend}
+            composerLayout={composerLayout}
             queuedMessages={queuedMessages}
             queuedItemCount={threadQueueState?.pendingIds.length ?? 0}
             replyTarget={replyTarget}

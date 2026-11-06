@@ -1,6 +1,8 @@
 import { createFileRoute, Link, useNavigate, useSearch } from "@tanstack/react-router";
+import { useState } from "react";
 import { useArtifacts } from "~/api/artifacts";
 import { useMe } from "~/api/settings";
+import { CreateArtifactDialog } from "~/components/artifact/create-artifact";
 import { Badge, Button, EmptyRow, ErrorRow, LoadingRow, PageHeader, WorkList, WorkRow, pageClass } from "~/components/primitives";
 import { Pager } from "~/components/pager";
 import { WorkspaceClause } from "~/components/workspace-clause";
@@ -24,6 +26,7 @@ export function ArtifactsPage() {
   const me = useMe();
   const search = readSearch(useSearch({ strict: false }));
   const navigate = useNavigate();
+  const [creating, setCreating] = useState(false);
   const ownerKey = owner ? `${owner.ownerType}:${owner.ownerId}` : undefined;
   // Cursors belong to one owner. Switching workspaces starts at page one.
   const cursors = search.pageOwner === ownerKey ? parseCursorStack(search.page) : [];
@@ -40,8 +43,11 @@ export function ArtifactsPage() {
         className="mb-6"
         title="Artifacts"
         clause={<WorkspaceClause />}
-        description="Published documents and pages in this workspace, most recently updated first."
-        actions={<Button asChild variant="secondary" size="sm"><Link to="/memory">Memory</Link></Button>}
+        description="Documents and pages in this workspace."
+        actions={<div className="flex flex-wrap gap-2">
+          <Button size="sm" disabled={!owner} onClick={() => setCreating(true)}>Create artifact</Button>
+          <Button asChild variant="secondary" size="sm"><Link to="/memory">Memory</Link></Button>
+        </div>}
       />
       {!owner && me.isError ? <ErrorRow>Could not load your workspace. Reload this page to try again.</ErrorRow>
         : !owner || query.isPending ? <LoadingRow label="Loading artifacts…" />
@@ -52,20 +58,25 @@ export function ArtifactsPage() {
             {cursors.length > 0 && <Button variant="ghost" size="sm" onClick={() => go([])}>First page</Button>}
           </div>
         </> : <>
-          {query.data.artifacts.length === 0 ? <EmptyRow>
-            {cursors.length || nextCursor ? "No visible artifacts on this page. Use the page controls to continue." : "No artifacts yet. Ask your assistant to publish a document or page."}
-          </EmptyRow> : <WorkList>
+          {query.data.artifacts.length === 0 ? <>
+            <EmptyRow>{cursors.length || nextCursor ? "No visible artifacts on this page. Use the page controls to continue." : "No artifacts yet. Start with a document or HTML page."}</EmptyRow>
+            {!cursors.length && !nextCursor && <Button onClick={() => setCreating(true)}>Create artifact</Button>}
+          </> : <WorkList>
             {query.data.artifacts.map((artifact) => <WorkRow
               key={artifact.id}
               title={artifact.revoked ? artifact.title : <Link to="/a/$token" params={{ token: artifact.token }} className="[overflow-wrap:anywhere]">{artifact.title}</Link>}
               badge={<Badge>{artifact.revoked ? "Revoked" : artifact.ownerType === "team" ? "Team" : artifact.visibility === "public" ? "Public" : "Organization"}</Badge>}
               time={artifact.updatedAt}
-              detail={<span className="[overflow-wrap:anywhere]">{artifact.format === "html" ? "Page" : "Document"} · Version {artifact.sharedVersion ?? artifact.version} · {artifact.path}</span>}
+              detail={<span>{artifact.format === "html" ? "HTML Page" : "Document"} · Version {artifact.sharedVersion ?? artifact.version}</span>}
+              actions={artifact.actorUserId === me.data?.id && <Button asChild variant="secondary" size="sm">
+                <Link to="/artifacts/$id" params={{ id: artifact.id }} aria-label={`Edit ${artifact.title}`}>Edit</Link>
+              </Button>}
             />)}
           </WorkList>}
           <Pager label="artifacts" page={pageNumber(cursors)} hasPrevious={cursors.length > 0} hasNext={!!nextCursor}
             onPrevious={() => go(popCursor(cursors))} onNext={() => { if (nextCursor) go(pushCursor(cursors, nextCursor)); }} />
         </>}
     </div>
+    {owner && <CreateArtifactDialog open={creating} owner={owner} onOpenChange={setCreating} />}
   </div>;
 }

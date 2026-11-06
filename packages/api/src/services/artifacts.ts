@@ -19,12 +19,17 @@
  * logged-in member of the artifact's org; personal `public` pages need the
  * org opt-in. Team ownership always requires live membership.
  */
+import { z } from "zod";
+import { isOrgAdmin } from "./org.js";
+import { resolveArtifactSelection } from "./artifact-selection.js";
+import type { RequestArtifactEditRequest, ApplyArtifactEditRequest, RestoreArtifactRequest } from "../wire/types.js";
 import { isLegacyAssistantRuntime } from "./legacy-runtime.js";
 import { randomBytes, randomUUID } from "node:crypto";
 import { and, asc, desc, eq, exists, isNull, lt, ne, or } from "drizzle-orm";
 import { marked } from "marked";
 import {
   NotFoundError,
+  ValetError,
   ValidationError,
   artifactSizeError,
   isArtifactFormat,
@@ -287,7 +292,8 @@ async function writeArtifact(db: AppDb, scope: ArtifactScope, input: PublishInpu
         eq(artifacts.orgId, input.orgId),
       ),
     )
-    .limit(1);
+    .limit(1)
+    .for("update");
   const existing = existingRows[0];
 
   if (existing) {
@@ -493,6 +499,124 @@ export async function setArtifactSharedVersion(
   return row;
 }
 
+// ─── Managed authoring ───────────────────────────────────────────────────
+
+export class ArtifactVersionConflictError extends Error {
+  readonly code = "artifact_version_conflict";
+  constructor() { super("This artifact has a newer revision. Refresh it, then select the change again."); }
+}
+
+export type ArtifactSnapshot = Pick<ArtifactRow, "title" | "format" | "content" | "rendered"> & { version: number };
+
+export async function getArtifactSnapshot(db: AppDb, artifact: ArtifactRow, version: number, actorUserId: string): Promise<ArtifactSnapshot> {
+  if (!Number.isSafeInteger(version) || version < 1) throw new ValidationError("Choose a positive whole revision number.");
+  if (version === artifact.version) return artifact;
+  const [snapshot] = await db.select().from(artifactVersions).where(and(
+    eq(artifactVersions.artifactId, artifact.id), eq(artifactVersions.version, version), eq(artifactVersions.actorUserId, actorUserId),
+  )).limit(1);
+  if (!snapshot) throw new ValetError("Revision unavailable. Ask its original publisher to open or restore this revision.", "NOT_FOUND", 404);
+  return snapshot;
+}
+
+async function lockArtifactRevision(db: AppDb, scope: ArtifactScope, orgId: string, id: string): Promise<ArtifactRow> {
+  if (scope.owner.type === "team") await lockTeamForOwnership(db, scope.owner.id);
+  await requireTeamArtifactScope(db, scope, orgId, true);
+  const [row] = await db.select().from(artifacts).where(and(
+    eq(artifacts.id, id), eq(artifacts.orgId, orgId), eq(artifacts.ownerType, scope.owner.type),
+    eq(artifacts.ownerId, scope.owner.id), isNull(artifacts.revokedAt),
+  )).limit(1).for("update");
+  if (!row || (row.actorUserId !== scope.actorUserId && !await isOrgAdmin(db, orgId, scope.actorUserId))) {
+    throw new NotFoundError("artifact", id);
+  }
+  return row;
+}
+
+function requireBaseVersion(row: ArtifactRow, baseVersion: number): void {
+  if (!Number.isSafeInteger(baseVersion) || baseVersion < 1) throw new ValidationError("Send the current revision number with this change.");
+  if (row.version !== baseVersion) throw new ArtifactVersionConflictError();
+}
+
+const editRequestSchema = z.object({
+  kind: z.literal("valet-artifact-edit-request-v1"),
+  baseVersion: z.number().int().positive(), start: z.number().int().nonnegative(), end: z.number().int().positive(),
+  oldText: z.string().min(1).max(65536), instruction: z.string().min(1).max(4096),
+  sourceSessionId: z.string(), sourceThreadId: z.string().nullable(),
+});
+
+export async function createArtifactEditRequest(db: AppDb, scope: ArtifactScope, orgId: string, id: string, input: RequestArtifactEditRequest): Promise<ArtifactCommentRow> {
+  if (typeof input.instruction !== "string" || !input.instruction.trim() || input.instruction.length > 4096) {
+    throw new ValidationError("Describe the change in 1 to 4096 characters.");
+  }
+  return db.transaction(async tx => {
+    const row = await lockArtifactRevision(tx, scope, orgId, id);
+    requireBaseVersion(row, input.baseVersion);
+    const range = resolveArtifactSelection(row.content, row.format, input.selection);
+    const [request] = await tx.insert(artifactComments).values({
+      id: randomUUID(), artifactId: row.id, version: row.version, authorUserId: scope.actorUserId,
+      body: JSON.stringify({ kind: "valet-artifact-edit-request-v1", baseVersion: row.version, ...range,
+        instruction: input.instruction.trim(), sourceSessionId: row.sourceSessionId, sourceThreadId: row.sourceThreadId }),
+      vdid: input.selection.vdid ?? null, createdAt: Date.now(),
+    }).returning();
+    if (!request) throw new NotFoundError("edit request");
+    return request;
+  });
+}
+
+async function appendArtifactRevision(db: AppDb, row: ArtifactRow, scope: ArtifactScope, snapshot: ArtifactSnapshot): Promise<ArtifactRow> {
+  const now = Date.now();
+  const [updated] = await db.update(artifacts).set({
+    title: snapshot.title, format: snapshot.format, content: snapshot.content, rendered: snapshot.rendered,
+    version: row.version + 1, updatedAt: now,
+  }).where(and(eq(artifacts.id, row.id), eq(artifacts.orgId, row.orgId), eq(artifacts.version, row.version))).returning();
+  if (!updated) throw new ArtifactVersionConflictError();
+  await appendVersion(db, updated, scope.actorUserId, now);
+  return updated;
+}
+
+export async function applyArtifactEdit(db: AppDb, scope: ArtifactScope, orgId: string, id: string, input: ApplyArtifactEditRequest): Promise<ArtifactRow> {
+  if (typeof input.requestId !== "string" || !input.requestId || typeof input.replacement !== "string") {
+    throw new ValidationError("Send an edit request id and its replacement source.");
+  }
+  return db.transaction(async tx => {
+    const row = await lockArtifactRevision(tx, scope, orgId, id);
+    const [comment] = await tx.select().from(artifactComments).where(and(
+      eq(artifactComments.id, input.requestId), eq(artifactComments.artifactId, row.id),
+    )).limit(1);
+    if (!comment || comment.authorUserId !== scope.actorUserId || comment.parentId !== null ||
+        (comment.authorUserId !== row.actorUserId && !await isOrgAdmin(tx, orgId, comment.authorUserId))) {
+      throw new NotFoundError("edit request", input.requestId);
+    }
+    let body: unknown;
+    try { body = JSON.parse(comment.body); } catch { throw new ValidationError("Choose a saved artifact edit request, then try again."); }
+    const parsed = editRequestSchema.safeParse(body);
+    if (!parsed.success) throw new ValidationError("Choose a saved artifact edit request, then try again.");
+    const request = parsed.data;
+    requireBaseVersion(row, request.baseVersion);
+    if (comment.resolvedAt !== null) throw new ValidationError("Send a new edit request for the current revision.");
+    if (comment.version !== request.baseVersion || request.end <= request.start ||
+        request.sourceSessionId !== row.sourceSessionId || request.sourceThreadId !== row.sourceThreadId ||
+        row.content.slice(request.start, request.end) !== request.oldText) {
+      throw new ValidationError("The saved selection no longer matches. Refresh the artifact and send a new edit request.");
+    }
+    const content = row.content.slice(0, request.start) + input.replacement + row.content.slice(request.end);
+    const sizeError = artifactSizeError(content);
+    if (sizeError) throw new ValidationError(sizeError);
+    const updated = await appendArtifactRevision(tx, row, scope, { ...row, content, rendered: renderArtifactBody(content, row.format === "html" ? "html" : "markdown") });
+    await tx.update(artifactComments).set({ resolvedAt: Date.now(), resolvedBy: scope.actorUserId })
+      .where(and(eq(artifactComments.id, comment.id), eq(artifactComments.artifactId, row.id)));
+    return updated;
+  });
+}
+
+export async function restoreArtifactVersion(db: AppDb, scope: ArtifactScope, orgId: string, id: string, input: RestoreArtifactRequest): Promise<ArtifactRow> {
+  return db.transaction(async tx => {
+    const row = await lockArtifactRevision(tx, scope, orgId, id);
+    requireBaseVersion(row, input.baseVersion);
+    const snapshot = await getArtifactSnapshot(tx, row, input.version, scope.actorUserId);
+    return appendArtifactRevision(tx, row, scope, snapshot);
+  });
+}
+
 // ─── List / manage ───────────────────────────────────────────────────────
 
 /** Everything the list/manage surfaces need — deliberately WITHOUT
@@ -696,16 +820,25 @@ export async function addArtifactComment(db: AppDb, opts: AddArtifactCommentOpts
 }
 
 export async function listArtifactComments(db: AppDb, artifactId: string): Promise<ArtifactCommentRow[]> {
-  return db
+  const rows = await db
     .select()
     .from(artifactComments)
     .where(eq(artifactComments.artifactId, artifactId))
     .orderBy(asc(artifactComments.createdAt));
+  return rows.filter(row => !isAuthoringComment(row));
+}
+
+/** Authoring payloads contain protected working source, never ordinary comment data. */
+function isAuthoringComment(row: ArtifactCommentRow): boolean {
+  try {
+    const body: unknown = JSON.parse(row.body);
+    return typeof body === "object" && body !== null && "kind" in body && body.kind === "valet-artifact-edit-request-v1";
+  } catch { return false; }
 }
 
 export async function getArtifactComment(db: AppDb, id: string): Promise<ArtifactCommentRow | undefined> {
-  const rows = await db.select().from(artifactComments).where(eq(artifactComments.id, id)).limit(1);
-  return rows[0];
+  const [row] = await db.select().from(artifactComments).where(eq(artifactComments.id, id)).limit(1);
+  return row && !isAuthoringComment(row) ? row : undefined;
 }
 
 /** Resolve a root comment's thread. Replies are not independently

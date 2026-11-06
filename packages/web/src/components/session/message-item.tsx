@@ -16,6 +16,7 @@ import { ToolCallBlock } from "./tool-call-block";
 import { ReasoningLine, segmentParts, withExtraWork, WorkGroup, workKey, type WorkPart } from "./work-group";
 import { extractSkillInvocation, type SkillBlock } from "./tool-renderers/skill";
 import { cn } from "~/lib/cn";
+import { stripArtifactConversationContext } from "~/lib/artifact-conversation-context";
 import { shortModelLabel } from "~/lib/models";
 import { useRateMessage, useSessionRatings } from "~/api/queries";
 import { RatingButtons } from "./rating-buttons";
@@ -344,13 +345,15 @@ export function messageCopyText(message: StreamMessage): string {
     .filter((p): p is Extract<MessagePart, { kind: "text" }> => p.kind === "text")
     .map((p) => p.text.trim())
     .filter(Boolean);
-  const raw = texts.length > 0 ? texts.join("\n\n") : (message.content?.trim() ?? "");
+  const body = texts.length > 0 ? texts.join("\n\n") : (message.content?.trim() ?? "");
+  const raw = message.role === "user" ? stripArtifactConversationContext(body).trim() : body;
   // A skill-invocation user message displays as a card plus the typed
   // arguments — copying the raw multi-KB expansion would paste internal
   // markup that, re-sent, bypasses dispatch and persists the stale skill
   // body. Copy the re-sendable command form instead.
   if (message.role === "user" && raw) {
-    const block = extractSkillInvocation(raw, message.skill);
+    const skill = message.skill && { ...message.skill, args: stripArtifactConversationContext(message.skill.args ?? "") };
+    const block = extractSkillInvocation(raw, skill);
     if (block) return `/skill:${block.name}${block.rest ? ` ${block.rest}` : ""}`;
   }
   return raw;
@@ -398,7 +401,7 @@ function PartView({
 }
 
 function TextBlock({
-  text,
+  text: rawText,
   skillMeta,
   detectSkill = false,
   collapseStructured = false,
@@ -411,10 +414,15 @@ function TextBlock({
   detectSkill?: boolean;
   collapseStructured?: boolean;
 }) {
+  const text = detectSkill ? stripArtifactConversationContext(rawText) : rawText;
   // Memoized so streaming re-renders elsewhere in the thread don't re-run
   // the extraction on static user text every frame.
   const block = useMemo(
-    () => (detectSkill ? extractSkillInvocation(text, skillMeta) : null),
+    () => {
+      if (!detectSkill) return null;
+      const skill = skillMeta && { ...skillMeta, args: stripArtifactConversationContext(skillMeta.args ?? "") };
+      return extractSkillInvocation(text, skill);
+    },
     [text, skillMeta, detectSkill],
   );
   const structured = useMemo(
