@@ -507,8 +507,12 @@ export function useSetThreadReasoning(sessionId: string) {
   const qc = useQueryClient();
   return useMutation<PatchThreadResponse, Error, { threadId: string; reasoning: string | null }>({
     mutationFn: ({ threadId, reasoning }) => api.patchThread(threadId, { reasoning }),
-    onSuccess: () => {
-      qc.invalidateQueries(threadListFilters(sessionId));
+    onSuccess: async (saved) => {
+      await qc.cancelQueries(threadListFilters(sessionId));
+      qc.setQueriesData<ListThreadsResponse | InfiniteData<ListThreadsResponse>>(
+        threadListFilters(sessionId),
+        (current) => mapThreadData(current, thread => thread.id === saved.id ? { ...thread, reasoning: saved.reasoning } : thread),
+      );
     },
   });
 }

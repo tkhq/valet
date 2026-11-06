@@ -611,7 +611,7 @@ export function ModelPicker({
               {newThreadDefault.onMakeDefault && (
                 <button
                   type="button"
-                  disabled={newThreadDefault.saving}
+                  disabled={disabled || newThreadDefault.saving}
                   className="shrink-0 max-sm:min-h-11 rounded-full border border-line px-2 py-0.5 text-ink hover:bg-moss-wash disabled:opacity-50"
                   // Keep focus in the menu on click; Enter and Space still activate it.
                   onMouseDown={(e) => e.preventDefault()}

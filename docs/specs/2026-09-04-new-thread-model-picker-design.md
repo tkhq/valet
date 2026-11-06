@@ -101,6 +101,7 @@ In a workspace conversation, the picker footer shows "New threads:" with the mod
 
 ## Error handling
 
+- While a model or reasoning change is pending, the picker disables selection and default saves. Successful thread changes update the cached field from the confirmed response before saves resume. Failed changes retain the saved settings.
 - Reject an unknown `newThreadBehavior` with a corrective 400 response.
 - Reject a source thread from another session as `thread not found`.
 - If current-default resolution cannot find an active tier target, return the existing corrective tier error.

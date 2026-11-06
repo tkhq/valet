@@ -239,8 +239,8 @@ export function SessionHeader({
     : session.reasoning;
   const activeModel = useActiveModelForThread(session.id, threadId);
   const pickerDisabled = threadScoped
-    ? !activeThread || setThreadModel.isPending
-    : setModel.isPending;
+    ? !activeThread || setThreadModel.isPending || setThreadReasoning.isPending
+    : setModel.isPending || setReasoning.isPending;
   const pause = usePauseSession(session.id);
   const replace = useReplaceSandbox(session.id);
   const rename = useRenameSession(session.id);
