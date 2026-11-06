@@ -497,6 +497,7 @@ export function SessionHeader({
         <ModelPicker
           presentation={presentation}
           onOpenPanel={() => modelSettings.setOpen(true)}
+          onPicked={() => { if (mobile) modelSettings.setOpen(false); }}
           currentId={configuredModel}
           displayId={modelSaving ? configuredModel : (activeModel ?? configuredModel)}
           ariaDescription={modelHint}

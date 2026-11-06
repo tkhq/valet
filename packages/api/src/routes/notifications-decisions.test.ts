@@ -41,6 +41,9 @@ it("lists pending gates from the caller's own and team sessions only", async () 
 
   const body = await (await fetch(`${api.baseUrl}/api/notifications/decisions`)).json() as ListNotificationDecisionsResponse;
   expect(body.items.map((item) => item.sessionId).sort()).toEqual(["own", "team-mine"]);
+  // Each item names its workspace, so a client can keep team approvals out of personal views.
+  expect(body.items.find((item) => item.sessionId === "own")?.owner).toEqual({ type: "user", id: "local-user" });
+  expect(body.items.find((item) => item.sessionId === "team-mine")?.owner).toEqual({ type: "team", id: "mine" });
 });
 
 it("keeps another member's helper-thread approvals out of the inbox, and the viewer's own in", async () => {
@@ -198,6 +201,8 @@ it.each([
   const inbox = await (await request("notifications/decisions")).json() as ListNotificationDecisionsResponse;
   expect(inbox.items.map(item => item.gate.id)).toEqual(["borrow-child"]);
   expect(inbox.items[0]?.canOpenThread).toBe(false);
+  // Workflow (`wf:`) rows carry the run's owner, like app rows carry the session's.
+  expect(inbox.items[0]?.owner).toEqual({ type: "team", id: "mine" });
   for (const address of [`sessions/${childId}`, "threads/child-asked"]) {
     const decisions = await request(`${address}/decisions`);
     expect(decisions.status).toBe(200);

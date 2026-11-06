@@ -541,19 +541,45 @@ describe("ModelPicker — reasoning row", () => {
 
 
 describe("ModelPicker — phone settings panel", () => {
-  it("shows model and thinking controls directly, and stays open after a selection", async () => {
+  it("shows model and thinking controls directly, and reports a size pick but not a thinking change", async () => {
     const onSelect = vi.fn();
+    const onPicked = vi.fn();
     const onSelectReasoning = vi.fn();
-    renderPicker({ presentation: "panel", currentId: "custom_1/llama-3", onSelect, onSelectReasoning });
+    renderPicker({ presentation: "panel", currentId: "custom_1/llama-3", onSelect, onPicked, onSelectReasoning });
     expect(screen.queryByRole("button", { name: /^Choose model:/ })).toBeNull();
     expect(screen.queryByRole("textbox", { name: "Search models" })).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "Small" }));
     expect(onSelect).toHaveBeenCalledWith("s");
+    expect(onPicked).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("button", { name: "High reasoning" })).toBeNull();
     await userEvent.selectOptions(screen.getByRole("combobox", { name: "Thinking level" }), "high");
     expect(onSelectReasoning).toHaveBeenCalledWith("high");
+    expect(onPicked).toHaveBeenCalledTimes(1);
     expect(onSelect).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("reports a catalog pick but not typing in the search box", async () => {
+    const onSelect = vi.fn();
+    const onPicked = vi.fn();
+    renderPicker({ presentation: "panel", onSelect, onPicked });
+    await userEvent.click(screen.getByRole("button", { name: "More models" }));
+    await userEvent.type(screen.getByRole("textbox", { name: "Search models" }), "Llama");
+    expect(onPicked).not.toHaveBeenCalled();
+    await userEvent.keyboard("{Enter}");
+    expect(onSelect).toHaveBeenCalledWith("custom_1/llama-3");
+    expect(onPicked).toHaveBeenCalledTimes(1);
+  });
+
+  it("commits a tapped catalog row and reports it", async () => {
+    const onSelect = vi.fn();
+    const onPicked = vi.fn();
+    renderPicker({ presentation: "panel", onSelect, onPicked });
+    await userEvent.click(screen.getByRole("button", { name: "More models" }));
+    await userEvent.type(screen.getByRole("textbox", { name: "Search models" }), "Llama");
+    await userEvent.click(screen.getByRole("button", { name: /Llama 3/ }));
+    expect(onSelect).toHaveBeenCalledWith("custom_1/llama-3");
+    expect(onPicked).toHaveBeenCalledTimes(1);
   });
 
   it("uses native keyboard activation for thinking without selecting a highlighted model", () => {

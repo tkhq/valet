@@ -188,6 +188,7 @@ function decisionItem(i: number, overrides: Partial<DecisionGate> = {}): Decisio
     title: i % 4 === 0 ? `Thread in ${stressTitle(i + 5)}` : `Workspace ${teamId(i % 30)} · ${stressTitle(i + 2)}`,
     gate: decisionGate(i, overrides),
     canOpenThread: i % 7 === 6 ? false : undefined,
+    owner: { type: "team", id: teamId(i % 30) },
   };
 }
 
