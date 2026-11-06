@@ -969,19 +969,24 @@ coverage, redeliver) matches a `subject` filter the same way ingest did.
 
 *Depends on: Part F.*
 
-The composer status line, the thread context card's Background work
-section, and the thread-list line come from the wakeups spec. This part
-adds the event kind to each:
+The composer status line and the thread context card's Background work
+section come from the wakeups spec. This part adds the event kind to both:
 
 - Composer line: an event icon and the text `waiting on <subject label>`.
 - Card section: the subject as a link, the clause count, and the deadline.
-- Thread list: `Waiting on <subject label>` on the thread's row, for its oldest
-  event waiter, plus `+N more` when the thread has other event waits.
+- Thread list: no waiting-status line under chat titles (2026-11-05).
 - Signal cards: an `event.matched` card shows the key, a status chip, the
   actor, the summary, and the link. A stream signal lists each digest.
 
 Each plugin exports `subjectLabel(subject)` and `subjectUrl(subject)`. The
 web shows a link only when `subjectUrl` returns one.
+
+For internal child-session subjects, the API reads the child's task title.
+It checks the caller's organization, session access, and spawning-thread access before returning the title and a child-panel link.
+Missing, deleted, or hidden children use `background task` without a link.
+An untitled visible child uses the same label with a link.
+Automatic child-watch reasons use the readable label instead of the child-session ID.
+A request resolves each subject once and checks at most four children at the same time.
 
 ## Part I: Agent guidance
 

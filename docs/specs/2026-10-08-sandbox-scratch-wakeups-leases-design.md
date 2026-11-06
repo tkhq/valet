@@ -670,7 +670,7 @@ valet_leases_over_deadline > 0                                     for 5m
   + (sum(valet_wakeups_kill_failed_total unless valet_wakeups_kill_failed_total offset 1h) or vector(0)) > 0
 ```
 
-UI: background work shows in three places, all read from one
+UI: background work shows in two places, both read from one
 `GET /api/sessions/:id/wakeups` query per session.
 
 - **Composer status line.** A muted one-line strip under the composer
@@ -687,12 +687,10 @@ UI: background work shows in three places, all read from one
   with its reason, its state (waiting, running, starting, or held), and
   its fire time or deadline, with the same Cancel. The section is hidden
   when the thread has no background work.
-- **Thread list line.** A thread row with an active timer shows one quiet
-  line, `Waiting · next wakeup in 26m`, with the fire time on hover.
-  Processes, watches, and holds get no row line. The line is part of the
-  row element, under the title. The selected tint, the accent bar, and the
-  hover tint cover the title and the line together. The line refreshes its
-  relative time every 30 seconds.
+
+The sidebar does not show waiting-status lines under chat titles.
+Timer and event details remain in the composer status line and thread card.
+This replaces the earlier sidebar timer line (2026-11-05).
 
 The query polls once a minute while one of these reads it. A
 `queue.state` frame and every cancel, pause, replace, or forced action

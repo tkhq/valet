@@ -3,8 +3,7 @@
  * Background work in the web UI (spec 2026-10-08, review UI placement):
  * the composer status line ("next wakeup in 26m · 1 process · +1 in other
  * threads"), its list of the work with a Cancel per row behind a confirm
- * step that names the reason, the thread card section, and the thread
- * list's timer line.
+ * step that names the reason, and the thread card section.
  */
 import type { ReactNode } from "react";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
@@ -19,8 +18,6 @@ import { TooltipProvider } from "~/components/primitives";
 import {
   BackgroundWorkSection,
   BackgroundWorkStatusLine,
-  ThreadEventLine,
-  ThreadTimerLine,
   backgroundItems,
   eventSectionDetail,
   feederLinks,
@@ -29,8 +26,6 @@ import {
   sectionDetail,
   statusLine,
   statusLineText,
-  threadEventWaits,
-  threadTimerWaits,
   timeSince,
   timeUntil,
 } from "./background-work";
@@ -183,14 +178,6 @@ describe("background work helpers", () => {
     expect(proc && sectionDetail({ ...proc, status: "pending" }, NOW)).toBe("Process · starting · deadline in 1d");
   });
 
-  it("keeps the soonest timer of each thread, and only timers", () => {
-    const data = listing(NOW);
-    data.wakeups.push({ id: "wk_4", threadId: "th-1", kind: "timer", status: "pending", reason: "sooner", fireAt: NOW + HOUR, createdAt: NOW });
-    const waits = threadTimerWaits(data);
-    expect([...waits.entries()]).toEqual([["th-1", NOW + HOUR]]);
-    expect(threadTimerWaits(undefined).size).toBe(0);
-  });
-
   it("keeps an event waiter's subject, link, and clause count", () => {
     const items = backgroundItems(eventListing(NOW));
     expect(items).toHaveLength(1);
@@ -250,22 +237,6 @@ describe("background work helpers", () => {
     ]);
   });
 
-  it("names each thread's oldest event waiter and counts the rest", () => {
-    const data = eventListing(NOW);
-    const waits = threadEventWaits(data);
-    expect([...waits.entries()]).toEqual([["th-1", { label: "acme/lean-proofs#42", moreCount: 0 }]]);
-    expect(threadEventWaits(undefined).size).toBe(0);
-    const base = data.wakeups[0]!;
-    const several = {
-      ...data,
-      wakeups: [
-        { ...base, id: "wk_new", createdAt: NOW - 1_000, subjectLabel: "acme/lean-proofs#43" },
-        { ...base, id: "wk_old", createdAt: NOW - 9_000, subjectLabel: "acme/lean-proofs#41" },
-        { ...base, id: "wk_mid", createdAt: NOW - 5_000, subjectLabel: "acme/lean-proofs#42" },
-      ],
-    };
-    expect(threadEventWaits(several).get("th-1")).toEqual({ label: "acme/lean-proofs#41", moreCount: 2 });
-  });
 });
 
 describe("BackgroundWorkStatusLine", () => {
@@ -497,25 +468,5 @@ describe("BackgroundWorkSection", () => {
     it("seeds the feeders query under the session+thread key", async () => {
       expect(qkThreadFeeders("s-1", "th-1")).toEqual(["presence", "feeders", "s-1", "th-1"]);
     });
-  });
-});
-
-describe("ThreadTimerLine", () => {
-  it("says the thread waits and when the next wakeup is", () => {
-    const { wrapper } = wrap();
-    render(<ThreadTimerLine fireAt={Date.now() + 26 * MINUTE + 10_000} />, { wrapper });
-    expect(screen.getByText("Waiting · next wakeup in 26m")).toBeTruthy();
-  });
-});
-
-describe("ThreadEventLine", () => {
-  it("names the subject it waits on", () => {
-    render(<ThreadEventLine label="acme/lean-proofs#42" />);
-    expect(screen.getByText("Waiting on acme/lean-proofs#42")).toBeTruthy();
-  });
-
-  it("counts the other waits on the thread", () => {
-    render(<ThreadEventLine label="acme/lean-proofs#41" moreCount={2} />);
-    expect(screen.getByText("Waiting on acme/lean-proofs#41 +2 more")).toBeTruthy();
   });
 });
