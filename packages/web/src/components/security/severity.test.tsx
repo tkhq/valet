@@ -6,7 +6,7 @@
 import { describe, expect, it } from "vitest";
 import { render } from "@testing-library/react";
 import type { SecurityFindingStatus } from "@valet/api/wire";
-import { FindingStatusChip } from "./severity";
+import { FindingStatusChip, SEVERITY_FILL, SeverityBadge } from "./severity";
 
 describe("FindingStatusChip", () => {
   it("renders every status, including the re-scan `fixed` chip", () => {
@@ -32,5 +32,16 @@ describe("FindingStatusChip", () => {
     // A leading check mark carries the "resolved" read.
     expect(fixed.querySelector("svg")).not.toBeNull();
     expect(verified.querySelector("svg")).toBeNull();
+  });
+});
+
+describe("SeverityBadge", () => {
+  it("keeps low off the accent scale, which follows the palette", () => {
+    // Under Ember, `accent` is rust orange, so a low finding on it would
+    // look more severe than a high one.
+    const { container } = render(<SeverityBadge severity="low" />);
+    expect(container.querySelector("span")?.className).toContain("bg-blue-100");
+    expect(container.querySelector("span")?.className).not.toContain("accent");
+    expect(SEVERITY_FILL.low).not.toContain("accent");
   });
 });

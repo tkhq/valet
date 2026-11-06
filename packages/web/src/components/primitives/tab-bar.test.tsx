@@ -20,6 +20,17 @@ describe("TabBar", () => {
     expect(one.getAttribute("tabindex")).toBe("-1");
   });
 
+  it("draws an inset moss focus ring on every tab", () => {
+    // The strip scrolls sideways and clips, so an outset ring would be cut off.
+    render(<TabBar tabs={TABS} active="one" onSelect={vi.fn()} label="Demo" />);
+    for (const name of ["One", "Two", "Three"]) {
+      const tab = screen.getByRole("tab", { name });
+      for (const cls of ["rounded-sm", "focus-visible:outline-none", "focus-visible:ring-2", "focus-visible:ring-inset", "focus-visible:ring-moss"]) {
+        expect(tab.classList.contains(cls), `${name} ${cls}`).toBe(true);
+      }
+    }
+  });
+
   it("wires aria-controls to the tabPanelId helper", () => {
     render(<TabBar tabs={TABS} active="one" onSelect={vi.fn()} label="Demo" />);
     expect(screen.getByRole("tab", { name: "One" }).getAttribute("aria-controls")).toBe(

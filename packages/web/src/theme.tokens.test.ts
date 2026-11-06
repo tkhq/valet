@@ -105,7 +105,35 @@ describe("theme.css", () => {
       "--danger-wash",
       "--warning-wash",
       "--warning-fg",
+      "--on-moss",
+      "--moss-text",
+      "--control-border",
+      "--danger-text",
+      "--neutral-h",
+      "--neutral-c",
+      "--accent-h",
+      "--accent-c",
     ]);
+  });
+
+  it("gives native checkboxes and radios the moss accent", () => {
+    const root = RULES.find(
+      (rule) => rule.media === null && rule.selectors.length === 1 && rule.selectors[0] === ":root" && rule.declarations.has("accent-color"),
+    );
+    expect(root?.declarations.get("accent-color")).toBe("var(--moss)");
+  });
+
+  it("pins the default muted text to its contrast-checked values", () => {
+    const [light, osDark, dark] = expectedBlocks("default").map(findRule);
+    expect(light?.declarations.get("--muted")).toBe("oklch(50.0% 0.015 247)");
+    expect(osDark?.declarations.get("--muted")).toBe("oklch(62.0% 0.015 247)");
+    expect(dark?.declarations.get("--muted")).toBe("oklch(62.0% 0.015 247)");
+    expect(light?.declarations.get("--on-moss")).toBe("#fff");
+    expect(dark?.declarations.get("--on-moss")).toBe("oklch(13.0% 0.005 247)");
+    // The default moss measures 4.496:1 on its own wash, so light text is
+    // one point darker. Dark moss passes and stays `var(--moss)`.
+    expect(light?.declarations.get("--moss-text")).toBe("oklch(52.5% 0.190 264)");
+    expect(dark?.declarations.get("--moss-text")).toBe("var(--moss)");
   });
 
   it("pins the default palette to the values an untouched install shows", () => {
@@ -151,6 +179,51 @@ describe("theme.css", () => {
           expect(findRule(block)?.declarations.get("color-scheme")).toBe(block.scheme);
         });
 
+        it(`reads its scale hue and chroma from the palette in its ${block.label} block`, () => {
+          // The `neutral` and `accent` Tailwind scales multiply these, so a
+          // wrong pair repaints every `bg-neutral-*` and `text-accent-*`.
+          const rule = findRule(block);
+          const scale = SCALES[palette];
+          expect(rule?.declarations.get("--neutral-h")).toBe(scale.neutral[0]);
+          expect(rule?.declarations.get("--neutral-c")).toBe(scale.neutral[1]);
+          expect(rule?.declarations.get("--accent-h")).toBe(scale.accent[0]);
+          expect(rule?.declarations.get("--accent-c")).toBe(scale.accent[1]);
+        });
+
+        it(`keeps --muted-wash on the L/C/H of --muted in its ${block.label} block`, () => {
+          const rule = findRule(block);
+          const muted = rule?.declarations.get("--muted") ?? "";
+          expect(rule?.declarations.get("--muted-wash")).toBe(muted.replace(/\)$/, " / 0.5)"));
+        });
+
+        describe(`contrast in its ${block.label} block`, () => {
+          // WCAG 2.2: 4.5:1 for text (1.4.3), 3:1 for a control's outline
+          // and an off switch's thumb (1.4.11). The washes are translucent,
+          // so each one is laid over `--paper` first, as the browser paints
+          // it. `--moss-wash` is the fill of a selected `RadioCard`, and
+          // `--ink-wash-strong` is the track of an off `Switch`.
+          const rule = findRule(block);
+          const color = (token: string) => resolveColor(rule?.declarations ?? new Map(), token);
+          const paper = () => color("--paper");
+          const onPaper = (wash: string) => () => over(color(wash), paper());
+          const cases: [string, () => Rgba, () => Rgba, number][] = [
+            ["--on-moss on --moss", () => color("--on-moss"), () => color("--moss"), 4.5],
+            ["--moss-text on --paper", () => color("--moss-text"), paper, 4.5],
+            ["--moss-text on --moss-wash", () => color("--moss-text"), onPaper("--moss-wash"), 4.5],
+            ["--muted on --paper", () => color("--muted"), paper, 4.5],
+            ["--muted on --ink-wash", () => color("--muted"), onPaper("--ink-wash"), 4.5],
+            ["--muted on --moss-wash", () => color("--muted"), onPaper("--moss-wash"), 4.5],
+            ["--danger-text on --paper", () => color("--danger-text"), paper, 4.5],
+            ["--control-border on --paper", () => color("--control-border"), paper, 3],
+            ["--control-border on --ink-wash-strong", () => color("--control-border"), onPaper("--ink-wash-strong"), 3],
+          ];
+          for (const [name, fg, bg, floor] of cases) {
+            it(`${name} is at least ${floor}:1`, () => {
+              expect(contrastRatio(fg(), bg())).toBeGreaterThanOrEqual(floor);
+            });
+          }
+        });
+
         it(`keeps every wash on the alpha form in its ${block.label} block`, () => {
           // The opacity-modifier trap, caught at the token: a wash whose
           // value carries no alpha renders as an opaque slab, and one whose
@@ -167,6 +240,89 @@ describe("theme.css", () => {
     });
   }
 });
+
+/** The `[hue, chroma]` each palette gives the `neutral` and `accent` scales. */
+const SCALES: Record<string, { neutral: [string, string]; accent: [string, string] }> = {
+  default: { neutral: ["247", "0.015"], accent: ["264", "0.19"] },
+  ember: { neutral: ["65", "0.030"], accent: ["45", "0.15"] },
+  tide: { neutral: ["210", "0.028"], accent: ["195", "0.115"] },
+  orchid: { neutral: ["325", "0.030"], accent: ["330", "0.17"] },
+};
+
+/** A color in gamma-encoded sRGB, each channel 0 to 1, with its alpha. */
+interface Rgba {
+  r: number;
+  g: number;
+  b: number;
+  a: number;
+}
+
+/**
+ * Reads a token's value as a color. It follows `var(--x)` to another token
+ * in the same block, and reads `#rgb`, `#rrggbb`, and `oklch(L% C H / a)`,
+ * the only forms `theme.css` uses. Anything else fails the test, so a new
+ * form cannot pass unmeasured.
+ */
+function resolveColor(declarations: Map<string, string>, token: string, seen: string[] = []): Rgba {
+  const value = declarations.get(token);
+  if (value === undefined) throw new Error(`${token} is not declared`);
+  const reference = /^var\((--[\w-]+)\)$/.exec(value);
+  if (reference) {
+    if (seen.includes(reference[1])) throw new Error(`${token} refers to itself`);
+    return resolveColor(declarations, reference[1], [...seen, token]);
+  }
+  const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(value);
+  if (hex) {
+    const digits = hex[1].length === 3 ? [...hex[1]].map((digit) => digit + digit) : hex[1].match(/../g) ?? [];
+    const [r, g, b] = digits.map((pair) => parseInt(pair, 16) / 255);
+    return { r, g, b, a: 1 };
+  }
+  const oklch = /^oklch\(([\d.]+)%\s+([\d.]+)\s+([\d.]+)(?:\s*\/\s*([\d.]+))?\)$/.exec(value);
+  if (oklch) {
+    const [r, g, b] = oklchToSrgb(Number(oklch[1]) / 100, Number(oklch[2]), Number(oklch[3]));
+    return { r, g, b, a: oklch[4] === undefined ? 1 : Number(oklch[4]) };
+  }
+  throw new Error(`${token} has a value the contrast check cannot read: ${value}`);
+}
+
+/**
+ * OKLCH to gamma-encoded sRGB, clipped to the sRGB gamut. The matrices are
+ * from the OKLab definition: https://bottosson.github.io/posts/oklab/
+ */
+function oklchToSrgb(lightness: number, chroma: number, hue: number): [number, number, number] {
+  const angle = (hue * Math.PI) / 180;
+  const a = chroma * Math.cos(angle);
+  const b = chroma * Math.sin(angle);
+  const l = (lightness + 0.3963377774 * a + 0.2158037573 * b) ** 3;
+  const m = (lightness - 0.1055613458 * a - 0.0638541728 * b) ** 3;
+  const s = (lightness - 0.0894841775 * a - 1.291485548 * b) ** 3;
+  const linear = [
+    4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+    -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+    -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s,
+  ];
+  const [r, g, bl] = linear.map((channel) => {
+    const clipped = Math.min(1, Math.max(0, channel));
+    return clipped <= 0.0031308 ? 12.92 * clipped : 1.055 * clipped ** (1 / 2.4) - 0.055;
+  });
+  return [r, g, bl];
+}
+
+/** Paints a translucent color over an opaque one, in sRGB as browsers do. */
+function over(top: Rgba, bottom: Rgba): Rgba {
+  const mix = (upper: number, lower: number) => upper * top.a + lower * (1 - top.a);
+  return { r: mix(top.r, bottom.r), g: mix(top.g, bottom.g), b: mix(top.b, bottom.b), a: 1 };
+}
+
+/** The WCAG 2.2 contrast ratio of two opaque colors. */
+function contrastRatio(first: Rgba, second: Rgba): number {
+  const luminance = ({ r, g, b }: Rgba) => {
+    const linear = (channel: number) => (channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4);
+    return 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
+  };
+  const [lighter, darker] = [luminance(first), luminance(second)].sort((x, y) => y - x);
+  return (lighter + 0.05) / (darker + 0.05);
+}
 
 function isWash(token: string): boolean {
   return token.endsWith("-wash") || token.endsWith("-wash-strong");

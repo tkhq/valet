@@ -63,7 +63,7 @@
  *
  * Opacity modifiers: the variable tokens (`ink`, `paper`, `moss`, …) are
  * registered through `varColor` in `tailwind.config.ts`, so `bg-ink/10`
- * emits a `color-mix(...)` rule, and the fixed OKLCH scales (`neutral`,
+ * emits a `color-mix(...)` rule, and the OKLCH scales (`neutral`,
  * `accent`, `danger`, `success`) carry `<alpha-value>`. Before both, slash
  * classes silently emitted no CSS. Prefer these pre-mixed wash variables
  * (the `ink-wash` / `moss-wash` Tailwind colors) for hover and press states:
@@ -75,6 +75,55 @@
  * the base hex and could drift from it silently. These can't drift: change
  * the base token's L/C/H and the wash follows.
  */
+
+/**
+ * Contrast pairs — `--on-moss`, `--moss-text`, `--control-border` and
+ * `--danger-text`.
+ *
+ * A fill and the text on it are one pair, as in shadcn's `primary` and
+ * `primary-foreground`. Every block states both halves, and
+ * `theme.tokens.test.ts` measures each pair with the WCAG 2.2 contrast
+ * ratio:
+ *
+ * - `--on-moss` is text and icons on a `--moss` fill: 4.5:1 or more. Light
+ *   blocks use white. Dark blocks use their own `--paper`, because white on
+ *   the lighter dark moss measured 2.82:1.
+ * - `--moss-text` is moss-colored text: 4.5:1 or more on `--paper` and on
+ *   `--moss-wash`, the fill of a selected `RadioCard`. It is `var(--moss)`
+ *   where the moss passes both. The default and Tide light blocks give it
+ *   a darker value, because their moss measured 4.496:1 and 4.34:1 on the
+ *   wash.
+ * - `--control-border` is the outline of an unchecked checkbox or an off
+ *   switch, and the off switch's thumb: 3:1 or more on `--paper` and on
+ *   the `--ink-wash-strong` track (WCAG 1.4.11, non-text contrast). `--line`
+ *   is far under that, so a control drawn with it disappears.
+ * - `--danger-text` is error text on `--paper`: 4.5:1 or more. Like the
+ *   status washes, it is the same in every palette.
+ *
+ * `--muted` has the same floor: 4.5:1 on `--paper`, on `--ink-wash` and on
+ * `--moss-wash`.
+ */
+
+/**
+ * Palette scales — `--neutral-h`, `--neutral-c`, `--accent-h` and
+ * `--accent-c`.
+ *
+ * The `neutral` and `accent` Tailwind scales read their hue and chroma
+ * from these numbers, so `bg-neutral-100` and `text-accent-600` follow the
+ * active palette instead of staying cool grey and blue. Each step keeps its
+ * lightness and scales its chroma by its ratio to the base step (500 for
+ * `neutral`, 600 for `accent`). The default palette's numbers give the
+ * same colors as the fixed scales they replace.
+ */
+
+/**
+ * Native checkboxes, radios and range inputs take the brand accent instead
+ * of the browser's blue. `accent-color` inherits, so one declaration on
+ * `:root` reaches every native control on the page.
+ */
+:root {
+  accent-color: var(--moss);
+}
 
 /**
  * Shared layout metric: the fixed top-nav height. Consumed by the nav
@@ -127,7 +176,7 @@
 
   --paper: oklch(98.5% 0.002 247);
   --ink: oklch(20.5% 0.006 247);
-  --muted: oklch(55.4% 0.015 247);
+  --muted: oklch(50.0% 0.015 247);
   --line: oklch(92.9% 0.005 247);
   --moss: oklch(53.5% 0.190 264);
   /* `--amber` is a narrow semantic marker ("thinking / pending"), not part
@@ -141,7 +190,7 @@
   /* Mid-strength neutral fill for data marks — chart bars, idle dots —
      that must read against an `--ink-wash` track. Same L/C/H as `--muted`,
      with the alpha in the token. */
-  --muted-wash: oklch(55.4% 0.015 247 / 0.5);
+  --muted-wash: oklch(50.0% 0.015 247 / 0.5);
 
   /* Status washes. These exist for the same reason as the washes above,
      and they were added because the trap caught us: `badge.tsx` shipped
@@ -158,6 +207,18 @@
   --danger-wash: oklch(60.0% 0.220 27 / 0.15);
   --warning-wash: oklch(70.0% 0.140 75 / 0.18);
   --warning-fg: oklch(45.0% 0.110 75);
+
+  /* Contrast pairs. See "Contrast pairs" at the top of this file. */
+  --on-moss: #fff;
+  --moss-text: oklch(52.5% 0.190 264);
+  --control-border: oklch(55.4% 0.015 247);
+  --danger-text: oklch(53.0% 0.220 27);
+
+  /* The hue and chroma of the `neutral` and `accent` Tailwind scales. */
+  --neutral-h: 247;
+  --neutral-c: 0.015;
+  --accent-h: 264;
+  --accent-c: 0.19;
 }
 
 /* OS-level dark preference — only applies when there's no explicit
@@ -169,14 +230,14 @@
 
     --paper: oklch(13.0% 0.005 247);
     --ink: oklch(98.5% 0.002 247);
-    /* `--muted` and `--amber` repeat their light values on purpose. They
-       were formerly stated only on `:root` and reached dark by inheritance;
-       writing them out changes no computed value and lets one completeness
-       test cover every block. `--muted` here is about 4.2:1 on `--paper`,
-       under the 4.5:1 AA floor — a pre-existing defect of the default
-       palette, held as-is so an untouched install looks unchanged. The
-       palettes below do not repeat it. */
-    --muted: oklch(55.4% 0.015 247);
+    /* `--amber` repeats its light value on purpose. It was formerly stated
+       only on `:root` and reached dark by inheritance. Writing it out
+       changes no computed value and lets one completeness test cover every
+       block. `--muted` is lighter here than in the light block: at 62% it
+       keeps secondary text at 4.5:1 or more on `--paper` and on
+       `--ink-wash`. Until 2026-10-30 it repeated the light 55.4%, which
+       measured about 3.6:1 on a wash. */
+    --muted: oklch(62.0% 0.015 247);
     --line: oklch(27.8% 0.008 247);
     --moss: oklch(69.0% 0.150 264);
     --amber: #b98a2f;
@@ -185,12 +246,22 @@
     --ink-wash-strong: oklch(98.5% 0.002 247 / 0.14);
     --moss-wash: oklch(69.0% 0.150 264 / 0.14);
     --moss-wash-strong: oklch(69.0% 0.150 264 / 0.22);
-    --muted-wash: oklch(55.4% 0.015 247 / 0.5);
+    --muted-wash: oklch(62.0% 0.015 247 / 0.5);
 
     --success-wash: oklch(72.0% 0.150 145 / 0.20);
     --danger-wash: oklch(68.0% 0.200 27 / 0.20);
     --warning-wash: oklch(80.0% 0.130 75 / 0.20);
     --warning-fg: oklch(85.0% 0.110 75);
+
+    --on-moss: oklch(13.0% 0.005 247);
+    --moss-text: var(--moss);
+    --control-border: oklch(57.0% 0.015 247);
+    --danger-text: oklch(68.0% 0.200 27);
+
+    --neutral-h: 247;
+    --neutral-c: 0.015;
+    --accent-h: 264;
+    --accent-c: 0.19;
   }
 }
 
@@ -201,7 +272,7 @@
 
   --paper: oklch(13.0% 0.005 247);
   --ink: oklch(98.5% 0.002 247);
-  --muted: oklch(55.4% 0.015 247);
+  --muted: oklch(62.0% 0.015 247);
   --line: oklch(27.8% 0.008 247);
   --moss: oklch(69.0% 0.150 264);
   --amber: #b98a2f;
@@ -210,12 +281,22 @@
   --ink-wash-strong: oklch(98.5% 0.002 247 / 0.14);
   --moss-wash: oklch(69.0% 0.150 264 / 0.14);
   --moss-wash-strong: oklch(69.0% 0.150 264 / 0.22);
-  --muted-wash: oklch(55.4% 0.015 247 / 0.5);
+  --muted-wash: oklch(62.0% 0.015 247 / 0.5);
 
   --success-wash: oklch(72.0% 0.150 145 / 0.20);
   --danger-wash: oklch(68.0% 0.200 27 / 0.20);
   --warning-wash: oklch(80.0% 0.130 75 / 0.20);
   --warning-fg: oklch(85.0% 0.110 75);
+
+  --on-moss: oklch(13.0% 0.005 247);
+  --moss-text: var(--moss);
+  --control-border: oklch(57.0% 0.015 247);
+  --danger-text: oklch(68.0% 0.200 27);
+
+  --neutral-h: 247;
+  --neutral-c: 0.015;
+  --accent-h: 264;
+  --accent-c: 0.19;
 }
 
 /* ── Ember ─────────────────────────────────────────────────────────────
@@ -230,7 +311,7 @@
 
   --paper: oklch(98.2% 0.010 75);
   --ink: oklch(21.5% 0.018 60);
-  --muted: oklch(52.5% 0.030 65);
+  --muted: oklch(51.5% 0.030 65);
   --line: oklch(91.5% 0.018 70);
   --moss: oklch(52.0% 0.150 45);
   --amber: #b98a2f;
@@ -239,12 +320,22 @@
   --ink-wash-strong: oklch(21.5% 0.018 60 / 0.1);
   --moss-wash: oklch(52.0% 0.150 45 / 0.1);
   --moss-wash-strong: oklch(52.0% 0.150 45 / 0.18);
-  --muted-wash: oklch(52.5% 0.030 65 / 0.5);
+  --muted-wash: oklch(51.5% 0.030 65 / 0.5);
 
   --success-wash: oklch(65.0% 0.150 145 / 0.15);
   --danger-wash: oklch(60.0% 0.220 27 / 0.15);
   --warning-wash: oklch(70.0% 0.140 75 / 0.18);
   --warning-fg: oklch(45.0% 0.110 75);
+
+  --on-moss: #fff;
+  --moss-text: var(--moss);
+  --control-border: oklch(55.4% 0.030 65);
+  --danger-text: oklch(53.0% 0.220 27);
+
+  --neutral-h: 65;
+  --neutral-c: 0.030;
+  --accent-h: 45;
+  --accent-c: 0.15;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -271,6 +362,16 @@
     --danger-wash: oklch(68.0% 0.200 27 / 0.20);
     --warning-wash: oklch(80.0% 0.130 75 / 0.20);
     --warning-fg: oklch(85.0% 0.110 75);
+
+    --on-moss: oklch(15.0% 0.014 60);
+    --moss-text: var(--moss);
+    --control-border: oklch(57.0% 0.030 65);
+    --danger-text: oklch(68.0% 0.200 27);
+
+    --neutral-h: 65;
+    --neutral-c: 0.030;
+    --accent-h: 45;
+    --accent-c: 0.15;
   }
 }
 
@@ -295,6 +396,16 @@
   --danger-wash: oklch(68.0% 0.200 27 / 0.20);
   --warning-wash: oklch(80.0% 0.130 75 / 0.20);
   --warning-fg: oklch(85.0% 0.110 75);
+
+  --on-moss: oklch(15.0% 0.014 60);
+  --moss-text: var(--moss);
+  --control-border: oklch(57.0% 0.030 65);
+  --danger-text: oklch(68.0% 0.200 27);
+
+  --neutral-h: 65;
+  --neutral-c: 0.030;
+  --accent-h: 45;
+  --accent-c: 0.15;
 }
 
 /* ── Tide ──────────────────────────────────────────────────────────────
@@ -309,7 +420,7 @@
 
   --paper: oklch(98.3% 0.008 205);
   --ink: oklch(21.0% 0.016 215);
-  --muted: oklch(52.5% 0.028 210);
+  --muted: oklch(51.5% 0.028 210);
   --line: oklch(91.8% 0.016 205);
   --moss: oklch(51.0% 0.115 195);
   --amber: #b98a2f;
@@ -318,12 +429,22 @@
   --ink-wash-strong: oklch(21.0% 0.016 215 / 0.1);
   --moss-wash: oklch(51.0% 0.115 195 / 0.1);
   --moss-wash-strong: oklch(51.0% 0.115 195 / 0.18);
-  --muted-wash: oklch(52.5% 0.028 210 / 0.5);
+  --muted-wash: oklch(51.5% 0.028 210 / 0.5);
 
   --success-wash: oklch(65.0% 0.150 145 / 0.15);
   --danger-wash: oklch(60.0% 0.220 27 / 0.15);
   --warning-wash: oklch(70.0% 0.140 75 / 0.18);
   --warning-fg: oklch(45.0% 0.110 75);
+
+  --on-moss: #fff;
+  --moss-text: oklch(49.0% 0.115 195);
+  --control-border: oklch(55.4% 0.028 210);
+  --danger-text: oklch(53.0% 0.220 27);
+
+  --neutral-h: 210;
+  --neutral-c: 0.028;
+  --accent-h: 195;
+  --accent-c: 0.115;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -348,6 +469,16 @@
     --danger-wash: oklch(68.0% 0.200 27 / 0.20);
     --warning-wash: oklch(80.0% 0.130 75 / 0.20);
     --warning-fg: oklch(85.0% 0.110 75);
+
+    --on-moss: oklch(14.5% 0.014 215);
+    --moss-text: var(--moss);
+    --control-border: oklch(57.0% 0.028 210);
+    --danger-text: oklch(68.0% 0.200 27);
+
+    --neutral-h: 210;
+    --neutral-c: 0.028;
+    --accent-h: 195;
+    --accent-c: 0.115;
   }
 }
 
@@ -372,6 +503,16 @@
   --danger-wash: oklch(68.0% 0.200 27 / 0.20);
   --warning-wash: oklch(80.0% 0.130 75 / 0.20);
   --warning-fg: oklch(85.0% 0.110 75);
+
+  --on-moss: oklch(14.5% 0.014 215);
+  --moss-text: var(--moss);
+  --control-border: oklch(57.0% 0.028 210);
+  --danger-text: oklch(68.0% 0.200 27);
+
+  --neutral-h: 210;
+  --neutral-c: 0.028;
+  --accent-h: 195;
+  --accent-c: 0.115;
 }
 
 /* ── Orchid ────────────────────────────────────────────────────────────
@@ -386,7 +527,7 @@
 
   --paper: oklch(98.2% 0.008 325);
   --ink: oklch(21.5% 0.018 320);
-  --muted: oklch(52.5% 0.030 325);
+  --muted: oklch(51.5% 0.030 325);
   --line: oklch(91.5% 0.018 325);
   --moss: oklch(52.0% 0.170 330);
   --amber: #b98a2f;
@@ -395,12 +536,22 @@
   --ink-wash-strong: oklch(21.5% 0.018 320 / 0.1);
   --moss-wash: oklch(52.0% 0.170 330 / 0.1);
   --moss-wash-strong: oklch(52.0% 0.170 330 / 0.18);
-  --muted-wash: oklch(52.5% 0.030 325 / 0.5);
+  --muted-wash: oklch(51.5% 0.030 325 / 0.5);
 
   --success-wash: oklch(65.0% 0.150 145 / 0.15);
   --danger-wash: oklch(60.0% 0.220 27 / 0.15);
   --warning-wash: oklch(70.0% 0.140 75 / 0.18);
   --warning-fg: oklch(45.0% 0.110 75);
+
+  --on-moss: #fff;
+  --moss-text: var(--moss);
+  --control-border: oklch(55.4% 0.030 325);
+  --danger-text: oklch(53.0% 0.220 27);
+
+  --neutral-h: 325;
+  --neutral-c: 0.030;
+  --accent-h: 330;
+  --accent-c: 0.17;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -425,6 +576,16 @@
     --danger-wash: oklch(68.0% 0.200 27 / 0.20);
     --warning-wash: oklch(80.0% 0.130 75 / 0.20);
     --warning-fg: oklch(85.0% 0.110 75);
+
+    --on-moss: oklch(14.5% 0.016 320);
+    --moss-text: var(--moss);
+    --control-border: oklch(57.0% 0.030 325);
+    --danger-text: oklch(68.0% 0.200 27);
+
+    --neutral-h: 325;
+    --neutral-c: 0.030;
+    --accent-h: 330;
+    --accent-c: 0.17;
   }
 }
 
@@ -449,4 +610,14 @@
   --danger-wash: oklch(68.0% 0.200 27 / 0.20);
   --warning-wash: oklch(80.0% 0.130 75 / 0.20);
   --warning-fg: oklch(85.0% 0.110 75);
+
+  --on-moss: oklch(14.5% 0.016 320);
+  --moss-text: var(--moss);
+  --control-border: oklch(57.0% 0.030 325);
+  --danger-text: oklch(68.0% 0.200 27);
+
+  --neutral-h: 325;
+  --neutral-c: 0.030;
+  --accent-h: 330;
+  --accent-c: 0.17;
 }

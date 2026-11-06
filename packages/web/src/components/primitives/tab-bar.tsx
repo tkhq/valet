@@ -32,6 +32,9 @@ export const TAB_STRIP_CLASS = "flex min-w-0 max-w-full gap-1 overflow-x-auto ov
 export function tabClass(active: boolean, size: ControlSize = "md"): string {
   return cn(
     "inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap border-b-2 transition-colors touch-manipulation",
+    // The strip scrolls sideways and clips anything outside a tab, so the
+    // focus ring sits inside the tab.
+    "rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-moss",
     CONTROL_SIZE[size],
     size === "sm" ? "px-2.5" : "px-3",
     "disabled:cursor-not-allowed disabled:opacity-50",

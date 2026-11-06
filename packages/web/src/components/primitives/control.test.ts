@@ -1,6 +1,13 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import { Button } from "./button";
+import { Checkbox } from "./checkbox";
+import { FOCUS_RING } from "./control";
+import { RadioCard } from "./radio-card";
+import { Switch } from "./switch";
 
 // Controls in one row had five different heights because call sites styled
 // their own buttons and fields, or overrode a primitive's height. These checks
@@ -92,5 +99,63 @@ describe("control sizes", () => {
         .map(() => file));
     expect([...new Set(found)].filter((file) => !(file in OVERRIDE_ALLOWED))).toEqual([]);
     expect(Object.keys(OVERRIDE_ALLOWED).filter((file) => !found.includes(file))).toEqual([]);
+  });
+});
+
+/** The root element's attributes in server-rendered markup, by name. */
+function rootAttributes(html: string): Record<string, string> {
+  const tag = /^<\w+([^>]*)>/.exec(html)?.[1] ?? "";
+  return Object.fromEntries([...tag.matchAll(/([\w-]+)="([^"]*)"/g)].map((match) => [match[1], match[2]]));
+}
+
+const classesOf = (html: string) => (rootAttributes(html).class ?? "").split(/\s+/);
+const noop = () => {};
+
+describe("focus ring", () => {
+  // The grey `ring-neutral-400` on the secondary and ghost buttons measured
+  // 2.49:1 on the page, under the 3:1 floor for a focus indicator.
+  const ring = FOCUS_RING.split(" ");
+  const strayRings = (classes: string[]) =>
+    classes.filter((name) => /^focus-visible:ring-(?!2$|inset$|offset-)/.test(name) && !ring.includes(name));
+
+  for (const variant of ["primary", "secondary", "ghost", "danger"] as const) {
+    it(`draws the one moss focus ring on a ${variant} Button`, () => {
+      const html = renderToStaticMarkup(createElement(Button, { variant }, "Save"));
+      expect(html).toContain(">Save</button>");
+      expect(classesOf(html)).toEqual(expect.arrayContaining(ring));
+      expect(strayRings(classesOf(html))).toEqual([]);
+    });
+  }
+
+  it("draws it on Switch, Checkbox, and RadioCard", () => {
+    const controls = [
+      createElement(Switch, { checked: false, onCheckedChange: noop, "aria-label": "Alerts" }),
+      createElement(Checkbox, { checked: true, onCheckedChange: noop, "aria-label": "Platform" }),
+      createElement(RadioCard, { title: "Dark", description: "Low-glare surfaces.", selected: true, onSelect: noop }),
+    ];
+    for (const control of controls) {
+      const html = renderToStaticMarkup(control);
+      expect(classesOf(html)).toEqual(expect.arrayContaining(ring));
+      expect(strayRings(classesOf(html))).toEqual([]);
+    }
+  });
+});
+
+describe("Button size iconSm", () => {
+  it("is a 32px square on desktop and 44px on a phone or a coarse pointer", () => {
+    const html = renderToStaticMarkup(createElement(Button, { size: "iconSm", "aria-label": "Copy output" }, "x"));
+    expect(rootAttributes(html)["aria-label"]).toBe("Copy output");
+    expect(rootAttributes(html).type).toBe("button");
+    expect(classesOf(html)).toEqual(
+      expect.arrayContaining(["h-8", "w-8", "p-0", "max-md:size-11", "[@media(pointer:coarse)]:size-11"]),
+    );
+  });
+});
+
+describe("Button primary", () => {
+  it("pairs the moss fill with the on-moss text token", () => {
+    const classes = classesOf(renderToStaticMarkup(createElement(Button, null, "Approve")));
+    expect(classes).toEqual(expect.arrayContaining(["bg-moss", "text-on-moss"]));
+    expect(classes).not.toContain("text-white");
   });
 });

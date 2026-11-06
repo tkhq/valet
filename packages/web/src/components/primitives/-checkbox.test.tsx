@@ -17,6 +17,26 @@ describe("Checkbox", () => {
     );
   });
 
+  it("outlines an unchecked box in control-border and fills a checked one with moss", () => {
+    render(
+      <>
+        <Checkbox checked={false} onCheckedChange={() => {}} aria-label="Unchecked" />
+        <Checkbox checked onCheckedChange={() => {}} aria-label="Checked" />
+      </>,
+    );
+    const unchecked = screen.getByRole("checkbox", { name: "Unchecked" });
+    expect(unchecked.getAttribute("aria-checked")).toBe("false");
+    expect(unchecked.classList.contains("border-control-border")).toBe(true);
+    expect(unchecked.classList.contains("border-line")).toBe(false);
+    expect(unchecked.querySelector("svg")).toBeNull();
+
+    const checked = screen.getByRole("checkbox", { name: "Checked" });
+    expect(checked.getAttribute("aria-checked")).toBe("true");
+    expect(checked.classList.contains("bg-moss")).toBe(true);
+    expect(checked.classList.contains("text-on-moss")).toBe(true);
+    expect(checked.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
+  });
+
   it("fires onCheckedChange with the toggled value", async () => {
     const user = userEvent.setup();
     const onCheckedChange = vi.fn();

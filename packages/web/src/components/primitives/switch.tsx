@@ -1,5 +1,6 @@
 import { forwardRef, type ButtonHTMLAttributes } from "react";
 import { cn } from "~/lib/cn";
+import { FOCUS_RING } from "./control.js";
 
 export interface SwitchProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, "onChange"> {
   checked: boolean;
@@ -33,11 +34,17 @@ export const Switch = forwardRef<HTMLButtonElement, SwitchProps>(function Switch
       onClick={() => onCheckedChange(!checked)}
       className={cn(
         "relative inline-flex shrink-0 items-center rounded-full transition-colors touch-manipulation",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss focus-visible:ring-offset-2 focus-visible:ring-offset-[--bg]",
+        FOCUS_RING,
         TRACK[size],
         "disabled:pointer-events-none disabled:opacity-50",
         "max-sm:after:absolute max-sm:after:-inset-x-1 max-sm:after:-inset-y-3",
-        checked ? "bg-moss" : "bg-neutral-300 dark:bg-neutral-700",
+        // Off: a faint track with a 1px `control-border` outline and a
+        // `control-border` thumb, as in Material 3's switch. The outline on
+        // the page and the thumb on the track each measure 3:1 or more
+        // (WCAG 1.4.11, `theme.tokens.test.ts`). The outline is an inset box
+        // shadow, not `ring-1 ring-inset`: a ring would make the focus ring
+        // inset too, and Tailwind composes a box shadow under the ring.
+        checked ? "bg-moss" : "bg-ink-wash-strong shadow-[inset_0_0_0_1px_var(--control-border)]",
         className,
       )}
       {...rest}
@@ -45,9 +52,9 @@ export const Switch = forwardRef<HTMLButtonElement, SwitchProps>(function Switch
       <span
         aria-hidden
         className={cn(
-          "inline-block transform rounded-full bg-white shadow transition-transform motion-reduce:transition-none",
+          "inline-block transform rounded-full shadow transition-transform motion-reduce:transition-none",
           THUMB[size],
-          checked ? THUMB_ON[size] : THUMB_OFF[size],
+          checked ? cn(THUMB_ON[size], "bg-on-moss") : cn(THUMB_OFF[size], "bg-control-border"),
         )}
       />
     </button>
