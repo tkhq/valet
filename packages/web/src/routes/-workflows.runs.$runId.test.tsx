@@ -285,6 +285,7 @@ describe("RunDetailBody", () => {
       }),
       // `notify` is new since the run: the action comes from the server, not the old definition.
       rerunSteps: [{ nodeId: "summarize" }, { nodeId: "notify", action: "slack.send_message" }],
+      rerunDefinitionVersionId: "preview-v1",
     };
     render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={onRetry} retryPending={false} />);
     expect(screen.queryByRole("button", { name: "Retry run" })).toBeNull();
@@ -295,7 +296,26 @@ describe("RunDetailBody", () => {
     expect(within(dialog).getByText("These steps run again: summarize, notify. Every other step keeps this run's result.")).toBeTruthy();
     expect(within(dialog).getByText("These tool steps do their action: notify (slack.send_message).")).toBeTruthy();
     fireEvent.click(within(dialog).getByRole("button", { name: "Re-run changed steps" }));
-    expect(onRetry.mock.calls).toEqual([["changed_steps"]]);
+    expect(onRetry.mock.calls).toEqual([["changed_steps", "preview-v1"]]);
+  });
+
+  it("keeps the confirmed steps and version together when a newer preview arrives", async () => {
+    const onRetry = vi.fn();
+    const props = { runId: "wfrun_1", onCancel: vi.fn(), cancelPending: false, onRetry, retryPending: false };
+    const data: WorkflowRunDetail = {
+      ...baseRun({ status: "settled", outcome: "completed" }),
+      rerunSteps: [{ nodeId: "summary" }], rerunDefinitionVersionId: "preview-v1",
+    };
+    const { rerender } = render(<RunDetailBody {...props} data={data} />);
+    fireEvent.click(screen.getByRole("button", { name: "Re-run changed steps" }));
+    const dialog = await screen.findByRole("dialog");
+    rerender(<RunDetailBody {...props} data={{ ...data, rerunDefinitionVersionId: "preview-v2",
+      rerunSteps: [{ nodeId: "fetch" }, { nodeId: "notify", action: "slack.send_message" }] }} />);
+    expect(within(dialog).getByText("These steps run again: summary. Every other step keeps this run's result.")).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Re-run changed steps" }));
+    expect(onRetry.mock.calls).toEqual([["changed_steps", "preview-v1"]]);
+    fireEvent.click(screen.getByRole("button", { name: "Re-run changed steps" }));
+    expect(await screen.findByText("These tool steps do their action: notify (slack.send_message).")).toBeTruthy();
   });
 
   it("offers no re-run when no step changed since a completed run, and shows a refused retry", () => {

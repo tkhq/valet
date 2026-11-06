@@ -1172,11 +1172,11 @@ describe("GET /api/workflows/runs/:runId + approvals + cancel", () => {
       body: JSON.stringify(body),
     });
 
-    const unchanged = await retry({ from: "changed_steps" });
+    const before = (await (await fetch(`${api.baseUrl}/api/workflows/runs/${runId}`)).json()) as GetWorkflowRunResponse;
+    const unchanged = await retry({ from: "changed_steps", rerunDefinitionVersionId: before.rerunDefinitionVersionId });
     expect(unchanged.status).toBe(409);
     expect(((await unchanged.json()) as { error: string }).error)
       .toBe("No step changed since this run, so no step would run again. Edit the workflow first, or start a new run.");
-    const before = (await (await fetch(`${api.baseUrl}/api/workflows/runs/${runId}`)).json()) as GetWorkflowRunResponse;
     expect(before.rerunSteps).toEqual([]);
 
     const fromStart = await retry({ from: "start" });
@@ -1193,7 +1193,13 @@ describe("GET /api/workflows/runs/:runId + approvals + cancel", () => {
     const after = (await (await fetch(`${api.baseUrl}/api/workflows/runs/${runId}`)).json()) as GetWorkflowRunResponse;
     expect(after.rerunSteps).toEqual([{ nodeId: "summary" }, { nodeId: "stop" }]);
 
-    const rerun = await retry({ from: "changed_steps" });
+    const missingPreview = await retry({ from: "changed_steps" });
+    expect(missingPreview.status).toBe(409);
+    const stale = await retry({ from: "changed_steps", rerunDefinitionVersionId: before.rerunDefinitionVersionId });
+    expect(stale.status).toBe(409);
+    expect(((await stale.json()) as { error: string }).error).toContain("confirm its changed steps again");
+    expect(stub.started).toHaveLength(0);
+    const rerun = await retry({ from: "changed_steps", rerunDefinitionVersionId: after.rerunDefinitionVersionId });
     expect(rerun.status).toBe(201);
     expect(((await rerun.json()) as RetryWorkflowRunResponse).rerunSteps).toEqual([{ nodeId: "summary" }, { nodeId: "stop" }]);
     expect(stub.started.at(-1)?.opts?.seed?.map((cp) => cp.nodeId)).toEqual(["trigger", "fetch"]);

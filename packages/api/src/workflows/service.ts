@@ -1942,6 +1942,7 @@ export type RetryWorkflowRunResult =
   | "run_completed"
   | "run_not_completed"
   | "nothing_changed"
+  | "stale_preview"
   | "workflow_deleted"
   | "input_needs_start";
 
@@ -1963,6 +1964,9 @@ function dagDefinition(value: unknown): WorkflowDefinition | undefined {
 
 /** No step changed since the run, so a re-run of its changed steps would run nothing. */
 class NothingChangedError extends Error {}
+
+/** The confirmed definition no longer matches the snapshot to execute. */
+class StaleRerunPreviewError extends Error {}
 
 /** The steps a re-run runs, each tool step with the action it does in `current`. */
 function rerunStepViews(current: WorkflowDefinition, ids: readonly string[]): WorkflowRerunStep[] {
@@ -1988,7 +1992,7 @@ export async function retryWorkflowRun(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
   runId: string,
-  opts: { from?: RetryFrom; input?: Record<string, unknown> } = {},
+  opts: { from?: RetryFrom; input?: Record<string, unknown>; rerunDefinitionVersionId?: string } = {},
 ): Promise<RetryWorkflowRunResult> {
   const run = await ownedRun(deps, owner, runId);
   if (!run) return "not_found";
@@ -2019,6 +2023,10 @@ export async function retryWorkflowRun(
       readToolScope(run.params.toolScope),
       readToolScope(run.params.originToolScope),
       from === "start" ? undefined : async (next) => {
+        // Check the exact snapshot before any run, checkpoint, or tool action exists.
+        if (from === "changed_steps" && opts.rerunDefinitionVersionId !== definitionVersionId(next.definition)) {
+          throw new StaleRerunPreviewError();
+        }
         const previous = dagDefinition(run.definition);
         const current = dagDefinition(next.definition);
         if (!previous || !current) return [];
@@ -2038,6 +2046,7 @@ export async function retryWorkflowRun(
     );
   } catch (err) {
     if (err instanceof NothingChangedError) return "nothing_changed";
+    if (err instanceof StaleRerunPreviewError) return "stale_preview";
     throw err;
   }
   if (!started) return "workflow_deleted";
@@ -2047,21 +2056,24 @@ export async function retryWorkflowRun(
 
 /**
  * For a completed run: the steps that a re-run of its changed steps runs,
- * from the current saved workflow. Empty when no step changed. Undefined for
- * any other run, and when the caller cannot start the workflow.
+ * from the current saved workflow, with the version the caller must confirm.
+ * The list is empty when no step changed. Undefined for any other run, and
+ * when the caller cannot start the workflow.
  */
 export async function changedStepsToRerun(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
   run: { runId: string; workflowId: string; status: string; outcome?: string | null; definition: unknown },
   checkpoints: readonly { nodeId: string; status: NodeCheckpoint["status"] }[],
-): Promise<WorkflowRerunStep[] | undefined> {
+): Promise<{ rerunSteps: WorkflowRerunStep[]; rerunDefinitionVersionId: string } | undefined> {
   if (run.status !== "settled" || run.outcome !== "completed") return undefined;
   const row = await ownedDefinitionRow(deps.db, owner, run.workflowId);
   const previous = dagDefinition(run.definition);
-  const current = row ? dagDefinition(row.definition) : undefined;
+  if (!row) return undefined;
+  const current = dagDefinition(row.definition);
   return previous && current
-    ? rerunStepViews(current, retryRerunSteps(previous, current, checkpoints, { completed: true }))
+    ? { rerunSteps: rerunStepViews(current, retryRerunSteps(previous, current, checkpoints, { completed: true })),
+      rerunDefinitionVersionId: definitionVersionId(row.definition) }
     : undefined;
 }
 

@@ -113,9 +113,10 @@ describe("retryWorkflowRun from changed_steps", () => {
     await saveDefinition(report("Summarize v2, one line per PR"));
     const run = { runId: "wfrun_done", workflowId: WORKFLOW_ID, status: "settled", outcome: "completed", definition: report("Summarize v1") };
     const rerunSteps = [{ nodeId: "summarize" }, { nodeId: "notify", action: "slack.send_message" }, { nodeId: "done" }];
-    expect(await changedStepsToRerun(deps, OWNER, run, checkpoints)).toEqual(rerunSteps);
+    const preview = await changedStepsToRerun(deps, OWNER, run, checkpoints);
+    expect(preview?.rerunSteps).toEqual(rerunSteps);
 
-    const result = await retryWorkflowRun(deps, OWNER, "wfrun_done", { from: "changed_steps" });
+    const result = await retryWorkflowRun(deps, OWNER, "wfrun_done", { from: "changed_steps", rerunDefinitionVersionId: preview?.rerunDefinitionVersionId });
 
     // The tool step after the edit sends its message again, and the result says so.
     expect(result).toEqual({ runId: expect.any(String), rerunSteps });
@@ -129,10 +130,43 @@ describe("retryWorkflowRun from changed_steps", () => {
   it("refuses when no step changed since the run, and starts nothing", async () => {
     const checkpoints = await settledRun("wfrun_same", "completed");
     const run = { runId: "wfrun_same", workflowId: WORKFLOW_ID, status: "settled", outcome: "completed", definition: report("Summarize v1") };
-    expect(await changedStepsToRerun(deps, OWNER, run, checkpoints)).toEqual([]);
+    const preview = await changedStepsToRerun(deps, OWNER, run, checkpoints);
+    expect(preview?.rerunSteps).toEqual([]);
 
-    expect(await retryWorkflowRun(deps, OWNER, "wfrun_same", { from: "changed_steps" })).toBe("nothing_changed");
+    expect(await retryWorkflowRun(deps, OWNER, "wfrun_same", { from: "changed_steps", rerunDefinitionVersionId: preview?.rerunDefinitionVersionId })).toBe("nothing_changed");
     expect(started).toHaveLength(0);
+  });
+
+  it("rejects a deferred confirmation after another edit adds an unconfirmed tool action", async () => {
+    const checkpoints = await settledRun("wfrun_stale", "completed");
+    const lateEdit = report("Summarize v1");
+    lateEdit.nodes[4] = { id: "done", type: "set", values: { prs: [9] } };
+    await saveDefinition(lateEdit);
+    const run = { runId: "wfrun_stale", workflowId: WORKFLOW_ID, status: "settled", outcome: "completed", definition: report("Summarize v1") };
+    const preview = await changedStepsToRerun(deps, OWNER, run, checkpoints);
+    expect(preview?.rerunSteps).toEqual([{ nodeId: "done" }]);
+
+    // A teammate changes an upstream step while the confirmation remains open.
+    await saveDefinition(report("Summarize v2"));
+    expect(await retryWorkflowRun(deps, OWNER, "wfrun_stale", {
+      from: "changed_steps", rerunDefinitionVersionId: preview?.rerunDefinitionVersionId,
+    })).toBe("stale_preview");
+    expect(started).toEqual([]);
+    const refreshed = await changedStepsToRerun(deps, OWNER, run, checkpoints);
+    expect(refreshed?.rerunSteps).toEqual([
+      { nodeId: "summarize" }, { nodeId: "notify", action: "slack.send_message" }, { nodeId: "done" },
+    ]);
+    expect(await retryWorkflowRun(deps, OWNER, "wfrun_stale", {
+      from: "changed_steps", rerunDefinitionVersionId: refreshed?.rerunDefinitionVersionId,
+    })).toEqual({ runId: expect.any(String), rerunSteps: refreshed?.rerunSteps });
+    expect(started).toHaveLength(1);
+  });
+
+  it("requires a confirmed preview before starting changed steps", async () => {
+    await settledRun("wfrun_unconfirmed", "completed");
+    await saveDefinition(report("Summarize v2"));
+    expect(await retryWorkflowRun(deps, OWNER, "wfrun_unconfirmed", { from: "changed_steps" })).toBe("stale_preview");
+    expect(started).toEqual([]);
   });
 
   it("keeps each retry mode to its own run outcome", async () => {

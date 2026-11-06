@@ -915,6 +915,41 @@ describe("DB-backed actions", () => {
     expect((after.data as { webhook: { workflowId: string } }).webhook.workflowId).toBe(workflowId);
   });
 
+  it("binds the assistant's changed-step retry to the version returned by get_run", async () => {
+    const workflowId = await seedWorkflow();
+    const definition = (value: string) => ({ version: "dag/v1", nodes: [
+      { id: "trigger", type: "trigger" }, { id: "summary", type: "set", values: { text: value } },
+    ], edges: [{ from: "trigger", to: "summary" }] });
+    await db.update(workflowDefinitions).set({ definition: definition("v1") }).where(eq(workflowDefinitions.id, workflowId));
+    await deps.workflowStore.createRun("rerun-tool", { workflowId, definitionVersionId: "v1", input: { type: "manual", data: {} } },
+      definition("v1"), "v1", { ownerType: "user", ownerId: "user1" });
+    for (const nodeId of ["trigger", "summary"]) {
+      const checkpoint = { runId: "rerun-tool", nodeId, iteration: 0, attempt: 0, createdAt: 1 };
+      await deps.workflowStore.putIntent({ ...checkpoint, status: "intent" });
+      await deps.workflowStore.completeCheckpoint("rerun-tool", nodeId, 0, 0, { ...checkpoint, status: "completed", result: nodeId });
+    }
+    await deps.workflowStore.settleRun("rerun-tool", "completed");
+    await db.update(workflowDefinitions).set({ definition: definition("v2") }).where(eq(workflowDefinitions.id, workflowId));
+    const plugin = workflowsActionPlugin(() => deps);
+    const get = plugin.actions.find(action => action.id === "workflows.get_run");
+    const retry = plugin.actions.find(action => action.id === "workflows.retry_run");
+    if (!get || !retry) throw new Error("Missing workflow actions");
+    const preview = await get.execute({ run_id: "rerun-tool" }, ctx());
+    expect(preview).toMatchObject({ success: true, data: { rerunSteps: [{ nodeId: "summary" }], rerunDefinitionVersionId: expect.stringMatching(/^[a-f0-9]{64}$/) } });
+    const data = preview.data;
+    if (!data || typeof data !== "object" || !("rerunDefinitionVersionId" in data)) throw new Error("Missing rerun preview version");
+    const confirmed = { run_id: "rerun-tool", from: "changed_steps", rerun_definition_version_id: data.rerunDefinitionVersionId };
+    await db.update(workflowDefinitions).set({ definition: definition("v3") }).where(eq(workflowDefinitions.id, workflowId));
+    expect(await retry.execute(confirmed, ctx())).toMatchObject({ success: false, error: expect.stringContaining("confirm its changed steps again") });
+    expect(runHost.started).toEqual([]);
+    const refreshed = await get.execute({ run_id: "rerun-tool" }, ctx());
+    const fresh = refreshed.data;
+    if (!fresh || typeof fresh !== "object" || !("rerunDefinitionVersionId" in fresh)) throw new Error("Missing refreshed version");
+    expect(await retry.execute({ ...confirmed, rerun_definition_version_id: fresh.rerunDefinitionVersionId }, ctx()))
+      .toMatchObject({ success: true, data: { runId: expect.any(String), rerunSteps: [{ nodeId: "summary" }] } });
+    expect(runHost.started).toHaveLength(1);
+  });
+
   it("get_node_result returns the checkpoint result verbatim when small, a truncation stub when huge", async () => {
     const plugin = workflowsActionPlugin(() => deps);
     const getNodeResult = plugin.actions.find((a) => a.id === "workflows.get_node_result")!;

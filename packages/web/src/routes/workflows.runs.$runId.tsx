@@ -48,7 +48,7 @@ export function RunDetailPage() {
   const { runId } = Route.useParams();
   const search = Route.useSearch();
   // A missing run stays missing: a 404 shows its text at once, with no retries.
-  const { data, isLoading, error } = useRunDetail(runId, { retry: retryUnlessNotFound });
+  const { data, isLoading, error, refetch } = useRunDetail(runId, { retry: retryUnlessNotFound });
   // The header names the workflow. A viewer who can see the run but not
   // the workflow keeps the generic back link.
   const workflow = useWorkflow(data?.run.workflowId ?? "", { retry: false });
@@ -96,18 +96,20 @@ export function RunDetailPage() {
         back={hasConversations ? back : undefined}
         onSelect={(view, conversation) => void navigate({ to: "/workflows/runs/$runId", params: { runId }, search: { view, conversation }, replace: true })}>
       <RunDetailBody
+        key={runId}
         runId={runId}
         data={data}
         back={hasConversations ? undefined : back}
         onCancel={() => cancelRun.mutate()}
         cancelPending={cancelRun.isPending}
-        onRetry={(from) => {
+        onRetry={(from, rerunDefinitionVersionId) => {
           if (from === "start" && Object.keys(schema).length > 0) {
             setRetryInputOpen(true);
             return;
           }
-          retryRun.mutate({ from }, { onSuccess: ({ runId: newRunId }) => goToRun(newRunId) });
+          retryRun.mutate({ from, ...(rerunDefinitionVersionId ? { rerunDefinitionVersionId } : {}) }, { onSuccess: ({ runId: newRunId }) => goToRun(newRunId) });
         }}
+        onRefreshRerun={async () => { const result = await refetch(); if (result.error) throw result.error; return result.data; }}
         retryPending={retryRun.isPending}
         retryError={retryRun.error ? errorText(retryRun.error) : undefined}
         onExplainFailure={(nodeId, iteration) => void navigate({
@@ -162,7 +164,8 @@ export interface RunDetailBodyProps {
   back?: ReactNode;
   onCancel: () => void;
   cancelPending: boolean;
-  onRetry: (from: "failed_step" | "start" | "changed_steps") => void;
+  onRetry: (from: "failed_step" | "start" | "changed_steps", rerunDefinitionVersionId?: string) => void;
+  onRefreshRerun?: () => Promise<WorkflowRunDetail | undefined>;
   retryPending: boolean;
   /** Why the last retry was refused, with the corrective action. */
   retryError?: string;
@@ -184,13 +187,34 @@ export function RunDetailBody({
   cancelPending,
   onRetry,
   retryPending,
+  onRefreshRerun,
   retryError,
   onExplainFailure,
 }: RunDetailBodyProps) {
   // Cancel stops a run part-way and cannot be undone, so it asks first.
   const [cancelOpen, setCancelOpen] = useState(false);
   // A re-run repeats the actions of the tool steps it runs, so it asks first.
-  const [rerunOpen, setRerunOpen] = useState(false);
+  const [rerunPreview, setRerunPreview] = useState<Pick<WorkflowRunDetail, "rerunSteps" | "rerunDefinitionVersionId">>();
+  const [refreshingPreview, setRefreshingPreview] = useState(false);
+  const [previewError, setPreviewError] = useState<string>();
+  // Keep an open confirmation immutable while queries refresh behind it.
+  useEffect(() => setRerunPreview(undefined), [runId]);
+  const prepareRerun = async () => {
+    setRefreshingPreview(true);
+    setPreviewError(undefined);
+    try {
+      const fresh = onRefreshRerun ? await onRefreshRerun() : data;
+      if (!fresh?.rerunDefinitionVersionId) {
+        setPreviewError("Could not refresh changed steps. Reload the run and try again.");
+        return;
+      }
+      if (fresh.rerunSteps?.length) setRerunPreview({ rerunSteps: fresh.rerunSteps, rerunDefinitionVersionId: fresh.rerunDefinitionVersionId });
+    } catch {
+      setPreviewError("Could not refresh changed steps. Reload the run and try again.");
+    } finally {
+      setRefreshingPreview(false);
+    }
+  };
   const [diagramOpen, setDiagramOpen] = useState(false);
   const { run, checkpoints } = data;
   const stepCosts = data.stepCosts ?? [];
@@ -206,8 +230,9 @@ export function RunDetailBody({
   // The server lists the steps that run again only for a completed run,
   // with each tool step's action from the workflow that will run.
   const rerunSteps = run.status === "settled" && run.outcome === "completed" ? data.rerunSteps ?? [] : [];
-  const rerunNames = rerunSteps.map((step) => step.nodeId).join(", ");
-  const rerunActions = rerunSteps.flatMap((step) => step.action ? [`${step.nodeId} (${step.action})`] : []);
+  const previewSteps = rerunPreview?.rerunSteps ?? rerunSteps;
+  const rerunNames = previewSteps.map((step) => step.nodeId).join(", ");
+  const rerunActions = previewSteps.flatMap((step) => step.action ? [`${step.nodeId} (${step.action})`] : []);
   const nodeOrder = definition?.nodes.flatMap((node) => node.type === "foreach" ? [node.id, node.body.id] : [node.id]);
   const nodeStatuses = statusByNodeId(run, checkpoints);
   const activeSteps = Object.entries(nodeStatuses.status)
@@ -280,7 +305,7 @@ export function RunDetailBody({
             </Button>
           )}
           {rerunSteps.length > 0 && (
-            <Button size="sm" onClick={() => setRerunOpen(true)} disabled={retryPending}
+            <Button size="sm" onClick={() => void prepareRerun()} disabled={retryPending || refreshingPreview}
               title={`Runs again: ${rerunNames}. Every other step keeps this run's result.`}>
               {retryPending ? "Re-running…" : "Re-run changed steps"}
             </Button>
@@ -288,16 +313,17 @@ export function RunDetailBody({
         </div>
       </div>
 
+      {previewError && <p role="alert" className="text-sm text-danger-500">{previewError}</p>}
       <ConfirmDialog
-        open={rerunOpen && rerunSteps.length > 0}
-        onOpenChange={setRerunOpen}
+        open={!!rerunPreview}
+        onOpenChange={(open) => { if (!open) setRerunPreview(undefined); }}
         title="Re-run changed steps?"
         description={`These steps run again: ${rerunNames}. Every other step keeps this run's result.`}
         confirmLabel="Re-run changed steps"
         confirmVariant="primary"
         onConfirm={() => {
-          setRerunOpen(false);
-          onRetry("changed_steps");
+          setRerunPreview(undefined);
+          onRetry("changed_steps", rerunPreview?.rerunDefinitionVersionId);
         }}
       >
         {rerunActions.length > 0 && (
