@@ -46,7 +46,7 @@ describe("agent onboarding pages", () => {
 
   it("is public on an instance with real auth", async () => {
     api = await bootTestApi({ auth: true });
-    for (const path of ["/agent-setup.md", "/agent-skill.md"]) {
+    for (const path of ["/agent-setup.md", "/agent-skill.md", "/cli/install.sh"]) {
       const res = await fetch(`${api.baseUrl}${path}`);
       expect(res.status).toBe(200);
       expect(await res.text()).toContain("Valet");

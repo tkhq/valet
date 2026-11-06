@@ -37,7 +37,7 @@ function PersonalProxySettings() {
     <div className="min-w-0 max-w-full space-y-10">
       <Section
         title="Proxy"
-        description="Route your Claude Code, Codex, or OpenCode traffic through Valet for spend tracking and recording."
+        description="Route model requests from your coding tools through Valet for spend tracking and recording."
       >
         <ProxyGovernance editable={singleUser} />
       </Section>

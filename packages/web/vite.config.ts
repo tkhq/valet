@@ -47,6 +47,10 @@ export default defineConfig({
         target: API_URL,
         changeOrigin: true,
       },
+      "/cli": {
+        target: API_URL,
+        changeOrigin: true,
+      },
     },
   },
   resolve: {

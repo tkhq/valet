@@ -1,12 +1,12 @@
 # CLI proxy setup
 
 **Date:** 2026-10-27
-**Status:** Implemented (PR #1072)
+**Status:** Implemented; Codex and OpenCode adapters added 2026-11-05
 **Relates to:** `docs/specs/2026-08-26-llm-proxy-mitm-design.md`, `docs/specs/2026-07-14-auth-v2-design.md`, `docs/specs/2026-07-15-single-binary-cli-design.md`, `docs/specs/2026-09-04-team-api-keys-design.md`
 
 ## Scope
 
-`valet proxy setup <harness>` points a local coding harness at the Valet LLM proxy in one step. The command gets a proxy key that the person approves in the browser, stores it in the CLI profile, and writes the harness config. The first harness is Claude Code (`claude-code`). The command shape and an adapter registry leave room for Codex and OpenCode later.
+`valet proxy setup <harness>` points a local coding harness at the Valet LLM proxy in one step. The command gets a proxy key that the person approves in the browser, stores it in the CLI profile, and writes the harness config. The supported harnesses are Claude Code (`claude-code`), Codex (`codex`), and OpenCode (`opencode`). Each adapter owns its local config and declares its supported proxy modes.
 
 ## Context
 
@@ -18,7 +18,7 @@ Claude Code chooses one credential in a fixed order: `ANTHROPIC_AUTH_TOKEN`, the
 
 ## Decisions
 
-1. **One command per harness.** The commands are `valet proxy setup <harness>`, `valet proxy token <harness>`, and `valet proxy remove <harness>`. If the harness is missing or unknown, the CLI lists the supported harnesses and exits 2. `--help` exits 0.
+1. **One command per harness.** The commands are `valet proxy setup <harness>`, `valet proxy status <harness>`, `valet proxy token <harness>`, and `valet proxy remove <harness>`. `valet proxy list` shows available tools and modes without a sign-in. If the harness is missing or unknown, the CLI lists the supported harnesses and exits 2. `--help` exits 0.
 
 2. **One key per harness per profile.** The profile stores `proxyKeys: { [harness]: { id, key, name, createdAt } }` in the CLI config. The config file is mode 0600. The key name is `<harness>@<hostname>`. Then `remove` revokes only the key of that harness, and the usage dashboard can show spend for each harness by key name. `valet login` to the same URL keeps `proxyKeys`, because signing in again is how a person recovers an expired CLI sign-in.
 
@@ -28,9 +28,9 @@ Claude Code chooses one credential in a fixed order: `ANTHROPIC_AUTH_TOKEN`, the
 
    The key stays in one secret store. A key rotation does not edit the Claude Code settings. The helper path is absolute, so `claude` does not depend on `PATH`. The path is the running binary, unless the CLI runs as a script under `node` or `bun`; then it is the first `valet` on `PATH`. A release binary keeps its download name (`valet-darwin-arm64`), so the file name is not the test. `VALET_DATA_DIR` goes into the command when it is set, because a harness started from an IDE may not inherit the shell environment.
 
-   Before setup writes the settings, it runs the helper command once in a shell and checks that it prints the stored key. If it does not, setup prints the command and its error, and leaves the settings unchanged. This catches an older `valet` on `PATH`.
+   Before setup writes the settings, it runs the helper command once in a shell and checks that it prints the stored key. If it does not, setup prints the command and a credential-redacted error, and leaves the settings unchanged. This catches an older `valet` on `PATH`.
 
-4. **Claude Code supports centralized mode only.** Claude Code sends the helper value as both `x-api-key` and `Authorization: Bearer`. In pass-through mode the gateway needs the person's own provider key in `x-api-key` (`extractPassthroughKey`). The helper would replace that key. Each adapter declares the modes it supports. In pass-through mode the Claude Code adapter refuses and points to Settings > Proxy. A Codex adapter can support pass-through later through `env_http_headers`.
+4. **Claude Code supports centralized mode only.** Claude Code sends the helper value as both `x-api-key` and `Authorization: Bearer`. In pass-through mode the gateway needs the person's own provider key in `x-api-key` (`extractPassthroughKey`). The helper would replace that key. Each adapter declares the modes it supports. In pass-through mode the Claude Code adapter refuses and points to Settings > Proxy. The Codex and OpenCode adapters also support centralized mode only. Automatic setup does not collect a separate upstream provider credential.
 
 5. **A person approves the key in the browser.** A new credential must not come from an agent alone. So the CLI asks, and the person approves on the device sign-in page:
    - The CLI starts a request with `POST /api/cli/device/code { device, purpose: "proxy-key", key_name }` and sends its CLI token in `x-api-key`. The route requires a valid CLI token for this purpose, and stores its user as `requested_by`.
@@ -49,15 +49,118 @@ Claude Code chooses one credential in a fixed order: `ANTHROPIC_AUTH_TOKEN`, the
    - The gateway is on, and the adapter supports the org's mode.
    - **Admin policy.** The adapter reads `managed-settings.json` and `managed-settings.d/*.json`. It refuses when they set `forceLoginMethod`, `forceLoginOrgUUID`, `apiKeyHelper`, `env.ANTHROPIC_BASE_URL`, or an `allowedProviders` list without `customEndpoint`. `--force` does not skip this. The CLI cannot read MDM profiles or server-managed settings.
    - **Shell keys.** If the shell exports `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY`, Claude Code uses it before the helper and sends it to the proxy, which fails. Setup refuses. `--force` skips this check, and setup then warns after it writes. An exported `ANTHROPIC_BASE_URL` gets a warning.
-   - **Settings conflicts.** If `apiKeyHelper`, `env.ANTHROPIC_BASE_URL`, `env.ANTHROPIC_AUTH_TOKEN`, or `env.ANTHROPIC_API_KEY` holds a value that setup did not write, setup refuses and lists each one. `--force` replaces them after it saves `settings.json.valet-backup`. A helper with this harness and instance's arguments counts as setup's own value, wherever the valet binary was.
+   - **Settings conflicts.** If `apiKeyHelper`, `env.ANTHROPIC_BASE_URL`, `env.ANTHROPIC_AUTH_TOKEN`, or `env.ANTHROPIC_API_KEY` holds a value that setup did not write, setup refuses and lists each one. `--force` replaces them after it saves `settings.json.valet-backup`. Backups have mode 0600. Later backups use numeric suffixes and keep the first recovery copy. A helper with this harness and instance's arguments counts as setup's own value, wherever the valet binary was.
 
-9. **The settings write is safe.** If the settings file is not valid JSON, setup refuses and writes nothing. Setup keeps every key it does not own. It writes a temp file in the same directory and renames it, so a crash cannot leave half a file. It writes through a symlinked settings file to its target and keeps the file mode. A second run changes nothing and reports "already set up".
+9. **The settings write is safe.** If the settings file is not valid JSON, setup refuses and writes nothing. Setup keeps every key it does not own. Before applying a plan, it checks that the file did not change during approval. Conflict reports omit existing helper commands and endpoint values because those can contain secrets. It writes a temp file in the same directory and renames it, so a crash cannot leave half a file. It writes through a symlinked settings file to its target and keeps the file mode. A second run changes nothing and reports "already set up".
 
 10. **Re-runs check the stored key.** If the profile holds a key for the harness, setup reads `GET /api/proxy/keys/:id`. If the key still works, setup reuses it. If the person revoked it, setup says so and requests a new key. `--rotate` requests a new key, stores it after approval, and then revokes the old key. If the revoke fails, setup warns and names the old key id.
 
 11. **Agents can finish setup.** An agent's command can time out during the ten-minute approval wait. Setup saves a waiting request in `pendingProxyKeys` in the CLI config, keyed by `<profile>/<harness>`. A later setup resumes it, and its first poll is immediate. `--no-wait` starts or resumes the request, prints the code, and exits. A denied or expired request is forgotten, so the next setup starts a new one.
 
 12. **Setup says what changes.** After it writes the settings, setup prints that the helper ranks above a claude.ai login, so model use bills through Valet and not the person's Claude subscription. It also prints that a repository's `.claude/settings.json` or `settings.local.json` can override the values, and tells the person to start a new `claude` session and check `/status`.
+
+## Additional tool adapters (2026-11-05)
+
+### Codex
+
+The adapter requires Codex CLI 0.164.0 or later. This conservative minimum
+matches the locally verified client. The adapter writes only
+`$CODEX_HOME/valet.config.toml`, with `~/.codex` as the default config directory.
+It leaves the default `config.toml` and `auth.json` unchanged.
+
+The profile selects `model_provider = "valet"`. Its provider uses
+`<instance>/proxy/openai/v1`, `wire_api = "responses"`, and a command-backed
+bearer token. The auth command is `/bin/sh` with `args = ["-c", <helper>]`.
+It reads the existing private CLI key store. Setup does not add an inline key,
+`env_key`, or `requires_openai_auth` to this provider.
+
+Start Codex with `codex --profile valet`. The profile inherits the selected
+model from the default config. The org's OpenAI provider must support that model.
+A complete generated profile counts as owned by its instance. A different
+profile needs `--force` and a backup. Removal keeps an edited profile intact.
+
+The [official profile documentation](https://developers.openai.com/codex/config-advanced)
+uses separate profile files. It states that Codex 0.134.0 removed legacy
+`[profiles.<name>]` tables. The [configuration reference](https://developers.openai.com/codex/config-reference)
+documents `model_providers.<id>.auth.command` and `auth.args`.
+Local verification used Codex 0.164.0-alpha.11.1. Its help describes profile
+files, and it loaded a generated profile through `codex --profile valet mcp list`.
+That check validates config loading, not live inference.
+
+### OpenCode
+
+The adapter supports installed OpenCode 1.x and 2.x. It checks the major version
+before requesting a key. It writes the selected global JSON or JSONC config.
+`jsonc-parser` edits retain comments and unrelated settings. `OPENCODE_CONFIG`
+selects an explicit file. Otherwise, `XDG_CONFIG_HOME` selects the global config
+root. When both `opencode.json` and `opencode.jsonc` exist, setup requests an
+explicit `OPENCODE_CONFIG` selection.
+
+OpenCode has no documented config key-helper field. Setup therefore writes a
+mode-0600 credential file under the CLI data directory's `proxy-keys` directory.
+The config contains only a `{file:<absolute path>}` reference. Setup writes the
+credential after helper verification. Re-runs update this file for key rotation.
+Removal deletes it when no remaining config reference uses it.
+
+For 1.x, setup configures `provider.anthropic.options` and
+`provider.openai.options`. It sets `apiKey` to the file reference and `baseURL`
+to `<instance>/proxy/anthropic/v1` or `<instance>/proxy/openai/v1`.
+The native model selection and model overrides stay in place. A saved native
+Anthropic or OpenAI OAuth account blocks setup. OAuth plugins can ignore the
+custom endpoint. The corrective action is `opencode auth logout`, followed by
+setup. The adapter never deletes these credentials itself.
+
+For 2.x, setup adds `providers.valet-anthropic` and `providers.valet-openai`.
+Each alias declares its native `canonical` catalog and native runtime `package`.
+It uses `settings.baseURL`, `settings.apiKey`, HTTP transport, and uncompressed
+request bodies. Native provider settings and saved accounts stay unchanged.
+Setup discovers the native catalog through `opencode api get /api/model
+--standalone`. Discovery uses a temporary home, config, and account database.
+Its placeholder credentials point only at a disabled loopback endpoint.
+Setup copies actual upstream model IDs, native transports, limits, capabilities, and reasoning variants.
+It removes credentials, endpoints, and transport overrides from variant metadata.
+It never copies effective credentials or endpoint settings from the model API.
+Explicit model entries are required: `canonical` alone does not populate aliases.
+Custom native model definitions are copied when the alias lacks that model.
+Partial definitions merge recursively over catalog metadata. Explicit user fields win,
+and arrays replace catalog arrays. A name-only override retains the upstream model
+ID, native transport, request body, limits, and reasoning controls.
+Model definitions with connection overrides are refused before key approval.
+Legacy custom model definitions must first migrate to the v2 schema.
+
+If the selected top-level model is `anthropic/<model>` or `openai/<model>`, setup
+selects the corresponding `valet-<provider>/<model>` alias. Other model selections
+stay unchanged. The user can select a Valet model in `/models`. Other providers
+keep their existing endpoints. Removal restores this selected model's native
+prefix and removes the instance's proxy credential and endpoint fields. It keeps
+alias metadata and custom models, including subsequent user edits.
+
+The [OpenCode 1.x provider documentation](https://opencode.ai/docs/providers/)
+documents native provider options. The [1.x config documentation](https://opencode.ai/docs/config/)
+documents JSONC and file substitution. The [2.x provider documentation](https://dev.opencode.ai/v2/docs/providers/)
+documents `canonical`, native packages, settings, and HTTP transport.
+The [2.x config documentation](https://dev.opencode.ai/v2/docs/config/)
+documents `providers.<id>.settings.apiKey` with file substitution.
+The [2.x account documentation](https://dev.opencode.ai/v2/docs/cli/providers/)
+places native credentials in the server database. The adapter leaves that database
+unchanged and uses separate provider IDs. Runtime verification installed OpenCode 1.19.5 and 2.2.5 only in a temporary
+directory. Isolated clients used generated configs and a dummy-key loopback gateway.
+Both versions sent OpenAI requests to `/proxy/openai/v1/responses` with the expected
+bearer token. Both sent Anthropic requests to `/proxy/anthropic/v1/messages` with
+the expected `x-api-key`. The gateway returned an intentional test error after
+capturing requests. Real upstream inference remains a pilot acceptance check.
+
+### Status and secrets
+
+`valet proxy status <harness>` checks the planned settings, helper output,
+separate credential file, stored key status, and org proxy mode. It prints no
+credential and makes no inference request. It instructs the user to send a model
+request and check Usage > Proxy. This confirms actual request routing.
+
+Setup reports the version, policy, and file problems before key approval.
+`--force` does not skip version or policy blockers. It backs up conflicting
+settings before replacement. A file changed during approval always stops setup,
+including with `--force`. The user must re-run setup to inspect the new file.
 
 ## Command flow
 
@@ -88,6 +191,9 @@ For each harness in the profile's `proxyKeys`, logout runs the `remove` steps fi
 
 - `packages/api/src/cli/commands/proxy.ts`: `runProxy` with injected deps, `removeProxySetup` (shared with logout), and `realProxyDeps`.
 - `packages/api/src/cli/proxy/harnesses/index.ts`: the adapter registry and the `HarnessAdapter` interface.
+- `packages/api/src/cli/proxy/harnesses/codex.ts`: the named Codex profile and command authentication.
+- `packages/api/src/cli/proxy/harnesses/opencode.ts`: version-aware JSONC config and private credential files.
+- `packages/api/src/cli/proxy/harnesses/files.ts`: atomic text writes, protected backups, and version probes.
 - `packages/api/src/cli/proxy/harnesses/claude-code.ts`: the Claude Code adapter. Its plan, unapply, and managed-policy functions are pure. The file reads and the atomic write are a thin shell.
 - `packages/api/src/cli/commands/login.ts`, `logout.ts`: keep keys across login; undo setup on logout.
 - `packages/api/src/cli/config.ts`: `proxyKeys` on `ProfileConfig`, and `pendingProxyKeys`.
@@ -109,7 +215,7 @@ interface HarnessAdapter {
   modes: readonly ("centralized" | "passthrough")[];
   modeRefusal(mode: ProxyMode): string;
   preflight(env: NodeJS.ProcessEnv): { blockers: string[]; shellBlockers: string[]; warnings: string[] };
-  plan(target: HarnessTarget): HarnessPlan;     // { path, changes, conflicts, apply({ force }) }
+  plan(target: HarnessTarget): HarnessPlan;     // { path, changes, conflicts, apply({ force, key }) }
   unapply(target: Pick<HarnessTarget, "instanceUrl" | "helperArgs">): HarnessUnapplyReport;
   notices: string[];
   nextStep: string;
@@ -117,6 +223,10 @@ interface HarnessAdapter {
 ```
 
 ## Testing
+
+- Codex filesystem tests: separate profile, unchanged default config and auth, forced backup, changed-file refusal, conservative removal, and installed version checks.
+- OpenCode filesystem tests: JSONC comments, both schemas, private credential mode, v2 aliases and selected model mapping, conflict backups, changed-file refusal, and v1 OAuth detection. Catalog tests cover fresh configs, upstream model IDs, native transports, and credential exclusion.
+- CLI tests: list without sign-in, status without secret output, approved OpenCode key handoff, and helper-error redaction.
 
 - Claude Code adapter unit tests: the settings merge and unapply (including another instance's setup), each managed-policy key, the shell preflight, invalid JSON, `--force` with a backup, and a symlinked settings file.
 - Command tests with stub deps: every refusal before the key request, `--no-wait` and resume, a denied request, a revoked stored key, `--rotate`, a helper that fails or prints another key, `token`, `remove`, and `--help`.
@@ -126,9 +236,15 @@ interface HarnessAdapter {
 - A live run against a real-auth API with Claude Code.
 - `make e2e`.
 
+## Standalone CLI packaging
+
+The standalone build selects the JSONC parser's ESM entry. Its UMD entry hides
+relative dependencies behind a factory, which breaks the compiled CLI. A bundle
+guard runs `valet proxy list` from a bare directory without `node_modules`.
+Native client builds run the same command before publishing their artifacts.
+
 ## Out of scope
 
-- Codex and OpenCode adapters.
 - Team keys from the CLI.
 - Project-scoped Claude Code settings (`.claude/settings.local.json`).
 - Pass-through mode for Claude Code.

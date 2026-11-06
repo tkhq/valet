@@ -55,8 +55,8 @@ describe("planClaudeSettings", () => {
       env: { ANTHROPIC_BASE_URL: "https://gateway.other", ANTHROPIC_AUTH_TOKEN: "sk-secret-1", ANTHROPIC_API_KEY: "sk-secret-2" },
     }, TARGET);
     expect(plan.conflicts).toHaveLength(4);
-    expect(plan.conflicts.join("\n")).toContain("~/bin/get-key.sh");
-    expect(plan.conflicts.join("\n")).toContain("https://gateway.other");
+    expect(plan.conflicts.join("\n")).toContain("apiKeyHelper");
+    expect(plan.conflicts.join("\n")).toContain("ANTHROPIC_BASE_URL");
     expect(plan.conflicts.join("\n")).not.toContain("sk-secret");
     expect(plan.changes.join("\n")).not.toContain("sk-secret");
     expect(plan.next).toEqual({ env: { ANTHROPIC_BASE_URL: BASE }, apiKeyHelper: TARGET.helperCommand });
@@ -113,6 +113,19 @@ describe("managedSettingsBlockers", () => {
 });
 
 describe("claudeCodeAdapter files", () => {
+  it("keeps settings changed during approval", () => {
+    const path = settingsFile();
+    writeFileSync(path, '{"model":"original"}');
+    const plan = claudeCodeAdapter.plan(TARGET);
+    writeFileSync(path, '{"model":"changed-during-approval"}');
+    expect(() => plan.apply({ force: false })).toThrow(/changed/);
+    expect(readSettings().model).toBe("changed-during-approval");
+  });
+  it("hides credentials inside existing helper commands and URLs", () => {
+    const secret = planClaudeSettings({ apiKeyHelper: "echo vlt-private", env: { ANTHROPIC_BASE_URL: "https://secret:password@host" } }, TARGET);
+    expect(secret.conflicts.join(" ")).not.toContain("vlt-private");
+    expect(secret.conflicts.join(" ")).not.toContain("password");
+  });
   it("follows CLAUDE_CONFIG_DIR", () => {
     expect(claudeSettingsPath({ CLAUDE_CONFIG_DIR: "/tmp/cc" })).toBe("/tmp/cc/settings.json");
     expect(claudeSettingsPath({}).endsWith(join(".claude", "settings.json"))).toBe(true);

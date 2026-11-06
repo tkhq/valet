@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } fr
 import type { PendingLogin, ProfileConfig, ProxyKeyRecord, ValetConfig } from "../config.js";
 import { ApiError, AuthError, ExitCode } from "../exit.js";
 import { claudeCodeAdapter } from "../proxy/harnesses/claude-code.js";
+import { harnessAdapter } from "../proxy/harnesses/index.js";
 import type { HarnessAdapter, HarnessPreflight } from "../proxy/harnesses/index.js";
 import { findValetPath, helperCommand, parseProxyArgs, runProxy, shellWord, type HelperResult, type ProxyClient, type ProxyDeps } from "./proxy.js";
 import type { ProxySettingsResponse } from "../../wire/types.js";
@@ -163,6 +164,32 @@ describe("valet proxy --help", () => {
   });
 });
 
+describe("valet proxy list and status", () => {
+  it("lists available tools without an instance sign-in", async () => {
+    expect(await runProxy(["list"], {}, deps().deps)).toBe(ExitCode.OK);
+    expect(stdout()).toContain("claude-code");
+    expect(stdout()).toContain("codex");
+    expect(stdout()).toContain("opencode");
+    expect(stdout()).toContain("centralized");
+  });
+
+  it("checks configured settings, helper, and key without printing the secret", async () => {
+    writeFileSync(join(dir, "settings.json"), JSON.stringify({ env: { ANTHROPIC_BASE_URL: `${URL_}/proxy/anthropic` }, apiKeyHelper: HELPER }));
+    expect(await runProxy(["status", "claude-code"], config({ proxyKeys: { "claude-code": KEY } }), deps().deps)).toBe(ExitCode.OK);
+    expect(stdout()).toContain("configured");
+    expect(stdout() + stderr()).not.toContain(KEY.key);
+    expect(stdout()).toContain("model request");
+  });
+
+  it("reports a missing config or revoked key and names setup as the fix", async () => {
+    const cfg = config({ proxyKeys: { "claude-code": KEY } });
+    expect(await runProxy(["status", "claude-code"], cfg, deps().deps)).toBe(ExitCode.Failure);
+    expect(stderr()).toContain("valet proxy setup claude-code");
+    writeFileSync(join(dir, "settings.json"), JSON.stringify({ env: { ANTHROPIC_BASE_URL: `${URL_}/proxy/anthropic` }, apiKeyHelper: HELPER }));
+    expect(await runProxy(["status", "claude-code"], cfg, deps({ gone: [KEY.id] }).deps)).toBe(ExitCode.AuthFailure);
+  });
+});
+
 describe("valet proxy setup", () => {
   it("asks for a key, checks the helper, stores the key, and points Claude Code at the proxy", async () => {
     const t = deps();
@@ -242,7 +269,7 @@ describe("valet proxy setup", () => {
     const first = deps();
     expect(await runProxy(["setup", "claude-code"], config(), first.deps)).toBe(ExitCode.Failure);
     expect(first.started).toEqual([]);
-    expect(stderr()).toContain("~/bin/get-key.sh");
+    expect(stderr()).toContain("apiKeyHelper is set");
     expect(settings().apiKeyHelper).toBe("~/bin/get-key.sh");
 
     const forced = deps();
@@ -291,8 +318,30 @@ describe("valet proxy setup", () => {
   });
 
   it("names the supported harnesses for an unknown one", async () => {
-    expect(await runProxy(["setup", "codex"], config(), deps().deps)).toBe(ExitCode.Usage);
+    expect(await runProxy(["setup", "unknown"], config(), deps().deps)).toBe(ExitCode.Usage);
     expect(stderr()).toContain("Supported: claude-code");
+  });
+
+  it("configures OpenCode with an approved key without printing the key", async () => {
+    vi.stubEnv("OPENCODE_CONFIG", join(dir, "opencode.json"));
+    vi.stubEnv("VALET_DATA_DIR", dir);
+    const t = deps();
+    t.deps.adapter = (id) => {
+      const adapter = harnessAdapter(id);
+      return adapter ? { ...adapter, preflight: () => ({ blockers: [], shellBlockers: [], warnings: [] }) } : undefined;
+    };
+    try {
+      expect(await runProxy(["setup", "opencode"], config(), t.deps)).toBe(ExitCode.OK);
+      expect(readFileSync(join(dir, "opencode.json"), "utf8")).toContain("{file:");
+      expect(stdout() + stderr()).not.toContain(KEY.key);
+      expect(t.saved[0]?.harness).toBe("opencode");
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it("redacts an approved key from helper errors", async () => {
+    const t = deps({ helper: () => ({ ok: false, error: `failed: ${KEY.key}` }) });
+    expect(await runProxy(["setup", "claude-code"], config(), t.deps)).toBe(ExitCode.Failure);
+    expect(stdout() + stderr()).not.toContain(KEY.key);
   });
 });
 

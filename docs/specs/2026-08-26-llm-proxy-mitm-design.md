@@ -258,13 +258,30 @@ New route in `packages/web/src/routes/` (proposed `usage.tsx`, or a tab under se
 
 ### 9. Onboarding panel
 
-A settings panel that issues a proxy key and shows copy-paste setup. Every tool reads the key from one environment variable, `VALET_PROXY_KEY`, so the reader sets the key once:
+The API keys and proxy page leads with **Connect your coding tool**, before the general API key list. A selector shows one tool's instructions at a time: Claude Code, Codex, OpenCode, Cursor, or Other tools. Agent access through MCP is a separate function from sending model requests through this proxy.
+
+For personal access in centralized mode, the panel first shows the instance-local CLI installer and browser-approved setup:
+
+```sh
+curl -fsSL https://<valet-host>/cli/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+valet login https://<valet-host>
+valet proxy setup claude-code
+```
+
+Use `codex` or `opencode` as the setup argument for those tools. Codex setup requires CLI 0.164 or later and uses the `valet` profile. Launch it with `codex --profile valet`. OpenCode setup supports versions 1.x and 2.x. Version 2 creates separate Valet Anthropic and Valet OpenAI provider aliases and preserves native provider logins. Select a Valet provider in `/models` if needed. For version 1, saved Anthropic or OpenAI logins can override provider settings; the CLI refuses setup until the person disconnects them. Other OpenCode providers keep their existing routing. CLI setup creates a key scoped to proxy traffic. Removal revokes it; the API key list can also revoke it.
+
+The instance serves `/cli/install.sh` and allowlisted `/cli/downloads/:asset` routes for macOS and Linux on x64 or arm64. The installer defaults to `~/.local/bin`. It checks that the downloaded CLI supports `valet proxy list` before replacing an existing binary. When `VALET_CLI_DOWNLOAD_DIR` is configured, the API serves binaries built for that installation. Otherwise, downloads redirect to the rolling release. Pilot deployments supply matching local binaries so the setup commands do not depend on an older public CLI.
+
+Automatic setup creates personal keys in centralized mode only. Team setup and pass-through mode retain the manual path. The panel preserves team creation permissions and clears revealed secrets when team scope or access changes.
+
+The manual path issues a proxy key and shows copy-paste setup for the selected tool. It remains available before key creation with a placeholder. Terminal tools read the key from `VALET_PROXY_KEY`:
 
 ```
 export VALET_PROXY_KEY=vlt_<key>
 ```
 
-A proxy key is an ordinary valet API key (`vlt_` prefix, the better-auth `apiKey` plugin). The panel names it `proxy-key`. The gateway and the `/api` auth ladder verify it the same way.
+A manually created personal proxy key is an ordinary Valet API key (`vlt_` prefix, the better-auth `apiKey` plugin). The panel names it `proxy-key`. Unlike CLI-created proxy-scoped keys, it also works with the `/api` auth ladder. Manual key secrets are shown once and are not persisted in browser storage.
 
 - **Claude Code:**
   ```
@@ -280,7 +297,7 @@ A proxy key is an ordinary valet API key (`vlt_` prefix, the better-auth `apiKey
   env_key = "VALET_PROXY_KEY"
   wire_api = "responses"
   ```
-- **OpenCode** (`opencode.json`):
+- **OpenCode 1.x manual setup** (`opencode.json`; use automatic setup for version 2):
   ```json
   {
     "provider": {
@@ -305,7 +322,11 @@ In pass-through mode, the shared block also exports `ANTHROPIC_API_KEY` and `OPE
 | OpenCode | `apiKey` from `ANTHROPIC_API_KEY` as `x-api-key` | `options.headers` Bearer from `VALET_PROXY_KEY` |
 | OpenAI SDK | `api_key` as Bearer | `default_headers` `x-api-key` |
 
-Before a key exists, the panel shows steps 3 and 4 in a collapsed setup guide. The guide renders the same snippets with the `<your-valet-proxy-key>` placeholder, so a reader can see the setup without creating a key. A team member who cannot create a key can also read it. After creation, the snippets contain the real key.
+Cursor uses its Models settings and the OpenAI-compatible endpoint, not a generated CLI configuration. The guide names the proxy key, exact base URL, and a local Chat or Agent test. It does not claim support for Cursor Tab, Auto, Cloud agents, or proprietary models. Cursor's settings cannot provide both credentials for pass-through mode, so that mode directs the person to another tool or centralized access. See [Cursor API key documentation](https://cursor.com/help/models-and-usage/api-keys) and [OpenAI's Cursor gateway guidance](https://help.openai.com/en/articles/20001506-using-openai-models-in-cursor).
+
+Other tools show the exact Anthropic and OpenAI base URLs, the required headers for the current mode, and an SDK example. Anthropic clients that append `/messages` directly use the base URL with `/v1`.
+
+The **Check connection** button reads the latest 25 personal proxy requests recorded since the selected setup opened. It makes no request until clicked and does not poll. A successful result requires a new 2xx request without a recorded failure. Old, failed, or team requests do not qualify. The message confirms observed proxy traffic; it does not infer that every feature or request from the selected tool uses the proxy. Loading, failure, and empty states name the next action. Team setup does not query personal history and directs the person to team spend in Usage instead.
 
 ## Error handling
 
