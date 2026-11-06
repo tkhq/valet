@@ -885,9 +885,9 @@ export interface WakeupSummary {
   fireAt?: number;
   /** `event`: the canonical subject it waits on, e.g. `github:acme/x#1`. */
   subject?: string;
-  /** `event`: the subject's display label, from the owning plugin's `eventSubjects.label`. */
+  /** `event`: the visible child task's title, or the owning plugin's subject label. */
   subjectLabel?: string;
-  /** `event`: the subject's link, from `eventSubjects.url`. Absent when the plugin returns none. */
+  /** `event`: the visible child task's link, or the owning plugin's subject URL when available. */
   subjectUrl?: string;
   /** `event`: the number of match clauses it waits on. */
   clauseCount?: number;

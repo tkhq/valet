@@ -18,10 +18,11 @@ import {
   type Wakeup,
 } from "@valet/engine";
 import githubPlugin from "@valet/plugin-github/plugin";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { childWatches, eventDropLog, agentSessions, sessionThreads, teamMembers, teams } from "../schema/index.js";
+import * as sessionAccess from "../services/session-access.js";
 import type {
   BackgroundWorkConflict,
   CancelSessionWakeupResponse,
@@ -98,6 +99,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   unregister?.();
   unregister = undefined;
   await api?.cleanup();
@@ -205,6 +207,7 @@ async function seedEvent(
   threadId: string,
   n: number,
   subject = "github:acme/lean-proofs#42",
+  reason = "wait for CI",
 ): Promise<Wakeup> {
   const now = Date.now();
   const wakeup: Wakeup = {
@@ -213,7 +216,7 @@ async function seedEvent(
     threadId,
     kind: "event",
     status: "running",
-    reason: "wait for CI",
+    reason,
     deadlineAt: now + 2 * HOUR_MS,
     logOffset: 0,
     logTail: "",
@@ -306,6 +309,142 @@ describe("GET /api/sessions/:id/wakeups", () => {
     await seedSession(api, "wk-list-other", { type: "user", id: "test-member" }, "test-member");
     const res = await fetch(`${api.baseUrl}/api/sessions/wk-list-other/wakeups`);
     expect(res.status).toBe(404);
+  });
+
+  it.each([
+    { title: "Review the onboarding flow", label: "Review the onboarding flow", reason: "Waiting on Review the onboarding flow" },
+    { title: null, label: "background task", reason: "Waiting on background task" },
+  ])("names a visible child task ($label) and links its detail panel", async ({ title, label, reason }) => {
+    api = await bootTestApi();
+    await seedSession(api, "wk-child-parent");
+    const session = await api.providers.engineHost.sessionFor("wk-child-parent", {
+      userId: "local-user", orgId: "local-org", workspace: "/tmp/wk-child-parent",
+    });
+    const thread = await session.ensureDefaultThread();
+    await seedSession(api, "child_named");
+    await api.providers.db.update(agentSessions).set({ title })
+      .where(and(eq(agentSessions.id, "child_named"), eq(agentSessions.orgId, "local-org")));
+    await seedEvent(api, session.id, thread.id, 1, "valet:session:child_named", "Child updates: child_named");
+
+    const res = await fetch(`${api.baseUrl}/api/sessions/${session.id}/wakeups`);
+    expect(res.status).toBe(200);
+    // The assertions below check this route's wire response.
+    const body = (await res.json()) as ListSessionWakeupsResponse;
+    expect(body.wakeups[0]).toMatchObject({
+      subjectLabel: label,
+      subjectUrl: "/chat?child=child_named",
+      reason,
+    });
+  });
+
+  it.each(["missing", "other owner", "other org", "deleted"])("uses a generic label for a child that is %s", async (scenario) => {
+    api = await bootTestApi();
+    await seedSession(api, "wk-hidden-child-parent");
+    const session = await api.providers.engineHost.sessionFor("wk-hidden-child-parent", {
+      userId: "local-user", orgId: "local-org", workspace: "/tmp/wk-hidden-child-parent",
+    });
+    const thread = await session.ensureDefaultThread();
+    if (scenario !== "missing") {
+      const ownerId = scenario === "other owner" ? "test-member" : "local-user";
+      await seedSession(api, "child_hidden", { type: "user", id: ownerId }, ownerId);
+      await api.providers.db.update(agentSessions).set({
+        title: "Private task details",
+        ...(scenario === "other org" ? { orgId: "another-org" } : {}),
+        ...(scenario === "deleted" ? { status: "deleted" } : {}),
+      }).where(and(eq(agentSessions.id, "child_hidden"), eq(agentSessions.orgId, "local-org")));
+    }
+    await seedEvent(api, session.id, thread.id, 1, "valet:session:child_hidden", "Child updates: child_hidden");
+
+    const res = await fetch(`${api.baseUrl}/api/sessions/${session.id}/wakeups`);
+    expect(res.status).toBe(200);
+    // The assertions below check this route's wire response.
+    const body = (await res.json()) as ListSessionWakeupsResponse;
+    expect(body.wakeups[0]).toMatchObject({ subjectLabel: "background task", reason: "Waiting on background task" });
+    expect(body.wakeups[0]?.subjectUrl).toBeUndefined();
+    expect(JSON.stringify(body)).not.toContain("Private task details");
+  });
+
+  it("shows a team child's title and link only to viewers of its spawning private thread", async () => {
+    api = await bootTestApi();
+    await seedTeam(api, "team_child_wait", [
+      { userId: "local-user", role: "admin" },
+      { userId: "test-member", role: "member" },
+    ]);
+    const owner = { type: "team", id: "team_child_wait" } satisfies { type: "team"; id: string };
+    await seedSession(api, "wk-private-child-parent", owner);
+    const session = await api.providers.engineHost.sessionFor("wk-private-child-parent", {
+      userId: "local-user", orgId: "local-org", workspace: "/tmp/wk-private-child-parent",
+    });
+    const publicThread = await session.ensureDefaultThread();
+    const privateThread = await session.createThread("app-assistant:test-member");
+    await seedSession(api, "child_private", owner);
+    await api.providers.db.update(agentSessions).set({ title: "Private task details" })
+      .where(and(eq(agentSessions.id, "child_private"), eq(agentSessions.orgId, "local-org")));
+    await api.providers.engineHost.childSessionFor("child_private", {
+      parentSessionId: session.id, parentThreadId: privateThread.id,
+      actorUserId: "test-member", orgId: "local-org", owner, workspace: "/tmp/child-private",
+    });
+    await seedEvent(api, session.id, publicThread.id, 1, "valet:session:child_private");
+
+    const res = await fetch(`${api.baseUrl}/api/sessions/${session.id}/wakeups`);
+    expect(res.status).toBe(200);
+    // The assertions below check this route's wire response.
+    const body = (await res.json()) as ListSessionWakeupsResponse;
+    expect(body.wakeups[0]?.subjectLabel).toBe("background task");
+    expect(body.wakeups[0]?.subjectUrl).toBeUndefined();
+    expect(JSON.stringify(body)).not.toContain("Private task details");
+
+    const allowed = await fetch(`${api.baseUrl}/api/sessions/${session.id}/wakeups`, {
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(allowed.status).toBe(200);
+    // The assertions below check this route's wire response.
+    const visible = (await allowed.json()) as ListSessionWakeupsResponse;
+    expect(visible.wakeups[0]).toMatchObject({ subjectLabel: "Private task details", subjectUrl: "/chat?child=child_private" });
+  });
+
+  it("reuses duplicate child resolutions and checks at most four children at once", async () => {
+    api = await bootTestApi();
+    await seedSession(api, "wk-many-children");
+    const session = await api.providers.engineHost.sessionFor("wk-many-children", {
+      userId: "local-user", orgId: "local-org", workspace: "/tmp/wk-many-children",
+    });
+    const thread = await session.ensureDefaultThread();
+    const childIds = Array.from({ length: 8 }, (_, index) => `child_bounded_${index}`);
+    for (const childId of childIds) await seedSession(api, childId);
+    for (let index = 0; index < childIds.length * 2; index++) {
+      await seedEvent(api, session.id, thread.id, index, `valet:session:${childIds[index % childIds.length]}`);
+    }
+
+    const select = vi.spyOn(api.providers.db, "select");
+    const canView = sessionAccess.canViewSession;
+    const checks = new Map<string, number>();
+    let active = 0;
+    let peak = 0;
+    vi.spyOn(sessionAccess, "canViewSession").mockImplementation(async (db, child, caller) => {
+      if (!("id" in child) || typeof child.id !== "string" || !childIds.includes(child.id)) return canView(db, child, caller);
+      checks.set(child.id, (checks.get(child.id) ?? 0) + 1);
+      active++;
+      peak = Math.max(peak, active);
+      try {
+        // Hold real authorization briefly so concurrent checks overlap.
+        await new Promise<void>((resolve) => setTimeout(resolve, 25));
+        return await canView(db, child, caller);
+      } finally {
+        active--;
+      }
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/sessions/${session.id}/wakeups`);
+    expect(res.status).toBe(200);
+    // The assertions below check this route's wire response.
+    const body = (await res.json()) as ListSessionWakeupsResponse;
+    expect(body.wakeups).toHaveLength(16);
+    expect(body.wakeups.every((wakeup) => wakeup.subjectLabel === "background task" && wakeup.subjectUrl !== undefined)).toBe(true);
+    expect(checks.size).toBe(8);
+    expect.soft([...checks.values()]).toEqual(Array.from({ length: 8 }, () => 1));
+    expect.soft(peak).toBeLessThanOrEqual(4);
+    expect.soft(select.mock.calls.length).toBeLessThanOrEqual(9);
   });
 });
 

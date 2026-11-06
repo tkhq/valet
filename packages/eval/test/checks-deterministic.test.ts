@@ -71,6 +71,27 @@ describe("tool_called", () => {
   });
 });
 
+describe("citation_validity", () => {
+  const cited = makeTrajectory({
+    finalOutput: "Deploy Friday [s1].",
+    toolCalls: [call("mem_read", 0, { result: { details: { sources: [
+      { id: "s1", service: "memory", title: "Deployment notes" },
+    ] } } })],
+  });
+  it("accepts citations backed by this trajectory's tool results and reports counts", () => {
+    const result = run({ type: "citation_validity" }, cited);
+    expect(result.pass).toBe(true);
+    expect(result.metrics).toEqual({ citations: 1, invalid_citations: 0, cited_sources: 1 });
+  });
+  it("rejects invented ids and a response that skips citations", () => {
+    expect(run({ type: "citation_validity" }, { ...cited, finalOutput: "Friday [s2]." }).pass).toBe(false);
+    expect(run({ type: "citation_validity" }, { ...cited, finalOutput: "Friday." }).pass).toBe(false);
+  });
+  it("ignores examples in code and ordinary links", () => {
+    expect(run({ type: "citation_validity" }, { ...cited, finalOutput: "Friday [s1]. `[s9]` [s8](https://example.com)" }).pass).toBe(true);
+  });
+});
+
 describe("tool_not_called", () => {
   it("passes when absent and fails when present", () => {
     const t = makeTrajectory({ toolCalls: [call("bash", 0)] });

@@ -1,4 +1,4 @@
-import { TOOL_INTENT_SCHEMA, actionInScope, scopeRefusal } from "@valet/shared";
+import { TOOL_INTENT_SCHEMA, actionInScope, deriveActionLabel, scopeRefusal, type SourceInput } from "@valet/shared";
 import { IsObject, ObjectOptions, Type } from "typebox";
 import { Value } from "typebox/value";
 import type { Static, TSchema } from "typebox";
@@ -75,6 +75,12 @@ export interface PluginAction<TParams extends TSchema = TSchema> {
     args: Static<TParams>,
     ctx: PluginActionContext,
   ) => Promise<PluginActionResult>;
+  /**
+   * One past-tense line for the thread's step, with the key inputs
+   * ("Searched Slack for “deploy”"). Read only after a successful call; the
+   * model never sees it. Without one, the step names the service and action.
+   */
+  label?: (args: Static<TParams>) => string | undefined;
 }
 
 /**
@@ -101,6 +107,9 @@ export interface PluginActionResult {
   error?: string;
   /** Attachments to inject into the LLM's vision context or store via BlobStore. */
   attachments?: ToolAttachment[];
+  /** Items the action read: a message permalink, a file at a commit. The
+   * engine gives each a thread-scoped id the model can cite. */
+  sources?: SourceInput[];
 }
 
 export type ApprovalMode = "allow" | "require_approval" | "deny";
@@ -355,7 +364,7 @@ export function pluginCatalogTools(opts: PluginCatalogOptions): ToolDef[] {
  * (`ToolResult` text vs. a `command_result` markdown output).
  */
 export type InvokeActionResult =
-  | { kind: "ok"; result: PluginActionResult; automatic?: true }
+  | { kind: "ok"; result: PluginActionResult; automatic?: true; label?: string }
   | { kind: "unknown"; toolId: string }
   | { kind: "invalid-args"; error: string }
   /** `shared_account`: the action needs a teammate's shared account, and
@@ -1561,7 +1570,8 @@ function renderInvokeOutcome(outcome: InvokeActionResult, toolId: string, simila
 function renderInvokeResult(outcome: InvokeActionResult, toolId: string, similar: readonly string[] = []): ToolResult {
   switch (outcome.kind) {
     case "ok":
-      return { ...actionResultToToolResult(outcome.result, toolId), ...(outcome.automatic ? { approval: "automatic" as const } : {}) };
+      return { ...actionResultToToolResult(outcome.result, toolId), ...(outcome.automatic ? { approval: "automatic" as const } : {}),
+        ...(outcome.label ? { label: outcome.label } : {}) };
     case "unknown":
       return {
         text: `unknown tool_id: "${toolId}".${similar.length ? ` Did you mean ${similar.map((id) => `"${id}"`).join(" or ")}?` : ""} Use list_tools to find available actions.`,
@@ -1905,7 +1915,8 @@ async function executeAction(
         result,
       });
     }
-    return { kind: "ok", result };
+    const label = result.success ? actionLabel(entry.action, prepared.args, entry.service) : undefined;
+    return { kind: "ok", result, ...(label ? { label } : {}) };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (audit) {
@@ -2044,6 +2055,26 @@ function scopedCredentialProvider(
   };
 }
 
+/**
+ * The step line for a finished call: the action's own `label`, else one built
+ * from the action name and key arguments. A label that throws or says nothing
+ * falls through. Exported so a test can check every registered action.
+ */
+export function actionLabel(action: PluginAction, args: unknown, service: string): string | undefined {
+  const clean = (value: string | undefined) => value?.replace(/\s+/g, " ").trim().slice(0, 160) || undefined;
+  try {
+    const own = clean(action.label?.(args as never));
+    if (own) return own;
+  } catch {
+    // Fall through to the derived line.
+  }
+  try {
+    return clean(deriveActionLabel(service, action.id, args));
+  } catch {
+    return undefined;
+  }
+}
+
 function actionResultToToolResult(
   result: PluginActionResult,
   toolId: string,
@@ -2069,6 +2100,7 @@ function actionResultToToolResult(
     text: typeof result.data === "string" ? result.data : encodeToolOutput(result.data),
     attachments: attachments && attachments.length > 0 ? attachments : undefined,
     ok: true,
+    ...(result.sources?.length ? { sources: result.sources } : {}),
     // Usage counts terminal PRs from bash parts only; the action has its own fact.
     ...(createdPullRequest ? { outcome: { kind: "pull_request_created" as const, url: createdPullRequest } } : {}),
   };

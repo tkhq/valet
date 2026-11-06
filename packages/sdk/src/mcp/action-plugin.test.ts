@@ -170,6 +170,15 @@ describe('mcpActionPlugin resolveActions', () => {
     expect(actions[2].description).toBe('example tool: read_only_tool');
   });
 
+  it('gives each discovered tool a step label from its name and arguments', async () => {
+    vi.stubGlobal('fetch', makeFetchMock({ tools: fixtureTools }));
+    const plugin = mcpActionPlugin({ mcpUrl: 'https://mcp.example.com/mcp', serviceName: 'linear', defaultRiskLevel: 'medium' });
+    const actions = await plugin.resolveActions!({ credentials: fakeCredentialProvider({ accessToken: 'tok-abc' }) });
+    expect(actions[0].label?.({ query: 'deploy' } as never)).toBe('Searched Linear zones for “deploy”');
+    expect(actions[1].label?.({ id: 'z-9' } as never)).toBe('Deleted Linear zone z-9');
+    expect(actions[2].label?.({} as never)).toBe('Read Linear only tool');
+  });
+
   it('derives risk level from tool annotations, falling back to defaultRiskLevel', async () => {
     vi.stubGlobal('fetch', makeFetchMock({ tools: fixtureTools }));
     const plugin = mcpActionPlugin({
@@ -1257,5 +1266,30 @@ describe('mcpActionPlugin auth-rejection messages on discovery (HTTP 401/403)', 
     await expect(plugin.resolveActions!({ credentials })).rejects.toThrow(
       'MCP linear tools/list failed: HTTP 500 — server exploded',
     );
+  });
+});
+
+describe('mcpActionPlugin sources', () => {
+  const run = async (sources: (name: string, data: unknown) => Array<{ service: string; title: string }>, callResult: McpToolResult) => {
+    vi.stubGlobal('fetch', makeFetchMock({ tools: fixtureTools, callResult }));
+    const plugin = mcpActionPlugin({ mcpUrl: 'https://mcp.example.com/mcp', serviceName: 'example', defaultRiskLevel: 'medium', sources });
+    const credentials = fakeCredentialProvider({ accessToken: 'tok-abc' });
+    const [action] = await plugin.resolveActions!({ credentials });
+    return action.execute({}, { credentials } as PluginActionContext);
+  };
+  const ok: McpToolResult = { content: [{ type: 'text', text: '{"title":"A"}' }] };
+
+  it('adds the sources the plugin derives from a successful result', async () => {
+    const result = await run((name, data) => [{ service: 'example', title: `${name}:${JSON.stringify(data)}` }], ok);
+    expect(result.sources).toEqual([{ service: 'example', title: 'list_zones:{"title":"A"}' }]);
+  });
+
+  it('keeps the result when the sources function throws, and adds none for an error', async () => {
+    const thrown = await run(() => { throw new Error('bad'); }, ok);
+    expect(thrown).toMatchObject({ success: true });
+    expect(thrown.sources).toBeUndefined();
+    const failed = await run(() => [{ service: 'example', title: 'x' }], { content: [{ type: 'text', text: 'no' }], isError: true });
+    expect(failed.success).toBe(false);
+    expect(failed.sources).toBeUndefined();
   });
 });

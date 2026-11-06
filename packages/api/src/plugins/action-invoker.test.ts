@@ -635,7 +635,7 @@ describe("buildActionInvoker", () => {
       if (allowed) {
         expect(result).toMatchObject({ ok: true, result: { channel, messages: [{ text: "Visible message", ts: "1.2" }] } });
         expect(fetchMock.mock.calls[1][0]).toContain(action === "read_thread" ? "conversations.replies" : "conversations.history");
-        expect(fetchMock).toHaveBeenCalledTimes(2);
+        expect(fetchMock).toHaveBeenCalledTimes(3); // guard, read, auth.test for message links
       } else {
         expect(result).toEqual({ ok: false, error: isIm || isMpim
           ? "Shared runs cannot read direct messages. Use a personal run owned by a linked conversation member."

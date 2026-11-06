@@ -172,6 +172,8 @@ export type DeterministicCheck =
   | { type: "output_not_contains"; value?: string; pattern?: string }
   | { type: "all_terminal" }
   | { type: "no_errors" }
+  /** Require at least one source tag, with every tag backed by a tool result. */
+  | { type: "citation_validity" }
   | {
       type: "max_turns";
       value: number;
@@ -333,6 +335,7 @@ export const CHECK_TYPES = [
   "output_not_contains",
   "all_terminal",
   "no_errors",
+  "citation_validity",
   "max_turns",
   "max_tokens",
   "min_compactions",
@@ -391,6 +394,17 @@ export type EvalProfile = "unit" | "mock" | "integration" | "full";
 /** Canned response for one mocked tool (`profile: mock`). */
 export interface MockToolSpec {
   response: string;
+  /** Sources the mocked read returns; the engine numbers them (s1, s2…) like a real tool. */
+  sources?: MockSource[];
+}
+
+/** One source a mocked tool returns. Same shape a plugin action returns. */
+export interface MockSource {
+  service: string;
+  title: string;
+  url?: string;
+  snippet?: string;
+  location?: string;
 }
 
 /**

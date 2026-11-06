@@ -1,0 +1,24 @@
+id: gmail-source-citations
+description: Cite the email that states a meeting time without a citation request.
+profile: mock
+turns:
+  - role: user
+    content: >-
+      Read Gmail message m1 and tell me when the vendor meeting is.
+timeout_ms: 120000
+mock_tools:
+  gmail.get_message:
+    response: '{"id":"m1","threadId":"t1","subject":"Vendor meeting","body":"The vendor meeting is at 3pm on Friday."}'
+    sources:
+      - service: gmail
+        title: Vendor meeting
+        url: https://mail.google.com/mail/u/0/#all/t1
+        snippet: The vendor meeting is at 3pm on Friday.
+checks:
+  - type: tool_called
+    tool: gmail.get_message
+  - type: citation_validity
+  - type: judge_output
+    rubric: >-
+      The reply says the vendor meeting is at 3pm on Friday and cites the Gmail source. Uncited facts score at most 2.
+  - type: no_errors

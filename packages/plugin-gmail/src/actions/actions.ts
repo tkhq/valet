@@ -5,6 +5,7 @@ import type {
   PluginAction,
   PluginActionContext,
   PluginActionResult,
+  SourceInput,
 } from "@valet/engine";
 import { gmailFetch, decodeBase64Url, decodeBase64UrlBytes, submitRawMessage } from "./api.js";
 import { appendAttachments, buildMimeMessage, type MimeAttachment } from "./mime.js";
@@ -192,6 +193,16 @@ function truncate(text: string, max: number): string {
   return collapsed.slice(0, max) + '…';
 }
 
+function messageSources(message: GmailMessage): SourceInput[] {
+  if (!message.threadId || !message.snippet?.trim()) return [];
+  return [{
+    service: 'gmail',
+    title: findHeaderValue(message.payload?.headers, 'Subject') || 'Gmail message',
+    url: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(message.threadId)}`,
+    snippet: truncate(message.snippet, 500),
+  }];
+}
+
 /**
  * Curried action builder. The first call binds T from the parameters
  * schema; the second call types `execute`'s args via Static<T>. Splitting
@@ -204,6 +215,7 @@ function action<TParams extends TSchema>(parameters: TParams) {
     name: string;
     description: string;
     riskLevel: PluginAction["riskLevel"];
+    label?: PluginAction<TParams>["label"];
     execute: (
       args: Static<TParams>,
       ctx: PluginActionContext,
@@ -365,6 +377,7 @@ const listMessages = action(
 
       return {
         success: true,
+        sources: detailed.flatMap((msg) => msg ? messageSources(msg) : []),
         data: {
           messages,
           resultSizeEstimate: listData.resultSizeEstimate ?? messages.length,
@@ -404,6 +417,7 @@ const getMessage = action(
       if (!res.ok) return gmailError(res);
       const msg = (await res.json()) as GmailMessage;
       const headers = msg.payload?.headers;
+      const sources = messageSources(msg);
 
       const base = {
         id: msg.id,
@@ -416,7 +430,7 @@ const getMessage = action(
       };
 
       if (format === 'minimal') {
-        return { success: true, data: base };
+        return { success: true, sources, data: base };
       }
 
       const headerSummary = {
@@ -430,7 +444,7 @@ const getMessage = action(
       };
 
       if (format === 'metadata') {
-        return { success: true, data: { ...base, headers: headerSummary } };
+        return { success: true, sources, data: { ...base, headers: headerSummary } };
       }
 
       // full
@@ -438,6 +452,7 @@ const getMessage = action(
       const attachments = collectAttachments(msg.payload);
       return {
         success: true,
+        sources,
         data: { ...base, headers: headerSummary, body: { text, html }, attachments },
       };
     } catch (error) {
@@ -957,6 +972,7 @@ const triageInbox = action(
   description:
     "Composite action: fetches the user's most recent unread Gmail messages with full content and heuristic categorization in a single call. Returns headers, body excerpts, labels, plus per-message signals (newsletter, meeting reference, contains question, action requested) AND aggregate stats (total unread, top senders, breakdown by category). Designed for AI inbox triage workflows — use the returned data to decide which messages need a reply, can be archived, or warrant a draft response. Pairs naturally with create_draft, modify_labels, and trash_message.",
   riskLevel: 'medium',
+  label: () => 'Triaged the Gmail inbox',
   execute: async (args, ctx) => {
     const p = args;
     const token = await getAccessToken(ctx);

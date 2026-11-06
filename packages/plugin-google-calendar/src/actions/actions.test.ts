@@ -104,6 +104,7 @@ describe('google-calendar actions', () => {
 
     expect(result).toEqual({
       success: true,
+      sources: [{ service: 'google_calendar', title: 'Standup', url: 'https://calendar.google.com/e1', location: '2026-04-15 09:00' }],
       data: {
         events: [
           {
@@ -124,6 +125,19 @@ describe('google-calendar actions', () => {
         nextPageToken: 'np1',
       },
     });
+  });
+
+  it('omits descriptions and physical locations from source previews while preserving event data', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { items: [{
+      id: 'e1', summary: 'Standup', htmlLink: 'https://calendar.google.com/e1',
+      description: 'Join with passcode 123456', location: 'Room code 9876',
+      start: { dateTime: '2026-04-15T09:00:00-07:00' },
+    }] }));
+    const result = await action('calendar.list_events').execute({}, pluginCtx());
+    expect(result.sources).toEqual([{
+      service: 'google_calendar', title: 'Standup', url: 'https://calendar.google.com/e1', location: '2026-04-15 09:00',
+    }]);
+    expect(result.data).toMatchObject({ events: [{ description: 'Join with passcode 123456', location: 'Room code 9876' }] });
   });
 
   it('list_events maps a 403 response to a permission error', async () => {

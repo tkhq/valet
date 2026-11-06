@@ -32,5 +32,8 @@ export * from './event-match.js';
 export * from './thread-projects.js';
 export * from './thread-recap.js';
 export * from './turn-progress.js';
+export * from './sources.js';
 
 export * from "./tool-intent.js";
+export * from './service-display-name.js';
+export * from './action-label.js';

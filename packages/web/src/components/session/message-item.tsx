@@ -213,7 +213,7 @@ export const MessageItem = memo(function MessageItem({
               <UserAttachmentStrip attachments={message.attachments} />
             )}
             {message.parts.length === 0 && message.content && (
-              <TextBlock text={message.content} skillMeta={isUser ? message.skill : undefined} detectSkill={isUser} collapseStructured={collapseStructured} />
+              <TextBlock text={message.content} skillMeta={isUser ? message.skill : undefined} detectSkill={isUser} citations={message.role === "assistant"} collapseStructured={collapseStructured} />
             )}
             {segments.map((segment, i) => segment.kind === "work"
               // Work lines and tool cards hold per-mount state (open or
@@ -228,6 +228,7 @@ export const MessageItem = memo(function MessageItem({
                   readOnly={readOnly}
                   skillMeta={isUser ? message.skill : undefined}
                   detectSkill={isUser}
+                  citations={message.role === "assistant"}
                   collapseStructured={collapseStructured}
                 />)}
             {!suppressEmptyPlaceholder && isEmptyAssistantMessage(message) && (message.errorMessage?.trim()
@@ -378,6 +379,7 @@ function PartView({
   part,
   skillMeta,
   detectSkill,
+  citations,
   collapseStructured,
   readOnly,
 }: {
@@ -385,11 +387,12 @@ function PartView({
   part: MessagePart;
   skillMeta?: MessageSkillInvocation;
   detectSkill?: boolean;
+  citations?: boolean;
   collapseStructured?: boolean;
 }) {
   switch (part.kind) {
     case "text":
-      return <TextBlock text={part.text} skillMeta={skillMeta} detectSkill={detectSkill} collapseStructured={collapseStructured} />;
+      return <TextBlock text={part.text} skillMeta={skillMeta} detectSkill={detectSkill} citations={citations} collapseStructured={collapseStructured} />;
     case "thinking":
       return <ReasoningLine part={part} live={false} />;
     case "tool_call":
@@ -401,6 +404,7 @@ function TextBlock({
   text,
   skillMeta,
   detectSkill = false,
+  citations = false,
   collapseStructured = false,
 }: {
   text: string;
@@ -409,6 +413,7 @@ function TextBlock({
   /** True only for user messages — the dispatcher writes skill blocks
    *  nowhere else, and assistant prose that quotes one must stay prose. */
   detectSkill?: boolean;
+  citations?: boolean;
   collapseStructured?: boolean;
 }) {
   // Memoized so streaming re-renders elsewhere in the thread don't re-run
@@ -433,7 +438,7 @@ function TextBlock({
   }
   // Assistant text fills a centered column, so its tables may grow past
   // it. A user message sits in a bubble at one side.
-  return <Markdown wideTables={!detectSkill}>{text}</Markdown>;
+  return <Markdown wideTables={!detectSkill} citations={citations}>{text}</Markdown>;
 }
 
 interface StructuredText {

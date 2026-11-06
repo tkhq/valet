@@ -25,7 +25,7 @@ import type { TSchema } from "typebox";
 import { encodeToolOutput, serializePrincipal, type Principal } from "@valet/engine";
 import type { ToolContext, ToolDef, ToolResult } from "@valet/engine";
 import { artifactSizeError, artifactSizeErrorForBytes } from "@valet/shared";
-import { normalizePath } from "../lib/okf.js";
+import { normalizePath, parseConcept } from "../lib/okf.js";
 import { artifactCommentDigest, artifactCommentRef, parseArtifactComments } from "../lib/artifact-comment-digest.js";
 
 const UNAVAILABLE_TEXT = "[memory_unavailable] memory endpoint not configured";
@@ -363,7 +363,14 @@ export const memReadTool = defineTool({
     url.searchParams.set("path", args.path);
     return memoryRequest(url, { method: "GET", headers: memoryHeaders(cfg, owner, ctx, false, true) }, async (res) => {
       const body = asReadResultBody(await parseJsonBody(res));
-      return { text: body?.rendered ?? "" };
+      const text = body?.rendered ?? "";
+      // A file is a source a reply can cite; a directory index is not.
+      if (body?.kind !== "file" || !args.path) return { text };
+      const path = args.path.replace(/^\/+/, "");
+      const concept = parseConcept(text);
+      const title = concept.title.trim() || path;
+      const snippet = (concept.description.trim() || concept.body.trim()).slice(0, 300);
+      return { text, sources: [{ service: "memory", title, url: `/memory/${path.split("/").map(encodeURIComponent).join("/")}`, snippet }] };
     });
   },
 });
@@ -404,7 +411,7 @@ export const memSearchTool = defineTool({
   sideEffect: "none",
   ownerOnly: true,
   description:
-    "Full-text search over memory (path, title, description, tags, content) within your own scope and any teams you belong to. Search before mem_write when the memory might already exist, especially for anything with a `resource`.",
+    "Full-text search over memory (path, title, description, tags, content) within your own scope and any teams you belong to. Search when a message names a person, project, client, repository, or earlier decision, to find what you already know. Each result is a path and a description, not the file: mem_read the files your answer depends on. Also search before mem_write when the memory might already exist, especially for anything with a `resource`.",
   parameters: Type.Object({
     query: Type.String({
       description:
@@ -427,7 +434,9 @@ export const memSearchTool = defineTool({
         const desc = r.description ? ` — ${r.description}` : "";
         return `[${r.type}] ${r.path}${desc}`;
       });
-      return { text: lines.join("\n") };
+      // The next step rides in the result, where the model decides what to
+      // do with the hits. A description alone often reads as the answer.
+      return { text: `${lines.join("\n")}\n\nThese lines describe files. mem_read each file your answer depends on before you use it.` };
     });
   },
 });

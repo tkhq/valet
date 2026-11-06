@@ -20,7 +20,7 @@ export async function authorizeSlackFile(
   args: { file_id?: string; url?: string },
   credential: Credential,
   ctx: PluginActionContext,
-): Promise<{ url: URL; name: string } | { error: string }> {
+): Promise<{ url: URL; name: string; permalink?: string } | { error: string }> {
   const suppliedUrl = args.url ? slackFileUrl(args.url) : undefined;
   if (args.url && !suppliedUrl) return { error: 'Use a file ID or an HTTPS files.slack.com URL from Slack message data.' };
   const fileId = args.file_id ?? suppliedUrl?.pathname.match(/\/files-(?:pri|tmb)\/[^/]+-(F[A-Z0-9]+)\//)?.[1];
@@ -58,7 +58,11 @@ export async function authorizeSlackFile(
     const access = await checkPrivateChannelAccess(credential.accessToken, channel,
       typeof ownerId === 'string' ? ownerId : undefined,
       { ownerType: ctx.owner?.type, directIsPrivate: true });
-    if (access.allowed) return { url, name: typeof file.name === 'string' ? file.name : url.pathname.split('/').pop() || 'file' };
+    if (access.allowed) return {
+      url,
+      name: typeof file.name === 'string' ? file.name : url.pathname.split('/').pop() || 'file',
+      ...(typeof file.permalink === 'string' ? { permalink: file.permalink } : {}),
+    };
     if (access.error) errors.add(access.error);
   }
   if (errors.size) return { error: `Slack file access could not be verified. ${[...errors].slice(0, 3).join(' ')} Check the connected account, then retry.` };

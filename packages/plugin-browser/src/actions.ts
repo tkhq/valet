@@ -334,6 +334,10 @@ export const browserPlugin: ActionPlugin = {
       description:
         "Run JavaScript in the persistent browser REPL. Call browser.describe first for the API. Browser operations are authorized individually.",
       parameters: executeSchema,
+      label: (args) => {
+        const title = (args as { title?: unknown }).title;
+        return typeof title === "string" && title.trim() ? `Ran browser step “${title.trim().slice(0, 80)}”` : "Ran a step in the browser";
+      },
       execute: async (args, ctx) => {
         if (!Value.Check(executeSchema, args))
           throw new Error("Invalid browser cell. Supply code and a title.");
@@ -347,6 +351,7 @@ export const browserPlugin: ActionPlugin = {
       description:
         "Read the installed browser API, limits, and capabilities before controlling a page.",
       parameters: describeSchema,
+      label: () => "Read the browser guide",
       execute: async (args, ctx) => {
         if (!Value.Check(describeSchema, args))
           throw new Error("Invalid browser topic. Supply a string.");
@@ -373,6 +378,7 @@ export const browserPlugin: ActionPlugin = {
       description:
         "Reset this thread’s JavaScript bindings. Browser tabs and the signed-in profile remain available.",
       parameters: resetSchema,
+      label: () => "Reset the browser session scripts",
       execute: async (args, ctx) => {
         if (!Value.Check(resetSchema, args))
           throw new Error("Invalid browser reset reason. Supply a string.");

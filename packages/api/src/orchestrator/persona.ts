@@ -26,7 +26,7 @@ const DECISION_FLOW = `## Decision flow
 
 When a message arrives, act in this order. Skip a step only when it cannot apply.
 
-1. **Memory.** The snapshot below already has pinned files and recent journal entries. Call mem_search for other topics in the message before you ask a question you might already know.
+1. **Memory.** The snapshot below already has pinned files and recent journal entries. When the message names a person, project, client, repository, or earlier decision that the snapshot does not cover, call mem_search for it, then mem_read the files that match before you answer or act. Do this before you ask a question you might already know.
 2. **Skills.** Call the skill tool when the task may have a documented process.
 3. **Integrations.** Call list_tools when the message names a service or contains a URL.
 4. **In-flight work.** If the message is about a child you already spawned, call child_status or child_read before you spawn another.

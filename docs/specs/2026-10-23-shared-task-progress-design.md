@@ -20,6 +20,10 @@ Show the same task progress in the web app and channel conversations. Keep one c
 12. Count plan steps when a plan exists. Do not count the tools used to complete those steps again. Keep unfinished steps distinct from completed steps after a turn stops.
 13. Publish channel progress only for a turn that can reply to that destination. A manual or overheard signal does not authorize a progress message. A successful reply to the origin can authorize progress for that turn.
 14. Retry a rejected creation only when the provider confirms that no message was created. Keep network failures and unknown outcomes in recovery mode. Hash internal delivery keys before sending them to a provider.
+15. A snapshot lists the turn's tool call IDs (`callIds`), oldest first, at most 50, for a planned turn too. The list holds IDs only, so decision 4 still holds. The revision does not cover it, so a channel card does not change for a new call.
+16. The web card shows the turn's calls as steps. It joins `callIds` to the tool parts that the thread's loaded messages already hold, and renders each with the message stream's step view: the service icon, a past-tense title, and the full tool card when the step opens. A run of alike calls folds into one step ("Read 4 memory files"). Steps start collapsed. A call that the messages do not hold keeps its engine task row. A planned turn shows its plan steps first and its calls under them, so the card shows the work on every model, whether or not the model calls `update_plan`.
+17. A plugin action can name its own step. `PluginAction.label(args)` returns one past-tense line with the key inputs ("Searched Slack for “deploy”"). The catalog calls it only after a successful call and drops a label that throws. The label rides `details.label` on the persisted tool result; the model never reads it. Without a label, a step uses the agent's one-line purpose, then the service and action names.
+18. A pending, running, or waiting web card carries the live status and elapsed time. Keep only its screen-reader announcement outside the card. Show the separate working row when no active card is visible, including a progress load error or a new turn after a finished card. Test this through the session view so its card and status wiring cannot drift.
 
 ## Implementation plan
 
@@ -27,11 +31,11 @@ Show the same task progress in the web app and channel conversations. Keep one c
 - Channel publisher: durable delivery ledger, coalesced event subscription, restart recovery, and host lifecycle; tests for retries, stale events, organization isolation, and uncertain creation.
 - Slack adapter: native blocks, create/update/reconcile operations, plain accessibility text, mention safety, and fake-API tests.
 - Web and API: authorized endpoint, query and event invalidation, compact progress component, phone layout, and API/component tests.
-- Integrate, run root and web typechecks and relevant suites with at most three workers. Review independently. Check desktop and phone locally. Back up and deploy on the latest pilot build. Open a draft PR with validation.
+- Integrate, run root and web typechecks and relevant suites with at most three workers. Review independently. Check desktop and phone locally. Open a draft PR with validation.
 
 ## Shared contract
 
-`TurnProgress` has `turnId`, `title`, `status`, `revision` (string), `updatedAt`, `tasks`, and `omittedTasks` (number). `ProgressTask` has `id`, `title`, `status`, optional `details`, `output`, and `sources` (URL and title).
+`TurnProgress` has `turnId`, `title`, `status`, `revision` (string), `updatedAt`, `tasks`, `omittedTasks` (number), and optional `callIds` (string array). `ProgressTask` has `id`, `title`, `status`, optional `details`, `output`, and `sources` (URL and title).
 
 The engine exports `readTurnProgress(store, sessionId, threadId, turnId)` and `readLatestTurnProgress(store, sessionId, threadId)`. Both return a snapshot or null.
 

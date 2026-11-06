@@ -139,7 +139,7 @@ describe("runCase", () => {
     expect(names).toEqual(["mem_write", "mem_read"]);
     expect(result.trajectory.toolCalls.every((c) => c.status === "completed")).toBe(true);
     const readResult = result.trajectory.toolCalls[1].result as { text?: string };
-    expect(readResult.text).toBe("fact");
+    expect(readResult.text).toBe("fact\n\nSources:\n[s1] notes/x.md");
 
     faux.unregister();
   });

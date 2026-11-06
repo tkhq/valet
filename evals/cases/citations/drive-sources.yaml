@@ -1,0 +1,24 @@
+id: drive-source-citations
+description: Cite the Drive file that states the budget.
+profile: mock
+turns:
+  - role: user
+    content: >-
+      Get the details of Drive file f1 and tell me the budget it describes. Cite the returned source id after the fact.
+timeout_ms: 120000
+mock_tools:
+  drive.get_document_info:
+    response: '{"file":{"id":"f1","name":"Q4 budget","description":"The Q4 budget is 40,000 dollars."}}'
+    sources:
+      - service: google_drive
+        title: Q4 budget
+        url: https://docs.google.com/document/d/f1/edit
+        snippet: The Q4 budget is 40,000 dollars.
+checks:
+  - type: tool_called
+    tool: drive.get_document_info
+  - type: citation_validity
+  - type: judge_output
+    rubric: >-
+      The reply says the Q4 budget is 40,000 dollars and cites the Drive source. Uncited facts score at most 2.
+  - type: no_errors

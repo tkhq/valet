@@ -20,20 +20,26 @@ import {
   createRouter,
 } from "@tanstack/react-router";
 import { api } from "~/api/client";
+import type { TurnProgress } from "@valet/shared";
+import type { Message } from "@valet/api/wire";
+import { eventWidget } from "~/dev/ui-stress/fixtures/widgets";
+import { qkThreadProgress } from "~/api/thread-progress";
 import { SessionView } from "./session-view";
 import { ChildPanel } from "./child-panel";
 import { useThreadReplyTarget } from "./send-as-person";
 
 
 let browserActivity = false;
+let progressMessages: Message[] = [];
 let liveStatus: import("~/stores/stream").AgentStatus = "idle";
+let turnStartedAt: number | undefined;
 let queueState: import("@valet/api/wire").WireQueueState | undefined;
 let fullProfile = false;
 let readOnlyReason: string | undefined;
 let mobileLayout = false;
 let pendingGate: import("@valet/api/wire").DecisionGate | undefined;
 let sessionOwner: { type: "user" | "team"; id: string } = { type: "user", id: "u1" };
-beforeEach(() => { pendingGate = undefined; browserActivity = false; fullProfile = false; readOnlyReason = undefined; liveStatus = "idle"; queueState = undefined; mobileLayout = false; sessionOwner = { type: "user", id: "u1" }; announceView.mockClear(); });
+beforeEach(() => { progressMessages = []; turnStartedAt = undefined; pendingGate = undefined; browserActivity = false; fullProfile = false; readOnlyReason = undefined; liveStatus = "idle"; queueState = undefined; mobileLayout = false; sessionOwner = { type: "user", id: "u1" }; announceView.mockClear(); });
 
 
 vi.mock("~/hooks/use-mobile-layout", () => ({ useMobileLayout: () => mobileLayout }));
@@ -63,12 +69,12 @@ vi.mock("~/stores/stream", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/stores/stream")>();
   return {
     ...actual,
-    useSessionStream: () => ({ messages: browserActivity ? [{ id: "browser-call", sessionId: "sess-1", threadId: "t1", role: "assistant", content: "", createdAt: 1, parts: [{kind: "tool_call", callId: "browser", toolName: "browser.execute", status: "completed"}] }] : [], statusByThread: {}, conn: "open" }),
+    useSessionStream: () => ({ messages: browserActivity ? [{ id: "browser-call", sessionId: "sess-1", threadId: "t1", role: "assistant", content: "", createdAt: 1, parts: [{kind: "tool_call", callId: "browser", toolName: "browser.execute", status: "completed"}] }] : progressMessages, statusByThread: {}, conn: "open" }),
     useStreamStore: (selector: (s: { setThreadMessages: () => void; setPendingGates: () => void }) => unknown) =>
       selector({ setThreadMessages: vi.fn(), setPendingGates: vi.fn() }),
     usePendingGateForThread: () => pendingGate,
     useQueueStateForThread: () => queueState,
-    useThreadLiveStatus: () => ({ status: liveStatus }),
+    useThreadLiveStatus: () => ({ status: liveStatus, turnStartedAt }),
   };
 });
 
@@ -105,7 +111,7 @@ function renderInRouter(sessionId: string, panel: boolean, onClose?: () => void,
   return renderComponent(() => <SessionView sessionId={sessionId} panel={panel} onClose={onClose} active={active} />);
 }
 
-function renderComponent(component: () => ReactNode) {
+function renderComponent(component: () => ReactNode, qc = new QueryClient()) {
   const rootRoute = createRootRoute({ component });
   const router = createRouter({
     routeTree: rootRoute.addChildren([]),
@@ -113,7 +119,6 @@ function renderComponent(component: () => ReactNode) {
   });
   // SessionView's query hooks need a QueryClient in scope. Provide a scratch
   // client per render so the test shares no cache state.
-  const qc = new QueryClient();
   return render(
     <QueryClientProvider client={qc}>
       <RouterProvider router={router} />
@@ -390,6 +395,61 @@ it("shows completed browser work in mobile chat-only conversations", async () =>
 });
 
 describe("SessionView processing visibility", () => {
+  const progress: TurnProgress = { turnId: "turn1", title: "Task progress", status: "in_progress", revision: "1", updatedAt: 1, tasks: [], omittedTasks: 0 };
+
+  it.each([false, true])("keeps progress widget replies under the thread's read-only rule (%s)", async (readOnly) => {
+    if (readOnly) readOnlyReason = "This thread is read-only.";
+    progressMessages = [{ id: "widget-message", sessionId: "sess-1", threadId: "t1", role: "assistant", content: "", createdAt: 1,
+      parts: [{ kind: "tool_call", callId: "widget-call", toolName: "show_widget", status: "completed", args: { title: "Invite", spec: eventWidget } }] }];
+    const client = new QueryClient();
+    client.setQueryData(qkThreadProgress("t1"), { progress: { ...progress, callIds: ["widget-call"] } });
+    renderComponent(() => <SessionView sessionId="sess-1" activeThreadId="t1" />, client);
+    const card = await screen.findByRole("region", { name: "Task progress" });
+    fireEvent.click(within(card).getByRole("button", { expanded: false }));
+    fireEvent.click(within(card).getByRole("button", { expanded: false }));
+    expect(within(card).getByRole("button", { name: "Send invite" })).toHaveProperty("disabled", readOnly);
+  });
+
+  it("keeps one mascot and moves the live clock into the active task card", async () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(100_000);
+    try {
+      liveStatus = "thinking";
+      turnStartedAt = 75_000;
+      const client = new QueryClient();
+      client.setQueryData(qkThreadProgress("t1"), { progress });
+      renderComponent(() => <SessionView sessionId="sess-1" activeThreadId="t1" />, client);
+      const card = await screen.findByRole("region", { name: "Task progress" });
+      expect(document.querySelectorAll('img[src="/icons/valet-mascot.webp"]')).toHaveLength(1);
+      expect(within(card).getByText("25s").getAttribute("aria-hidden")).toBe("true");
+      expect(screen.getByText("Valet is thinking…").closest(".sr-only")).toBeTruthy();
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("keeps a new turn's working row outside a finished card", async () => {
+    liveStatus = "thinking";
+    const client = new QueryClient();
+    client.setQueryData(qkThreadProgress("t1"), { progress: { ...progress, status: "complete" } });
+    renderComponent(() => <SessionView sessionId="sess-1" activeThreadId="t1" />, client);
+    const card = await screen.findByRole("region", { name: "Task progress" });
+    const line = screen.getByText("Valet is thinking…");
+    expect(card.contains(line)).toBe(false);
+    expect(line.closest(".sr-only")).toBeNull();
+    expect(document.querySelectorAll('img[src="/icons/valet-mascot.webp"]')).toHaveLength(1);
+  });
+
+  it("keeps the working row visible when a stale progress snapshot fails to reload", async () => {
+    liveStatus = "thinking";
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(qkThreadProgress("t1"), { progress });
+    client.getQueryCache().find({ queryKey: qkThreadProgress("t1") })?.setState({ status: "error", error: new Error("offline") });
+    renderComponent(() => <SessionView sessionId="sess-1" activeThreadId="t1" />, client);
+    await screen.findByText("Progress unavailable. Refresh to retry.");
+    expect(screen.getByText("Valet is thinking…").closest(".sr-only")).toBeNull();
+    expect(document.querySelectorAll('img[src="/icons/valet-mascot.webp"]')).toHaveLength(1);
+  });
+
   it.each([
     ["queued", "Valet is queued"],
     ["thinking", "Valet is thinking…"],

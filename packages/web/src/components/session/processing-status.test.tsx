@@ -10,6 +10,26 @@ afterEach(cleanup);
 const base: WireQueueState = { mode: "followup", status: "idle", pendingIds: [], collectingIds: [] };
 
 describe("ProcessingStatus", () => {
+  it("keeps the same announcement node when progress moves into and out of the card", () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(100_000);
+    try {
+      const { rerender } = render(<ProcessingStatus status="thinking" startedAt={75_000} />);
+      const announcement = screen.getByRole("status");
+      rerender(<ProcessingStatus status="thinking" startedAt={75_000} inCard />);
+      expect(screen.getByRole("status")).toBe(announcement);
+      expect(announcement.closest(".sr-only")).toBeTruthy();
+      expect(document.querySelector("img")).toBeNull();
+      expect(screen.queryByText("25s")).toBeNull();
+      rerender(<ProcessingStatus status="thinking" startedAt={75_000} />);
+      expect(screen.getByRole("status")).toBe(announcement);
+      expect(announcement.closest(".sr-only")).toBeNull();
+      expect(document.querySelectorAll("img")).toHaveLength(1);
+      expect(screen.getByText("25s")).toBeTruthy();
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it("says Valet is compacting context in place of thinking, with the pulse and the clock", () => {
     vi.useFakeTimers();
     vi.setSystemTime(10_000);

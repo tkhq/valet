@@ -104,7 +104,11 @@ describe('sheets actions', () => {
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe(`${SHEETS_API}/ss1/values/Sheet1!A1%3AB2?valueRenderOption=FORMATTED_VALUE`);
     expect((init.headers as Record<string, string>).Authorization).toBe('Bearer test-token');
-    expect(result).toEqual({ success: true, data: { range: 'Sheet1!A1:B2', values: [[1, 2]] } });
+    expect(result).toEqual({
+      success: true,
+      data: { range: 'Sheet1!A1:B2', values: [[1, 2]] },
+      sources: [{ service: 'google_sheets', title: 'Sheet1', url: 'https://docs.google.com/spreadsheets/d/ss1/edit', snippet: '1 | 2', location: 'A1:B2' }],
+    });
   });
 
   it('read_spreadsheet maps a 403 response to a Sheets API error', async () => {
@@ -208,6 +212,7 @@ describe('sheets actions', () => {
 
     expect(result).toEqual({
       success: true,
+      sources: [{ service: 'google_sheets', title: 'Budget', url: 'https://docs.google.com/spreadsheets/d/ss1/edit', location: '1 sheet' }],
       data: {
         title: 'Budget',
         spreadsheetId: 'ss1',

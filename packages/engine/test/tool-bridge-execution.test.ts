@@ -1,4 +1,4 @@
-import { Engine, InMemorySessionStore, InMemoryEventStream, VirtualSandboxProvider } from "../src/index.js";
+import { Engine, InMemorySessionStore, InMemoryEventStream, VirtualSandboxProvider, type SourceInput } from "../src/index.js";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "../src/test-helpers/index.js";
 import { describe, it, expect, vi } from "vitest";
 import { Type } from "typebox";
@@ -144,6 +144,61 @@ describe("tool bridge: terminal outcomes", () => {
     );
     const result = await tool.execute("tc-auto", {}, new AbortController().signal, () => {});
     expect(result.details).toEqual({ ok: true, approval: "automatic" });
+  });
+
+  it("keeps an action's step label in persisted result details, not in the model's text", async () => {
+    const tool = toAgentTool(
+      defineTool({
+        name: "call_tool",
+        intent: "exempt",
+        description: "runs an action",
+        parameters: Type.Object({}),
+        execute: async () => ({ text: "3 matches", ok: true, label: "Searched Slack for “deploy”" }),
+      }),
+      buildCtx,
+    );
+    const result = await tool.execute("tc-label", {}, new AbortController().signal, () => {});
+    expect(result.details).toEqual({ ok: true, label: "Searched Slack for “deploy”" });
+    expect(result.content).toEqual([{ type: "text", text: "3 matches" }]);
+  });
+});
+
+describe("tool bridge: sources", () => {
+  const reader = (sources: SourceInput[]) => toAgentTool(
+    defineTool({
+      name: "call_tool",
+      intent: "exempt",
+      description: "reads things",
+      parameters: Type.Object({}),
+      execute: async () => ({ text: "2 matches", ok: true, sources }),
+    }),
+    () => ({ ...buildCtx(), allocateSourceIds: async (count: number) => Array.from({ length: count }, (_, i) => `s${i + 7}`) }),
+  );
+
+  it("gives each source a thread id, lists the ids for the model, and stores the records", async () => {
+    const result = await reader([
+      { service: "slack", title: "Message in #eng", url: "https://acme.slack.com/archives/C1/p1", snippet: "deploy  at\n5pm", location: "2026-11-04 10:00 UTC" },
+      { service: "", title: "no service" },
+      { service: "github", title: "acme/app/src/a.ts", url: "javascript:alert(1)" },
+    ]).execute("tc-src", {}, new AbortController().signal, () => {});
+    expect(result.content).toEqual([{ type: "text", text: "2 matches\n\nSources:\n[s7] Message in #eng (2026-11-04 10:00 UTC)\n[s8] acme/app/src/a.ts" }]);
+    expect(result.details).toEqual({ ok: true, sources: [
+      { id: "s7", service: "slack", title: "Message in #eng", url: "https://acme.slack.com/archives/C1/p1", snippet: "deploy at 5pm", location: "2026-11-04 10:00 UTC" },
+      { id: "s8", service: "github", title: "acme/app/src/a.ts" },
+    ] });
+  });
+
+  it("drops sources it cannot give an id, so the model never sees an id that leads nowhere", async () => {
+    const def = defineTool({
+      name: "call_tool", intent: "exempt", description: "reads things", parameters: Type.Object({}),
+      execute: async () => ({ text: "1 match", sources: [{ service: "slack", title: "Message" }] }),
+    });
+    for (const allocateSourceIds of [undefined, async () => { throw new Error("store down"); }]) {
+      const result = await toAgentTool(def, () => ({ ...buildCtx(), ...(allocateSourceIds ? { allocateSourceIds } : {}) }))
+        .execute("tc-none", {}, new AbortController().signal, () => {});
+      expect(result.content).toEqual([{ type: "text", text: "1 match" }]);
+      expect(result.details).toBeUndefined();
+    }
   });
 });
 

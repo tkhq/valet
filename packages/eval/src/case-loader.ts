@@ -18,6 +18,7 @@ import {
   type PullRequestSpec,
   type EvalCase,
   type EvalTurn,
+  type MockSource,
   type MockToolSpec,
 } from "./types.js";
 
@@ -174,6 +175,7 @@ function parseCheck(raw: unknown, i: number, source: string): Check {
     }
     case "all_terminal":
     case "no_errors":
+    case "citation_validity":
       return { type };
     case "max_turns": {
       const perSubmission = raw.per_submission;
@@ -368,9 +370,28 @@ function parseMockTools(
     if (!isRecord(spec) || typeof spec.response !== "string") {
       throw new CaseValidationError(source, `\`mock_tools.${tool}.response\` must be a string`);
     }
-    out[tool] = { response: spec.response };
+    const sources = parseMockSources(spec.sources, `mock_tools.${tool}`, source);
+    out[tool] = { response: spec.response, ...(sources ? { sources } : {}) };
   }
   return out;
+}
+
+function parseMockSources(raw: unknown, path: string, source: string): MockSource[] | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw)) throw new CaseValidationError(source, `\`${path}.sources\` must be a list`);
+  return raw.map((item, i): MockSource => {
+    if (!isRecord(item) || typeof item.service !== "string" || typeof item.title !== "string") {
+      throw new CaseValidationError(source, `\`${path}.sources[${i}]\` needs string \`service\` and \`title\``);
+    }
+    const out: MockSource = { service: item.service, title: item.title };
+    for (const key of ["url", "snippet", "location"] as const) {
+      const v = item[key];
+      if (v === undefined) continue;
+      if (typeof v !== "string") throw new CaseValidationError(source, `\`${path}.sources[${i}].${key}\` must be a string`);
+      out[key] = v;
+    }
+    return out;
+  });
 }
 
 /**

@@ -185,7 +185,7 @@ describe("orchestratorPersona", () => {
   it("ports the v1 decision flow and persistence brief onto v2 tools", () => {
     const persona = flat(orchestratorPersona({ type: "user", id: "u1" }));
     expect(persona).toContain("## Decision flow");
-    expect(persona).toContain("Call mem_search");
+    expect(persona).toContain("call mem_search for it");
     expect(persona).toContain("Wait for child.settled");
     expect(persona).toContain("A turn that does work must contain a tool call");
     expect(persona).toContain("the check it ran and pass/fail");
@@ -194,6 +194,12 @@ describe("orchestratorPersona", () => {
     expect(persona).toContain("The spawned `branch` is the base");
     expect(persona).toContain("## Errors");
     expect(persona).toContain("mem_search first");
+  });
+
+  it("tells the assistant to search memory and open what it finds before it answers", () => {
+    const persona = flat(orchestratorPersona({ type: "user", id: "u1" }));
+    expect(persona).toContain("names a person, project, client, repository, or earlier decision");
+    expect(persona).toContain("mem_read the files that match before you answer or act");
   });
 
   it("keeps the owner-kind identity bodies distinct", () => {
