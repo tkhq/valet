@@ -1,3 +1,4 @@
+import { cardId, cardStorageKey } from "~/lib/card-context";
 /**
  * Per-thread composer drafts: text, attachments, and intake errors, keyed
  * by the signed-in account and `draftKey(sessionId, threadId)`.
@@ -15,6 +16,11 @@
  * The text also persists to localStorage, so a draft survives a reload and
  * shows in another window. Attachments stay in memory: they are uploads in
  * flight, not text that can be written back.
+ *
+ * A Tabs card persists its text to sessionStorage instead. Duplicating a
+ * browser tab copies its card ids, so shared localStorage would let the two
+ * tabs overwrite each other's drafts. The copy gets the drafts once and then
+ * keeps its own.
  *
  * The send key persists beside the text from the moment a send starts. A
  * send with a 2xx answer or a definite 4xx answer drops it. If the page
@@ -136,9 +142,9 @@ interface ComposerDraftStore {
  * the draft it changed and leaves the others alone. localStorage can be
  * absent or throw (private windows, blocked site data, a full quota). A draft
  * that cannot be saved still works for this tab. */
-const STORAGE_PREFIX = "valet:composer-draft:v2:";
+const STORAGE_PREFIX = cardStorageKey("valet:composer-draft:v2:");
 /** One JSON `SendKey` per draft, beside the draft's text entry. */
-const SEND_KEY_PREFIX = "valet:composer-send-key:v1:";
+const SEND_KEY_PREFIX = cardStorageKey("valet:composer-send-key:v1:");
 
 function parseSendKey(raw: string | null): SendKey | undefined {
   if (!raw) return undefined;
@@ -154,6 +160,10 @@ function parseSendKey(raw: string | null): SendKey | undefined {
   }
 }
 
+function draftStorage(): Storage {
+  return cardId() ? sessionStorage : localStorage;
+}
+
 /**
  * The owner's stored drafts. A send key without text is a send that was in
  * flight at the reload: its text comes back into the box with it.
@@ -161,14 +171,15 @@ function parseSendKey(raw: string | null): SendKey | undefined {
 function storedDrafts(owner: string): Record<string, ComposerDraft> {
   const byKey: Record<string, ComposerDraft> = {};
   try {
-    for (let i = 0; i < localStorage.length; i++) {
-      const name = localStorage.key(i);
+    const storage = draftStorage();
+    for (let i = 0; i < storage.length; i++) {
+      const name = storage.key(i);
       const prefix = [STORAGE_PREFIX, SEND_KEY_PREFIX].find((p) => name?.startsWith(p + owner + "\u0000"));
       if (!name || !prefix) continue;
       const key = name.slice(prefix.length);
       if (byKey[key]) continue;
-      const text = localStorage.getItem(STORAGE_PREFIX + key);
-      const sendKey = parseSendKey(localStorage.getItem(SEND_KEY_PREFIX + key));
+      const text = storage.getItem(STORAGE_PREFIX + key);
+      const sendKey = parseSendKey(storage.getItem(SEND_KEY_PREFIX + key));
       if (text) byKey[key] = sendKey ? { ...EMPTY_DRAFT, text, sendKey } : { ...EMPTY_DRAFT, text };
       else if (sendKey) byKey[key] = { ...EMPTY_DRAFT, text: sendKey.text, sendKey };
     }
@@ -179,16 +190,16 @@ function storedDrafts(owner: string): Record<string, ComposerDraft> {
 function storeText(key: string, text: string): void {
   try {
     if (!useComposerDraftStore.getState().owner) return;
-    if (text) localStorage.setItem(STORAGE_PREFIX + key, text);
-    else localStorage.removeItem(STORAGE_PREFIX + key);
+    if (text) draftStorage().setItem(STORAGE_PREFIX + key, text);
+    else draftStorage().removeItem(STORAGE_PREFIX + key);
   } catch { /* keep the in-memory draft */ }
 }
 
 function storeSendKey(key: string, sendKey: SendKey | undefined): void {
   try {
     if (!useComposerDraftStore.getState().owner) return;
-    if (sendKey) localStorage.setItem(SEND_KEY_PREFIX + key, JSON.stringify(sendKey));
-    else localStorage.removeItem(SEND_KEY_PREFIX + key);
+    if (sendKey) draftStorage().setItem(SEND_KEY_PREFIX + key, JSON.stringify(sendKey));
+    else draftStorage().removeItem(SEND_KEY_PREFIX + key);
   } catch { /* keep the in-memory key */ }
 }
 
@@ -261,11 +272,11 @@ useComposerDraftStore.subscribe((state, prev) => {
 if (typeof window !== "undefined") {
   window.addEventListener("storage", (event) => {
     if (!event.key?.startsWith(STORAGE_PREFIX)) return;
-    if (event.storageArea !== localStorage) return;
     // Storage events can queue behind newer keystrokes or a sent-message clear.
     // Never replay an obsolete value, or echo a remote update to other tabs.
     try {
-      if (localStorage.getItem(event.key) !== event.newValue) return;
+      const storage = draftStorage();
+      if (event.storageArea !== storage || storage.getItem(event.key) !== event.newValue) return;
     } catch { return; }
     applyingRemoteDraft = true;
     try {
