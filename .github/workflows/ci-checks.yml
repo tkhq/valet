@@ -92,6 +92,48 @@ jobs:
           sudo install -o dockerd -g dockerd -m 755 docker/valet-kubernetes.mjs docker/valet-kubernetes_test.sh /tmp/valet-kubernetes-test/
           sudo -u dockerd bash /tmp/valet-kubernetes-test/valet-kubernetes_test.sh
 
+  # Click and loading-state latency of the built web app against mocked api
+  # fixtures, under calibrated CPU slowdown (packages/web/perf/run.mjs).
+  # Fails when a flow's median is over its budget
+  # (packages/web/src/lib/perf/budgets.ts). Not yet part of the aggregate
+  # check below, so a noisy runner cannot block a merge while it beds in.
+  web-perf:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      # Node 24 imports budgets.ts with type stripping on by default.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Emit workspace packages
+        run: pnpm exec tsc --build --noCheck
+
+      - name: Build web SPA
+        run: pnpm --filter @valet/web exec vite build
+
+      - name: Install Chromium
+        run: pnpm --filter @valet/web exec playwright-core install --with-deps --only-shell chromium
+
+      - name: Latency check
+        run: pnpm --filter @valet/web perf --json perf-results.json
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-perf
+          path: |
+            packages/web/perf-results.json
+            packages/web/perf/failure-*.png
+          if-no-files-found: ignore
+
   # The same thresholded STE lint the e2e "docs-lint" suite runs, promoted to
   # a blocking check. The runner's system python3 is enough; no setup step.
   docs-lint:

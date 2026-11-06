@@ -3,6 +3,7 @@ import { fauxAssistantMessage, registerFauxProvider, Type, type FauxResponseStep
 import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import {
   Engine,
+  entriesToAgentMessages,
   InMemoryEventStream,
   InMemorySessionStore,
   VirtualSandboxProvider,
@@ -31,6 +32,171 @@ async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 
     await new Promise((r) => setTimeout(r, 5));
   }
 }
+
+describe("origin correction context", () => {
+  it("carries only the sender's queued inputs into a stop and leaves other senders queued", async () => {
+    const faux = registerFauxProvider({ provider: "origin-carry", tokensPerSecond: 30 });
+    faux.setResponses([fauxAssistantMessage(Array.from({ length: 80 }, () => "working").join(" ")), fauxAssistantMessage("stopped"), fauxAssistantMessage("other done")]);
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+    const thread = session.thread();
+    const content = (body: string) => ({ kind: "signal" as const, signalType: "slack.message", body, origin: { channelType: "slack", threadKey: "slack:C1:1", reply: "auto" as const } });
+    const sender = { id: "sender", name: "Sender" };
+    try {
+      const active = await thread.submitPrompt(content("start"), { author: sender });
+      await waitFor(() => events.some(e => e.event.type === "text_delta"));
+      const older = await thread.submitPrompt({ ...content("deploy now"), attachments: [{ type: "image", mimeType: "image/png", data: new Uint8Array([1, 2, 3]), name: "queued.png" }, { type: "file", path: "/workspace/uploads/queued.pdf", bytes: 12, sha256: "abc", name: "queued.pdf" }] }, { queueMode: "followup", author: sender });
+      const other = await thread.submitPrompt(content("also check the logs"), { queueMode: "followup", author: { id: "other", name: "Other" } });
+      const stop = await thread.submitPrompt(content("stop"), { queueMode: "steer", steerScope: "active-origin", author: sender });
+      await thread.awaitResult(stop.queueItemId);
+      expect((await thread.awaitResult(older.queueItemId)).outcome).toBe("superseded");
+      expect((await store.getQueueItem(session.id, active.queueItemId))?.outcome?.outcome).toBe("superseded");
+      expect((await thread.awaitResult(other.queueItemId)).outcome).toBe("completed");
+      const entries = await session.readEntries("web:default");
+      const userEntries = entries.filter((e): e is MessageEntry => e.type === "message" && e.role === "user");
+      expect(userEntries).toHaveLength(3);
+      const newest = userEntries[1];
+      expect(newest.author).toEqual(sender);
+      expect(newest.content).toMatch(/^Messages received while you worked, in order:/);
+      expect(newest.content).toContain("> Sender · sender\n> deploy now");
+      expect(newest.content).toContain("> Sender · sender\n> stop");
+      expect(newest.content.indexOf("deploy now")).toBeLessThan(newest.content.indexOf("> stop"));
+      expect(newest.content.match(/deploy now/g)).toHaveLength(1);
+      expect(newest.content).not.toContain("also check the logs");
+      expect(newest.content).not.toContain("correction");
+      expect(newest.content).not.toContain('"signalType"');
+      expect(newest.attachments).toMatchObject([{ type: "image", mimeType: "image/png", name: "queued.png" }, { type: "file", path: "/workspace/uploads/queued.pdf" }]);
+      const messages = entriesToAgentMessages([newest], faux.getModel());
+      expect(messages[0].content).toContainEqual({ type: "image", data: "AQID", mimeType: "image/png" });
+      expect(JSON.stringify(messages[0].content)).toContain("/workspace/uploads/queued.pdf");
+    } finally {
+      await session.destroy();
+      faux.unregister();
+    }
+  });
+
+  it("runs a stop that carries queued input in that input's place, before later work", async () => {
+    const faux = registerFauxProvider({ provider: "origin-carry-order", tokensPerSecond: 60 });
+    faux.setResponses([fauxAssistantMessage(Array.from({ length: 40 }, () => "working").join(" ")), fauxAssistantMessage("stopped"), fauxAssistantMessage("web done")]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+    const thread = session.thread();
+    const slack = (body: string) => ({ kind: "signal" as const, signalType: "slack.message", body, origin: { channelType: "slack", threadKey: "slack:C1:1", reply: "auto" as const } });
+    const sender = { id: "sender", name: "Sender" };
+    const pause = () => new Promise((r) => setTimeout(r, 5));
+    try {
+      // An unrelated web turn runs, so the stop has no matching turn to replace.
+      await thread.submitPrompt("unrelated web task", { author: { id: "owner" } });
+      await waitFor(() => events.some(e => e.event.type === "text_delta"));
+      await thread.submitPrompt(slack("deploy now"), { queueMode: "followup", author: sender });
+      await pause();
+      const web = await thread.submitPrompt("later web task", { queueMode: "followup", author: { id: "owner" } });
+      await pause();
+      const stop = await thread.submitPrompt(slack("stop"), { queueMode: "steer", steerScope: "active-origin", author: sender });
+      await thread.awaitResult(stop.queueItemId);
+      await thread.awaitResult(web.queueItemId);
+      const users = (await session.readEntries("web:default")).filter((e): e is MessageEntry => e.type === "message" && e.role === "user");
+      const carriedAt = users.findIndex(e => e.content.includes("deploy now"));
+      const webAt = users.findIndex(e => e.content.includes("later web task"));
+      expect(carriedAt).toBeGreaterThan(0);
+      expect(carriedAt).toBeLessThan(webAt);
+    } finally {
+      await session.destroy();
+      faux.unregister();
+    }
+  });
+
+  it("keeps another sender's active turn running", async () => {
+    const faux = registerFauxProvider({ provider: "origin-other-sender", tokensPerSecond: 60 });
+    faux.setResponses([fauxAssistantMessage(Array.from({ length: 40 }, () => "working").join(" ")), fauxAssistantMessage("later")]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+    const thread = session.thread();
+    const content = (body: string) => ({ kind: "signal" as const, signalType: "slack.message", body, origin: { channelType: "slack", threadKey: "slack:C1:1", reply: "auto" as const } });
+    try {
+      const active = await thread.submitPrompt(content("start"), { author: { id: "owner" } });
+      await waitFor(() => events.some(e => e.event.type === "text_delta"));
+      const stop = await thread.submitPrompt(content("stop"), { queueMode: "steer", steerScope: "active-origin", author: { id: "other" } });
+      expect((await thread.awaitResult(active.queueItemId)).outcome).toBe("completed");
+      expect((await thread.awaitResult(stop.queueItemId)).outcome).toBe("completed");
+    } finally {
+      await session.destroy();
+      faux.unregister();
+    }
+  });
+});
+
+describe("origin correction recovery", () => {
+  it("preserves an unrelated active approval when replacing queued Slack input", async () => {
+    const faux = registerFauxProvider({ provider: "origin-carry-gate" });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("ask", {}, { id: "ask1" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("approved"), fauxAssistantMessage("correction done"),
+    ]);
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(),
+      tools: [{ name: "ask", description: "Request approval", parameters: Type.Object({}), execute: async (_args, ctx) => {
+        await ctx.requestDecision({ type: "approval", title: "Approve", resumeKey: "ask" });
+        return { text: "approved" };
+      } }],
+    });
+    const thread = session.thread();
+    const content = (body: string, threadKey: string) => ({ kind: "signal" as const, signalType: "slack.message", body, origin: { channelType: "slack", threadKey, reply: "auto" as const } });
+    try {
+      const active = await thread.submitPrompt(content("needs approval", "slack:A:1"), {});
+      await waitFor(async () => (await store.getQueueItem(session.id, active.queueItemId))?.status === "blocked_on_decision_gate");
+      const gate = thread.pendingDecisionGates()[0];
+      if (!gate) throw new Error("Expected active approval");
+      const older = await thread.submitPrompt(content("deploy", "slack:B:1"), { queueMode: "followup" });
+      const correction = await thread.submitPrompt(content("stop", "slack:B:1"), { queueMode: "steer", steerScope: "active-origin" });
+      expect(thread.pendingDecisionGates().map(g => g.id)).toContain(gate.id);
+      expect(events.filter(e => e.event.type === "decision_gate_withdrawn")).toHaveLength(0);
+      expect(await store.getQueueItem(session.id, active.queueItemId)).toMatchObject({ status: "blocked_on_decision_gate" });
+      expect((await thread.awaitResult(older.queueItemId)).outcome).toBe("superseded");
+      await session.resolveDecision(gate.id, { actionId: "approve", resolvedBy: "u1", resolvedAt: Date.now() });
+      expect((await thread.awaitResult(active.queueItemId)).outcome).toBe("completed");
+      expect((await thread.awaitResult(correction.queueItemId)).outcome).toBe("completed");
+    } finally { await session.destroy(); faux.unregister(); }
+  });
+
+  it.each([false, true])("restores transitive context and image-only input after admission, promoted=%s", async (promote) => {
+    const faux = registerFauxProvider({ provider: "origin-carry-restore" });
+    faux.setResponses([fauxAssistantMessage("restored correction")]);
+    const { engine, store } = makeEngine();
+    const options = { userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() };
+    const session = await engine.createSession(options);
+    const thread = await session.ensureDefaultThread();
+    await thread.pause();
+    const content = (body: string) => ({ kind: "signal" as const, signalType: "slack.message", body, origin: { channelType: "slack", threadKey: "slack:C1:1", reply: "auto" as const } });
+    const original = await thread.submitPrompt({ ...content(""), attachments: [{ type: "image", mimeType: "image/png", data: new Uint8Array([1, 2, 3]) }] }, { author: { id: "sender" }, dispatchId: "restore-original" });
+    const originalItem = await store.getQueueItem(session.id, original.queueItemId);
+    if (!originalItem) throw new Error("Expected queued input");
+    const middle = { ...originalItem, id: "restore-middle", dispatchId: "restore-middle", content: content("review image") };
+    const latest = { ...middle, id: "restore-latest", dispatchId: "restore-latest", content: content("stop deployment") };
+    const opts = { steer: true, steerScope: "active-origin" as const };
+    await store.admitSubmission(session.id, thread.id, middle, opts);
+    await store.admitSubmission(session.id, thread.id, latest, opts);
+    const runnableId = promote ? (await thread.promoteQueuedItem(latest.id)).queueItemId : latest.id;
+    session.suspendTimers();
+    const restoredEngine = new Engine({ providers: { store, stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() } });
+    const restored = await restoredEngine.restoreSession({ sessionId: session.id, options });
+    try {
+      const restoredThread = restored.thread();
+      await restoredThread.resume();
+      expect((await restoredThread.awaitResult(runnableId)).outcome).toBe("completed");
+      expect((await restoredThread.awaitResult(original.queueItemId)).outcome).toBe("superseded");
+      const users = (await restored.readEntries("web:default")).filter((e): e is MessageEntry => e.type === "message" && e.role === "user");
+      expect(users).toHaveLength(1);
+      expect(users[0].content.match(/^> sender$/gm)).toHaveLength(3);
+      expect(users[0].content.indexOf("review image")).toBeLessThan(users[0].content.indexOf("stop deployment"));
+      expect(entriesToAgentMessages(users, faux.getModel())[0].content).toContainEqual({ type: "image", data: "AQID", mimeType: "image/png" });
+      expect(users[0].author).toEqual({ id: "sender" });
+      const replay = await store.admitSubmission(session.id, thread.id, latest, opts);
+      expect(replay.admitted).toBe(false);
+      expect(replay.item.metadata?.carriedInputIds).toEqual([original.queueItemId, middle.id]);
+    } finally { await restored.destroy(); faux.unregister(); }
+  });
+});
 
 describe("queue mode: followup (FIFO)", () => {
   it("processes prompts in order and settles each submission completed", async () => {

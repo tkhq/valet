@@ -12,7 +12,8 @@ CREATE TABLE "orgs" (
 	"model_tiers" jsonb,
 	"approved_models" jsonb,
 	"reasoning_settings" jsonb,
-	"default_tier" text
+	"default_tier" text,
+	"tutorial_version" integer NOT NULL DEFAULT 0
 );
 --> statement-breakpoint
 CREATE TABLE "user" (
@@ -185,6 +186,32 @@ CREATE TABLE "oauth_consent" (
 CREATE INDEX "oauthConsent_clientId_idx" ON "oauth_consent" ("client_id");
 --> statement-breakpoint
 CREATE INDEX "oauthConsent_userId_idx" ON "oauth_consent" ("user_id");
+--> statement-breakpoint
+CREATE TABLE "mcp_registrations" (
+	"id" text PRIMARY KEY NOT NULL,
+	"address" text NOT NULL,
+	"pending" boolean NOT NULL,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "mcp_registrations_address_idx" ON "mcp_registrations" ("address", "created_at");
+--> statement-breakpoint
+CREATE TABLE "admin_audit_events" (
+	"id" text PRIMARY KEY NOT NULL,
+	"org_id" text NOT NULL,
+	"actor_user_id" text,
+	"actor_email" text,
+	"action" text NOT NULL,
+	"target_type" text NOT NULL,
+	"target_id" text,
+	"target_name" text,
+	"changes" jsonb,
+	"ip" text,
+	"user_agent" text,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "admin_audit_events_org_created" ON "admin_audit_events" ("org_id", "created_at" DESC, "id" DESC);
 --> statement-breakpoint
 CREATE TABLE "invites" (
 	"id" text PRIMARY KEY NOT NULL,
@@ -369,12 +396,18 @@ CREATE TABLE "child_watches" (
 	"sandbox_reclaimed_at" bigint,
 	"parked_sandbox_id" text,
 	"origin_json" text,
-	"reply_route" text
+	"reply_route" text,
+	"batch_key" text,
+	"batch_held_json" text,
+	"report_to_parent" boolean DEFAULT true NOT NULL,
+	"plugin_delivery_id" text
 );
 --> statement-breakpoint
 CREATE INDEX "child_watches_delivery" ON "child_watches" ("child_session_id") WHERE "delivery_active" = true OR "settled" = false;
 --> statement-breakpoint
 CREATE INDEX "child_watches_parent" ON "child_watches" ("parent_session_id");
+--> statement-breakpoint
+CREATE INDEX "child_watches_plugin_delivery" ON "child_watches" ("plugin_delivery_id") WHERE "plugin_delivery_id" IS NOT NULL;
 --> statement-breakpoint
 CREATE INDEX "child_watches_settled" ON "child_watches" ("settled");
 --> statement-breakpoint
@@ -595,6 +628,36 @@ ALTER TABLE "memory_files" ADD COLUMN "search_vector" tsvector GENERATED ALWAYS 
 ) STORED;
 --> statement-breakpoint
 CREATE INDEX "memory_files_search_vector_idx" ON "memory_files" USING gin ("search_vector");
+--> statement-breakpoint
+-- How agents use each memory file (brain spec, "Usage"). A table of its own,
+-- not columns on `memory_files`: an update there rewrites the row and
+-- recomputes `search_vector`, and reads far outnumber writes. Counts arrive
+-- in batches from `services/memory-usage.ts`, which only inserts a row for a
+-- file that exists. `read` is a file the agent chose to open, `inject` a
+-- file the memory snapshot put in the prompt, `cite` a principle a turn named.
+CREATE TABLE "memory_file_usage" (
+	"owner_type" text NOT NULL,
+	"owner_id" text NOT NULL,
+	"namespace" text DEFAULT '' NOT NULL,
+	"path" text NOT NULL,
+	"read_count" integer DEFAULT 0 NOT NULL,
+	"last_read_at" bigint,
+	"inject_count" integer DEFAULT 0 NOT NULL,
+	"last_injected_at" bigint,
+	"cite_count" integer DEFAULT 0 NOT NULL,
+	"last_cited_at" bigint,
+	PRIMARY KEY("owner_type", "owner_id", "namespace", "path")
+);
+--> statement-breakpoint
+-- When usage tracking started. One row. Before this time, "never used" only
+-- means "not seen", so the memory page calls no file stale until tracking
+-- has run for 30 days.
+CREATE TABLE "memory_usage_tracking" (
+	"id" boolean PRIMARY KEY DEFAULT true NOT NULL CHECK ("id"),
+	"started_at" bigint NOT NULL
+);
+--> statement-breakpoint
+INSERT INTO "memory_usage_tracking" ("started_at") VALUES ((extract(epoch from clock_timestamp()) * 1000)::bigint);
 --> statement-breakpoint
 CREATE TABLE "artifacts" (
 	"id" text PRIMARY KEY NOT NULL,
@@ -1665,6 +1728,19 @@ CREATE TABLE IF NOT EXISTS "team_deletion_requests" (
 CREATE UNIQUE INDEX IF NOT EXISTS "team_deletion_requests_pending" ON "team_deletion_requests" ("team_id", "resource_type", "resource_id") WHERE "status" = 'pending';
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "team_deletion_requests_team_status" ON "team_deletion_requests" ("team_id", "status");
+
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "image_source_change_requests" (
+  "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "target_key" text NOT NULL,
+  "source_id" text, "source_name" text NOT NULL, "action" text NOT NULL, "payload" jsonb NOT NULL,
+  "base_updated_at" bigint, "requested_by" text NOT NULL, "requested_at" bigint NOT NULL,
+  "expires_at" bigint NOT NULL, "status" text NOT NULL DEFAULT 'pending',
+  "decided_by" text, "decided_at" bigint, "decision_note" text
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "image_source_change_requests_pending" ON "image_source_change_requests" ("org_id", "target_key") WHERE "status" = 'pending';
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "image_source_change_requests_org_status" ON "image_source_change_requests" ("org_id", "status", "requested_at");
 
 --> statement-breakpoint
 -- usage analytics projection v1
@@ -2780,16 +2856,10 @@ CREATE TABLE "legacy_workflow_run_runtimes" (run_id text PRIMARY KEY, session_id
 CREATE TABLE "legacy_artifact_publications" (artifact_id text PRIMARY KEY, org_id text NOT NULL, owner_type text NOT NULL, owner_id text NOT NULL, source_session_id text NOT NULL);
 
 --> statement-breakpoint
-CREATE TABLE "product_announcements" (
-  "id" text PRIMARY KEY, "activated_at" bigint NOT NULL
-);
---> statement-breakpoint
-INSERT INTO "product_announcements" ("id", "activated_at")
-VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_timestamp()) * 1000)::bigint);
---> statement-breakpoint
-CREATE TABLE "product_announcement_acknowledgements" (
-  "announcement_id" text NOT NULL, "user_id" text NOT NULL, "acknowledged_at" bigint NOT NULL,
-  PRIMARY KEY ("announcement_id", "user_id")
+CREATE TABLE "user_tutorial" (
+  "user_id" text PRIMARY KEY REFERENCES "user"("id") ON DELETE CASCADE,
+  "seen_version" integer NOT NULL DEFAULT 0, "seen_org_version" integer NOT NULL DEFAULT 0,
+  "outcome" text, "step" text, "updated_at" bigint NOT NULL
 );
 
 --> statement-breakpoint
@@ -2866,6 +2936,31 @@ CREATE INDEX IF NOT EXISTS "home_tasks_user" ON "home_tasks" ("user_id", "create
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "home_tasks_thread" ON "home_tasks" ("session_id", "thread_id");
 
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "channel_progress_deliveries" (
+  "id" text PRIMARY KEY,
+  "org_id" text NOT NULL,
+  "session_id" text NOT NULL,
+  "thread_id" text NOT NULL,
+  "turn_id" text NOT NULL,
+  "channel_type" text NOT NULL,
+  "conversation_key" text NOT NULL,
+  "thread_ts" text,
+  "message_id" text,
+  "last_revision" text,
+  "create_started" boolean NOT NULL DEFAULT false,
+  "attempts" integer NOT NULL DEFAULT 0,
+  "next_attempt_at" bigint NOT NULL DEFAULT 0,
+  "lease_token" text,
+  "lease_until" bigint NOT NULL DEFAULT 0,
+  "completed_at" bigint,
+  "failed_at" bigint,
+  "last_error" text
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "channel_progress_scope" ON "channel_progress_deliveries" ("org_id", "session_id", "thread_id", "turn_id", "channel_type", "conversation_key");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "channel_progress_pending_due" ON "channel_progress_deliveries" ("org_id", "next_attempt_at") WHERE "completed_at" IS NULL AND "failed_at" IS NULL;
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "external_calls" (
   "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "user_id" text,

@@ -216,6 +216,16 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
     expect(rows.rows).toEqual([{ session_id: first.sessionId }]);
   });
 
+  it("recovers an event admitted before the sender flag existed when it is retried after the deploy", async () => {
+    const deps = { db: testDb.appDb, engineHost };
+    const signal = (attributes: Record<string, string>) => ({ kind: "signal" as const, signalType: "github.issue_comment", body: "New comment", attributes });
+    const args = { orgId: ORG, owner: OWNER, actorUserId: `org:${ORG}`, dispatchId: "event:pre-deploy",
+      destination: { kind: "key" as const, key: "events:pre-deploy", title: "Events" }, mismatchReason: "test", unattended: true };
+    const first = await deliverToAssistantThread(deps, { ...args, signal: signal({ eventId: "ev-1" }) });
+    const retry = await deliverToAssistantThread(deps, { ...args, signal: signal({ eventId: "ev-1", senderBot: "false" }) });
+    expect(retry).toEqual({ ...first, recovered: true });
+  });
+
   it("recovers a routine slot retried after its prompt was edited (INV-D4)", async () => {
     const deps = { db: testDb.appDb, engineHost };
     const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
@@ -581,6 +591,57 @@ describe("deliverToAssistantThread — which assistant answers", () => {
     } finally {
       await host.destroyAll();
     }
+  });
+
+  it.each([
+    ["the sender's stop phrase", "Stop!", "app_mention", USER, true],
+    ["a reply that is not a stop phrase", "thanks, how is it going?", "app_mention", USER, false],
+    ["a channel subscription message", "stop", "slack.message", USER, false],
+    ["another person's stop phrase", "stop", "app_mention", "someone-else", false],
+  ])("stops a running Slack turn only for %s", async (_label, body, signalType, authorId, stops) => {
+    const deps = { db: testDb.appDb, engineHost };
+    const personal = { type: "user" as const, id: USER };
+    const session = await defaultAssistantSessionFor(deps, personal, { actorUserId: USER, orgId: ORG });
+    const thread = await session.createThread(`reply-stop-${signalType}-${authorId}-${stops}`);
+    const origin = { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" as const };
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("ask_question", { question: "Which task?" }, { id: "reply-ask" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("Stopped."),
+    ]);
+    const first = await thread.submitPrompt({ ...signal("start work"), signalType: "app_mention", origin }, { dispatchId: `reply-running-${body}-${authorId}`, author: { id: USER } });
+    await vi.waitFor(async () => expect((await session.providers.store.getQueueItem(session.id, first.queueItemId))?.status).toBe("blocked_on_decision_gate"));
+    const queued = await thread.submitPrompt("keep this queued work", { dispatchId: `reply-queued-${body}-${authorId}`, queueMode: "followup" });
+    const reply = await deliverToAssistantThread(deps, {
+      orgId: ORG, owner: personal, actorUserId: USER, author: { id: authorId },
+      destination: { kind: "target", sessionId: session.id, threadId: thread.id },
+      signal: { ...signal(body), signalType, origin }, dispatchId: `reply-${body}-${authorId}`, mismatchReason: "test",
+    });
+    const active = await session.providers.store.getQueueItem(session.id, first.queueItemId);
+    expect(active?.supersededByItemId).toBe(stops ? reply.queueItemId : undefined);
+    if (!stops) expect(active?.status).toBe("blocked_on_decision_gate");
+    expect((await session.providers.store.getQueueItem(session.id, queued.queueItemId))?.supersededByItemId).toBeUndefined();
+    if (stops) {
+      if (!reply.queueItemId) throw new Error("Expected reply queue item");
+      expect((await thread.awaitResult(first.queueItemId)).outcome).toBe("superseded");
+    }
+    await thread.abort();
+  });
+
+  it.each(["manual", "bot", "rehydrated", "unspecified"])("keeps a %s Slack stop phrase on the injection path", async (kind) => {
+    const deps = { db: testDb.appDb, engineHost };
+    const personal = { type: "user" as const, id: USER };
+    const session = await defaultAssistantSessionFor(deps, personal, { actorUserId: USER, orgId: ORG });
+    const thread = await session.createThread("passive-reply");
+    const submit = vi.spyOn(thread, "submitPrompt");
+    await deliverToAssistantThread(deps, {
+      orgId: ORG, owner: personal, actorUserId: USER,
+      destination: { kind: "target", sessionId: session.id, threadId: thread.id },
+      signal: { ...signal("stop"), attributes: kind === "bot" ? { senderBot: "true" } : kind === "rehydrated" ? { rehydrated: "true" } : {},
+        origin: { channelType: "slack", threadKey: "slack:C1:1.2", ...(kind === "unspecified" ? {} : { reply: kind === "manual" ? "manual" as const : "auto" as const }) } },
+      dispatchId: `passive-${kind}`, mismatchReason: "test",
+    });
+    expect(submit.mock.calls[0][1]?.queueMode).toBe("inject");
+    expect(submit.mock.calls[0][1]?.steerScope).toBeUndefined();
   });
 
   it("queues an event behind a busy personal thread instead of aborting its turn", async () => {

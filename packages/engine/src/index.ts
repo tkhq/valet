@@ -3,7 +3,7 @@ export * from "./types.js";
 export { toolScopeSchema } from "./tool-scope-schema.js";
 export { modelCallUsage, type ReportedUsage } from "./model-call-usage.js";
 export { parseResourceQuantity } from "@valet/shared";
-export { readThreadPlan, THREAD_PLAN_KEY, type ThreadPlan, type ThreadPlanItem, type ThreadPlanStatus } from "@valet/shared";
+export { readThreadPlan, THREAD_PLAN_KEY, type ThreadPlan, type ThreadPlanItem, type ThreadPlanStatus, type TurnProgress, type ProgressTask, type ProgressStatus } from "@valet/shared";
 export { subjectService } from "./events/subjects.js";
 export { boundEventDigest, cutUtf8, stripNul } from "./wakeups/digest.js";
 // pi-ai passthroughs, re-exported so downstream packages (e.g. @valet/eval)
@@ -41,6 +41,7 @@ export {
   type ReasoningLevel,
 } from "./reasoning.js";
 export {
+  frontmatterBlock,
   parseMarkdownArtifact,
   renderTemplate,
   loadRoleFromMarkdown,
@@ -48,6 +49,7 @@ export {
   skillFileManifest,
   validateSkillFrontmatter,
   isLoadable,
+  type FrontmatterBlock,
   type FrontmatterValue,
   type ParsedArtifact,
   type SkillSpecField,
@@ -59,7 +61,9 @@ export {
   playbookPlanItems,
   playbookSeedNote,
   readPlaybookSteps,
+  scanPlaybookSteps,
   type PlaybookSeedResult,
+  type PlaybookStepLine,
   type PlaybookSteps,
 } from "./roles-skills/index.js";
 export {
@@ -69,6 +73,18 @@ export {
   completedSubmissionOutcome,
   resolvePartialSubmissionText,
   originFromEntries,
+  sameSubmissionOrigin,
+  isInteractiveSlackSignal,
+  isInteractiveSlackInput,
+  isSlackStopRequest,
+  sameSubmissionAuthor,
+  interruptibleBy,
+  carriedInputIds,
+  carriedInputBridgeIds,
+  queuedOriginInputs,
+  carryInputMetadata,
+  withoutCarriedInputs,
+  MAX_CARRIED_INPUTS,
   validateSignalTagName,
   validateSignalAttributeKeys,
   renderSignalEnvelope,
@@ -87,6 +103,18 @@ export {
   parseAssistantSessionId,
 } from "./principal.js";
 export { extractStructuredOutput } from "./result-schema.js";
+export {
+  pluginHandlerAccepts,
+  type PluginChild,
+  type PluginChildRequest,
+  type PluginEvent,
+  type PluginEventContext,
+  type PluginEventHandler,
+  type PluginMemory,
+  type PluginReply,
+  type PluginThreadRef,
+  type PluginThreads,
+} from "./plugin-agents.js";
 export { encodeToolOutput } from "./tool-output.js";
 export { buildRepoInstructionsFragment } from "./repo-instructions.js";
 export {
@@ -146,9 +174,21 @@ export {
   type WorkspaceGrowOutcome,
   type EventDeriveResult,
 } from "./metrics.js";
+export {
+  ERROR_AREAS,
+  ERROR_TALLY_WINDOW_MS,
+  MAX_ERROR_SERIES,
+  recentErrorReports,
+  reportError,
+  resetErrorReports,
+  type ErrorArea,
+  type ErrorReport,
+  type ErrorTallyRow,
+} from "./error-report.js";
+export { errorLogFields, log, type LogFields, type LogLevel } from "./log.js";
 export { Engine } from "./engine.js";
 export { Session, type ThreadInitialSettings } from "./session.js";
-export { Thread, THREAD_BRANCHED_KEY, FORK_SEED_APPLIED_KEY, type ThreadEntryQuery } from "./thread.js";
+export { Thread, THREAD_BRANCHED_KEY, FORK_SEED_APPLIED_KEY, FORK_SEED_PENDING_KEY, type ThreadEntryQuery } from "./thread.js";
 export {
   BRANCH_NOTE_KEY,
   THREAD_EDIT_KEY,
@@ -215,6 +255,7 @@ export { NATIVE_IMAGE_RESULT_TOOL } from "./native-images.js";
 // DockerSandbox / DockerSandboxProvider live in @valet/sandbox-docker.
 export {
   builtinTools,
+  childStopTool,
   DEFAULT_WAKEUP_LIMITS,
   readTool,
   writeTool,
@@ -289,6 +330,7 @@ export {
   type FilterOptionResolver,
   type PluginValidationIssue,
   ChannelDeliveryRejectedError,
+  ChannelProgressRejectedError,
   type ChannelTransport,
   type ChannelTransportFactory,
   type TransportContext,
@@ -376,6 +418,7 @@ export {
   type SummaryWindowOptions,
   type Turn,
 } from "./compaction.js";
+export { readThreadOutline } from "./thread-outline.js";
 export {
   canDeliverMidTurn,
   entriesToAgentMessages,
@@ -384,6 +427,7 @@ export {
   parseProviderRetryHintMs,
   turnRetryWaitMs,
   resolveModelId,
+  settledSubmissionResult,
   type CompactionOutcome,
 } from "./thread.js";
 export { classifyCacheBreak, type CacheBreakCause, type CacheTurnSnapshot } from "./cache-telemetry.js";
@@ -412,4 +456,5 @@ export { validatePluginHttpRoutes, MAX_PLUGIN_HTTP_BODY_BYTES, type PluginHttpRo
 export { MAX_IMAGE_BYTES, IMAGE_FORMATS, imageDecoder, validateImage, imageAttachment, decodeImageBase64 } from "./image-output.js";
 
 export { MODEL_RESPONSE_METADATA_KEY, modelResponseMetadata, readModelResponseMetadata } from "./model-response.js";
-export { sniffImageMediaType, correctImageBlocks, type ImageMediaType } from "./image-media-type.js";
+export { sniffImageMediaType, isSafeSvg, validatedImageMediaType, correctImageBlocks, type ImageMediaType } from "./image-media-type.js";
+export { projectTurnProgress, readTurnProgress, readLatestTurnProgress } from "./turn-progress.js";

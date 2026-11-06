@@ -1,62 +1,6 @@
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { WaitingThreadsResponse } from "@valet/api/wire";
-import { api, type OwnerFilter } from "./client";
+import type { OwnerFilter } from "./client";
 
 export const qkCatchUp = {
-  active: (owner: OwnerFilter) => ["workspace-active-work", owner.ownerType, owner.ownerId] as const,
-  waiting: (owner: OwnerFilter) => ["workspace-waiting", owner.ownerType, owner.ownerId] as const,
-  outcomes: (owner: OwnerFilter) => ["workspace-outcomes", owner.ownerType, owner.ownerId] as const,
   workArtifacts: (owner: OwnerFilter, sessionId: string, threadId?: string) =>
     ["artifacts", "work", owner.ownerType, owner.ownerId, sessionId, threadId] as const,
 };
-
-export function useWorkspaceOutcomes(owner: OwnerFilter) {
-  return useInfiniteQuery({
-    queryKey: qkCatchUp.outcomes(owner),
-    initialPageParam: undefined as string | undefined,
-    queryFn: ({ pageParam }) => api.listWorkspaceOutcomes(owner, pageParam),
-    getNextPageParam: page => page.nextCursor ?? undefined,
-    refetchInterval: 10_000,
-  });
-}
-
-export function useWorkspaceActiveWork(owner: OwnerFilter) {
-  return useInfiniteQuery({
-    queryKey: qkCatchUp.active(owner),
-    initialPageParam: undefined as string | undefined,
-    queryFn: ({ pageParam }) => api.listWorkspaceActiveWork(owner, pageParam),
-    getNextPageParam: page => page.nextCursor ?? undefined,
-    refetchInterval: 10_000,
-  });
-}
-
-/** Threads whose newest agent message came after the last human action. */
-export function useWaitingThreads(owner: OwnerFilter) {
-  return useQuery({
-    queryKey: qkCatchUp.waiting(owner),
-    queryFn: () => api.getWaitingThreads(owner),
-    refetchInterval: 10_000,
-  });
-}
-
-/**
- * Marks a waiting thread done by archiving it. It leaves the list at once.
- * A thread with background work comes back: the server refuses the archive
- * (409 `background_work`) unless `force` is set, and the caller asks first.
- */
-export function useFinishWaitingThread(owner: OwnerFilter) {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (thread: { sessionId: string; threadId: string; force?: boolean }) =>
-      api.patchThread(thread.threadId, { archived: true, ...(thread.force ? { force: true } : {}) }),
-    onMutate: (thread) => {
-      qc.setQueryData<WaitingThreadsResponse>(qkCatchUp.waiting(owner), (current) => current && ({
-        threads: current.threads.filter((row) => row.threadId !== thread.threadId),
-      }));
-    },
-    onSettled: (_result, _error, thread) => {
-      void qc.invalidateQueries({ queryKey: qkCatchUp.waiting(owner) });
-      void qc.invalidateQueries({ queryKey: ["sessions", thread.sessionId, "threads"] });
-    },
-  });
-}

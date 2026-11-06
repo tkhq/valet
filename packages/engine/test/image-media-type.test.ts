@@ -1,7 +1,7 @@
 import { entriesToAgentMessages } from "../src/thread.js";
 import type { MessageEntry } from "../src/types.js";
 import { describe, expect, it } from "vitest";
-import { correctImageBlocks, sniffImageMediaType } from "../src/image-media-type.js";
+import { correctImageBlocks, isSafeSvg, sniffImageMediaType, validatedImageMediaType } from "../src/image-media-type.js";
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46]);
@@ -48,5 +48,47 @@ describe("image media type correction", () => {
     const restored = entriesToAgentMessages([entry], { api: "anthropic", provider: "anthropic", id: "model" });
     const [msg] = correctImageBlocks(restored) as Array<{ content: Array<{ type: string; mimeType?: string }> }>;
     expect(msg.content.find((c) => c.type === "image")?.mimeType).toBe("image/png");
+  });
+});
+
+describe("validatedImageMediaType", () => {
+  const encode = (text: string) => new TextEncoder().encode(text);
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0]);
+
+  it("takes the type from raster bytes, whatever the name says", () => {
+    expect(validatedImageMediaType(png, "chart.bin")).toBe("image/png");
+  });
+
+  it("refuses an image name whose bytes are not an image", () => {
+    expect(validatedImageMediaType(encode("<html>not an image</html>"), "report.png")).toBeUndefined();
+    expect(validatedImageMediaType(encode("plain text"), "photo.jpg")).toBeUndefined();
+  });
+
+  it("accepts a well-formed SVG with an svg root, including a declaration and a comment", () => {
+    expect(validatedImageMediaType(encode('<?xml version="1.0"?>\n<!-- chart -->\n<svg xmlns="http://www.w3.org/2000/svg"><rect width="4" height="4"/></svg>\n'), "chart.svg")).toBe("image/svg+xml");
+  });
+
+  it.each([
+    ["a script element", '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'],
+    ["an event handler", '<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"></svg>'],
+    ["a javascript URL", '<svg xmlns="http://www.w3.org/2000/svg"><a href="javascript:alert(1)">x</a></svg>'],
+    ["a DOCTYPE", '<!DOCTYPE svg [<!ENTITY x "y">]><svg xmlns="http://www.w3.org/2000/svg"></svg>'],
+    ["an HTML root", "<html><svg></svg></html>"],
+    ["no closing tag", '<svg xmlns="http://www.w3.org/2000/svg"><rect/>'],
+  ])("refuses an SVG with %s", (_label, text) => {
+    expect(isSafeSvg(encode(text))).toBe(false);
+    expect(validatedImageMediaType(encode(text), "chart.svg")).toBeUndefined();
+  });
+
+  it("accepts a self-closed svg root", () => {
+    expect(isSafeSvg(encode('<svg xmlns="http://www.w3.org/2000/svg"/>'))).toBe(true);
+  });
+
+  it("does not treat SVG text as an image without the .svg name", () => {
+    expect(validatedImageMediaType(encode('<svg xmlns="http://www.w3.org/2000/svg"></svg>'), "notes.txt")).toBeUndefined();
+  });
+
+  it("refuses bytes that are not UTF-8", () => {
+    expect(isSafeSvg(new Uint8Array([0x3c, 0x73, 0x76, 0x67, 0xff, 0xfe]))).toBe(false);
   });
 });

@@ -1186,7 +1186,9 @@ describe("compaction: summarizer failure handling (TKAI-306)", () => {
     // … and after the manual pass's one-turn cool-down
     // (skipNextProactiveCheck), over-budget turns compact proactively again.
     faux.appendResponses([
-      fauxAssistantMessage("r5 " + "x".repeat(40_000)), // cool-down turn: no compaction attempt
+      // Leave headroom below the overflow line, so a tool schema change does
+      // not move the next turn's compaction from after the turn to before it.
+      fauxAssistantMessage("r5 " + "x".repeat(36_000)), // cool-down turn: no compaction attempt
       boundaryResponse("r6"),
       fauxAssistantMessage(SUMMARY_RESPONSE),
     ]);

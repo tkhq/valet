@@ -19,8 +19,13 @@
  * Under `agent_view` the thread root is the user's own message and carries no
  * `assistant_app_thread` subtype. Nothing here keys off that subtype.
  */
+import { createHash } from "node:crypto";
+import type { TurnProgress } from "@valet/engine";
+import { progressBlocks } from "./progress-blocks.js";
 import {
   ChannelLookupError,
+  ChannelDeliveryRejectedError,
+  ChannelProgressRejectedError,
   ChannelStreamError,
   type ChannelGatePrompt,
   type ChannelGateResolution,
@@ -40,6 +45,7 @@ import {
   type TransportContext,
   credentialSecret,
   sniffImageMediaType,
+  reportError,
 } from "@valet/engine";
 import {
   buildContentBlocks,
@@ -59,6 +65,11 @@ import { fetchThreadTranscript } from "./thread-context.js";
 import { enrichSlackText } from "./text-enrich.js";
 import { escapeMrkdwn, markdownToSlackMrkdwn, neutralizeSlackMentions } from "./format.js";
 import { verifySlackDelivery } from "./verify.js";
+
+const PROGRESS_CREATE_REJECTIONS = new Set([
+  "invalid_blocks", "invalid_arguments", "missing_scope", "not_in_channel", "channel_not_found", "not_authed",
+  "token_revoked", "account_inactive", "rate_limited", "ratelimited", "msg_blocks_too_long", "msg_blocks_too_many", "no_permission",
+]);
 
 const MAX_IMAGE_DOWNLOAD_BYTES = 10 * 1024 * 1024; // 10 MB (images prefer thumbnails anyway)
 const MAX_FILE_DOWNLOAD_BYTES = 25 * 1024 * 1024; // 25 MB (PDFs, documents)
@@ -839,6 +850,38 @@ export class SlackTransport implements ChannelTransport {
 
   // ─── Assistant thread controls ────────────────────────────────────────
 
+  async publishProgress(
+    conversationKey: string, progress: TurnProgress,
+    options: { threadTs: string; idempotencyKey: string; messageId?: string; recoverOnly?: boolean },
+  ): Promise<{ messageId: string } | null> {
+    const target = this.mustParse(conversationKey);
+    if (target.threadTs !== options.threadTs) throw new Error("The progress destination does not match the conversation. Check the thread mapping.");
+    const key = createHash("sha256").update(options.idempotencyKey).digest("hex");
+    const rendered = progressBlocks(progress, key);
+    let messageId = options.messageId;
+    if (!messageId && options.recoverOnly) {
+      const identity = this.botUserId || this.botId ? { userId: this.botUserId, botId: this.botId } : await this.api.authTest();
+      const found = await this.api.findProgressMessage(target.channelId, options.threadTs, key, identity);
+      if (!found) return null;
+      return { messageId: found };
+    }
+    if (messageId) {
+      await this.api.updateMessage({ channel: target.channelId, ts: messageId, text: rendered.text, blocks: rendered.blocks, parse: "none", attention: true });
+      return { messageId };
+    }
+    try {
+      const created = await this.api.postMessage({ channel: target.channelId, threadTs: options.threadTs, text: rendered.text, blocks: rendered.blocks, progressDeliveryId: key });
+      return { messageId: created.ts };
+    } catch (error) {
+      // Only documented no-write rejections permit another creation attempt.
+      // Internal, fatal, network, and unknown failures can have side effects.
+      const rejected = error instanceof ChannelDeliveryRejectedError ||
+        (error instanceof SlackApiError && error.providerRejected && PROGRESS_CREATE_REJECTIONS.has(error.detail));
+      if (rejected) throw new ChannelProgressRejectedError("Slack rejected task progress. Check the app's access and block configuration.");
+      throw error;
+    }
+  }
+
   async setStatus(conversationKey: string, threadTs: string, status: string): Promise<void> {
     const target = this.mustParse(conversationKey);
     await this.api.setThreadStatus(target.channelId, threadTs, status);
@@ -1092,19 +1135,19 @@ export class SlackTransport implements ChannelTransport {
     if (text === undefined) return;
     const answer = this.gateCallbackAnswers.get(callbackId);
     if (!answer) {
-      console.warn(`[slack] no recorded answer address for callback ${callbackId}`);
+      reportError({ area: "channels", reason: "approval_answer_address", provider: "slack", level: "warn" }, `[slack] no recorded answer address for callback ${callbackId}`);
       return;
     }
     let responseUrl: string | undefined;
     if (answer.responseUrl !== undefined) {
       if (this.isSlackResponseUrl(answer.responseUrl)) responseUrl = answer.responseUrl;
-      else console.warn(`[slack] refused an approval answer to a non-Slack response_url for callback ${callbackId}`);
+      else reportError({ area: "channels", reason: "approval_answer_refused", provider: "slack", level: "warn" }, `[slack] refused an approval answer to a non-Slack response_url for callback ${callbackId}`);
     }
     if (responseUrl !== undefined && (await this.postToResponseUrl(responseUrl, text))) return;
     try {
       await this.api.postEphemeral({ channel: answer.channelId, user: answer.userId, text });
     } catch (err) {
-      console.error("[slack] could not answer an approval click", err);
+      reportError({ area: "channels", reason: "approval_answer", provider: "slack" }, "[slack] could not answer an approval click", err);
     }
   }
 
@@ -1135,9 +1178,9 @@ export class SlackTransport implements ChannelTransport {
         body: JSON.stringify({ response_type: "ephemeral", replace_original: false, text }),
       });
       if (res.ok) return true;
-      console.warn(`[slack] response_url rejected an approval answer: http ${res.status}`);
+      reportError({ area: "channels", reason: "approval_answer_rejected", provider: "slack", level: "warn" }, `[slack] response_url rejected an approval answer: http ${res.status}`);
     } catch (err) {
-      console.error("[slack] response_url answer failed", err);
+      reportError({ area: "channels", reason: "approval_answer_send", provider: "slack" }, "[slack] response_url answer failed", err);
     }
     return false;
   }

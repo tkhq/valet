@@ -28,15 +28,8 @@ import { linearEventArmBlock } from "../linear-ingress.js";
  * from the root whatever that setting holds. A source that sets a subpath and
  * expects it to hide `.valet/workflows` would be surprised, so say it here.
  */
-import type { WorkflowDefinition } from "@valet/workflow";
+import type { ValidateEnvironment, WorkflowDefinition, WorkflowFile } from "@valet/workflow";
 import { and, eq, inArray } from "drizzle-orm";
-import { parse as parseYaml } from "yaml";
-import {
-  parseWorkflowFileValue,
-  WORKFLOW_FILE_EXTENSIONS,
-  type ValidateEnvironment,
-  type WorkflowFile,
-} from "@valet/workflow";
 import type { CredentialStore, ValetPlugin } from "@valet/engine";
 import type { AppDb, AppQueryable } from "../../lib/drizzle.js";
 import { canonicalJson } from "../../lib/canonical-json.js";
@@ -55,7 +48,8 @@ import {
   purgeWorkflowRows,
   revokeWorkflowGrants,
 } from "../../workflows/service.js";
-import { BAD_CRON_REASON, nextFireAt } from "../../workflows/schedule-service.js";
+import { BAD_CRON_REASON } from "../../workflows/schedule-service.js";
+import { nextFireAt } from "../../workflows/next-fire.js";
 import {
   teamArmRefusals,
   teamServiceReadiness,
@@ -74,9 +68,7 @@ import type {
   ContentCollector,
   ContentManifestEntry,
 } from "./collector.js";
-
-/** The two roots that hold definitions. */
-const WORKFLOW_ROOTS = [".valet/workflows", "workflows"] as const;
+import { readWorkflowFile, workflowRootFor } from "./workflow-file.js";
 
 export interface WorkflowCollectorDeps {
   /**
@@ -120,8 +112,8 @@ export class WorkflowCollector implements ContentCollector {
       // A symlink's blob holds a path string and not a definition, so mode
       // 120000 is not a candidate.
       if (entry.type !== "blob" || entry.mode === "120000") continue;
-      const root = rootFor(entry.path);
-      if (root === null || !hasWorkflowExtension(entry.path)) continue;
+      const root = workflowRootFor(entry.path);
+      if (root === null) continue;
       candidates.push({
         name: nameFromPath(entry.path),
         path: entry.path,
@@ -148,20 +140,6 @@ interface WorkflowCandidate extends ContentManifestEntry {
    * key is a mistake worth naming, because that folder is unambiguous. Under
    * a top-level `workflows/` it is a file that belongs to something else. */
   root: string;
-}
-
-/** The root that claims `path`, or null. A file sitting directly in `.valet/`
- * is not under `.valet/workflows` and is never a candidate, which keeps this
- * away from `.valet/prebuild.yaml`. */
-function rootFor(path: string): string | null {
-  for (const root of WORKFLOW_ROOTS) {
-    if (path.startsWith(`${root}/`) && path.length > root.length + 1) return root;
-  }
-  return null;
-}
-
-function hasWorkflowExtension(path: string): boolean {
-  return WORKFLOW_FILE_EXTENSIONS.some((ext) => path.endsWith(ext));
 }
 
 /** The file's base name without its extension. The file's own `name` key wins
@@ -266,7 +244,7 @@ class WorkflowPass implements CollectorPass {
       const raw = text.get(candidate.path);
       if (raw === undefined) continue;
 
-      const parsed = this.readFile(raw, candidate);
+      const parsed = readWorkflowFile(raw, candidate.path, candidate.root, this.env);
       if (parsed.kind === "skip") continue;
       if (parsed.kind === "warn") {
         warnings.push(parsed.message);
@@ -471,65 +449,6 @@ class WorkflowPass implements CollectorPass {
         deferred: [...disarmed, ...unchecked, ...ingressPending],
       };
     };
-  }
-
-  /** One candidate's body to a workflow file, or to what to say about it. */
-  private readFile(
-    raw: string,
-    candidate: WorkflowCandidate,
-  ): { kind: "ok"; file: WorkflowFile } | { kind: "warn"; message: string } | { kind: "skip" } {
-    let value: unknown;
-    try {
-      // YAML 1.2 parses JSON, so one parser reads both accepted forms.
-      value = parseYaml(raw);
-    } catch (err) {
-      const detail = err instanceof Error ? `: ${err.message}` : "";
-      return {
-        kind: "warn",
-        message: `${candidate.path} is not valid YAML or JSON${detail}. Fix the file and push.`,
-      };
-    }
-
-    const parsed = parseWorkflowFileValue(value, candidate.path, this.env ?? {});
-    if (!parsed.ok) {
-      // A file with no `valet:` key under a repository's own `workflows/` is
-      // not a mistake: that folder belongs to the repository and may hold
-      // anything. Under `.valet/workflows` the folder is unambiguous, so the
-      // same file gets a warning naming the path.
-      if (parsed.code === "unlabeled" && candidate.root !== ".valet/workflows") {
-        return { kind: "skip" };
-      }
-      // The validator names the node and not the file, so the path goes in
-      // front of its messages. Without it, the most common failure of this
-      // feature reports a broken node and never says which file holds it.
-      return { kind: "warn", message: `${candidate.path}: ${parsed.errors.join(" ")}` };
-    }
-    // The two collectors partition the path space by FOLDER, so a template
-    // that sits in a workflow folder is mirrored by neither. Say so: silence
-    // here reads as "Valet took it" to the person who wrote it. The message
-    // names both halves of the fix, because moving the file is not enough on
-    // a source that does not collect templates.
-    if (parsed.file.kind !== "workflow") {
-      return {
-        kind: "warn",
-        message: `${candidate.path} is a workflow template and it sits in a workflow folder, so Valet did not mirror it. Move it to .valet/templates/ and push, and check that this repository is set to collect templates.`,
-      };
-    }
-
-    // A YAML anchor that refers to itself survives the validator, which only
-    // walks `version`, `policy`, `nodes` and `edges`. It then throws out of
-    // `JSON.stringify` in drizzle's jsonb encoder and in
-    // `definitionVersionId`, which would abort the sync for every OTHER file
-    // in the same pass. One file's mistake must cost that file only.
-    try {
-      JSON.stringify(parsed.file.definition);
-    } catch {
-      return {
-        kind: "warn",
-        message: `${candidate.path}: this workflow refers to itself, so Valet cannot store it. Look for a YAML anchor that includes the node holding it, and write the value out in full.`,
-      };
-    }
-    return { kind: "ok", file: parsed.file };
   }
 
   notice(ctx: CollectorNoticeContext): string | null {

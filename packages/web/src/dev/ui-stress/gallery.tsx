@@ -197,6 +197,7 @@ export default function UiStressGallery() {
               <Frame label="Streaming a response" className="pt-3"><ProcessingStatus status="streaming" /></Frame>
               <Frame label="Queued submission" className="pt-3"><ProcessingStatus status="queued" /></Frame>
               <Frame label="Waiting for a response" className="pt-3"><ProcessingStatus status="blocked_on_decision_gate" /></Frame>
+              <Frame label="Compacting context between turns" className="pt-3"><ProcessingStatus status="idle" compacting /></Frame>
               <Frame label="Paused queue" className="pt-3"><ProcessingStatus status="idle" queue={{ mode: "followup", status: "paused", pendingIds: ["queued"], collectingIds: [] }} /></Frame>
               <Frame label="Slack-origin work after reconnect" className="pt-3"><ProcessingStatus status="idle" queue={{ mode: "followup", status: "running", activeItemId: "slack-origin", pendingIds: [], collectingIds: [] }} /></Frame>
               <Frame label="Queued external submission after reconnect" className="pt-3"><ProcessingStatus status="idle" queue={{ mode: "followup", status: "queued", pendingIds: ["external"], collectingIds: [] }} /></Frame>

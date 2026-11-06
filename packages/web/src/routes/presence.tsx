@@ -43,6 +43,8 @@ export function PresenceLayout() {
             actions={<OverviewActions />}
           />
         )}
+        {/* A detail page has a breadcrumb, not a page header: its space step sits above it. */}
+        {!onOverview && <div className="mb-1"><WorkspaceClause size="crumb" /></div>}
         <div className="min-w-0">
           <Outlet />
         </div>

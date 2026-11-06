@@ -12,8 +12,30 @@ api:
   # for that work and 35 minutes for rollout progress. Session restore runs
   # after bind and remains controlled by readiness.
   startupProbe:
-    failureThreshold: 360 # 5 seconds per probe = 30 minutes.
+    failureThreshold: 360 # 5-second units = 30 minutes. The probe polls every 1s.
   progressDeadlineSeconds: 2100
+
+  # SIGTERM drain budget. The api exits within 20s of SIGTERM; keep this above.
+  terminationGracePeriodSeconds: 30
+
+  # Route Service traffic to the api pod while it is not ready, so callers get
+  # the api's own 503 + Retry-After during boot and drain instead of an
+  # ingress error or a refused connection. Correct only with one replica on
+  # Recreate. Set false for RollingUpdate (see the chart README).
+  publishNotReadyAddresses: true
+
+  # Pull the new api image onto the nodes before the Recreate rollout stops
+  # the old pod. A pre-upgrade hook Job runs `replicas` pods of the new image,
+  # one per node that matches the api's nodeSelector, tolerations, and
+  # affinity.nodeAffinity, and Helm waits for them. This removes the image
+  # pull (about 10s on a cold node) from the 503 window. Set replicas to the
+  # number of nodes the api can schedule on: with fewer, some nodes stay cold.
+  # If a pod cannot finish within activeDeadlineSeconds, the hook fails the
+  # upgrade before the old pod stops.
+  imagePrepull:
+    enabled: true
+    replicas: 2
+    activeDeadlineSeconds: 300
 
   # Defaults target the local reference env (`make k8s-build` images, visible
   # to k3s via Rancher Desktop moby mode). CI publishes multi-arch images to
@@ -70,6 +92,13 @@ api:
   # Optional social/SSO env (non-secret half — client IDs, issuer, domain).
   # Secret halves (client secrets) live under api.secrets below.
   auth:
+    # Sign-in methods to turn on, as a comma list: password, oidc, google,
+    # github. Login is off for every method not listed. When this is empty
+    # and oidcIssuer is set, the api turns on oidc alone (SSO only, no
+    # password). Example for password sign-in only: "password".
+    methods: ""
+    # The method the login page shows first. Empty: the first listed method.
+    primaryMethod: ""
     oidcIssuer: ""
     oidcClientId: ""
     oidcName: ""
@@ -78,6 +107,39 @@ api:
     githubClientId: ""
     trustedOrigins: ""
     allowedEmailDomains: ""
+    # Comma-separated administrator emails (AUTH_ADMIN_EMAILS). Each becomes
+    # an org admin on SSO sign-in, or on Google/GitHub sign-in with a verified
+    # email. With SSO on, the api refuses to boot until an admin exists or one
+    # is listed here.
+    adminEmails: ""
+    # MCP dynamic client registration (AUTH_MCP_*). Each value renders only
+    # when set; empty keeps the api default shown here.
+    mcp:
+      # "open" (default) or "off". Off refuses new registrations; apps that
+      # already connected keep working.
+      registration: ""
+      # Registrations each address may make in an hour (default 10; 0 = no limit).
+      registrationRatePerHour: ""
+      # Refuse registration while this many clients from the last day have no
+      # consent and no token (default 200; 0 = no cap).
+      unconsentedClientCap: ""
+      # Redirect URIs one registration may hold (default 5; at least 1).
+      maxRedirectUris: ""
+      # Native app schemes a redirect URI may use, as a comma list
+      # (default "claude,cursor").
+      appSchemes: ""
+
+  # Outbound URL guard for admin-configured endpoints, such as custom LLM
+  # provider base URLs. The api refuses link-local, loopback, private,
+  # cluster, and instance-internal targets at save time and at request time.
+  security:
+    # Comma-separated hosts, *.suffix patterns, and CIDR ranges that skip
+    # the guard (VALET_OUTBOUND_URL_ALLOWLIST). Use it for a self-hosted
+    # endpoint, for example "vllm.corp.example,10.20.0.0/16".
+    outboundUrlAllowlist: ""
+    # Comma-separated extra hosts or addresses to refuse (VALET_INTERNAL_HOSTS),
+    # for example an internal registry proxy.
+    internalHosts: ""
 
   # Optional pre-existing GitHub App (non-secret half — the `GITHUB_APP_*`
   # env fallback). Set these three plus the api.secrets.githubApp* values
@@ -435,6 +497,18 @@ build:
   # Soft in-process cap (KubernetesImageBuilder) on simultaneously
   # outstanding BuildKit Jobs; extra builds queue FIFO.
   concurrency: 1
+  # Bakes run setup commands that an org admin or a repo controls, so treat
+  # every build pod as untrusted. Build pods carry the label
+  # valet.dev/workload: untrusted-build for a NetworkPolicy to select.
+  # nodeSelector and tolerations place them on an isolated, tainted node pool.
+  # Empty keeps the scheduler's choice. See the cluster-side requirements in
+  # docs/specs/2026-08-02-sandbox-reconcile-design.md.
+  # Example:
+  #   nodeSelector: { valet.dev/pool: builds }
+  #   tolerations:
+  #     - { key: valet.dev/build, operator: Exists, effect: NoSchedule }
+  nodeSelector: {}
+  tolerations: []
 
 observability:
   # Bundled local observability stack (grafana/otel-lgtm: OTel collector +

@@ -381,7 +381,8 @@ describe("isolated delivery execution", () => {
       expect(peak).toBe(4);
       expect(send).toHaveBeenCalledTimes(10);
       expect((await db.select().from(pendingChannelDeliveries)).every(row => row.status === "sent")).toBe(true);
-      expect(log).toHaveBeenCalledWith(expect.stringContaining("failed"), expect.any(Error));
+      // A failure logs either as a message plus the error, or as one reportError JSON line with its class.
+      expect(log.mock.calls.some(([line, err]) => String(line).includes("failed") && (err instanceof Error || String(line).includes('"error_class"')))).toBe(true);
     } finally {
       release(); await Promise.all([work, queued]); log.mockRestore();
       await db.execute(sql`DROP TRIGGER attention_claim_failure ON pending_channel_deliveries`);

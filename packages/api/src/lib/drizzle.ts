@@ -430,6 +430,46 @@ const CONTRACT_BACKFILL_SQL = `WITH base AS (
 SELECT id FROM base UNION ALL SELECT id FROM repo`;
 
 const SCHEMA_REPAIRS: SchemaRepair[] = [
+  { describe: "channel progress ledger", probe: { kind: "table", table: "channel_progress_deliveries" }, sql: `CREATE TABLE IF NOT EXISTS "channel_progress_deliveries" (
+  "id" text PRIMARY KEY,
+  "org_id" text NOT NULL,
+  "session_id" text NOT NULL,
+  "thread_id" text NOT NULL,
+  "turn_id" text NOT NULL,
+  "channel_type" text NOT NULL,
+  "conversation_key" text NOT NULL,
+  "thread_ts" text,
+  "message_id" text,
+  "last_revision" text,
+  "create_started" boolean NOT NULL DEFAULT false,
+  "attempts" integer NOT NULL DEFAULT 0,
+  "next_attempt_at" bigint NOT NULL DEFAULT 0,
+  "lease_token" text,
+  "lease_until" bigint NOT NULL DEFAULT 0,
+  "completed_at" bigint,
+  "failed_at" bigint,
+  "last_error" text
+);` },
+  { describe: "channel progress scope", probe: { kind: "index", index: "channel_progress_scope" }, sql: `CREATE UNIQUE INDEX IF NOT EXISTS "channel_progress_scope" ON "channel_progress_deliveries" ("org_id", "session_id", "thread_id", "turn_id", "channel_type", "conversation_key");` },
+  { describe: "channel progress due", probe: { kind: "index", index: "channel_progress_pending_due" }, sql: `CREATE INDEX IF NOT EXISTS "channel_progress_pending_due" ON "channel_progress_deliveries" ("org_id", "next_attempt_at") WHERE "completed_at" IS NULL AND "failed_at" IS NULL;` },
+  { describe: "memory_file_usage table", probe: { kind: "table", table: "memory_file_usage" }, sql: `CREATE TABLE IF NOT EXISTS "memory_file_usage" (
+  "owner_type" text NOT NULL,
+  "owner_id" text NOT NULL,
+  "namespace" text DEFAULT '' NOT NULL,
+  "path" text NOT NULL,
+  "read_count" integer DEFAULT 0 NOT NULL,
+  "last_read_at" bigint,
+  "inject_count" integer DEFAULT 0 NOT NULL,
+  "last_injected_at" bigint,
+  "cite_count" integer DEFAULT 0 NOT NULL,
+  "last_cited_at" bigint,
+  PRIMARY KEY ("owner_type", "owner_id", "namespace", "path")
+)` },
+  // Tracking starts when this repair runs on a deployed database.
+  { describe: "memory_usage_tracking table", probe: { kind: "table", table: "memory_usage_tracking" }, sql: `DO $repair$ BEGIN
+  CREATE TABLE IF NOT EXISTS "memory_usage_tracking" ("id" boolean PRIMARY KEY DEFAULT true NOT NULL CHECK ("id"), "started_at" bigint NOT NULL);
+  INSERT INTO "memory_usage_tracking" ("started_at") VALUES ((extract(epoch from clock_timestamp()) * 1000)::bigint) ON CONFLICT DO NOTHING;
+END $repair$` },
   { describe: "durable session config invalidations", probe: { kind: "table", table: "session_config_invalidations" },
     sql: 'CREATE TABLE "session_config_invalidations" ("session_id" text PRIMARY KEY NOT NULL, "token" text NOT NULL)' },
   { describe: "direct-channel conversation bindings", probe: { kind: "table", table: "channel_conversation_bindings" }, sql: `CREATE TABLE "channel_conversation_bindings" (
@@ -561,15 +601,11 @@ WHERE r.status <> 'merged' ORDER BY l.org_id, l.subject_type, l.subject_id, l.di
   "created_at" bigint NOT NULL
 )` },
   { describe: "generated file deduplication", probe: { kind: "index", index: "generated_files_scope_digest" }, sql: "CREATE UNIQUE INDEX generated_files_scope_digest ON generated_files (org_id, session_id, thread_id, digest)" },
-  { describe: "product announcements", probe: { kind: "table", table: "product_announcements" }, sql: `CREATE TABLE "product_announcements" (
-  "id" text PRIMARY KEY, "activated_at" bigint NOT NULL
-);
-INSERT INTO "product_announcements" ("id", "activated_at")
-VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_timestamp()) * 1000)::bigint);` },
-  { describe: "product announcement acknowledgements", probe: { kind: "table", table: "product_announcement_acknowledgements" }, sql: `CREATE TABLE "product_announcement_acknowledgements" (
-  "announcement_id" text NOT NULL, "user_id" text NOT NULL, "acknowledged_at" bigint NOT NULL,
-  PRIMARY KEY ("announcement_id", "user_id")
-);` },
+  { describe: "user_tutorial table", probe: { kind: "table", table: "user_tutorial" }, sql: `CREATE TABLE IF NOT EXISTS "user_tutorial" (
+  "user_id" text PRIMARY KEY REFERENCES "user"("id") ON DELETE CASCADE,
+  "seen_version" integer NOT NULL DEFAULT 0, "seen_org_version" integer NOT NULL DEFAULT 0,
+  "outcome" text, "step" text, "updated_at" bigint NOT NULL
+)` },
   { describe: "quarantine unscoped legacy workflow approvals", probe: { kind: "column", table: "action_policy_overrides", column: "legacy_unscoped" }, sql: `DO $$ BEGIN
     ALTER TABLE action_policy_overrides ADD COLUMN legacy_unscoped boolean NOT NULL DEFAULT true;
     ALTER TABLE action_policy_overrides ALTER COLUMN legacy_unscoped SET DEFAULT false; END $$` },
@@ -807,6 +843,15 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
 );` },
   { describe: "team_deletion_requests_pending", probe: { kind: "index", index: "team_deletion_requests_pending" }, sql: `CREATE UNIQUE INDEX IF NOT EXISTS "team_deletion_requests_pending" ON "team_deletion_requests" ("team_id", "resource_type", "resource_id") WHERE "status" = 'pending';` },
   { describe: "team_deletion_requests_team_status", probe: { kind: "index", index: "team_deletion_requests_team_status" }, sql: `CREATE INDEX IF NOT EXISTS "team_deletion_requests_team_status" ON "team_deletion_requests" ("team_id", "status");` },
+  { describe: "image source change requests", probe: { kind: "table", table: "image_source_change_requests" }, sql: `CREATE TABLE IF NOT EXISTS "image_source_change_requests" (
+  "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "target_key" text NOT NULL,
+  "source_id" text, "source_name" text NOT NULL, "action" text NOT NULL, "payload" jsonb NOT NULL,
+  "base_updated_at" bigint, "requested_by" text NOT NULL, "requested_at" bigint NOT NULL,
+  "expires_at" bigint NOT NULL, "status" text NOT NULL DEFAULT 'pending',
+  "decided_by" text, "decided_at" bigint, "decision_note" text
+);` },
+  { describe: "image_source_change_requests_pending", probe: { kind: "index", index: "image_source_change_requests_pending" }, sql: `CREATE UNIQUE INDEX IF NOT EXISTS "image_source_change_requests_pending" ON "image_source_change_requests" ("org_id", "target_key") WHERE "status" = 'pending';` },
+  { describe: "image_source_change_requests_org_status", probe: { kind: "index", index: "image_source_change_requests_org_status" }, sql: `CREATE INDEX IF NOT EXISTS "image_source_change_requests_org_status" ON "image_source_change_requests" ("org_id", "status", "requested_at");` },
   { describe: "cli_device_requests table", probe: { kind: "table", table: "cli_device_requests" }, sql: `CREATE TABLE IF NOT EXISTS "cli_device_requests" (
   "device_code_hash" text PRIMARY KEY NOT NULL, "user_code" text NOT NULL, "device" text NOT NULL,
   "status" text NOT NULL DEFAULT 'pending', "user_id" text REFERENCES "user"("id") ON DELETE cascade,
@@ -919,6 +964,12 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "compaction_window_tokens" integer',
   },
   {
+    // Org-wide tour reset counter ("Show the tour to everyone again").
+    describe: "orgs.tutorial_version column",
+    probe: { kind: "column", table: "orgs", column: "tutorial_version" },
+    sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "tutorial_version" integer NOT NULL DEFAULT 0',
+  },
+  {
     describe: "image_sources.sandbox_resources column",
     probe: { kind: "column", table: "image_sources", column: "sandbox_resources" },
     sql: 'ALTER TABLE "image_sources" ADD COLUMN IF NOT EXISTS "sandbox_resources" jsonb',
@@ -1005,6 +1056,21 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
       END $$`,
   },
   {
+    describe: "child_watches.report_to_parent column",
+    probe: { kind: "column", table: "child_watches", column: "report_to_parent" },
+    sql: 'ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "report_to_parent" boolean NOT NULL DEFAULT true',
+  },
+  {
+    describe: "child_watches.plugin_delivery_id column",
+    probe: { kind: "column", table: "child_watches", column: "plugin_delivery_id" },
+    sql: 'ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "plugin_delivery_id" text',
+  },
+  {
+    describe: "child_watches_plugin_delivery index",
+    probe: { kind: "index", index: "child_watches_plugin_delivery" },
+    sql: 'CREATE INDEX IF NOT EXISTS "child_watches_plugin_delivery" ON "child_watches" ("plugin_delivery_id") WHERE "plugin_delivery_id" IS NOT NULL',
+  },
+  {
     describe: "child_watches.pending_cap_incident column",
     probe: { kind: "column", table: "child_watches", column: "pending_cap_incident" },
     sql: 'ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "pending_cap_incident" text',
@@ -1038,6 +1104,16 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     describe: "child_watches.events_started_at column",
     probe: { kind: "column", table: "child_watches", column: "events_started_at" },
     sql: 'ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "events_started_at" bigint',
+  },
+  {
+    describe: "child_watches.batch_key column",
+    probe: { kind: "column", table: "child_watches", column: "batch_key" },
+    sql: 'ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "batch_key" text',
+  },
+  {
+    describe: "child_watches.batch_held_json column",
+    probe: { kind: "column", table: "child_watches", column: "batch_held_json" },
+    sql: 'ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "batch_held_json" text',
   },
   {
     // The spawning submission's channel origin, inherited by child.settled
@@ -2417,6 +2493,15 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     probe: { kind: "column", table: "agent_sessions", column: "image_fallback" },
     sql: `ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS image_fallback jsonb`,
   },
+  { describe: "mcp_registrations", probe: { kind: "table", table: "mcp_registrations" }, sql: `CREATE TABLE IF NOT EXISTS "mcp_registrations" (
+ "id" text PRIMARY KEY NOT NULL, "address" text NOT NULL, "pending" boolean NOT NULL, "created_at" bigint NOT NULL
+)` },
+  { describe: "mcp_registrations_address_idx", probe: { kind: "index", index: "mcp_registrations_address_idx" }, sql: `CREATE INDEX IF NOT EXISTS "mcp_registrations_address_idx" ON "mcp_registrations" ("address", "created_at")` },
+  { describe: "admin_audit_events table", probe: { kind: "table", table: "admin_audit_events" }, sql: `CREATE TABLE IF NOT EXISTS "admin_audit_events" (
+ "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "actor_user_id" text, "actor_email" text, "action" text NOT NULL,
+ "target_type" text NOT NULL, "target_id" text, "target_name" text, "changes" jsonb, "ip" text, "user_agent" text, "created_at" bigint NOT NULL
+)` },
+  { describe: "admin_audit_events_org_created index", probe: { kind: "index", index: "admin_audit_events_org_created" }, sql: `CREATE INDEX IF NOT EXISTS "admin_audit_events_org_created" ON "admin_audit_events" ("org_id", "created_at" DESC, "id" DESC)` },
 ];
 
 /**

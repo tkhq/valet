@@ -157,3 +157,21 @@ export async function orgAllowsPluginForUser(
     .where(and(eq(teamMembers.userId, userId), inArray(teamMembers.teamId, entitlement.teamIds)));
   return memberRows.length > 0;
 }
+
+/**
+ * Whether the org admits plugin `name` for a workspace owner. A person goes
+ * through `orgAllowsPluginForUser`. A team qualifies under `all`, or under
+ * `teams` when the team itself is listed.
+ */
+export async function orgAllowsPluginForOwner(
+  db: AppQueryable,
+  orgId: string,
+  owner: { type: "user" | "team"; id: string },
+  name: string,
+): Promise<boolean> {
+  if (owner.type === "user") return orgAllowsPluginForUser(db, orgId, owner.id, name);
+  const entitlement = await getPluginEntitlement(db, orgId, name);
+  if (entitlement.mode === "off") return false;
+  if (entitlement.mode === "all") return true;
+  return entitlement.teamIds.includes(owner.id);
+}

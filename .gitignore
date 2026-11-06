@@ -78,3 +78,7 @@ workspaces/*
 
 # Eval run output (baselines stay tracked; see packages/eval)
 evals/results/
+
+# Web latency check output (packages/web/perf/run.mjs)
+packages/web/perf/failure-*.png
+packages/web/perf-results.json

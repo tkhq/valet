@@ -12,6 +12,7 @@ import {
   type InviteRole,
 } from "../auth/invites.js";
 import { isOrgAdmin } from "../services/org.js";
+import { auditRequest } from "./_admin-audit.js";
 import type {
   CreateInviteRequest,
   CreateInviteResponse,
@@ -61,6 +62,16 @@ orgInvitesRouter.post("/", async (c) => {
     createdBy: user.id,
   });
 
+  // The invite code is a credential: the row names the invite, never the code.
+  await auditRequest(c, {
+    action: "invite.create",
+    targetType: "invite",
+    targetId: invite.id,
+    targetName: invite.email ?? null,
+    changes: { role: invite.role, email: invite.email ?? null, expiresAt: invite.expiresAt },
+    alert: invite.role === "admin" ? "new_admin" : null,
+  });
+
   const resp: CreateInviteResponse = {
     id: invite.id,
     code,
@@ -88,6 +99,7 @@ orgInvitesRouter.delete("/:id", async (c) => {
   const id = c.req.param("id");
   const revoked = await revokeInvite(db, id);
   if (!revoked) return c.json({ error: "invite not found" }, 404);
+  await auditRequest(c, { action: "invite.revoke", targetType: "invite", targetId: id });
 
   const resp: RevokeInviteResponse = { ok: true };
   return c.json(resp);

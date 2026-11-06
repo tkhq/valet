@@ -169,6 +169,7 @@ const EVENT_WORDS: Readonly<Record<string, { when: readonly [string, string]; on
   "slack.channel_archive": { when: ["a channel", "is archived"], one: "Archived channel" },
   "slack.channel_unarchive": { when: ["a channel", "is unarchived"], one: "Unarchived channel" },
   "slack.file_shared": { when: ["someone", "shares a file"], one: "Shared file" },
+  "slack.user_online": { when: ["someone", "comes back online"], one: "Came online" },
 
   "github.ping": { when: ["GitHub", "pings"], one: "GitHub ping" },
   "github.push": { when: ["a push", "lands"], one: "Push" },
@@ -498,6 +499,9 @@ const ANY_PLACE: Readonly<Record<SentenceService, string>> = {
   linear: "any team",
 };
 
+/** Event keys that happen to a person, not in a channel, so a sentence names no place. */
+const PLACELESS_KEYS: ReadonlySet<string> = new Set(["slack.user_online"]);
+
 /** Filter fields that name who sent the event. */
 const SENDER_FIELDS: readonly string[] = ["user", "sender", "creator"];
 
@@ -656,6 +660,7 @@ export function replies(sub: Pick<EventSubscriptionWire, "target">): boolean {
 export function presenceDoesParts(sub: EventSubscriptionWire, workflows: WorkflowNames, threads: ThreadTitles): SentencePart[] {
   const target = sub.target;
   if (target.kind === "workflow") return workflowParts(workflows, target.workflowId);
+  if (target.kind === "plugin") return [text(`let the ${target.plugin} plugin ${target.handler.replace(/-/g, " ")}`)];
   const policy = displayThreadPolicy(target, sub.eventKeys);
   switch (policy.mode) {
     case "new":
@@ -727,7 +732,9 @@ export function presenceWhenParts(
     return tidy([text("someone replies in the Slack thread"), ...where]);
   }
   const service = serviceOf(sub.eventKeys);
-  const place = withPlace ? presencePlace(service, sub.filters, names) : null;
+  // An event with no place, such as a person coming back online, reads without one.
+  const placeless = sub.eventKeys.length > 0 && sub.eventKeys.every((key) => PLACELESS_KEYS.has(key));
+  const place = withPlace && !placeless ? presencePlace(service, sub.filters, names) : null;
   const where = place === null ? [] : [text(` ${service === "github" ? "on" : "in"} `), ...place];
   const sender = senderFilter(sub.eventKeys, sub.filters);
   const mention = sub.eventKeys.some(isMentionKey);

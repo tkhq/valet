@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, startTransition, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { cn } from "~/lib/cn";
 import { useScrollHeader } from "~/hooks/use-scroll-header";
 import { ArrowDown } from "lucide-react";
@@ -12,6 +12,9 @@ import { CommandResult } from "./command-result";
 import { CompactionDivider } from "./compaction-divider";
 import { BranchNoteDivider } from "./branch-note-divider";
 import { NewSinceDivider } from "./thread-recap";
+
+/** Transcript rows a thread's first paint shows. */
+const FIRST_PAINT_ROWS = 16;
 
 /**
  * Scrolling message list. Auto-scrolls to bottom when new messages arrive
@@ -112,6 +115,12 @@ export function MessageList({
   /** The "new" line before the first message other people added since the reader's last visit. */
   newSince?: { anchorId: string; label: string };
 }) {
+  // Callers pass inline handlers. Kept stable here, so a parent render does
+  // not re-render (and re-parse the Markdown of) every memoized row.
+  const replyHandler = useStableHandler(onReply);
+  const editHandler = useStableHandler(onEdit);
+  const branchHandler = useStableHandler(onBranch);
+  const branchPrivatelyHandler = useStableHandler(onBranchPrivately);
   const containerRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
@@ -140,6 +149,17 @@ export function MessageList({
     return { items, plans: planTranscript(items, agentBusy) };
   }, [visible, agentBusy]);
 
+  // A thread opens with its last rows only, and the rows above follow in a
+  // transition after that first paint. Parsing a long transcript's Markdown
+  // in one render held the first paint of a thread for half a second.
+  const threadKey = threadId ?? "";
+  const [completeFor, setCompleteFor] = useState<string | undefined>(undefined);
+  const complete = completeFor === threadKey || transcript.items.length <= FIRST_PAINT_ROWS;
+  useEffect(() => {
+    if (!complete) startTransition(() => setCompleteFor(threadKey));
+  }, [complete, threadKey]);
+  const firstRow = complete ? 0 : transcript.items.length - FIRST_PAINT_ROWS;
+
   // A thread switch starts at the bottom: the previous thread's scroll
   // position must not decide whether the new thread auto-scrolls or shows
   // the "Latest" button. Reset only — `visible` recomputes on the same
@@ -157,7 +177,7 @@ export function MessageList({
       el.scrollTop = el.scrollHeight;
       scrollHeader.syncPosition();
     }
-  }, [visible, scrollHeader.syncPosition]);
+  }, [visible, complete, scrollHeader.syncPosition]);
 
   // Pinned readers intentionally follow every resize. The browser handles
   // unpinned positions; a collapse that reaches the end can pin the reader.
@@ -265,6 +285,7 @@ export function MessageList({
           <div ref={contentRef} className="shrink-0 space-y-2 py-4">
             {onShowEarlier && <ShowEarlier onShow={onShowEarlier} loading={loadingEarlier} />}
             {transcript.items.map((item, i, items) => {
+              if (i < firstRow) return null;
               const plan = transcript.plans[i]!;
               if (item.kind === "watch") {
                 return <WatchEventsCard key={item.events[0]?.id ?? i} events={item.events} />;
@@ -292,10 +313,10 @@ export function MessageList({
                   extraWorkLive={plan.extraWorkLive}
                   workedForMs={plan.workedForMs}
                   viewerId={viewerId}
-                  onReply={onReply}
-                  onEdit={onEdit && editable.has(m.id) ? onEdit : undefined}
-                  onBranch={onBranch && branchable(m) ? onBranch : undefined}
-                  onBranchPrivately={onBranch && branchable(m) ? onBranchPrivately : undefined}
+                  onReply={replyHandler}
+                  onEdit={editHandler && editable.has(m.id) ? editHandler : undefined}
+                  onBranch={branchHandler && branchable(m) ? branchHandler : undefined}
+                  onBranchPrivately={branchHandler && branchable(m) ? branchPrivatelyHandler : undefined}
                   dimmed={dimFrom >= 0 && visible.indexOf(m) >= dimFrom}
                   ratings={ratings}
                 />
@@ -421,4 +442,15 @@ function ShowEarlier({ onShow, loading }: { onShow: () => void; loading: boolean
       {loading ? "Loading earlier messages…" : "Show earlier messages"}
     </button>
   </div>;
+}
+
+/** A function with a stable identity that calls the latest `handler`, or
+ * undefined while `handler` is undefined. */
+function useStableHandler<A extends unknown[]>(handler: ((...args: A) => void) | undefined): ((...args: A) => void) | undefined {
+  const latest = useRef(handler);
+  useLayoutEffect(() => {
+    latest.current = handler;
+  });
+  const stable = useCallback((...args: A) => latest.current?.(...args), []);
+  return handler ? stable : undefined;
 }

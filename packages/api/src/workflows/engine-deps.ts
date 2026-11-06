@@ -1,4 +1,5 @@
 import { workflowStepToolScope } from "./tool-scope.js";
+import { modelFetchFor } from "../lib/outbound-url.js";
 import { actionInScope, scopeRefusal, MODEL_CALL_LIMIT_KEY, UNATTENDED_WORKFLOW_KEY, WORKFLOW_STEP_KEY } from "@valet/shared";
 import { mergeAppearance, readAppearance, type Appearance } from "@valet/shared";
 /**
@@ -534,6 +535,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         },
         {
           apiKey: resolved.apiKey,
+          fetch: modelFetchFor(resolved.model),
           temperature: req.temperature,
           maxTokens: req.maxOutputTokens,
           ...(reasoning ? { reasoning } : {}),

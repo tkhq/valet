@@ -359,7 +359,7 @@ describe("resolveModelSpec (catalog-aware bridge)", () => {
         orgId,
         kind: "openai_compatible",
         name: "Rotate",
-        baseUrl: "https://x/v1",
+        baseUrl: "https://x.example/v1",
         models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
       });
       await saveKey(row.id, "key-1");
@@ -400,7 +400,7 @@ describe("resolveModelSpec (catalog-aware bridge)", () => {
         orgId,
         kind: "openai_compatible",
         name: "Custom",
-        baseUrl: "https://x/v1",
+        baseUrl: "https://x.example/v1",
         models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
       });
       await saveKey(row.id, "org-custom");
@@ -567,7 +567,7 @@ describe("EngineHost model resolution wiring", () => {
       orgId: "local-org",
       kind: "openai_compatible",
       name: "Custom",
-      baseUrl: "https://x/v1",
+      baseUrl: "https://x.example/v1",
       models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
     });
     // enabled: true (default), but no org credential was ever saved for
@@ -589,7 +589,7 @@ describe("EngineHost model resolution wiring", () => {
       orgId: "local-org",
       kind: "openai_compatible",
       name: "Custom",
-      baseUrl: "https://x/v1",
+      baseUrl: "https://x.example/v1",
       models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
     });
     await updateLlmProvider(db, "local-org", row.id, { enabled: false });
@@ -609,7 +609,7 @@ describe("EngineHost model resolution wiring", () => {
       orgId: "local-org",
       kind: "openai_compatible",
       name: "Custom",
-      baseUrl: "https://x/v1",
+      baseUrl: "https://x.example/v1",
       models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
     });
     await updateLlmProvider(db, "local-org", row.id, { enabled: false });
@@ -711,7 +711,7 @@ describe("EngineHost model resolution wiring", () => {
       orgId: "local-org",
       kind: "openai_compatible",
       name: "Custom",
-      baseUrl: "https://x/v1",
+      baseUrl: "https://x.example/v1",
       models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
     });
     await updateLlmProvider(db, "local-org", row.id, { enabled: false });
@@ -772,7 +772,7 @@ describe("EngineHost model resolution wiring", () => {
       orgId: "local-org",
       kind: "openai_compatible",
       name: "Custom",
-      baseUrl: "https://x/v1",
+      baseUrl: "https://x.example/v1",
       models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
     });
     await engineCredentials.save({ type: "org", id: "local-org" }, `llm:${row.id}`, {
@@ -832,7 +832,7 @@ describe("EngineHost model resolution wiring", () => {
       orgId: "local-org",
       kind: "openai_compatible",
       name: "Custom",
-      baseUrl: "https://x/v1",
+      baseUrl: "https://x.example/v1",
       models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
     });
     await engineCredentials.save({ type: "org", id: "local-org" }, `llm:${row.id}`, {
@@ -952,7 +952,7 @@ describe("EngineHost model resolution wiring", () => {
         orgId: "local-org",
         kind: "openai_compatible",
         name: "Custom",
-        baseUrl: "https://x/v1",
+        baseUrl: "https://x.example/v1",
         models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
       });
       await engineCredentials.save({ type: "org", id: "local-org" }, `llm:${row.id}`, { type: "api_key", apiKey: "org-custom" });

@@ -34,6 +34,7 @@ export const updatePlanTool = defineTool({
     "Mark an item done only when the step is complete. You see the open plan " +
     "at the start of every turn, also after compaction.",
   parameters: Type.Object({
+    title: Type.Optional(Type.String({ minLength: 1, maxLength: THREAD_PLAN_MAX_TEXT, pattern: "\\S", description: "A short public title for this task. Exclude private data." })),
     items: Type.Array(
       Type.Object({
         text: Type.String({ minLength: 1, maxLength: THREAD_PLAN_MAX_TEXT, pattern: "\\S", description: "One step, in a few words." }),
@@ -45,7 +46,7 @@ export const updatePlanTool = defineTool({
   execute: async (args, ctx) => {
     if (!ctx.setThreadPlan) return { text: "This session cannot keep a plan. List the steps in your reply.", ok: false };
     // Store only the known fields: the schema lets an item carry others.
-    const { done, total, current } = planProgress(await ctx.setThreadPlan(args.items.map(({ text, status }) => ({ text, status }))));
+    const { done, total, current } = planProgress(await ctx.setThreadPlan(args.items.map(({ text, status }) => ({ text, status })), args.title));
     return { text: `Plan updated: ${done} of ${total} done.${current !== undefined ? ` Now: ${current}` : ""}` };
   },
 });

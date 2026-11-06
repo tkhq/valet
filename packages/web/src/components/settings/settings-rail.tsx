@@ -6,7 +6,9 @@ import {
   Building2,
   ChevronDown,
   Cpu,
+  GitPullRequest,
   KeyRound,
+  Plug,
   Shield,
   ShieldCheck,
   SlidersHorizontal,
@@ -15,7 +17,9 @@ import {
   type LucideIcon,
   BarChart3,
 } from "lucide-react";
-import { useOrg, useTeams } from "~/api/settings";
+import { usePlugins } from "~/api/integrations";
+import { pluginEnabledForCaller, useOrg, useTeams } from "~/api/settings";
+import { REVIEW_PLUGIN } from "~/components/code-review/review-lines";
 import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger, type AppPath } from "~/components/primitives";
 import { eligibleTeams } from "~/components/session/assistant-rail";
 import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
@@ -27,10 +31,13 @@ import { cn } from "~/lib/cn";
  * workspace switcher:
  *
  * - **Account**: you.
- * - **Personal workspace**: your own workspace's keys, proxy, agent access,
- *   and policies.
+ * - **Personal workspace**: your own workspace's integrations, usage, keys,
+ *   proxy, agent access, and policies.
  * - **Your teams**: one item per team you belong to, each opening its own
  *   `/settings/teams/$teamId` pages.
+ * - **Plugins**: Valet Security, for a caller with the plugin, and Code
+ *   review, when the deployment loads the PR review plugin. Each opens its
+ *   page in the active space; the sidebar's space rows leave them out.
  * - **Organization**: shown once `useOrg()` resolves with the gate on (never
  *   flashes). An admin sees four grouped sections, each a tab bar over its
  *   existing routes (`ORG_SECTIONS`). A plain member sees Teams and 1Password.
@@ -92,6 +99,7 @@ export const ORG_SECTIONS: ReadonlyArray<{ label: string; icon: LucideIcon; rout
       { to: "/settings/organization/policies", label: "Policies" },
       { to: "/settings/organization/sandbox-images", label: "Sandbox settings" },
       { to: "/settings/organization/action-log", label: "Action log" },
+      { to: "/settings/organization/audit-log", label: "Audit log" },
     ],
   },
 ];
@@ -152,6 +160,8 @@ const ACCOUNT_ITEMS: RailItem[] = [
 ];
 
 const PERSONAL_ITEMS: RailItem[] = [
+  { to: "/settings/integrations", label: "Integrations", icon: Plug, active: exact("/settings/integrations") },
+  { to: "/settings/usage", label: "Usage", icon: BarChart3, active: exact("/settings/usage") },
   { to: "/settings/api-keys", label: "API keys and proxy", icon: KeyRound, active: exact("/settings/api-keys") },
   { to: "/settings/agent-access", label: "Agent access", icon: Bot, active: exact("/settings/agent-access") },
   { to: "/settings/policies", label: "Policies", icon: Shield, active: exact("/settings/policies") },
@@ -167,14 +177,17 @@ const MODELS_ITEM: RailItem = { to: "/settings/models", label: "Models", icon: C
 
 /** Single-user-mode stand-in for Organization · MCP servers, shown only
  * while the org gate is OFF and only to an org admin. The API answers with
- * the gate off but returns 403 to a non-admin. The first user of a
- * deployment is its org admin. */
+ * the gate off but returns 403 to a non-admin. A deployment's first admin
+ * joins through an admin invite. */
 const MCP_SERVERS_ITEM: RailItem = {
   to: "/settings/mcp-servers",
   label: "MCP servers",
   icon: Blocks,
   active: exact("/settings/mcp-servers"),
 };
+
+const SECURITY_ITEM: RailItem = { to: "/security", label: "Valet Security", icon: ShieldCheck, active: (p) => onRoute(p, "/security") };
+const CODE_REVIEW_ITEM: RailItem = { to: "/code-review", label: "Code review", icon: GitPullRequest, active: (p) => onRoute(p, "/code-review") };
 
 const MEMBER_ORG_ITEMS: RailItem[] = [
   { to: ORG_TEAMS_PATH, label: "Teams", icon: Users, active: (p) => onRoute(p, ORG_TEAMS_PATH) },
@@ -192,6 +205,7 @@ export function SettingsRail() {
   const sectionMenu = useResponsiveOverlay("sm");
   const orgQ = useOrg();
   const teamsQ = useTeams();
+  const pluginsQ = usePlugins();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const organizationsOn = orgQ.data?.features.organizations === true;
   const orgAdmin = orgQ.data?.callerRole === "admin";
@@ -211,10 +225,15 @@ export function SettingsRail() {
     active: (p) => onRoute(p, `/settings/teams/${team.id}`),
   }));
 
+  const pluginItems = [
+    ...(pluginEnabledForCaller(orgQ.data, "security") === true ? [SECURITY_ITEM] : []),
+    ...(pluginsQ.data?.plugins.some((p) => p.name === REVIEW_PLUGIN) === true ? [CODE_REVIEW_ITEM] : []),
+  ];
   const groups: RailGroupSpec[] = [
     { label: "Account", items: ACCOUNT_ITEMS },
     { label: "Personal workspace", items: personalItems },
     ...(teamItems.length > 0 ? [{ label: "Your teams", items: teamItems }] : []),
+    ...(pluginItems.length > 0 ? [{ label: "Plugins", items: pluginItems }] : []),
     ...(organizationsOn ? [{ label: "Organization", items: orgAdmin ? ADMIN_ORG_ITEMS : MEMBER_ORG_ITEMS }] : []),
   ];
   const currentGroup = groups.find((group) => group.items.some((item) => item.active(pathname)));

@@ -10,7 +10,8 @@
 // carries `// copy-lint: allow <word>` (on the line or the line before) may
 // use that word, for the few texts that name a system value such as a tool
 // id or a stored text. Comments, identifiers, test files, log lines
-// (`console.*` arguments and text that opens with a `[tag]`), tagged
+// (`console.*`, `log.*`, and `reportError` arguments, and text that opens
+// with a `[tag]`), tagged
 // templates such as `sql` queries, and the files only the model reads
 // (MODEL_FACING) are not copy. Each banned word is a stem, so it also
 // catches its inflections (deliveries, subscribed, triggered).
@@ -77,12 +78,14 @@ function isSentence(text: string): boolean {
   return /\s/.test(trimmed) && !trimmed.startsWith("[");
 }
 
-/** Whether a node is an argument of a `console.*` call: a log line, not copy. */
-function inConsoleCall(node: ts.Node): boolean {
+/** Whether a node is an argument of a `console.*`, `log.*`, or `reportError`
+ * call: a log line, not copy. */
+function inLogCall(node: ts.Node): boolean {
   for (let current = node.parent; current !== undefined; current = current.parent) {
     if (ts.isCallExpression(current)) {
       const callee = current.expression;
-      if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression) && callee.expression.text === "console") return true;
+      if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression) && ["console", "log"].includes(callee.expression.text)) return true;
+      if (ts.isIdentifier(callee) && callee.text === "reportError") return true;
     }
   }
   return false;
@@ -120,7 +123,7 @@ function lintApiCopy(file: string, source: string): CopyHit[] {
   };
 
   const check = (node: ts.Node, text: string) => {
-    if (!isSentence(text) || inConsoleCall(node)) return;
+    if (!isSentence(text) || inLogCall(node)) return;
     const line = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line;
     for (const match of text.matchAll(BANNED_RE)) {
       const word = match[1]!.toLowerCase();
@@ -167,6 +170,8 @@ describe("api Presence copy lint (INV-H2)", () => {
         'const k = "It was delivered and triggered twice.";',
         "// copy-lint: allow delivery",
         'const l = "Two deliveries ran.";',
+        'reportError({ area: "events", reason: "dispatch_delivery" }, "event delivery failed", err);',
+        'log.warn("the receipt write failed");',
       ].join("\n"),
     );
     expect(hits.map((hit) => [hit.line, hit.word])).toEqual([

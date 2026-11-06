@@ -14,6 +14,7 @@ import type {
   GithubWebhookCapability,
 } from "./capabilities.js";
 import { isRecord, json, noContent } from "./respond.js";
+import { reportError } from "@valet/engine";
 
 const SIG_FAILURE_LOG_INTERVAL_MS = 60_000;
 let lastSigFailureLogAt = 0;
@@ -91,7 +92,7 @@ async function handleInstallationEvent(effects: GithubDeliveryEffects, payload: 
     try {
       await effects.discoverInstallations();
     } catch (err) {
-      console.error("github-app webhook: discovery after installation.created failed:", err);
+      reportError({ area: "plugins", reason: "github_discovery", provider: "github" }, "github-app webhook: discovery after installation.created failed", err);
     }
   }
 }
@@ -139,7 +140,7 @@ export async function receiveWebhook(
     const push = parseContentPushPayload(payload);
     if (push) {
       await effects.contentPushed(push).catch((err) => {
-        console.error(`content sync onPush (${push.repoFullName}):`, err);
+        reportError({ area: "plugins", reason: "github_content_sync", provider: "github" }, `content sync onPush (${push.repoFullName})`, err);
       });
     }
   }
@@ -149,7 +150,7 @@ export async function receiveWebhook(
     const pr = pullRequestWebhookState(payload);
     if (pr) {
       await effects.pullRequestChanged(pr).catch((err) => {
-        console.error(`thread pull request state (${pr.url}):`, err);
+        reportError({ area: "plugins", reason: "github_pr_state", provider: "github" }, `thread pull request state (${pr.url})`, err);
       });
     }
   }

@@ -12,6 +12,7 @@ import {
   recordWakeupsActive,
   recordWakeupSweepFailed,
   recordWakeupSweepOk,
+  reportError,
 } from "@valet/engine";
 import type {
   ChannelOrigin,
@@ -280,7 +281,7 @@ export class WakeWatcher {
         const row = await this.deps.engineStore.getWakeup(id);
         if (row && row.kind === "event" && row.status === "running" && (row.eventBuffer ?? []).length > 0) rows.push(row);
       } catch (err) {
-        console.error(`WakeWatcher: reading nudged event wakeup ${id} failed; the next full pass handles it:`, err);
+        reportError({ area: "engine", reason: "wakeup_nudge_read" }, `WakeWatcher: reading nudged event wakeup ${id} failed; the next full pass handles it`, err);
       }
     }
     await this.processEventRows(now, rows);
@@ -347,9 +348,9 @@ export class WakeWatcher {
       await step(progress);
     } catch (err) {
       if (progress.pastCas) {
-        console.error(`WakeWatcher: wakeup ${row.id} failed after its transition was stored:`, err);
+        reportError({ area: "engine", reason: "wakeup_post_transition" }, `WakeWatcher: wakeup ${row.id} failed after its transition was stored`, err);
       } else {
-        console.error(`WakeWatcher: wakeup ${row.id} failed this tick; it stays due for the next tick:`, err);
+        reportError({ area: "engine", reason: "wakeup_tick" }, `WakeWatcher: wakeup ${row.id} failed this tick; it stays due for the next tick`, err);
       }
     }
   }
@@ -368,7 +369,7 @@ export class WakeWatcher {
       try {
         steps[index] = await this.deriveStep(row, limit);
       } catch (err) {
-        console.error(`WakeWatcher: derive step of event wakeup ${row.id} failed; it stays due for the next tick:`, err);
+        reportError({ area: "engine", reason: "wakeup_derive_step" }, `WakeWatcher: derive step of event wakeup ${row.id} failed; it stays due for the next tick`, err);
       }
     }));
     for (const [index, row] of rows.entries()) {
@@ -394,19 +395,19 @@ export class WakeWatcher {
       // starting it.
       probe = { kind: "none" };
     } else if (row.execId === undefined) {
-      console.error(`WakeWatcher: ${row.kind} wakeup ${row.id} has no execId; it expires at its deadline.`);
+      reportError({ area: "engine", reason: "wakeup_no_exec" }, `WakeWatcher: ${row.kind} wakeup ${row.id} has no execId; it expires at its deadline.`);
       probe = { kind: "error" };
     } else {
       try {
         const target = await this.probeTarget(row);
         if (target.kind === "unavailable") {
-          console.warn(`WakeWatcher: wakeup ${row.id} cannot reach its sandbox: ${target.why}.`);
+          reportError({ area: "engine", reason: "wakeup_sandbox_unreachable", level: "warn" }, `WakeWatcher: wakeup ${row.id} cannot reach its sandbox: ${target.why}.`);
           probe = { kind: "unavailable" };
         } else if (target.kind === "error") {
-          console.error(`WakeWatcher: wakeup ${row.id} was not probed: ${target.why}. It expires at its deadline.`);
+          reportError({ area: "engine", reason: "wakeup_not_probed" }, `WakeWatcher: wakeup ${row.id} was not probed: ${target.why}. It expires at its deadline.`);
           probe = { kind: "error" };
         } else if (!target.sandbox.pollJob) {
-          console.error(`WakeWatcher: sandbox ${target.sandbox.id} has no job mode; cannot probe wakeup ${row.id}.`);
+          reportError({ area: "engine", reason: "wakeup_no_job_mode" }, `WakeWatcher: sandbox ${target.sandbox.id} has no job mode; cannot probe wakeup ${row.id}.`);
           probe = { kind: "error" };
         } else {
           sandbox = target.sandbox;
@@ -424,7 +425,7 @@ export class WakeWatcher {
         if (isSandboxGone(err)) {
           probe = { kind: "unavailable" };
         } else {
-          console.error(`WakeWatcher: probe of wakeup ${row.id} failed; retrying next tick until its deadline:`, err);
+          reportError({ area: "engine", reason: "wakeup_probe" }, `WakeWatcher: probe of wakeup ${row.id} failed; retrying next tick until its deadline`, err);
           probe = { kind: "error" };
         }
       }
@@ -434,7 +435,7 @@ export class WakeWatcher {
     if (!decision) return;
     if (decision.badRow) {
       this.metrics.badRow("engine_wakeups");
-      console.error(`WakeWatcher: ${row.kind} wakeup ${row.id} cannot be acted on as stored; it ends as ${decision.to}.`);
+      reportError({ area: "engine", reason: "wakeup_bad_row" }, `WakeWatcher: ${row.kind} wakeup ${row.id} cannot be acted on as stored; it ends as ${decision.to}.`);
     }
     await this.applyDecision(row, decision, sandbox, progress);
   }
@@ -462,7 +463,7 @@ export class WakeWatcher {
         } catch (error) {
           // One blocked result must not starve a later approval notification.
           blocked = true;
-          console.error(`WakeWatcher: child digest ${digest.dedupeKey} stays buffered:`, error);
+          reportError({ area: "engine", reason: "child_digest_buffered" }, `WakeWatcher: child digest ${digest.dedupeKey} stays buffered`, error);
           continue;
         }
         // Internal dispatch ids retain replay protection in the queue store.
@@ -477,7 +478,7 @@ export class WakeWatcher {
     if (!decision) return;
     if (decision.badRow) {
       this.metrics.badRow("engine_wakeups");
-      console.error(`WakeWatcher: event wakeup ${row.id} has no match spec; it ends as ${decision.to}.`);
+      reportError({ area: "engine", reason: "wakeup_no_match_spec" }, `WakeWatcher: event wakeup ${row.id} has no match spec; it ends as ${decision.to}.`);
     }
     await this.applyDecision(row, decision, null, progress);
   }
@@ -508,7 +509,7 @@ export class WakeWatcher {
     if (groups.length === 0) return { row, derived: false };
     const deriveEvent = this.deps.deriveEvent;
     if (!deriveEvent) {
-      console.error(`WakeWatcher: event wakeup ${row.id} holds ${groups[0]?.latest.derive} digests, but this watcher has no derive step; they stay buffered.`);
+      reportError({ area: "engine", reason: "wakeup_no_derive" }, `WakeWatcher: event wakeup ${row.id} holds ${groups[0]?.latest.derive} digests, but this watcher has no derive step; they stay buffered.`);
       return { row, derived: false };
     }
     let ran = false;
@@ -526,7 +527,7 @@ export class WakeWatcher {
         waiterId: row.id, sourceDedupeKey: latest.dedupeKey, key: latest.derive, result: outcome.result,
       });
       if (outcome.result === "error") {
-        console.warn(`WakeWatcher: derive of ${latest.derive} for event wakeup ${row.id} failed; ${outcome.consumeSource ? "consuming denied source" : "it retries next tick"}:`, outcome.error);
+        reportError({ area: "engine", reason: "wakeup_derive", level: "warn" }, `WakeWatcher: derive of ${latest.derive} for event wakeup ${row.id} failed; ${outcome.consumeSource ? "consuming denied source" : "it retries next tick"}`, outcome.error);
         if (outcome.consumeSource) await this.deps.engineStore.removeEventMatches(row.id, sources, this.clock(), "source");
         return;
       }
@@ -608,7 +609,7 @@ export class WakeWatcher {
           || await this.deps.engineStore.claimTerminalSignalLoss(updated.sessionId, updated.id, Math.max(updated.terminalSignalStartedAt ?? 0, at))) {
           this.metrics.signalLost(updated.kind);
         }
-        console.error(`WakeWatcher: delivery of ${signal.signalType} for wakeup ${row.id} failed; the signal is lost:`, err);
+        reportError({ area: "engine", reason: "wakeup_signal_delivery" }, `WakeWatcher: delivery of ${signal.signalType} for wakeup ${row.id} failed; the signal is lost`, err);
       }
     }
 
@@ -624,7 +625,7 @@ export class WakeWatcher {
         await sandbox.cancelJob(row.execId);
       } catch (err) {
         this.metrics.killFailed(updated.kind);
-        console.error(`WakeWatcher: kill of wakeup ${row.id} (exec ${row.execId}) failed after the row moved to ${decision.to}:`, err);
+        reportError({ area: "engine", reason: "wakeup_kill" }, `WakeWatcher: kill of wakeup ${row.id} (exec ${row.execId}) failed after the row moved to ${decision.to}`, err);
       }
     }
 
@@ -657,7 +658,7 @@ export class WakeWatcher {
         at,
       );
     } catch (err) {
-      console.error(`WakeWatcher: rollback of event wakeup ${row.id}'s emit failed; its next signal can count twice in the rate window:`, err);
+      reportError({ area: "engine", reason: "wakeup_emit_rollback" }, `WakeWatcher: rollback of event wakeup ${row.id}'s emit failed; its next signal can count twice in the rate window`, err);
     }
   }
 
@@ -667,7 +668,7 @@ export class WakeWatcher {
       const target = await this.probeTarget(row);
       return target.kind === "sandbox" ? target.sandbox : null;
     } catch (err) {
-      console.warn(`WakeWatcher: no sandbox to kill wakeup ${row.id} in:`, err);
+      reportError({ area: "engine", reason: "wakeup_kill_no_sandbox", level: "warn" }, `WakeWatcher: no sandbox to kill wakeup ${row.id} in`, err);
       return null;
     }
   }
@@ -706,7 +707,7 @@ export class WakeWatcher {
     try {
       await this.deps.engineStore.setLeaseSandboxId(lease.id, sandboxId);
     } catch (err) {
-      console.error(`WakeWatcher: recording sandbox ${sandboxId} on lease ${lease.id} failed; resolving it again next tick:`, err);
+      reportError({ area: "engine", reason: "lease_sandbox_record" }, `WakeWatcher: recording sandbox ${sandboxId} on lease ${lease.id} failed; resolving it again next tick`, err);
     }
     return { kind: "id", sandboxId };
   }
@@ -790,9 +791,7 @@ export class WakeWatcher {
         if (ownerOpen && !pastDeadline) continue;
         if (ownerOpen && owner && (await this.endOverdueOwner(now, owner))) {
           this.metrics.orphanReleased(lease.ownerKind, "deadline");
-          console.error(
-            `WakeWatcher: ${lease.ownerKind} wakeup ${owner.id} of session ${lease.sessionId} was still ${owner.status} two ticks past its deadline; ended it as expired.`,
-          );
+          reportError({ area: "engine", reason: "wakeup_over_deadline" }, `WakeWatcher: ${lease.ownerKind} wakeup ${owner.id} of session ${lease.sessionId} was still ${owner.status} two ticks past its deadline; ended it as expired.`);
           continue;
         }
         const reason: OrphanReleaseReason = owner === null ? "missing_owner" : ownerOpen ? "deadline" : "terminal_owner";
@@ -804,7 +803,7 @@ export class WakeWatcher {
             `its wakeup ${lease.ownerId ?? "(none)"} is ${owner ? owner.status : "missing or unreadable"} (${reason}).`,
         );
       } catch (err) {
-        console.error(`WakeWatcher: orphan check of lease ${lease.id} failed; it stays due for the next tick:`, err);
+        reportError({ area: "engine", reason: "lease_orphan_check" }, `WakeWatcher: orphan check of lease ${lease.id} failed; it stays due for the next tick`, err);
       }
     }
   }
@@ -828,7 +827,7 @@ export class WakeWatcher {
     try {
       released = await this.deps.engineStore.releaseLease(lease.id, "deadline", now, { terminalSignalExpected: true });
     } catch (err) {
-      console.error(`WakeWatcher: release of hold lease ${lease.id} failed; it stays due for the next tick:`, err);
+      reportError({ area: "engine", reason: "lease_hold_release" }, `WakeWatcher: release of hold lease ${lease.id} failed; it stays due for the next tick`, err);
       return;
     }
     if (!released) return;
@@ -837,7 +836,7 @@ export class WakeWatcher {
     } catch (err) {
       // The lease is already released, so this signal is lost (spec Deviations).
       if (await this.deps.engineStore.claimTerminalSignalLoss(lease.sessionId, lease.id, now)) this.metrics.signalLost("hold");
-      console.error(`WakeWatcher: delivery of lease.expired for lease ${lease.id} failed; the signal is lost:`, err);
+      reportError({ area: "engine", reason: "lease_expired_delivery" }, `WakeWatcher: delivery of lease.expired for lease ${lease.id} failed; the signal is lost`, err);
     }
   }
 
@@ -897,7 +896,7 @@ export class WakeWatcher {
         }
         if (resolved.kind !== "id") {
           if (lease.createdAt < stale) {
-            console.warn(`WakeWatcher: lease ${lease.id} has no sandbox to protect: ${resolved.why}.`);
+            reportError({ area: "engine", reason: "lease_protect_no_sandbox", level: "warn" }, `WakeWatcher: lease ${lease.id} has no sandbox to protect: ${resolved.why}.`);
           }
           continue;
         }
@@ -914,27 +913,27 @@ export class WakeWatcher {
         if (r.changed && oldest < stale) unannotated++;
       } catch (err) {
         unannotated++;
-        console.error(`WakeWatcher: eviction protection for leased sandbox ${sandboxId} failed:`, err);
+        reportError({ area: "engine", reason: "lease_eviction_protect" }, `WakeWatcher: eviction protection for leased sandbox ${sandboxId} failed`, err);
       }
     }
     this.metrics.leasesUnannotated(unannotated);
 
     if (lookupFailed) {
-      console.error("WakeWatcher: a lease lookup failed, so no eviction protection is removed this tick.");
+      reportError({ area: "engine", reason: "lease_lookup" }, "WakeWatcher: a lease lookup failed, so no eviction protection is removed this tick.");
       return;
     }
     let protectedIds: string[] = [];
     try {
       protectedIds = (await listEvictionProtected?.call(provider)) ?? [];
     } catch (err) {
-      console.error("WakeWatcher: listing eviction-protected sandboxes failed:", err);
+      reportError({ area: "engine", reason: "lease_protected_list" }, "WakeWatcher: listing eviction-protected sandboxes failed", err);
     }
     for (const sandboxId of protectedIds) {
       if (oldestBySandbox.has(sandboxId)) continue;
       try {
         await setEvictionProtection.call(provider, sandboxId, false);
       } catch (err) {
-        console.error(`WakeWatcher: removing eviction protection from sandbox ${sandboxId} failed:`, err);
+        reportError({ area: "engine", reason: "lease_unprotect" }, `WakeWatcher: removing eviction protection from sandbox ${sandboxId} failed`, err);
       }
     }
   }

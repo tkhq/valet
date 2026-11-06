@@ -38,7 +38,7 @@
  * one. Network is required (clones/ls-remotes `octocat/Hello-World` for
  * real). No `ANTHROPIC_API_KEY` needed — nothing here drives a model turn.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, afterAll, beforeAll, vi } from "vitest";
 import { spawnSync } from "node:child_process";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -51,6 +51,16 @@ import { agentSessions, bakes } from "../schema/index.js";
 import type {
   CreateSessionResponse,
 } from "../wire/types.js";
+
+// These suites pin source CRUD itself. The second-admin gate has its own
+// suite (`sources.approval.test.ts`), so it is off here.
+beforeAll(() => {
+  vi.stubEnv("VALET_IMAGE_SOURCE_APPROVAL", "off");
+});
+afterAll(() => {
+  vi.unstubAllEnvs();
+});
+
 
 const HEADERS = { "Content-Type": "application/json" };
 const CLONE_URL = "https://github.com/octocat/Hello-World.git";

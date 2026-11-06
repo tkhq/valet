@@ -13,6 +13,8 @@ import { Hono } from "hono";
 import { eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
+import { auditRequest } from "./_admin-audit.js";
+import { diffFields } from "../services/admin-audit.js";
 import { orgs } from "../schema/index.js";
 import type { OrgSettingsResponse } from "../wire/types.js";
 
@@ -95,11 +97,19 @@ orgSettingsRouter.patch("/", async (c) => {
     return c.json({ error: "no recognized fields" }, 400);
   }
 
+  const before = (await db.select().from(orgs).where(eq(orgs.id, user.orgId)).limit(1))[0];
   await db.update(orgs).set(update).where(eq(orgs.id, user.orgId));
 
   const rows = await db.select().from(orgs).where(eq(orgs.id, user.orgId)).limit(1);
   const row = rows[0];
   if (!row) return c.json({ error: "org not found" }, 404);
+  await auditRequest(c, {
+    action: "org_settings.update",
+    targetType: "org_settings",
+    targetId: user.orgId,
+    targetName: row.name,
+    changes: before ? diffFields(before, row, ["bareSkillCommands", "allowPublicArtifacts", "allowAnonymousImageBakes", "allowPersonalInstallations", "compactionWindowTokens"]) : update,
+  });
   if ("compactionWindowTokens" in update) {
     c.var.providers.engineHost.setOrgCompactionWindow(user.orgId, row.compactionWindowTokens);
   }

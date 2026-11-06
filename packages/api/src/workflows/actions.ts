@@ -11,6 +11,7 @@ import {
   type PluginAction,
   type PluginActionContext,
   type PluginActionResult,
+  reportError,
 } from "@valet/engine";
 import { TeamAdminRequiredError } from "../services/team-deletion-access.js";
 import { submitDeletionRequest } from "../services/team-deletion-requests.js";
@@ -1047,7 +1048,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       } catch (err) {
         // The approval is already recorded. A failed read only loses the
         // still-waiting list; it must not turn a success into a failure.
-        console.warn(`resolve_approval: could not read run ${run_id} after the approval:`, err);
+        reportError({ area: "workflows", reason: "approval_run_read", level: "warn" }, `resolve_approval: could not read run ${run_id} after the approval`, err);
       }
       const next = stillWaiting === undefined
         ? "The gate is resolved, but the run's waiting state could not be read. Call get_run to check for remaining approvals."
@@ -1533,6 +1534,15 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
             "matches channels created later.",
         }),
       ),
+      once_per_hours: Type.Optional(
+        Type.Integer({
+          minimum: 1,
+          maximum: 168,
+          description:
+            "Run at most once in this many hours, however often the event happens. Use it with " +
+            "slack.user_online so a person who drifts between away and active is nudged once.",
+        }),
+      ),
     }),
   )({
     id: "workflows.create_trigger",
@@ -1546,14 +1556,14 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     // conversation ends, so a person approves it by default (risk default
     // for "high"). Agents can steer the assistant through threads.
     riskLevel: "high",
-    execute: async ({ workflow_id, name, event_keys, filters, any_channel, presence }, ctx) => {
+    execute: async ({ workflow_id, name, event_keys, filters, any_channel, presence, once_per_hours }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
       const deps = getDeps();
       const result = await createWorkflowTrigger(
         armDepsFrom(deps),
         owner,
-        { workflowId: workflow_id, name, eventKeys: event_keys, filters, anyChannel: any_channel, appearance: presence },
+        { workflowId: workflow_id, name, eventKeys: event_keys, filters, anyChannel: any_channel, appearance: presence, oncePerHours: once_per_hours },
       );
       if (!result.ok) return { success: false, error: result.error };
       return { success: true, data: result.trigger };
@@ -1641,16 +1651,17 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     name: "Propose workflow event trigger",
     description: "Save a disabled event trigger for human review. Returns a review link and the stored configuration. Repeated keys return the existing record without changing it. Ask the user to review and turn it on in Presence.",
     riskLevel: "low",
-    execute: async ({ workflow_id, name, event_keys, filters, any_channel, proposal_key, presence }, ctx) => {
+    execute: async ({ workflow_id, name, event_keys, filters, any_channel, proposal_key, presence, once_per_hours }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
       const result = await createWorkflowTrigger(armDepsFrom(getDeps()), owner, {
-        workflowId: workflow_id, name, eventKeys: event_keys, filters, anyChannel: any_channel, proposalKey: proposal_key, appearance: presence,
+        workflowId: workflow_id, name, eventKeys: event_keys, filters, anyChannel: any_channel, proposalKey: proposal_key, appearance: presence, oncePerHours: once_per_hours,
       });
       if (!result.ok) return { success: false, error: result.error };
       return { success: true, data: proposalResult("subscription", result.trigger.triggerId, result.trigger.enabled, {
         ...result.trigger, target: { kind: "workflow", workflowId: result.trigger.workflowId,
           ...(result.trigger.appearance ? { appearance: result.trigger.appearance } : {}),
+          ...(result.trigger.oncePerHours !== undefined ? { oncePerHours: result.trigger.oncePerHours } : {}),
         },
       }) };
     },
@@ -1794,6 +1805,11 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
             "matches channels created later.",
         }),
       ),
+      once_per_hours: Type.Optional(
+        Type.Union([Type.Integer({ minimum: 1, maximum: 168 }), Type.Null()], {
+          description: "Run at most once in this many hours. Null removes the limit.",
+        }),
+      ),
     }),
   )({
     id: "workflows.update_trigger",
@@ -1805,7 +1821,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     // conversation ends, so a person approves it by default (risk default
     // for "high"). Agents can steer the assistant through threads.
     riskLevel: "high",
-    execute: async ({ trigger_id, name, event_keys, filters, enabled, any_channel }, ctx) => {
+    execute: async ({ trigger_id, name, event_keys, filters, enabled, any_channel, once_per_hours }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
       const deps = getDeps();
@@ -1813,7 +1829,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
         armDepsFrom(deps),
         owner,
         trigger_id,
-        { name, eventKeys: event_keys, filters, enabled, anyChannel: any_channel },
+        { name, eventKeys: event_keys, filters, enabled, anyChannel: any_channel, oncePerHours: once_per_hours },
       );
       if (!result.ok) return { success: false, error: result.error };
       return { success: true, data: result.trigger };

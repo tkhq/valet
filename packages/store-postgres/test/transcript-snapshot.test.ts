@@ -84,4 +84,15 @@ describe("getTranscriptSnapshot", () => {
     expect(live.entries).toEqual(full.entries);
     expect(render(live.entries)).toEqual(render(full.entries));
   });
+
+  it("reads entries by type and id, from the head, and outlines without payloads", async () => {
+    await seed("m6");
+    const head = await store.getEntries(S, T, { entryTypes: ["message"], headLimit: 3 });
+    expect(head.map((entry) => entry.id)).toEqual(["m1", "m2", "m3"]);
+    const [compaction] = await store.getEntries(S, T, { entryIds: ["c1"] });
+    expect(compaction?.type === "compaction" ? compaction.summary : undefined).toBe("earlier work");
+    const outline = await store.getThreadOutline(S, T);
+    expect(outline?.entries.map((entry) => entry.id)).toEqual(["m1", "m2", "m3", "m4", "c1", "m5", "m6"]);
+    expect(outline?.entries.every((entry) => entry.type !== "message" || entry.content === undefined || entry.content === "")).toBe(true);
+  });
 });

@@ -177,10 +177,9 @@ describe("SandboxAttachment — credential push", () => {
     expect(provider.updateCredsCalls).toHaveLength(1);
     expect(provider.updateCredsCalls[0]!.id).toBe("sb-1");
     expect(provider.updateCredsCalls[0]!.files).toEqual(credsFiles);
-    expect(consoleSpy).toHaveBeenCalledWith(
-      "SandboxAttachment: updateCreds after resume failed (non-fatal)",
-      expect.any(Error),
-    );
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringMatching(
+      /"error_class":"Error".*"message":"SandboxAttachment: updateCreds after resume failed \(non-fatal\)"/,
+    ));
     consoleSpy.mockRestore();
   });
 

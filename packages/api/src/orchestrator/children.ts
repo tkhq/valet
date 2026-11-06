@@ -20,7 +20,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { and, count, eq, gt, inArray, or, isNotNull, isNull, lte, notExists, sql } from "drizzle-orm";
+import { and, count, desc, eq, gt, inArray, or, isNotNull, isNull, lte, notExists, sql } from "drizzle-orm";
 import { governingThreadKeySql, isOutsideReader, outsideReaderMayReach, sharedWithWholeTeamSql, threadSlackChannelsSql } from "../services/thread-access.js";
 import {
   namespaceInternalDispatchId,
@@ -39,6 +39,7 @@ import {
   type ChildSender,
   type ChildSpawner,
   type ChildStatusReader,
+  type ChildStopper,
   type EventStream,
   type EventMatchDigest,
   type Wakeup,
@@ -49,11 +50,13 @@ import {
   type SpawnChildRequest,
   type SpawnChildResult,
   type SubmissionResult,
+  readThreadOutline,
   walkTranscriptDag,
   type AttachmentState,
 } from "@valet/engine";
 import { isScratchRequestError, parseResourceQuantity, validateScratchRequest, type ScratchCaps } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
+import { sandboxReclaimBackoff } from "../lib/retry-backoff.js";
 import { agentSessions, childEventOutbox, childReplyDeliveries, childWatches, eventDropLog, sessionRepos, type ChildWatchRow } from "../schema/index.js";
 import type { EngineHost } from "../engine/host.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
@@ -422,7 +425,8 @@ async function privateInputThrough(
       if (other.mergedIntoItemId && turnItems.has(other.mergedIntoItemId)) turnItems.add(other.id);
     }
   }
-  const entries = await store.getEntries(childSessionId, item.threadId);
+  // Only order and queue items matter here, so read the outline, not payloads.
+  const entries = (await readThreadOutline(store, childSessionId, item.threadId))?.entries ?? [];
   let last = -1;
   for (let index = 0; index < entries.length; index++) {
     const id = entries[index]?.queueItemId;
@@ -510,6 +514,8 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       origin?: ChannelOrigin;
       unattendedWorkflow?: boolean;
       parentQueueItemId?: string;
+      reportToParent?: boolean;
+      pluginDeliveryId?: string;
     },
   ): Promise<SpawnChildResult> => {
     const parentData = await deps.engineStore.getSession(ctx.parentSessionId);
@@ -703,6 +709,9 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
         // the child.settled signal must still inherit this origin.
         originJson: ctx.origin !== undefined ? JSON.stringify(ctx.origin) : null,
         replyRoute: ctx.origin !== undefined ? ("origin" satisfies ChildReplyRoute) : null,
+        batchKey: req.batch?.trim() || null,
+        reportToParent: ctx.reportToParent ?? true,
+        pluginDeliveryId: ctx.pluginDeliveryId ?? null,
       })
       .catch((error: unknown) => cleanupFailedSpawn(deps, childSessionId, workspace, error));
 
@@ -791,6 +800,8 @@ export class ChildWatcher {
   private retentionTimer: SweepTimer | undefined;
   /** Children the retention sweep already logged as kept by background work. */
   private readonly keptForWork = new Set<string>();
+  /** Spaces retention retries for a child whose reclaim keeps failing. */
+  private readonly retentionBackoff = sandboxReclaimBackoff();
   private readonly pendingTerminalAdmissions = new Map<string, { child: string; id: string; kind: WakeupKind | "hold"; at: number; dispatchId: string }>();
 
   constructor(private readonly deps: ChildrenDeps) {
@@ -801,7 +812,8 @@ export class ChildWatcher {
   /** Publishes a gate event. Delivery keeps gate replies manual. */
   async reportGateOpened(childSessionId: string, gate: Pick<DecisionGate, "id" | "title" | "type" | "queueItemId" | "threadId">): Promise<void> {
     const [row] = await this.deps.db.select().from(childWatches).where(eq(childWatches.childSessionId, childSessionId)).limit(1);
-    if (!row) return;
+    // A plugin's child reports to the plugin, not to the parent thread.
+    if (!row || !row.reportToParent) return;
     const watch = gate.queueItemId === row.queueItemId ? watchRowToArgs(row) : await this.turnWatch(row, gate.queueItemId);
     await this.ensureSubscription(watch);
     await this.publish(watch, {
@@ -984,7 +996,8 @@ export class ChildWatcher {
     const rows = await this.deps.db
       .select({
         queueItemId: childWatches.queueItemId, settled: childWatches.settled,
-        originJson: childWatches.originJson, replyRoute: childWatches.replyRoute,
+        originJson: childWatches.originJson, replyRoute: childWatches.replyRoute, reportToParent: childWatches.reportToParent,
+        batchKey: childWatches.batchKey, parentQueueItemId: childWatches.parentQueueItemId,
       })
       .from(childWatches)
       .where(eq(childWatches.childSessionId, watch.childSessionId))
@@ -1041,6 +1054,16 @@ export class ChildWatcher {
 
     if (result.outcome === "superseded" || result.outcome === "merged") return;
 
+    if (!digest && !row.reportToParent) {
+      // A plugin's child: the plugin reads the result (`awaitChild`), so
+      // the parent thread gets no child.settled turn. Its sandbox goes like
+      // any settled child's: a live sandbox counts against the parent's
+      // child cap, and the plugin reads the result from the store.
+      await this.markSettled(watch.childSessionId, watch.queueItemId);
+      await this.parkChildSandbox(watch.childSessionId);
+      return;
+    }
+
     if (!digest) {
       const work = await this.backgroundWork(watch.childSessionId, itemId, row.originJson !== null,
         { parentThreadId: watch.parentThreadId, originThreadKey: parseOriginJson(row.originJson)?.threadKey });
@@ -1087,34 +1110,147 @@ export class ChildWatcher {
         .where(and(eq(childWatches.childSessionId, watch.childSessionId), eq(childWatches.replyRoute, "origin")));
     }
     const origin = settlementOrigin(digest.refs?.origin_json ?? row.originJson, replyRoute);
+    const report: BatchReport = {
+      childSessionId: watch.childSessionId,
+      itemId,
+      ...(title !== undefined ? { title } : {}),
+      outcome: result.outcome,
+      body: digest.summary,
+      backgroundWork: digest.refs?.background_work ?? "[]",
+      ...(continuationCheckpoint !== undefined ? { continuationCheckpointId: continuationCheckpoint.id } : {}),
+      ...(origin !== undefined ? { origin } : {}),
+      toolScope: intersectToolScopes(readToolScope(childData.metadata?.[TOOL_SCOPE_KEY]), readToolScope((await this.deps.engineStore.getQueueItem(watch.childSessionId, itemId))?.metadata?.[TOOL_SCOPE_KEY]),
+        readToolScope((await this.deps.engineStore.getQueueItem(watch.childSessionId, watch.queueItemId))?.metadata?.[TOOL_SCOPE_KEY])),
+    };
+    if (row.batchKey) {
+      // Members of one batch decide hold or release one at a time, so two
+      // that settle together cannot both hold and leave nobody to release.
+      const batch: BatchRef = { key: row.batchKey, spawnedBy: row.parentQueueItemId };
+      await withChildDelivery(this.deps.db, batchLockKey(watch, batch), () =>
+        this.admitSettlement(watch, childData.owner, report, batch, true));
+      return;
+    }
+    await this.admitSettlement(watch, childData.owner, report, null, true);
+  }
+
+  /**
+   * Releases the held reports of every batch the ended parent turn spawned
+   * members of. The parent turn is still spawning while it runs, so a member
+   * that settles first holds; this is the release once nothing is left.
+   */
+  async releaseBatchesAfterTurn(parentSessionId: string, queueItemId: string): Promise<void> {
+    const batches = await this.deps.db.selectDistinct({ thread: childWatches.parentThreadId, batch: childWatches.batchKey })
+      .from(childWatches).where(and(eq(childWatches.parentSessionId, parentSessionId),
+        eq(childWatches.parentQueueItemId, queueItemId), isNotNull(childWatches.batchKey)));
+    for (const { thread, batch } of batches) {
+      if (batch !== null) await this.releaseHeldBatch(parentSessionId, thread, { key: batch, spawnedBy: queueItemId });
+    }
+  }
+
+  /** Admits a batch whose members all settled while a spawning turn ran. */
+  private async releaseHeldBatch(parentSessionId: string, parentThreadId: string, batch: BatchRef): Promise<void> {
+    await withChildDelivery(this.deps.db, batchLockKey({ parentSessionId, parentThreadId }, batch), async () => {
+      const [last] = await this.deps.db.select().from(childWatches).where(and(
+        eq(childWatches.parentSessionId, parentSessionId), eq(childWatches.parentThreadId, parentThreadId),
+        batchMembers(batch), isNotNull(childWatches.batchHeldJson), isNull(childWatches.dismissedAt)))
+        .orderBy(desc(childWatches.settledAt)).limit(1);
+      if (!last?.batchHeldJson) return;
+      const report = heldReports(last.batchHeldJson).at(-1);
+      const child = await this.deps.engineStore.getSession(last.childSessionId);
+      if (!report || !child) return;
+      await this.admitSettlement(watchRowToArgs(last), child.owner, report, batch, false);
+    });
+  }
+
+  /** Every held batch with nothing left to wait for, after a restart lost its trigger. */
+  private async releaseHeldBatches(): Promise<void> {
+    const batches = await this.deps.db.selectDistinct({
+      session: childWatches.parentSessionId, thread: childWatches.parentThreadId, batch: childWatches.batchKey,
+      spawnedBy: childWatches.parentQueueItemId,
+    }).from(childWatches).where(isNotNull(childWatches.batchHeldJson));
+    for (const { session, thread, batch, spawnedBy } of batches) {
+      if (batch === null) continue;
+      try { await this.releaseHeldBatch(session, thread, { key: batch, spawnedBy }); }
+      catch (error) { console.error(`ChildWatcher: batch release failed for ${session}/${batch}:`, error); }
+    }
+  }
+
+  /**
+   * Admits one child's report to the parent thread. A batch member holds its
+   * report instead while another member is unsettled or the turn that
+   * spawned the batch is still running (it may spawn more): the member is marked
+   * settled, its sandbox parks, and the report waits on its watch row. The
+   * last member to settle, or the end of the spawning turn
+   * (`releaseBatchesAfterTurn`), admits one signal with every held report.
+   * `fresh` is false when `report` is itself a held report being released.
+   */
+  private async admitSettlement(
+    watch: ArmArgs, childOwner: Principal, report: BatchReport, batch: BatchRef | null, fresh: boolean,
+  ): Promise<void> {
+    const itemId = report.itemId;
+    let held: BatchReport[] = [];
+    if (batch !== null) {
+      const members = await this.deps.db.select({
+        child: childWatches.childSessionId, settled: childWatches.settled, heldJson: childWatches.batchHeldJson,
+      }).from(childWatches).where(and(
+        eq(childWatches.parentSessionId, watch.parentSessionId), eq(childWatches.parentThreadId, watch.parentThreadId),
+        batchMembers(batch), isNull(childWatches.dismissedAt)));
+      const others = members.filter(member => member.child !== watch.childSessionId);
+      // A member re-opened with child_send while its report was held keeps
+      // that report: it is undelivered work, delivered with the batch.
+      const mine = heldReports(members.find(member => member.child === watch.childSessionId)?.heldJson ?? null)
+        .filter(held => held.itemId !== report.itemId);
+      // A spawning turn that is gone cannot spawn more, so it does not hold the batch.
+      const spawner = batch.spawnedBy ? await this.deps.engineStore.getQueueItem(watch.parentSessionId, batch.spawnedBy) : null;
+      const spawnerRunning = spawner !== null && spawner !== undefined && spawner.status !== "settled";
+      if (others.some(member => !member.settled) || spawnerRunning) {
+        if (!fresh) return;
+        await this.deps.db.update(childWatches).set({ batchHeldJson: JSON.stringify([...mine, report]) })
+          .where(eq(childWatches.childSessionId, watch.childSessionId));
+        await this.markSettled(watch.childSessionId, watch.queueItemId);
+        await this.parkChildSandbox(watch.childSessionId, true);
+        return;
+      }
+      held = [...others.flatMap(member => heldReports(member.heldJson)), ...mine];
+    }
+
+    const reports = [...held, report];
+    const origin = batchOrigin(report.origin, held);
     const replyId = namespaceInternalDispatchId(watch.childSessionId, `settled:${watch.childSessionId}:${itemId}`);
     const automaticReply = origin !== undefined && origin.reply !== "manual";
     // Write the intent before the parent can finish. Dispatch-ID lookup recovers a lost receipt.
     if (automaticReply) await this.openReplyIntent({ ...watch, queueItemId: itemId }, replyId);
     const receipt = await admitSignal(this.deps, {
-      from: { sessionId: watch.childSessionId, owner: childData.owner },
+      from: { sessionId: watch.childSessionId, owner: childOwner },
       to: watch.parentSessionId,
       threadKey: watch.parentThreadId,
       content: {
         kind: "signal",
         signalType: "child.settled",
-        body: digest.summary,
+        body: held.length ? batchBody(batch?.key ?? "", reports) : report.body,
         attributes: {
           child_session_id: watch.childSessionId,
-          outcome: result.outcome,
-          background_work: digest.refs?.background_work ?? "[]",
-          ...(title !== undefined ? { title } : {}),
-          ...(continuationCheckpoint !== undefined
-            ? { continuation_checkpoint_entry_id: continuationCheckpoint.id }
+          outcome: report.outcome,
+          background_work: report.backgroundWork,
+          ...(report.title !== undefined ? { title: report.title } : {}),
+          ...(report.continuationCheckpointId !== undefined
+            ? { continuation_checkpoint_entry_id: report.continuationCheckpointId }
             : {}),
+          ...(batch !== null ? { batch: batch.key, batch_children: [...new Set(reports.map(r => r.childSessionId))].join(",") } : {}),
         },
         // Preserve the spawning turn's route and reply policy for the parent's update.
         ...(origin !== undefined ? { origin } : {}),
       },
-      toolScope: intersectToolScopes(readToolScope(childData.metadata?.[TOOL_SCOPE_KEY]), readToolScope((await this.deps.engineStore.getQueueItem(watch.childSessionId, itemId))?.metadata?.[TOOL_SCOPE_KEY]),
-        readToolScope((await this.deps.engineStore.getQueueItem(watch.childSessionId, watch.queueItemId))?.metadata?.[TOOL_SCOPE_KEY])),
+      // A batch turn may do only what every member's report may.
+      toolScope: intersectToolScopes(...reports.map(r => r.toolScope)),
       dispatchId: `settled:${watch.childSessionId}:${itemId}`,
     });
+    if (batch !== null) {
+      // Every report in this signal is delivered, including a stale one a
+      // re-opened member still carried on its own row.
+      await this.deps.db.update(childWatches).set({ batchHeldJson: null, reportQueueItemId: receipt.queueItemId })
+        .where(inArray(childWatches.childSessionId, reports.map(r => r.childSessionId)));
+    }
 
     if (automaticReply) {
       // A landed admission always re-opens a reply that was never sent, even
@@ -1123,8 +1259,9 @@ export class ChildWatcher {
         queueItemId: receipt.queueItemId, completedAt: null, failedAt: null, attempts: 0, lastError: null, nextAttemptAt: Date.now(),
       }).where(and(eq(childReplyDeliveries.id, replyId), eq(childReplyDeliveries.orgId, watch.orgId), isNull(childReplyDeliveries.queueItemId)));
     }
+    if (!fresh) return;
     await this.markSettled(watch.childSessionId, watch.queueItemId, receipt.queueItemId);
-    await this.parkChildSandbox(watch.childSessionId, digest !== undefined);
+    await this.parkChildSandbox(watch.childSessionId, true);
   }
 
   /**
@@ -1571,7 +1708,7 @@ export class ChildWatcher {
     const [row] = await this.deps.db.select().from(childWatches).where(eq(childWatches.childSessionId, watch.childSessionId));
     if (channelAudience && await privateInputThrough(store, watch.childSessionId, itemId,
       { parentThreadId: watch.parentThreadId, originThreadKey: parseOriginJson(row?.originJson ?? null)?.threadKey })) return undefined;
-    const snapshot = await store.getThreadSnapshot(watch.childSessionId, item.threadId);
+    const snapshot = await readThreadOutline(store, watch.childSessionId, item.threadId);
     if (!snapshot) return undefined;
     // Storage order is execution order, not queue admission time. A later turn must never donate its checkpoint.
     const entries = snapshot.entries;
@@ -1583,7 +1720,10 @@ export class ChildWatcher {
     const activeEntries = walkTranscriptDag(entries, snapshot.thread.activeLeafEntryId);
     for (let index = activeEntries.length - 1; index >= 0; index--) {
       const entry = activeEntries[index];
-      if (entry.type === "compaction" && allowed.has(entry.id)) return entry;
+      if (entry.type !== "compaction" || !allowed.has(entry.id)) continue;
+      // The outline stubs compactions; read this one with its payload.
+      const [full] = await store.getEntries(watch.childSessionId, item.threadId, { entryIds: [entry.id] });
+      return full?.type === "compaction" ? full : undefined;
     }
     return undefined;
   }
@@ -1791,6 +1931,7 @@ export class ChildWatcher {
         ),
       );
     for (const row of rows) {
+      if (!this.retentionBackoff.ready(row.childSessionId, now)) continue;
       try {
         const waiter = await this.deps.engineStore.getWakeup(`wk_child_events:${row.childSessionId}`);
         if (waiter?.status === "running") await this.closeSubscription(waiter, now);
@@ -1815,8 +1956,10 @@ export class ChildWatcher {
           `ChildWatcher: retention reclaim for ${row.childSessionId} found no live session and no parked sandbox id; stamping reclaimed without a destroy`,
         );
         await this.destroyChildSandbox(row.childSessionId, sandboxId, "child_retention", row, now);
+        this.retentionBackoff.succeeded(row.childSessionId);
       } catch (err) {
-        console.error(`ChildWatcher: retention reclaim failed for child ${row.childSessionId}:`, err);
+        const waitMs = this.retentionBackoff.failed(row.childSessionId, now);
+        console.error(`ChildWatcher: retention reclaim failed for child ${row.childSessionId}; next attempt in ${Math.round(waitMs / 60_000)} min:`, err);
       }
     }
     for (const [key, gap] of this.pendingTerminalAdmissions) {
@@ -1998,6 +2141,8 @@ export class ChildWatcher {
         }
       }
     }
+    // A restart can drop the turn-end event that would release a held batch.
+    await this.releaseHeldBatches();
   }
 }
 
@@ -2021,6 +2166,9 @@ export function wireChildGateReports(eventStream: EventStream, watcher: ChildWat
     if (delivered.event.type === "submission_settled") {
       watcher.observeTurn(delivered.sessionId, delivered.event.queueItemId).catch((err) => {
         console.error(`child turn observation failed for ${delivered.sessionId}:`, err);
+      });
+      watcher.releaseBatchesAfterTurn(delivered.sessionId, delivered.event.queueItemId).catch((err) => {
+        console.error(`child batch release failed for ${delivered.sessionId}:`, err);
       });
       return;
     }
@@ -2337,6 +2485,44 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
 }
 
 /**
+ * Builds the `ChildStopper` behind the engine's `child_stop` built-in. It
+ * has the sender's authority (the same `child_watches` edge and thread
+ * reach) and aborts every unsettled submission of the child: queued ones
+ * first, so the claim loop cannot start one, then the running turn. The
+ * watcher then reports the aborted work like any other settlement, so a
+ * stopped batch member releases its batch.
+ */
+export function buildChildStopper(deps: ChildrenDeps): ChildStopper {
+  return async (req, ctx) => {
+    const [watchRow] = await deps.db.select().from(childWatches)
+      .where(and(eq(childWatches.childSessionId, req.childSessionId), eq(childWatches.parentSessionId, ctx.parentSessionId)))
+      .limit(1);
+    if (!watchRow || !(await childReachableFrom(deps.db, watchRow, ctx.parentSessionId, ctx.parentThreadId))) return null;
+    const unsettled = await deps.engineStore.listUnsettledSubmissions(req.childSessionId);
+    if (unsettled.length === 0) return { stopped: 0 };
+    const [child] = await deps.db.select({
+      id: agentSessions.id, userId: agentSessions.userId, orgId: agentSessions.orgId, workspace: agentSessions.workspace,
+      profile: agentSessions.profile, docker: agentSessions.docker, kubernetes: agentSessions.kubernetes,
+      sandboxResourceOverrides: agentSessions.sandboxResourceOverrides, status: agentSessions.status,
+      ownerType: agentSessions.ownerType, ownerId: agentSessions.ownerId, credentialOwnerMode: agentSessions.credentialOwnerMode,
+    }).from(agentSessions).where(eq(agentSessions.id, req.childSessionId)).limit(1);
+    if (!child || child.status === "deleted") return null;
+    return deps.engineHost.withSessionFor(req.childSessionId, await loadSessionMeta(deps.db, child), async (childSession) => {
+      const running = new Set(unsettled.map(item => childSession.threadById(item.threadId)?.runningItemId()).filter(id => id !== undefined));
+      const order = [...unsettled.filter(item => !running.has(item.id)), ...unsettled.filter(item => running.has(item.id))];
+      let stopped = 0;
+      for (const item of order) {
+        const thread = childSession.threadById(item.threadId);
+        if (!thread) continue;
+        await thread.abortSubmission(item.id);
+        stopped++;
+      }
+      return { stopped };
+    });
+  };
+}
+
+/**
  * Ceiling on the child result carried inline in a `child.settled` signal.
  *
  * The signal lands in the parent's thread, so the parent pays for it in
@@ -2352,6 +2538,83 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
  * distinction — the parent has no other channel to its child.
  */
 export const CHILD_RESULT_MAX_CHARS = 16_000;
+
+/**
+ * Ceiling on the reports one batch signal carries. Each member gets an even
+ * share, never under 2,000 characters; `child_read` recovers what is cut.
+ */
+export const CHILD_BATCH_RESULT_MAX_CHARS = 2 * CHILD_RESULT_MAX_CHARS;
+
+/** One batch member's report, held on its watch row until the batch releases. */
+interface BatchReport {
+  childSessionId: string;
+  /** The child queue item this report settles. */
+  itemId: string;
+  title?: string;
+  outcome: string;
+  body: string;
+  backgroundWork: string;
+  continuationCheckpointId?: string;
+  origin?: ChannelOrigin;
+  toolScope?: ToolScope;
+}
+
+/** A member's held reports, oldest first. A row holds more than one when
+ * child_send re-opened the member before its batch released. */
+function heldReports(json: string | null): BatchReport[] {
+  if (!json) return [];
+  const held = JSON.parse(json) as BatchReport | BatchReport[];
+  return Array.isArray(held) ? held : [held];
+}
+
+/**
+ * One batch: the children one parent turn spawned with one `task` batch name.
+ * A later turn that reuses the name starts a new batch, so its work never
+ * waits on, or reports with, an earlier turn's children. `spawnedBy` is null
+ * only for watches from before spawning turns were recorded.
+ */
+interface BatchRef {
+  key: string;
+  spawnedBy: string | null;
+}
+
+/** Watch rows of one batch (the caller adds the parent session and thread). */
+function batchMembers(batch: BatchRef) {
+  return and(eq(childWatches.batchKey, batch.key),
+    batch.spawnedBy === null ? isNull(childWatches.parentQueueItemId) : eq(childWatches.parentQueueItemId, batch.spawnedBy));
+}
+
+/** One in-process lock per batch. */
+function batchLockKey(watch: Pick<ArmArgs, "parentSessionId" | "parentThreadId">, batch: BatchRef): string {
+  return `batch:${watch.parentSessionId}:${watch.parentThreadId}:${batch.spawnedBy ?? ""}:${batch.key}`;
+}
+
+/**
+ * The route of a batch signal. It replies automatically only when every
+ * report could reply automatically to the same channel thread on its own.
+ * Otherwise a held report kept manual (private input, a takeover, or no
+ * channel origin) would reach the channel in the combined reply.
+ */
+export function batchOrigin(own: ChannelOrigin | undefined, held: Pick<BatchReport, "origin">[]): ChannelOrigin | undefined {
+  if (own === undefined || held.length === 0) return own;
+  const automatic = own.reply !== "manual" && held.every(({ origin }) => origin !== undefined && origin.reply !== "manual"
+    && origin.channelType === own.channelType && origin.threadKey === own.threadKey);
+  return automatic ? own : { ...own, reply: "manual" };
+}
+
+/** The body of the one signal that reports a whole batch. */
+export function batchBody(batchKey: string, reports: BatchReport[]): string {
+  const share = Math.max(2_000, Math.floor(CHILD_BATCH_RESULT_MAX_CHARS / Math.max(1, reports.length)));
+  const sections = reports.map((report) => {
+    const body = report.body.length <= share
+      ? report.body
+      : codePointPrefix(report.body, share) +
+        `\n\n[Shortened to fit the batch. Call child_read with child_session_id "${report.childSessionId}" for the full result.]`;
+    return `## ${report.title ?? report.childSessionId} (${report.childSessionId}): ${report.outcome}\n\n${body}`;
+  });
+  const children = new Set(reports.map(report => report.childSessionId)).size;
+  return `All ${children} children in batch "${batchKey}" have settled. Their results follow.\n\n${sections.join("\n\n")}`;
+}
 
 function codePointPrefix(text: string, maxUnits: number): string {
   const end = Math.max(0, Math.floor(maxUnits));

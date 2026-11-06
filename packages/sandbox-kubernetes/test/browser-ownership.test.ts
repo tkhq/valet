@@ -237,8 +237,7 @@ it("keeps a new browser volume when ownership cannot be checked after apply fail
   expect(claims.size).toBe(1);
   expect(deleted).toHaveLength(0);
   expect(errorLog).toHaveBeenCalledWith(
-    expect.stringContaining("browser volume rollback after apply failure failed"),
-    expect.any(Error),
+    expect.stringMatching(/"error_class":"Error".*browser volume rollback after apply failure failed/),
   );
   errorLog.mockRestore();
 });

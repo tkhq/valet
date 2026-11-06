@@ -570,6 +570,9 @@ export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
     case "task_end":
     // submission_stuck is an attention signal routed in Phase 4; no wire mapping yet.
     case "submission_stuck":
+    // principle_cited feeds memory usage and stays in the durable thread
+    // log. No client shows it yet.
+    case "principle_cited":
       return [];
 
     case "sandbox_status":

@@ -1,9 +1,12 @@
 import * as RPopover from "@radix-ui/react-popover";
 import { forwardRef, type ComponentPropsWithoutRef, type ElementRef } from "react";
 import { cn } from "~/lib/cn";
+import { quietCloseAutoFocus } from "./close-focus";
 
 export const Popover = RPopover.Root;
 export const PopoverTrigger = RPopover.Trigger;
+/** Positions the panel against an element other than the trigger; `virtualRef` takes any element. */
+export const PopoverAnchor = RPopover.Anchor;
 
 /**
  * Portalled popover panel. Radix handles what a hand-rolled
@@ -22,7 +25,7 @@ export const PopoverTrigger = RPopover.Trigger;
 export const PopoverContent = forwardRef<
   ElementRef<typeof RPopover.Content>,
   ComponentPropsWithoutRef<typeof RPopover.Content>
->(function PopoverContent({ className, align = "end", sideOffset = 4, collisionPadding = 16, ...rest }, ref) {
+>(function PopoverContent({ className, align = "end", sideOffset = 4, collisionPadding = 16, onCloseAutoFocus, ...rest }, ref) {
   return (
     <RPopover.Portal>
       <RPopover.Content
@@ -36,6 +39,7 @@ export const PopoverContent = forwardRef<
             "data-[state=open]:fade-in-0 data-[state=closed]:fade-out-0",
           className,
         )}
+        onCloseAutoFocus={(event) => quietCloseAutoFocus(event, onCloseAutoFocus)}
         {...rest}
       />
     </RPopover.Portal>

@@ -17,6 +17,7 @@ import {
   type EventClause,
   type SessionStore,
   type ValetPlugin,
+  reportError,
 } from "@valet/engine";
 import { identityForUser } from "../channels/identity-links.js";
 import type { AppDb } from "../lib/drizzle.js";
@@ -204,7 +205,7 @@ async function bounded<T>(work: () => Promise<T>, ms: number, fallback: T): Prom
   try {
     return await withTimeout(work(), ms, fallback);
   } catch (err) {
-    console.warn("[wait_for_event] an arm check read failed; using its fallback:", err);
+    reportError({ area: "events", reason: "waiter_arm_read", level: "warn" }, "[wait_for_event] an arm check read failed; using its fallback", err);
     return fallback;
   }
 }
@@ -300,7 +301,7 @@ export async function checkArm(
   try {
     self = await deps.selfIds(parsed.service);
   } catch (err) {
-    console.warn("[wait_for_event] the self lookup failed; the waiter has an empty self set:", err);
+    reportError({ area: "events", reason: "waiter_self_lookup", level: "warn" }, "[wait_for_event] the self lookup failed; the waiter has an empty self set", err);
     self = [];
   }
   // A derived key's sources can carry only the repository and commit

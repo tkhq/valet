@@ -1,10 +1,11 @@
+import { readLatestTurnProgress } from "@valet/engine";
 import { HOME_THREAD_KEY, HOME_THREAD_TITLE } from "../home/context.js";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import type { AppEnv } from "../env.js";
 import { agentSessions, sessionThreads, users, workflowRuns, workflowDefinitions } from "../schema/index.js";
 import { shareAllows, type ThreadShareNeed } from "../services/thread-share.js";
-import type { ActiveViewersResponse, ThreadAddress, ThreadPlanResponse, ToolOutputResponse } from "../wire/types.js";
+import type { ActiveViewersResponse, ThreadAddress, ThreadPlanResponse, ThreadProgressResponse, ToolOutputResponse } from "../wire/types.js";
 import { threadOwner } from "../services/thread-links.js";
 import { readStoredThreadPlan } from "../services/thread-plan.js";
 import { activeViewers } from "../services/active-viewers.js";
@@ -13,7 +14,7 @@ import { keepVisibleThreads, threadEntry, threadsVisibleTo } from "./_thread-acc
 import { ensureDefaultAssistantSession, findDefaultAssistant } from "../assistants/service.js";
 import { readOptionalJsonObject } from "../lib/optional-json-body.js";
 import {
-  abortThread, branchPreview, cancelQueuedItem, createThread, editPreview, forkThread, moveThread, getThreadChannelActivity, getThreadContext, getThreadRecap, listDecisions, listMessages,
+  abortThread, branchPreview, cancelQueuedItem, createThread, duplicateThread, editPreview, forkThread, moveThread, getThreadChannelActivity, getThreadContext, getThreadRecap, listDecisions, listMessages,
   listThreads, loadDecisionSession, patchThread, readThreads, resolveDecision, resumeThread, returnToBranch,
   sendPrompt, withdrawDecision,
 } from "./messages.js";
@@ -179,6 +180,10 @@ threadsRouter.get("/:threadId/plan", c => inThread(c, async (c, sessionId, threa
   const body: ThreadPlanResponse = { plan: await readStoredThreadPlan(c.var.providers.engineStore, sessionId, threadId) ?? null };
   return c.json(body);
 }, "content", "read"));
+threadsRouter.get("/:threadId/progress", c => inThread(c, async (c, sessionId, threadId) => {
+  const body: ThreadProgressResponse = { progress: await readLatestTurnProgress(c.var.providers.engineStore, sessionId, threadId) };
+  return c.json(body);
+}, "content", "read"));
 threadsRouter.post("/:threadId/abort", c => inThread(c, abortThread, "content", "reply"));
 // A guest who may reply may go back past their own edit. A fork creates a
 // thread in the owner's workspace, so it is the owner's (and members') alone.
@@ -187,6 +192,7 @@ threadsRouter.get("/:threadId/edit-preview", c => inThread(c, editPreview, "cont
 threadsRouter.get("/:threadId/branch-preview", c => inThread(c, branchPreview, "content", "read"));
 threadsRouter.post("/:threadId/fork", c => inThread(c, forkThread, "content"));
 threadsRouter.post("/:threadId/move", c => inThread(c, moveThread, "content"));
+threadsRouter.post("/:threadId/duplicate", c => inThread(c, duplicateThread, "content"));
 threadsRouter.post("/:threadId/queue/:itemId/cancel", c => inThread(c, cancelQueuedItem, "content"));
 threadsRouter.post("/:threadId/resume", c => inThread(c, resumeThread, "content", "reply"));
 threadsRouter.get("/:threadId/decisions", c => inThread(c, listDecisions, "decision", "read"));

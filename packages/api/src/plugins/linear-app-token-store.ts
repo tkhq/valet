@@ -22,6 +22,7 @@ import {
   LINEAR_CLIENT_CREDENTIALS_GRANT,
   LINEAR_CREDENTIAL_SERVICE,
 } from "../services/linear-app.js";
+import { reportError } from "@valet/engine";
 
 /** Renew a day early: the token lasts 30 days, and a day of margin keeps a
  * slow or failed renewal from reaching callers as an expired token. */
@@ -77,7 +78,7 @@ export class LinearAppTokenStore implements CredentialStore {
     try {
       token = await createLinearService(config, this.deps.env).clientCredentialsToken();
     } catch (err) {
-      console.error(`linear app token renewal failed for org ${owner.id}:`, err);
+      reportError({ area: "plugins", reason: "linear_token_renewal", provider: "linear" }, `linear app token renewal failed for org ${owner.id}`, err);
       const stamped: StoredCredential = { ...stored, metadata: { ...stored.metadata, refreshFailedAt: now } };
       return (await this.saveIfUnchanged(owner, stored, stamped)) === stamped ? stored : this.inner.get(owner, LINEAR_CREDENTIAL_SERVICE);
     }
@@ -118,7 +119,7 @@ export class LinearAppTokenStore implements CredentialStore {
       const after = await this.inner.get(owner, LINEAR_CREDENTIAL_SERVICE);
       if (after?.metadata?.connectionId === config.connectionId) return after;
       await this.inner.delete(owner, LINEAR_CREDENTIAL_SERVICE);
-      console.warn(`linear app token renewal raced a reconnect for org ${owner.id}; reconnect Linear in Settings to restore it.`);
+      reportError({ area: "plugins", reason: "linear_token_renewal_race", provider: "linear", level: "warn" }, `linear app token renewal raced a reconnect for org ${owner.id}; reconnect Linear in Settings to restore it.`);
       return null;
     }
     return next;

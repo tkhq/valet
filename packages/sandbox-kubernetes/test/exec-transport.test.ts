@@ -73,7 +73,10 @@ describe("Kubernetes exec transport errors", () => {
       expect(failure.cause).toMatchObject({ message: "Unexpected server response: 403", error: expect.any(Error) });
       // The failure was logged with its diagnostic message — and without the
       // command/stdin payload leaking into the log.
-      expect(errorLog).toHaveBeenCalledWith("k8s pods/exec transport failed:", failure.message);
+      expect(errorLog).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(String(errorLog.mock.calls[0]?.[0]))).toMatchObject({
+        message: "k8s pods/exec transport failed", area: "sandbox", reason: "exec_transport", provider: "kubernetes", error: failure.message,
+      });
       expect(JSON.stringify(errorLog.mock.calls)).not.toContain("secret");
     } finally {
       errorLog.mockRestore();

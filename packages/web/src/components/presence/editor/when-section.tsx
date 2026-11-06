@@ -24,6 +24,8 @@ import {
   addCondition,
   draftThread,
   hasCreatorScope,
+  oncePerHoursValue,
+  USER_ONLINE,
   removeCondition,
   scheduleCron,
   setService,
@@ -381,6 +383,27 @@ function Conditions({ draft, mode, onChange, services, names }: {
           </span>
         </label>
       )}
+      {draft.events.has(USER_ONLINE) && <OncePerHours draft={draft} onChange={onChange} />}
+    </div>
+  );
+}
+
+/** "Only once every N hours" for the comes-online event. Empty runs every time. */
+function OncePerHours({ draft, onChange }: { draft: Draft; onChange: (next: Draft) => void }) {
+  const bad = draft.oncePerHours.trim().length > 0 && oncePerHoursValue(draft) === null;
+  return (
+    <div className="mt-2 grid gap-1">
+      <label htmlFor="editor-once-per-hours" className="text-xs text-muted">Only once every … hours</label>
+      <Input
+        id="editor-once-per-hours"
+        inputMode="numeric"
+        value={draft.oncePerHours}
+        onChange={(e) => onChange({ ...draft, oncePerHours: e.target.value })}
+        placeholder="Every time"
+        aria-invalid={bad}
+        className="w-32"
+      />
+      <p className="text-xs text-muted">Valet checks about once a minute and counts a return only after 5 minutes away. Leave empty to run on every return.</p>
     </div>
   );
 }

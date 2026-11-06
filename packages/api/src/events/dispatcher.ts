@@ -27,10 +27,10 @@
 import type { Appearance } from "@valet/shared";
 import { slackEventChannel } from "../services/thread-access.js";
 import type { EventHead } from "../services/event-columns.js";
-import type { ChannelOrigin, NormalizedEvent, PromptAuthor, SignalContent, ValetPlugin } from "@valet/engine";
+import type { ChannelOrigin, NormalizedEvent, PluginEvent, PluginEventHandler, PluginThreads, Principal, PromptAuthor, SignalContent, ValetPlugin } from "@valet/engine";
 import { readThreadPolicy, type AssistantThreadPolicy } from "@valet/shared";
 import type { RunHost, RunParams, WorkflowStore, WorkflowTriggerPayload } from "@valet/workflow";
-import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
+import { and, arrayContains, asc, eq, inArray, lte, sql, type SQL } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventDeliveries, events, eventSubscriptions, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { definitionVersionId } from "../workflows/definition-version.js";
@@ -67,7 +67,14 @@ import {
   type DestinationRecorder,
 } from "../observability/delivery-metrics.js";
 import { readStoredTarget } from "./target-names.js";
+import type { PluginThreadsScope } from "../plugins/plugin-threads.js";
+import { pluginStore } from "../services/plugin-store.js";
+import { buildPluginMemory } from "../plugins/plugin-memory.js";
+import { pluginHandlerConfig } from "./subscription-write.js";
+import { orgAllowsPluginForOwner } from "../services/plugin-entitlements.js";
+import { actorUserIdFor } from "../workflows/engine-deps.js";
 import { FAILED_TURN_SWEEP_WINDOW_MS, markFailedDeliveryTurns } from "./delivery-turn.js";
+import { reportError } from "@valet/engine";
 
 /** Retry backoff per failed attempt; a failure past the last entry is dead. */
 const BACKOFF_MS = [30_000, 120_000, 600_000, 1_800_000];
@@ -77,6 +84,44 @@ const FAILED_TURN_SWEEP_MS = 60_000;
 const BATCH = 20;
 /** How long a claimed-but-unresolved row stays invisible to other polls. */
 const CLAIM_LEASE_MS = 60_000;
+/** Plugin handlers running at once in one process. */
+const DEFAULT_PLUGIN_CONCURRENCY = 8;
+/** When all plugin slots are busy, retry the delivery after this long. */
+const PLUGIN_BUSY_RETRY_MS = 10_000;
+/** Abort reason when a plugin line is turned off or deleted mid-run. */
+const PLUGIN_LINE_OFF = "plugin-line-off";
+/** Abort reason when another run re-claimed the delivery after this run's lease lapsed. */
+const PLUGIN_LEASE_LOST = "plugin-lease-lost";
+/** Abort reason when a newer event for the same subject superseded this run (`concurrency: "supersede"`). */
+const PLUGIN_SUPERSEDED = "plugin-superseded";
+
+/** The skip reason a superseded plugin delivery records. */
+function supersededText(label: string): string {
+  return `A newer event for ${label} superseded this one.`;
+}
+
+/** The services a plugin may ask app tokens for: its own and those it declares credentials for. */
+function pluginServices(plugin: ValetPlugin): Set<string> {
+  return new Set([plugin.name, ...(plugin.credentials ?? []).map((c) => c.service ?? plugin.name)]);
+}
+
+/** What the dispatcher needs to run plugin event handlers. */
+export interface PluginHandlerHost {
+  /** `PluginThreads` for one handler run (`buildPluginThreads` in production). */
+  threads(scope: PluginThreadsScope): PluginThreads;
+  /** The org's app credential for `service`, or null when it is not connected. */
+  appToken(orgId: string, service: string, scope?: { owner?: string }): Promise<string | null>;
+  /**
+   * Stop the children recorded against these deliveries
+   * (`stopPluginDeliveryChildren` in production). Called when deliveries
+   * are cancelled for good: the line was turned off, or a newer event
+   * superseded them, whether or not their run is live in this process.
+   */
+  stopDeliveryChildren(deliveryIds: string[]): Promise<void>;
+  maxConcurrent?: number;
+  /** How often a running handler renews its lease and checks its line. Tests shorten it. */
+  leaseRenewMs?: number;
+}
 const MAX_ERROR_CHARS = 2_000;
 const MAX_BODY_EXCERPT_CHARS = 4_000;
 
@@ -120,6 +165,11 @@ export interface EventDispatcherDeps {
   db: AppDb;
   workflowRunHost: RunHost;
   workflowStore: WorkflowStore;
+  /**
+   * Runs plugin event handlers (`target.kind: "plugin"`). Absent: a plugin
+   * delivery fails with a configuration error and retries.
+   */
+  pluginHandlers?: PluginHandlerHost;
   /** Seam over the assistant runtime and the destination thread's `submitPrompt`. See `assistant-target.ts`. */
   deliverToAssistant: AssistantDeliverFn;
   /** Marks delivered rows whose turn failed (`delivery-turn.ts`). Absent → `markFailedDeliveryTurns`. */
@@ -283,7 +333,12 @@ interface OwnedElsewhere {
 /** The `target` jsonb column's shape, read through `readStoredTarget` so old
  * names arrive renamed. Written only by the subscriptions CRUD validator. */
 interface SubscriptionTarget {
-  kind: "workflow" | "assistant" | "signal";
+  kind: "workflow" | "assistant" | "signal" | "plugin";
+  /** Plugin targets: the plugin and its handler id. */
+  plugin?: string;
+  handler?: string;
+  /** Plugin targets: the handler's settings, checked against its `configSchema`. */
+  config?: unknown;
   /** The assistant thread policy (spec 2026-10-16: delivery threads, Part
    * A). Read through `deliveryThreadPolicy`; absent reads as `new` for a
    * delivery with a channel origin, `subject` for other Slack channel
@@ -328,6 +383,8 @@ export class EventDispatcher {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    // Their rows keep the lease; a later process re-runs them.
+    for (const run of this.pluginRuns.values()) run.abort();
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     while (this.draining) await new Promise((r) => setTimeout(r, 25));
@@ -341,7 +398,7 @@ export class EventDispatcher {
     if (this.stopped) return;
     if (this.ingressInFlight) this.ingressWakeRequested = true;
     if (this.draining) { this.wakeRequested = true; return; }
-    void this.pollOnce().catch((err) => console.error("event dispatcher poll failed:", err));
+    void this.pollOnce().catch((err) => reportError({ area: "events", reason: "dispatch_poll" }, "event dispatcher poll failed", err));
   };
 
   async pollOnce(): Promise<void> {
@@ -352,7 +409,7 @@ export class EventDispatcher {
       // Keep one ingress drain in flight; durable claims cover process restarts.
       if (this.drainIngress && !this.ingressInFlight) {
         this.ingressInFlight = Promise.resolve().then(() => this.drainIngress?.())
-          .catch(err => console.error("event ingress drain failed:", err))
+          .catch(err => reportError({ area: "events", reason: "ingress_drain" }, "event ingress drain failed", err))
           .finally(() => {
             this.ingressInFlight = null;
             if (this.ingressWakeRequested) { this.ingressWakeRequested = false; this.nudge(); }
@@ -362,11 +419,11 @@ export class EventDispatcher {
       if (this.deps.drainAttention) {
         // The outbox serializes each transport independently across ticks.
         void this.deps.drainAttention()
-          .catch(err => console.error("attention outbox drain failed:", err));
+          .catch(err => reportError({ area: "events", reason: "attention_drain" }, "attention outbox drain failed", err));
       }
-      void this.deps.retainExternalUsage?.().catch(() => console.warn("Intent retention failed. Check database availability."));
+      void this.deps.retainExternalUsage?.().catch(() => reportError({ area: "events", reason: "intent_retention", level: "warn" }, "Intent retention failed. Check database availability."));
       if (this.deps.drainTagging) {
-        void this.deps.drainTagging().catch(() => console.warn("Tagging batch failed. Check the model provider and queued tagging attempts."));
+        void this.deps.drainTagging().catch(() => reportError({ area: "events", reason: "tagging_batch", level: "warn" }, "Tagging batch failed. Check the model provider and queued tagging attempts."));
       }
       const now = Date.now();
       // Atomic claim (see file doc comment): lease the due rows by moving
@@ -393,11 +450,11 @@ export class EventDispatcher {
         .returning({ id: eventDeliveries.id });
 
       for (const row of claimed) {
-        await this.deliverOne(row.id).catch((err) => console.error(`event dispatch ${row.id}:`, err));
+        await this.deliverOne(row.id).catch((err) => reportError({ area: "events", reason: "dispatch_delivery" }, `event dispatch ${row.id}`, err));
       }
       if (now - this.lastFailedTurnSweepAt >= FAILED_TURN_SWEEP_MS) {
         this.lastFailedTurnSweepAt = now;
-        await this.sweepFailedDeliveryTurns(now).catch((err) => console.error("event failed-turn sweep:", err));
+        await this.sweepFailedDeliveryTurns(now).catch((err) => reportError({ area: "events", reason: "failed_turn_sweep" }, "event failed-turn sweep", err));
       }
     } finally {
       this.draining = false;
@@ -459,6 +516,9 @@ export class EventDispatcher {
         await db.update(eventDeliveries).set({ status: "skipped", lastError: covered
           ? `The team already listens for this.${paused ? " This personal line is paused." : ""}`
           : "This line is off. Turn it on to receive these events." }).where(and(eq(eventDeliveries.id, delivery.id), eq(eventDeliveries.eventId, event.id)));
+        // A plugin delivery waiting to retry may have children from an
+        // earlier attempt; the line is off, so they stop too.
+        if (target.kind === "plugin") await this.deps.pluginHandlers?.stopDeliveryChildren([delivery.id]);
         return;
       }
 
@@ -492,6 +552,13 @@ export class EventDispatcher {
         // it, so the channel's privacy gates reads of that thread.
         const slackChannel = slackEventChannel(event);
         const attributes: Record<string, string> = { ...refs, eventId: event.id, service: event.service };
+        // Ingest preserves the normalizer's bot flag. Payload fields cover older event rows.
+        if (event.service === "slack") {
+          const actorBot = event.actor !== null && typeof event.actor === "object" && "bot" in event.actor && event.actor.bot === true;
+          attributes.senderBot = String(actorBot || event.eventKey === "slack.bot_message" ||
+            !!resolvePath(event.payload, "bot_id") || !!resolvePath(event.payload, "bot_profile.id") ||
+            resolvePath(event.payload, "subtype") === "bot_message");
+        }
         let body: string;
         let channelBody = "";
         if (origin) {
@@ -707,6 +774,11 @@ export class EventDispatcher {
         }
       } else if (target.kind === "signal") {
         await this.signalParkedRuns(event, refs);
+      } else if (target.kind === "plugin") {
+        // A handler can wait minutes on child sessions, so it runs beside
+        // the loop and records its own outcome (`runPluginDelivery`).
+        this.startPluginDelivery(delivery, event, sub, target);
+        return;
       } else {
         throw new Error(`unknown target kind: ${target.kind}`);
       }
@@ -720,24 +792,315 @@ export class EventDispatcher {
       // marks the row later.
       if (queueItemId) {
         await (this.deps.markFailedTurns ?? markFailedDeliveryTurns)(db, { deliveryId })
-          .catch((err) => console.error(`event dispatch ${deliveryId}: failed-turn check:`, err));
+          .catch((err) => reportError({ area: "events", reason: "failed_turn_check" }, `event dispatch ${deliveryId}: failed-turn check`, err));
       }
     } catch (err) {
-      const attempts = delivery.attempts + 1;
-      const backoff = BACKOFF_MS[attempts - 1];
-      // The last attempt failed, so the waiters this delivery suppressed get
-      // the event back before the row goes dead.
-      if (backoff === undefined) await this.recoverClaimedDigest(delivery.destination, event);
-      await db
-        .update(eventDeliveries)
-        .set({
-          status: backoff === undefined ? "dead" : "failed",
-          attempts,
-          nextAttemptAt: backoff === undefined ? delivery.nextAttemptAt : Date.now() + backoff,
-          lastError: String(err).slice(0, MAX_ERROR_CHARS),
-        })
-        .where(eq(eventDeliveries.id, deliveryId));
+      await this.recordDeliveryFailure(delivery, event, err);
     }
+  }
+
+  private async recordDeliveryFailure(
+    delivery: typeof eventDeliveries.$inferSelect,
+    event: typeof events.$inferSelect,
+    err: unknown,
+    attempts = delivery.attempts + 1,
+    /** Narrows the write, e.g. to a plugin run's fenced lease. Default: the row. */
+    where: SQL | undefined = eq(eventDeliveries.id, delivery.id),
+  ): Promise<void> {
+    const backoff = BACKOFF_MS[attempts - 1];
+    // The last attempt failed, so the waiters this delivery suppressed get
+    // the event back before the row goes dead.
+    if (backoff === undefined) await this.recoverClaimedDigest(delivery.destination, event);
+    await this.deps.db
+      .update(eventDeliveries)
+      .set({
+        status: backoff === undefined ? "dead" : "failed",
+        attempts,
+        nextAttemptAt: backoff === undefined ? delivery.nextAttemptAt : Date.now() + backoff,
+        lastError: String(err).slice(0, MAX_ERROR_CHARS),
+      })
+      .where(where);
+  }
+
+  /** Plugin deliveries running in this process, by delivery id. */
+  private readonly pluginRuns = new Map<string, AbortController>();
+
+  /**
+   * Start a plugin handler in the background. While it runs it renews the
+   * claim lease, so no other poll re-claims the row. If this process dies,
+   * the lease lapses and a later poll runs the handler again; handlers are
+   * idempotent per event (`PluginThreads` dispatch ids).
+   */
+  private startPluginDelivery(
+    delivery: typeof eventDeliveries.$inferSelect,
+    event: typeof events.$inferSelect,
+    sub: typeof eventSubscriptions.$inferSelect,
+    target: SubscriptionTarget,
+  ): void {
+    const { db } = this.deps;
+    if (this.pluginRuns.has(delivery.id)) return;
+    const limit = this.deps.pluginHandlers?.maxConcurrent ?? DEFAULT_PLUGIN_CONCURRENCY;
+    if (this.pluginRuns.size >= limit) {
+      // Full: leave the row for a later poll instead of failing it.
+      void db.update(eventDeliveries).set({ nextAttemptAt: Date.now() + PLUGIN_BUSY_RETRY_MS })
+        .where(eq(eventDeliveries.id, delivery.id))
+        .catch((err) => console.error(`plugin delivery ${delivery.id}: requeue failed:`, err));
+      return;
+    }
+    const abort = new AbortController();
+    this.pluginRuns.set(delivery.id, abort);
+    // A run cancelled for good stops the children it started. Shutdown and
+    // a lost lease do not: the next run finds those children by dispatch id.
+    const cancelChildren = new AbortController();
+    abort.signal.addEventListener("abort", () => {
+      if (abort.signal.reason !== PLUGIN_LINE_OFF && abort.signal.reason !== PLUGIN_SUPERSEDED) return;
+      cancelChildren.abort(abort.signal.reason);
+      // A superseding run already stopped this delivery's children; stopping
+      // twice finds nothing to stop.
+      this.deps.pluginHandlers?.stopDeliveryChildren([delivery.id])
+        .catch((err) => console.error(`plugin delivery ${delivery.id}: stopping children failed:`, err));
+    }, { once: true });
+    // The lease value is the fence. This run owns the row only while
+    // `next_attempt_at` still holds the value it last wrote, so a run that
+    // outlived its lease (and was re-claimed elsewhere) can neither renew
+    // nor record an outcome over the new run.
+    let lease = delivery.nextAttemptAt;
+    const owned = () => and(
+      eq(eventDeliveries.id, delivery.id),
+      inArray(eventDeliveries.status, ["pending", "failed"]),
+      eq(eventDeliveries.nextAttemptAt, lease),
+    );
+    // Lease writes run one at a time. Two renewals that both read the same
+    // `lease` would race: one moves it, and the other misses the fence and
+    // reads as a lost lease although this run still owns the row.
+    let leaseWrites: Promise<unknown> = Promise.resolve();
+    const serialLeaseWrite = <T>(write: () => Promise<T>): Promise<T> => {
+      const next = leaseWrites.then(write);
+      leaseWrites = next.catch(() => {});
+      return next;
+    };
+    /** Move the lease to a new value, fenced on the current one. False when another run took the row. */
+    const takeLease = (set: Partial<typeof eventDeliveries.$inferInsert> = {}): Promise<boolean> => serialLeaseWrite(async () => {
+      // Jitter keeps two writes in the same millisecond from minting one value.
+      const next = Date.now() + CLAIM_LEASE_MS + Math.floor(Math.random() * 1000);
+      const moved = await db.update(eventDeliveries).set({ ...set, nextAttemptAt: next }).where(owned())
+        .returning({ id: eventDeliveries.id });
+      if (moved.length === 0) return false;
+      lease = next;
+      return true;
+    });
+    const finish = () => {
+      clearInterval(renew);
+      this.pluginRuns.delete(delivery.id);
+    };
+    /** True while a renewal tick runs. A slow tick makes the next ones skip, not pile up. */
+    let renewing = false;
+    const renew = setInterval(() => {
+      if (renewing) return;
+      renewing = true;
+      void (async () => {
+        const [line] = await db.select({ enabled: eventSubscriptions.enabled }).from(eventSubscriptions)
+          .where(eq(eventSubscriptions.id, sub.id)).limit(1);
+        if (!line?.enabled) {
+          abort.abort(PLUGIN_LINE_OFF);
+          return;
+        }
+        if (!(await takeLease())) abort.abort(await this.lostLeaseReason(delivery.id));
+      })()
+        .catch((err) => console.error(`plugin delivery ${delivery.id}: lease renewal failed:`, err))
+        .finally(() => { renewing = false; });
+    }, this.deps.pluginHandlers?.leaseRenewMs ?? CLAIM_LEASE_MS / 3);
+
+    void (async () => {
+      // Count the attempt when it starts, so a handler that crashes the
+      // process still uses up its retries instead of looping forever.
+      const attempts = delivery.attempts + 1;
+      if (attempts > BACKOFF_MS.length + 1) {
+        await db.update(eventDeliveries).set({ status: "dead", lastError: `The handler did not finish after ${attempts - 1} attempts.` }).where(owned());
+        return;
+      }
+      // Take the claim this poll made. A miss means another process
+      // re-claimed the row between the claim and here.
+      if (!(await takeLease({ attempts }))) return;
+      // `concurrency: "supersede"`: only the newest event per subject runs.
+      const superseding = this.supersedeSubject(target, event);
+      if (superseding) {
+        if (await this.newerSubjectDelivery(sub.id, event, superseding.subject)) {
+          await serialLeaseWrite(() => db.update(eventDeliveries)
+            .set({ status: "skipped", lastError: supersededText(superseding.label) }).where(owned()));
+          return;
+        }
+        const superseded = await this.supersedeOlder(sub.id, event, superseding);
+        for (const id of superseded) {
+          // Same process: stop now. Another process finds its row skipped at
+          // its next renewal and stops then.
+          this.pluginRuns.get(id)?.abort(PLUGIN_SUPERSEDED);
+        }
+        // Children of a superseded delivery stop even when no run holds it,
+        // such as one waiting to retry after a failed attempt.
+        if (superseded.length > 0) await this.deps.pluginHandlers?.stopDeliveryChildren(superseded);
+      }
+      // The outcome is decided after the run, abort reason first: a handler
+      // that ignores `ctx.signal` and returns normally after its line was
+      // turned off must not read as delivered.
+      let failure: { err: unknown } | undefined;
+      try {
+        await this.runPluginDelivery(delivery.id, event, sub, target, abort.signal, cancelChildren.signal);
+      } catch (err) {
+        failure = { err };
+      }
+      // No renewal may move the lease after this point: the outcome write
+      // below is fenced on the last value, so it waits for any write in flight.
+      clearInterval(renew);
+      await leaseWrites;
+      if (abort.signal.aborted && (abort.signal.reason === PLUGIN_LEASE_LOST || abort.signal.reason === PLUGIN_SUPERSEDED)) {
+        // Another run owns the row now, or the superseding run already
+        // marked it skipped; that outcome is the one that counts.
+      } else if (abort.signal.aborted && abort.signal.reason === PLUGIN_LINE_OFF) {
+        await db.update(eventDeliveries).set({ status: "skipped", lastError: "This line was turned off while its handler ran." }).where(owned());
+      } else if (abort.signal.aborted && this.stopped) {
+        // Shutdown is not the handler's fault. The lease lapses and a
+        // later process runs it again.
+      } else if (failure) {
+        await this.recordDeliveryFailure(delivery, event, failure.err, attempts, owned());
+      } else {
+        await db.update(eventDeliveries).set({ status: "delivered", deliveredAt: Date.now() }).where(owned());
+      }
+    })()
+      .catch((err) => console.error(`plugin delivery ${delivery.id}: outcome not recorded:`, err))
+      .finally(finish);
+  }
+
+  /** The loaded handler a plugin target names, or undefined. */
+  private pluginHandler(target: SubscriptionTarget): { plugin: ValetPlugin; handler: PluginEventHandler } | undefined {
+    const plugin = (this.deps.plugins ?? []).find((p) => p.name === target.plugin);
+    const handler = plugin?.eventHandlers?.find((h) => h.id === target.handler);
+    return plugin && handler ? { plugin, handler } : undefined;
+  }
+
+  /** The subject this run supersedes on, or null when the handler runs in parallel or the event has none. */
+  private supersedeSubject(target: SubscriptionTarget, event: typeof events.$inferSelect): { subject: string; label: string } | null {
+    if (this.pluginHandler(target)?.handler.concurrency !== "supersede") return null;
+    return this.naturalSubject(event);
+  }
+
+  /**
+   * Whether a newer event for `subject` already has a live or finished
+   * delivery on this line. Skipped deliveries do not count: a newer event
+   * the line skipped never ran.
+   */
+  private async newerSubjectDelivery(subscriptionId: string, event: typeof events.$inferSelect, subject: string): Promise<boolean> {
+    const rows = await this.subjectDeliveries(subscriptionId, subject, and(
+      inArray(eventDeliveries.status, ["pending", "failed", "delivered", "dead"]),
+      sql`(${events.occurredAt}, ${events.receivedAt}, ${events.id}) > (${event.occurredAt}, ${event.receivedAt}, ${event.id})`,
+    ));
+    return rows.length > 0;
+  }
+
+  /** Skip this line's unfinished deliveries of older events for the subject. Returns their ids. */
+  private async supersedeOlder(subscriptionId: string, event: typeof events.$inferSelect, subject: { subject: string; label: string }): Promise<string[]> {
+    const older = await this.subjectDeliveries(subscriptionId, subject.subject, and(
+      inArray(eventDeliveries.status, ["pending", "failed"]),
+      sql`(${events.occurredAt}, ${events.receivedAt}, ${events.id}) < (${event.occurredAt}, ${event.receivedAt}, ${event.id})`,
+    ));
+    if (older.length === 0) return [];
+    const rows = await this.deps.db.update(eventDeliveries)
+      .set({ status: "skipped", lastError: supersededText(subject.label) })
+      .where(and(inArray(eventDeliveries.id, older), inArray(eventDeliveries.status, ["pending", "failed"])))
+      .returning({ id: eventDeliveries.id });
+    return rows.map((r) => r.id);
+  }
+
+  /**
+   * This line's deliveries whose event has `subject` as its natural subject.
+   * The SQL prefilter only finds events that carry the subject; an event
+   * also carries broader subjects (a GitHub PR event names its repo too),
+   * so each candidate's own natural subject must equal `subject`. Otherwise
+   * a repo-level event would supersede every pull request in the repo.
+   */
+  private async subjectDeliveries(subscriptionId: string, subject: string, where: SQL | undefined): Promise<string[]> {
+    const candidates = await this.deps.db.select({ id: eventDeliveries.id, event: events })
+      .from(eventDeliveries)
+      .innerJoin(events, eq(events.id, eventDeliveries.eventId))
+      .where(and(eq(eventDeliveries.subscriptionId, subscriptionId), arrayContains(events.subjects, [subject]), where));
+    return candidates.filter((row) => this.naturalSubject(row.event)?.subject === subject).map((row) => row.id);
+  }
+
+  /** Why a renewal missed its fence: a superseding run skipped the row, or another run re-claimed it. */
+  private async lostLeaseReason(deliveryId: string): Promise<string> {
+    const [row] = await this.deps.db.select({ status: eventDeliveries.status }).from(eventDeliveries)
+      .where(eq(eventDeliveries.id, deliveryId)).limit(1);
+    return row?.status === "skipped" ? PLUGIN_SUPERSEDED : PLUGIN_LEASE_LOST;
+  }
+
+  private async runPluginDelivery(
+    deliveryId: string,
+    event: typeof events.$inferSelect,
+    sub: typeof eventSubscriptions.$inferSelect,
+    target: SubscriptionTarget,
+    signal: AbortSignal,
+    cancelChildren: AbortSignal,
+  ): Promise<void> {
+    const host = this.deps.pluginHandlers;
+    if (!host) throw new Error("Plugin handlers are not configured on this server. Restart the API with plugin handler support.");
+    const loaded = this.pluginHandler(target);
+    if (!loaded) {
+      throw new Error(`Plugin handler ${target.plugin}/${target.handler} is not loaded. Enable the plugin or delete this line.`);
+    }
+    const { plugin, handler } = loaded;
+    let config: Record<string, unknown> = {};
+    if (handler.configSchema) {
+      // Checked again here: the plugin's schema may have changed since the line was saved.
+      const checked = pluginHandlerConfig(handler.configSchema, target.config);
+      if (!checked.ok) {
+        throw new Error(`This line's settings do not match ${plugin.name}/${handler.id}: ${checked.error}. Edit the line's settings.`);
+      }
+      config = checked.args;
+    } else if (target.config !== undefined) {
+      throw new Error(`Handler ${plugin.name}/${handler.id} no longer takes settings. Remove the settings from this line.`);
+    }
+    if (sub.ownerType !== "user" && sub.ownerType !== "team") {
+      throw new Error("A plugin handler acts for a person or a team. Arm it from a personal or team workspace.");
+    }
+    const owner = { type: sub.ownerType, id: sub.ownerId } satisfies Principal;
+    if (!(await orgAllowsPluginForOwner(this.deps.db, sub.orgId, owner, plugin.name))) {
+      throw new Error(`Plugin ${plugin.name} is off for this workspace. An org admin can turn it on in Settings, or delete this line.`);
+    }
+    // The handler acts as the workspace that owns the line, as a workflow
+    // run does, not as the member who armed it.
+    const actorUserId = actorUserIdFor(owner);
+    const services = pluginServices(plugin);
+    const store = pluginStore(this.deps.db, plugin.name);
+    await handler.handle(
+      {
+        id: event.id,
+        key: event.eventKey,
+        dedupeKey: event.dedupeKey,
+        occurredAt: new Date(event.occurredAt).toISOString(),
+        // Written by ingest from NormalizedEvent; same narrowing as `refs` above.
+        ...(event.actor ? { actor: event.actor as NonNullable<PluginEvent["actor"]> } : {}),
+        refs: event.refs as Record<string, string>,
+        summary: event.summary,
+        payload: event.payload,
+        ...(event.subjects ? { subjects: event.subjects } : {}),
+      },
+      {
+        orgId: sub.orgId,
+        owner,
+        actorUserId,
+        threads: host.threads({ plugin, orgId: sub.orgId, owner, actorUserId, deliveryId, signal, cancelChildren }),
+        config,
+        store: owner.type === "team" ? store.team(owner.id) : store.user(owner.id),
+        memory: buildPluginMemory(this.deps.db, owner, actorUserId, sub.orgId),
+        appToken: async (service, scope) => {
+          if (!services.has(service)) {
+            throw new Error(`Plugin ${plugin.name} did not declare service ${service}. Declare a credential for it in the plugin manifest.`);
+          }
+          return host.appToken(sub.orgId, service, scope);
+        },
+        signal,
+      },
+    );
   }
 
   /** The event's natural subject from the plugin that owns its service, or null (spec Part D). */
@@ -881,7 +1244,7 @@ export class EventDispatcher {
     try {
       await end({ waiterId, sessionId: landed.sessionId, threadId: landed.threadId });
     } catch (err) {
-      console.error(`event dispatch: ending waiter ${waiterId} after its redirect delivery failed; it stays running:`, err);
+      reportError({ area: "events", reason: "waiter_redirect_end" }, `event dispatch: ending waiter ${waiterId} after its redirect delivery failed; it stays running`, err);
     }
   }
 

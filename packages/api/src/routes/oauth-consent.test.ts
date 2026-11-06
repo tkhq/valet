@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { oauthAccessToken, verification } from "../schema/index.js";
 import { seedMcpConsent } from "../integration/_mcp-consent.js";
+import { bootstrapAdminInviteCode } from "../test-helpers/bootstrap-admin-code.js";
 
 let api: TestApi | undefined;
 afterEach(async () => {
@@ -31,7 +32,7 @@ async function setup() {
   const signUp = await fetch(`${testApi.baseUrl}/api/auth/sign-up/email`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: "Consent User", email: "consent@nowhere.test", password: "correct-horse-battery" }),
+    body: JSON.stringify({ name: "Consent User", email: "consent@nowhere.test", password: "correct-horse-battery", inviteCode: await bootstrapAdminInviteCode(testApi.providers.db) }),
   });
   expect(signUp.status).toBe(200);
   const cookie = sessionCookie(signUp.headers.get("set-cookie"));

@@ -70,7 +70,7 @@ import { EXEC_ID_PATTERN, newExecId } from "@valet/engine/wakeups-ids";
 import { HOME_LAYOUT_VERSION } from "./home-persistence.js";
 import type * as k8s from "@kubernetes/client-node";
 import { setHeaderOptions } from "@kubernetes/client-node";
-import { formatSandboxErrorCause, isSandboxTransportError, SandboxEvictedError, SandboxStartupError, recordSandboxWorkspaceGrow } from "@valet/engine";
+import { formatSandboxErrorCause, isSandboxTransportError, SandboxEvictedError, SandboxStartupError, recordSandboxWorkspaceGrow, reportError } from "@valet/engine";
 import type {
   ExecJobHandle,
   ExecOpts,
@@ -144,7 +144,7 @@ import {
   NEVER_READY_OWNER_ANNOTATION_KEY,
 } from "./manifest.js";
 import type { K8sProviderConfig, SandboxCRRead } from "./types.js";
-import { deleteRuntimeState, ensureRuntimeState, listRuntimeStateOwners, RUNTIME_STATE_ANNOTATION, type RuntimeStateApi } from "./runtime-state.js";
+import { deleteRuntimeState, ensureRuntimeState, listRuntimeStateOwners, readRuntimeStateOwner, RUNTIME_STATE_ANNOTATION, type RuntimeStateApi } from "./runtime-state.js";
 import {
   growWorkspacePvc,
   parseStorageQuantity,
@@ -965,6 +965,39 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     return rows;
   }
 
+  /** The session's runtime-state claim names its browser sandbox, so one
+   * claim read replaces a fleet listing. The claim exists for every sandbox
+   * that holds browser state (`ensureRuntimeState` runs before the CR). */
+  async listBrowserForSession(sessionId: string): Promise<SandboxListing[]> {
+    if (!this.deps.runtimeStateApi) return [];
+    const owner = await readRuntimeStateOwner(this.deps.runtimeStateApi, this.cfg.namespace, sessionId);
+    if (!owner) return [];
+    const row = await this.describe(owner.sandboxId);
+    return [row ?? { id: owner.sandboxId, sessionId, browserEnabled: true, createdAtMs: null }];
+  }
+
+  /** One CR and its runtime-state claim, with the same ownership rules as `list()`. */
+  async describe(id: string): Promise<SandboxListing | null> {
+    const cr = await getSandbox(this.deps.objectsApi, this.cfg, id);
+    const owners = this.deps.runtimeStateApi ? await listRuntimeStateOwners(this.deps.runtimeStateApi, this.cfg.namespace, id) : [];
+    if (!cr && owners.length === 0) return null;
+    const annotations = cr?.metadata.annotations;
+    let sessionId = annotations?.[SESSION_ANNOTATION_KEY] ?? null;
+    for (const owner of owners) {
+      if (sessionId !== null && sessionId !== owner.sessionId) {
+        throw new Error("The browser volume and sandbox have different session owners. Restore matching ownership before changing this session.");
+      }
+      sessionId = owner.sessionId;
+    }
+    const createdAtMs = cr?.metadata.creationTimestamp ? Date.parse(cr.metadata.creationTimestamp) : Number.NaN;
+    return {
+      id,
+      sessionId,
+      browserEnabled: owners.length > 0 || Boolean(annotations?.[RUNTIME_STATE_ANNOTATION]),
+      createdAtMs: Number.isNaN(createdAtMs) ? null : createdAtMs,
+    };
+  }
+
   /** Upsert-shaped (decision 5, NON-NEGOTIABLE): `applySandbox` adopts an
    * existing CR of the same name rather than erroring, so the attachment
    * layer's failure-recovery path (which calls `create()` again with the
@@ -1028,16 +1061,14 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     // Upsert creds Secret BEFORE applying the Sandbox CR — the pod scheduler
     // reads the volume reference at start; the Secret must exist first.
     if (opts.credsFiles && Object.keys(opts.credsFiles).length > 0 && !this.deps.secretsApi) {
-      console.error(
-        `k8s sandbox ${name}: credsFiles provided but secretsApi is not wired — creds mount will be empty`,
-      );
+      reportError({ area: "sandbox", reason: "creds_secret_unwired", provider: "kubernetes" }, `k8s sandbox ${name}: credsFiles provided but secretsApi is not wired — creds mount will be empty`);
     }
     if (this.deps.secretsApi && opts.credsFiles && Object.keys(opts.credsFiles).length > 0) {
       try {
         await this.deps.secretsApi.upsertSecret(this.cfg.namespace, credsSecretName(name), opts.credsFiles);
       } catch (error) {
         await rollbackUnownedRuntimeState().catch((cleanupError) => {
-          console.error(`k8s sandbox ${name}: browser volume rollback after credential failure failed:`, cleanupError);
+          reportError({ area: "sandbox", reason: "browser_volume_rollback", provider: "kubernetes" }, `k8s sandbox ${name}: browser volume rollback after credential failure failed`, cleanupError);
         });
         throw error;
       }
@@ -1091,7 +1122,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       });
     } catch (error) {
       await rollbackUnownedRuntimeState().catch((cleanupError) => {
-        console.error(`k8s sandbox ${name}: browser volume rollback after apply failure failed:`, cleanupError);
+        reportError({ area: "sandbox", reason: "browser_volume_rollback", provider: "kubernetes" }, `k8s sandbox ${name}: browser volume rollback after apply failure failed`, cleanupError);
       });
       throw error;
     }
@@ -1102,7 +1133,8 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     // sandbox between sessions and the reconcile sweep then attributes it to
     // the wrong owner. Surface it — this is a signal, not a repair (TKAI-402).
     if (adopted && previousSession !== undefined && opts.sessionId !== undefined && previousSession !== opts.sessionId) {
-      console.warn(
+      reportError(
+        { area: "sandbox", reason: "shared_workspace_adopt", provider: "kubernetes", level: "warn" },
         `k8s sandbox ${name}: adopted by session ${opts.sessionId} but previously owned by session ${previousSession} — ` +
           "two sessions share one workspace string; the sandbox and its volume now serve the new session",
       );
@@ -1290,7 +1322,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         await this.destroy(name).then(
           () => { destroyed = true; },
           (cleanupErr) => {
-            console.error(`k8s sandbox ${name}: CR cleanup after failed create failed:`, cleanupErr);
+            reportError({ area: "sandbox", reason: "cr_cleanup", provider: "kubernetes" }, `k8s sandbox ${name}: CR cleanup after failed create failed`, cleanupErr);
           },
         );
         // Spec 8.2: do not hand control back while the pod and PVC we just
@@ -1325,7 +1357,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         : false;
       if (!podPresent && !pvcPresent) return true;
       if (Date.now() >= deadline) {
-        console.warn(`k8s sandbox ${name}: pod or PVC still present after ${timeoutMs}ms; continuing`);
+        reportError({ area: "sandbox", reason: "destroy_timeout", provider: "kubernetes", level: "warn" }, `k8s sandbox ${name}: pod or PVC still present after ${timeoutMs}ms; continuing`);
         return false;
       }
       await sleep(RESOURCE_GONE_POLL_MS);
@@ -1478,7 +1510,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       const cr = await getSandbox(this.deps.objectsApi, this.cfg, id);
       await this.adoptCredsSecret(id, cr?.metadata.uid);
     } catch (err) {
-      console.error(`k8s sandbox ${id}: updateCreds ownerReference adopt failed (non-fatal)`, err);
+      reportError({ area: "sandbox", reason: "creds_owner_adopt", provider: "kubernetes" }, `k8s sandbox ${id}: updateCreds ownerReference adopt failed (non-fatal)`, err);
     }
   }
 
@@ -1499,7 +1531,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         uid,
       });
     } catch (err) {
-      console.error(`k8s sandbox ${crName}: creds Secret ownerReference patch failed (non-fatal)`, err);
+      reportError({ area: "sandbox", reason: "creds_owner_patch", provider: "kubernetes" }, `k8s sandbox ${crName}: creds Secret ownerReference patch failed (non-fatal)`, err);
     }
   }
 

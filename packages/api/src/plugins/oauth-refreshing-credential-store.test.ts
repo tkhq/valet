@@ -128,6 +128,62 @@ describe("OAuthRefreshingCredentialStore", () => {
     expect((await inner.get(OWNER, "linear"))?.accessToken).toBe("at-new"); // persisted
   });
 
+  describe("after a scope change re-registers the service", () => {
+    // A scope change registers client-2 and stores it in place of client-1.
+    // The refresh token was issued to client-1, and the fake server refuses
+    // it from any other client, as a real one does.
+    async function reRegistered(metadata?: Record<string, unknown>) {
+      await seedMcpClient();
+      fake.refreshTokenClients.set("rt-old", "client-1");
+      await testDb.appDb.update(mcpOauthClients).set({ clientId: "client-2", updatedAt: NOW });
+      const inner = memoryStore();
+      await inner.save(OWNER, "linear", {
+        type: "oauth2", accessToken: "stale", refreshToken: "rt-old", expiresAt: NOW - 1, ...(metadata ? { metadata } : {}),
+      });
+      fake.tokenResponse = { access_token: "at-new", refresh_token: "rt-new", expires_in: 3600 };
+      const store = new OAuthRefreshingCredentialStore(inner, { db: testDb.appDb, plugins: mcpPlugins(), env: {}, now: () => NOW });
+      return { inner, store };
+    }
+
+    it("refreshes with the client that issued the tokens and stays healthy", async () => {
+      const metadata = { connectedVia: "oauth", oauthClientId: "client-1", oauthTokenEndpoint: `${fake.url}/token` };
+      const { inner, store } = await reRegistered(metadata);
+
+      const got = await store.get(OWNER, "linear");
+      expect(fake.tokenRequests[0]).toMatchObject({ grant_type: "refresh_token", refresh_token: "rt-old", client_id: "client-1" });
+      expect(got).toMatchObject({ accessToken: "at-new", refreshToken: "rt-new", metadata });
+      expect(got && isUnusableOAuthCredential(got, NOW)).toBe(false);
+      // The rotated token stays with its issuing client for the next refresh.
+      expect((await inner.get(OWNER, "linear"))?.metadata).toEqual(metadata);
+    });
+
+    it("refreshes a credential with no recorded client with the stored client, as before", async () => {
+      const { store } = await reRegistered({ connectedVia: "oauth" });
+
+      const got = await store.get(OWNER, "linear");
+      expect(fake.tokenRequests[0]).toMatchObject({ grant_type: "refresh_token", client_id: "client-2" });
+      expect(got?.metadata).toMatchObject({ refreshRefused: true });
+      expect(got?.metadata).not.toHaveProperty("oauthClientId");
+    });
+  });
+
+  it("records the stored client on a credential with no record once a refresh with it succeeds", async () => {
+    await seedMcpClient();
+    fake.refreshTokenClients.set("rt-old", "client-1");
+    const inner = memoryStore();
+    await inner.save(OWNER, "linear", {
+      type: "oauth2", accessToken: "stale", refreshToken: "rt-old", expiresAt: NOW + 30_000, metadata: { connectedVia: "oauth" },
+    });
+    fake.tokenResponse = { access_token: "at-new", expires_in: 3600 };
+    const store = new OAuthRefreshingCredentialStore(inner, { db: testDb.appDb, plugins: mcpPlugins(), env: {}, now: () => NOW });
+
+    await store.get(OWNER, "linear");
+    expect(fake.tokenRequests[0]).toMatchObject({ client_id: "client-1" });
+    expect((await inner.get(OWNER, "linear"))?.metadata).toEqual({
+      connectedVia: "oauth", oauthClientId: "client-1", oauthTokenEndpoint: `${fake.url}/token`,
+    });
+  });
+
   it("stamps metadata.refreshFailedAt and returns the stamped credential on refresh failure", async () => {
     await seedMcpClient();
     const inner = memoryStore();
@@ -174,7 +230,7 @@ describe("OAuthRefreshingCredentialStore", () => {
     });
     const store = new OAuthRefreshingCredentialStore(inner, { db: testDb.appDb, plugins: mcpPlugins(), env: {}, now: () => NOW });
     await store.get(OWNER, "linear");
-    expect((await inner.get(OWNER, "linear"))?.metadata).toBeUndefined();
+    expect((await inner.get(OWNER, "linear"))?.metadata).toEqual({ oauthClientId: "client-1", oauthTokenEndpoint: `${fake.url}/token` });
   });
 
   it("masks token fields in form and JSON shapes and caps the length", () => {

@@ -18,6 +18,10 @@ import type {
   ListBakeQueueResponse,
   CreateSourceResponse,
   ListBakesResponse,
+  ListSourceChangesResponse,
+  PendingSourceChangeResponse,
+  ResolveSourceChangeResponse,
+  SourceChangeSummary,
   ListSourcesResponse,
   PatchSourceResponse,
   SourceSummary,
@@ -31,6 +35,7 @@ export const qkSources = {
   all: () => ["sources"] as const,
   queue: () => ["sources", "queue"] as const,
   bakes: (sourceId: string) => ["sources", sourceId, "bakes"] as const,
+  changes: () => ["sources", "changes"] as const,
 };
 
 // ── Read hooks ───────────────────────────────────────────────────────────────
@@ -77,7 +82,7 @@ export function useSourceBakes(sourceId: string, opts?: { enabled?: boolean }) {
  * `name`+`setupCommands`). The server validates kind-scoped fields. */
 export function useCreateSource() {
   const qc = useQueryClient();
-  return useMutation<CreateSourceResponse, Error, Record<string, unknown>>({
+  return useMutation<CreateSourceResponse | PendingSourceChangeResponse, Error, Record<string, unknown>>({
     mutationFn: (body) => api.createSource(body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkSources.all() });
@@ -87,7 +92,7 @@ export function useCreateSource() {
 
 export function usePatchSource() {
   const qc = useQueryClient();
-  return useMutation<PatchSourceResponse, Error, { id: string; body: Record<string, unknown> }>({
+  return useMutation<PatchSourceResponse | PendingSourceChangeResponse, Error, { id: string; body: Record<string, unknown> }>({
     mutationFn: ({ id, body }) => api.patchSource(id, body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkSources.all() });
@@ -116,5 +121,25 @@ export function useBakeSource() {
   });
 }
 
+/** Image-source changes that wait for a second org admin. */
+export function useSourceChanges() {
+  return useQuery<ListSourceChangesResponse>({
+    queryKey: qkSources.changes(),
+    queryFn: () => api.listSourceChanges(),
+    refetchInterval: 15_000,
+  });
+}
+
+export function useResolveSourceChange() {
+  const qc = useQueryClient();
+  return useMutation<ResolveSourceChangeResponse, Error, { id: string; decision: "approve" | "reject" | "withdraw" }>({
+    mutationFn: ({ id, decision }) =>
+      decision === "approve" ? api.approveSourceChange(id) : decision === "reject" ? api.rejectSourceChange(id) : api.withdrawSourceChange(id),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: qkSources.all() });
+    },
+  });
+}
+
 // Re-export wire types so callers can import from one place.
-export type { BakeQueueItem, ListBakeQueueResponse, SourceSummary, BakeSummary, ListSourcesResponse, ListBakesResponse };
+export type { BakeQueueItem, ListBakeQueueResponse, SourceSummary, BakeSummary, ListSourcesResponse, ListBakesResponse, SourceChangeSummary };

@@ -121,8 +121,8 @@ describe("handleFollowedMessage", () => {
     // Read persisted queue metadata after all four admissions. Editing the
     // rule must not rewrite earlier turns or retain removed avatar fields.
     for (const [eventId, expected] of [
-      ["presence-first", { [MID_TURN_DELIVERY_KEY]: true, presence: first }],
-      ["presence-edited", { [MID_TURN_DELIVERY_KEY]: true, presence: edited }],
+      ["presence-first", { presence: first, [MID_TURN_DELIVERY_KEY]: true }],
+      ["presence-edited", { presence: edited, [MID_TURN_DELIVERY_KEY]: true }],
       ["presence-unbound", { [MID_TURN_DELIVERY_KEY]: true }],
       ["presence-cleared", { [MID_TURN_DELIVERY_KEY]: true }],
     ] as const) {

@@ -14,12 +14,16 @@ vi.mock("~/lib/workspace-scope", () => ({
   useWorkspaceScope: () => ({ key: "team_1", teamId: "team_1", available: ["user", "team_1"], setKey: vi.fn() }),
 }));
 
+vi.mock("~/api/integrations", async (importOriginal) => ({
+  ...await importOriginal<typeof import("~/api/integrations")>(),
+  usePlugins: () => ({ data: { plugins: [] }, isLoading: false, error: null }),
+}));
 vi.mock("~/api/settings", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/settings")>();
   return {
     ...actual,
     useOrg: () => ({
-      data: { callerRole: "admin", features: { organizations: true } },
+      data: { callerRole: "admin", features: { organizations: true }, plugins: [] },
       isLoading: false,
       error: null,
     }),

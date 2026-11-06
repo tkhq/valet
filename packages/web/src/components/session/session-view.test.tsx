@@ -82,11 +82,12 @@ vi.mock("./session-header", () => ({
     <div data-testid="full-header"><button aria-label="Thread menu">Menu</button>{session.title}{summaryControl}{onOpenView && <button onClick={() => onOpenView("browser")}>Open browser</button>}</div>
   ),
 }));
-vi.mock("./thread-context-panel", () => ({ ThreadContextPanel: () => <div>Thread summary contents</div> }));
+vi.mock("./thread-context-panel", () => ({ ThreadContextPanel: ({ onCreate, onReveal }: { onCreate: () => void; onReveal: (messageId: string) => void }) =>
+  <div>Thread summary contents<button onClick={onCreate}>Create a file or site</button><button onClick={() => onReveal("m1")}>Show m1</button></div> }));
 vi.mock("./message-list", () => ({ MessageList: ({ header }: { header?: ReactNode }) =>
-  <div data-testid="message-list" data-can-reply={Boolean(useThreadReplyTarget())}>{header}</div> }));
+  <div data-testid="message-list" data-can-reply={Boolean(useThreadReplyTarget())}>{header}<div data-message-id="m1" /></div> }));
 // The stub renders the status line slot, so the background work line shows.
-vi.mock("./composer", () => ({ Composer: ({ statusLine }: { statusLine?: ReactNode }) => <div data-testid="composer">{statusLine}</div> }));
+vi.mock("./composer", () => ({ Composer: ({ statusLine }: { statusLine?: ReactNode }) => <div data-testid="composer">{statusLine}<textarea aria-label="Message" /></div> }));
 vi.mock("./decision-gate-card", () => ({ DecisionGateCard: () => null }));
 
 vi.mock("./browser/browser-overlay", () => ({ BrowserOverlay: ({ minimized, onMinimize, onRestore, onClose, onExpand }: {
@@ -194,6 +195,46 @@ describe("SessionView header chrome", () => {
     expect((await screen.findByRole("region", { name: "Full browser" })).getAttribute("data-compact")).toBe("true");
     fireEvent.click(screen.getByRole("button", { name: "Back to chat" }));
     expect(screen.getByTestId("composer")).toBeTruthy();
+  });
+
+  it("opens the summary as a bottom sheet on a phone, and a swipe down closes it", async () => {
+    mobileLayout = true;
+    const { MobileConversationLayout } = await import("~/components/home/mobile-conversation-layout");
+    renderComponent(() => <MobileConversationLayout view="chat" onViewChange={() => {}}><SessionView sessionId="sess-1" activeThreadId="t1" panel hidePanelHeader chatOnly sharedConversationChrome /></MobileConversationLayout>);
+    fireEvent.click(await screen.findByRole("button", { name: "Toggle summary" }));
+    const sheet = await screen.findByRole("dialog", { name: "Thread summary" });
+    expect(sheet.textContent).toContain("Thread summary contents");
+    expect(sheet.className).toContain("bottom-0");
+    // The dialog's scroll lock reads both touch lists, so each event carries both.
+    const start = [{ clientX: 100, clientY: 100 }];
+    const end = [{ clientX: 104, clientY: 220 }];
+    fireEvent.touchStart(sheet, { touches: start, changedTouches: start });
+    fireEvent.touchEnd(sheet, { touches: [], changedTouches: end });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Thread summary" })).toBeNull());
+  });
+
+  it("closes the phone summary sheet before Create a file or site focuses the composer", async () => {
+    mobileLayout = true;
+    const { MobileConversationLayout } = await import("~/components/home/mobile-conversation-layout");
+    renderComponent(() => <MobileConversationLayout view="chat" onViewChange={() => {}}><SessionView sessionId="sess-1" activeThreadId="t1" panel hidePanelHeader chatOnly sharedConversationChrome /></MobileConversationLayout>);
+    fireEvent.click(await screen.findByRole("button", { name: "Toggle summary" }));
+    fireEvent.click(within(await screen.findByRole("dialog", { name: "Thread summary" })).getByRole("button", { name: "Create a file or site" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Thread summary" })).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Message" })));
+  });
+
+  it("closes the phone summary sheet before revealing a message in the transcript", async () => {
+    mobileLayout = true;
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    const { MobileConversationLayout } = await import("~/components/home/mobile-conversation-layout");
+    renderComponent(() => <MobileConversationLayout view="chat" onViewChange={() => {}}><SessionView sessionId="sess-1" activeThreadId="t1" panel hidePanelHeader chatOnly sharedConversationChrome /></MobileConversationLayout>);
+    fireEvent.click(await screen.findByRole("button", { name: "Toggle summary" }));
+    fireEvent.click(within(await screen.findByRole("dialog", { name: "Thread summary" })).getByRole("button", { name: "Show m1" }));
+    // The scroll waits until the sheet has closed.
+    expect(scrolled).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Thread summary" })).toBeNull());
+    await waitFor(() => expect(scrolled).toHaveBeenCalledWith({ behavior: "smooth", block: "center" }));
   });
 
   it("keeps embedded panel close controls on a phone", async () => {

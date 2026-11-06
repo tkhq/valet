@@ -12,6 +12,7 @@
 import type { PluginHttpRequest } from "@valet/engine";
 import type { GithubConnectionCapability, GithubEndpoints } from "./capabilities.js";
 import { isRecord, json, noContent, queryParam, redirect } from "./respond.js";
+import { reportError } from "@valet/engine";
 
 const NO_APP = "no GitHub App is configured for this organization; ask an admin to set it up first";
 
@@ -82,7 +83,7 @@ export async function connectCallback(
       body: JSON.stringify({ client_id: client.clientId, client_secret: client.clientSecret, code }),
     });
   } catch (err) {
-    console.error("github connect callback: token exchange request failed:", err);
+    reportError({ area: "plugins", reason: "github_token_exchange", provider: "github" }, "github connect callback: token exchange request failed", err);
     return json({ error: "failed to reach GitHub" }, 502);
   }
   if (!tokenRes.ok) {
@@ -109,7 +110,7 @@ export async function connectCallback(
       },
     });
   } catch (err) {
-    console.error("github connect callback: GET /user request failed:", err);
+    reportError({ area: "plugins", reason: "github_user_lookup", provider: "github" }, "github connect callback: GET /user request failed", err);
     return json({ error: "failed to reach GitHub" }, 502);
   }
   if (!userRes.ok) {

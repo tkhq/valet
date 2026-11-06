@@ -104,6 +104,54 @@ describe("file_attach", () => {
     expect(await readGeneratedFile(api!.providers.db, reopened, { orgId: "other-org", sessionId: "session", threadId: "thread" }, id)).toBeNull();
   });
 
+  it("stores a chart image as an inline image with its alt text, and names the Slack post in a Slack turn", async () => {
+    directory = await mkdtemp(join(tmpdir(), "generated-files-"));
+    const tool = buildFileAttachTool(api!.providers.db, new FsBlobStore(directory), "https://valet.example");
+    const sandbox = await testSandbox();
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+    // The extension is wrong; the bytes decide the stored type.
+    await sandbox.writeBinary("/workspace/charts/signups.dat", png);
+    const web = await tool.execute({ path: "/workspace/charts/signups.dat", alt: "Signups by week", title: "Signups" }, context(sandbox));
+    expect(JSON.parse(web.text)).toMatchObject({ mimeType: "image/png", alt: "Signups by week", title: "Signups", shown: expect.stringContaining("inline") });
+    const slackTurn = { ...context(sandbox, "session", "thread-slack"), origin: { channelType: "slack", threadKey: "slack:C1:1.2" } };
+    const slack = JSON.parse((await tool.execute({ path: "/workspace/charts/signups.dat", alt: "Signups by week" }, slackTurn)).text);
+    expect(slack.slack).toBe(`This chat preview does not reach Slack. Post the image with call_tool slack.reply_file_to_origin { file_id: "${slack.id}", alt_text, title }.`);
+    expect(slack.shown).toBeUndefined();
+  });
+
+  it.each([
+    ["HTML named like a PNG", "/workspace/report.png", "<html>not an image</html>"],
+    ["an SVG with a script", "/workspace/chart.svg", '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'],
+  ])("stores %s as a plain download, not an inline image", async (_label, path, text) => {
+    directory = await mkdtemp(join(tmpdir(), "generated-files-"));
+    const sandbox = await testSandbox();
+    await sandbox.writeFile(path, text);
+    const result = await buildFileAttachTool(api!.providers.db, new FsBlobStore(directory)).execute({ path, alt: "A chart" }, context(sandbox));
+    const output = JSON.parse(result.text);
+    expect(output.mimeType).toBe("application/octet-stream");
+    expect(output.alt).toBeUndefined();
+    expect(output.shown).toBeUndefined();
+  });
+
+  it("stores a well-formed SVG as an inline image", async () => {
+    directory = await mkdtemp(join(tmpdir(), "generated-files-"));
+    const sandbox = await testSandbox();
+    await sandbox.writeFile("/workspace/flow.svg", '<svg xmlns="http://www.w3.org/2000/svg"><rect width="4" height="4"/></svg>');
+    const result = await buildFileAttachTool(api!.providers.db, new FsBlobStore(directory)).execute({ path: "/workspace/flow.svg", alt: "Flow" }, context(sandbox));
+    expect(JSON.parse(result.text)).toMatchObject({ mimeType: "image/svg+xml", alt: "Flow" });
+  });
+
+  it("keeps the alt text off a file that is not an image", async () => {
+    directory = await mkdtemp(join(tmpdir(), "generated-files-"));
+    const sandbox = await testSandbox();
+    await sandbox.writeBinary("/workspace/report.pdf", bytes);
+    const result = await buildFileAttachTool(api!.providers.db, new FsBlobStore(directory)).execute({ path: "/workspace/report.pdf", alt: "ignored" }, context(sandbox));
+    const output = JSON.parse(result.text);
+    expect(output).toMatchObject({ mimeType: "application/pdf" });
+    expect(output.alt).toBeUndefined();
+    expect(output.shown).toBeUndefined();
+  });
+
   it("rejects oversized files before reading and checks the bytes after a file changes", async () => {
     directory = await mkdtemp(join(tmpdir(), "generated-files-"));
     const tool = buildFileAttachTool(api!.providers.db, new FsBlobStore(directory));

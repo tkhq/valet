@@ -6,7 +6,7 @@
  * `middleware/auth.ts`), so any row seeded under another org id is
  * "cross-org" from every test request's point of view.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterAll, afterEach, beforeAll, beforeEach, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { serve, type ServerType } from "@hono/node-server";
 import { Hono } from "hono";
@@ -30,6 +30,16 @@ import type {
   PutLlmProviderKeyResponse,
   TestLlmProviderResponse,
 } from "../wire/types.js";
+
+// The upstream fixtures listen on loopback. The SSRF guard allows them only
+// through the operator allowlist, the same path a self-hosted endpoint uses.
+beforeAll(() => {
+  vi.stubEnv("VALET_OUTBOUND_URL_ALLOWLIST", "127.0.0.1");
+});
+afterAll(() => {
+  vi.unstubAllEnvs();
+});
+
 
 /** Tiny `/v1/models`-shaped fixture server (pattern: `packages/sandbox-gateway/test/fake-backend.ts`) —
  * a real HTTP server on port 0 the probe route hits instead of a live upstream. */
@@ -1150,5 +1160,123 @@ describe("GET /api/org/llm-providers/openrouter/models (live ∪ registry)", () 
     expect(patchRes.status).toBe(200);
     const patched = (await patchRes.json()) as CreateLlmProviderResponse;
     expect(patched.models).toEqual([{ id: "moonshotai/kimi-k2.6", name: "Kimi K2.6" }]);
+  });
+});
+
+describe("SSRF guard on custom provider base URLs", () => {
+  // These tests run with the loopback fixture allowlist removed, so the
+  // guard sees the same policy as a default deploy.
+  beforeEach(() => {
+    vi.stubEnv("VALET_OUTBOUND_URL_ALLOWLIST", "");
+  });
+  afterEach(() => {
+    vi.stubEnv("VALET_OUTBOUND_URL_ALLOWLIST", "127.0.0.1");
+  });
+
+  async function createCustomProvider(base: string, providerBaseUrl: string): Promise<CreateLlmProviderResponse> {
+    const res = await fetch(`${base}/api/org/llm-providers`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ kind: "openai_compatible", name: "Custom", baseUrl: providerBaseUrl }),
+    });
+    expect(res.status).toBe(201);
+    return (await res.json()) as CreateLlmProviderResponse;
+  }
+
+  // The targets seen on 2026-11-02: cloud metadata, loopback ports, a
+  // private address, the Kubernetes API, and a cluster service name.
+  const REFUSED = [
+    "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+    "http://127.0.0.1:80/v1",
+    "https://127.0.0.1:443/v1",
+    "http://127.0.0.1:3000/v1",
+    "http://127.0.0.1:8080/v1",
+    "http://localhost:8080/v1",
+    "http://10.0.0.1/v1",
+    "https://kubernetes.default.svc/api/v1/secrets",
+    "http://ecr-proxy.valet.svc.cluster.local:5000/v2",
+    "http://[::ffff:169.254.169.254]/v1",
+  ];
+
+  it.each(REFUSED)("refuses %s on create and stores nothing", async (baseUrl) => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ kind: "openai_compatible", name: "Internal", baseUrl }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/^baseUrl is refused\. /);
+    expect(body.error).toContain("VALET_OUTBOUND_URL_ALLOWLIST");
+    expect(await api.providers.db.select().from(llmProviders)).toEqual([]);
+  });
+
+  it("refuses an internal base URL on PATCH and keeps the stored one", async () => {
+    api = await bootTestApi();
+    const created = await createCustomProvider(api.baseUrl, "https://api.example.com/v1");
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}`, {
+      method: "PATCH",
+      headers: HEADERS,
+      body: JSON.stringify({ baseUrl: "http://169.254.169.254/latest/" }),
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toMatch(/169\.254\.169\.254, a private, loopback, link-local, or internal address/);
+    const [row] = await api.providers.db.select().from(llmProviders).where(eq(llmProviders.id, created.id));
+    expect(row?.baseUrl).toBe("https://api.example.com/v1");
+  });
+
+  it("accepts a loopback endpoint that the operator allowlisted", async () => {
+    vi.stubEnv("VALET_OUTBOUND_URL_ALLOWLIST", "127.0.0.1");
+    api = await bootTestApi();
+    const created = await createCustomProvider(api.baseUrl, "http://127.0.0.1:8000/v1");
+    expect(created.baseUrl).toBe("http://127.0.0.1:8000/v1");
+  });
+
+  /** A row saved before the guard existed, or written by instance config. */
+  async function insertStaleRow(t: TestApi, baseUrl: string): Promise<string> {
+    const id = "prov_stale_internal";
+    await t.providers.db.insert(llmProviders).values({
+      id,
+      orgId: "local-org",
+      kind: "openai_compatible",
+      name: "Stale internal",
+      baseUrl,
+      enabled: true,
+      models: [{ id: "m1", name: "M1" }],
+      createdAt: Date.now(),
+    });
+    await t.providers.engineCredentials.save({ type: "org", id: "local-org" }, `llm:${id}`, { type: "api_key", apiKey: "sk-stale-secret" });
+    return id;
+  }
+
+  it("refuses a probe of a stored internal base URL without sending the key", async () => {
+    api = await bootTestApi();
+    const fake = startFakeModelsServer(() => ({ status: 200, body: { data: [{ id: "leak" }] } }));
+    try {
+      const id = await insertStaleRow(api, fake.baseUrl);
+      const res = await fetch(`${api.baseUrl}/api/org/llm-providers/${id}/probe`, { method: "POST", headers: HEADERS });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toMatch(/^baseUrl is refused\. /);
+      expect(body.error).not.toContain("sk-stale-secret");
+      expect(fake.lastAuthHeader()).toBeUndefined();
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it("fails the test button for a stored internal base URL with the refusal, not a transport error", async () => {
+    api = await bootTestApi();
+    const id = await insertStaleRow(api, "http://169.254.169.254/v1");
+    const res = await fetch(`${api.baseUrl}/api/org/llm-providers/${id}/test`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ modelId: "m1" }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as TestLlmProviderResponse;
+    expect(body.ok).toBe(false);
+    if (!body.ok) expect(body.error).toMatch(/has a refused base URL\. The URL points at 169\.254\.169\.254/);
   });
 });

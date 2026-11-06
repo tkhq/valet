@@ -33,11 +33,11 @@ import type { BakeQueueItem, ListBakeQueueResponse } from "../wire/types.js";
  */
 import { readCacheState } from "./cache-health.js";
 import { isPushFailure, probeRegistry, RegistryCapacityError } from "./registry-health.js";
-import { recordBakeHealth } from "./metrics.js";
+import { recordBakeHealth, recordBuiltInSourceRepair } from "./metrics.js";
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 
-import { and, desc, eq, gte, inArray, ne } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, ne } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import {
   imageSources,
@@ -103,7 +103,43 @@ export class PrebuildUnavailableError extends Error {
 /** Name marker for a repo-declared base layer's synthetic source (prebuild
  * `baseSetup` — see `ensureRepoBaseLayer`). */
 export function repoBaseSourceName(repoFullName: string): string {
-  return `repo-base:${repoFullName}`;
+  return `${REPO_BASE_SOURCE_PREFIX}${repoFullName}`;
+}
+
+const REPO_BASE_SOURCE_PREFIX = "repo-base:";
+/** Name of the seeded `kind='external'` row for the deploy-pinned sandbox image. */
+export const STOCK_FULL_SOURCE_NAME = "stock-full";
+/** Name of the seeded `kind='base'`, `profile='full'` row. */
+export const DEFAULT_FULL_SOURCE_NAME = "default-full";
+
+/** Which code-managed role a source row has, or null for an admin-owned row. */
+export type BuiltInSourceKind = "stock-full" | "default-full" | "repo-base";
+
+/**
+ * Identifies the image sources that code owns. Uses the same keys that
+ * `seedDefaultBasesIfMissing` and `ensureRepoBaseLayer` use to find their
+ * rows: kind + name for stock-full, kind + profile for the full base, and the
+ * name prefix for a repo-declared base layer. Content of these rows comes
+ * from the deploy pin, from code, or from the repo's `.valet/prebuild.yaml`.
+ * The admin API must not change them: a changed setup command runs in every
+ * later bake and sandbox.
+ */
+export function builtInSourceKind(row: Pick<ImageSourceRow, "kind" | "name" | "profile">): BuiltInSourceKind | null {
+  if (row.kind === "external" && row.name === STOCK_FULL_SOURCE_NAME) return "stock-full";
+  if (row.kind === "base" && row.profile === "full") return "default-full";
+  if (row.kind === "base" && row.profile === null && row.name.startsWith(REPO_BASE_SOURCE_PREFIX)) return "repo-base";
+  return null;
+}
+
+/** True when an admin-created source with this name would shadow a built-in
+ * row that seeding or the repo base layer looks up by name. */
+export function isReservedSourceName(name: string): boolean {
+  const normalized = name.trim().toLowerCase();
+  return (
+    normalized === STOCK_FULL_SOURCE_NAME ||
+    normalized === DEFAULT_FULL_SOURCE_NAME ||
+    normalized.startsWith(REPO_BASE_SOURCE_PREFIX)
+  );
 }
 
 export class AnonymousImageBakesDisabledError extends Error {
@@ -1358,10 +1394,12 @@ export class SourceService {
   private async ensureRepoBaseLayer(source: ImageSourceRow, baseSetup: string[]): Promise<ImageSourceRow> {
     if (source.kind !== "repo") return source;
     const name = repoBaseSourceName(source.repoFullName ?? "");
+    // `profile IS NULL`: a legacy full base that happens to carry this name is
+    // the org's built-in base, and repository config must never write to it.
     const rows = await this.db
       .select()
       .from(imageSources)
-      .where(and(eq(imageSources.orgId, source.orgId), eq(imageSources.kind, "base"), eq(imageSources.name, name)))
+      .where(and(eq(imageSources.orgId, source.orgId), eq(imageSources.kind, "base"), eq(imageSources.name, name), isNull(imageSources.profile)))
       .limit(1);
     const synthetic = rows[0];
     const now = this.now();
@@ -2365,38 +2403,36 @@ export class SourceService {
 
     // Step 1 — ensure the stock-full external row exists.
     const existingExternal = await this.db
-      .select({ id: imageSources.id })
+      .select()
       .from(imageSources)
       .where(
         and(
           eq(imageSources.orgId, orgId),
           eq(imageSources.kind, "external"),
-          eq(imageSources.name, "stock-full"),
+          eq(imageSources.name, STOCK_FULL_SOURCE_NAME),
         ),
       )
       .limit(1);
 
     let stockFullId: string;
     if (existingExternal[0]) {
-      stockFullId = existingExternal[0].id;
+      const stockFull = existingExternal[0];
+      stockFullId = stockFull.id;
       // Follow deploy pin changes: when VALET_FULL_BASE_IMAGE moves to a new
       // tag, the external row must move with it or every org keeps baking
       // its full base FROM the stale CI image. The ref change moves the full
       // base's identity, so the nightly scheduler rebakes it on the new pin.
-      const currentRef = await this.db
-        .select({ externalRef: imageSources.externalRef })
-        .from(imageSources)
-        .where(eq(imageSources.id, stockFullId))
-        .limit(1);
-      if (currentRef[0] && currentRef[0].externalRef !== fullBaseImage) {
+      // A pin change is normal operation, so this logs at info level.
+      if (stockFull.externalRef !== fullBaseImage) {
         await this.db
           .update(imageSources)
           .set({ externalRef: fullBaseImage, updatedAt: now })
           .where(eq(imageSources.id, stockFullId));
         console.log(
-          `seedDefaultBasesIfMissing(${orgId}): stock-full ref ${currentRef[0].externalRef} → ${fullBaseImage}`,
+          `seedDefaultBasesIfMissing(${orgId}): stock-full ref ${stockFull.externalRef} → ${fullBaseImage}`,
         );
       }
+      await this.repairStockFull(stockFull, orgId);
     } else {
       stockFullId = `src_${this.newId()}`;
       await this.db.insert(imageSources).values({
@@ -2404,7 +2440,7 @@ export class SourceService {
         orgId,
         kind: "external",
         parentId: null,
-        name: "stock-full",
+        name: STOCK_FULL_SOURCE_NAME,
         externalRef: fullBaseImage,
         pullSecretName: null,
         setupCommands: null,
@@ -2440,9 +2476,9 @@ export class SourceService {
       console.log(`seedDefaultBasesIfMissing(${orgId}): disabled legacy headless base ${retired[0]!.id}`);
     }
 
-    // Step 3 — ensure the full base row exists.
+    // Step 3 — ensure the full base row exists and holds the code values.
     const existingFull = await this.db
-      .select({ id: imageSources.id })
+      .select()
       .from(imageSources)
       .where(
         and(
@@ -2453,14 +2489,16 @@ export class SourceService {
       )
       .limit(1);
 
-    if (!existingFull[0]) {
+    if (existingFull[0]) {
+      await this.repairDefaultFullBase(existingFull[0], stockFullId, orgId);
+    } else {
       const fullId = `src_${this.newId()}`;
       await this.db.insert(imageSources).values({
         id: fullId,
         orgId,
         kind: "base",
         parentId: stockFullId,
-        name: "default-full",
+        name: DEFAULT_FULL_SOURCE_NAME,
         externalRef: null,
         pullSecretName: null,
         setupCommands: [],
@@ -2477,6 +2515,94 @@ export class SourceService {
       console.log(`seedDefaultBasesIfMissing(${orgId}): seeded full base ${fullId} FROM ${fullBaseImage}`);
       await this.maybeFireBaseBake(fullId, orgId);
     }
+  }
+
+  /** Puts the stock-full row's non-ref fields back to the code values. Same
+   * reason and alarm as `repairDefaultFullBase`. */
+  private async repairStockFull(row: ImageSourceRow, orgId: string): Promise<void> {
+    const want = { pullSecretName: null, enabled: true, schedule: "nightly" as const };
+    const drift: string[] = [];
+    if (row.pullSecretName !== want.pullSecretName) drift.push("pullSecretName");
+    if (row.enabled !== want.enabled) drift.push("enabled");
+    if (row.schedule !== want.schedule) drift.push("schedule");
+    if (drift.length === 0) return;
+    await this.db
+      .update(imageSources)
+      .set({ ...want, updatedAt: this.now() })
+      .where(eq(imageSources.id, row.id));
+    const before = { pullSecretName: row.pullSecretName, enabled: row.enabled, schedule: row.schedule };
+    console.error(
+      `seedDefaultBasesIfMissing(${orgId}): built-in ${STOCK_FULL_SOURCE_NAME} (${row.id}) drifted from code values; ` +
+        `repaired ${drift.join(", ")}. This means tampering or a legacy edit. ` +
+        `old=${JSON.stringify(before)} new=${JSON.stringify(want)}`,
+    );
+    for (const field of drift) recordBuiltInSourceRepair(orgId, STOCK_FULL_SOURCE_NAME, field);
+  }
+
+  /**
+   * Puts the full base row back to the code values when it drifted.
+   *
+   * This is an auto-repair, which "Invariants: alert, don't auto-repair"
+   * permits only with a stated reason. The reason: code owns built-in image
+   * content, and no API path can change it. A drifted row means tampering or
+   * an edit made before the API refused it. Its setup commands run in every
+   * later bake and sandbox, so keeping the drift is not safe. The repair
+   * still alerts: it logs at error level with old and new values and counts
+   * `valet.image_source.builtin_repaired`. It then starts a bake so sandboxes
+   * stop using the image built from the drifted commands.
+   */
+  private async repairDefaultFullBase(row: ImageSourceRow, stockFullId: string, orgId: string): Promise<void> {
+    const want = { setupCommands: [] as string[], parentId: stockFullId, enabled: true, schedule: "nightly" as const };
+    const drift: string[] = [];
+    const have = row.setupCommands;
+    if (!Array.isArray(have) || have.length > 0) drift.push("setupCommands");
+    if (row.parentId !== want.parentId) drift.push("parentId");
+    if (row.enabled !== want.enabled) drift.push("enabled");
+    if (row.schedule !== want.schedule) drift.push("schedule");
+    if (drift.length === 0) return;
+
+    await this.db
+      .update(imageSources)
+      .set({ ...want, updatedAt: this.now() })
+      .where(eq(imageSources.id, row.id));
+    const before = { setupCommands: have, parentId: row.parentId, enabled: row.enabled, schedule: row.schedule };
+    console.error(
+      `seedDefaultBasesIfMissing(${orgId}): built-in ${DEFAULT_FULL_SOURCE_NAME} (${row.id}) drifted from code values; ` +
+        `repaired ${drift.join(", ")}. This means tampering or a legacy edit. ` +
+        `old=${JSON.stringify(before)} new=${JSON.stringify(want)}`,
+    );
+    for (const field of drift) recordBuiltInSourceRepair(orgId, DEFAULT_FULL_SOURCE_NAME, field);
+    // Every image of this base, and of each source built FROM it, may carry
+    // the drifted commands: fail its queued, building, and pushed bakes so
+    // no session boots one (resolution uses pushed bakes only; sessions fall
+    // back to the stock image). The repaired base bake then cascades to its
+    // children.
+    const tainted = await this.sourceWithDescendants(orgId, row.id);
+    await this.failActiveBuilds("superseded by a built-in source repair", tainted);
+    await this.db
+      .update(bakes)
+      .set({ status: "failed", error: "built from drifted built-in commands; rebuilt after the repair" })
+      .where(and(inArray(bakes.sourceId, tainted), eq(bakes.status, "pushed")));
+    await this.maybeFireBaseBake(row.id, orgId);
+  }
+
+  /** `rootId` and every org source whose parent chain reaches it. */
+  private async sourceWithDescendants(orgId: string, rootId: string): Promise<string[]> {
+    const rows = await this.db
+      .select({ id: imageSources.id, parentId: imageSources.parentId })
+      .from(imageSources)
+      .where(eq(imageSources.orgId, orgId));
+    const found = new Set([rootId]);
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (const row of rows) {
+        if (row.parentId && found.has(row.parentId) && !found.has(row.id)) {
+          found.add(row.id);
+          grew = true;
+        }
+      }
+    }
+    return [...found];
   }
 
   /** Best-effort background bake for a newly-seeded base source. Skips when
@@ -2497,10 +2623,21 @@ export class SourceService {
   /** Marks every `queued`/`building` row `failed` at boot (interrupted by
    * restart) and best-effort `cleanupOrphan`s durable cluster resources. */
   private async sweepOrphanedBuilds(): Promise<void> {
+    await this.failActiveBuilds("interrupted by restart");
+  }
+
+  /** Marks `queued`/`building` rows `failed` with `reason`, for the given
+   * sources or all, and best-effort `cleanupOrphan`s their cluster resources. A
+   * failed row is never synced again, so its image is never used. */
+  private async failActiveBuilds(reason: string, sourceIds?: string[]): Promise<void> {
+    if (sourceIds?.length === 0) return;
+    const active = sourceIds === undefined
+      ? inArray(bakes.status, ["queued", "building"])
+      : and(inArray(bakes.sourceId, sourceIds), inArray(bakes.status, ["queued", "building"]));
     const orphaned = await this.db
       .select({ id: bakes.id, sourceId: bakes.sourceId, provider: bakes.builderBackend })
       .from(bakes)
-      .where(inArray(bakes.status, ["queued", "building"]));
+      .where(active);
     if (orphaned.length === 0) return;
 
     const sources = await this.db
@@ -2510,15 +2647,15 @@ export class SourceService {
     const sourceById = new Map(sources.map((source) => [source.id, source]));
     await this.db
       .update(bakes)
-      .set({ status: "failed", error: "interrupted by restart", finishedAt: this.now() })
-      .where(inArray(bakes.status, ["queued", "building"]));
+      .set({ status: "failed", error: reason, finishedAt: this.now() })
+      .where(inArray(bakes.id, orphaned.map((row) => row.id)));
     for (const row of orphaned) {
       const source = sourceById.get(row.sourceId);
       const dimensions = source
         ? this.dimensions(source, row.provider)
         : { sourceKind: "other", profile: "other", provider: row.provider };
       recordPrebuildTransition(dimensions, "failed");
-      logPrebuildEvent("bake_failed", { buildId: row.id, bakeId: row.id, sourceId: row.sourceId, repository: source?.repoFullName, profile: source?.profile, provider: row.provider, error: "interrupted by restart" });
+      logPrebuildEvent("bake_failed", { buildId: row.id, bakeId: row.id, sourceId: row.sourceId, repository: source?.repoFullName, profile: source?.profile, provider: row.provider, error: reason });
     }
 
     const builder = this.builder;

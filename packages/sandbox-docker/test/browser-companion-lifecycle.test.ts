@@ -9,7 +9,7 @@ let root: string;
 let config: { inventoryRoot: string; browserEnabled: boolean; browserImage: string };
 let opts: { sessionId: string; workspace: string; image: string; docker: boolean; browser: { enabled: boolean }; pullIfMissing: boolean };
 const calls = async (): Promise<string[][]> => (await readFile(join(root, 'calls'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
-interface FixtureOwner { Id: string; Image: string; HostConfig: { NetworkMode: string }; State: { Running: boolean }; Mounts: { Source: string; Destination: string }[] }
+interface FixtureOwner { Id: string; Image: string; HostConfig: { NetworkMode: string; CgroupParent?: string }; State: { Running: boolean }; Mounts: { Source: string; Destination: string }[] }
 const containers = async (): Promise<FixtureOwner[]> => JSON.parse(await readFile(join(root, 'containers'), 'utf8'));
 beforeEach(async () => {
   root = await realpath(await mkdtemp(join(tmpdir(), 'valet-companion-lifecycle-')));
@@ -24,7 +24,7 @@ else if(a[0]==='run' && a.includes('--rm')){process.stdout.write('{"entries":[],
 else if(a[0]==='run'){
  const browser=a.includes('valet.dev/container-role=browser');if(browser && fs.existsSync(path.join(root,'fail-browser')))fail('injected browser creation failure');
  const labels={};const mounts=[];for(let i=0;i<a.length;i++){if(a[i]==='--label'){const [key,...v]=a[++i].split('=');labels[key]=v.join('=');}if(a[i]==='-v'){const [Source,Destination,mode]=a[++i].split(':');mounts.push({Source,Destination,RW:mode!=='ro'});}}
- const id=(browser?'browser-':'workload-')+(owners.length+1);const owner={Id:id,Name:a[a.indexOf('--name')+1],Image:browser?'sha256:browser':'sha256:workload',Config:{Labels:labels},HostConfig:{NetworkMode:a.includes('--network')?a[a.indexOf('--network')+1]:'bridge'},State:{Running:true},Mounts:mounts};owners.push(owner);save();process.stdout.write(id);
+ const id=(browser?'browser-':'workload-')+(owners.length+1);const owner={Id:id,Name:a[a.indexOf('--name')+1],Image:browser?'sha256:browser':'sha256:workload',Config:{Labels:labels},HostConfig:{NetworkMode:a.includes('--network')?a[a.indexOf('--network')+1]:'bridge',CgroupParent:a.includes('--cgroup-parent')?a[a.indexOf('--cgroup-parent')+1]:''},State:{Running:true},Mounts:mounts};owners.push(owner);save();process.stdout.write(id);
 }
 else if(a[0]==='inspect'){
  const owner=owners.find(o=>o.Id===a.at(-1)||o.Name===a.at(-1));if(!owner)fail('No such container');if(owner.Id.startsWith('browser-')&&fs.existsSync(path.join(root,'fail-browser-inspection')))fail('injected browser inspection failure');process.stdout.write(a.includes('-f')?String(owner.State.Running):JSON.stringify([owner]));
@@ -183,4 +183,105 @@ it('cleans interrupted creation by verified names when the container IDs were no
   await provider.destroy(saved.id);
   expect((await calls()).filter(args => args[0] === 'rm').map(args => args.at(-1))).toEqual(['browser-2', 'workload-1']);
   expect(await inventory.read(saved.id)).toBeUndefined();
+});
+
+it.each([
+  { resources: undefined, cpu: '2', memory: '2147483648' },
+  { resources: { cpu: 3 }, cpu: '3', memory: '2147483648' },
+  { resources: { memory: '512Mi' }, cpu: '2', memory: '536870912' },
+  { resources: { cpu: 4, memory: '1Gi' }, cpu: '4', memory: '1073741824' },
+  { resources: { cpu: undefined, memory: undefined }, cpu: '2', memory: '2147483648' },
+])('merges workload defaults per field ($cpu CPUs, $memory bytes)', async ({ resources, cpu, memory }) => {
+  const provider = new DockerSandboxProvider({ ...config, defaultResources: { cpu: 2, memory: '2Gi' } });
+  await provider.create({ ...opts, resources });
+  const workload = (await calls()).find(args => args[0] === 'run');
+  expect(workload).toBeDefined();
+  expect(workload?.slice(workload.indexOf('--cpus'), workload.indexOf('--cpus') + 2)).toEqual(['--cpus', cpu]);
+  expect(workload?.slice(workload.indexOf('--memory'), workload.indexOf('--memory') + 2)).toEqual(['--memory', memory]);
+});
+
+it('keeps workload resource flags and all cgroup flags absent without configuration', async () => {
+  await new DockerSandboxProvider(config).create(opts);
+  const runs = (await calls()).filter(args => args[0] === 'run');
+  expect(runs[0]).not.toContain('--cpus');
+  expect(runs[0]).not.toContain('--memory');
+  expect(runs.every(args => !args.includes('--cgroup-parent'))).toBe(true);
+});
+
+it('places workload and companion creation under the configured parent', async () => {
+  const configured = { ...config, cgroupParent: 'sandbox.slice' };
+  const sandbox = await new DockerSandboxProvider(configured).create(opts);
+  const runs = (await calls()).filter(args => args[0] === 'run');
+  expect(runs).toHaveLength(2);
+  for (const args of runs) expect(args.slice(args.indexOf('--cgroup-parent'), args.indexOf('--cgroup-parent') + 2)).toEqual(['--cgroup-parent', 'sandbox.slice']);
+  await expect(new DockerSandboxProvider(configured).restore(sandbox.id)).resolves.toMatchObject({ id: sandbox.id });
+});
+
+it.each([0, 1])('rejects a running owner outside the parent (role %s) and still releases it with retained state', async role => {
+  const sandbox = await new DockerSandboxProvider(config).create(opts);
+  const owners = await containers();
+  owners[1 - role].HostConfig.CgroupParent = 'sandbox.slice';
+  await writeFile(join(root, 'containers'), JSON.stringify(owners));
+  const inventory = new DockerInventory(config.inventoryRoot);
+  const saved = await inventory.read(sandbox.id);
+  if (!saved) throw new Error('Missing fixture inventory');
+  await writeFile(join(saved.runtimeStateDir, 'retained'), 'private');
+  const before = await readFile(join(config.inventoryRoot, 'inventory', sandbox.id + '.json'), 'utf8');
+  const provider = new DockerSandboxProvider({ ...config, cgroupParent: 'sandbox.slice' });
+  await expect(provider.restore(sandbox.id)).rejects.toThrow(/cgroup.*Release/i);
+  await expect(provider.create(opts)).rejects.toThrow(/cgroup.*Release/i);
+  expect(await readFile(join(config.inventoryRoot, 'inventory', sandbox.id + '.json'), 'utf8')).toBe(before);
+  expect((await calls()).filter(args => args[0] === 'run')).toHaveLength(2);
+  expect((await containers()).every(owner => owner.State.Running)).toBe(true);
+  await provider.release(sandbox.id);
+  expect(await containers()).toHaveLength(0);
+  expect(await readFile(join(saved.runtimeStateDir, 'retained'), 'utf8')).toBe('private');
+  expect(await inventory.read(sandbox.id)).toMatchObject({ state: 'released' });
+});
+
+it.each([undefined, 'sandbox.slice'])('contains retained-audit and stopped-owner ownership-repair helpers when configured (%s)', async cgroupParent => {
+  const provider = new DockerSandboxProvider({ ...config, cgroupParent });
+  const sandbox = await provider.create({ ...opts, docker: false });
+  const saved = await new DockerInventory(config.inventoryRoot).read(sandbox.id);
+  if (!saved) throw new Error('Missing fixture inventory');
+  await mkdir(join(saved.runtimeStateDir, 'browser'));
+  await writeFile(join(saved.runtimeStateDir, 'browser/journal.sqlite'), 'fixture');
+  const owners = await containers(); owners[0].State.Running = false;
+  await writeFile(join(root, 'containers'), JSON.stringify(owners));
+  await provider.release(sandbox.id);
+  expect(await provider.readBrowserAudit(sandbox.id)).toEqual({ entries: [], total: 0 });
+  const helpers = (await calls()).filter(args => args[0] === 'run' && args.includes('--rm'));
+  expect(helpers).toHaveLength(2);
+  expect(helpers.some(args => args.includes('chown'))).toBe(true);
+  expect(helpers.some(args => args.includes('/usr/bin/flock'))).toBe(true);
+  for (const args of helpers) {
+    if (cgroupParent) expect(args.slice(args.indexOf('--cgroup-parent'), args.indexOf('--cgroup-parent') + 2)).toEqual(['--cgroup-parent', 'sandbox.slice']);
+    else expect(args).not.toContain('--cgroup-parent');
+  }
+});
+
+it('upgrades a legacy owner into the configured parent without deleting old state', async () => {
+  const sandbox = await new DockerSandboxProvider(config).create({ ...opts, browser: undefined });
+  const inventory = new DockerInventory(config.inventoryRoot);
+  const legacy = await inventory.read(sandbox.id);
+  if (!legacy) throw new Error('Missing fixture inventory');
+  await writeFile(join(legacy.runtimeStateDir, 'retained'), 'private');
+  const configured = { ...config, cgroupParent: 'sandbox.slice' };
+  await new DockerSandboxProvider(configured).create(opts);
+  const replacement = (await calls()).filter(args => args[0] === 'run').slice(1);
+  expect(replacement).toHaveLength(2);
+  for (const args of replacement) expect(args.slice(args.indexOf('--cgroup-parent'), args.indexOf('--cgroup-parent') + 2)).toEqual(['--cgroup-parent', 'sandbox.slice']);
+  expect(await readFile(join(legacy.runtimeStateDir, 'retained'), 'utf8')).toBe('private');
+  await expect(new DockerSandboxProvider(configured).restore(sandbox.id)).resolves.toMatchObject({ id: sandbox.id });
+});
+
+it('applies the default scratch mount when only CPU is overridden', async () => {
+  const provider = new DockerSandboxProvider({ ...config, defaultResources: { cpu: 2, memory: '2Gi', scratch: '1Gi' } });
+  const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    const sandbox = await provider.create({ ...opts, resources: { cpu: 3 } });
+    const saved = await new DockerInventory(config.inventoryRoot).read(sandbox.id);
+    expect(saved?.scratchHostDir).toBe(join(config.inventoryRoot, 'scratch', sandbox.id));
+    expect((await calls()).find(args => args[0] === 'run')).toContain(`${saved?.scratchHostDir}:/scratch`);
+  } finally { warning.mockRestore(); }
 });

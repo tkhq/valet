@@ -12,6 +12,7 @@ import slackPlugin from '@valet/plugin-slack/plugin';
 import { internalToken } from '../lib/internal-auth.js';
 import type { RequestPrincipal } from '../lib/request-principal.js';
 import { compatibilityRouteIssue, mountPluginHttpRoutes, readPluginBody } from './http-routes.js';
+import { bootstrapAdminInviteCode } from "../test-helpers/bootstrap-admin-code.js";
 
 let api: TestApi | undefined;
 afterEach(async () => { await api?.cleanup(); api = undefined; });
@@ -119,7 +120,7 @@ describe('plugin route mounting', () => {
     expect(handle).not.toHaveBeenCalled();
     const signup = await fetch(`${api.baseUrl}/api/auth/sign-up/email`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ email: 'plugin@nowhere.test', name: 'Admin', password: 'correct-horse-battery' }),
+      body: JSON.stringify({ email: 'plugin@nowhere.test', name: 'Admin', password: 'correct-horse-battery', inviteCode: await bootstrapAdminInviteCode(api.providers.db) }),
     });
     const cookie = signup.headers.get('set-cookie')?.match(/better-auth\.session_token=[^;]+/)?.[0];
     if (!cookie) throw new Error('Missing session cookie');

@@ -33,7 +33,14 @@ import {
   type WorkflowOwner,
   type WorkflowOwnerRef,
 } from "./service.js";
-import { appearanceOf } from "../events/target-names.js";
+import { appearanceOf, readStoredTarget } from "../events/target-names.js";
+import { oncePerHoursOf } from "../events/once-per.js";
+
+/** The stored target with `oncePerHours` set, or removed for null. */
+function withOncePerHours(target: unknown, hours: number | null): Record<string, unknown> {
+  const { oncePerHours: _old, ...rest } = readStoredTarget(target) as Record<string, unknown>;
+  return hours === null ? rest : { ...rest, oncePerHours: hours };
+}
 
 export interface WorkflowTriggerSummary {
   appearance?: Appearance;
@@ -43,6 +50,8 @@ export interface WorkflowTriggerSummary {
   eventKeys: string[];
   filters: unknown[];
   enabled: boolean;
+  /** Run at most once in this many hours (`events/once-per.ts`). */
+  oncePerHours?: number;
 }
 
 export interface EventTypeCatalog {
@@ -74,8 +83,10 @@ function rowToTrigger(row: typeof eventSubscriptions.$inferSelect): WorkflowTrig
   if (target?.kind !== "workflow" || typeof target.workflowId !== "string") return null;
   // Stored rows may carry the old `presence` name (`events/target-names.ts`).
   const appearance = readAppearance(appearanceOf(row.target));
+  const oncePerHours = oncePerHoursOf(row.target);
   return {
     ...(appearance ? { appearance } : {}),
+    ...(oncePerHours !== null ? { oncePerHours } : {}),
     triggerId: row.id,
     workflowId: target.workflowId,
     name: row.name,
@@ -95,10 +106,14 @@ function rowToTrigger(row: typeof eventSubscriptions.$inferSelect): WorkflowTrig
 export async function createWorkflowTrigger(
   deps: TeamServiceReadinessDeps,
   owner: WorkflowOwner,
-  input: { workflowId: string; name: string; appearance?: Appearance; eventKeys: string[]; filters?: unknown[]; anyChannel?: boolean; proposalKey?: string },
+  input: { workflowId: string; name: string; appearance?: Appearance; eventKeys: string[]; filters?: unknown[]; anyChannel?: boolean; proposalKey?: string; oncePerHours?: number },
 ): Promise<{ ok: true; trigger: WorkflowTriggerSummary } | { ok: false; error: string }> {
   const db = deps.db;
-  const target = { kind: "workflow" as const, workflowId: input.workflowId, ...(input.appearance !== undefined ? { appearance: input.appearance } : {}) };
+  const target = {
+    kind: "workflow" as const, workflowId: input.workflowId,
+    ...(input.appearance !== undefined ? { appearance: input.appearance } : {}),
+    ...(input.oncePerHours !== undefined ? { oncePerHours: input.oncePerHours } : {}),
+  };
   const write = await validateSubscriptionWrite(
     db,
     deps.plugins,
@@ -272,6 +287,8 @@ export interface WorkflowTriggerPatch {
   filters?: unknown[];
   enabled?: boolean;
   anyChannel?: boolean;
+  /** Null removes the limit. */
+  oncePerHours?: number | null;
 }
 
 export async function updateWorkflowTrigger(
@@ -300,7 +317,7 @@ export async function updateWorkflowTrigger(
       name,
       eventKeys,
       filters: patch.filters ?? current.filters,
-      target: { kind: "workflow", workflowId: current.workflowId },
+      target: { kind: "workflow", workflowId: current.workflowId, ...(patch.oncePerHours != null ? { oncePerHours: patch.oncePerHours } : {}) },
     },
     {
       creatorUserId: accessible.row.createdBy,
@@ -322,7 +339,10 @@ export async function updateWorkflowTrigger(
 
   const updated = await db
     .update(eventSubscriptions)
-    .set({ name, eventKeys, filters, enabled: patch.enabled ?? current.enabled, updatedAt: Date.now() })
+    .set({
+      name, eventKeys, filters, enabled: patch.enabled ?? current.enabled, updatedAt: Date.now(),
+      ...(patch.oncePerHours !== undefined ? { target: withOncePerHours(accessible.row.target, patch.oncePerHours) } : {}),
+    })
     .where(and(eq(eventSubscriptions.id, triggerId), eq(eventSubscriptions.orgId, owner.orgId)))
     .returning();
   const trigger = rowToTrigger(updated[0]!);

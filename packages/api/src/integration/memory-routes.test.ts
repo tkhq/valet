@@ -11,6 +11,8 @@ import { internalToken } from "../lib/internal-auth.js";
 import { mintSandboxToken } from "../auth/sandbox-tokens.js";
 import { agentSessions, securityCells, teamMembers, teams, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import type { GetMemoryTreeResponse } from "../wire/types.js";
+import { writeFile, type MemoryScope } from "../services/memory.js";
+import { memoryUsageRecorder, readMemoryUsage } from "../services/memory-usage.js";
 
 describe("api integration: memory routes", () => {
   it("session user can write/read/search/patch/export their own scope", async () => {
@@ -55,6 +57,72 @@ describe("api integration: memory routes", () => {
 
       const getAfterDelete = await fetch(`${api.baseUrl}/api/memory?${new URLSearchParams({ path: "notes/hello.md" })}`);
       expect(getAfterDelete.status).toBe(404);
+    } finally {
+      await api.cleanup();
+    }
+  });
+
+  it("records an agent's file read as usage, but not a person's read or a directory read", async () => {
+    const api = await bootTestApi();
+    try {
+      const { db } = api.providers;
+      const own: MemoryScope = { owner: { type: "user", id: "local-user" }, actorUserId: "local-user" };
+      const team: MemoryScope = { owner: { type: "team", id: "team-use" }, actorUserId: "local-user" };
+      await db.insert(teams).values({ id: "team-use", orgId: "local-org", name: "Use", createdAt: Date.now() });
+      await db.insert(teamMembers).values({ teamId: "team-use", userId: "local-user", role: "member" });
+      await writeFile(db, own, { path: "notes/a.md", content: "# A\n" });
+      await writeFile(db, own, { path: "notes/person.md", content: "# Person\n" });
+      await writeFile(db, team, { path: "notes/t.md", content: "# T\n" });
+      const agent = {
+        "x-valet-internal": internalToken(),
+        "x-valet-owner": "user:local-user",
+        "x-valet-actor": "local-user",
+        "x-valet-session-id": "sess-use",
+      };
+      const read = (path: string, headers: Record<string, string> = {}) =>
+        fetch(`${api.baseUrl}/api/memory?${new URLSearchParams({ path })}`, { headers });
+
+      expect((await read("notes/a.md", agent)).status).toBe(200);
+      expect((await read("notes/", agent)).status).toBe(200);
+      expect((await read("team:team-use/notes/t.md", agent)).status).toBe(200);
+      // The browser session is a person looking at the memory page.
+      expect((await read("notes/person.md")).status).toBe(200);
+      await memoryUsageRecorder(db).flush();
+
+      const ownUsage = await readMemoryUsage(db, own);
+      expect(ownUsage.get("notes/a.md")).toMatchObject({ readCount: 1, injectCount: 0 });
+      expect(ownUsage.has("notes/person.md")).toBe(false);
+      expect((await readMemoryUsage(db, team)).get("notes/t.md")).toMatchObject({ readCount: 1 });
+    } finally {
+      await api.cleanup();
+    }
+  });
+
+  it("lists each file's last use, use count and last load in the tree", async () => {
+    const api = await bootTestApi();
+    try {
+      const { db } = api.providers;
+      const own: MemoryScope = { owner: { type: "user", id: "local-user" }, actorUserId: "local-user" };
+      await writeFile(db, own, { path: "notes/used.md", content: "# Used\n" });
+      await writeFile(db, own, { path: "notes/never.md", content: "# Never\n" });
+      await writeFile(db, own, { path: "preferences/pinned.md", content: "# Pinned\n", pinned: true });
+      const usage = memoryUsageRecorder(db);
+      usage.record({ ownerType: "user", ownerId: "local-user", namespace: "", path: "notes/used.md" }, "read", 1_000);
+      usage.record({ ownerType: "user", ownerId: "local-user", namespace: "", path: "notes/used.md" }, "cite", 3_000);
+      usage.record({ ownerType: "user", ownerId: "local-user", namespace: "", path: "preferences/pinned.md" }, "inject", 2_000);
+      await usage.flush();
+
+      const res = await fetch(`${api.baseUrl}/api/memory/tree`);
+      expect(res.status).toBe(200);
+      const tree = (await res.json()) as GetMemoryTreeResponse;
+      // When tracking started. Before that, "never used" means "not seen".
+      expect(tree.usageSince).toBeGreaterThan(0);
+      expect(tree.usageSince).toBeLessThanOrEqual(Date.now());
+      const byPath = new Map(tree.entries.map((e) => [e.path, e]));
+      expect(byPath.get("notes/used.md")).toMatchObject({ lastUsedAt: 3_000, useCount: 2, lastLoadedAt: null });
+      expect(byPath.get("notes/never.md")).toMatchObject({ lastUsedAt: null, useCount: 0, lastLoadedAt: null });
+      // Loading at wake is not a use the agent chose.
+      expect(byPath.get("preferences/pinned.md")).toMatchObject({ lastUsedAt: null, useCount: 0, lastLoadedAt: 2_000 });
     } finally {
       await api.cleanup();
     }

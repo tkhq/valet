@@ -22,6 +22,7 @@
 import { sql, type SQL } from "drizzle-orm";
 import type { EventStream, Unsubscribe } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
+import { reportError } from "@valet/engine";
 
 const MAX_ERROR_CHARS = 2_000;
 const PREFIX = "The assistant turn failed: ";
@@ -71,6 +72,6 @@ export function wireDeliveryTurnFailures(eventStream: EventStream, db: AppDb): U
     if (event.type !== "submission_settled" || event.outcome.outcome !== "failed") return;
     // A failed write here is caught up by the dispatcher's sweep.
     void markFailedDeliveryTurns(db, { queueItemId: event.queueItemId })
-      .catch((err) => console.error("[events] could not mark a delivery whose turn failed", err));
+      .catch((err) => reportError({ area: "events", reason: "delivery_turn_mark" }, "[events] could not mark a delivery whose turn failed", err));
   });
 }

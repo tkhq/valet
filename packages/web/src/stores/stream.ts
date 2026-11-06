@@ -355,7 +355,7 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       next.serverClockOffset = Date.now() - ev.ts;
       // Compacting is transient too: the engine balances the start/end pair
       // in-process, but an api crash mid-compaction orphans the start frame
-      // — without this reset the "Compacting context…" strip would survive
+      // — without this reset the "Valet is compacting context…" status line would survive
       // every reconnect. A live compaction re-arms via durable replay.
       next.compactingByThread = {};
       return next;

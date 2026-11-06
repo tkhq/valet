@@ -27,6 +27,7 @@ const OVERRIDE_ALLOWED: Record<string, string> = {
   "components/presence/place-row.tsx": "The overflow menu button lines up with the place name's first line.",
   "components/presence/presence-line.tsx": "Inline text actions sit in the line's status sentence.",
   "components/presence/routine-row.tsx": "Inline text actions sit in the routine's row of text.",
+  "components/session/thread-plan.tsx": "The task card's header holds two lines, the task and its status, so it grows past a control's height.",
 };
 
 const TEXT_INPUT_TYPES = new Set(["", "text", "search", "email", "url", "number", "date", "month", "password", "tel", "time", "datetime-local"]);

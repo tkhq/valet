@@ -26,22 +26,36 @@ export function Section({
   actions?: ReactNode;
   children: ReactNode;
 }) {
-  const tab = useContext(ActiveTabLabel);
   return (
     <section className="space-y-3">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div className="min-w-0 flex-1 space-y-1">
-          <h2 className={tab !== undefined && title === tab ? "sr-only" : "text-lg font-medium text-ink"}>{title}</h2>
-          {description && <p className="text-sm text-muted">{description}</p>}
-        </div>
-        {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
-      </div>
+      <SectionHeading title={title} description={description} actions={actions} />
       {/* The group pads its own top and bottom, so a child with no padding
           of its own (a note, a form) does not touch the rounded edge. A row
           with its own padding trims it at the ends to keep the same inset.
           A group whose rows all render nothing is hidden, not an empty box. */}
       <div className="divide-y divide-line rounded-2xl bg-ink-wash px-4 py-3 empty:hidden">{children}</div>
     </section>
+  );
+}
+
+/**
+ * A settings heading row: the title (screen-reader only when it repeats the
+ * active tab), an optional description, and actions on the right. `Section`
+ * uses it, and so does a settings page whose content is not one grouped
+ * list, such as Usage.
+ */
+export function SectionHeading({ title, description, actions }: {
+  title: ReactNode; description?: string; actions?: ReactNode;
+}) {
+  const tab = useContext(ActiveTabLabel);
+  return (
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+      <div className="min-w-0 flex-1 space-y-1">
+        <h2 className={tab !== undefined && title === tab ? "sr-only" : "text-lg font-medium text-ink"}>{title}</h2>
+        {description && <p className="text-sm text-muted">{description}</p>}
+      </div>
+      {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
+    </div>
   );
 }
 

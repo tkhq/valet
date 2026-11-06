@@ -3,6 +3,7 @@ import { and, eq, sql } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventReceipts } from "../schema/index.js";
 import type { EventReceiptWire, ReceiptStage, ReceiptSubscriptionDecision } from "../wire/types.js";
+import { reportError } from "@valet/engine";
 
 export const RECEIPT_RETENTION_DAYS = 7;
 /** Retention runs at most this often per organization, not on every receipt,
@@ -20,7 +21,7 @@ export function receiptCleanupDue(orgId: string, now: number): boolean {
  * for every service but Slack; a Slack receipt keeps `channelId` and
  * `workspaceId`. Receipts written before ingest recorded `place` carry none. */
 export const RECEIPT_METADATA_KEYS: ReadonlySet<string> = new Set(["place", "channelId", "workspaceId", "actorId", "botId", "appId", "rawType", "rawSubtype", "messageTs", "threadTs", "retryNum", "retryReason", "botIdentityAvailable", "botUserIdentityAvailable", "payloadBytes", "configuredTriggerCount"]);
-const outcomes = new Set(["matched", "filter_excluded", "authorization_denied", "disabled", "key_mismatch"]);
+const outcomes = new Set(["matched", "filter_excluded", "authorization_denied", "disabled", "key_mismatch", "rate_limited"]);
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const bounded = (value: unknown, max = 256): string => typeof value === "string" ? value.slice(0, max) : "";
 export function sanitizeReceiptMetadata(value: unknown): Record<string, string | number | boolean> {
@@ -49,9 +50,9 @@ export async function createEventReceipt(db: AppDb, input: { orgId: string; serv
     if (receiptCleanupDue(input.orgId, now)) try {
       await db.execute(sql`DELETE FROM event_receipts WHERE org_id = ${input.orgId} AND (created_at < ${now - RECEIPT_RETENTION_DAYS * 86_400_000}
         OR id IN (SELECT id FROM event_receipts WHERE org_id = ${input.orgId} ORDER BY created_at DESC, id DESC OFFSET 10000))`);
-    } catch { console.warn("[event-receipts] cleanup unavailable"); }
+    } catch { reportError({ area: "events", reason: "receipt_cleanup", level: "warn" }, "[event-receipts] cleanup unavailable"); }
     return id;
-  } catch { console.warn("[event-receipts] write unavailable"); return undefined; }
+  } catch { reportError({ area: "events", reason: "receipt_write", level: "warn" }, "[event-receipts] write unavailable"); return undefined; }
 }
 export async function appendReceiptStage(db: AppDb, receiptId: string | undefined, stage: { stage: string; outcome: string; detail: string }, patch?: { eventKey?: string; eventId?: string; subscriptions?: ReceiptSubscriptionDecision[]; metadata?: Record<string, string> }): Promise<void> {
   if (!receiptId) return;
@@ -67,7 +68,7 @@ export async function appendReceiptStage(db: AppDb, receiptId: string | undefine
       // Merged into the stored metadata, through the same allow-list as a new receipt.
       ...(patch?.metadata !== undefined ? { metadata: sql`(CASE WHEN jsonb_typeof(${eventReceipts.metadata}) = 'object' THEN ${eventReceipts.metadata} ELSE '{}'::jsonb END) || ${JSON.stringify(sanitizeReceiptMetadata(patch.metadata))}::jsonb` } : {}),
     }).where(eq(eventReceipts.id, receiptId));
-  } catch { console.warn("[event-receipts] write unavailable"); }
+  } catch { reportError({ area: "events", reason: "receipt_write", level: "warn" }, "[event-receipts] write unavailable"); }
 }
 
 /**
@@ -108,7 +109,7 @@ export async function appendReceiptStageForEvent(
     await appendReceiptStage(db, row.id, stage);
     return "appended";
   } catch {
-    console.warn("[event-receipts] write unavailable");
+    reportError({ area: "events", reason: "receipt_write", level: "warn" }, "[event-receipts] write unavailable");
     return "no_receipt";
   }
 }

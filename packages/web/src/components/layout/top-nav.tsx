@@ -1,57 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import { useWorkspaceAssistant } from "./workspace-assistant";
 import { Link, useRouterState } from "@tanstack/react-router";
-import { ChevronDown, Menu, Sparkles, PanelLeftClose, PanelLeftOpen, Settings, ShieldCheck } from "lucide-react";
+import { ChevronDown, GitPullRequest, Menu, Sparkles, PanelLeftClose, PanelLeftOpen, Settings, ShieldCheck } from "lucide-react";
 import { useChangelog } from "~/api/changelog";
+import { usePlugins } from "~/api/integrations";
 import { useSession } from "~/api/queries";
-import { pluginEnabledForCaller, useMe, useOrg, useTeams } from "~/api/settings";
-import {
-  WorkspaceSwitcher,
-  workspaceOptions,
-} from "~/components/layout/workspace-switcher";
+import { pluginEnabledForCaller, useMe, useOrg } from "~/api/settings";
+import { REVIEW_PLUGIN } from "~/components/code-review/review-lines";
 import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger, StatusDot } from "~/components/primitives";
-import { eligibleTeams } from "~/components/session/assistant-rail";
 import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
 import { cn } from "~/lib/cn";
 import { useLastSeenCheckpoint } from "~/lib/changelog-read-state";
-import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { useSidebarControls } from "./app-shell";
 import { NotificationsBell } from "./notifications-bell";
 
-/** One navigation link with a hover menu; clicking still opens Artifacts. */
-function ArtifactsNav() {
-  const [open, setOpen] = useState(false);
-  const hover = useRef(false);
-  const closeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const cancelClose = () => clearTimeout(closeTimer.current);
-  useEffect(() => () => clearTimeout(closeTimer.current), []);
-  const leave = () => { closeTimer.current = setTimeout(() => setOpen(false), 150); };
-  return <DropdownMenu open={open} onOpenChange={setOpen} modal={false}>
-    <DropdownMenuTrigger asChild>
-      <Link to="/artifacts" search={{ page: undefined, pageOwner: undefined }}
-        className={cn(NAV_BASE, "gap-1")}
-        activeProps={{ className: NAV_ACTIVE }} inactiveProps={{ className: NAV_INACTIVE }}
-        onPointerEnter={(event) => {
-          if (event.pointerType !== "mouse") return;
-          cancelClose(); hover.current = true; setOpen(true);
-        }}
-        onPointerLeave={leave}
-        onPointerDown={(event) => { if (event.button === 0) event.preventDefault(); }}
-        onClick={() => { cancelClose(); setOpen(false); }}
-        onKeyDown={(event) => {
-          hover.current = false;
-          if (event.key === "Enter") { event.preventDefault(); event.currentTarget.click(); }
-        }}
-      >Artifacts<ChevronDown className="h-3 w-3" aria-hidden /></Link>
-    </DropdownMenuTrigger>
-    <DropdownMenuContent align="start" aria-label="Artifacts and memory"
-      onPointerEnter={cancelClose} onPointerLeave={leave}
-      onCloseAutoFocus={(event) => { if (hover.current) event.preventDefault(); }}>
-      <DropdownMenuItem asChild><Link to="/artifacts" search={{ page: undefined, pageOwner: undefined }}>Artifacts</Link></DropdownMenuItem>
-      <DropdownMenuItem asChild><Link to="/memory">Memory</Link></DropdownMenuItem>
-    </DropdownMenuContent>
-  </DropdownMenu>;
-}
 
 /**
  * Top-nav link with a working active state. Text color lives in
@@ -146,19 +108,6 @@ function SidebarToggle() {
       >
         <PanelLeftOpen className="h-4 w-4" aria-hidden />
       </button>
-      <button
-        type="button"
-        aria-label={controls.collapsed ? "Expand sidebar" : "Collapse sidebar"}
-        aria-expanded={!controls.collapsed}
-        onClick={controls.toggleCollapsed}
-        className={`hidden md:inline-flex ${buttonClass}`}
-      >
-        {controls.collapsed ? (
-          <PanelLeftOpen className="h-4 w-4" aria-hidden />
-        ) : (
-          <PanelLeftClose className="h-4 w-4" aria-hidden />
-        )}
-      </button>
     </>
   );
 }
@@ -166,24 +115,12 @@ function SidebarToggle() {
 export function TopNav() {
   const assistant = useWorkspaceAssistant();
   const mobileNav = useResponsiveOverlay("md");
-  const scope = useWorkspaceScope();
-
-  // The switcher reads the same three queries the rail does, so switching
-  // costs no extra request — react-query serves all three from cache.
-  const teamsQ = useTeams();
   const orgQ = useOrg();
   const meQ = useMe();
   const changelogQ = useChangelog();
   const newestCheckpoint = changelogQ.data?.manifest.checkpoints[0];
   const seenCheckpoint = useLastSeenCheckpoint(meQ.data?.id);
   const changelogUnread = !!meQ.data && !!newestCheckpoint && seenCheckpoint !== newestCheckpoint.id;
-  const teams = eligibleTeams(teamsQ.data?.teams, orgQ.data?.features.organizations);
-  const options = workspaceOptions(teams);
-  // The active workspace is no longer derived here from `?assistant=`. That
-  // only ever resolved on `/chat`, so every other page read "Personal"
-  // regardless of the workspace the reader was in. The scope owns it now and
-  // still lets the open assistant win — see `workspace-scope.tsx`.
-  const onChat = useRouterState({ select: (st) => st.location.pathname === "/chat" });
   // A security session lives at /sessions/:id like any other, so the URL
   // cannot distinguish it — read the id off the path and check its kind so
   // the nav lights "Security". The query is shared
@@ -196,25 +133,45 @@ export function TopNav() {
   });
   const routeSession = useSession(sessionRouteId ?? "");
   const onSecuritySession = routeSession.data?.kind === "security";
-  const onSecurityPage = useRouterState({ select: (st) => st.location.pathname.startsWith("/security") });
+  const onPluginPage = useRouterState({ select: (st) => st.location.pathname.startsWith("/security") || st.location.pathname.startsWith("/code-review") });
   // Gate the Security link on the `security` plugin's entitlement for this
   // caller. `undefined` (org not yet loaded) hides the link — no flash of a
   // link the caller may not have, matching the settings rail's no-flash rule.
   const securityEnabled = pluginEnabledForCaller(orgQ.data, "security") === true;
+  // Code review shows once the deployment loads the PR review plugin.
+  const pluginsQ = usePlugins();
+  const pluginPages = [
+    ...(securityEnabled ? [{ to: "/security", label: "Valet Security", Icon: ShieldCheck }] : []),
+    ...(pluginsQ.data?.plugins.some((p) => p.name === REVIEW_PLUGIN) === true ? [{ to: "/code-review", label: "Code review", Icon: GitPullRequest }] : []),
+  ];
+  const pluginItems = pluginPages.map(({ to, label, Icon }) => (
+    <DropdownMenuItem key={to} asChild><Link to={to}><Icon className="h-4 w-4" aria-hidden />{label}</Link></DropdownMenuItem>
+  ));
+  // Threads, Workflows, Presence and Artifacts belong to a space: the
+  // sidebar lists them under each space. The bar keeps the global pages.
   const destinations: Array<{ to: string; label: string; active?: boolean }> = [
     { to: "/chat", label: "Threads" },
     { to: "/artifacts", label: "Artifacts" },
     { to: "/presence", label: "Presence" },
     { to: "/workflows", label: "Workflows" },
-    { to: "/usage", label: "Usage" },
+  ];
+  // Skills belong to a space too, and Integrations and Usage open the
+  // space's settings: the sidebar lists them per space. A phone's menu keeps them.
+  const spaceMore: Array<{ to: string; label: string; active?: boolean }> = [
     { to: "/skills", label: "Skills" },
     { to: "/integrations", label: "Integrations" },
-    { to: "/changelog", label: "Changelog" },
+    { to: "/usage", label: "Usage" },
   ];
+  // The bar's More holds only pages that no space owns.
+  const more: Array<{ to: string; label: string; active?: boolean }> = [
+    { to: "/changelog", label: "Changelog" },
+    { to: "/settings/model-comparison", label: "Model comparison" },
+  ];
+  const onMore = useRouterState({ select: (st) => more.some(({ to }) => st.location.pathname.startsWith(to)) });
   const destinationLabel = (label: string) => (
     <span className="inline-flex items-center gap-1.5">
       {label}
-      {label === "Changelog" && changelogUnread && (
+      {(label === "Changelog" || label === "More") && changelogUnread && (
         <StatusDot tone="accent" size="sm" label="New releases" />
       )}
     </span>
@@ -228,7 +185,7 @@ export function TopNav() {
       <Link
         to="/"
         className="hidden min-h-8 min-w-8 shrink-0 items-center justify-center gap-2 rounded px-1.5 py-1 hover:bg-ink-wash md:inline-flex"
-        aria-label="Valet — dashboard"
+        aria-label="Valet — Home"
       >
         <span className="text-moss text-base leading-none" aria-hidden>
           ◈
@@ -236,33 +193,27 @@ export function TopNav() {
         <span className="hidden font-display text-sm font-medium text-ink md:inline">Valet</span>
       </Link>
 
-      {/* Beside the logo, not in the sidebar: it scopes the surfaces below
-          rather than filtering one list. */}
-      <WorkspaceSwitcher
-        options={options}
-        activeKey={scope.key}
-        onSelect={scope.setKey}
-        navigateOnSelect={onChat}
-      />
-
-      <nav
-        aria-label="Primary"
-        className="hidden min-w-0 flex-1 items-center gap-2 overflow-x-auto md:flex xl:justify-end [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-      >
-        {destinations.map(({ to, label, active }) => (
-          to === "/artifacts" ? <ArtifactsNav key={to} /> : <NavLink key={to} to={to} active={active}>{destinationLabel(label)}</NavLink>
-        ))}
-      </nav>
+      {/* No page links or space control here: the sidebar lists each space
+          and its pages. */}
+      <div className="hidden min-w-0 flex-1 md:block" />
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
-          <button type="button" className={cn(NAV_BASE, "hidden gap-1 md:inline-flex", onSecurityPage || onSecuritySession ? NAV_ACTIVE : NAV_INACTIVE)}>
+          <button type="button" className={cn(NAV_BASE, "hidden gap-1 md:inline-flex", onMore ? NAV_ACTIVE : NAV_INACTIVE)}>
+            {destinationLabel("More")} <ChevronDown className="h-3 w-3" aria-hidden />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" aria-label="More pages" className="w-48">
+          {more.map(({ to, label }) => <DropdownMenuItem key={to} asChild><Link to={to}>{destinationLabel(label)}</Link></DropdownMenuItem>)}
+        </DropdownMenuContent>
+      </DropdownMenu>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button type="button" className={cn(NAV_BASE, "hidden gap-1 md:inline-flex", onPluginPage || onSecuritySession ? NAV_ACTIVE : NAV_INACTIVE)}>
             Plugins <ChevronDown className="h-3 w-3" aria-hidden />
           </button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" aria-label="Plugins" className="w-56">
-          {securityEnabled ? <DropdownMenuItem asChild>
-            <Link to="/security"><ShieldCheck className="h-4 w-4" aria-hidden />Valet Security</Link>
-          </DropdownMenuItem> : <div className="px-2 py-3 text-xs text-muted">No plugins available.</div>}
+          {pluginItems.length > 0 ? pluginItems : <div className="px-2 py-3 text-xs text-muted">No plugins available.</div>}
         </DropdownMenuContent>
       </DropdownMenu>
       <div className="ml-auto shrink-0 md:hidden">
@@ -278,7 +229,7 @@ export function TopNav() {
             <DropdownMenuItem asChild>
               <Link to="/" activeOptions={{ exact: true }} activeProps={{ className: NAV_ACTIVE }} inactiveProps={{ className: NAV_INACTIVE }}>Home</Link>
             </DropdownMenuItem>
-            {destinations.map(({ to, label, active }) => (
+            {[...destinations, ...spaceMore, ...more].map(({ to, label, active }) => (
               <DropdownMenuItem key={to} asChild>
                 <Link
                   to={to}
@@ -295,12 +246,10 @@ export function TopNav() {
             <DropdownMenuItem asChild>
               <Link to="/settings"><Settings className="h-4 w-4" aria-hidden />Settings</Link>
             </DropdownMenuItem>
-            {securityEnabled && <>
+            {pluginItems.length > 0 && <>
               <DropdownMenuSeparator />
               <div className="px-2 py-1 text-xs text-muted">Plugins</div>
-              <DropdownMenuItem asChild>
-                <Link to="/security"><ShieldCheck className="h-4 w-4" aria-hidden />Valet Security</Link>
-              </DropdownMenuItem>
+              {pluginItems}
             </>}
           </DropdownMenuContent>
         </DropdownMenu>

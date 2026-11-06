@@ -184,3 +184,40 @@ describe("AppShell — phone visual viewport", () => {
     expect(document.documentElement.style.getPropertyValue("--app-viewport-height")).toBe("");
   });
 });
+
+describe("AppShell — icon rail", () => {
+  afterEach(() => localStorage.clear());
+
+  function renderRail(collapseScope?: string) {
+    return render(
+      <AppShell topNav={<NavProbe />} sidebar={<nav>full sidebar</nav>} rail={<nav>icon rail</nav>} collapseScope={collapseScope}>
+        <div>content</div>
+      </AppShell>,
+    );
+  }
+
+  it("shows the 44px rail in place of the sidebar while collapsed, and remembers it", async () => {
+    const view = renderRail();
+    expect(screen.queryByRole("complementary", { name: "Sidebar rail" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "toggle" }));
+    const rail = screen.getByRole("complementary", { name: "Sidebar rail" });
+    expect(rail.className).toContain("w-11");
+    expect(within(rail).getByText("icon rail")).toBeTruthy();
+    expect(localStorage.getItem("valet:sidebar-collapsed")).toBe("1");
+    view.unmount();
+    renderRail();
+    expect(screen.getByTestId("collapsed").textContent).toBe("true");
+  });
+
+  it("starts a scoped page, such as the workflow editor, collapsed under its own key", async () => {
+    localStorage.setItem("valet:sidebar-collapsed", "0");
+    const view = renderRail("workflow-editor");
+    expect(screen.getByTestId("collapsed").textContent).toBe("true");
+    await userEvent.click(screen.getByRole("button", { name: "toggle" }));
+    expect(localStorage.getItem("valet:sidebar-collapsed:workflow-editor")).toBe("0");
+    expect(localStorage.getItem("valet:sidebar-collapsed")).toBe("0");
+    view.unmount();
+    renderRail();
+    expect(screen.getByTestId("collapsed").textContent).toBe("false");
+  });
+});

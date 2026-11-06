@@ -18,6 +18,7 @@
  * concurrent git tools.)
  */
 import type { BlobStore, Sandbox, SessionStartRef, SettlePatchRef } from "./types.js";
+import { reportError } from "./error-report.js";
 
 /** Uncompressed size cap. Head-only truncation with a trailing marker — a
  * truncated patch is still cross-checkable; rejecting a large diff would
@@ -57,10 +58,7 @@ export async function capturePatch(ctx: PatchCaptureContext): Promise<SettlePatc
     return await capturePatchInner(ctx);
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
-    console.error(
-      `[engine] patch capture failed (session=${ctx.sessionId}, item=${ctx.queueItemId}):`,
-      reason,
-    );
+    reportError({ area: "engine", reason: "patch_capture" }, `[engine] patch capture failed (session=${ctx.sessionId}, item=${ctx.queueItemId})`, reason);
     return { status: "failed", reason };
   }
 }

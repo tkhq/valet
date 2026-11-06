@@ -1,8 +1,10 @@
 /**
  * CredentialStore decorator: lazily refreshes near-expiry oauth2
  * credentials on read (integration-OAuth design). Refresh routes by the
- * service's manifest declaration — mcp mode via the stored registered
- * client (mcp_oauth_clients) + refreshTokenPkce, authorization_code mode
+ * service's manifest declaration — mcp mode via the client that issued the
+ * credential's tokens (recorded on its metadata at connect; the stored
+ * mcp_oauth_clients row for a credential with no record) +
+ * refreshTokenPkce, authorization_code mode
  * via the declaration's tokenUrl + env client id/secret. GitHub never
  * routes through here (its refresh lives in services/github-tokens.ts) —
  * findOAuthDeclaration excludes it. Refresh failure stamps
@@ -17,7 +19,14 @@ import type { CredentialOwner, CredentialStore, StoredCredential, ValetPlugin } 
 import { OAuthTokenError, refreshTokenPkce, type TokenResponse } from "@valet/sdk";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { mcpOauthClients } from "../schema/index.js";
-import { findOAuthDeclaration, refreshAuthorizationCodeToken } from "../services/integration-oauth.js";
+import {
+  findOAuthDeclaration,
+  type IssuingClient,
+  issuingClientMetadata,
+  readIssuingClient,
+  refreshAuthorizationCodeToken,
+} from "../services/integration-oauth.js";
+import { reportError } from "@valet/engine";
 
 const REFRESH_BUFFER_MS = 60_000;
 /** The longest refusal text kept on a credential. */
@@ -115,11 +124,21 @@ export class OAuthRefreshingCredentialStore implements CredentialStore {
     if (!found) return stored;
 
     let tokens: TokenResponse;
+    // The client this refresh used, when the credential had no record of it.
+    // A good refresh proves that client issued the tokens, so it is recorded.
+    let adopted: IssuingClient | undefined;
     try {
       if (found.oauth.mode === "mcp") {
-        const rows = await this.deps.db.select().from(mcpOauthClients).where(eq(mcpOauthClients.service, service));
-        const client = rows[0];
-        if (!client) throw new Error(`no registered MCP client for ${service}`);
+        // A refresh token belongs to the client it was issued to. The stored
+        // client changes when the declared scopes change, so a credential
+        // refreshes with the client it recorded at connect.
+        let client = readIssuingClient(stored.metadata);
+        if (!client) {
+          const rows = await this.deps.db.select().from(mcpOauthClients).where(eq(mcpOauthClients.service, service));
+          if (!rows[0]) throw new Error(`no registered MCP client for ${service}`);
+          client = { clientId: rows[0].clientId, tokenEndpoint: rows[0].tokenEndpoint };
+          adopted = client;
+        }
         tokens = await refreshTokenPkce({
           tokenEndpoint: client.tokenEndpoint,
           clientId: client.clientId,
@@ -143,8 +162,8 @@ export class OAuthRefreshingCredentialStore implements CredentialStore {
       const reason = err instanceof OAuthTokenError
         ? refreshErrorText(err, [stored.refreshToken, stored.accessToken, clientSecret])
         : undefined;
-      if (reason !== undefined) console.error(`credential refresh failed for ${service}: ${reason}`);
-      else console.error(`credential refresh failed for ${service}:`, err);
+      if (reason !== undefined) reportError({ area: "plugins", reason: "credential_refresh", provider: service }, `credential refresh failed for ${service}: ${reason}`);
+      else reportError({ area: "plugins", reason: "credential_refresh", provider: service }, `credential refresh failed for ${service}`, err);
       // Only the provider refusing the grant (400 or 401) makes the row dead
       // (`isDeadConnection`). A 5xx, a 429, or a network error stamps the
       // failure and leaves the next read to retry.
@@ -166,7 +185,9 @@ export class OAuthRefreshingCredentialStore implements CredentialStore {
       accessToken: tokens.access_token,
       refreshToken: tokens.refresh_token ?? stored.refreshToken,
       expiresAt: typeof tokens.expires_in === "number" ? now + tokens.expires_in * 1000 : undefined,
-      metadata: Object.keys(restMetadata).length > 0 ? restMetadata : undefined,
+      metadata: adopted
+        ? { ...restMetadata, ...issuingClientMetadata(adopted) }
+        : Object.keys(restMetadata).length > 0 ? restMetadata : undefined,
     };
     return this.saveIfUnchanged(owner, service, stored, fresh);
   }

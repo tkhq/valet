@@ -1,3 +1,5 @@
+import { githubInstallationTokenFor } from "../events/derive.js";
+import { buildPluginThreads, stopPluginDeliveryChildren } from "../plugins/plugin-threads.js";
 import { externalUsageRetention } from "../services/external-usage.js";
 import { taggingDrain } from "../tagging/worker.js";
 import { drainAttentionDeliveries } from "../events/attention-delivery.js";
@@ -10,7 +12,7 @@ import { Pool } from "pg";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ChildReader, ChildSender, ChildSpawner, ChildStatusReader, ValetPlugin } from "@valet/engine";
+import type { ChildReader, ChildSender, ChildSpawner, ChildStatusReader, ChildStopper, ValetPlugin } from "@valet/engine";
 import { PgSessionStore, PgEventStream, applyEngineMigrations } from "@valet/store-postgres";
 import { eq } from "drizzle-orm";
 import { tracedSessionStore, tracedWorkflowStore } from "../observability/traced-store.js";
@@ -29,6 +31,7 @@ import { buildHibernationHooks } from "../engine/hibernation-hooks.js";
 import {
   buildChildReader,
   buildChildSender,
+  buildChildStopper,
   buildChildSpawner,
   buildChildStatusReader,
   ChildWatcher,
@@ -36,6 +39,7 @@ import {
 import { HibernationReaper } from "../engine/hibernation-reaper.js";
 import { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
 import { IdleHibernationSweep } from "../engine/idle-hibernation-sweep.js";
+import { OnlineStatusWatcher } from "../services/online-status-watch.js";
 import { WakeWatcher } from "../engine/wake-watcher.js";
 import { SecurityRunnerDriver } from "../orchestrator/security-runner-driver.js";
 import { routeAttention } from "../orchestrator/attention.js";
@@ -52,6 +56,8 @@ import { profilePictureActions } from "../services/profile-picture-actions.js";
 import { skillsActionPlugin } from "../services/skills-actions.js";
 import { eventsActionPlugin } from "../events/actions.js";
 import { diagnosticsActionPlugin } from "../diagnostics/actions.js";
+import { podHealthTargetFromEnv } from "../diagnostics/pod-health.js";
+import { diagnosticsTemplates } from "../diagnostics/template.js";
 import { productionEventWaiterDeriver } from "../events/derive.js";
 import { ContentSyncService } from "../services/content-sync/service.js";
 import { SkillCollector } from "../services/content-sync/skill-collector.js";
@@ -109,9 +115,10 @@ import { resolveImageBuilder, resolvePrebuildPreflight } from "./image-builder.j
 import { SourceService } from "../bakes/source-service.js";
 import type { Providers } from "./types.js";
 import type { InstanceConfig } from "../config/instance-config.js";
-import { InstanceConfigError } from "../config/instance-config.js";
+import { InstanceConfigError, resolveTutorialVersion } from "../config/instance-config.js";
 import { createAutoTitleHost } from "../sessions/auto-title-host.js";
 import { valetBuildSha } from "../version.js";
+import { reportError } from "@valet/engine";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // packages/api/src/providers -> packages/api
@@ -207,8 +214,8 @@ export interface NodeProviderOpts {
    * Seed the `local-user`/`local-org` stub identity (default `true`, for
    * backward compat with every existing stub-mode caller/test). Must be
    * `false` whenever real auth is configured (`BETTER_AUTH_SECRET` set):
-   * `evaluateAdmission`'s "zero users → first signup becomes admin" rule
-   * (`auth/provisioning.ts`) never fires if a local user is pre-seeded, so a
+   * the one-time admin invite (`auth/bootstrap-admin.ts`) is minted only
+   * while there are no users, so with a local user pre-seeded a
    * fresh real deployment could never mint its first admin and every real
    * signup would land in the seeded "Local Dev" org. The stub identity is an
    * admin, so seeding it next to real auth also leaves an admin row nobody
@@ -429,9 +436,18 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   const diagnosticsActions: ValetPlugin = {
     name: "diagnostics-actions",
     version: "0.1.0",
-    description: "Agent-facing tool failure and request latency diagnostics.",
-    actions: [diagnosticsActionPlugin(db, () => ({ engineCredentials, onePassword }))],
+    description: "Agent-facing tool failure, thread outcome, request latency, server error, and API health diagnostics.",
+    actions: [diagnosticsActionPlugin(db, () => ({
+      engineCredentials, onePassword, publicUrl: publicUrlFromEnv(process.env) ?? process.env.BETTER_AUTH_URL,
+    }), {
+      sandboxBackend: parseSandboxBackend(process.env.VALET_SANDBOX_BACKEND),
+      ...(parseSandboxBackend(process.env.VALET_SANDBOX_BACKEND) === "kubernetes" ? { podHealth: podHealthTargetFromEnv(process.env) } : {}),
+    })],
+    templates: diagnosticsTemplates,
   };
+
+  // Same both-set guard as the plugin filter below: env and file together fail boot.
+  const tutorialVersion = resolveTutorialVersion(opts.instanceConfig ?? null, process.env);
 
   // Plugin filter: config file `plugins` block takes precedence over
   // VALET_PLUGINS env var. Both set simultaneously is a configuration error —
@@ -511,6 +527,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   let readerRef: ChildReader | undefined;
   let senderRef: ChildSender | undefined;
   let statusRef: ChildStatusReader | undefined;
+  let stopperRef: ChildStopper | undefined;
   let homeDepsRef: HomeDeps | undefined;
   const engineHost = new EngineHost({
     engineStore,
@@ -560,6 +577,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       if (!statusRef) throw new Error("childStatusReader invoked before provider wiring completed");
       return statusRef(req, ctx);
     },
+    childStopper: (req, ctx) => {
+      if (!stopperRef) throw new Error("childStopper invoked before provider wiring completed");
+      return stopperRef(req, ctx);
+    },
     homeTools: () => buildHomeTools(() => {
       if (!homeDepsRef) throw new Error("home tools invoked before provider wiring completed");
       return homeDepsRef;
@@ -608,6 +629,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   readerRef = buildChildReader(childrenDeps);
   senderRef = buildChildSender(childrenDeps, childWatcher);
   statusRef = buildChildStatusReader(childrenDeps);
+  stopperRef = buildChildStopper(childrenDeps);
 
   // Destroys sandboxes hibernated past the retention window; `start()`/
   // `stop()` are called from `main.ts`, next to the child retention sweep.
@@ -698,7 +720,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       try {
         await prebuildService.seedDefaultBasesIfMissing(id);
       } catch (err) {
-        console.error(`seedDefaultBasesIfMissing(${id}) failed:`, err);
+        reportError({ area: "sandbox", reason: "seed_default_bases" }, `seedDefaultBasesIfMissing(${id}) failed`, err);
       }
     }
   })();
@@ -772,7 +794,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
         });
       }
     } catch (err) {
-      console.error(`workflow approval grant write failed for run ${info.runId}:`, err);
+      reportError({ area: "workflows", reason: "approval_grant_write" }, `workflow approval grant write failed for run ${info.runId}`, err);
     }
   };
 
@@ -795,7 +817,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
         { status: info.outcome, resolvedBy: info.resolvedBy, error: info.error },
       );
     } catch (err) {
-      console.error(`workflow gate resolved callback failed for ${info.runId}:${info.nodeId}`, err);
+      reportError({ area: "workflows", reason: "gate_resolved_callback" }, `workflow gate resolved callback failed for ${info.runId}:${info.nodeId}`, err);
     }
   };
 
@@ -873,6 +895,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // Event dispatcher (event-system plan Task 6): drains event_deliveries
   // into workflow/assistant/signal targets. `start()`/`stop()` are called
   // from main.ts; ingest routes pass `eventDispatcher.nudge` as `onIngest`.
+  // Polled source of the slack.user_online event (Slack sends no webhook for it).
+  // `start()`/`stop()` are called from `main.ts`.
+  const onlineStatusWatcher = new OnlineStatusWatcher({ db, plugins, credentials: engineCredentials, onIngest: () => eventDispatcher.nudge() });
+
   const eventDispatcher = new EventDispatcher({
     db,
     retainExternalUsage: externalUsageRetention(db),
@@ -895,6 +921,38 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     // skipped after ingest (`events/claim-recovery.ts`).
     recoverClaimedDigest: (args) => appendClaimedWaiterDigest(
       waiterMatchDeps({ db, engineStore, engineCredentials, plugins, onePassword, channelHost }, { nudge: (ids) => wakeWatcher.nudge(ids) }), args),
+    // Plugin event handlers run AI work as threads and children of the
+    // subscription owner's assistant (`plugins/plugin-threads.ts`).
+    pluginHandlers: {
+      threads: (scope) => buildPluginThreads({
+        db,
+        engineHost,
+        engineStore,
+        childSpawner: (req, ctx) => {
+          if (!spawnerRef) throw new Error("childSpawner invoked before provider wiring completed");
+          return spawnerRef(req, ctx);
+        },
+        childStopper: (req, ctx) => {
+          if (!stopperRef) throw new Error("childStopper invoked before provider wiring completed");
+          return stopperRef(req, ctx);
+        },
+      }, scope),
+      stopDeliveryChildren: async (deliveryIds) => {
+        await stopPluginDeliveryChildren({
+          db,
+          childStopper: (req, ctx) => {
+            if (!stopperRef) throw new Error("childStopper invoked before provider wiring completed");
+            return stopperRef(req, ctx);
+          },
+        }, deliveryIds);
+      },
+      appToken: (() => {
+        const githubToken = githubInstallationTokenFor({ db, credentials: engineCredentials, key: deriveSecretKey(opts.encryptionKey) });
+        // Only GitHub has an app credential a handler can borrow today.
+        return async (orgId: string, service: string, scope?: { owner?: string }) =>
+          service === "github" ? githubToken(orgId, scope?.owner) : null;
+      })(),
+    },
   });
 
   // Repository content sync. `readerFor` gives each source the GitHub
@@ -973,11 +1031,13 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     workflowStore,
     workflowRunHost,
     workflowScheduler,
+    onlineStatusWatcher,
     webhookRateLimiter,
     eventDispatcher,
     contentSync,
     plugins,
     configMcpServers: opts.instanceConfig?.mcpServers ?? [],
+    tutorialVersion,
     actionPluginByService,
     serviceProbes,
     prebuildService,

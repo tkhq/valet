@@ -66,7 +66,15 @@ describe("OAuth consent page", () => {
     expect(screen.getAllByText(/https:\/\/evil\.example/).length).toBeGreaterThan(0);
   });
 
-  it("sends the decision and follows the returned redirect", async () => {
+  it("labels the app name as unverified and shows where the code goes", async () => {
+    oauthConsent.mockResolvedValue({ ...LOCAL, client_name: "Valet CLI", redirect_origin: "claude://claude.ai" });
+    renderPage("code-4");
+    expect(await screen.findByText("Valet CLI")).toBeTruthy();
+    expect(screen.getByText(/does not verify app names/)).toBeTruthy();
+    expect(screen.getAllByText("claude://claude.ai").length).toBeGreaterThan(0);
+  });
+
+    it("sends the decision and follows the returned redirect", async () => {
     oauthConsent.mockResolvedValue(LOCAL);
     decideOAuthConsent.mockResolvedValue({ redirect: "http://localhost:33418/callback?code=x" });
     const assign = vi.fn();

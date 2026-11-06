@@ -39,6 +39,7 @@
     { "path": "./packages/plugin-figma" },
     { "path": "./packages/plugin-sentry" },
     { "path": "./packages/plugin-deepwiki" },
+    { "path": "./packages/plugin-pr-review" },
     { "path": "./packages/plugin-email-auth" },
     { "path": "./packages/plugin-google-auth" },
     { "path": "./packages/plugin-telegram" },

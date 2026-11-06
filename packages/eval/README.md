@@ -99,6 +99,46 @@ catalog shows its action schemas. The harness answers decision cards
 itself: a typed answer for a question, the declining action for every
 other card.
 
+## Code-review benchmark
+
+`evals/cases/code-review/` holds the 50 pull requests of Martian Code
+Review Bench (MIT, github.com/withmartian/code-review-benchmark). Each
+case checks out a PR and runs the `@valet/plugin-pr-review` reviewer on
+it. The `review_match` check then scores the review with Martian's
+method: extract issues, group duplicates, and match them to the golden
+comments. After the cases, the scorecard prints precision, recall, F1
+and F2 for the reviewer. It also prints the same numbers for the
+reference tools (cubic, Qodo, Greptile, CodeRabbit and others), taken
+from Martian's published results with the same judge and on the same PRs.
+
+These cases run on a Valet key only, never on a personal provider key.
+Every model call, judge calls included, goes through the Valet LLM
+gateway:
+
+```bash
+VALET_LLM_GATEWAY_URL=https://valet.dev.agents.turnkey.engineering \
+VALET_API_KEY_FILE=~/.valet/post-deploy.key \
+pnpm --silent --filter @valet/eval start --cases evals/cases/code-review \
+  --model anthropic/claude-sonnet-5-5 --concurrency 6
+```
+
+When the gateway is set, the CLI deletes `ANTHROPIC_API_KEY`,
+`ANTHROPIC_AUTH_TOKEN` and `OPENAI_API_KEY` from its environment. If the
+gateway is not set, the code-review cases SKIP.
+
+- Repos are cached as blobless bare clones in `VALET_EVAL_REPO_CACHE`
+  (default `~/.cache/valet-eval/repos`). The first run downloads about
+  3.5 GB.
+- The reviewer's `bash` runs on the local machine with no isolation. Run
+  this suite only on repos you trust to read.
+- To regenerate the cases, run `pnpm --filter @valet/eval import:martian`.
+  It needs the `gh` CLI.
+- A run measures the reviewer the plugin ships: one reviewer pass and no
+  verifier. `--verify` checks each finding with a verifier agent, and
+  `--review-passes <n>` merges n independent reviewer passes.
+- One full run costs about $5 for the reviews on Sonnet 5.5, plus the
+  judge calls. `--verify` roughly doubles the review cost.
+
 ## Compare models
 
 ```bash

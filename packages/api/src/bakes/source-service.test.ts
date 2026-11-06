@@ -6,7 +6,7 @@
  * lifecycle scenarios (poll sync, retention, orphan sweep, manual rebuild).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { startGithubFixture, type GithubFixture, type GithubFixtureResponse } from "../test-helpers/github-fixture.js";
@@ -22,6 +22,8 @@ import {
   PrebuildUnavailableError,
   RepoBaseLayerBakingError,
   repoBaseSourceName,
+  builtInSourceKind,
+  isReservedSourceName,
   defaultRetention,
   imageRefFor,
   slugify,
@@ -37,6 +39,12 @@ import {
 import { RegistryCapacityError } from "./registry-health.js";
 import { MIN_IMAGE_CONTRACT } from "@valet/sandbox-kubernetes";
 import { lastSchedulerPassAt } from "../observability/prebuild-lifecycle.js";
+import { recordBuiltInSourceRepair } from "./metrics.js";
+
+vi.mock("./metrics.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./metrics.js")>()),
+  recordBuiltInSourceRepair: vi.fn(),
+}));
 
 const orgId = "org1";
 const NOW = 1_700_000_000_000;
@@ -1412,6 +1420,27 @@ describe("SourceService", () => {
       expect(builder.specs[1].baseImage).toBe(baseBake.imageRef);
     });
 
+    it("never writes repository baseSetup into a legacy full base that carries the layer's name", async () => {
+      prebuildYaml = BASE_YAML;
+      const now = Date.now();
+      await db.insert(imageSources).values({
+        id: "legacy_full", orgId, kind: "base", parentId: null, name: repoBaseSourceName("acme/widgets"),
+        externalRef: null, pullSecretName: null, setupCommands: ["echo org-wide"], profile: "full", repoHost: null,
+        repoFullName: null, cloneUrl: null, schedule: "nightly", enabled: true, lastBoundAt: null, createdAt: now, updatedAt: now,
+      });
+      const repoId = await seedRepoSource(db, { id: "repo1" });
+
+      await expect(service.startBake(repoId)).rejects.toThrow(RepoBaseLayerBakingError);
+
+      expect((await loadSource("legacy_full")).setupCommands).toEqual(["echo org-wide"]);
+      const layers = await db
+        .select()
+        .from(imageSources)
+        .where(and(eq(imageSources.kind, "base"), eq(imageSources.name, repoBaseSourceName("acme/widgets")), isNull(imageSources.profile)));
+      expect(layers).toHaveLength(1);
+      expect((await loadSource(repoId)).parentId).toBe(layers[0]!.id);
+    });
+
     it("a new commit reuses the pushed base (identity-keyed): no second base bake", async () => {
       prebuildYaml = BASE_YAML;
       const repoId = await seedRepoSource(db, { id: "repo1" });
@@ -1784,6 +1813,117 @@ describe("SourceService", () => {
 
       expect(external).toBeDefined();
       expect(fullBase.parentId).toBe(external.id);
+    });
+
+    it("re-seed puts a tampered full base back to the code values, alarms, and rebakes it", async () => {
+      await service.seedDefaultBasesIfMissing(orgId);
+      const seeded = await db.select().from(imageSources).where(eq(imageSources.orgId, orgId));
+      const stockFull = seeded.find((s) => s.name === "stock-full")!;
+      const full = seeded.find((s) => s.kind === "base" && s.profile === "full")!;
+      // Settle the seed bake so the repair's rebake is not skipped as in flight.
+      await db.update(bakes).set({ status: "failed" }).where(eq(bakes.sourceId, full.id));
+      const implant = ["echo aW1wbGFudA== | base64 -d | sh"];
+      await db
+        .update(imageSources)
+        .set({ setupCommands: implant, parentId: null, enabled: false, schedule: "off" })
+        .where(eq(imageSources.id, full.id));
+      vi.mocked(recordBuiltInSourceRepair).mockClear();
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+      const specsBefore = builder.specs.length;
+
+      await service.seedDefaultBasesIfMissing(orgId);
+
+      const [repaired] = await db.select().from(imageSources).where(eq(imageSources.id, full.id));
+      expect(repaired).toMatchObject({ setupCommands: [], parentId: stockFull.id, enabled: true, schedule: "nightly" });
+      const alarm = errors.mock.calls.map((call) => String(call[0])).find((line) => line.includes("drifted from code values"));
+      expect(alarm).toContain("repaired setupCommands, parentId, enabled, schedule");
+      expect(alarm).toContain(JSON.stringify(implant));
+      expect(alarm).toContain(`"parentId":"${stockFull.id}"`);
+      expect(vi.mocked(recordBuiltInSourceRepair).mock.calls).toEqual([
+        [orgId, "default-full", "setupCommands"],
+        [orgId, "default-full", "parentId"],
+        [orgId, "default-full", "enabled"],
+        [orgId, "default-full", "schedule"],
+      ]);
+      expect(builder.specs.length).toBe(specsBefore + 1);
+      errors.mockRestore();
+    });
+
+    it("re-seed fails a bake still in flight from the tampered commands and bakes the repaired row", async () => {
+      await service.seedDefaultBasesIfMissing(orgId);
+      const full = (await db.select().from(imageSources).where(eq(imageSources.orgId, orgId))).find((s) => s.kind === "base" && s.profile === "full")!;
+      const [inFlight] = await db.select().from(bakes).where(eq(bakes.sourceId, full.id));
+      expect(inFlight?.status).toMatch(/queued|building/);
+      await db.update(imageSources).set({ setupCommands: ["echo aW1wbGFudA== | base64 -d | sh"] }).where(eq(imageSources.id, full.id));
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+      const specsBefore = builder.specs.length;
+
+      await service.seedDefaultBasesIfMissing(orgId);
+
+      const rows = await db.select().from(bakes).where(eq(bakes.sourceId, full.id));
+      expect(rows.find((r) => r.id === inFlight!.id)).toMatchObject({ status: "failed", error: "superseded by a built-in source repair" });
+      expect(rows.filter((r) => r.status === "queued" || r.status === "building")).toHaveLength(1);
+      expect(builder.specs.length).toBe(specsBefore + 1);
+      expect(builder.specs.at(-1)?.kind).toBe("base");
+      expect(JSON.stringify(builder.specs.at(-1))).not.toContain("aW1wbGFudA");
+      errors.mockRestore();
+    });
+
+    it("re-seed fails pushed images of the tampered base and of every source built from it", async () => {
+      await service.seedDefaultBasesIfMissing(orgId);
+      const seeded = await db.select().from(imageSources).where(eq(imageSources.orgId, orgId));
+      const stockFull = seeded.find((s) => s.name === "stock-full")!;
+      const full = seeded.find((s) => s.kind === "base" && s.profile === "full")!;
+      await db.update(bakes).set({ status: "failed" }).where(eq(bakes.sourceId, full.id));
+      const repoId = await seedRepoSource(db, { id: "repo_child", parentId: full.id });
+      await seedBake(db, full.id, { id: "pb_base_tainted" });
+      await seedBake(db, repoId, { id: "pb_repo_tainted" });
+      await seedBake(db, stockFull.id, { id: "pb_stock_clean" });
+      await db.update(imageSources).set({ setupCommands: ["echo aW1wbGFudA== | base64 -d | sh"] }).where(eq(imageSources.id, full.id));
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await service.seedDefaultBasesIfMissing(orgId);
+
+      const byId = new Map((await db.select().from(bakes)).map((b) => [b.id, b]));
+      expect(byId.get("pb_base_tainted")?.status).toBe("failed");
+      expect(byId.get("pb_repo_tainted")).toMatchObject({ status: "failed", error: "built from drifted built-in commands; rebuilt after the repair" });
+      expect(byId.get("pb_stock_clean")?.status).toBe("pushed");
+      errors.mockRestore();
+    });
+
+    it("re-seed puts a tampered stock-full row back and alarms", async () => {
+      await service.seedDefaultBasesIfMissing(orgId);
+      await db
+        .update(imageSources)
+        .set({ pullSecretName: "attacker-secret", enabled: false, schedule: "off" })
+        .where(and(eq(imageSources.orgId, orgId), eq(imageSources.name, "stock-full")));
+      vi.mocked(recordBuiltInSourceRepair).mockClear();
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await service.seedDefaultBasesIfMissing(orgId);
+
+      const [stockFull] = await db
+        .select()
+        .from(imageSources)
+        .where(and(eq(imageSources.orgId, orgId), eq(imageSources.name, "stock-full")));
+      expect(stockFull).toMatchObject({ pullSecretName: null, enabled: true, schedule: "nightly" });
+      expect(errors.mock.calls.some((call) => String(call[0]).includes("built-in stock-full"))).toBe(true);
+      expect(vi.mocked(recordBuiltInSourceRepair).mock.calls.map((call) => call[2])).toEqual(["pullSecretName", "enabled", "schedule"]);
+      errors.mockRestore();
+    });
+
+    it("re-seed of untouched built-in rows writes nothing and raises no alarm", async () => {
+      await service.seedDefaultBasesIfMissing(orgId);
+      const before = await db.select().from(imageSources).where(eq(imageSources.orgId, orgId));
+      vi.mocked(recordBuiltInSourceRepair).mockClear();
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await service.seedDefaultBasesIfMissing(orgId);
+
+      expect(await db.select().from(imageSources).where(eq(imageSources.orgId, orgId))).toEqual(before);
+      expect(errors).not.toHaveBeenCalled();
+      expect(recordBuiltInSourceRepair).not.toHaveBeenCalled();
+      errors.mockRestore();
     });
 
     it("full base has empty setup_commands", async () => {
@@ -2330,6 +2470,32 @@ describe("SourceService", () => {
 });
 
 // ── pure helpers (ported) ────────────────────────────────────────────────
+
+describe("builtInSourceKind / isReservedSourceName", () => {
+  it("names the code-managed rows by the keys seeding uses", () => {
+    expect(builtInSourceKind({ kind: "external", name: "stock-full", profile: null })).toBe("stock-full");
+    expect(builtInSourceKind({ kind: "base", name: "default-full", profile: "full" })).toBe("default-full");
+    // A legacy full base with another name is still the org's full base.
+    expect(builtInSourceKind({ kind: "base", name: "Base", profile: "full" })).toBe("default-full");
+    expect(builtInSourceKind({ kind: "base", name: repoBaseSourceName("acme/widgets"), profile: null })).toBe("repo-base");
+  });
+
+  it("leaves admin-owned rows unmarked", () => {
+    expect(builtInSourceKind({ kind: "external", name: "Node 22", profile: null })).toBeNull();
+    expect(builtInSourceKind({ kind: "base", name: "default-headless", profile: "headless" })).toBeNull();
+    expect(builtInSourceKind({ kind: "repo", name: "acme/widgets", profile: null })).toBeNull();
+    expect(builtInSourceKind({ kind: "repo", name: "repo-base:acme/widgets", profile: null })).toBeNull();
+  });
+
+  it("reserves the built-in names, ignoring case and outer spaces", () => {
+    for (const name of ["stock-full", " STOCK-FULL ", "default-full", "repo-base:x/y"]) {
+      expect(isReservedSourceName(name)).toBe(true);
+    }
+    for (const name of ["stock-full-2", "my default-full", "Node 22"]) {
+      expect(isReservedSourceName(name)).toBe(false);
+    }
+  });
+});
 
 describe("imageRefFor / slugify", () => {
   const commit = "abcdef1234567890abcdef1234567890abcdef12";

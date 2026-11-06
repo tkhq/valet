@@ -1,4 +1,5 @@
 import type { AssistantThreadPolicy, Appearance } from "@valet/shared";
+import { sameSettings } from "~/components/plugins/handler-settings";
 import { displayThreadPolicy, sameThreadPolicy } from "~/components/presence/thread-policy-copy";
 /**
  * The pure diff behind the editor's Save: compare the draft against the
@@ -55,6 +56,10 @@ export function buildSubscriptionPatch(
     prompts?: PromptFieldsValue;
     deliveryPreferences?: DeliveryPreferencesValue;
     thread?: AssistantThreadPolicy;
+    /** "Only once every N hours". Null for no limit. */
+    oncePerHours?: number | null;
+    /** A plugin handler's settings. Empty clears them. Read only for a plugin target. */
+    config?: Record<string, unknown>;
   },
 ): PatchEventSubscriptionRequest | null {
   const body: PatchEventSubscriptionRequest = {};
@@ -102,6 +107,14 @@ export function buildSubscriptionPatch(
     if (form.appearance.displayName !== stored.displayName || form.appearance.avatarUrl !== stored.avatarUrl) {
       body.appearance = Object.keys(form.appearance).length > 0 ? form.appearance : null;
     }
+  }
+
+  if (form.oncePerHours !== undefined && form.oncePerHours !== (sub.target.oncePerHours ?? null)) {
+    body.oncePerHours = form.oncePerHours;
+  }
+
+  if (form.config !== undefined && sub.target.kind === "plugin" && !sameSettings(form.config, sub.target.config ?? {})) {
+    body.config = Object.keys(form.config).length > 0 ? form.config : null;
   }
 
   return Object.keys(body).length === 0 ? null : body;

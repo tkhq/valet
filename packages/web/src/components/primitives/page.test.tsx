@@ -28,6 +28,16 @@ describe("PageHeader", () => {
     expect(screen.getByText("Instructions for a task.").className).toContain("text-muted");
   });
 
+  it("keeps a phone breadcrumb on one line, truncating the space first", () => {
+    const { rerender } = render(<PageHeader title="Integrations" clause={<span>Team A</span>} />);
+    const heading = screen.getByRole("heading", { level: 1, name: "Integrations" });
+    expect(heading.className).toContain("max-md:truncate");
+    expect(heading.parentElement?.className).toContain("max-md:flex-nowrap");
+    // A title with no space step wraps instead.
+    rerender(<PageHeader title="A long page title with no space step" />);
+    expect(screen.getByRole("heading", { level: 1 }).className).not.toContain("max-md:truncate");
+  });
+
   it("renders the back link above the title", () => {
     render(<PageHeader title="Run" back={<a href="/workflows">← Workflows</a>} />);
     const back = screen.getByRole("link", { name: "← Workflows" });

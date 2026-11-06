@@ -19,6 +19,12 @@ const baseOpts = {
 };
 
 describe("buildDockerRunArgs (pure)", () => {
+  it("places workloads under the configured host cgroup parent", () => {
+    const args = buildDockerRunArgs({ ...baseOpts, cgroupParent: "sandbox.slice" });
+    expect(args.slice(args.indexOf("--cgroup-parent"), args.indexOf("--cgroup-parent") + 2)).toEqual(["--cgroup-parent", "sandbox.slice"]);
+    expect(buildDockerRunArgs(baseOpts)).not.toContain("--cgroup-parent");
+  });
+
   it("headless (profile omitted) publishes no ports — byte-identical pin", () => {
     const args = buildDockerRunArgs(baseOpts);
     expect(args).not.toContain("-p");

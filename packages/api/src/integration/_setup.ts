@@ -21,6 +21,7 @@ import {
   VirtualSandboxProvider,
   type ChildReader,
   type ChildSender,
+  type ChildStopper,
   type ChildSpawner,
   type ChildStatusReader,
   type SandboxProvider,
@@ -35,6 +36,7 @@ import { buildHibernationHooks } from "../engine/hibernation-hooks.js";
 import {
   buildChildReader,
   buildChildSender,
+  buildChildStopper,
   buildChildSpawner,
   buildChildStatusReader,
   ChildWatcher,
@@ -43,6 +45,7 @@ import {
 import { HibernationReaper } from "../engine/hibernation-reaper.js";
 import { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
 import { IdleHibernationSweep } from "../engine/idle-hibernation-sweep.js";
+import { OnlineStatusWatcher } from "../services/online-status-watch.js";
 import { WakeWatcher } from "../engine/wake-watcher.js";
 import { SecurityRunnerDriver } from "../orchestrator/security-runner-driver.js";
 import { submitSessionPrompt } from "../routes/messages.js";
@@ -222,8 +225,12 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
 
   const prevAuthSecret = process.env.BETTER_AUTH_SECRET;
   const prevLocalAuth = process.env.VALET_LOCAL_AUTH;
+  const prevAuthMethods = process.env.AUTH_METHODS;
   if (opts.auth) {
     process.env.BETTER_AUTH_SECRET = "test-secret";
+    // Login is off until a deployment lists a method. Real-auth tests sign up
+    // with a password unless the test lists its own methods.
+    process.env.AUTH_METHODS ??= "password";
     // Stub auth and real auth are mutually exclusive — the boot check in
     // `main.ts` refuses the pair. A real-auth test must see production's
     // answer to a credential-less request (401), so the stub var comes OFF
@@ -314,6 +321,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   let readerRef: ChildReader | undefined;
   let senderRef: ChildSender | undefined;
   let statusRef: ChildStatusReader | undefined;
+  let stopperRef: ChildStopper | undefined;
   // Default hibernation hooks are the SAME db-backed implementation real
   // boot uses (`providers/node.ts`) — matches production behavior for tests
   // that don't need to observe the hooks directly. `opts.on*` overrides
@@ -373,6 +381,10 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
       if (!statusRef) throw new Error("childStatusReader invoked before provider wiring completed");
       return statusRef(req, ctx);
     },
+    childStopper: (req, ctx) => {
+      if (!stopperRef) throw new Error("childStopper invoked before provider wiring completed");
+      return stopperRef(req, ctx);
+    },
   });
   // Prebuilds are out of scope for the integration harness (no real
   // docker/kubernetes builder wired here unless a test injects one); routes
@@ -415,6 +427,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   readerRef = buildChildReader(childrenDeps);
   senderRef = buildChildSender(childrenDeps, childWatcher);
   statusRef = buildChildStatusReader(childrenDeps);
+  stopperRef = buildChildStopper(childrenDeps);
 
   // retentionMs 0 disables the sweep; behavior is tested in engine/hibernation-reaper.test.ts.
   const hibernationReaper = new HibernationReaper({ db, engineHost, engineStore, retentionMs: 0 });
@@ -629,6 +642,8 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     workflowStore,
     workflowRunHost,
     workflowScheduler,
+    // Never started on its timer in tests; drive `tick()` directly.
+    onlineStatusWatcher: new OnlineStatusWatcher({ db, plugins, credentials: engineCredentials }),
     webhookRateLimiter,
     eventDispatcher,
     contentSync,
@@ -679,6 +694,8 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
         else process.env.BETTER_AUTH_SECRET = prevAuthSecret;
         if (prevLocalAuth === undefined) delete process.env.VALET_LOCAL_AUTH;
         else process.env.VALET_LOCAL_AUTH = prevLocalAuth;
+        if (prevAuthMethods === undefined) delete process.env.AUTH_METHODS;
+        else process.env.AUTH_METHODS = prevAuthMethods;
       }
     },
   };

@@ -17,7 +17,6 @@ import type {
   ListTeamDeletionRequestsResponse,
   ListTeamDeletionTargetsResponse,
   SubmitTeamDeletionRequest,
-  WorkspaceOutcomesResponse,
   ListChannelsResponse,
   WorkspaceIntegrationLimitResponse,
   ListPresencePlacesResponse,
@@ -28,9 +27,8 @@ import type {
   ThreadDefaultsResponse,
   ActiveViewersResponse,
   ThreadPlanResponse,
+  ThreadProgressResponse,
   ThreadRecapResponse,
-  WaitingThreadsResponse,
-  WorkspaceActiveWorkResponse,
   AbortThreadRequest,
   AddTeamMemberRequest,
   AuthConfigResponse,
@@ -42,6 +40,9 @@ import type {
   GetWorkflowPermissionsResponse,
   WorkflowWebhookResponse,
   CreateSourceResponse,
+  ListSourceChangesResponse,
+  PendingSourceChangeResponse,
+  ResolveSourceChangeResponse,
   ListBakesResponse,
   ListSourcesResponse,
   ListBakeQueueResponse,
@@ -87,6 +88,7 @@ import type {
   GetChangelogResponse,
   GetGithubAppResponse,
   GetGithubOrgStatusResponse,
+  GetMemoryPrinciplesResponse,
   GetMemoryTreeResponse,
   ListArtifactsResponse,
   PatchArtifactRequest,
@@ -126,6 +128,7 @@ import type {
   DelegateCredentialRequest,
   DelegateCredentialResponse,
   ListActionLogResponse,
+  ListAdminAuditResponse,
   ListDecisionsResponse,
   ListGrantsResponse,
   ListIdentityLinksResponse,
@@ -150,6 +153,7 @@ import type {
   ListNotificationsResponse,
   ListNotificationDecisionsResponse,
   ListModelsResponse,
+  ListCodeReviewsResponse,
   ListPluginsResponse,
   ListSessionsResponse,
   ListSkillsResponse,
@@ -615,8 +619,10 @@ export const api = {
   agentAccess: () => request<import("@valet/api/wire").AgentAccessResponse>("GET", "/me/agent-access"),
   disconnectMcpApp: (clientId: string) => request<{ ok: true }>("DELETE", `/me/agent-access/mcp/${encodeURIComponent(clientId)}`),
   disconnectCliDevice: (id: string) => request<{ ok: true }>("DELETE", `/me/agent-access/cli/${encodeURIComponent(id)}`),
-  productAnnouncements: () => request<import("@valet/api/wire").ProductAnnouncementsResponse>("GET", "/product-announcements"),
-  acknowledgeProductAnnouncement: (id: string) => request<{ acknowledged: true }>("POST", `/product-announcements/${encodeURIComponent(id)}/acknowledge`),
+  tutorial: () => request<import("@valet/api/wire").TutorialStateResponse>("GET", "/tutorial"),
+  updateTutorial: (body: import("@valet/api/wire").UpdateTutorialRequest) =>
+    request<import("@valet/api/wire").TutorialStateResponse>("PUT", "/tutorial", body),
+  resetTutorial: () => request<import("@valet/api/wire").ResetTutorialResponse>("POST", "/tutorial/reset"),
   listTeamDeletionRequests: (teamId: string, options: ListTeamDeletionRequestsParams = {}) => {
     const query = new URLSearchParams();
     if (options.status) query.set("status", options.status);
@@ -642,10 +648,6 @@ export const api = {
       "GET",
       kind ? `/sessions?kind=${kind}${ownerSuffix(owner)}` : `/sessions${ownerQuery(owner)}`,
     ),
-  listWorkspaceActiveWork: (owner: OwnerFilter, cursor?: string) =>
-    request<WorkspaceActiveWorkResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/active-work?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
-  getWaitingThreads: (owner: OwnerFilter) =>
-    request<WaitingThreadsResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/waiting`),
   listWorkspaceChannels: (owner: OwnerFilter) =>
     request<ListChannelsResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/channels`),
   getIntegrationLimit: (owner: OwnerFilter) =>
@@ -672,6 +674,8 @@ export const api = {
   getActiveViewers: (workspace: string) =>
     request<ActiveViewersResponse>("GET", `/threads/viewers?workspace=${encodeURIComponent(workspace)}`),
   /** The checklist the model keeps with `update_plan`. */
+  getThreadProgress: (threadId: string) =>
+    request<ThreadProgressResponse>("GET", `/threads/${encodeURIComponent(threadId)}/progress`),
   /** One tool call's full result, when the transcript trimmed it. */
   getToolOutput: (threadId: string, entryId: string, callId: string) =>
     request<ToolOutputResponse>("GET", `/threads/${encodeURIComponent(threadId)}/tool-output?entryId=${encodeURIComponent(entryId)}&callId=${encodeURIComponent(callId)}`),
@@ -683,8 +687,6 @@ export const api = {
   /** Download URL for a file attached to the thread; an `<a download>` target. */
   threadFileUrl: (sessionId: string, threadId: string, path: string): string =>
     `/api/sessions/${encodeURIComponent(sessionId)}/threads/${encodeURIComponent(threadId)}/files?${new URLSearchParams({ path })}`,
-  listWorkspaceOutcomes: (owner: OwnerFilter, cursor?: string) =>
-    request<WorkspaceOutcomesResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/outcomes?limit=25${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
   getThreadAddress: (id: string) =>
     request<ThreadAddress>("GET", `/threads/${encodeURIComponent(id)}`),
   getSession: (id: string) =>
@@ -863,6 +865,8 @@ export const api = {
    * — a team's memory is the team's, not a view of yours. */
   getMemoryTree: (owner?: OwnerFilter) =>
     request<GetMemoryTreeResponse>("GET", `/memory/tree${ownerQuery(owner)}`),
+  getMemoryPrinciples: (owner?: OwnerFilter) =>
+    request<GetMemoryPrinciplesResponse>("GET", `/memory/principles${ownerQuery(owner)}`),
 
   // artifacts (artifacts design). `getArtifact` is the token-addressed
   // read the public `/a/$token` page uses — org-visibility artifacts 401
@@ -1018,6 +1022,8 @@ export const api = {
     request<ForkThreadResponse>("POST", `/threads/${encodeURIComponent(threadId)}/fork`, body),
   moveThread: (threadId: string, body: MoveThreadRequest) =>
     request<ForkThreadResponse>("POST", `/threads/${encodeURIComponent(threadId)}/move`, body),
+  duplicateThread: (threadId: string) =>
+    request<ForkThreadResponse>("POST", `/threads/${encodeURIComponent(threadId)}/duplicate`),
   returnToBranch: (threadId: string, body: ReturnToBranchRequest) =>
     request<ReturnToBranchResponse>("POST", `/threads/${encodeURIComponent(threadId)}/branch/return`, body),
   cancelQueuedItem: (threadId: string, itemId: string) =>
@@ -1161,8 +1167,6 @@ export const api = {
       "POST",
       `/workflows/runs/${encodeURIComponent(runId)}/cancel`,
     ),
-  dismissWorkflowRun: (runId: string) =>
-    request<{ ok: true }>("POST", `/workflows/runs/${encodeURIComponent(runId)}/dismiss`),
   retryWorkflowRun: (runId: string, body?: RetryWorkflowRunRequest) =>
     request<RetryWorkflowRunResponse>(
       "POST",
@@ -1450,6 +1454,11 @@ export const api = {
     request<{ ok: true }>("DELETE", `/teams/${encodeURIComponent(id)}/api-keys/${encodeURIComponent(keyId)}`),
 
   // plugins + credentials (plugin-system-v2 plan Task 15 — connect surface)
+  listCodeReviews: (teamId?: string) =>
+    request<ListCodeReviewsResponse>(
+      "GET",
+      teamId === undefined ? "/code-review/reviews" : `/code-review/reviews?teamId=${encodeURIComponent(teamId)}`,
+    ),
   listPlugins: (teamId?: string) =>
     request<ListPluginsResponse>(
       "GET",
@@ -1558,11 +1567,18 @@ export const api = {
   listBakeQueue: () => request<ListBakeQueueResponse>("GET", "/org/sources/queue"),
   reorderBakeQueue: (bakeIds: string[]) => request<{ ok: true }>("PATCH", "/org/sources/queue", { bakeIds }),
   listSources: () => request<ListSourcesResponse>("GET", "/org/sources"),
-  createSource: (body: Record<string, unknown>) => request<CreateSourceResponse>("POST", "/org/sources", body),
+  createSource: (body: Record<string, unknown>) => request<CreateSourceResponse | PendingSourceChangeResponse>("POST", "/org/sources", body),
   patchSource: (id: string, body: Record<string, unknown>) =>
-    request<PatchSourceResponse>("PATCH", `/org/sources/${encodeURIComponent(id)}`, body),
+    request<PatchSourceResponse | PendingSourceChangeResponse>("PATCH", `/org/sources/${encodeURIComponent(id)}`, body),
   deleteSource: (id: string) => request<{ ok: true }>("DELETE", `/org/sources/${encodeURIComponent(id)}`),
   bakeSource: (id: string) => request<TriggerBakeResponse>("POST", `/org/sources/${encodeURIComponent(id)}/bake`),
+  listSourceChanges: () => request<ListSourceChangesResponse>("GET", "/org/sources/changes"),
+  approveSourceChange: (id: string) =>
+    request<ResolveSourceChangeResponse>("POST", `/org/sources/changes/${encodeURIComponent(id)}/approve`),
+  rejectSourceChange: (id: string) =>
+    request<ResolveSourceChangeResponse>("POST", `/org/sources/changes/${encodeURIComponent(id)}/reject`, {}),
+  withdrawSourceChange: (id: string) =>
+    request<ResolveSourceChangeResponse>("DELETE", `/org/sources/changes/${encodeURIComponent(id)}`),
   listSourceBakes: (id: string) => request<ListBakesResponse>("GET", `/org/sources/${encodeURIComponent(id)}/bakes`),
 
   // org GitHub App setup (GitHub/repo integration plan, Task 5) — admin-gated
@@ -1666,6 +1682,17 @@ export const api = {
     if (opts?.to !== undefined) qs.set("to", String(opts.to));
     const tail = qs.toString() ? `?${qs}` : "";
     return request<ListActionLogResponse>("GET", `/org/action-log${tail}`);
+  },
+
+  // admin audit log (docs/specs/2026-11-03-admin-audit-log-design.md)
+  listAdminAudit: (opts?: { cursor?: string; limit?: number; targetType?: string; actorUserId?: string }) => {
+    const qs = new URLSearchParams();
+    if (opts?.cursor) qs.set("cursor", opts.cursor);
+    if (opts?.limit) qs.set("limit", String(opts.limit));
+    if (opts?.targetType) qs.set("targetType", opts.targetType);
+    if (opts?.actorUserId) qs.set("actorUserId", opts.actorUserId);
+    const tail = qs.toString() ? `?${qs}` : "";
+    return request<ListAdminAuditResponse>("GET", `/org/audit-log${tail}`);
   },
 
   // per-user policy overrides + runtime grants (action-policies plan, Task 4/5)

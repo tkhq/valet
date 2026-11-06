@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
+import { auditRequest } from "./_admin-audit.js";
 import { getOrgDefaultTier, getOrgTierMap } from "../services/model-tiers.js";
 import { patchModelTiers, tiersResponse } from "../services/model-tier-settings.js";
 export { tierTargetsNotApproved } from "../services/model-tier-settings.js";
@@ -18,5 +19,7 @@ modelTiersRouter.patch("/", async c => {
   try { raw = await c.req.json(); } catch { return c.json({ error: "invalid JSON body" }, 400); }
   const { db, engineCredentials } = c.var.providers;
   const result = await patchModelTiers(db, engineCredentials, c.var.user, raw);
-  return "error" in result ? c.json(result, 400) : c.json(result);
+  if ("error" in result) return c.json(result, 400);
+  await auditRequest(c, { action: "model_policy.tiers_update", targetType: "model_policy", targetId: "model_tiers", targetName: "Model tiers", changes: { request: raw } });
+  return c.json(result);
 });

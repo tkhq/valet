@@ -2,19 +2,36 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
+import { MAX_PROMPT_TEMPLATE_CHARS } from "@valet/shared";
 import { describe, expect, it } from "vitest";
 import type { CatalogService } from "~/components/events/subscription-match";
+import type { HandlerOption } from "~/components/plugins/handler-settings";
 import { line } from "../test-fixtures";
 import { draftFromLine, newDraft, setService, toggleEvent, type Draft, type EditorMode } from "./draft";
 import { DoSection, EVENT_MESSAGE_VARIABLE, eventMessageDetails, type AssistantOption } from "./do-section";
 
 const SERVICES: CatalogService[] = [
   { service: "github", entries: [{ key: "github.check_run.completed", description: "Check", filters: [{ field: "repo" }, { field: "head_branch" }] }] },
+  { service: "github", entries: [{ key: "github.pull_request.opened", description: "PR opened", filters: [{ field: "repo" }] }] },
 ];
+
+const REVIEW: HandlerOption = {
+  plugin: "pr-review",
+  id: "review-pull-request",
+  label: "PR review: Review pull request",
+  description: "Review each push to a pull request.",
+  events: ["github.pull_request.opened", "github.pull_request.unlisted"],
+  configSchema: {
+    type: "object",
+    properties: { reviewDrafts: { type: "boolean", default: false, description: "Review draft pull requests too." } },
+  },
+};
 
 let latest: Draft | undefined;
 
-function Harness({ initial, mode = { kind: "create" }, assistants = [] }: { initial: Draft; mode?: EditorMode; assistants?: AssistantOption[] }) {
+function Harness({ initial, mode = { kind: "create" }, assistants = [], handlers = [] }: {
+  initial: Draft; mode?: EditorMode; assistants?: AssistantOption[]; handlers?: HandlerOption[];
+}) {
   const [draft, setDraft] = useState(initial);
   latest = draft;
   return (
@@ -25,6 +42,7 @@ function Harness({ initial, mode = { kind: "create" }, assistants = [] }: { init
       services={SERVICES}
       workflows={[{ id: "wf_1", name: "Triage" }]}
       assistants={assistants}
+      handlers={handlers}
     />
   );
 }
@@ -156,9 +174,64 @@ describe("DoSection", () => {
     expect(instructions.parentElement?.contains(note)).toBe(false);
   });
 
+  it("counts the instructions near the api's limit and says what to do past it", () => {
+    render(<Harness initial={github()} />);
+    const box = screen.getByLabelText("Instructions (optional)") as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: "x".repeat(100) } });
+    expect(screen.queryByText(/of 4,000 characters/)).toBeNull();
+    fireEvent.change(box, { target: { value: "x".repeat(3_500) } });
+    expect(screen.getByText("3,500 of 4,000 characters")).toBeTruthy();
+    expect(box.getAttribute("aria-invalid")).not.toBe("true");
+    fireEvent.change(box, { target: { value: "x".repeat(MAX_PROMPT_TEMPLATE_CHARS + 512) } });
+    const error = screen.getByText(
+      "Too long: 4,512 of 4,000 characters. Shorten it or move details into a skill.",
+    );
+    expect(box.getAttribute("aria-invalid")).toBe("true");
+    expect(box.getAttribute("aria-describedby")?.split(" ")).toContain(error.id);
+    // The note sits with the field, not in the footer.
+    expect(error.parentElement?.contains(box)).toBe(true);
+  });
+
+  it("counts no limit for a routine's instructions, which the api does not cap", () => {
+    const draft = setService(newDraft({ timezone: "UTC" }), "schedule");
+    render(<Harness initial={{ ...draft, doKind: "work", instructions: "x".repeat(MAX_PROMPT_TEMPLATE_CHARS + 1) }} mode={{ kind: "create", preselected: { schedule: true } }} />);
+    expect(screen.queryByText(/limit is 4,000/)).toBeNull();
+    expect(screen.queryByText(/of 4,000 characters/)).toBeNull();
+  });
+
   it("gives the instructions six rows at least", () => {
     const draft = setService(newDraft({ timezone: "UTC" }), "schedule");
     render(<Harness initial={{ ...draft, doKind: "work" }} mode={{ kind: "create", preselected: { schedule: true } }} />);
     expect((screen.getByLabelText("Instructions (required)") as HTMLTextAreaElement).rows).toBe(6);
+  });
+
+  it("offers Run a plugin when a plugin declares a handler, and picks its events and settings", async () => {
+    render(<Harness initial={github()} handlers={[REVIEW]} />);
+    expect(screen.getAllByRole("radio").map((r) => r.getAttribute("aria-label"))).toEqual(["Reply", "Work on it", "Run a workflow", "Run a plugin"]);
+    fireEvent.click(screen.getByRole("radio", { name: "Run a plugin" }));
+    expect(latest?.doKind).toBe("plugin");
+    expect(latest?.handler).toEqual({ plugin: "pr-review", handler: "review-pull-request" });
+    // Only the handler's events the catalog lists.
+    expect([...latest!.events]).toEqual(["github.pull_request.opened"]);
+    expect(screen.queryByLabelText(/Instructions/)).toBeNull();
+    await userEvent.click(screen.getByRole("switch", { name: "Review drafts" }));
+    expect(latest?.handlerConfig).toEqual({ reviewDrafts: true });
+  });
+
+  it("hides Run a plugin when no plugin declares a handler", () => {
+    render(<Harness initial={github()} />);
+    expect(screen.queryByRole("radio", { name: "Run a plugin" })).toBeNull();
+  });
+
+  it("keeps a stored plugin line's handler fixed and its settings editable", async () => {
+    const stored = line("l-review", {
+      eventKeys: ["github.pull_request.opened"],
+      target: { kind: "plugin", plugin: "pr-review", handler: "review-pull-request", config: { reviewDrafts: true } },
+    });
+    render(<Harness initial={draftFromLine(stored)} mode={{ kind: "edit", line: stored }} handlers={[REVIEW]} />);
+    expect(screen.getByText("Run a plugin")).toBeTruthy();
+    expect((screen.getByLabelText("Plugin handler") as HTMLSelectElement).disabled).toBe(true);
+    await userEvent.click(screen.getByRole("switch", { name: "Review drafts" }));
+    expect(latest?.handlerConfig).toEqual({});
   });
 });

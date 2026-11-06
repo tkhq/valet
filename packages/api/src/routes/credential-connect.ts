@@ -40,6 +40,7 @@ import {
   exchangeAuthorizationCodeRaw,
   findOAuthDeclaration,
   getMcpOAuthClient,
+  issuingClientMetadata,
 } from "../services/integration-oauth.js";
 import { missingClientEnv } from "../services/integration-availability.js";
 import { isOrgAdmin } from "../services/org.js";
@@ -337,8 +338,8 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
       if (!verified.codeVerifier) return c.redirect(`${landing}error=oauth_state`, 302);
       const clientRow = await getMcpOAuthClient({ db }, verified.service);
       // A connect that re-registered the client after this authorize (a
-      // scope change) replaced it. The code belongs to the old client, and
-      // stored refreshes use the new one, so the user starts again. A state
+      // scope change) replaced it. The code belongs to the old client, whose
+      // token endpoint is no longer stored, so the user starts again. A state
       // signed before client binding has no id and keeps the old behavior.
       if (verified.clientId !== undefined && clientRow.clientId !== verified.clientId) {
         return c.redirect(`${landing}error=oauth_client_changed`, 302);
@@ -355,7 +356,8 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
         refreshToken: tokens.refresh_token,
         expiresAt: typeof tokens.expires_in === "number" ? now + tokens.expires_in * 1000 : undefined,
         scopes: grantedScopes(tokens.scope, verified.scopes ?? (clientRow.scopes.length > 0 ? clientRow.scopes : undefined)),
-        metadata: { connectedVia: "oauth" },
+        // Refreshes use this client, not whichever one is stored later.
+        metadata: { connectedVia: "oauth", ...issuingClientMetadata(clientRow) },
       };
     } else if (found.oauth.interpretTokenResponse) {
       const raw = await exchangeAuthorizationCodeRaw({ oauth: found.oauth, env: process.env, code, redirectUri });

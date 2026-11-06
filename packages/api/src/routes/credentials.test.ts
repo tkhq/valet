@@ -1944,6 +1944,19 @@ describe("team credential scope (TKAI-205)", () => {
     expect(await res.json()).toEqual({ error: "metadata.refreshError is reserved. Valet sets it when a token refresh fails." });
   });
 
+  it("refuses a client-written issuing client", async () => {
+    await teamWithMember();
+    const res = await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ type: "oauth2", accessToken: "lin", metadata: { oauthTokenEndpoint: "http://169.254.169.254/token" } }),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error: "metadata.oauthClientId and metadata.oauthTokenEndpoint are reserved. Valet sets them when an OAuth connect completes.",
+    });
+  });
+
   it("names the corrective action on a malformed delegate body and a non-shareable credential", async () => {
     const team = await teamWithMember();
     const malformed = await fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {

@@ -307,9 +307,10 @@ function TeamRow({
           <TeamMembers team={team} orgMembers={orgMembers} canMutate={canMutate} onSelfRemoved={leavePage} />
           <TeamDefaults team={team} canMutate={canMutate} />
           <TeamSlack key={team.id} team={team} canMutate={canMutate} />
-          <SubSection title="Connections">
+          {/* The team's own page has an Integrations tab for its connections. */}
+          {!page && <SubSection title="Connections">
             <TeamCredentials team={team} orgMembers={orgMembers} canMutate={canMutate} />
-          </SubSection>
+          </SubSection>}
           <TeamDeletionRequests
             key={`deletion-requests:${team.id}`}
             teamId={team.id}

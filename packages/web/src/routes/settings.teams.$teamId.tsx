@@ -9,9 +9,10 @@ import { PinnedWorkspaceScope } from "~/lib/workspace-scope";
 /**
  * `/settings/teams/$teamId` — one team's settings, chosen by name in the
  * rail rather than by the workspace switcher (settings-redesign spec,
- * decision 2). The tabs pin this team's scope, so the sections they render
- * (`TeamsPanel`, API keys, proxy, policies) read it through
- * `useWorkspaceScope()` unchanged.
+ * decision 2). It is the team's one home: the sidebar's Settings row opens
+ * it too. The tabs pin this team's scope, so the sections they render
+ * (`TeamsPanel`, Integrations, Usage, API keys, proxy, policies) read it
+ * through `useWorkspaceScope()` unchanged.
  */
 export const Route = createFileRoute("/settings/teams/$teamId")({
   component: TeamSettingsLayout,
@@ -36,15 +37,14 @@ export function TeamSettingsShell({ teamId }: { teamId: string }) {
 
   const tabs: LinkTab[] = [
     { to: "/settings/teams/$teamId", label: "General", params: { teamId } },
+    { to: "/settings/teams/$teamId/integrations", label: "Integrations", params: { teamId } },
+    { to: "/settings/teams/$teamId/usage", label: "Usage", params: { teamId } },
     { to: "/settings/teams/$teamId/access", label: "API keys and proxy", params: { teamId } },
     { to: "/settings/teams/$teamId/policies", label: "Policies", params: { teamId } },
   ];
   const path = normalizeSettingsPath(pathname);
-  const activeTo: AppPath = path.endsWith("/access")
-    ? "/settings/teams/$teamId/access"
-    : path.endsWith("/policies")
-      ? "/settings/teams/$teamId/policies"
-      : "/settings/teams/$teamId";
+  const activeTo: AppPath = tabs.find((tab) => tab.to !== "/settings/teams/$teamId" && path.endsWith(tab.to.slice(tab.to.lastIndexOf("/"))))?.to
+    ?? "/settings/teams/$teamId";
 
   return (
     <div className="space-y-6">

@@ -171,6 +171,19 @@ vi.mock("~/api/child-work", async (importOriginal) => {
 });
 
 
+describe("ThreadTree — New thread", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    vi.clearAllMocks();
+  });
+
+  it("is a plain button with no create menu beside it", () => {
+    render(<TooltipProvider><ThreadTree /></TooltipProvider>);
+    expect(screen.getByRole("button", { name: "New thread" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "More to create" })).toBeNull();
+  });
+});
+
 describe("ThreadTree — delete project", () => {
   const key = "valet:thread-projects:user-1:team-runtime";
   function seed(assignments: Record<string, string> = { "thread-1": "acme", unloaded: "acme", unrelated: "other" }) {

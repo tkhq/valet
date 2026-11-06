@@ -11,6 +11,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
+import type { AuthConfigResponse } from "@valet/api/wire";
 
 const navigate = vi.fn();
 vi.mock("~/lib/auth-navigation", () => ({ finishAuthChange: (to: string) => navigate({ to }) }));
@@ -36,11 +37,14 @@ vi.mock("~/lib/auth-client", () => ({
   },
 }));
 
-let authConfigData: { stub: boolean; social: ("google" | "github")[]; sso: { name: string } | null } = {
+const PASSWORD_AND_PROVIDERS: AuthConfigResponse = {
   stub: false,
+  password: true,
+  primary: "password",
   social: ["github"],
   sso: { name: "Keycloak" },
 };
+let authConfigData: AuthConfigResponse = PASSWORD_AND_PROVIDERS;
 
 vi.mock("~/api/auth-config", () => ({
   useAuthConfig: () => ({ data: authConfigData, isLoading: false, error: null }),
@@ -54,7 +58,7 @@ describe("LoginPage", () => {
     signInEmail.mockClear();
     signInSocial.mockClear();
     signInSso.mockClear();
-    authConfigData = { stub: false, social: ["github"], sso: { name: "Keycloak" } };
+    authConfigData = PASSWORD_AND_PROVIDERS;
   });
 
   it("renders email/password fields plus only the configured social + SSO buttons", () => {
@@ -67,7 +71,7 @@ describe("LoginPage", () => {
   });
 
   it("renders no alternatives block when auth-config has neither social nor sso", () => {
-    authConfigData = { stub: false, social: [], sso: null };
+    authConfigData = { stub: false, password: true, primary: "password", social: [], sso: null };
     render(<LoginPage />);
     expect(screen.queryByText(/Continue with/)).toBeNull();
   });
@@ -137,5 +141,35 @@ describe("LoginPage", () => {
 
     await waitFor(() => expect(screen.getByText("Invalid email or password")).toBeTruthy());
     expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("with SSO alone, shows only the SSO button and no password form or sign-up link", () => {
+    authConfigData = { stub: false, password: false, primary: "oidc", social: [], sso: { name: "Keycloak" } };
+    render(<LoginPage />);
+    expect(screen.queryByLabelText("Email")).toBeNull();
+    expect(screen.queryByLabelText("Password")).toBeNull();
+    expect(screen.queryByText("Create an account")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Continue with Keycloak" }));
+    expect(signInSso).toHaveBeenCalledWith({ providerId: "oidc", callbackURL: `${window.location.origin}/` });
+  });
+
+  it("puts the primary method first", () => {
+    authConfigData = { ...PASSWORD_AND_PROVIDERS, primary: "oidc" };
+    render(<LoginPage />);
+    const sso = screen.getByRole("button", { name: "Continue with Keycloak" });
+    const email = screen.getByLabelText("Email");
+    // DOCUMENT_POSITION_FOLLOWING: the email field comes after the SSO button.
+    expect(sso.compareDocumentPosition(email) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const buttons = screen.getAllByRole("button").map((b) => b.textContent);
+    expect(buttons.indexOf("Continue with Keycloak")).toBeLessThan(buttons.indexOf("Continue with GitHub"));
+  });
+
+  it("says sign-in is not set up when no method is on", () => {
+    authConfigData = { stub: false, password: false, primary: null, social: [], sso: null };
+    render(<LoginPage />);
+    expect(screen.getByRole("status").textContent).toBe(
+      "Sign-in is not set up for this Valet. Ask your administrator to turn on a sign-in method.",
+    );
+    expect(screen.queryByLabelText("Email")).toBeNull();
   });
 });

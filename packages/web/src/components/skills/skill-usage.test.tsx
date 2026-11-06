@@ -59,7 +59,7 @@ describe("SkillUsage", () => {
       mode: "require_approval", source: "default", overridden: false, settable: ["allow", "require_approval", "deny"] }];
     render(<SkillUsage skill={skill} />);
     const links = screen.getAllByRole("link").map((link) => link.getAttribute("href"));
-    expect(links).toEqual(["/integrations?service=google-workspace", "/integrations?service=gmail"]);
+    expect(links).toEqual(["/settings/integrations?service=google-workspace", "/settings/integrations?service=gmail"]);
     // The same row grammar as Integrations: the pill, and your tool summary.
     expect(screen.getByText("Refresh failed")).toBeTruthy();
     expect(screen.getAllByText("1 tool · 1 ask").length).toBeGreaterThan(0);

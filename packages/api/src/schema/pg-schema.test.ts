@@ -50,6 +50,7 @@ const APP_TABLES = [
   "oauth_consent",
   "invites",
   "sandbox_tokens",
+  "admin_audit_events",
   "org_members",
   "agent_sessions",
   "session_threads",
@@ -1047,6 +1048,28 @@ describe("pg app schema + migrations", () => {
       await db.query("INSERT INTO session_config_invalidations (session_id, token) VALUES ($1, $2)", ["stale-session", "token"]);
       await applyAppMigrations(db);
       expect((await db.query("SELECT token FROM session_config_invalidations WHERE session_id = $1", ["stale-session"])).rows).toEqual([{ token: "token" }]);
+      expect(await missingSchemaRepairs(db)).toEqual([]);
+    });
+
+    it("repairs the memory usage table on an already-migrated database", async () => {
+      await db.query('DROP TABLE "memory_file_usage"');
+      expect((await missingSchemaRepairs(db)).map(repair => repair.describe)).toContain("memory_file_usage table");
+      await applyAppMigrations(db);
+      await db.query("INSERT INTO memory_file_usage (owner_type, owner_id, path, read_count) VALUES ($1, $2, $3, $4)", ["user", "u1", "notes/a.md", 2]);
+      expect((await db.query("SELECT namespace, read_count, last_read_at FROM memory_file_usage")).rows)
+        .toEqual([{ namespace: "", read_count: 2, last_read_at: null }]);
+      expect(await missingSchemaRepairs(db)).toEqual([]);
+    });
+
+    it("repairs the memory usage start time, set once to the repair time", async () => {
+      await db.query('DROP TABLE "memory_usage_tracking"');
+      expect((await missingSchemaRepairs(db)).map(repair => repair.describe)).toContain("memory_usage_tracking table");
+      const before = Date.now();
+      await applyAppMigrations(db);
+      await applyAppMigrations(db);
+      // One row, however often the repair runs, and set when it first ran.
+      expect((await db.query("SELECT started_at >= $1 AS fresh FROM memory_usage_tracking", [before - 1_000])).rows)
+        .toEqual([{ fresh: true }]);
       expect(await missingSchemaRepairs(db)).toEqual([]);
     });
 

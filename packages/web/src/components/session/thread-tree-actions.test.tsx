@@ -17,6 +17,7 @@ import { ApiError } from "~/api/client";
 import type {
   ArtifactListItem,
   BackgroundWorkConflict,
+  ListTeamsResponse,
   DecisionGate,
   GetModelTiersResponse,
   ModelInfo,
@@ -31,6 +32,7 @@ const setArchivedMutateAsync = vi.fn().mockResolvedValue({ id: "thread-1" });
 const replaceMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const dismissMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const renameMutateAsync = vi.fn().mockResolvedValue({ id: "thread-1" });
+const duplicateMutateAsync = vi.fn();
 
 let threads: ThreadSummary[] = [];
 let searchMatches: ThreadSummary[] = [];
@@ -47,6 +49,8 @@ let sessionModel: string | undefined;
 let models: ModelInfo[] = [];
 let tierMap: GetModelTiersResponse = { xs: [], s: [], m: [], l: [], xl: [] };
 let wakeups: ListSessionWakeupsResponse | undefined;
+/** The person's teams, which the Move to menu offers as workspaces. */
+let teamsData: ListTeamsResponse = { teams: [] };
 // The phone drawer and the web sidebar share this component. Most tests
 // cover the web sidebar; a phone test sets `mobile`.
 let mobile = false;
@@ -108,6 +112,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
     useCreateThread: () => ({ mutateAsync: vi.fn(), isPending: false }),
     useSetThreadArchived: () => ({ mutateAsync: setArchivedMutateAsync, isPending: false }),
     useRenameThread: () => ({ mutateAsync: renameMutateAsync, isPending: false }),
+    useDuplicateThread: () => ({ mutateAsync: duplicateMutateAsync, isPending: false }),
     useReplaceSandbox: () => ({ mutateAsync: replaceMutateAsync, isPending: false }),
     useMarkThreadsRead: () => ({ mutate: markThreadsReadMutate, isPending: false }),
     // The gate seed (usePendingGatesSeed) stays inert: with no data the
@@ -122,6 +127,7 @@ vi.mock("~/api/settings", async (importOriginal) => {
   return {
     ...actual,
     useMe: () => ({ data: { id: "user-1" }, error: null }),
+    useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
     useModels: () => ({ data: { models }, isLoading: false, error: null }),
     useModelTiers: () => ({ data: tierMap, isLoading: false, error: null }),
   };
@@ -214,6 +220,7 @@ beforeEach(() => {
   replaceMutateAsync.mockClear();
   dismissMutateAsync.mockClear();
   renameMutateAsync.mockClear();
+  duplicateMutateAsync.mockReset();
   threads = [thread()];
   archivedThreads = [];
   searchMatches = [];
@@ -228,6 +235,7 @@ beforeEach(() => {
   models = [];
   tierMap = { xs: [], s: [], m: [], l: [], xl: [] };
   wakeups = undefined;
+  teamsData = { teams: [] };
   workflows = [];
   artifacts = [];
   listReads.length = 0;
@@ -236,7 +244,9 @@ beforeEach(() => {
 });
 
 describe("ThreadTree — Home row", () => {
-  const home = () => thread({ id: "home-1", key: "home", title: "Home", lastAgentActivityAt: Date.now() + 1 });
+  // Fixed times: two `Date.now()` reads can differ on a slow runner, and the
+  // unread mark needs the agent's activity to be newer than the person's.
+  const home = () => thread({ id: "home-1", key: "home", title: "Home", lastUserActivityAt: 1_000, lastAgentActivityAt: 2_000 });
 
   it("pins Home above the list in the person's own workspace and keeps it out of Recents", () => {
     homeConversation = { sessionId: "orchestrator:user-1", threadId: "home-1" };
@@ -246,7 +256,7 @@ describe("ThreadTree — Home row", () => {
     // The router Link mock renders a bare anchor, so query it by tag.
     const link = section.querySelector("a");
     expect(link?.textContent).toContain("Home");
-    expect(link?.getAttribute("to")).toBe("/chat");
+    expect(link?.getAttribute("to")).toBe("/");
     expect(within(section).getByLabelText("Unread")).toBeTruthy();
     // One Home, above everything else in the list.
     expect(screen.getAllByText("Home")).toHaveLength(1);
@@ -260,7 +270,7 @@ describe("ThreadTree — Home row", () => {
     threads = [home(), thread({ id: "slack-old", key: "slack:D1:111.1", title: "Earlier Slack conversation" })];
     renderTree();
     const homeLink = screen.getByRole("region", { name: "Home" }).querySelector("a");
-    expect(homeLink?.getAttribute("to")).toBe("/chat");
+    expect(homeLink?.getAttribute("to")).toBe("/");
     const recents = screen.getByRole("region", { name: "Recents" });
     expect(within(recents).getByText("Earlier Slack conversation")).toBeTruthy();
     expect(within(recents).queryByText("Home")).toBeNull();
@@ -275,11 +285,21 @@ describe("ThreadTree — Home row", () => {
     expect(screen.queryByText("Home")).toBeNull();
   });
 
-  it("shows no Home row in another workspace's sidebar", () => {
+  it("pins Home in another workspace's sidebar too, without that list's thread marks", () => {
     homeConversation = { sessionId: "orchestrator:someone-else", threadId: "home-9" };
     threads = [thread()];
     renderTree();
-    expect(screen.queryByRole("region", { name: "Home" })).toBeNull();
+    const section = screen.getByRole("region", { name: "Home" });
+    expect(section.querySelector("a")?.getAttribute("to")).toBe("/");
+    expect(within(section).queryByLabelText("Unread")).toBeNull();
+  });
+
+  it("starts Home fresh: no tasks nest under the Home row", () => {
+    homeConversation = { sessionId: "orchestrator:user-1", threadId: "home-1" };
+    threads = [home(), thread()];
+    renderTree();
+    expect(screen.queryByRole("list", { name: "Tasks from Home" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /tasks for Home/ })).toBeNull();
   });
 
   it("finds Home in search when its content matches", async () => {
@@ -442,6 +462,34 @@ describe("ThreadTree — thread context menu", () => {
     await user.click(screen.getByRole("menuitem", { name: "Pin thread" }));
     await user.click(screen.getByRole("button", { name: /thread menu/i }));
     expect(await screen.findByRole("menuitem", { name: "Unpin thread" })).toBeTruthy();
+  });
+
+  it("duplicates a thread into this workspace and opens the copy", async () => {
+    duplicateMutateAsync.mockResolvedValueOnce({ thread: thread({ id: "thread-copy", title: "Plan the launch (copy)" }), workspace: "user" });
+    const user = userEvent.setup();
+    renderTree();
+
+    await user.click(screen.getByRole("button", { name: /thread menu/i }));
+    await user.click(screen.getByRole("menuitem", { name: "Duplicate thread" }));
+
+    expect(duplicateMutateAsync).toHaveBeenCalledWith({ threadId: "thread-1" });
+    await waitFor(() => expect(navigate).toHaveBeenCalledTimes(1));
+    const call = navigate.mock.calls[0]?.[0] as { search: (prev: Record<string, unknown>) => Record<string, unknown> };
+    expect(call.search({ thread: "thread-1", child: "c" })).toEqual({ thread: "thread-copy", workspace: "user", child: undefined });
+    expect(setArchivedMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("shows the server's reason when a thread does not duplicate", async () => {
+    const busy = "A turn is running or waiting on an approval in this thread. Let it finish, then duplicate it.";
+    duplicateMutateAsync.mockRejectedValueOnce(new ApiError(409, "POST → 409", { error: busy }));
+    const user = userEvent.setup();
+    renderTree();
+
+    await user.click(screen.getByRole("button", { name: /thread menu/i }));
+    await user.click(screen.getByRole("menuitem", { name: "Duplicate thread" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain(busy);
+    expect(navigate).not.toHaveBeenCalled();
   });
 
   it("offers a session-wide Replace sandbox action", async () => {
@@ -1019,9 +1067,9 @@ describe("ThreadTree: timer wait line", () => {
       leases: [],
     };
     renderTree();
-    // The selected tint and accent bar sit on one element that holds the
-    // title and the line, so the line does not hang below the row.
-    const highlighted = screen.getByText("Plan the launch").closest(".bg-moss-wash-strong");
+    // The selected fill sits on one element that holds the title and the
+    // line, so the line does not hang below the row.
+    const highlighted = screen.getByText("Plan the launch").closest(".bg-ink-wash-strong");
     expect(highlighted?.contains(screen.getByText("Waiting · next wakeup in 5m"))).toBe(true);
   });
 
@@ -1090,6 +1138,47 @@ describe("ThreadTree: Needs you section", () => {
   });
 });
 
+describe("ThreadTree: one Move to menu", () => {
+  const team = (id: string, name: string, callerRole: "admin" | "member" | null): ListTeamsResponse["teams"][number] =>
+    ({ id, orgId: "org-1", name, origin: "local", externalId: null, createdAt: 1, memberCount: 2, callerRole, defaultModel: null });
+
+  it("lists this sidebar's projects and every other workspace the person is on", async () => {
+    saveSidebar({ projects: [{ id: "acme", name: "ACME", collapsed: false }] });
+    teamsData = { teams: [team("team-a", "Platform", "member"), team("team-b", "Design", "admin"), team("team-c", "Sales", null)] };
+    threads = [thread({ key: "web:t1" })];
+    const user = userEvent.setup();
+    render(<TooltipProvider><ThreadTree workspace="team-a" /></TooltipProvider>);
+
+    await user.click(screen.getByRole("button", { name: /thread menu: plan the launch/i }));
+    expect(screen.queryByRole("menuitem", { name: /Move to (project|workspace)/ })).toBeNull();
+    await user.click(screen.getByRole("menuitem", { name: "Move to" }));
+    const sub = (await screen.findByRole("menuitem", { name: "ACME" })).closest<HTMLElement>('[role="menu"]')!;
+    expect(within(sub).getByRole("menuitem", { name: "Recents" })).toBeTruthy();
+    expect(within(sub).getByRole("menuitem", { name: "Private" })).toBeTruthy();
+    expect(within(sub).getByRole("menuitem", { name: "Design" })).toBeTruthy();
+    // Not the team it is in, and not a team the person is not on.
+    expect(within(sub).queryByRole("menuitem", { name: "Platform" })).toBeNull();
+    expect(within(sub).queryByRole("menuitem", { name: "Sales" })).toBeNull();
+
+    // A submenu item selects on click; userEvent's pointer sequence does not reach it in jsdom.
+    fireEvent.click(within(sub).getByRole("menuitem", { name: "Design" }));
+    expect(await screen.findByText(/Everyone on Design will see this thread's messages and files.*Your teammates here will no longer see it/)).toBeTruthy();
+  });
+
+  it("offers only projects for a thread that cannot change workspace", async () => {
+    teamsData = { teams: [team("team-b", "Design", "admin")] };
+    threads = [thread({ key: "slack:C1:1.1" })];
+    const user = userEvent.setup();
+    renderTree();
+
+    await user.click(screen.getByRole("button", { name: /thread menu: plan the launch/i }));
+    await user.click(screen.getByRole("menuitem", { name: "Move to" }));
+    const sub = (await screen.findByRole("menuitem", { name: "Recents" })).closest<HTMLElement>('[role="menu"]')!;
+    expect(within(sub).queryByText("Workspace")).toBeNull();
+    expect(within(sub).queryByRole("menuitem", { name: "Design" })).toBeNull();
+  });
+});
+
 describe("ThreadTree: project row controls", () => {
   it("keeps project creation visible on a phone with a touch target", () => {
     saveSidebar({ projects: [{ id: "acme", name: "ACME", collapsed: false }] });
@@ -1099,9 +1188,15 @@ describe("ThreadTree: project row controls", () => {
     expect(create.className).not.toContain("max-md:hidden");
     expect(create.className).toContain("max-md:min-h-11");
     for (const name of ["Project menu: ACME", "New project"]) {
-      const control = screen.getByRole("button", { name });
-      expect(control.className).toContain("max-md:hidden");
-      expect(control.className).not.toContain("opacity-0");
+      expect(screen.getByRole("button", { name }).className).toContain("max-md:hidden");
+    }
+    // Row chrome hides only where a pointer can hover, so a touch screen
+    // always shows it.
+    for (const name of ["New thread in ACME", "Project menu: ACME", "New project", "Sidebar options"]) {
+      const classes = screen.getByRole("button", { name }).className.split(/\s+/);
+      expect(classes).toContain("[@media(hover:hover)]:opacity-0");
+      expect(classes).toContain("group-hover:opacity-100");
+      expect(classes).not.toContain("opacity-0");
     }
     // The list-wide menu (sort, filter, mark all read) has no other home on a
     // phone, so it stays, with a 44px target.
@@ -1220,5 +1315,33 @@ describe("ThreadTree: search filter chips", () => {
     const firstWorkflow = screen.getByRole("option", { name: "Deploy workflow 0" });
     expect(firstWorkflow.getAttribute("aria-selected")).toBe("true");
     expect(input.getAttribute("aria-activedescendant")).toBe(firstWorkflow.id);
+  });
+});
+
+describe("ThreadTree: Recents length", () => {
+  // Thread 7 is the newest, so it is the open thread, but it has the oldest activity.
+  const eight = () => Array.from({ length: 8 }, (_, i) => thread({ id: `t${i}`, title: `Thread ${i}`, createdAt: 1_000 + i, lastUserActivityAt: 10_000 - i }));
+  const recentTitles = () => within(screen.getByRole("region", { name: "Recents" })).getAllByText(/^Thread \d$/).map((node) => node.textContent);
+
+  it("shows five Recents and the open thread on a wider screen, then the rest on Show more", async () => {
+    threads = eight();
+    hasMoreThreads = true;
+    renderTree();
+    expect(recentTitles()).toEqual(["Thread 0", "Thread 1", "Thread 2", "Thread 3", "Thread 4", "Thread 7"]);
+    // The next page loads only once every loaded row shows.
+    expect(screen.queryByRole("button", { name: "Load more threads" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Show more" }));
+    expect(recentTitles()).toHaveLength(8);
+    expect(screen.getByRole("button", { name: "Load more threads" })).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Show less" }));
+    expect(recentTitles()).toHaveLength(6);
+  });
+
+  it("lists every Recent in the phone drawer", () => {
+    mobile = true;
+    threads = eight();
+    renderTree();
+    expect(recentTitles()).toHaveLength(8);
+    expect(screen.queryByRole("button", { name: "Show more" })).toBeNull();
   });
 });

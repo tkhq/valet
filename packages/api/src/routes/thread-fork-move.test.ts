@@ -8,7 +8,7 @@ import type { MessageEntry, Thread, ToolContext } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { ensureAssistantExecution, ensureDefaultAssistantSession } from "../assistants/service.js";
 import { buildThreadLinkTools } from "../home/thread-link-tools.js";
-import { sessionThreads, teamMembers, teams } from "../schema/index.js";
+import { orgMembers, sessionThreads, teamMembers, teams, users } from "../schema/index.js";
 import { FORK_OF_METADATA_KEY, MOVED_TO_METADATA_KEY } from "../services/thread-links.js";
 import type { ForkThreadResponse, ListMessagesResponse, ThreadAddress } from "../wire/types.js";
 
@@ -144,6 +144,34 @@ describe("move", () => {
     expect(note?.content).toContain(`/chat?workspace=fork-team&thread=${moved.thread.id}`);
   });
 
+  it("moves a team thread into another team the person is on, under the same rules", async () => {
+    await boot();
+    await api!.providers.db.insert(teams).values({ id: "other-team", orgId: "local-org", name: "Other", createdAt: 1 });
+    await api!.providers.db.insert(teamMembers).values({ teamId: "other-team", userId: "local-user", role: "member" });
+    const { thread, sessionId } = await teamThread();
+    expect((await post(`/threads/${thread.id}/move`, { to: { teamId: "fork-team" }, confirm: true })).status).toBe(400);
+    // The other team reads it after the move, so the request confirms.
+    const unconfirmed = await post(`/threads/${thread.id}/move`, { to: { teamId: "other-team" } });
+    expect(((await unconfirmed.json()) as { code: string }).code).toBe("confirm_required");
+    // A teammate who wrote nothing there cannot take it from its author, and
+    // cannot move it into a team they are not on.
+    const teammate = await post(`/threads/${thread.id}/move`, { to: { teamId: "other-team" }, confirm: true }, MEMBER);
+    expect(teammate.status).toBe(403);
+
+    const res = await post(`/threads/${thread.id}/move`, { to: { teamId: "other-team" }, confirm: true });
+    expect(res.status).toBe(201);
+    const moved = (await res.json()) as ForkThreadResponse;
+    expect(moved.workspace).toBe("other-team");
+    expect((await read(moved.thread.id)).status).toBe(200);
+    expect((await read(moved.thread.id, MEMBER)).status).toBe(404);
+    const [row] = await api!.providers.db.select().from(sessionThreads).where(and(eq(sessionThreads.sessionId, sessionId), eq(sessionThreads.id, thread.id)));
+    expect(row?.archivedAt).toBeTypeOf("number");
+    // Teammates left behind learn where it went, without a link they cannot open.
+    const note = ((await (await read(thread.id, MEMBER)).json()) as ListMessagesResponse).messages.at(-1);
+    expect(note?.content).toContain("moved this thread to Other");
+    expect(note?.content).not.toContain("/chat?");
+  });
+
   it("refuses a team the person is not on, and a thread not started in Valet", async () => {
     await boot();
     await api!.providers.db.insert(teams).values({ id: "other-team", orgId: "local-org", name: "Other", createdAt: 1 });
@@ -153,6 +181,86 @@ describe("move", () => {
     const res = await post(`/threads/${rule.thread.id}/move`, { to: "private" });
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toContain("Only a thread started in Valet can move");
+  });
+});
+
+describe("duplicate", () => {
+  it("copies a team thread into the same team and leaves the source as it was", async () => {
+    await boot();
+    const { thread, sessionId } = await teamThread();
+    await api!.providers.db.insert(sessionThreads).values({ id: thread.id, sessionId, createdAt: 1, title: "Plan" });
+    const res = await post(`/threads/${thread.id}/duplicate`, {}, MEMBER);
+    expect(res.status).toBe(201);
+    const copy = (await res.json()) as ForkThreadResponse;
+    expect(copy.workspace).toBe("fork-team");
+    expect(copy.thread.title).toBe("Plan (copy)");
+    expect(copy.thread.id).not.toBe(thread.id);
+    // Everyone on the team reads the copy, as they read the source.
+    for (const reader of ["local-user", MEMBER]) {
+      const messages = ((await (await read(copy.thread.id, reader)).json()) as ListMessagesResponse).messages;
+      expect(messages.map((m) => m.content).slice(0, 2)).toEqual(["first", "first answer"]);
+    }
+    const stored = await api!.providers.engineStore.getThread(copy.thread.sessionId, copy.thread.id);
+    expect(stored?.metadata?.[FORK_OF_METADATA_KEY]).toEqual({ sessionId, threadId: thread.id });
+
+    const [row] = await api!.providers.db.select().from(sessionThreads).where(and(eq(sessionThreads.sessionId, sessionId), eq(sessionThreads.id, thread.id)));
+    expect(row?.archivedAt ?? null).toBeNull();
+    const source = await api!.providers.engineStore.getThread(sessionId, thread.id);
+    expect(source?.metadata?.[MOVED_TO_METADATA_KEY]).toBeUndefined();
+    const sourceMessages = ((await (await read(thread.id)).json()) as ListMessagesResponse).messages;
+    expect(sourceMessages.map((m) => m.content)).toEqual(["first", "first answer"]);
+  });
+
+  it("copies a private thread into the private threads and keeps one copy suffix", async () => {
+    await boot();
+    const { thread, sessionId } = await personalThread();
+    await api!.providers.db.insert(sessionThreads).values({ id: thread.id, sessionId, createdAt: 1, title: "Idea (copy)" });
+    const res = await post(`/threads/${thread.id}/duplicate`, {});
+    expect(res.status).toBe(201);
+    const copy = (await res.json()) as ForkThreadResponse;
+    expect(copy.workspace).toBe("user");
+    expect(copy.thread.title).toBe("Idea (copy)");
+    expect(((await (await read(copy.thread.id)).json()) as ListMessagesResponse).messages.map((m) => m.content).slice(0, 2)).toEqual(["my idea", "my answer"]);
+  });
+
+  it("refuses a copy of a team thread that is private to one person", async () => {
+    await boot();
+    // An Ask Valet or workflow editor thread in a team is its owner's alone;
+    // a copy in the team would show it to everyone, so it stays one thread.
+    const { thread } = await teamThread("app-assistant:local-user");
+    const res = await post(`/threads/${thread.id}/duplicate`, {});
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("Branch it privately instead");
+  });
+
+  it("names the copy of an untitled thread", async () => {
+    await boot();
+    const { thread } = await personalThread();
+    const copy = (await (await post(`/threads/${thread.id}/duplicate`, {})).json()) as ForkThreadResponse;
+    expect(copy.thread.title).toBe("Untitled thread (copy)");
+  });
+
+  it("keeps the copy suffix when the source title is at the length limit", async () => {
+    await boot();
+    const { thread, sessionId } = await personalThread();
+    const long = "x".repeat(200);
+    await api!.providers.db.insert(sessionThreads).values({ id: thread.id, sessionId, createdAt: 1, title: long });
+    const copy = (await (await post(`/threads/${thread.id}/duplicate`, {})).json()) as ForkThreadResponse;
+    expect(copy.thread.title).toBe(`${"x".repeat(193)} (copy)`);
+    expect(copy.thread.title).not.toBe(long);
+  });
+
+  it("refuses a thread with a turn waiting to run, and a person outside the team", async () => {
+    await boot();
+    const { thread } = await teamThread();
+    await api!.providers.db.insert(users).values({ id: "test-outsider", email: "outsider@dev", name: "Outsider", role: "member" });
+    await api!.providers.db.insert(orgMembers).values({ orgId: "local-org", userId: "test-outsider", role: "member", createdAt: 1 });
+    expect((await post(`/threads/${thread.id}/duplicate`, {}, "test-outsider")).status).toBe(404);
+    // The thread is paused, so this message waits in its queue.
+    expect((await post(`/threads/${thread.id}/messages`, { text: "keep going" })).status).toBeLessThan(300);
+    const res = await post(`/threads/${thread.id}/duplicate`, {});
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toContain("Let it finish, then duplicate it");
   });
 });
 

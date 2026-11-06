@@ -43,7 +43,6 @@ vi.mock("~/api/settings", async (importOriginal) => {
   };
 });
 vi.mock("~/components/layout/notifications-bell", () => ({ NotificationsBell: () => null }));
-vi.mock("~/components/product-announcement", () => ({ ProductAnnouncement: () => null }));
 vi.mock("~/lib/use-attention-ping", () => ({ useAttentionPing: () => {} }));
 vi.mock("~/components/layout/workspace-assistant", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/components/layout/workspace-assistant")>();

@@ -2,7 +2,8 @@
 
 The Home and navigation layout is updated by
 [Mobile Home and shared conversation components](2026-10-23-mobile-home-conversation-design.md).
-That design changes the shell below 768px and preserves the desktop shell.
+That design changes the shell below 768px. Since 2026-11-02, desktop Home also
+shows the conversation, and the dashboard moves to `/overview`.
 
 ## Scope
 
@@ -83,7 +84,7 @@ The final flex sizing change passed browser checks, targeted tests, typecheck, p
 
 ## Page layouts
 
-Home and team dashboards use narrower phone padding, wrapping titles, and touch-sized card actions.
+Personal and team dashboards (now at `/overview`) use narrower phone padding, wrapping titles, and touch-sized card actions.
 Usage summaries, request logs, and event filters retain readable labels at phone widths. Wide payloads scroll within their own containers.
 Workflow lists, runs, approvals, and trigger dialogs wrap long names and action groups.
 

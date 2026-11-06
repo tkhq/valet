@@ -3,6 +3,7 @@
  * rows, one transaction. Callers (generic webhook route, github-app
  * forwarder) handle org resolution and signature verification first.
  */
+import { lockOncePerLine, oncePerHoursBlocks, oncePerHoursOf } from "./once-per.js";
 import { createEventReceipt, appendReceiptStage } from "./receipts.js";
 import type { ReceiptSubscriptionDecision } from "../wire/types.js";
 import { randomUUID } from "node:crypto";
@@ -28,6 +29,7 @@ import { isDeliverableTarget } from "./assistant-delivery.js";
 import { hasTeamCoverage } from "./delivery-policy.js";
 import { isAssistantKind } from "./target-names.js";
 import { placeOfSubject } from "../services/presence-places.js";
+import { reportError } from "@valet/engine";
 
 /** The target kind a receipt records. A stored old `orchestrator` kind records as `assistant`. */
 function receiptTargetKind(target: unknown): string {
@@ -213,7 +215,7 @@ async function logFilterExcludedDrop(
       detail: message,
     });
   } catch (err) {
-    console.error("[ingest] filter-excluded drop-log failed", err);
+    reportError({ area: "events", reason: "ingest_drop_log" }, "[ingest] filter-excluded drop-log failed", err);
   }
 }
 
@@ -336,7 +338,10 @@ export async function ingestEvent(
     let authorizationDenied = false;
     phase = "the line filter and sender checks";
     for (const sub of subs) {
-      const outcome = await subscriptionMatchOutcome(deps.db, sub, event.key, event.payload, catalog, true, event.subjects);
+      let outcome: Awaited<ReturnType<typeof subscriptionMatchOutcome>> | "rate_limited" =
+        await subscriptionMatchOutcome(deps.db, sub, event.key, event.payload, catalog, true, event.subjects);
+      // "Only once every N hours" (`once-per.ts`): a line inside its window skips the event.
+      if (outcome === "matched" && await oncePerHoursBlocks(deps.db, sub, now)) outcome = "rate_limited";
       if (outcome === "matched") matched.push(sub);
       if (outcome === "authorization_denied") authorizationDenied = true;
       if (subscriptionNamesKey(sub, event.key)) decisions.push({
@@ -352,7 +357,8 @@ export async function ingestEvent(
         target: receiptTargetKind(sub.target), outcome: "disabled" });
     }
     await appendReceiptStage(deps.db, receiptId, { stage: "subscription_match",
-      outcome: matched.length > 0 ? "matched" : authorizationDenied ? "authorization_denied" : decisions.some(d => d.outcome === "filter_excluded") ? "filtered" : "no_subscription",
+      outcome: matched.length > 0 ? "matched" : authorizationDenied ? "authorization_denied" : decisions.some(d => d.outcome === "filter_excluded") ? "filtered"
+        : decisions.some(d => d.outcome === "rate_limited") ? "rate_limited" : "no_subscription",
       detail: `${subs.length} enabled lines of presence checked; ${decisions.filter(d => d.outcome !== "disabled").length} name this key; ${matched.length} matched; ${decisions.filter(d => d.outcome === "disabled").length} naming this key are disabled. Decisions show up to 50 lines that name this key.`,
     }, { subscriptions: decisions });
     // Event waiters evaluate before the early return for an unmatched event,
@@ -476,9 +482,21 @@ export async function ingestEvent(
         return { eventId: existing?.id ?? eventId, duplicate: true, deliveries: 0, linkedEventId: existing?.id };
       }
 
-      if (matched.length > 0) {
+      // The match-time check above ran outside this transaction. A line with
+      // a "once every N hours" limit re-checks here under its lock, in id
+      // order, so concurrent events admit at most one delivery per window.
+      const admitted: typeof matched = [];
+      const limited: string[] = [];
+      for (const sub of [...matched].sort((a, b) => a.id.localeCompare(b.id))) {
+        if (oncePerHoursOf(sub.target) !== null) {
+          await lockOncePerLine(tx, sub.id);
+          if (await oncePerHoursBlocks(tx, sub, now)) { limited.push(sub.id); continue; }
+        }
+        admitted.push(sub);
+      }
+      if (admitted.length > 0) {
         await tx.insert(eventDeliveries).values(
-          matched.map((sub) => ({
+          admitted.map((sub) => ({
             id: randomUUID(),
             eventId,
             subscriptionId: sub.id,
@@ -492,7 +510,7 @@ export async function ingestEvent(
           })),
         );
       }
-      return { eventId, duplicate: false, deliveries: matched.length, linkedEventId: eventId };
+      return { eventId, duplicate: false, deliveries: admitted.length, linkedEventId: eventId, limited };
     });
     let result: Awaited<ReturnType<typeof persist>>;
     try {
@@ -505,6 +523,15 @@ export async function ingestEvent(
     }
     await appendDigests(claims?.waiters);
 
+    // A line the locked re-check dropped read as matched above. Correct its decision.
+    const limited = "limited" in result ? result.limited ?? [] : [];
+    if (limited.length > 0) {
+      await appendReceiptStage(deps.db, receiptId, {
+        stage: "subscription_match", outcome: result.deliveries > 0 ? "matched" : "rate_limited",
+        detail: `${limited.length} ${limited.length === 1 ? "line" : "lines"} already ran inside ${limited.length === 1 ? "its" : "their"} once-every-N-hours window, so ${limited.length === 1 ? "it" : "they"} skipped this event.`,
+      }, { subscriptions: decisions.map((d) => (limited.includes(d.id) ? { ...d, outcome: "rate_limited" as const } : d)) });
+    }
+
     await appendReceiptStage(deps.db, receiptId, { stage: "persistence", outcome: result.duplicate ? "duplicate" : "stored",
       detail: result.duplicate ? "This provider event was already stored. No line acted on it again." : `Event stored for ${result.deliveries} ${result.deliveries === 1 ? "line" : "lines"}. Open its Activity entry to see what each line did.`,
     }, result.linkedEventId ? { eventId: result.linkedEventId } : undefined);
@@ -516,7 +543,7 @@ export async function ingestEvent(
     return { eventId: result.eventId, duplicate: result.duplicate, deliveries: result.deliveries, authorizationDenied };
   } catch (error) {
     await appendReceiptStage(deps.db, receiptId, { stage: "ingestion", outcome: "failed", detail: `Processing failed during ${phase}. Search the server logs for this event's ID; the error itself is not kept here.` });
-    console.error(`[ingest] receipt ${receiptId ?? "unavailable"} failed`, error);
+    reportError({ area: "events", reason: "ingest_receipt" }, `[ingest] receipt ${receiptId ?? "unavailable"} failed`, error);
     throw error;
   }
 }

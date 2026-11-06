@@ -181,7 +181,7 @@ describe("runBoundedRestore", () => {
     rejectHung?.(new Error("late auth failure"));
     await new Promise((r) => setTimeout(r, 0));
     const logged = errSpy.mock.calls.some(
-      (call) => String(call[0]).includes("later failed in the background") && String(call[1]).includes("late auth failure"),
+      (call) => String(call[0]).includes("later failed in the background") && String(call[0]).includes("late auth failure"),
     );
     expect(logged).toBe(true);
     errSpy.mockRestore();

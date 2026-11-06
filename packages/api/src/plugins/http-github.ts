@@ -84,6 +84,7 @@ import { waiterMatchDeps } from "../events/waiters.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 import type { GetGithubAppResponse, GetGithubOrgStatusResponse } from "../wire/types.js";
 import type { PluginHttpBinding, PluginHttpBindingContext } from "./http-bindings.js";
+import { reportError } from "@valet/engine";
 
 const GITHUB_CREDENTIAL_SERVICE = "github";
 
@@ -222,7 +223,7 @@ async function saveApp(providers: Providers, orgId: string, input: GithubAppConf
   try {
     await discoverInstallations(appDeps(providers), orgId);
   } catch (err) {
-    console.error(`${label}: post-save discovery failed:`, err);
+    reportError({ area: "plugins", reason: "github_discovery", provider: "github" }, `${label}: post-save discovery failed`, err);
   }
   // The App can point at a stale public URL, such as a restarted tunnel.
   // `syncAppWebhookUrl` never throws.
@@ -252,7 +253,7 @@ function appCapability(providers: Providers, caller: PluginHttpCaller, request: 
         await discoverInstallations(appDeps(providers), orgId);
         return true;
       } catch (err) {
-        console.error("github-app refresh: discovery failed:", err);
+        reportError({ area: "plugins", reason: "github_discovery", provider: "github" }, "github-app refresh: discovery failed", err);
         return false;
       }
     },
@@ -422,7 +423,7 @@ function connectionCapability(
                   userId, githubId: connection.githubId, accessToken: connection.accessToken,
                 });
               } catch (err) {
-                console.error("github connect callback: personal installation reconcile failed:", err);
+                reportError({ area: "plugins", reason: "github_installation_reconcile", provider: "github" }, "github connect callback: personal installation reconcile failed", err);
               }
             }
           },

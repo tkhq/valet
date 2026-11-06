@@ -13,7 +13,18 @@ import type {
   SandboxBatchJobsApi,
 } from "@valet/sandbox-kubernetes";
 import type { PrebuildSpec } from "./builder.js";
-import { BUILDKIT_IMAGE, buildkitdToml, buildKitJobManifest, KubernetesImageBuilder, mapJobStatus, PREBUILD_LABEL_KEY, pushRefFor, refHost } from "./k8s-builder.js";
+import {
+  BUILDKIT_IMAGE,
+  buildkitdToml,
+  buildKitJobManifest,
+  KubernetesImageBuilder,
+  mapJobStatus,
+  PREBUILD_LABEL_KEY,
+  pushRefFor,
+  refHost,
+  UNTRUSTED_BUILD_WORKLOAD,
+  WORKLOAD_LABEL_KEY,
+} from "./k8s-builder.js";
 
 function baseSpec(overrides: Partial<PrebuildSpec> = {}): PrebuildSpec {
   return {
@@ -119,11 +130,31 @@ describe("buildKitJobManifest", () => {
 
     expect(job.metadata?.name).toBe("valet-prebuild-1");
     expect(job.metadata?.namespace).toBe("valet-sandboxes");
-    expect(job.metadata?.labels).toEqual({ [PREBUILD_LABEL_KEY]: "1" });
+    expect(job.metadata?.labels).toEqual({ [PREBUILD_LABEL_KEY]: "1", [WORKLOAD_LABEL_KEY]: UNTRUSTED_BUILD_WORKLOAD });
     expect(job.spec?.activeDeadlineSeconds).toBe(1800);
     expect(job.spec?.backoffLimit).toBe(0);
     expect(job.spec?.template.spec?.restartPolicy).toBe("Never");
-    expect(job.spec?.template.metadata?.labels).toEqual({ [PREBUILD_LABEL_KEY]: "1" });
+    expect(job.spec?.template.metadata?.labels).toEqual({ [PREBUILD_LABEL_KEY]: "1", [WORKLOAD_LABEL_KEY]: UNTRUSTED_BUILD_WORKLOAD });
+    // Unset placement keeps the scheduler's choice.
+    expect(job.spec?.template.spec).not.toHaveProperty("nodeSelector");
+    expect(job.spec?.template.spec).not.toHaveProperty("tolerations");
+  });
+
+  it("puts the configured node selector and tolerations on the build pod", () => {
+    const tolerations = [{ key: "valet.dev/build", operator: "Exists", effect: "NoSchedule" }];
+    const job = buildKitJobManifest({
+      id: "1",
+      namespace: "valet-sandboxes",
+      imageRef: "valet-registry:5000/acme-widgets:abc123",
+      hasGitToken: false,
+      buildkitImage: BUILDKIT_IMAGE,
+      activeDeadlineSeconds: 1800,
+      registryInsecure: false,
+      nodeSelector: { pool: "builds" },
+      tolerations,
+    });
+    expect(job.spec?.template.spec?.nodeSelector).toEqual({ pool: "builds" });
+    expect(job.spec?.template.spec?.tolerations).toEqual(tolerations);
   });
 
   it("mounts the git-token secret at /run/valet/git-token and passes --secret when a token is present", () => {
@@ -463,7 +494,10 @@ class FakeJobsApi implements SandboxBatchJobsApi {
   }
 }
 
-function newBuilder(jobsApi: FakeJobsApi, overrides: Partial<{ registryInsecure: boolean; registryPushHost: string; registryPullHost: string }> = {}) {
+function newBuilder(
+  jobsApi: FakeJobsApi,
+  overrides: Partial<Pick<ConstructorParameters<typeof KubernetesImageBuilder>[0], "registryInsecure" | "registryPushHost" | "registryPullHost" | "nodeSelector" | "tolerations">> = {},
+) {
   let counter = 0;
   return new KubernetesImageBuilder({
     jobsApi,
@@ -471,6 +505,8 @@ function newBuilder(jobsApi: FakeJobsApi, overrides: Partial<{ registryInsecure:
     registryInsecure: overrides.registryInsecure ?? true,
     ...(overrides.registryPushHost ? { registryPushHost: overrides.registryPushHost } : {}),
     ...(overrides.registryPullHost ? { registryPullHost: overrides.registryPullHost } : {}),
+    nodeSelector: overrides.nodeSelector,
+    tolerations: overrides.tolerations,
     newId: () => String(++counter),
   });
 }
@@ -491,6 +527,18 @@ describe("KubernetesImageBuilder", () => {
     expect(jobsApi.secrets.has("valet-prebuild-pb-1-token")).toBe(true);
     const secret = jobsApi.secrets.get("valet-prebuild-pb-1-token");
     expect(secret?.stringData.token).toBe("ghp_secret");
+  });
+
+  it("dispatched Job carries the builder's placement and the untrusted-build label", async () => {
+    const jobsApi = new FakeJobsApi();
+    const tolerations = [{ key: "valet.dev/build", operator: "Equal", value: "true", effect: "NoSchedule" }];
+    const builder = newBuilder(jobsApi, { nodeSelector: { pool: "builds" }, tolerations });
+    await builder.build(baseSpec());
+    await new Promise((r) => setTimeout(r, 0));
+    const body = jobsApi.jobs.get("valet-prebuild-pb-1")?.params.body;
+    expect(body?.spec?.template.metadata?.labels?.[WORKLOAD_LABEL_KEY]).toBe(UNTRUSTED_BUILD_WORKLOAD);
+    expect(body?.spec?.template.spec?.nodeSelector).toEqual({ pool: "builds" });
+    expect(body?.spec?.template.spec?.tolerations).toEqual(tolerations);
   });
 
   it("build() names resources from the row id even when it carries characters invalid in a k8s name", async () => {

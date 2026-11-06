@@ -1,6 +1,7 @@
 import { afterEach, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { webPresence } from "../services/web-presence.js";
+import { bootstrapAdminInviteCode } from "../test-helpers/bootstrap-admin-code.js";
 
 let api: TestApi | undefined;
 afterEach(async () => { await api?.cleanup(); api = undefined; });
@@ -9,7 +10,7 @@ it("reports only the authenticated user's tabs", async () => {
   api = await bootTestApi({ auth: true });
   const signup = await fetch(`${api.baseUrl}/api/auth/sign-up/email`, {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: "Presence", email: "presence@example.test", password: "correct-horse-battery" }),
+    body: JSON.stringify({ name: "Presence", email: "presence@example.test", password: "correct-horse-battery", inviteCode: await bootstrapAdminInviteCode(api.providers.db) }),
   });
   expect(signup.status).toBe(200);
   const cookie = signup.headers.get("set-cookie")?.match(/better-auth\.session_token=[^;]+/)?.[0];

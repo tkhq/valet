@@ -5,10 +5,11 @@
  * test app with stub providers, no node-server). It also keeps boot-time
  * I/O (open sqlite, build providers) out of the hot test path.
  */
+import { reportError } from "@valet/engine";
 import { cliUsage } from "./middleware/cli-usage.js";
 import { threadsRouter } from "./routes/threads.js";
 import { TeamAdminRequiredError, teamAdminRefusal } from "./services/team-deletion-access.js";
-import { productAnnouncementsRouter } from "./routes/product-announcements.js";
+import { tutorialRouter } from "./routes/tutorial.js";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
@@ -25,7 +26,8 @@ import { filterTeamKeysFromPersonalApiKeyList } from "./lib/personal-api-key-lis
 import { teamIdFromApiKeyMetadata } from "./lib/request-principal.js";
 import { oAuthDiscoveryMetadata, oAuthProtectedResourceMetadata, type ValetAuth } from "./auth/index.js";
 import { mcpHandler } from "./auth/mcp.js";
-import type { AuthConfig } from "./auth/config.js";
+import { mcpRegisterGate } from "./auth/mcp-registration.js";
+import { DEFAULT_MCP_REGISTRATION, type AuthConfig } from "./auth/config.js";
 import type { AuthConfigResponse, HealthResponse, ReadyResponse } from "./wire/types.js";
 import { publicUrlFromEnv } from "./channels/host.js";
 import { generatedFileOrigin } from "./services/generated-files.js";
@@ -55,6 +57,7 @@ import { workflowTriggersRouter } from "./routes/workflow-triggers.js";
 import { workflowConversationRouter } from "./routes/workflow-conversation.js";
 import { workflowsRouter } from "./routes/workflows.js";
 import { pluginsRouter } from "./routes/plugins.js";
+import { codeReviewRouter } from "./routes/code-review.js";
 import { actionsRouter } from "./routes/actions.js";
 import { mcpAuthorizeGate, mcpTokenGate, oauthConsentRouter } from "./routes/oauth-consent.js";
 import { cliDevicePublicRouter, cliDeviceRouter } from "./routes/cli-device.js";
@@ -99,6 +102,7 @@ import { eventReceiptsRouter } from "./routes/event-receipts.js";
 import { eventsRouter } from "./routes/events.js";
 import { mountWebStatic } from "./static-web.js";
 import { traceRequests } from "./observability/http-middleware.js";
+import { lifecycleGate, type Lifecycle } from "./lib/lifecycle.js";
 
 export interface CreatedApp {
   app: Hono<AppEnv>;
@@ -133,6 +137,12 @@ export interface CreateAppOpts {
    * embedded callers have no boot chain).
    */
   isReady?: () => boolean;
+  /**
+   * Boot/drain gate (`lib/lifecycle.ts`): API, MCP, webhook and proxy routes
+   * answer 503 + `Retry-After` until the boot chain is done and again during
+   * the SIGTERM drain. Absent → no gate (test harnesses, embedded callers).
+   */
+  lifecycle?: Lifecycle;
 }
 
 /**
@@ -173,6 +183,8 @@ export function createApp(
       credentials: true,
     }),
   );
+  // After CORS, so a 503 from the gate still reaches a cross-origin caller.
+  if (opts.lifecycle) app.use("*", lifecycleGate(opts.lifecycle));
   app.use("*", providersMiddleware(providers));
   app.use("/api/*", cliUsage());
 
@@ -275,8 +287,11 @@ export function createApp(
   if (auth) {
     // Every MCP authorization goes through Valet's consent page: a client
     // cannot skip it by leaving out prompt=consent (routes/oauth-consent.ts).
-    app.get("/api/auth/mcp/authorize", mcpAuthorizeGate(auth));
+    app.get("/api/auth/mcp/authorize", mcpAuthorizeGate(auth, (authConfig?.mcp ?? DEFAULT_MCP_REGISTRATION).appSchemes));
     app.post("/api/auth/mcp/token", mcpTokenGate(providers.db));
+    // Registration stays open (MCP clients register before sign-in), but
+    // redirect URIs are checked and registrations are limited.
+    app.post("/api/auth/mcp/register", mcpRegisterGate(providers.db, authConfig?.mcp ?? DEFAULT_MCP_REGISTRATION));
     // `valet login` starts, polls, refreshes, and signs out here before it
     // has a credential (routes/cli-device.ts).
     app.use("/api/cli/device/code", bodyLimit({ maxSize: 16 * 1024 }));
@@ -317,13 +332,15 @@ export function createApp(
       ...(authConfig
         ? {
             stub: false,
+            password: authConfig.methods.includes("password"),
+            primary: authConfig.primaryMethod,
             social: [
               ...(authConfig.social.google ? (["google"] as const) : []),
               ...(authConfig.social.github ? (["github"] as const) : []),
             ],
             sso: authConfig.oidc ? { name: authConfig.oidc.name } : null,
           }
-        : { stub: true, social: [], sso: null }),
+        : { stub: true, password: false, primary: null, social: [], sso: null }),
       ...(publicOrigin ? { publicOrigin } : {}),
     };
     return c.json(body);
@@ -383,6 +400,7 @@ export function createApp(
   app.route("/api/workflows", workflowsRouter);
   app.route("/api/templates", templatesRouter);
   app.route("/api/plugins", pluginsRouter);
+  app.route("/api/code-review", codeReviewRouter);
   app.route("/api/skills", skillsRouter);
   app.route("/api/credentials", credentialConnectRouter);
   app.route("/api/credentials", credentialsRouter);
@@ -395,7 +413,7 @@ export function createApp(
   app.route("/api/me/agent-access", agentAccessRouter);
   app.route("/api/me/identity-links", identityLinksRouter);
   app.route("/api/me", meRouter);
-  app.route("/api/product-announcements", productAnnouncementsRouter);
+  app.route("/api/tutorial", tutorialRouter);
   app.route("/api/models", modelsRouter);
   app.route("/api/usage", usageRouter);
   app.route("/api/proxy", proxyUsageRouter);
@@ -471,7 +489,6 @@ export function createApp(
   // would hide a server-side failure from alerting.
   app.onError(async (err, c) => {
     if (err instanceof TeamAdminRequiredError) return c.json(await teamAdminRefusal(c.var.providers.db, c.var.user.orgId, err), 403);
-    console.error(`route error ${c.req.method} ${c.req.path}:`, err);
     const duck = err as { statusCode?: unknown; code?: unknown };
     const declared =
       err instanceof ValetError
@@ -481,6 +498,9 @@ export function createApp(
           : undefined;
     const status =
       typeof declared === "number" && declared >= 400 && declared <= 599 ? declared : 500;
+    // A declared 4xx is a refusal the client caused: log it, do not count it.
+    if (status >= 500) reportError({ area: "api", reason: "route_error" }, `route error ${c.req.method} ${c.req.routePath ?? c.req.path}`, err);
+    else console.error(`route error ${c.req.method} ${c.req.path}:`, err);
     return c.json(
       {
         error: err.message ?? "internal error",

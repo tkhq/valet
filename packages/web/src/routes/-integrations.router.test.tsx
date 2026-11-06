@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * `/integrations` under a real router and memory history: the detail panel
+ * `/settings/integrations` under a real router and memory history: the detail panel
  * is a URL (`?service=`), so opening, closing, and Back are history
  * behavior that a mocked router cannot show.
  */
@@ -26,9 +26,13 @@ import type {
 vi.mock("~/api/workflows", () => ({ useTriggerCatalog: () => ({ data: { catalog: [] } }) }));
 vi.mock("~/components/integrations/integration-limit-notice", () => ({ IntegrationLimitNotice: () => null }));
 vi.mock("~/lib/use-list-owner", () => ({ useListOwner: () => undefined }));
+// The membership read can fail, as a network error would leave it.
+const membership = vi.hoisted(() => ({ failed: false }));
 vi.mock("~/api/settings", () => ({
   useMe: () => ({ data: { id: "u1", orgRole: "member" }, isLoading: false, error: null }),
-  useTeams: () => ({ data: { teams: [team] }, isLoading: false, error: null }),
+  useTeams: () => membership.failed
+    ? { data: undefined, isLoading: false, error: new Error("offline") }
+    : { data: { teams: [team] }, isLoading: false, error: null },
   useOrg: () => ({ data: { features: { organizations: true } } }),
   useOrgDirectory: () => ({ data: { users: [] }, isLoading: false, error: null }),
 }));
@@ -83,9 +87,9 @@ vi.mock("~/api/policies", async (importOriginal) => ({
   useSetMyToolModes: () => ({ mutate: setToolModes, error: setToolModesError }),
 }));
 
-import { WorkspaceScopeProvider, useWorkspaceScope } from "~/lib/workspace-scope";
-import { WorkspaceSwitcher, workspaceOptions } from "~/components/layout/workspace-switcher";
-import { Route as IntegrationsRoute } from "./integrations";
+import { WorkspaceScopeProvider } from "~/lib/workspace-scope";
+import { Route as IntegrationsRoute } from "./settings.integrations";
+import { Route as IntegrationsRedirectRoute } from "./integrations";
 
 function service(name: string, extra: Partial<PluginServiceSummary> = {}): PluginServiceSummary {
   return { service: name, type: "api_key", configKeys: ["accessToken"], connected: false, connect: "manual", actions: [], ...extra };
@@ -95,23 +99,17 @@ function plugin(name: string, services: PluginServiceSummary[], description = ""
   return { name, version: "1", actionCount: 3, description, services };
 }
 
-/** The workspace switcher as the top nav wires it, off `/chat`. */
-function Switcher() {
-  const scope = useWorkspaceScope();
-  return <WorkspaceSwitcher options={workspaceOptions([team])} activeKey={scope.key} onSelect={scope.setKey} navigateOnSelect={false} />;
-}
-
 /** The real route's component and search schema under a memory history.
  * `/elsewhere` is the page the reader came from, one entry back. */
-function mount(initial = "/integrations") {
-  // The real scope provider in the root route, as in `__root.tsx`, so it
-  // reads `?workspace=` through the page route's own search schema.
+function mount(initial = "/settings/integrations") {
+  // The real scope provider in the root route, as in `__root.tsx`. The
+  // page pins your own workspace whatever the switcher holds.
   const root = createRootRoute({
-    component: () => <WorkspaceScopeProvider><Switcher /><Outlet /></WorkspaceScopeProvider>,
+    component: () => <WorkspaceScopeProvider><Outlet /></WorkspaceScopeProvider>,
   });
   const page = createRoute({
     getParentRoute: () => root,
-    path: "integrations",
+    path: "settings/integrations",
     component: IntegrationsRoute.options.component,
     validateSearch: IntegrationsRoute.options.validateSearch,
   });
@@ -123,6 +121,7 @@ function mount(initial = "/integrations") {
 }
 
 beforeEach(() => {
+  membership.failed = false;
   window.sessionStorage.clear();
   credentials = [];
   plugins = { plugins: [plugin("notion", [service("notion", { connected: true })], "Notes and docs")] };
@@ -139,7 +138,7 @@ describe("the integration detail panel", () => {
       await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
       await waitFor(() => expect(router.state.location.search).toEqual({}));
     }
-    expect(router.state.location.pathname).toBe("/integrations");
+    expect(router.state.location.pathname).toBe("/settings/integrations");
 
     await act(async () => router.history.back());
     await waitFor(() => expect(router.state.location.pathname).toBe("/elsewhere"));
@@ -147,12 +146,12 @@ describe("the integration detail panel", () => {
   });
 
   it("closes a linked panel in place, so Back leaves without reopening it", async () => {
-    const router = mount("/integrations?service=notion");
+    const router = mount("/settings/integrations?service=notion");
     fireEvent.keyDown(await screen.findByRole("dialog"), { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     // The panel was the first Integrations entry, so closing must not go
     // back out of the page.
-    expect(router.state.location.pathname).toBe("/integrations");
+    expect(router.state.location.pathname).toBe("/settings/integrations");
     expect(router.state.location.search).toEqual({});
 
     await act(async () => router.history.back());
@@ -174,7 +173,7 @@ describe("the integration detail panel", () => {
   });
 
   it("keeps the search when it closes", async () => {
-    const router = mount("/integrations?q=notes");
+    const router = mount("/settings/integrations?q=notes");
     fireEvent.click(await screen.findByRole("link", { name: /Notion/ }));
     await waitFor(() => expect(router.state.location.search).toEqual({ q: "notes", service: "notion" }));
     fireEvent.keyDown(await screen.findByRole("dialog"), { key: "Escape" });
@@ -184,13 +183,13 @@ describe("the integration detail panel", () => {
   });
 
   it("opens nothing for an unknown service and keeps the list", async () => {
-    mount("/integrations?service=does-not-exist");
+    mount("/settings/integrations?service=does-not-exist");
     expect(await screen.findByRole("link", { name: /Notion/ })).toBeTruthy();
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   it("opens the panel a link names", async () => {
-    mount("/integrations?service=notion");
+    mount("/settings/integrations?service=notion");
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByRole("button", { name: "Disconnect Notion" })).toBeTruthy();
   });
@@ -264,20 +263,12 @@ describe("integration rows", () => {
   });
 });
 
-describe("the workspace a link names", () => {
-  it("opens personal Integrations from ?workspace=user while the switcher holds a team", async () => {
+describe("the pinned workspace", () => {
+  it("opens personal Integrations while the switcher holds a team", async () => {
     window.sessionStorage.setItem("valet:workspace", "t1");
-    const router = mount("/integrations?workspace=user");
+    mount();
     expect(await screen.findByRole("link", { name: /Notion/ })).toBeTruthy();
     expect(screen.queryByText("Platform workspace")).toBeNull();
-    // The route's own schema keeps the parameter, so a typed link can send it.
-    expect(router.state.matches.at(-1)?.search).toMatchObject({ workspace: "user" });
-  });
-
-  it("shows the switcher's team without the parameter", async () => {
-    window.sessionStorage.setItem("valet:workspace", "t1");
-    mount("/integrations");
-    expect(await screen.findByText("Platform workspace")).toBeTruthy();
   });
 });
 
@@ -297,16 +288,30 @@ describe("other saved credentials", () => {
   });
 });
 
-describe("the switcher on a link that names the workspace", () => {
-  it("changes the page to the team chosen after ?workspace=user", async () => {
-    window.sessionStorage.setItem("valet:workspace", "t1");
-    const user = userEvent.setup();
-    const router = mount("/integrations?workspace=user");
-    expect(await screen.findByRole("link", { name: /Notion/ })).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "Workspace: Personal. Change workspace" }));
-    await user.click(await screen.findByRole("menuitem", { name: "Platform" }));
-    expect(await screen.findByText("Platform workspace")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Workspace: Platform. Change workspace" })).toBeTruthy();
-    expect(router.state.location.pathname).toBe("/integrations");
+describe("the /integrations redirect", () => {
+  function mountRedirect(initial: string) {
+    const root = createRootRoute({ component: () => <WorkspaceScopeProvider><Outlet /></WorkspaceScopeProvider> });
+    const routes = [
+      createRoute({ getParentRoute: () => root, path: "integrations", component: IntegrationsRedirectRoute.options.component }),
+      createRoute({ getParentRoute: () => root, path: "settings/integrations", component: () => <p>Personal integrations</p> }),
+      createRoute({ getParentRoute: () => root, path: "settings/teams/$teamId/integrations", component: () => <p>Team integrations</p> }),
+    ];
+    const router = createRouter({ routeTree: root.addChildren(routes), history: createMemoryHistory({ initialEntries: [initial] }) });
+    render(<RouterProvider router={router} />);
+    return router;
+  }
+
+  it("keeps a team result on its team when the membership read fails", async () => {
+    membership.failed = true;
+    const router = mountRedirect("/integrations?teamId=t1&connected=linear");
+    expect(await screen.findByText("Team integrations")).toBeTruthy();
+    expect(router.state.location.pathname).toBe("/settings/teams/t1/integrations");
+    expect(router.state.location.searchStr).toBe("?teamId=t1&connected=linear");
+  });
+
+  it("sends a result for a team you are not on to personal Integrations", async () => {
+    const router = mountRedirect("/integrations?teamId=gone&error=team_access_changed");
+    expect(await screen.findByText("Personal integrations")).toBeTruthy();
+    expect(router.state.location.searchStr).toBe("?teamId=gone&error=team_access_changed");
   });
 });

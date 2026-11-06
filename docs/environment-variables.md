@@ -17,6 +17,7 @@ All variables are read by the `@valet/api` server process unless noted. The
 | `VALET_PLUGINS` | No | Extra plugin module specifiers to load beyond the bundled registry |
 | `VALET_CONFIG` | No | Path to the instance config file (`valet.yaml`). `make dev-local` points it at `config/valet.dev.yaml`; the helm chart mounts `api.instanceConfig` and sets it. See docs/specs/2026-08-14-instance-config-design.md |
 | `OPENAI_API_KEY` | No | Fallback OpenAI key |
+| `VALET_TUTORIAL_VERSION` | No | In-app tour version, a whole number from 1 (default 1). Raise it after a large UI change: each user whose stored version is lower sees the tour again on next load. No data is deleted. Do not set it and `org.tutorialVersion` in `valet.yaml` together; the server refuses to boot |
 
 The instance config's `mcpServers` entries with `auth: bearer` each name
 their own env var (`tokenEnv`). Set that variable in the api's environment;
@@ -33,7 +34,16 @@ stub applies. Provider variable pairs are all-or-none.
 | `BETTER_AUTH_URL` | Public base URL (default `http://localhost:8788`) |
 | `AUTH_TRUSTED_ORIGINS` | Extra CORS/trusted origins (`http://localhost:5173` is always included) |
 | `AUTH_ALLOWED_EMAIL_DOMAINS` | Comma-separated signup domain allowlist |
+| `AUTH_ADMIN_EMAILS` | Comma-separated administrator emails. Each becomes an org admin on SSO sign-in, or on Google/GitHub sign-in with a verified email; an existing user with a verified identity is promoted at boot. Password sign-up cannot claim a listed email without the one-time admin code. With SSO on and no admin, the api refuses to boot until this is set. Removing an email does not demote anyone |
 | `AUTH_ALLOW_SIGNUP` | `1` admits uninvited accounts only when `AUTH_ALLOWED_EMAIL_DOMAINS` is empty; new accounts get the member role. Default: invitation or domain admission only |
+| `AUTH_MCP_REGISTRATION` | `open` (default) or `off`. Off refuses new MCP app registrations; apps that already connected keep working |
+| `AUTH_MCP_REGISTRATION_RATE_PER_HOUR` | MCP app registrations each address may make in an hour. Default `10`; `0` turns the limit off |
+| `AUTH_MCP_UNCONSENTED_CLIENT_CAP` | Refuse MCP app registration while this many clients from the last day have no consent and no token. Default `200`; `0` turns the cap off |
+| `AUTH_MCP_MAX_REDIRECT_URIS` | Redirect URIs one MCP app registration may hold. Default `5`; at least `1` |
+| `AUTH_MCP_APP_SCHEMES` | Native app schemes an MCP redirect URI may use, as a comma list. Default `claude,cursor`; empty allows none |
+| `VALET_IMAGE_SOURCE_APPROVAL` | `off` lets one org admin create or change image sources without a second admin. Any other value, or unset, keeps second-admin approval on. Use `off` only for an organization with one admin |
+| `VALET_OUTBOUND_URL_ALLOWLIST` | Comma-separated hosts, `*.suffix` patterns, and CIDR ranges that the outbound URL guard allows. Use it for a self-hosted LLM endpoint on a private address. Default: empty, so link-local, loopback, private, cluster, and instance hosts are refused. A malformed range stops the api at boot |
+| `VALET_INTERNAL_HOSTS` | Comma-separated extra hosts or addresses that the outbound URL guard refuses, in addition to the built-in rules, the instance's public host, and Kubernetes service addresses |
 | `AUTH_OIDC_ISSUER` / `AUTH_OIDC_CLIENT_ID` / `AUTH_OIDC_CLIENT_SECRET` | Generic OIDC SSO (e.g. Keycloak). Optional: `AUTH_OIDC_NAME`, `AUTH_OIDC_DOMAIN` |
 | `AUTH_OIDC_TEAM_CLAIM` | Claim carrying the user's group paths (default `groups`) — see below. Prefer `auth.sso.teams.claim` in `valet.yaml` |
 | `AUTH_OIDC_TEAM_ASSERTED_CLAIM` | Claim that proves the group mapper ran (default `groups_asserted`). Prefer `auth.sso.teams.assertedClaim` |

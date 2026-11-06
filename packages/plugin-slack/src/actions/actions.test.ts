@@ -233,6 +233,69 @@ describe('slack actions', () => {
     expect(result).toEqual({ success: true, data: { ts: '111.222', channel: 'D2' } });
   });
 
+  it('get_user_status reports presence, status, and local time for a workspace member', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, {
+        ok: true,
+        user: {
+          id: 'U123', name: 'ada', team_id: 'T1', tz: 'UTC',
+          profile: { real_name: 'Ada L', status_text: 'Heads down', status_emoji: ':headphones:', status_expiration: 0 },
+        },
+      }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, presence: 'active' }));
+
+    const result = await action('slack.get_user_status').execute(
+      { user: 'U123', include_local_time: true },
+      pluginCtx({ credentials: makeCredentials({ accessToken: 'xoxb-test-token', metadata: { teamId: 'T1' } }) }),
+    );
+
+    const urls = fetchMock.mock.calls.map((call) => String(call[0]));
+    expect(urls).toEqual(['https://slack.com/api/users.info?user=U123', 'https://slack.com/api/users.getPresence?user=U123']);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data).toMatchObject({
+      user: 'U123', name: 'ada', real_name: 'Ada L', presence: 'active', online: true,
+      status_text: 'Heads down', status_emoji: ':headphones:', timezone: 'UTC',
+    });
+    expect((result.data as { local_time?: string }).local_time).toMatch(/^[A-Z][a-z]{2},? \d{2}:\d{2}$/);
+  });
+
+  it('get_user_status reports away as not online', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, user: { id: 'U123', name: 'ada', team_id: 'T1', profile: {} } }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, presence: 'away' }));
+
+    const result = await action('slack.get_user_status').execute({ user: 'U123' }, pluginCtx());
+
+    expect(result).toEqual({ success: true, data: { user: 'U123', name: 'ada', presence: 'away', online: false } });
+  });
+
+  it('get_user_status names the reinstall fix for a missing users:read scope', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'missing_scope' }));
+
+    const result = await action('slack.get_user_status').execute({ user: 'U123' }, pluginCtx());
+
+    expect(result).toEqual({
+      success: false,
+      error: 'Reading online status needs the users:read bot scope. Ask a Slack admin to reinstall the Slack app from Settings → Organization → Slack to grant it.',
+    });
+  });
+
+  it('get_user_status refuses a user from another workspace and never reads their presence', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, user: { id: 'U9', name: 'guest', team_id: 'T2', profile: {} } }));
+
+    const result = await action('slack.get_user_status').execute(
+      { user: 'U9' },
+      pluginCtx({ credentials: makeCredentials({ accessToken: 'xoxb-test-token', metadata: { teamId: 'T1' } }) }),
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({
+      success: false,
+      error: 'Slack user U9 is not a member of the connected workspace. Online status is shown only for members of this workspace.',
+    });
+  });
+
   it('lookup_user_by_email resolves an explicit email for dm_user', async () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse(200, {
@@ -543,7 +606,116 @@ describe('slack actions', () => {
       thread_ts: '1.2',
       initial_comment: 'Report',
     });
-    expect(result).toEqual({ success: true, data: { channel: 'C1', fileId: 'F1' } });
+    expect(result).toEqual({ success: true, data: { channel: 'C1', fileId: 'F1', mime_type: 'application/pdf' } });
+  });
+
+  const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+
+  it('reply_file_to_origin posts a chart image inline with its alt text and title', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, upload_url: 'https://uploads.slack.test/file', file_id: 'F2' }))
+      .mockResolvedValueOnce(new Response('', { status: 200 }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+    const sandbox = makeSandbox({
+      id: 'sb-chart',
+      stat: async () => ({ isFile: true, isDirectory: false, size: PNG.byteLength }),
+      readBinary: async () => PNG,
+    });
+    // A wrong extension and declared type: the PNG bytes still decide the type.
+    const result = await action('slack.reply_file_to_origin').execute(
+      { path: '/workspace/charts/signups.bin', mime_type: 'application/octet-stream', alt_text: 'Signups rose each week in May', title: 'Weekly signups' },
+      pluginCtx({ sandbox, origin: { channelType: 'slack', threadKey: 'slack:C1:1.2' } }),
+    );
+
+    const [uploadUrlCall, uploadCall, completeCall] = fetchMock.mock.calls as [string, RequestInit][];
+    expect(uploadUrlCall[0]).toBe('https://slack.com/api/files.getUploadURLExternal');
+    const form = new URLSearchParams(uploadUrlCall[1].body as string);
+    expect(Object.fromEntries(form)).toEqual({ filename: 'signups.bin', length: String(PNG.byteLength), alt_txt: 'Signups rose each week in May' });
+    expect((uploadCall[1].body as Blob).type).toBe('image/png');
+    expect(JSON.parse(completeCall[1].body as string)).toMatchObject({
+      files: [{ id: 'F2', title: 'Weekly signups' }],
+      channel_id: 'C1',
+      thread_ts: '1.2',
+    });
+    expect(result).toEqual({ success: true, data: { channel: 'C1', fileId: 'F2', mime_type: 'image/png' } });
+  });
+
+  it('reply_file_to_origin uploads a file this thread saved, by file_id', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, upload_url: 'https://uploads.slack.test/file', file_id: 'F3' }))
+      .mockResolvedValueOnce(new Response('', { status: 200 }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+    const read = vi.fn(async (id: string) => id === 'saved-1'
+      ? { id, name: 'flow.png', mimeType: 'image/png', bytes: PNG.byteLength, url: '/f', webUrl: '/f', data: PNG }
+      : null);
+    const save = vi.fn();
+    const sandbox = makeSandbox({ stat: vi.fn(), readBinary: vi.fn() });
+    const result = await action('slack.reply_file_to_origin').execute(
+      { file_id: 'saved-1', alt_text: 'Request flow from web to api to sandbox' },
+      pluginCtx({ sandbox, threadFiles: { read, save }, origin: { channelType: 'slack', threadKey: 'slack:C1:1.2' } }),
+    );
+    expect(read).toHaveBeenCalledWith('saved-1');
+    expect(sandbox.readBinary).not.toHaveBeenCalled();
+    const form = new URLSearchParams((fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string);
+    expect(form.get('filename')).toBe('flow.png');
+    expect(result).toMatchObject({ success: true, data: { fileId: 'F3', mime_type: 'image/png' } });
+  });
+
+  it.each([
+    ['a file_id saved in another thread', { file_id: 'other-thread-file' }, 'No file with that file_id is saved in this thread'],
+    ['both path and file_id', { path: '/workspace/a.png', file_id: 'saved-1' }, 'Pass exactly one of path or file_id'],
+    ['neither path nor file_id', {}, 'Pass exactly one of path or file_id'],
+  ])('reply_file_to_origin refuses %s and calls no Slack method', async (_label, args, error) => {
+    const read = vi.fn(async () => null);
+    const result = await action('slack.reply_file_to_origin').execute(
+      args,
+      pluginCtx({ threadFiles: { read, save: vi.fn() }, origin: { channelType: 'slack', threadKey: 'slack:C1:1.2' } }),
+    );
+    expect(result).toMatchObject({ success: false, error: expect.stringContaining(error) });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('reply_file_to_origin refuses a turn with no Slack origin before it reads the file', async () => {
+    const sandbox = makeSandbox({ stat: vi.fn(), readBinary: vi.fn() });
+    const result = await action('slack.reply_file_to_origin').execute(
+      { path: '/workspace/chart.png', alt_text: 'Chart' },
+      pluginCtx({ sandbox }),
+    );
+    expect(result).toMatchObject({ success: false, error: expect.stringContaining('did not come from a Slack channel') });
+    expect(sandbox.stat).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['HTML named and declared as a PNG', '/workspace/report.png', '<html>not an image</html>', 'image/png'],
+    ['an SVG with a script', '/workspace/chart.svg', '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>', undefined],
+  ])('reply_file_to_origin uploads %s as a plain file, not an image', async (_label, path, text, declared) => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, upload_url: 'https://uploads.slack.test/file', file_id: 'F5' }))
+      .mockResolvedValueOnce(new Response('', { status: 200 }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+    const bytes = new TextEncoder().encode(text);
+    const sandbox = makeSandbox({ stat: async () => ({ isFile: true, isDirectory: false, size: bytes.byteLength }), readBinary: async () => bytes });
+    const result = await action('slack.reply_file_to_origin').execute(
+      { path, alt_text: 'A chart', ...(declared ? { mime_type: declared } : {}) },
+      pluginCtx({ sandbox, origin: { channelType: 'slack', threadKey: 'slack:C1:1.2' } }),
+    );
+    expect(((fetchMock.mock.calls[1] as [string, RequestInit])[1].body as Blob).type).toBe('application/octet-stream');
+    expect(result).toEqual({ success: true, data: { channel: 'C1', fileId: 'F5', mime_type: 'application/octet-stream' } });
+  });
+
+  it('reply_file_to_origin notes that Slack shows no preview for SVG', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, upload_url: 'https://uploads.slack.test/file', file_id: 'F4' }))
+      .mockResolvedValueOnce(new Response('', { status: 200 }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+    const svg = new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg"/>');
+    const sandbox = makeSandbox({ stat: async () => ({ isFile: true, isDirectory: false, size: svg.byteLength }), readBinary: async () => svg });
+    const result = await action('slack.reply_file_to_origin').execute(
+      { path: '/workspace/diagram.svg', alt_text: 'Diagram' },
+      pluginCtx({ sandbox, origin: { channelType: 'slack', threadKey: 'slack:C1:1.2' } }),
+    );
+    expect(result).toMatchObject({ success: true, data: { mime_type: 'image/svg+xml', note: expect.stringContaining('Upload a PNG copy') } });
   });
 
   it('reply_file_to_origin rejects a directory before calling Slack', async () => {
