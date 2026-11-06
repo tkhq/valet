@@ -78,6 +78,8 @@ Do not claim the import reconstructed behavior from logs alone.
 4. Start a real run only when the person authorized it. Existing approval policies still apply.
    To test a fix to a failed run, use `workflows.retry_run` with `from: "failed_step"`. It reuses the finished steps before the failure, and the edited step and later steps run again.
    If the fix is upstream, use `from: "start"`. Pass a smaller `input`, for example a one-day window, when the trigger declares one.
+   To test an edit to a late step of a completed run, use `from: "changed_steps"`. The steps before the edit keep their results.
+   A tool step after the edit does its action again, for example it posts the message again. Tell the person before you start it.
 5. Follow `start_run.followUp.next`. End the turn when a completion signal will report here.
 6. On continuation, inspect the result and each success check. Verify delivery from its posting receipt.
 
