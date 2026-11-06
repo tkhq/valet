@@ -21,6 +21,8 @@ import {
 } from "@tanstack/react-router";
 import { api } from "~/api/client";
 import { SessionView } from "./session-view";
+import { AssistantPanel } from "./assistant-panel";
+import type { ComposerContext } from "./composer";
 import { ChildPanel } from "./child-panel";
 import { useThreadReplyTarget } from "./send-as-person";
 
@@ -33,6 +35,8 @@ let readOnlyReason: string | undefined;
 let mobileLayout = false;
 let pendingGate: import("@valet/api/wire").DecisionGate | undefined;
 let sessionOwner: { type: "user" | "team"; id: string } = { type: "user", id: "u1" };
+let composerBeforeSend: ((text: string) => Promise<{ text: string; threadId: string }>) | undefined;
+let composerLayoutReceived: "stacked" | undefined;
 beforeEach(() => { pendingGate = undefined; browserActivity = false; fullProfile = false; readOnlyReason = undefined; liveStatus = "idle"; queueState = undefined; mobileLayout = false; sessionOwner = { type: "user", id: "u1" }; announceView.mockClear(); });
 
 
@@ -84,10 +88,14 @@ vi.mock("./session-header", () => ({
 }));
 vi.mock("./thread-context-panel", () => ({ ThreadContextPanel: ({ onCreate, onReveal }: { onCreate: () => void; onReveal: (messageId: string) => void }) =>
   <div>Thread summary contents<button onClick={onCreate}>Create a file or site</button><button onClick={() => onReveal("m1")}>Show m1</button></div> }));
-vi.mock("./message-list", () => ({ MessageList: ({ header }: { header?: ReactNode }) =>
-  <div data-testid="message-list" data-can-reply={Boolean(useThreadReplyTarget())}>{header}<div data-message-id="m1" /></div> }));
+vi.mock("./message-list", () => ({ MessageList: ({ header, emptyState }: { header?: ReactNode; emptyState?: ReactNode }) =>
+  <div data-testid="message-list" data-can-reply={Boolean(useThreadReplyTarget())}>{header}{emptyState}<div data-message-id="m1" /></div> }));
 // The stub renders the status line slot, so the background work line shows.
-vi.mock("./composer", () => ({ Composer: ({ statusLine }: { statusLine?: ReactNode }) => <div data-testid="composer">{statusLine}<textarea aria-label="Message" /></div> }));
+vi.mock("./composer", () => ({ Composer: ({ statusLine, context, beforeSend, composerLayout }: { statusLine?: ReactNode; context?: ComposerContext; beforeSend?: typeof composerBeforeSend; composerLayout?: "stacked" }) => {
+  composerBeforeSend = beforeSend;
+  composerLayoutReceived = composerLayout;
+  return <div data-testid="composer">{statusLine}{context?.content}<textarea aria-label="Message" placeholder={context?.placeholder} /></div>;
+} }));
 vi.mock("./decision-gate-card", () => ({ DecisionGateCard: () => null }));
 
 vi.mock("./browser/browser-overlay", () => ({ BrowserOverlay: ({ minimized, onMinimize, onRestore, onClose, onExpand }: {
@@ -122,12 +130,28 @@ function renderComponent(component: () => ReactNode) {
 }
 
 describe("SessionView header chrome", () => {
+  it("shows host context and an empty transcript through the assistant panel", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(true);
+    const beforeSend = vi.fn(async (text: string) => ({ text, threadId: "t1" }));
+    renderComponent(() => <AssistantPanel title="Quarterly report" sessionId="sess-1" threadId="t1" onRetry={() => {}}
+      context={{ content: <span>Selected report heading</span>, placeholder: "Ask about this selection…", onSubmit }}
+      beforeSend={beforeSend}
+      composerLayout="stacked"
+      emptyState={<p>Ask Valet to update this report.</p>} />);
+    expect(await screen.findByText("Selected report heading")).toBeTruthy();
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveProperty("placeholder", "Ask about this selection…");
+    expect(screen.getByText("Ask Valet to update this report.")).toBeTruthy();
+    expect(screen.getByText("Quarterly report").closest("header")?.className).toContain("h-[--nav-height]");
+    expect(composerBeforeSend).toBe(beforeSend);
+    expect(composerLayoutReceived).toBe("stacked");
+  });
   it("uses Chat, Tasks, and Make for a team thread with a sharing notice, keeping its draft mounted", async () => {
     mobileLayout = true;
     sessionOwner = { type: "team", id: "team-a" };
     renderComponent(() => <SessionView sessionId="sess-1" activeThreadId="t1" scopeNotice="Shared with Platform. Members can read and reply." />);
     expect((await screen.findAllByRole("tab")).map((tab) => tab.textContent)).toEqual(["Chat", "Tasks", "Make"]);
     const composer = screen.getByTestId("composer");
+    expect(composerLayoutReceived).toBeUndefined();
     fireEvent.click(screen.getByRole("tab", { name: "Make" }));
     expect(screen.getByText("Make across workspaces")).toBeTruthy();
     fireEvent.click(screen.getByRole("tab", { name: "Tasks" }));

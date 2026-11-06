@@ -30,6 +30,7 @@ export interface ArtifactPick {
 export interface ArtifactSelection {
   text: string;
   vdid?: string;
+  rect?: ArtifactAnchorRect;
 }
 
 interface ArtifactFrameProps {
@@ -57,7 +58,8 @@ function isFiniteNumber(v: unknown): v is number {
 function asRect(v: unknown): ArtifactAnchorRect | null {
   if (typeof v !== "object" || v === null) return null;
   const r = v as Record<string, unknown>;
-  if (!isFiniteNumber(r.top) || !isFiniteNumber(r.left) || !isFiniteNumber(r.width) || !isFiniteNumber(r.height)) {
+  if (!isFiniteNumber(r.top) || !isFiniteNumber(r.left) || !isFiniteNumber(r.width) || !isFiniteNumber(r.height)
+    || r.width < 0 || r.height < 0) {
     return null;
   }
   return { top: r.top, left: r.left, width: r.width, height: r.height };
@@ -297,7 +299,9 @@ export function ArtifactFrame({
       if (msg.type === "valet-artifact:selection") {
         if (typeof msg.text !== "string" || !msg.text.trim() || msg.text.length > 8192) return;
         if (msg.vdid !== undefined && (typeof msg.vdid !== "string" || !VDID_RE.test(msg.vdid))) return;
-        onSelectRef.current?.({ text: msg.text, ...(typeof msg.vdid === "string" ? { vdid: msg.vdid } : {}) });
+        const rect = msg.rect === undefined ? undefined : asRect(msg.rect);
+        if (msg.rect !== undefined && !rect) return;
+        onSelectRef.current?.({ text: msg.text, ...(typeof msg.vdid === "string" ? { vdid: msg.vdid } : {}), ...(rect ? { rect } : {}) });
         return;
       }
       if (msg.type === "valet-artifact:rects") {

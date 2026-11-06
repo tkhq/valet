@@ -485,7 +485,7 @@ export const ARTIFACT_DS_RUNTIME_JS = `
 export type ArtifactFrameMessage =
   | { type: "valet-artifact:ready" }
   | { type: "valet-artifact:pick"; vdid: string; rect: ArtifactAnchorRect; label: string; text?: string }
-  | { type: "valet-artifact:selection"; text: string; vdid?: string }
+  | { type: "valet-artifact:selection"; text: string; vdid?: string; rect?: ArtifactAnchorRect }
   | { type: "valet-artifact:rects"; rects: Record<string, ArtifactAnchorRect> }
   | { type: "valet-artifact:mermaid"; id: string; source: string };
 
@@ -643,6 +643,7 @@ export const ARTIFACT_RUNTIME_JS = `
     requestAnimationFrame(function () {
       rafPending = false;
       postRects();
+      reportSelection();
     });
   }
 
@@ -691,7 +692,9 @@ export const ARTIFACT_RUNTIME_JS = `
     var node = range.commonAncestorContainer;
     var el = node.nodeType === 1 ? node : node.parentElement;
     var anchor = el && el.closest ? el.closest("[data-vdid]") : null;
-    post({ type: "valet-artifact:selection", text: text, vdid: anchor ? anchor.getAttribute("data-vdid") : undefined });
+    var message = { type: "valet-artifact:selection", text: text, vdid: anchor ? anchor.getAttribute("data-vdid") : undefined };
+    if (typeof range.getBoundingClientRect === "function") message.rect = rectOf(range);
+    post(message);
   }
   document.addEventListener("mouseup", reportSelection);
   document.addEventListener("keyup", reportSelection);
@@ -725,7 +728,7 @@ export const ARTIFACT_RUNTIME_JS = `
     }
   });
 
-  window.addEventListener("scroll", scheduleRects, true);
+  window.addEventListener("scroll", scheduleRects, { capture: true, passive: true });
   window.addEventListener("resize", scheduleRects);
 
   function boot() {

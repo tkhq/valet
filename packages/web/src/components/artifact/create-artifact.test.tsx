@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ShareArtifactResponse } from "@valet/api/wire";
 import { api } from "~/api/client";
 import type { OwnerFilter } from "~/api/client";
@@ -42,9 +42,10 @@ describe("create artifact", () => {
   it("offers only supported templates and states the personal audience before publishing", async () => {
     show();
     expect(screen.getByRole("dialog", { name: "Create artifact" })).toBeTruthy();
-    expect(screen.getAllByRole("radio")).toHaveLength(2);
-    expect(screen.getByRole("radio", { name: /^Document/ })).toBeTruthy();
-    expect(screen.getByRole("radio", { name: /^HTML Page/ })).toBeTruthy();
+    const templates = within(screen.getByRole("radiogroup", { name: "Template" }));
+    expect(templates.getAllByRole("radio")).toHaveLength(2);
+    expect(templates.getByRole("radio", { name: /^Document/, checked: true })).toBeTruthy();
+    expect(templates.getByRole("radio", { name: /^HTML Page/, checked: false })).toBeTruthy();
     expect(screen.getByText(/organization can view/)).toBeTruthy();
     fireEvent.change(screen.getByRole("textbox", { name: "Artifact title" }), { target: { value: "Release plan" } });
     fireEvent.click(screen.getByRole("button", { name: "Create artifact" }));
@@ -54,6 +55,20 @@ describe("create artifact", () => {
       key: expect.stringMatching(/^template-/), title: "Release plan", format: "markdown", content: expect.stringContaining("# Release plan"),
     }), personal, { sessionId: "personal-session", threadId: "fresh-thread" });
     expect(api.ensureWorkspaceRuntime).not.toHaveBeenCalled();
+  });
+
+  it("updates the suggested title when choosing a template and preserves a custom title", () => {
+    show();
+    const title = screen.getByRole("textbox", { name: "Artifact title" });
+    const html = screen.getByRole("radio", { name: /^HTML Page/ });
+    const document = screen.getByRole("radio", { name: /^Document/ });
+    fireEvent.click(html);
+    expect(screen.getByRole("radio", { name: /^HTML Page/, checked: true })).toBe(html);
+    expect(screen.getByRole("radio", { name: /^Document/, checked: false })).toBe(document);
+    expect(title.getAttribute("value")).toBe("Project overview");
+    fireEvent.change(title, { target: { value: "Launch plan" } });
+    fireEvent.click(document);
+    expect(title.getAttribute("value")).toBe("Launch plan");
   });
 
   it("publishes HTML under the selected team using a shared team conversation", async () => {
@@ -107,6 +122,7 @@ describe("create artifact", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create artifact" }));
     expect(await screen.findByRole("button", { name: "Creating…" })).toBeTruthy();
     expect(title.hasAttribute("disabled")).toBe(true);
+    expect(screen.getAllByRole("radio").every((option) => option.matches(":disabled"))).toBe(true);
     expect(screen.getByRole("button", { name: "Cancel" }).hasAttribute("disabled")).toBe(true);
   });
 
