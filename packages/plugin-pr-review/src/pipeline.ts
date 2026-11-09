@@ -79,7 +79,9 @@ export function mergeFindings(passes: Finding[][]): Finding[] {
   for (const findings of passes) {
     const earlier = [...kept];
     for (const f of findings) {
-      if (!earlier.some((k) => k.path === f.path && Math.abs(k.line - f.line) <= SAME_SPOT_LINES)) kept.push(f);
+      // LEFT and RIGHT lines number different files, so only the same side can repeat.
+      const sameSpot = (k: Finding): boolean => k.path === f.path && (k.side ?? "RIGHT") === (f.side ?? "RIGHT") && Math.abs(k.line - f.line) <= SAME_SPOT_LINES;
+      if (!earlier.some(sameSpot)) kept.push(f);
     }
   }
   return kept;

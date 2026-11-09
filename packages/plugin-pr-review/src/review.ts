@@ -98,9 +98,24 @@ export function lineCount(text: string): number {
  * path to its line count at HEAD. A line outside the diff hunks is not a
  * problem: hosts post those findings outside the inline comments.
  */
-export function anchorProblems(findings: Finding[], lineCounts: ReadonlyMap<string, number>): { index: number; problem: string }[] {
+export function anchorProblems(
+  findings: Finding[],
+  lineCounts: ReadonlyMap<string, number>,
+  /** Line counts in the base file, for findings on deleted code (side LEFT). Unset: LEFT findings are not checked. */
+  baseLineCounts?: ReadonlyMap<string, number>,
+): { index: number; problem: string }[] {
   const problems: { index: number; problem: string }[] = [];
   findings.forEach((f, index) => {
+    if (f.side === "LEFT") {
+      if (baseLineCounts === undefined) return;
+      const n = baseLineCounts.get(f.path);
+      if (n === undefined) {
+        problems.push({ index, problem: `${f.path} does not exist in the base commit, so a LEFT finding cannot anchor there. Use side RIGHT with a HEAD line.` });
+      } else if (f.line > n) {
+        problems.push({ index, problem: `${f.path} has ${n} lines in the base commit, so LEFT line ${f.line} does not exist. Give the deleted line's number in the base file.` });
+      }
+      return;
+    }
     const n = lineCounts.get(f.path);
     if (n === undefined) {
       problems.push({ index, problem: `${f.path} is not a file this PR adds or changes at HEAD. Anchor the finding to a line of a changed file.` });
@@ -112,14 +127,15 @@ export function anchorProblems(findings: Finding[], lineCounts: ReadonlyMap<stri
 }
 
 /**
- * Line count at `head` of each path that still exists there. A deleted file
- * is absent. A submodule counts as one line: its diff shows one
- * "Subproject commit" line, and an empty directory stands in the checkout.
+ * Line count at `commit` of each path that exists there; an absent file is
+ * left out. A submodule counts as one line: its diff shows one
+ * "Subproject commit" line. With `checkedOut`, blobs are read from the
+ * working tree, which is at `commit`; otherwise from git.
  */
-async function headLineCounts(workspace: string, head: string, paths: string[]): Promise<Map<string, number>> {
+async function treeLineCounts(workspace: string, commit: string, paths: string[], checkedOut: boolean): Promise<Map<string, number>> {
   const counts = new Map<string, number>();
   if (paths.length === 0) return counts;
-  const tree = await git(workspace, ["ls-tree", "-z", head, "--", ...paths]).catch(() => "");
+  const tree = await git(workspace, ["ls-tree", "-z", commit, "--", ...paths]).catch(() => "");
   for (const entry of tree.split("\0").filter(Boolean)) {
     // "<mode> <type> <sha>\t<path>"
     const tab = entry.indexOf("\t");
@@ -127,7 +143,9 @@ async function headLineCounts(workspace: string, head: string, paths: string[]):
     const path = entry.slice(tab + 1);
     if (type === "commit") counts.set(path, 1);
     else if (type === "blob") {
-      const text = await readFile(join(workspace, path), "utf8").catch(() => undefined);
+      const text = checkedOut
+        ? await readFile(join(workspace, path), "utf8").catch(() => undefined)
+        : await git(workspace, ["show", `${commit}:${path}`]).catch(() => undefined);
       if (text !== undefined) counts.set(path, lineCount(text));
     }
   }
@@ -166,7 +184,8 @@ export async function createReviewerSpec(opts: ReviewerSpecOptions): Promise<Rev
     // Only the PR's own files: a merge of the base branch into the PR is not new PR code.
     diff = await diffPullRequest(opts.workspace, opts.incrementFrom, opts.head, budget, diff.files);
   }
-  const lineCounts = await headLineCounts(opts.workspace, opts.head, prFiles);
+  const lineCounts = await treeLineCounts(opts.workspace, opts.head, prFiles, true);
+  const baseLineCounts = await treeLineCounts(opts.workspace, opts.base, prFiles, false);
   let refusals = 0;
   let submitted: Review | undefined;
   const submitReview: ToolDef<typeof ReviewSchema> = {
@@ -179,7 +198,7 @@ export async function createReviewerSpec(opts: ReviewerSpecOptions): Promise<Rev
         const first = [...Value.Errors(ReviewSchema, args)].slice(0, 3);
         return { text: `Review rejected: ${first.map((e) => `${e.instancePath} ${e.message}`).join("; ")}. Fix and call again.` };
       }
-      const problems = [...anchorProblems(args.findings, lineCounts), ...evidenceProblems(args.findings)];
+      const problems = [...anchorProblems(args.findings, lineCounts, baseLineCounts), ...evidenceProblems(args.findings)];
       if (problems.length > 0 && refusals < ANCHOR_REFUSALS) {
         refusals++;
         return {
