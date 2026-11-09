@@ -5,6 +5,7 @@
 import { parseArgs } from "node:util";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolvePrivateCases } from "./private-pull-request.js";
 import { REASONING_LEVELS, type EvalCase, type ReasoningLevel } from "./types.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -19,6 +20,8 @@ export interface CliOptions {
   verbose: boolean;
   timeoutMs?: number;
   casesDir: string;
+  /** `--cases private:<suite>` whose suite is not on this machine: why the run SKIPs. */
+  casesSkip?: string;
   baselinesDir: string;
   /** Pull thumbs-rated sessions into the corpus instead of running cases. */
   pullFlagged: boolean;
@@ -130,7 +133,7 @@ export function parseCliArgs(argv: string[]): CliOptions {
     // Relative paths resolve against the repo root, not the process cwd:
     // `make eval` runs the CLI through pnpm with cwd packages/eval, so a
     // documented flag like `--cases evals/cases/hard` must not resolve there.
-    casesDir: resolve(REPO_ROOT, values.cases ?? "evals/cases"),
+    ...privateCasesOrDir(values.cases ?? "evals/cases"),
     baselinesDir: resolve(REPO_ROOT, values.baselines ?? "evals/baselines"),
     pullFlagged: values["pull-flagged"],
     pullRating,
@@ -156,4 +159,11 @@ export function filterCases(cases: EvalCase[], pattern: string | undefined): Eva
     re = null;
   }
   return cases.filter((c) => c.id.includes(pattern) || (re !== null && re.test(c.id)));
+}
+
+/** `--cases private:<suite>` reads the suite from VALET_EVAL_PRIVATE_CASES; other values are repo-relative paths. */
+function privateCasesOrDir(cases: string): { casesDir: string; casesSkip?: string } {
+  const p = resolvePrivateCases(cases);
+  if (p === undefined) return { casesDir: resolve(REPO_ROOT, cases) };
+  return "dir" in p ? { casesDir: p.dir } : { casesDir: "", casesSkip: p.skip };
 }

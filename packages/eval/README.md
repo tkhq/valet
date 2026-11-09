@@ -184,6 +184,48 @@ Two more suites use the same case shape and scoring:
   repos, so expect some training-data contamination. To regenerate the
   cases, run `pnpm --filter @valet/eval import:swr`.
 
+### Private suites
+
+Suites whose cases name private production repositories or describe
+their defects are not committed here. The Turnkey history suite (merged
+production PRs at the commit a human reviewed) and its held-out set are
+kept outside the repo.
+
+1. Set `VALET_EVAL_PRIVATE_CASES` to the directory that holds the suite
+   directories.
+2. Run with `--cases private:<suite>`, for example
+   `--cases private:turnkey-history`.
+
+If the variable is unset or the suite is missing, the run prints SKIP and
+exits 0. A case with `pull_request.private: true` SKIPs when `git
+ls-remote` reports no read access, and fails on any other error. With
+`pull_request.number` and no `body`, the runner reads the description
+through `gh`; a failed read fails the case. A golden comment may carry
+`fix`, the fix the human reviewer proposed, for a later fix-match scorer.
+
+### Reviewer matrix
+
+`src/review-matrix-cli.ts` lists every issue any reviewer raised on each
+case and who raised it: the golden comments, one column per recorded
+Valet run, and one per reference reviewer.
+
+```bash
+pnpm --silent --filter @valet/eval start --cases private:turnkey-history \
+  --save-baseline --allow-live-baselines --baselines /tmp/tkh-valet
+pnpm --filter @valet/eval exec tsx src/review-matrix-cli.ts \
+  --cases private:turnkey-history --run valet=/tmp/tkh-valet --out /tmp/matrix.md
+```
+
+- Keep the baselines directory out of the repo: trajectories carry code.
+- Reference reviewers with text and links come from
+  `<cases>/reference/<case id>.json`. Reference tools with only `matched`
+  and `fp` counts (Martian, the trial suite) mark golden rows and add a
+  count of their other issues.
+- Each row has a status: `human` (a golden comment), `acted` (the author
+  changed the code under a reference comment), `corroborated` (two or
+  more reviewers; Valet runs count as one), `unconfirmed`, or `noise` (a
+  person marked the reference finding wrong).
+
 ## Compare models
 
 ```bash
