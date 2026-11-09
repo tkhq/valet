@@ -21,7 +21,7 @@ describe("api integration: memory routes", () => {
       const put = await fetch(`${api.baseUrl}/api/memory`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: "notes/hello.md", content: "# Hello\n\nWorld.\n" }),
+        body: JSON.stringify({ path: "notes/hello.md", description: "Test note.", content: "# Hello\n\nWorld.\n" }),
       });
       expect(put.status).toBe(200);
       const putBody = (await put.json()) as { file: { title: string } };
@@ -168,7 +168,7 @@ describe("api integration: memory routes", () => {
         fetch(`${api.baseUrl}/api/memory${teamId ? `?teamId=${teamId}` : ""}`, {
           method: "PUT",
           headers,
-          body: JSON.stringify({ path: "knowledge/x.md", content: "# X\n" }),
+          body: JSON.stringify({ path: "knowledge/x.md", description: "Test note.", content: "# X\n" }),
         });
 
       // Not a member yet: refused, and refused as not-found so membership
@@ -189,7 +189,7 @@ describe("api integration: memory routes", () => {
         fetch(`${api.baseUrl}/api/memory?teamId=team-mem`, {
           method: "PUT",
           headers: { ...headers, "x-valet-session-id": "sess-1", "x-valet-thread-id": "thread-1" },
-          body: JSON.stringify({ path: "principles/ship-small.md", content: "# Ship small\n" }),
+          body: JSON.stringify({ path: "principles/ship-small.md", description: "Test note.", content: "# Ship small\n" }),
         });
       const refused = await writePrinciple();
       expect(refused.status).toBe(400);
@@ -226,7 +226,7 @@ describe("api integration: memory routes", () => {
       const put = await fetch(`${api.baseUrl}/api/memory`, {
         method: "PUT",
         headers,
-        body: JSON.stringify({ path: "notes/team-note.md", content: "# Team Note\n\nShared.\n" }),
+        body: JSON.stringify({ path: "notes/team-note.md", description: "Test note.", content: "# Team Note\n\nShared.\n" }),
       });
       expect(put.status).toBe(200);
 
@@ -254,7 +254,7 @@ describe("api integration: memory routes", () => {
         fetch(`${api.baseUrl}/api/memory`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ path, content }),
+          body: JSON.stringify({ path, content, description: "Test note." }),
         });
       expect((await write("people/frank.md", "# Frank\n")).status).toBe(200);
       expect((await write("notes/ref.md", "see [Frank](/people/frank.md)\n")).status).toBe(200);
@@ -371,7 +371,7 @@ describe("api integration: memory owner scope", () => {
         "x-valet-owner": "team:team_1",
         "x-valet-actor": "local-user",
       },
-      body: JSON.stringify({ path: TEAM_NOTE, content: "# Team Note\n\nShared.\n" }),
+      body: JSON.stringify({ path: TEAM_NOTE, description: "Test note.", content: "# Team Note\n\nShared.\n" }),
     });
     expect(res.status).toBe(200);
   }
@@ -383,7 +383,7 @@ describe("api integration: memory owner scope", () => {
     const put = await fetch(`${api.baseUrl}/api/memory`, {
       method: "PUT",
       headers: { ...JSON_HEADERS, ...MEMBER_HEADERS },
-      body: JSON.stringify({ path: "notes/mine.md", content: "# Mine\n\nPrivate.\n" }),
+      body: JSON.stringify({ path: "notes/mine.md", description: "Test note.", content: "# Mine\n\nPrivate.\n" }),
     });
     expect(put.status).toBe(200);
 
@@ -450,7 +450,7 @@ describe("api integration: memory owner scope", () => {
     const write = await fetch(`${api.baseUrl}/api/memory?${TEAM_QUERY}`, {
       method: "PUT",
       headers: { ...JSON_HEADERS, ...MEMBER_HEADERS },
-      body: JSON.stringify({ path: "notes/planted.md", content: "# Planted\n" }),
+      body: JSON.stringify({ path: "notes/planted.md", description: "Test note.", content: "# Planted\n" }),
     });
     expect(write.status).toBe(404);
   });
@@ -469,7 +469,7 @@ describe("api integration: memory owner scope", () => {
     const put = await fetch(`${api.baseUrl}/api/memory?${TEAM_QUERY}`, {
       method: "PUT",
       headers: { ...JSON_HEADERS, ...MEMBER_HEADERS },
-      body: JSON.stringify({ path: TEAM_NOTE, content: "# Team Note\n\nPlanted instruction.\n" }),
+      body: JSON.stringify({ path: TEAM_NOTE, description: "Test note.", content: "# Team Note\n\nPlanted instruction.\n" }),
     });
     expect(put.status).toBe(404);
 
@@ -511,7 +511,7 @@ describe("api integration: memory owner scope", () => {
     const put = await fetch(`${api.baseUrl}/api/memory?${TEAM_QUERY}`, {
       method: "PUT",
       headers: { ...JSON_HEADERS, ...MEMBER_HEADERS },
-      body: JSON.stringify({ path: "notes/from-admin.md", content: "# From admin\n\nAgreed.\n" }),
+      body: JSON.stringify({ path: "notes/from-admin.md", description: "Test note.", content: "# From admin\n\nAgreed.\n" }),
     });
     expect(put.status).toBe(200);
 
@@ -535,7 +535,7 @@ describe("api integration: memory owner scope", () => {
     const write = await fetch(`${api.baseUrl}/api/memory?ownerType=org&ownerId=local-org`, {
       method: "PUT",
       headers: JSON_HEADERS,
-      body: JSON.stringify({ path: "notes/x.md", content: "# X\n" }),
+      body: JSON.stringify({ path: "notes/x.md", description: "Test note.", content: "# X\n" }),
     });
     expect(write.status).toBe(404);
   });
@@ -570,7 +570,7 @@ describe("api integration: memory owner scope", () => {
     const { token } = await mintSandboxToken(target.providers.db, { sessionId: "team-runtime", userId: actor, orgId: "local-org" });
     const put = await fetch(`${target.baseUrl}/api/memory?ownerType=user&ownerId=local-user`, {
       method: "PUT", headers: { ...JSON_HEADERS, "x-valet-sandbox": token },
-      body: JSON.stringify({ path: "notes/runtime.md", content: "# Team runtime" }),
+      body: JSON.stringify({ path: "notes/runtime.md", description: "Test note.", content: "# Team runtime" }),
     });
     expect(put.status).toBe(200);
     const read = (owner: string) => fetch(`${target.baseUrl}/api/memory?path=notes/runtime.md`, {
@@ -594,7 +594,7 @@ describe("api integration: memory owner scope", () => {
       definition: {}, params: {}, ownerType: "team", ownerId: "team_1", createdAt: 1, updatedAt: 1 });
     const { token } = await mintSandboxToken(target.providers.db, { sessionId: "wf:memory-run:step", userId: "local-user", orgId: "local-org" });
     expect((await fetch(`${target.baseUrl}/api/memory`, { method: "PUT", headers: { ...JSON_HEADERS, "x-valet-sandbox": token },
-      body: JSON.stringify({ path: "notes/workflow.md", content: "# Team workflow" }) })).status).toBe(200);
+      body: JSON.stringify({ path: "notes/workflow.md", description: "Test note.", content: "# Team workflow" }) })).status).toBe(200);
     expect((await fetch(`${target.baseUrl}/api/memory?path=notes/workflow.md&${TEAM_QUERY}`)).status).toBe(200);
     expect((await fetch(`${target.baseUrl}/api/memory?path=notes/workflow.md`, { headers: { "x-valet-sandbox": token } })).status).toBe(200);
     const next = await mintSandboxToken(target.providers.db, { sessionId: "wf:memory-run:next", userId: "local-user", orgId: "local-org" });
@@ -649,7 +649,7 @@ describe("api integration: memory owner scope", () => {
     const put = await fetch(`${api.baseUrl}/api/memory?${TEAM_QUERY}`, {
       method: "PUT",
       headers: { ...JSON_HEADERS, "x-valet-sandbox": token },
-      body: JSON.stringify({ path: "notes/from-sandbox.md", content: "# From sandbox\n\nOwn scope.\n" }),
+      body: JSON.stringify({ path: "notes/from-sandbox.md", description: "Test note.", content: "# From sandbox\n\nOwn scope.\n" }),
     });
     expect(put.status).toBe(200);
 
@@ -709,7 +709,7 @@ describe("api integration: memory owner scope", () => {
     const put = await fetch(`${api.baseUrl}/api/memory`, {
       method: "PUT",
       headers: { ...JSON_HEADERS, "x-valet-sandbox": plain.token },
-      body: JSON.stringify({ path: "notes/plain.md", content: "# Plain\n" }),
+      body: JSON.stringify({ path: "notes/plain.md", description: "Test note.", content: "# Plain\n" }),
     });
     expect(put.status).toBe(200);
   });
