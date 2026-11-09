@@ -36,6 +36,9 @@ export const DELEGATED_SNAPSHOT_BUDGET_CHARS = 16_000;
 /** Most lines the memory index lists before it points at mem_search. */
 export const MEMORY_INDEX_MAX_LINES = 200;
 
+/** Most characters of file lines the memory index holds, about 4k tokens. */
+export const MEMORY_INDEX_MAX_CHARS = 16_000;
+
 /** Most characters of one description an index line shows. */
 const INDEX_DESCRIPTION_MAX_CHARS = 140;
 
@@ -79,13 +82,14 @@ function indexLine(file: MemoryFileSummary): string {
 
 /**
  * The memory index lines: one per own file, newest first up to
- * `maxLines`, then listed in path order. Pinned files and principles are
+ * `maxLines` lines and `maxChars` characters, then listed in path order. Pinned files and principles are
  * already in the snapshot, and expired files are stale, so none of them
  * is listed. Each
  * collapsed folder becomes one line with its file count and date range.
  */
-export function memoryIndexLines(files: MemoryFileSummary[], opts: { now: number; maxLines?: number }): string[] {
+export function memoryIndexLines(files: MemoryFileSummary[], opts: { now: number; maxLines?: number; maxChars?: number }): string[] {
   const maxLines = opts.maxLines ?? MEMORY_INDEX_MAX_LINES;
+  const maxChars = opts.maxChars ?? MEMORY_INDEX_MAX_CHARS;
   const live = files.filter((f) => !f.pinned && (f.expires === null || f.expires > opts.now)
     && !f.path.startsWith(PRINCIPLES_DIR) && !f.path.startsWith(SYNCED_PRINCIPLES_DIR));
   const folderLines: string[] = [];
@@ -98,7 +102,15 @@ export function memoryIndexLines(files: MemoryFileSummary[], opts: { now: number
   const listed = live
     .filter((f) => !COLLAPSED_FOLDERS.some((folder) => f.path.startsWith(folder)))
     .sort((a, b) => b.updatedAt - a.updatedAt);
-  const kept = listed.slice(0, Math.max(0, maxLines - folderLines.length)).sort((a, b) => a.path.localeCompare(b.path));
+  const kept: MemoryFileSummary[] = [];
+  let chars = 0;
+  for (const file of listed) {
+    if (kept.length >= maxLines - folderLines.length) break;
+    chars += indexLine(file).length + 1;
+    if (chars > maxChars) break;
+    kept.push(file);
+  }
+  kept.sort((a, b) => a.path.localeCompare(b.path));
   const lines = [...kept.map(indexLine), ...folderLines];
   const omitted = listed.length - kept.length;
   if (omitted > 0) lines.push(`- ${omitted} older file${omitted === 1 ? "" : "s"} not listed. Find them with mem_search.`);

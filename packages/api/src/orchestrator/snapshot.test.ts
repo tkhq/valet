@@ -186,6 +186,13 @@ describe("memoryIndexLines", () => {
     ]);
   });
 
+  it("stops at the character cap", () => {
+    const files = Array.from({ length: 50 }, (_, i) => file(`notes/file-${String(i).padStart(2, "0")}.md`, i));
+    const lines = memoryIndexLines(files, { now: 100, maxChars: 300 });
+    expect(lines.slice(0, -1).join("\n").length).toBeLessThanOrEqual(300);
+    expect(lines.at(-1)).toMatch(/^- \d+ older files not listed/);
+  });
+
   it("shortens a long description", () => {
     const [line] = memoryIndexLines([file("long.md", 1, { description: "word ".repeat(60) })], { now: 10 });
     expect(line.length).toBeLessThan(160);
