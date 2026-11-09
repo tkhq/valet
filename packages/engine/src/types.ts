@@ -148,6 +148,15 @@ export const MID_TURN_DELIVERY_KEY = "midTurnDelivery";
  * without starting a reply (docs/specs/2026-10-22-thread-edit-fork-design.md).
  */
 export const RECORD_ONLY_KEY = "recordOnly";
+
+/**
+ * Queue item metadata flag for a turn that sends the model only its own
+ * messages: the system prompt, the tools, this submission, and what the turn
+ * adds. The turn's entries still join the transcript, so later turns read
+ * them. A daily routine into a long thread uses it, because a request a day
+ * apart misses the prompt cache and re-writes the whole history.
+ */
+export const FRESH_CONTEXT_KEY = "freshContext";
 export type ThreadStatus = "active" | "paused" | "archived";
 export type QueueStatus = "idle" | "queued" | "running" | "blocked_on_decision_gate" | "paused";
 

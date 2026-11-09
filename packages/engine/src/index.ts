@@ -409,6 +409,7 @@ export {
   applyPrune,
   extractFileContext,
   summarize,
+  summarizeOnPrefix,
   entriesToSummaryMessages,
   type CutPoint,
   type PruneOptions,
@@ -423,6 +424,7 @@ export { readThreadOutline } from "./thread-outline.js";
 export {
   canDeliverMidTurn,
   entriesToAgentMessages,
+  freshContextOnly,
   skillInvocationsInContext,
   buildSpilledInputMarker,
   parseProviderRetryHintMs,
