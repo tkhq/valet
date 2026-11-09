@@ -330,7 +330,7 @@ describe("review-pull-request handler", () => {
     expect(gh.comments[0]).toMatchObject({ path: "a.ts", line: 5, pull_request_review_id: review.id });
 
     const reviewer = threads.spawned.find((s) => s.req.role === "pr-reviewer");
-    expect(reviewer?.req).toMatchObject({ repo: "acme/site", ref: H1, model: "anthropic/claude-sonnet-5-5" });
+    expect(reviewer?.req).toMatchObject({ repo: "acme/site", ref: H1, model: "anthropic/claude-sonnet-5-5", gitAccess: "read" });
     expect(reviewer?.req.prompt).toContain("```json");
     // The spec asks for the event id in every dispatch id.
     expect(threads.spawned.every((s) => s.dispatchId.startsWith(`ev1:${H1.slice(0, 12)}:`))).toBe(true);

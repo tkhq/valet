@@ -434,6 +434,10 @@ export const agentSessions = pgTable(
     // team rows that predate the column, and no writer sets it since.
     // NULL reads as `owner`. Ignored for user- and org-owned rows.
     credentialOwnerMode: text("credential_owner_mode", { enum: ["owner", "actor"] }),
+    // `read`: the sandbox git credential clones and fetches, never pushes
+    // (`routes/sandbox-git-credential.ts`). Plugin review children set it.
+    // NULL keeps the full credential.
+    gitAccess: text("git_access", { enum: ["read"] }),
     // Interactive-service profile (sandbox auth gateway plan, Task 5).
     // "headless" (default) is agent-only; "full" additionally runs
     // ttyd + code-server + the auth gateway inside the sandbox.

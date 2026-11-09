@@ -2332,6 +2332,13 @@ WHERE r.status <> 'merged' ORDER BY l.org_id, l.subject_type, l.subject_id, l.di
       `WHERE "owner_type" = 'team' AND "credential_owner_mode" IS NULL RETURNING "id"`,
   },
   {
+    // `read`: the sandbox git credential can clone and fetch, never push
+    // (plugin review children). Nullable; null keeps the full credential.
+    describe: "agent_sessions.git_access column",
+    probe: { kind: "column", table: "agent_sessions", column: "git_access" },
+    sql: 'ALTER TABLE "agent_sessions" ADD COLUMN IF NOT EXISTS "git_access" text',
+  },
+  {
     // Before the usage repairs: the action fact rule reads it.
     describe: "action_invocations.queue_item_id column",
     probe: { kind: "column", table: "action_invocations", column: "queue_item_id" },

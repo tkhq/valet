@@ -37,6 +37,14 @@
  * the session's own `github.*` plugin tools, and the sandbox principal
  * carries the same user + org. Unrecognized hosts still 403.
  *
+ * A plugin child (`child_watches.plugin_delivery_id` set) has no
+ * integration actions, so the org-level fallback above would reach beyond
+ * it: its credential covers exactly its own bindings, matched by host,
+ * owner and repo (`boundRepository`); any other request reads anonymously.
+ * A read-only session (`agent_sessions.git_access = 'read'`, a review
+ * child) gets a fresh installation token with read permissions for the
+ * bound repository only, never a person's token or an org PAT.
+ *
  * ── Resolution ───────────────────────────────────────────────────────────
  * The binding is matched by full `owner/repo` (case-insensitive) when the
  * request carries a `repo`, falling back to the first owner match otherwise
@@ -60,21 +68,36 @@
  * The token is emitted ONLY in the JSON response body; it is never logged.
  */
 import { Hono } from "hono";
-import { eq } from "drizzle-orm";
+import { and, eq, isNotNull } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import { credentialSecret } from "@valet/engine";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { agentSessions, sessionRepos } from "../schema/index.js";
+import { agentSessions, childWatches, sessionRepos } from "../schema/index.js";
 import { orgFallbackPolicy, onePasswordScopesFor } from "../services/credential-resolution.js";
 import { canBorrowCredential } from "../services/credential-borrow.js";
 import { membersSharing } from "../services/credential-shares.js";
 import { ownerOf, repoOf, usableTeamGithubRow } from "../services/session-github-token.js";
 import { getTeamInOrg } from "../services/teams.js";
+import { mintReadOnlyInstallationToken } from "../services/github-app.js";
 import { repoHostForUrl, type RepoHostContext } from "../repos/host.js";
 import { workflowSessionOwner } from "../workflows/session-owner.js";
 import type { PostSandboxGitCredentialResponse } from "../wire/types.js";
 
 export const sandboxGitCredentialRouter = new Hono<AppEnv>();
+
+/**
+ * The binding a request names exactly: same host, owner and repo. A request
+ * without a repo names the owner's binding only when it has exactly one.
+ */
+export function boundRepository<B extends { fullName: string; cloneUrl: string }>(
+  bindings: readonly B[], host: string, owner: string | undefined, repo: string | undefined,
+): B | undefined {
+  if (owner === undefined) return undefined;
+  const sameHost = (b: B) => { try { return new URL(b.cloneUrl).hostname.toLowerCase() === host.toLowerCase(); } catch { return false; } };
+  const owned = bindings.filter((b) => sameHost(b) && ownerOf(b.fullName).toLowerCase() === owner.toLowerCase());
+  if (repo !== undefined) return owned.find((b) => repoOf(b.fullName).toLowerCase() === repo.toLowerCase());
+  return owned.length === 1 ? owned[0] : undefined;
+}
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
@@ -126,12 +149,14 @@ sandboxGitCredentialRouter.post("/git-credential", async (c) => {
   // first waker, not authority for every later sandbox command.
   const workflowOwner = await workflowSessionOwner(db, sandbox.sessionId, sandbox.orgId);
   let executionOwner = workflowOwner;
+  let gitAccess: "read" | null = null;
   if (workflowOwner === undefined) {
     const [session] = await db.select({
       orgId: agentSessions.orgId, status: agentSessions.status,
-      ownerType: agentSessions.ownerType, ownerId: agentSessions.ownerId,
+      ownerType: agentSessions.ownerType, ownerId: agentSessions.ownerId, gitAccess: agentSessions.gitAccess,
     }).from(agentSessions).where(eq(agentSessions.id, sandbox.sessionId)).limit(1);
     if (session && (session.orgId !== sandbox.orgId || session.status === "deleted")) return c.json(anonymous);
+    gitAccess = session?.gitAccess ?? null;
     if (session?.ownerType === "team" || session?.ownerType === "org") {
       executionOwner = session.ownerId ? { type: session.ownerType, id: session.ownerId } : null;
     }
@@ -139,7 +164,7 @@ sandboxGitCredentialRouter.post("/git-credential", async (c) => {
   const bindings = await db.select().from(sessionRepos).where(eq(sessionRepos.sessionId, sandbox.sessionId));
 
   const wantOwner = owner?.toLowerCase();
-  const binding =
+  let binding =
     wantOwner === undefined
       ? undefined
       : ((wantRepo !== undefined
@@ -149,6 +174,26 @@ sandboxGitCredentialRouter.post("/git-credential", async (c) => {
                 repoOf(b.fullName).toLowerCase() === wantRepo,
             )
           : undefined) ?? bindings.find((b) => ownerOf(b.fullName).toLowerCase() === wantOwner));
+
+  // A plugin child has no integration actions, so its git reach is exactly
+  // its own bindings: the request must name a bound repository on its host.
+  // A read-only session (a review child) also gets a token that can clone
+  // and fetch, never push: never a person's token or an org PAT.
+  const [pluginChild] = workflowOwner === undefined
+    ? await db.select({ id: childWatches.childSessionId }).from(childWatches)
+      .where(and(eq(childWatches.childSessionId, sandbox.sessionId), isNotNull(childWatches.pluginDeliveryId))).limit(1)
+    : [];
+  if (gitAccess === "read" || pluginChild) {
+    const bound = boundRepository(bindings, host, wantOwner, wantRepo);
+    if (!bound) return c.json(anonymous);
+    if (gitAccess === "read") {
+      const token = await mintReadOnlyInstallationToken(
+        { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) }, sandbox.orgId, ownerOf(bound.fullName), repoOf(bound.fullName),
+      );
+      return c.json(token ? { username: "x-access-token", password: token } : anonymous);
+    }
+    binding = bound;
+  }
 
   if (executionOwner !== undefined) {
     const sharedBinding = workflowOwner === undefined ? binding : undefined;

@@ -3361,6 +3361,8 @@ export interface SpawnChildRequest {
   repo?: string;
   branch?: string;
   model?: string;
+  /** `read`: the sandbox git credential clones and fetches, never pushes. */
+  gitAccess?: "read";
   /** CPU, memory, and scratch overrides for the child's sandbox. Omitted fields use host defaults. */
   resources?: Pick<SandboxResources, "cpu" | "memory" | "scratch">;
   /** Interactive-service profile for the child's sandbox (default "headless"). */
