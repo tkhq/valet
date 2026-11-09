@@ -260,7 +260,7 @@ Hosted tools cannot obtain ungated access to an actor-scoped action.
 
 ### Run without asking (2026-10-26)
 
-A person can let one thread run without approval cards: the thread menu item "Run without asking". It is stored on `session_threads` as `approval_bypass_by` (the person who turned it on) and `approval_bypass_at`. `PATCH /api/threads/:id` with `approvalBypass` turns it on or off, and thread summaries carry `approvalBypass: true` while it is on. The header shows a "Runs without asking" badge.
+A person can let one thread run without approval cards: the "Run without asking" switch under the composer (2026-11-09; it was a thread menu item before). The switch shows where the thread menu did, so the Ask Valet dock leaves it out. To turn it on, the person must own the thread personally or administer its team. Anyone sees it while it is on, so they can turn it off. In a read-only thread it shows beside the notice only while it is on. It is stored on `session_threads` as `approval_bypass_by` (the person who turned it on) and `approval_bypass_at`. `PATCH /api/threads/:id` with `approvalBypass` turns it on or off, and thread summaries carry `approvalBypass: true` while it is on. The header shows a "Runs without asking" badge.
 
 What it approves is the same set that the owner option above could stop for good. In `buildPolicyResolver.resolve`, after `anyoneMayAllow` is computed, a covered call resolves `allow` with provenance `thread_bypass` and opens no gate. So these still ask:
 

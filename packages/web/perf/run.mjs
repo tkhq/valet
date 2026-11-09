@@ -94,11 +94,13 @@ const FLOWS = [
   {
     flow: "message.send",
     kinds: ["interaction"],
-    async run(page) {
+    async run(page, vp) {
       const box = page.getByPlaceholder(COMPOSER).last();
       await box.fill(`Perf probe ${Date.now()}`);
       await settle(page);
-      await box.press("Enter");
+      // On a touch screen Return inserts a newline, so a phone user taps Send.
+      if (vp.hasTouch) await page.locator('[data-perf-flow="message.send"]').last().tap();
+      else await box.press("Enter");
     },
     async done(page) {
       await page.getByText(/^Perf probe \d+$/).last().waitFor();

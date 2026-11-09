@@ -94,6 +94,9 @@ vi.mock("./message-list", () => ({ MessageList: ({ header }: { header?: ReactNod
   <div data-testid="message-list" data-can-reply={Boolean(useThreadReplyTarget())}>{header}<div data-message-id="m1" /></div> }));
 // The stub renders the status line slot, so the background work line shows.
 vi.mock("./composer", () => ({ Composer: ({ statusLine }: { statusLine?: ReactNode }) => <div data-testid="composer">{statusLine}<textarea aria-label="Message" /></div> }));
+vi.mock("./run-without-asking-toggle", () => ({
+  RunWithoutAskingToggle: ({ onlyWhenOn }: { onlyWhenOn?: boolean }) => <div data-testid="bypass-switch" data-only-when-on={String(Boolean(onlyWhenOn))} />,
+}));
 vi.mock("./decision-gate-card", () => ({ DecisionGateCard: () => null }));
 
 vi.mock("./browser/browser-overlay", () => ({ BrowserOverlay: ({ minimized, onMinimize, onRestore, onClose, onExpand }: {
@@ -272,6 +275,27 @@ describe("SessionView header chrome", () => {
     expect(await screen.findByText(readOnlyReason)).toBeTruthy();
     expect(screen.queryByTestId("composer")).toBeNull();
     expect(screen.getByTestId("message-list").getAttribute("data-can-reply")).toBe("false");
+  });
+  it("shows the read-only notice with the Run without asking switch, which hides itself while off", async () => {
+    readOnlyReason = "This thread is read-only.";
+    renderInRouter("sess-1", false);
+    expect(await screen.findByText(readOnlyReason)).toBeTruthy();
+    expect(screen.getByTestId("bypass-switch").getAttribute("data-only-when-on")).toBe("true");
+  });
+  it("shows the Run without asking switch under the composer on a full page", async () => {
+    renderInRouter("sess-1", false);
+    expect((await screen.findByTestId("composer")).contains(screen.getByTestId("bypass-switch"))).toBe(true);
+  });
+  it("leaves the Run without asking switch out of the Ask Valet dock", async () => {
+    renderInRouter("sess-1", true);
+    await screen.findByTestId("composer");
+    expect(screen.queryByTestId("bypass-switch")).toBeNull();
+  });
+  it("leaves the Run without asking switch out of a read-only dock", async () => {
+    readOnlyReason = "This thread is read-only.";
+    renderInRouter("sess-1", true);
+    await screen.findByText(readOnlyReason);
+    expect(screen.queryByTestId("bypass-switch")).toBeNull();
   });
   it("watches from chat, suspends in the full pane, restores, and returns focus on close", async () => {
     fullProfile = true;
