@@ -1,0 +1,24 @@
+# Turnkey history suite: a merged PR at the commit a human reviewed.
+# Golden comments paraphrase the human review threads; `fix` is what they proposed or what merged.
+# Threads: https://github.com/tkhq/mono/pull/8057#discussion_r3992758757
+# Fix: https://github.com/tkhq/mono/compare/9c1d19a65...23fbcd4cc
+id: tk-mono-8057-9c1d19a
+description: fix release workflow for operator hotfixes (https://github.com/tkhq/mono/pull/8057) at the commit the reviewer
+  saw
+timeout_ms: 1200000
+pull_request:
+  repo: tkhq-mono
+  remote: https://github.com/tkhq/mono.git
+  base: 5989cd628f119aee11e03f7eab8f9eacc4d444ce
+  head: 9c1d19a65dffd2996d3a57636af80c38963223a9
+  title: fix release workflow for operator hotfixes
+  number: 8057
+  private: true
+checks:
+- type: review_match
+  golden:
+  - comment: The diverged-tag override disables --no-rollback for all three operator services, so a service already on a newer
+      release or main SHA is downgraded to MONO_TAG.
+    category: bug
+    severity: High
+    fix: Keep --no-rollback and bypass it only for the service whose tag diverged.

@@ -1,0 +1,23 @@
+# Turnkey history suite: a merged PR at the commit a human reviewed.
+# Golden comments paraphrase the human review threads; `fix` is what they proposed or what merged.
+# Threads: https://github.com/tkhq/mono/pull/8199#discussion_r4077174601
+# Fix: https://github.com/tkhq/mono/compare/6176ef0c6...227d766f1
+id: tk-mono-8199-6176ef0
+description: '[TXL-384] Add Supported Chains Api (https://github.com/tkhq/mono/pull/8199) at the commit the reviewer saw'
+timeout_ms: 1200000
+pull_request:
+  repo: tkhq-mono
+  remote: https://github.com/tkhq/mono.git
+  base: 3f5a0d3accede112eb269d6db516b6f2b8fcdc7c
+  head: 6176ef0c669fde1152f0db14abdb375c891a95f2
+  title: '[TXL-384] Add Supported Chains Api'
+  number: 8199
+  private: true
+checks:
+- type: review_match
+  golden:
+  - comment: 'For a chain without transaction history support, the webhooks feature reports supported: false while it still
+      lists SEND_TRANSACTION_STATUS_UPDATES as a subscription.'
+    category: api
+    severity: Low
+    fix: 'Derive supported from the subscription list: supported when the list is not empty.'

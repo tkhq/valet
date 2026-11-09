@@ -1,0 +1,30 @@
+# Turnkey history suite: a merged PR at the commit a human reviewed.
+# Golden comments paraphrase the human review threads; `fix` is what they proposed or what merged.
+# Threads: https://github.com/tkhq/mono/pull/8869#discussion_r4352878029 https://github.com/tkhq/mono/pull/8869#discussion_r4352878263
+# Fix: https://github.com/tkhq/mono/compare/6c9afd4b5...01b8436d7
+id: tk-mono-8869-6c9afd4
+description: 'fix: block sub-org deletion while a wallet holds an Earn position (https://github.com/tkhq/mono/pull/8869) at
+  the commit the reviewer saw'
+timeout_ms: 1200000
+pull_request:
+  repo: tkhq-mono
+  remote: https://github.com/tkhq/mono.git
+  base: 4fc97979437a6bc9949f7ba07268266a0bda16f3
+  head: 6c9afd4b5a3606927c3c235876af45d517dc2215
+  title: 'fix: block sub-org deletion while a wallet holds an Earn position'
+  number: 8869
+  private: true
+checks:
+- type: review_match
+  golden:
+  - comment: The Earn guard sends every non-Solana account (BTC, Cosmos, Tron) through the EVM wrapper checks. HexToAddress
+      ignores decode errors, so every bech32 BTC address maps to the same 0x…bc address, and one dust deposit there blocks
+      deleting every sub-org that has an unexported BTC account.
+    category: security
+    severity: High
+    fix: Check the EVM wrappers only for EVM-format addresses and skip other address formats.
+  - comment: The delete guard walks wallet accounts only. Private keys can also sign Earn deposits, and deleteWithoutExport
+      deletes unexported private keys, so a sub-org that deposited from a private key can delete itself and strand the position.
+    category: security
+    severity: High
+    fix: Run the Earn guard over the addresses of unexported private keys too.

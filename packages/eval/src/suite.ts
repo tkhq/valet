@@ -14,6 +14,7 @@ import {
 import { runChecks, type JudgeRunner } from "./checks/index.js";
 import type { ReviewMatcher } from "./checks/review-match.js";
 import type { LlmGateway } from "./gateway.js";
+import { privateRemoteDenied } from "./private-pull-request.js";
 import { runProductCase } from "./product-drive.js";
 import { runCase } from "./runner.js";
 import { aggregateUsage } from "./trajectory.js";
@@ -120,6 +121,13 @@ export async function runSuite(cases: EvalCase[], opts: SuiteOptions): Promise<S
     if (evalCase.pull_request !== undefined && opts.gateway === undefined) {
       skip("code-review cases run on a Valet key. Set VALET_LLM_GATEWAY_URL and VALET_API_KEY (or VALET_API_KEY_FILE).");
       return;
+    }
+    if (evalCase.pull_request?.private === true) {
+      const denied = await privateRemoteDenied(evalCase.pull_request.remote);
+      if (denied !== undefined) {
+        skip(denied);
+        return;
+      }
     }
 
     if (profile === "integration" || profile === "full") {

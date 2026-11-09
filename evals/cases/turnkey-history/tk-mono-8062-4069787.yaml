@@ -1,0 +1,28 @@
+# Turnkey history suite: a merged PR at the commit a human reviewed.
+# Golden comments paraphrase the human review threads; `fix` is what they proposed or what merged.
+# Threads: https://github.com/tkhq/mono/pull/8062#discussion_r4018619050 https://github.com/tkhq/mono/pull/8062#discussion_r4018662290
+# Fix: https://github.com/tkhq/mono/compare/4069787a5...ae890f8fe
+id: tk-mono-8062-4069787
+description: Changed variables that handle secrets to use Zeroizing. SYS-110 (https://github.com/tkhq/mono/pull/8062) at the
+  commit the reviewer saw
+timeout_ms: 1200000
+pull_request:
+  repo: tkhq-mono
+  remote: https://github.com/tkhq/mono.git
+  base: 5989cd628f119aee11e03f7eab8f9eacc4d444ce
+  head: 4069787a5a6b9b65d5bb1a069ebf296ab881a5ec
+  title: Changed variables that handle secrets to use Zeroizing. SYS-110
+  number: 8062
+  private: true
+checks:
+- type: review_match
+  golden:
+  - comment: The ed25519 load copies the private key into a Zeroizing buffer, but the caller's slice still holds the key,
+      so the zeroizing copy adds no protection.
+    category: security
+    severity: Low
+    fix: Drop the redundant copy (convert the slice with try_into) or zeroize at the source.
+  - comment: A debug_assert was added to enclave route code. Enclave code must not have code paths that can panic.
+    category: security
+    severity: Medium
+    fix: Remove the debug assert; size the buffer exactly or handle the condition without a panic.

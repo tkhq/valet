@@ -1,0 +1,23 @@
+# Turnkey history suite: a merged PR at the commit a human reviewed.
+# Golden comments paraphrase the human review threads; `fix` is what they proposed or what merged.
+# Threads: https://github.com/tkhq/gitops/pull/5406#discussion_r4133655975
+# Fix: https://github.com/tkhq/gitops/compare/036812b2e...30a1aba47
+id: tk-gitops-5406-036812b
+description: 'apps/grafana-agent: Send logs for keycloak straight to an S3 bucket (https://github.com/tkhq/gitops/pull/5406)
+  at the commit the reviewer saw'
+timeout_ms: 1200000
+pull_request:
+  repo: tkhq-gitops
+  remote: https://github.com/tkhq/gitops.git
+  base: 26f948b623d0fece7e97e333333bd15d2f77ce5d
+  head: 036812b2ed33855874e85896eba24a9b76b24430
+  title: 'apps/grafana-agent: Send logs for keycloak straight to an S3 bucket'
+  number: 5406
+  private: true
+checks:
+- type: review_match
+  golden:
+  - comment: The IAM role applies to the whole pod-logs pod, but it is named and scoped as a keycloak-runreveal role.
+    category: security
+    severity: Low
+    fix: Name the role for the pod (-pod-logs) and attach a -keycloak-runreveal IAM policy to it.

@@ -1,0 +1,24 @@
+# Turnkey history suite: a merged PR at the commit a human reviewed.
+# Golden comments paraphrase the human review threads; `fix` is what they proposed or what merged.
+# Threads: https://github.com/tkhq/mono/pull/8662#discussion_r4273706554
+# Fix: https://github.com/tkhq/mono/compare/eabc9c337...5884d85ad
+id: tk-mono-8662-eabc9c3
+description: 'vivosuite: add indexer database progress checks (https://github.com/tkhq/mono/pull/8662) at the commit the reviewer
+  saw'
+timeout_ms: 1200000
+pull_request:
+  repo: tkhq-mono
+  remote: https://github.com/tkhq/mono.git
+  base: ab24bc359b49041299ada261684b4b9c30656ef0
+  head: eabc9c337a09a36babf547ab5ffad201ee1320a6
+  title: 'vivosuite: add indexer database progress checks'
+  number: 8662
+  private: true
+checks:
+- type: review_match
+  golden:
+  - comment: 'The deferred close of the probe connection only logs a warning on error, so indexerDBProgress can return Passed
+      = true after a cleanup failure: the check fails open.'
+    category: bug
+    severity: Medium
+    fix: In the deferred close, set Passed to false and record the close error in the summary, keeping any earlier failure.

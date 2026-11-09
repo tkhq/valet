@@ -279,7 +279,12 @@ function parseCheck(raw: unknown, i: number, source: string): Check {
         if (!isRecord(g) || typeof g.comment !== "string" || typeof g.category !== "string") {
           throw new CaseValidationError(source, `\`${at}.golden[${gi}]\` needs string \`comment\` and \`category\``);
         }
-        return { comment: g.comment, category: g.category, ...(typeof g.severity === "string" ? { severity: g.severity } : {}) };
+        return {
+          comment: g.comment,
+          category: g.category,
+          ...(typeof g.severity === "string" ? { severity: g.severity } : {}),
+          ...(typeof g.fix === "string" ? { fix: g.fix } : {}),
+        };
       });
       const profile = optString("profile");
       if (profile !== undefined && !(REVIEW_PROFILES as readonly string[]).includes(profile)) {
@@ -351,6 +356,16 @@ function parsePullRequest(raw: Record<string, unknown>, source: string): PullReq
     throw new CaseValidationError(source, "`pull_request.repo` must be a simple name (letters, digits, . _ -)");
   }
   if (typeof v.body === "string") spec.body = v.body;
+  if (v.private !== undefined) {
+    if (typeof v.private !== "boolean") throw new CaseValidationError(source, "`pull_request.private` must be true or false");
+    spec.private = v.private;
+  }
+  if (v.number !== undefined) {
+    if (typeof v.number !== "number" || !Number.isInteger(v.number) || v.number < 1) {
+      throw new CaseValidationError(source, "`pull_request.number` must be a positive integer");
+    }
+    spec.number = v.number;
+  }
   if (v.verify !== undefined) {
     if (typeof v.verify !== "boolean") throw new CaseValidationError(source, "`pull_request.verify` must be true or false");
     spec.verify = v.verify;

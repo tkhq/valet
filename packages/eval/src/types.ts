@@ -281,6 +281,8 @@ export interface GoldenComment {
   severity?: string;
   /** Martian category: bug, security, concurrency, data, api, perf, test_gap, doc_defect, style, speculative. */
   category: string;
+  /** The fix the human reviewer proposed or the author merged, for fix-match scoring. `review_match` ignores it. */
+  fix?: string;
 }
 
 /** Martian scoring profiles: which golden categories count toward TP and FN. */
@@ -422,6 +424,13 @@ export interface PullRequestSpec {
   head: string;
   title: string;
   body?: string;
+  /**
+   * The remote is private. Without read access the case SKIPs, and the case
+   * file holds no code or description text.
+   */
+  private?: boolean;
+  /** Pull request number on the remote's GitHub repo. With no `body`, the runner reads the description from GitHub. */
+  number?: number;
   /** Check each finding with a verifier agent before scoring. Default true. */
   verify?: boolean;
 }

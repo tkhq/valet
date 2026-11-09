@@ -1,0 +1,24 @@
+# Turnkey history suite: a merged PR at the commit a human reviewed.
+# Golden comments paraphrase the human review threads; `fix` is what they proposed or what merged.
+# Threads: https://github.com/tkhq/mono/pull/8064#discussion_r4007439855
+# Fix: https://github.com/tkhq/mono/compare/15afd50ad...1308afafd
+id: tk-mono-8064-15afd50
+description: tkinfra promotion apply (https://github.com/tkhq/mono/pull/8064) at the commit the reviewer saw
+timeout_ms: 1200000
+pull_request:
+  repo: tkhq-mono
+  remote: https://github.com/tkhq/mono.git
+  base: 4bbc023d670f73b8730447d88420eb8726a3c567
+  head: 15afd50add99eec8f19a6985f4c5fd3a774dd314
+  title: tkinfra promotion apply
+  number: 8064
+  private: true
+checks:
+- type: review_match
+  golden:
+  - comment: Secret redaction replaces every value with the same placeholder, so a change to secret values only renders as
+      an empty diff and the operator can miss syncing it.
+    category: bug
+    severity: Medium
+    fix: When a secret value changed, render placeholders that differ between live and target (or list the changed keys),
+      so the preview still shows a change.

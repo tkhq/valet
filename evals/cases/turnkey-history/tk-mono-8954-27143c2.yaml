@@ -1,0 +1,25 @@
+# Turnkey history suite: a merged PR at the commit a human reviewed.
+# Golden comments paraphrase the human review threads; `fix` is what they proposed or what merged.
+# Threads: https://github.com/tkhq/mono/pull/8954#discussion_r4406561019
+# Fix: https://github.com/tkhq/mono/compare/27143c2c7...cadcafdeb
+id: tk-mono-8954-27143c2
+description: 'feat(paymaster): fund Solana gas paymaster token ATAs for the Kamino invest crank (https://github.com/tkhq/mono/pull/8954)
+  at the commit the reviewer saw'
+timeout_ms: 1200000
+pull_request:
+  repo: tkhq-mono
+  remote: https://github.com/tkhq/mono.git
+  base: a20281b3b2fbd12a31d24f239dc84ab2bfe07a7d
+  head: 27143c2c7b0b5184563784c06d91d57c3b2b6778
+  title: 'feat(paymaster): fund Solana gas paymaster token ATAs for the Kamino invest crank'
+  number: 8954
+  private: true
+checks:
+- type: review_match
+  golden:
+  - comment: The Solana top-up policy only checks the parsed transfers, and the parser drops other instructions. With a leaked
+      Broadcast API key, an attacker can add a 0-amount TransferChecked from the hot wallet next to other instructions (account
+      creation or assign funded by the hot wallet, token authority changes) and drain it.
+    category: security
+    severity: Critical
+    fix: Restrict the policy to the exact expected instructions and deny any transaction with other instructions or programs.

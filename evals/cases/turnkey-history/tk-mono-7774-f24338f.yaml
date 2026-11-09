@@ -1,0 +1,24 @@
+# Turnkey history suite: a merged PR at the commit a human reviewed.
+# Golden comments paraphrase the human review threads; `fix` is what they proposed or what merged.
+# Threads: https://github.com/tkhq/mono/pull/7774#discussion_r4076366682
+# Fix: https://github.com/tkhq/mono/compare/f24338fa3...3a60c7e7a
+id: tk-mono-7774-f24338f
+description: 'ToB-26Q2-​12: Inconsistent handling of email case sensitivity (https://github.com/tkhq/mono/pull/7774) at the
+  commit the reviewer saw'
+timeout_ms: 1200000
+pull_request:
+  repo: tkhq-mono
+  remote: https://github.com/tkhq/mono.git
+  base: b1c2313ac37264bf34705773195afab246e03a61
+  head: f24338fa3362031ef653882479cddd4fe62e1059
+  title: 'ToB-26Q2-​12: Inconsistent handling of email case sensitivity'
+  number: 7774
+  private: true
+checks:
+- type: review_match
+  golden:
+  - comment: emails_equal treats two missing emails as equal, so a credential could be inserted for a user without an email.
+      The mutation should validate the email first.
+    category: security
+    severity: Medium
+    fix: Return InvalidEmailFormat when is_valid_email fails, before the emails_equal comparison.

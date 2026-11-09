@@ -1,0 +1,23 @@
+# Turnkey history suite: a merged PR at the commit a human reviewed.
+# Golden comments paraphrase the human review threads; `fix` is what they proposed or what merged.
+# Threads: https://github.com/tkhq/mono/pull/8561#discussion_r4353223104
+# Fix: https://github.com/tkhq/mono/compare/00eadfc8f...f6e498f3b
+id: tk-mono-8561-00eadfc
+description: Gas sponsorship for PayG/Pro (https://github.com/tkhq/mono/pull/8561) at the commit the reviewer saw
+timeout_ms: 1200000
+pull_request:
+  repo: tkhq-mono
+  remote: https://github.com/tkhq/mono.git
+  base: 4fc97979437a6bc9949f7ba07268266a0bda16f3
+  head: 00eadfc8fca4719a8f6880a0874fbab82f8bf67e
+  title: Gas sponsorship for PayG/Pro
+  number: 8561
+  private: true
+checks:
+- type: review_match
+  golden:
+  - comment: The legacy-limits allowlist check runs before the plan lookup, so a legacy org that downgrades to Free keeps
+      its Enterprise gas limits, and gas keeps being fronted until someone removes the org from the allowlist.
+    category: bug
+    severity: High
+    fix: Look up the plan cap first and let the legacy flag lift only the PayG and Pro caps; do the same in upsert and tkinfra.
