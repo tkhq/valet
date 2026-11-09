@@ -530,6 +530,9 @@ drafts.
 - **Scoring.** `review_match` (`src/checks/review-match.ts`) copies Martian's extract, dedup and judge prompts and its match rules. TP and FN count only golden comments in the profile (default `core`). FP counts extracted issues that match no golden comment. The default judge is Sonnet 4.5, the judge of Martian's published vendor results. Each case carries those results as `reference`, so the scorecard compares tools on the same PRs.
 - **Keys.** Code-review cases need the Valet LLM gateway (`src/gateway.ts`): `VALET_LLM_GATEWAY_URL` plus a `vlt_` key. The runner passes the key through the session `resolveModel` seam, and the judges get it as their API key. The CLI deletes provider keys from its environment, so no call falls back to a personal key.
 - **Concurrency.** `--concurrency` runs cases in parallel and keeps the scorecard in case order.
+- **Case kinds.** `review_match.kind` is `planted`, `control` or `setup`. A control or setup case may list no golden comments, so every issue on it is a false positive. A golden comment may set `cross_repo: true`; the matcher then reports `cross:tp` and `cross:fn`, and `ref:<tool>:cross_*` for references. The scorecard prints a TRIAL table when any case declares a kind.
+- **More suites.** `evals/cases/turnkey-trial` (21 PRs from the private Turnkey review trial, `src/trial-import.ts`, with a `coderabbit` reference scored by `scoreReviewText`) and `evals/cases/swr-bench` (80 PRs from SWR-Bench, `src/swr-import.ts`). SWR-Bench maps functional defects to `bug` and maintainability changes to `style`, so a style match is neither a hit nor a false positive.
+- **Confidence.** `--min-confidence` passes `minConfidence` to the pipeline, which drops findings rated below it. The draft stays whole in the trajectory.
 
 ## Known limitations
 

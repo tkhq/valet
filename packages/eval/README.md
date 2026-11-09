@@ -159,6 +159,30 @@ gateway is not set, the code-review cases SKIP.
   `--review-passes <n>` merges n independent reviewer passes.
 - One full run costs about $5 for the reviews on Sonnet 5.5, plus the
   judge calls. `--verify` roughly doubles the review cost.
+- `--min-confidence <x>` drops findings the reviewer rated below x. The
+  scorecard then also scores the unfiltered draft as "valet (before
+  verify)", so one run shows what the threshold cost.
+
+Two more suites use the same case shape and scoring:
+
+- `evals/cases/turnkey-trial/` holds the 21 PRs of the Turnkey review
+  trial in the private repos `tkhq/test-sdk`, `tkhq/test-go-sdk` and
+  `tkhq/test-rust-sdk`. 12 PRs carry one planted defect (2 are visible
+  only in another repo), 6 are clean controls, and 3 lay down fixtures.
+  Each case declares `kind: planted`, `control` or `setup`. On a control
+  or setup PR every issue is a false positive. The scorecard adds a TRIAL
+  table: planted recall, control and setup false positives, and
+  cross-repo recall. The `coderabbit` reference row is CodeRabbit's
+  review from the trial, scored with the same judge. To run it, sign in
+  `gh` with read access to the three repos. To regenerate the cases, run
+  `pnpm --filter @valet/eval import:trial`.
+- `evals/cases/swr-bench/` holds 80 PRs from SWR-Bench (Peking
+  University, FSE 2026, MIT, github.com/ZZR0/SWRench): 60 PRs with a
+  functional defect that a human reviewer raised and the author fixed,
+  and 20 clean PRs as controls, from 12 Python projects. Only functional
+  (F.*) defects count toward recall. All 12 projects are SWE-bench
+  repos, so expect some training-data contamination. To regenerate the
+  cases, run `pnpm --filter @valet/eval import:swr`.
 
 ## Compare models
 
