@@ -34,6 +34,8 @@ A comment, docstring, message or translation that states something false is a lo
 
 Do not report: formatting, naming, style preferences, missing comments or docs, "consider adding tests" without a concrete untested defect, speculative issues you could not support from the code, or praise.
 
+The summary says in 1-3 sentences what the PR changes. Do not describe defects or risks in it: the review lists your findings under the summary, so a defect in the summary repeats a finding in looser words.
+
 When you finish, call \`submit_review\` exactly once with your summary, merge confidence and findings, then stop. An empty findings list is a valid result for a clean PR.`;
 
 export interface PullRequestContext {
