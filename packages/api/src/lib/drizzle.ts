@@ -140,6 +140,7 @@ export async function applyAppMigrations(db: PgDb, pgDataDir?: string): Promise<
   await expandLegacySlackWildcards(db);
   await stripRetiredAssistantTargets(db);
   await normalizeLegacyWorkflowDefinitions(db);
+  await removeStockMorningBriefs(db);
   await syncAssistantSessionStatus(db);
   await reportRetiredAssistantSettings(db);
 }
@@ -279,6 +280,34 @@ export async function stripRetiredAssistantTargets(db: PgDb): Promise<void> {
   await db.query(
     `UPDATE event_subscriptions SET target = target - 'assistantId', updated_at = $1 WHERE target ? 'assistantId'`,
     [Date.now()],
+  );
+}
+
+/** The prompt of the retired automatic morning brief, exactly as Home created it. */
+export const RETIRED_MORNING_BRIEF_PROMPT = [
+  "Write the person's morning brief in this conversation.",
+  "1. Call list_tasks to see what is in progress and what needs the person across their workspaces.",
+  "2. If calendar or email tools are connected, check today's meetings and unread mail that need a reply. Skip this step if they are not connected.",
+  "3. Call show_brief once. The headline counts what is in progress and what needs them, such as \"Morning. 4 in progress, 2 need you.\" Add at most six items, the ones that need them first. Each item has a short topic and one line that says what is ready or what you need from them. Give an item the thread_id from list_tasks when it is about a task.",
+  "Write nothing else after show_brief. If nothing needs the person, the headline says so and the brief has no items.",
+].join("\n");
+
+/**
+ * Home no longer creates a daily morning brief: the Tasks tab shows the same
+ * tasks, and each run re-sent the whole Home conversation to the model.
+ * Delete the routines Home created that nobody changed: same name, prompt,
+ * and 08:00 cron, still posting into the owner's Home thread. A routine a
+ * person edited stays. Idempotent: a later boot finds no match.
+ */
+export async function removeStockMorningBriefs(db: PgDb): Promise<void> {
+  await db.query(
+    `DELETE FROM workflow_schedules s
+      WHERE s.owner_type = 'user' AND s.target_kind IN ('assistant', 'orchestrator')
+        AND s.name = 'Morning brief' AND s.cron = '0 8 * * *' AND s.prompt = $1
+        AND s.thread_policy->>'mode' = 'existing'
+        AND EXISTS (SELECT 1 FROM engine_threads t WHERE t.id = s.thread_policy->>'threadId'
+          AND t.session_id = s.thread_policy->>'sessionId' AND t.key = 'home')`,
+    [RETIRED_MORNING_BRIEF_PROMPT],
   );
 }
 

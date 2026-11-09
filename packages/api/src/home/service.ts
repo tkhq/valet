@@ -6,13 +6,13 @@
  * gathers what is in flight and what needs the person across all of them.
  */
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, isNull, or, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import type { EventStream, Principal, QueueItem, Session, SessionStore, Thread } from "@valet/engine";
 import { planProgress, readThreadPlan } from "@valet/shared";
 import { ensureAssistantExecution, ensureDefaultAssistantSession } from "../assistants/service.js";
 import type { EngineHost } from "../engine/host.js";
 import type { AppDb } from "../lib/drizzle.js";
-import { homeTaskDismissals, homeTasks, sessionThreads, users, workflowSchedules } from "../schema/index.js";
+import { homeTaskDismissals, homeTasks, sessionThreads, users } from "../schema/index.js";
 import { isTeamMember, listTeamsForUser } from "../services/teams.js";
 import { visibleThreadIds, type AccessDeps } from "../services/thread-access.js";
 import { listWaitingThreads } from "../services/thread-read-state.js";
@@ -391,44 +391,6 @@ export function describeHomeTasks(tasks: HomeTasksResponse): string {
     ...section("In progress", tasks.working),
     ...section("Finished tasks started from home, not marked done", tasks.finished),
   ].join("\n");
-}
-
-const BRIEF_NAME = "Morning brief";
-
-const BRIEF_PROMPT_OPENING = "Write the person's morning brief in this conversation.";
-
-export const MORNING_BRIEF_PROMPT = [
-  BRIEF_PROMPT_OPENING,
-  "1. Call list_tasks to see what is in progress and what needs the person across their workspaces.",
-  "2. If calendar or email tools are connected, check today's meetings and unread mail that need a reply. Skip this step if they are not connected.",
-  "3. Call show_brief once. The headline counts what is in progress and what needs them, such as \"Morning. 4 in progress, 2 need you.\" Add at most six items, the ones that need them first. Each item has a short topic and one line that says what is ready or what you need from them. Give an item the thread_id from list_tasks when it is about a task.",
-  "Write nothing else after show_brief. If nothing needs the person, the headline says so and the brief has no items.",
-].join("\n");
-
-/**
- * Makes sure the person has the daily brief routine, posting into home at
- * 08:00 in their timezone. Created once; after that the person changes or
- * pauses it like any routine. Returns true when this call created it.
- */
-export async function ensureMorningBrief(db: AppDb, user: HomeUser, home: { sessionId: string; threadId: string },
-  thread: Thread,
-  createSchedule: (input: { name: string; cron: string; timezone: string; prompt: string;
-    thread: { mode: "existing"; sessionId: string; threadId: string } }) => Promise<unknown>): Promise<boolean> {
-  // The offer survives a schedule rename or deletion. Claim it before creating
-  // the convenience routine; failures are logged by the caller, never retried
-  // by opening Home or mistaken for permission to restore a deleted routine.
-  if (!await thread.setMetadataFlag("homeMorningBriefOffered")) return false;
-  const existing = await db.select({ id: workflowSchedules.id, prompt: workflowSchedules.prompt }).from(workflowSchedules)
-    .where(and(eq(workflowSchedules.orgId, user.orgId), eq(workflowSchedules.ownerType, "user"), eq(workflowSchedules.ownerId, user.id),
-      or(eq(workflowSchedules.name, BRIEF_NAME),
-        sql`${workflowSchedules.threadPolicy}->>'sessionId'=${home.sessionId} AND ${workflowSchedules.threadPolicy}->>'threadId'=${home.threadId}`))).limit(1);
-  if (existing.length > 0) return false;
-  const [person] = await db.select({ timezone: users.timezone }).from(users).where(eq(users.id, user.id)).limit(1);
-  await createSchedule({
-    name: BRIEF_NAME, cron: "0 8 * * *", timezone: person?.timezone || "UTC", prompt: MORNING_BRIEF_PROMPT,
-    thread: { mode: "existing", ...home },
-  });
-  return true;
 }
 
 /**
