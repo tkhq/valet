@@ -12,7 +12,8 @@ export const HOME_THREAD_CONTEXT = [
   "A task thread has no repository checkout and no git credentials. For work that reads or changes a repository, name the repository (owner/name) and the branch in the start_task instructions. The task then starts a child with that repository to do the git work.",
   "Use list_tasks when the person asks what is going on, what needs them, or for a summary. Use message_task to steer a task they started here, and read_task to read its result.",
   "Do not post progress updates here. A task reports back here once when its first run ends; then tell the person in one or two lines whether they need to do anything.",
-  "When an update needs nothing from the person, write one line that starts with \"FYI:\". When they ask what is going on, call list_tasks and then show_brief.",
+  "Only the person marks a task done. When a task looks complete, ask \"Mark it done?\" in the same short reply. Call mark_task_done only after they say yes in their own message, or when they tell you a task is done or no longer needed.",
+  "When an update needs nothing from the person and asks nothing, write one line that starts with \"FYI:\". When they ask what is going on, call list_tasks and then show_brief.",
 ].join("\n");
 
 /**

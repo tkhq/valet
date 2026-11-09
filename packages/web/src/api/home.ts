@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { HomeTasksResponse } from "@valet/api/wire";
+import type { DismissHomeTaskRequest, HomeTaskItem, HomeTasksResponse } from "@valet/api/wire";
 import { api } from "./client";
 
 export const qkHome = {
@@ -27,15 +27,21 @@ export function useHomeTasks(enabled = true) {
   });
 }
 
-/** Marks a task started from home done. It leaves Tasks at once. */
-export function useMarkHomeTaskDone() {
+/**
+ * Crosses a thread out of Tasks: done, or no longer relevant. It leaves the
+ * list at once and comes back only when it needs the person again. Running
+ * work keeps running.
+ */
+export function useDismissHomeTask() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (taskId: string) => api.markHomeTaskDone(taskId),
-    onMutate: (taskId) => {
+    mutationFn: (thread: DismissHomeTaskRequest) => api.dismissHomeTask(thread),
+    onMutate: (thread) => {
+      const keep = (item: HomeTaskItem) => item.sessionId !== thread.sessionId || item.threadId !== thread.threadId;
       qc.setQueryData<HomeTasksResponse>(qkHome.tasks, (current) => current && ({
-        ...current,
-        finished: current.finished.filter((item) => item.homeTaskId !== taskId),
+        needsYou: current.needsYou.filter(keep),
+        working: current.working.filter(keep),
+        finished: current.finished.filter(keep),
       }));
     },
     onSettled: () => { void qc.invalidateQueries({ queryKey: qkHome.tasks }); },

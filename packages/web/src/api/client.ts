@@ -845,7 +845,7 @@ export const api = {
     request<ListWorkspaceConversationsResponse>("GET", `/workspaces/${encodeURIComponent(workspace)}/conversations`),
   ensureHomeConversation: () => request<HomeConversationResponse>("POST", "/home"),
   getHomeTasks: () => request<HomeTasksResponse>("GET", "/home/tasks"),
-  markHomeTaskDone: (taskId: string) => request<void>("POST", `/home/tasks/${encodeURIComponent(taskId)}/done`),
+  dismissHomeTask: (body: import("@valet/api/wire").DismissHomeTaskRequest) => request<void>("POST", "/home/tasks/dismiss", body),
   ensureWorkspaceRuntime: (workspace: string) =>
     request<EnsureWorkspaceRuntimeResponse>("POST", `/workspaces/${encodeURIComponent(workspace)}/runtime`),
   getWorkspaceRuntimeInfo: (workspace: string) =>

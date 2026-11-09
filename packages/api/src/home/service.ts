@@ -12,7 +12,7 @@ import { planProgress, readThreadPlan } from "@valet/shared";
 import { ensureAssistantExecution, ensureDefaultAssistantSession } from "../assistants/service.js";
 import type { EngineHost } from "../engine/host.js";
 import type { AppDb } from "../lib/drizzle.js";
-import { homeTasks, sessionThreads, users, workflowSchedules } from "../schema/index.js";
+import { homeTaskDismissals, homeTasks, sessionThreads, users, workflowSchedules } from "../schema/index.js";
 import { isTeamMember, listTeamsForUser } from "../services/teams.js";
 import { visibleThreadIds, type AccessDeps } from "../services/thread-access.js";
 import { listWaitingThreads } from "../services/thread-read-state.js";
@@ -195,12 +195,27 @@ export async function sessionFor(deps: HomeDeps, row: { ownerType: string; owner
   return (await ensureAssistantExecution(deps, owner, meta, execution.conversation_key)).session;
 }
 
-/** Marks a home task done. Only the person who started it can. */
-export async function markHomeTaskDone(db: AppDb, user: HomeUser, taskId: string): Promise<boolean> {
-  const updated = await db.update(homeTasks).set({ doneAt: Date.now() })
-    .where(and(eq(homeTasks.id, taskId), eq(homeTasks.userId, user.id), eq(homeTasks.orgId, user.orgId), isNull(homeTasks.doneAt)))
-    .returning({ id: homeTasks.id });
-  return updated.length > 0;
+/**
+ * Crosses a thread out of the person's Tasks: it is done, or no longer
+ * relevant. Only the person can do this; Valet asks first. A task they
+ * started from home is marked done too. The thread keeps running if it is
+ * working: this changes the person's list, not the work. It comes back only
+ * when it next needs them (`listHomeTasks`).
+ */
+export async function dismissHomeTask(db: AppDb, user: HomeUser, thread: { sessionId: string; threadId: string }): Promise<void> {
+  const now = Date.now();
+  await db.insert(homeTaskDismissals).values({ userId: user.id, orgId: user.orgId, ...thread, dismissedAt: now })
+    .onConflictDoUpdate({ target: [homeTaskDismissals.userId, homeTaskDismissals.sessionId, homeTaskDismissals.threadId], set: { dismissedAt: now } });
+  await db.update(homeTasks).set({ doneAt: now })
+    .where(and(eq(homeTasks.userId, user.id), eq(homeTasks.orgId, user.orgId), eq(homeTasks.sessionId, thread.sessionId),
+      eq(homeTasks.threadId, thread.threadId), isNull(homeTasks.doneAt)));
+}
+
+/** When the person crossed each thread out, keyed `sessionId:threadId`. */
+async function dismissedThreads(db: AppDb, user: HomeUser): Promise<Map<string, number>> {
+  const rows = await db.select().from(homeTaskDismissals)
+    .where(and(eq(homeTaskDismissals.userId, user.id), eq(homeTaskDismissals.orgId, user.orgId)));
+  return new Map(rows.map((row) => [`${row.sessionId}:${row.threadId}`, row.dismissedAt]));
 }
 
 type PlanProgress = ReturnType<typeof planProgress>;
@@ -249,17 +264,19 @@ function safeJson(text: string): unknown {
 
 /**
  * Everything in flight across the person's workspaces, sorted for action:
- * what needs them, what Valet is working on, replies they have not answered,
- * and tasks they started from home that finished and are not marked done.
- * Each workspace's own visibility rules apply (a private team thread stays
- * private). The home conversation itself is never listed.
+ * what needs them, what Valet is working on, and tasks they started from
+ * home that finished and are not marked done. An unread reply alone is not a
+ * task: the thread list shows it. A thread the person crossed out stays out
+ * until it needs them again. Each workspace's own visibility rules apply (a
+ * private team thread stays private). The home conversation itself is never
+ * listed.
  */
 export async function listHomeTasks(deps: HomeDeps, user: HomeUser): Promise<HomeTasksResponse> {
   const workspaces = await homeWorkspaces(deps.db, user);
   const started = await visibleStartedTasks(deps, user, workspaces);
   const startedActivity = await startedTaskActivity(deps.db, user, started);
   const viewer = { orgId: user.orgId, userId: user.id };
-  const homeThread = await homeThreadId(deps.db, user);
+  const [homeThread, dismissed] = await Promise.all([homeThreadId(deps.db, user), dismissedThreads(deps.db, user)]);
   const perWorkspace = await Promise.all(workspaces.map(async (ws) => {
     const [active, waiting] = await Promise.all([
       listWorkspaceActiveWork(deps.db, user.orgId, ws.owner, 50, undefined, user.id),
@@ -295,7 +312,6 @@ export async function listHomeTasks(deps: HomeDeps, user: HomeUser): Promise<Hom
   const listed = new Set<string>();
   const needsYou: HomeTaskItem[] = [];
   const working: HomeTaskItem[] = [];
-  const updates: HomeTaskItem[] = [];
   const finishedFromReplies: HomeTaskItem[] = [];
   // One row per thread: the most urgent state wins.
   const rank = { needs_you: 3, failed: 2, working: 1 } as const;
@@ -325,9 +341,9 @@ export async function listHomeTasks(deps: HomeDeps, user: HomeUser): Promise<Hom
         workspace: wsRef(ws), state: finishedTask ? "done" : "waiting", updatedAt: thread.lastAgentActivityAt,
         ...(thread.question ? { detail: thread.question, question: true } : thread.preview ? { detail: thread.preview } : {}),
         ...(thread.unread ? { unread: true } : {}) });
-      // A reply the person already read is not news: Tasks stays quiet.
-      if (!thread.question && !finishedTask && !thread.unread) continue;
-      (thread.question ? needsYou : finishedTask ? finishedFromReplies : updates).push(row);
+      // A reply without a question is not a task: the thread list shows it.
+      if (!thread.question && !finishedTask) continue;
+      (thread.question ? needsYou : finishedFromReplies).push(row);
     }
   }
   const finished: HomeTaskItem[] = [...finishedFromReplies];
@@ -340,7 +356,13 @@ export async function listHomeTasks(deps: HomeDeps, user: HomeUser): Promise<Hom
       workspace: wsRef(ws), state: "done", updatedAt: row.reportedAt ?? row.createdAt }));
   }
   const newest = (a: HomeTaskItem, b: HomeTaskItem) => b.updatedAt - a.updatedAt;
-  return { needsYou: needsYou.sort(newest), working: working.sort(newest), updates: updates.sort(newest), finished: finished.sort(newest) };
+  // A crossed-out thread comes back only for something newer that needs the person.
+  const kept = (needs: boolean) => (item: HomeTaskItem) => {
+    const at = dismissed.get(`${item.sessionId}:${item.threadId}`);
+    return at === undefined || (needs && item.updatedAt > at);
+  };
+  return { needsYou: needsYou.filter(kept(true)).sort(newest), working: working.filter(kept(false)).sort(newest),
+    finished: finished.filter(kept(false)).sort(newest) };
 }
 
 async function homeThreadId(db: AppDb, user: HomeUser): Promise<string | undefined> {
@@ -367,7 +389,6 @@ export function describeHomeTasks(tasks: HomeTasksResponse): string {
   return [
     ...section("Needs the person", tasks.needsYou),
     ...section("In progress", tasks.working),
-    ...section("Replies not yet answered", tasks.updates),
     ...section("Finished tasks started from home, not marked done", tasks.finished),
   ].join("\n");
 }
@@ -467,7 +488,9 @@ async function reportSettled(deps: HomeDeps, viewers: Pick<ActiveViewers, "viewe
     signalType: "home.task_report",
     body: `The task "${row.title}" in ${ws?.name ?? "a workspace"} ${state}. thread_id=${row.threadId} task_id=${row.id}. ` +
       "Tell the person in one or two short lines what happened and whether they need to do anything. " +
-      "If they need to do nothing, start the line with \"FYI:\". " +
+      (outcome === "failed" || outcome === "aborted" ? "" :
+        "If the task looks complete and they need to do nothing, end with the question \"Mark it done?\". " +
+        "Only the person marks a task done: call mark_task_done after they say yes in their own message. ") +
       "Call read_task only if you need the task's result. Do not start new work.",
     attributes: { task_id: row.id, thread_id: row.threadId, outcome, title: row.title },
   }, { dispatchId: `home-report:${row.id}:${queueItemId}`, queueMode: "followup" });

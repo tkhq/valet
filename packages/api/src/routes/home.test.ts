@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ToolContext } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { homeTasks, sessionThreads, teamMembers, teams, threadPullRequests, workflowSchedules } from "../schema/index.js";
-import { HOME_THREAD_KEY, MORNING_BRIEF_PROMPT, ensureHomeThread, homeTaskPrompt, homeWorkspaces, matchWorkspace, messageHomeTask, readHomeTask, startHomeTask, wireHomeTaskReports } from "../home/service.js";
+import { HOME_THREAD_KEY, MORNING_BRIEF_PROMPT, dismissHomeTask, ensureHomeThread, homeTaskPrompt, homeWorkspaces, matchWorkspace, messageHomeTask, readHomeTask, startHomeTask, wireHomeTaskReports } from "../home/service.js";
 import { buildHomeTools } from "../home/tools.js";
 import type { HomeConversationResponse, HomeTasksResponse, ListThreadsResponse } from "../wire/types.js";
 
@@ -168,7 +168,7 @@ describe("home tasks", () => {
     expect(submission?.content).toBe(homeTaskPrompt("Check whether the deploy finished."));
     expect(submission?.content).toContain("start a child with the task tool and pass repo");
     const tasks = await (await fetch(`${test.baseUrl}/api/home/tasks`)).json() as HomeTasksResponse;
-    const all = [...tasks.needsYou, ...tasks.working, ...tasks.updates, ...tasks.finished];
+    const all = [...tasks.needsYou, ...tasks.working, ...tasks.finished];
     const listed = all.find((item) => item.threadId === task.threadId);
     expect(listed).toMatchObject({ title: "Check the deploy", workspace: { key: "team-ops", name: "Ops Team" }, homeTaskId: task.id });
   });
@@ -217,14 +217,48 @@ describe("home tasks", () => {
     }
   });
 
-  it("marks a finished task done for the person who started it only", async () => {
+  it("crosses a finished task out of Tasks and marks it done", async () => {
     const test = await boot(1);
     const workspaces = await homeWorkspaces(test.providers.db, USER);
     const task = await startHomeTask(test.providers, USER, { workspace: workspaces[0]!, title: "Tidy notes", instructions: "Tidy them." });
-    expect((await fetch(`${test.baseUrl}/api/home/tasks/${task.id}/done`, { method: "POST" })).status).toBe(204);
-    expect((await fetch(`${test.baseUrl}/api/home/tasks/${task.id}/done`, { method: "POST" })).status).toBe(404);
+    await vi.waitFor(async () => {
+      expect(await test.providers.engineStore.listUnsettledSubmissions(task.sessionId)).toEqual([]);
+    });
+    const before = await (await fetch(`${test.baseUrl}/api/home/tasks`)).json() as HomeTasksResponse;
+    expect(before.finished.map((item) => item.threadId)).toContain(task.threadId);
+    const dismiss = (body: unknown) => fetch(`${test.baseUrl}/api/home/tasks/dismiss`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    expect((await dismiss({ sessionId: task.sessionId, threadId: task.threadId })).status).toBe(204);
+    const after = await (await fetch(`${test.baseUrl}/api/home/tasks`)).json() as HomeTasksResponse;
+    expect([...after.needsYou, ...after.working, ...after.finished].map((item) => item.threadId)).not.toContain(task.threadId);
     const [row] = await test.providers.db.select().from(homeTasks).where(eq(homeTasks.id, task.id));
     expect(row?.doneAt).toBeTypeOf("number");
+    expect((await dismiss({ threadId: task.threadId })).status).toBe(400);
+  });
+
+  it("keeps a crossed-out thread out of Tasks until something newer needs the person", async () => {
+    const test = await boot(1);
+    const [workspace] = await homeWorkspaces(test.providers.db, USER);
+    if (!workspace) throw new Error("Expected personal workspace");
+    const task = await startHomeTask(test.providers, USER, { workspace, title: "Long job", instructions: "Run it." });
+    await vi.waitFor(async () => {
+      expect(await test.providers.engineStore.listUnsettledSubmissions(task.sessionId)).toEqual([]);
+    });
+    const list = async () => await (await fetch(`${test.baseUrl}/api/home/tasks`)).json() as HomeTasksResponse;
+    await test.providers.db.execute(sql`INSERT INTO engine_queue_items
+      (id,session_id,thread_id,status,content,attempt_count,max_attempts,timeout_at,created_at,updated_at)
+      VALUES ('still-running',${task.sessionId},${task.threadId},'running','{}',0,1,9999999999999,1,1)`);
+    expect((await list()).working.map((item) => item.threadId)).toContain(task.threadId);
+    await dismissHomeTask(test.providers.db, USER, { sessionId: task.sessionId, threadId: task.threadId });
+    // Work that keeps running does not bring it back.
+    const hidden = await list();
+    expect([...hidden.needsYou, ...hidden.working, ...hidden.finished].map((item) => item.threadId)).not.toContain(task.threadId);
+    // A new approval after the cross-out does.
+    const later = Date.now() + 60_000;
+    await test.providers.db.execute(sql`INSERT INTO engine_queue_items
+      (id,session_id,thread_id,status,content,attempt_count,max_attempts,timeout_at,created_at,updated_at)
+      VALUES ('needs-approval',${task.sessionId},${task.threadId},'blocked_on_decision_gate','{}',0,1,9999999999999,${later},${later})`);
+    expect((await list()).needsYou.map((item) => item.threadId)).toContain(task.threadId);
   });
 
   it("rechecks a saved team's thread audience before reading, messaging, or listing its outputs", async () => {
@@ -243,7 +277,7 @@ describe("home tasks", () => {
     await expect(readHomeTask(test.providers, USER, task.threadId)).rejects.toThrow(/no longer have access/);
     await expect(messageHomeTask(test.providers, USER, task.threadId, "Continue")).rejects.toThrow(/no longer have access/);
     const tasks = await (await fetch(`${test.baseUrl}/api/home/tasks`)).json() as HomeTasksResponse;
-    expect([...tasks.needsYou, ...tasks.working, ...tasks.updates, ...tasks.finished].map((item) => item.threadId)).not.toContain(task.threadId);
+    expect([...tasks.needsYou, ...tasks.working, ...tasks.finished].map((item) => item.threadId)).not.toContain(task.threadId);
   });
 
   it("keeps a saved task working when newer queue items fill the active-work page", async () => {
@@ -275,7 +309,7 @@ describe("home task outputs and brief", () => {
     await test.providers.db.insert(threadPullRequests).values({ sessionId: task.sessionId, threadId: task.threadId, url: "https://github.com/o/r/pull/7",
       repo: "o/r", number: 7, state: "merged", createdAt: 1, updatedAt: 2, checkedAt: 2 });
     const tasks = await (await fetch(`${test.baseUrl}/api/home/tasks`)).json() as HomeTasksResponse;
-    const row = [...tasks.needsYou, ...tasks.working, ...tasks.updates, ...tasks.finished].find((item) => item.threadId === task.threadId);
+    const row = [...tasks.needsYou, ...tasks.working, ...tasks.finished].find((item) => item.threadId === task.threadId);
     expect(row?.outputs).toEqual([{ kind: "pull_request", title: "o/r #7", href: "https://github.com/o/r/pull/7", state: "merged", updatedAt: 2 }]);
   });
 
@@ -331,6 +365,25 @@ describe("home tools", () => {
     const [start] = buildHomeTools(() => test.providers);
     const result = await start!.execute({ workspace: "Finance", title: "x", instructions: "y" }, ctx({ interactiveActor: { id: USER.id } }));
     expect(result.text).toBe('[start_task_error] No workspace named "Finance". Choose one of: Personal, Ops Team.');
+  });
+
+  it("marks a task done only on a turn the person wrote", async () => {
+    const test = await boot(1);
+    const markDone = buildHomeTools(() => test.providers).find((tool) => tool.name === "mark_task_done");
+    if (!markDone) throw new Error("Expected mark_task_done");
+    const [workspace] = await homeWorkspaces(test.providers.db, USER);
+    if (!workspace) throw new Error("Expected personal workspace");
+    const task = await startHomeTask(test.providers, USER, { workspace, title: "Send notes", instructions: "Send them." });
+    await vi.waitFor(async () => {
+      expect(await test.providers.engineStore.listUnsettledSubmissions(task.sessionId)).toEqual([]);
+    });
+    expect((await markDone.execute({ thread_id: task.threadId }, ctx({}))).text).toContain("[mark_task_done_refused]");
+    expect((await markDone.execute({ thread_id: "no-such-thread" }, ctx({ interactiveActor: { id: USER.id } }))).text)
+      .toContain("[mark_task_done_error] No task with that thread id");
+    const done = await markDone.execute({ thread_id: task.threadId }, ctx({ interactiveActor: { id: USER.id } }));
+    expect(done.text).toContain("Send notes");
+    const tasks = await (await fetch(`${test.baseUrl}/api/home/tasks`)).json() as HomeTasksResponse;
+    expect(tasks.finished.map((item) => item.threadId)).not.toContain(task.threadId);
   });
 });
 

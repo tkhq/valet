@@ -1,8 +1,8 @@
 import { Hono } from "hono";
 import type { AppEnv } from "../env.js";
-import { ensureHomeThread, ensureMorningBrief, listHomeTasks, markHomeTaskDone } from "../home/service.js";
+import { dismissHomeTask, ensureHomeThread, ensureMorningBrief, listHomeTasks } from "../home/service.js";
 import { createWorkflowSchedule } from "../workflows/schedule-service.js";
-import type { HomeConversationResponse, HomeTasksResponse } from "../wire/types.js";
+import type { DismissHomeTaskRequest, HomeConversationResponse, HomeTasksResponse } from "../wire/types.js";
 
 export const homeRouter = new Hono<AppEnv>();
 
@@ -33,9 +33,21 @@ homeRouter.get("/tasks", async (c) => {
   return c.json(body);
 });
 
-homeRouter.post("/tasks/:taskId/done", async (c) => {
+const ID_MAX = 200;
+
+/** A string id of 1 to `ID_MAX` characters, or undefined. */
+function idField(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 && value.length <= ID_MAX ? value : undefined;
+}
+
+// Crosses a thread out of the person's Tasks. It changes only their list.
+homeRouter.post("/tasks/dismiss", async (c) => {
   const person = personOf(c);
   if (!person) return c.json({ error: "Home is for a person. Sign in with your own account." }, 403);
-  const done = await markHomeTaskDone(c.var.providers.db, person, c.req.param("taskId"));
-  return done ? c.body(null, 204) : c.json({ error: "Task not found, or it is already done." }, 404);
+  const body = await c.req.json<Partial<Record<keyof DismissHomeTaskRequest, unknown>>>().catch(() => null);
+  const sessionId = idField(body?.sessionId);
+  const threadId = idField(body?.threadId);
+  if (!sessionId || !threadId) return c.json({ error: "Send the task's sessionId and threadId from GET /api/home/tasks." }, 400);
+  await dismissHomeTask(c.var.providers.db, person, { sessionId, threadId });
+  return c.body(null, 204);
 });
