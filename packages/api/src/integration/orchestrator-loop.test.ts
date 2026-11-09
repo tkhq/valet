@@ -16,8 +16,8 @@
  *      Docker child running `bash echo p4-loop-ok`; await the
  *      `child.settled` signal entry on the spawning thread and confirm the
  *      child's own transcript actually ran the echo.
- *   4. Prompt the orchestrator to append a note to today's journal via
- *      `mem_patch`; assert the journal row updated.
+ *   4. Prompt the orchestrator to append a note to a memory file via
+ *      `mem_patch`; assert the row updated.
  *
  * Key-gated (real Anthropic) AND docker-gated (the child runs in a real
  * Docker sandbox, mirroring Phase 3's suites) — skipped entirely otherwise.
@@ -33,7 +33,7 @@ import { bootTestApi, type TestApi } from "./_setup.js";
 import { driveTurn } from "./_test-utils.js";
 import { internalToken } from "../lib/internal-auth.js";
 import { childWatches, memoryFiles } from "../schema/index.js";
-import { readFile as readMemoryFile } from "../services/memory.js";
+import { readFile as readMemoryFile, writeFile as writeMemoryFile, type MemoryScope } from "../services/memory.js";
 import type { EnsureWorkspaceRuntimeResponse } from "../wire/types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -118,7 +118,7 @@ afterEach(async () => {
 
 describeE2E("api integration: phase 4 exit criteria — full orchestrator loop", () => {
   it(
-    "import fixture -> sandbox-less wake with snapshot -> task-spawns a Docker child -> child.settled -> mem_patch journals",
+    "import fixture -> sandbox-less wake with snapshot -> task-spawns a Docker child -> child.settled -> mem_patch appends",
     async () => {
       const counter = new CreateCountingSandboxProvider();
       api = await bootTestApi({ sandboxProvider: counter });
@@ -253,31 +253,28 @@ describeE2E("api integration: phase 4 exit criteria — full orchestrator loop",
       const childText = JSON.stringify(childEntries);
       expect(childText).toContain("p4-loop-ok");
 
-      // ── 4. mem_patch appends a note to today's journal ─────────────────
-      const today = new Date().toISOString().slice(0, 10);
-      const todayPath = `journal/${today}.md`;
-      const before = await readMemoryFile(db, { owner: { type: "user", id: "local-user" }, actorUserId: "local-user" }, todayPath);
-      const beforeContent = before.kind === "file" ? before.file.content : "";
-      expect(beforeContent).toBe(`# ${today}\n`);
+      // ── 4. mem_patch appends a note to an existing file ────────────────
+      const owner: MemoryScope = { owner: { type: "user", id: "local-user" }, actorUserId: "local-user" };
+      const notePath = "notes/loop-log.md";
+      await writeMemoryFile(db, owner, { path: notePath, content: "# Loop log\n", description: "Notes the loop test appends to" });
 
       await driveTurn({
         baseUrl: api.baseUrl,
         wsUrl: api.wsUrl,
         sessionId,
-        // Name the journal's current body: with no read allowed, the model
+        // Name the file's current body: with no read allowed, the model
         // otherwise guesses the trailing whitespace and the one patch misses.
         prompt:
           "Use mem_patch exactly once to append the exact line " +
-          `"p4-loop journal note" to the end of today's journal file, ${todayPath}. ` +
-          `Its whole current body is the heading line "# ${today}" and one newline. ` +
-          "Then reply 'journaled' and stop. Do not use any other tools.",
+          `"p4-loop note" to the end of the memory file ${notePath}. ` +
+          'Its whole current body is the heading line "# Loop log" and one newline. ' +
+          "Then reply 'noted' and stop. Do not use any other tools.",
         timeoutMs: 60_000,
       });
 
-      const after = await readMemoryFile(db, { owner: { type: "user", id: "local-user" }, actorUserId: "local-user" }, todayPath);
-      if (after.kind !== "file") throw new Error("expected today's journal to be a file");
-      expect(after.file.content).not.toBe(beforeContent);
-      expect(after.file.content).toContain("p4-loop journal note");
+      const after = await readMemoryFile(db, owner, notePath);
+      if (after.kind !== "file") throw new Error("expected the note to be a file");
+      expect(after.file.content).toContain("p4-loop note");
     },
     300_000,
   );

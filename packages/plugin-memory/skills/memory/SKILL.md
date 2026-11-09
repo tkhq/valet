@@ -9,10 +9,10 @@ Load this skill when the person wants you to use what you know, or when the task
 
 ## Find and use what you know
 
-The snapshot holds pinned files, recent journal entries, and the root index. The rest of memory stays in the store until you open it.
+The snapshot holds pinned files and the memory index: every file you can read, with its description. The rest of memory stays in the store until you open it.
 
 1. Search when a message names a person, project, client, repository, or earlier decision. Put two to four specific terms and their synonyms in one `mem_search` call. Positive terms match any of them.
-2. Read the hits. A result line is a path and a description, not the file. `mem_read` each file your answer depends on. When your own file and a `team:{id}/` file cover one subject, open yours first.
+2. Read the hits. A result line is a path, a description, and the matched text, not the file. `mem_read` each file your answer depends on. When your own file and a `team:{id}/` file cover one subject, open yours first.
 3. Follow the links. A file's `## Related` section and `mem_links` lead to the rest of its cluster.
 4. Answer from what you read. When the person asks how you know, name the file.
 5. If memory has nothing, say so, then ask or look it up. Write what you learn, so the next search finds it.
@@ -23,7 +23,8 @@ The snapshot holds pinned files, recent journal entries, and the root index. The
 - Memory tools include: `mem_write`, `mem_patch`, `mem_read`, `mem_search`, `mem_move`, `mem_links`, `mem_rm`, `mem_copy_to_team`, `mem_copy_from_team`.
 - Directories imply a default `type`: `preferences/` → preference, `projects/` → project-note, `workflows/` → workflow, `journal/` → journal-entry, `people/` → person; anything else → note. Paths cap at 5 levels — flatten under `projects/<name>/` rather than nesting deeper.
 - Markdown links between memory files build a derived graph — there is no stored links table; edges are read from your markdown on demand. Relative (`../people/alice.md`) and absolute (`/projects/valet/overview.md`) targets both resolve. `mem_links` shows one file's inbound and outbound edges; the memory UI renders the whole graph.
-- Pinned files load in full at orchestrator wake, alongside recent journal entries and the memory index. Pins cost context every session — keep them few and short.
+- Pinned files load in full at orchestrator wake, alongside the memory index. Pins cost context every session — keep them few and short.
+- Every new file needs a one-line `description` of what it holds. The index and `mem_search` show only that line, so write it for a reader who has not opened the file. `mem_patch` edits files that exist; create files with `mem_write`.
 - Reads union in team memories under a virtual `team:{teamId}/` prefix. You can read those. A write with no `teamId` touches only your own scope; pass `teamId` on `mem_write` or `mem_patch` to write a team you belong to. The virtual prefix is for reading only, and a write path may never contain a colon. Copy tools move a file that already exists between scopes without retyping it.
 
 ## Pull and push team knowledge
@@ -60,8 +61,7 @@ On update, an omitted param means *unchanged* — a body-only `mem_write` can't 
 ## Linking effectively
 
 - Add a `## Related` section linking cluster members: a project's files to each other, workflows to the projects that use them. Meaning lives in the surrounding prose — say *why* each file is related, not just that it is.
-- **People hubs**: one `people/<name>.md` per person (`type: person`, `resource:` their email or handle), then link the hub from every file that mentions them. Durable facts about a person live in the hub, not scattered across journal entries.
-- **Journal entries link every file they touch.** The journal is the chronological spine: a day's entry that links what it changed makes the session reconstructable later.
+- **People hubs**: one `people/<name>.md` per person (`type: person`, `resource:` their email or handle), then link the hub from every file that mentions them. Durable facts about a person live in the hub, not scattered across other files.
 - Use `mem_links` to orient on a topic's cluster before working on it, and to check inbound edges before a move or delete.
 - A phantom in `mem_links` output (a link target with no file behind it) is either a TODO stub — create the file — or a typo — fix the link. End a curation pass with only phantoms you can name and justify.
 
@@ -77,7 +77,7 @@ Work in passes over the whole store, not file-by-file:
 6. **Ephemera** — give anything time-bound an `expires`.
 7. **Verify** — re-read one enriched file per directory and confirm the frontmatter projection looks right.
 
-Close by appending a journal entry describing what you did, linking every touched file.
+Close by telling the person what you changed, with the paths you touched.
 
 ## Playbook: dedup / merge
 
@@ -92,23 +92,23 @@ Close by appending a journal entry describing what you did, linking every touche
 2. `mem_move(from, to)` — one file at a time. It rewrites inbound links in referencing files for you (to the absolute `/path` form) and reports which files it updated; never hand-edit referencers after a move.
 3. **`mem_move` does not reclassify `type`.** A cross-directory move keeps the old type — the response warns when the new directory implies a different one. Follow up with a metadata-only `mem_write(to, type: ...)`.
 4. Spot-check one rewritten referencer to confirm the link resolves.
-5. Journal the mapping (`old → new`) so future-you can follow stale references.
+5. Tell the person the mapping (`old → new`). `mem_move` already rewrote the links.
 
 Never reorganize with write + rm — you'd orphan every inbound link. `mem_move` exists so the graph follows the file.
 
 ## Playbook: journal distillation
 
-Journal entries are ephemeral by convention — durable knowledge must escape into a typed home:
+Older builds wrote a daily journal. New builds do not. Distill the old journals so their durable facts reach a typed home:
 
 1. Scan journals older than ~2 weeks for facts that are still true (decisions, preferences, gotchas, project state).
 2. Promote each into the right home (`projects/`, `preferences/`, `workflows/`, `people/`) — update existing files over creating new ones.
 3. Link back to the source journal date in the promoted file (provenance).
 
-Append to today's journal with `mem_patch`: `oldString: ''` against a non-existent `journal/YYYY-MM-DD.md` creates it, and an exact-match `oldString` at the tail appends to it.
+4. When a journal holds nothing still true, remove it with `mem_rm`, or set `expires` so search drops it.
 
 ## Pin hygiene
 
-- Pinned files and recent journal entries load into every orchestrator wake — each pin is a permanent context tax. Reserve pins for standing preferences and core identity notes.
+- Pinned files load into every orchestrator wake — each pin is a permanent context tax. Reserve pins for standing preferences and core identity notes.
 - Keep pinned files short and high-signal. When a pinned file grows, split the durable kernel (stays pinned) from the reference detail (unpinned spoke, linked from the kernel).
 - If something must be findable but not always-loaded, don't pin it — give it a good description and link it from a hub.
 

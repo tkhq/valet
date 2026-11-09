@@ -158,7 +158,7 @@ export function MemoryUsagePanel({ onSelect, now = Date.now() }: {
       <div className="flex flex-col gap-3 border-b border-line p-4">
         <p className="text-sm text-muted">
           {fileCount(entries.length)}, {neverUsed} never used. A file is used when an agent reads it or a
-          turn cites it. Pinned files, recent journals and principles load at wake instead. Stale means no use, no load and no edit for 30 days. {trackedFor(now, usageSince)}
+          turn cites it. Pinned files and principles load at wake instead. Stale means no use, no load and no edit for 30 days. {trackedFor(now, usageSince)}
         </p>
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <div className="flex items-center gap-2">

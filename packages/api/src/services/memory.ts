@@ -291,7 +291,14 @@ export interface WriteFileParams {
   /** The agent session that made the write. Set only by the route, from
    * host headers. A principle write records it as provenance. */
   source?: WriteSource;
+  /** Refuse to create a file without a description. The route sets it for
+   * agent writes: the memory index and search show only the description. */
+  requireDescription?: boolean;
 }
+
+/** The error an agent gets when it creates a memory file with no description. */
+export const MISSING_DESCRIPTION_MESSAGE =
+  "A new memory file needs a one-line description of what it holds. Write it again with `description`.";
 
 export interface WriteFileResult {
   file: MemoryFileRow;
@@ -375,6 +382,9 @@ export async function writeFile(db: AppDb, scope: MemoryScope, params: WriteFile
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
   };
+  if (params.requireDescription && !existing && row.description.trim() === "") {
+    throw new ValidationError(MISSING_DESCRIPTION_MESSAGE);
+  }
 
   await db.transaction(async (tx) => {
     if (existing) {
@@ -398,6 +408,8 @@ export interface PatchFileParams {
   newString: string;
   /** Passed through to `writeFile`. */
   source?: WriteSource;
+  /** Refuse to create a file: a patch carries no description. */
+  requireDescription?: boolean;
 }
 
 /** Exact-replace patch on the body. Patch-created files are allowed
@@ -419,6 +431,9 @@ export async function patchFile(db: AppDb, scope: MemoryScope, params: PatchFile
   if (!existing) {
     if (params.oldString !== "") {
       throw new NotFoundError("memory file", path);
+    }
+    if (params.requireDescription) {
+      throw new ValidationError(`${path} does not exist. Create it with mem_write and a one-line description; mem_patch edits files that exist.`);
     }
     return writeFile(db, scope, { path, content: params.newString, source: params.source });
   }
@@ -447,9 +462,11 @@ export async function patchFile(db: AppDb, scope: MemoryScope, params: PatchFile
 export const MAX_PATCH_BATCH = 20;
 
 export interface PatchFilesParams {
-  patches: Array<Omit<PatchFileParams, "source">>;
+  patches: Array<Omit<PatchFileParams, "source" | "requireDescription">>;
   /** Passed through to every patch. */
   source?: WriteSource;
+  /** Passed through to every patch. */
+  requireDescription?: boolean;
 }
 
 /**
@@ -468,7 +485,7 @@ export async function patchFiles(db: AppDb, scope: MemoryScope, params: PatchFil
     const results: WriteFileResult[] = [];
     for (const [i, patch] of patches.entries()) {
       try {
-        results.push(await patchFile(tx, scope, { ...patch, source: params.source }));
+        results.push(await patchFile(tx, scope, { ...patch, source: params.source, requireDescription: params.requireDescription }));
       } catch (err) {
         if (err instanceof ValidationError || err instanceof NotFoundError || err instanceof ReservedPathError) {
           throw new ValidationError(`Patch ${i + 1} of ${patches.length} (${patch.path}) failed: ${err.message.replace(/\.$/, "")}. No patch was applied.`);
@@ -996,6 +1013,8 @@ export interface MemoryFileSummary {
   type: string;
   pinned: boolean;
   updatedAt: number;
+  /** Epoch ms after which the file is stale, or null. */
+  expires: number | null;
 }
 
 /** Flat listing across the read-union (own scope + accessible teams),
@@ -1020,6 +1039,7 @@ export async function listFiles(db: AppDb, scope: MemoryScope, opts?: { prefix?:
         type: row.type,
         pinned: row.pinned,
         updatedAt: row.updatedAt,
+        expires: row.expires ?? null,
       });
     }
   }

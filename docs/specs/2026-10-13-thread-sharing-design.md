@@ -55,7 +55,7 @@ Artifacts need no change. A personal artifact is visible to its organization by 
 ## Known limits
 
 - A guest cannot open a child session that the shared thread started. The child card links to a page that returns 404.
-- The orchestrator's system prompt holds a memory snapshot (pinned files, recent journals, and the index). It is fixed when the thread starts, so a guest's turn can still see it.
+- The orchestrator's system prompt holds a memory snapshot (principles, pinned files, and the memory index). It is fixed when the thread starts, so a guest's turn can still see it.
 - A guest's stream does not replay events from before the page loaded. History loads over REST, and pending approvals load from `GET /api/threads/:id/decisions`.
 - The recheck of a guest stream is per process. If the API runs on more than one process, a revoke made on another process reaches the stream within five seconds.
 
