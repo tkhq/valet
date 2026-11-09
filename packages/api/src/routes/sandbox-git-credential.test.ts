@@ -17,7 +17,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { mintSandboxToken } from "../auth/sandbox-tokens.js";
-import { agentSessions, teamMembers, githubInstallations, orgs, sessionRepos, teams, workflowDefinitions, workflowRuns } from "../schema/index.js";
+import { agentSessions, childWatches, teamMembers, githubInstallations, orgs, sessionRepos, teams, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { saveAppConfig } from "../services/github-app.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { shareCredential } from "../services/credential-shares.js";
@@ -493,6 +493,79 @@ describe("POST /api/sandbox/git-credential for workflow sessions", () => {
     // ladder. A team run's `gh` gets the installation too.
     const gh = await post(token, { host: "github.com", owner: "tkhq", repo: "docs", purpose: "api" });
     expect(await gh.json()).toEqual({ username: "x-access-token", password: INSTALLATION_TOKEN });
+  });
+
+  async function reviewChild(sessionId: string, opts: { gitAccess?: "read"; bind?: string[] } = {}): Promise<string> {
+    const now = Date.now();
+    await api!.providers.db.insert(agentSessions).values({
+      id: sessionId, userId: "local-user", orgId: ORG, workspace: "/tmp", status: "active",
+      ownerType: "user", ownerId: "local-user", gitAccess: opts.gitAccess ?? null, createdAt: now, updatedAt: now,
+    });
+    await api!.providers.db.insert(childWatches).values({
+      childSessionId: sessionId, queueItemId: "q-1", parentSessionId: "sess-parent", parentThreadId: "thr-parent",
+      actorUserId: "local-user", orgId: ORG, settled: false, createdAt: now, reportToParent: false, pluginDeliveryId: "del-1",
+    });
+    for (const [position, fullName] of (opts.bind ?? []).entries()) {
+      await api!.providers.db.insert(sessionRepos).values({
+        sessionId, host: "github", fullName, cloneUrl: `https://github.com/${fullName}.git`, ref: null, auth: "auto", position,
+      });
+    }
+    return tokenFor(sessionId, "local-user");
+  }
+
+  it("a read-only session gets a fresh read-only installation token for its bound repository, never a personal token", async () => {
+    api = await bootTestApi();
+    await saveUserCredential("ghp_member_personal");
+    await installApp("tkhq");
+    const token = await reviewChild("child_plg_readonly", { gitAccess: "read", bind: ["tkhq/docs"] });
+
+    for (const purpose of ["git", "api"] as const) {
+      const res = await post(token, { host: "github.com", owner: "tkhq", repo: "docs", purpose });
+      expect(await res.json()).toEqual({ username: "x-access-token", password: INSTALLATION_TOKEN });
+    }
+    const mints = fixture!.calls.filter((call) => call.path.endsWith("/access_tokens"));
+    expect(mints).toHaveLength(2);
+    for (const mint of mints) {
+      expect(mint.body).toEqual({ permissions: { contents: "read", metadata: "read", pull_requests: "read" }, repositories: ["docs"] });
+    }
+    // The cached full-permission token on the installation row stays untouched.
+    const [row] = await api.providers.db.select().from(githubInstallations);
+    expect(row?.cachedToken).toBeNull();
+  });
+
+  it("a read-only session cannot get a token for a repository it is not bound to", async () => {
+    api = await bootTestApi();
+    await saveUserCredential("ghp_member_personal");
+    await installApp("tkhq");
+    const token = await reviewChild("child_plg_other", { gitAccess: "read", bind: ["tkhq/docs"] });
+    for (const body of [
+      { host: "github.com", owner: "tkhq", repo: "private-keys" },
+      { host: "github.com", owner: "acme", repo: "docs" },
+      { host: "github.com", owner: "tkhq", repo: "private-keys", purpose: "api" },
+      { host: "gitlab.com", owner: "tkhq", repo: "docs" },
+    ]) {
+      const res = await post(token, body);
+      expect(await res.json()).toEqual({ anonymous: true });
+    }
+    expect(fixture!.calls.filter((call) => call.path.endsWith("/access_tokens"))).toHaveLength(0);
+  });
+
+  it("a read-only session without an installation reads anonymously", async () => {
+    api = await bootTestApi();
+    await saveUserCredential("ghp_member_personal");
+    const token = await reviewChild("child_plg_noinstall", { gitAccess: "read", bind: ["tkhq/docs"] });
+    const res = await post(token, { host: "github.com", owner: "tkhq", repo: "docs" });
+    expect(await res.json()).toEqual({ anonymous: true });
+  });
+
+  it("a plugin child gets no org-level credential for a repository it is not bound to", async () => {
+    api = await bootTestApi();
+    await saveUserCredential("ghp_member_personal");
+    const token = await reviewChild("child_plg_write", { bind: ["tkhq/docs"] });
+    const unbound = await post(token, { host: "github.com", owner: "tkhq", repo: "private-keys" });
+    expect(await unbound.json()).toEqual({ anonymous: true });
+    const bound = await post(token, { host: "github.com", owner: "tkhq", repo: "docs" });
+    expect(await bound.json()).toMatchObject({ password: "ghp_member_personal" });
   });
 
   it("a team run's gh outside a repository gets the org's sole installation", async () => {

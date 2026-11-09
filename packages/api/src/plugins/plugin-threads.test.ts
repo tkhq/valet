@@ -57,14 +57,14 @@ describe("PluginThreads.spawnChild", () => {
     const { spawner, threads } = await setup();
     const child = await threads.spawnChild(
       thread,
-      { prompt: "check it", role: "verifier", repo: "acme/site", ref: "abc123", profile: "full", docker: true, resources: { cpu: 4 } },
+      { prompt: "check it", role: "verifier", repo: "acme/site", ref: "abc123", profile: "full", docker: true, resources: { cpu: 4 }, gitAccess: "read" },
       { dispatchId: "verify:abc:0" },
     );
     expect(child.childSessionId).toBe(pluginChildSessionId("reviewer", owner, thread.key, "verify:abc:0"));
     const [req, ctx] = spawner.mock.calls[0];
     expect(req).toMatchObject({
       prompt: "check it", role: "verifier", repo: "acme/site", branch: "abc123", sessionId: child.childSessionId,
-      profile: "full", docker: true, resources: { cpu: 4 },
+      profile: "full", docker: true, resources: { cpu: 4 }, gitAccess: "read",
     });
     // No integration actions unless the plugin asks for them.
     expect(req.toolScope).toEqual({ actions: [] });

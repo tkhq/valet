@@ -988,6 +988,50 @@ function parseAccessTokenResponse(payload: unknown): ParsedAccessToken {
   return { token, expiresAtMs };
 }
 
+/**
+ * A short-lived installation token that can read code and pull requests,
+ * never write: `contents`, `metadata` and `pull_requests` at `read`,
+ * limited to `repository` when given. It is not cached: the cached token
+ * on the row carries the App's full permissions. Returns null when the
+ * org has no installation for `accountLogin`.
+ */
+export async function mintReadOnlyInstallationToken(
+  deps: GithubAppDeps,
+  orgId: string,
+  accountLogin: string,
+  repository?: string,
+): Promise<string | null> {
+  const [row] = await deps.db
+    .select()
+    .from(githubInstallations)
+    .where(and(
+      eq(githubInstallations.orgId, orgId),
+      sql`lower(${githubInstallations.accountLogin}) = lower(${accountLogin})`,
+      eq(githubInstallations.suspended, false),
+    ))
+    .limit(1);
+  if (!row) return null;
+  const config = await loadAppConfig(deps, orgId);
+  if (!config) return null;
+  const res = await githubFetch(deps)(`${githubApiUrl(deps)}/app/installations/${row.installationId}/access_tokens`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${mintAppJwt(config)}`,
+      Accept: "application/vnd.github+json",
+      "User-Agent": "Valet-App",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      permissions: { contents: "read", metadata: "read", pull_requests: "read" },
+      ...(repository !== undefined ? { repositories: [repository] } : {}),
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`GitHub API POST /app/installations/${row.installationId}/access_tokens (read-only) returned ${res.status}`);
+  }
+  return parseAccessTokenResponse(await res.json()).token;
+}
+
 /** THE one cached installation-token minting path. Looks up the
  * non-suspended installation for `(orgId, accountLogin)` (case-insensitive);
  * returns `null` when there is none. Returns the cached token when it has

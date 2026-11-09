@@ -16,7 +16,7 @@ import type { ServiceProbes } from "../plugins/service-probe.js";
 import type { Model } from "@earendil-works/pi-ai/compat";
 import { and, eq, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readdir, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import {
@@ -3810,6 +3810,18 @@ export class EngineHost {
    * `child_watches.parkedSandboxId` recorded at park time is the only
    * remaining handle.
    */
+  /**
+   * Empty a working directory whose sandbox is gone, and keep the directory
+   * for a revival. A provider whose directory outlives `destroy` deletes
+   * the files as the sandbox user; elsewhere the api user owns them.
+   */
+  async releaseWorkspace(hostPath: string): Promise<void> {
+    const image = this.stockImage();
+    if (this.opts.sandboxProvider.releaseWorkspace && image) return this.opts.sandboxProvider.releaseWorkspace(hostPath, { image });
+    const entries = await readdir(hostPath).catch(() => [] as string[]);
+    await Promise.all(entries.map((name) => rm(join(hostPath, name), { recursive: true, force: true })));
+  }
+
   async destroySandbox(sandboxId: string): Promise<void> {
     await this.stopBrowserBefore(sandboxId, 'destroy');
     await this.opts.sandboxProvider.destroy(sandboxId);

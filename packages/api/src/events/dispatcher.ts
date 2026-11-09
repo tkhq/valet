@@ -63,8 +63,11 @@ import { appendReceiptStageForEvent, destinationReceiptStage, destinationStageMa
 import {
   destinationMetricReason,
   recordDeliveryDestination,
+  recordPluginDeliveryOutcome,
   type DeliveryDestinationMetricReason,
   type DestinationRecorder,
+  type PluginDeliveryOutcome,
+  type PluginDeliveryRecorder,
 } from "../observability/delivery-metrics.js";
 import { readStoredTarget } from "./target-names.js";
 import type { PluginThreadsScope } from "../plugins/plugin-threads.js";
@@ -225,6 +228,11 @@ export interface EventDispatcherDeps {
    * `valet_event_delivery_destination` counter. Tests pass a recorder.
    */
   recordDestination?: DestinationRecorder;
+  /**
+   * Counts plugin handler delivery outcomes. Absent → the
+   * `valet_plugin_delivery_outcomes` counter. Tests pass a recorder.
+   */
+  recordPluginDelivery?: PluginDeliveryRecorder;
 }
 
 /** The message text on a channel event payload (`text`), when present. */
@@ -375,6 +383,11 @@ export class EventDispatcher {
     (this.deps.recordDestination ?? recordDeliveryDestination)(reason);
   }
 
+  /** Count one plugin delivery outcome under the plugin and handler the line names. */
+  private recordPluginOutcome(target: SubscriptionTarget, outcome: PluginDeliveryOutcome): void {
+    (this.deps.recordPluginDelivery ?? recordPluginDeliveryOutcome)(target.plugin ?? "unknown", target.handler ?? "unknown", outcome);
+  }
+
   start(): void {
     if (this.timer) return;
     this.stopped = false;
@@ -489,11 +502,11 @@ export class EventDispatcher {
 
     // Set only by an assistant delivery: the queue item its prompt became.
     let queueItemId: string | undefined;
+    // Both jsonb shapes are owned by their writers: `target` by the
+    // subscriptions CRUD validator, `refs` by ingest (NormalizedEvent.refs
+    // is Record<string, string>). Same narrowing convention as ingest.ts.
+    const target = readStoredTarget(sub.target) as SubscriptionTarget;
     try {
-      // Both jsonb shapes are owned by their writers: `target` by the
-      // subscriptions CRUD validator, `refs` by ingest (NormalizedEvent.refs
-      // is Record<string, string>). Same narrowing convention as ingest.ts.
-      const target = readStoredTarget(sub.target) as SubscriptionTarget;
       const refs = event.refs as Record<string, string>;
       if (event.orgId !== sub.orgId) throw new Error("The event and the line of presence belong to different organizations.");
       const covered = sub.enabled && await hasTeamCoverage(db, sub, event, allCatalogEntries(this.deps.plugins ?? []));
@@ -518,7 +531,10 @@ export class EventDispatcher {
           : "This line is off. Turn it on to receive these events." }).where(and(eq(eventDeliveries.id, delivery.id), eq(eventDeliveries.eventId, event.id)));
         // A plugin delivery waiting to retry may have children from an
         // earlier attempt; the line is off, so they stop too.
-        if (target.kind === "plugin") await this.deps.pluginHandlers?.stopDeliveryChildren([delivery.id]);
+        if (target.kind === "plugin") {
+          this.recordPluginOutcome(target, "skipped");
+          await this.deps.pluginHandlers?.stopDeliveryChildren([delivery.id]);
+        }
         return;
       }
 
@@ -795,10 +811,12 @@ export class EventDispatcher {
           .catch((err) => reportError({ area: "events", reason: "failed_turn_check" }, `event dispatch ${deliveryId}: failed-turn check`, err));
       }
     } catch (err) {
-      await this.recordDeliveryFailure(delivery, event, err);
+      const status = await this.recordDeliveryFailure(delivery, event, err);
+      if (target.kind === "plugin" && status) this.recordPluginOutcome(target, status);
     }
   }
 
+  /** Record a failed attempt. Returns the status written, or null when the `where` matched no row. */
   private async recordDeliveryFailure(
     delivery: typeof eventDeliveries.$inferSelect,
     event: typeof events.$inferSelect,
@@ -806,20 +824,23 @@ export class EventDispatcher {
     attempts = delivery.attempts + 1,
     /** Narrows the write, e.g. to a plugin run's fenced lease. Default: the row. */
     where: SQL | undefined = eq(eventDeliveries.id, delivery.id),
-  ): Promise<void> {
+  ): Promise<"failed" | "dead" | null> {
     const backoff = BACKOFF_MS[attempts - 1];
     // The last attempt failed, so the waiters this delivery suppressed get
     // the event back before the row goes dead.
     if (backoff === undefined) await this.recoverClaimedDigest(delivery.destination, event);
-    await this.deps.db
+    const status = backoff === undefined ? "dead" : "failed";
+    const written = await this.deps.db
       .update(eventDeliveries)
       .set({
-        status: backoff === undefined ? "dead" : "failed",
+        status,
         attempts,
         nextAttemptAt: backoff === undefined ? delivery.nextAttemptAt : Date.now() + backoff,
         lastError: String(err).slice(0, MAX_ERROR_CHARS),
       })
-      .where(where);
+      .where(where)
+      .returning({ id: eventDeliveries.id });
+    return written.length > 0 ? status : null;
   }
 
   /** Plugin deliveries running in this process, by delivery id. */
@@ -842,6 +863,7 @@ export class EventDispatcher {
     const limit = this.deps.pluginHandlers?.maxConcurrent ?? DEFAULT_PLUGIN_CONCURRENCY;
     if (this.pluginRuns.size >= limit) {
       // Full: leave the row for a later poll instead of failing it.
+      this.recordPluginOutcome(target, "busy");
       void db.update(eventDeliveries).set({ nextAttemptAt: Date.now() + PLUGIN_BUSY_RETRY_MS })
         .where(eq(eventDeliveries.id, delivery.id))
         .catch((err) => console.error(`plugin delivery ${delivery.id}: requeue failed:`, err));
@@ -889,6 +911,10 @@ export class EventDispatcher {
       lease = next;
       return true;
     });
+    /** Count an outcome only when its fenced write landed. A miss means another run owns the row. */
+    const countIfWritten = async (outcome: PluginDeliveryOutcome, write: PromiseLike<{ id: string }[]>): Promise<void> => {
+      if ((await write).length > 0) this.recordPluginOutcome(target, outcome);
+    };
     const finish = () => {
       clearInterval(renew);
       this.pluginRuns.delete(delivery.id);
@@ -916,7 +942,9 @@ export class EventDispatcher {
       // process still uses up its retries instead of looping forever.
       const attempts = delivery.attempts + 1;
       if (attempts > BACKOFF_MS.length + 1) {
-        await db.update(eventDeliveries).set({ status: "dead", lastError: `The handler did not finish after ${attempts - 1} attempts.` }).where(owned());
+        await countIfWritten("dead", db.update(eventDeliveries)
+          .set({ status: "dead", lastError: `The handler did not finish after ${attempts - 1} attempts.` }).where(owned())
+          .returning({ id: eventDeliveries.id }));
         return;
       }
       // Take the claim this poll made. A miss means another process
@@ -926,12 +954,15 @@ export class EventDispatcher {
       const superseding = this.supersedeSubject(target, event);
       if (superseding) {
         if (await this.newerSubjectDelivery(sub.id, event, superseding.subject)) {
-          await serialLeaseWrite(() => db.update(eventDeliveries)
-            .set({ status: "skipped", lastError: supersededText(superseding.label) }).where(owned()));
+          await countIfWritten("skipped", serialLeaseWrite(() => db.update(eventDeliveries)
+            .set({ status: "skipped", lastError: supersededText(superseding.label) }).where(owned())
+            .returning({ id: eventDeliveries.id })));
           return;
         }
         const superseded = await this.supersedeOlder(sub.id, event, superseding);
         for (const id of superseded) {
+          // This run wrote each skip, so it counts them. An aborted run writes no outcome.
+          this.recordPluginOutcome(target, "skipped");
           // Same process: stop now. Another process finds its row skipped at
           // its next renewal and stops then.
           this.pluginRuns.get(id)?.abort(PLUGIN_SUPERSEDED);
@@ -957,14 +988,19 @@ export class EventDispatcher {
         // Another run owns the row now, or the superseding run already
         // marked it skipped; that outcome is the one that counts.
       } else if (abort.signal.aborted && abort.signal.reason === PLUGIN_LINE_OFF) {
-        await db.update(eventDeliveries).set({ status: "skipped", lastError: "This line was turned off while its handler ran." }).where(owned());
+        await countIfWritten("skipped", db.update(eventDeliveries)
+          .set({ status: "skipped", lastError: "This line was turned off while its handler ran." }).where(owned())
+          .returning({ id: eventDeliveries.id }));
       } else if (abort.signal.aborted && this.stopped) {
         // Shutdown is not the handler's fault. The lease lapses and a
         // later process runs it again.
       } else if (failure) {
-        await this.recordDeliveryFailure(delivery, event, failure.err, attempts, owned());
+        const status = await this.recordDeliveryFailure(delivery, event, failure.err, attempts, owned());
+        if (status) this.recordPluginOutcome(target, status);
       } else {
-        await db.update(eventDeliveries).set({ status: "delivered", deliveredAt: Date.now() }).where(owned());
+        await countIfWritten("delivered", db.update(eventDeliveries)
+          .set({ status: "delivered", deliveredAt: Date.now() }).where(owned())
+          .returning({ id: eventDeliveries.id }));
       }
     })()
       .catch((err) => console.error(`plugin delivery ${delivery.id}: outcome not recorded:`, err))

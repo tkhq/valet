@@ -1853,6 +1853,14 @@ export interface SandboxProvider {
    */
   release?(id: string): Promise<void>;
   /**
+   * Empty a working directory that a destroyed sandbox mounted from the
+   * host, and keep the directory. Only providers whose working directory
+   * outlives `destroy` implement it (docker: a host bind mount). Files the
+   * sandbox wrote can belong to the sandbox user, so the provider deletes
+   * them as that user. `image` is an image the provider can run.
+   */
+  releaseWorkspace?(hostPath: string, opts: { image: string }): Promise<void>;
+  /**
    * Optional deterministic-id seam. Providers whose sandbox ids are a pure
    * function of the session key (sandbox-kubernetes: `sandboxCrName`)
    * implement this so reapers can recompute a destroy handle that was never
@@ -3353,6 +3361,8 @@ export interface SpawnChildRequest {
   repo?: string;
   branch?: string;
   model?: string;
+  /** `read`: the sandbox git credential clones and fetches, never pushes. */
+  gitAccess?: "read";
   /** CPU, memory, and scratch overrides for the child's sandbox. Omitted fields use host defaults. */
   resources?: Pick<SandboxResources, "cpu" | "memory" | "scratch">;
   /** Interactive-service profile for the child's sandbox (default "headless"). */

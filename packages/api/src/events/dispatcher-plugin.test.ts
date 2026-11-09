@@ -15,6 +15,7 @@ import { eventDeliveries, eventSubscriptions, events } from "../schema/index.js"
 import githubPlugin from "@valet/plugin-github/plugin";
 import { EventDispatcher, type PluginHandlerHost } from "./dispatcher.js";
 import type { PluginThreadsScope } from "../plugins/plugin-threads.js";
+import type { PluginDeliveryOutcome, PluginDeliveryRecorder } from "../observability/delivery-metrics.js";
 
 const ORG = "org-1";
 
@@ -119,7 +120,7 @@ describe("EventDispatcher plugin target", () => {
     return row;
   }
 
-  function dispatcher(plugin: ValetPlugin, host: PluginHandlerHost | "none" = handlerHost()) {
+  function dispatcher(plugin: ValetPlugin, host: PluginHandlerHost | "none" = handlerHost(), recordPluginDelivery?: PluginDeliveryRecorder) {
     return new EventDispatcher({
       db: tdb.appDb,
       workflowRunHost: fakeRunHost(),
@@ -128,7 +129,15 @@ describe("EventDispatcher plugin target", () => {
       // The GitHub plugin gives events their natural subject (one pull request).
       plugins: [plugin, githubPlugin],
       ...(host !== "none" ? { pluginHandlers: host } : {}),
+      ...(recordPluginDelivery ? { recordPluginDelivery } : {}),
     });
+  }
+
+  /** A recorder that keeps each outcome as "plugin/handler:outcome". */
+  function outcomes() {
+    const seen: string[] = [];
+    const record = (plugin: string, handler: string, outcome: PluginDeliveryOutcome) => { seen.push(`${plugin}/${handler}:${outcome}`); };
+    return { seen, record };
   }
 
   /** Wait for the background run to record its outcome. */
@@ -327,6 +336,98 @@ describe("EventDispatcher plugin target", () => {
     expect(handle).not.toHaveBeenCalled();
     await d.stop();
   });
+
+  describe("outcome counter", () => {
+    it("counts a handler that returns as delivered", async () => {
+      const { deliveryId } = await seed();
+      const { seen, record } = outcomes();
+      const d = dispatcher(pluginWith(async () => {}), handlerHost(), record);
+      await d.pollOnce();
+      expect((await settled(deliveryId)).status).toBe("delivered");
+      await vi.waitFor(() => expect(seen).toEqual(["reviewer/review:delivered"]));
+      await d.stop();
+    });
+
+    it("counts a throw with retries left as failed", async () => {
+      const { deliveryId } = await seed();
+      const { seen, record } = outcomes();
+      const d = dispatcher(pluginWith(async () => { throw new Error("review failed"); }), handlerHost(), record);
+      await d.pollOnce();
+      expect((await settled(deliveryId)).status).toBe("failed");
+      await vi.waitFor(() => expect(seen).toEqual(["reviewer/review:failed"]));
+      await d.stop();
+    });
+
+    it("counts a throw on the last attempt as dead", async () => {
+      // Four backoff steps: the fifth attempt is the last one.
+      const { deliveryId } = await seed({ attempts: 4 });
+      const { seen, record } = outcomes();
+      const d = dispatcher(pluginWith(async () => { throw new Error("review failed"); }), handlerHost(), record);
+      await d.pollOnce();
+      const row = await settled(deliveryId);
+      expect(row.status).toBe("dead");
+      expect(row.attempts).toBe(5);
+      await vi.waitFor(() => expect(seen).toEqual(["reviewer/review:dead"]));
+      await d.stop();
+    });
+
+    it("counts a delivery with no attempts left as dead without running the handler", async () => {
+      const { deliveryId } = await seed({ attempts: 5 });
+      const { seen, record } = outcomes();
+      const handle = vi.fn(async () => {});
+      const d = dispatcher(pluginWith(handle), handlerHost(), record);
+      await d.pollOnce();
+      expect((await settled(deliveryId)).status).toBe("dead");
+      expect(handle).not.toHaveBeenCalled();
+      await vi.waitFor(() => expect(seen).toEqual(["reviewer/review:dead"]));
+      await d.stop();
+    });
+
+    it("counts a run whose line was turned off as skipped", async () => {
+      const { deliveryId } = await seed();
+      const { seen, record } = outcomes();
+      const d = dispatcher(pluginWith(async (_event, ctx) => {
+        await new Promise<void>((resolve) => ctx.signal.addEventListener("abort", () => resolve()));
+        throw new Error("stopped");
+      }), handlerHost(), record);
+      await d.pollOnce();
+      await tdb.appDb.update(eventSubscriptions).set({ enabled: false });
+      expect((await settled(deliveryId)).status).toBe("skipped");
+      await vi.waitFor(() => expect(seen).toEqual(["reviewer/review:skipped"]));
+      await d.stop();
+    });
+
+    it("counts a superseded delivery as skipped", async () => {
+      const now = Date.now();
+      const earlier = await seed({ occurredAt: now - 10_000, receivedAt: now - 2_000 });
+      const later = await seed({ subscriptionId: earlier.subscriptionId, occurredAt: now - 10_000, receivedAt: now - 1_000 });
+      const { seen, record } = outcomes();
+      const d = dispatcher(pluginWith(async () => {}, { concurrency: "supersede" }), handlerHost(), record);
+      await d.pollOnce();
+      expect((await settled(later.deliveryId)).status).toBe("delivered");
+      expect((await settled(earlier.deliveryId)).status).toBe("skipped");
+      await vi.waitFor(() => expect([...seen].sort()).toEqual(["reviewer/review:delivered", "reviewer/review:skipped"]));
+      await d.stop();
+    });
+
+    it("counts a delivery left for a later poll as busy when every handler slot is taken", async () => {
+      const first = await seed();
+      const second = await seed({ subscriptionId: first.subscriptionId, pr: "8" });
+      const { seen, record } = outcomes();
+      let release: () => void = () => {};
+      const gate = new Promise<void>((r) => { release = r; });
+      const d = dispatcher(pluginWith(async () => { await gate; }), { ...handlerHost(), maxConcurrent: 1 }, record);
+      await d.pollOnce();
+      await vi.waitFor(() => expect(seen).toEqual(["reviewer/review:busy"]));
+      // The busy row stays pending for a later poll.
+      const rows = [await delivery(first.deliveryId), await delivery(second.deliveryId)];
+      expect(rows.map((r) => r.status)).toEqual(["pending", "pending"]);
+      release();
+      await vi.waitFor(() => expect(seen).toEqual(["reviewer/review:busy", "reviewer/review:delivered"]));
+      await d.stop();
+    });
+  });
+
   describe("line settings", () => {
     const schema = Type.Object({ instructions: Type.Optional(Type.String()), minSeverity: Type.String({ default: "low" }) });
 

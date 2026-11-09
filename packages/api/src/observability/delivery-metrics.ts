@@ -40,7 +40,31 @@ export function recordDeliveryDestination(reason: DeliveryDestinationMetricReaso
 export function destinationMetricReason(destination: Destination): DeliveryDestinationMetricReason {
   return destination.kind === "skip" ? "claim_skip" : destination.reason;
 }
+/**
+ * The outcome of one plugin handler delivery (`target.kind: "plugin"`).
+ * `failed`: the handler threw and the row waits to retry. `dead`: no
+ * retries are left. `skipped`: a newer event superseded the run, or the
+ * line is off. `busy`: the process already runs its maximum of handlers,
+ * so a later poll takes the row.
+ */
+export type PluginDeliveryOutcome = "delivered" | "failed" | "dead" | "skipped" | "busy";
 
+/** A sink for one plugin delivery outcome: the counter, or a test's recorder. */
+export type PluginDeliveryRecorder = (plugin: string, handler: string, outcome: PluginDeliveryOutcome) => void;
+
+let pluginDeliveryCounter: Counter | undefined;
+
+/**
+ * Exported as `valet_plugin_delivery_outcomes_total{plugin,handler,outcome}`.
+ * Plugin and handler names come from the line's target, so the line count
+ * bounds them. Alert on `dead`.
+ */
+export function recordPluginDeliveryOutcome(plugin: string, handler: string, outcome: PluginDeliveryOutcome): void {
+  pluginDeliveryCounter ??= metrics.getMeter("@valet/api").createCounter("valet_plugin_delivery_outcomes", {
+    description: "Plugin handler deliveries by plugin, handler, and outcome",
+  });
+  pluginDeliveryCounter.add(1, { plugin, handler, outcome });
+}
 
 let attentionFailureCounter: Counter | undefined;
 

@@ -43,6 +43,11 @@ export interface PluginChildRequest {
   profile?: "headless" | "full";
   /** A Docker daemon in the child's sandbox, to run the project's own containers. */
   docker?: boolean;
+  /**
+   * `read`: the child's git credential can clone and fetch, never push.
+   * Use it for a child that only reads a repository, such as a reviewer.
+   */
+  gitAccess?: "read";
   /** CPU, memory and scratch for this child only. */
   resources?: Pick<SandboxResources, "cpu" | "memory" | "scratch">;
 }

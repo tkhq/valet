@@ -262,6 +262,7 @@ CREATE TABLE "agent_sessions" (
 	"owner_type" text DEFAULT 'user' NOT NULL,
 	"owner_id" text DEFAULT '' NOT NULL,
 	"credential_owner_mode" text,
+	"git_access" text,
 	"profile" text DEFAULT 'headless' NOT NULL,
 	"docker" boolean DEFAULT false NOT NULL,
 	"kubernetes" boolean DEFAULT false NOT NULL,

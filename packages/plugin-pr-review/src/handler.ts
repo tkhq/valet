@@ -540,7 +540,7 @@ async function runVerifier(
 ): Promise<Verdict | undefined> {
   const child: PluginChild = await ctx.threads.spawnChild(
     thread,
-    { prompt: req.prompt, title: req.title, role: VERIFIER_ROLE, model: req.model, repo: req.repo, ref: req.head },
+    { prompt: req.prompt, title: req.title, role: VERIFIER_ROLE, model: req.model, repo: req.repo, ref: req.head, gitAccess: "read" },
     { dispatchId: req.dispatchId },
   );
   const result = await ctx.threads.awaitChild(child, { resultSchema: VerdictSchema });
@@ -600,6 +600,8 @@ async function runReviewerChild(
       model: input.settings.model,
       repo: input.repoName,
       ref: input.head,
+      // The child reads untrusted PR text and has bash: its git credential must not push.
+      gitAccess: "read",
     },
     { dispatchId: input.dispatchId },
   );

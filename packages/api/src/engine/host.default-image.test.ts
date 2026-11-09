@@ -330,6 +330,7 @@ describe("EngineHost defaultImage → SandboxCreateOpts.image", () => {
     const { readFile } = await import("node:fs/promises");
     const source = await readFile(new URL("./host.ts", import.meta.url), "utf8");
     expect(source.match(/image: this\.opts\.defaultImage,/g)).toBeNull();
-    expect(source.match(/this\.stockImage\(\)/g)?.length ?? 0).toBe(6);
+    // Six create sites, plus releaseWorkspace, which runs the stock image to empty a working directory.
+    expect(source.match(/this\.stockImage\(\)/g)?.length ?? 0).toBe(7);
   });
 });
