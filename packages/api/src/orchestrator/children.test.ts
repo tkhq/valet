@@ -622,6 +622,52 @@ describe("buildChildSpawner", () => {
     expect(await deps.engineStore.getSession(req.sessionId)).not.toBeNull();
   });
 
+  it("runs a prepare step in the child's sandbox before its first turn and sends the prompt it returns", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const parent = await deps.engineHost.sessionFor("parent-prepare", { userId: "local-user", orgId: "local-org", workspace: "/tmp" });
+    const prompts: string[] = [];
+    const original = deps.engineHost.childSessionFor.bind(deps.engineHost);
+    vi.spyOn(deps.engineHost, "childSessionFor").mockImplementation(async (...args) => {
+      const child = await original(...args);
+      const send = child.prompt.bind(child);
+      vi.spyOn(child, "prompt").mockImplementation(async (content, opts) => {
+        prompts.push(String(content));
+        return send(content, opts);
+      });
+      return child;
+    });
+    const results: { exitCode: number; stdout: string; truncated: boolean }[] = [];
+    const spawn = buildChildSpawner(deps, testChildWatcher(deps));
+    await spawn(
+      {
+        prompt: "review",
+        prepare: async (runner, prompt) => {
+          const r = await runner.run("echo scanned");
+          results.push(r);
+          return `${prompt}\n\n${r.stdout.trim()}`;
+        },
+      },
+      { parentSessionId: parent.id, parentThreadId: parent.thread("web:default").id, actorUserId: "local-user", owner: { type: "user", id: "local-user" } },
+    );
+    expect(results).toEqual([expect.objectContaining({ exitCode: 0, stdout: "scanned\n", truncated: false })]);
+    expect(prompts).toEqual(["review\n\nscanned"]);
+    vi.mocked(deps.engineHost.childSessionFor).mockRestore();
+  });
+
+  it("removes the child when its prepare step throws", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const parent = await deps.engineHost.sessionFor("parent-prepare-fail", { userId: "local-user", orgId: "local-org", workspace: "/tmp" });
+    const spawn = buildChildSpawner(deps, testChildWatcher(deps));
+    const req = { sessionId: "child-prepare-fail", prompt: "review", prepare: async () => { throw new Error("scan failed"); } };
+    await expect(spawn(req, { parentSessionId: parent.id, parentThreadId: parent.thread("web:default").id, actorUserId: "local-user", owner: { type: "user" as const, id: "local-user" } }))
+      .rejects.toThrow("scan failed");
+    expect(await deps.engineStore.getSession(req.sessionId)).toBeNull();
+    expect(await deps.db.select().from(agentSessions).where(eq(agentSessions.id, req.sessionId))).toHaveLength(0);
+    expect(await deps.db.select().from(childWatches).where(eq(childWatches.childSessionId, req.sessionId))).toHaveLength(0);
+  });
+
   it("full-profile child resolves its sandbox image with the child's profile — not the headless default", async () => {
     // Isolated + customImage provider so buildSpecProvider wires image
     // resolution (resolveBaseImage consults the org's per-profile base bakes).

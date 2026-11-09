@@ -15,7 +15,7 @@
 import type { TSchema } from "typebox";
 import type { NormalizedEvent } from "./valet-plugin.js";
 import type { ToolScope } from "@valet/shared";
-import type { Principal, SandboxResources, ScopedPluginStore, SubmissionResult } from "./types.js";
+import type { ChildCommandRunner, Principal, SandboxResources, ScopedPluginStore, SubmissionResult } from "./types.js";
 
 /** A plugin's thread in the owner's assistant. */
 export interface PluginThreadRef {
@@ -50,6 +50,15 @@ export interface PluginChildRequest {
   gitAccess?: "read";
   /** CPU, memory and scratch for this child only. */
   resources?: Pick<SandboxResources, "cpu" | "memory" | "scratch">;
+  /**
+   * Deterministic work in the child's sandbox before its first turn, such
+   * as scanning the checked-out repository. The host starts the sandbox,
+   * calls `prepare` with a runner scoped to this child (time and output
+   * caps per command, one deadline for the step), and sends the prompt it
+   * returns. A retried dispatch that finds the child already started does
+   * not call it again. A throw fails `spawnChild`.
+   */
+  prepare?: (runner: ChildCommandRunner, prompt: string) => Promise<string>;
 }
 
 export interface PluginChild {

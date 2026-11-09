@@ -183,6 +183,16 @@ Two more suites use the same case shape and scoring:
   (F.*) defects count toward recall. All 12 projects are SWE-bench
   repos, so expect some training-data contamination. To regenerate the
   cases, run `pnpm --filter @valet/eval import:swr`.
+- `--context-budget <tokens>` builds a context pack before each review:
+  repository conventions, domain notes, definitions, callers, tests and
+  team notes, from one scan of the checkout at HEAD. The trajectory
+  metadata keeps the pack, its manifest and the consolidate drops. The
+  plugin default is 12000. `0` or no flag runs without a pack.
+- `--memory-dir <dir>` gives the pack a directory of memory files as
+  team memory, mounted at `lib/` the way a content source syncs it, for
+  example a source repo's `.valet/memory`. Notes under
+  `lib/code-review/notes/` become review rules; other notes are
+  background.
 
 ### Private suites
 

@@ -35,7 +35,7 @@ function prRepo(): { dir: string; base: string } {
 }
 
 const finding = (line: number, title: string) =>
-  ({ path: "a.py", line, severity: "high", category: "bug", trigger: "any call", evidence: "a.py:1", title, body: "b" }) as const;
+  ({ path: "a.py", line, severity: "high", category: "bug", trigger: `any call (${title})`, evidence: `a.py:${line}`, title, body: "b" }) as const;
 
 async function submit(spec: AgentSpec, name: string, args: unknown): Promise<void> {
   const tool = spec.tools.find((t) => t.name === name);

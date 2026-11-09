@@ -97,6 +97,10 @@ export interface RunnerOptions {
   reviewPasses?: number;
   /** Drop code-review findings rated below this confidence (0-1). */
   minConfidence?: number;
+  /** Context pack budget in tokens for code-review cases (about 4 chars each). 0 or unset: no pack. */
+  contextBudget?: number;
+  /** A directory of memory files the code-review pack reads as team memory. */
+  memoryDir?: string;
   /**
    * Send every model call through this Valet LLM gateway with its `vlt_`
    * key, instead of provider keys from the environment.

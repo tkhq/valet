@@ -1,6 +1,11 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ToolDef } from "@valet/engine";
+import { consolidateFindings, type Consolidation } from "./consolidate.js";
+import { gatherContext, type PackMemory } from "./context/gather.js";
+import type { ContextPack } from "./context/pack.js";
+import { rankPatch } from "./context/rank.js";
+import { gitFileAt, localRunner } from "./context/repo.js";
 import { git } from "./git.js";
 import { createReviewerSpec, type ReviewerSpecOptions } from "./review.js";
 import type { Finding, Review } from "./types.js";
@@ -45,6 +50,10 @@ export interface PipelineResult {
   /** The reviewer's own review, before verification. */
   draft?: Review;
   verdicts: FindingVerdict[];
+  /** The gather stage's pack, when `contextBudget` is set. */
+  context?: ContextPack;
+  /** What the consolidate stage dropped from `draft`, and why. */
+  consolidation?: Consolidation["dropped"];
 }
 
 export interface PipelineOptions extends ReviewerSpecOptions {
@@ -56,6 +65,12 @@ export interface PipelineOptions extends ReviewerSpecOptions {
   verifyModel?: string;
   /** Independent reviewer passes, merged by location before verification. Default 1. */
   passes?: number;
+  /** Character budget of the context pack built before the review. 0 or unset: no pack. */
+  contextBudget?: number;
+  /** Team memory for the pack's principles and notes. */
+  memory?: PackMemory;
+  /** `owner/name`, for memory queries. */
+  repo?: string;
   /** Drop findings the reviewer rated below this confidence (0-1). A finding with no rating stays. Unset: keep all. */
   minConfidence?: number;
 }
@@ -64,6 +79,9 @@ export interface PipelineOptions extends ReviewerSpecOptions {
 export function confidentEnough(f: Finding, minConfidence: number | undefined): boolean {
   return minConfidence === undefined || f.confidence === undefined || f.confidence >= minConfidence;
 }
+
+/** Characters of diff in the review prompt (the reviewer's default); the pack's drop log names the files past it. */
+const DIFF_BUDGET = 150_000;
 
 /** Findings this close on the same file are one report. */
 const SAME_SPOT_LINES = 3;
@@ -96,32 +114,55 @@ export async function runReviewPipeline(input: PipelineOptions, run: AgentRunner
   // Review what GitHub shows: the change since the merge-base. A two-dot
   // diff from a base branch that moved on shows its later commits reversed.
   const opts = { ...input, base: await mergeBase(input.workspace, input.base, input.head) };
+  // Gather once, before any pass: every pass reads the same pack.
+  let context: ContextPack | undefined;
+  if ((opts.contextBudget ?? 0) > 0) {
+    const from = opts.incrementFrom ?? opts.base;
+    const patch = await git(opts.workspace, ["diff", "--unified=5", from, opts.head]);
+    context = await gatherContext({
+      runner: localRunner(opts.workspace),
+      // Instructions come from the merge base, never from the PR head.
+      readTrusted: (path) => gitFileAt(opts.workspace, opts.base, path),
+      patch,
+      diffDropped: rankPatch(patch, opts.diffBudgetChars ?? DIFF_BUDGET).dropped,
+      title: opts.title,
+      budgetChars: opts.contextBudget ?? 0,
+      ...(opts.memory ? { memory: opts.memory } : {}),
+      ...(opts.repo ? { repo: opts.repo } : {}),
+    });
+  }
+  const withContext = { ...opts, ...(context ? { contextPack: context.text } : {}) };
   // Passes run in parallel; each samples its own path through the PR, so
   // their union finds more than one pass. Pass 1 keeps the label "review".
   const passCount = Math.max(1, opts.passes ?? 1);
   const passes = await Promise.all(
     Array.from({ length: passCount }, async (_, i) => {
-      const reviewer = await createReviewerSpec(opts);
+      const reviewer = await createReviewerSpec(withContext);
       const result = await run({ ...reviewer, label: i === 0 ? "review" : `review:${i + 1}` });
       return { result, review: result.outcome === "completed" ? reviewer.review() : undefined };
     }),
   );
   const done = passes.filter((p): p is { result: AgentRunResult; review: Review } => p.review !== undefined);
   const reviewRun = done[0]?.result ?? passes[0].result;
-  const draft: Review | undefined =
+  const merged: Review | undefined =
     done.length > 0 ? { ...done[0].review, findings: mergeFindings(done.map((p) => p.review.findings)) } : passes[0].review;
+  // Consolidate: drop repeats inside the merged review before anything else sees it.
+  const consolidated = merged ? consolidateFindings(merged.findings) : undefined;
+  const draft: Review | undefined = merged && consolidated ? { ...merged, findings: consolidated.kept } : merged;
+  const stages = { ...(context ? { context } : {}), ...(consolidated ? { consolidation: consolidated.dropped } : {}) };
   if (reviewRun.outcome !== "completed" || draft === undefined) {
     return {
       outcome: reviewRun.outcome === "completed" ? "no_review" : reviewRun.outcome,
       ...(reviewRun.error !== undefined ? { error: reviewRun.error } : {}),
       ...(draft !== undefined ? { draft, review: draft } : {}),
       verdicts: [],
+      ...stages,
     };
   }
   // `draft` stays whole, so a run can score what the threshold cost.
   const gate = (f: Finding): boolean => confidentEnough(f, opts.minConfidence);
   if (opts.verify !== true || draft.findings.length === 0) {
-    return { outcome: "completed", review: { ...draft, findings: draft.findings.filter(gate) }, draft, verdicts: [] };
+    return { outcome: "completed", review: { ...draft, findings: draft.findings.filter(gate) }, draft, verdicts: [], ...stages };
   }
 
   const verdicts: (FindingVerdict | undefined)[] = new Array(draft.findings.length);
@@ -152,7 +193,7 @@ export async function runReviewPipeline(input: PipelineOptions, run: AgentRunner
     }),
   );
   const kept = draft.findings.filter((_, i) => verdicts[i]?.kept === true);
-  return { outcome: "completed", review: { ...draft, findings: kept }, draft, verdicts: verdicts.filter((v): v is FindingVerdict => v !== undefined) };
+  return { outcome: "completed", review: { ...draft, findings: kept }, draft, verdicts: verdicts.filter((v): v is FindingVerdict => v !== undefined), ...stages };
 }
 
 async function mergeBase(workspace: string, base: string, head: string): Promise<string> {

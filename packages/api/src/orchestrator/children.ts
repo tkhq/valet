@@ -49,6 +49,9 @@ import {
   type Principal,
   type SessionStore,
   type SpawnChildRequest,
+  type ChildCommandRunner,
+  type ExecOpts,
+  type ExecResult,
   type SpawnChildResult,
   type SubmissionResult,
   readThreadOutline,
@@ -169,6 +172,40 @@ export class ChildLimitError extends Error {
     this.name = "ChildLimitError";
     this.code = code;
   }
+}
+
+/** How long a child's sandbox may take to start (repository clone included) before `prepare` gives up. */
+const PREPARE_READY_TIMEOUT_MS = 10 * 60_000;
+/** The whole `prepare` step, sandbox start excluded. */
+const PREPARE_DEADLINE_MS = 5 * 60_000;
+const PREPARE_COMMAND_TIMEOUT_MS = { default: 60_000, max: 180_000 };
+const PREPARE_OUTPUT_BYTES = { default: 4 * 1024 * 1024, max: 32 * 1024 * 1024 };
+
+/**
+ * Run a spawn request's `prepare` in the child's sandbox and return the
+ * prompt it builds. Commands run from the child's primary checkout, each
+ * under its own time and output caps and one deadline for the step.
+ */
+async function runChildPrepare(
+  session: { attachment: { ensureReady(opts: { timeoutMs: number }): Promise<{ sandbox: { exec(command: string, opts?: ExecOpts): Promise<ExecResult> } }> } },
+  targetDir: string | undefined,
+  prepare: NonNullable<SpawnChildRequest["prepare"]>,
+  prompt: string,
+): Promise<string> {
+  const { sandbox } = await session.attachment.ensureReady({ timeoutMs: PREPARE_READY_TIMEOUT_MS });
+  const deadline = Date.now() + PREPARE_DEADLINE_MS;
+  const cd = targetDir && targetDir !== "." ? `cd -- '${targetDir.replace(/'/g, "'\\''")}' && ` : "";
+  const runner: ChildCommandRunner = {
+    async run(command, opts) {
+      const left = deadline - Date.now();
+      if (left <= 0) throw new Error(`The child's prepare step passed its ${PREPARE_DEADLINE_MS / 1000} s deadline. Make the step cheaper or split it.`);
+      const timeout = Math.min(opts?.timeoutMs ?? PREPARE_COMMAND_TIMEOUT_MS.default, PREPARE_COMMAND_TIMEOUT_MS.max, left);
+      const maxOutputBytes = Math.min(opts?.maxOutputBytes ?? PREPARE_OUTPUT_BYTES.default, PREPARE_OUTPUT_BYTES.max);
+      const result = await sandbox.exec(`${cd}${command}`, { timeout, maxOutputBytes, ...(opts?.stdin !== undefined ? { stdin: opts.stdin } : {}) });
+      return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr, truncated: result.truncated === true, timedOut: result.timedOut === true };
+    },
+  };
+  return prepare(runner, prompt);
 }
 
 function newChildSessionId(): string {
@@ -689,7 +726,13 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
     await watcher.ensureSubscription({ childSessionId, parentSessionId: ctx.parentSessionId, parentThreadId: ctx.parentThreadId })
       .catch((error: unknown) => cleanupFailedSpawn(deps, childSessionId, workspace, error));
 
-    const receipt = await childSession.prompt(req.prompt, {
+    // A plugin's deterministic pre-turn step (for example a repository scan) builds the first prompt.
+    const prompt = req.prepare
+      ? await runChildPrepare(childSession, binding ? computeTargetDirs([binding])[0] : undefined, req.prepare, req.prompt)
+          .catch((error: unknown) => cleanupFailedSpawn(deps, childSessionId, workspace, error))
+      : req.prompt;
+
+    const receipt = await childSession.prompt(prompt, {
       // Per-turn role overlay (the security dispatch names the persona
       // role; the claimed child's build registered it in options.roles).
       ...(req.role !== undefined ? { role: req.role } : {}),

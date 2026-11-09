@@ -12,6 +12,9 @@ import { Type, type Static, type TSchema } from "typebox";
 import type { PluginChild, PluginEvent, PluginEventContext, PluginEventHandler, PluginThreadRef } from "@valet/engine";
 import { cutPatch, type PullRequestDiff } from "./git.js";
 import { githubClient, GitHubError, type GitHubClient, type PullFile, type PullRequest, type ReviewComment, type ReviewThread } from "./github.js";
+import { matchesGlob } from "./context/glob.js";
+import { consolidateFindings } from "./consolidate.js";
+import { gatherForReview, renderConsolidation, type StageOutcome } from "./stages.js";
 import { sameIssue } from "./incremental.js";
 import { commentableLines, nearestCommentableLine } from "./linemap.js";
 import { buildReviewPrompt } from "./prompt.js";
@@ -63,6 +66,17 @@ export const ReviewSettingsSchema = Type.Object(
     model: Type.String({
       default: "anthropic/claude-sonnet-5-5",
       description: "provider/model for the reviewer and verifier children.",
+    }),
+    riskPaths: Type.Array(Type.String({ minLength: 1 }), {
+      default: [],
+      maxItems: 100,
+      description: "Globs of paths where a defect costs the most in this repository, such as `deploy/**` or `**/rollouts/*.yaml`. A diff over the budget keeps these files first, with auth, keys, migrations and access-control paths.",
+    }),
+    contextBudget: Type.Integer({
+      default: 12000,
+      minimum: 0,
+      maximum: 100000,
+      description: "Tokens of context gathered before the review: repository conventions, domain notes, definitions, callers, tests and team notes. 0 turns it off.",
     }),
   },
   { additionalProperties: false },
@@ -267,16 +281,23 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   // 2. Review the PR, or only the new commits, told what is already open.
   const review = (async () => runReviewerChild(ctx, thread, {
     slug, repoName, pr, base: mergeBase, head, settings,
-    diff: from !== undefined ? await incrementDiff(gh, from, head, reviewed) : prDiffFor(prDiff, reviewed, mergeBase, head),
+    diff: from !== undefined ? await incrementDiff(gh, from, head, reviewed, settings.riskPaths) : prDiffFor(prDiff, reviewed, mergeBase, head, settings.riskPaths),
     ...(from !== undefined ? { incrementFrom: from } : {}),
     knownFindings: [...open.live, ...open.dismissed.filter(hasTitle)].map((f) => ({ path: f.path, line: f.line, title: f.title })),
     dispatchId: dispatch("review"),
+    context: {
+      // Convention files and playbooks are instructions: read them at the merge base, never at the PR head.
+      readTrusted: (path) => gh.fileText(path, mergeBase),
+      patch: from === undefined && prDiff !== undefined ? onlyFiles(prDiff, new Set(reviewed.map((f) => f.filename))) : undefined,
+    },
   }))();
 
   const [draft] = await Promise.all([review, recheck]);
+  // Consolidate: drop repeats inside the draft before any other step.
+  const consolidated = consolidateFindings(draft.findings);
 
   // 3. Drop findings on a line that does not exist.
-  const inPaths = draft.findings.filter((f) => !excluded(f.path, settings.excludePaths));
+  const inPaths = consolidated.kept.filter((f) => !excluded(f.path, settings.excludePaths));
   const candidates = await anchoredFindings(gh, files, inPaths, head, mergeBase);
   if (candidates.length < inPaths.length) log(slug, `dropped ${inPaths.length - candidates.length} finding(s) anchored to a line that does not exist at ${head.slice(0, 7)}`);
 
@@ -301,8 +322,8 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   let nextId = prior?.nextId ?? 1;
   const posted: PostedFinding[] = [];
   const reopened: OpenFinding[] = [];
-  let hidden = draft.findings.length - candidates.length;
-  for (const f of draft.findings.filter((x) => kept.includes(x))) {
+  let hidden = consolidated.kept.length - candidates.length;
+  for (const f of consolidated.kept.filter((x) => kept.includes(x))) {
     if (SEVERITY_ORDER.indexOf(f.severity) < minRank) {
       hidden++;
       continue;
@@ -318,6 +339,20 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
     }
     posted.push({ ...f, id: `f${nextId++}` });
   }
+
+  await ctx.threads.record(thread, renderConsolidation(head, draft.findings.map((f): StageOutcome => {
+    const repeat = consolidated.dropped.find((d) => d.finding === f);
+    const out = posted.find((p) => p.path === f.path && p.line === f.line && p.title === f.title);
+    const result = repeat ? `dropped: ${repeat.reason}`
+      : !inPaths.includes(f) ? "dropped: excluded path"
+      : !candidates.includes(f) ? "dropped: line does not exist at HEAD"
+      : !kept.includes(f) ? "dropped: the verifier refuted it"
+      : SEVERITY_ORDER.indexOf(f.severity) < minRank ? `hidden: below ${settings.minSeverity}`
+      : out ? `posted as ${out.id}`
+      : reopened.some((r) => r.path === f.path && r.title === f.title) ? "reopened a fixed finding"
+      : "dropped: repeats an open or dismissed finding";
+    return { finding: f, result };
+  })), { dispatchId: dispatch("consolidate") });
 
   // 6. Map new findings to diff lines. GitHub refuses a comment on a line outside the diff.
   const anchorable = new Map(files.map((f) => [f.filename, { RIGHT: commentableLines(f.patch ?? "", "RIGHT"), LEFT: commentableLines(f.patch ?? "", "LEFT") }]));
@@ -589,26 +624,56 @@ async function runReviewerChild(
   input: {
     slug: string; repoName: string; pr: PullRequest; base: string; head: string; settings: ReviewSettings; diff: PullRequestDiff;
     incrementFrom?: string; knownFindings: { path: string; line: number; title: string }[]; dispatchId: string;
+    /** Gather a context pack first, in the child's sandbox. `patch` is the diff before the budget; unset uses the reviewed diff. */
+    context?: { readTrusted: (path: string) => Promise<string | undefined>; patch?: string | undefined };
   },
 ): Promise<Review> {
-  const memory = await teamNotes(ctx, input.repoName);
+  const [owner = "", repo = ""] = input.repoName.split("/");
+  const promptWith = (pack: string | undefined, memory: string): string =>
+    reviewerPrompt({
+      review: buildReviewPrompt({
+        title: input.pr.title,
+        body: input.pr.body ?? "",
+        base: input.base,
+        head: input.head,
+        diff: input.diff,
+        ...(input.incrementFrom !== undefined ? { increment: { from: input.incrementFrom } } : {}),
+        knownFindings: input.knownFindings,
+        ...(pack !== undefined ? { contextPack: pack } : {}),
+      }),
+      instructions: input.settings.instructions,
+      excludePaths: input.settings.excludePaths,
+      memory,
+    });
+  // Without a pack, the memory search stands in for the pack's team notes.
+  const fallback = promptWith(undefined, await teamNotes(ctx, input.repoName));
+  const context = input.context;
+  const budgetTokens = input.settings.contextBudget ?? 0;
   const child = await ctx.threads.spawnChild(
     thread,
     {
-      prompt: reviewerPrompt({
-        review: buildReviewPrompt({
-          title: input.pr.title,
-          body: input.pr.body ?? "",
-          base: input.base,
-          head: input.head,
-          diff: input.diff,
-          ...(input.incrementFrom !== undefined ? { increment: { from: input.incrementFrom } } : {}),
-          knownFindings: input.knownFindings,
-        }),
-        instructions: input.settings.instructions,
-        excludePaths: input.settings.excludePaths,
-        memory,
-      }),
+      prompt: fallback,
+      // Gather in the child's sandbox, on the checkout it already has. The pack goes into the first prompt, so compaction never drops it.
+      ...(context && budgetTokens > 0
+        ? {
+            prepare: async (runner) => {
+              const pack = await gatherForReview(ctx, {
+                runner,
+                readTrusted: context.readTrusted,
+                owner,
+                repo,
+                head: input.head,
+                title: input.pr.title,
+                patch: context.patch ?? input.diff.patch,
+                diffDropped: input.diff.dropped ?? [],
+                budgetTokens,
+                thread,
+                dispatchId: `${input.dispatchId}:context`,
+              });
+              return pack ? promptWith(pack.text, "") : fallback;
+            },
+          }
+        : {}),
       title: `Review ${input.head.slice(0, 7)}`,
       role: REVIEWER_ROLE,
       model: input.settings.model,
@@ -676,9 +741,10 @@ async function shadowReview(
   const prDiff = (await gh.compareDiff(mergeBase, checkout)) ?? undefined;
   const draft = await runReviewerChild(ctx, thread, {
     slug, repoName, pr, base: mergeBase, head: checkout, settings,
-    diff: prDiffFor(prDiff, reviewed, mergeBase, checkout),
+    diff: prDiffFor(prDiff, reviewed, mergeBase, checkout, settings.riskPaths),
     knownFindings: [],
     dispatchId: dispatch("shadow-review"),
+    context: { readTrusted: (path: string) => gh.fileText(path, mergeBase), patch: prDiff !== undefined ? onlyFiles(prDiff, new Set(reviewed.map((f) => f.filename))) : undefined },
   });
   const inPaths = draft.findings.filter((f) => !excluded(f.path, settings.excludePaths));
   const minRank = SEVERITY_ORDER.indexOf(settings.minSeverity);
@@ -727,21 +793,21 @@ async function lineCountsAt(gh: GitHubClient, files: PullFile[], paths: string[]
 }
 
 /** The PR diff limited to the reviewed files, cut to the budget. */
-function prDiffFor(patch: string | undefined, files: PullFile[], base: string, head: string): PullRequestDiff {
+function prDiffFor(patch: string | undefined, files: PullFile[], base: string, head: string, riskPaths: readonly string[] = []): PullRequestDiff {
   const names = files.map((f) => f.filename);
   const stat = files.map((f) => `${f.filename} | +${f.additions} -${f.deletions}`).join("\n");
   if (patch === undefined) return unrendered(stat, names, base, head);
-  return { stat, files: names, ...cutPatch(onlyFiles(patch, new Set(names)), DIFF_BUDGET) };
+  return { stat, files: names, ...cutPatch(onlyFiles(patch, new Set(names)), DIFF_BUDGET, riskPaths) };
 }
 
 /** The diff of the new commits, limited to the PR's reviewed files: a merge of the base branch is not new PR code. */
-async function incrementDiff(gh: GitHubClient, from: string, head: string, files: PullFile[]): Promise<PullRequestDiff> {
+async function incrementDiff(gh: GitHubClient, from: string, head: string, files: PullFile[], riskPaths: readonly string[] = []): Promise<PullRequestDiff> {
   const names = new Set(files.map((f) => f.filename));
   const patch = await gh.compareDiff(from, head);
   const touched = patch === null ? [...names] : [...names].filter((n) => patch.includes(` b/${n}\n`));
   const stat = touched.join("\n");
   if (patch === null) return unrendered(stat, touched, from, head);
-  return { stat, files: touched, ...cutPatch(onlyFiles(patch, names), DIFF_BUDGET) };
+  return { stat, files: touched, ...cutPatch(onlyFiles(patch, names), DIFF_BUDGET, riskPaths) };
 }
 
 function unrendered(stat: string, files: string[], base: string, head: string): PullRequestDiff {
@@ -771,30 +837,8 @@ async function teamNotes(ctx: PluginEventContext, repo: string): Promise<string>
   return hits.map((h) => `- ${h.title}: ${h.snippet.replace(/\s+/g, " ").trim()}`).join("\n");
 }
 
-/**
- * Whether `path` matches one of the globs. `**` matches across directories,
- * `*` and `?` stay within one. A pattern without a slash matches at any
- * depth; a trailing slash matches everything under that directory.
- */
-export function excluded(path: string, patterns: readonly string[]): boolean {
-  return patterns.some((raw) => {
-    let p = raw.trim().replace(/^\.?\//, "");
-    if (p.endsWith("/")) p += "**";
-    if (!p.includes("/")) p = `**/${p}`;
-    let re = "";
-    for (let i = 0; i < p.length; i++) {
-      const ch = p[i];
-      if (ch === "*" && p[i + 1] === "*") {
-        const slash = p[i + 2] === "/";
-        re += slash ? "(?:.*/)?" : ".*";
-        i += slash ? 2 : 1;
-      } else if (ch === "*") re += "[^/]*";
-      else if (ch === "?") re += "[^/]";
-      else re += ch.replace(/[.+^${}()|[\]\\]/g, "\\$&");
-    }
-    return new RegExp(`^${re}$`).test(path);
-  });
-}
+/** Whether `path` matches one of the exclude globs (see `matchesGlob`). */
+export const excluded = matchesGlob;
 
 async function forEachLimit<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
   let next = 0;

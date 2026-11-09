@@ -83,6 +83,8 @@ export interface ReviewerSpecOptions {
   incrementFrom?: string;
   /** Findings already posted and still open, so the reviewer does not repeat them. */
   knownFindings?: { path: string; line: number; title: string }[];
+  /** The gather stage's context pack, put in the first prompt. */
+  contextPack?: string;
 }
 
 /** Lines in a file's text; a trailing newline does not start another line. */
@@ -226,6 +228,7 @@ export async function createReviewerSpec(opts: ReviewerSpecOptions): Promise<Rev
       diff,
       ...(opts.incrementFrom !== undefined ? { increment: { from: opts.incrementFrom } } : {}),
       ...(opts.knownFindings !== undefined ? { knownFindings: opts.knownFindings } : {}),
+      ...(opts.contextPack !== undefined ? { contextPack: opts.contextPack } : {}),
     }),
     review: () => submitted,
   };

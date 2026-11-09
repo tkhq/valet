@@ -29,7 +29,7 @@ import {
   resolveModelId,
   type Model,
 } from "@valet/engine";
-import { runReviewPipeline, type AgentRunResult, type AgentRunner } from "@valet/plugin-pr-review";
+import { directoryMemory, runReviewPipeline, type AgentRunResult, type AgentRunner } from "@valet/plugin-pr-review";
 import { LocalSandboxProvider } from "@valet/sandbox-local";
 import { gatewayModelResolver, viaGateway } from "./gateway.js";
 import { pullRequestBody } from "./private-pull-request.js";
@@ -196,6 +196,9 @@ async function reviewInWorkspace(
       ...(opts.verifyModel !== undefined ? { verifyModel: opts.verifyModel } : {}),
       ...(opts.reviewPasses !== undefined ? { passes: opts.reviewPasses } : {}),
       ...(opts.minConfidence !== undefined ? { minConfidence: opts.minConfidence } : {}),
+      ...(opts.contextBudget ? { contextBudget: opts.contextBudget * 4 } : {}),
+      ...(opts.memoryDir !== undefined ? { memory: directoryMemory(opts.memoryDir, "lib") } : {}),
+      ...(githubRepo(spec.remote) ? { repo: githubRepo(spec.remote) } : {}),
     },
     runAgent,
   );
@@ -210,12 +213,19 @@ async function reviewInWorkspace(
       ...(pipeline.review !== undefined ? { review: pipeline.review } : {}),
       ...(pipeline.draft !== undefined ? { draft: pipeline.draft } : {}),
       ...(pipeline.verdicts.length > 0 ? { verdicts: pipeline.verdicts } : {}),
+      ...(pipeline.context !== undefined ? { context: pipeline.context } : {}),
+      ...(pipeline.consolidation !== undefined && pipeline.consolidation.length > 0 ? { consolidation: pipeline.consolidation } : {}),
       ...(reasoning !== undefined ? { reasoning } : {}),
     },
   };
   const outcome: CaseOutcome =
     pipeline.outcome === "timeout" ? "timeout" : pipeline.outcome === "failed" ? "failed" : "completed";
   return { trajectory, outcome, ...(pipeline.error !== undefined ? { error: pipeline.error } : {}) };
+}
+
+/** `owner/name` of a GitHub remote URL, for the context pack's memory queries. */
+function githubRepo(remote: string): string | undefined {
+  return /github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?$/.exec(remote)?.[1];
 }
 
 function reviewPrompt(spec: PullRequestSpec): string {

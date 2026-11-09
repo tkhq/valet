@@ -3376,9 +3376,37 @@ export interface CompactionConfig {
 // ── Child spawning (`task` built-in, Phase 4 decision 10) ──────────
 
 /** Request payload for the `task` built-in tool. `repo` interpretation is host policy. */
+/** One command's result from a child's sandbox (`ChildCommandRunner.run`). */
+export interface ChildCommandResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  /** Output passed `maxOutputBytes`; the middle is missing (head and tail stay). */
+  truncated: boolean;
+  timedOut: boolean;
+}
+
+/**
+ * Runs deterministic commands, with no model, in one child's sandbox before
+ * its first turn. Each command runs in a shell from the child's primary
+ * checkout (the sandbox workspace when the child has no repository). The
+ * host caps each command's time and output and the whole step's time.
+ */
+export interface ChildCommandRunner {
+  run(command: string, opts?: { stdin?: string; timeoutMs?: number; maxOutputBytes?: number }): Promise<ChildCommandResult>;
+}
+
 export interface SpawnChildRequest {
   toolScope?: ToolScope;
   prompt: string;
+  /**
+   * Work to do in the child's sandbox before its first turn, without a
+   * model. The host starts the sandbox (the repository checked out at
+   * `branch`), calls `prepare` with a runner scoped to this child, and sends
+   * the prompt it returns instead of `prompt`. A throw fails the spawn and
+   * removes the child. In-process callers only; the `task` tool never sets it.
+   */
+  prepare?: (runner: ChildCommandRunner, prompt: string) => Promise<string>;
   title?: string;
   repo?: string;
   branch?: string;

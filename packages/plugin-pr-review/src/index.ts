@@ -52,6 +52,15 @@ export {
 } from "./state.js";
 export { commentableLines, mapLine, nearestCommentableLine, mapLineThroughHunks, parseHunks, type LineFate } from "./linemap.js";
 export { cutPatch, diffPullRequest, type PullRequestDiff } from "./git.js";
+export { consolidateFindings, sameCitation, type Consolidation } from "./consolidate.js";
+export { gatherContext, type GatherInput, type PackMemory } from "./context/gather.js";
+export { buildContextPack, definitionBody, definitionScore, type ContextPack, type PackManifest } from "./context/pack.js";
+export { rankPatch, type DroppedFile, type RankedPatch } from "./context/rank.js";
+export { fetchLines, fillContext, scanRepo, type Hit, type LineStore, type ScanResult } from "./context/scan.js";
+export { gitFileAt, localRunner, type RepoRunner } from "./context/repo.js";
+export { diffSymbols, parseDiff, type DiffSymbols } from "./context/symbols.js";
+export { noteMatch, parseNote, type DomainNote } from "./context/notes.js";
+export { directoryMemory } from "./context/memory-dir.js";
 export { REVIEWER_SYSTEM_PROMPT, buildReviewPrompt } from "./prompt.js";
 export * from "./types.js";
 export {

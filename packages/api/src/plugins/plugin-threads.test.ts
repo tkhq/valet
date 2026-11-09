@@ -71,6 +71,13 @@ describe("PluginThreads.spawnChild", () => {
     expect(ctx).toMatchObject({ parentSessionId: "sess-parent", parentThreadId: "thr-parent", owner, unattendedWorkflow: true, reportToParent: false, pluginDeliveryId: "del-1" });
   });
 
+  it("hands the plugin's prepare step to the child spawner", async () => {
+    const { spawner, threads } = await setup();
+    const prepare = async (_runner: unknown, prompt: string): Promise<string> => `${prompt} with context`;
+    await threads.spawnChild(thread, { prompt: "review", repo: "acme/site", ref: "abc123", prepare }, { dispatchId: "review:abc" });
+    expect(spawner.mock.calls[0][0].prepare).toBe(prepare);
+  });
+
   it("returns the existing child on a retry of the same dispatch", async () => {
     const { tdb, spawner, threads } = await setup();
     // The retrying run's delivery is still live.
