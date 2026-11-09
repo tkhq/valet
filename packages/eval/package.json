@@ -16,7 +16,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "start": "tsx src/cli.ts",
-    "import:martian": "tsx src/martian-import.ts"
+    "import:martian": "tsx src/martian-import.ts",
+    "import:trial": "tsx src/trial-import.ts"
   },
   "dependencies": {
     "@valet/api": "workspace:*",
