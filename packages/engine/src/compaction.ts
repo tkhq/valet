@@ -881,6 +881,8 @@ export interface SummarizeResult {
   summary: string;
   inputTokens: number;
   outputTokens: number;
+  /** Input tokens the provider served from the prompt cache. Set by `summarizeOnPrefix`. */
+  cacheReadTokens?: number;
 }
 
 /**
@@ -1070,9 +1072,11 @@ export async function summarizeOnPrefix(opts: PrefixSummarizeOptions): Promise<S
   ].join("\n\n");
   let inputTokens = 0;
   let outputTokens = 0;
+  let cacheReadTokens = 0;
   const complete = async (text: string): Promise<string> => {
     const result = await opts.send([...opts.messages, { role: "user", content: [{ type: "text", text }], timestamp: Date.now() }]);
     inputTokens += result.usage.input + result.usage.cacheRead + result.usage.cacheWrite;
+    cacheReadTokens += result.usage.cacheRead;
     outputTokens += result.usage.output;
     if (result.stopReason !== "stop" || result.content.some((block) => block.type === "toolCall")) {
       throw new Error(result.errorMessage ?? `The cached-prefix summary failed (${result.stopReason}).`);
@@ -1091,7 +1095,7 @@ export async function summarizeOnPrefix(opts: PrefixSummarizeOptions): Promise<S
     summary = await complete(`${prompt}\n\nThe previous response did not match the required summary format. Output every template section exactly once, in order, with content in every leaf section. Use "(none)" or "(unknown)" when appropriate.`);
     validateSummaryStructure(summary);
   }
-  return { summary, inputTokens, outputTokens };
+  return { summary, inputTokens, outputTokens, cacheReadTokens };
 }
 
 /**

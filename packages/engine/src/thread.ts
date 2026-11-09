@@ -6310,7 +6310,14 @@ export class Thread {
           });
           headForSummary = [...pendingHead];
           tailEvidence = [];
-          span?.setAttribute("valet.compaction.summary_source", "cached_prefix");
+          span?.setAttributes({
+            "valet.compaction.summary_source": "cached_prefix",
+            "valet.compaction.summary_input_tokens": summaryResult.inputTokens,
+            "valet.compaction.summary_cache_read_tokens": summaryResult.cacheReadTokens ?? 0,
+          });
+          // Compaction calls reach no usage ledger, so this line is the
+          // evidence that the prompt cache served the summary.
+          console.info(`[engine] cached-prefix summary session=${session.id} thread=${this.id} input_tokens=${summaryResult.inputTokens} cache_read_tokens=${summaryResult.cacheReadTokens ?? 0} output_tokens=${summaryResult.outputTokens}`);
         } catch (err) {
           if (opts.signal?.aborted) throw err;
           span?.setAttribute("valet.compaction.summary_source", "prefix_failed");
