@@ -63,13 +63,17 @@ const MAX_MEMORY_READS = 12;
 export async function gatherContext(input: GatherInput): Promise<ContextPack> {
   const sourcePatch = parseDiff(input.patch).length > 0 ? onlySource(input.patch) : input.patch;
   const symbols = diffSymbols(sourcePatch);
-  const changedPaths = symbols.paths;
+  // Source files at HEAD: the code scans read only these.
+  const changedPaths = symbols.headPaths;
+  // Every path the diff touches: added, changed, deleted, and both sides of a rename.
+  // Rules and memory follow all of them, so a deletion or a move out of a directory keeps that directory's rules.
+  const touched = diffPaths(input.patch);
+  const touchedSource = touched.filter((p) => noiseKind(p) === undefined);
   const words = [...new Set([...symbols.changed.map((s) => s.name), ...symbols.used])].slice(0, MAX_WORDS);
   // Instruction files this PR adds, edits or deletes: reviewed as part of the diff, never followed.
-  const changedConventions = diffPaths(input.patch).filter(instructionPath);
-  // A changed instruction file's own directory counts as changed: a PR that only deletes src/AGENTS.md still gets that file's merge-base rule.
+  const changedConventions = touched.filter(instructionPath);
   const ancestors = new Set([""]);
-  for (const p of [...changedPaths, ...changedConventions]) {
+  for (const p of touched) {
     const parts = p.split("/");
     for (let i = 1; i < parts.length; i++) ancestors.add(parts.slice(0, i).join("/"));
   }
@@ -80,7 +84,7 @@ export async function gatherContext(input: GatherInput): Promise<ContextPack> {
   };
 
   // The head scan finds code facts (data): the file list, the symbol hits, then the lines the pack can quote.
-  const changed = new Set(changedPaths);
+  const changed = new Set(symbols.paths);
   const scan = await scanRepo(input.runner, { words, keepPath: (p) => isConvention(p) || isTestPath(p) });
   const ranges: LineRange[] = changedPaths.filter((p) => langOf(p) !== "other").slice(0, MAX_IMPORT_FILES).map((path) => ({ path, from: 1, to: IMPORT_LINES }));
   const taken = new Map<string, number>();
@@ -113,7 +117,7 @@ export async function gatherContext(input: GatherInput): Promise<ContextPack> {
     const dir = path.includes("/") && !ROOT_CONVENTIONS.has(path) ? path.slice(0, path.lastIndexOf("/")) : "";
     conventions.push({ path, text, why: dir ? `applies to ${dir}/` : "repo root" });
   }
-  const changeTokens = tokens([...changedPaths, input.title].join(" "));
+  const changeTokens = tokens([...touchedSource, input.title].join(" "));
   const playbookDirs = new Map<string, { score: number; files: string[]; hits: string[] }>();
   for (const path of candidates.filter((p) => PLAYBOOK.test(p))) {
     const rel = path.slice(path.search(/playbooks\//i) + "playbooks/".length);
@@ -139,7 +143,7 @@ export async function gatherContext(input: GatherInput): Promise<ContextPack> {
 
   // Domain notes come from team memory only: the plugin ships no organization's rules.
   const addedText = parseDiff(sourcePatch).flatMap((f) => f.added).join("\n");
-  const change = { paths: changedPaths, addedText, title: input.title };
+  const change = { paths: touchedSource, addedText, title: input.title };
   const notes: { note: DomainNote; why: string }[] = [];
   const memory: MemoryItem[] = [];
 
@@ -163,8 +167,8 @@ export async function gatherContext(input: GatherInput): Promise<ContextPack> {
     const queries = [...new Set([
       input.repo ?? "",
       input.repo?.split("/")[1] ?? "",
-      ...topDirs(changedPaths),
-      ...pathWords(changedPaths),
+      ...topDirs(touchedSource),
+      ...pathWords(touchedSource),
       ...symbols.changed.slice(0, 3).map((s) => s.name),
       ...distinctiveTerms(addedText),
       ...input.title.split(/[^A-Za-z0-9]+/).filter((w) => w.length >= 5),

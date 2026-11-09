@@ -132,6 +132,9 @@ describe("rankPatch", () => {
     const patch = [chunk("deploy/rollouts/gate.yaml", 10), chunk("src/ui/button.ts", 60)].join("");
     expect(rankPatch(patch, 800).patch).not.toContain("b/deploy/rollouts/gate.yaml");
     expect(rankPatch(patch, 800, ["deploy/**"]).patch).toContain("b/deploy/rollouts/gate.yaml");
+    // A file moved out of a risky path is still risky.
+    const moved = chunk("misc/gate.yaml", 10).replace("diff --git a/misc/gate.yaml", "diff --git a/deploy/rollouts/gate.yaml");
+    expect(rankPatch(moved + chunk("src/ui/button.ts", 60), 800, ["deploy/**"]).patch).toContain("b/misc/gate.yaml");
   });
 
   it("drops noise first, keeps risky paths, then larger changes, and names every file left out", () => {
@@ -337,6 +340,36 @@ describe("the pack's trust boundary", () => {
     });
     expect(pack.text).toContain("#### src/AGENTS.md (applies to src/)\n# Source rules\nNever log raw amounts.");
     expect(pack.text).toContain("- src/AGENTS.md");
+  });
+
+  describe("a PR that deletes or moves files keeps their directories' rules", () => {
+    const RULE = "# Source rules\nNever log raw amounts.\n";
+    const gather = (r: ReturnType<typeof repo>, memory?: PackMemory) =>
+      gatherContext({ runner: localRunner(r.dir), readTrusted: (p) => gitFileAt(r.dir, r.base, p), patch: r.patch, diffDropped: [], title: "Tidy", memory, budgetChars: 20_000 });
+
+    it("deleting a source file under a nested AGENTS.md keeps the rule, and the deleted code's callers", async () => {
+      const r = repo({ ...BASE_FILES, "src/AGENTS.md": RULE }, { "src/money.ts": null });
+      const pack = await gather(r);
+      expect(pack.text).toContain("#### src/AGENTS.md (applies to src/)\n# Source rules\nNever log raw amounts.");
+      expect(pack.text).toContain("#### `parseAmount` (removed in src/money.ts)");
+    });
+
+    it("renaming a file out of a governed directory keeps the old directory's rule", async () => {
+      const r = repo({ ...BASE_FILES, "src/AGENTS.md": RULE }, { "src/checkout.ts": null, "app/checkout.ts": BASE_FILES["src/checkout.ts"] });
+      expect(r.patch).toContain("rename from src/checkout.ts");
+      const pack = await gather(r);
+      expect(pack.text).toContain("#### src/AGENTS.md (applies to src/)\n# Source rules\nNever log raw amounts.");
+    });
+
+    it("matches a domain note's paths against a deleted file", async () => {
+      const note = '---\ntitle: "Money module"\npaths: "[\\"src/money.ts\\"]"\n---\n\nKeep parseAmount.';
+      const memory: PackMemory = {
+        search: async (q) => ("lib/code-review/notes/money.md".includes(q) ? [{ path: "lib/code-review/notes/money.md", title: "Money module", description: "", snippet: "" }] : []),
+        read: async (path) => (path === "lib/code-review/notes/money.md" ? { path, content: note } : null),
+      };
+      const pack = await gather(repo(BASE_FILES, { "src/money.ts": null }), memory);
+      expect(pack.text).toContain("#### Money module (team memory lib/code-review/notes/money.md; matched: path src/money.ts)");
+    });
   });
 
   it("uses the base version of a playbook the PR edits, and keeps the edit in the diff budget", async () => {

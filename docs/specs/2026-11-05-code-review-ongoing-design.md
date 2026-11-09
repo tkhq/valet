@@ -47,6 +47,9 @@ the plugin keeps them apart.
 - **Instructions come from trusted sources only.** Repository convention files
   (`AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md` and similar) and `playbooks/`
   files are read at the merge base, which is the target branch's state.
+  A nested convention file applies when the PR touches any path under its
+  directory: an added, changed or deleted file, or either side of a rename.
+  Domain note paths match the same set of paths.
   Domain notes become rules only from read-only synced memory under
   `lib/code-review/notes/` (a source repo's `.valet/memory/code-review/notes/`),
   which agents cannot write. The pack presents these as rules the team

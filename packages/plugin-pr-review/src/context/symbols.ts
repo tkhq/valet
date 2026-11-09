@@ -17,8 +17,10 @@ export interface DiffSymbols {
   changed: ChangedSymbol[];
   /** Identifiers that added lines call or name, defined outside the diff, most used first. */
   used: string[];
-  /** Paths the diff adds or changes at HEAD. */
+  /** Paths of the files the diff adds, changes or deletes (a renamed file by its new path). */
   paths: string[];
+  /** The subset of `paths` that exists at HEAD: not deleted. */
+  headPaths: string[];
 }
 
 type Lang = "ts" | "py" | "go" | "java" | "rb" | "rs" | "other";
@@ -102,7 +104,11 @@ function lookupWorthy(name: string): boolean {
 }
 
 interface FileDiff {
+  /** The new path, or the old path of a deleted file. */
   path: string;
+  /** The base-side path: differs from `path` for a rename, empty for an added file. */
+  oldPath: string;
+  deleted: boolean;
   added: string[];
   removed: string[];
   /** Enclosing function names from hunk headers (`@@ ... @@ func Foo(`). */
@@ -115,14 +121,16 @@ export function parseDiff(patch: string): FileDiff[] {
   let cur: FileDiff | undefined;
   for (const line of patch.split("\n")) {
     if (line.startsWith("diff --git ")) {
-      const m = /^diff --git a\/.* b\/(.*)$/.exec(line);
-      cur = { path: m ? m[1] : "", added: [], removed: [], contexts: [] };
+      const m = /^diff --git a\/(.*) b\/(.*)$/.exec(line);
+      cur = { path: m ? m[2] : "", oldPath: m ? m[1] : "", deleted: false, added: [], removed: [], contexts: [] };
       files.push(cur);
       continue;
     }
     if (!cur) continue;
     if (line.startsWith("+++ ") || line.startsWith("--- ")) {
-      if (line === "+++ /dev/null") cur.path = "";
+      // A deleted file keeps its old path: its removed definitions still have callers.
+      if (line === "+++ /dev/null") cur.deleted = true;
+      if (line === "--- /dev/null") cur.oldPath = "";
       continue;
     }
     if (line.startsWith("@@")) {
@@ -171,5 +179,5 @@ export function diffSymbols(patch: string, opts: { maxUsed?: number } = {}): Dif
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .slice(0, opts.maxUsed ?? 40)
     .map(([name]) => name);
-  return { changed: [...changed.values()], used, paths: files.map((f) => f.path) };
+  return { changed: [...changed.values()], used, paths: files.map((f) => f.path), headPaths: files.filter((f) => !f.deleted).map((f) => f.path) };
 }

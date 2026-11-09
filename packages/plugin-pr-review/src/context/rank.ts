@@ -38,7 +38,9 @@ export function rankPatch(full: string, budgetChars: number, riskPaths: readonly
     .split(/^(?=diff --git )/m)
     .filter((t) => t.length > 0)
     .map((text, index) => {
-      const path = /^diff --git a\/.* b\/(.*)$/m.exec(text)?.[1] ?? "";
+      const header = /^diff --git a\/(.*) b\/(.*)$/m.exec(text);
+      const path = header?.[2] ?? "";
+      const oldPath = header?.[1] ?? path;
       let added = 0;
       let removed = 0;
       const addedText: string[] = [];
@@ -49,7 +51,7 @@ export function rankPatch(full: string, budgetChars: number, riskPaths: readonly
         } else if (line.startsWith("-") && !line.startsWith("---")) removed++;
       }
       const noise = noiseKind(path) ?? (looksGenerated(addedText.join("\n")) ? "generated" : undefined);
-      return { index, path, text, added, removed, ...(noise ? { noise } : {}), risky: riskyPath(path, riskPaths) };
+      return { index, path, text, added, removed, ...(noise ? { noise } : {}), risky: riskyPath(path, riskPaths) || riskyPath(oldPath, riskPaths) };
     });
   // A diff header before the first file (rare) is kept as is.
   const preamble = chunks.length > 0 && !chunks[0].text.startsWith("diff --git ") ? chunks.shift() : undefined;
