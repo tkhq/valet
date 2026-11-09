@@ -16,6 +16,7 @@ import { terminalOutcome } from "./terminal-outcome.js";
 import { defineTool } from "./define.js";
 export { defineTool } from "./define.js";
 import { updatePlanTool } from "./update-plan.js";
+import { fileSource, readFileOrigin } from "./file-source.js";
 export { updatePlanTool } from "./update-plan.js";
 import {
   watchTool,
@@ -268,9 +269,11 @@ export const readTool = defineTool({
   parameters: Type.Object({ path: Type.String() }),
   concurrencySafe: true,
   execute: async (args, ctx) => {
-    const text = await ctx.sandbox.readFile(args.path);
-    ctx.fileReads?.record(normalizeGatePath(args.path, ctx.cwd), hashFileContent(text));
-    return { text };
+    const path = normalizeGatePath(args.path, ctx.cwd);
+    // The git lookup runs beside the read, so it adds no wait to a fast read.
+    const [text, origin] = await Promise.all([ctx.sandbox.readFile(args.path), readFileOrigin(ctx.sandbox, path, ctx.signal)]);
+    ctx.fileReads?.record(path, hashFileContent(text));
+    return { text, sources: [fileSource(path, text, origin, 1)] };
   },
 });
 

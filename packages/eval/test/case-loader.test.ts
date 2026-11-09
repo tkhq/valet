@@ -54,6 +54,7 @@ describe("citation cases", () => {
       "gmail-source-citations",
       "memory-source-citations",
       "multi-source-attribution",
+      "sandbox-file-source-citations",
       "slack-source-citations",
     ]);
     for (const c of cases) expect(c.checks).toContainEqual({ type: "citation_validity" });

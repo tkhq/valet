@@ -1,0 +1,18 @@
+id: sandbox-file-source-citations
+description: Cite the sandbox file read that states a config value.
+turns:
+  - role: user
+    content: >-
+      Write config/retry.yaml with the line "max_attempts: 7". Read the file back with the read tool.
+      Then tell me the configured maximum number of attempts.
+      Cite the returned source id after the fact.
+timeout_ms: 120000
+checks:
+  - type: tool_called
+    tool: read
+  - type: citation_validity
+  - type: judge_output
+    rubric: >-
+      The reply says the maximum is 7 attempts and cites the source from the file read.
+      Score 5 only if the fact has a citation. Uncited facts score at most 2.
+  - type: no_errors
