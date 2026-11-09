@@ -288,34 +288,20 @@ describe("SessionHeader — phone thread menu", () => {
 describe("SessionHeader: run without asking", () => {
   afterEach(() => { headerThreads = []; meData = undefined; setBypassMutate.mockReset(); });
 
-  it("lets the owner turn it on after a confirm", async () => {
+  it("no longer offers it in the thread menu", async () => {
     meData = { id: "u1" };
-    headerThreads = [{ id: "t1", sessionId: "sess-1", createdAt: 1 }];
-    renderHeader(undefined, "t1");
-    expect(screen.queryByTestId("thread-runs-without-asking")).toBeNull();
-    await userEvent.click(screen.getByRole("button", { name: "Thread menu" }));
-    await userEvent.click(await screen.findByRole("menuitemcheckbox", { name: "Run without asking" }));
-    expect(setBypassMutate).not.toHaveBeenCalled();
-    await userEvent.click(await screen.findByRole("button", { name: "Run without asking" }));
-    expect(setBypassMutate).toHaveBeenCalledWith({ threadId: "t1", on: true }, expect.anything());
-  });
-
-  it("shows the badge while it is on, and turns it off without a confirm", async () => {
-    headerThreads = [{ id: "t1", sessionId: "sess-1", createdAt: 1, approvalBypass: true }];
-    renderHeader(undefined, "t1");
-    expect(screen.getByTestId("thread-runs-without-asking").textContent).toBe("Runs without asking");
-    await userEvent.click(screen.getByRole("button", { name: "Thread menu" }));
-    await userEvent.click(await screen.findByRole("menuitemcheckbox", { name: "Run without asking" }));
-    expect(setBypassMutate).toHaveBeenCalledWith({ threadId: "t1", on: false }, expect.anything());
-  });
-
-  it("does not offer it to a viewer who cannot turn it on", async () => {
-    meData = { id: "someone-else" };
     headerThreads = [{ id: "t1", sessionId: "sess-1", createdAt: 1 }];
     renderHeader(undefined, "t1");
     await userEvent.click(screen.getByRole("button", { name: "Thread menu" }));
     await screen.findByRole("menuitem", { name: /copy transcript/i });
     expect(screen.queryByRole("menuitemcheckbox", { name: "Run without asking" })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: "Run without asking" })).toBeNull();
+  });
+
+  it("still shows the badge while it is on", () => {
+    headerThreads = [{ id: "t1", sessionId: "sess-1", createdAt: 1, approvalBypass: true }];
+    renderHeader(undefined, "t1");
+    expect(screen.getByTestId("thread-runs-without-asking").textContent).toBe("Runs without asking");
   });
 });
 

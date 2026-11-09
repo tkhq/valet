@@ -17,7 +17,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { useRef, useState, type ReactNode } from "react";
-import { ApiError } from "~/api/client";
+import { extractActionError } from "~/lib/extract-action-error";
 import { useWorkspaceChannels } from "~/api/channels";
 import { placeOfSubject } from "~/api/presence";
 import {
@@ -30,7 +30,6 @@ import {
   useSetSessionProfile,
   useSetSessionReasoning,
   useSetThreadModel,
-  useSetThreadApprovalBypass,
   useSetThreadReasoning,
   useThreads,
 } from "~/api/queries";
@@ -43,7 +42,6 @@ import {
   Dialog,
   DialogContent,
   DropdownMenu,
-  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
@@ -153,14 +151,6 @@ const STOP_AND_RESTART: GuardedAction = {
   title: "Stop background work and restart the sandbox?",
   confirmLabel: "Stop background work and restart",
 };
-
-function extractActionError(err: unknown, fallback: string): string {
-  if (err instanceof ApiError && err.payload && typeof err.payload === "object") {
-    const message = (err.payload as Record<string, unknown>).error;
-    if (typeof message === "string" && message) return message;
-  }
-  return err instanceof Error ? err.message : fallback;
-}
 
 export function SessionHeader({
   session,
@@ -281,9 +271,7 @@ export function SessionHeader({
   const [titleDraft, setTitleDraft] = useState("");
   const [moving, setMoving] = useState(false);
   const [sharing, setSharing] = useState(false);
-  const [confirmBypass, setConfirmBypass] = useState(false);
   const [confirmTeamDefault, setConfirmTeamDefault] = useState(false);
-  const bypass = useSetThreadApprovalBypass(session.id);
   // Enter and blur both reach `commitRename`, and Enter unmounts the input,
   // which fires blur straight after. The ref makes the commit idempotent so
   // one edit sends one PATCH.
@@ -450,9 +438,6 @@ export function SessionHeader({
   // Only the owner shares a personal thread. A team thread is already open
   // to its team.
   const canShare = activeThread !== undefined && owner.type === "user" && owner.id === me.data?.id;
-  // The server's rule: the owner of a personal thread, or a team admin.
-  // Anyone who sees it on may turn it off.
-  const canEnableBypass = activeThread !== undefined && (owner.type === "user" ? owner.id === me.data?.id : owner.type === "team" && canAdminister);
   const bypassOn = activeThread?.approvalBypass === true;
   // The server's rule: the thread owner or a team member. A copy stays in
   // this workspace, so the reader opens it here.
@@ -467,14 +452,6 @@ export function SessionHeader({
       onError: (err) => setActionError(extractActionError(err, "Could not duplicate the thread. Try again.")),
     });
   }
-  function setBypass(on: boolean) {
-    if (!activeThread) return;
-    setActionError(null);
-    bypass.mutate({ threadId: activeThread.id, on }, {
-      onError: (err) => setActionError(extractActionError(err, on ? "Could not turn on Run without asking. Try again." : "Could not turn off Run without asking. Try again.")),
-    });
-  }
-
   // A subject thread names its place (spec Part G): the channel, repository,
   // or Linear issue it was opened for. The Slack case resolves the raw
   // channel id to a readable name from the same channel list ThreadChannelChip
@@ -702,18 +679,9 @@ export function SessionHeader({
                 <Copy className="h-4 w-4" aria-hidden />{duplicate.isPending ? "Duplicating…" : "Duplicate thread"}
               </DropdownMenuItem>
             )}
-            {(bypassOn || canEnableBypass || canAdminister) && <DropdownMenuSeparator />}
-            {(bypassOn || canEnableBypass) && (
-              <>
-                <DropdownMenuCheckboxItem checked={bypassOn} disabled={bypass.isPending}
-                  onCheckedChange={(checked) => { if (checked) setConfirmBypass(true); else setBypass(false); }}>
-                  Run without asking
-                </DropdownMenuCheckboxItem>
-                <DropdownMenuSeparator />
-              </>
-            )}
             {canAdminister && (
               <>
+                <DropdownMenuSeparator />
                 {!mobile && <>
                 {/* Sleeps the sandbox until the next message. A menu item with a
                     label, not a header icon nobody could read. */}
@@ -781,17 +749,6 @@ export function SessionHeader({
         {modelPicker(mobile ? "trigger" : "menu")}
         {modelSaving && <span role="status" className="sr-only">Saving model…</span>}
       </>, modelControlTarget)}
-      <ConfirmDialog
-        open={confirmBypass}
-        onOpenChange={setConfirmBypass}
-        title="Run without asking?"
-        description="Valet stops asking for approval in this thread and the agents it starts, for the actions you could always allow yourself."
-        confirmLabel="Run without asking"
-        confirmVariant="primary"
-        onConfirm={() => { setConfirmBypass(false); setBypass(true); }}
-      >
-        <p className="text-sm text-muted">Valet still asks for critical actions, actions an admin rule names, and a teammate's shared account. Turn it off from this menu at any time.</p>
-      </ConfirmDialog>
       {owner.type === "team" && (
         <ConfirmDialog
           open={confirmTeamDefault}

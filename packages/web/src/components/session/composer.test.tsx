@@ -6,7 +6,7 @@
  * leave the store empty afterward, so it doesn't leak into a later
  * mount/remount.
  */
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { EditPreviewResponse, WireQueueState } from "@valet/api/wire";
@@ -16,6 +16,7 @@ import { ApiError } from "~/api/client";
 import { AppPageHintContext } from "~/lib/app-page-hint";
 import { qkThreadContext } from "~/api/thread-context";
 import { draftKey, useComposerDraftStore } from "~/stores/composer-drafts";
+import { stubCoarsePointer } from "~/test/media-query";
 
 const navigate = vi.fn().mockResolvedValue(undefined);
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
@@ -321,62 +322,7 @@ describe("Composer queued-message stack", () => {
   });
 });
 
-describe("Composer — compact layout", () => {
-  it("expands on input focus and collapses when the empty composer loses focus", () => {
-    renderComposer();
-    const input = screen.getByRole("textbox", { name: "Message" });
-    const form = input.closest("form");
-    expect(form?.dataset.expanded).toBe("false");
-    act(() => input.focus());
-    expect(form?.dataset.expanded).toBe("true");
-    act(() => input.blur());
-    expect(form?.dataset.expanded).toBe("false");
-  });
-
-  it("keeps its layout when focus moves from the input to an action", () => {
-    queueStateRef.current = queueState("followup");
-    renderComposer("streaming");
-    const input = screen.getByRole("textbox", { name: "Message" });
-    const stop = screen.getByRole("button", { name: "Stop" });
-    act(() => stop.focus());
-    expect(input.closest("form")?.dataset.expanded).toBe("false");
-    act(() => input.focus());
-    act(() => stop.focus());
-    expect(input.closest("form")?.dataset.expanded).toBe("true");
-    act(() => stop.blur());
-    expect(input.closest("form")?.dataset.expanded).toBe("false");
-  });
-
-  it("focuses pointer-activated actions before the textarea can blur", () => {
-    queueStateRef.current = queueState("followup");
-    renderComposer("streaming");
-    const input = screen.getByRole("textbox", { name: "Message" });
-    const stop = screen.getByRole("button", { name: "Stop" });
-    act(() => input.focus());
-    expect(fireEvent.mouseDown(stop, { button: 0 })).toBe(false);
-    expect(document.activeElement).toBe(stop);
-    expect(input.closest("form")?.dataset.expanded).toBe("true");
-    act(() => stop.blur());
-    expect(input.closest("form")?.dataset.expanded).toBe("false");
-  });
-
-  // A press on a card above the composer blurs it on pointerdown. Collapsing
-  // then moved the card, so the release missed the button and the first
-  // click on "Approve step" did nothing.
-  it("stays expanded through a press outside, then collapses after its click", async () => {
-    renderComposer();
-    const input = screen.getByRole("textbox", { name: "Message" });
-    const outside = document.createElement("button");
-    document.body.appendChild(outside);
-    act(() => input.focus());
-    fireEvent.pointerDown(outside);
-    act(() => input.blur());
-    expect(input.closest("form")?.dataset.expanded).toBe("true");
-    fireEvent.pointerUp(outside);
-    await waitFor(() => expect(input.closest("form")?.dataset.expanded).toBe("false"));
-    outside.remove();
-  });
-
+describe("Composer — pointer focus", () => {
   // A press on the hint text under the field moved focus to the page, so
   // the next keystrokes went nowhere.
   it("keeps focus in the message field when the box's hint text is pressed", () => {
@@ -386,58 +332,6 @@ describe("Composer — compact layout", () => {
     const hint = screen.getByText(/Shift\+Enter for a new line/);
     expect(fireEvent.mouseDown(hint, { button: 0 })).toBe(false);
     expect(document.activeElement).toBe(input);
-    expect(input.closest("form")?.dataset.expanded).toBe("true");
-  });
-
-  it("keeps a draft expanded after blur, then collapses when the draft is cleared", () => {
-    renderComposer();
-    const input = screen.getByRole("textbox", { name: "Message" });
-    act(() => input.focus());
-    fireEvent.change(input, { target: { value: "A draft" } });
-    act(() => input.blur());
-    expect(input.closest("form")?.dataset.expanded).toBe("true");
-    act(() => useComposerDraftStore.getState().setText(draftKey("orchestrator:user-1", "thread-1"), ""));
-    expect(input.closest("form")?.dataset.expanded).toBe("false");
-  });
-
-  it("collapses when a focused action disappears after the agent stops", async () => {
-    queueStateRef.current = queueState("followup");
-    const view = renderComposer("streaming");
-    const input = screen.getByRole("textbox", { name: "Message" });
-    act(() => input.focus());
-    act(() => screen.getByRole("button", { name: "Stop" }).focus());
-    queueStateRef.current = undefined;
-    view.rerenderComposer("idle");
-    await waitFor(() => expect(input.closest("form")?.dataset.expanded).toBe("false"));
-  });
-
-  it("stays expanded while sending and restores input focus after the draft clears", () => {
-    const view = renderComposer();
-    const input = screen.getByRole("textbox", { name: "Message" });
-    act(() => input.focus());
-    fireEvent.change(input, { target: { value: "Send this draft" } });
-    sendState.pending = true;
-    view.rerenderComposer();
-    fireEvent.blur(input);
-    act(() => useComposerDraftStore.getState().clear(draftKey("orchestrator:user-1", "thread-1")));
-    expect(input.closest("form")?.dataset.expanded).toBe("true");
-    sendState.pending = false;
-    view.rerenderComposer();
-    expect(document.activeElement).toBe(input);
-    expect(input.closest("form")?.dataset.expanded).toBe("true");
-    act(() => input.blur());
-    expect(input.closest("form")?.dataset.expanded).toBe("false");
-  });
-
-  it("expands for intake errors and collapses when they are dismissed", () => {
-    renderComposer();
-    const input = screen.getByRole("textbox", { name: "Message" });
-    const key = draftKey("orchestrator:user-1", "thread-1");
-    act(() => useComposerDraftStore.getState().setFileErrors(key, ["Choose a smaller file."]));
-    expect(input.closest("form")?.dataset.expanded).toBe("true");
-    expect(screen.getByText("Choose a smaller file.")).toBeDefined();
-    act(() => useComposerDraftStore.getState().setFileErrors(key, []));
-    expect(input.closest("form")?.dataset.expanded).toBe("false");
   });
 });
 
@@ -1592,4 +1486,121 @@ it("keeps the source open when a fork command returns no destination", async () 
   fireEvent.keyDown(input, { key: "Enter", code: "Enter" });
   await waitFor(() => expect(sendMutateAsync).toHaveBeenCalled());
   expect(navigate).not.toHaveBeenCalled();
+});
+
+describe("Composer: Enter key by input device", () => {
+  /** Make `(pointer: coarse)` match, as on a phone. */
+  function useTouchScreen() {
+    stubCoarsePointer(true);
+  }
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  function typeMessage(value = "Hello") {
+    const box = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.change(box, { target: { value } });
+    return box;
+  }
+
+  it("sends on Enter on a desktop", async () => {
+    renderComposer();
+    // keyDown returns false when the handler called preventDefault.
+    expect(fireEvent.keyDown(typeMessage(), { key: "Enter" })).toBe(false);
+    await waitFor(() => expect(sendMutateAsync).toHaveBeenCalledWith(expect.objectContaining({ text: "Hello" })));
+  });
+
+  it("keeps Shift+Enter as a newline on a desktop", () => {
+    renderComposer();
+    expect(fireEvent.keyDown(typeMessage(), { key: "Enter", shiftKey: true })).toBe(true);
+    expect(sendMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("does not send on Enter while an IME composition is active", () => {
+    renderComposer();
+    fireEvent.keyDown(typeMessage(), { key: "Enter", isComposing: true });
+    expect(sendMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("leaves Return as a newline on a touch screen, and Send still sends", async () => {
+    useTouchScreen();
+    renderComposer();
+    const box = typeMessage();
+    expect(fireEvent.keyDown(box, { key: "Enter" })).toBe(true);
+    expect(sendMutateAsync).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(sendMutateAsync).toHaveBeenCalledWith(expect.objectContaining({ text: "Hello" })));
+  });
+
+  it("sends on Cmd+Enter and Ctrl+Enter on a touch screen, for a hardware keyboard", async () => {
+    useTouchScreen();
+    renderComposer();
+    expect(fireEvent.keyDown(typeMessage(), { key: "Enter", metaKey: true })).toBe(false);
+    await waitFor(() => expect(sendMutateAsync).toHaveBeenCalledTimes(1));
+    expect(sendMutateAsync).toHaveBeenCalledWith(expect.objectContaining({ text: "Hello" }));
+  });
+
+  it("sends on Ctrl+Enter on a touch screen", async () => {
+    useTouchScreen();
+    renderComposer();
+    expect(fireEvent.keyDown(typeMessage(), { key: "Enter", ctrlKey: true })).toBe(false);
+    await waitFor(() => expect(sendMutateAsync).toHaveBeenCalledWith(expect.objectContaining({ text: "Hello" })));
+  });
+
+  it("shows the Enter hint on a desktop only", () => {
+    const desktop = renderComposer();
+    expect(screen.getByText(/Shift\+Enter for a new line/)).toBeTruthy();
+    desktop.unmount();
+    useTouchScreen();
+    renderComposer();
+    expect(screen.queryByText(/Shift\+Enter for a new line/)).toBeNull();
+  });
+});
+
+describe("Composer: layout does not change on focus", () => {
+  // The toolbar sits under the textarea in one column. A layout that moved it
+  // beside the textarea at rest (the dev-v2 compact row) fails here.
+  function layout() {
+    const box = screen.getByRole("textbox", { name: "Message" });
+    const column = box.parentElement;
+    const toolbar = screen.getByRole("button", { name: "Send" }).parentElement;
+    const frame = column?.parentElement;
+    if (!column || !toolbar || !frame) throw new Error("composer layout not found");
+    return {
+      column,
+      toolbar,
+      columnClass: column.className,
+      frameClass: frame.className,
+      toolbarClass: toolbar.className,
+      toolbarFollowsTextarea: box.nextElementSibling === toolbar,
+      boxClass: box.className,
+    };
+  }
+
+  it("stacks the toolbar under the textarea at rest and on focus, with unchanged classes", () => {
+    renderComposer();
+    const box = screen.getByRole("textbox", { name: "Message" });
+    const rest = layout();
+    expect(rest.column.className).toContain("flex-col");
+    expect(rest.column.className).not.toContain("items-end");
+    expect(rest.column).toBe(rest.toolbar.parentElement);
+    expect(rest.toolbarFollowsTextarea).toBe(true);
+    expect(rest.boxClass).not.toContain("max-h-11");
+    act(() => box.focus());
+    const focused = layout();
+    expect(focused.column).toBe(rest.column);
+    expect(focused.toolbarFollowsTextarea).toBe(true);
+    expect(focused.columnClass).toBe(rest.columnClass);
+    expect(focused.frameClass).toBe(rest.frameClass);
+    expect(focused.toolbarClass).toBe(rest.toolbarClass);
+    expect(focused.boxClass).toBe(rest.boxClass);
+  });
+
+  it("shows the footer controls before and after focus", () => {
+    renderComposer();
+    const box = screen.getByRole("textbox", { name: "Message" });
+    const controls = () => ["Attach files", "Send"].map((name) => !!screen.queryByRole("button", { name }));
+    const before = controls();
+    expect(before).toEqual([true, true]);
+    fireEvent.focus(box);
+    expect(controls()).toEqual(before);
+  });
 });

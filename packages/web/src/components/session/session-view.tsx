@@ -52,6 +52,7 @@ import { BackgroundWorkStatusLine } from "~/components/session/background-work";
 import { useCanAdministerSession } from "~/components/session/use-can-administer-session";
 import { draftKey, useComposerDraftStore } from "~/stores/composer-drafts";
 import { SessionHeader } from "~/components/session/session-header";
+import { RunWithoutAskingToggle } from "~/components/session/run-without-asking-toggle";
 import { useMe } from "~/api/settings";
 import { useInvalidateSessionOnModelSwitch } from "~/hooks/use-invalidate-session-on-model-switch";
 import { useInvalidateMessagesOnCompaction } from "~/hooks/use-invalidate-messages-on-compaction";
@@ -178,6 +179,8 @@ export function SessionView({
   const mobile = useMobileLayout();
   const mobileNavigation = mobile && !panel;
   const mobileConversation = mobile && (!panel || sharedConversationChrome);
+  // The switch lives where the thread menu did: not in the Ask Valet dock.
+  const showRunWithoutAsking = !panel || mobileConversation;
   const [mobileView, setMobileView] = useState<MobileConversationView>("chat");
   useEffect(() => setMobileView("chat"), [sessionId, activeThreadId, mobileNavigation]);
   const chatActive = active && (!mobileNavigation || mobileView === "chat");
@@ -566,7 +569,12 @@ export function SessionView({
               a thread switch swaps the draft without a remount (a remount
               would orphan in-flight uploads). */}
           <div className={responseFormActive ? "hidden" : "contents"} aria-hidden={responseFormActive || undefined}>
-          {session.data?.readOnlyReason ? <p className="border-t border-border px-4 py-3 text-sm text-muted" role="status">{session.data.readOnlyReason}</p> : <Composer
+          {session.data?.readOnlyReason ? <div className="border-t border-border px-4 py-3">
+            <p className="text-sm text-muted" role="status">{session.data.readOnlyReason}</p>
+            {showRunWithoutAsking && (
+              <RunWithoutAskingToggle sessionId={sessionId} threadId={effectiveThreadId} owner={session.data.owner} className="mt-1.5" onlyWhenOn />
+            )}
+          </div> : <Composer
             modelControlRef={(mobileConversation || !panel) && canCancelWork ? setComposerModelTarget : undefined}
             active={chatActive && !responseFormActive}
             sessionId={sessionId}
@@ -577,14 +585,22 @@ export function SessionView({
             replyTarget={replyTarget}
             onCancelReply={() => setReplyTarget(undefined)}
             {...edit.composer}
-            statusLine={
+            statusLine={<>
+              {showRunWithoutAsking && (
+                <RunWithoutAskingToggle
+                  sessionId={sessionId}
+                  threadId={effectiveThreadId}
+                  owner={session.data?.owner}
+                  className="mt-1.5"
+                />
+              )}
               <BackgroundWorkStatusLine
                 sessionId={sessionId}
                 threadId={effectiveThreadId}
                 canCancel={canCancelWork}
                 className="mt-1.5 self-start"
               />
-            }
+            </>}
           />}
           </div>
         </PageDropTarget>
