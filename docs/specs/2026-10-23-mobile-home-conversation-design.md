@@ -111,7 +111,7 @@ Home. Each run sent the whole Home conversation to the model again, after the
 prompt cache expired. In production, one run cost $1.10 to $1.47 for its first
 request as Home grew from 136k to 183k tokens. At startup,
 `removeStockMorningBriefs` deletes each of those routines that nobody changed.
-A routine with an edited name, prompt, cron, or thread stays.
+A paused routine, or one with an edited name, prompt, cron, or thread, stays.
 
 ## Shared conversation components
 

@@ -297,12 +297,12 @@ export const RETIRED_MORNING_BRIEF_PROMPT = [
  * tasks, and each run re-sent the whole Home conversation to the model.
  * Delete the routines Home created that nobody changed: same name, prompt,
  * and 08:00 cron, still posting into the owner's Home thread. A routine a
- * person edited stays. Idempotent: a later boot finds no match.
+ * person edited or paused stays. Idempotent: a later boot finds no match.
  */
 export async function removeStockMorningBriefs(db: PgDb): Promise<void> {
   await db.query(
     `DELETE FROM workflow_schedules s
-      WHERE s.owner_type = 'user' AND s.target_kind IN ('assistant', 'orchestrator')
+      WHERE s.owner_type = 'user' AND s.target_kind IN ('assistant', 'orchestrator') AND s.enabled
         AND s.name = 'Morning brief' AND s.cron = '0 8 * * *' AND s.prompt = $1
         AND s.thread_policy->>'mode' = 'existing'
         AND EXISTS (SELECT 1 FROM engine_threads t WHERE t.id = s.thread_policy->>'threadId'
