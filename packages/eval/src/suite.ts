@@ -60,6 +60,8 @@ export interface SuiteOptions {
   verify?: boolean;
   /** Independent code-review passes per case. */
   reviewPasses?: number;
+  /** Drop code-review findings rated below this confidence (0-1). */
+  minConfidence?: number;
   /** Save each finished case's trajectory as a new baseline. */
   saveBaselines?: boolean;
   /**
@@ -176,6 +178,7 @@ export async function runSuite(cases: EvalCase[], opts: SuiteOptions): Promise<S
                 ...(opts.verifyModel !== undefined ? { verifyModel: opts.verifyModel } : {}),
                 ...(opts.verify !== undefined ? { verify: opts.verify } : {}),
                 ...(opts.reviewPasses !== undefined ? { reviewPasses: opts.reviewPasses } : {}),
+                ...(opts.minConfidence !== undefined ? { minConfidence: opts.minConfidence } : {}),
                 ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
                 ...(opts.gateway !== undefined ? { gateway: opts.gateway } : {}),
                 ...(opts.mockPlugins !== undefined ? { mockPlugins: opts.mockPlugins } : {}),

@@ -146,6 +146,8 @@ describe("--verify-model", () => {
     expect(parseCliArgs(["--verify", "--review-passes", "2"])).toMatchObject({ verify: true, reviewPasses: 2 });
     expect(parseCliArgs([]).verify).toBeUndefined();
     expect(() => parseCliArgs(["--review-passes", "9"])).toThrow(/--review-passes/);
+    expect(parseCliArgs(["--min-confidence", "0.6"]).minConfidence).toBe(0.6);
+    expect(() => parseCliArgs(["--min-confidence", "2"])).toThrow(/--min-confidence/);
   });
 });
 

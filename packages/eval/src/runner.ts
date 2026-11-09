@@ -93,6 +93,8 @@ export interface RunnerOptions {
   verify?: boolean;
   /** Independent code-review passes per case. */
   reviewPasses?: number;
+  /** Drop code-review findings rated below this confidence (0-1). */
+  minConfidence?: number;
   /**
    * Send every model call through this Valet LLM gateway with its `vlt_`
    * key, instead of provider keys from the environment.

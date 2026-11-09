@@ -14,6 +14,7 @@
  *   --verify-model <spec> model for code-review verifiers (default: --model)
  *   --verify             check each code-review finding with a verifier (default: off)
  *   --review-passes <n>  independent code-review passes per case (default 1)
+ *   --min-confidence <x> drop code-review findings rated below x (0-1)
  *
  * With VALET_LLM_GATEWAY_URL and VALET_API_KEY (or VALET_API_KEY_FILE) set,
  * every model call goes through that Valet gateway with the Valet key, and
@@ -110,6 +111,7 @@ async function main(): Promise<number> {
     ...(opts.verifyModel !== undefined ? { verifyModel: opts.verifyModel } : {}),
     ...(opts.verify !== undefined ? { verify: opts.verify } : {}),
     ...(opts.reviewPasses !== undefined ? { reviewPasses: opts.reviewPasses } : {}),
+    ...(opts.minConfidence !== undefined ? { minConfidence: opts.minConfidence } : {}),
     saveBaselines: opts.saveBaseline,
     allowLiveBaselines: opts.allowLiveBaselines,
     onCaseStart: (evalCase, index, total) => {

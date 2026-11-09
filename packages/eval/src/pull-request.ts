@@ -194,6 +194,7 @@ async function reviewInWorkspace(
       verify,
       ...(opts.verifyModel !== undefined ? { verifyModel: opts.verifyModel } : {}),
       ...(opts.reviewPasses !== undefined ? { passes: opts.reviewPasses } : {}),
+      ...(opts.minConfidence !== undefined ? { minConfidence: opts.minConfidence } : {}),
     },
     runAgent,
   );

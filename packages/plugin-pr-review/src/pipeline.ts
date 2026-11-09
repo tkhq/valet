@@ -56,6 +56,13 @@ export interface PipelineOptions extends ReviewerSpecOptions {
   verifyModel?: string;
   /** Independent reviewer passes, merged by location before verification. Default 1. */
   passes?: number;
+  /** Drop findings the reviewer rated below this confidence (0-1). A finding with no rating stays. Unset: keep all. */
+  minConfidence?: number;
+}
+
+/** Whether a finding clears the confidence threshold. */
+export function confidentEnough(f: Finding, minConfidence: number | undefined): boolean {
+  return minConfidence === undefined || f.confidence === undefined || f.confidence >= minConfidence;
 }
 
 /** Findings this close on the same file are one report. */
@@ -109,15 +116,20 @@ export async function runReviewPipeline(input: PipelineOptions, run: AgentRunner
       verdicts: [],
     };
   }
-  if (opts.verify !== true || draft.findings.length === 0) return { outcome: "completed", review: draft, draft, verdicts: [] };
+  // `draft` stays whole, so a run can score what the threshold cost.
+  const gate = (f: Finding): boolean => confidentEnough(f, opts.minConfidence);
+  if (opts.verify !== true || draft.findings.length === 0) {
+    return { outcome: "completed", review: { ...draft, findings: draft.findings.filter(gate) }, draft, verdicts: [] };
+  }
 
-  const verdicts: FindingVerdict[] = new Array(draft.findings.length);
+  const verdicts: (FindingVerdict | undefined)[] = new Array(draft.findings.length);
   let next = 0;
   const limit = Math.max(1, opts.verifyConcurrency ?? 4);
   await Promise.all(
     Array.from({ length: Math.min(limit, draft.findings.length) }, async () => {
       while (next < draft.findings.length) {
         const index = next++;
+        if (!gate(draft.findings[index])) continue;
         const spec = await createVerifierSpec({
           ...opts,
           finding: draft.findings[index],
@@ -137,8 +149,8 @@ export async function runReviewPipeline(input: PipelineOptions, run: AgentRunner
       }
     }),
   );
-  const kept = draft.findings.filter((_, i) => verdicts[i].kept);
-  return { outcome: "completed", review: { ...draft, findings: kept }, draft, verdicts };
+  const kept = draft.findings.filter((_, i) => verdicts[i]?.kept === true);
+  return { outcome: "completed", review: { ...draft, findings: kept }, draft, verdicts: verdicts.filter((v): v is FindingVerdict => v !== undefined) };
 }
 
 async function mergeBase(workspace: string, base: string, head: string): Promise<string> {

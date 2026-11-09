@@ -40,6 +40,8 @@ export interface CliOptions {
   verify?: boolean;
   /** Independent code-review passes per case. */
   reviewPasses?: number;
+  /** Drop code-review findings rated below this confidence (0-1). */
+  minConfidence?: number;
 }
 
 /** Parse argv (no process side effects; throws on invalid input). */
@@ -65,6 +67,7 @@ export function parseCliArgs(argv: string[]): CliOptions {
       "verify-model": { type: "string" },
       verify: { type: "boolean", default: false },
       "review-passes": { type: "string" },
+      "min-confidence": { type: "string" },
     },
   });
   const reasoning = values.reasoning;
@@ -90,6 +93,13 @@ export function parseCliArgs(argv: string[]): CliOptions {
     reviewPasses = Number.parseInt(values["review-passes"], 10);
     if (!Number.isInteger(reviewPasses) || reviewPasses < 1 || reviewPasses > 5) {
       throw new Error(`--review-passes must be an integer from 1 to 5, got \`${values["review-passes"]}\``);
+    }
+  }
+  let minConfidence: number | undefined;
+  if (values["min-confidence"] !== undefined) {
+    minConfidence = Number(values["min-confidence"]);
+    if (!Number.isFinite(minConfidence) || minConfidence < 0 || minConfidence > 1) {
+      throw new Error(`--min-confidence must be a number from 0 to 1, got \`${values["min-confidence"]}\``);
     }
   }
   const pullRating = values.rating ?? "positive";
@@ -132,6 +142,7 @@ export function parseCliArgs(argv: string[]): CliOptions {
     ...(values["verify-model"] !== undefined ? { verifyModel: values["verify-model"] } : {}),
     ...(values.verify ? { verify: true } : {}),
     ...(reviewPasses !== undefined ? { reviewPasses } : {}),
+    ...(minConfidence !== undefined ? { minConfidence } : {}),
   };
 }
 

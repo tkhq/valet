@@ -278,3 +278,17 @@ describe("evidence", () => {
     expect(spec.review()?.findings.map((f) => f.title)).toEqual(["Division by zero"]);
   });
 });
+
+describe("minConfidence", () => {
+  it("drops findings rated below the threshold, keeps unrated ones, and keeps the whole draft", async () => {
+    const { dir, base, head } = repo();
+    const run: AgentRunner = async (spec) => {
+      const at = (title: string, confidence?: number) => ({ ...finding(title), ...(confidence !== undefined ? { confidence } : {}) });
+      await submit(spec, "submit_review", { summary: "s", confidence: 3, findings: [at("Sure", 0.9), at("Unsure", 0.3), at("Unrated")] });
+      return { outcome: "completed" };
+    };
+    const result = await runReviewPipeline({ workspace: dir, base, head, title: "t", body: "", minConfidence: 0.5 }, run);
+    expect(result.review?.findings.map((f) => f.title)).toEqual(["Sure", "Unrated"]);
+    expect(result.draft?.findings).toHaveLength(3);
+  });
+});
