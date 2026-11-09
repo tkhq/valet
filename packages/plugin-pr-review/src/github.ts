@@ -6,6 +6,8 @@
 
 export interface PullRequest {
   state: "open" | "closed";
+  merged?: boolean;
+  merge_commit_sha?: string | null;
   draft: boolean;
   title: string;
   body: string | null;
@@ -17,7 +19,8 @@ export interface Comparison {
   /** `ahead`: base is an ancestor of head. */
   status: "ahead" | "behind" | "diverged" | "identical";
   merge_base_commit: { sha: string };
-  files?: { filename: string }[];
+  /** The changed files, as the pull request files endpoint returns them. At most 300. */
+  files?: PullFile[];
 }
 
 export interface PullFile {
@@ -43,7 +46,7 @@ export interface Review {
 export interface NewReviewComment {
   path: string;
   line: number;
-  side: "RIGHT";
+  side: "RIGHT" | "LEFT";
   body: string;
 }
 

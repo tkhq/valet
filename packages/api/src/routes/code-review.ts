@@ -1,16 +1,19 @@
-/** Read-only review chains for the selected personal or team workspace. */
+/** Review chains for the selected personal or team workspace, and manual review runs. */
+import { randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import type { Principal } from "@valet/engine";
 import { and, desc, eq, inArray, ne, sql } from "drizzle-orm";
-import { POINTERS_COLLECTION, pullTarget, type PullPointers, type ReviewRound } from "@valet/plugin-pr-review";
+import { MANUAL_REVIEW_EVENT, POINTERS_COLLECTION, pullTarget, type ManualReviewOptions, type PullPointers, type ReviewRound } from "@valet/plugin-pr-review";
 import type { AppEnv } from "../env.js";
+import { catalogForService } from "../events/ingest.js";
+import { authorizedSubscriptionMatchesEvent } from "../events/team-slack-gate.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { pluginThreadKey } from "../plugins/plugin-thread-key.js";
 import { assistantExecutions, assistants, eventDeliveries, events, eventSubscriptions, pluginStore } from "../schema/index.js";
 import { resolveGithubApiUrl } from "../services/github-env.js";
 import { resolveGitHubToken } from "../services/github-tokens.js";
 import { canViewTeam, getTeamInOrg } from "../services/teams.js";
-import type { CodeReviewWire, ListCodeReviewsResponse } from "../wire/types.js";
+import type { CodeReviewWire, ListCodeReviewsResponse, RunCodeReviewRequest, RunCodeReviewResponse } from "../wire/types.js";
 
 export const PR_REVIEW_PLUGIN = "pr-review";
 
@@ -203,4 +206,92 @@ codeReviewRouter.get("/reviews", async (c) => {
     }];
   });
   return c.json({ reviews } satisfies ListCodeReviewsResponse);
+});
+
+const PR_URL = /^https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/([1-9]\d*)\/?(?:[?#].*)?$/;
+const COMMIT = /^[0-9a-f]{7,40}$/;
+
+/**
+ * `POST /api/code-review/runs`: review one pull request now. It runs the
+ * same handler path as a webhook: the route stores a
+ * `github.pull_request.valet_review_requested` event and one delivery for
+ * the workspace's enabled line that covers the pull request, and the
+ * dispatcher runs the handler. A run with `shadow` records the review in
+ * the plugin thread only; with `commit` it reviews a merged or closed pull
+ * request at that commit.
+ */
+codeReviewRouter.post("/runs", async (c) => {
+  const { db, plugins, eventDispatcher, engineCredentials, encryptionKey } = c.var.providers;
+  const user = c.var.user;
+  const principal = c.var.principal;
+  let body: RunCodeReviewRequest;
+  try {
+    body = (await c.req.json()) as RunCodeReviewRequest;
+  } catch {
+    return c.json({ error: "Send a JSON body with the pull request url." }, 400);
+  }
+  const match = typeof body.url === "string" ? PR_URL.exec(body.url.trim()) : null;
+  if (!match) return c.json({ error: "Enter a pull request URL such as https://github.com/owner/repo/pull/12." }, 400);
+  const [, repoOwner, repoName, numberText] = match;
+  const repo = `${repoOwner}/${repoName}`;
+  const number = Number(numberText);
+  const shadow = body.shadow === true;
+  if (body.commit !== undefined && (typeof body.commit !== "string" || !COMMIT.test(body.commit))) return c.json({ error: "Enter the commit as a 7 to 40 character hex sha." }, 400);
+  if (body.commit !== undefined && !shadow) return c.json({ error: "A review at a given commit posts nothing on GitHub. Turn on shadow mode to use a commit." }, 400);
+
+  const teamId = body.teamId ?? (principal.type === "team" ? principal.id : undefined);
+  if (principal.type === "team" && teamId !== principal.id) return c.json({ error: "Team not found. Select an accessible team." }, 404);
+  if (teamId) {
+    const team = await getTeamInOrg(db, user.orgId, teamId);
+    if (!team || (principal.type !== "team" && !(await canViewTeam(db, teamId, user.id)))) return c.json({ error: "Team not found. Select an accessible team." }, 404);
+  }
+  const owner: Principal = teamId ? { type: "team", id: teamId } : { type: "user", id: user.id };
+
+  const resolved = await resolveGitHubToken({ db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) }, {
+    orgId: user.orgId, ...(owner.type === "user" ? { userId: owner.id } : {}), purpose: "api", repo: { owner: repoOwner, name: repoName },
+  });
+  if (!resolved.token) return c.json({ error: `Valet has no GitHub access to ${repo}. Install the GitHub App on ${repoOwner} in Settings.` }, 403);
+  const response = await fetch(`${resolveGithubApiUrl(process.env)}/repos/${repo}/pulls/${number}`, {
+    headers: { authorization: `Bearer ${resolved.token}`, accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28", "user-agent": "valet-code-review" },
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (response.status === 404) return c.json({ error: `Valet cannot find ${repo}#${number}. Check the URL and that the GitHub App can read ${repo}.` }, 404);
+  if (!response.ok) return c.json({ error: `GitHub answered ${response.status} for ${repo}#${number}. Try again later.` }, 502);
+  const pr = (await response.json()) as Record<string, unknown> & { state?: string; base?: { repo?: unknown } };
+  if (!shadow && pr.state !== "open") return c.json({ error: `${repo}#${number} is ${pr.state ?? "not open"}. Turn on shadow mode to review it without posting on GitHub.` }, 409);
+
+  const options: ManualReviewOptions = { ...(shadow ? { shadow: true } : {}), ...(body.commit !== undefined ? { commit: body.commit } : {}) };
+  const payload = { action: "valet_review_requested", number, pull_request: { ...pr, number }, repository: pr.base?.repo, valet: { ...options, requestedBy: user.id } };
+  const subjects = [`github:${repoOwner}`, `github:${repo}`, `github:${repo}#${number}`];
+  const lines = await db.select().from(eventSubscriptions).where(and(
+    eq(eventSubscriptions.orgId, user.orgId), eq(eventSubscriptions.enabled, true),
+    eq(eventSubscriptions.ownerType, owner.type), eq(eventSubscriptions.ownerId, owner.id),
+    sql`${eventSubscriptions.target}->>'kind' = 'plugin'`,
+    sql`${eventSubscriptions.target}->>'plugin' = ${PR_REVIEW_PLUGIN}`,
+    sql`${eventSubscriptions.target}->>'handler' = 'review-pull-request'`,
+  ));
+  // The line's own filters decide, matched as an opened event for this pull request.
+  const catalog = catalogForService(plugins, "github");
+  let line: (typeof lines)[number] | undefined;
+  for (const candidate of lines) {
+    if (await authorizedSubscriptionMatchesEvent(db, candidate, "github.pull_request.opened", payload, catalog, subjects)) {
+      line = candidate;
+      break;
+    }
+  }
+  if (!line) return c.json({ error: `No code review line in this workspace covers ${repo}. Turn the repository on in Code review first.` }, 404);
+
+  const now = Date.now();
+  const eventId = randomUUID();
+  const deliveryId = randomUUID();
+  await db.transaction(async (tx) => {
+    await tx.insert(events).values({
+      id: eventId, orgId: user.orgId, service: "github", eventKey: MANUAL_REVIEW_EVENT, dedupeKey: `valet-review:${eventId}`,
+      actor: null, refs: { repo, pr_number: String(number) }, summary: `${repo}#${number}: review requested in Valet${shadow ? " (shadow)" : ""}`,
+      payload, occurredAt: now, receivedAt: now, subjects,
+    });
+    await tx.insert(eventDeliveries).values({ id: deliveryId, eventId, subscriptionId: line.id, status: "pending", attempts: 0, nextAttemptAt: now, createdAt: now });
+  });
+  eventDispatcher.nudge();
+  return c.json({ eventId, deliveryId, subscriptionId: line.id, shadow } satisfies RunCodeReviewResponse, 201);
 });

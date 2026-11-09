@@ -2,7 +2,12 @@ import { Type, type Static } from "typebox";
 
 export const FindingSchema = Type.Object({
   path: Type.String({ description: "Repo-relative path of the file the comment anchors to." }),
-  line: Type.Integer({ minimum: 1, description: "Line in the HEAD version of the file." }),
+  line: Type.Integer({ minimum: 1, description: "Line the comment anchors to: in the HEAD file, or in the BASE file when side is LEFT." }),
+  side: Type.Optional(
+    Type.Union([Type.Literal("RIGHT"), Type.Literal("LEFT")], {
+      description: "RIGHT (default): the defect is in the HEAD file. LEFT: the defect is code the PR deletes, and `line` is that deleted line in the BASE file.",
+    }),
+  ),
   severity: Type.Union([Type.Literal("critical"), Type.Literal("high"), Type.Literal("medium"), Type.Literal("low")]),
   category: Type.Union([
     Type.Literal("bug"),
@@ -22,7 +27,9 @@ export const FindingSchema = Type.Object({
 });
 
 export const ReviewSchema = Type.Object({
-  summary: Type.String({ description: "2-5 sentences: what the PR changes and the main risks found." }),
+  summary: Type.String({
+    description: "1-3 sentences on what the PR changes. Do not describe defects or risks here: each finding states its own trigger and result, and the review lists the findings under the summary.",
+  }),
   confidence: Type.Integer({
     minimum: 1,
     maximum: 5,

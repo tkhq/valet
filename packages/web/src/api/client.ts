@@ -154,6 +154,8 @@ import type {
   ListNotificationDecisionsResponse,
   ListModelsResponse,
   ListCodeReviewsResponse,
+  RunCodeReviewRequest,
+  RunCodeReviewResponse,
   ListPluginsResponse,
   ListSessionsResponse,
   ListSkillsResponse,
@@ -1454,6 +1456,7 @@ export const api = {
     request<{ ok: true }>("DELETE", `/teams/${encodeURIComponent(id)}/api-keys/${encodeURIComponent(keyId)}`),
 
   // plugins + credentials (plugin-system-v2 plan Task 15 — connect surface)
+  runCodeReview: (body: RunCodeReviewRequest) => request<RunCodeReviewResponse>("POST", "/code-review/runs", body),
   listCodeReviews: (teamId?: string) =>
     request<ListCodeReviewsResponse>(
       "GET",

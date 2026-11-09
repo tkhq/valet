@@ -117,6 +117,7 @@ describe("PluginThreads.spawnChild", () => {
     await expect(threads.spawnChild(thread, { prompt: "p", ref: "main" }, { dispatchId: "d" })).rejects.toThrow("needs a repo");
     const foreign = { ...thread, key: pluginThreadKey("other", "k") };
     await expect(threads.spawnChild(foreign, { prompt: "p" }, { dispatchId: "d" })).rejects.toThrow("does not belong to plugin reviewer");
+    await expect(threads.record(foreign, "a record", { dispatchId: "d" })).rejects.toThrow("does not belong to plugin reviewer");
   });
 });
 

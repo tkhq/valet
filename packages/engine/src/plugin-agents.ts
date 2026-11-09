@@ -76,6 +76,12 @@ export interface PluginThreads {
     opts: { dispatchId: string; attributes?: Record<string, string>; resultSchema?: TSchema },
   ): Promise<PluginReply>;
   /**
+   * Add a message to the thread without a model call. People read it in
+   * the thread, and the assistant reads it on its next turn. Idempotent
+   * per `dispatchId`. Use it for a record, such as a review nobody posted.
+   */
+  record(thread: PluginThreadRef, body: string, opts: { dispatchId: string; attributes?: Record<string, string> }): Promise<void>;
+  /**
    * Wait for the assistant's answer to a `post`. With `resultSchema`, the
    * answer's JSON is validated into `output`; pass the same schema to `post`
    * so the message asks for it.

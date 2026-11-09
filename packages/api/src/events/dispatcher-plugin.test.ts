@@ -43,6 +43,7 @@ function pluginWith(handle: PluginEventHandler["handle"], extra: Partial<PluginE
 const noThreads: PluginThreads = {
   ensure: async () => { throw new Error("threads are not used in this test"); },
   post: async () => { throw new Error("threads are not used in this test"); },
+  record: async () => { throw new Error("threads are not used in this test"); },
   spawnChild: async () => { throw new Error("threads are not used in this test"); },
   awaitChild: async () => { throw new Error("threads are not used in this test"); },
   awaitReply: async () => { throw new Error("threads are not used in this test"); },

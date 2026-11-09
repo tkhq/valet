@@ -11,7 +11,7 @@
 import { Type, type Static, type TSchema } from "typebox";
 import type { PluginChild, PluginEvent, PluginEventContext, PluginEventHandler, PluginThreadRef } from "@valet/engine";
 import { cutPatch, type PullRequestDiff } from "./git.js";
-import { githubClient, GitHubError, type GitHubClient, type PullFile, type ReviewComment, type ReviewThread } from "./github.js";
+import { githubClient, GitHubError, type GitHubClient, type PullFile, type PullRequest, type ReviewComment, type ReviewThread } from "./github.js";
 import { sameIssue } from "./incremental.js";
 import { commentableLines } from "./linemap.js";
 import { buildReviewPrompt } from "./prompt.js";
@@ -19,6 +19,8 @@ import {
   parseFindings,
   renderFixedComment,
   renderForkNotice,
+  renderShadowNotice,
+  renderShadowReview,
   renderInlineComment,
   renderSummary,
   type PostedFinding,
@@ -50,6 +52,10 @@ export const ReviewSettingsSchema = Type.Object(
       description: "Post only findings at this severity or above.",
     }),
     reviewDrafts: Type.Boolean({ default: false, description: "Review draft pull requests too." }),
+    shadow: Type.Boolean({
+      default: false,
+      description: "Record each review in the plugin thread only. Nothing is posted on GitHub.",
+    }),
     verify: Type.Boolean({
       default: false,
       description: "Check each new finding in its own verifier child before posting. Rechecks of earlier findings run either way.",
@@ -67,7 +73,10 @@ export type ReviewSettings = Static<typeof ReviewSettingsSchema>;
 export interface FindingPointer {
   id: string;
   path: string;
+  /** In the HEAD file, or in the BASE file when `side` is LEFT. */
   line: number;
+  /** LEFT: the finding names a line the PR deletes. Absent: RIGHT. */
+  side?: "LEFT";
   /** The inline review comment. Absent: the finding is in the summary review's body. */
   commentId?: number;
   /** The GraphQL id of the comment's review thread, once known. */
@@ -101,6 +110,33 @@ export interface PullPointers {
 }
 
 export const POINTERS_COLLECTION = "pulls";
+
+/**
+ * The event key of a review a person asked for in Valet (`POST
+ * /api/code-review/runs`). Its payload carries `valet` options. Only this
+ * key's options count: a webhook payload never sets them.
+ */
+export const MANUAL_REVIEW_EVENT = "github.pull_request.valet_review_requested";
+
+/** Options of a review a person asked for. */
+export interface ManualReviewOptions {
+  /** Record the review in the plugin thread only. */
+  shadow?: boolean;
+  /** Review the files at this commit instead of the PR head (a merged or closed PR). */
+  commit?: string;
+}
+
+/** The options of a manual review event, or undefined for a webhook event. */
+export function manualReviewOptions(event: Pick<PluginEvent, "key" | "payload">): ManualReviewOptions | undefined {
+  if (event.key !== MANUAL_REVIEW_EVENT) return undefined;
+  const payload = event.payload;
+  const valet = typeof payload === "object" && payload !== null && "valet" in payload ? payload.valet : undefined;
+  if (typeof valet !== "object" || valet === null) return {};
+  return {
+    ...("shadow" in valet && valet.shadow === true ? { shadow: true } : {}),
+    ...("commit" in valet && typeof valet.commit === "string" && /^[0-9a-f]{7,40}$/.test(valet.commit) ? { commit: valet.commit } : {}),
+  };
+}
 
 /** Children of one kind in flight at once. */
 const CHILD_CONCURRENCY = 4;
@@ -161,6 +197,8 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   // resolution, so read the PR's current state.
   const pr = await gh.pull();
   const head = pr.head.sha;
+  const manual = manualReviewOptions(event);
+  if (settings.shadow || manual?.shadow) return shadowReview(event, ctx, gh, pr, settings, { slug, repoName, commit: manual?.commit });
   if (pr.state !== "open") return log(slug, `skipped: the pull request is ${pr.state}`);
   if (pr.draft && !settings.reviewDrafts) return log(slug, "skipped: draft pull request");
 
@@ -171,7 +209,8 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
     stored = await ctx.store.put(POINTERS_COLLECTION, slug, next, stored ? { ifRevision: stored.revision } : undefined);
   };
   if (prior?.pending) prior = await finishPendingUpdates(gh, prior, save, ctx.signal);
-  if (prior?.lastReviewedHead === head) return log(slug, `skipped: ${head.slice(0, 7)} is already reviewed`);
+  // A person who asks for a review gets one, even of a head already reviewed.
+  if (manual === undefined && prior?.lastReviewedHead === head) return log(slug, `skipped: ${head.slice(0, 7)} is already reviewed`);
 
   if (pr.head.repo?.full_name !== pr.base.repo.full_name) {
     // A child cannot check out a fork's head yet (refs/pull/N/head).
@@ -221,54 +260,25 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
       head,
     });
     if (verdict?.verdict === "refuted") fixed.push({ finding: f, reason: verdict.counter_evidence || verdict.refutation_reason || "fixed" });
-    else stillOpen.push({ ...f, line: verdict?.current_line ?? f.line });
+    // The recheck names the line at HEAD, so a moved finding anchors on the RIGHT side.
+    else stillOpen.push(verdict?.current_line !== undefined ? { ...f, line: verdict.current_line, side: "RIGHT" } : f);
   });
 
   // 2. Review the PR, or only the new commits, told what is already open.
-  const review = (async () => {
-    const diff = from !== undefined ? await incrementDiff(gh, from, head, reviewed) : prDiffFor(prDiff, reviewed, mergeBase, head);
-    const memory = await teamNotes(ctx, repoName);
-    const child = await ctx.threads.spawnChild(
-      thread,
-      {
-        prompt: reviewerPrompt({
-          review: buildReviewPrompt({
-            title: pr.title,
-            body: pr.body ?? "",
-            base: mergeBase,
-            head,
-            diff,
-            ...(from !== undefined ? { increment: { from } } : {}),
-            knownFindings: [...open.live, ...open.dismissed.filter(hasTitle)].map((f) => ({ path: f.path, line: f.line, title: f.title })),
-          }),
-          instructions: settings.instructions,
-          excludePaths: settings.excludePaths,
-          memory,
-        }),
-        title: `Review ${head.slice(0, 7)}`,
-        role: REVIEWER_ROLE,
-        model: settings.model,
-        repo: repoName,
-        ref: head,
-      },
-      { dispatchId: dispatch("review") },
-    );
-    const result = await ctx.threads.awaitChild(child, { resultSchema: ReviewSchema });
-    if (result.outcome !== "completed" || result.output === undefined) {
-      throw new Error(`The review child for ${slug} at ${head.slice(0, 7)} ended without a review (${result.outcome}${result.error ? `: ${result.error}` : ""}). Open the plugin thread to see why, then retry the delivery.`);
-    }
-    return result.output as Review; // validated against ReviewSchema by awaitChild
-  })();
+  const review = (async () => runReviewerChild(ctx, thread, {
+    slug, repoName, pr, base: mergeBase, head, settings,
+    diff: from !== undefined ? await incrementDiff(gh, from, head, reviewed) : prDiffFor(prDiff, reviewed, mergeBase, head),
+    ...(from !== undefined ? { incrementFrom: from } : {}),
+    knownFindings: [...open.live, ...open.dismissed.filter(hasTitle)].map((f) => ({ path: f.path, line: f.line, title: f.title })),
+    dispatchId: dispatch("review"),
+  }))();
 
   const [draft] = await Promise.all([review, recheck]);
 
-  // 3. Drop findings on a line that does not exist at HEAD: the reviewer
-  // child answers through awaitChild, so no tool refused them.
+  // 3. Drop findings on a line that does not exist.
   const inPaths = draft.findings.filter((f) => !excluded(f.path, settings.excludePaths));
-  const lineCounts = await headLineCounts(gh, files, inPaths.map((f) => f.path), head);
-  const misplaced = new Set(anchorProblems(inPaths, lineCounts).map((p) => p.index));
-  if (misplaced.size > 0) log(slug, `dropped ${misplaced.size} finding(s) anchored to a line that does not exist at ${head.slice(0, 7)}`);
-  const candidates = inPaths.filter((_, i) => !misplaced.has(i));
+  const candidates = await anchoredFindings(gh, files, inPaths, head, mergeBase);
+  if (candidates.length < inPaths.length) log(slug, `dropped ${inPaths.length - candidates.length} finding(s) anchored to a line that does not exist at ${head.slice(0, 7)}`);
 
   // 4. With `verify` on, check each new finding in a fresh child; refuted ones are dropped.
   const kept: Finding[] = [];
@@ -310,8 +320,8 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   }
 
   // 6. Map new findings to diff lines. GitHub refuses a comment on a line outside the diff.
-  const anchorable = new Map(files.map((f) => [f.filename, commentableLines(f.patch ?? "")]));
-  let inline = posted.filter((f) => anchorable.get(f.path)?.has(f.line) ?? false);
+  const anchorable = new Map(files.map((f) => [f.filename, { RIGHT: commentableLines(f.patch ?? "", "RIGHT"), LEFT: commentableLines(f.patch ?? "", "LEFT") }]));
+  let inline = posted.filter((f) => anchorable.get(f.path)?.[f.side ?? "RIGHT"].has(f.line) ?? false);
   let outside = posted.filter((f) => !inline.includes(f));
 
   // 7. Post: one summary review, edited in place, plus inline comments.
@@ -334,7 +344,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   /** Post the inline findings in one review with `body`. A 422 (a line GitHub cannot resolve) moves them all to the summary. */
   const postInline = async (body: string): Promise<number | undefined> => {
     try {
-      return (await gh.createReview({ commitId: head, body, comments: inline.map((f) => ({ path: f.path, line: f.line, side: "RIGHT", body: renderInlineComment(f) })) })).id;
+      return (await gh.createReview({ commitId: head, body, comments: inline.map((f) => ({ path: f.path, line: f.line, side: f.side ?? "RIGHT", body: renderInlineComment(f) })) })).id;
     } catch (err) {
       if (!(err instanceof GitHubError) || err.status !== 422 || inline.length === 0) throw err;
       console.warn(`pr-review ${slug}: GitHub refused the inline comments, so the summary carries them`, err.message);
@@ -489,7 +499,7 @@ async function recoverFindings(
   for (const p of pointers) {
     const text = p.commentId !== undefined ? parseFindings(comments.get(p.commentId)?.body ?? "").get(p.id) : summary.get(p.id);
     const thread = p.commentId !== undefined ? threads.get(p.commentId) : undefined;
-    const where = { path: p.path, line: p.line, ...(p.commentId !== undefined ? { commentId: p.commentId } : {}), ...((thread?.id ?? p.threadId) ? { threadId: thread?.id ?? p.threadId } : {}) };
+    const where = { path: p.path, line: p.line, ...(p.side === "LEFT" ? { side: "LEFT" as const } : {}), ...(p.commentId !== undefined ? { commentId: p.commentId } : {}), ...((thread?.id ?? p.threadId) ? { threadId: thread?.id ?? p.threadId } : {}) };
     const gone = !text;
     // Valet resolves a thread only when it marks the finding fixed, so an
     // open finding in a resolved thread was resolved by a person.
@@ -514,8 +524,13 @@ async function newCommentIds(gh: GitHubClient, reviewId: number): Promise<Map<st
   return ids;
 }
 
-function pointer(f: Pick<PostedFinding, "id" | "path" | "line">, status: FindingPointer["status"], ids: { commentId?: number; threadId?: string }): FindingPointer {
-  return { id: f.id, path: f.path, line: f.line, status, ...(ids.commentId !== undefined ? { commentId: ids.commentId } : {}), ...(ids.threadId !== undefined ? { threadId: ids.threadId } : {}) };
+function pointer(f: Pick<PostedFinding, "id" | "path" | "line" | "side">, status: FindingPointer["status"], ids: { commentId?: number; threadId?: string }): FindingPointer {
+  return {
+    id: f.id, path: f.path, line: f.line, status,
+    ...(f.side === "LEFT" ? { side: "LEFT" as const } : {}),
+    ...(ids.commentId !== undefined ? { commentId: ids.commentId } : {}),
+    ...(ids.threadId !== undefined ? { threadId: ids.threadId } : {}),
+  };
 }
 
 async function runVerifier(
@@ -553,20 +568,127 @@ export function reviewerPrompt(input: { review: string; instructions: string; ex
   ].join("\n");
 }
 
+/** Start the reviewer child at `head` and read its review. A child without a review fails the delivery. */
+async function runReviewerChild(
+  ctx: PluginEventContext,
+  thread: PluginThreadRef,
+  input: {
+    slug: string; repoName: string; pr: PullRequest; base: string; head: string; settings: ReviewSettings; diff: PullRequestDiff;
+    incrementFrom?: string; knownFindings: { path: string; line: number; title: string }[]; dispatchId: string;
+  },
+): Promise<Review> {
+  const memory = await teamNotes(ctx, input.repoName);
+  const child = await ctx.threads.spawnChild(
+    thread,
+    {
+      prompt: reviewerPrompt({
+        review: buildReviewPrompt({
+          title: input.pr.title,
+          body: input.pr.body ?? "",
+          base: input.base,
+          head: input.head,
+          diff: input.diff,
+          ...(input.incrementFrom !== undefined ? { increment: { from: input.incrementFrom } } : {}),
+          knownFindings: input.knownFindings,
+        }),
+        instructions: input.settings.instructions,
+        excludePaths: input.settings.excludePaths,
+        memory,
+      }),
+      title: `Review ${input.head.slice(0, 7)}`,
+      role: REVIEWER_ROLE,
+      model: input.settings.model,
+      repo: input.repoName,
+      ref: input.head,
+    },
+    { dispatchId: input.dispatchId },
+  );
+  const result = await ctx.threads.awaitChild(child, { resultSchema: ReviewSchema });
+  if (result.outcome !== "completed" || result.output === undefined) {
+    throw new Error(`The review child for ${input.slug} at ${input.head.slice(0, 7)} ended without a review (${result.outcome}${result.error ? `: ${result.error}` : ""}). Open the plugin thread to see why, then retry the delivery.`);
+  }
+  return result.output as Review; // validated against ReviewSchema by awaitChild
+}
+
+/**
+ * The findings whose line exists: the reviewer child answers through
+ * awaitChild, so no tool refused them. A LEFT finding names a deleted line,
+ * so it is checked against the base file.
+ */
+async function anchoredFindings(gh: GitHubClient, files: PullFile[], findings: Finding[], head: string, base: string): Promise<Finding[]> {
+  const right = findings.map((f, i) => ({ f, i })).filter(({ f }) => f.side !== "LEFT");
+  const left = findings.map((f, i) => ({ f, i })).filter(({ f }) => f.side === "LEFT");
+  const headCounts = await lineCountsAt(gh, files.filter((f) => f.status !== "removed"), right.map(({ f }) => f.path), head);
+  const baseCounts = left.length > 0 ? await lineCountsAt(gh, files.filter((f) => f.status !== "added"), left.map(({ f }) => f.path), base) : new Map<string, number>();
+  const misplaced = new Set([
+    ...anchorProblems(right.map(({ f }) => f), headCounts).map((p) => right[p.index].i),
+    ...anchorProblems(left.map(({ f }) => f), baseCounts).map((p) => left[p.index].i),
+  ]);
+  return findings.filter((_, i) => !misplaced.has(i));
+}
+
+/**
+ * A review recorded in the plugin thread only: nothing on GitHub and no
+ * pointers in the store. It covers the whole PR, at `commit` when given
+ * (a merged or closed PR), else at the merge commit of a merged PR or the
+ * PR head. The diff, file list and line checks cover the merge base to the
+ * commit it checks out, so a finding names code that exists there. GitHub's
+ * compare lists at most 300 files.
+ */
+async function shadowReview(
+  event: PluginEvent,
+  ctx: PluginEventContext,
+  gh: GitHubClient,
+  pr: PullRequest,
+  settings: ReviewSettings,
+  where: { slug: string; repoName: string; commit: string | undefined },
+): Promise<void> {
+  const { slug, repoName } = where;
+  const checkout = where.commit ?? (pr.merged && pr.merge_commit_sha ? pr.merge_commit_sha : pr.head.sha);
+  const thread = await ctx.threads.ensure(slug, { title: `Review ${slug}` });
+  const dispatch = (label: string): string => `${event.id}:${checkout.slice(0, 12)}:${label}`;
+  if (!pr.merged && pr.head.repo?.full_name !== pr.base.repo.full_name && where.commit === undefined) {
+    await ctx.threads.record(thread, renderShadowNotice(slug, "Valet cannot check out the head of a pull request from a fork. Pass a commit that a branch of this repository contains."), { dispatchId: dispatch("shadow-fork") });
+    return log(slug, "shadow review skipped: pull request from a fork");
+  }
+  const comparison = await gh.compare(pr.base.sha, checkout);
+  if (!comparison) throw new Error(`GitHub cannot compare ${pr.base.sha.slice(0, 7)} with ${checkout.slice(0, 7)} on ${slug}. Pass a commit that still exists, then retry.`);
+  const mergeBase = comparison.merge_base_commit.sha;
+  const files = comparison.files ?? [];
+  const reviewed = files.filter((f) => !excluded(f.filename, settings.excludePaths));
+  const prDiff = (await gh.compareDiff(mergeBase, checkout)) ?? undefined;
+  const draft = await runReviewerChild(ctx, thread, {
+    slug, repoName, pr, base: mergeBase, head: checkout, settings,
+    diff: prDiffFor(prDiff, reviewed, mergeBase, checkout),
+    knownFindings: [],
+    dispatchId: dispatch("shadow-review"),
+  });
+  const inPaths = draft.findings.filter((f) => !excluded(f.path, settings.excludePaths));
+  const minRank = SEVERITY_ORDER.indexOf(settings.minSeverity);
+  const shown = (await anchoredFindings(gh, files, inPaths, checkout, mergeBase)).filter((f) => SEVERITY_ORDER.indexOf(f.severity) >= minRank);
+  ctx.signal.throwIfAborted();
+  await ctx.threads.record(
+    thread,
+    renderShadowReview({ slug, commit: checkout, summary: draft.summary, confidence: draft.confidence, findings: shown, hidden: draft.findings.length - shown.length }),
+    { dispatchId: dispatch("shadow-record") },
+  );
+  log(slug, `shadow review of ${checkout.slice(0, 7)} recorded in the plugin thread: ${shown.length} finding(s)`);
+}
+
 /** How a verifier child ends: JSON the verdict schema accepts, not a submit tool. */
 const VERDICT_FINISH = `Check the claim, then give your verdict.\n\n${answerFormat(VerdictSchema)}`;
 
 /**
- * Line count at HEAD of each path a finding names, for `anchorProblems`.
- * Only files the PR adds or changes count; a file GitHub will not return
- * as text (a submodule) counts as one line.
+ * Line count at `ref` of each path a finding names, for `anchorProblems`.
+ * Only `files` (the PR files present at that side) count; a file GitHub
+ * will not return as text (a submodule) counts as one line.
  */
-async function headLineCounts(gh: GitHubClient, files: PullFile[], paths: string[], head: string): Promise<Map<string, number>> {
-  const present = new Set(files.filter((f) => f.status !== "removed").map((f) => f.filename));
+async function lineCountsAt(gh: GitHubClient, files: PullFile[], paths: string[], ref: string): Promise<Map<string, number>> {
+  const present = new Set(files.map((f) => f.filename));
   const counts = new Map<string, number>();
   for (const path of new Set(paths)) {
     if (!present.has(path)) continue;
-    const text = await gh.fileText(path, head);
+    const text = await gh.fileText(path, ref);
     counts.set(path, text === undefined ? 1 : lineCount(text));
   }
   return counts;

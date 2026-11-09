@@ -182,6 +182,16 @@ export function buildPluginThreads(deps: PluginThreadsDeps, scope: PluginThreads
       return { sessionId: session.id, threadId: thread.id, queueItemId: receipt.queueItemId };
     },
 
+    async record(ref, body, opts) {
+      owned(ref);
+      const { thread } = await openThread(ref.key);
+      // No model call: the message is a record, read on the next turn.
+      await thread.recordSignal(
+        { kind: "signal", signalType: `plugin.${plugin.name}`, body, ...(opts.attributes !== undefined ? { attributes: opts.attributes } : {}) },
+        { dispatchId: `plugin:${plugin.name}:${createHash("sha256").update(ref.key).digest("hex").slice(0, 12)}:${opts.dispatchId}` },
+      );
+    },
+
     async awaitReply(reply, opts) {
       // The host checks the ids it is handed: the reply must sit in one of
       // this plugin's threads in this owner's workspace.
