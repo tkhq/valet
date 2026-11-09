@@ -17,7 +17,8 @@
     "test": "vitest run",
     "start": "tsx src/cli.ts",
     "import:martian": "tsx src/martian-import.ts",
-    "import:trial": "tsx src/trial-import.ts"
+    "import:trial": "tsx src/trial-import.ts",
+    "import:swr": "tsx src/swr-import.ts"
   },
   "dependencies": {
     "@valet/api": "workspace:*",
