@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ToolContext } from "@valet/engine";
-import { anchorProblems, buildVerifierPrompt, createReviewerSpec, createVerifierSpec, lineCount, decideFinding, mergeFindings, quoteInFile, runReviewPipeline, type AgentRunner, type AgentSpec } from "../src/index.js";
+import { anchorProblems, evidenceProblems, buildVerifierPrompt, createReviewerSpec, createVerifierSpec, lineCount, decideFinding, mergeFindings, quoteInFile, runReviewPipeline, type AgentRunner, type AgentSpec } from "../src/index.js";
 
 function repo(): { dir: string; base: string; head: string } {
   const dir = mkdtempSync(join(tmpdir(), "pr-review-pipeline-"));
@@ -23,7 +23,8 @@ function repo(): { dir: string; base: string; head: string } {
   return { dir, base, head: g("rev-parse", "HEAD") };
 }
 
-const finding = (title: string) => ({ path: "a.py", line: 2, severity: "high", category: "bug", title, body: "b" }) as const;
+const finding = (title: string) =>
+  ({ path: "a.py", line: 2, severity: "high", category: "bug", trigger: "any call", evidence: "a.py:2", title, body: "b" }) as const;
 
 /** Calls the agent's submit tool directly, as the model would. */
 async function submit(spec: AgentSpec, name: string, args: unknown): Promise<void> {
@@ -252,5 +253,71 @@ describe("line anchors", () => {
     // The submit tool ignores its context.
     await tool.execute({ summary: "s", confidence: 3, findings: [{ ...finding("Accidental submodule"), path: "sub", line: 1 }] } as never, {} as ToolContext);
     expect(spec.review()?.findings.map((f) => f.path)).toEqual(["sub"]);
+  });
+});
+
+describe("evidence", () => {
+  it("flags a finding with no trigger or no path:line evidence", () => {
+    const base = finding("F");
+    const problems = evidenceProblems([base, { ...base, trigger: " " }, { ...base, evidence: "the docs say so" }, { ...base, trigger: undefined, evidence: undefined }]);
+    expect(problems.map((p) => p.index)).toEqual([1, 2, 3]);
+    expect(problems[1].problem).toContain("no path:line reference");
+  });
+
+  it("submit_review refuses an unsupported finding, then drops it", async () => {
+    const { dir, base, head } = repo();
+    const spec = await createReviewerSpec({ workspace: dir, base, head, title: "t", body: "" });
+    const tool = spec.tools.find((t) => t.name === "submit_review");
+    if (!tool) throw new Error("no submit_review tool");
+    // The submit tool ignores its context.
+    const call = async (findings: unknown[]) => tool.execute({ summary: "s", confidence: 3, findings } as never, {} as ToolContext);
+    const speculative = { ...finding("Might break later"), evidence: "" };
+    expect(JSON.stringify(await call([finding("Division by zero"), speculative]))).toContain("evidence has no path:line reference");
+    await call([finding("Division by zero"), speculative]);
+    await call([finding("Division by zero"), speculative]);
+    expect(spec.review()?.findings.map((f) => f.title)).toEqual(["Division by zero"]);
+  });
+});
+
+describe("minConfidence", () => {
+  it("drops findings rated below the threshold, keeps unrated ones, and keeps the whole draft", async () => {
+    const { dir, base, head } = repo();
+    const run: AgentRunner = async (spec) => {
+      const at = (title: string, confidence?: number) => ({ ...finding(title), ...(confidence !== undefined ? { confidence } : {}) });
+      await submit(spec, "submit_review", { summary: "s", confidence: 3, findings: [at("Sure", 0.9), at("Unsure", 0.3), at("Unrated")] });
+      return { outcome: "completed" };
+    };
+    const result = await runReviewPipeline({ workspace: dir, base, head, title: "t", body: "", minConfidence: 0.5 }, run);
+    expect(result.review?.findings.map((f) => f.title)).toEqual(["Sure", "Unrated"]);
+    expect(result.draft?.findings).toHaveLength(3);
+  });
+});
+
+describe("findings on deleted code", () => {
+  it("checks a LEFT finding against the base file and keeps it apart from a RIGHT one", () => {
+    const at = (line: number, side?: "LEFT" | "RIGHT") => ({ ...finding("F"), path: "w.json", line, ...(side ? { side } : {}) });
+    const head = new Map([["w.json", 10]]);
+    const base = new Map([["w.json", 70]]);
+    expect(anchorProblems([at(63, "LEFT"), at(63)], head, base).map((p) => p.index)).toEqual([1]);
+    expect(anchorProblems([at(80, "LEFT")], head, base)[0].problem).toContain("70 lines in the base commit");
+    expect(anchorProblems([{ ...at(5, "LEFT"), path: "new.ts" }], head, base)[0].problem).toContain("does not exist in the base commit");
+    // Without base counts, LEFT findings are checked against the counts given.
+    expect(anchorProblems([at(80, "LEFT")], base)[0].problem).toContain("70 lines in the base commit");
+    expect(mergeFindings([[at(5)], [at(5, "LEFT"), at(6)]]).map((f) => f.side ?? "RIGHT")).toEqual(["RIGHT", "LEFT"]);
+  });
+
+  it("submit_review accepts a LEFT finding on a line the PR deletes", async () => {
+    const { dir, base } = repo();
+    const g = (...args: string[]): string => execFileSync("git", args, { cwd: dir, encoding: "utf8" }).trim();
+    // base a.py has 1 line; delete it in a new commit.
+    writeFileSync(join(dir, "a.py"), "");
+    g("commit", "-qam", "delete");
+    const head = g("rev-parse", "HEAD");
+    const spec = await createReviewerSpec({ workspace: dir, base, head, title: "t", body: "" });
+    const tool = spec.tools.find((t) => t.name === "submit_review");
+    if (!tool) throw new Error("no submit_review tool");
+    // The submit tool ignores its context.
+    await tool.execute({ summary: "s", confidence: 3, findings: [{ ...finding("Removed guard"), line: 1, side: "LEFT" }] } as never, {} as ToolContext);
+    expect(spec.review()?.findings.map((f) => f.side)).toEqual(["LEFT"]);
   });
 });

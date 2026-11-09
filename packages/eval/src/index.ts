@@ -30,13 +30,14 @@ export {
   type BaselineComparison,
   type BaselineRecord,
 } from "./baseline.js";
-export { formatReviewSummary, formatScorecard } from "./scorecard.js";
+export { formatReviewSummary, formatScorecard, formatTrialSummary } from "./scorecard.js";
 export {
   DEFAULT_REVIEW_JUDGE_MODEL,
   REVIEW_PROFILE_CATEGORIES,
   buildReviewMatcher,
   profileMetrics,
   reviewCommentText,
+  scoreReviewText,
   type ReviewLlm,
   type ReviewMatcher,
   type ReviewMatcherOptions,

@@ -1,5 +1,6 @@
 export {
   anchorProblems,
+  evidenceProblems,
   createLocalAgentRunner,
   createReviewerSpec,
   lineCount,
@@ -11,6 +12,7 @@ export {
   type ReviewPullRequestOptions,
 } from "./review.js";
 export {
+  confidentEnough,
   mergeFindings,
   runReviewPipeline,
   type AgentRunner,

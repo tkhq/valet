@@ -98,9 +98,27 @@ export function lineCount(text: string): number {
  * path to its line count at HEAD. A line outside the diff hunks is not a
  * problem: hosts post those findings outside the inline comments.
  */
-export function anchorProblems(findings: Finding[], lineCounts: ReadonlyMap<string, number>): { index: number; problem: string }[] {
+export function anchorProblems(
+  findings: Finding[],
+  lineCounts: ReadonlyMap<string, number>,
+  /**
+   * Line counts in the base file, for findings on deleted code (side LEFT).
+   * Unset: LEFT findings are checked against `lineCounts`, for a caller that
+   * splits findings by side and passes base counts for the LEFT ones.
+   */
+  baseLineCounts?: ReadonlyMap<string, number>,
+): { index: number; problem: string }[] {
   const problems: { index: number; problem: string }[] = [];
   findings.forEach((f, index) => {
+    if (f.side === "LEFT") {
+      const n = (baseLineCounts ?? lineCounts).get(f.path);
+      if (n === undefined) {
+        problems.push({ index, problem: `${f.path} does not exist in the base commit, so a LEFT finding cannot anchor there. Use side RIGHT with a HEAD line.` });
+      } else if (f.line > n) {
+        problems.push({ index, problem: `${f.path} has ${n} lines in the base commit, so LEFT line ${f.line} does not exist. Give the deleted line's number in the base file.` });
+      }
+      return;
+    }
     const n = lineCounts.get(f.path);
     if (n === undefined) {
       problems.push({ index, problem: `${f.path} is not a file this PR adds or changes at HEAD. Anchor the finding to a line of a changed file.` });
@@ -112,14 +130,15 @@ export function anchorProblems(findings: Finding[], lineCounts: ReadonlyMap<stri
 }
 
 /**
- * Line count at `head` of each path that still exists there. A deleted file
- * is absent. A submodule counts as one line: its diff shows one
- * "Subproject commit" line, and an empty directory stands in the checkout.
+ * Line count at `commit` of each path that exists there; an absent file is
+ * left out. A submodule counts as one line: its diff shows one
+ * "Subproject commit" line. With `checkedOut`, blobs are read from the
+ * working tree, which is at `commit`; otherwise from git.
  */
-async function headLineCounts(workspace: string, head: string, paths: string[]): Promise<Map<string, number>> {
+async function treeLineCounts(workspace: string, commit: string, paths: string[], checkedOut: boolean): Promise<Map<string, number>> {
   const counts = new Map<string, number>();
   if (paths.length === 0) return counts;
-  const tree = await git(workspace, ["ls-tree", "-z", head, "--", ...paths]).catch(() => "");
+  const tree = await git(workspace, ["ls-tree", "-z", commit, "--", ...paths]).catch(() => "");
   for (const entry of tree.split("\0").filter(Boolean)) {
     // "<mode> <type> <sha>\t<path>"
     const tab = entry.indexOf("\t");
@@ -127,14 +146,36 @@ async function headLineCounts(workspace: string, head: string, paths: string[]):
     const path = entry.slice(tab + 1);
     if (type === "commit") counts.set(path, 1);
     else if (type === "blob") {
-      const text = await readFile(join(workspace, path), "utf8").catch(() => undefined);
+      const text = checkedOut
+        ? await readFile(join(workspace, path), "utf8").catch(() => undefined)
+        : await git(workspace, ["show", `${commit}:${path}`]).catch(() => undefined);
       if (text !== undefined) counts.set(path, lineCount(text));
     }
   }
   return counts;
 }
 
-/** Times submit_review refuses bad anchors before it drops those findings instead. */
+/** A `path:line` reference, e.g. `pkg/a.go:42` or `a.py:3-9`. */
+const CODE_REF = /[\w./-]+\.\w+:\d+/;
+
+/**
+ * Findings the reviewer cannot back: no concrete trigger, or evidence with
+ * no `path:line` reference to code it read. A claim without both is
+ * speculation, and speculation is the main source of false positives.
+ */
+export function evidenceProblems(findings: Finding[]): { index: number; problem: string }[] {
+  const problems: { index: number; problem: string }[] = [];
+  findings.forEach((f, index) => {
+    if ((f.trigger ?? "").trim().length === 0) {
+      problems.push({ index, problem: "trigger is empty. Name the input or state that makes the code fail, or drop the finding." });
+    } else if (!CODE_REF.test(f.evidence ?? "")) {
+      problems.push({ index, problem: "evidence has no path:line reference. Cite the code you read that shows the failure, or drop the finding." });
+    }
+  });
+  return problems;
+}
+
+/** Times submit_review refuses unanchored or unsupported findings before it drops them instead. */
 const ANCHOR_REFUSALS = 2;
 
 export async function createReviewerSpec(opts: ReviewerSpecOptions): Promise<ReviewerSpec> {
@@ -146,7 +187,8 @@ export async function createReviewerSpec(opts: ReviewerSpecOptions): Promise<Rev
     // Only the PR's own files: a merge of the base branch into the PR is not new PR code.
     diff = await diffPullRequest(opts.workspace, opts.incrementFrom, opts.head, budget, diff.files);
   }
-  const lineCounts = await headLineCounts(opts.workspace, opts.head, prFiles);
+  const lineCounts = await treeLineCounts(opts.workspace, opts.head, prFiles, true);
+  const baseLineCounts = await treeLineCounts(opts.workspace, opts.base, prFiles, false);
   let refusals = 0;
   let submitted: Review | undefined;
   const submitReview: ToolDef<typeof ReviewSchema> = {
@@ -159,16 +201,16 @@ export async function createReviewerSpec(opts: ReviewerSpecOptions): Promise<Rev
         const first = [...Value.Errors(ReviewSchema, args)].slice(0, 3);
         return { text: `Review rejected: ${first.map((e) => `${e.instancePath} ${e.message}`).join("; ")}. Fix and call again.` };
       }
-      const problems = anchorProblems(args.findings, lineCounts);
+      const problems = [...anchorProblems(args.findings, lineCounts, baseLineCounts), ...evidenceProblems(args.findings)];
       if (problems.length > 0 && refusals < ANCHOR_REFUSALS) {
         refusals++;
         return {
-          text: `Review rejected: ${problems.map((p) => `finding ${p.index + 1} (${args.findings[p.index].path}:${args.findings[p.index].line}): ${p.problem}`).join(" ")} Fix the lines and call submit_review again with every finding.`,
+          text: `Review rejected: ${problems.map((p) => `finding ${p.index + 1} (${args.findings[p.index].path}:${args.findings[p.index].line}): ${p.problem}`).join(" ")} Fix those findings and call submit_review again with every finding.`,
         };
       }
       const bad = new Set(problems.map((p) => p.index));
       submitted = { ...args, findings: args.findings.filter((_, i) => !bad.has(i)) };
-      return { text: bad.size > 0 ? `Review recorded without ${bad.size} finding(s) whose line does not exist. Stop now.` : "Review recorded. Stop now." };
+      return { text: bad.size > 0 ? `Review recorded without ${bad.size} finding(s) that had no valid line, trigger or evidence. Stop now.` : "Review recorded. Stop now." };
     },
   };
   return {
