@@ -17,6 +17,7 @@ describe("fresh-context turns", () => {
     };
     const session = await new Engine({ providers }).createSession({
       userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel(), tools: [lookup],
+      systemPrompt: "You are the test assistant.",
     });
     const contexts: string[] = [];
     const record = (reply: ReturnType<typeof fauxAssistantMessage>) => (context: { messages: unknown[] }) => {
@@ -38,9 +39,12 @@ describe("fresh-context turns", () => {
       await thread.awaitResult(routine.queueItemId);
       // Both requests of the routine turn: no earlier history, and the tool
       // result reaches the second request.
+      // The system prompt and the tool announcement still go out.
       for (const sent of [contexts[1], contexts[2]]) {
         expect(sent).toContain("write the brief");
         expect(sent).not.toContain("blue house");
+        expect(sent).toContain("You are the test assistant.");
+        expect(sent).toContain('"toolsAdded"');
       }
       expect(contexts[2]).toContain("lookup result");
 
@@ -54,12 +58,13 @@ describe("fresh-context turns", () => {
     }
   });
 
-  it("sends the whole context when the turn's prompt is not in it", () => {
-    const prompt = { role: "user" as const, content: "now", timestamp: 2 };
+  it("keeps the earlier system messages, and sends the whole context when the turn's prompt is not in it", () => {
+    const system = { role: "system" as const, content: "system prompt", timestamp: 0 };
     const earlier = { role: "user" as const, content: "before", timestamp: 1 };
-    const context = { systemPrompt: "s", messages: [earlier, prompt] };
+    const prompt = { role: "user" as const, content: "now", timestamp: 2 };
+    const context = { systemPrompt: "s", messages: [system, earlier, prompt] };
     expect(freshContextOnly(context, undefined)).toBe(context);
     expect(freshContextOnly(context, { ...prompt })).toBe(context);
-    expect(freshContextOnly(context, prompt).messages).toEqual([prompt]);
+    expect(freshContextOnly(context, prompt).messages).toEqual([system, prompt]);
   });
 });

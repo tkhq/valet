@@ -8688,14 +8688,19 @@ export function renderReplyContext(
 }
 
 /**
- * The request context of a `FRESH_CONTEXT_KEY` turn: the messages from the
- * turn's prompt on. When the prompt is not in the context (no fresh turn, or
- * a compaction rebuilt the messages), the context goes out whole.
+ * The request context of a `FRESH_CONTEXT_KEY` turn: the system messages
+ * before the turn's prompt, then the messages from the prompt on. The system
+ * messages carry the system prompt and the tool announcements, so the turn
+ * keeps them and leaves out only the earlier conversation. When the prompt is
+ * not in the context (no fresh turn, or a compaction rebuilt the messages),
+ * the context goes out whole.
  */
 export function freshContextOnly(context: AgentContext, start: AgentMessage | undefined): AgentContext {
   if (start === undefined) return context;
   const index = context.messages.indexOf(start);
-  return index > 0 ? { ...context, messages: context.messages.slice(index) } : context;
+  if (index <= 0) return context;
+  const system = context.messages.slice(0, index).filter((message) => message.role === "system");
+  return { ...context, messages: [...system, ...context.messages.slice(index)] };
 }
 
 /** The roles `convertToLlm` sends. Custom agent message kinds never reach the model, so context estimates skip them. */
