@@ -34,4 +34,5 @@ checks:
       It states that early session cookie expiry blocks release and attributes that fact to the GitHub issue source.
       Score 5 only when each fact cites its own supporting source id. Swapped sources, one source for both facts,
       or any uncited fact score at most 2.
+      A caveat about the source, such as that it reports a cause nobody verified or that it may be out of date, is not an uncited fact and does not lower the score.
   - type: no_errors
