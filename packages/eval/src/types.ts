@@ -281,7 +281,17 @@ export interface GoldenComment {
   severity?: string;
   /** Martian category: bug, security, concurrency, data, api, perf, test_gap, doc_defect, style, speculative. */
   category: string;
+  /** The defect shows only in another repository, e.g. a consumer of a changed wire format. */
+  cross_repo?: boolean;
 }
+
+/**
+ * What a review case holds: a planted defect to find, a control with no
+ * defect (every finding counts as a false positive), or a setup PR that
+ * lays down fixtures for later cases.
+ */
+export const REVIEW_CASE_KINDS = ["planted", "control", "setup"] as const;
+export type ReviewCaseKind = (typeof REVIEW_CASE_KINDS)[number];
 
 /** Martian scoring profiles: which golden categories count toward TP and FN. */
 export const REVIEW_PROFILES = ["strict", "core", "all"] as const;
@@ -296,7 +306,10 @@ export type ReviewProfile = (typeof REVIEW_PROFILES)[number];
  */
 export interface ReviewMatchCheck {
   type: "review_match";
+  /** Empty only for a `control` or `setup` case. */
   golden: GoldenComment[];
+  /** Unset for Martian cases: every case has golden comments. */
+  kind?: ReviewCaseKind;
   /** Default `core`, Martian's primary metric. */
   profile?: ReviewProfile;
   /** Pass when recall on this case reaches this fraction. Default 0: any submitted review passes. */

@@ -12,9 +12,11 @@ import { parse } from "yaml";
 import {
   CHECK_TYPES,
   REASONING_LEVELS,
+  REVIEW_CASE_KINDS,
   REVIEW_PROFILES,
   type Check,
   type GoldenComment,
+  type ReviewCaseKind,
   type PullRequestSpec,
   type EvalCase,
   type EvalTurn,
@@ -272,14 +274,28 @@ function parseCheck(raw: unknown, i: number, source: string): Check {
     }
     case "review_match": {
       const golden = raw.golden;
-      if (!Array.isArray(golden) || golden.length === 0) {
-        throw new CaseValidationError(source, `\`${at}.golden\` must be a non-empty array of {comment, category}`);
+      const kind = optString("kind");
+      if (kind !== undefined && !(REVIEW_CASE_KINDS as readonly string[]).includes(kind)) {
+        throw new CaseValidationError(source, `\`${at}.kind\` must be one of: ${REVIEW_CASE_KINDS.join(", ")}`);
+      }
+      // A control or setup PR has no planted defect, so it may list none.
+      const mayBeEmpty = kind === "control" || kind === "setup";
+      if (!Array.isArray(golden) || (golden.length === 0 && !mayBeEmpty)) {
+        throw new CaseValidationError(
+          source,
+          `\`${at}.golden\` must be a non-empty array of {comment, category}. Only a \`kind: control\` or \`kind: setup\` case may leave it empty.`,
+        );
       }
       const parsedGolden: GoldenComment[] = golden.map((g, gi) => {
         if (!isRecord(g) || typeof g.comment !== "string" || typeof g.category !== "string") {
           throw new CaseValidationError(source, `\`${at}.golden[${gi}]\` needs string \`comment\` and \`category\``);
         }
-        return { comment: g.comment, category: g.category, ...(typeof g.severity === "string" ? { severity: g.severity } : {}) };
+        return {
+          comment: g.comment,
+          category: g.category,
+          ...(typeof g.severity === "string" ? { severity: g.severity } : {}),
+          ...(g.cross_repo === true ? { cross_repo: true } : {}),
+        };
       });
       const profile = optString("profile");
       if (profile !== undefined && !(REVIEW_PROFILES as readonly string[]).includes(profile)) {
@@ -294,6 +310,7 @@ function parseCheck(raw: unknown, i: number, source: string): Check {
       return {
         type,
         golden: parsedGolden,
+        ...(kind !== undefined ? { kind: kind as ReviewCaseKind } : {}),
         ...(profile !== undefined ? { profile: profile as ReviewProfileName } : {}),
         ...(minRecall !== undefined ? { min_recall: minRecall } : {}),
         ...(judgeModel !== undefined ? { judge_model: judgeModel } : {}),

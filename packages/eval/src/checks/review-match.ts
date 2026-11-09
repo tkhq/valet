@@ -153,18 +153,8 @@ export function buildReviewMatcher(opts: ReviewMatcherOptions = {}): ReviewMatch
     const review = submittedReview(trajectory);
     if (review === undefined) return failed("the reviewer did not submit a review (no submit_review call)");
 
-    let llm = opts.llm;
-    if (llm === undefined) {
-      const spec = check.judge_model ?? (typeof opts.model === "string" ? opts.model : undefined);
-      const model =
-        spec !== undefined
-          ? resolveModelId(spec)
-          : typeof opts.model === "object"
-            ? opts.model
-            : resolveModelId(DEFAULT_REVIEW_JUDGE_MODEL);
-      if (!model) return failed(`unknown judge model \`${spec ?? DEFAULT_REVIEW_JUDGE_MODEL}\`. Use provider/model form.`);
-      llm = opts.gateway !== undefined ? modelLlm(viaGateway(model, opts.gateway), opts.gateway.apiKey) : modelLlm(model, opts.apiKey);
-    }
+    const llm = judgeLlm(check, opts);
+    if (typeof llm === "string") return failed(llm);
 
     let scored: ReviewScore;
     try {
@@ -205,10 +195,37 @@ export function buildReviewMatcher(opts: ReviewMatcherOptions = {}): ReviewMatch
         candidates: scored.candidates,
         ...(scored.judgeErrors > 0 ? { judge_errors: scored.judgeErrors } : {}),
         ...draftMetrics,
+        ...crossRepoMetrics(check, profile, scored.matchedGolden, "cross:"),
         ...referenceMetrics(check, profile),
       },
     };
   };
+}
+
+/** The judge for a check, or an error message when its model is unknown. */
+function judgeLlm(check: ReviewMatchCheck, opts: ReviewMatcherOptions): ReviewLlm | string {
+  if (opts.llm !== undefined) return opts.llm;
+  const spec = check.judge_model ?? (typeof opts.model === "string" ? opts.model : undefined);
+  const model =
+    spec !== undefined ? resolveModelId(spec) : typeof opts.model === "object" ? opts.model : resolveModelId(DEFAULT_REVIEW_JUDGE_MODEL);
+  if (!model) return `unknown judge model \`${spec ?? DEFAULT_REVIEW_JUDGE_MODEL}\`. Use provider/model form.`;
+  return opts.gateway !== undefined ? modelLlm(viaGateway(model, opts.gateway), opts.gateway.apiKey) : modelLlm(model, opts.apiKey);
+}
+
+/**
+ * Score another tool's review comments against a case's golden comments,
+ * with the same extract, dedup and judge steps. Importers use it to fill a
+ * case's `reference` for tools Martian did not publish.
+ */
+export async function scoreReviewText(
+  check: ReviewMatchCheck,
+  commentText: string,
+  opts: ReviewMatcherOptions = {},
+): Promise<{ matched: number[]; fp: number; candidates: number }> {
+  const llm = judgeLlm(check, opts);
+  if (typeof llm === "string") throw new Error(llm);
+  const scored = await scoreReview(llm, check, commentText);
+  return { matched: scored.matchedGolden, fp: scored.fp, candidates: scored.candidates };
 }
 
 interface ReviewScore {
@@ -284,8 +301,18 @@ function referenceMetrics(check: ReviewMatchCheck, profile: ReviewProfile): Reco
     out[`ref:${tool}:tp`] = m.tp;
     out[`ref:${tool}:fp`] = m.fp;
     out[`ref:${tool}:fn`] = m.fn;
+    Object.assign(out, crossRepoMetrics(check, profile, ref.matched, `ref:${tool}:cross_`));
   }
   return out;
+}
+
+/** Found and missed cross-repo golden comments in the profile, as `<prefix>tp` and `<prefix>fn`. Empty when the case has none. */
+function crossRepoMetrics(check: ReviewMatchCheck, profile: ReviewProfile, matchedGolden: number[], prefix: string): Record<string, number> {
+  const cats = REVIEW_PROFILE_CATEGORIES[profile];
+  const cross = check.golden.flatMap((g, i) => (g.cross_repo === true && cats.has(g.category) ? [i] : []));
+  if (cross.length === 0) return {};
+  const tp = cross.filter((i) => matchedGolden.includes(i)).length;
+  return { [`${prefix}tp`]: tp, [`${prefix}fn`]: cross.length - tp };
 }
 
 // Replacer functions: a `$&` or `$'` inside review text must stay literal.
