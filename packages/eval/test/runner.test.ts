@@ -5,7 +5,7 @@ import {
   fauxToolCall,
   registerFauxProvider,
 } from "@valet/engine/test-helpers";
-import { interpolateTurnContent, runCase } from "../src/index.js";
+import { interpolateTurnContent, runCase, runChecks } from "../src/index.js";
 import type { EvalCase } from "../src/index.js";
 
 function modelOf(faux: ReturnType<typeof registerFauxProvider>): ReturnType<typeof faux.getModel> {
@@ -227,6 +227,41 @@ describe("runCase", () => {
     // The parent processed the child.settled signal.
     expect(result.trajectory.finalOutput).toBe("the child reported 4");
 
+    faux.unregister();
+  });
+
+  it("orchestrator case: the parent cites what a child cited through child_read", async () => {
+    const faux = registerFauxProvider({ provider: "eval-run-child-sources" });
+    const textOf = (content: unknown): string => typeof content === "string" ? content : Array.isArray(content)
+      ? content.map((b) => typeof b === "object" && b !== null && "text" in b ? String(b.text) : "").join("") : "";
+    const route = (context: { messages: Array<{ role: string; content: unknown }> }) => {
+      const last = textOf(context.messages.at(-1)?.content);
+      if (last.includes("# child:")) return fauxAssistantMessage("It renews March 3 [s1].");
+      if (last.includes("renewal-task")) return fauxAssistantMessage([fauxToolCall("write", { path: "/workspace/facts.txt", content: "Contract renews March 3.\n" }, { id: "w1" })], { stopReason: "toolUse" });
+      if (last.includes("wrote /workspace/facts.txt")) return fauxAssistantMessage([fauxToolCall("read", { path: "/workspace/facts.txt" }, { id: "r1" })], { stopReason: "toolUse" });
+      if (last.includes("Contract renews March 3.")) return fauxAssistantMessage("The contract renews March 3 [s1].");
+      const child = /child_session_id="([^"]+)"/.exec(last)?.[1];
+      if (last.includes("child_settled") && child) return fauxAssistantMessage([fauxToolCall("child_read", { child_session_id: child }, { id: "cr1" })], { stopReason: "toolUse" });
+      if (last.includes("spawned child session")) return fauxAssistantMessage("child dispatched");
+      return fauxAssistantMessage([fauxToolCall("task", { prompt: "renewal-task: find the renewal date" }, { id: "spawn1" })], { stopReason: "toolUse" });
+    };
+    faux.setResponses(Array.from({ length: 20 }, () => route));
+
+    const result = await runCase(
+      makeCase({ session_type: "orchestrator", turns: [{ role: "user", content: "delegate this" }] }),
+      { model: modelOf(faux) },
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.outcome).toBe("completed");
+    const read = result.trajectory.toolCalls.find((c) => c.toolName === "child_read");
+    const text = JSON.stringify(read?.result);
+    expect(text).toContain("The contract renews March 3 [child s1].");
+    expect(text).toContain("[s1] /workspace/facts.txt (child s1");
+    expect(text).toContain("/threads/");
+    expect(result.trajectory.finalOutput).toBe("It renews March 3 [s1].");
+    const [check] = await runChecks([{ type: "citation_validity" }], result.trajectory);
+    expect(check?.pass).toBe(true);
     faux.unregister();
   });
 

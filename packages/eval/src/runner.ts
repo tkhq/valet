@@ -20,6 +20,7 @@ import {
   VirtualSandboxProvider,
   builtinTools,
   resolveModelId,
+  type ChildReader,
   type ChildSpawner,
   type Model,
   type Principal,
@@ -29,6 +30,7 @@ import {
   type ToolDef,
   type ValetPlugin,
 } from "@valet/engine";
+import { childCitationNote, markForeignCitations } from "@valet/shared";
 import { gatewayModelResolver, viaGateway, type LlmGateway } from "./gateway.js";
 import { buildRealCatalogTools } from "./integration.js";
 import { EvalMemoryStore, buildEvalMemoryTools } from "./memory-tools.js";
@@ -283,6 +285,13 @@ async function runCaseInner(evalCase: EvalCase, opts: RunnerOptions): Promise<Ca
     return { childSessionId: child.id, queueItemId: receipt.queueItemId };
   };
 
+  // Mirrors the api's buildChildReader: only this run's children, default thread.
+  const childReader: ChildReader = async (req, ctx) => {
+    const child = children.find((c) => c.session.id === req.childSessionId && ctx.parentSessionId === session.id);
+    if (!child) return null;
+    return store.getEntries(child.session.id, child.session.thread().id, { limit: req.limit ?? 30, includeCompacted: true });
+  };
+
   // Restriction applies across builtins and custom tools alike; the engine
   // assembles `session.builtinTools + options.tools`.
   const allTools = [...builtinTools, ...customTools];
@@ -325,7 +334,7 @@ async function runCaseInner(evalCase: EvalCase, opts: RunnerOptions): Promise<Ca
         }
       : {}),
     systemPrompt: opts.systemPrompt ?? (isOrchestrator ? EVAL_PERSONA : undefined),
-    ...(isOrchestrator ? { toolConfig: { childSpawner } } : {}),
+    ...(isOrchestrator ? { toolConfig: { childSpawner, childReader } } : {}),
     // Evals are unattended, but retries would blur cost/duration numbers —
     // measure the single attempt.
     turnRetry: { maxAttempts: 1 },
@@ -370,10 +379,11 @@ async function runCaseInner(evalCase: EvalCase, opts: RunnerOptions): Promise<Ca
         const res = await next.session.thread().awaitResult(next.queueItemId, { timeoutMs: remaining() });
         next.settledAt = Date.now();
         childOutcome = res.outcome;
+        // Same citation marking as the api's resultBody, without its ceiling.
         body =
           res.outcome === "failed" || res.outcome === "aborted"
-            ? (res.error ?? res.text ?? `child submission ${res.outcome}`)
-            : (res.text ?? "");
+            ? markForeignCitations(res.error ?? res.text ?? `child submission ${res.outcome}`, "child")
+            : markForeignCitations(res.text ?? "", "child") + childCitationNote(res.text ?? "", next.session.id);
       } catch (err) {
         if (err instanceof TimeoutError) {
           outcome = "timeout";

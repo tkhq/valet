@@ -49,6 +49,7 @@ describe("citation cases", () => {
     const ids = cases.map((c) => c.id).sort();
     expect(ids).toEqual([
       "browser-source-citations",
+      "child-source-citations",
       "drive-source-citations",
       "github-source-citations",
       "gmail-source-citations",
