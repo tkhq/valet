@@ -262,20 +262,67 @@ export function normalizeGatePath(path: string, cwd: string | undefined): string
   return "/" + parts.join("/");
 }
 
+/** Most lines one `read` result holds. */
+export const READ_MAX_LINES = 2_000;
+/** Most characters one `read` result holds, about 25k tokens. */
+export const READ_MAX_CHARS = 100_000;
+
 export const readTool = defineTool({
   name: "read",
   intent: "exempt",
-  description: "Read the contents of a file from the sandbox.",
-  parameters: Type.Object({ path: Type.String() }),
+  description:
+    `Read a file from the sandbox. A result holds at most ${READ_MAX_LINES} lines and ${READ_MAX_CHARS} characters. ` +
+    "When a file is longer, the result ends with the next offset; read again with it to continue.",
+  parameters: Type.Object({
+    path: Type.String(),
+    offset: Type.Optional(Type.Integer({ minimum: 1, description: "First line to read, 1-based. Default 1." })),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: READ_MAX_LINES, description: `Most lines to read. Default and maximum ${READ_MAX_LINES}.` })),
+  }),
   concurrencySafe: true,
   execute: async (args, ctx) => {
     const path = normalizeGatePath(args.path, ctx.cwd);
     // The git lookup runs beside the read, so it adds no wait to a fast read.
     const [text, origin] = await Promise.all([ctx.sandbox.readFile(args.path), readFileOrigin(ctx.sandbox, args.path, ctx.signal)]);
+    // The staleness gate compares whole files, so a partial read records
+    // the hash of the whole file it came from.
     ctx.fileReads?.record(path, hashFileContent(text));
-    return { text, sources: [fileSource(args.path, text, origin, 1)] };
+    const offset = args.offset ?? 1;
+    const window = readWindow(text, offset, args.limit ?? READ_MAX_LINES);
+    // The source cites the lines the read returned, without the closing note.
+    const lines = window === text ? text : window.replace(/\n?\[read: [^\n]*\]$/, "");
+    return { text: window, sources: [fileSource(args.path, lines, origin, offset)] };
   },
 });
+
+/**
+ * The lines of `text` from `offset` (1-based), at most `limit` lines and
+ * `READ_MAX_CHARS` characters. A window that stops before the end of the
+ * file ends with a note naming the next offset. A whole small file comes
+ * back unchanged.
+ */
+export function readWindow(text: string, offset: number, limit: number): string {
+  const lines = text.split("\n");
+  // A trailing newline ends the last line; it does not start another.
+  const total = text.endsWith("\n") ? lines.length - 1 : lines.length;
+  if (offset === 1 && limit >= total && text.length <= READ_MAX_CHARS) return text;
+  if (offset > Math.max(total, 1)) return `[read: line ${offset} is past the end of the file, which has ${total} lines]`;
+  const start = offset - 1;
+  let end = Math.min(total, start + limit);
+  let chars = 0;
+  for (let i = start; i < end; i++) {
+    chars += lines[i]!.length + 1;
+    if (chars > READ_MAX_CHARS) {
+      end = Math.max(i, start + 1);
+      break;
+    }
+  }
+  let body = lines.slice(start, end).join("\n");
+  if (body.length > READ_MAX_CHARS) body = body.slice(0, READ_MAX_CHARS);
+  if (end >= total && start === 0) return body;
+  return end >= total
+    ? `${body}\n[read: lines ${offset}-${total} of ${total}; end of file]`
+    : `${body}\n[read: lines ${offset}-${end} of ${total}; read again with offset ${end + 1} to continue]`;
+}
 
 export const writeTool = defineTool({
   name: "write",

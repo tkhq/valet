@@ -66,6 +66,21 @@ describe("buildSkillTool", () => {
       return { session, refreshes: () => refreshes };
     }
 
+    it("returns a short note for a body already in context, and the body otherwise", async () => {
+      const deploy = skill("deploy", "Deploy body.");
+      const tool = buildSkillTool([deploy])!;
+      const seen: SkillSource[] = [];
+      const loadedCtx: ToolContext = { ...ctx, skillBodyInContext: (s) => { seen.push(s); return s.name === "deploy"; } };
+
+      const again = await tool.execute({ name: "deploy" }, loadedCtx);
+      expect(again.text).toContain("[skill_already_loaded]");
+      expect(again.text).not.toContain("Deploy body.");
+      expect(seen).toEqual([deploy]);
+      // A file read and a context without the check always render.
+      expect((await tool.execute({ name: "deploy" }, ctx)).text).toContain("Deploy body.");
+      expect((await tool.execute({ name: "deploy" }, { ...ctx, skillBodyInContext: () => false })).text).toContain("Deploy body.");
+    });
+
     it("describes and serves the session's current skills, not the build list", async () => {
       const { session } = fakeSession([skill("deploy", "Deploy v2."), skill("slides", "Slides body.")]);
       const tool = buildSkillTool([skill("deploy", "Deploy v1.")], () => session);

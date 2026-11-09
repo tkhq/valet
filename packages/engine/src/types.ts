@@ -905,6 +905,12 @@ export interface ToolContext {
   repo?: { url?: string; branch?: string; ref?: string; provider?: string };
   credentials: CredentialProvider;
   sandbox: Sandbox;
+  /**
+   * True when this skill's body, at this version, is already in the
+   * thread's live context from an earlier skill read: it is not covered by
+   * a compaction and was not elided. Absent on a context built by hand.
+   */
+  skillBodyInContext?: (skill: SkillSource) => boolean;
   /** Record a model-tool skill invocation in the current thread. */
   recordSkillInvocation?: (
     skill: SkillSource,

@@ -1519,6 +1519,15 @@ export class Thread {
     }
   }
 
+  /** Whether a skill read already put this skill's body, at this version, in live context. */
+  private skillBodyInContext(skill: SkillSource): boolean {
+    const probe = this.buildSkillInvocationFact(skill, "model_tool", "", null, "probe");
+    for (const fact of this.activeSkillInvocations.values()) {
+      if (fact.path === "model_tool" && fact.skillKey === probe.skillKey && fact.contentSha === probe.contentSha) return true;
+    }
+    return false;
+  }
+
   private async recordModelToolSkillInvocation(
     skill: SkillSource,
     path: "model_tool" | "file_read" | "script_run",
@@ -7269,6 +7278,7 @@ export class Thread {
         ...(this.runningItem ? { queueItemId: this.runningItem.id } : {}),
       }),
       sandbox: session.sandbox,
+      skillBodyInContext: (skill) => this.skillBodyInContext(skill),
       recordSkillInvocation: (skill, path, injectedText) =>
         this.recordModelToolSkillInvocation(skill, path, injectedText, toolCallId),
       fileReads: {

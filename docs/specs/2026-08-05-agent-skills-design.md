@@ -76,6 +76,7 @@ Skills use progressive disclosure, as the spec describes:
 1. The `skill` tool's description carries the name and the one-line description of every installed skill. That is what every turn pays for.
 2. The model calls `skill` with a name, and the tool returns that skill's markdown body.
 3. The body stays in context: `"skill"` is in `DEFAULT_PROTECTED_TOOLS` and the ToolDef sets `protectedFromPruning`, so compaction cannot drop the instructions the turn is following.
+4. A body read loads once per context (2026-11-09). When the same skill at the same `contentSha` is already in live context, the tool returns `[skill_already_loaded]` instead of the body. The engine answers through `ToolContext.skillBodyInContext`, which checks the thread's active skill invocations: reads that no compaction covers and no prune elided. A templated skill, a call with `args`, and a path read always render. Before this change, the tool told the model to read a skill before the first use of its integration in every turn, and each protected copy stayed in context; the workflow skill alone is about 9,600 tokens.
 
 `packages/api/src/plugins/skill-tool.ts` builds the tool. `pluginSessionExtras` appends it to the session's tools whenever the assembled set holds at least one skill.
 
