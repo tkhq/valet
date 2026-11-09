@@ -101,14 +101,17 @@ export function lineCount(text: string): number {
 export function anchorProblems(
   findings: Finding[],
   lineCounts: ReadonlyMap<string, number>,
-  /** Line counts in the base file, for findings on deleted code (side LEFT). Unset: LEFT findings are not checked. */
+  /**
+   * Line counts in the base file, for findings on deleted code (side LEFT).
+   * Unset: LEFT findings are checked against `lineCounts`, for a caller that
+   * splits findings by side and passes base counts for the LEFT ones.
+   */
   baseLineCounts?: ReadonlyMap<string, number>,
 ): { index: number; problem: string }[] {
   const problems: { index: number; problem: string }[] = [];
   findings.forEach((f, index) => {
     if (f.side === "LEFT") {
-      if (baseLineCounts === undefined) return;
-      const n = baseLineCounts.get(f.path);
+      const n = (baseLineCounts ?? lineCounts).get(f.path);
       if (n === undefined) {
         problems.push({ index, problem: `${f.path} does not exist in the base commit, so a LEFT finding cannot anchor there. Use side RIGHT with a HEAD line.` });
       } else if (f.line > n) {

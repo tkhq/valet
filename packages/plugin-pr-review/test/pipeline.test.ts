@@ -301,8 +301,8 @@ describe("findings on deleted code", () => {
     expect(anchorProblems([at(63, "LEFT"), at(63)], head, base).map((p) => p.index)).toEqual([1]);
     expect(anchorProblems([at(80, "LEFT")], head, base)[0].problem).toContain("70 lines in the base commit");
     expect(anchorProblems([{ ...at(5, "LEFT"), path: "new.ts" }], head, base)[0].problem).toContain("does not exist in the base commit");
-    // Without base counts a LEFT finding is not checked.
-    expect(anchorProblems([at(80, "LEFT")], head)).toEqual([]);
+    // Without base counts, LEFT findings are checked against the counts given.
+    expect(anchorProblems([at(80, "LEFT")], base)[0].problem).toContain("70 lines in the base commit");
     expect(mergeFindings([[at(5)], [at(5, "LEFT"), at(6)]]).map((f) => f.side ?? "RIGHT")).toEqual(["RIGHT", "LEFT"]);
   });
 
