@@ -654,6 +654,8 @@ export class Thread {
   private overflowRetryInProgress = false;
   /** The prompt message of a `FRESH_CONTEXT_KEY` turn: requests send it and the messages after it. */
   private freshContextStart: AgentMessage | undefined;
+  /** The skill reads in live context when a fresh-context turn started. Its requests leave them out. */
+  private skillReadsBeforeFreshContext: ReadonlySet<string> | undefined;
   /** The latest turn request, as sent. `scoped` marks a fresh-context request, which left history out. */
   private lastModelRequest: { model: Model<Api>; context: TranscriptContext; options?: SimpleStreamOptions; scoped: boolean } | undefined;
   /** The response to `lastModelRequest`, once its turn finishes. */
@@ -1519,10 +1521,15 @@ export class Thread {
     }
   }
 
-  /** Whether a skill read already put this skill's body, at this version, in live context. */
+  /**
+   * Whether a skill read already put this skill's body, at this version, in
+   * the context the model receives. A fresh-context turn sends only its own
+   * messages, so a read from before that turn does not count.
+   */
   private skillBodyInContext(skill: SkillSource): boolean {
     const probe = this.buildSkillInvocationFact(skill, "model_tool", "", null, "probe");
     for (const fact of this.activeSkillInvocations.values()) {
+      if (this.skillReadsBeforeFreshContext?.has(fact.id)) continue;
       if (fact.path === "model_tool" && fact.skillKey === probe.skillKey && fact.contentSha === probe.contentSha) return true;
     }
     return false;
@@ -5457,10 +5464,12 @@ export class Thread {
     const prompt: AgentMessage = { role: "user", content: userContentBlocks(text, attachments, sender, time), timestamp: Date.now() };
     // Retries in this call continue the same transcript, so they keep the scope.
     this.freshContextStart = freshContext ? prompt : undefined;
+    this.skillReadsBeforeFreshContext = freshContext ? new Set(this.activeSkillInvocations.keys()) : undefined;
     try {
       await this.runAgentFrom(prompt);
     } finally {
       this.freshContextStart = undefined;
+      this.skillReadsBeforeFreshContext = undefined;
     }
   }
 
