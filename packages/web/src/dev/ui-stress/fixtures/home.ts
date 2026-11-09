@@ -34,12 +34,6 @@ export const stressHomeTasks: HomeTasksResponse = {
       plan: { done: 0, total: 20, current: words("Read every alert since midnight and group them by service", 200) } }),
     item(7, { state: "working", title: "Draft the weekly update", workspace: personal }),
   ],
-  updates: [
-    item(8, { state: "waiting", unread: true, title: "Calendar cleanup", workspace: personal,
-      detail: "I moved the design review to Thursday and declined the duplicate invite." }),
-    item(9, { state: "waiting", title: "Vendor contract summary", workspace: team(0), detail: words("The contract renews automatically each year unless you cancel", 600) }),
-    item(10, { state: "waiting", title: "سجل التغييرات للإصدار التالي", workspace: team(1), detail: "تمت كتابة المسودة وهي جاهزة للمراجعة." }),
-  ],
   finished: [
     item(11, { state: "done", title: "Summarize the customer call", workspace: personal, homeTaskId: "ht_11", updatedAt: NOW - 2 * HOUR }),
     item(12, { state: "done", title: "Open the pull request for the drawer", workspace: team(0), homeTaskId: "ht_12", plan: { done: 4, total: 4 },

@@ -684,6 +684,11 @@ WHERE r.status <> 'merged' ORDER BY l.org_id, l.subject_type, l.subject_id, l.di
 )` },
   { describe: "home_tasks_user", probe: { kind: "index", index: "home_tasks_user" }, sql: 'CREATE INDEX IF NOT EXISTS "home_tasks_user" ON "home_tasks" ("user_id", "created_at")' },
   { describe: "home_tasks_thread", probe: { kind: "index", index: "home_tasks_thread" }, sql: 'CREATE INDEX IF NOT EXISTS "home_tasks_thread" ON "home_tasks" ("session_id", "thread_id")' },
+  { describe: "home task dismissals", probe: { kind: "table", table: "home_task_dismissals" }, sql: `CREATE TABLE IF NOT EXISTS "home_task_dismissals" (
+  "user_id" text NOT NULL, "org_id" text NOT NULL, "session_id" text NOT NULL, "thread_id" text NOT NULL,
+  "dismissed_at" bigint NOT NULL,
+  PRIMARY KEY ("user_id", "session_id", "thread_id")
+)` },
   // The thread that opened the pull request. A delegating thread's copy names
   // its child here; rows recorded before this column stay null.
   { describe: "thread_pull_requests.opened_session_id column", probe: { kind: "column", table: "thread_pull_requests", column: "opened_session_id" }, sql: 'ALTER TABLE "thread_pull_requests" ADD COLUMN IF NOT EXISTS "opened_session_id" text' },

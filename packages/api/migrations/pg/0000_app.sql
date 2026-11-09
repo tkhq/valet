@@ -2937,6 +2937,12 @@ CREATE TABLE IF NOT EXISTS "home_tasks" (
 CREATE INDEX IF NOT EXISTS "home_tasks_user" ON "home_tasks" ("user_id", "created_at");
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "home_tasks_thread" ON "home_tasks" ("session_id", "thread_id");
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "home_task_dismissals" (
+  "user_id" text NOT NULL, "org_id" text NOT NULL, "session_id" text NOT NULL, "thread_id" text NOT NULL,
+  "dismissed_at" bigint NOT NULL,
+  PRIMARY KEY ("user_id", "session_id", "thread_id")
+);
 
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "channel_progress_deliveries" (

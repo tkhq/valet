@@ -1,15 +1,16 @@
 /**
  * Tools the personal assistant uses from the home conversation to work
  * across the person's workspaces: start a task in a workspace, list what is
- * in flight, and send a follow-up into a task it started.
+ * in flight, send a follow-up into a task it started, and cross a task out
+ * when the person says it is done.
  *
- * They act for the person, so `start_task` and `message_task` run only on a
- * turn the person wrote themself (`interactiveActor`), never on a background signal, a
+ * They act for the person, so `start_task`, `message_task`, and
+ * `mark_task_done` run only on a turn the person wrote themself (`interactiveActor`), never on a background signal, a
  * routine, a workflow step, or another sender's message.
  */
 import { Type, type TSchema } from "typebox";
 import type { ToolContext, ToolDef } from "@valet/engine";
-import { describeHomeTasks, homeWorkspaces, listHomeTasks, matchWorkspace, messageHomeTask, readHomeTask, startHomeTask, userDisplayName, type HomeDeps } from "./service.js";
+import { describeHomeTasks, dismissHomeTask, homeWorkspaces, listHomeTasks, matchWorkspace, messageHomeTask, readHomeTask, startHomeTask, userDisplayName, type HomeDeps } from "./service.js";
 
 function defineTool<T extends TSchema>(def: ToolDef<T>): ToolDef<T> {
   return def;
@@ -67,7 +68,7 @@ export function buildHomeTools(getDeps: () => HomeDeps): ToolDef[] {
     ownerOnly: true,
     concurrencySafe: true,
     description:
-      "List what is in flight across all of the person's workspaces: work that needs them, work in progress (with plan progress), replies they have not answered, and finished tasks they started from here. Also lists their workspaces.",
+      "List what is in flight across all of the person's workspaces: work that needs them, work in progress (with plan progress), and finished tasks they started from here that they have not marked done. Also lists their workspaces.",
     parameters: Type.Object({}),
     execute: async (_args, ctx) => {
       const person = personOf(ctx, false);
@@ -139,5 +140,28 @@ export function buildHomeTools(getDeps: () => HomeDeps): ToolDef[] {
     },
   });
 
-  return [startTask, listTasks, messageTask, showBrief, readTask];
+  const markTaskDone = defineTool({
+    name: "mark_task_done",
+    ownerOnly: true,
+    description:
+      "Cross a task out of the person's Tasks list, by its thread id from list_tasks. Only the person decides that a task is done: " +
+      "call this only after they say so in their own message, for example a yes to \"Mark it done?\". It does not stop work that is still running.",
+    parameters: Type.Object({ thread_id: Type.String({ description: "The task's thread id from list_tasks." }) }),
+    execute: async (args, ctx) => {
+      const person = personOf(ctx, true);
+      if (typeof person === "string") return { text: `[mark_task_done_refused] ${person}`, ok: false };
+      const deps = getDeps();
+      try {
+        const tasks = await listHomeTasks(deps, person);
+        const item = [...tasks.needsYou, ...tasks.working, ...tasks.finished].find((row) => row.threadId === args.thread_id);
+        if (!item) return { text: "[mark_task_done_error] No task with that thread id is in Tasks. Call list_tasks to find the task.", ok: false };
+        await dismissHomeTask(deps.db, person, { sessionId: item.sessionId, threadId: item.threadId });
+        return { text: JSON.stringify({ done: item.title, note: "Crossed out of Tasks. Confirm in a few words." }) };
+      } catch (err) {
+        return { text: `[mark_task_done_error] ${errorText(err)}`, ok: false };
+      }
+    },
+  });
+
+  return [startTask, listTasks, messageTask, showBrief, readTask, markTaskDone];
 }

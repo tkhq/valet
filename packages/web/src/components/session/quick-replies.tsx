@@ -5,7 +5,7 @@ import { messageCopyText } from "./message-item";
 import { useSendAsPerson } from "./send-as-person";
 
 /** Words that open a question a person can answer with yes or no. */
-const YES_NO_OPENER = /^(should|shall|do|does|did|can|could|would|will|want|wanna|is|are|was|were|has|have|ok|okay|ready|good to|sound good|send|post|merge|publish|ship|deploy|go ahead|proceed|continue|approve|keep|use|start|schedule|book|add|remove|delete|close|open|move|try|draft|create)\b/i;
+const YES_NO_OPENER = /^(should|shall|do|does|did|can|could|would|will|want|wanna|is|are|was|were|has|have|ok|okay|ready|good to|sound good|send|post|merge|publish|ship|deploy|go ahead|proceed|continue|approve|keep|use|start|schedule|book|add|remove|delete|close|open|move|try|draft|create|mark)\b/i;
 
 /**
  * The yes-or-no question that closes the newest message, when Valet asked

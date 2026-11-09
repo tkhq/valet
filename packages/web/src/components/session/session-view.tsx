@@ -555,7 +555,8 @@ export function SessionView({
           )}
           {!pendingGate && resolvedGate && <ResolvedGateNotice label={resolvedGate.label} title={resolvedGate.gate.title} className="mx-auto w-full max-w-[52rem]" />}
           <ChildGateCards children={childWork} threadId={effectiveThreadId} onOpenChild={onOpenChild} />
-          {mobile && <QuickReplies sessionId={sessionId} threadId={effectiveThreadId} messages={stream.messages.filter(m => m.threadId === effectiveThreadId)}
+          {/* Home (the only view with replies) shows them on every screen size, so "Mark it done?" is one tap on desktop too. */}
+          {(mobile || enableReplies) && <QuickReplies sessionId={sessionId} threadId={effectiveThreadId} messages={stream.messages.filter(m => m.threadId === effectiveThreadId)}
             disabled={Boolean(pendingGate) || threadStatus.status !== "idle" || Boolean(session.data?.readOnlyReason)} />}
           <div className={mobile && pendingGate ? "hidden" : "contents"} aria-hidden={mobile && pendingGate ? true : undefined}>{composerAccessory}</div>
           <TypingLine viewers={viewers} />

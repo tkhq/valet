@@ -3314,6 +3314,18 @@ export const homeTasks = pgTable("home_tasks", {
   doneAt: bigint("done_at", { mode: "number" }),
 }, (t) => [index("home_tasks_user").on(t.userId, t.createdAt), index("home_tasks_thread").on(t.sessionId, t.threadId)]);
 
+/**
+ * A thread the person crossed out of Tasks. It stays out until it next needs
+ * them: a question, approval, or failure newer than `dismissedAt`.
+ */
+export const homeTaskDismissals = pgTable("home_task_dismissals", {
+  userId: text("user_id").notNull(),
+  orgId: text("org_id").notNull(),
+  sessionId: text("session_id").notNull(),
+  threadId: text("thread_id").notNull(),
+  dismissedAt: bigint("dismissed_at", { mode: "number" }).notNull(),
+}, (t) => [primaryKey({ columns: [t.userId, t.sessionId, t.threadId] })]);
+
 /** Durable progress intent; create_started survives an uncertain provider outcome. */
 export const channelProgressDeliveries = pgTable("channel_progress_deliveries", {
   id: text("id").primaryKey(),

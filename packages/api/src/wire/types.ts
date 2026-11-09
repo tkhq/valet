@@ -6847,8 +6847,8 @@ export interface HomeTaskItem {
   threadId: string;
   title: string;
   workspace: HomeWorkspaceRef;
-  /** `waiting`: Valet replied and the person has not answered. `done`: a task
-   * started from home whose first run ended and that is not marked done. */
+  /** `waiting`: Valet asked the person a question. `done`: a task started
+   * from home whose run ended and that is not marked done. */
   state: "needs_you" | "working" | "failed" | "waiting" | "done";
   /** Valet's question, or the last sentence of its reply, as plain text. */
   detail?: string;
@@ -6878,8 +6878,13 @@ export interface HomeTaskOutput {
 export interface HomeTasksResponse {
   needsYou: HomeTaskItem[];
   working: HomeTaskItem[];
-  updates: HomeTaskItem[];
   finished: HomeTaskItem[];
+}
+
+/** `POST /api/home/tasks/dismiss`: cross a thread out of Tasks. */
+export interface DismissHomeTaskRequest {
+  sessionId: string;
+  threadId: string;
 }
 
 // ── In-app tour (`/api/tutorial`) ──

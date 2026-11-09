@@ -21,7 +21,7 @@ access rules.
 The mobile-only boundary applies to navigation. It does not apply
 to conversation cards, approval previews, durable plans, measured thinking
 time, or agent processing feedback. These are shared thread features.
-Quick replies are shown only in the mobile layout.
+Quick replies are shown in the mobile layout and in Home on every screen size.
 
 The mobile conversation shell is shared by Home, `/chat`, `/threads/:id`,
 and `/sessions/:id`. Opening a team thread from the drawer must keep the
@@ -43,9 +43,21 @@ Home uses the `home` thread in the person's personal assistant session.
 Changing the workspace switcher does not change this conversation. It is
 private to that person; it is not a team chat.
 
-Tasks collects work across accessible workspaces. Needs you appears before
-working tasks, unread replies, and finished tasks started from Home. Each
-row names its workspace and opens its thread. Task rows can show plan
+Tasks collects work across accessible workspaces, in three sections:
+Waiting on you, In progress, and Done. Done holds tasks started from Home
+that finished and that the person has not marked done. It starts collapsed.
+An unread reply without a question is not a task, so Tasks does not list
+it; the thread list shows it. Each row names its workspace and opens its
+thread.
+
+Only the person marks a task done, as in Claude Duet. Every row has a Mark
+done control, so the person can cross out a task that is done or no longer
+relevant. Crossing out writes a `home_task_dismissals` row and marks a saved
+Home task done. It does not stop running work. The thread stays out of Tasks
+until a question, approval, or failure newer than the cross-out needs the
+person. When a Home task finishes, Valet asks "Mark it done?" in Home. The
+`mark_task_done` tool crosses the task out, and it runs only on a turn the
+person wrote. Task rows can show plan
 progress, pull requests, and shared files. Approvals live in Tasks and have
 a compact shortcut above the Home composer when action is needed. On a phone,
 the shortcut shows only approvals from the person's personal workspace. Team and org
@@ -138,8 +150,9 @@ both people are viewing. Private Home does not expose teammate presence.
 ## Storage and verification
 
 `home_tasks` records the requesting user, organization, workspace owner,
-session, thread, and report state. The Postgres schema and startup repairs
-create the table and indexes. Plans and thinking timing use engine metadata.
+session, thread, and report state. `home_task_dismissals` records when each
+person crossed a thread out of Tasks. The Postgres schema and startup repairs
+create the tables and indexes. Plans and thinking timing use engine metadata.
 
 Regression tests cover the exact media-query breakpoint, switching back to
 desktop, saved-task audience changes, active-work paging, requester versus

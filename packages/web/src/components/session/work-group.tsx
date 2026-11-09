@@ -141,6 +141,7 @@ const BUILTIN: Record<string, [present: string, past: string]> = {
   read_task: ["Reading a task", "Read a task"],
   start_task: ["Starting a task", "Started a task"],
   message_task: ["Messaging a task", "Messaged a task"],
+  mark_task_done: ["Marking a task done", "Marked a task done"],
   show_brief: ["Showing the brief", "Showed the brief"],
   show_widget: ["Showing a widget", "Showed a widget"],
   mem_copy_to_team: ["Copying memory to the team", "Copied memory to the team"],
@@ -182,7 +183,7 @@ const BUILTIN: Record<string, [present: string, past: string]> = {
 const NO_TARGET = new Set([
   "list_tools", "focus_tools", "thread_read", "update_plan", "wakeup_list", "switch_model", "ask_question",
   "ask_approval", "hold_sandbox", "list_threads", "list_linked_threads", "message_linked_thread", "list_tasks", "read_task",
-  "start_task", "message_task", "show_brief", "show_widget", "process_read", "wait_for_event", "watch", "call_tool", "skill_script",
+  "start_task", "message_task", "mark_task_done", "show_brief", "show_widget", "process_read", "wait_for_event", "watch", "call_tool", "skill_script",
   "mem_copy_to_team", "mem_copy_from_team", "save_principle", "artifact_copy_to_team", "file_attach",
 ]);
 
