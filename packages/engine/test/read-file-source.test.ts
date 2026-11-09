@@ -42,7 +42,7 @@ describe("read tool sources", () => {
     const box = sandbox(async (command, opts) => {
       commands.push(command);
       expect(opts?.timeout).toBeGreaterThan(0);
-      return gitAnswer(["/workspace/app", SHA, "https://x-access-token:secret@github.com/acme/app.git", "clean", "pushed"])(command);
+      return gitAnswer(["/workspace/app", "src/", SHA, "https://x-access-token:secret@github.com/acme/app.git", "clean", "pushed"])(command);
     });
     const result = await readTool.execute({ path: "src/a b.ts" }, ctx(box));
     expect(result.text).toBe(TEXT);
@@ -54,14 +54,17 @@ describe("read tool sources", () => {
       location: "L1-L2 at 3f2a1c9",
     }]);
     expect(commands).toHaveLength(1);
-    expect(commands[0]).toContain("cd '/workspace/app/src'");
-    expect(commands[0]).toContain("'/workspace/app/src/a b.ts'");
+    // The exec gets the path the tool got, never the host's cwd, and reads
+    // a repo another user owns.
+    expect(commands[0]).toContain("cd 'src' && ");
+    expect(commands[0]).toContain("-- 'a b.ts'");
+    expect(commands[0]).toContain("safe.directory='*'");
     expect(JSON.stringify(result.sources)).not.toContain("secret");
   });
 
   it("keeps the commit in the location and gives no link when the file changed or HEAD is not pushed", async () => {
     for (const [state, pushed] of [["changed", "pushed"], ["clean", ""]]) {
-      const box = sandbox(gitAnswer(["/workspace/app", SHA, "git@github.com:acme/app.git", state!, pushed!]));
+      const box = sandbox(gitAnswer(["/workspace/app", "src/", SHA, "git@github.com:acme/app.git", state!, pushed!]));
       const [source] = (await readTool.execute({ path: "/workspace/app/src/a.ts" }, ctx(box))).sources ?? [];
       expect(source).toEqual({
         service: "sandbox",
@@ -73,13 +76,19 @@ describe("read tool sources", () => {
   });
 
   it("names the repo folder when the remote is not GitHub, and the path alone outside a repo", async () => {
-    const gitlab = sandbox(gitAnswer(["/workspace/app", SHA, "https://gitlab.com/acme/app.git", "clean", "pushed"]));
+    const gitlab = sandbox(gitAnswer(["/workspace/app", "", SHA, "https://gitlab.com/acme/app.git", "clean", "pushed"]));
     const [inRepo] = (await readTool.execute({ path: "README.md" }, ctx(gitlab))).sources ?? [];
     expect(inRepo).toMatchObject({ service: "sandbox", title: "app/README.md", location: "L1-L2 at 3f2a1c9, /workspace/app/README.md" });
     expect(inRepo?.url).toBeUndefined();
     const noGit = sandbox(async () => ({ exitCode: 128, stdout: "", stderr: "not a git repository" }));
     const [outside] = (await readTool.execute({ path: "/tmp/notes.txt" }, ctx(noGit))).sources ?? [];
     expect(outside).toEqual({ service: "sandbox", title: "/tmp/notes.txt", snippet: TEXT, location: "L1-L2" });
+  });
+
+  it("names a relative file by the path the tool got, not the host's working directory", async () => {
+    const noGit = sandbox(async () => ({ exitCode: 128, stdout: "", stderr: "" }));
+    const [source] = (await readTool.execute({ path: "notes.txt" }, { ...ctx(noGit), cwd: "/var/lib/valet/assistants/a1" })).sources ?? [];
+    expect(source).toMatchObject({ service: "sandbox", title: "notes.txt", location: "L1-L2" });
   });
 
   it("still reads the file when git throws", async () => {
@@ -101,13 +110,14 @@ describe("file source helpers", () => {
   });
 
   it("rejects a git answer that is not a root and a commit", async () => {
-    expect(await readFileOrigin(sandbox(gitAnswer(["relative", SHA, "", "clean", ""])), "/a/b")).toBeUndefined();
-    expect(await readFileOrigin(sandbox(gitAnswer(["/a", "HEAD", "", "clean", ""])), "/a/b")).toBeUndefined();
+    expect(await readFileOrigin(sandbox(gitAnswer(["relative", "", SHA, "", "clean", ""])), "/a/b")).toBeUndefined();
+    expect(await readFileOrigin(sandbox(gitAnswer(["/a", "", "HEAD", "", "clean", ""])), "/a/b")).toBeUndefined();
+    expect(await readFileOrigin(sandbox(gitAnswer(["/a", "", SHA, "", "clean", ""])), "/a/")).toBeUndefined();
   });
 
   it("numbers lines from the first line read", () => {
-    const origin = { root: "/r", sha: SHA, github: "acme/app", clean: true, pushed: true };
-    expect(fileSource("/r/a.ts", "x\ny\n", origin, 10)).toMatchObject({ url: `https://github.com/acme/app/blob/${SHA}/a.ts#L10-L11`, location: "L10-L11 at 3f2a1c9" });
+    const origin = { root: "/r", relative: "a.ts", sha: SHA, github: "acme/app", clean: true, pushed: true };
+    expect(fileSource("a.ts", "x\ny\n", origin, 10)).toMatchObject({ url: `https://github.com/acme/app/blob/${SHA}/a.ts#L10-L11`, location: "L10-L11 at 3f2a1c9" });
   });
 
   it("gives an empty file no line range", () => {

@@ -271,9 +271,9 @@ export const readTool = defineTool({
   execute: async (args, ctx) => {
     const path = normalizeGatePath(args.path, ctx.cwd);
     // The git lookup runs beside the read, so it adds no wait to a fast read.
-    const [text, origin] = await Promise.all([ctx.sandbox.readFile(args.path), readFileOrigin(ctx.sandbox, path, ctx.signal)]);
+    const [text, origin] = await Promise.all([ctx.sandbox.readFile(args.path), readFileOrigin(ctx.sandbox, args.path, ctx.signal)]);
     ctx.fileReads?.record(path, hashFileContent(text));
-    return { text, sources: [fileSource(path, text, origin, 1)] };
+    return { text, sources: [fileSource(args.path, text, origin, 1)] };
   },
 });
 
