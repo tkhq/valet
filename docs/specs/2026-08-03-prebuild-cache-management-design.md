@@ -41,7 +41,7 @@ Three distinct things accumulate:
 
 2. **Per-source retention floor.** Keep the newest `N = 2` pushed bakes per source (existing `applyRetention`, both backends) — every source always has a current image plus one rollback.
 
-3. **Global size ceiling on baked images (both backends).** `VALET_PREBUILD_CACHE_BUDGET_GB` (default `20` — modest, local-friendly). After any bake pushes, if the summed size of all pushed bake images exceeds the budget, evict oldest-first until under budget. NEVER evict (a) a source's current (newest pushed) bake, or (b) a bake referenced by a live session (`agent_sessions.bake_id` of an `active`/`hibernated` session). Eviction deletes the image (docker `rmi`; k8s registry tag delete) AND the `bakes` row. If the budget cannot be met without touching protected bakes, stop and log a visible warning — never delete a protected image.
+3. **Global size ceiling on baked images (both backends).** `VALET_PREBUILD_CACHE_BUDGET_GB` (default `20` — modest, local-friendly). After any bake pushes, if the summed size of all pushed bake images exceeds the budget, evict oldest-first until under budget. NEVER evict (a) a source's current (newest pushed) bake, or (b) a bake referenced by a live session (`agent_sessions.bake_id` of an `active`/`hibernated` session that still has a sandbox). A session whose sandbox was reclaimed protects nothing: `agent_sessions.sandbox_reclaimed_at` is set for a reaped hibernated session, and `child_watches.sandbox_reclaimed_at` is set for a settled child. Child sessions stay `active` after they finish, so without this rule their bakes stayed protected forever and filled a deployment's disk (2026-11-09). A reclaimed session's next start resolves the newest bake again. Eviction deletes the image (docker `rmi`; k8s registry tag delete) AND the `bakes` row. If the budget cannot be met without touching protected bakes, stop and log a visible warning — never delete a protected image.
 
 4. **Bake size recorded at push.** New nullable `bakes.size_bytes BIGINT`, set when a bake flips to `pushed` — docker: `docker image inspect --format {{.Size}}`; k8s: sum of registry manifest layer sizes. The ceiling sums this column.
 
@@ -66,7 +66,7 @@ Three distinct things accumulate:
 ### Testing
 
 - **Build-cache prune unit:** `buildCachePruneArgs(10)` → correct argv; docker builder invokes prune after a bake (spy the spawn); make-target smoke (documented, not unit).
-- **Ceiling unit:** over-budget evicts oldest first; NEVER a source's current or a live-session-referenced bake; stops + logs when only protected remain; under-budget no-op; `size_bytes` summed correctly; delegates delete to the backend `RetentionFn`.
+- **Ceiling unit:** over-budget evicts oldest first; NEVER a source's current or a live-session-referenced bake (a session with a reclaimed sandbox does not count); stops + logs when only protected remain; under-budget no-op; `size_bytes` summed correctly; delegates delete to the backend `RetentionFn`.
 - **Size recording:** a pushed docker bake records `size_bytes` from inspect; k8s from the fixture manifest.
 - **Retention floor still holds** alongside the ceiling (N=2 per source).
 - **Chart:** registry-gc CronJob golden (fixed command); both `VALET_PREBUILD_*` budgets plumbed.
