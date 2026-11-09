@@ -78,6 +78,24 @@ describe("PluginThreads.spawnChild", () => {
     expect(spawner.mock.calls[0][0].prepare).toBe(prepare);
   });
 
+  it("hands the delivery's cancel signal to the child spawner, so a cancel stops a spawn still in its prepare step", async () => {
+    const tdb = await freshTestPgDb();
+    const spawner = vi.fn<ChildSpawner>(async (req) => ({ childSessionId: req.sessionId ?? "x", queueItemId: "q-1" }));
+    const cancel = new AbortController();
+    const threads = buildPluginThreads(
+      {
+        db: tdb.appDb,
+        engineStore: new InMemorySessionStore(),
+        childSpawner: spawner,
+        childStopper: vi.fn<ChildStopper>(async () => ({ stopped: 0 })),
+        resolveThread: async () => ({ sessionId: thread.sessionId, threadId: thread.threadId }),
+      },
+      { plugin: reviewer, orgId: "org-1", owner, actorUserId: "user-1", deliveryId: "del-1", cancelChildren: cancel.signal },
+    );
+    await threads.spawnChild(thread, { prompt: "review", repo: "acme/site", ref: "abc123" }, { dispatchId: "review:abc" });
+    expect(spawner.mock.calls[0][1].cancel).toBe(cancel.signal);
+  });
+
   it("returns the existing child on a retry of the same dispatch", async () => {
     const { tdb, spawner, threads } = await setup();
     // The retrying run's delivery is still live.

@@ -258,6 +258,7 @@ export function buildPluginThreads(deps: PluginThreadsDeps, scope: PluginThreads
           unattendedWorkflow: true,
           reportToParent: false,
           pluginDeliveryId: scope.deliveryId,
+          ...(scope.cancelChildren !== undefined ? { cancel: scope.cancelChildren } : {}),
         },
       );
       return stopIfCancelled({ childSessionId: spawned.childSessionId, queueItemId: spawned.queueItemId }, parent);

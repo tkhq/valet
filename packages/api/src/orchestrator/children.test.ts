@@ -62,6 +62,7 @@ import { MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR, DEFAULT_ORG_ACTIVE_SESSION_CEILIN
 import { childWorkspaceCounts, reclaimedActiveChildren } from "../observability/child-lifecycle-metrics.js";
 import { agentSessions, bakes, childEventOutbox, childReplyDeliveries, childWatches, eventReceipts, events, eventDeliveries, eventSubscriptions, eventDropLog, imageSources, sandboxTokens, sessionRepos, teams, teamMembers } from "../schema/index.js";
 import { PendingCapError, ValidationError as EngineValidationError } from "@valet/engine";
+import type { SpawnChildRequest } from "@valet/engine";
 import { isScratchRequestError } from "@valet/shared";
 import { admitSignal, SignalEdgeDeniedError } from "./signals.js";
 import { submitSessionPrompt } from "../routes/messages.js";
@@ -666,6 +667,51 @@ describe("buildChildSpawner", () => {
     expect(await deps.engineStore.getSession(req.sessionId)).toBeNull();
     expect(await deps.db.select().from(agentSessions).where(eq(agentSessions.id, req.sessionId))).toHaveLength(0);
     expect(await deps.db.select().from(childWatches).where(eq(childWatches.childSessionId, req.sessionId))).toHaveLength(0);
+  });
+
+  it("stops a spawn that is cancelled while its prepare step runs, and queues no prompt", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const parent = await deps.engineHost.sessionFor("parent-prepare-cancel", { userId: "local-user", orgId: "local-org", workspace: "/tmp" });
+    const prompts: string[] = [];
+    const original = deps.engineHost.childSessionFor.bind(deps.engineHost);
+    vi.spyOn(deps.engineHost, "childSessionFor").mockImplementation(async (...args) => {
+      const child = await original(...args);
+      const send = child.prompt.bind(child);
+      vi.spyOn(child, "prompt").mockImplementation(async (content, opts) => {
+        prompts.push(String(content));
+        return send(content, opts);
+      });
+      return child;
+    });
+    const cancel = new AbortController();
+    let started!: () => void;
+    const scanning = new Promise<void>((resolve) => { started = resolve; });
+    let ranAfterCancel = false;
+    const spawn = buildChildSpawner(deps, testChildWatcher(deps));
+    const req: SpawnChildRequest = {
+      sessionId: "child-prepare-cancel",
+      prompt: "review",
+      // Blocks until the test cancels, as a long repository scan would.
+      prepare: async (runner, prompt) => {
+        started();
+        await new Promise<void>((resolve) => cancel.signal.addEventListener("abort", () => resolve(), { once: true }));
+        await runner.run("echo late").then(() => { ranAfterCancel = true; }, () => undefined);
+        return prompt;
+      },
+    };
+    const spawned = spawn(req, { parentSessionId: parent.id, parentThreadId: parent.thread("web:default").id, actorUserId: "local-user", owner: { type: "user", id: "local-user" }, cancel: cancel.signal });
+    await scanning;
+    cancel.abort();
+    await expect(spawned).rejects.toMatchObject({ name: "AbortError" });
+    // Let the abandoned prepare step finish its last command attempt.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(prompts).toEqual([]);
+    expect(ranAfterCancel).toBe(false);
+    expect(await deps.engineStore.getSession("child-prepare-cancel")).toBeNull();
+    expect(await deps.db.select().from(agentSessions).where(eq(agentSessions.id, "child-prepare-cancel"))).toHaveLength(0);
+    expect(await deps.db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-prepare-cancel"))).toHaveLength(0);
+    vi.mocked(deps.engineHost.childSessionFor).mockRestore();
   });
 
   it("full-profile child resolves its sandbox image with the child's profile — not the headless default", async () => {

@@ -3473,6 +3473,9 @@ export type ChildSpawner = (
     /** The plugin event delivery that started the child. Cancelling that
      * delivery stops the child. Absent for every other child. */
     pluginDeliveryId?: string;
+    /** Aborts when the spawning work is cancelled for good. A spawn that is
+     * still in its `prepare` step stops, removes the child and queues no prompt. */
+    cancel?: AbortSignal;
   },
 ) => Promise<SpawnChildResult>;
 
