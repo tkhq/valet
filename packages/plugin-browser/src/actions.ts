@@ -13,6 +13,7 @@ import type {
   BrowserResponse,
 } from "@valet/shared";
 import { browserRequest, readBrowserExport } from "./client.js";
+import { pageSources } from "./page-sources.js";
 
 export function browserIdentity(
   ctx: Pick<PluginActionContext, "owner" | "userId" | "sessionId" | "threadId">,
@@ -261,6 +262,7 @@ async function executeCell(
         continue;
       }
       const success = cell.status === "completed";
+      const sources = success ? pageSources(cell) : [];
       return {
         success,
         data: {
@@ -270,6 +272,7 @@ async function executeCell(
           cell,
         },
         attachments,
+        ...(sources.length ? { sources } : {}),
         ...(success
           ? {}
           : {

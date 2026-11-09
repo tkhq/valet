@@ -48,6 +48,7 @@ describe("citation cases", () => {
     const cases = await loadCases(join(CASES_DIR, "citations"));
     const ids = cases.map((c) => c.id).sort();
     expect(ids).toEqual([
+      "browser-source-citations",
       "drive-source-citations",
       "github-source-citations",
       "gmail-source-citations",

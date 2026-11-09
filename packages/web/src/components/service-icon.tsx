@@ -120,6 +120,8 @@ export function brandMark(slug: string | undefined): BrandMark | undefined {
 const PLUGIN_GLYPHS: Record<string, LucideIcon> = {
   // A real Chromium the agent drives.
   browser: Globe,
+  // A page that browser read, as a cited source.
+  web: Globe,
   // Who the assistant is being; the manifest picks theatre masks too.
   assistants: Drama,
   // A wire out of the sandbox to a public hostname.

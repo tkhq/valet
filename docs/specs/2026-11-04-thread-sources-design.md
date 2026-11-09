@@ -45,6 +45,7 @@ Every tool call shows one specific line in the task card. No built-in tool or bu
 - Notion (MCP): a fetched page, or each search result, with a `notion.so` or `notion.site` link.
 - `calendar.list_events`: each event with a link (`htmlLink`) and a title. The location is the start time. Sources omit event descriptions and physical locations, which can contain passcodes. The full tool output keeps these fields. Web previews also omit snippets from older stored Calendar sources. This is specific to Calendar snippets, not general secret redaction.
 - `github.get_issue`, `github.get_pull_request`: the page, titled with the repo and number, with the start of its text.
+- `browser.execute`: each page the cell read with an accessibility observation (`tab.getAXState`, `tab.getAXStateAndScreenshot`). The source has the page URL without its query, the page title (the host when the title is empty), an excerpt of the snapshot text, and the read time in UTC. The service is `web`. A cell that only navigates, clicks, or takes screenshots gives no source. One URL gives one source for each call.
 - `sheets.read_spreadsheet`: the sheet name, the range, and the first rows. `sheets.get_spreadsheet_info`: the title and the sheet count. Both use the Google Sheets service and link to the spreadsheet. The link has no `gid`, because the values API does not return one.
 
 ## Presentation
@@ -70,6 +71,8 @@ These readers give no source, for these reasons:
 - Sentry (MCP): results are Markdown text with no structured link per item.
 - Fireflies and Granola: no plugin for either service exists in this codebase.
 - `docs.read_document`: the action returns no title or link, and its many output formats each need a change. `drive.download_file` already cites a document.
+- Browser reads other than an accessibility observation: `tab.domSnapshot`, locator text reads, and `browser.describe` (the browser guide, not a web page). A locator read does not record its page. The daemon also omits an observation from the receipt when the cell's results pass 32,000 characters, and an omitted observation gives no source.
+- No other tool fetches the web. The browser is the only path. The `web_search` entry in the engine step labels names no tool in this stack.
 - Other GitHub reads (lists, commits, workflow runs, job logs): they return many items or logs, and each needs its own mapping. `github.get_issue` and `github.get_pull_request` cite the page.
 Citation opening analytics and measured comparisons across models remain follow-up work.
 
@@ -79,9 +82,9 @@ Citation-open analytics are deferred on purpose. The repo has no path that sends
 
 - Shared: `normalizeSource` and `readSources` keep only well-formed records and safe links.
 - Engine: the bridge assigns ids, lists them for the model, stores the records, and drops sources without an allocator. Parallel allocations get distinct ids, and a restored thread continues the count.
-- Plugins: Slack search sources, GitHub file sources pinned to a commit with a line range, and the fallback link without a commit. Memory file sources and no source for a directory.
+- Plugins: browser page sources from observation receipts, Slack search sources, GitHub file sources pinned to a commit with a line range, and the fallback link without a commit. Memory file sources and no source for a directory.
 - Web: a step counts its sources and lists each with its link.
 - Web: chips preserve code and links, isolate thread ids, support keyboard controls, and reveal collapsed tool input and output.
 - Eval: `citation_validity` requires a citation and rejects ids without tool sources. It reports citation and invalid-id counts. The judge checks factual citation coverage separately.
-- Eval cases: `slack-sources`, `github-sources`, `gmail-sources`, `drive-sources` (mocked tools that return sources) and `multi-source-attribution` (mocked Slack and GitHub facts, each requiring its own supporting source). Gmail and multi-source prompts do not request citations. These mocks do not test live integrations. The integration profile excludes dynamic MCP actions, including Linear. Tests check that they parse, that every mocked action exists, and that mock sources get ids. They have not been run against a model.
+- Eval cases: `slack-sources`, `github-sources`, `gmail-sources`, `drive-sources`, `browser-sources` (mocked tools that return sources) and `multi-source-attribution` (mocked Slack and GitHub facts, each requiring its own supporting source). Gmail and multi-source prompts do not request citations. These mocks do not test live integrations. The integration profile excludes dynamic MCP actions, including Linear. Tests check that they parse, that every mocked action exists, and that mock sources get ids. They have not been run against a model.
 - Run the model comparison case with `make eval EVAL_ARGS="--cases evals/cases/citations --model <provider/model>"`. Model results are measured only when this command runs with credentials.

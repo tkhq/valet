@@ -1,0 +1,25 @@
+id: browser-source-citations
+description: Cite the web page that states a plan price.
+profile: mock
+turns:
+  - role: user
+    content: >-
+      Open https://example.com/pricing in the browser and tell me what the Team plan costs. Cite the returned source id after the fact.
+timeout_ms: 120000
+mock_tools:
+  browser.execute:
+    response: '{"text":"- heading \"Pricing\" [level=1]\n- paragraph: The Team plan costs $20 per seat each month.","artifacts":[]}'
+    sources:
+      - service: web
+        title: Pricing
+        url: https://example.com/pricing
+        snippet: Pricing The Team plan costs $20 per seat each month.
+        location: Read 2026-11-09 14:03 UTC
+checks:
+  - type: tool_called
+    tool: browser.execute
+  - type: citation_validity
+  - type: judge_output
+    rubric: >-
+      The reply says the Team plan costs $20 per seat each month and cites the web page source. Uncited facts score at most 2.
+  - type: no_errors

@@ -1,7 +1,7 @@
 import type { SourceRecord } from "@valet/shared";
 
 const SERVICE_NAMES: Record<string, string> = {
-  memory: "Memory", slack: "Slack", slack_user: "Slack", github: "GitHub", gmail: "Gmail", linear: "Linear", notion: "Notion",
+  memory: "Memory", web: "Web page", slack: "Slack", slack_user: "Slack", github: "GitHub", gmail: "Gmail", linear: "Linear", notion: "Notion",
   google_drive: "Google Drive", google_docs: "Google Docs", google_sheets: "Google Sheets", google_slides: "Google Slides", google_calendar: "Google Calendar", "google-calendar": "Google Calendar", "google-calendar-events": "Google Calendar", google_calendar_events: "Google Calendar",
 };
 /** Shown when a source has no link to open. */
