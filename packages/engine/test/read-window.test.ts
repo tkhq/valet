@@ -24,6 +24,15 @@ describe("readWindow", () => {
     expect(window).toMatch(/read again with offset \d+ to continue\]$/);
   });
 
+  it("says when one line is longer than the cap and names a way to read the rest", () => {
+    const window = readWindow("x".repeat(READ_MAX_CHARS + 1), 1, 2000);
+    expect(window.startsWith("x".repeat(READ_MAX_CHARS))).toBe(true);
+    expect(window).toContain(`line 1 is ${READ_MAX_CHARS + 1} characters`);
+    expect(window).toContain(`cut -c${READ_MAX_CHARS + 1}-`);
+    const twoLines = readWindow(`${"y".repeat(READ_MAX_CHARS + 1)}\nnext\n`, 1, 2000);
+    expect(twoLines).toContain("Continue with offset 2.");
+  });
+
   it("says when the offset is past the end", () => {
     expect(readWindow(numbered(3), 9, 10)).toBe("[read: line 9 is past the end of the file, which has 3 lines]");
   });

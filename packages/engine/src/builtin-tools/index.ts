@@ -317,7 +317,12 @@ export function readWindow(text: string, offset: number, limit: number): string 
     }
   }
   let body = lines.slice(start, end).join("\n");
-  if (body.length > READ_MAX_CHARS) body = body.slice(0, READ_MAX_CHARS);
+  // A line longer than the cap alone: line offsets cannot reach the rest of
+  // it, so say so and name a way to read it.
+  if (body.length > READ_MAX_CHARS) {
+    const tail = end < total ? ` Continue with offset ${end + 1}.` : "";
+    return `${body.slice(0, READ_MAX_CHARS)}\n[read: line ${end} is ${body.length} characters; this shows the first ${READ_MAX_CHARS}. Read the rest with bash, e.g. \`cut -c${READ_MAX_CHARS + 1}- <file> | head -c ${READ_MAX_CHARS}\`.${tail}]`;
+  }
   if (end >= total && start === 0) return body;
   return end >= total
     ? `${body}\n[read: lines ${offset}-${total} of ${total}; end of file]`

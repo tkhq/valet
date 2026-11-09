@@ -30,7 +30,7 @@ async function writeMemoryFile(baseUrl: string, path: string, content: string): 
   const res = await fetch(`${baseUrl}/api/memory`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path, content }),
+    body: JSON.stringify({ path, content, description: "Test note." }),
   });
   expect(res.status).toBe(200);
 }
@@ -129,7 +129,7 @@ describe("api integration: artifacts", () => {
       const put = await fetch(`${api.baseUrl}/api/memory`, {
         method: "PUT",
         headers,
-        body: JSON.stringify({ path: "artifacts/tool-note.md", content: "# Tool Note\n\nVia tool.\n" }),
+        body: JSON.stringify({ path: "artifacts/tool-note.md", description: "Test note.", content: "# Tool Note\n\nVia tool.\n" }),
       });
       expect(put.status).toBe(200);
 

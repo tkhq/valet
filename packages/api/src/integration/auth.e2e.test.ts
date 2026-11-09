@@ -146,7 +146,7 @@ describe("auth v2 — end-to-end deployment flow", () => {
     const memoryPutRes = await fetch(`${api.baseUrl}/api/memory`, {
       method: "PUT",
       headers: { "content-type": "application/json", "x-valet-sandbox": sandboxToken },
-      body: JSON.stringify({ path: "notes/e2e.md", content: "hello from the e2e sandbox token" }),
+      body: JSON.stringify({ path: "notes/e2e.md", description: "Test note.", content: "hello from the e2e sandbox token" }),
     });
     expect(memoryPutRes.status).toBe(200);
 
