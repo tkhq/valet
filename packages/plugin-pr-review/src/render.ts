@@ -90,7 +90,7 @@ export function renderSummary(s: SummaryInput): string {
   ];
   if (open.length > 0) {
     lines.push("", `### Open findings (${open.length})`, "");
-    for (const f of open) lines.push(`- **${label(f.severity)}** \`${f.path}:${f.line}\` ${oneLine(f.title)}`);
+    for (const f of open) lines.push(`- **${label(f.severity)}** \`${f.path}:${f.line}\`${f.side === "LEFT" ? " (deleted line)" : ""} ${oneLine(f.title)}`);
   } else {
     lines.push("", "No open findings.");
   }

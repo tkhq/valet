@@ -43,7 +43,7 @@ export interface Review {
 export interface NewReviewComment {
   path: string;
   line: number;
-  side: "RIGHT";
+  side: "RIGHT" | "LEFT";
   body: string;
 }
 

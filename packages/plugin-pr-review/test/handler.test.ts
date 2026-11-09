@@ -45,6 +45,7 @@ interface GhComment {
   id: number;
   path: string;
   line: number;
+  side?: string;
   body: string;
   pull_request_review_id: number;
 }
@@ -60,6 +61,7 @@ class FakeGitHub {
   reviews = new Map<number, { id: number; body: string; commit_id: string }>();
   comments: GhComment[] = [];
   refuseInline = false;
+  extraFiles: { filename: string; status: string; additions: number; deletions: number; patch: string }[] = [];
   /** Thread state by first-comment id. Every comment is its own thread here. */
   resolved = new Set<number>();
   resolvedBy = new Map<number, string>();
@@ -124,7 +126,7 @@ class FakeGitHub {
       return ok({ status: this.incrementStatus, merge_base_commit: { sha: from }, files: this.incrementFiles.map((filename) => ({ filename })) });
     }
     if (method === "GET" && path === "/pulls/7/files") {
-      return ok(url.searchParams.get("page") === "1" ? [{ filename: "a.ts", status: "modified", additions: 20, deletions: 3, patch: PATCH_A }] : []);
+      return ok(url.searchParams.get("page") === "1" ? [{ filename: "a.ts", status: "modified", additions: 20, deletions: 3, patch: PATCH_A }, ...this.extraFiles] : []);
     }
     // a.ts has 60 lines; the diff covers lines 1-20.
     if (method === "GET" && path.startsWith("/contents/")) return ok(Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join("\n"));
@@ -140,11 +142,11 @@ class FakeGitHub {
       return ok({ ...review, html_url: "https://github.com/r" });
     }
     if (method === "POST" && path === "/pulls/7/reviews") {
-      const comments = (body.comments as { path: string; line: number; body: string }[]) ?? [];
+      const comments = (body.comments as { path: string; line: number; side?: string; body: string }[]) ?? [];
       if (this.refuseInline && comments.length > 0) return new Response(JSON.stringify({ message: "Line could not be resolved" }), { status: 422 });
       const id = this.nextId++;
       this.reviews.set(id, { id, body: String(body.body ?? ""), commit_id: String(body.commit_id) });
-      for (const c of comments) this.comments.push({ id: this.nextId++, path: c.path, line: c.line, body: c.body, pull_request_review_id: id });
+      for (const c of comments) this.comments.push({ id: this.nextId++, path: c.path, line: c.line, side: c.side, body: c.body, pull_request_review_id: id });
       return ok({ id, body: body.body, html_url: "https://github.com/r" });
     }
     const commentMatch = /^\/pulls\/comments\/(\d+)$/.exec(path);
@@ -721,6 +723,30 @@ describe("review-pull-request handler", () => {
     expect(body).toContain("2 finding(s) are not shown");
   });
 
+  it("posts a finding on a deleted line inline on the LEFT side", async () => {
+    const gh = new FakeGitHub();
+    // b.ts drops lines 41-43 of the base file.
+    gh.extraFiles = [{ filename: "b.ts", status: "modified", additions: 0, deletions: 3, patch: "@@ -40,4 +40,1 @@\n ctx\n-gone 1\n-gone 2\n-gone 3" }];
+    const store = new FakeStore();
+    const threads = new FakeThreads(scripted(reviewOf([finding({ path: "b.ts", line: 42, side: "LEFT", severity: "critical", title: "Removed guard" })]), {}));
+    await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1"), context(threads, store));
+    expect(gh.comments).toMatchObject([{ path: "b.ts", line: 42, side: "LEFT" }]);
+    const body = [...gh.reviews.values()][0].body;
+    expect(body).toContain("`b.ts:42` (deleted line) Removed guard");
+    expect(body).not.toContain("Findings outside the diff");
+    expect(store.pointers()?.findings).toMatchObject([{ id: "f1", line: 42, side: "LEFT" }]);
+  });
+
+  it("drops a LEFT finding past the end of the base file", async () => {
+    const gh = new FakeGitHub();
+    gh.extraFiles = [{ filename: "b.ts", status: "modified", additions: 0, deletions: 3, patch: "@@ -40,4 +40,1 @@\n ctx\n-gone 1\n-gone 2\n-gone 3" }];
+    const store = new FakeStore();
+    const threads = new FakeThreads(scripted(reviewOf([finding({ path: "b.ts", line: 99, side: "LEFT", title: "Past the base end" })]), {}));
+    await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1"), context(threads, store));
+    expect(gh.comments).toHaveLength(0);
+    expect([...gh.reviews.values()][0].body).toContain("1 finding(s) are not shown");
+  });
+
   it("moves inline findings into the summary when GitHub refuses their lines", async () => {
     const gh = new FakeGitHub();
     gh.refuseInline = true;
@@ -749,6 +775,10 @@ describe("review helpers", () => {
 
   it("lists the lines a review comment can anchor to", () => {
     expect([...commentableLines("@@ -10,3 +10,4 @@\n ctx\n-old\n+new\n+added\n ctx2\n\\ No newline at end of file")]).toEqual([10, 11, 12, 13]);
+  });
+
+  it("lists the deleted and context lines of the old file for the LEFT side", () => {
+    expect([...commentableLines("@@ -10,4 +10,3 @@\n ctx\n-old\n-gone\n+new\n ctx2", "LEFT")]).toEqual([10, 11, 12, 13]);
   });
 
   it("reads back a finding it rendered", () => {

@@ -67,7 +67,10 @@ export type ReviewSettings = Static<typeof ReviewSettingsSchema>;
 export interface FindingPointer {
   id: string;
   path: string;
+  /** In the HEAD file, or in the BASE file when `side` is LEFT. */
   line: number;
+  /** LEFT: the finding names a line the PR deletes. Absent: RIGHT. */
+  side?: "LEFT";
   /** The inline review comment. Absent: the finding is in the summary review's body. */
   commentId?: number;
   /** The GraphQL id of the comment's review thread, once known. */
@@ -221,7 +224,8 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
       head,
     });
     if (verdict?.verdict === "refuted") fixed.push({ finding: f, reason: verdict.counter_evidence || verdict.refutation_reason || "fixed" });
-    else stillOpen.push({ ...f, line: verdict?.current_line ?? f.line });
+    // The recheck names the line at HEAD, so a moved finding anchors on the RIGHT side.
+    else stillOpen.push(verdict?.current_line !== undefined ? { ...f, line: verdict.current_line, side: "RIGHT" } : f);
   });
 
   // 2. Review the PR, or only the new commits, told what is already open.
@@ -262,11 +266,18 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
 
   const [draft] = await Promise.all([review, recheck]);
 
-  // 3. Drop findings on a line that does not exist at HEAD: the reviewer
-  // child answers through awaitChild, so no tool refused them.
+  // 3. Drop findings on a line that does not exist: the reviewer child
+  // answers through awaitChild, so no tool refused them. A LEFT finding
+  // names a deleted line, so it is checked against the base file.
   const inPaths = draft.findings.filter((f) => !excluded(f.path, settings.excludePaths));
-  const lineCounts = await headLineCounts(gh, files, inPaths.map((f) => f.path), head);
-  const misplaced = new Set(anchorProblems(inPaths, lineCounts).map((p) => p.index));
+  const right = inPaths.map((f, i) => ({ f, i })).filter(({ f }) => f.side !== "LEFT");
+  const left = inPaths.map((f, i) => ({ f, i })).filter(({ f }) => f.side === "LEFT");
+  const headCounts = await lineCountsAt(gh, files.filter((f) => f.status !== "removed"), right.map(({ f }) => f.path), head);
+  const baseCounts = left.length > 0 ? await lineCountsAt(gh, files.filter((f) => f.status !== "added"), left.map(({ f }) => f.path), mergeBase) : new Map<string, number>();
+  const misplaced = new Set([
+    ...anchorProblems(right.map(({ f }) => f), headCounts).map((p) => right[p.index].i),
+    ...anchorProblems(left.map(({ f }) => f), baseCounts).map((p) => left[p.index].i),
+  ]);
   if (misplaced.size > 0) log(slug, `dropped ${misplaced.size} finding(s) anchored to a line that does not exist at ${head.slice(0, 7)}`);
   const candidates = inPaths.filter((_, i) => !misplaced.has(i));
 
@@ -310,8 +321,8 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   }
 
   // 6. Map new findings to diff lines. GitHub refuses a comment on a line outside the diff.
-  const anchorable = new Map(files.map((f) => [f.filename, commentableLines(f.patch ?? "")]));
-  let inline = posted.filter((f) => anchorable.get(f.path)?.has(f.line) ?? false);
+  const anchorable = new Map(files.map((f) => [f.filename, { RIGHT: commentableLines(f.patch ?? "", "RIGHT"), LEFT: commentableLines(f.patch ?? "", "LEFT") }]));
+  let inline = posted.filter((f) => anchorable.get(f.path)?.[f.side ?? "RIGHT"].has(f.line) ?? false);
   let outside = posted.filter((f) => !inline.includes(f));
 
   // 7. Post: one summary review, edited in place, plus inline comments.
@@ -334,7 +345,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   /** Post the inline findings in one review with `body`. A 422 (a line GitHub cannot resolve) moves them all to the summary. */
   const postInline = async (body: string): Promise<number | undefined> => {
     try {
-      return (await gh.createReview({ commitId: head, body, comments: inline.map((f) => ({ path: f.path, line: f.line, side: "RIGHT", body: renderInlineComment(f) })) })).id;
+      return (await gh.createReview({ commitId: head, body, comments: inline.map((f) => ({ path: f.path, line: f.line, side: f.side ?? "RIGHT", body: renderInlineComment(f) })) })).id;
     } catch (err) {
       if (!(err instanceof GitHubError) || err.status !== 422 || inline.length === 0) throw err;
       console.warn(`pr-review ${slug}: GitHub refused the inline comments, so the summary carries them`, err.message);
@@ -489,7 +500,7 @@ async function recoverFindings(
   for (const p of pointers) {
     const text = p.commentId !== undefined ? parseFindings(comments.get(p.commentId)?.body ?? "").get(p.id) : summary.get(p.id);
     const thread = p.commentId !== undefined ? threads.get(p.commentId) : undefined;
-    const where = { path: p.path, line: p.line, ...(p.commentId !== undefined ? { commentId: p.commentId } : {}), ...((thread?.id ?? p.threadId) ? { threadId: thread?.id ?? p.threadId } : {}) };
+    const where = { path: p.path, line: p.line, ...(p.side === "LEFT" ? { side: "LEFT" as const } : {}), ...(p.commentId !== undefined ? { commentId: p.commentId } : {}), ...((thread?.id ?? p.threadId) ? { threadId: thread?.id ?? p.threadId } : {}) };
     const gone = !text;
     // Valet resolves a thread only when it marks the finding fixed, so an
     // open finding in a resolved thread was resolved by a person.
@@ -514,8 +525,13 @@ async function newCommentIds(gh: GitHubClient, reviewId: number): Promise<Map<st
   return ids;
 }
 
-function pointer(f: Pick<PostedFinding, "id" | "path" | "line">, status: FindingPointer["status"], ids: { commentId?: number; threadId?: string }): FindingPointer {
-  return { id: f.id, path: f.path, line: f.line, status, ...(ids.commentId !== undefined ? { commentId: ids.commentId } : {}), ...(ids.threadId !== undefined ? { threadId: ids.threadId } : {}) };
+function pointer(f: Pick<PostedFinding, "id" | "path" | "line" | "side">, status: FindingPointer["status"], ids: { commentId?: number; threadId?: string }): FindingPointer {
+  return {
+    id: f.id, path: f.path, line: f.line, status,
+    ...(f.side === "LEFT" ? { side: "LEFT" as const } : {}),
+    ...(ids.commentId !== undefined ? { commentId: ids.commentId } : {}),
+    ...(ids.threadId !== undefined ? { threadId: ids.threadId } : {}),
+  };
 }
 
 async function runVerifier(
@@ -557,16 +573,16 @@ export function reviewerPrompt(input: { review: string; instructions: string; ex
 const VERDICT_FINISH = `Check the claim, then give your verdict.\n\n${answerFormat(VerdictSchema)}`;
 
 /**
- * Line count at HEAD of each path a finding names, for `anchorProblems`.
- * Only files the PR adds or changes count; a file GitHub will not return
- * as text (a submodule) counts as one line.
+ * Line count at `ref` of each path a finding names, for `anchorProblems`.
+ * Only `files` (the PR files present at that side) count; a file GitHub
+ * will not return as text (a submodule) counts as one line.
  */
-async function headLineCounts(gh: GitHubClient, files: PullFile[], paths: string[], head: string): Promise<Map<string, number>> {
-  const present = new Set(files.filter((f) => f.status !== "removed").map((f) => f.filename));
+async function lineCountsAt(gh: GitHubClient, files: PullFile[], paths: string[], ref: string): Promise<Map<string, number>> {
+  const present = new Set(files.map((f) => f.filename));
   const counts = new Map<string, number>();
   for (const path of new Set(paths)) {
     if (!present.has(path)) continue;
-    const text = await gh.fileText(path, head);
+    const text = await gh.fileText(path, ref);
     counts.set(path, text === undefined ? 1 : lineCount(text));
   }
   return counts;
