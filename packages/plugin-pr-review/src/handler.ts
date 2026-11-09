@@ -631,7 +631,9 @@ async function anchoredFindings(gh: GitHubClient, files: PullFile[], findings: F
  * A review recorded in the plugin thread only: nothing on GitHub and no
  * pointers in the store. It covers the whole PR, at `commit` when given
  * (a merged or closed PR), else at the merge commit of a merged PR or the
- * PR head. The diff is the PR's own, base to head.
+ * PR head. The diff, file list and line checks cover the merge base to the
+ * commit it checks out, so a finding names code that exists there. GitHub's
+ * compare lists at most 300 files.
  */
 async function shadowReview(
   event: PluginEvent,
@@ -649,12 +651,12 @@ async function shadowReview(
     await ctx.threads.record(thread, renderShadowNotice(slug, "Valet cannot check out the head of a pull request from a fork. Pass a commit that a branch of this repository contains."), { dispatchId: dispatch("shadow-fork") });
     return log(slug, "shadow review skipped: pull request from a fork");
   }
-  const files = await gh.pullFiles();
-  const reviewed = files.filter((f) => !excluded(f.filename, settings.excludePaths));
-  const comparison = await gh.compare(pr.base.sha, pr.head.sha);
-  if (!comparison) throw new Error(`GitHub cannot compare ${pr.base.sha.slice(0, 7)} with ${pr.head.sha.slice(0, 7)} on ${slug}. Pass a commit that still exists, then retry.`);
+  const comparison = await gh.compare(pr.base.sha, checkout);
+  if (!comparison) throw new Error(`GitHub cannot compare ${pr.base.sha.slice(0, 7)} with ${checkout.slice(0, 7)} on ${slug}. Pass a commit that still exists, then retry.`);
   const mergeBase = comparison.merge_base_commit.sha;
-  const prDiff = (await gh.compareDiff(mergeBase, pr.head.sha)) ?? undefined;
+  const files = comparison.files ?? [];
+  const reviewed = files.filter((f) => !excluded(f.filename, settings.excludePaths));
+  const prDiff = (await gh.compareDiff(mergeBase, checkout)) ?? undefined;
   const draft = await runReviewerChild(ctx, thread, {
     slug, repoName, pr, base: mergeBase, head: checkout, settings,
     diff: prDiffFor(prDiff, reviewed, mergeBase, checkout),

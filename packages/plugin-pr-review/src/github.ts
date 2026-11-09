@@ -19,7 +19,8 @@ export interface Comparison {
   /** `ahead`: base is an ancestor of head. */
   status: "ahead" | "behind" | "diverged" | "identical";
   merge_base_commit: { sha: string };
-  files?: { filename: string }[];
+  /** The changed files, as the pull request files endpoint returns them. At most 300. */
+  files?: PullFile[];
 }
 
 export interface PullFile {

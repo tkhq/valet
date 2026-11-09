@@ -64,6 +64,10 @@ class FakeGitHub {
   comments: GhComment[] = [];
   refuseInline = false;
   state: "open" | "closed" = "open";
+  /** Files compare(BASE...<sha>) lists, by target sha. Default: a.ts. */
+  filesAt: Record<string, { filename: string; status: string }[]> = {};
+  compared: string[] = [];
+  diffed: string[] = [];
   merged = false;
   extraFiles: { filename: string; status: string; additions: number; deletions: number; patch: string }[] = [];
   /** Thread state by first-comment id. Every comment is its own thread here. */
@@ -127,8 +131,13 @@ class FakeGitHub {
     }
     if (method === "GET" && path.startsWith("/compare/")) {
       const [from] = path.slice("/compare/".length).split("...");
-      if ((init?.headers as Record<string, string>).accept === "application/vnd.github.diff") return ok(DIFF);
-      if (from === BASE) return ok({ status: "ahead", merge_base_commit: { sha: BASE }, files: [{ filename: "a.ts" }] });
+      if ((init?.headers as Record<string, string>).accept === "application/vnd.github.diff") {
+        this.diffed.push(path.slice("/compare/".length));
+        return ok(DIFF);
+      }
+      const to = path.slice("/compare/".length).split("...")[1];
+      this.compared.push(`${from}...${to}`);
+      if (from === BASE) return ok({ status: "ahead", merge_base_commit: { sha: BASE }, files: this.filesAt[to] ?? [{ filename: "a.ts" }] });
       return ok({ status: this.incrementStatus, merge_base_commit: { sha: from }, files: this.incrementFiles.map((filename) => ({ filename })) });
     }
     if (method === "GET" && path === "/pulls/7/files") {
@@ -793,6 +802,20 @@ describe("review-pull-request handler", () => {
     expect(threads.spawned[0].req).toMatchObject({ role: "pr-reviewer", ref: commit });
     expect(threads.records[0].body).toContain("at `ccccccc`");
     expect(gh.writes).toEqual([]);
+  });
+
+  it("takes the diff, files and line checks of a shadow review from the commit it checks out", async () => {
+    const gh = new FakeGitHub();
+    gh.state = "closed";
+    const commit = "c".repeat(40);
+    // At the requested commit the PR's change is c.ts; a.ts changes only at the PR head.
+    gh.filesAt[commit] = [{ filename: "c.ts", status: "added" }];
+    const threads = new FakeThreads(scripted(reviewOf([finding({ path: "c.ts", title: "Bug at the commit" }), finding({ path: "a.ts", title: "Bug only at the head" })]), {}));
+    await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1", MANUAL_REVIEW_EVENT, { shadow: true, commit }), context(threads, new FakeStore()));
+    expect(gh.compared).toContain(`${BASE}...${commit}`);
+    expect(gh.diffed).toEqual([`${BASE}...${commit}`]);
+    expect(threads.records[0].body).toContain("Bug at the commit");
+    expect(threads.records[0].body).not.toContain("Bug only at the head");
   });
 
   it("skips a closed pull request outside shadow mode", async () => {
