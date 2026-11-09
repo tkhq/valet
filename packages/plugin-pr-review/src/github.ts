@@ -6,6 +6,8 @@
 
 export interface PullRequest {
   state: "open" | "closed";
+  merged?: boolean;
+  merge_commit_sha?: string | null;
   draft: boolean;
   title: string;
   body: string | null;

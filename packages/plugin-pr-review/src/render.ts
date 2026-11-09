@@ -120,3 +120,28 @@ export function renderForkNotice(head: string): string {
 function oneLine(s: string): string {
   return s.replace(/\s+/g, " ").replace(/\*\*/g, "").trim();
 }
+
+/** A review recorded in the plugin thread only. Nothing of it is on GitHub. */
+export function renderShadowReview(r: { slug: string; commit: string; summary: string; confidence: number; findings: Finding[]; hidden: number }): string {
+  const sorted = [...r.findings].sort((a, b) => SEVERITIES.indexOf(a.severity) - SEVERITIES.indexOf(b.severity));
+  const lines = [
+    `## Shadow review of ${r.slug} at \`${r.commit.slice(0, 7)}\``,
+    "",
+    "Valet recorded this review here only. Nothing is posted on GitHub.",
+    "",
+    r.summary.trim(),
+    "",
+    `**Merge confidence: ${r.confidence}/5** · ${sorted.length} finding(s)`,
+  ];
+  for (const f of sorted) {
+    lines.push("", `### ${label(f.severity)} · \`${f.path}:${f.line}\`${f.side === "LEFT" ? " (deleted line)" : ""}`, "", `**${oneLine(f.title)}**`, "", f.body.trim());
+    if (f.suggestion) lines.push("", "```suggestion", f.suggestion.replace(/\n+$/, ""), "```");
+  }
+  if (r.hidden > 0) lines.push("", `${r.hidden} finding(s) are not shown: below the line's minimum severity, in excluded paths, or on a line that does not exist at this commit.`);
+  return lines.join("\n");
+}
+
+/** Why a shadow review did not run. */
+export function renderShadowNotice(slug: string, reason: string): string {
+  return `## Shadow review of ${slug}\n\n${reason}`;
+}

@@ -55,10 +55,13 @@ export * from "./types.js";
 export {
   createReviewHandler,
   excluded,
+  MANUAL_REVIEW_EVENT,
+  manualReviewOptions,
   POINTERS_COLLECTION,
   pullTarget,
   ReviewSettingsSchema,
   type FindingPointer,
+  type ManualReviewOptions,
   type PullPointers,
   type ReviewSettings,
 } from "./handler.js";

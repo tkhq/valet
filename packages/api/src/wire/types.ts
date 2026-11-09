@@ -3828,6 +3828,26 @@ export interface ListCodeReviewsResponse {
   reviews: CodeReviewWire[];
 }
 
+/** `POST /api/code-review/runs`: review one pull request now, through the workspace's line for its repository. */
+export interface RunCodeReviewRequest {
+  /** `https://github.com/<owner>/<repo>/pull/<number>`. */
+  url: string;
+  /** Run in this team workspace. Absent: the personal workspace. */
+  teamId?: string;
+  /** Record the review in the plugin thread only. Nothing is posted on GitHub. */
+  shadow?: boolean;
+  /** Review the files at this commit (a merged or closed pull request). Needs `shadow`. */
+  commit?: string;
+}
+
+export interface RunCodeReviewResponse {
+  eventId: string;
+  deliveryId: string;
+  /** The line that runs the review. */
+  subscriptionId: string;
+  shadow: boolean;
+}
+
 // ── REST: skills ─────────────────────────────────────────────────────────
 
 /**

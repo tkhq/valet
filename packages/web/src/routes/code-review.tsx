@@ -9,6 +9,7 @@ import { AddRepositoryDialog } from "~/components/code-review/add-repository-dia
 import { OngoingReviews } from "~/components/code-review/ongoing-reviews";
 import { RepositoryRow } from "~/components/code-review/repository-row";
 import { RepositorySetupRow } from "~/components/code-review/repository-setup-row";
+import { RunReviewDialog } from "~/components/code-review/run-review-dialog";
 import { belongsToWorkspace, repositoryInventory } from "~/components/code-review/repository-inventory";
 import { REVIEW_HANDLER, REVIEW_PLUGIN, isReviewLine, isSingleRepositoryLine } from "~/components/code-review/review-lines";
 import { handlerOptions } from "~/components/plugins/handler-settings";
@@ -45,6 +46,7 @@ export function CodeReviewPage() {
   const teamsQ = useTeams();
   const reviewsQ = useCodeReviews(scope.teamId);
   const [adding, setAdding] = useState(false);
+  const [running, setRunning] = useState(false);
   const [repositorySearch, setRepositorySearch] = useState("");
   const [settingsRequest, setSettingsRequest] = useState<{ id: string; version: number } | null>(null);
 
@@ -75,7 +77,12 @@ export function CodeReviewPage() {
       title="Code review"
       clause={<WorkspaceClause />}
       description="Valet reviews each push to an open pull request and keeps one review on it, edited in place."
-      actions={handler !== undefined ? <Button disabled={owner === undefined} onClick={() => setAdding(true)}>Add repository</Button> : undefined}
+      actions={handler !== undefined ? (
+        <div className="flex gap-2">
+          <Button variant="secondary" disabled={owner === undefined || lines.length === 0} onClick={() => setRunning(true)}>Review a pull request</Button>
+          <Button disabled={owner === undefined} onClick={() => setAdding(true)}>Add repository</Button>
+        </div>
+      ) : undefined}
     />
   );
 
@@ -115,6 +122,7 @@ export function CodeReviewPage() {
           </WorkSection>
           <OngoingReviews reviews={reviewsQ.data?.reviews} loading={reviewsQ.isLoading} error={reviewsQ.error} />
         </div>
+      <RunReviewDialog open={running} onOpenChange={setRunning} teamId={scope.teamId} />
       <AddRepositoryDialog open={adding} onOpenChange={setAdding} lines={lines} handler={handler} teamId={scope.teamId} onAdded={openSettings} onExisting={openSettings} />
     </Shell>
   );

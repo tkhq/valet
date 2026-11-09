@@ -20,6 +20,8 @@ import {
   commentableLines,
   createReviewHandler,
   excluded,
+  MANUAL_REVIEW_EVENT,
+  manualReviewOptions,
   parseFindings,
   renderFinding,
   ReviewSettingsSchema,
@@ -61,6 +63,8 @@ class FakeGitHub {
   reviews = new Map<number, { id: number; body: string; commit_id: string }>();
   comments: GhComment[] = [];
   refuseInline = false;
+  state: "open" | "closed" = "open";
+  merged = false;
   extraFiles: { filename: string; status: string; additions: number; deletions: number; patch: string }[] = [];
   /** Thread state by first-comment id. Every comment is its own thread here. */
   resolved = new Set<number>();
@@ -110,7 +114,9 @@ class FakeGitHub {
     if (method === "GET" && path === "/pulls/7") {
       return ok({
         number: 7,
-        state: "open",
+        state: this.state,
+        merged: this.merged,
+        merge_commit_sha: this.merged ? "9".repeat(40) : null,
         draft: this.draft,
         title: "Add a.ts",
         body: "Adds a.",
@@ -203,8 +209,12 @@ class FakeThreads implements PluginThreads {
   async ensure(key: string): Promise<PluginThreadRef> {
     return { sessionId: "s1", threadId: "t1", key: `plugin:pr-review:${key}` };
   }
+  records: { body: string; dispatchId: string }[] = [];
   async post(): Promise<never> {
     throw new Error("the review handler does not post to its thread");
+  }
+  async record(_thread: PluginThreadRef, body: string, opts: { dispatchId: string }): Promise<void> {
+    this.records.push({ body, dispatchId: opts.dispatchId });
   }
   async awaitReply(): Promise<never> {
     throw new Error("the review handler does not post to its thread");
@@ -254,7 +264,7 @@ function scripted(review: Review, verdicts: Record<string, Verdict>): Answer {
   };
 }
 
-function event(id: string, key = "github.pull_request.synchronize"): PluginEvent {
+function event(id: string, key = "github.pull_request.synchronize", valet?: Record<string, unknown>): PluginEvent {
   return {
     id,
     key,
@@ -262,7 +272,7 @@ function event(id: string, key = "github.pull_request.synchronize"): PluginEvent
     occurredAt: new Date().toISOString(),
     refs: { repo: "acme/site" },
     summary: "PR #7 updated",
-    payload: { action: "synchronize", pull_request: { number: 7 } },
+    payload: { action: "synchronize", pull_request: { number: 7 }, ...(valet !== undefined ? { valet } : {}) },
   };
 }
 
@@ -747,6 +757,52 @@ describe("review-pull-request handler", () => {
     expect([...gh.reviews.values()][0].body).toContain("1 finding(s) are not shown");
   });
 
+  it("reviews again when a person asks, even at a head already reviewed", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const handler = createReviewHandler({ fetch: gh.fetch });
+    await handler.handle(event("ev1"), context(new FakeThreads(scripted(reviewOf([]), {})), store));
+    const again = new FakeThreads(scripted(reviewOf([]), {}));
+    await handler.handle(event("ev2", MANUAL_REVIEW_EVENT, { requestedBy: "user-1" }), context(again, store));
+    expect(again.spawned.map((s) => s.req.role)).toEqual(["pr-reviewer"]);
+    expect(gh.reviews.size).toBe(1);
+  });
+
+  it("records a shadow review in the plugin thread and writes nothing to GitHub or the store", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const threads = new FakeThreads(scripted(reviewOf([finding({}), finding({ line: 99, title: "Past the end" })]), {}));
+    await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1"), context(threads, store, { shadow: true }));
+    expect(gh.writes).toEqual([]);
+    expect(store.pointers()).toBeUndefined();
+    expect(threads.records).toHaveLength(1);
+    expect(threads.records[0].body).toContain(`Shadow review of acme/site#7 at \`${H1.slice(0, 7)}\``);
+    expect(threads.records[0].body).toContain("Null deref in parse");
+    expect(threads.records[0].body).not.toContain("Past the end");
+    expect(threads.records[0].dispatchId).toBe(`ev1:${H1.slice(0, 12)}:shadow-record`);
+  });
+
+  it("shadow-reviews a merged pull request at the given commit", async () => {
+    const gh = new FakeGitHub();
+    gh.state = "closed";
+    gh.merged = true;
+    const store = new FakeStore();
+    const threads = new FakeThreads(scripted(reviewOf([]), {}));
+    const commit = "c".repeat(40);
+    await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1", MANUAL_REVIEW_EVENT, { shadow: true, commit }), context(threads, store));
+    expect(threads.spawned[0].req).toMatchObject({ role: "pr-reviewer", ref: commit });
+    expect(threads.records[0].body).toContain("at `ccccccc`");
+    expect(gh.writes).toEqual([]);
+  });
+
+  it("skips a closed pull request outside shadow mode", async () => {
+    const gh = new FakeGitHub();
+    gh.state = "closed";
+    const threads = new FakeThreads(scripted(reviewOf([]), {}));
+    await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1", MANUAL_REVIEW_EVENT, {}), context(threads, new FakeStore()));
+    expect(threads.spawned).toHaveLength(0);
+  });
+
   it("moves inline findings into the summary when GitHub refuses their lines", async () => {
     const gh = new FakeGitHub();
     gh.refuseInline = true;
@@ -764,6 +820,12 @@ describe("review-pull-request handler", () => {
 });
 
 describe("review helpers", () => {
+  it("reads manual review options only from a manual review event", () => {
+    expect(manualReviewOptions({ key: MANUAL_REVIEW_EVENT, payload: { valet: { shadow: true, commit: "abc1234" } } })).toEqual({ shadow: true, commit: "abc1234" });
+    expect(manualReviewOptions({ key: MANUAL_REVIEW_EVENT, payload: { valet: { shadow: "yes", commit: "not a sha" } } })).toEqual({});
+    expect(manualReviewOptions({ key: "github.pull_request.opened", payload: { valet: { shadow: true } } })).toBeUndefined();
+  });
+
   it("matches exclude globs", () => {
     expect(excluded("pnpm-lock.yaml", ["*.yaml"])).toBe(true);
     expect(excluded("deep/dir/x.lock", ["*.lock"])).toBe(true);

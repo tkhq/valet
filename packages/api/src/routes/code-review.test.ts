@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 import type { PullPointers, PullRequestReviewState } from "@valet/plugin-pr-review";
+import githubPlugin from "@valet/plugin-github/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { ensureAssistantExecution } from "../assistants/service.js";
 import { pluginThreadKey } from "../plugins/plugin-thread-key.js";
@@ -29,7 +30,7 @@ async function bootWithGitHub(getPull: GithubFixtureHandlers["getPull"] = (_owne
 })) {
   github = await startGithubFixture({ getPull });
   vi.stubEnv("GITHUB_API_URL", github.url);
-  api = await bootTestApi();
+  api = await bootTestApi({ plugins: [githubPlugin] });
   await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "github", { type: "oauth2", accessToken: "org-token" });
   return api;
 }
@@ -196,4 +197,59 @@ it("refuses a team the caller cannot see", async () => {
   api = await bootTestApi();
   const { status } = await reviews("?teamId=team-nope");
   expect(status).toBe(404);
+});
+
+async function run(body: Record<string, unknown>): Promise<{ status: number; body: Record<string, unknown> }> {
+  const res = await fetch(`${api!.baseUrl}/api/code-review/runs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  return { status: res.status, body: await res.json() as Record<string, unknown> };
+}
+
+async function seedLine(local: TestApi, repo: string, ownerId: string = owner.id) {
+  const now = Date.now();
+  await local.providers.db.insert(eventSubscriptions).values({
+    id: `line-${repo}-${ownerId}`, orgId: "local-org", ownerType: "user", ownerId, name: `Code review: ${repo}`,
+    eventKeys: ["github.pull_request.opened", "github.pull_request.synchronize"],
+    filters: [{ op: "eq", field: "repo", value: repo }], target: { kind: "plugin", plugin: "pr-review", handler: "review-pull-request" },
+    createdBy: "local-user", createdAt: now, updatedAt: now,
+  });
+}
+
+// The fixture passes the number from the URL path as text.
+const pullBody = (state: "open" | "closed") => (_owner: string, _repo: string, number: string) => ({
+  body: { number: Number(number), state, title: `Pull request ${number}`, html_url: `https://github.com/acme/site/pull/${number}`, base: { ref: "main", repo: { full_name: "acme/site" } }, head: { ref: "f", sha: "abc" } },
+});
+
+it("starts a review of a pull request through the workspace's line, on the handler's delivery path", async () => {
+  api = await bootWithGitHub(pullBody("open"));
+  await seedLine(api, "acme/site");
+  const res = await run({ url: "https://github.com/acme/site/pull/7" });
+  expect(res.status).toBe(201);
+  expect(res.body).toMatchObject({ subscriptionId: "line-acme/site-local-user", shadow: false });
+  const [event] = await api.providers.db.select().from(events);
+  expect(event).toMatchObject({ service: "github", eventKey: "github.pull_request.valet_review_requested", refs: { repo: "acme/site", pr_number: "7" }, subjects: ["github:acme", "github:acme/site", "github:acme/site#7"] });
+  expect(event.payload).toMatchObject({ pull_request: { number: 7 }, valet: { requestedBy: "local-user" } });
+  const deliveries = await api.providers.db.select().from(eventDeliveries);
+  expect(deliveries).toMatchObject([{ eventId: event.id, subscriptionId: "line-acme/site-local-user" }]);
+});
+
+it("shadow-reviews a closed pull request at a commit, and refuses one outside shadow mode", async () => {
+  api = await bootWithGitHub(pullBody("closed"));
+  await seedLine(api, "acme/site");
+  expect((await run({ url: "https://github.com/acme/site/pull/7" })).status).toBe(409);
+  const res = await run({ url: "https://github.com/acme/site/pull/7", shadow: true, commit: "abcdef1" });
+  expect(res.status).toBe(201);
+  const [event] = await api.providers.db.select().from(events);
+  expect(event.payload).toMatchObject({ valet: { shadow: true, commit: "abcdef1" } });
+});
+
+it("refuses a bad URL, a commit without shadow mode, and a repository no line in the workspace covers", async () => {
+  api = await bootWithGitHub(pullBody("open"));
+  await seedLine(api, "acme/other");
+  await seedLine(api, "acme/site", "someone-else");
+  expect((await run({ url: "https://gitlab.com/acme/site/merge_requests/7" })).status).toBe(400);
+  expect((await run({ url: "https://github.com/acme/site/pull/7", commit: "abcdef1" })).status).toBe(400);
+  const missing = await run({ url: "https://github.com/acme/site/pull/7" });
+  expect(missing.status).toBe(404);
+  expect(String(missing.body.error)).toContain("Turn the repository on in Code review first");
+  expect(await api.providers.db.select().from(events)).toHaveLength(0);
 });
