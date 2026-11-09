@@ -1,4 +1,3 @@
-import { usePageActive } from "~/lib/page-active";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouterState } from "@tanstack/react-router";
 import { useSidebarControls } from "~/components/layout/app-shell";
@@ -18,7 +17,6 @@ export function useChatKeybindings(): {
   helpOpen: boolean;
   setHelpOpen: (open: boolean) => void;
 } {
-  const pageActive = usePageActive();
   const [helpOpen, setHelpOpenState] = useState(false);
   // The listener reads the dialog state through a ref, not through its own
   // closure. Two keydowns can arrive before React re-renders, and a closure
@@ -33,7 +31,7 @@ export function useChatKeybindings(): {
   const sidebar = useSidebarControls();
 
   useEffect(() => {
-    if (!onChat || !pageActive) return;
+    if (!onChat) return;
 
     function onKeyDown(e: KeyboardEvent) {
       if (e.defaultPrevented || e.isComposing) return;
@@ -87,7 +85,7 @@ export function useChatKeybindings(): {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onChat, pageActive, sidebar, setHelpOpen]);
+  }, [onChat, sidebar, setHelpOpen]);
 
   return { helpOpen, setHelpOpen };
 }
