@@ -1,4 +1,3 @@
-import { usePageActive } from "~/lib/page-active";
 import { AppPageHintContext, inAskValetDock } from "~/lib/app-page-hint";
 import { useNavigate } from "@tanstack/react-router";
 import { announceTyping } from "~/api/ws";
@@ -176,7 +175,6 @@ export function Composer({
   // still land in the thread it started on. See stores/composer-drafts.ts.
   // Store actions are reached through `getState()` inside handlers so
   // callback identities do not churn per keystroke.
-  const pageActive = usePageActive();
   const key = draftKey(sessionId, threadId);
   const { text, images, files, imageErrors, fileErrors, recall } = useComposerDraft(key);
   const setText = (value: string) => useComposerDraftStore.getState().setText(key, value);
@@ -858,7 +856,7 @@ export function Composer({
   const abortMutate = abort.mutate;
   const abortPending = abort.isPending;
   useEffect(() => {
-    if (!active || !pageActive) return;
+    if (!active) return;
     function onEscape(e: globalThis.KeyboardEvent) {
       if (e.key !== "Escape" || e.defaultPrevented || e.isComposing) return;
       // Focus picks the area: the Ask Valet dock or the page beside it. A
@@ -890,12 +888,12 @@ export function Composer({
     const target: Document | Window = inAskValetDock(inputRef.current) ? window : document;
     target.addEventListener("keydown", onEscape as EventListener);
     return () => target.removeEventListener("keydown", onEscape as EventListener);
-  }, [active, pageActive, working, threadId, queueState?.activeItemId, abortPending, abortMutate, setSubmitError, editingId, onCancelEdit]);
+  }, [active, working, threadId, queueState?.activeItemId, abortPending, abortMutate, setSubmitError, editingId, onCancelEdit]);
   useEffect(() => {
-    if (!active || !pageActive || inAskValetDock(inputRef.current)) return;
+    if (!active || inAskValetDock(inputRef.current)) return;
     pageComposers += 1;
     return () => { pageComposers -= 1; };
-  }, [active, pageActive]);
+  }, [active]);
 
   function insertSelection(id: string) {
     if (commandQuery !== null) {

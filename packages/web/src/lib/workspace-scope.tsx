@@ -1,4 +1,3 @@
-import { cardStorageKey } from "./card-context";
 import { useSearch } from "@tanstack/react-router";
 
 import {
@@ -16,7 +15,7 @@ import { PageTitleProvider } from "~/lib/page-title";
 import { eligibleTeams } from "~/components/session/assistant-rail";
 
 // Keep each browser tab's workspace independent, including after a reload.
-const STORAGE_KEY = cardStorageKey("valet:workspace");
+const STORAGE_KEY = "valet:workspace";
 
 /** Your own workspace. Not a team id, and never a user id — the key is a
  * routing value, not a principal. `useWorkspaceScope().teamId` is what
