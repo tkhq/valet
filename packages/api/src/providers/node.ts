@@ -34,8 +34,10 @@ import {
   buildChildStopper,
   buildChildSpawner,
   buildChildStatusReader,
+  childWorkspaceRoot,
   ChildWatcher,
 } from "../orchestrator/children.js";
+import { registerChildLifecycleMetrics } from "../observability/child-lifecycle-metrics.js";
 import { HibernationReaper } from "../engine/hibernation-reaper.js";
 import { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
 import { IdleHibernationSweep } from "../engine/idle-hibernation-sweep.js";
@@ -625,6 +627,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     nudgeChildEvents: (ids: string[]) => wakeWatcher.nudge(ids),
   };
   const childWatcher = new ChildWatcher(childrenDeps);
+  registerChildLifecycleMetrics(db, childWorkspaceRoot(undefined));
   spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
   readerRef = buildChildReader(childrenDeps);
   senderRef = buildChildSender(childrenDeps, childWatcher);

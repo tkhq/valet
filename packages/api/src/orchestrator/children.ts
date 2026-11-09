@@ -27,6 +27,7 @@ import {
   PendingCapError,
   stripNul,
   recordSandboxDestroyed,
+  reportError,
   recordChildTerminalSignalAbandoned,
   recordChildResultRecovered,
   recordScratchRefused,
@@ -56,6 +57,7 @@ import {
 } from "@valet/engine";
 import { isScratchRequestError, parseResourceQuantity, validateScratchRequest, type ScratchCaps } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
+import { recordChildReclaimFailure } from "../observability/child-lifecycle-metrics.js";
 import { sandboxReclaimBackoff } from "../lib/retry-backoff.js";
 import { agentSessions, childEventOutbox, childReplyDeliveries, childWatches, eventDropLog, sessionRepos, type ChildWatchRow } from "../schema/index.js";
 import type { EngineHost } from "../engine/host.js";
@@ -223,6 +225,11 @@ export function parseTaskRepo(repo: string, branch?: string): RepoBinding | unde
     ...(branch !== undefined ? { ref: branch } : {}),
     auth: "auto",
   };
+}
+
+/** Where child working directories live on the api host: `{root}/{childSessionId}`. */
+export function childWorkspaceRoot(workspaceRoot: string | undefined): string {
+  return workspaceRoot ?? join(homedir(), ".valet", "children");
 }
 
 /**
@@ -576,7 +583,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
     // A pre-assigned id (the security dispatch's cell-claim seam) wins so
     // the caller's durable claim row names the session this spawn builds.
     const childSessionId = req.sessionId ?? newChildSessionId();
-    const workspace = join(deps.workspaceRoot ?? join(homedir(), ".valet", "children"), childSessionId);
+    const workspace = join(childWorkspaceRoot(deps.workspaceRoot), childSessionId);
 
     // A child resolves credentials the way its parent does. A team
     // orchestrator from before owner-mode resolution keeps acting as the
@@ -1746,6 +1753,28 @@ export class ChildWatcher {
         eq(childWatches.settled, true), isNull(childWatches.sandboxReclaimedAt)));
   }
 
+  /**
+   * The one step after a child's sandbox is reclaimed: empty its working
+   * directory and leave the session hibernated with the reclaim stamped,
+   * as the hibernation reaper leaves a reaped session. The empty directory
+   * stays, because the engine rebuilds a revived child in it. A wake makes
+   * the session active again. A failed release is
+   * reported and counted; `valet_child_workspaces{state="retired"}` keeps
+   * it visible. Nothing retries it in the background.
+   */
+  private async retireChild(childSessionId: string, now: number): Promise<void> {
+    try {
+      await this.deps.engineHost.releaseWorkspace(join(childWorkspaceRoot(this.deps.workspaceRoot), childSessionId));
+    } catch (err) {
+      recordChildReclaimFailure("workspace");
+      reportError({ area: "sandbox", reason: "child_workspace_release", level: "error" },
+        `Releasing the working directory of child ${childSessionId} failed. Check the sandbox backend, then delete the directory.`, err);
+    }
+    await this.deps.db.update(agentSessions)
+      .set({ status: "hibernated", sandboxReclaimedAt: now, updatedAt: now })
+      .where(and(eq(agentSessions.id, childSessionId), eq(agentSessions.status, "active")));
+  }
+
   private async forgetDestroyedSandbox(childSessionId: string, sandboxId: string): Promise<boolean> {
     // Clear both durable handles before revoke. Its retry must not destroy
     // or count the same sandbox again, even after restart.
@@ -1803,6 +1832,7 @@ export class ChildWatcher {
         if (destroyedId && !await this.forgetDestroyedSandbox(childSessionId, destroyedId)) return false;
         await revokeSandboxTokens(this.deps.db, childSessionId);
         await this.markReclaimed(childSessionId, now, cycle);
+        await this.retireChild(childSessionId, now);
         if (!live) this.deps.engineHost.evictCache(childSessionId, current);
         return true;
       } finally {
@@ -1893,7 +1923,9 @@ export class ChildWatcher {
       const sandboxId = live.attachment.sandboxId ?? (await this.deps.engineStore.getSession(childSessionId))?.sandboxId;
       if (watch) await this.destroyChildSandbox(childSessionId, sandboxId, "child_settled", watch, Date.now(), deliveryLocked);
     } catch (err) {
-      console.error(`ChildWatcher: sandbox park failed for settled child ${childSessionId}:`, err);
+      recordChildReclaimFailure("park");
+      reportError({ area: "sandbox", reason: "child_sandbox_park", level: "error" },
+        `Parking or reclaiming the sandbox of settled child ${childSessionId} failed. The retention sweep retries it.`, err);
     }
   }
 
@@ -1959,7 +1991,9 @@ export class ChildWatcher {
         this.retentionBackoff.succeeded(row.childSessionId);
       } catch (err) {
         const waitMs = this.retentionBackoff.failed(row.childSessionId, now);
-        console.error(`ChildWatcher: retention reclaim failed for child ${row.childSessionId}; next attempt in ${Math.round(waitMs / 60_000)} min:`, err);
+        recordChildReclaimFailure("retention");
+        reportError({ area: "sandbox", reason: "child_retention_reclaim", level: "error" },
+          `Retention reclaim failed for child ${row.childSessionId}. The next attempt is in ${Math.round(waitMs / 60_000)} min.`, err);
       }
     }
     for (const [key, gap] of this.pendingTerminalAdmissions) {

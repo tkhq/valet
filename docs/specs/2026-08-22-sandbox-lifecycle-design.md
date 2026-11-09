@@ -181,6 +181,21 @@ defects. Both are fixed; decision 6 (no age-based kill) stands.
    revival and an overnight look at yesterday's run. Reclaiming resets
    only the workspace volume; chat history and memories live in
    Postgres.
+
+   On docker the working directory is a host directory
+   (`~/.valet/children/<id>`) that outlived the container: nothing deleted
+   it, and the session stayed `active`. One docker deployment held 171
+   settled children and about 67 GB this way. `ChildWatcher.retireChild` is now the one step
+   after every reclaim. It calls `SandboxProvider.releaseWorkspace`, which
+   empties the directory and keeps it: docker deletes the files as the
+   sandbox user in a one-off container, because the api user cannot, and
+   the engine rebuilds a revived child in the empty directory. It then sets
+   the session `hibernated` with `sandbox_reclaimed_at`, the state the
+   hibernation reaper leaves. A wake makes it `active` again. A failed release is reported (`child_workspace_release`) and
+   counted. `valet_children_reclaimed_active`,
+   `valet_child_workspaces{state}`, `valet_child_workspace_bytes` and
+   `valet_child_reclaim_failures_total` feed two alerts. Nothing retries a
+   failed release in the background.
 4. **The `/workspace` claim drops to 1Gi and is finally configurable.**
    `K8sProviderConfig.defaultStorage` existed but nothing ever set it, so
    the manifest builder's constant was the only size a deploy could get.

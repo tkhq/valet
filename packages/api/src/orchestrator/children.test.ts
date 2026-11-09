@@ -8,7 +8,7 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { CONTINUATION_SOURCE_ITEM_KEY, INHERIT_TOOL_SCOPE_KEY, UNATTENDED_WORKFLOW_KEY, WORKFLOW_STEP_KEY } from "@valet/shared";
 import { RegistryCapacityError } from "../bakes/registry-health.js";
-import { mkdtempSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { eq, and, sql } from "drizzle-orm";
@@ -59,6 +59,7 @@ import {
   CHILD_RESULT_MAX_CHARS,
 } from "./children.js";
 import { MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR, DEFAULT_ORG_ACTIVE_SESSION_CEILING } from "./limits.js";
+import { childWorkspaceCounts, reclaimedActiveChildren } from "../observability/child-lifecycle-metrics.js";
 import { agentSessions, bakes, childEventOutbox, childReplyDeliveries, childWatches, eventReceipts, events, eventDeliveries, eventSubscriptions, eventDropLog, imageSources, sandboxTokens, sessionRepos, teams, teamMembers } from "../schema/index.js";
 import { PendingCapError, ValidationError as EngineValidationError } from "@valet/engine";
 import { isScratchRequestError } from "@valet/shared";
@@ -2975,6 +2976,71 @@ describe("ChildWatcher", () => {
     expect(attachment.state).toBe("released");
     const childData = await engineStore.getSession("child-td");
     expect(childData).not.toBeNull();
+  });
+
+  async function settledChild(name: string, deps: ChildrenDeps) {
+    const { engineHost, engineStore, db } = api!.providers;
+    const parent = await engineHost.sessionFor(`parent-${name}`, { userId: "local-user", orgId: "local-org", workspace: "/tmp" });
+    const parentThread = parent.thread("web:default");
+    await parent.pause();
+    const childId = `child-${name}`;
+    const workspace = join(deps.workspaceRoot!, childId);
+    mkdirSync(join(workspace, "repo"), { recursive: true });
+    writeFileSync(join(workspace, "repo", "file.txt"), "work");
+    const child = await engineHost.childSessionFor(childId, {
+      parentSessionId: `parent-${name}`, parentThreadId: parentThread.id, actorUserId: "local-user", orgId: "local-org",
+      owner: { type: "user", id: "local-user" }, workspace,
+    });
+    await db.insert(agentSessions).values({
+      id: childId, userId: "local-user", orgId: "local-org", workspace, status: "active",
+      ownerType: "user", ownerId: "local-user", profile: "headless", createdAt: Date.now(), updatedAt: Date.now(),
+    });
+    const childThread = child.thread("web:default");
+    await child.attachment.ensureReady({ timeoutMs: 5_000 });
+    // The virtual sandbox's own destroy leaves it in the provider's map; a real provider reports it released.
+    vi.spyOn(engineHost, "sandboxStatus").mockResolvedValue({ id: "vsb", state: "released" });
+    const itemId = `qi-${name}-1`;
+    await engineStore.admitSubmission(childId, childThread.id, queuedItem(itemId, childThread.id, "work"));
+    await appendTerminalResult(engineStore, childId, childThread.id, itemId);
+    await engineStore.settleUnclaimed(childId, childThread.id, itemId, { outcome: "completed" });
+    const watch = { childSessionId: childId, queueItemId: itemId, parentSessionId: `parent-${name}`, parentThreadId: parentThread.id, actorUserId: "local-user", orgId: "local-org" };
+    await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now(), reportToParent: false });
+    return { childId, workspace, watch };
+  }
+
+  it("retires a reclaimed child: empties its working directory and leaves the session hibernated", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const watcher = testChildWatcher(deps);
+    const { childId, workspace, watch } = await settledChild("retire", deps);
+    watcher.arm(watch);
+    await waitFor(async () => {
+      const [row] = await api!.providers.db.select().from(agentSessions).where(eq(agentSessions.id, childId));
+      return row?.status === "hibernated";
+    });
+    const [row] = await api.providers.db.select().from(agentSessions).where(eq(agentSessions.id, childId));
+    expect(row?.sandboxReclaimedAt).toEqual(expect.any(Number));
+    // Emptied, not removed: the engine rebuilds a revived child in it.
+    expect(readdirSync(workspace)).toEqual([]);
+    expect(await reclaimedActiveChildren(api.providers.db)).toBe(0);
+    expect(await childWorkspaceCounts(api.providers.db, deps.workspaceRoot!)).toEqual({ live: 0, retired: 0 });
+  });
+
+  it("still hibernates a reclaimed child when its working directory cannot be released, and counts it", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const release = vi.spyOn(api.providers.engineHost, "releaseWorkspace").mockRejectedValue(new Error("EACCES: permission denied"));
+    const watcher = testChildWatcher(deps);
+    const { childId, workspace, watch } = await settledChild("retire-fail", deps);
+    watcher.arm(watch);
+    await waitFor(async () => {
+      const [row] = await api!.providers.db.select().from(agentSessions).where(eq(agentSessions.id, childId));
+      return row?.status === "hibernated";
+    });
+    expect(release).toHaveBeenCalledWith(workspace);
+    expect(existsSync(join(workspace, "repo", "file.txt"))).toBe(true);
+    // The directory outlived its reclaim, so the gauge behind the alert shows it.
+    expect(await childWorkspaceCounts(api.providers.db, deps.workspaceRoot!)).toEqual({ live: 0, retired: 1 });
   });
 
   it("tears down a plugin child's sandbox on settle, so it stops counting against the child cap", async () => {

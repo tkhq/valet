@@ -1853,6 +1853,14 @@ export interface SandboxProvider {
    */
   release?(id: string): Promise<void>;
   /**
+   * Empty a working directory that a destroyed sandbox mounted from the
+   * host, and keep the directory. Only providers whose working directory
+   * outlives `destroy` implement it (docker: a host bind mount). Files the
+   * sandbox wrote can belong to the sandbox user, so the provider deletes
+   * them as that user. `image` is an image the provider can run.
+   */
+  releaseWorkspace?(hostPath: string, opts: { image: string }): Promise<void>;
+  /**
    * Optional deterministic-id seam. Providers whose sandbox ids are a pure
    * function of the session key (sandbox-kubernetes: `sandboxCrName`)
    * implement this so reapers can recompute a destroy handle that was never

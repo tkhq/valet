@@ -457,6 +457,19 @@ function bindMount(source: string, target: string, readonly = false): string[] {
   return ["--mount", `type=bind,${field},dst=${target}${readonly ? ",readonly" : ""}`];
 }
 
+/**
+ * `docker run` arguments that delete everything inside a working
+ * directory as the sandbox's root, with no network and only the
+ * capabilities a delete needs.
+ */
+export function releaseWorkspaceArgs(hostPath: string, image: string, cgroupParent?: string): string[] {
+  return [
+    "run", "--rm", ...(cgroupParent ? ["--cgroup-parent", cgroupParent] : []), "--network", "none", "--user", "0",
+    "--cap-drop", "ALL", "--cap-add", "DAC_OVERRIDE", "--cap-add", "FOWNER", "--security-opt", "no-new-privileges",
+    "--entrypoint", "find", ...bindMount(hostPath, CONTAINER_WORKSPACE), image, CONTAINER_WORKSPACE, "-mindepth", "1", "-delete",
+  ];
+}
+
 export function buildDockerRunArgs(opts: BuildDockerRunArgsOpts): string[] {
   const runArgs: string[] = ["run", "-d", "--name", opts.containerName];
   if (opts.cgroupParent) runArgs.push("--cgroup-parent", opts.cgroupParent);
@@ -1711,6 +1724,18 @@ export class DockerSandboxProvider implements SandboxProvider {
     await this.removeContainer(value);
     value.state = "released"; await this.inventory.write(value);
     this.sandboxes.delete(id);
+  }
+
+  /**
+   * Empty a working directory after its sandbox is destroyed, and keep the
+   * directory for a later revival. The sandbox user owns the files, so a
+   * one-off container deletes them.
+   */
+  async releaseWorkspace(hostPath: string, opts: { image: string }): Promise<void> {
+    const path = resolve(hostPath);
+    if (!(await fs.stat(path).catch(() => null))?.isDirectory()) return;
+    const result = await execProcess("docker", releaseWorkspaceArgs(path, opts.image, this.cgroupParent), { timeout: 300_000 });
+    if (result.exitCode !== 0) throw new Error(`Cannot delete the working directory ${path}. Check the Docker daemon, then retry. ${result.stderr.trim()}`);
   }
 
   /** Final deletion. The host must export browser audit records before calling this method. */
