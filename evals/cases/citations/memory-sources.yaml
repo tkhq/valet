@@ -17,4 +17,6 @@ checks:
       The reply states that Alder deploys on Friday and Mira owns the release.
       Each fact has a source citation from the memory read.
       Score 5 only if both facts have citations. Uncited facts score at most 2.
+      A caveat about the source, such as that it reports a cause nobody verified or that it may be out of date, is not an uncited fact and does not lower the score.
+      A bracketed id such as [s1] cites the tool source with that id; the reply does not need to name the source in words.
   - type: no_errors

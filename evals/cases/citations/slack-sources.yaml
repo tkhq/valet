@@ -21,4 +21,6 @@ checks:
   - type: judge_output
     rubric: >-
       The reply says the launch is on Tuesday, Nov 12, and cites the Slack message source. Score 5 only if the fact has a citation. Uncited facts score at most 2.
+      A caveat about the source, such as that it reports a cause nobody verified or that it may be out of date, is not an uncited fact and does not lower the score.
+      A bracketed id such as [s1] cites the tool source with that id; the reply does not need to name the source in words.
   - type: no_errors
