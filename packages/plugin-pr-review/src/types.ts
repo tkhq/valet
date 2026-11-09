@@ -27,6 +27,14 @@ export const FindingSchema = Type.Object({
   evidence: Type.Optional(
     Type.String({ description: "Required. path:line references to the code you read that shows the failure, at least one. Not posted." }),
   ),
+  confidence: Type.Optional(
+    Type.Number({
+      minimum: 0,
+      maximum: 1,
+      description:
+        "Probability that the repo's maintainers would agree this is a real defect worth fixing in this PR. Calibrated: of findings you rate 0.7, about 7 in 10 should be real. Not posted.",
+    }),
+  ),
   title: Type.String({ description: "One line naming the single defect and where it is." }),
   body: Type.String({
     description: "One sentence joining the trigger to the wrong result. No other claim: no restated title, second effect, impact, or fix.",
