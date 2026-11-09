@@ -1,5 +1,6 @@
 export {
   anchorProblems,
+  evidenceProblems,
   createLocalAgentRunner,
   createReviewerSpec,
   lineCount,

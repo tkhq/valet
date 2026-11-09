@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ToolContext } from "@valet/engine";
-import { anchorProblems, buildVerifierPrompt, createReviewerSpec, createVerifierSpec, lineCount, decideFinding, mergeFindings, quoteInFile, runReviewPipeline, type AgentRunner, type AgentSpec } from "../src/index.js";
+import { anchorProblems, evidenceProblems, buildVerifierPrompt, createReviewerSpec, createVerifierSpec, lineCount, decideFinding, mergeFindings, quoteInFile, runReviewPipeline, type AgentRunner, type AgentSpec } from "../src/index.js";
 
 function repo(): { dir: string; base: string; head: string } {
   const dir = mkdtempSync(join(tmpdir(), "pr-review-pipeline-"));
@@ -23,7 +23,8 @@ function repo(): { dir: string; base: string; head: string } {
   return { dir, base, head: g("rev-parse", "HEAD") };
 }
 
-const finding = (title: string) => ({ path: "a.py", line: 2, severity: "high", category: "bug", title, body: "b" }) as const;
+const finding = (title: string) =>
+  ({ path: "a.py", line: 2, severity: "high", category: "bug", trigger: "any call", evidence: "a.py:2", title, body: "b" }) as const;
 
 /** Calls the agent's submit tool directly, as the model would. */
 async function submit(spec: AgentSpec, name: string, args: unknown): Promise<void> {
@@ -252,5 +253,28 @@ describe("line anchors", () => {
     // The submit tool ignores its context.
     await tool.execute({ summary: "s", confidence: 3, findings: [{ ...finding("Accidental submodule"), path: "sub", line: 1 }] } as never, {} as ToolContext);
     expect(spec.review()?.findings.map((f) => f.path)).toEqual(["sub"]);
+  });
+});
+
+describe("evidence", () => {
+  it("flags a finding with no trigger or no path:line evidence", () => {
+    const base = finding("F");
+    const problems = evidenceProblems([base, { ...base, trigger: " " }, { ...base, evidence: "the docs say so" }, { ...base, trigger: undefined, evidence: undefined }]);
+    expect(problems.map((p) => p.index)).toEqual([1, 2, 3]);
+    expect(problems[1].problem).toContain("no path:line reference");
+  });
+
+  it("submit_review refuses an unsupported finding, then drops it", async () => {
+    const { dir, base, head } = repo();
+    const spec = await createReviewerSpec({ workspace: dir, base, head, title: "t", body: "" });
+    const tool = spec.tools.find((t) => t.name === "submit_review");
+    if (!tool) throw new Error("no submit_review tool");
+    // The submit tool ignores its context.
+    const call = async (findings: unknown[]) => tool.execute({ summary: "s", confidence: 3, findings } as never, {} as ToolContext);
+    const speculative = { ...finding("Might break later"), evidence: "" };
+    expect(JSON.stringify(await call([finding("Division by zero"), speculative]))).toContain("evidence has no path:line reference");
+    await call([finding("Division by zero"), speculative]);
+    await call([finding("Division by zero"), speculative]);
+    expect(spec.review()?.findings.map((f) => f.title)).toEqual(["Division by zero"]);
   });
 });

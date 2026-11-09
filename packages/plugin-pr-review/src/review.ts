@@ -134,7 +134,27 @@ async function headLineCounts(workspace: string, head: string, paths: string[]):
   return counts;
 }
 
-/** Times submit_review refuses bad anchors before it drops those findings instead. */
+/** A `path:line` reference, e.g. `pkg/a.go:42` or `a.py:3-9`. */
+const CODE_REF = /[\w./-]+\.\w+:\d+/;
+
+/**
+ * Findings the reviewer cannot back: no concrete trigger, or evidence with
+ * no `path:line` reference to code it read. A claim without both is
+ * speculation, and speculation is the main source of false positives.
+ */
+export function evidenceProblems(findings: Finding[]): { index: number; problem: string }[] {
+  const problems: { index: number; problem: string }[] = [];
+  findings.forEach((f, index) => {
+    if ((f.trigger ?? "").trim().length === 0) {
+      problems.push({ index, problem: "trigger is empty. Name the input or state that makes the code fail, or drop the finding." });
+    } else if (!CODE_REF.test(f.evidence ?? "")) {
+      problems.push({ index, problem: "evidence has no path:line reference. Cite the code you read that shows the failure, or drop the finding." });
+    }
+  });
+  return problems;
+}
+
+/** Times submit_review refuses unanchored or unsupported findings before it drops them instead. */
 const ANCHOR_REFUSALS = 2;
 
 export async function createReviewerSpec(opts: ReviewerSpecOptions): Promise<ReviewerSpec> {
@@ -159,16 +179,16 @@ export async function createReviewerSpec(opts: ReviewerSpecOptions): Promise<Rev
         const first = [...Value.Errors(ReviewSchema, args)].slice(0, 3);
         return { text: `Review rejected: ${first.map((e) => `${e.instancePath} ${e.message}`).join("; ")}. Fix and call again.` };
       }
-      const problems = anchorProblems(args.findings, lineCounts);
+      const problems = [...anchorProblems(args.findings, lineCounts), ...evidenceProblems(args.findings)];
       if (problems.length > 0 && refusals < ANCHOR_REFUSALS) {
         refusals++;
         return {
-          text: `Review rejected: ${problems.map((p) => `finding ${p.index + 1} (${args.findings[p.index].path}:${args.findings[p.index].line}): ${p.problem}`).join(" ")} Fix the lines and call submit_review again with every finding.`,
+          text: `Review rejected: ${problems.map((p) => `finding ${p.index + 1} (${args.findings[p.index].path}:${args.findings[p.index].line}): ${p.problem}`).join(" ")} Fix those findings and call submit_review again with every finding.`,
         };
       }
       const bad = new Set(problems.map((p) => p.index));
       submitted = { ...args, findings: args.findings.filter((_, i) => !bad.has(i)) };
-      return { text: bad.size > 0 ? `Review recorded without ${bad.size} finding(s) whose line does not exist. Stop now.` : "Review recorded. Stop now." };
+      return { text: bad.size > 0 ? `Review recorded without ${bad.size} finding(s) that had no valid line, trigger or evidence. Stop now.` : "Review recorded. Stop now." };
     },
   };
   return {
