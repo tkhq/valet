@@ -9,7 +9,7 @@
  * lives in the review comments on GitHub and is read back from them.
  */
 import { Type, type Static, type TSchema } from "typebox";
-import type { PluginChild, PluginEvent, PluginEventContext, PluginEventHandler, PluginThreadRef } from "@valet/engine";
+import { READ_MAX_CHARS, type PluginChild, type PluginEvent, type PluginEventContext, type PluginEventHandler, type PluginThreadRef } from "@valet/engine";
 import { cutPatch, type PullRequestDiff } from "./git.js";
 import { githubClient, GitHubError, type GitHubClient, type PullFile, type PullRequest, type ReviewComment, type ReviewThread } from "./github.js";
 import { sameIssue } from "./incremental.js";
@@ -142,7 +142,10 @@ export function manualReviewOptions(event: Pick<PluginEvent, "key" | "payload">)
 const CHILD_CONCURRENCY = 4;
 /** Findings verified per run; the rest are posted as unverified. */
 const MAX_VERIFIED = 12;
-const DIFF_BUDGET = 150_000;
+/** The PR diff the reviewer's prompt holds: the engine's `read` cap, about
+ * 25,000 tokens. The cut note lists the files left out; the reviewer runs
+ * git diff for them. */
+const DIFF_BUDGET = READ_MAX_CHARS;
 const FILE_DIFF_CHARS = 30_000;
 
 export interface ReviewHandlerOptions {
@@ -711,7 +714,7 @@ async function lineCountsAt(gh: GitHubClient, files: PullFile[], paths: string[]
 }
 
 /** The PR diff limited to the reviewed files, cut to the budget. */
-function prDiffFor(patch: string | undefined, files: PullFile[], base: string, head: string): PullRequestDiff {
+export function prDiffFor(patch: string | undefined, files: PullFile[], base: string, head: string): PullRequestDiff {
   const names = files.map((f) => f.filename);
   const stat = files.map((f) => `${f.filename} | +${f.additions} -${f.deletions}`).join("\n");
   if (patch === undefined) return unrendered(stat, names, base, head);

@@ -258,6 +258,8 @@ export {
   childStopTool,
   DEFAULT_WAKEUP_LIMITS,
   readTool,
+  READ_MAX_CHARS,
+  READ_MAX_LINES,
   writeTool,
   editTool,
   bashTool,

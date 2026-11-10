@@ -60,6 +60,7 @@ export {
   MANUAL_REVIEW_EVENT,
   manualReviewOptions,
   POINTERS_COLLECTION,
+  prDiffFor,
   pullTarget,
   ReviewSettingsSchema,
   type FindingPointer,
