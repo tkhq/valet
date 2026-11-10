@@ -131,6 +131,7 @@ const BUILTIN: Record<string, [present: string, past: string]> = {
   wakeup_list: ["Checking wake-ups", "Checked wake-ups"],
   wakeup_cancel: ["Canceling a wake-up", "Canceled a wake-up"],
   artifact_publish: ["Publishing", "Published"],
+  artifact_edit: ["Editing the artifact", "Edited the artifact"],
   switch_model: ["Switching the model", "Switched the model"],
   ask_approval: ["Asking for approval", "Asked for approval"],
   hold_sandbox: ["Keeping the sandbox running", "Kept the sandbox running"],
