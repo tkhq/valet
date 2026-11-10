@@ -670,8 +670,9 @@ async function shadowReview(
     await ctx.threads.record(thread, renderShadowNotice(slug, "Valet cannot check out the head of a pull request from a fork. Pass a commit that a branch of this repository contains."), { dispatchId: dispatch("shadow-fork") });
     return log(slug, "shadow review skipped: pull request from a fork");
   }
-  const comparison = await gh.compare(pr.base.sha, checkout);
-  if (!comparison) throw new Error(`GitHub cannot compare ${pr.base.sha.slice(0, 7)} with ${checkout.slice(0, 7)} on ${slug}. Pass a commit that still exists, then retry.`);
+  const from = await shadowBase(gh, pr, checkout);
+  const comparison = await gh.compare(from, checkout);
+  if (!comparison) throw new Error(`GitHub cannot compare ${from.slice(0, 7)} with ${checkout.slice(0, 7)} on ${slug}. Pass a commit that still exists, then retry.`);
   const mergeBase = comparison.merge_base_commit.sha;
   const files = comparison.files ?? [];
   const reviewed = files.filter((f) => !excluded(f.filename, settings.excludePaths));
@@ -692,6 +693,21 @@ async function shadowReview(
     { dispatchId: dispatch("shadow-record") },
   );
   log(slug, `shadow review of ${checkout.slice(0, 7)} recorded in the plugin thread: ${shown.length} finding(s)`);
+}
+
+/**
+ * The commit a shadow review diffs from. For a merged pull request read at
+ * its merge commit, that is the merge commit's first parent: the base branch
+ * just before the merge, so the diff is the pull request's own change for a
+ * merge commit or a squash. `pr.base.sha` is the base from the pull
+ * request's last update. The base branch moved on after it, so diffing from
+ * it would sweep in every commit merged in between. A rebase merge of
+ * several commits shows only its last commit this way. Any other checkout
+ * diffs from `pr.base.sha`, through the merge base, as before.
+ */
+async function shadowBase(gh: GitHubClient, pr: PullRequest, checkout: string): Promise<string> {
+  if (!pr.merged || !pr.merge_commit_sha || checkout !== pr.merge_commit_sha) return pr.base.sha;
+  return (await gh.commitParents(checkout))?.[0] ?? pr.base.sha;
 }
 
 /** How a verifier child ends: JSON the verdict schema accepts, not a submit tool. */

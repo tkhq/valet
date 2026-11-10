@@ -72,6 +72,8 @@ class FakeGitHub {
   compared: string[] = [];
   diffed: string[] = [];
   merged = false;
+  /** Parent shas by commit, for `GET /commits/<sha>`. */
+  parentsOf: Record<string, string[]> = {};
   extraFiles: { filename: string; status: string; additions: number; deletions: number; patch: string }[] = [];
   /** Thread state by first-comment id. Every comment is its own thread here. */
   resolved = new Set<number>();
@@ -142,6 +144,11 @@ class FakeGitHub {
       this.compared.push(`${from}...${to}`);
       if (from === BASE) return ok({ status: "ahead", merge_base_commit: { sha: BASE }, files: this.filesAt[to] ?? [{ filename: "a.ts" }] });
       return ok({ status: this.incrementStatus, merge_base_commit: { sha: from }, files: this.incrementFiles.map((filename) => ({ filename })) });
+    }
+    const commitMatch = /^\/commits\/([0-9a-f]{40})$/.exec(path);
+    if (method === "GET" && commitMatch) {
+      const parents = this.parentsOf[commitMatch[1]];
+      return parents ? ok({ sha: commitMatch[1], parents: parents.map((sha) => ({ sha })) }) : new Response(JSON.stringify({ message: "Not Found" }), { status: 404 });
     }
     if (method === "GET" && path === "/pulls/7/files") {
       return ok(url.searchParams.get("page") === "1" ? [{ filename: "a.ts", status: "modified", additions: 20, deletions: 3, patch: PATCH_A }, ...this.extraFiles] : []);
@@ -824,6 +831,27 @@ describe("review-pull-request handler", () => {
     expect(threads.spawned[0].req).toMatchObject({ role: "pr-reviewer", ref: commit });
     expect(threads.records[0].body).toContain("at `ccccccc`");
     expect(gh.writes).toEqual([]);
+  });
+
+  it("diffs a merged pull request from its merge commit's first parent, not the stale base", async () => {
+    const gh = new FakeGitHub();
+    gh.state = "closed";
+    gh.merged = true;
+    const merge = "9".repeat(40);
+    const parent = "8".repeat(40);
+    // Main moved on after the pull request's base; its first parent is main just before the merge.
+    gh.parentsOf[merge] = [parent, H1];
+    gh.incrementFiles = ["a.ts"];
+    const threads = new FakeThreads(scripted(reviewOf([]), {}));
+    await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1", MANUAL_REVIEW_EVENT, { shadow: true }), context(threads, new FakeStore()));
+    expect(threads.spawned[0].req).toMatchObject({ ref: merge });
+    expect(gh.compared).toEqual([`${parent}...${merge}`]);
+    expect(gh.diffed).toEqual([`${parent}...${merge}`]);
+    // The same commit passed by hand is the merge commit too.
+    const again = new FakeThreads(scripted(reviewOf([]), {}));
+    gh.compared = [];
+    await createReviewHandler({ fetch: gh.fetch }).handle(event("ev2", MANUAL_REVIEW_EVENT, { shadow: true, commit: merge }), context(again, new FakeStore()));
+    expect(gh.compared).toEqual([`${parent}...${merge}`]);
   });
 
   it("takes the diff, files and line checks of a shadow review from the commit it checks out", async () => {
