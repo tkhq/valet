@@ -217,6 +217,7 @@ pnpm --filter @valet/eval exec tsx src/review-matrix-cli.ts \
 ```
 
 - Keep the baselines directory out of the repo: trajectories carry code.
+- `--model` names the reviewer model whose saved baselines the matrix reads, for cases that name no model. `--judge-model` picks the model that matches issues across reviewers; it defaults to `DEFAULT_REVIEW_JUDGE_MODEL`.
 - Reference reviewers with text and links come from
   `<cases>/reference/<case id>.json`. Reference tools with only `matched`
   and `fp` counts (Martian, the trial suite) mark golden rows and add a

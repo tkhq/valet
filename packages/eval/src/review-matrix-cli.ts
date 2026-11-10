@@ -4,10 +4,13 @@
  *
  *   tsx src/review-matrix-cli.ts --cases <dir | private:<suite>> --run valet=<baselines dir> \
  *     [--run valet-context=<baselines dir>] [--model anthropic/claude-sonnet-5-5] \
- *     [--out matrix.md] [--json matrix.json] [--concurrency 4]
+ *     [--judge-model <provider/model>] [--out matrix.md] [--json matrix.json] [--concurrency 4]
  *
  * Each `--run` names a baselines directory that a suite run wrote with
- * `--save-baseline --baselines <dir>`. The judge calls go through the Valet
+ * `--save-baseline --baselines <dir>`. `--model` is the reviewer model whose
+ * saved baselines are read, for cases that name no model. `--judge-model`
+ * picks the model that matches issues across reviewers (default
+ * DEFAULT_REVIEW_JUDGE_MODEL). The judge calls go through the Valet
  * gateway (VALET_LLM_GATEWAY_URL and VALET_API_KEY or VALET_API_KEY_FILE).
  */
 import { writeFile } from "node:fs/promises";
@@ -20,10 +23,11 @@ import { llmGatewayFromEnv, viaGateway } from "./gateway.js";
 import { resolvePrivateCases } from "./private-pull-request.js";
 import { buildCaseMatrix, loadReferenceSidecar, renderMatrixMarkdown, runFindings, type CaseMatrix, type RunReview } from "./review-matrix.js";
 
-function parse(argv: string[]): { cases: string; runs: { label: string; dir: string }[]; model: string; out?: string; json?: string; concurrency: number } {
+function parse(argv: string[]): { cases: string; runs: { label: string; dir: string }[]; model: string; judgeModel: string; out?: string; json?: string; concurrency: number } {
   const runs: { label: string; dir: string }[] = [];
   let cases: string | undefined;
   let model = "anthropic/claude-sonnet-5-5";
+  let judgeModel = DEFAULT_REVIEW_JUDGE_MODEL;
   let out: string | undefined;
   let json: string | undefined;
   let concurrency = 4;
@@ -32,6 +36,7 @@ function parse(argv: string[]): { cases: string; runs: { label: string; dir: str
     switch (argv[i]) {
       case "--cases": cases = v; i++; break;
       case "--model": model = v; i++; break;
+      case "--judge-model": judgeModel = v; i++; break;
       case "--out": out = v; i++; break;
       case "--json": json = v; i++; break;
       case "--concurrency": concurrency = Math.max(1, Number(v)); i++; break;
@@ -53,15 +58,15 @@ function parse(argv: string[]): { cases: string; runs: { label: string; dir: str
     process.stdout.write(`SKIP ${priv.skip}\n`);
     process.exit(0);
   }
-  return { cases: priv !== undefined ? priv.dir : resolve(cases), runs, model, ...(out ? { out } : {}), ...(json ? { json } : {}), concurrency };
+  return { cases: priv !== undefined ? priv.dir : resolve(cases), runs, model, judgeModel, ...(out ? { out } : {}), ...(json ? { json } : {}), concurrency };
 }
 
 async function main(): Promise<void> {
   const args = parse(process.argv.slice(2));
   const gateway = llmGatewayFromEnv();
   if (gateway === undefined) throw new Error("The matrix judge runs on a Valet key. Set VALET_LLM_GATEWAY_URL and VALET_API_KEY (or VALET_API_KEY_FILE).");
-  const judge = resolveModelId(DEFAULT_REVIEW_JUDGE_MODEL);
-  if (!judge) throw new Error(`unknown judge model ${DEFAULT_REVIEW_JUDGE_MODEL}`);
+  const judge = resolveModelId(args.judgeModel);
+  if (!judge) throw new Error(`Unknown judge model ${args.judgeModel}. Pass --judge-model as provider/model, e.g. ${DEFAULT_REVIEW_JUDGE_MODEL}.`);
   const llm = modelLlm(viaGateway(judge, gateway), gateway.apiKey);
 
   const cases = (await loadCases(args.cases)).filter((c) => c.pull_request !== undefined);
