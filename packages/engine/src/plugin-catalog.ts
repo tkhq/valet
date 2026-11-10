@@ -1130,6 +1130,11 @@ async function resolveDynamic(
   catalog: Catalog,
   plugin: ActionPlugin,
   ctx: ToolContext,
+  /** False for a broad `list_tools` search. Discovery that would ask a
+   * person (a teammate's shared account, or an approval rule) then opens no
+   * card and throws {@link DiscoveryNeedsApproval}. The card opens only when
+   * the model names the service. */
+  mayAsk = true,
 ): Promise<ResolvedDynamic> {
   const now = catalog.now();
   const cacheKey = JSON.stringify([plugin.service, ctx.userId, ctx.threadId, ctx.externalSender === true]);
@@ -1160,6 +1165,10 @@ async function resolveDynamic(
       },
     };
     const entry: CatalogEntry = { service: plugin.service, plugin, action };
+    if (!mayAsk) {
+      const reason = await discoveryApprovalReason(ctx, plugin, action.id);
+      if (reason) throw new DiscoveryNeedsApproval(reason);
+    }
     const outcome = await invokeAction(
       { ...catalog, entries: [entry], byId: new Map([[action.id, entry]]), dynamicPlugins: [] },
       action.id, {}, ctx.toolScope?.actions ? { ...ctx, toolScope: { ...ctx.toolScope, actions: [...ctx.toolScope.actions, action.id] } } : ctx, `Read the list of ${label} tools this account can use.`,
@@ -1190,6 +1199,46 @@ async function resolveDynamic(
   }
   catalog.resolved.set(cacheKey, result);
   return result;
+}
+
+/** A broad search skipped a service because listing its tools would ask a
+ * person. The message says how to ask on purpose. */
+class DiscoveryNeedsApproval extends Error {}
+
+/**
+ * Why discovery for `plugin` would open an approval card now, or undefined
+ * when it would not. It reads the policy decision and opens no gate. Like a
+ * read-only lookup in Claude Code, a broad search must not ask anyone: a
+ * teammate gets a card only when the model asks for their service by name.
+ */
+async function discoveryApprovalReason(ctx: ToolContext, plugin: ActionPlugin, actionId: string): Promise<string | undefined> {
+  const resolver = ctx.policyResolver;
+  if (!resolver) return undefined;
+  let decision: PolicyDecision;
+  try {
+    decision = await resolver.resolve({
+      teamId: ctx.owner?.type === "team" ? ctx.owner.id : undefined,
+      service: plugin.service,
+      actionId,
+      riskLevel: "low",
+      params: {},
+      userId: ctx.userId,
+      orgId: ctx.orgId,
+      sessionId: ctx.sessionId,
+      threadId: ctx.threadId,
+      ...(ctx.queueItemId ? { queueItemId: ctx.queueItemId } : {}),
+      appliesIn: "session",
+      ...(ctx.externalSender ? { externalSender: true } : {}),
+    });
+  } catch {
+    // The normal discovery path reports the failed policy check.
+    return undefined;
+  }
+  if (decision.mode !== "require_approval") return undefined;
+  const ask = `Call list_tools with service "${plugin.service}" to ask.`;
+  if (!decision.approver) return `tools not listed: listing them needs approval. ${ask}`;
+  const who = decision.approver.name ?? "a teammate";
+  return `tools not listed: listing them uses ${who}'s shared account, and ${who} must approve. ${ask}`;
 }
 
 // ── list_tools ───────────────────────────────────────────────────
@@ -1344,13 +1393,17 @@ function makeListTool(
         if (discoveryScope?.actions && !discoveryScope.actions.some((id) => id.startsWith(`${plugin.service}.`))) continue;
         dynamicServicesConsidered.add(plugin.service);
         try {
-          const resolvedDyn = await resolveDynamic(catalog, plugin, discoveryCtx);
+          const resolvedDyn = await resolveDynamic(catalog, plugin, discoveryCtx, a.service === plugin.service);
           const dynEntries =
             query.hasInput
               ? resolvedDyn.entries.filter((e) => matchesQuery(e.action))
               : resolvedDyn.entries;
           entries = entries.concat(dynEntries.filter((entry) => actionInScope(discoveryScope, qualifiedId(entry))));
         } catch (err) {
+          if (err instanceof DiscoveryNeedsApproval) {
+            warnings.push({ service: plugin.service, reason: err.message });
+            continue;
+          }
           const message = err instanceof Error ? err.message : String(err);
           warnings.push({ service: plugin.service, reason: `action discovery failed: ${message}` });
         }

@@ -1641,6 +1641,48 @@ describe("pluginCatalogTools: dynamic actions (resolveActions)", () => {
     expect(resolveActions).toHaveBeenCalledTimes(answer === "approve" ? 1 : 0);
   });
 
+  // A broad search is a read-only lookup: it must not send a teammate a
+  // card for a service the model never asked about.
+  it.each([
+    ["shared account", { approver: { userId: "lender", name: "Lee" } }, "uses Lee's shared account, and Lee must approve"],
+    ["approval rule", {}, "listing them needs approval"],
+  ] as const)("a broad search skips discovery that would ask (%s)", async (_label, extra, expected) => {
+    const resolveActions = vi.fn(async () => []);
+    const requestDecision = vi.fn(async (): Promise<DecisionResolution> => ({ actionId: "approve", resolvedBy: "lender", resolvedAt: 1 }));
+    const [list] = pluginCatalogTools({ plugins: [makeDynamicPlugin("remote", resolveActions)] });
+    const result = await list.execute({ query: "issue" }, makeCtx({ owner: { type: "team", id: "team" }, requestDecision,
+      policyResolver: { resolve: async () => ({ mode: "require_approval", provenance: { baseMode: "allow", source: "shared_account" }, ...extra }) } }));
+    expect(requestDecision).not.toHaveBeenCalled();
+    expect(resolveActions).not.toHaveBeenCalled();
+    const payload = decode(result.text) as { warnings?: Array<{ service: string; reason: string }> };
+    const reason = payload.warnings?.find((w) => w.service === "remote")?.reason;
+    expect(reason).toContain(expected);
+    expect(reason).toContain(`Call list_tools with service "remote" to ask.`);
+    expect(reason).not.toContain("action discovery failed");
+  });
+
+  it("a broad search still lists a team service that needs no approval", async () => {
+    const resolveActions = vi.fn(async () => [{ id: "remote.read", name: "Read", description: "Read", riskLevel: "low" as const,
+      parameters: Type.Object({}), execute: async () => ({ success: true }) }]);
+    const requestDecision = vi.fn(async (): Promise<DecisionResolution> => ({ actionId: "approve", resolvedBy: "u1", resolvedAt: 1 }));
+    const [list] = pluginCatalogTools({ plugins: [makeDynamicPlugin("remote", resolveActions)] });
+    const result = await list.execute({}, makeCtx({ owner: { type: "team", id: "team" }, requestDecision,
+      policyResolver: { resolve: async () => ({ mode: "allow", provenance: { baseMode: "allow", source: "risk_default" } }) } }));
+    expect(requestDecision).not.toHaveBeenCalled();
+    expect(resolveActions).toHaveBeenCalledOnce();
+    const payload = decode(result.text) as { tools: Array<{ tool_id: string }> };
+    expect(payload.tools.map((t) => t.tool_id)).toContain("remote.read");
+  });
+
+  it("calling a skipped service's tool by name still asks the account owner", async () => {
+    const requestDecision = vi.fn(async (): Promise<DecisionResolution> => ({ actionId: "deny", resolvedBy: "lender", resolvedAt: 1 }));
+    const context = makeCtx({ owner: { type: "team", id: "team" }, requestDecision,
+      policyResolver: { resolve: async () => ({ mode: "require_approval", provenance: { baseMode: "allow", source: "shared_account" }, approver: { userId: "lender" } }) } });
+    const outcome = await invokeAction(buildPluginCatalog([makeDynamicPlugin("remote", vi.fn(async () => []))]), "remote.read", {}, context, "Read");
+    expect(requestDecision).toHaveBeenCalledOnce();
+    expect(outcome.kind).toBe("resolve-failed");
+  });
+
   it("team discovery reports a pending approval as waiting, not denied", async () => {
     const [list] = pluginCatalogTools({ plugins: [makeDynamicPlugin("remote", vi.fn(async () => []))] });
     const result = await list.execute({ service: "remote" }, makeCtx({ owner: { type: "team", id: "team" },
