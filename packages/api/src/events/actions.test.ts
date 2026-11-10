@@ -240,14 +240,19 @@ describe("eventsActionPlugin", () => {
     expect(await db.select().from(eventSubscriptions)).toHaveLength(0);
   });
 
-  it("turns a proposed code review line on and off, behind an approval by default", async () => {
+  it("turns a proposed code review line on and off on the person's request, with no approval by default", async () => {
     const plugin = eventsActionPlugin(db, [githubPlugin, prReviewPlugin]);
     const propose = plugin.actions.find(a => a.id === "events.propose_subscription")!;
     const toggle = plugin.actions.find(a => a.id === "events.set_subscription_enabled")!;
-    expect(toggle.riskLevel).toBe("high");
+    expect(toggle.riskLevel).toBe("medium");
     const line = { name: "Code review: acme/site", plugin_handler: { plugin: "pr-review", handler: "review-pull-request" }, filters: [{ field: "repo", op: "eq" as const, value: "acme/site" }] };
     const proposed = await propose.execute({ ...line, proposal_key: "site" }, context("member"));
     const id = (proposed.data as { proposal: { id: string } }).proposal.id;
+    // No person asks in a workflow step or a child session.
+    for (const sessionPurpose of ["workflow", "child"] as const) {
+      expect(await toggle.execute({ subscription_id: id, enabled: true }, context("member", { sessionPurpose }))).toMatchObject({ success: false, error: expect.stringContaining("cannot turn lines on or off") });
+    }
+    expect(await toggle.execute({ subscription_id: id, enabled: true }, context("member", { unattendedWorkflow: true }))).toMatchObject({ success: false });
     expect(await toggle.execute({ subscription_id: id, enabled: true }, context("member"))).toMatchObject({ success: true, data: { subscription: { id, enabled: true } } });
     // Repeating the same state changes nothing.
     expect(await toggle.execute({ subscription_id: id, enabled: true }, context("member"))).toMatchObject({ success: true, data: { subscription: { enabled: true } } });

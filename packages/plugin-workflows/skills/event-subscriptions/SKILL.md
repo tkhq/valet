@@ -116,7 +116,7 @@ A code review line hands a repository's pull request events to the PR review plu
 
 1. Call `events.list_subscriptions` to check that the workspace has no code review line for the repository yet.
 2. Call `events.propose_subscription` with `plugin_handler` and a `repo` filter. Leave out `event_keys`: the line takes the events the handler accepts. Add `config` only to change the default settings.
-3. If the person asked you to turn it on, call `events.set_subscription_enabled` with the line's ID and `enabled: true`. A person approves that call. Otherwise, tell them to turn it on with the switch on the Code review page.
+3. If the person asked you to turn it on, call `events.set_subscription_enabled` with the line's ID and `enabled: true`. Otherwise, tell them to turn it on with the switch on the Code review page.
 
 ```json
 {

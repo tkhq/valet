@@ -205,12 +205,16 @@ export function eventsActionPlugin(
   }))({
     id: "events.set_subscription_enabled",
     name: "Turn event subscription on or off",
-    description: "Turn a line in this workspace on or off. Turning on works for a plugin handler line, such as a code review line from events.propose_subscription; turn assistant lines on in Presence. A person approves each call by default, because an enabled line acts on every matching event. Turning on refuses a line that would fire together with an enabled line on the same events.",
-    // An enabled line keeps acting after the conversation ends, and a code
-    // review line posts on GitHub and spends model calls, so a person
-    // approves it by default, as for workflows.update_trigger.
-    riskLevel: "high",
-    execute: async ({ subscription_id, enabled }, ctx) => withSubscriptionScope(ctx, "write", async (tx, scope) => {
+    description: "Turn a line in this workspace on or off when the person asks for it. Turning on works for a plugin handler line, such as a code review line from events.propose_subscription; turn assistant lines on in Presence. Turning on refuses a line that would fire together with an enabled line on the same events. A workflow step or a child session cannot use it.",
+    // The person's request is the approval, as in a direct chat: no card by
+    // default, and an org or team policy can still require one. Work with no
+    // person behind it cannot arm a line that keeps acting, posts on GitHub
+    // and spends model calls: unattended team runs are refused by
+    // withSubscriptionScope, and workflow steps and child sessions below.
+    riskLevel: "medium",
+    execute: async ({ subscription_id, enabled }, ctx) => (ctx.sessionPurpose === "workflow" || ctx.sessionPurpose === "child" || ctx.unattendedWorkflow)
+      ? { success: false, error: "A workflow step or a child session cannot turn lines on or off. Ask the person to do it from a thread or on the Code review page." }
+      : withSubscriptionScope(ctx, "write", async (tx, scope) => {
       const [row] = await tx.select().from(eventSubscriptions).where(and(eq(eventSubscriptions.id, subscription_id),
         eq(eventSubscriptions.orgId, scope.orgId), eq(eventSubscriptions.ownerType, scope.ownerType), eq(eventSubscriptions.ownerId, scope.ownerId))).limit(1);
       if (!row) return { success: false, error: "Subscription not found in this workspace. Use events.list_subscriptions to select one." };
