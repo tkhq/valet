@@ -49,6 +49,9 @@ import {
   type Principal,
   type SessionStore,
   type SpawnChildRequest,
+  type ChildCommandRunner,
+  type ExecOpts,
+  type ExecResult,
   type SpawnChildResult,
   type SubmissionResult,
   readThreadOutline,
@@ -169,6 +172,59 @@ export class ChildLimitError extends Error {
     this.name = "ChildLimitError";
     this.code = code;
   }
+}
+
+/** How long a child's sandbox may take to start (repository clone included) before `prepare` gives up. */
+const PREPARE_READY_TIMEOUT_MS = 10 * 60_000;
+/** The whole `prepare` step, sandbox start excluded. */
+const PREPARE_DEADLINE_MS = 5 * 60_000;
+const PREPARE_COMMAND_TIMEOUT_MS = { default: 60_000, max: 180_000 };
+const PREPARE_OUTPUT_BYTES = { default: 4 * 1024 * 1024, max: 32 * 1024 * 1024 };
+
+/**
+ * Run a spawn request's `prepare` in the child's sandbox and return the
+ * prompt it builds. Commands run from the child's primary checkout, each
+ * under its own time and output caps and one deadline for the step.
+ */
+async function runChildPrepare(
+  session: { attachment: { ensureReady(opts: { timeoutMs: number }): Promise<{ sandbox: { exec(command: string, opts?: ExecOpts): Promise<ExecResult> } }> } },
+  targetDir: string | undefined,
+  prepare: NonNullable<SpawnChildRequest["prepare"]>,
+  prompt: string,
+  cancel: AbortSignal | undefined,
+): Promise<string> {
+  // A cancel ends the wait at once; the caller then destroys the child and its sandbox, which stops any command still running.
+  const untilCancelled = <T>(work: Promise<T>): Promise<T> => {
+    if (!cancel) return work;
+    if (cancel.aborted) return Promise.reject(spawnCancelled());
+    return new Promise<T>((resolve, reject) => {
+      const onAbort = (): void => reject(spawnCancelled());
+      cancel.addEventListener("abort", onAbort, { once: true });
+      work.then(
+        (value) => { cancel.removeEventListener("abort", onAbort); resolve(value); },
+        (error: unknown) => { cancel.removeEventListener("abort", onAbort); reject(error); },
+      );
+    });
+  };
+  const { sandbox } = await untilCancelled(session.attachment.ensureReady({ timeoutMs: PREPARE_READY_TIMEOUT_MS }));
+  const deadline = Date.now() + PREPARE_DEADLINE_MS;
+  const cd = targetDir && targetDir !== "." ? `cd -- '${targetDir.replace(/'/g, "'\\''")}' && ` : "";
+  const runner: ChildCommandRunner = {
+    async run(command, opts) {
+      if (cancel?.aborted) throw spawnCancelled();
+      const left = deadline - Date.now();
+      if (left <= 0) throw new Error(`The child's prepare step passed its ${PREPARE_DEADLINE_MS / 1000} s deadline. Make the step cheaper or split it.`);
+      const timeout = Math.min(opts?.timeoutMs ?? PREPARE_COMMAND_TIMEOUT_MS.default, PREPARE_COMMAND_TIMEOUT_MS.max, left);
+      const maxOutputBytes = Math.min(opts?.maxOutputBytes ?? PREPARE_OUTPUT_BYTES.default, PREPARE_OUTPUT_BYTES.max);
+      const result = await untilCancelled(sandbox.exec(`${cd}${command}`, { timeout, maxOutputBytes, ...(opts?.stdin !== undefined ? { stdin: opts.stdin } : {}) }));
+      return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr, truncated: result.truncated === true, timedOut: result.timedOut === true };
+    },
+  };
+  return untilCancelled(prepare(runner, prompt));
+}
+
+function spawnCancelled(): DOMException {
+  return new DOMException("The child's spawn was cancelled before its first turn. No prompt was queued.", "AbortError");
 }
 
 function newChildSessionId(): string {
@@ -523,6 +579,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       parentQueueItemId?: string;
       reportToParent?: boolean;
       pluginDeliveryId?: string;
+      cancel?: AbortSignal;
     },
   ): Promise<SpawnChildResult> => {
     const parentData = await deps.engineStore.getSession(ctx.parentSessionId);
@@ -689,7 +746,17 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
     await watcher.ensureSubscription({ childSessionId, parentSessionId: ctx.parentSessionId, parentThreadId: ctx.parentThreadId })
       .catch((error: unknown) => cleanupFailedSpawn(deps, childSessionId, workspace, error));
 
-    const receipt = await childSession.prompt(req.prompt, {
+    // A plugin's deterministic pre-turn step (for example a repository scan) builds the first prompt.
+    const prompt = req.prepare
+      ? await runChildPrepare(childSession, binding ? computeTargetDirs([binding])[0] : undefined, req.prepare, req.prompt, ctx.cancel)
+          .catch((error: unknown) => cleanupFailedSpawn(deps, childSessionId, workspace, error))
+      : req.prompt;
+    // No child_watches row exists yet, so a cancel in this window has no other way to stop the child.
+    if (ctx.cancel?.aborted) await cleanupFailedSpawn(deps, childSessionId, workspace, spawnCancelled());
+
+    const receipt = await childSession.prompt(prompt, {
+      // A cancel while the store admits the prompt settles it before its turn starts.
+      ...(ctx.cancel !== undefined ? { cancel: ctx.cancel } : {}),
       // Per-turn role overlay (the security dispatch names the persona
       // role; the claimed child's build registered it in options.roles).
       ...(req.role !== undefined ? { role: req.role } : {}),

@@ -45,6 +45,10 @@ export interface CliOptions {
   reviewPasses?: number;
   /** Drop code-review findings rated below this confidence (0-1). */
   minConfidence?: number;
+  /** Context pack budget in tokens for code-review cases (about 4 chars each). 0 or unset: no pack. */
+  contextBudget?: number;
+  /** A directory of memory files the code-review pack reads as team memory. */
+  memoryDir?: string;
 }
 
 /** Parse argv (no process side effects; throws on invalid input). */
@@ -71,6 +75,8 @@ export function parseCliArgs(argv: string[]): CliOptions {
       verify: { type: "boolean", default: false },
       "review-passes": { type: "string" },
       "min-confidence": { type: "string" },
+      "context-budget": { type: "string" },
+      "memory-dir": { type: "string" },
     },
   });
   const reasoning = values.reasoning;
@@ -89,6 +95,13 @@ export function parseCliArgs(argv: string[]): CliOptions {
     runsOverride = Number.parseInt(values.runs, 10);
     if (!Number.isInteger(runsOverride) || runsOverride < 1 || runsOverride > 25) {
       throw new Error(`--runs must be an integer from 1 to 25, got \`${values.runs}\``);
+    }
+  }
+  let contextBudget: number | undefined;
+  if (values["context-budget"] !== undefined) {
+    contextBudget = Number.parseInt(values["context-budget"], 10);
+    if (!Number.isInteger(contextBudget) || contextBudget < 0 || contextBudget > 100_000) {
+      throw new Error(`--context-budget must be a token count from 0 to 100000, got \`${values["context-budget"]}\``);
     }
   }
   let reviewPasses: number | undefined;
@@ -146,6 +159,8 @@ export function parseCliArgs(argv: string[]): CliOptions {
     ...(values.verify ? { verify: true } : {}),
     ...(reviewPasses !== undefined ? { reviewPasses } : {}),
     ...(minConfidence !== undefined ? { minConfidence } : {}),
+    ...(contextBudget !== undefined ? { contextBudget } : {}),
+    ...(values["memory-dir"] !== undefined ? { memoryDir: values["memory-dir"] } : {}),
   };
 }
 

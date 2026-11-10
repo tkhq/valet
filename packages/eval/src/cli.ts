@@ -15,6 +15,8 @@
  *   --verify             check each code-review finding with a verifier (default: off)
  *   --review-passes <n>  independent code-review passes per case (default 1)
  *   --min-confidence <x> drop code-review findings rated below x (0-1)
+ *   --context-budget <tokens>  context pack built before each code review (default 0: none)
+ *   --memory-dir <dir>   memory files the context pack reads as team memory
  *
  * With VALET_LLM_GATEWAY_URL and VALET_API_KEY (or VALET_API_KEY_FILE) set,
  * every model call goes through that Valet gateway with the Valet key, and
@@ -116,6 +118,8 @@ async function main(): Promise<number> {
     ...(opts.verify !== undefined ? { verify: opts.verify } : {}),
     ...(opts.reviewPasses !== undefined ? { reviewPasses: opts.reviewPasses } : {}),
     ...(opts.minConfidence !== undefined ? { minConfidence: opts.minConfidence } : {}),
+    ...(opts.contextBudget !== undefined ? { contextBudget: opts.contextBudget } : {}),
+    ...(opts.memoryDir !== undefined ? { memoryDir: opts.memoryDir } : {}),
     saveBaselines: opts.saveBaseline,
     allowLiveBaselines: opts.allowLiveBaselines,
     onCaseStart: (evalCase, index, total) => {

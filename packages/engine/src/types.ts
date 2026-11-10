@@ -402,6 +402,12 @@ export type PromptAttachment =
   | { type: "audio"; url?: string; data?: Uint8Array; mimeType: string; name?: string };
 
 export interface PromptOptions {
+  /**
+   * Aborts the admission. A prompt cancelled before admission is refused; a
+   * cancel that lands while the store admits it settles the item `aborted`
+   * before any turn can claim it. Either way the call throws an `AbortError`.
+   */
+  cancel?: AbortSignal;
   /** Request-scoped host operation; must enforce the source thread permissions. */
   forkThread?: (threadId: string, prompt: string) => Promise<string>;
   /**
@@ -3376,9 +3382,37 @@ export interface CompactionConfig {
 // ── Child spawning (`task` built-in, Phase 4 decision 10) ──────────
 
 /** Request payload for the `task` built-in tool. `repo` interpretation is host policy. */
+/** One command's result from a child's sandbox (`ChildCommandRunner.run`). */
+export interface ChildCommandResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  /** Output passed `maxOutputBytes`; the middle is missing (head and tail stay). */
+  truncated: boolean;
+  timedOut: boolean;
+}
+
+/**
+ * Runs deterministic commands, with no model, in one child's sandbox before
+ * its first turn. Each command runs in a shell from the child's primary
+ * checkout (the sandbox workspace when the child has no repository). The
+ * host caps each command's time and output and the whole step's time.
+ */
+export interface ChildCommandRunner {
+  run(command: string, opts?: { stdin?: string; timeoutMs?: number; maxOutputBytes?: number }): Promise<ChildCommandResult>;
+}
+
 export interface SpawnChildRequest {
   toolScope?: ToolScope;
   prompt: string;
+  /**
+   * Work to do in the child's sandbox before its first turn, without a
+   * model. The host starts the sandbox (the repository checked out at
+   * `branch`), calls `prepare` with a runner scoped to this child, and sends
+   * the prompt it returns instead of `prompt`. A throw fails the spawn and
+   * removes the child. In-process callers only; the `task` tool never sets it.
+   */
+  prepare?: (runner: ChildCommandRunner, prompt: string) => Promise<string>;
   title?: string;
   repo?: string;
   branch?: string;
@@ -3445,6 +3479,9 @@ export type ChildSpawner = (
     /** The plugin event delivery that started the child. Cancelling that
      * delivery stops the child. Absent for every other child. */
     pluginDeliveryId?: string;
+    /** Aborts when the spawning work is cancelled for good. A spawn that is
+     * still in its `prepare` step stops, removes the child and queues no prompt. */
+    cancel?: AbortSignal;
   },
 ) => Promise<SpawnChildResult>;
 

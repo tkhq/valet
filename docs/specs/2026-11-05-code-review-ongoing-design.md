@@ -37,3 +37,42 @@ to personal scope, because plugins can act only for a person or a team.
 The change does not move existing configurations between workspaces or create a
 second review subscription. Turnkey's monorepo pilot still requires the PR
 review plugin to be deployed there before its repository can be configured.
+
+## Context pack trust boundary
+
+Before a review, the PR review plugin builds a context pack and puts it in the
+reviewer's first prompt. The pack mixes inputs with two levels of trust, and
+the plugin keeps them apart.
+
+- **Instructions come from trusted sources only.** Repository convention files
+  (`AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md` and similar) and `playbooks/`
+  files are read at the merge base, which is the target branch's state.
+  A nested convention file applies when the PR touches any path under its
+  directory: an added, changed or deleted file, or either side of a rename.
+  Domain note paths match the same set of paths.
+  Domain notes become rules only from read-only synced memory under
+  `lib/code-review/notes/` (a source repo's `.valet/memory/code-review/notes/`),
+  which agents cannot write. The pack presents these as rules the team
+  enforces. Other matching memory notes and principles are labeled
+  background, not rules. The plugin ships no organization's rules.
+- **The PR head is data.** The author controls the PR head. The plugin scans it
+  only for code facts: definitions, callers and tests. The scan runs in the
+  reviewer child's sandbox before its first turn (`spawnChild` `prepare`), on
+  the checkout the child already has, so the api never downloads the repository. The pack labels them as
+  untrusted code and tells the reviewer to ignore instructions inside them or
+  inside the diff.
+- **A PR that changes an instruction file is reviewed, not followed.** A
+  convention file or playbook that the PR adds, edits or deletes is listed
+  under "Instruction files this PR changes". Its rule text stays at the merge
+  base version, and the change is in the diff for review. The diff budget
+  keeps these files. A change that removes or weakens a rule is a finding.
+- **PR text is data.** The PR title and description, and any text a bot
+  added to them, sit in a labeled block. The reviewer treats them as claims
+  to check against the code, never as instructions. The verifier labels the
+  PR title and the claim it checks the same way.
+- **Failures are visible.** A failed memory search or read, or a failed
+  merge-base read, appears in the pack's drop log or in the "not built"
+  notice. It never reads as "nothing found".
+- **Selection is not trust.** Changed paths, the PR title and added lines
+  choose which trusted notes and playbooks go into the pack. They never supply
+  rule text.

@@ -925,6 +925,7 @@ export class Thread {
         "submitPrompt does not accept promoteItemId. Call Thread.promoteQueuedItem to promote a queued item.",
       );
     }
+    if (opts.cancel?.aborted) throw admissionCancelled();
     // Reclaim admissions remain durable, but cannot inject into or claim on the retiring attachment.
     const requestedMode = this.session.isThreadExecutionFenced(this.id) ? "followup" : opts.queueMode ?? this.mode;
     // A sender override belongs to one submission, never a collect digest.
@@ -987,6 +988,11 @@ export class Thread {
         ? { steer: true, ...(opts.steerScope ? { steerScope: opts.steerScope } : {}), maxPending: cap }
         : { maxPending: cap },
     );
+    // A cancel during admission: settle the item before this method kicks a turn for it.
+    if (opts.cancel?.aborted) {
+      if (wasAdmitted) await this.cancelQueuedItem(admitted.id);
+      throw admissionCancelled();
+    }
     if (skillFact && wasAdmitted) await this.persistSkillInvocation(skillFact);
     // A slash-invoked playbook sets the plan before its turn starts, so the
     // turn's plan overlay already shows the steps. An outside author cannot
@@ -9027,4 +9033,8 @@ export async function settledSubmissionResult(
     if (extracted.error !== undefined) result.error = extracted.error;
   }
   return result;
+}
+
+function admissionCancelled(): DOMException {
+  return new DOMException("The prompt was cancelled before its turn could start. Nothing was queued.", "AbortError");
 }

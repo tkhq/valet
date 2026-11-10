@@ -63,6 +63,10 @@ export interface SuiteOptions {
   reviewPasses?: number;
   /** Drop code-review findings rated below this confidence (0-1). */
   minConfidence?: number;
+  /** Context pack budget in tokens for code-review cases (about 4 chars each). 0 or unset: no pack. */
+  contextBudget?: number;
+  /** A directory of memory files the code-review pack reads as team memory. */
+  memoryDir?: string;
   /** Save each finished case's trajectory as a new baseline. */
   saveBaselines?: boolean;
   /**
@@ -191,6 +195,8 @@ export async function runSuite(cases: EvalCase[], opts: SuiteOptions): Promise<S
                 ...(opts.verify !== undefined ? { verify: opts.verify } : {}),
                 ...(opts.reviewPasses !== undefined ? { reviewPasses: opts.reviewPasses } : {}),
                 ...(opts.minConfidence !== undefined ? { minConfidence: opts.minConfidence } : {}),
+                ...(opts.contextBudget !== undefined ? { contextBudget: opts.contextBudget } : {}),
+                ...(opts.memoryDir !== undefined ? { memoryDir: opts.memoryDir } : {}),
                 ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
                 ...(opts.gateway !== undefined ? { gateway: opts.gateway } : {}),
                 ...(opts.mockPlugins !== undefined ? { mockPlugins: opts.mockPlugins } : {}),

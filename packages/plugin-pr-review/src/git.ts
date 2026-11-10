@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { rankPatch, type DroppedFile } from "./context/rank.js";
 
 const run = promisify(execFile);
 
@@ -14,6 +15,8 @@ export interface PullRequestDiff {
   patch: string;
   truncated: boolean;
   files: string[];
+  /** Files the budget left out, and why. */
+  dropped?: DroppedFile[];
 }
 
 /** Diff BASE..HEAD, keeping whole files until the character budget runs out. */
@@ -32,21 +35,11 @@ export async function diffPullRequest(
   return { stat, files: names, ...cutPatch(full, budgetChars) };
 }
 
-/** Keep whole files of a unified diff until the character budget runs out, and name the files left out. */
-export function cutPatch(full: string, budgetChars: number): { patch: string; truncated: boolean } {
-  if (full.length <= budgetChars) return { patch: full, truncated: false };
-  const chunks = full.split(/^(?=diff --git )/m);
-  const kept: string[] = [];
-  let used = 0;
-  const skipped: string[] = [];
-  for (const chunk of chunks) {
-    if (used + chunk.length <= budgetChars) {
-      kept.push(chunk);
-      used += chunk.length;
-    } else {
-      skipped.push(chunk.split("\n", 1)[0]);
-    }
-  }
-  const note = `\n# Diff budget reached. Not shown (run git diff yourself):\n${skipped.map((s) => `#   ${s}`).join("\n")}\n`;
-  return { patch: kept.join("") + note, truncated: true };
+/**
+ * Fit a unified diff to the character budget: noise files go first, then
+ * whole files are kept risky paths first and by size of change. See
+ * `rankPatch`. `dropped` names each file left out and why.
+ */
+export function cutPatch(full: string, budgetChars: number, riskPaths: readonly string[] = []): { patch: string; truncated: boolean; dropped: DroppedFile[] } {
+  return rankPatch(full, budgetChars, riskPaths);
 }

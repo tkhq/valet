@@ -92,18 +92,31 @@ export interface GitHubClient {
   setThreadResolved(threadId: string, resolved: boolean): Promise<void>;
 }
 
-const API = "https://api.github.com";
+/**
+ * The GitHub API base URL. `GITHUB_API_URL` retargets it to a GitHub
+ * Enterprise Server host (`https://<host>/api/v3`), with the same name and
+ * default as `resolveGithubApiUrl` in the api and the GitHub plugin.
+ */
+export function githubApiUrl(env: NodeJS.ProcessEnv = process.env): string {
+  return (env.GITHUB_API_URL || "https://api.github.com").replace(/\/+$/, "");
+}
+
+/** GraphQL lives at `/graphql` on github.com and at `/api/graphql` on Enterprise Server, beside `/api/v3`. */
+export function githubGraphqlUrl(api: string): string {
+  return api.endsWith("/api/v3") ? `${api.slice(0, -"/v3".length)}/graphql` : `${api}/graphql`;
+}
 const PAGE = 100;
 /** GitHub lists at most 3000 files for a pull request. */
 const MAX_PAGES = 30;
 
-export function githubClient(opts: { token: string; owner: string; repo: string; number: number; fetch?: typeof fetch; signal?: AbortSignal }): GitHubClient {
+export function githubClient(opts: { token: string; owner: string; repo: string; number: number; fetch?: typeof fetch; signal?: AbortSignal; apiUrl?: string }): GitHubClient {
   const doFetch = opts.fetch ?? fetch;
+  const api = opts.apiUrl ?? githubApiUrl();
   const repoPath = `/repos/${opts.owner}/${opts.repo}`;
   const pullPath = `${repoPath}/pulls/${opts.number}`;
 
   const call = async (method: string, path: string, init: { body?: unknown; accept?: string } = {}): Promise<Response> => {
-    const res = await doFetch(`${API}${path}`, {
+    const res = await doFetch(path === "/graphql" ? githubGraphqlUrl(api) : `${api}${path}`, {
       method,
       headers: {
         authorization: `Bearer ${opts.token}`,
@@ -181,8 +194,11 @@ export function githubClient(opts: { token: string; owner: string; repo: string;
       const res = await call("GET", `${repoPath}/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${ref}`, {
         accept: "application/vnd.github.raw+json",
       });
-      if (!res.ok) return undefined;
-      return res.text();
+      if (res.status === 404) return undefined;
+      // Auth, rate-limit and server errors throw: a caller must not read them as a missing file.
+      if (!res.ok) throw await failed(res, `read ${path} at ${ref.slice(0, 7)}`);
+      const text = await res.text();
+      return text.slice(0, 8192).includes("\0") ? undefined : text;
     },
     async review(id) {
       const res = await call("GET", `${pullPath}/reviews/${id}`);
