@@ -402,6 +402,12 @@ export type PromptAttachment =
   | { type: "audio"; url?: string; data?: Uint8Array; mimeType: string; name?: string };
 
 export interface PromptOptions {
+  /**
+   * Aborts the admission. A prompt cancelled before admission is refused; a
+   * cancel that lands while the store admits it settles the item `aborted`
+   * before any turn can claim it. Either way the call throws an `AbortError`.
+   */
+  cancel?: AbortSignal;
   /** Request-scoped host operation; must enforce the source thread permissions. */
   forkThread?: (threadId: string, prompt: string) => Promise<string>;
   /**

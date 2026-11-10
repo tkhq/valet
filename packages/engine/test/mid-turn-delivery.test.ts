@@ -264,6 +264,27 @@ describe("mid-turn delivery", () => {
     h.faux.unregister();
   });
 
+  it("refuses or settles a prompt cancelled during admission, and runs no turn for it", async () => {
+    const h = await setup("admission-cancel", [fauxAssistantMessage("should not run")]);
+    const before = new AbortController();
+    before.abort();
+    await expect(h.thread.submitPrompt("too late", { author: PERSON, cancel: before.signal })).rejects.toMatchObject({ name: "AbortError" });
+
+    // A cancel while the store writes the item: it settles before a turn can claim it.
+    const cancel = new AbortController();
+    const admit = h.store.admitSubmission.bind(h.store);
+    h.store.admitSubmission = async (...args) => {
+      const result = await admit(...args);
+      cancel.abort();
+      return result;
+    };
+    await expect(h.thread.submitPrompt("review", { author: PERSON, cancel: cancel.signal })).rejects.toMatchObject({ name: "AbortError" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(await h.store.listUnsettledSubmissions(h.session.id)).toEqual([]);
+    expect(h.faux.state.callCount).toBe(0);
+    h.faux.unregister();
+  });
+
   it("does not deliver a message cancelled before the next step", async () => {
     const { tool, entered, release } = blockingTool();
     let seen: string[] = [];

@@ -714,6 +714,51 @@ describe("buildChildSpawner", () => {
     vi.mocked(deps.engineHost.childSessionFor).mockRestore();
   });
 
+  it("settles a first prompt cancelled while the store admits it, and starts no turn", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const parent = await deps.engineHost.sessionFor("parent-admit-cancel", { userId: "local-user", orgId: "local-org", workspace: "/tmp" });
+    const childId = "child-admit-cancel";
+    const store = deps.engineStore;
+    const admit = store.admitSubmission.bind(store);
+    const claim = store.claimSubmission.bind(store);
+    let entered!: () => void;
+    const admitting = new Promise<void>((resolve) => { entered = resolve; });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    // Hold the child's admission open, as a slow database write would.
+    vi.spyOn(store, "admitSubmission").mockImplementation(async (...args) => {
+      if (args[0] === childId) {
+        entered();
+        await gate;
+      }
+      return admit(...args);
+    });
+    const claimed: string[] = [];
+    vi.spyOn(store, "claimSubmission").mockImplementation(async (c) => {
+      const item = await claim(c);
+      if (item && c.sessionId === childId) claimed.push(item.id);
+      return item;
+    });
+    const cancel = new AbortController();
+    const spawn = buildChildSpawner(deps, testChildWatcher(deps));
+    const spawned = spawn(
+      { sessionId: childId, prompt: "review" },
+      { parentSessionId: parent.id, parentThreadId: parent.thread("web:default").id, actorUserId: "local-user", owner: { type: "user", id: "local-user" }, cancel: cancel.signal },
+    );
+    await admitting;
+    cancel.abort();
+    release();
+    await expect(spawned).rejects.toMatchObject({ name: "AbortError" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(claimed).toEqual([]);
+    expect(await store.listUnsettledSubmissions(childId)).toEqual([]);
+    expect(await store.getSession(childId)).toBeNull();
+    expect(await deps.db.select().from(childWatches).where(eq(childWatches.childSessionId, childId))).toHaveLength(0);
+    vi.mocked(store.admitSubmission).mockRestore();
+    vi.mocked(store.claimSubmission).mockRestore();
+  });
+
   it("full-profile child resolves its sandbox image with the child's profile — not the headless default", async () => {
     // Isolated + customImage provider so buildSpecProvider wires image
     // resolution (resolveBaseImage consults the org's per-profile base bakes).

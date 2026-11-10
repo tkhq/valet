@@ -755,6 +755,8 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
     if (ctx.cancel?.aborted) await cleanupFailedSpawn(deps, childSessionId, workspace, spawnCancelled());
 
     const receipt = await childSession.prompt(prompt, {
+      // A cancel while the store admits the prompt settles it before its turn starts.
+      ...(ctx.cancel !== undefined ? { cancel: ctx.cancel } : {}),
       // Per-turn role overlay (the security dispatch names the persona
       // role; the claimed child's build registered it in options.roles).
       ...(req.role !== undefined ? { role: req.role } : {}),
