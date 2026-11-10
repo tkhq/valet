@@ -576,6 +576,8 @@ The run page names steps the way the editor does (`fetch_meetings` reads "Fetch 
 
 An `llm` step with an `outputSchema` now states the schema in its first prompt, as `session` and `orchestrator` steps do. In production, 142 of 148 such steps had needed the repair call because the first answer was prose.
 
+An `llm` step makes one model call with no compaction, so a prompt larger than the model's context window can only fail (2026-11-10). When the provider reports an overflow (`isContextOverflow`), the step fails with a message that names the step and the window, and tells the author to pass less data or to use a `session` step. A `session` step saves a too-large prompt to a file and reads it in parts.
+
 ### Checking a draft before a save (2026-10-20)
 
 In an internal comparison, two models drafted the same workflow from the workflows skill. Both wrote a stop step with `outcome: "completed"`, and one wrote a foreach `body` as a list of node ids. The validator rejects both shapes. The skill's own example used the first shape, and its foreach line did not say that a body is one inline node. An agent also had no way to check a draft before a save, because `preview_workflow` reads only a saved workflow.

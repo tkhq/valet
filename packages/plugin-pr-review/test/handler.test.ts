@@ -4,6 +4,7 @@
  * skips.
  */
 import { describe, expect, it } from "vitest";
+import { READ_MAX_CHARS } from "@valet/engine";
 import { Value } from "typebox/value";
 import type {
   PluginChild,
@@ -24,6 +25,7 @@ import {
   MANUAL_REVIEW_EVENT,
   manualReviewOptions,
   parseFindings,
+  prDiffFor,
   renderFinding,
   ReviewSettingsSchema,
   type Finding,
@@ -896,5 +898,20 @@ describe("review helpers", () => {
     const f = { ...finding({ suggestion: "if (!x) return;\n" }), id: "f9" };
     const parsed = parseFindings(`Intro\n\n${renderFinding(f)}\n\nOutro`).get("f9");
     expect(parsed).toEqual({ id: "f9", severity: "high", category: "bug", title: f.title, body: f.body, suggestion: "if (!x) return;" });
+  });
+});
+
+describe("reviewer diff budget", () => {
+  it("holds at most the engine's read cap and lists the files it leaves out", () => {
+    const section = (name: string) => `diff --git a/${name} b/${name}\n--- a/${name}\n+++ b/${name}\n@@ -1 +1 @@\n+${"x".repeat(20_000)}\n`;
+    const names = ["a.ts", "b.ts", "c.ts"];
+    const files = names.map((filename) => ({ filename, status: "modified", additions: 1, deletions: 0 }));
+    const diff = prDiffFor(names.map(section).join(""), files, BASE, H1);
+    expect(diff.truncated).toBe(true);
+    expect(diff.patch).toContain("+++ b/a.ts");
+    expect(diff.patch).toContain("+++ b/b.ts");
+    expect(diff.patch).not.toContain("+++ b/c.ts");
+    expect(diff.patch).toContain("#   diff --git a/c.ts b/c.ts");
+    expect(diff.patch.length).toBeLessThan(READ_MAX_CHARS + 200);
   });
 });
