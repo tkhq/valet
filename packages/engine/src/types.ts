@@ -779,6 +779,13 @@ export interface ToolDef<TParams extends TSchema = TSchema> {
   /** When true, this tool's outputs are exempt from pruning during compaction. */
   protectedFromPruning?: boolean;
   /**
+   * Most characters of one result that go into context. A larger result is
+   * saved to a file and the model gets a preview (`capToolResult`). Default
+   * `TOOL_RESULT_MAX_CHARS`. `Infinity` turns the cap off for a tool that
+   * pages its own output, such as `read`.
+   */
+  maxResultChars?: number;
+  /**
    * When true, this tool may execute concurrently with other tool calls in
    * the same assistant response. Default: false — the tool runs
    * sequentially, and one sequential tool serializes its whole batch

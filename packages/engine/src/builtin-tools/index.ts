@@ -269,13 +269,16 @@ export const READ_MAX_LINES = 2_000;
  * one file read. Claude Code counts real tokens and refuses a larger read;
  * `read` returns the first window and names the next offset. */
 export const READ_MAX_TOKENS = 25_000;
-/** READ_MAX_TOKENS at the engine's 4 characters per token (`estimateTokens`).
- * Code and JSON run nearer 3, so a full window can exceed 25,000 tokens. */
-export const READ_MAX_CHARS = READ_MAX_TOKENS * 4;
+/** READ_MAX_TOKENS at 2 characters per token. Measured with the Anthropic
+ * tokenizer, TypeScript runs about 2.5 characters per token, Markdown 3.0
+ * and JSON 2.0, so a full window stays near or under 25,000 tokens. */
+export const READ_MAX_CHARS = READ_MAX_TOKENS * 2;
 
 export const readTool = defineTool({
   name: "read",
   intent: "exempt",
+  // `readWindow` pages the file, so the generic result cap does not apply.
+  maxResultChars: Number.POSITIVE_INFINITY,
   description:
     `Read a file from the sandbox. A result holds at most ${READ_MAX_LINES} lines and ${READ_MAX_CHARS} characters. ` +
     "When a file is longer, the result ends with the next offset; read again with it to continue.",
@@ -440,6 +443,8 @@ export const bashTool = defineTool({
   name: "bash",
   sideEffect: "files",
   intent: "exempt",
+  // Claude Code's bash output limit (`BASH_MAX_OUTPUT_LENGTH`, default 30,000).
+  maxResultChars: 30_000,
   description:
     "Execute a shell command in the sandbox. `timeout` (seconds, default " +
     `${BASH_DEFAULT_TIMEOUT_S}, max 3600) bounds how long the command may ` +

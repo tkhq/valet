@@ -9,6 +9,7 @@ import { mergeAppearance, readAppearance, type Appearance } from "@valet/shared"
 import { classifyProviderFailure, isNonRetryableProviderFailure, isUsageLimitFailure, isRateLimitedProviderFailure } from "@valet/shared";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { uid } from "./ids.js";
+import { capToolResult, TOOL_RESULT_MAX_CHARS, TOOL_RESULT_MAX_TOKENS } from "./tool-result-cap.js";
 import type { AgentContext, AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import { isContextOverflow } from "@earendil-works/pi-ai/compat";
 // Root import (not /compat): the transient classifier lives in pi-ai's
@@ -386,6 +387,18 @@ type ProactiveCompactionTrigger = "overflow" | "budget";
 const SPILLED_INPUT_PATH_KEY = "valetSpilledInputPath";
 
 /**
+ * The path of a file the engine saved under `<workspace>/.valet/`, from
+ * `.valet/` on. The host and the sandbox can name the workspace differently
+ * (a host folder mounted at /workspace), so an absolute path from one side
+ * can fail on the other. `read` and `bash` both resolve this relative path
+ * against the working directory.
+ */
+export function workingDirectoryPath(path: string): string {
+  const at = path.lastIndexOf("/.valet/");
+  return at < 0 ? path : path.slice(at + 1);
+}
+
+/**
  * Build the in-context pointer that replaces an oversized inbound message
  * after its full text is spilled to `path` in the sandbox. The model reads
  * this instead of the raw paste and pages the file in slices.
@@ -395,12 +408,13 @@ export function buildSpilledInputMarker(args: {
   tokens: number;
   chars: number;
 }): string {
+  const path = workingDirectoryPath(args.path);
   return (
     `[Large input saved to a file]\n` +
     `Your message was about ${args.tokens} tokens (${args.chars} characters), too large to place in the context window directly. ` +
-    `The full text is saved in the sandbox at:\n` +
-    `  ${args.path}\n` +
-    `Read it in slices, not all at once. For example: \`sed -n '1,400p' ${args.path}\`. ` +
+    `The full text is saved in the working directory at:\n` +
+    `  ${path}\n` +
+    `Read it in slices, not all at once. For example: \`sed -n '1,400p' ${path}\`. ` +
     `Do not read the whole file in one call; that overflows the context again.`
   );
 }
@@ -7021,7 +7035,8 @@ export class Thread {
     const all: ToolDef[] = [this.nativeImages.tool(), ...this.session.builtinTools, ...(this.session.options.tools ?? [])]
       .map(refuseOutsideAuthors)
       .map((def) => def.sideEffect === "files" ? this.withFileCheckpoint(def) : def)
-      .map((def) => this.withOutputSanitizer(def));
+      .map((def) => this.withOutputSanitizer(def))
+      .map((def) => this.withResultCap(def));
     return all.filter((def) => includeRestricted || def.name === "focus_tools" || (def.scopeAction
       ? actionInScope(this.effectiveToolScope(), def.scopeAction)
       : toolInScope(this.effectiveToolScope(), def.name))).map((def) =>
@@ -7030,6 +7045,42 @@ export class Thread {
         this.session.options.toolStopGraceMs,
       ),
     );
+  }
+
+  /** Wraps a tool so a result over its cap is saved to a file in the
+   * sandbox and the model gets a preview (`capToolResult`). It runs after the
+   * output sanitizer, so the saved file holds sanitized text. Every session
+   * that builds tools here gets the cap: the assistant, children, workflow
+   * steps and plugin reviews. */
+  private withResultCap(def: ToolDef): ToolDef {
+    const maxChars = def.maxResultChars ?? TOOL_RESULT_MAX_CHARS;
+    if (maxChars === Number.POSITIVE_INFINITY) return def;
+    return {
+      ...def,
+      execute: async (args, ctx) => capToolResult(await def.execute(args, ctx), {
+        toolName: def.name,
+        maxChars,
+        maxTokens: TOOL_RESULT_MAX_TOKENS,
+        save: (text) => this.saveLargeToolResult(def.name, text),
+      }),
+    };
+  }
+
+  /** Save a tool result too large for context under the workspace, where
+   * the read and bash tools reach it. Returns the path from `.valet/`
+   * (`workingDirectoryPath`), or undefined when the write fails. */
+  private async saveLargeToolResult(toolName: string, text: string): Promise<string | undefined> {
+    const root = this.session.options.workspace.replace(/\/+$/, "");
+    const dir = `${root}/.valet/tool-results`;
+    const path = `${dir}/${uid(toolName.replace(/[^a-zA-Z0-9_-]/g, "_"))}.txt`;
+    try {
+      await this.session.sandbox.mkdir(dir);
+      await this.session.sandbox.writeFile(path, text);
+      return workingDirectoryPath(path);
+    } catch (err) {
+      console.warn(`[engine] could not save a large ${toolName} result: ${err instanceof Error ? err.message : String(err)}`);
+      return undefined;
+    }
   }
 
   /** Wraps a tool so the host's output sanitizer (the credential tripwire)
