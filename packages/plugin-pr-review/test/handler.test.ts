@@ -333,6 +333,14 @@ function context(threads: PluginThreads, store: ScopedPluginStore, config: Recor
 const reviewOf = (findings: Finding[]): Review => ({ summary: "Adds a.ts.", confidence: 3, findings });
 
 describe("review-pull-request handler", () => {
+  it("still posts the review when GitHub cannot serve a changed file for the line count and verifier checks", async () => {
+    const gh = new FakeGitHub();
+    gh.contentsStatusAt[H1] = { "a.ts": 503 };
+    const threads = new FakeThreads(scripted(reviewOf([finding({ title: "Null deref in parse" })]), {}));
+    await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1", "github.pull_request.opened"), context(threads, new FakeStore(), { verify: true, contextBudget: 0 }));
+    expect(gh.reviews.size).toBe(1);
+  });
+
   it("posts one review with inline and summary findings on the first push", async () => {
     const gh = new FakeGitHub();
     const store = new FakeStore();
@@ -975,6 +983,19 @@ describe("review-pull-request handler stages", () => {
     expect(threads.records[0].body).toMatch(/^\*\*Context pack for `[0-9a-f]{7}`\*\*/);
     expect(threads.records[1].body).toContain("the reviewer drafted 2; 1 posted.");
     expect(threads.records[1].body).toContain('→ dropped: repeats "Null deref in parse" at a.ts:5 (same evidence a.ts:5)');
+  });
+
+  it("runs the repo-wide team-notes search only when no pack replaces the prompt", async () => {
+    const gh = new FakeGitHub();
+    gh.contentsAt[BASE] = { "AGENTS.md": "Always validate parse input.\n" };
+    const threads = new FakeThreads(scripted(reviewOf([]), {}));
+    threads.checkout = repoOf({ "AGENTS.md": "Always validate parse input.\n", "a.ts": "export function parse() {}\n" });
+    const queries: string[] = [];
+    const ctx = { ...context(threads, new FakeStore()), memory: { search: async (q: string) => { queries.push(q); return []; }, read: async () => null } };
+    await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1", "github.pull_request.opened"), ctx);
+    expect(threads.spawned.find((s) => s.req.role === "pr-reviewer")?.req.prompt).toContain("## Context pack");
+    // Once, from the gather's own queries; the fallback prompt's search did not run.
+    expect(queries.filter((q) => q === "acme/site")).toHaveLength(1);
   });
 
   it("gathers a pack for a shadow review too", async () => {

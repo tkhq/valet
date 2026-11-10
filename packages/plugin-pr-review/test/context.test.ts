@@ -232,6 +232,25 @@ describe("gatherContext", () => {
     expect(pack.text).toContain("### Team principles and notes (background, not review rules)\n#### From Slack (team memory scratch/slack-digest.md)");
   });
 
+  it("skips and logs a note whose title-pattern is not a valid regex, and keeps the rest of the pack", async () => {
+    const r = repo({ "apps/vivo/gate.yaml": "kind: AnalysisTemplate\n" }, { "apps/vivo/gate.yaml": "kind: AnalysisTemplate\nfailureLimit: 1\n" });
+    const pack = await gatherContext({
+      runner: localRunner(r.dir),
+      readTrusted: (p) => gitFileAt(r.dir, r.base, p),
+      patch: r.patch,
+      diffDropped: [],
+      title: "gate",
+      memory: memory({
+        "lib/code-review/notes/broken.md": '---\ntitle: "Broken gate"\ntitle-pattern: "gate("\nterms: "[\\"failureLimit\\"]"\n---\n\nBroken.',
+        "lib/code-review/notes/analysis.md": '---\ntitle: "Analysis gates"\nterms: "[\\"failureLimit\\"]"\n---\n\nTeam rule.',
+      }),
+      budgetChars: 10_000,
+    });
+    expect(pack.text).toContain("#### Analysis gates (team memory lib/code-review/notes/analysis.md; matched: added text has `failureLimit`)");
+    expect(pack.text).not.toContain("Broken gate");
+    expect(pack.manifest.dropped).toEqual(expect.arrayContaining([expect.objectContaining({ section: "memory", ref: "lib/code-review/notes/broken.md", reason: expect.stringMatching(/^skipped: title-pattern is not a valid regex/) })]));
+  });
+
   it("logs a failed memory search instead of reading it as nothing found", async () => {
     const r = repo({ "a.ts": "export const a = 1;\n" }, { "a.ts": "export const a = 2;\n" });
     const failing = { search: async () => { throw new Error("memory service unavailable"); }, read: async () => null };

@@ -15,6 +15,8 @@ export interface DomainNote {
   terms: string[];
   /** Case-insensitive pattern over the PR title. */
   titlePattern?: string;
+  /** Why the note cannot be used, such as a `title-pattern` that is not a valid regex. The pack skips it and logs this. */
+  invalid?: string;
   body: string;
   /** Where the note came from: the team's memory, at `path`. */
   origin: "memory";
@@ -63,12 +65,21 @@ export function parseNote(name: string, text: string, origin: DomainNote["origin
     return block[1].split("\n").map((l) => l.replace(/^\s+-\s+/, "").trim().replace(/^["']|["']$/g, "")).filter(Boolean);
   };
   const titlePattern = scalar("title-pattern");
+  let invalid: string | undefined;
+  if (titlePattern) {
+    try {
+      new RegExp(titlePattern, "i");
+    } catch (err) {
+      invalid = `title-pattern is not a valid regex (${err instanceof Error ? err.message : String(err)}). Fix the pattern in the note.`;
+    }
+  }
   return {
     name,
     title: scalar("title") ?? name,
     paths: list("paths"),
     terms: list("terms"),
-    ...(titlePattern ? { titlePattern } : {}),
+    ...(titlePattern && !invalid ? { titlePattern } : {}),
+    ...(invalid ? { invalid } : {}),
     body,
     origin,
     ...(path ? { path } : {}),

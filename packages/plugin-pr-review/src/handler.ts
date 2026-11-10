@@ -313,7 +313,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
       repo: repoName,
       head,
     });
-    const decision = decideFinding(f, verdict, await gh.fileText(f.path, head));
+    const decision = decideFinding(f, verdict, await readableText(gh, f.path, head));
     if (decision.keep) kept.push(f);
   });
 
@@ -645,16 +645,18 @@ async function runReviewerChild(
       excludePaths: input.settings.excludePaths,
       memory,
     });
-  // Without a pack, the memory search stands in for the pack's team notes.
-  const fallback = promptWith(undefined, await teamNotes(ctx, input.repoName));
+  // Without a pack, the memory search stands in for the pack's team notes. It runs only when no pack replaces the prompt.
+  const fallback = async (): Promise<string> => promptWith(undefined, await teamNotes(ctx, input.repoName));
   const context = input.context;
   const budgetTokens = input.settings.contextBudget ?? 0;
+  const gathers = context !== undefined && budgetTokens > 0;
   const child = await ctx.threads.spawnChild(
     thread,
     {
-      prompt: fallback,
+      // With a prepare step, the host sends the prompt that step returns; this one is only its input.
+      prompt: gathers ? promptWith(undefined, "") : await fallback(),
       // Gather in the child's sandbox, on the checkout it already has. The pack goes into the first prompt, so compaction never drops it.
-      ...(context && budgetTokens > 0
+      ...(context && gathers
         ? {
             prepare: async (runner) => {
               const pack = await gatherForReview(ctx, {
@@ -670,7 +672,7 @@ async function runReviewerChild(
                 thread,
                 dispatchId: `${input.dispatchId}:context`,
               });
-              return pack ? promptWith(pack.text, "") : fallback;
+              return pack ? promptWith(pack.text, "") : fallback();
             },
           }
         : {}),
@@ -786,10 +788,25 @@ async function lineCountsAt(gh: GitHubClient, files: PullFile[], paths: string[]
   const counts = new Map<string, number>();
   for (const path of new Set(paths)) {
     if (!present.has(path)) continue;
-    const text = await gh.fileText(path, ref);
+    const text = await readableText(gh, path, ref);
     counts.set(path, text === undefined ? 1 : lineCount(text));
   }
   return counts;
+}
+
+/**
+ * A file's text for a best-effort check (line counts, quote checks), or
+ * undefined when GitHub cannot serve it: one unreadable file must not fail
+ * the review. Instruction reads (`readTrusted`) call `gh.fileText` directly,
+ * because a failed read there must fail the pack, not drop the rule.
+ */
+async function readableText(gh: GitHubClient, path: string, ref: string): Promise<string | undefined> {
+  try {
+    return await gh.fileText(path, ref);
+  } catch (err) {
+    console.warn(`pr-review: cannot read ${path} at ${ref.slice(0, 7)}; checks treat it as unreadable`, err instanceof Error ? err.message : err);
+    return undefined;
+  }
 }
 
 /** The PR diff limited to the reviewed files, cut to the budget. */

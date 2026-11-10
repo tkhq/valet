@@ -189,6 +189,11 @@ export async function gatherContext(input: GatherInput): Promise<ContextPack> {
       }
       if (!file) continue;
       const note = parseNote(baseName(path), file.content, "memory", path);
+      // One broken note is skipped and logged; it must not drop the whole pack.
+      if (note.invalid) {
+        extraDrops.push({ section: "memory", ref: path, reason: `skipped: ${note.invalid}` });
+        continue;
+      }
       const ruled = note.paths.length > 0 || note.terms.length > 0 || note.titlePattern !== undefined;
       const why = ruled ? noteMatch(note, change, matchesGlob) : undefined;
       // Only a person can change synced, read-only notes, so only they become review rules.
