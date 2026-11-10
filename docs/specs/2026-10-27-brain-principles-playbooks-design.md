@@ -120,7 +120,7 @@ The scope is the one the memory routes resolve for the session id (`delegatedMem
 - A workflow step's read names its session, so the route resolves the run's memory audience. A step whose team audience cannot be resolved gets no snapshot and no memory tools. It never widens to the whole team.
 - A security persona child gets neither.
 
-Children and steps run often and in parallel, so their snapshot budget is 16,000 characters instead of 48,000. The budget drops journals first, then the oldest pinned files. It never drops the Principles section or the root index.
+Children and steps run often and in parallel, so their snapshot budget is 16,000 characters instead of 48,000. Pinned files load whole, and the memory index takes the room that is left, newest files first. The budget drops the oldest pinned files only when they leave no room for the index's folder lines. It never drops the Principles section.
 
 ## Usage
 
