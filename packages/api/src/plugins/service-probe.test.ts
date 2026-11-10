@@ -207,3 +207,47 @@ describe("ServiceProbes limits", () => {
     expect(plugin.calls).toBe(2);
   });
 });
+
+describe("ServiceProbes token refresh", () => {
+  /** A refreshing store stand-in: counts its reads, and returns what the
+   * stored rows hold, the way a store with nothing to refresh does. */
+  function refreshingOver(rows: InMemoryCredentialStore): InMemoryCredentialStore & { reads: number } {
+    const store = Object.assign(new InMemoryCredentialStore(), { reads: 0 });
+    store.get = async (o, service) => {
+      store.reads += 1;
+      return rows.get(o, service);
+    };
+    return store;
+  }
+
+  it("answers a cached listing from the stored row, with no refreshing read", async () => {
+    const rows = await storeWith("t-1");
+    const credentials = refreshingOver(rows);
+    const probes = new ServiceProbes({ credentials, storedCredentials: rows });
+    const plugin = mcpPlugin(async () => listed());
+
+    await probes.get(owner, "mb", plugin);
+    expect(credentials.reads).toBe(1);
+    await probes.get(owner, "mb", plugin);
+    await probes.get(owner, "mb", plugin);
+    expect(credentials.reads).toBe(1);
+    expect(plugin.calls).toBe(1);
+  });
+
+  it("does not list a service whose provider refused the refresh token", async () => {
+    const rows = new InMemoryCredentialStore();
+    await rows.save(owner, "mb", {
+      type: "oauth2",
+      accessToken: "t-1",
+      refreshToken: "r-1",
+      metadata: { refreshFailedAt: 1, refreshRefused: true },
+    });
+    const credentials = refreshingOver(rows);
+    const probes = new ServiceProbes({ credentials, storedCredentials: rows });
+    const plugin = mcpPlugin(async () => listed());
+
+    expect(await probes.get(owner, "mb", plugin)).toEqual({});
+    expect(credentials.reads).toBe(0);
+    expect(plugin.calls).toBe(0);
+  });
+});

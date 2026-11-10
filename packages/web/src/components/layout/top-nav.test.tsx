@@ -33,16 +33,22 @@ let securityPlugins: OrgPluginWire[] = [
   },
 ];
 
+let loadedPlugins: string[] = [];
+
+// The bar is on every page. The plugin catalog reads every connection and
+// lists MCP tools, so the bar must never load it.
 vi.mock("~/api/integrations", async (importOriginal) => ({
   ...await importOriginal<typeof import("~/api/integrations")>(),
-  usePlugins: () => ({ data: { plugins: [] }, isLoading: false, error: null }),
+  usePlugins: () => {
+    throw new Error("the top bar loaded the plugin catalog");
+  },
 }));
 vi.mock("~/api/settings", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/settings")>();
   return {
     ...actual,
     useOrg: () => ({
-      data: { callerRole: "admin", features: { organizations: true }, plugins: securityPlugins },
+      data: { callerRole: "admin", features: { organizations: true }, plugins: securityPlugins, loadedPlugins },
       isLoading: false,
       error: null,
     }),
@@ -122,6 +128,7 @@ function renderNav(opts: { withSidebar?: boolean; workspace?: string; path?: str
 describe("TopNav", () => {
   beforeEach(() => {
     navTeams = [];
+    loadedPlugins = [];
     window.sessionStorage.clear();
     securityPlugins = [
       {
@@ -149,6 +156,13 @@ describe("TopNav", () => {
     expect(within(menu).getByRole("menuitem", { name: "Valet Security" })).toBeTruthy();
     await userEvent.click(within(menu).getByRole("menuitem", { name: "Skills" }));
     expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("offers Code review once the org response lists the PR review plugin as loaded", async () => {
+    loadedPlugins = ["pr-review"];
+    renderNav();
+    await userEvent.click(await screen.findByRole("button", { name: "Open navigation" }));
+    expect(within(screen.getByRole("menu")).getByRole("menuitem", { name: "Code review" })).toBeTruthy();
   });
 
   it("applies entitlement filtering to mobile destinations", async () => {

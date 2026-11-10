@@ -89,6 +89,17 @@ export function pluginEnabledForCaller(
   return org.plugins.find((p) => p.name === name)?.enabledForCaller ?? false;
 }
 
+/**
+ * Whether the deployment loaded the plugin `name`, gated or not.
+ * `undefined` while the org loads. A nav item reads this, not the plugin
+ * catalog: the catalog reads every connection and lists MCP tools, which is
+ * too much for every page.
+ */
+export function pluginLoaded(org: OrgResponse | undefined, name: string): boolean | undefined {
+  if (!org) return undefined;
+  return org.loadedPlugins?.includes(name) ?? false;
+}
+
 // ── Query key factory ────────────────────────────────────────────────────
 
 export const qkSettings = {

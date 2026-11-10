@@ -624,6 +624,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     imageBuilder: null,
     eventStream,
     engineCredentials,
+    storedCredentials: engineCredentials,
     onePassword,
     engineHost,
     autoTitleHost,

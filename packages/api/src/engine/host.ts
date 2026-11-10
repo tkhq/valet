@@ -1610,6 +1610,11 @@ export class EngineHost {
     return (this.opts.plugins ?? []).some((p) => p.name === name);
   }
 
+  /** The names of every plugin in the same loaded set `isPluginLoaded` reads. */
+  loadedPluginNames(): string[] {
+    return (this.opts.plugins ?? []).map((p) => p.name);
+  }
+
   /**
    * The loaded plugins that opted into org gating (a `gate` manifest field).
    * Drives the admin API and the `GET /api/org` visibility block, and

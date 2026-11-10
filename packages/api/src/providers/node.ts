@@ -506,9 +506,12 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // token; this layer mints a replacement before it expires.
   const linearAppCredentials = new LinearAppTokenStore(refreshingCredentials, { env: process.env });
   const engineCredentials = new TeamCredentialStore(linearAppCredentials);
+  // The same rows with the team read rule but no refresh layer, for paths
+  // that only show a row's state (`Providers.storedCredentials`).
+  const storedCredentials = new TeamCredentialStore(baseCredentials);
   // One cache of dynamic (MCP) tool listings, shared by `/api/plugins`, the
   // policy routes, and the engine host's policy resolver.
-  const serviceProbes = new ServiceProbes({ credentials: engineCredentials });
+  const serviceProbes = new ServiceProbes({ credentials: engineCredentials, storedCredentials });
 
   // 1Password reference-credential service (1Password credential provider
   // plan, Task 1/2) — the same instance is threaded into `EngineHost`'s
@@ -1014,6 +1017,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     imageBuilder,
     eventStream,
     engineCredentials,
+    storedCredentials,
     onePassword,
     engineHost,
     autoTitleHost,

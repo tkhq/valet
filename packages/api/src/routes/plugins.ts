@@ -2,7 +2,7 @@
  * `/api/plugins` — read-only manifest surface for the connect UI
  * (plugin-system-v2 plan Task 15). Reflects `providers.plugins` (the
  * assembled `ValetPlugin[]` — see `plugins/assemble.ts`) merged with the
- * caller's own connected-service set from `providers.engineCredentials`.
+ * caller's own connected-service set from `providers.storedCredentials`.
  *
  * Never returns secret material — only which services are connected, not
  * their tokens. See `routes/credentials.ts` for the mutation surface. The
@@ -17,6 +17,11 @@
  * `metadata.refreshFailedAt`). `connected` alone is set membership in the
  * credential store, so an expired or revoked token reads as connected while
  * `list_tools` hides the service. Health says otherwise.
+ *
+ * This route reads rows as stored (`storedCredentials`) and never refreshes
+ * a token. It runs on page loads, and a refresh per page view per dead row
+ * locked a provider's token endpoint once. An expired token that can renew
+ * reports `renews`, so the client does not ask for a reconnect.
  *
  * A connected dynamic (MCP) service is also listed live, TTL-cached. The
  * listing's tools join the service's `actions` (both groupings) in the same
@@ -100,6 +105,7 @@ function credentialHealth(stored: StoredCredential): PluginServiceSummary["healt
     expiresAt: stored.expiresAt,
     login: typeof metadata?.login === "string" ? metadata.login : undefined,
     refreshFailed: typeof metadata?.refreshFailedAt === "number" ? true : undefined,
+    renews: stored.type === "oauth2" && !!stored.refreshToken && metadata?.refreshRefused !== true ? true : undefined,
     identityOnly: metadata?.identityOnly === true ? true : undefined,
   };
 }
@@ -114,7 +120,7 @@ function withProbe(
 }
 
 pluginsRouter.get("/", async (c) => {
-  const { plugins, engineCredentials, actionPluginByService, serviceProbes, db } = c.var.providers;
+  const { plugins, storedCredentials, actionPluginByService, serviceProbes, db } = c.var.providers;
   const teamId = c.req.query("teamId");
   let owner: CredentialOwner = { type: "user", id: c.var.user.id };
   if (teamId) {
@@ -134,16 +140,17 @@ pluginsRouter.get("/", async (c) => {
   // the response asks the same question about the same caller.
   const callerIsOrgAdmin = await isOrgAdmin(db, c.var.user.orgId, c.var.user.id);
 
-  const connectedServices = new Set((await engineCredentials.list(owner)).map((cred) => cred.service));
+  const connectedServices = new Set((await storedCredentials.list(owner)).map((cred) => cred.service));
 
   // `list()` carries neither `expiresAt` nor `metadata`, so each connected
   // service is read back through `get()` for its health fields — the same
   // N+1 over a small per-user list `routes/credentials.ts` accepts, rather
-  // than widening the `CredentialStore` port's `list` return shape.
+  // than widening the `CredentialStore` port's `list` return shape. The
+  // read is the stored row: showing health must not refresh a token.
   const health = new Map<string, PluginServiceSummary["health"]>();
   await Promise.all(
     [...connectedServices].map(async (service) => {
-      const stored = await engineCredentials.get(owner, service);
+      const stored = await storedCredentials.get(owner, service);
       if (stored) health.set(service, credentialHealth(stored));
       else connectedServices.delete(service);
     }),
@@ -153,7 +160,7 @@ pluginsRouter.get("/", async (c) => {
   if (owner.type === "team") {
     await Promise.all((await listTeamShares(db, owner.id)).map(async (share) => {
       if (connectedServices.has(share.service) || !(await isTeamMember(db, owner.id, share.userId))) return;
-      if (await engineCredentials.get({ type: "user", id: share.userId }, share.service)) connectedServices.add(share.service);
+      if (await storedCredentials.get({ type: "user", id: share.userId }, share.service)) connectedServices.add(share.service);
     }));
   }
 
@@ -211,7 +218,7 @@ pluginsRouter.get("/", async (c) => {
         decl,
         service,
         orgId: c.var.user.orgId,
-        credentials: engineCredentials,
+        credentials: storedCredentials,
         env: process.env,
         owner,
       });
