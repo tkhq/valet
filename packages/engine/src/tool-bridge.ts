@@ -200,6 +200,13 @@ function toAgentToolResult(result: ToolResult, toolName: string, sources: readon
   return { content, details: Object.keys(details).length === 0 ? undefined : details };
 }
 
+/** The text a text attachment puts into the model's context. `capToolResult`
+ * counts it toward the result cap. */
+export function textAttachmentText(att: Extract<ToolAttachment, { type: "text" }>): string {
+  const lang = att.language ? ` (${att.language})` : "";
+  return `--- ${att.name ?? "attachment"}${lang} ---\n${att.content}`;
+}
+
 function attachmentToContent(att: ToolAttachment): TextContent | ImageContent | null {
   if (att.type === "image") {
     return {
@@ -208,10 +215,7 @@ function attachmentToContent(att: ToolAttachment): TextContent | ImageContent | 
       mimeType: att.mimeType,
     };
   }
-  if (att.type === "text") {
-    const lang = att.language ? ` (${att.language})` : "";
-    return { type: "text", text: `--- ${att.name ?? "attachment"}${lang} ---\n${att.content}` };
-  }
+  if (att.type === "text") return { type: "text", text: textAttachmentText(att) };
   // file: omit raw bytes from LLM context — engine should have stored via BlobStore
   return { type: "text", text: `[file attachment: ${att.name}]` };
 }

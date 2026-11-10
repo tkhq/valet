@@ -274,8 +274,11 @@ Two layers fix it:
   characters, Claude Code's `BASH_MAX_OUTPUT_LENGTH`. `read` opts out because
   it pages its own output: 2,000 lines or 50,000 characters, which is 25,000
   tokens at 2 characters per token. If the save fails, the model gets the
-  first part and a note that the rest was dropped. Compaction keeps its own
-  4-character estimate (`estimateTokens`).
+  first part and a note that the rest was dropped. Text attachments count
+  toward the cap and fold into the saved file. A thrown tool error's message
+  gets the same cap, because pi-agent-core puts it into context as the
+  result (`capToolError`). Compaction keeps its own 4-character estimate
+  (`estimateTokens`).
 - **Fail-safe (defense in depth).** For a tail that still exceeds the window
   (a tool that opts out of the result cap, or a spill that could not write), `compactThreadInner`
   checks the kept tail after cut-point selection. It measures the POST-prune

@@ -9,7 +9,7 @@ import { mergeAppearance, readAppearance, type Appearance } from "@valet/shared"
 import { classifyProviderFailure, isNonRetryableProviderFailure, isUsageLimitFailure, isRateLimitedProviderFailure } from "@valet/shared";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { uid } from "./ids.js";
-import { capToolResult, TOOL_RESULT_MAX_CHARS, TOOL_RESULT_MAX_TOKENS } from "./tool-result-cap.js";
+import { capToolError, capToolResult, TOOL_RESULT_MAX_CHARS, TOOL_RESULT_MAX_TOKENS } from "./tool-result-cap.js";
 import type { AgentContext, AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import { isContextOverflow } from "@earendil-works/pi-ai/compat";
 // Root import (not /compat): the transient classifier lives in pi-ai's
@@ -7063,12 +7063,17 @@ export class Thread {
     if (maxChars === Number.POSITIVE_INFINITY) return def;
     return {
       ...def,
-      execute: async (args, ctx) => capToolResult(await def.execute(args, ctx), {
-        toolName: def.name,
-        maxChars,
-        maxTokens: TOOL_RESULT_MAX_TOKENS,
-        save: (text) => this.saveLargeToolResult(def.name, text),
-      }),
+      execute: async (args, ctx) => {
+        const opts = { toolName: def.name, maxChars, maxTokens: TOOL_RESULT_MAX_TOKENS, save: (text: string) => this.saveLargeToolResult(def.name, text) };
+        let result: ToolResult;
+        try {
+          result = await def.execute(args, ctx);
+        } catch (err) {
+          // A thrown message reaches context as the result, so it gets the cap too.
+          throw await capToolError(err, opts);
+        }
+        return capToolResult(result, opts);
+      },
     };
   }
 
