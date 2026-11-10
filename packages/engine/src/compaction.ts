@@ -1,6 +1,6 @@
 import { failedToolResultText } from "./tool-result-text.js";
 import { completeSimple, isContextOverflow } from "@earendil-works/pi-ai/compat";
-import type { Message, Model } from "@earendil-works/pi-ai/compat";
+import type { AssistantMessage, Message, Model } from "@earendil-works/pi-ai/compat";
 import { attributedAuthor, formatSenderLine, type AuthorAttribution } from "./submission.js";
 import { entryMessageTime, messageTimeLine } from "./model-context.js";
 import type { CompactionConfig, CreateSessionOptions, SessionEntry } from "./types.js";
@@ -881,6 +881,8 @@ export interface SummarizeResult {
   summary: string;
   inputTokens: number;
   outputTokens: number;
+  /** Input tokens the provider served from the prompt cache. Set by `summarizeOnPrefix`. */
+  cacheReadTokens?: number;
 }
 
 /**
@@ -1030,6 +1032,70 @@ export async function summarize(opts: SummarizeOptions): Promise<SummarizeResult
     inputTokens,
     outputTokens,
   };
+}
+
+export interface PrefixSummarizeOptions {
+  /** The thread's latest request messages and its response, in order. */
+  messages: Message[];
+  /** Sends one request with these messages and the thread's own system
+   * prompt, tools, and request options, so the prompt cache serves the
+   * prefix. */
+  send: (messages: Message[]) => Promise<AssistantMessage>;
+  /** The conversation already opens with an earlier summary. */
+  hasPreviousSummary: boolean;
+  instructions?: string;
+}
+
+/**
+ * Summarize from the thread's own cached prefix. The request repeats the
+ * thread's latest request (same system prompt, tools, and messages) and
+ * adds its response and the summary prompt. The provider serves the
+ * repeated part from the prompt cache, so this costs cache reads instead
+ * of a full-price read of the history. `summarize` sends its own system
+ * prompt and no tools, which no cache entry matches.
+ *
+ * It keeps the tools: a changed `tool_choice` clears the provider's cached
+ * messages. The prompt asks for text only, and a tool call fails the pass,
+ * so the caller falls back to `summarize`.
+ */
+export async function summarizeOnPrefix(opts: PrefixSummarizeOptions): Promise<SummarizeResult> {
+  const anchor = opts.hasPreviousSummary
+    ? "Update the anchored summary at the start of this conversation using everything after it. Preserve still-true details, remove stale details, and merge in the new facts."
+    : "Create a new anchored summary of this conversation.";
+  const steer = opts.instructions
+    ? `\n\nThe user gave these instructions for this compaction — follow them when deciding what to keep:\n${opts.instructions}`
+    : "";
+  const prompt = [
+    "Pause the task to compact this conversation. Do not call any tools. Reply with text only.",
+    `${anchor} The summary replaces the earlier messages; the most recent messages stay verbatim after it.`,
+    `${SUMMARY_TEMPLATE}${steer}`,
+  ].join("\n\n");
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let cacheReadTokens = 0;
+  const complete = async (text: string): Promise<string> => {
+    const result = await opts.send([...opts.messages, { role: "user", content: [{ type: "text", text }], timestamp: Date.now() }]);
+    inputTokens += result.usage.input + result.usage.cacheRead + result.usage.cacheWrite;
+    cacheReadTokens += result.usage.cacheRead;
+    outputTokens += result.usage.output;
+    if (result.stopReason !== "stop" || result.content.some((block) => block.type === "toolCall")) {
+      throw new Error(result.errorMessage ?? `The cached-prefix summary failed (${result.stopReason}).`);
+    }
+    const summary = stripAnalysisScratchpad(result.content
+      .filter((b): b is { type: "text"; text: string } => b.type === "text")
+      .map((b) => b.text)
+      .join(""));
+    if (summary.length === 0) throw new Error("The cached-prefix summary returned no text.");
+    return summary;
+  };
+  let summary = await complete(prompt);
+  try {
+    validateSummaryStructure(summary);
+  } catch {
+    summary = await complete(`${prompt}\n\nThe previous response did not match the required summary format. Output every template section exactly once, in order, with content in every leaf section. Use "(none)" or "(unknown)" when appropriate.`);
+    validateSummaryStructure(summary);
+  }
+  return { summary, inputTokens, outputTokens, cacheReadTokens };
 }
 
 /**

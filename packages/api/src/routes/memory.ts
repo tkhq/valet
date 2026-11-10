@@ -602,6 +602,7 @@ memoryRouter.put("/", async (c) => {
       expires: body.expires,
       pinned: body.pinned,
       source: writeSource(c),
+      requireDescription: writeSource(c) !== undefined,
     });
     return c.json(result);
   } catch (err) {
@@ -647,7 +648,7 @@ memoryRouter.post("/patch", async (c) => {
       return c.json({ error: "Send patches as an array of { path, oldString, newString }, without a top-level path." }, 400);
     }
     try {
-      const results = await patchFiles(c.var.providers.db, scope, { patches, source: writeSource(c) });
+      const results = await patchFiles(c.var.providers.db, scope, { patches, source: writeSource(c), requireDescription: writeSource(c) !== undefined });
       return c.json({ files: results.map((r) => r.file), warnings: results.flatMap((r) => r.warnings) });
     } catch (err) {
       const mapped = handleServiceError(err);
@@ -667,6 +668,7 @@ memoryRouter.post("/patch", async (c) => {
       oldString: body.oldString,
       newString: body.newString,
       source: writeSource(c),
+      requireDescription: writeSource(c) !== undefined,
     });
     return c.json(result);
   } catch (err) {

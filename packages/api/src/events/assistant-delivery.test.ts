@@ -1,7 +1,7 @@
 import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
 import { fauxAssistantMessage, Type, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
 import { fauxToolCall } from "@valet/engine/test-helpers";
-import { MID_TURN_DELIVERY_KEY, VirtualSandboxProvider, type MessageEntry } from "@valet/engine";
+import { FRESH_CONTEXT_KEY, MID_TURN_DELIVERY_KEY, VirtualSandboxProvider, type MessageEntry } from "@valet/engine";
 import { UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY } from "@valet/shared";
 import { PgEventStream, PgSessionStore } from "@valet/store-postgres";
 import { eq, sql } from "drizzle-orm";
@@ -126,8 +126,39 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
       });
       const result = await testDb.appDb.execute(sql`SELECT metadata FROM engine_queue_items WHERE dispatch_id = ${dispatchId}`) as { rows: Array<{ metadata: unknown }> };
       const metadata = result.rows[0]?.metadata;
-      expect(typeof metadata === "string" ? JSON.parse(metadata) : metadata).toEqual({ [MID_TURN_DELIVERY_KEY]: true, ...(unattended ? { [UNATTENDED_DELIVERY_KEY]: true } : {}) });
+      // The events firehose runs each unattended delivery without its history.
+      expect(typeof metadata === "string" ? JSON.parse(metadata) : metadata).toEqual({ [MID_TURN_DELIVERY_KEY]: true, ...(unattended ? { [UNATTENDED_DELIVERY_KEY]: true, [FRESH_CONTEXT_KEY]: true } : {}) });
     }
+  });
+
+  it("runs an unattended delivery on a rule's own thread without the thread's history", async () => {
+    const deps = { db: testDb.appDb, engineHost };
+    const cases = [
+      ["rule-thread", "sub:rule-a", true, true],
+      ["routine-thread", "schedule:rule-b", true, true],
+      ["firehose", "events", true, true],
+      ["subject-thread", "subject:github:o/r#1", true, false],
+      ["attended-rule-thread", "sub:rule-c", false, false],
+    ] as const;
+    for (const [dispatchId, key, unattended, fresh] of cases) {
+      await deliverToAssistantThread(deps, {
+        orgId: ORG, owner: OWNER, actorUserId: USER, destination: { kind: "key", key },
+        signal: { kind: "signal", signalType: "test", body: dispatchId },
+        dispatchId, mismatchReason: "test", ...(unattended ? { unattended } : {}),
+      });
+      const result = await testDb.appDb.execute(sql`SELECT metadata FROM engine_queue_items WHERE dispatch_id = ${dispatchId}`) as { rows: Array<{ metadata: unknown }> };
+      const metadata = result.rows[0]?.metadata;
+      const parsed = (typeof metadata === "string" ? JSON.parse(metadata) : metadata) as Record<string, unknown>;
+      expect(parsed[FRESH_CONTEXT_KEY] === true, dispatchId).toBe(fresh);
+    }
+    // A person took part in sub:rule-c, so a later unattended delivery keeps the history.
+    await deliverToAssistantThread(deps, {
+      orgId: ORG, owner: OWNER, actorUserId: USER, destination: { kind: "key", key: "sub:rule-c" },
+      signal: { kind: "signal", signalType: "test", body: "after a person" }, dispatchId: "joined-rule-thread", mismatchReason: "test", unattended: true,
+    });
+    const joined = await testDb.appDb.execute(sql`SELECT metadata FROM engine_queue_items WHERE dispatch_id = 'joined-rule-thread'`) as { rows: Array<{ metadata: unknown }> };
+    const joinedMeta = joined.rows[0]?.metadata;
+    expect(((typeof joinedMeta === "string" ? JSON.parse(joinedMeta) : joinedMeta) as Record<string, unknown>)[FRESH_CONTEXT_KEY]).toBeUndefined();
   });
 
   it("uses the current team defaults for new Slack threads after restore", async () => {

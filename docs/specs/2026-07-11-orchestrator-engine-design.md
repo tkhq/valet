@@ -75,7 +75,7 @@ The orchestrator has no user-visible wake state. An inbound event durably admits
 The adapter host reconstructs `CreateSessionOptions` on wake from configuration, not from persisted creation options:
 
 - **Persona and roles**: the orchestrator persona plus per-user identity, loaded as `RoleSpec`s.
-- **Memory snapshot**: `systemContext` entry (pinned files + recent journals + neighbor tier), assembled at wake. Wake-time bootstrap also ensures today's journal exists and the link index is fresh.
+- **Memory snapshot**: `systemContext` entry, assembled at wake: the Principles section, every pinned file in full, and the memory index. The index lists each own file with its description (at most 200 lines and 16,000 characters, newest first). It leaves out pinned files, principles, and expired files, and collapses `journal/` and `artifacts/` to one line each. Wake creates no journal file, and compaction appends nothing to memory (2026-11-09): both wrote files that nothing read. An agent that creates a memory file must give it a description, because the index and `mem_search` show only that line. `mem_patch` edits existing files and creates none.
 - **Tools**: memory tools, channel tools, task tools, the plugin action bridge, `task` — all engine-side ToolDefs configured via `toolConfig` (API base URL, credentials); nothing assumes a sandbox-local gateway.
 - **Sandbox**: a `SandboxCreateOpts` template, **not** a warm sandbox (below).
 

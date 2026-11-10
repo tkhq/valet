@@ -164,6 +164,57 @@ describe("compaction budget: a finished turn above the budget", () => {
     faux.unregister();
   });
 
+  it("summarizes by repeating the turn's last request, so the prompt cache serves it", async () => {
+    const { faux, store, events, session, thread } = await bigWindowSession("budget-cached-prefix", { contextBudgetTokens: 15_000, tailTurns: 1 });
+    const seen: Array<{ systemPrompt: unknown; tools: string; messages: unknown[] }> = [];
+    const record = (reply: ReturnType<typeof fauxAssistantMessage>) => (context: { systemPrompt?: unknown; tools?: unknown; messages: unknown[] }) => {
+      seen.push({ systemPrompt: context.systemPrompt, tools: JSON.stringify(context.tools ?? []), messages: [...context.messages] });
+      return reply;
+    };
+    faux.setResponses([
+      record(fauxAssistantMessage("third response " + "y".repeat(16_000))),
+      record(fauxAssistantMessage(COMPLETE_SUMMARY)),
+    ]);
+
+    const receipt = await session.prompt("third prompt", { channel: SLACK });
+    await waitFor(() => events.some((e) => e.event.type === "compaction_end" && e.event.threadId === receipt.threadId));
+    await thread.awaitResult(receipt.queueItemId, { timeoutMs: 4000 });
+
+    expect(seen).toHaveLength(2);
+    const [turn, summary] = seen;
+    // Same system prompt and tools, and the turn's messages as a prefix.
+    expect(summary.systemPrompt).toEqual(turn.systemPrompt);
+    expect(summary.tools).toBe(turn.tools);
+    expect(JSON.stringify(summary.messages.slice(0, turn.messages.length))).toBe(JSON.stringify(turn.messages));
+    // Then the turn's response and the summary prompt.
+    expect(JSON.stringify(summary.messages.at(-2))).toContain("third response");
+    expect(JSON.stringify(summary.messages.at(-1))).toContain("Do not call any tools");
+    const checkpoint = (await store.getEntries(session.id, thread.id)).find((e) => e.type === "compaction");
+    expect(checkpoint?.type === "compaction" && checkpoint.coveredEntryIds).toEqual(expect.arrayContaining(["e-1", "e-2"]));
+    expect(errorCodes(events)).toEqual([]);
+    faux.unregister();
+  });
+
+  it("falls back to the bounded summarizer when the cached-prefix summary calls a tool", async () => {
+    const { faux, store, events, session, thread } = await bigWindowSession("budget-prefix-fallback", { contextBudgetTokens: 15_000, tailTurns: 1 });
+    let calls = 0;
+    faux.setResponses([
+      () => { calls++; return fauxAssistantMessage("third response " + "y".repeat(16_000)); },
+      () => { calls++; return fauxAssistantMessage([fauxToolCall("lookup", {}, { id: "tc-1" })]); },
+      () => { calls++; return fauxAssistantMessage(COMPLETE_SUMMARY); },
+    ]);
+
+    const receipt = await session.prompt("third prompt", { channel: SLACK });
+    await waitFor(() => events.some((e) => e.event.type === "compaction_end" && e.event.threadId === receipt.threadId));
+    await thread.awaitResult(receipt.queueItemId, { timeoutMs: 4000 });
+
+    expect(calls).toBe(3);
+    const checkpoints = (await store.getEntries(session.id, thread.id)).filter((e) => e.type === "compaction");
+    expect(checkpoints).toHaveLength(1);
+    expect(errorCodes(events)).toEqual([]);
+    faux.unregister();
+  });
+
   it("sends the summary and the newest turn verbatim on the next request", async () => {
     const { faux, events, session, thread } = await bigWindowSession("budget-next-request", { contextBudgetTokens: 15_000, tailTurns: 1, idleCompactionMs: 0 });
     let nextRequest = "";

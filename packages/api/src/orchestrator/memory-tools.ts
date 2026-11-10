@@ -167,7 +167,7 @@ export const memWriteTool = defineTool({
   name: "mem_write",
   ownerOnly: true,
   description:
-    "Create or update a memory file in your own memory, or in a team's shared memory when you pass `teamId`. Create requires `content`; call again with `content` omitted to update metadata only (type/description/tags/etc.) without touching the body. Search with mem_search before writing to update an existing file about the same thing instead of creating a duplicate.",
+    "Create or update a memory file in your own memory, or in a team's shared memory when you pass `teamId`. Create requires `content` and `description`; call again with `content` omitted to update metadata only (type/description/tags/etc.) without touching the body. Search with mem_search before writing to update an existing file about the same thing instead of creating a duplicate.",
   parameters: Type.Object({
     path: Type.String({ description: "Memory path, e.g. 'people/alice.md' or 'projects/valet/overview.md'." }),
     content: Type.Optional(
@@ -176,7 +176,7 @@ export const memWriteTool = defineTool({
     type: Type.Optional(
       Type.String({ description: "Concept type, e.g. 'preference', 'person', 'project-note', 'journal-entry'. Defaults from the directory when omitted." }),
     ),
-    description: Type.Optional(Type.String({ description: "One-line summary used in search results and directory indexes." })),
+    description: Type.Optional(Type.String({ description: "One line that says what the file holds. Required to create a file: the memory index and mem_search show only this line." })),
     tags: Type.Optional(Type.Array(Type.String(), { description: "Free-form tags." })),
     resource: Type.Optional(
       Type.String({
@@ -205,7 +205,7 @@ export const memWriteTool = defineTool({
     pinned: Type.Optional(
       Type.Boolean({
         description:
-          "Pin this file so it's always loaded in full at orchestrator wake (memory snapshot). Use sparingly — only for durable, high-value facts (standing preferences, core identity notes), not routine journal entries.",
+          "Pin this file so it's always loaded in full at orchestrator wake (memory snapshot). Use sparingly — only for durable, high-value facts (standing preferences, core identity notes), not routine notes.",
       }),
     ),
     teamId: Type.Optional(
@@ -252,7 +252,7 @@ export const memWriteTool = defineTool({
 
 const patchSchema = Type.Object({
   path: Type.String(),
-  oldString: Type.String({ description: "Exact text to find, or '' to create a new file at `path`." }),
+  oldString: Type.String({ description: "Exact text to find. It must match exactly once." }),
   newString: Type.String({ description: "Replacement text (or full body, when creating)." }),
 });
 
@@ -276,10 +276,10 @@ export const memPatchTool = defineTool({
   name: "mem_patch",
   ownerOnly: true,
   description:
-    "Exact-string replace a memory file's body, in your own memory or in a team's shared memory when you pass `teamId`: finds `oldString` and replaces it with `newString`. Fails if `oldString` doesn't match exactly once. Pass `oldString: ''` against a non-existent path to create it with `newString` as the body (useful for appending to today's journal). To change several files together, send `patches` instead of `path`/`oldString`/`newString`: up to 20 patches, applied in order, all or none.",
+    "Exact-string replace a memory file's body, in your own memory or in a team's shared memory when you pass `teamId`: finds `oldString` and replaces it with `newString`. Fails if `oldString` doesn't match exactly once. It edits files that exist; create a file with mem_write and a description. To change several files together, send `patches` instead of `path`/`oldString`/`newString`: up to 20 patches, applied in order, all or none.",
   parameters: Type.Object({
     path: Type.Optional(Type.String()),
-    oldString: Type.Optional(Type.String({ description: "Exact text to find, or '' to create a new file at `path`." })),
+    oldString: Type.Optional(Type.String({ description: "Exact text to find. It must match exactly once." })),
     newString: Type.Optional(Type.String({ description: "Replacement text (or full body, when creating)." })),
     patches: Type.Optional(
       Type.Array(patchSchema, {
@@ -382,6 +382,21 @@ interface SearchResultRow {
   title: string;
   description: string;
   type: string;
+  /** The matched body text on one line, or "" when there is none. */
+  snippet: string;
+}
+
+/** Most characters of matched body text one search line shows. */
+const SEARCH_SNIPPET_MAX_CHARS = 200;
+
+function snippetText(value: unknown): string {
+  if (!Array.isArray(value)) return "";
+  const text = value
+    .map((segment) => (isRecord(segment) && typeof segment.text === "string" ? segment.text : ""))
+    .join("")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text.length > SEARCH_SNIPPET_MAX_CHARS ? `${text.slice(0, SEARCH_SNIPPET_MAX_CHARS - 1)}…` : text;
 }
 
 interface SearchResultBody {
@@ -396,6 +411,7 @@ function asSearchResultRow(v: unknown): SearchResultRow | null {
     title: typeof v.title === "string" ? v.title : "",
     description: typeof v.description === "string" ? v.description : "",
     type: typeof v.type === "string" ? v.type : "",
+    snippet: snippetText(v.snippet),
   };
 }
 
@@ -411,7 +427,7 @@ export const memSearchTool = defineTool({
   sideEffect: "none",
   ownerOnly: true,
   description:
-    "Full-text search over memory (path, title, description, tags, content) within your own scope and any teams you belong to. Search when a message names a person, project, client, repository, or earlier decision, to find what you already know. Each result is a path and a description, not the file: mem_read the files your answer depends on. Also search before mem_write when the memory might already exist, especially for anything with a `resource`.",
+    "Full-text search over memory (path, title, description, tags, content) within your own scope and any teams you belong to. Search when a message names a person, project, client, repository, or earlier decision, to find what you already know. Each result is a path, a description, and the matched text, not the file: mem_read the files your answer depends on. Also search before mem_write when the memory might already exist, especially for anything with a `resource`.",
   parameters: Type.Object({
     query: Type.String({
       description:
@@ -432,7 +448,10 @@ export const memSearchTool = defineTool({
       if (results.length === 0) return { text: `(no memory results for "${args.query}")` };
       const lines = results.map((r) => {
         const desc = r.description ? ` — ${r.description}` : "";
-        return `[${r.type}] ${r.path}${desc}`;
+        // The matched text shows why the file matched, most of all for a
+        // file with no description.
+        const match = r.snippet ? `\n    matched: ${r.snippet}` : "";
+        return `[${r.type}] ${r.path}${desc}${match}`;
       });
       // The next step rides in the result, where the model decides what to
       // do with the hits. A description alone often reads as the answer.

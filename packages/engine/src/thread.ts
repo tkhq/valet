@@ -23,6 +23,7 @@ import { bundledModel } from "./model-catalog.js";
 import { appendRuntimeModelContext, entryMessageTime, messageTimeLine, threadStartedSection, type MessageTime } from "./model-context.js";
 import { recordCacheBreak } from "./metrics.js";
 import type { Api, AssistantMessage, ImageContent, JsonObject, Message, Model, TextContent, ThinkingContent, ToolCall } from "@earendil-works/pi-ai/compat";
+import type { AssistantMessageEventStream, SimpleStreamOptions, TranscriptContext } from "@earendil-works/pi-ai";
 
 type PiModel = Model<Api>;
 import type { Session, EmitOptions } from "./session.js";
@@ -147,6 +148,7 @@ import {
   planPrune,
   selectCutPoint,
   summarize,
+  summarizeOnPrefix,
   SummarizeOverflowError,
   compactionBudget,
   idleCompactionDelayMs,
@@ -203,7 +205,7 @@ import type {
   ToolResult,
   WriteFence,
 } from "./types.js";
-import { ENTRY_USER_TIMEZONE_KEY, MESSAGE_TURN_ERROR_KEY, MID_TURN_DELIVERY_KEY, RECORD_ONLY_KEY, THREAD_USER_TIMEZONE_KEY } from "./types.js";
+import { ENTRY_USER_TIMEZONE_KEY, FRESH_CONTEXT_KEY, MESSAGE_TURN_ERROR_KEY, MID_TURN_DELIVERY_KEY, RECORD_ONLY_KEY, THREAD_USER_TIMEZONE_KEY } from "./types.js";
 import { correctImageBlocks } from "./image-media-type.js";
 import { reportError } from "./error-report.js";
 
@@ -650,6 +652,14 @@ export class Thread {
   private turnToolCallCount = 0;
   /** True while a reactive (overflow) compaction is rerunning the failed turn. */
   private overflowRetryInProgress = false;
+  /** The prompt message of a `FRESH_CONTEXT_KEY` turn: requests send it and the messages after it. */
+  private freshContextStart: AgentMessage | undefined;
+  /** The skill reads in live context when a fresh-context turn started. Its requests leave them out. */
+  private skillReadsBeforeFreshContext: ReadonlySet<string> | undefined;
+  /** The latest turn request, as sent. `scoped` marks a fresh-context request, which left history out. */
+  private lastModelRequest: { model: Model<Api>; context: TranscriptContext; options?: SimpleStreamOptions; scoped: boolean } | undefined;
+  /** The response to `lastModelRequest`, once its turn finishes. */
+  private lastModelResponse: AgentMessage | undefined;
   /**
    * Set when a compaction pass in this turn reported an outcome that no
    * second pass can change: the newest turn is too large, or the head holds
@@ -1509,6 +1519,20 @@ export class Thread {
     } catch (err) {
       console.error("skill invocation telemetry write failed:", err);
     }
+  }
+
+  /**
+   * Whether a skill read already put this skill's body, at this version, in
+   * the context the model receives. A fresh-context turn sends only its own
+   * messages, so a read from before that turn does not count.
+   */
+  private skillBodyInContext(skill: SkillSource): boolean {
+    const probe = this.buildSkillInvocationFact(skill, "model_tool", "", null, "probe");
+    for (const fact of this.activeSkillInvocations.values()) {
+      if (this.skillReadsBeforeFreshContext?.has(fact.id)) continue;
+      if (fact.path === "model_tool" && fact.skillKey === probe.skillKey && fact.contentSha === probe.contentSha) return true;
+    }
+    return false;
   }
 
   private async recordModelToolSkillInvocation(
@@ -5213,7 +5237,7 @@ export class Thread {
       if (!(await this.publishActiveModelState(item.id, this.agent.state.model))) return;
 
       try {
-        await this.runAgent(text, attachments, sender, time);
+        await this.runAgent(text, attachments, sender, time, item.metadata?.[FRESH_CONTEXT_KEY] === true);
       } catch (err) {
         // Record the throw for settlement: a stream failing before its first
         // message_start leaves no assistant message this turn, and
@@ -5434,19 +5458,28 @@ export class Thread {
     attachments: MessageEntry["attachments"] | undefined,
     sender: PromptAuthor | undefined,
     time: MessageTime,
+    freshContext = false,
   ): Promise<void> {
     if (!(await this.canRunCurrentSubmission())) return;
-    const content = userContentBlocks(text, attachments, sender, time);
+    const prompt: AgentMessage = { role: "user", content: userContentBlocks(text, attachments, sender, time), timestamp: Date.now() };
+    // Retries in this call continue the same transcript, so they keep the scope.
+    this.freshContextStart = freshContext ? prompt : undefined;
+    this.skillReadsBeforeFreshContext = freshContext ? new Set(this.activeSkillInvocations.keys()) : undefined;
+    try {
+      await this.runAgentFrom(prompt);
+    } finally {
+      this.freshContextStart = undefined;
+      this.skillReadsBeforeFreshContext = undefined;
+    }
+  }
+
+  private async runAgentFrom(prompt: AgentMessage): Promise<void> {
     // Delivery steers only inside finishTurn, just before the loop reads the
     // steered messages, so this queue is empty here. Clearing it keeps an
     // interrupted boundary from replaying a delivered message into a later
     // run.
     this.agent.clearSteeringQueue();
-    await this.agent.prompt({
-      role: "user",
-      content,
-      timestamp: Date.now(),
-    });
+    await this.agent.prompt(prompt);
     await this.agent.waitForIdle();
 
     const last = this.agent.state.messages[this.agent.state.messages.length - 1];
@@ -6176,7 +6209,7 @@ export class Thread {
       { type: "compaction_start", threadId: this.id },
       { queueItemId: this.runningItem?.id },
     );
-    let summaryResult: SummarizeResult;
+    let summaryResult: SummarizeResult | undefined;
     // Everything between compaction_start and here MUST balance the pair —
     // the wire contract promises "compaction_end fires on failure too", and
     // the web store's compacting indicator only clears on the end frame. The
@@ -6263,7 +6296,44 @@ export class Thread {
         );
         return "coverage_gap";
       }
-      for (let attempt = 0; ; attempt++) {
+      // A pass between requests repeats the thread's latest request, which
+      // the prompt cache still holds, and adds the summary prompt. The
+      // model then reads the whole live context, so the pass covers the
+      // whole pending head. A reactive pass follows an overflow, so the
+      // latest request no longer fits; it and any failure here use the
+      // bounded summarizer below.
+      const prefix = opts.mode === "reactive" ? undefined : this.prefixForSummary(model);
+      if (prefix) {
+        try {
+          summaryResult = await summarizeOnPrefix({
+            messages: prefix.messages,
+            hasPreviousSummary: previousSummary !== undefined,
+            instructions: opts.instructions,
+            send: async (messages) => {
+              const stream = await this.streamModel(prefix.model, { ...prefix.context, messages }, {
+                ...prefix.options,
+                ...(opts.signal ? { signal: opts.signal } : { signal: undefined }),
+              });
+              return stream.result();
+            },
+          });
+          headForSummary = [...pendingHead];
+          tailEvidence = [];
+          span?.setAttributes({
+            "valet.compaction.summary_source": "cached_prefix",
+            "valet.compaction.summary_input_tokens": summaryResult.inputTokens,
+            "valet.compaction.summary_cache_read_tokens": summaryResult.cacheReadTokens ?? 0,
+          });
+          // Compaction calls reach no usage ledger, so this line is the
+          // evidence that the prompt cache served the summary.
+          console.info(`[engine] cached-prefix summary session=${session.id} thread=${this.id} input_tokens=${summaryResult.inputTokens} cache_read_tokens=${summaryResult.cacheReadTokens ?? 0} output_tokens=${summaryResult.outputTokens}`);
+        } catch (err) {
+          if (opts.signal?.aborted) throw err;
+          span?.setAttribute("valet.compaction.summary_source", "prefix_failed");
+          console.warn(`[engine] cached-prefix summary failed, using the bounded summarizer session=${session.id} thread=${this.id}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      for (let attempt = 0; summaryResult === undefined; attempt++) {
         try {
           summaryResult = await summarize({
             headEntries: [...headForSummary, ...tailEvidence],
@@ -6311,6 +6381,8 @@ export class Thread {
           headForSummary = truncated;
         }
       }
+
+      if (summaryResult === undefined) throw new Error("Compaction produced no summary. Run /compact to retry.");
 
       // Step 4: persist CompactionEntry.
       //
@@ -6579,6 +6651,103 @@ export class Thread {
     recordHostedActionInvocation(ctx, grant, { ...receipt }, `Generated an image with ${NATIVE_IMAGE_TOOL_PARAMS.model} through the session model`);
   }
 
+  /**
+   * The thread's latest turn request and its response, when a summary can
+   * repeat them from the prompt cache: the summary runs on the same model,
+   * the request carried the whole history (not a fresh-context slice), and
+   * the response finished the turn as the newest live message.
+   */
+  private prefixForSummary(model: Model<Api>): { model: Model<Api>; context: TranscriptContext; options?: SimpleStreamOptions; messages: Message[] } | undefined {
+    const request = this.lastModelRequest;
+    const response = this.lastModelResponse;
+    if (!request || request.scoped || !response || response.role !== "assistant" || response.stopReason !== "stop") return undefined;
+    if (request.model.provider !== model.provider || request.model.id !== model.id) return undefined;
+    const live = this.agent.state.messages;
+    if (live[live.length - 1] !== response) return undefined;
+    return { model: request.model, context: request.context, options: request.options, messages: [...request.context.messages, response] };
+  }
+
+  /** One model request, sent the way every turn request is sent. */
+  private async streamModel(model: Model<Api>, context: TranscriptContext, options?: SimpleStreamOptions): Promise<AssistantMessageEventStream> {
+    this.requestedMaxOutputTokens = options?.maxTokens;
+    this.requestEvidence = modelRequestEvidence(undefined);
+    await this.persistSkillContextAttributions();
+    const runtimeModelContext = this.modelSystemPrompt(undefined, model);
+    const initialSystemIndex = context.messages.findIndex((message) => message.role === "system");
+    const runtimeSystem = {
+      role: "system" as const,
+      content: "",
+      sections: { "valet-runtime-model": runtimeModelContext },
+      timestamp: Date.now(),
+    };
+    const transcript = {
+      messages: initialSystemIndex === -1
+        ? [runtimeSystem, ...context.messages]
+        : context.messages.map((message, index) =>
+          index === initialSystemIndex && message.role === "system"
+            ? {
+                ...message,
+                sections: {
+                  ...message.sections,
+                  "valet-runtime-model": runtimeModelContext,
+                },
+              }
+            : message,
+        ),
+    };
+    const modelFetch = this.session.options.modelFetch?.(model);
+    return this.nativeImages.stream(model, transcript, {
+      ...options,
+      ...(modelFetch && !options?.fetch ? { fetch: modelFetch } : {}),
+      onPayload: async (payload, requestModel) => {
+        const transformed = (await options?.onPayload?.(payload, requestModel)) ?? payload;
+        this.requestEvidence = modelRequestEvidence(transformed);
+        return transformed;
+      },
+      onResponse: async (response, requestModel) => {
+        const requestId = Object.entries(response.headers).find(([key]) => ["x-request-id", "request-id", "x-amzn-requestid"].includes(key.toLowerCase()))?.[1];
+        this.requestEvidence.requestId = requestId?.slice(0, 200) ?? null;
+        await options?.onResponse?.(response, requestModel);
+      },
+      maxRetries: options?.maxRetries ?? TURN_STREAM_MAX_RETRIES,
+      maxRetryDelayMs: options?.maxRetryDelayMs ?? TURN_STREAM_MAX_RETRY_DELAY_MS,
+      timeoutMs: options?.timeoutMs ?? TURN_STREAM_TIMEOUT_MS,
+      // Cache wiring (TKAI-320): a stable per-thread session id gives
+      // providers with session-affinity caching a routing key (threads
+      // have divergent transcripts, so the key is thread-scoped).
+      // Retention defaults long for orchestrators — they idle between
+      // wake-ups, outliving the short TTL. Same defaults-not-overrides
+      // rule as the retry knobs above.
+      sessionId: options?.sessionId ?? `${this.session.id}/${this.id}`,
+      cacheRetention:
+        options?.cacheRetention ??
+        this.session.options.cacheRetention ??
+        (this.session.options.purpose === "orchestrator" ? "long" : "short"),
+      // Host sampling defaults (eval reproducibility seam). Same
+      // defaults-not-overrides rule: anything pi-agent-core forwards wins.
+      temperature: options?.temperature ?? this.session.options.sampling?.temperature,
+      // Reasoning layers per call: pi-agent-core's own option → this
+      // thread's pin → the session default. The clamp lives here (not
+      // in setReasoning) so a pin survives a model that cannot honor
+      // it: `model` is the model this call actually runs on.
+      reasoning: resolveReasoningLevel(
+        model,
+        options?.reasoning,
+        this.reasoningOverride,
+        this.session.options.sampling?.reasoning,
+      ),
+      samplingParams: options?.samplingParams ?? this.session.options.sampling?.params,
+    }, this.session.sandbox, {
+      permitted: () => this.nativeImageGenerationPermitted(options?.signal),
+      // Never start or wait for a sandbox on a text turn (orchestrators are sandbox-less by default).
+      sandboxReady: () => this.session.attachment.state === "ready",
+      saved: async (receipt) => {
+        await this.checkpointNativeImage(receipt);
+        this.recordNativeImage({ path: receipt.path, image_id: receipt.image_id });
+      },
+    });
+  }
+
   private buildAgent(): Agent {
     // Only wire `getApiKey` when a host resolver is present. Absent → the Agent
     // is constructed with the exact same options as before the seam existed, so
@@ -6601,83 +6770,12 @@ export class Thread {
       // from its own config wins — pinning here would silently disable the
       // upstream knob forever.
       streamFn: async (model, context, options) => {
-        this.requestedMaxOutputTokens = options?.maxTokens;
-        this.requestEvidence = modelRequestEvidence(undefined);
-        await this.persistSkillContextAttributions();
-        const runtimeModelContext = this.modelSystemPrompt(undefined, model);
-        const initialSystemIndex = context.messages.findIndex((message) => message.role === "system");
-        const runtimeSystem = {
-          role: "system" as const,
-          content: "",
-          sections: { "valet-runtime-model": runtimeModelContext },
-          timestamp: Date.now(),
-        };
-        const transcript = {
-          messages: initialSystemIndex === -1
-            ? [runtimeSystem, ...context.messages]
-            : context.messages.map((message, index) =>
-              index === initialSystemIndex && message.role === "system"
-                ? {
-                    ...message,
-                    sections: {
-                      ...message.sections,
-                      "valet-runtime-model": runtimeModelContext,
-                    },
-                  }
-                : message,
-            ),
-        };
-        const modelFetch = this.session.options.modelFetch?.(model);
-        return this.nativeImages.stream(model, transcript, {
-          ...options,
-          ...(modelFetch && !options?.fetch ? { fetch: modelFetch } : {}),
-          onPayload: async (payload, requestModel) => {
-            const transformed = (await options?.onPayload?.(payload, requestModel)) ?? payload;
-            this.requestEvidence = modelRequestEvidence(transformed);
-            return transformed;
-          },
-          onResponse: async (response, requestModel) => {
-            const requestId = Object.entries(response.headers).find(([key]) => ["x-request-id", "request-id", "x-amzn-requestid"].includes(key.toLowerCase()))?.[1];
-            this.requestEvidence.requestId = requestId?.slice(0, 200) ?? null;
-            await options?.onResponse?.(response, requestModel);
-          },
-          maxRetries: options?.maxRetries ?? TURN_STREAM_MAX_RETRIES,
-          maxRetryDelayMs: options?.maxRetryDelayMs ?? TURN_STREAM_MAX_RETRY_DELAY_MS,
-          timeoutMs: options?.timeoutMs ?? TURN_STREAM_TIMEOUT_MS,
-          // Cache wiring (TKAI-320): a stable per-thread session id gives
-          // providers with session-affinity caching a routing key (threads
-          // have divergent transcripts, so the key is thread-scoped).
-          // Retention defaults long for orchestrators — they idle between
-          // wake-ups, outliving the short TTL. Same defaults-not-overrides
-          // rule as the retry knobs above.
-          sessionId: options?.sessionId ?? `${this.session.id}/${this.id}`,
-          cacheRetention:
-            options?.cacheRetention ??
-            this.session.options.cacheRetention ??
-            (this.session.options.purpose === "orchestrator" ? "long" : "short"),
-          // Host sampling defaults (eval reproducibility seam). Same
-          // defaults-not-overrides rule: anything pi-agent-core forwards wins.
-          temperature: options?.temperature ?? this.session.options.sampling?.temperature,
-          // Reasoning layers per call: pi-agent-core's own option → this
-          // thread's pin → the session default. The clamp lives here (not
-          // in setReasoning) so a pin survives a model that cannot honor
-          // it: `model` is the model this call actually runs on.
-          reasoning: resolveReasoningLevel(
-            model,
-            options?.reasoning,
-            this.reasoningOverride,
-            this.session.options.sampling?.reasoning,
-          ),
-          samplingParams: options?.samplingParams ?? this.session.options.sampling?.params,
-        }, this.session.sandbox, {
-          permitted: () => this.nativeImageGenerationPermitted(options?.signal),
-          // Never start or wait for a sandbox on a text turn (orchestrators are sandbox-less by default).
-          sandboxReady: () => this.session.attachment.state === "ready",
-          saved: async (receipt) => {
-            await this.checkpointNativeImage(receipt);
-            this.recordNativeImage({ path: receipt.path, image_id: receipt.image_id });
-          },
-        });
+        // The exact inputs and response of the latest turn request. A
+        // compaction sends the same prefix again, so the prompt cache serves
+        // it (`prefixForSummary`).
+        this.lastModelRequest = { model, context, options, scoped: this.freshContextStart !== undefined };
+        this.lastModelResponse = undefined;
+        return this.streamModel(model, context, options);
       },
       // Filter out custom AgentMessage types (decision_gate, compaction, etc.)
       // before the LLM sees them. They live in the engine DAG, not in LLM context.
@@ -6696,8 +6794,10 @@ export class Thread {
       // here is what makes "takes effect on the next LLM call" true.
       prepareNextTurnWithContext: ({ context }) => ({ model: this.agent.state.model, context: { ...context, tools: this.buildTools() } }),
       prepareRequest: async ({ context, model }, signal) => {
-        const fitted = await this.fitContextBeforeRequest(context, model, signal);
-        return fitted ? { context: fitted } : undefined;
+        const scoped = freshContextOnly(context, this.freshContextStart);
+        const fitted = await this.fitContextBeforeRequest(scoped, model, signal);
+        if (fitted) return { context: fitted };
+        return scoped === context ? undefined : { context: scoped };
       },
       // A stale fenced publication means a successor owns this submission.
       // abort() is best-effort while a tool is executing, so also end at the
@@ -6711,6 +6811,7 @@ export class Thread {
       // would read the turn as complete, and the delivered message would
       // get no answer. Such items run as the next turn instead.
       finishTurn: async (turn) => {
+        this.lastModelResponse = turn.message;
         if (this.staleFenceDetected) return { action: "end" };
         const decision = this.chargeModelCall(turn.message);
         if (decision) return decision;
@@ -7193,6 +7294,7 @@ export class Thread {
         ...(this.runningItem ? { queueItemId: this.runningItem.id } : {}),
       }),
       sandbox: session.sandbox,
+      skillBodyInContext: (skill) => this.skillBodyInContext(skill),
       recordSkillInvocation: (skill, path, injectedText) =>
         this.recordModelToolSkillInvocation(skill, path, injectedText, toolCallId),
       fileReads: {
@@ -8583,6 +8685,22 @@ export function renderReplyContext(
     "",
     text,
   ].join("\n");
+}
+
+/**
+ * The request context of a `FRESH_CONTEXT_KEY` turn: the system messages
+ * before the turn's prompt, then the messages from the prompt on. The system
+ * messages carry the system prompt and the tool announcements, so the turn
+ * keeps them and leaves out only the earlier conversation. When the prompt is
+ * not in the context (no fresh turn, or a compaction rebuilt the messages),
+ * the context goes out whole.
+ */
+export function freshContextOnly(context: AgentContext, start: AgentMessage | undefined): AgentContext {
+  if (start === undefined) return context;
+  const index = context.messages.indexOf(start);
+  if (index <= 0) return context;
+  const system = context.messages.slice(0, index).filter((message) => message.role === "system");
+  return { ...context, messages: [...system, ...context.messages.slice(index)] };
 }
 
 /** The roles `convertToLlm` sends. Custom agent message kinds never reach the model, so context estimates skip them. */

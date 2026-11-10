@@ -35,7 +35,7 @@ it("keeps team helper files and memory separate across members and cache rebuild
       "x-valet-owner": `team:${team.id}`, "x-valet-actor": actor, "x-valet-session-id": sessionId, "x-valet-org-id": "local-org" },
     body: body ? JSON.stringify(body) : undefined,
   });
-  expect((await memory(alice.sessionId, "local-user", "PUT", { path: "notes/private.md", content: "Private acquisition", pinned: true })).status).toBe(200);
+  expect((await memory(alice.sessionId, "local-user", "PUT", { path: "notes/private.md", content: "Private acquisition", pinned: true, description: "Test note." })).status).toBe(200);
   expect((await memory(bob.sessionId, "test-member", "GET")).status).toBe(404);
   const attack = await fetch(`${api.baseUrl}/api/memory?ownerType=team&ownerId=${team.id}&sessionId=${alice.sessionId}&path=notes/private.md`, {
     headers: { "x-valet-test-user-id": "test-member" },
@@ -203,7 +203,7 @@ it("keeps shared team memory across web threads and private workflow memory acro
     method: content === undefined ? "GET" : "PUT",
     headers: { "content-type": "application/json", "x-valet-internal": internalToken(), "x-valet-owner": `team:${team.id}`,
       "x-valet-actor": "local-user", "x-valet-session-id": sessionId, "x-valet-org-id": "local-org" },
-    body: content === undefined ? undefined : JSON.stringify({ path, content }),
+    body: content === undefined ? undefined : JSON.stringify({ path, content, description: "Test note." }),
   });
   expect((await request(first.sessionId, "notes/shared.md", "Team onboarding instructions")).status).toBe(200);
   expect(await (await request(second.sessionId, "notes/shared.md")).json())

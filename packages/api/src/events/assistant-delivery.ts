@@ -13,7 +13,7 @@ import { UNATTENDED_DELIVERY_KEY, type Appearance } from "@valet/shared";
  * The workspace owner determines the assistant.
  */
 import { isDeepStrictEqual } from "node:util";
-import { isSlackStopRequest } from "@valet/engine";
+import { FRESH_CONTEXT_KEY, isSlackStopRequest } from "@valet/engine";
 import type { ChannelOrigin, Principal, PromptAuthor, Session, SignalContent, Thread } from "@valet/engine";
 import { ensureAssistantExecution, loadAssistantBySessionId } from "../assistants/service.js";
 import type { EngineHost } from "../engine/host.js";
@@ -26,7 +26,7 @@ import { writeDropLog } from "../orchestrator/signals.js";
 import { recordChannelMessage, type InboundChannelMessage } from "../services/channel-messages.js";
 import type { DestinationReason } from "./destination.js";
 import { reopenThread, seedThreadTitle } from "./delivery-thread.js";
-import { CONVERSATIONAL_THREAD_KEY, isAutomatedThreadKey } from "./automated-threads.js";
+import { CONVERSATIONAL_THREAD_KEY, deliveryRunsWithoutHistory, isAutomatedThreadKey } from "./automated-threads.js";
 import { answerOpenQuestion } from "../channels/open-question-reply.js";
 
 /**
@@ -465,6 +465,7 @@ async function deliverToAssistantThreadInner(
   const metadata = {
     ...(args.appearance ? { presence: args.appearance } : {}),
     ...(args.unattended ? { [UNATTENDED_DELIVERY_KEY]: true } : {}),
+    ...(args.unattended && deliveryRunsWithoutHistory(thread.toThreadData()) ? { [FRESH_CONTEXT_KEY]: true } : {}),
   };
   if (args.answer && await answerOpenQuestion(deps.db, {
     session, thread, ...args.answer, dispatchId: args.dispatchId, now: Date.now(),

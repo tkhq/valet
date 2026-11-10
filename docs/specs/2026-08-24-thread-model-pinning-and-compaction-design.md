@@ -676,3 +676,34 @@ These references support the retention principle; the engine keeps its provider-
 Regression coverage combines the workflow interpreter, PostgreSQL-compatible storage, original task retention, compaction, restart, and one bounded repair.
 Session nodes and team orchestrator nodes retain operation receipts. They reuse completed operations and deliver only validated output.
 A blocked repair fails the workflow without posting a fabricated report.
+
+## Amendment (2026-11-09): summaries reuse the thread's cached prefix
+
+`summarize` sends its own system prompt and no tools. No prompt cache entry
+matches that request, so each pass read the whole head at the full input
+price. On Opus 5.5, a 200k-token pass cost about $0.80 instead of about $0.04
+in cache reads.
+
+A proactive or manual pass now tries `summarizeOnPrefix` first. The request
+repeats the thread's latest turn request (same system prompt, tools, request
+options, and messages), then adds that request's response and the summary
+prompt. The thread records the request inputs in its stream function and the
+response in `finishTurn`. The provider serves the repeated part from the
+prompt cache. The summary covers the whole live context, so the checkpoint
+claims the whole pending head.
+
+The cached path applies only when all of these hold:
+
+- The pass is not reactive. A reactive pass follows an overflow, so the latest
+  request no longer fits.
+- The summary model is the turn model. A configured `summarizerModel` uses
+  `summarize`.
+- The latest request carried the whole history. A fresh-context request does
+  not.
+- The response finished the turn and is the newest live message.
+
+The request keeps the tools and asks for text only. A changed `tool_choice`
+clears the provider's cached messages. A tool call, an error, or a summary
+that misses the template fails the cached path, and the pass falls back to
+`summarize` with the bounded windows above. The span attribute
+`valet.compaction.summary_source` reads `cached_prefix` or `prefix_failed`.

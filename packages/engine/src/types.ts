@@ -148,6 +148,15 @@ export const MID_TURN_DELIVERY_KEY = "midTurnDelivery";
  * without starting a reply (docs/specs/2026-10-22-thread-edit-fork-design.md).
  */
 export const RECORD_ONLY_KEY = "recordOnly";
+
+/**
+ * Queue item metadata flag for a turn that sends the model only its own
+ * messages: the system prompt, the tools, this submission, and what the turn
+ * adds. The turn's entries still join the transcript, so later turns read
+ * them. A daily routine into a long thread uses it, because a request a day
+ * apart misses the prompt cache and re-writes the whole history.
+ */
+export const FRESH_CONTEXT_KEY = "freshContext";
 export type ThreadStatus = "active" | "paused" | "archived";
 export type QueueStatus = "idle" | "queued" | "running" | "blocked_on_decision_gate" | "paused";
 
@@ -896,6 +905,12 @@ export interface ToolContext {
   repo?: { url?: string; branch?: string; ref?: string; provider?: string };
   credentials: CredentialProvider;
   sandbox: Sandbox;
+  /**
+   * True when this skill's body, at this version, is already in the
+   * thread's live context from an earlier skill read: it is not covered by
+   * a compaction and was not elided. Absent on a context built by hand.
+   */
+  skillBodyInContext?: (skill: SkillSource) => boolean;
   /** Record a model-tool skill invocation in the current thread. */
   recordSkillInvocation?: (
     skill: SkillSource,

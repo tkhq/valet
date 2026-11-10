@@ -91,6 +91,13 @@ describe("read tool sources", () => {
     expect(source).toMatchObject({ service: "sandbox", title: "notes.txt", location: "L1-L2" });
   });
 
+  it("cites only the lines a partial read returned", async () => {
+    const noGit = sandbox(async () => ({ exitCode: 128, stdout: "", stderr: "" }));
+    const result = await readTool.execute({ path: "/tmp/notes.txt", offset: 2, limit: 1 }, ctx(noGit));
+    expect(result.text).toBe("export const b = 2;\n[read: lines 2-2 of 2; end of file]");
+    expect(result.sources?.[0]).toEqual({ service: "sandbox", title: "/tmp/notes.txt", snippet: "export const b = 2;", location: "L2-L2" });
+  });
+
   it("still reads the file when git throws", async () => {
     const box = sandbox(async () => { throw new Error("exec unavailable"); });
     const result = await readTool.execute({ path: "/tmp/x" }, ctx(box));
