@@ -556,15 +556,16 @@ export function SessionView({
               over when the pending gate changes (e.g. a thread switch to a
               different pending gate). */}
           <ThreadRecapDock recap={recap} collapsed={Boolean(pendingGate)} />
+          {/* Home (the only view with replies) shows them on every screen size, so "Mark it done?" is one tap on desktop too.
+              They sit right under the question: below the pinned task card they read as answers to the card. */}
+          {(mobile || enableReplies) && <QuickReplies sessionId={sessionId} threadId={effectiveThreadId} messages={stream.messages.filter(m => m.threadId === effectiveThreadId)}
+            disabled={Boolean(pendingGate) || threadStatus.status !== "idle" || Boolean(session.data?.readOnlyReason)} />}
           <PinnedPlan threadId={effectiveThreadId} live={workingLine} messages={stream.messages} />
           {pendingGate && (
             <DecisionGateCard key={pendingGate.id} sessionId={sessionId} gate={pendingGate} collapsible />
           )}
           {!pendingGate && resolvedGate && <ResolvedGateNotice label={resolvedGate.label} title={resolvedGate.gate.title} className="mx-auto w-full max-w-[52rem]" />}
           <ChildGateCards children={childWork} threadId={effectiveThreadId} onOpenChild={onOpenChild} />
-          {/* Home (the only view with replies) shows them on every screen size, so "Mark it done?" is one tap on desktop too. */}
-          {(mobile || enableReplies) && <QuickReplies sessionId={sessionId} threadId={effectiveThreadId} messages={stream.messages.filter(m => m.threadId === effectiveThreadId)}
-            disabled={Boolean(pendingGate) || threadStatus.status !== "idle" || Boolean(session.data?.readOnlyReason)} />}
           <div className={mobile && pendingGate ? "hidden" : "contents"} aria-hidden={mobile && pendingGate ? true : undefined}>{composerAccessory}</div>
           <TypingLine viewers={viewers} />
           {/* While the task card shows a running turn, it carries this line: one row, one mascot. */}
