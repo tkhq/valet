@@ -1043,6 +1043,33 @@ describe("buildWorkflowEngineDeps: llmComplete", () => {
     }
   });
 
+  it("names the step and the fix when the prompt overflows the model's window", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
+    const original = piAi.getApiProvider("openai-responses");
+    if (!original) throw new Error("The OpenAI Responses transport must be registered.");
+    const stream = vi.fn<piAi.ApiStreamSimpleFunction>(() => {
+      const events = piAi.createAssistantMessageEventStream();
+      const failed = { ...fauxAssistantMessage(""), stopReason: "error" as const, errorMessage: "Your input exceeds the context window of this model." };
+      events.push({ type: "error", reason: "error", error: failed });
+      events.end(failed);
+      return events;
+    });
+    piAi.registerApiProvider({ api: "openai-responses", stream, streamSimple: stream });
+    try {
+      api = await bootTestApi();
+      const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+      const deps = buildWorkflowEngineDeps({
+        host: engineHost, store: workflowStore, db, engineStore,
+        actionPluginByService, credentials: engineCredentials,
+      });
+      await seedRun(api, "wfrun_llm_overflow", "wf_llm_overflow");
+      await expect(deps.llmComplete({ runId: "wfrun_llm_overflow", nodeId: "summarize", iteration: 0, model: "openai/gpt-6.1-sol", prompt: "big" }))
+        .rejects.toThrow(/Step "summarize" sent the model a prompt larger than its 272000-token context window\. Pass less data into this step/);
+    } finally {
+      piAi.registerApiProvider(original);
+    }
+  });
+
   it("sends the owner's default reasoning level, and a step's own level wins", async () => {
     vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
     const original = piAi.getApiProvider("openai-responses");

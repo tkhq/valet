@@ -37,7 +37,7 @@ import { mergeAppearance, readAppearance, type Appearance } from "@valet/shared"
 
 import { runEventChannel, slackEventsThreadKey } from "../services/thread-access.js";
 import type { Usage } from "@earendil-works/pi-ai/compat";
-import { completeSimple } from "@earendil-works/pi-ai/compat";
+import { completeSimple, isContextOverflow } from "@earendil-works/pi-ai/compat";
 import {
   isUnattendedWorkflowRefusal,
   parsePrincipal,
@@ -548,6 +548,15 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       }).catch((err: unknown) => {
         console.error(`[workflow] Cannot record usage for step ${req.nodeId} of run ${req.runId}; Usage omits this call.`, err);
       });
+      // An llm step makes one call with no compaction, so a prompt larger
+      // than the window can only fail. Name the step and the fix: a session
+      // step saves a too-large prompt to a file and reads it in parts.
+      if (isContextOverflow(result, resolved.model.contextWindow)) {
+        throw new Error(
+          `Step "${req.nodeId}" sent the model a prompt larger than its ${resolved.model.contextWindow}-token context window. ` +
+          "Pass less data into this step: select only the fields it needs from earlier steps, or make it a session step, which reads a large input from a file.",
+        );
+      }
       if (result.stopReason === "error" || result.stopReason === "aborted") {
         throw new Error(`Workflow model "${req.model}" ${result.stopReason}: ${result.errorMessage || "The provider did not complete the request."}`);
       }
