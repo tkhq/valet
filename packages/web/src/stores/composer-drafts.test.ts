@@ -122,6 +122,26 @@ describe("starter drafts", () => {
     expect(localStorage.getItem(`valet:composer-send-key:v1:${key}`)).toBeNull();
   });
 
+  it("restores an in-flight send's exact prepared target after reload", () => {
+    const key = draftKey(SESSION, THREAD);
+    const sendKey = { id: "key-prepared", text: "Shorten the report", attachments: [], target: { text: "Shorten the report\n\nOriginal source context", threadId: "created-thread" } };
+    store().setSendKey(key, sendKey);
+    store().activateOwner("");
+    store().activateOwner("account-a");
+    expect(store().byKey[key]?.text).toBe("Shorten the report");
+    expect(store().byKey[key]?.sendKey).toEqual(sendKey);
+  });
+
+  it.each([null, "invalid", {}, { text: 1, threadId: "created-thread" }, { text: "Prepared prompt" }, { text: "Prepared prompt", threadId: 1 }, { text: "Prepared prompt", threadId: "" }, { text: "Prepared prompt", threadId: "  " }])("rejects a stored send key with malformed prepared target %s", (target) => {
+    const key = draftKey(SESSION, THREAD);
+    store().setText(key, "Keep the visible draft");
+    localStorage.setItem(`valet:composer-send-key:v1:${key}`, JSON.stringify({ id: "key-prepared", text: "Keep the visible draft", attachments: [], target }));
+    store().activateOwner("");
+    store().activateOwner("account-a");
+    expect(store().byKey[key]?.text).toBe("Keep the visible draft");
+    expect(store().byKey[key]?.sendKey).toBeUndefined();
+  });
+
   it("brings an in-flight send's text back with its key after a reload", () => {
     const key = draftKey(SESSION, THREAD);
     store().setText(key, "deploy the fix");

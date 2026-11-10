@@ -39,6 +39,16 @@ describe("promptHistory", () => {
       message("m2", "<skill name=\"status\">Status instructions…</skill>", { ...mine, skill: { name: "status" } }),
     ], "t1", "u1")).toEqual(["/skill:review fix the bug", "/skill:status"]);
   });
+
+  it("recalls the human request without artifact context and deduplicates its optimistic copy", () => {
+    const human = "Improve this:\n```html\n<section>";
+    const contextual = `${human}\n\n[valet-artifact-context]: # ${JSON.stringify('Current artifact context: {"content":"Private source"}')}`;
+    expect(promptHistory([
+      message("m1", human, { persistence: "optimistic" }),
+      message("m2", contextual, mine),
+      message("m3", "skill body", { ...mine, skill: { name: "review", args: contextual } }),
+    ], "t1", "u1")).toEqual([human, `/skill:review ${human}`]);
+  });
 });
 
 describe("stepHistory", () => {

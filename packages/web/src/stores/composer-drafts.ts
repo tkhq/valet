@@ -53,6 +53,8 @@ export interface SendKey {
   id: string;
   text: string;
   attachments: string[];
+  /** Keep the prepared prompt and thread unchanged when an uncertain send is retried. */
+  target?: { text: string; threadId: string };
 }
 
 /**
@@ -148,6 +150,12 @@ function parseSendKey(raw: string | null): SendKey | undefined {
     const { id, text, attachments } = value;
     if (typeof id !== "string" || typeof text !== "string" || !Array.isArray(attachments)) return undefined;
     if (!attachments.every((a): a is string => typeof a === "string")) return undefined;
+    if ("target" in value) {
+      const target = value.target;
+      if (typeof target !== "object" || target === null || !("text" in target) || !("threadId" in target)
+        || typeof target.text !== "string" || typeof target.threadId !== "string" || !target.threadId.trim()) return undefined;
+      return { id, text, attachments, target: { text: target.text, threadId: target.threadId } };
+    }
     return { id, text, attachments };
   } catch {
     return undefined;

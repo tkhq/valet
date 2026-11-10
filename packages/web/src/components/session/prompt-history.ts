@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { useMe } from "~/api/settings";
+import { stripArtifactConversationContext } from "~/lib/artifact-conversation-context";
 import { useStreamStore, type StreamMessage } from "~/stores/stream";
 
 /**
@@ -40,10 +41,10 @@ export function promptHistory(
  */
 function typedText(message: StreamMessage): string {
   if (message.skill) {
-    const args = message.skill.args?.trim();
+    const args = stripArtifactConversationContext(message.skill.args ?? "").trim();
     return args ? `/skill:${message.skill.name} ${args}` : `/skill:${message.skill.name}`;
   }
-  return message.content.trim();
+  return stripArtifactConversationContext(message.content).trim();
 }
 
 /**

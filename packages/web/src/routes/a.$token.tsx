@@ -191,6 +191,7 @@ export function ArtifactPage() {
           </div>
         </div>
         <div className="flex max-w-full shrink-0 flex-wrap items-center gap-3">
+            {doc.management && <a href={`/artifacts/${encodeURIComponent(doc.management.id)}`} className="text-xs text-moss hover:underline">Edit with Valet</a>}
             {doc.management && !meQ.error && <RevokeArtifact key={doc.management.id} id={doc.management.id} title={doc.title} token={token} onRevoked={() => setRevokedToken(token)} />}
             {canComment && (
               <button

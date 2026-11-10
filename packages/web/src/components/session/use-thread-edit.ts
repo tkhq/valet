@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { ListMessagesResponse } from "@valet/api/wire";
 import { useReturnToBranch } from "~/api/queries";
 import type { StreamMessage } from "~/stores/stream";
+import { stripArtifactConversationContext } from "~/lib/artifact-conversation-context";
 import type { ComposerEditTarget } from "./composer";
 
 /**
@@ -33,7 +34,7 @@ export function useThreadEdit(
     const attachments = message.attachments ?? [];
     setEditTarget({
       messageId: message.id,
-      text: message.content,
+      text: message.role === "user" ? stripArtifactConversationContext(message.content) : message.content,
       images: attachments.flatMap((attachment) => attachment.kind === "image" && attachment.url.startsWith("data:")
         ? [{
             id: `edit-${message.id}-${attachment.name}`,

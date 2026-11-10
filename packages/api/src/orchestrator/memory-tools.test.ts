@@ -102,6 +102,7 @@ describe("buildMemoryTools", () => {
       "mem_links",
       "mem_share",
       "artifact_publish",
+      "artifact_edit",
       "artifact_comments",
       "mem_rm",
     ]);
