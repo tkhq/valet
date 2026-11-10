@@ -236,9 +236,11 @@ forked.
 ### 12. The note lists approval choices that still apply
 
 Call: an approval choice beyond the engine's one-time approval (for example
-"Always allow for me", "Approve for this session") outlives the branch it
+"Always allow for me", "Allow in this thread") outlives the branch it
 was made on. The note lists each one, from the left branch's decision-gate
 entries, so neither the person nor the model assumes the edit took it back.
+An edit keeps the thread id, so "Allow in this thread" still applies. A fork
+gets a new thread id and starts without it.
 
 ### 13. A team thread can branch privately
 

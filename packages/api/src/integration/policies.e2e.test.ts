@@ -304,7 +304,7 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       queueCallTool(faux, "widgets.nuke", {}, "nuke it");
       await postPrompt(baseUrl, sessionA, "call nuke");
       const defaultGate = await waitForGate(baseUrl, sessionA);
-      expect(defaultGate.actions.map((a) => a.id).sort()).toEqual(["always_allow", "always_allow_owner", "approve", "approve_session", "deny"]);
+      expect(defaultGate.actions.map((a) => a.id).sort()).toEqual(["always_allow", "always_allow_owner", "approve", "approve_thread", "deny"]);
       // The live gate carries WHY it opened (spec Deviations T6 #5, fixed):
       // risk default for an unconfigured critical action.
       expect(defaultGate.provenance).toMatchObject({ baseMode: "require_approval", source: "risk_default" });
@@ -370,16 +370,16 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       expect(deployProdRow.params).toEqual({ env: "prod" });
       expect(deployProdRow.result).toBeTruthy();
 
-      // ── (d) "Approve for this session" grant lifecycle ──────────────────
+      // ── (d) "Allow in this thread" grant lifecycle ──────────────────
       before = await knownLogIds(baseUrl, "widgets.nuke");
-      queueCallTool(faux, "widgets.nuke", {}, "nuke, approve for session");
-      await postPrompt(baseUrl, sessionA, "nuke, approve for session");
+      queueCallTool(faux, "widgets.nuke", {}, "nuke, allow in this thread");
+      await postPrompt(baseUrl, sessionA, "nuke, allow in this thread");
       const sessionGrantGate = await waitForGate(baseUrl, sessionA);
-      await resolveGate(baseUrl, sessionA, sessionGrantGate.id, "approve_session");
+      await resolveGate(baseUrl, sessionA, sessionGrantGate.id, "approve_thread");
       await waitForNewLogRow(baseUrl, "widgets.nuke", before);
       expect(fixture.calls("widgets.nuke")).toBe(1);
 
-      // A follow-up call to the same action in the same session runs
+      // A follow-up call to the same action in the same thread runs
       // grant-clean — no gate.
       before = await knownLogIds(baseUrl, "widgets.nuke");
       queueCallTool(faux, "widgets.nuke", {}, "nuke again, should be grant-clean");
@@ -414,9 +414,9 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       queueCallTool(faux, "widgets.nuke", {}, "nuke after revoke");
       await postPrompt(baseUrl, sessionA, "nuke after revoke");
       const reGatedNuke = await waitForGate(baseUrl, sessionA);
-      // Re-approve for session (grant resurrection after revoke), then stop
+      // Re-allow in the thread (grant resurrection after revoke), then stop
       // the session — the stop must kill the grant.
-      await resolveGate(baseUrl, sessionA, reGatedNuke.id, "approve_session");
+      await resolveGate(baseUrl, sessionA, reGatedNuke.id, "approve_thread");
       await poll(async () => fixture.calls("widgets.nuke"), (n) => n === 3);
       const grantsBeforeStopRes = await fetch(`${baseUrl}/api/me/grants`, { headers: HEADERS });
       const grantsBeforeStop = (await grantsBeforeStopRes.json()) as ListGrantsResponse;

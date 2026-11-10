@@ -1034,6 +1034,7 @@ CREATE TABLE "runtime_grants" (
 	"org_id" text NOT NULL,
 	"session_id" text,
 	"workflow_execution_id" text,
+	"thread_id" text,
 	"policy_key" text NOT NULL,
 	"mode" text DEFAULT 'allow' NOT NULL,
 	"granted_by" text NOT NULL,
@@ -1042,7 +1043,9 @@ CREATE TABLE "runtime_grants" (
 	CONSTRAINT "runtime_grants_one_of_scope" CHECK ((("session_id" IS NOT NULL)::int + ("workflow_execution_id" IS NOT NULL)::int) = 1)
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX "runtime_grants_session_policy_key" ON "runtime_grants" ("org_id","session_id","policy_key") WHERE "session_id" IS NOT NULL AND "revoked_at" IS NULL;
+CREATE UNIQUE INDEX "runtime_grants_session_wide_policy_key" ON "runtime_grants" ("org_id","session_id","policy_key") WHERE "session_id" IS NOT NULL AND "thread_id" IS NULL AND "revoked_at" IS NULL;
+--> statement-breakpoint
+CREATE UNIQUE INDEX "runtime_grants_thread_policy_key" ON "runtime_grants" ("org_id","session_id","thread_id","policy_key") WHERE "thread_id" IS NOT NULL AND "revoked_at" IS NULL;
 --> statement-breakpoint
 CREATE UNIQUE INDEX "runtime_grants_execution_policy_key" ON "runtime_grants" ("org_id","workflow_execution_id","policy_key") WHERE "workflow_execution_id" IS NOT NULL AND "revoked_at" IS NULL;
 --> statement-breakpoint

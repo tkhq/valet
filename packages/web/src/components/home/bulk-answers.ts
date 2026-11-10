@@ -20,8 +20,9 @@ export type BulkDecision = "approve" | "deny";
  * the server marks it `oneShot`: a tool approval whose "approve" allows that
  * one call. Other approval gates also use these ids (`ask_approval`,
  * `sec_start`), but their approval can cover later work. The policy resolver
- * adds `approve_session` and `always_allow` (`api/src/policies/service.ts`);
- * both write a lasting grant, so a bulk answer never sends them. */
+ * adds `approve_thread` and `always_allow` (`api/src/policies/service.ts`);
+ * both write a grant that covers later calls, so a bulk answer never sends
+ * them. */
 const ONE_TIME_APPROVE = "approve";
 const DENY = "deny";
 
