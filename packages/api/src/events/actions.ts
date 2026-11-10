@@ -8,6 +8,7 @@ import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import { eventDropLog, eventReceipts, eventSubscriptions, orgMembers, type EventDropLogRow, type EventSubscriptionRow } from "../schema/index.js";
 
 import { withAuthorizedTeamOwnership } from "../services/teams.js";
+import { orgAllowsPluginForOwner } from "../services/plugin-entitlements.js";
 import { FILTER_OPS } from "./match.js";
 import { validateSubscriptionWrite } from "./subscription-write.js";
 import { proposalId, proposalResult } from "./proposals.js";
@@ -40,6 +41,40 @@ function metadata(row: EventDropLogRow): Record<string, unknown> {
 function timestampIsSafe(value: number | undefined): boolean {
   return value === undefined || (Number.isSafeInteger(value) && value >= MIN_TIMESTAMP && value <= MAX_TIMESTAMP);
 }
+
+const PROPOSE_INPUT = Type.Object({
+  proposal_key: Type.String({ minLength: 1, maxLength: 200, description: "Stable proposal key. Reuse on retries; use a new key for a different proposal." }),
+  name: Type.String({ minLength: 1 }),
+  event_keys: Type.Optional(Type.Array(Type.String(), { minItems: 1, description: "Required for an assistant subscription. For a plugin handler, omit it to use the events the handler accepts." })),
+  plugin_handler: Type.Optional(Type.Object({
+    plugin: Type.String({ minLength: 1 }),
+    handler: Type.String({ minLength: 1 }),
+    config: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "Handler settings. Omit them to use the handler's defaults." })),
+  }, { description: "Hand the events to a plugin's event handler instead of the assistant. Code review on one repository is plugin pr-review, handler review-pull-request, with the filter repo eq owner/name." })),
+  filters: Type.Optional(Type.Array(Type.Object({
+    field: Type.String(), op: Type.Union(FILTER_OPS.map((op) => Type.Literal(op))),
+    value: Type.Unknown(),
+  }), { description: "Conditions on fields the selected event keys declare. To cover Slack channels by name, including channels created later, filter channel_name with prefix (such as alerts-) or regex. To skip events, such as posts from one bot, use not_in with a list, not_prefix, or not_regex; an event without the field still matches." })),
+  any_channel: Type.Optional(Type.Boolean({ description: "For slack.app_mention only: listen in every channel the app can see. A channel_name condition needs it too, because it is not a fixed channel list." })),
+  follow: Type.Optional(Type.Boolean({ description: "For slack.app_mention only: also deliver later replies from the source thread. Defaults to true for a slack.app_mention rule." })),
+  delivery_policy: Type.Optional(Type.Union([
+    Type.Literal("always"), Type.Literal("ignoreIfMyTeamSubscribed"), Type.Literal("ignoreIfAnyTeamSubscribed"),
+  ], { description: "Personal target only: choose whether matching team subscriptions suppress delivery." })),
+  pause_on_overlap: Type.Optional(Type.Boolean({ description: "Personal target only: pause following when a team subscription covers the thread." })),
+  presence: Type.Optional(Type.Object({
+    displayName: Type.Optional(Type.String()),
+    avatarUrl: Type.Optional(Type.String()),
+  })),
+  user_prompt_template: Type.Optional(Type.String()),
+  system_prompt: Type.Optional(Type.String()),
+  audience: Type.Optional(Type.Union([Type.Literal("team"), Type.Literal("organization")])),
+  replaces: Type.Optional(Type.String({ minLength: 1, description: "ID of the enabled subscription in this workspace that this proposal updates. When a person enables the proposal, Valet disables that subscription." })),
+  once_per_hours: Type.Optional(Type.Integer({ minimum: 1, maximum: 168, description: "Deliver at most once in this many hours, however often the event happens. Use it with slack.user_online." })),
+});
+type ProposeInput = Static<typeof PROPOSE_INPUT>;
+
+/** Inputs that shape an assistant's delivery, refused with a plugin handler. */
+const ASSISTANT_ONLY_INPUTS = ["follow", "delivery_policy", "pause_on_overlap", "presence", "user_prompt_template", "system_prompt", "replaces"] as const;
 
 /** A channel sender with no Valet account runs as the rule's creator, but is
  * not that person: they may not manage or inspect the workspace's events. */
@@ -156,33 +191,69 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
     }),
   });
 
-  const proposeSubscription = action(Type.Object({
-    proposal_key: Type.String({ minLength: 1, maxLength: 200, description: "Stable proposal key. Reuse on retries; use a new key for a different proposal." }),
-    name: Type.String({ minLength: 1 }),
-    event_keys: Type.Array(Type.String(), { minItems: 1 }),
-    filters: Type.Optional(Type.Array(Type.Object({
-      field: Type.String(), op: Type.Union(FILTER_OPS.map((op) => Type.Literal(op))),
-      value: Type.Unknown(),
-    }), { description: "Conditions on fields the selected event keys declare. To cover Slack channels by name, including channels created later, filter channel_name with prefix (such as alerts-) or regex. To skip events, such as posts from one bot, use not_in with a list, not_prefix, or not_regex; an event without the field still matches." })),
-    any_channel: Type.Optional(Type.Boolean({ description: "For slack.app_mention only: listen in every channel the app can see. A channel_name condition needs it too, because it is not a fixed channel list." })),
-    follow: Type.Optional(Type.Boolean({ description: "For slack.app_mention only: also deliver later replies from the source thread. Defaults to true for a slack.app_mention rule." })),
-    delivery_policy: Type.Optional(Type.Union([
-      Type.Literal("always"), Type.Literal("ignoreIfMyTeamSubscribed"), Type.Literal("ignoreIfAnyTeamSubscribed"),
-    ], { description: "Personal target only: choose whether matching team subscriptions suppress delivery." })),
-    pause_on_overlap: Type.Optional(Type.Boolean({ description: "Personal target only: pause following when a team subscription covers the thread." })),
-    presence: Type.Optional(Type.Object({
-      displayName: Type.Optional(Type.String()),
-      avatarUrl: Type.Optional(Type.String()),
-    })),
-    user_prompt_template: Type.Optional(Type.String()),
-    system_prompt: Type.Optional(Type.String()),
-    audience: Type.Optional(Type.Union([Type.Literal("team"), Type.Literal("organization")])),
-    replaces: Type.Optional(Type.String({ minLength: 1, description: "ID of the enabled subscription in this workspace that this proposal updates. When a person enables the proposal, Valet disables that subscription." })),
-    once_per_hours: Type.Optional(Type.Integer({ minimum: 1, maximum: 168, description: "Deliver at most once in this many hours, however often the event happens. Use it with slack.user_online." })),
-  }))({
+  const pluginList = (): ValetPlugin[] => typeof plugins === "function" ? plugins() : plugins;
+
+  /** The assistant target a proposal stores, from the assistant-only inputs. */
+  function assistantTarget(input: ProposeInput, ownerType: "user" | "team", ownerId: string): Record<string, unknown> {
+    // A mention rule follows its thread by default, as the setup wizard
+    // does: Valet answers follow-ups meant for it without a fresh mention.
+    const mentionOnly = input.event_keys?.length === 1 && input.event_keys[0] === "slack.app_mention";
+    const follow = input.follow ?? (mentionOnly ? true : undefined);
+    return {
+      kind: "assistant" as const, assistant: ownerType,
+      ...(ownerType === "team" ? { teamId: ownerId } : {}),
+      ...(follow !== undefined ? { follow } : {}),
+      ...(input.delivery_policy !== undefined ? { deliveryPolicy: input.delivery_policy } : {}),
+      ...(input.pause_on_overlap !== undefined ? { pauseOnOverlap: input.pause_on_overlap } : {}),
+      ...(input.presence !== undefined ? { appearance: input.presence } : {}),
+      ...(input.user_prompt_template !== undefined ? { userPromptTemplate: input.user_prompt_template } : {}),
+      ...(input.system_prompt !== undefined ? { systemPrompt: input.system_prompt } : {}),
+      ...(input.replaces !== undefined ? { replaces: input.replaces } : {}),
+      ...(input.once_per_hours !== undefined ? { oncePerHours: input.once_per_hours } : {}),
+    };
+  }
+
+  /**
+   * The plugin target and event keys a proposal stores, with the checks the
+   * POST route makes for a plugin line: the handler exists and the org
+   * admits the plugin for this workspace. Team membership is checked when
+   * the row is written.
+   */
+  async function pluginHandlerTarget(
+    input: ProposeInput,
+    orgId: string,
+    owner: { type: "user" | "team"; id: string },
+  ): Promise<{ ok: true; eventKeys: string[]; target: Record<string, unknown> } | { ok: false; error: string }> {
+    const choice = input.plugin_handler!;
+    const assistantOnly = ASSISTANT_ONLY_INPUTS.filter((field) => input[field] !== undefined);
+    if (assistantOnly.length > 0) {
+      return { ok: false, error: `A plugin handler does not take ${assistantOnly.join(", ")}. Remove them, or drop plugin_handler to propose an assistant subscription.` };
+    }
+    const declared = pluginList().flatMap((p) => (p.eventHandlers ?? []).map((h) => ({ plugin: p.name, handler: h })));
+    const found = declared.find((d) => d.plugin === choice.plugin && d.handler.id === choice.handler);
+    if (!found) {
+      const known = declared.map((d) => `${d.plugin}/${d.handler.id}`).join(", ") || "none";
+      return { ok: false, error: `Unknown plugin handler ${choice.plugin}/${choice.handler}. Pick one of: ${known}.` };
+    }
+    if (!(await orgAllowsPluginForOwner(db, orgId, owner, choice.plugin))) {
+      return { ok: false, error: `Plugin ${choice.plugin} is off for this workspace. Ask an org admin to turn it on in Settings.` };
+    }
+    return {
+      ok: true,
+      eventKeys: input.event_keys ?? [...found.handler.events],
+      target: {
+        kind: "plugin" as const, plugin: choice.plugin, handler: choice.handler,
+        // A team line acts for the team, as one the Code review page adds.
+        ...(owner.type === "team" ? { teamId: owner.id } : {}),
+        ...(choice.config !== undefined ? { config: choice.config } : {}),
+      },
+    };
+  }
+
+  const proposeSubscription = action(PROPOSE_INPUT)({
     id: "events.propose_subscription",
-    name: "Propose assistant event subscription",
-    description: "Save a disabled event subscription for the current personal or team assistant. Pick event keys from workflows.list_event_types. Returns the stored configuration and a Presence review link. The user must review and enable it. Repeated proposal keys do not change the existing record. To revise an enabled subscription, set replaces to its ID from events.list_subscriptions; enabling the proposal disables the replaced subscription, so only one version replies.",
+    name: "Propose event subscription",
+    description: "Save a disabled event subscription for the current personal or team assistant, or for a plugin event handler (plugin_handler), such as code review on a repository. Pick event keys from workflows.list_event_types. Returns the stored configuration and a Presence review link. The user must review and enable it. Repeated proposal keys do not change the existing record. To revise an enabled subscription, set replaces to its ID from events.list_subscriptions; enabling the proposal disables the replaced subscription, so only one version replies.",
     riskLevel: "low",
     execute: async (input, ctx) => {
       if (ctx.externalSender) return EXTERNAL_SENDER;
@@ -198,33 +269,24 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
       if (ownerType === "team" && (input.delivery_policy !== undefined || input.pause_on_overlap !== undefined)) {
         return { success: false, error: "These delivery preferences apply only to personal subscriptions. Open your personal assistant or omit these fields." };
       }
-      if (input.follow === true && (input.event_keys.length !== 1 || input.event_keys[0] !== "slack.app_mention")) {
+      if (input.plugin_handler === undefined && input.follow === true && (input.event_keys?.length !== 1 || input.event_keys[0] !== "slack.app_mention")) {
         return { success: false, error: "Follow is only available for slack.app_mention. Message subscriptions already deliver matching replies." };
       }
-      // A mention rule follows its thread by default, as the setup wizard
-      // does: Valet answers follow-ups meant for it without a fresh mention.
-      const mentionOnly = input.event_keys.length === 1 && input.event_keys[0] === "slack.app_mention";
-      const follow = input.follow ?? (mentionOnly ? true : undefined);
-      const target = {
-        kind: "assistant" as const, assistant: ownerType,
-        ...(ownerType === "team" ? { teamId: ownerId } : {}),
-        ...(follow !== undefined ? { follow } : {}),
-        ...(input.delivery_policy !== undefined ? { deliveryPolicy: input.delivery_policy } : {}),
-        ...(input.pause_on_overlap !== undefined ? { pauseOnOverlap: input.pause_on_overlap } : {}),
-        ...(input.presence !== undefined ? { appearance: input.presence } : {}),
-        ...(input.user_prompt_template !== undefined ? { userPromptTemplate: input.user_prompt_template } : {}),
-        ...(input.system_prompt !== undefined ? { systemPrompt: input.system_prompt } : {}),
-        ...(input.replaces !== undefined ? { replaces: input.replaces } : {}),
-        ...(input.once_per_hours !== undefined ? { oncePerHours: input.once_per_hours } : {}),
-      };
-      const write = await validateSubscriptionWrite(db, typeof plugins === "function" ? plugins() : plugins, {
-        name: input.name, eventKeys: input.event_keys, filters: input.filters ?? [], target, audience: input.audience,
+      const planned = input.plugin_handler !== undefined
+        ? await pluginHandlerTarget(input, ctx.orgId, { type: ownerType, id: ownerId })
+        : input.event_keys !== undefined
+          ? { ok: true as const, eventKeys: input.event_keys, target: assistantTarget(input, ownerType, ownerId) }
+          : { ok: false as const, error: "event_keys is required for an assistant subscription. Pick event keys from workflows.list_event_types." };
+      if (!planned.ok) return { success: false, error: planned.error };
+      const { eventKeys, target } = planned;
+      const write = await validateSubscriptionWrite(db, pluginList(), {
+        name: input.name, eventKeys, filters: input.filters ?? [], target, audience: input.audience,
       }, { creatorUserId: userId, ownerType, anyChannel: input.any_channel === true, matchChanged: true });
       if (!write.ok) return { success: false, error: write.error };
       const now = Date.now();
       const values = {
         id: proposalId("subscription", ctx.orgId, ownerType, ownerId, input.proposal_key),
-        orgId: ctx.orgId, ownerType, ownerId, name: input.name, eventKeys: input.event_keys,
+        orgId: ctx.orgId, ownerType, ownerId, name: input.name, eventKeys,
         filters: write.filters, target, audience: write.audience ?? null, enabled: false,
         createdBy: userId, createdAt: now, updatedAt: now,
       };

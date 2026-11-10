@@ -1,11 +1,13 @@
 import { eq } from "drizzle-orm";
 import githubPlugin from "@valet/plugin-github/plugin";
+import prReviewPlugin from "@valet/plugin-pr-review/plugin";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { PluginActionContext } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { eventDropLog, eventReceipts, eventSubscriptions, orgMembers, orgs, users, teams, teamMembers } from "../schema/index.js";
 import { eventsActionPlugin } from "./actions.js";
+import { setPluginEntitlement } from "../services/plugin-entitlements.js";
 
 const ORG = "event-problems-org";
 
@@ -191,6 +193,51 @@ describe("eventsActionPlugin", () => {
     expect(plain).toMatchObject({ success: true, data: { proposal: { enabled: false } } });
     expect(plain.data).not.toHaveProperty("proposal.replaces");
     expect(plain.data).not.toHaveProperty("proposal.config.target.replaces");
+  });
+
+  it("proposes a disabled code review line for a plugin handler, personal or team, with the handler's events by default", async () => {
+    const tool = eventsActionPlugin(db, [githubPlugin, prReviewPlugin]).actions.find(a => a.id === "events.propose_subscription")!;
+    const handlerEvents = prReviewPlugin.eventHandlers![0]!.events;
+    const input = {
+      proposal_key: "review-site", name: "Code review: acme/site",
+      plugin_handler: { plugin: "pr-review", handler: "review-pull-request" },
+      filters: [{ field: "repo", op: "eq" as const, value: "acme/site" }],
+    };
+    expect(await tool.execute(input, context("member"))).toMatchObject({ success: true, data: { proposal: { enabled: false, config: {
+      ownerType: "user", ownerId: "member", eventKeys: [...handlerEvents],
+      filters: [{ field: "repo", op: "eq", value: "acme/site" }],
+      target: { kind: "plugin", plugin: "pr-review", handler: "review-pull-request" },
+    } } } });
+    // A repeat answers with the same record.
+    expect(await tool.execute(input, context("member"))).toMatchObject({ success: true });
+    const now = Date.now();
+    await db.insert(teams).values({ id: "review-team", orgId: ORG, name: "Team", createdAt: now });
+    await db.insert(teamMembers).values({ teamId: "review-team", userId: "member", role: "member" });
+    const team = { owner: { type: "team" as const, id: "review-team" } };
+    expect(await tool.execute(input, context("member", team))).toMatchObject({ success: true, data: { proposal: { enabled: false, config: {
+      ownerType: "team", ownerId: "review-team", target: { kind: "plugin", plugin: "pr-review", handler: "review-pull-request", teamId: "review-team" },
+    } } } });
+    // A person not on the team cannot propose for it.
+    expect(await tool.execute(input, context("admin", team))).toMatchObject({ success: false });
+    const rows = await db.select().from(eventSubscriptions);
+    expect(rows).toHaveLength(2);
+    expect(rows.every((row) => row.enabled === false)).toBe(true);
+  });
+
+  it("refuses an unknown handler, assistant-only inputs, bad settings, a plugin that is off, and an assistant proposal without events", async () => {
+    const tool = eventsActionPlugin(db, [githubPlugin, prReviewPlugin]).actions.find(a => a.id === "events.propose_subscription")!;
+    const input = { proposal_key: "review", name: "Code review", plugin_handler: { plugin: "pr-review", handler: "review-pull-request" } };
+    expect(await tool.execute({ ...input, plugin_handler: { plugin: "pr-review", handler: "nope" } }, context("member")))
+      .toMatchObject({ success: false, error: expect.stringContaining("Pick one of: pr-review/review-pull-request") });
+    expect(await tool.execute({ ...input, system_prompt: "Be nice.", replaces: "live" }, context("member")))
+      .toMatchObject({ success: false, error: expect.stringContaining("does not take system_prompt, replaces") });
+    expect(await tool.execute({ ...input, plugin_handler: { ...input.plugin_handler, config: { minSeverity: "loud" } } }, context("member")))
+      .toMatchObject({ success: false, error: expect.stringContaining("do not match its schema") });
+    expect(await tool.execute({ proposal_key: "assistant", name: "No events" }, context("member")))
+      .toMatchObject({ success: false, error: expect.stringContaining("event_keys is required") });
+    await setPluginEntitlement(db, ORG, "pr-review", { mode: "off", teamIds: [] });
+    expect(await tool.execute(input, context("member"))).toMatchObject({ success: false, error: expect.stringContaining("off for this workspace") });
+    expect(await db.select().from(eventSubscriptions)).toHaveLength(0);
   });
 
   it("refuses a replaces ID that is unknown, in another workspace, or not enabled", async () => {

@@ -374,6 +374,19 @@ Superseded on 2026-09-29 by "Organization Linear application setup" below. The o
   workflow targets on different workflows never collide (intentional
   fan-out); a workflow↔orchestrator pair warns but never blocks. Disabled
   rows are skipped — they cannot fire — and enabling one re-runs the gate.
+- Plugin handler proposals: `events.propose_subscription` takes an optional
+  `plugin_handler` (`plugin`, `handler`, optional `config`) and stores a
+  `target.kind: "plugin"` line, such as code review on one repository
+  (`pr-review` / `review-pull-request` with the filter `repo eq owner/name`).
+  It makes the checks the POST route makes for a plugin line: the handler
+  must exist, the org must admit the plugin for the workspace, and a team
+  line needs team membership and stores `target.teamId`. Without
+  `event_keys`, the line takes the events the handler accepts. The action
+  refuses the assistant-only inputs (`follow`, `delivery_policy`,
+  `pause_on_overlap`, `presence`, both prompts, `replaces`). The line is
+  stored disabled, like any proposal, so a person turns it on in Presence or
+  on the Code review page before it acts. An agent cannot arm a handler that
+  posts on GitHub or spends model calls by itself.
 - Replacement proposals: `events.propose_subscription` takes an optional
   `replaces`, the ID of an enabled assistant subscription
   (`target.kind: "assistant"`; rows written before the 2026-10-16 presence hub rename store `"orchestrator"`) with the same owner, and stores it as
