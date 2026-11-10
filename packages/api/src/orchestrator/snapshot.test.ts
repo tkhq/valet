@@ -186,10 +186,16 @@ describe("memoryIndexLines", () => {
     ]);
   });
 
-  it("stops at the character cap", () => {
-    const files = Array.from({ length: 50 }, (_, i) => file(`notes/file-${String(i).padStart(2, "0")}.md`, i));
-    const lines = memoryIndexLines(files, { now: 100, maxChars: 300 });
-    expect(lines.slice(0, -1).join("\n").length).toBeLessThanOrEqual(300);
+  it("stops at the character cap, counting the folder and omission lines", () => {
+    const long = "x".repeat(120);
+    const files = [
+      ...Array.from({ length: 50 }, (_, i) => file(`notes/file-${String(i).padStart(2, "0")}.md`, i)),
+      file(`journal/${long}/${long}/a.md`, 1),
+      file(`artifacts/${long}/${long}/a.md`, 1),
+    ];
+    const lines = memoryIndexLines(files, { now: 100, maxChars: 1_000 });
+    expect(lines.join("\n").length).toBeLessThanOrEqual(1_000);
+    expect(lines.some((line) => line.startsWith("- journal/"))).toBe(true);
     expect(lines.at(-1)).toMatch(/^- \d+ older files not listed/);
   });
 

@@ -102,8 +102,10 @@ export function memoryIndexLines(files: MemoryFileSummary[], opts: { now: number
   const listed = live
     .filter((f) => !COLLAPSED_FOLDERS.some((folder) => f.path.startsWith(folder)))
     .sort((a, b) => b.updatedAt - a.updatedAt);
+  const omittedLine = (n: number) => `- ${n} older file${n === 1 ? "" : "s"} not listed. Find them with mem_search.`;
   const kept: MemoryFileSummary[] = [];
-  let chars = 0;
+  // The folder lines and a possible omission line count toward the cap too.
+  let chars = folderLines.reduce((sum, line) => sum + line.length + 1, 0) + omittedLine(listed.length).length + 1;
   for (const file of listed) {
     if (kept.length >= maxLines - folderLines.length) break;
     chars += indexLine(file).length + 1;
@@ -113,7 +115,7 @@ export function memoryIndexLines(files: MemoryFileSummary[], opts: { now: number
   kept.sort((a, b) => a.path.localeCompare(b.path));
   const lines = [...kept.map(indexLine), ...folderLines];
   const omitted = listed.length - kept.length;
-  if (omitted > 0) lines.push(`- ${omitted} older file${omitted === 1 ? "" : "s"} not listed. Find them with mem_search.`);
+  if (omitted > 0) lines.push(omittedLine(omitted));
   return lines;
 }
 
