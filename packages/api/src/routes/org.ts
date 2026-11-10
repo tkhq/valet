@@ -138,6 +138,7 @@ async function loadOrgResponse(
     allowPersonalInstallations: row.allowPersonalInstallations,
     compactionWindowTokens: row.compactionWindowTokens,
     plugins,
+    loadedPlugins: engineHost.loadedPluginNames(),
     callerRole,
   };
 }

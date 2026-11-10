@@ -48,6 +48,11 @@ export interface Providers {
   sandboxProvider: SandboxProvider;
   eventStream: EventStream;
   engineCredentials: CredentialStore;
+  /** The same credential rows as `engineCredentials`, read as stored: no
+   * OAuth refresh and no app-token renewal. Use it on page-load and list
+   * paths that only show a row's state. A read here never calls the vendor's
+   * token endpoint (integration-OAuth design, "Reads that show state"). */
+  storedCredentials: CredentialStore;
   /** 1Password reference-credential service (1Password credential provider
    * plan, Task 1/2) — same instance threaded into `EngineHost`'s
    * `onePassword` opt, and used directly by the (Task 3) `/api/onepassword`

@@ -17,8 +17,7 @@ import {
   type LucideIcon,
   BarChart3,
 } from "lucide-react";
-import { usePlugins } from "~/api/integrations";
-import { pluginEnabledForCaller, useOrg, useTeams } from "~/api/settings";
+import { pluginEnabledForCaller, pluginLoaded, useOrg, useTeams } from "~/api/settings";
 import { REVIEW_PLUGIN } from "~/components/code-review/review-lines";
 import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger, type AppPath } from "~/components/primitives";
 import { eligibleTeams } from "~/components/session/assistant-rail";
@@ -205,7 +204,6 @@ export function SettingsRail() {
   const sectionMenu = useResponsiveOverlay("sm");
   const orgQ = useOrg();
   const teamsQ = useTeams();
-  const pluginsQ = usePlugins();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const organizationsOn = orgQ.data?.features.organizations === true;
   const orgAdmin = orgQ.data?.callerRole === "admin";
@@ -227,7 +225,7 @@ export function SettingsRail() {
 
   const pluginItems = [
     ...(pluginEnabledForCaller(orgQ.data, "security") === true ? [SECURITY_ITEM] : []),
-    ...(pluginsQ.data?.plugins.some((p) => p.name === REVIEW_PLUGIN) === true ? [CODE_REVIEW_ITEM] : []),
+    ...(pluginLoaded(orgQ.data, REVIEW_PLUGIN) === true ? [CODE_REVIEW_ITEM] : []),
   ];
   const groups: RailGroupSpec[] = [
     { label: "Account", items: ACCOUNT_ITEMS },

@@ -361,7 +361,8 @@ async function toSummary(
 }
 
 credentialsRouter.get("/", async (c) => {
-  const { engineCredentials, db } = c.var.providers;
+  // A list shows state. It reads stored rows and never refreshes a token.
+  const { storedCredentials, db } = c.var.providers;
   const scope = parseCredentialScope(c.req.query("scope"));
   const ownerOrErr = await resolveCredentialOwner(c, scope, c.req.query("teamId"), "read");
   if (ownerOrErr instanceof Response) return ownerOrErr;
@@ -399,7 +400,7 @@ credentialsRouter.get("/", async (c) => {
     // Every member's share: one row each, so a service can appear more than once.
     for (const share of await listTeamShares(db, owner.id)) {
       const stillMember = await isTeamMember(db, owner.id, share.userId);
-      const source = stillMember ? await engineCredentials.get({ type: "user", id: share.userId }, share.service) : null;
+      const source = stillMember ? await storedCredentials.get({ type: "user", id: share.userId }, share.service) : null;
       // A source row with neither a secret nor a reference has nothing to
       // resolve. A personal-scope reference has one the team read cannot use.
       const referenceBroken = !source || (!rowHasSecret(source) && !usableByTeamRead(source));
@@ -410,9 +411,9 @@ credentialsRouter.get("/", async (c) => {
     return c.json({ credentials: listed } satisfies ListCredentialsResponse);
   }
 
-  const items = await engineCredentials.list(owner);
+  const items = await storedCredentials.list(owner);
   for (const item of items) {
-    const stored = await engineCredentials.get(owner, item.service);
+    const stored = await storedCredentials.get(owner, item.service);
     if (!stored) continue;
     const summary = await toSummary(item.service, stored, item.connectedAt);
     if (summary) listed.push(summary);

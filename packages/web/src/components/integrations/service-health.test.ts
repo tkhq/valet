@@ -41,6 +41,11 @@ describe("serviceHealth", () => {
     expect(serviceHealth(service({ health: { expiresAt: NOW + 60_000 } }), NOW)).toBe("connected");
   });
 
+  it("reads a past expiry that renews on use as connected", () => {
+    expect(serviceHealth(service({ health: { expiresAt: NOW - 1, renews: true } }), NOW)).toBe("connected");
+    expect(serviceHealth(service({ health: { expiresAt: NOW - 1, renews: true, refreshFailed: true } }), NOW)).toBe("refresh-failed");
+  });
+
   it("reads a failed refresh and an identity-only grant", () => {
     expect(serviceHealth(service({ health: { refreshFailed: true } }), NOW)).toBe("refresh-failed");
     expect(serviceHealth(service({ health: { identityOnly: true } }), NOW)).toBe("identity-only");

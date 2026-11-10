@@ -3689,6 +3689,11 @@ export interface PluginServiceSummary {
   health?: {
     /** Epoch ms the access token expires, when the grant reports one. */
     expiresAt?: number;
+    /** The row holds a refresh token the provider has not refused, so a
+     * past `expiresAt` renews on the next use and needs no reconnect. The
+     * catalog reads rows as stored and does not refresh them. Absent on
+     * older APIs, which refreshed on this read. */
+    renews?: boolean;
     /** The connected account, e.g. an email or login handle. Shown so a
      * user with two accounts knows which one is wired up. */
     login?: string;
@@ -4914,6 +4919,12 @@ export interface OrgResponse {
    * no loaded plugin declares a `gate`.
    */
   plugins: OrgPluginWire[];
+  /**
+   * The names of every plugin this deployment loaded, gated or not. A nav
+   * item for a plugin page reads this, so the app shell does not load the
+   * full plugin catalog on every page. Absent on older APIs.
+   */
+  loadedPlugins?: string[];
   callerRole: "admin" | "member";
 }
 

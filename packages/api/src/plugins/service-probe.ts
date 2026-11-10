@@ -18,6 +18,11 @@
  * live MCP network call:
  * - per owner+service TTL cache, keyed also by a hash of the access token,
  *   so a reconnect probes again at once;
+ * - the cache check reads the row as stored (`storedCredentials`), so a
+ *   cached listing costs no token refresh. Only a cold listing reads through
+ *   the refreshing store, because the server needs a live token;
+ * - a row whose provider refused its refresh token is not listed. Its token
+ *   cannot renew, and the row's own health already says "Refresh failed";
  * - in-flight dedupe (no stampedes);
  * - a hard timeout that fails soft to `{}`: the row keeps its static label
  *   and its stored health rather than the page blocking on a slow server;
@@ -64,7 +69,11 @@ export class ServiceProbes {
 
   constructor(
     private readonly deps: {
+      /** Reads that may refresh. Used only for a cold listing. */
       credentials: CredentialStore;
+      /** Reads of the row as stored, with no refresh. Omit it when
+       * `credentials` has no refresh layer, as in tests. */
+      storedCredentials?: CredentialStore;
       now?: () => number;
       timeoutMs?: number;
     },
@@ -75,14 +84,22 @@ export class ServiceProbes {
   async get(owner: CredentialOwner, service: string, actionPlugin: ActionPlugin): Promise<ServiceProbe> {
     const resolveActions = actionPlugin.resolveActions;
     if (!resolveActions) return {};
+    const key = `${owner.type}:${owner.id}:${service}`;
+    const asStored = await (this.deps.storedCredentials ?? this.deps.credentials).get(owner, service);
+    const storedSecret = credentialSecret(asStored);
+    if (!asStored || !storedSecret) return {};
+    if (asStored.metadata?.refreshRefused === true) return {};
+    const hit = this.cached(key, fingerprintOf(storedSecret));
+    if (hit) return hit;
+
+    // A cold listing calls the server, so it needs a live token. This read
+    // can refresh; the refreshing store holds back a failing service.
     const stored = await this.deps.credentials.get(owner, service);
     const secret = credentialSecret(stored);
     if (!stored || !secret) return {};
-
-    const key = `${owner.type}:${owner.id}:${service}`;
-    const fingerprint = createHash("sha256").update(secret).digest("hex").slice(0, 16);
-    const cached = this.cache.get(key);
-    if (cached && cached.fingerprint === fingerprint && this.now() - cached.at < TTL_MS) return cached.probe;
+    const fingerprint = fingerprintOf(secret);
+    const refreshedHit = this.cached(key, fingerprint);
+    if (refreshedHit) return refreshedHit;
 
     const flightKey = `${key}:${fingerprint}`;
     const running = this.inflight.get(flightKey);
@@ -157,6 +174,11 @@ export class ServiceProbes {
     return async (service) => byService.get(service) ?? [];
   }
 
+  private cached(key: string, fingerprint: string): ServiceProbe | undefined {
+    const entry = this.cache.get(key);
+    return entry && entry.fingerprint === fingerprint && this.now() - entry.at < TTL_MS ? entry.probe : undefined;
+  }
+
   private now(): number {
     return (this.deps.now ?? Date.now)();
   }
@@ -185,6 +207,10 @@ export class ServiceProbes {
       },
     };
   }
+}
+
+function fingerprintOf(secret: string): string {
+  return createHash("sha256").update(secret).digest("hex").slice(0, 16);
 }
 
 function fromMcpProbe(result: McpProbeResult): ServiceProbe {

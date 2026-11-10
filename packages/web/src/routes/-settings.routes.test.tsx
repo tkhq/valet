@@ -51,6 +51,7 @@ vi.mock("~/api/integrations", async (importOriginal) => ({
 }));
 vi.mock("~/api/settings", () => ({
   pluginEnabledForCaller: () => false,
+  pluginLoaded: () => false,
   useOrg: () => useMembershipLoaded()
     ? { data: { callerRole: orgRole, features: { organizations: organizationsOn }, plugins: [] }, isLoading: false, error: null }
     : { data: undefined, isLoading: true, error: null },

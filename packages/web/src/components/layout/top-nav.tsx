@@ -2,9 +2,8 @@ import { useWorkspaceAssistant } from "./workspace-assistant";
 import { Link, useRouterState } from "@tanstack/react-router";
 import { ChevronDown, GitPullRequest, Menu, Sparkles, PanelLeftOpen, Settings, ShieldCheck } from "lucide-react";
 import { useChangelog } from "~/api/changelog";
-import { usePlugins } from "~/api/integrations";
 import { useSession } from "~/api/queries";
-import { pluginEnabledForCaller, useMe, useOrg } from "~/api/settings";
+import { pluginEnabledForCaller, pluginLoaded, useMe, useOrg } from "~/api/settings";
 import { REVIEW_PLUGIN } from "~/components/code-review/review-lines";
 import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger, StatusDot } from "~/components/primitives";
 import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
@@ -95,10 +94,10 @@ export function TopNav() {
   // link the caller may not have, matching the settings rail's no-flash rule.
   const securityEnabled = pluginEnabledForCaller(orgQ.data, "security") === true;
   // Code review shows once the deployment loads the PR review plugin.
-  const pluginsQ = usePlugins();
+  const reviewLoaded = pluginLoaded(orgQ.data, REVIEW_PLUGIN) === true;
   const pluginPages = [
     ...(securityEnabled ? [{ to: "/security", label: "Valet Security", Icon: ShieldCheck }] : []),
-    ...(pluginsQ.data?.plugins.some((p) => p.name === REVIEW_PLUGIN) === true ? [{ to: "/code-review", label: "Code review", Icon: GitPullRequest }] : []),
+    ...(reviewLoaded ? [{ to: "/code-review", label: "Code review", Icon: GitPullRequest }] : []),
   ];
   const pluginItems = pluginPages.map(({ to, label, Icon }) => (
     <DropdownMenuItem key={to} asChild><Link to={to}><Icon className="h-4 w-4" aria-hidden />{label}</Link></DropdownMenuItem>
