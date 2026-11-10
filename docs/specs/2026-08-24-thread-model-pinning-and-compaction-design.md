@@ -261,8 +261,20 @@ Two layers fix it:
   envelope must render verbatim). If the sandbox write fails, the full text
   stays in context (nothing is truncated or dropped) and the fail-safe below
   surfaces a clear error if it overflows.
+- **Tool result cap (2026-11-10).** `Thread.withResultCap` wraps every tool,
+  so the assistant, children, workflow steps, and plugin reviews all get it.
+  A result over the tool's `maxResultChars` (default 100,000, Claude Code's
+  `maxResultSizeChars`) or 25,000 estimated tokens (Claude Code's MCP output
+  cap; `estimateResultTokens` counts JSON at 2 characters per token) is saved
+  to `<workspace>/.valet/tool-results/` in the sandbox. The model gets the
+  first 2,000 characters, the size, and the path. `bash` caps at 30,000
+  characters, Claude Code's `BASH_MAX_OUTPUT_LENGTH`. `read` opts out because
+  it pages its own output: 2,000 lines or 50,000 characters, which is 25,000
+  tokens at 2 characters per token. If the save fails, the model gets the
+  first part and a note that the rest was dropped. Compaction keeps its own
+  4-character estimate (`estimateTokens`).
 - **Fail-safe (defense in depth).** For a tail that still exceeds the window
-  (an oversized tool result, or a spill that could not write), `compactThreadInner`
+  (a tool that opts out of the result cap, or a spill that could not write), `compactThreadInner`
   checks the kept tail after cut-point selection. It measures the POST-prune
   view: a tool result the prune pass just elided is fittable now, so counting
   it at full size would wrongly abandon the turn. When `selectCutPoint` returns

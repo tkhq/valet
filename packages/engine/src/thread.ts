@@ -9,6 +9,7 @@ import { mergeAppearance, readAppearance, type Appearance } from "@valet/shared"
 import { classifyProviderFailure, isNonRetryableProviderFailure, isUsageLimitFailure, isRateLimitedProviderFailure } from "@valet/shared";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { uid } from "./ids.js";
+import { capToolResult, TOOL_RESULT_MAX_CHARS, TOOL_RESULT_MAX_TOKENS } from "./tool-result-cap.js";
 import type { AgentContext, AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import { isContextOverflow } from "@earendil-works/pi-ai/compat";
 // Root import (not /compat): the transient classifier lives in pi-ai's
@@ -7021,7 +7022,8 @@ export class Thread {
     const all: ToolDef[] = [this.nativeImages.tool(), ...this.session.builtinTools, ...(this.session.options.tools ?? [])]
       .map(refuseOutsideAuthors)
       .map((def) => def.sideEffect === "files" ? this.withFileCheckpoint(def) : def)
-      .map((def) => this.withOutputSanitizer(def));
+      .map((def) => this.withOutputSanitizer(def))
+      .map((def) => this.withResultCap(def));
     return all.filter((def) => includeRestricted || def.name === "focus_tools" || (def.scopeAction
       ? actionInScope(this.effectiveToolScope(), def.scopeAction)
       : toolInScope(this.effectiveToolScope(), def.name))).map((def) =>
@@ -7030,6 +7032,41 @@ export class Thread {
         this.session.options.toolStopGraceMs,
       ),
     );
+  }
+
+  /** Wraps a tool so a result over its cap is saved to a file in the
+   * sandbox and the model gets a preview (`capToolResult`). It runs after the
+   * output sanitizer, so the saved file holds sanitized text. Every session
+   * that builds tools here gets the cap: the assistant, children, workflow
+   * steps and plugin reviews. */
+  private withResultCap(def: ToolDef): ToolDef {
+    const maxChars = def.maxResultChars ?? TOOL_RESULT_MAX_CHARS;
+    if (maxChars === Number.POSITIVE_INFINITY) return def;
+    return {
+      ...def,
+      execute: async (args, ctx) => capToolResult(await def.execute(args, ctx), {
+        toolName: def.name,
+        maxChars,
+        maxTokens: TOOL_RESULT_MAX_TOKENS,
+        save: (text) => this.saveLargeToolResult(def.name, text),
+      }),
+    };
+  }
+
+  /** Save a tool result too large for context under the workspace, where
+   * the read and bash tools reach it. Undefined when the write fails. */
+  private async saveLargeToolResult(toolName: string, text: string): Promise<string | undefined> {
+    const root = this.session.options.workspace.replace(/\/+$/, "");
+    const dir = `${root}/.valet/tool-results`;
+    const path = `${dir}/${uid(toolName.replace(/[^a-zA-Z0-9_-]/g, "_"))}.txt`;
+    try {
+      await this.session.sandbox.mkdir(dir);
+      await this.session.sandbox.writeFile(path, text);
+      return path;
+    } catch (err) {
+      console.warn(`[engine] could not save a large ${toolName} result: ${err instanceof Error ? err.message : String(err)}`);
+      return undefined;
+    }
   }
 
   /** Wraps a tool so the host's output sanitizer (the credential tripwire)
