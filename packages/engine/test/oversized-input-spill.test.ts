@@ -82,7 +82,9 @@ describe("inputSpillThreshold", () => {
 describe("marker helpers", () => {
   it("buildSpilledInputMarker names the file and the paging instruction", () => {
     const marker = buildSpilledInputMarker({ path: "/workspace/.valet/large-inputs/e-1.txt", tokens: 900, chars: 3600 });
-    expect(marker).toContain("/workspace/.valet/large-inputs/e-1.txt");
+    // Named from .valet/, so read and bash both resolve it in the working directory.
+    expect(marker).toContain("at:\n  .valet/large-inputs/e-1.txt\n");
+    expect(marker).not.toContain("/workspace/");
     expect(marker).toContain("900 tokens");
     expect(marker).toContain("sed -n '1,400p'");
     expect(marker.length).toBeLessThan(600); // the pointer is small, not the paste
@@ -157,7 +159,8 @@ describe("oversized input spill (integration)", () => {
       .map((b) => b.text)
       .join("");
     expect(llmText).toContain("Large input saved to a file");
-    expect(llmText).toContain(path);
+    // The pointer names the file from .valet/, relative to the working directory.
+    expect(llmText).toContain(path.slice(path.lastIndexOf("/.valet/") + 1));
     expect(llmText).not.toContain(bigPaste);
     expect(llmText.length).toBeLessThan(bigPaste.length);
 

@@ -61,7 +61,7 @@ export async function capToolResult(
       ...result,
       text:
         `${text.slice(0, TOOL_RESULT_PREVIEW_CHARS)}\n\n` +
-        `[${opts.toolName} output too large (${size}). The full output is saved to ${path}. ` +
+        `[${opts.toolName} output too large (${size}). The full output is saved in the working directory at ${path}. ` +
         "Read it with read and offset, or search it with grep. The first part is shown above.]",
     };
   }

@@ -387,6 +387,18 @@ type ProactiveCompactionTrigger = "overflow" | "budget";
 const SPILLED_INPUT_PATH_KEY = "valetSpilledInputPath";
 
 /**
+ * The path of a file the engine saved under `<workspace>/.valet/`, from
+ * `.valet/` on. The host and the sandbox can name the workspace differently
+ * (a host folder mounted at /workspace), so an absolute path from one side
+ * can fail on the other. `read` and `bash` both resolve this relative path
+ * against the working directory.
+ */
+export function workingDirectoryPath(path: string): string {
+  const at = path.lastIndexOf("/.valet/");
+  return at < 0 ? path : path.slice(at + 1);
+}
+
+/**
  * Build the in-context pointer that replaces an oversized inbound message
  * after its full text is spilled to `path` in the sandbox. The model reads
  * this instead of the raw paste and pages the file in slices.
@@ -396,12 +408,13 @@ export function buildSpilledInputMarker(args: {
   tokens: number;
   chars: number;
 }): string {
+  const path = workingDirectoryPath(args.path);
   return (
     `[Large input saved to a file]\n` +
     `Your message was about ${args.tokens} tokens (${args.chars} characters), too large to place in the context window directly. ` +
-    `The full text is saved in the sandbox at:\n` +
-    `  ${args.path}\n` +
-    `Read it in slices, not all at once. For example: \`sed -n '1,400p' ${args.path}\`. ` +
+    `The full text is saved in the working directory at:\n` +
+    `  ${path}\n` +
+    `Read it in slices, not all at once. For example: \`sed -n '1,400p' ${path}\`. ` +
     `Do not read the whole file in one call; that overflows the context again.`
   );
 }
@@ -7054,7 +7067,8 @@ export class Thread {
   }
 
   /** Save a tool result too large for context under the workspace, where
-   * the read and bash tools reach it. Undefined when the write fails. */
+   * the read and bash tools reach it. Returns the path from `.valet/`
+   * (`workingDirectoryPath`), or undefined when the write fails. */
   private async saveLargeToolResult(toolName: string, text: string): Promise<string | undefined> {
     const root = this.session.options.workspace.replace(/\/+$/, "");
     const dir = `${root}/.valet/tool-results`;
@@ -7062,7 +7076,7 @@ export class Thread {
     try {
       await this.session.sandbox.mkdir(dir);
       await this.session.sandbox.writeFile(path, text);
-      return path;
+      return workingDirectoryPath(path);
     } catch (err) {
       console.warn(`[engine] could not save a large ${toolName} result: ${err instanceof Error ? err.message : String(err)}`);
       return undefined;

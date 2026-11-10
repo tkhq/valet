@@ -73,11 +73,13 @@ describe("tool result cap in a thread", () => {
       const thread = await session.ensureDefaultThread();
       const receipt = await thread.submitPrompt("look it up", {});
       await thread.awaitResult(receipt.queueItemId);
-      const path = /(\/workspace\/\.valet\/tool-results\/[^ ]+\.txt)/.exec(seen[0] ?? "")?.[1];
+      // The note names the file from .valet/, which read and bash resolve
+      // against the working directory.
+      const path = /saved in the working directory at (\.valet\/tool-results\/[^ ]+\.txt)/.exec(seen[0] ?? "")?.[1];
       expect(path).toBeDefined();
       expect(seen[0]).toContain("lookup output too large");
       expect(seen[0]).not.toContain("END");
-      expect(await session.sandbox.readFile(path!)).toBe(big);
+      expect(await session.sandbox.readFile(`/workspace/${path!}`)).toBe(big);
       // read pages its own output, so a 40,000-character file comes back whole.
       expect(seen[1]).toContain("n".repeat(40_000));
       expect(seen[1]).not.toContain("too large");

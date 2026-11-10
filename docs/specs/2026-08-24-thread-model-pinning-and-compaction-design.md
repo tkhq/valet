@@ -267,7 +267,10 @@ Two layers fix it:
   `maxResultSizeChars`) or 25,000 estimated tokens (Claude Code's MCP output
   cap; `estimateResultTokens` counts JSON at 2 characters per token) is saved
   to `<workspace>/.valet/tool-results/` in the sandbox. The model gets the
-  first 2,000 characters, the size, and the path. `bash` caps at 30,000
+  first 2,000 characters, the size, and the path from `.valet/` on. The host
+  and the sandbox can name the workspace differently (a host folder mounted at
+  `/workspace`), so both this note and the input spill pointer use that
+  relative path, which `read` and `bash` resolve against the working directory. `bash` caps at 30,000
   characters, Claude Code's `BASH_MAX_OUTPUT_LENGTH`. `read` opts out because
   it pages its own output: 2,000 lines or 50,000 characters, which is 25,000
   tokens at 2 characters per token. If the save fails, the model gets the
