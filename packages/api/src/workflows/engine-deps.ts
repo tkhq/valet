@@ -550,11 +550,14 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       });
       // An llm step makes one call with no compaction, so a prompt larger
       // than the window can only fail. Name the step and the fix: a session
-      // step saves a too-large prompt to a file and reads it in parts.
-      if (isContextOverflow(result, resolved.model.contextWindow)) {
+      // step saves a too-large prompt to a file and reads it in parts. Only a
+      // failed call counts: pi-ai also flags a completed call whose input
+      // exceeds the configured window, and a custom model's window can be
+      // set lower than its real one, so that answer is kept.
+      if (result.stopReason === "error" && isContextOverflow(result, resolved.model.contextWindow)) {
         throw new Error(
-          `Step "${req.nodeId}" sent the model a prompt larger than its ${resolved.model.contextWindow}-token context window. ` +
-          "Pass less data into this step: select only the fields it needs from earlier steps, or make it a session step, which reads a large input from a file.",
+          `Step "${req.nodeId}" sent the model a prompt larger than its context window. ` +
+          "Pass less data into this step, or make it a session step, which saves a large input to a file and reads it in parts.",
         );
       }
       if (result.stopReason === "error" || result.stopReason === "aborted") {

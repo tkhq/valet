@@ -5,7 +5,6 @@ import {
   InMemoryCredentialStore,
   InMemoryEventStream,
   InMemorySessionStore,
-  READ_MAX_CHARS,
   resolveModelId,
   type Model,
   type ReasoningLevel,
@@ -48,8 +47,7 @@ export interface ReviewPullRequestOptions {
 }
 
 const DEFAULT_TIMEOUT_MS = 20 * 60_000;
-/** Same budget as the in-host review (`handler.ts`): the engine's `read` cap. */
-const DEFAULT_DIFF_BUDGET = READ_MAX_CHARS;
+const DEFAULT_DIFF_BUDGET = 150_000;
 
 export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise<ReviewRun> {
   // Sandbox and engine timers are unref'd; in a gap between model calls they

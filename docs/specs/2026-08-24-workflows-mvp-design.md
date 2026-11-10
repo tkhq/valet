@@ -576,7 +576,7 @@ The run page names steps the way the editor does (`fetch_meetings` reads "Fetch 
 
 An `llm` step with an `outputSchema` now states the schema in its first prompt, as `session` and `orchestrator` steps do. In production, 142 of 148 such steps had needed the repair call because the first answer was prose.
 
-An `llm` step makes one model call with no compaction, so a prompt larger than the model's context window can only fail (2026-11-10). When the provider reports an overflow (`isContextOverflow`), the step fails with a message that names the step and the window, and tells the author to pass less data or to use a `session` step. A `session` step saves a too-large prompt to a file and reads it in parts.
+An `llm` step makes one model call with no compaction, so a prompt larger than the model's context window can only fail (2026-11-10). When the call fails and the provider reports an overflow (`isContextOverflow`), the step fails with a message that names the step and tells the author to pass less data or to use a `session` step. A `session` step saves a too-large prompt to a file and reads it in parts. A completed call is kept even when its reported input exceeds the configured window (2026-11-10): a custom model's window can be set lower than its real one. A Thread step does not spill, because its input arrives as a signal.
 
 ### Checking a draft before a save (2026-10-20)
 
