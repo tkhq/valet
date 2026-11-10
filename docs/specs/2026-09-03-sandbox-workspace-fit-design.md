@@ -69,6 +69,13 @@ lands it retries the command once (for a fresh clone, after best-effort
 or failed grow returns the original failure with the refusal reason
 appended, so the surfaced startup error names the corrective action.
 
+The fresh clone and the prebuilt `cp -a` pass an explicit 15-minute exec
+timeout (`COLD_COPY_TIMEOUT_MS`). Without one, the kubernetes provider stops
+waiting after its 60-second exec default. That limit is too short to copy a
+baked repo with hundreds of thousands of dependency files, so the retry
+after a grow timed out. A timed-out prep exec says "the command timed out"
+in its error.
+
 ### Trigger 2 (in-run, agent commands)
 
 Most fills happen during the run, not during prep: `pnpm install` on a
