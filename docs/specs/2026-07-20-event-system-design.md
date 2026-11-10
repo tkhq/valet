@@ -387,6 +387,17 @@ Superseded on 2026-09-29 by "Organization Linear application setup" below. The o
   stored disabled, like any proposal, so a person turns it on in Presence or
   on the Code review page before it acts. An agent cannot arm a handler that
   posts on GitHub or spends model calls by itself.
+- Turning a line on or off from a thread: `events.set_subscription_enabled`
+  turns any line in the workspace off, and turns a plugin handler line on.
+  It is `riskLevel: "high"`, so a person approves each call by default, as
+  for `workflows.update_trigger`. A turn-on makes the checks the PATCH route
+  makes for a line's switch: the org still admits the plugin, the row still
+  validates, a line on Linear events needs a ready Linear connection, and a
+  blocking collision refuses it with no override. Assistant lines stay with
+  Presence, because their replacement, pause and thread rules live in the
+  PATCH route. The `events` service is internal, so an external MCP client
+  reaches both actions through `start_thread`, where the approval card
+  appears in the thread.
 - Replacement proposals: `events.propose_subscription` takes an optional
   `replaces`, the ID of an enabled assistant subscription
   (`target.kind: "assistant"`; rows written before the 2026-10-16 presence hub rename store `"orchestrator"`) with the same owner, and stores it as

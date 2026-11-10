@@ -432,8 +432,8 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   const eventsActions: ValetPlugin = {
     name: "events-actions",
     version: "0.1.0",
-    description: "Agent-facing received event diagnostics.",
-    actions: [eventsActionPlugin(db, () => plugins)],
+    description: "Agent-facing event subscriptions and received event diagnostics.",
+    actions: [eventsActionPlugin(db, () => plugins, () => engineCredentials)],
   };
   const diagnosticsActions: ValetPlugin = {
     name: "diagnostics-actions",

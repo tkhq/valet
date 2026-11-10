@@ -240,6 +240,43 @@ describe("eventsActionPlugin", () => {
     expect(await db.select().from(eventSubscriptions)).toHaveLength(0);
   });
 
+  it("turns a proposed code review line on and off, behind an approval by default", async () => {
+    const plugin = eventsActionPlugin(db, [githubPlugin, prReviewPlugin]);
+    const propose = plugin.actions.find(a => a.id === "events.propose_subscription")!;
+    const toggle = plugin.actions.find(a => a.id === "events.set_subscription_enabled")!;
+    expect(toggle.riskLevel).toBe("high");
+    const line = { name: "Code review: acme/site", plugin_handler: { plugin: "pr-review", handler: "review-pull-request" }, filters: [{ field: "repo", op: "eq" as const, value: "acme/site" }] };
+    const proposed = await propose.execute({ ...line, proposal_key: "site" }, context("member"));
+    const id = (proposed.data as { proposal: { id: string } }).proposal.id;
+    expect(await toggle.execute({ subscription_id: id, enabled: true }, context("member"))).toMatchObject({ success: true, data: { subscription: { id, enabled: true } } });
+    // Repeating the same state changes nothing.
+    expect(await toggle.execute({ subscription_id: id, enabled: true }, context("member"))).toMatchObject({ success: true, data: { subscription: { enabled: true } } });
+    // A second line on the same repository would fire together with the first.
+    const second = await propose.execute({ ...line, proposal_key: "site-again" }, context("member"));
+    const secondId = (second.data as { proposal: { id: string } }).proposal.id;
+    expect(await toggle.execute({ subscription_id: secondId, enabled: true }, context("member"))).toMatchObject({ success: false, error: expect.stringContaining("both would fire together") });
+    // Another person's line is not found; turning off works.
+    expect(await toggle.execute({ subscription_id: id, enabled: false }, context("admin"))).toMatchObject({ success: false, error: expect.stringContaining("not found") });
+    expect(await toggle.execute({ subscription_id: id, enabled: false }, context("member"))).toMatchObject({ success: true, data: { subscription: { enabled: false } } });
+    const rows = await db.select().from(eventSubscriptions);
+    expect(rows.map((row) => row.enabled)).toEqual([false, false]);
+    // A plugin turned off for the workspace keeps its lines off.
+    await setPluginEntitlement(db, ORG, "pr-review", { mode: "off", teamIds: [] });
+    expect(await toggle.execute({ subscription_id: id, enabled: true }, context("member"))).toMatchObject({ success: false, error: expect.stringContaining("off for this workspace") });
+  });
+
+  it("turns an assistant line off but leaves turning it on to Presence", async () => {
+    const now = Date.now();
+    await db.insert(eventSubscriptions).values([
+      { id: "on", orgId: ORG, ownerType: "user", ownerId: "member", name: "On", eventKeys: ["github.pull_request.opened"], filters: [], target: { kind: "assistant", assistant: "user" }, createdBy: "member", createdAt: now, updatedAt: now },
+      { id: "off", orgId: ORG, ownerType: "user", ownerId: "member", name: "Off", eventKeys: ["github.pull_request.opened"], filters: [], target: { kind: "assistant", assistant: "user" }, enabled: false, createdBy: "member", createdAt: now, updatedAt: now },
+    ]);
+    const toggle = eventsActionPlugin(db, [githubPlugin]).actions.find(a => a.id === "events.set_subscription_enabled")!;
+    expect(await toggle.execute({ subscription_id: "on", enabled: false }, context("member"))).toMatchObject({ success: true, data: { subscription: { enabled: false } } });
+    expect(await toggle.execute({ subscription_id: "off", enabled: true }, context("member"))).toMatchObject({ success: false, error: expect.stringContaining("Turn it on in Presence") });
+    expect(await toggle.execute({ subscription_id: "on", enabled: false }, context("member", { externalSender: true }))).toMatchObject({ success: false });
+  });
+
   it("refuses a replaces ID that is unknown, in another workspace, or not enabled", async () => {
     const now = Date.now();
     const rule = { eventKeys: ["github.pull_request.opened"], filters: [], target: { kind: "assistant" }, createdAt: now, updatedAt: now };

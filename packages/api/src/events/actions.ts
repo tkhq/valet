@@ -3,12 +3,15 @@ import { isDeepStrictEqual } from "node:util";
 import { and, desc, eq, gte, lte, ne, sql } from "drizzle-orm";
 import { Type } from "typebox";
 import type { Static, TSchema } from "typebox";
-import type { ActionPlugin, PluginAction, PluginActionContext, PluginActionResult, ValetPlugin } from "@valet/engine";
+import type { ActionPlugin, CredentialStore, PluginAction, PluginActionContext, PluginActionResult, ValetPlugin } from "@valet/engine";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import { eventDropLog, eventReceipts, eventSubscriptions, orgMembers, type EventDropLogRow, type EventSubscriptionRow } from "../schema/index.js";
 
 import { withAuthorizedTeamOwnership } from "../services/teams.js";
 import { orgAllowsPluginForOwner } from "../services/plugin-entitlements.js";
+import { linearEventArmBlock } from "../services/linear-ingress.js";
+import { collisionBlockMessage, collisionsForWrite } from "../routes/events.js";
+import type { EventSubscriptionTargetWire } from "../wire/types.js";
 import { FILTER_OPS } from "./match.js";
 import { validateSubscriptionWrite } from "./subscription-write.js";
 import { proposalId, proposalResult } from "./proposals.js";
@@ -110,7 +113,12 @@ function matchOutcome(reason: string): "excluded_by_filter" | null {
 /** Agent-facing counterpart of the Problems page. The drop log remains the
  * only store: it retains a small, redacted event identity for filter misses,
  * never the source payload. */
-export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => ValetPlugin[]) = []): ActionPlugin {
+export function eventsActionPlugin(
+  db: AppDb,
+  plugins: ValetPlugin[] | (() => ValetPlugin[]) = [],
+  /** For the Linear readiness check a turn-on makes. Absent: lines on Linear events stay off. */
+  credentials?: () => CredentialStore,
+): ActionPlugin {
   async function withSubscriptionScope(
     ctx: PluginActionContext,
     access: "read" | "write",
@@ -188,6 +196,54 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
         eq(eventSubscriptions.ownerType, scope.ownerType), eq(eventSubscriptions.ownerId, scope.ownerId))).returning();
       return row ? { success: true, data: { subscription: { ...row, target: readStoredTarget(row.target) } } }
         : { success: false, error: "Subscription not found in this workspace. Use events.list_subscriptions to select one." };
+    }),
+  });
+
+  const setSubscriptionEnabled = action(Type.Object({
+    subscription_id: Type.String({ minLength: 1, description: "Line ID from events.list_subscriptions or events.propose_subscription." }),
+    enabled: Type.Boolean({ description: "true turns a plugin handler line on; false turns any line off." }),
+  }))({
+    id: "events.set_subscription_enabled",
+    name: "Turn event subscription on or off",
+    description: "Turn a line in this workspace on or off. Turning on works for a plugin handler line, such as a code review line from events.propose_subscription; turn assistant lines on in Presence. A person approves each call by default, because an enabled line acts on every matching event. Turning on refuses a line that would fire together with an enabled line on the same events.",
+    // An enabled line keeps acting after the conversation ends, and a code
+    // review line posts on GitHub and spends model calls, so a person
+    // approves it by default, as for workflows.update_trigger.
+    riskLevel: "high",
+    execute: async ({ subscription_id, enabled }, ctx) => withSubscriptionScope(ctx, "write", async (tx, scope) => {
+      const [row] = await tx.select().from(eventSubscriptions).where(and(eq(eventSubscriptions.id, subscription_id),
+        eq(eventSubscriptions.orgId, scope.orgId), eq(eventSubscriptions.ownerType, scope.ownerType), eq(eventSubscriptions.ownerId, scope.ownerId))).limit(1);
+      if (!row) return { success: false, error: "Subscription not found in this workspace. Use events.list_subscriptions to select one." };
+      const target = readStoredTarget(row.target) as EventSubscriptionTargetWire;
+      const answer = (stored: EventSubscriptionRow): PluginActionResult => ({ success: true, data: { subscription: { ...stored, target: readStoredTarget(stored.target) } } });
+      if (row.enabled === enabled) return answer(row);
+      if (enabled) {
+        // An assistant line has replacement, pause and thread rules that
+        // the PATCH route owns; a workflow trigger has workflows.update_trigger.
+        if (target.kind !== "plugin") {
+          return { success: false, error: `This is a ${target.kind} line. Turn it on in Presence, or with workflows.update_trigger for a workflow trigger.` };
+        }
+        if (!(await orgAllowsPluginForOwner(tx, scope.orgId, { type: scope.ownerType, id: scope.ownerId }, target.plugin))) {
+          return { success: false, error: `Plugin ${target.plugin} is off for this workspace. Ask an org admin to turn it on in Settings.` };
+        }
+        // The checks the PATCH route makes when a line's switch turns it on.
+        const eventKeys = row.eventKeys as string[];
+        const write = await validateSubscriptionWrite(db, pluginList(), { name: row.name, eventKeys, filters: row.filters, target, audience: row.audience ?? undefined },
+          { creatorUserId: row.createdBy, checkPluginConfig: false, anyChannel: false, ownerType: scope.ownerType, matchChanged: false, storedAudience: row.audience });
+        if (!write.ok) return { success: false, error: write.error };
+        if (eventKeys.some((key) => key.startsWith("linear."))) {
+          const blocked = credentials ? await linearEventArmBlock(db, credentials(), scope.orgId, eventKeys) : "Valet cannot check the Linear connection here. Turn this line on in Presence.";
+          if (blocked) return { success: false, error: blocked };
+        }
+        const report = await collisionsForWrite(db, pluginList(), scope.orgId, { ownerType: scope.ownerType, eventKeys, filters: write.filters, target }, [row.id]);
+        if (report.blocking.length > 0) {
+          return { success: false, error: `${collisionBlockMessage(report, "turn-on")} The button is on this line in Presence.` };
+        }
+      }
+      const [updated] = await tx.update(eventSubscriptions)
+        .set({ enabled, updatedAt: Math.max(Date.now(), row.updatedAt + 1) })
+        .where(and(eq(eventSubscriptions.id, row.id), eq(eventSubscriptions.updatedAt, row.updatedAt))).returning();
+      return updated ? answer(updated) : { success: false, error: "This line changed while you were turning it on or off. Read it again with events.list_subscriptions and retry." };
     }),
   });
 
@@ -449,5 +505,5 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
       return { success: true, data: { receipts: rows.slice(0, pageLimit).map(receiptWire), hasMore: rows.length > pageLimit, retentionDays: RECEIPT_RETENTION_DAYS } };
     },
   });
-  return { service: "events", description: "Diagnose event delivery, propose disabled subscriptions, and set the reply appearance on existing workspace subscriptions.", actions: [listProblems, listLogs, proposeSubscription, listSubscriptions, setSubscriptionPresence] };
+  return { service: "events", description: "Diagnose event delivery, propose disabled subscriptions, turn plugin handler lines on or off, and set the reply appearance on existing workspace subscriptions.", actions: [listProblems, listLogs, proposeSubscription, listSubscriptions, setSubscriptionPresence, setSubscriptionEnabled] };
 }

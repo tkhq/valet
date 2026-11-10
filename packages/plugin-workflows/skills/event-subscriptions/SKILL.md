@@ -110,6 +110,25 @@ Valet sends each event to one assistant thread per owner, once. It picks the thr
 
 When no Where choice is set, a message that a person wrote in Slack (`slack.message` or `slack.app_mention`) gets a new thread, another Slack event (such as an app's post) gets one thread per channel, and any other event uses the line's own thread. A routine has a Where choice too, but no subject.
 
+## Set up code review on a repository
+
+A code review line hands a repository's pull request events to the PR review plugin, not to the assistant. Valet then reviews each push and keeps one review on the pull request.
+
+1. Call `events.list_subscriptions` to check that the workspace has no code review line for the repository yet.
+2. Call `events.propose_subscription` with `plugin_handler` and a `repo` filter. Leave out `event_keys`: the line takes the events the handler accepts. Add `config` only to change the default settings.
+3. If the person asked you to turn it on, call `events.set_subscription_enabled` with the line's ID and `enabled: true`. A person approves that call. Otherwise, tell them to turn it on with the switch on the Code review page.
+
+```json
+{
+  "proposal_key": "code-review-acme-api",
+  "name": "Code review: acme/api",
+  "plugin_handler": { "plugin": "pr-review", "handler": "review-pull-request" },
+  "filters": [{ "field": "repo", "op": "eq", "value": "acme/api" }]
+}
+```
+
+To stop reviews on a repository, call `events.set_subscription_enabled` with `enabled: false`.
+
 ## Personal and team lines
 
 - A personal line replies as the person's assistant. `delivery_policy` sets whether a team line for the same event suppresses it: `always`, `ignoreIfMyTeamSubscribed`, or `ignoreIfAnyTeamSubscribed`. `pause_on_overlap` pauses following when a team line covers the thread. Both apply to personal lines only.

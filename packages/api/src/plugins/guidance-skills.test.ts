@@ -72,21 +72,28 @@ describe("event-subscriptions skill", () => {
       // The examples use the parameter names of events.propose_subscription,
       // which builds this body for the same validator.
       const example = JSON.parse(block) as {
-        name: string; event_keys: string[]; filters?: unknown[]; system_prompt?: string; user_prompt_template?: string;
+        name: string; event_keys?: string[]; filters?: unknown[]; system_prompt?: string; user_prompt_template?: string;
+        plugin_handler?: { plugin: string; handler: string };
       };
       // Only fields this check reads, and `proposal_key`, which only names
       // the proposal. A field it would drop could be one the tool refuses.
       for (const field of Object.keys(example)) {
-        expect(["proposal_key", "name", "event_keys", "filters", "system_prompt", "user_prompt_template"]).toContain(field);
+        expect(["proposal_key", "name", "event_keys", "filters", "system_prompt", "user_prompt_template", "plugin_handler"]).toContain(field);
       }
-      const target = {
-        kind: "assistant",
-        assistant: "user",
-        ...(example.system_prompt !== undefined ? { systemPrompt: example.system_prompt } : {}),
-        ...(example.user_prompt_template !== undefined ? { userPromptTemplate: example.user_prompt_template } : {}),
-      };
+      const choice = example.plugin_handler;
+      // A plugin line without event_keys takes the handler's events, as the tool does.
+      const handlerEvents = choice && bundledPlugins.find((p) => p.name === choice.plugin)?.eventHandlers?.find((h) => h.id === choice.handler)?.events;
+      const target = choice
+        ? { kind: "plugin", plugin: choice.plugin, handler: choice.handler }
+        : {
+          kind: "assistant",
+          assistant: "user",
+          ...(example.system_prompt !== undefined ? { systemPrompt: example.system_prompt } : {}),
+          ...(example.user_prompt_template !== undefined ? { userPromptTemplate: example.user_prompt_template } : {}),
+        };
+      if (choice) expect(handlerEvents).toBeDefined();
       expect(validateSubscription(bundledPlugins, {
-        name: example.name, eventKeys: example.event_keys, filters: example.filters ?? [], target,
+        name: example.name, eventKeys: example.event_keys ?? handlerEvents, filters: example.filters ?? [], target,
       })).toBeNull();
     },
   );
