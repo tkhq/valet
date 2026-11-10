@@ -52,8 +52,8 @@ export interface GithubFixtureHandlers {
   listUserRepos?: () => GithubFixtureResponse;
   /** `GET /installation/repositories`. Receives the `authorization` header,
    * so a fixture with several installations can answer per installation
-   * token. */
-  listInstallationRepositories?: (authHeader: string | undefined) => GithubFixtureResponse;
+   * token, and the requested page (1 when absent). */
+  listInstallationRepositories?: (authHeader: string | undefined, page: number) => GithubFixtureResponse;
   /** `GET /user/installations`, read with a user's OAuth token. GitHub
    * wraps the array in `{ installations }`. */
   listUserInstallations?: (authHeader: string | undefined) => GithubFixtureResponse;
@@ -330,7 +330,7 @@ export function startGithubFixture(overrides: GithubFixtureHandlers = {}): Githu
 
   app.get("/installation/repositories", (c) => {
     record(c, {});
-    const { status, body } = handlers.listInstallationRepositories(c.req.header("authorization"));
+    const { status, body } = handlers.listInstallationRepositories(c.req.header("authorization"), Number(c.req.query("page") ?? "1"));
     return c.json(body as object, status ?? 200);
   });
 
