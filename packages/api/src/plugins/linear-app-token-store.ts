@@ -23,15 +23,11 @@ import {
   LINEAR_CREDENTIAL_SERVICE,
 } from "../services/linear-app.js";
 import { reportError } from "@valet/engine";
+import { RETRY_AFTER_FAILURE_MS } from "./oauth-refreshing-credential-store.js";
 
 /** Renew a day early: the token lasts 30 days, and a day of margin keeps a
  * slow or failed renewal from reaching callers as an expired token. */
 const RENEW_BUFFER_MS = 24 * 60 * 60 * 1000;
-
-/** After a failed renewal, reads return the stored row without calling Linear
- * until this window passes. Without it, every credential read during a Linear
- * outage or after a bad secret made another token request. */
-const RETRY_AFTER_FAILURE_MS = 5 * 60 * 1000;
 
 interface Deps {
   env: NodeJS.ProcessEnv;
