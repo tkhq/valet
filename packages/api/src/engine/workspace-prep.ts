@@ -140,9 +140,16 @@ export function computeTargetDirs(repos: RepoBinding[]): string[] {
  * fetch` wedged inside a full-disk sandbox, and an unbounded exec here hangs
  * every caller that reaches prep — boot restore, run-start reconcile, and
  * `sessionFor` from routes (whose single-flight map then pins every later
- * request to the same never-resolving promise). Initial clones are NOT
- * bounded by this — a cold clone of a large repo legitimately runs longer. */
+ * request to the same never-resolving promise). Initial clones and prebuilt
+ * staging use `COLD_COPY_TIMEOUT_MS` instead. */
 const GIT_REFRESH_TIMEOUT_MS = 180_000;
+
+/** Upper bound for an exec that writes a whole repository into an empty
+ * workspace: the initial `git clone` and the prebuilt `cp -a`. A baked repo
+ * with its installed dependencies can hold hundreds of thousands of files,
+ * so the copy takes minutes. Pass it explicitly: with no `timeout`, the
+ * kubernetes provider stops waiting after its 60-second exec default. */
+const COLD_COPY_TIMEOUT_MS = 15 * 60_000;
 
 /** Runs `sandbox.exec`, converting a rejection into a synthetic failed
  * `ExecResult` so callers can treat "exec threw" and "exec returned
@@ -160,7 +167,8 @@ async function safeExec(
 }
 
 function execFailureMessage(label: string, result: ExecResult): string {
-  const detail = result.stderr.trim() || result.stdout.trim();
+  const output = result.stderr.trim() || result.stdout.trim();
+  const detail = result.timedOut ? [output, "the command timed out"].filter(Boolean).join("; ") : output;
   return detail ? `${label}: ${detail}` : label;
 }
 
@@ -571,7 +579,9 @@ async function cloneFresh(sandbox: Sandbox, dir: string, binding: RepoBinding): 
   const cleanup = async () => {
     if (dir !== ".") await safeExec(sandbox, `rm -rf ${shQuote(dir)}`);
   };
-  const result = await safeExecGrowRetry(sandbox, command, undefined, `git clone ${binding.fullName}`, cleanup);
+  const result = await safeExecGrowRetry(
+    sandbox, command, { timeout: COLD_COPY_TIMEOUT_MS }, `git clone ${binding.fullName}`, cleanup,
+  );
   if (result.exitCode !== 0) {
     throw new Error(execFailureMessage(`workspace prep: git clone failed for ${binding.fullName}`, result));
   }
@@ -623,7 +633,7 @@ async function stagePrebuiltRepo(sandbox: Sandbox, dir: string): Promise<void> {
   const result = await safeExecGrowRetry(
     sandbox,
     `mkdir -p ${q} && cp -a ${PREBUILT_REPO_PATH}/. ${q}`,
-    undefined,
+    { timeout: COLD_COPY_TIMEOUT_MS },
     `staging prebuilt repo into ${dir}`,
   );
   if (result.exitCode !== 0) {

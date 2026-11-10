@@ -415,6 +415,17 @@ describe("ENOSPC → grow workspace → retry once", () => {
     logSpy.mockRestore();
   });
 
+  it("cold clone and its ENOSPC retry both wait up to 15 minutes", async () => {
+    const sandbox = new RecordingSandbox();
+    sandbox.enableGrow({ grown: true, from: "1Gi", to: "2Gi" });
+    sandbox.queueResults(CLONE_CMD, [ENOSPC, OK]);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    await prepBinding(sandbox, "widgets", binding());
+    const clones = sandbox.execCalls.filter((c) => c.command === CLONE_CMD);
+    expect(clones.map((c) => c.opts?.timeout)).toEqual([15 * 60_000, 15 * 60_000]);
+    logSpy.mockRestore();
+  });
+
   it("clone ENOSPC with the workspace root ('.') as target never rm -rf's the root", async () => {
     const rootClone = "git clone --filter=blob:none 'https://github.com/acme/widgets.git' '.'";
     const sandbox = new RecordingSandbox();
@@ -638,6 +649,21 @@ describe("prepPrebuiltBinding", () => {
     ).resolves.toBeUndefined();
     expect(errSpy).toHaveBeenCalledWith(expect.stringMatching(/prebuild reinstall/));
     errSpy.mockRestore();
+  });
+
+  it("staging copy waits up to 15 minutes, not the provider's exec default", async () => {
+    const sandbox = new RecordingSandbox();
+    await prepPrebuiltBinding(sandbox, ".", binding(), { bakedSha: "bakedsha", recipe: [] });
+    const stage = sandbox.execCalls.find((c) => c.command === "mkdir -p '.' && cp -a /prebuilt/repo/. '.'");
+    expect(stage?.opts?.timeout).toBe(15 * 60_000);
+  });
+
+  it("a timed-out staging copy names the timeout in the thrown error", async () => {
+    const sandbox = new RecordingSandbox();
+    sandbox.setResult("mkdir -p '.' && cp -a /prebuilt/repo/. '.'", { stdout: "", stderr: "", exitCode: 124, timedOut: true });
+    await expect(
+      prepPrebuiltBinding(sandbox, ".", binding(), { bakedSha: "bakedsha", recipe: [] }),
+    ).rejects.toThrow("workspace prep: staging prebuilt repo into . failed: the command timed out");
   });
 
   it("cp staging failure THROWS", async () => {
