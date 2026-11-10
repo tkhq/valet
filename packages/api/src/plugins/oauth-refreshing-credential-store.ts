@@ -17,9 +17,11 @@
  * A failed refresh is not retried on every read. A refused row (400 or 401)
  * is never retried: only a reconnect, which replaces the row, revives it.
  * Any other failure (429, 5xx, network) waits `RETRY_AFTER_FAILURE_MS`.
- * Without these waits, each read of an expired credential made another token
- * request, and a provider that limits token requests locked every
- * connection out.
+ * A 429 also holds every refresh for that service, on every account, for the
+ * response's `Retry-After` or `RATE_LIMIT_HOLD_MS`: a provider that limits
+ * token requests limits the whole client, so one account's retry renews the
+ * lockout for all. Without these waits, each read of an expired credential
+ * made another token request, and Metabase locked every connection out.
  */
 import { eq } from "drizzle-orm";
 import type { CredentialOwner, CredentialStore, StoredCredential, ValetPlugin } from "@valet/engine";
@@ -39,6 +41,11 @@ const REFRESH_BUFFER_MS = 60_000;
 /** After a failed refresh, reads return the stored row without calling the
  * provider until this window passes. */
 export const RETRY_AFTER_FAILURE_MS = 5 * 60 * 1000;
+/** After a 429 with no `Retry-After`, how long no account refreshes that
+ * service. Metabase answered with hour-long lockouts. */
+export const RATE_LIMIT_HOLD_MS = 60 * 60 * 1000;
+/** The longest `Retry-After` the hold obeys. */
+const RATE_LIMIT_HOLD_MAX_MS = 6 * 60 * 60 * 1000;
 /** The longest refusal text kept on a credential. */
 const REFRESH_ERROR_MAX = 300;
 /** The shortest cut-off start of a secret that is still masked. */
@@ -104,6 +111,8 @@ interface Deps {
 
 export class OAuthRefreshingCredentialStore implements CredentialStore {
   private readonly inFlightRefreshes = new Map<string, Promise<StoredCredential | null>>();
+  /** Service -> time before which no account refreshes it (after a 429). */
+  private readonly rateLimitedUntil = new Map<string, number>();
 
   constructor(
     private readonly inner: CredentialStore,
@@ -116,7 +125,7 @@ export class OAuthRefreshingCredentialStore implements CredentialStore {
     if (stored.type !== "oauth2" || !stored.refreshToken || stored.expiresAt === undefined) return stored;
     const now = (this.deps.now ?? Date.now)();
     if (stored.expiresAt - now >= REFRESH_BUFFER_MS) return stored;
-    if (refreshOnHold(stored, now)) return stored;
+    if (refreshOnHold(stored, now) || (this.rateLimitedUntil.get(service) ?? 0) > now) return stored;
     const found = findOAuthDeclaration(this.deps.plugins, service);
     if (!found) return stored;
 
@@ -138,7 +147,7 @@ export class OAuthRefreshingCredentialStore implements CredentialStore {
     if (!stored) return null;
     if (stored.type !== "oauth2" || !stored.refreshToken || stored.expiresAt === undefined) return stored;
     if (stored.expiresAt - now >= REFRESH_BUFFER_MS) return stored;
-    if (refreshOnHold(stored, now)) return stored;
+    if (refreshOnHold(stored, now) || (this.rateLimitedUntil.get(service) ?? 0) > now) return stored;
     const found = findOAuthDeclaration(this.deps.plugins, service);
     if (!found) return stored;
 
@@ -187,6 +196,10 @@ export class OAuthRefreshingCredentialStore implements CredentialStore {
       // (`isDeadConnection`). A 5xx, a 429, or a network error stamps the
       // failure, and a read after `RETRY_AFTER_FAILURE_MS` tries again.
       const refused = err instanceof OAuthTokenError && (err.status === 400 || err.status === 401);
+      if (err instanceof OAuthTokenError && err.status === 429) {
+        const hold = Math.min(err.retryAfterMs ?? RATE_LIMIT_HOLD_MS, RATE_LIMIT_HOLD_MAX_MS);
+        this.rateLimitedUntil.set(service, now + hold);
+      }
       const stamped: StoredCredential = {
         ...stored,
         metadata: {
