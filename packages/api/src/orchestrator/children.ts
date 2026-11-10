@@ -1,4 +1,4 @@
-import { CONTINUATION_SOURCE_ITEM_KEY, intersectToolScopes, readToolScope, TOOL_SCOPE_KEY, UNATTENDED_WORKFLOW_KEY, WORKFLOW_STEP_KEY, type ToolScope } from "@valet/shared";
+import { CONTINUATION_SOURCE_ITEM_KEY, childCitationNote, intersectToolScopes, markForeignCitations, readToolScope, TOOL_SCOPE_KEY, UNATTENDED_WORKFLOW_KEY, WORKFLOW_STEP_KEY, type ToolScope } from "@valet/shared";
 import { withChildDelivery, discardChildDelivery } from "./child-delivery.js";
 import { submissionWorkflowStep, type WorkflowStepRef } from "../workflows/step-grants.js";
 /**
@@ -2677,9 +2677,12 @@ export function resultBody(
       `Call child_read with child_session_id "${childSessionId}" to read the child's transcript.]`
     );
   }
-  const full = isFailure
+  // The child's [sN] tags are its own thread's ids. child_read gives the
+  // sources new ids that this thread can cite.
+  const full = markForeignCitations(isFailure
     ? (result.error ?? result.text ?? `child submission ${result.outcome}`)
-    : (result.text ?? "");
+    : (result.text ?? ""), "child");
+  const sourcesNote = isFailure ? "" : childCitationNote(result.text ?? "", childSessionId);
   const checkpointHeader = continuationCheckpoint
     ? `\n\n## Continuation checkpoint (${continuationCheckpoint.id})\n`
     : "";
@@ -2690,8 +2693,8 @@ export function resultBody(
     : checkpointHeader + codePointPrefix(checkpointSummary, checkpointMaxChars) +
       `\n\n[Checkpoint truncated. Call child_read with child_session_id ` +
       `"${childSessionId}" for the complete recovery state.]`;
-  const available = Math.max(0, CHILD_RESULT_MAX_CHARS - checkpoint.length);
-  if (full.length <= available) return full + checkpoint;
+  const available = Math.max(0, CHILD_RESULT_MAX_CHARS - checkpoint.length - sourcesNote.length);
+  if (full.length <= available) return full + sourcesNote + checkpoint;
 
   const prefix = codePointPrefix(full, available);
   const dropped = full.length - prefix.length;
@@ -2707,6 +2710,7 @@ export function resultBody(
   return (
     prefix +
     `\n\n[Truncated. ${dropped} more characters follow this point. To read the ` +
-    `full result, call child_read with child_session_id "${childSessionId}".]`
+    `full result, call child_read with child_session_id "${childSessionId}".]` +
+    sourcesNote
   );
 }

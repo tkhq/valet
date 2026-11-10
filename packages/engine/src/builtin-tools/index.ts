@@ -1,4 +1,4 @@
-import { intersectToolScopes } from "@valet/shared";
+import { intersectToolScopes, markForeignCitations, MAX_SOURCES_PER_CALL, readSources, sourceCitationIds, type SourceInput, type SourceRecord } from "@valet/shared";
 import { toolScopeSchema } from "../tool-scope-schema.js";
 import { Type } from "typebox";
 import {
@@ -16,6 +16,7 @@ import { terminalOutcome } from "./terminal-outcome.js";
 import { defineTool } from "./define.js";
 export { defineTool } from "./define.js";
 import { updatePlanTool } from "./update-plan.js";
+import { fileSource, readFileOrigin } from "./file-source.js";
 export { updatePlanTool } from "./update-plan.js";
 import {
   watchTool,
@@ -268,9 +269,11 @@ export const readTool = defineTool({
   parameters: Type.Object({ path: Type.String() }),
   concurrencySafe: true,
   execute: async (args, ctx) => {
-    const text = await ctx.sandbox.readFile(args.path);
-    ctx.fileReads?.record(normalizeGatePath(args.path, ctx.cwd), hashFileContent(text));
-    return { text };
+    const path = normalizeGatePath(args.path, ctx.cwd);
+    // The git lookup runs beside the read, so it adds no wait to a fast read.
+    const [text, origin] = await Promise.all([ctx.sandbox.readFile(args.path), readFileOrigin(ctx.sandbox, args.path, ctx.signal)]);
+    ctx.fileReads?.record(path, hashFileContent(text));
+    return { text, sources: [fileSource(args.path, text, origin, 1)] };
   },
 });
 
@@ -563,6 +566,38 @@ export const TASK_BATCH_MAX_CHARS = 64;
  */
 export const CHILD_READ_MAX_CHARS = 16_000;
 
+/**
+ * The sources a child cited in the entries read, in citation order, as new
+ * sources for the parent. Each links to the child's thread, where the
+ * child's own citation opens the original. The location names the child's
+ * id so the parent can match it to the marked tag in the transcript.
+ */
+export function childSources(entries: readonly SessionEntry[]): SourceInput[] {
+  const records = new Map<string, { source: SourceRecord; threadId: string }>();
+  const cited: string[] = [];
+  for (const entry of entries) {
+    if (entry.type !== "message") continue;
+    for (const part of entry.parts ?? []) {
+      if (part.type !== "tool_call") continue;
+      for (const source of readSources(part.result)) records.set(source.id, { source, threadId: entry.threadId });
+    }
+    if (entry.role !== "assistant") continue;
+    for (const id of sourceCitationIds(entry.content)) if (!cited.includes(id)) cited.push(id);
+  }
+  return cited.flatMap((id): SourceInput[] => {
+    const record = records.get(id);
+    if (!record) return [];
+    const { service, title, snippet, location } = record.source;
+    return [{
+      service,
+      title,
+      url: `/threads/${encodeURIComponent(record.threadId)}`,
+      ...(snippet ? { snippet } : {}),
+      location: [`child ${id}`, location].filter(Boolean).join(", "),
+    }];
+  }).slice(0, MAX_SOURCES_PER_CALL);
+}
+
 export const childReadTool = defineTool({
   name: "child_read",
   concurrencySafe: true,
@@ -570,7 +605,8 @@ export const childReadTool = defineTool({
     "Read the messages of a child session this session spawned. A " +
     "`child.settled` signal carries only a bounded copy of the child's " +
     "result, so call this when the signal says it was truncated, or when " +
-    "you need the child's working detail rather than its conclusion.",
+    "you need the child's working detail rather than its conclusion. " +
+    "The sources the child cited come back with ids you can cite.",
   parameters: Type.Object({
     child_session_id: Type.String({ description: "The child session to read, as named in the child.settled signal." }),
     limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })),
@@ -597,7 +633,11 @@ export const childReadTool = defineTool({
       };
     }
     if (entries.length === 0) return { text: `(child ${args.child_session_id} has no messages)` };
-    const rendered = renderEntries(`child:${args.child_session_id}`, entries);
+    // The child's [sN] tags are its own thread's ids. The parent cites the
+    // new ids the bridge gives these sources.
+    const rendered = markForeignCitations(renderEntries(`child:${args.child_session_id}`, entries), "child");
+    const sources = childSources(entries);
+    const cited = sources.length > 0 ? { sources } : {};
     // The store's limit counts entries, not bytes — one oversized entry
     // (the exact case the settled-signal ceiling truncates) would flood
     // the parent's context through the recovery path. Keep the most
@@ -610,9 +650,10 @@ export const childReadTool = defineTool({
           `${dropped} older characters were dropped. No \`limit\` value recovers ` +
           `them — \`limit\` only picks how many recent entries are fetched.]\n\n` +
           rendered.slice(-CHILD_READ_MAX_CHARS),
+        ...cited,
       };
     }
-    return { text: rendered };
+    return { text: rendered, ...cited };
   },
 });
 

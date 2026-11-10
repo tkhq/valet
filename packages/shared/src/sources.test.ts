@@ -1,11 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { filterSourceCitations, sourceCitationIds, normalizeSource, readSources } from "./sources.js";
+import { filterSourceCitations, markForeignCitations, sourceCitationIds, normalizeSource, readSources } from "./sources.js";
 
 describe("sources", () => {
   it("keeps known prose citations and removes unknown ids", () => {
     expect(filterSourceCitations("One [s1]. Two [s22][s2].", new Set(["s1", "s2"])))
       .toBe("One [s1]. Two [s2].");
     expect(sourceCitationIds("One [s1]. Again [s1] and [s22].")).toEqual(["s1", "s1", "s22"]);
+  });
+
+  it("marks another thread's tags so they are no longer citations, and keeps code literal", () => {
+    const marked = markForeignCitations("Launch is Tuesday [s3][s1]. `[s2]` stays.", "child");
+    expect(marked).toBe("Launch is Tuesday [child s3][child s1]. `[s2]` stays.");
+    expect(sourceCitationIds(marked)).toEqual([]);
   });
 
   it("preserves literal tags in code, escaped text, and Markdown links", () => {

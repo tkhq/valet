@@ -3276,6 +3276,15 @@ describe("resultBody", () => {
     expect(body).toBe("all done");
   });
 
+  it("marks the child's citation tags and tells the parent to read the child to cite them", () => {
+    const body = resultBody({ queueItemId: "q1", outcome: "completed", text: "Launch is Tuesday [s3]. Owner is Mira [s3][s4]." }, childId);
+    expect(body).toBe("Launch is Tuesday [child s3]. Owner is Mira [child s3][child s4].\n\n" +
+      `[The child cited 2 sources. To cite them here, call child_read with child_session_id "${childId}".]`);
+    const truncated = resultBody({ queueItemId: "q1", outcome: "completed", text: "Fact [s1]." + "x".repeat(CHILD_RESULT_MAX_CHARS) }, childId);
+    expect(truncated).toContain("Fact [child s1].");
+    expect(truncated.endsWith(`[The child cited 1 source. To cite it here, call child_read with child_session_id "${childId}".]`)).toBe(true);
+  });
+
   it("bounds a result that is over the ceiling", () => {
     const huge = "x".repeat(CHILD_RESULT_MAX_CHARS + 50_000);
     const body = resultBody({ queueItemId: "q1", outcome: "completed", text: huge }, childId);

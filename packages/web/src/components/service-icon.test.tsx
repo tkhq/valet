@@ -90,6 +90,13 @@ describe("ServiceIcon first-party glyphs", () => {
     }
   });
 
+  it("draws the browser globe for a web page source", () => {
+    expect(pluginGlyph("web")).toBe(pluginGlyph("browser"));
+    const { container } = render(<ServiceGlyph service="web" fallback="x" />);
+    expect(container.textContent).toBe("");
+    expect(container.querySelector("svg")).toBeTruthy();
+  });
+
   it("tells the two action surfaces apart", () => {
     // Both are "S"-and-"W" rows on `/integrations`; the glyph is the only
     // thing that says which capability a row is.

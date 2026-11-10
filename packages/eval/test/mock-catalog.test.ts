@@ -84,7 +84,7 @@ describe("citation eval cases", () => {
   it("name only real actions, so every mocked tool exists in the bundled plugins", async () => {
     const cases = await loadCases(join(import.meta.dirname, "../../../evals/cases/citations"));
     const mocked = cases.filter((c) => c.profile === "mock");
-    expect(mocked.map((c) => c.id).sort()).toEqual(["drive-source-citations", "github-source-citations", "gmail-source-citations", "multi-source-attribution", "slack-source-citations"]);
+    expect(mocked.map((c) => c.id).sort()).toEqual(["browser-source-citations", "drive-source-citations", "github-source-citations", "gmail-source-citations", "multi-source-attribution", "slack-source-citations"]);
     for (const c of mocked) expect(() => buildMockCatalogTools(c.mock_tools ?? {}, bundledPlugins), c.id).not.toThrow();
   });
 });

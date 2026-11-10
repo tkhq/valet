@@ -48,11 +48,14 @@ describe("citation cases", () => {
     const cases = await loadCases(join(CASES_DIR, "citations"));
     const ids = cases.map((c) => c.id).sort();
     expect(ids).toEqual([
+      "browser-source-citations",
+      "child-source-citations",
       "drive-source-citations",
       "github-source-citations",
       "gmail-source-citations",
       "memory-source-citations",
       "multi-source-attribution",
+      "sandbox-file-source-citations",
       "slack-source-citations",
     ]);
     for (const c of cases) expect(c.checks).toContainEqual({ type: "citation_validity" });

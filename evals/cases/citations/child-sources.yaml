@@ -1,0 +1,24 @@
+# A child cites a file it read. The parent receives the child's tags marked
+# as "[child sN]", reads the child with child_read for new ids, and cites one.
+id: child-source-citations
+description: Cite a fact a background task found, through the source the task cited.
+session_type: orchestrator
+turns:
+  - role: user
+    content: >-
+      Start a background task with this prompt: "Write contract.txt with the line
+      'The vendor contract renews on March 3.' Read it back with the read tool,
+      then report the renewal date and cite the source id."
+      When the task finishes, tell me the renewal date and cite a source id from this thread.
+timeout_ms: 240000
+checks:
+  - type: tool_called
+    tool: task
+  - type: tool_called
+    tool: child_read
+  - type: citation_validity
+  - type: judge_output
+    rubric: >-
+      The reply says the contract renews on March 3 and cites a source.
+      Score 5 only if the fact has a citation. Uncited facts score at most 2.
+  - type: no_errors

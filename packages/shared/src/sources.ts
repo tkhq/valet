@@ -131,6 +131,26 @@ export function filterSourceCitations(text: string, sourceIds: ReadonlySet<strin
   return mapSourceCitations(text, id => sourceIds.has(id) ? `[${id}]` : "");
 }
 
+/**
+ * Mark another thread's citation tags, so a reader in this thread cannot
+ * take them for its own ids: with label "child", "[s3]" becomes "[child s3]".
+ */
+export function markForeignCitations(text: string, label: string): string {
+  return mapSourceCitations(text, id => `[${label} ${id}]`);
+}
+
+/**
+ * The line a child's settled result carries when the child cited sources.
+ * The parent cannot cite the child's ids; `child_read` gives the parent new
+ * ids for them. Empty when the result cites nothing.
+ */
+export function childCitationNote(text: string, childSessionId: string): string {
+  const cited = new Set(sourceCitationIds(text)).size;
+  if (cited === 0) return "";
+  const what = cited === 1 ? "1 source. To cite it" : `${cited} sources. To cite them`;
+  return `\n\n[The child cited ${what} here, call child_read with child_session_id "${childSessionId}".]`;
+}
+
 /** Citation ids in prose, including repeated uses, for quality checks. */
 export function sourceCitationIds(text: string): string[] {
   const ids: string[] = [];

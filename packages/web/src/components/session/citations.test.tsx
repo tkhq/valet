@@ -172,7 +172,7 @@ describe("source citations", () => {
     expect(within(list).getAllByRole("listitem")).toHaveLength(5);
     expect(sourcePresentation({ id: "s1", service: "google_drive", title: "x" }).service).toBe("Google Drive");
     expect(sourcePresentation({ id: "s1", service: "google_calendar", title: "x" }).service).toBe("Google Calendar");
-    for (const [service, name] of [["gmail", "Gmail"], ["linear", "Linear"], ["notion", "Notion"]]) {
+    for (const [service, name] of [["gmail", "Gmail"], ["linear", "Linear"], ["notion", "Notion"], ["web", "Web page"]]) {
       expect(sourcePresentation({ id: "s1", service: service!, title: "x" }).service).toBe(name);
     }
   });
