@@ -22,7 +22,7 @@ import { NativeImageBridge, NATIVE_IMAGE_RESULT_TOOL, NATIVE_IMAGE_PLUGIN_ACTION
 import { isToolDiscoveryApproval, recordHostedActionInvocation, resolveUngatedAction, type HostedActionGrant } from "./plugin-catalog.js";
 import { bundledModel } from "./model-catalog.js";
 import { appendRuntimeModelContext, entryMessageTime, messageTimeLine, threadStartedSection, type MessageTime } from "./model-context.js";
-import { recordCacheBreak } from "./metrics.js";
+import { recordCacheBreak, recordToolResultCapped } from "./metrics.js";
 import type { Api, AssistantMessage, ImageContent, JsonObject, Message, Model, TextContent, ThinkingContent, ToolCall } from "@earendil-works/pi-ai/compat";
 import type { AssistantMessageEventStream, SimpleStreamOptions, TranscriptContext } from "@earendil-works/pi-ai";
 
@@ -4993,7 +4993,7 @@ export class Thread {
     const dir = `${root}/.valet/large-inputs`;
     const path = `${dir}/${entryId}.txt`;
     try {
-      await this.session.sandbox.mkdir(dir);
+      await this.ensureEngineDir(dir);
       await this.session.sandbox.writeFile(path, content);
       return path;
     } catch (err) {
@@ -7064,17 +7064,47 @@ export class Thread {
     return {
       ...def,
       execute: async (args, ctx) => {
-        const opts = { toolName: def.name, maxChars, maxTokens: TOOL_RESULT_MAX_TOKENS, save: (text: string) => this.saveLargeToolResult(def.name, text) };
+        let saved: boolean | undefined;
+        const opts = {
+          toolName: def.name, maxChars, maxTokens: TOOL_RESULT_MAX_TOKENS, preview: def.resultPreview,
+          // A session without read or bash cannot open a saved file, so it
+          // keeps as much as the cap allows instead of a pointer it cannot use.
+          save: async (text: string) => {
+            const path = this.canReadSavedResults() ? await this.saveLargeToolResult(def.name, text) : undefined;
+            saved = path !== undefined;
+            return path;
+          },
+        };
+        const recordCap = () => { if (saved !== undefined) recordToolResultCapped(def.name, saved ? "saved" : "cut"); };
         let result: ToolResult;
         try {
           result = await def.execute(args, ctx);
         } catch (err) {
           // A thrown message reaches context as the result, so it gets the cap too.
-          throw await capToolError(err, opts);
+          const capped = await capToolError(err, opts);
+          recordCap();
+          throw capped;
         }
-        return capToolResult(result, opts);
+        const capped = await capToolResult(result, opts);
+        recordCap();
+        return capped;
       },
     };
+  }
+
+  /** The turn can open a saved result: it has `read` or `bash`. */
+  private canReadSavedResults(): boolean {
+    const scope = this.effectiveToolScope();
+    return toolInScope(scope, "read") || toolInScope(scope, "bash");
+  }
+
+  /** Create a folder for files the engine saves under `.valet/`, with a
+   * `.gitignore` of `*`: the folder can sit inside a repository checkout,
+   * and a `git add -A` must not commit what the engine saved. The file
+   * checkpoint store protects itself the same way. */
+  private async ensureEngineDir(dir: string): Promise<void> {
+    await this.session.sandbox.mkdir(dir);
+    await this.session.sandbox.writeFile(`${dir}/.gitignore`, "*\n");
   }
 
   /** Save a tool result too large for context under the workspace, where
@@ -7085,7 +7115,7 @@ export class Thread {
     const dir = `${root}/.valet/tool-results`;
     const path = `${dir}/${uid(toolName.replace(/[^a-zA-Z0-9_-]/g, "_"))}.txt`;
     try {
-      await this.session.sandbox.mkdir(dir);
+      await this.ensureEngineDir(dir);
       await this.session.sandbox.writeFile(path, text);
       return workingDirectoryPath(path);
     } catch (err) {

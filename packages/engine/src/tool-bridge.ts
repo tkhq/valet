@@ -196,6 +196,7 @@ function toAgentToolResult(result: ToolResult, toolName: string, sources: readon
     ...(result.approval === undefined ? {} : { approval: result.approval }),
     ...(result.label === undefined ? {} : { label: result.label }),
     ...(sources.length === 0 ? {} : { sources }),
+    ...(result.fullText === undefined ? {} : { fullText: result.fullText }),
   };
   return { content, details: Object.keys(details).length === 0 ? undefined : details };
 }

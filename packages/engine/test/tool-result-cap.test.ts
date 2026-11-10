@@ -42,7 +42,26 @@ describe("capToolResult", () => {
     const capped = await cap("b".repeat(150_000), async () => { throw new Error("read-only sandbox"); });
     expect(capped.text?.startsWith("b".repeat(100_000))).toBe(true);
     expect(capped.text).not.toContain("b".repeat(100_001));
-    expect(capped.text).toContain("could not be saved. Only the first 100000 characters are shown");
+    expect(capped.text).toContain("it is not saved to a file. Only 100000 characters are shown");
+    expect(capped.fullText).toBe("b".repeat(150_000));
+  });
+});
+
+describe("head-tail preview", () => {
+  it("keeps the end of bash-style output, so the exit status stays last", async () => {
+    const text = `${"passing test\n".repeat(10_000)}FAILED: 1 test\n[exit 1]`;
+    const capped = await capToolResult({ text }, { toolName: "bash", maxChars: 30_000, maxTokens: 25_000, preview: "head-tail", save: async () => ".valet/tool-results/bash.txt" });
+    expect(capped.text.startsWith("passing test")).toBe(true);
+    expect(capped.text.endsWith("FAILED: 1 test\n[exit 1]")).toBe(true);
+    expect(capped.text).toContain("The first and last parts are shown.");
+    expect(capped.text.length).toBeLessThan(TOOL_RESULT_PREVIEW_CHARS + 500);
+    expect(capped.fullText).toBe(text);
+  });
+
+  it("caps a thrown string like an error message", async () => {
+    const capped = await capToolError("s".repeat(150_000), { toolName: "lookup", maxChars: 100_000, maxTokens: 25_000, save: async () => ".valet/tool-results/x.txt" });
+    expect(capped).toBeInstanceOf(Error);
+    expect((capped as Error).message).toContain(".valet/tool-results/x.txt");
   });
 });
 
@@ -77,6 +96,7 @@ describe("text attachments and thrown errors", () => {
     expect((capped as Error).message).toContain(".valet/tool-results/lookup.txt");
     expect((capped as Error).cause).toBe(long);
     expect(await capToolError("plain string", opts(async () => "/unused"))).toBe("plain string");
+    expect(await capToolError({ code: 1 }, opts(async () => "/unused"))).toEqual({ code: 1 });
   });
 });
 
@@ -119,6 +139,8 @@ describe("tool result cap in a thread", () => {
       expect(seen[0]).toContain("lookup output too large");
       expect(seen[0]).not.toContain("END");
       expect(await session.sandbox.readFile(`/workspace/${path!}`)).toBe(big);
+      // The folder ignores itself, so a git add in a checkout never picks it up.
+      expect(await session.sandbox.readFile("/workspace/.valet/tool-results/.gitignore")).toBe("*\n");
       // read pages its own output, so a 40,000-character file comes back whole.
       expect(seen[1]).toContain("n".repeat(40_000));
       expect(seen[1]).not.toContain("too large");

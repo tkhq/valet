@@ -35,16 +35,32 @@ export interface ToolResultCapOptions {
   toolName: string;
   maxChars: number;
   maxTokens: number;
+  /** "head-tail" keeps the last part too, for output whose end carries the
+   * outcome (`ToolDef.resultPreview`). */
+  preview?: "head" | "head-tail";
+  /** Save the whole text and return its path, or undefined when the session
+   * cannot save it or could not read it back. */
   save: (text: string) => Promise<string | undefined>;
+}
+
+/** The first `size` characters, or the first and last halves of `size` with
+ * a marker between them for "head-tail". */
+function excerpt(text: string, size: number, preview: "head" | "head-tail", note: string): string {
+  if (preview === "head") return `${text.slice(0, size)}\n\n${note}`;
+  const half = Math.floor(size / 2);
+  // The note sits between the two parts, so the text still ends with the
+  // tool's own last line, such as bash's exit status.
+  return `${text.slice(0, half)}\n\n${note}\n\n${text.slice(-half)}`;
 }
 
 /**
  * Keep a tool result inside the cap. The result text and its text
  * attachments count together. A result over `maxChars` characters or
- * `maxTokens` estimated tokens is saved whole by `save`, with its text
- * attachments folded in, and the model gets a preview and the file path.
- * When `save` fails, the model gets the first part only and a note that
- * the rest was dropped.
+ * `maxTokens` estimated tokens is saved by `save`, with its text attachments
+ * folded in, and the model gets a preview and the file path. When `save`
+ * returns no path, the model gets as much as the cap allows and a note that
+ * the rest was dropped. Either way the whole text rides in `fullText`, which
+ * the UI loads and the model never sees.
  */
 export async function capToolResult(result: ToolResult, opts: ToolResultCapOptions): Promise<ToolResult> {
   const textAttachments = (result.attachments ?? []).filter((a): a is Extract<ToolAttachment, { type: "text" }> => a.type === "text");
@@ -52,8 +68,9 @@ export async function capToolResult(result: ToolResult, opts: ToolResultCapOptio
   if (!text) return result;
   const tokens = estimateResultTokens(text);
   if (text.length <= opts.maxChars && tokens <= opts.maxTokens) return result;
+  const preview = opts.preview ?? "head";
   const rest = result.attachments?.filter((a) => a.type !== "text");
-  const base: ToolResult = { ...result, ...(result.attachments ? { attachments: rest } : {}) };
+  const base: ToolResult = { ...result, ...(result.attachments ? { attachments: rest } : {}), fullText: text };
   const size = `${text.length} characters, about ${tokens} tokens`;
   let path: string | undefined;
   try {
@@ -61,34 +78,28 @@ export async function capToolResult(result: ToolResult, opts: ToolResultCapOptio
   } catch {
     path = undefined;
   }
+  const shown = preview === "head" ? "The first part is shown above." : "The first and last parts are shown.";
   if (path !== undefined) {
-    return {
-      ...base,
-      text:
-        `${text.slice(0, TOOL_RESULT_PREVIEW_CHARS)}\n\n` +
-        `[${opts.toolName} output too large (${size}). The full output is saved in the working directory at ${path}. ` +
-        "Read it with read and offset, or search it with grep. The first part is shown above.]",
-    };
+    const note = `[${opts.toolName} output too large (${size}). It is saved in the working directory at ${path}. ` +
+      `Read it with read and offset, or search it with grep. ${shown}]`;
+    return { ...base, text: excerpt(text, TOOL_RESULT_PREVIEW_CHARS, preview, note) };
   }
   // A fair share of the cap when the result is dense, so the kept part also fits.
   const keep = Math.min(opts.maxChars, Math.floor(text.length * (opts.maxTokens / tokens)));
-  return {
-    ...base,
-    text:
-      `${text.slice(0, keep)}\n\n` +
-      `[${opts.toolName} output too large (${size}), and it could not be saved. Only the first ${keep} characters are shown; ` +
-      "the rest was dropped. If the tool can page or filter its results, call it again for the part you need.]",
-  };
+  const note = `[${opts.toolName} output too large (${size}), and it is not saved to a file. Only ${keep} characters are shown; ` +
+    `the rest was dropped. ${shown} If the tool can page or filter its results, call it again for the part you need.]`;
+  return { ...base, text: excerpt(text, keep, preview, note) };
 }
 
 /**
  * Keep a thrown tool error inside the cap. pi-agent-core puts a thrown
- * error's message into context as the tool result, so a long message gets
- * the same preview and saved file as a long result. A message inside the cap
- * returns the same error unchanged.
+ * error's message into context as the tool result (`String(error)` for a
+ * non-Error), so a long message gets the same preview and saved file as a
+ * long result. A message inside the cap returns the same value unchanged.
  */
 export async function capToolError(err: unknown, opts: ToolResultCapOptions): Promise<unknown> {
-  if (!(err instanceof Error)) return err;
-  const capped = await capToolResult({ text: err.message }, opts);
-  return capped.text === err.message ? err : new Error(capped.text, { cause: err });
+  const message = err instanceof Error ? err.message : typeof err === "string" ? err : undefined;
+  if (message === undefined) return err;
+  const capped = await capToolResult({ text: message }, opts);
+  return capped.text === message ? err : new Error(capped.text, { cause: err });
 }

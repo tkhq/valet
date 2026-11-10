@@ -262,6 +262,12 @@ export function normalizeGatePath(path: string, cwd: string | undefined): string
   return "/" + parts.join("/");
 }
 
+/** Most characters of one `bash` result in context; more is saved to a
+ * file (`capToolResult`). */
+export const BASH_MAX_RESULT_CHARS = 30_000;
+/** A slice a bash command can print without going over its own cap. */
+const BASH_PAGE_CHARS = 25_000;
+
 /** Most lines one `read` result holds. Claude Code's Read tool reads
  * 2,000 lines by default. */
 export const READ_MAX_LINES = 2_000;
@@ -330,7 +336,7 @@ export function readWindow(text: string, offset: number, limit: number): string 
   // it, so say so and name a way to read it.
   if (body.length > READ_MAX_CHARS) {
     const tail = end < total ? ` Continue with offset ${end + 1}.` : "";
-    return `${body.slice(0, READ_MAX_CHARS)}\n[read: line ${end} is ${body.length} characters; this shows the first ${READ_MAX_CHARS}. Read the rest with bash, e.g. \`cut -c${READ_MAX_CHARS + 1}- <file> | head -c ${READ_MAX_CHARS}\`.${tail}]`;
+    return `${body.slice(0, READ_MAX_CHARS)}\n[read: line ${end} is ${body.length} characters; this shows the first ${READ_MAX_CHARS}. Read the rest with bash, e.g. \`cut -c${READ_MAX_CHARS + 1}-${READ_MAX_CHARS + BASH_PAGE_CHARS} <file>\`.${tail}]`;
   }
   if (end >= total && start === 0) return body;
   return end >= total
@@ -444,7 +450,9 @@ export const bashTool = defineTool({
   sideEffect: "files",
   intent: "exempt",
   // Claude Code's bash output limit (`BASH_MAX_OUTPUT_LENGTH`, default 30,000).
-  maxResultChars: 30_000,
+  maxResultChars: BASH_MAX_RESULT_CHARS,
+  // The exit status, timeout and truncation notes come last.
+  resultPreview: "head-tail",
   description:
     "Execute a shell command in the sandbox. `timeout` (seconds, default " +
     `${BASH_DEFAULT_TIMEOUT_S}, max 3600) bounds how long the command may ` +

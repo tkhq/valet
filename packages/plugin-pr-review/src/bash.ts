@@ -37,6 +37,9 @@ export function reviewerBashTool(workspace: string): ToolDef {
     name: "bash",
     sideEffect: "none",
     intent: "exempt",
+    // The engine bash cap and preview, which a new ToolDef does not inherit.
+    maxResultChars: bashTool.maxResultChars,
+    resultPreview: bashTool.resultPreview,
     description:
       `Run a read-only shell command in the repository checkout (grep, rg, git log/show/diff, find, ls, sed -n). ` +
       `Paths must stay inside the repository; relative paths resolve from its root. ` +
