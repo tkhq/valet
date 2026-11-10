@@ -51,14 +51,28 @@ export async function gatherForReview(ctx: PluginEventContext, req: PackRequest)
       memory: ctx.memory,
       budgetChars: req.budgetTokens * CHARS_PER_TOKEN,
     });
-    await ctx.threads.record(req.thread, renderManifest(pack.manifest, req.head, Date.now() - started), { dispatchId: req.dispatchId });
+    // A failed note must not discard a pack that was built.
+    await noteBestEffort(ctx, req.thread, renderManifest(pack.manifest, req.head, Date.now() - started), req.dispatchId);
     return pack;
   } catch (err) {
     if (ctx.signal.aborted) throw err;
     const message = err instanceof Error ? err.message : String(err);
     console.warn(`pr-review ${req.owner}/${req.repo}@${req.head.slice(0, 7)}: the context pack failed; the review runs on the diff alone`, message);
-    await ctx.threads.record(req.thread, `**Context pack for \`${req.head.slice(0, 7)}\`: not built.** ${message}\n\nThe review runs on the diff alone.`, { dispatchId: req.dispatchId });
+    await noteBestEffort(ctx, req.thread, `**Context pack for \`${req.head.slice(0, 7)}\`: not built.** ${message}\n\nThe review runs on the diff alone.`, req.dispatchId);
     return undefined;
+  }
+}
+
+/**
+ * Record an informational stage note in the plugin thread. A failed record is
+ * logged, not thrown: the note explains the review, it must not stop it.
+ */
+export async function noteBestEffort(ctx: PluginEventContext, thread: PluginThreadRef, body: string, dispatchId: string): Promise<void> {
+  try {
+    await ctx.threads.record(thread, body, { dispatchId });
+  } catch (err) {
+    if (ctx.signal.aborted) throw err;
+    console.warn(`pr-review: recording stage note ${dispatchId} failed; the review goes on`, err instanceof Error ? err.message : err);
   }
 }
 

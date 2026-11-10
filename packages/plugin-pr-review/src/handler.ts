@@ -14,7 +14,7 @@ import { cutPatch, type PullRequestDiff } from "./git.js";
 import { githubClient, GitHubError, type GitHubClient, type PullFile, type PullRequest, type ReviewComment, type ReviewThread } from "./github.js";
 import { matchesGlob } from "./context/glob.js";
 import { consolidateFindings } from "./consolidate.js";
-import { gatherForReview, renderConsolidation, type StageOutcome } from "./stages.js";
+import { gatherForReview, noteBestEffort, renderConsolidation, type StageOutcome } from "./stages.js";
 import { sameIssue } from "./incremental.js";
 import { commentableLines, nearestCommentableLine } from "./linemap.js";
 import { buildReviewPrompt } from "./prompt.js";
@@ -340,7 +340,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
     posted.push({ ...f, id: `f${nextId++}` });
   }
 
-  await ctx.threads.record(thread, renderConsolidation(head, draft.findings.map((f): StageOutcome => {
+  await noteBestEffort(ctx, thread, renderConsolidation(head, draft.findings.map((f): StageOutcome => {
     const repeat = consolidated.dropped.find((d) => d.finding === f);
     const out = posted.find((p) => p.path === f.path && p.line === f.line && p.title === f.title);
     const result = repeat ? `dropped: ${repeat.reason}`
@@ -352,7 +352,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
       : reopened.some((r) => r.path === f.path && r.title === f.title) ? "reopened a fixed finding"
       : "dropped: repeats an open or dismissed finding";
     return { finding: f, result };
-  })), { dispatchId: dispatch("consolidate") });
+  })), dispatch("consolidate"));
 
   // 6. Map new findings to diff lines. GitHub refuses a comment on a line outside the diff.
   const anchorable = new Map(files.map((f) => [f.filename, { RIGHT: commentableLines(f.patch ?? "", "RIGHT"), LEFT: commentableLines(f.patch ?? "", "LEFT") }]));

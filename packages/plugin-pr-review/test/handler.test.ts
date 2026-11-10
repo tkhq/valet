@@ -247,7 +247,10 @@ class FakeThreads implements PluginThreads {
   async post(): Promise<never> {
     throw new Error("the review handler does not post to its thread");
   }
+  /** Make every `record` call fail, as a broken plugin thread would. */
+  failRecords = false;
   async record(_thread: PluginThreadRef, body: string, opts: { dispatchId: string }): Promise<void> {
+    if (this.failRecords) throw new Error("thread write failed");
     this.records.push({ body, dispatchId: opts.dispatchId });
   }
   async awaitReply(): Promise<never> {
@@ -998,6 +1001,18 @@ describe("review-pull-request handler stages", () => {
     expect(threads.spawned.find((s) => s.req.role === "pr-reviewer")?.req.prompt).toContain("## Context pack");
     // Once, from the gather's own queries; the fallback prompt's search did not run.
     expect(queries.filter((q) => q === "acme/site")).toHaveLength(1);
+  });
+
+  it("keeps a built pack and posts the findings when the plugin thread's stage notes fail", async () => {
+    const gh = new FakeGitHub();
+    gh.contentsAt[BASE] = { "AGENTS.md": "Always validate parse input.\n" };
+    const threads = new FakeThreads(scripted(reviewOf([finding({ title: "Null deref in parse" })]), {}));
+    threads.checkout = repoOf({ "AGENTS.md": "Always validate parse input.\n", "a.ts": "export function parse() {}\n" });
+    threads.failRecords = true;
+    await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1", "github.pull_request.opened"), context(threads, new FakeStore()));
+    expect(threads.spawned.find((s) => s.req.role === "pr-reviewer")?.req.prompt).toContain("## Context pack");
+    expect(gh.reviews.size).toBe(1);
+    expect([...gh.reviews.values()][0].body).toContain("Open findings (1)");
   });
 
   it("gathers a pack for a shadow review too", async () => {
