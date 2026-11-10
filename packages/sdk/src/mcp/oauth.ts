@@ -265,10 +265,20 @@ export async function exchangeCodePkce(params: {
 /** A token endpoint answered with an HTTP error. `status` tells a refusal
  * (400 or 401: the grant is no longer valid) from a temporary failure. */
 export class OAuthTokenError extends Error {
-  constructor(message: string, readonly status: number) {
+  /** `retryAfterMs` is the wait the response's `Retry-After` header asks for, if it has one. */
+  constructor(message: string, readonly status: number, readonly retryAfterMs?: number) {
     super(message);
     this.name = 'OAuthTokenError';
   }
+}
+
+/** The wait a `Retry-After` header asks for (delay-seconds or an HTTP date), in ms. */
+export function retryAfterMs(header: string | null, now: number = Date.now()): number | undefined {
+  if (!header) return undefined;
+  const value = header.trim();
+  if (/^\d+$/.test(value)) return Number(value) * 1000;
+  const date = Date.parse(value);
+  return Number.isNaN(date) ? undefined : Math.max(0, date - now);
 }
 
 /** Refresh a token for a public client. */
@@ -288,7 +298,7 @@ export async function refreshTokenPkce(params: {
   });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    throw new OAuthTokenError(`MCP PKCE token refresh failed: ${res.status} ${body.slice(0, 200)}`, res.status);
+    throw new OAuthTokenError(`MCP PKCE token refresh failed: ${res.status} ${body.slice(0, 200)}`, res.status, retryAfterMs(res.headers.get('retry-after')));
   }
   return (await res.json()) as TokenResponse;
 }
