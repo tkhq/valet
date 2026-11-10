@@ -600,7 +600,7 @@ function EnvelopeCard({ message, signal }: { message: Message; signal: MessageSi
   if (signal.signalType === "home.task_report") {
     return <HomeTaskReportCard signal={signal} />;
   }
-  // A routine's prompt (the morning brief, a daily check) is the model's
+  // A routine's prompt (a daily check, a weekly report) is the model's
   // instruction too: show its name, with the prompt behind a disclosure.
   if (signal.signalType === "schedule") {
     return <RoutinePromptCard message={message} signal={signal} />;

@@ -101,10 +101,17 @@ Home. Reports name the task and outcome. Home must call the access-checked
 `read_task` tool to fetch a result. Reports stay quiet while the person is
 viewing the task. Background-only reports have a ten-minute minimum gap.
 
-On first Home use, Valet creates a daily morning brief at 08:00 in the
-person's timezone, or UTC if none is set. It posts into Home and can be
-edited or paused as a routine. Briefs and task reports cover personal work
-as well as team work; a team is not required.
+Home creates no routine. The Tasks tab shows what is in progress and what
+needs the person. When the person asks what is going on, Home calls
+`list_tasks` and shows the answer with `show_brief`. Briefs and task reports
+cover personal work as well as team work; a team is not required.
+
+Earlier builds created a daily 08:00 "Morning brief" routine that posted into
+Home. Each run sent the whole Home conversation to the model again, after the
+prompt cache expired. In production, one run cost $1.10 to $1.47 for its first
+request as Home grew from 136k to 183k tokens. At startup,
+`removeStockMorningBriefs` deletes each of those routines that nobody changed.
+A paused routine, or one with an edited name, prompt, cron, or thread, stays.
 
 ## Shared conversation components
 
@@ -212,9 +219,6 @@ The host marks a linked person's direct channel input separately from background
 Only that verified input supplies an interactive actor; replay retains its original channel context.
 Workflow and child turns cannot inherit this authority.
 
-Home records the morning-brief offer in persistent thread metadata before provisioning it once.
-Opening Home never overwrites an existing prompt or restores a renamed or deleted routine.
-If initial provisioning fails, Home remains available and logs the failure without retrying on later opens.
 
 Widget validation rejects cycles, more than 100 elements, nesting beyond 24 levels, and expansions beyond 256 elements.
 The web checks persisted widget specs with the same validator before rendering them.

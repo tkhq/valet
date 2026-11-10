@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ToolContext } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { homeTasks, sessionThreads, teamMembers, teams, threadPullRequests, workflowSchedules } from "../schema/index.js";
-import { HOME_THREAD_KEY, MORNING_BRIEF_PROMPT, dismissHomeTask, ensureHomeThread, homeTaskPrompt, homeWorkspaces, matchWorkspace, messageHomeTask, readHomeTask, startHomeTask, wireHomeTaskReports } from "../home/service.js";
+import { HOME_THREAD_KEY, dismissHomeTask, ensureHomeThread, homeTaskPrompt, homeWorkspaces, matchWorkspace, messageHomeTask, readHomeTask, startHomeTask, wireHomeTaskReports } from "../home/service.js";
 import { buildHomeTools } from "../home/tools.js";
 import type { HomeConversationResponse, HomeTasksResponse, ListThreadsResponse } from "../wire/types.js";
 
@@ -94,36 +94,13 @@ describe("home conversation", () => {
     expect(model.status).toBe(200);
   });
 
-  it("creates the morning brief routine once, posting into home at 08:00", async () => {
-    const test = await boot();
-    const home = await (await fetch(`${test.baseUrl}/api/home`, { method: "POST" })).json() as HomeConversationResponse;
-    await fetch(`${test.baseUrl}/api/home`, { method: "POST" });
-    const rows = await test.providers.db.select().from(workflowSchedules)
-      .where(and(eq(workflowSchedules.ownerId, USER.id), eq(workflowSchedules.name, "Morning brief")));
-    expect(rows).toHaveLength(1);
-    expect(rows[0]?.cron).toBe("0 8 * * *");
-    expect(rows[0]?.prompt).toBe(MORNING_BRIEF_PROMPT);
-    expect(rows[0]?.threadPolicy).toEqual({ mode: "existing", sessionId: home.sessionId, threadId: home.threadId });
-  });
-
-  it("does not recreate a renamed or deleted brief", async () => {
+  it("creates no routine when Home opens", async () => {
     const test = await boot();
     await fetch(`${test.baseUrl}/api/home`, { method: "POST" });
-    const owner = and(eq(workflowSchedules.orgId, USER.orgId), eq(workflowSchedules.ownerId, USER.id));
-    await test.providers.db.update(workflowSchedules).set({ name: "My summary" }).where(owner);
     await fetch(`${test.baseUrl}/api/home`, { method: "POST" });
-    expect(await test.providers.db.select().from(workflowSchedules).where(owner)).toHaveLength(1);
-    await test.providers.db.delete(workflowSchedules).where(owner);
-    await fetch(`${test.baseUrl}/api/home`, { method: "POST" });
-    expect(await test.providers.db.select().from(workflowSchedules).where(owner)).toHaveLength(0);
-  });
-
-  it("provisions one brief across concurrent Home opens", async () => {
-    const test = await boot();
-    await Promise.all(Array.from({ length: 3 }, () => fetch(`${test.baseUrl}/api/home`, { method: "POST" })));
     const rows = await test.providers.db.select().from(workflowSchedules)
       .where(and(eq(workflowSchedules.orgId, USER.orgId), eq(workflowSchedules.ownerId, USER.id)));
-    expect(rows).toHaveLength(1);
+    expect(rows).toEqual([]);
   });
 });
 
@@ -311,22 +288,6 @@ describe("home task outputs and brief", () => {
     const tasks = await (await fetch(`${test.baseUrl}/api/home/tasks`)).json() as HomeTasksResponse;
     const row = [...tasks.needsYou, ...tasks.working, ...tasks.finished].find((item) => item.threadId === task.threadId);
     expect(row?.outputs).toEqual([{ kind: "pull_request", title: "o/r #7", href: "https://github.com/o/r/pull/7", state: "merged", updatedAt: 2 }]);
-  });
-
-  it("keeps edits even when the person retains the generated opening sentence", async () => {
-    const test = await boot();
-    const home = await (await fetch(`${test.baseUrl}/api/home`, { method: "POST" })).json() as HomeConversationResponse;
-    const brief = and(eq(workflowSchedules.ownerId, USER.id), eq(workflowSchedules.name, "Morning brief"));
-    const edited = "Write the person's morning brief in this conversation.\nNever read my email or calendar.";
-    await test.providers.db.update(workflowSchedules).set({ prompt: edited }).where(brief);
-    await fetch(`${test.baseUrl}/api/home`, { method: "POST" });
-    const [upgraded] = await test.providers.db.select().from(workflowSchedules).where(brief);
-    expect(upgraded?.prompt).toBe(edited);
-    expect(upgraded?.threadPolicy).toEqual({ mode: "existing", sessionId: home.sessionId, threadId: home.threadId });
-    await test.providers.db.update(workflowSchedules).set({ prompt: "Just tell me my meetings." }).where(brief);
-    await fetch(`${test.baseUrl}/api/home`, { method: "POST" });
-    const [kept] = await test.providers.db.select().from(workflowSchedules).where(brief);
-    expect(kept?.prompt).toBe("Just tell me my meetings.");
   });
 });
 

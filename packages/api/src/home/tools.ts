@@ -110,9 +110,9 @@ export function buildHomeTools(getDeps: () => HomeDeps): ToolDef[] {
     concurrencySafe: true,
     description:
       "Show the person a brief as a card in this conversation: a one-line headline and up to six items, the ones that need them first. " +
-      "Use it for the morning brief and when the person asks what is going on. The card is the whole answer: write nothing after it.",
+      "Use it when the person asks what is going on. The card is the whole answer: write nothing after it.",
     parameters: Type.Object({
-      headline: Type.String({ minLength: 1, maxLength: 160, description: "One line, such as \"Morning. 4 in progress, 2 need you.\"" }),
+      headline: Type.String({ minLength: 1, maxLength: 160, description: "One line, such as \"4 in progress, 2 need you.\"" }),
       items: Type.Array(Type.Object({
         topic: Type.String({ minLength: 1, maxLength: 40, description: "Two to four words, such as \"Series A\" or \"TKAI-512\"." }),
         text: Type.String({ minLength: 1, maxLength: 240, description: "One line: what is ready, or what you need from them." }),

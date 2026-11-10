@@ -1,7 +1,6 @@
 import { Hono } from "hono";
 import type { AppEnv } from "../env.js";
-import { dismissHomeTask, ensureHomeThread, ensureMorningBrief, listHomeTasks } from "../home/service.js";
-import { createWorkflowSchedule } from "../workflows/schedule-service.js";
+import { dismissHomeTask, ensureHomeThread, listHomeTasks } from "../home/service.js";
 import type { DismissHomeTaskRequest, HomeConversationResponse, HomeTasksResponse } from "../wire/types.js";
 
 export const homeRouter = new Hono<AppEnv>();
@@ -11,18 +10,13 @@ function personOf(c: { var: AppEnv["Variables"] }) {
   return c.var.principal.type === "user" ? { id: c.var.user.id, orgId: c.var.user.orgId } : null;
 }
 
-// Opens the person's home conversation, creating it and its morning brief
-// routine on first use. It never submits a model turn.
+// Opens the person's home conversation, creating it on first use. It never
+// submits a model turn.
 homeRouter.post("/", async (c) => {
   const person = personOf(c);
   if (!person) return c.json({ error: "Home is for a person. Sign in with your own account." }, 403);
   const { session, thread } = await ensureHomeThread(c.var.providers, person);
   const home = { sessionId: session.id, threadId: thread.id };
-  const { db, engineCredentials, plugins, onePassword } = c.var.providers;
-  // The brief is a convenience: a failure here must not block home.
-  await ensureMorningBrief(db, person, home, thread, (input) =>
-    createWorkflowSchedule({ db, credentials: engineCredentials, plugins, onePassword }, { userId: person.id, orgId: person.orgId }, input),
-  ).catch((err: unknown) => console.error("[home] could not create the morning brief routine", err));
   return c.json(home satisfies HomeConversationResponse);
 });
 
