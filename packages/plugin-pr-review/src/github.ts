@@ -78,6 +78,8 @@ export interface GitHubClient {
   /** The unified diff from the merge-base of `base` and `head` to `head`, or null when GitHub will not render it. */
   compareDiff(base: string, head: string): Promise<string | null>;
   pullFiles(): Promise<PullFile[]>;
+  /** The parent shas of a commit, first parent first, or null when GitHub has no such commit. */
+  commitParents(sha: string): Promise<string[] | null>;
   /** The file's text at `ref`, or undefined when it is missing or binary. */
   fileText(path: string, ref: string): Promise<string | undefined>;
   review(id: number): Promise<Review | null>;
@@ -168,6 +170,13 @@ export function githubClient(opts: { token: string; owner: string; repo: string;
       return res.text();
     },
     pullFiles: () => pages<PullFile>(`${pullPath}/files`, "list pull request files"),
+    async commitParents(sha) {
+      const res = await call("GET", `${repoPath}/commits/${sha}`);
+      if (res.status === 404 || res.status === 422) return null;
+      if (!res.ok) throw await failed(res, "read commit");
+      const commit = (await res.json()) as { parents?: { sha: string }[] };
+      return (commit.parents ?? []).map((p) => p.sha);
+    },
     async fileText(path, ref) {
       const res = await call("GET", `${repoPath}/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${ref}`, {
         accept: "application/vnd.github.raw+json",
