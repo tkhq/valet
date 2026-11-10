@@ -13,7 +13,7 @@ Every integration action resolves to one mode: `allow`, `require_approval`, or `
 
 1. An organization policy that denies the action. Nothing overrides it.
 2. A team policy that denies the action.
-3. A grant that is live for this session: "Approve for this session" in a chat.
+3. A grant that is live for this thread: "Allow in this thread" in a chat. An older card's "Approve for this session" covers the whole session.
 4. In a personal session, the owner's own override, set with "Always allow for me" or on the personal Policies page. A team session does not read personal overrides.
 5. The team or organization policy mode. A team can make an organization rule stricter, never looser.
 6. A saved permission for a workflow step. It applies only when no team or organization policy matches the action, so it never loosens a policy.
@@ -28,7 +28,7 @@ A chat approval offers these choices. Explain what each one does before the pers
 
 - **Approve once** allows this one call.
 - **Always allow for me** (personal session) or **Always allow for this team** (team session) saves a setting for the session's owner. It is the same setting as the Integrations and team permission pages. Valet shows it only where that setting can allow the action. In a team session, any team member can pick it. For a `critical` action, or an action that a team rule covers, only a team admin can.
-- **Approve for this session** allows the same action for the rest of this session. The card shows it when a member cannot use the always-allow option: an org rule hides it, the action is `critical`, or a team rule covers it.
+- **Allow in this thread** allows the same action for the rest of this thread. Other threads still ask. Suggest it when the person wants the task to go ahead but does not want a lasting setting.
 - **Always allow (org)** saves an organization policy. Only an organization admin can pick it.
 - **Deny** stops the call.
 
@@ -47,6 +47,8 @@ In a chat, the card offers:
 In a workflow run, the card offers **Allow for this run**, **Always allow for this workflow** (later runs, until someone changes its steps), and **Always allow for this team** when offered.
 
 Only that member can choose **Always allow for this team**, in the browser or from a verified Slack link. An assistant, an API key, and an automated turn cannot grant it.
+
+A `list_tools` search with no `service` filter never asks that member. It leaves out the service and names the member in a warning. Ask only when the person's task needs that service: call `list_tools` with its `service`, or call its tool.
 
 Tell the person who asked that you are waiting for that member, and name them. To avoid the wait, the team can connect an account that the team owns.
 

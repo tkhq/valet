@@ -737,6 +737,17 @@ WHERE r.status <> 'merged' ORDER BY l.org_id, l.subject_type, l.subject_id, l.di
     before: 'DROP INDEX IF EXISTS "channel_messages_provider_message"',
     sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "channel_messages_session_message" ON "channel_messages" ("org_id", "session_id", "channel_key", "provider_message_id", "direction")',
   },
+  { describe: "runtime_grants.thread_id", probe: { kind: "column", table: "runtime_grants", column: "thread_id" }, sql: 'ALTER TABLE "runtime_grants" ADD COLUMN IF NOT EXISTS "thread_id" text' },
+  {
+    // A thread grant and a session-wide grant for one action can both be
+    // live, so the session key leaves out thread rows. The old key goes in
+    // the same transaction, so the table always keeps one of them.
+    describe: "runtime_grants_session_wide_policy_key",
+    probe: { kind: "index", index: "runtime_grants_session_wide_policy_key" },
+    before: 'DROP INDEX IF EXISTS "runtime_grants_session_policy_key"',
+    sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "runtime_grants_session_wide_policy_key" ON "runtime_grants" ("org_id", "session_id", "policy_key") WHERE "session_id" IS NOT NULL AND "thread_id" IS NULL AND "revoked_at" IS NULL',
+  },
+  { describe: "runtime_grants_thread_policy_key", probe: { kind: "index", index: "runtime_grants_thread_policy_key" }, sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "runtime_grants_thread_policy_key" ON "runtime_grants" ("org_id", "session_id", "thread_id", "policy_key") WHERE "thread_id" IS NOT NULL AND "revoked_at" IS NULL' },
   { describe: "channel_messages_channel", probe: { kind: "index", index: "channel_messages_channel" }, sql: 'CREATE INDEX IF NOT EXISTS "channel_messages_channel" ON "channel_messages" ("org_id", "channel_key", "created_at")' },
   { describe: "channel_messages_thread", probe: { kind: "index", index: "channel_messages_thread" }, sql: 'CREATE INDEX IF NOT EXISTS "channel_messages_thread" ON "channel_messages" ("session_id", "thread_id", "created_at")' },
   { describe: "slack channel privacy", probe: { kind: "table", table: "slack_channel_privacy" }, sql: `CREATE TABLE IF NOT EXISTS "slack_channel_privacy" (

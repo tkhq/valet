@@ -72,7 +72,12 @@ export const POLICY_AUDIT_FIELD_CAP = 8192;
  *  choice as an approval), but `onResolution` performs a DIFFERENT durable
  *  write for each — see its body. Kept as named constants so the engine gate,
  *  `onResolution`, and any UI stay in lockstep on the ids. */
+/** Legacy: chat cards no longer offer it, but a card opened before the
+ *  change still resolves with it and writes a session grant. */
 export const GATE_ACTION_APPROVE_SESSION = "approve_session";
+/** Allows the same action for the rest of this thread: Claude Code's
+ *  session-only approval. Offered on every chat policy card. */
+export const GATE_ACTION_APPROVE_THREAD = "approve_thread";
 export const GATE_ACTION_ALWAYS_ALLOW = "always_allow";
 /** Allows the action from now on for the session's owner: the person's own
  *  override in a personal session, the team's policy in a team session. It
@@ -81,7 +86,7 @@ export const GATE_ACTION_ALWAYS_ALLOW_OWNER = "always_allow_owner";
 /** The labels of the extra approval-card choices. The `approvals` skill
  *  quotes each one, and a test holds the two together. */
 export const GATE_ACTION_LABELS = {
-  approveSession: "Approve for this session",
+  approveThread: "Allow in this thread",
   alwaysAllowForMe: "Always allow for me",
   alwaysAllowForTeam: "Always allow for this team",
   alwaysAllowOrg: "Always allow (org)",
@@ -408,6 +413,7 @@ function toGrantRow(r: {
   id: string;
   sessionId: string | null;
   workflowExecutionId: string | null;
+  threadId: string | null;
   policyKey: string;
   revokedAt: number | null;
 }): RuntimeGrantRow {
@@ -415,6 +421,7 @@ function toGrantRow(r: {
     id: r.id,
     sessionId: r.sessionId,
     workflowExecutionId: r.workflowExecutionId,
+    threadId: r.threadId,
     policyKey: r.policyKey,
     revokedAt: r.revokedAt,
   };
@@ -430,6 +437,8 @@ export interface ResolveActionPolicyInput {
   params: Record<string, unknown> | undefined;
   appliesIn: "session" | "workflow";
   sessionId?: string;
+  /** The calling thread, so a thread-scoped grant matches only there. */
+  threadId?: string;
   workflowExecutionId?: string;
   pluginDefault: ApprovalMode | undefined;
   now: number;
@@ -465,6 +474,7 @@ export async function resolveActionPolicy(db: AppDb, input: ResolveActionPolicyI
       params: input.params,
       appliesIn: input.appliesIn,
       sessionId: input.sessionId,
+      ...(input.threadId ? { threadId: input.threadId } : {}),
       workflowExecutionId: input.workflowExecutionId,
       now: input.now,
       ...(input.partialParams ? { partialParams: true } : {}),
@@ -486,8 +496,8 @@ export interface GrantWrite {
 
 /**
  * Upsert a session-scoped runtime grant (allow-only). Idempotent under exact
- * restart replay via T2's partial unique index
- * `runtime_grants_session_policy_key` — a replayed `onResolution` re-fires
+ * restart replay via the partial unique index
+ * `runtime_grants_session_wide_policy_key` — a replayed `onResolution` re-fires
  * this write with the same `(org, session, policyKey)` and no-ops. A grant
  * re-issued AFTER a revoke inserts a fresh row (revoked rows are excluded
  * from the partial index), which is correct.
@@ -508,7 +518,35 @@ export async function writeSessionGrant(db: AppDb, sessionId: string, grant: Gra
     })
     .onConflictDoNothing({
       target: [runtimeGrants.orgId, runtimeGrants.sessionId, runtimeGrants.policyKey],
-      where: sql`${runtimeGrants.sessionId} is not null and ${runtimeGrants.revokedAt} is null`,
+      where: sql`${runtimeGrants.sessionId} is not null and ${runtimeGrants.threadId} is null and ${runtimeGrants.revokedAt} is null`,
+    });
+}
+
+/**
+ * Upsert the grant "Allow in this thread" writes: like `writeSessionGrant`,
+ * but it matches only calls from `threadId`. The assistant's session spans
+ * every thread of the workspace, so a session grant is close to permanent; a
+ * thread grant ends with the task. Idempotent on
+ * `runtime_grants_thread_policy_key`.
+ */
+export async function writeThreadGrant(db: AppDb, sessionId: string, threadId: string, grant: GrantWrite): Promise<void> {
+  await db
+    .insert(runtimeGrants)
+    .values({
+      id: randomUUID(),
+      orgId: grant.orgId,
+      sessionId,
+      workflowExecutionId: null,
+      threadId,
+      policyKey: grantPolicyKey(grant.service, grant.actionId),
+      mode: "allow",
+      grantedBy: grant.grantedBy,
+      createdAt: grant.now,
+      revokedAt: null,
+    })
+    .onConflictDoNothing({
+      target: [runtimeGrants.orgId, runtimeGrants.sessionId, runtimeGrants.threadId, runtimeGrants.policyKey],
+      where: sql`${runtimeGrants.threadId} is not null and ${runtimeGrants.revokedAt} is null`,
     });
 }
 
@@ -919,6 +957,7 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
         params: input.params,
         appliesIn: input.appliesIn,
         sessionId: input.sessionId,
+        threadId: input.threadId,
         pluginDefault: pluginDefaultFor(input.service),
         now: clock(),
         ...(input.externalSender ? { externalSender: true } : {}),
@@ -961,11 +1000,10 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
             sessionId: input.sessionId, now, ...(input.partialParams ? { partialParams: true } : {}) },
           pluginDefaultFor(input.service),
         );
-      // Fewer buttons: when anyone who may answer can stop the asking for
-      // good, the session-long approval adds nothing a person would pick. It
-      // stays where an org rule hides the owner option, and where only a team
-      // admin may set the team's allow: a critical action, or one a team rule
-      // names. A member who is refused the allow still has a lasting choice.
+      // "Run without asking" approves only what anyone who may answer could
+      // stop asking for themselves. It stays off where an org rule hides the
+      // owner option, and where only a team admin may set the team's allow:
+      // a critical action, or one a team rule names.
       const anyoneMayAllow = ownerMayAllow && input.riskLevel !== "critical"
         && !(owner.teamId && teamRuleNamesAction(rows.policies.filter((rule) => rule.principalType === "team"), input, now));
       // "Run without asking" approves exactly what the person could stop
@@ -973,10 +1011,13 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
       if (anyoneMayAllow && await threadBypassCovers(deps.db, input, owner)) {
         return { mode: "allow", provenance: { ...decision.provenance, source: "thread_bypass" } };
       }
+      // "Allow in this thread" is the choice for "go ahead for this task":
+      // the next call of this action in this thread runs without a card,
+      // other threads still ask, and deny rules still win.
       return {
         ...decision,
         extraGateActions: [
-          ...(anyoneMayAllow ? [] : [{ id: GATE_ACTION_APPROVE_SESSION, label: GATE_ACTION_LABELS.approveSession, approves: true }]),
+          { id: GATE_ACTION_APPROVE_THREAD, label: GATE_ACTION_LABELS.approveThread, approves: true },
           ...(ownerMayAllow
             ? [{ id: GATE_ACTION_ALWAYS_ALLOW_OWNER, label: owner.teamId ? GATE_ACTION_LABELS.alwaysAllowForTeam : GATE_ACTION_LABELS.alwaysAllowForMe, approves: true }]
             : []),
@@ -1021,7 +1062,16 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
         }, now);
         return;
       }
-      if (resolution.actionId === GATE_ACTION_APPROVE_SESSION) {
+      if (resolution.actionId === GATE_ACTION_APPROVE_THREAD) {
+        if (!input.sessionId || !input.threadId) throw new Error("This approval has no thread. Approve it once instead.");
+        await writeThreadGrant(deps.db, input.sessionId, input.threadId, {
+          orgId: input.orgId,
+          service: input.service,
+          actionId: input.actionId,
+          grantedBy: resolution.resolvedBy,
+          now,
+        });
+      } else if (resolution.actionId === GATE_ACTION_APPROVE_SESSION) {
         if (!input.sessionId) return;
         await writeSessionGrant(deps.db, input.sessionId, {
           orgId: input.orgId,

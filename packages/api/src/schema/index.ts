@@ -1731,6 +1731,9 @@ export const runtimeGrants = pgTable(
     orgId: text("org_id").notNull(),
     sessionId: text("session_id"),
     workflowExecutionId: text("workflow_execution_id"),
+    /** Set for "Allow in this thread": the grant matches only this thread of
+     * the session. Null: the grant covers the whole session or run. */
+    threadId: text("thread_id"),
     policyKey: text("policy_key").notNull(),
     mode: text("mode", { enum: ["allow"] }).notNull().default("allow"),
     grantedBy: text("granted_by").notNull(),

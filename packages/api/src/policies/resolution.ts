@@ -17,7 +17,8 @@
  *   matching org rule. Team invocations load no personal overrides.
  *
  *   (1) A live runtime grant (`runtime_grants`, always `mode: "allow"`)
- *       quiets the invocation outright.
+ *       quiets the invocation outright. A grant with a `threadId`
+ *       ("Allow in this thread") matches only calls from that thread.
  *   (2) A per-user override (`action_policy_overrides`) wins next — this can
  *       be ANY mode, including "deny": a user's own standing deny is
  *       distinct from an org-level deny (0) and stays overridable by a
@@ -75,6 +76,8 @@ export interface RuntimeGrantRow {
   id: string;
   sessionId: string | null;
   workflowExecutionId: string | null;
+  /** Set: the grant matches only calls from this thread of the session. */
+  threadId?: string | null;
   policyKey: string;
   revokedAt: number | null;
 }
@@ -111,6 +114,8 @@ export interface PolicyResolutionInput {
   appliesIn: "session" | "workflow";
   /** Required when `appliesIn === "session"` — scopes runtime-grant matching. */
   sessionId?: string;
+  /** The calling thread. A thread-scoped grant matches only when it is equal. */
+  threadId?: string;
   /** Required when `appliesIn === "workflow"` — scopes runtime-grant matching. */
   workflowExecutionId?: string;
   /** Caller-supplied clock reading (ms) — kept explicit so expiry edge cases
@@ -262,6 +267,7 @@ function matchesGrantRow(row: RuntimeGrantRow, input: PolicyResolutionInput): bo
   if (row.revokedAt !== null) return false;
   if (row.policyKey !== grantPolicyKey(input.service, input.actionId)) return false;
   if (input.appliesIn === "session") {
+    if (row.threadId != null && row.threadId !== input.threadId) return false;
     return row.sessionId !== null && row.sessionId === input.sessionId;
   }
   return row.workflowExecutionId !== null && row.workflowExecutionId === input.workflowExecutionId;

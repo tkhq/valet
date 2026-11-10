@@ -240,6 +240,18 @@ describe("resolvePolicyDecision — rung 1: live runtime grant", () => {
     expect(decision.provenance.source).not.toBe("runtime_grant");
   });
 
+  it("a thread grant matches only its own thread", () => {
+    const r = rows({ grants: [grant({ threadId: "thr_1" })] });
+    expect(resolvePolicyDecision(r, baseInput({ threadId: "thr_1" }), undefined)).toMatchObject({ mode: "allow", provenance: { source: "runtime_grant" } });
+    expect(resolvePolicyDecision(r, baseInput({ threadId: "thr_2" }), undefined).mode).toBe("require_approval");
+    expect(resolvePolicyDecision(r, baseInput(), undefined).mode).toBe("require_approval");
+  });
+
+  it("a session grant with no thread matches every thread", () => {
+    const r = rows({ grants: [grant({ threadId: null })] });
+    expect(resolvePolicyDecision(r, baseInput({ threadId: "thr_2" }), undefined).mode).toBe("allow");
+  });
+
   it("a grant scoped to a different session does not match", () => {
     const r = rows({ grants: [grant({ sessionId: "sess_other" })] });
     const decision = resolvePolicyDecision(r, baseInput(), undefined);
