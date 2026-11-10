@@ -207,7 +207,7 @@ export function rowToEventSummary(row: EventHead): EventSummaryWire {
 /** A stored row with its jsonb columns narrowed to the shapes the one write
  * gate (`validateSubscriptionWrite`) persists — what `computeCollisions`
  * compares against. */
-type NarrowedSubscriptionRow = Omit<
+export type NarrowedSubscriptionRow = Omit<
   typeof eventSubscriptions.$inferSelect,
   "eventKeys" | "filters" | "target"
 > & {
@@ -257,7 +257,7 @@ function withoutReplaces(target: EventSubscriptionTargetWire): EventSubscription
  * disables. Disabled rows do not fire, so they cannot collide; enabling
  * one later re-runs this check (see the PATCH route).
  */
-async function collisionsForWrite(
+export async function collisionsForWrite(
   db: AppDb,
   plugins: ValetPlugin[],
   orgId: string,

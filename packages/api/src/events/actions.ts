@@ -3,11 +3,15 @@ import { isDeepStrictEqual } from "node:util";
 import { and, desc, eq, gte, lte, ne, sql } from "drizzle-orm";
 import { Type } from "typebox";
 import type { Static, TSchema } from "typebox";
-import type { ActionPlugin, PluginAction, PluginActionContext, PluginActionResult, ValetPlugin } from "@valet/engine";
+import type { ActionPlugin, CredentialStore, PluginAction, PluginActionContext, PluginActionResult, ValetPlugin } from "@valet/engine";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import { eventDropLog, eventReceipts, eventSubscriptions, orgMembers, type EventDropLogRow, type EventSubscriptionRow } from "../schema/index.js";
 
 import { withAuthorizedTeamOwnership } from "../services/teams.js";
+import { orgAllowsPluginForOwner } from "../services/plugin-entitlements.js";
+import { linearEventArmBlock } from "../services/linear-ingress.js";
+import { collisionsForWrite } from "../routes/events.js";
+import type { EventSubscriptionTargetWire } from "../wire/types.js";
 import { FILTER_OPS } from "./match.js";
 import { validateSubscriptionWrite } from "./subscription-write.js";
 import { proposalId, proposalResult } from "./proposals.js";
@@ -40,6 +44,40 @@ function metadata(row: EventDropLogRow): Record<string, unknown> {
 function timestampIsSafe(value: number | undefined): boolean {
   return value === undefined || (Number.isSafeInteger(value) && value >= MIN_TIMESTAMP && value <= MAX_TIMESTAMP);
 }
+
+const PROPOSE_INPUT = Type.Object({
+  proposal_key: Type.String({ minLength: 1, maxLength: 200, description: "Stable proposal key. Reuse on retries; use a new key for a different proposal." }),
+  name: Type.String({ minLength: 1 }),
+  event_keys: Type.Optional(Type.Array(Type.String(), { minItems: 1, description: "Required for an assistant subscription. For a plugin handler, omit it to use the events the handler accepts." })),
+  plugin_handler: Type.Optional(Type.Object({
+    plugin: Type.String({ minLength: 1 }),
+    handler: Type.String({ minLength: 1 }),
+    config: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "Handler settings. Omit them to use the handler's defaults." })),
+  }, { description: "Hand the events to a plugin's event handler instead of the assistant. Code review on one repository is plugin pr-review, handler review-pull-request, with the filter repo eq owner/name." })),
+  filters: Type.Optional(Type.Array(Type.Object({
+    field: Type.String(), op: Type.Union(FILTER_OPS.map((op) => Type.Literal(op))),
+    value: Type.Unknown(),
+  }), { description: "Conditions on fields the selected event keys declare. To cover Slack channels by name, including channels created later, filter channel_name with prefix (such as alerts-) or regex. To skip events, such as posts from one bot, use not_in with a list, not_prefix, or not_regex; an event without the field still matches." })),
+  any_channel: Type.Optional(Type.Boolean({ description: "For slack.app_mention only: listen in every channel the app can see. A channel_name condition needs it too, because it is not a fixed channel list." })),
+  follow: Type.Optional(Type.Boolean({ description: "For slack.app_mention only: also deliver later replies from the source thread. Defaults to true for a slack.app_mention rule." })),
+  delivery_policy: Type.Optional(Type.Union([
+    Type.Literal("always"), Type.Literal("ignoreIfMyTeamSubscribed"), Type.Literal("ignoreIfAnyTeamSubscribed"),
+  ], { description: "Personal target only: choose whether matching team subscriptions suppress delivery." })),
+  pause_on_overlap: Type.Optional(Type.Boolean({ description: "Personal target only: pause following when a team subscription covers the thread." })),
+  presence: Type.Optional(Type.Object({
+    displayName: Type.Optional(Type.String()),
+    avatarUrl: Type.Optional(Type.String()),
+  })),
+  user_prompt_template: Type.Optional(Type.String()),
+  system_prompt: Type.Optional(Type.String()),
+  audience: Type.Optional(Type.Union([Type.Literal("team"), Type.Literal("organization")])),
+  replaces: Type.Optional(Type.String({ minLength: 1, description: "ID of the enabled subscription in this workspace that this proposal updates. When a person enables the proposal, Valet disables that subscription." })),
+  once_per_hours: Type.Optional(Type.Integer({ minimum: 1, maximum: 168, description: "Deliver at most once in this many hours, however often the event happens. Use it with slack.user_online." })),
+});
+type ProposeInput = Static<typeof PROPOSE_INPUT>;
+
+/** Inputs that shape an assistant's delivery, refused with a plugin handler. */
+const ASSISTANT_ONLY_INPUTS = ["follow", "delivery_policy", "pause_on_overlap", "presence", "user_prompt_template", "system_prompt", "replaces"] as const;
 
 /** A channel sender with no Valet account runs as the rule's creator, but is
  * not that person: they may not manage or inspect the workspace's events. */
@@ -75,7 +113,12 @@ function matchOutcome(reason: string): "excluded_by_filter" | null {
 /** Agent-facing counterpart of the Problems page. The drop log remains the
  * only store: it retains a small, redacted event identity for filter misses,
  * never the source payload. */
-export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => ValetPlugin[]) = []): ActionPlugin {
+export function eventsActionPlugin(
+  db: AppDb,
+  plugins: ValetPlugin[] | (() => ValetPlugin[]) = [],
+  /** For the Linear readiness check a turn-on makes. Absent: lines on Linear events stay off. */
+  credentials?: () => CredentialStore,
+): ActionPlugin {
   async function withSubscriptionScope(
     ctx: PluginActionContext,
     access: "read" | "write",
@@ -156,33 +199,126 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
     }),
   });
 
-  const proposeSubscription = action(Type.Object({
-    proposal_key: Type.String({ minLength: 1, maxLength: 200, description: "Stable proposal key. Reuse on retries; use a new key for a different proposal." }),
-    name: Type.String({ minLength: 1 }),
-    event_keys: Type.Array(Type.String(), { minItems: 1 }),
-    filters: Type.Optional(Type.Array(Type.Object({
-      field: Type.String(), op: Type.Union(FILTER_OPS.map((op) => Type.Literal(op))),
-      value: Type.Unknown(),
-    }), { description: "Conditions on fields the selected event keys declare. To cover Slack channels by name, including channels created later, filter channel_name with prefix (such as alerts-) or regex. To skip events, such as posts from one bot, use not_in with a list, not_prefix, or not_regex; an event without the field still matches." })),
-    any_channel: Type.Optional(Type.Boolean({ description: "For slack.app_mention only: listen in every channel the app can see. A channel_name condition needs it too, because it is not a fixed channel list." })),
-    follow: Type.Optional(Type.Boolean({ description: "For slack.app_mention only: also deliver later replies from the source thread. Defaults to true for a slack.app_mention rule." })),
-    delivery_policy: Type.Optional(Type.Union([
-      Type.Literal("always"), Type.Literal("ignoreIfMyTeamSubscribed"), Type.Literal("ignoreIfAnyTeamSubscribed"),
-    ], { description: "Personal target only: choose whether matching team subscriptions suppress delivery." })),
-    pause_on_overlap: Type.Optional(Type.Boolean({ description: "Personal target only: pause following when a team subscription covers the thread." })),
-    presence: Type.Optional(Type.Object({
-      displayName: Type.Optional(Type.String()),
-      avatarUrl: Type.Optional(Type.String()),
-    })),
-    user_prompt_template: Type.Optional(Type.String()),
-    system_prompt: Type.Optional(Type.String()),
-    audience: Type.Optional(Type.Union([Type.Literal("team"), Type.Literal("organization")])),
-    replaces: Type.Optional(Type.String({ minLength: 1, description: "ID of the enabled subscription in this workspace that this proposal updates. When a person enables the proposal, Valet disables that subscription." })),
-    once_per_hours: Type.Optional(Type.Integer({ minimum: 1, maximum: 168, description: "Deliver at most once in this many hours, however often the event happens. Use it with slack.user_online." })),
+  const setSubscriptionEnabled = action(Type.Object({
+    subscription_id: Type.String({ minLength: 1, description: "Line ID from events.list_subscriptions or events.propose_subscription." }),
+    enabled: Type.Boolean({ description: "true turns a plugin handler line on; false turns any line off." }),
+    allow_collision: Type.Optional(Type.Boolean({ description: "Turn the line on although enabled lines on the same events fire too, as the Turn on anyway button does. Set it only after you name those lines to the person and they agree." })),
   }))({
+    id: "events.set_subscription_enabled",
+    name: "Turn event subscription on or off",
+    description: "Turn a line in this workspace on or off when the person asks for it. Turning on works for a plugin handler line, such as a code review line from events.propose_subscription; turn assistant lines on in Presence. Turning on refuses a line that would fire together with an enabled line on the same events. A workflow step or a child session cannot use it.",
+    // The person's request is the approval, as in a direct chat: no card by
+    // default, and an org or team policy can still require one. Work with no
+    // person behind it cannot arm a line that keeps acting, posts on GitHub
+    // and spends model calls: unattended team runs are refused by
+    // withSubscriptionScope, and workflow steps and child sessions below.
+    riskLevel: "medium",
+    execute: async ({ subscription_id, enabled, allow_collision }, ctx) => (ctx.sessionPurpose === "workflow" || ctx.sessionPurpose === "child" || ctx.unattendedWorkflow)
+      ? { success: false, error: "A workflow step or a child session cannot turn lines on or off. Ask the person to do it from a thread or on the Code review page." }
+      : withSubscriptionScope(ctx, "write", async (tx, scope) => {
+      const [row] = await tx.select().from(eventSubscriptions).where(and(eq(eventSubscriptions.id, subscription_id),
+        eq(eventSubscriptions.orgId, scope.orgId), eq(eventSubscriptions.ownerType, scope.ownerType), eq(eventSubscriptions.ownerId, scope.ownerId))).limit(1);
+      if (!row) return { success: false, error: "Subscription not found in this workspace. Use events.list_subscriptions to select one." };
+      const target = readStoredTarget(row.target) as EventSubscriptionTargetWire;
+      const answer = (stored: EventSubscriptionRow): PluginActionResult => ({ success: true, data: { subscription: { ...stored, target: readStoredTarget(stored.target) } } });
+      if (row.enabled === enabled) return answer(row);
+      if (enabled) {
+        // An assistant line has replacement, pause and thread rules that
+        // the PATCH route owns; a workflow trigger has workflows.update_trigger.
+        if (target.kind !== "plugin") {
+          return { success: false, error: `This is a ${target.kind} line. Turn it on in Presence, or with workflows.update_trigger for a workflow trigger.` };
+        }
+        if (!(await orgAllowsPluginForOwner(tx, scope.orgId, { type: scope.ownerType, id: scope.ownerId }, target.plugin))) {
+          return { success: false, error: `Plugin ${target.plugin} is off for this workspace. Ask an org admin to turn it on in Settings.` };
+        }
+        // The checks the PATCH route makes when a line's switch turns it on.
+        const eventKeys = row.eventKeys as string[];
+        const write = await validateSubscriptionWrite(db, pluginList(), { name: row.name, eventKeys, filters: row.filters, target, audience: row.audience ?? undefined },
+          { creatorUserId: row.createdBy, checkPluginConfig: false, anyChannel: false, ownerType: scope.ownerType, matchChanged: false, storedAudience: row.audience });
+        if (!write.ok) return { success: false, error: write.error };
+        if (eventKeys.some((key) => key.startsWith("linear."))) {
+          const blocked = credentials ? await linearEventArmBlock(db, credentials(), scope.orgId, eventKeys) : "Valet cannot check the Linear connection here. Turn this line on in Presence.";
+          if (blocked) return { success: false, error: blocked };
+        }
+        const report = await collisionsForWrite(db, pluginList(), scope.orgId, { ownerType: scope.ownerType, eventKeys, filters: write.filters, target }, [row.id]);
+        if (report.blocking.length > 0 && allow_collision !== true) {
+          const names = report.blocking.map((c) => `"${c.subscription.name}"`).join(", ");
+          return { success: false, error: `Turning this line on makes it fire together with ${names} on the same events. Tell the person which lines also fire. If they agree, call again with allow_collision: true.` };
+        }
+        if (report.blocking.length > 0) {
+          console.warn(`[events] collision override: user ${ctx.actor?.id ?? ctx.userId} turned on subscription ${row.id} over ${report.blocking.map((c) => c.subscription.id).join(", ")}`);
+        }
+      }
+      const [updated] = await tx.update(eventSubscriptions)
+        .set({ enabled, updatedAt: Math.max(Date.now(), row.updatedAt + 1) })
+        .where(and(eq(eventSubscriptions.id, row.id), eq(eventSubscriptions.updatedAt, row.updatedAt))).returning();
+      return updated ? answer(updated) : { success: false, error: "This line changed while you were turning it on or off. Read it again with events.list_subscriptions and retry." };
+    }),
+  });
+
+  const pluginList = (): ValetPlugin[] => typeof plugins === "function" ? plugins() : plugins;
+
+  /** The assistant target a proposal stores, from the assistant-only inputs. */
+  function assistantTarget(input: ProposeInput, ownerType: "user" | "team", ownerId: string): Record<string, unknown> {
+    // A mention rule follows its thread by default, as the setup wizard
+    // does: Valet answers follow-ups meant for it without a fresh mention.
+    const mentionOnly = input.event_keys?.length === 1 && input.event_keys[0] === "slack.app_mention";
+    const follow = input.follow ?? (mentionOnly ? true : undefined);
+    return {
+      kind: "assistant" as const, assistant: ownerType,
+      ...(ownerType === "team" ? { teamId: ownerId } : {}),
+      ...(follow !== undefined ? { follow } : {}),
+      ...(input.delivery_policy !== undefined ? { deliveryPolicy: input.delivery_policy } : {}),
+      ...(input.pause_on_overlap !== undefined ? { pauseOnOverlap: input.pause_on_overlap } : {}),
+      ...(input.presence !== undefined ? { appearance: input.presence } : {}),
+      ...(input.user_prompt_template !== undefined ? { userPromptTemplate: input.user_prompt_template } : {}),
+      ...(input.system_prompt !== undefined ? { systemPrompt: input.system_prompt } : {}),
+      ...(input.replaces !== undefined ? { replaces: input.replaces } : {}),
+      ...(input.once_per_hours !== undefined ? { oncePerHours: input.once_per_hours } : {}),
+    };
+  }
+
+  /**
+   * The plugin target and event keys a proposal stores, with the checks the
+   * POST route makes for a plugin line: the handler exists and the org
+   * admits the plugin for this workspace. Team membership is checked when
+   * the row is written.
+   */
+  async function pluginHandlerTarget(
+    input: ProposeInput,
+    orgId: string,
+    owner: { type: "user" | "team"; id: string },
+  ): Promise<{ ok: true; eventKeys: string[]; target: Record<string, unknown> } | { ok: false; error: string }> {
+    const choice = input.plugin_handler!;
+    const assistantOnly = ASSISTANT_ONLY_INPUTS.filter((field) => input[field] !== undefined);
+    if (assistantOnly.length > 0) {
+      return { ok: false, error: `A plugin handler does not take ${assistantOnly.join(", ")}. Remove them, or drop plugin_handler to propose an assistant subscription.` };
+    }
+    const declared = pluginList().flatMap((p) => (p.eventHandlers ?? []).map((h) => ({ plugin: p.name, handler: h })));
+    const found = declared.find((d) => d.plugin === choice.plugin && d.handler.id === choice.handler);
+    if (!found) {
+      const known = declared.map((d) => `${d.plugin}/${d.handler.id}`).join(", ") || "none";
+      return { ok: false, error: `Unknown plugin handler ${choice.plugin}/${choice.handler}. Pick one of: ${known}.` };
+    }
+    if (!(await orgAllowsPluginForOwner(db, orgId, owner, choice.plugin))) {
+      return { ok: false, error: `Plugin ${choice.plugin} is off for this workspace. Ask an org admin to turn it on in Settings.` };
+    }
+    return {
+      ok: true,
+      eventKeys: input.event_keys ?? [...found.handler.events],
+      target: {
+        kind: "plugin" as const, plugin: choice.plugin, handler: choice.handler,
+        // A team line acts for the team, as one the Code review page adds.
+        ...(owner.type === "team" ? { teamId: owner.id } : {}),
+        ...(choice.config !== undefined ? { config: choice.config } : {}),
+      },
+    };
+  }
+
+  const proposeSubscription = action(PROPOSE_INPUT)({
     id: "events.propose_subscription",
-    name: "Propose assistant event subscription",
-    description: "Save a disabled event subscription for the current personal or team assistant. Pick event keys from workflows.list_event_types. Returns the stored configuration and a Presence review link. The user must review and enable it. Repeated proposal keys do not change the existing record. To revise an enabled subscription, set replaces to its ID from events.list_subscriptions; enabling the proposal disables the replaced subscription, so only one version replies.",
+    name: "Propose event subscription",
+    description: "Save a disabled event subscription for the current personal or team assistant, or for a plugin event handler (plugin_handler), such as code review on a repository. Pick event keys from workflows.list_event_types. Returns the stored configuration and a Presence review link. The user must review and enable it. Repeated proposal keys do not change the existing record. To revise an enabled subscription, set replaces to its ID from events.list_subscriptions; enabling the proposal disables the replaced subscription, so only one version replies.",
     riskLevel: "low",
     execute: async (input, ctx) => {
       if (ctx.externalSender) return EXTERNAL_SENDER;
@@ -198,33 +334,24 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
       if (ownerType === "team" && (input.delivery_policy !== undefined || input.pause_on_overlap !== undefined)) {
         return { success: false, error: "These delivery preferences apply only to personal subscriptions. Open your personal assistant or omit these fields." };
       }
-      if (input.follow === true && (input.event_keys.length !== 1 || input.event_keys[0] !== "slack.app_mention")) {
+      if (input.plugin_handler === undefined && input.follow === true && (input.event_keys?.length !== 1 || input.event_keys[0] !== "slack.app_mention")) {
         return { success: false, error: "Follow is only available for slack.app_mention. Message subscriptions already deliver matching replies." };
       }
-      // A mention rule follows its thread by default, as the setup wizard
-      // does: Valet answers follow-ups meant for it without a fresh mention.
-      const mentionOnly = input.event_keys.length === 1 && input.event_keys[0] === "slack.app_mention";
-      const follow = input.follow ?? (mentionOnly ? true : undefined);
-      const target = {
-        kind: "assistant" as const, assistant: ownerType,
-        ...(ownerType === "team" ? { teamId: ownerId } : {}),
-        ...(follow !== undefined ? { follow } : {}),
-        ...(input.delivery_policy !== undefined ? { deliveryPolicy: input.delivery_policy } : {}),
-        ...(input.pause_on_overlap !== undefined ? { pauseOnOverlap: input.pause_on_overlap } : {}),
-        ...(input.presence !== undefined ? { appearance: input.presence } : {}),
-        ...(input.user_prompt_template !== undefined ? { userPromptTemplate: input.user_prompt_template } : {}),
-        ...(input.system_prompt !== undefined ? { systemPrompt: input.system_prompt } : {}),
-        ...(input.replaces !== undefined ? { replaces: input.replaces } : {}),
-        ...(input.once_per_hours !== undefined ? { oncePerHours: input.once_per_hours } : {}),
-      };
-      const write = await validateSubscriptionWrite(db, typeof plugins === "function" ? plugins() : plugins, {
-        name: input.name, eventKeys: input.event_keys, filters: input.filters ?? [], target, audience: input.audience,
+      const planned = input.plugin_handler !== undefined
+        ? await pluginHandlerTarget(input, ctx.orgId, { type: ownerType, id: ownerId })
+        : input.event_keys !== undefined
+          ? { ok: true as const, eventKeys: input.event_keys, target: assistantTarget(input, ownerType, ownerId) }
+          : { ok: false as const, error: "event_keys is required for an assistant subscription. Pick event keys from workflows.list_event_types." };
+      if (!planned.ok) return { success: false, error: planned.error };
+      const { eventKeys, target } = planned;
+      const write = await validateSubscriptionWrite(db, pluginList(), {
+        name: input.name, eventKeys, filters: input.filters ?? [], target, audience: input.audience,
       }, { creatorUserId: userId, ownerType, anyChannel: input.any_channel === true, matchChanged: true });
       if (!write.ok) return { success: false, error: write.error };
       const now = Date.now();
       const values = {
         id: proposalId("subscription", ctx.orgId, ownerType, ownerId, input.proposal_key),
-        orgId: ctx.orgId, ownerType, ownerId, name: input.name, eventKeys: input.event_keys,
+        orgId: ctx.orgId, ownerType, ownerId, name: input.name, eventKeys,
         filters: write.filters, target, audience: write.audience ?? null, enabled: false,
         createdBy: userId, createdAt: now, updatedAt: now,
       };
@@ -387,5 +514,5 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
       return { success: true, data: { receipts: rows.slice(0, pageLimit).map(receiptWire), hasMore: rows.length > pageLimit, retentionDays: RECEIPT_RETENTION_DAYS } };
     },
   });
-  return { service: "events", description: "Diagnose event delivery, propose disabled subscriptions, and set the reply appearance on existing workspace subscriptions.", actions: [listProblems, listLogs, proposeSubscription, listSubscriptions, setSubscriptionPresence] };
+  return { service: "events", description: "Diagnose event delivery, propose disabled subscriptions, turn plugin handler lines on or off, and set the reply appearance on existing workspace subscriptions.", actions: [listProblems, listLogs, proposeSubscription, listSubscriptions, setSubscriptionPresence, setSubscriptionEnabled] };
 }

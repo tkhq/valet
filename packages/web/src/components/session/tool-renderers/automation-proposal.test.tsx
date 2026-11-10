@@ -24,6 +24,13 @@ describe("automation proposal renderer", () => {
     expect(screen.getByText("Team members")).toBeTruthy();
     expect(screen.getByRole("link", { name: "Review" }).getAttribute("href")).toBe("/presence/rules/proposal-1");
   });
+  it("names the plugin handler a plugin line hands events to", () => {
+    const Body = automationProposalRenderer.Body;
+    render(<Body args={{}} toolName="call_tool" status="completed" result={JSON.stringify({ proposal: { kind: "subscription", id: "proposal-3", config: { eventKeys: ["github.pull_request.opened"], filters: [{ field: "repo", op: "eq", value: "acme/site" }], target: { kind: "plugin", plugin: "pr-review", handler: "review-pull-request" } } } })} />);
+    expect(screen.getByText("Hand matching events to the pr-review/review-pull-request handler")).toBeTruthy();
+    expect(screen.getByText("Plugin handler pr-review/review-pull-request")).toBeTruthy();
+    expect(screen.queryByText("Workspace assistant")).toBeNull();
+  });
   it("links a schedule proposal to its routine page", () => {
     const Body = automationProposalRenderer.Body;
     render(<Body args={{}} toolName="call_tool" status="completed" result={JSON.stringify({ proposal: { kind: "schedule", id: "proposal-2", config: { cron: "0 9 * * *", timezone: "UTC", prompt: "Summarize" } } })} />);

@@ -48,11 +48,12 @@ function ProposalBody({ result }: ToolRendererProps) {
   }) : [];
   const schedule = proposal.kind === "schedule";
   const workflowId = typeof config?.workflowId === "string" ? config.workflowId : typeof target?.workflowId === "string" ? target.workflowId : undefined;
+  const handler = target?.kind === "plugin" ? `${String(target.plugin)}/${String(target.handler)}` : undefined;
   return <div className="space-y-3 p-3">
     <ProposalSummary follow={typeof target?.follow === "boolean" ? target.follow : undefined} audience={typeof config?.audience === "string" ? config.audience : undefined} workflowId={workflowId} when={schedule ? `${String(config?.cron ?? "")} (${String(config?.timezone ?? "")})` : keys.join(", ")}
       scope={filters.join("; ") || "Selected workspace"}
-      result={String(target?.userPromptTemplate ?? config?.prompt ?? (workflowId ? "Run workflow" : "Send matching events to the assistant"))}
-      destination={workflowId ?? "Workspace assistant"} />
+      result={String(target?.userPromptTemplate ?? config?.prompt ?? (workflowId ? "Run workflow" : handler ? `Hand matching events to the ${handler} handler` : "Send matching events to the assistant"))}
+      destination={workflowId ?? (handler ? `Plugin handler ${handler}` : "Workspace assistant")} />
     <p className="text-xs text-muted">Open the saved configuration to review its current settings. This preview does not grant permissions.</p>
     {schedule ? <Link className="text-sm text-moss underline" to="/presence/routines/$id" params={{ id: proposal.id }}>Review routine</Link>
       : <Link className="text-sm text-moss underline" to="/presence/rules/$id" params={{ id: proposal.id }}>Review</Link>}
