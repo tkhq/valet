@@ -788,14 +788,22 @@ async function lineCountsAt(gh: GitHubClient, files: PullFile[], paths: string[]
   const counts = new Map<string, number>();
   for (const path of new Set(paths)) {
     if (!present.has(path)) continue;
-    const text = await readableText(gh, path, ref);
+    let text: string | undefined;
+    try {
+      text = await gh.fileText(path, ref);
+    } catch (err) {
+      // Unreadable now (a 403, 5xx or rate limit): leave its findings unchecked rather than drop them as past a 1-line file.
+      console.warn(`pr-review: cannot read ${path} at ${ref.slice(0, 7)}; its findings skip the line check`, err instanceof Error ? err.message : err);
+      counts.set(path, Number.POSITIVE_INFINITY);
+      continue;
+    }
     counts.set(path, text === undefined ? 1 : lineCount(text));
   }
   return counts;
 }
 
 /**
- * A file's text for a best-effort check (line counts, quote checks), or
+ * A file's text for a best-effort check (the verifier's quote check), or
  * undefined when GitHub cannot serve it: one unreadable file must not fail
  * the review. Instruction reads (`readTrusted`) call `gh.fileText` directly,
  * because a failed read there must fail the pack, not drop the rule.

@@ -339,6 +339,8 @@ describe("review-pull-request handler", () => {
     const threads = new FakeThreads(scripted(reviewOf([finding({ title: "Null deref in parse" })]), {}));
     await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1", "github.pull_request.opened"), context(threads, new FakeStore(), { verify: true, contextBudget: 0 }));
     expect(gh.reviews.size).toBe(1);
+    // The finding on the unreadable file skips the line check instead of being dropped.
+    expect([...gh.reviews.values()][0].body).toContain("Open findings (1)");
   });
 
   it("posts one review with inline and summary findings on the first push", async () => {
