@@ -32,6 +32,7 @@ import {
 import { runReviewPipeline, type AgentRunResult, type AgentRunner } from "@valet/plugin-pr-review";
 import { LocalSandboxProvider } from "@valet/sandbox-local";
 import { gatewayModelResolver, viaGateway } from "./gateway.js";
+import { pullRequestBody } from "./private-pull-request.js";
 import { extractTrajectory } from "./trajectory.js";
 import type { CaseOutcome, CaseRunResult, RunnerOptions } from "./runner.js";
 import type { EvalCase, PullRequestSpec, Trajectory } from "./types.js";
@@ -190,7 +191,7 @@ async function reviewInWorkspace(
       base: spec.base,
       head: spec.head,
       title: spec.title,
-      body: spec.body ?? "",
+      body: spec.body ?? (spec.number !== undefined ? await pullRequestBody(spec.remote, spec.number) : ""),
       verify,
       ...(opts.verifyModel !== undefined ? { verifyModel: opts.verifyModel } : {}),
       ...(opts.reviewPasses !== undefined ? { passes: opts.reviewPasses } : {}),

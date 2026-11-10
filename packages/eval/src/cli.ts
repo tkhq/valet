@@ -71,6 +71,10 @@ async function main(): Promise<number> {
     return 0;
   }
 
+  if (opts.casesSkip !== undefined) {
+    console.log(`SKIP ${opts.casesSkip}`);
+    return 0;
+  }
   const allCases = await loadCases(opts.casesDir);
   const cases = filterCases(allCases, opts.filter);
   if (cases.length === 0) {

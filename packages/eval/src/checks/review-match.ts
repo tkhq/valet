@@ -316,7 +316,7 @@ function crossRepoMetrics(check: ReviewMatchCheck, profile: ReviewProfile, match
 }
 
 // Replacer functions: a `$&` or `$'` inside review text must stay literal.
-async function extractIssues(llm: ReviewLlm, comment: string): Promise<string[]> {
+export async function extractIssues(llm: ReviewLlm, comment: string): Promise<string[]> {
   const parsed = await callJson(llm, EXTRACT_SYSTEM, EXTRACT_PROMPT.replace("{comment}", () => comment), 3);
   if (!isRecord(parsed) || !Array.isArray(parsed.issues)) throw new Error("extract step returned no `issues` array");
   return parsed.issues.filter((x): x is string => typeof x === "string" && x.length > 0);
@@ -346,7 +346,7 @@ function validGroups(groups: unknown[], n: number): groups is number[][] {
   return seen.size === n;
 }
 
-async function judgePair(llm: ReviewLlm, golden: string, candidate: string): Promise<{ match: boolean; confidence: number }> {
+export async function judgePair(llm: ReviewLlm, golden: string, candidate: string): Promise<{ match: boolean; confidence: number }> {
   const prompt = JUDGE_PROMPT.replace("{golden_comment}", () => golden).replace("{candidate}", () => candidate);
   const parsed = await callJson(llm, JUDGE_SYSTEM, prompt, 5);
   if (!isRecord(parsed)) throw new Error("judge step returned a non-object");
@@ -373,7 +373,7 @@ async function callJson(llm: ReviewLlm, system: string, prompt: string, attempts
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
-function modelLlm(model: Model<string>, apiKey: string | undefined): ReviewLlm {
+export function modelLlm(model: Model<string>, apiKey: string | undefined): ReviewLlm {
   return async (system, prompt) => {
     const result = await completeSimple(
       model,
