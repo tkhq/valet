@@ -37,9 +37,3 @@ to personal scope, because plugins can act only for a person or a team.
 The change does not move existing configurations between workspaces or create a
 second review subscription. Turnkey's monorepo pilot still requires the PR
 review plugin to be deployed there before its repository can be configured.
-
-The reviewer's prompt holds at most 50,000 characters of the PR diff, the
-engine's `read` cap (`READ_MAX_CHARS`, about 25,000 tokens), in the plugin and
-in the standalone runner (2026-11-10). Before, it held 150,000 characters.
-`cutPatch` keeps whole files and lists the files it leaves out, and the
-reviewer runs `git diff` for them.
