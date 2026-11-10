@@ -10,7 +10,7 @@ import { eventDropLog, eventReceipts, eventSubscriptions, orgMembers, type Event
 import { withAuthorizedTeamOwnership } from "../services/teams.js";
 import { orgAllowsPluginForOwner } from "../services/plugin-entitlements.js";
 import { linearEventArmBlock } from "../services/linear-ingress.js";
-import { collisionBlockMessage, collisionsForWrite } from "../routes/events.js";
+import { collisionsForWrite } from "../routes/events.js";
 import type { EventSubscriptionTargetWire } from "../wire/types.js";
 import { FILTER_OPS } from "./match.js";
 import { validateSubscriptionWrite } from "./subscription-write.js";
@@ -202,6 +202,7 @@ export function eventsActionPlugin(
   const setSubscriptionEnabled = action(Type.Object({
     subscription_id: Type.String({ minLength: 1, description: "Line ID from events.list_subscriptions or events.propose_subscription." }),
     enabled: Type.Boolean({ description: "true turns a plugin handler line on; false turns any line off." }),
+    allow_collision: Type.Optional(Type.Boolean({ description: "Turn the line on although enabled lines on the same events fire too, as the Turn on anyway button does. Set it only after you name those lines to the person and they agree." })),
   }))({
     id: "events.set_subscription_enabled",
     name: "Turn event subscription on or off",
@@ -212,7 +213,7 @@ export function eventsActionPlugin(
     // and spends model calls: unattended team runs are refused by
     // withSubscriptionScope, and workflow steps and child sessions below.
     riskLevel: "medium",
-    execute: async ({ subscription_id, enabled }, ctx) => (ctx.sessionPurpose === "workflow" || ctx.sessionPurpose === "child" || ctx.unattendedWorkflow)
+    execute: async ({ subscription_id, enabled, allow_collision }, ctx) => (ctx.sessionPurpose === "workflow" || ctx.sessionPurpose === "child" || ctx.unattendedWorkflow)
       ? { success: false, error: "A workflow step or a child session cannot turn lines on or off. Ask the person to do it from a thread or on the Code review page." }
       : withSubscriptionScope(ctx, "write", async (tx, scope) => {
       const [row] = await tx.select().from(eventSubscriptions).where(and(eq(eventSubscriptions.id, subscription_id),
@@ -240,8 +241,12 @@ export function eventsActionPlugin(
           if (blocked) return { success: false, error: blocked };
         }
         const report = await collisionsForWrite(db, pluginList(), scope.orgId, { ownerType: scope.ownerType, eventKeys, filters: write.filters, target }, [row.id]);
+        if (report.blocking.length > 0 && allow_collision !== true) {
+          const names = report.blocking.map((c) => `"${c.subscription.name}"`).join(", ");
+          return { success: false, error: `Turning this line on makes it fire together with ${names} on the same events. Tell the person which lines also fire. If they agree, call again with allow_collision: true.` };
+        }
         if (report.blocking.length > 0) {
-          return { success: false, error: `${collisionBlockMessage(report, "turn-on")} The button is on this line in Presence.` };
+          console.warn(`[events] collision override: user ${ctx.actor?.id ?? ctx.userId} turned on subscription ${row.id} over ${report.blocking.map((c) => c.subscription.id).join(", ")}`);
         }
       }
       const [updated] = await tx.update(eventSubscriptions)

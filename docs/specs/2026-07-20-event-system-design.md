@@ -396,7 +396,8 @@ Superseded on 2026-09-29 by "Organization Linear application setup" below. The o
   turn-on makes the checks the PATCH route
   makes for a line's switch: the org still admits the plugin, the row still
   validates, a line on Linear events needs a ready Linear connection, and a
-  blocking collision refuses it with no override. Assistant lines stay with
+  blocking collision refuses it unless the call sets `allow_collision`, the
+  action's form of Turn on anyway, after the person agrees. Assistant lines stay with
   Presence, because their replacement, pause and thread rules live in the
   PATCH route. The `events` service is internal, so an external MCP client
   reaches both actions through `start_thread`.

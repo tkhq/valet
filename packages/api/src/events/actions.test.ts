@@ -259,7 +259,10 @@ describe("eventsActionPlugin", () => {
     // A second line on the same repository would fire together with the first.
     const second = await propose.execute({ ...line, proposal_key: "site-again" }, context("member"));
     const secondId = (second.data as { proposal: { id: string } }).proposal.id;
-    expect(await toggle.execute({ subscription_id: secondId, enabled: true }, context("member"))).toMatchObject({ success: false, error: expect.stringContaining("both would fire together") });
+    expect(await toggle.execute({ subscription_id: secondId, enabled: true }, context("member"))).toMatchObject({ success: false, error: expect.stringContaining("allow_collision: true") });
+    // The person agreed: both lines fire, as with Turn on anyway.
+    expect(await toggle.execute({ subscription_id: secondId, enabled: true, allow_collision: true }, context("member"))).toMatchObject({ success: true, data: { subscription: { enabled: true } } });
+    expect(await toggle.execute({ subscription_id: secondId, enabled: false }, context("member"))).toMatchObject({ success: true });
     // Another person's line is not found; turning off works.
     expect(await toggle.execute({ subscription_id: id, enabled: false }, context("admin"))).toMatchObject({ success: false, error: expect.stringContaining("not found") });
     expect(await toggle.execute({ subscription_id: id, enabled: false }, context("member"))).toMatchObject({ success: true, data: { subscription: { enabled: false } } });

@@ -292,7 +292,7 @@ function collisionsToWire(report: CollisionReport<NarrowedSubscriptionRow>): Eve
  * two ways out, since `errorText` may be all a caller renders. `way` names the
  * write, so the text quotes the button the caller shows for it: a create's
  * "Create anyway", a switch's "Turn on anyway", an edit's "Save anyway". */
-export function collisionBlockMessage(
+function collisionBlockMessage(
   report: CollisionReport<NarrowedSubscriptionRow>,
   way: "create" | "turn-on" | "save",
 ): string {
