@@ -149,6 +149,22 @@ describe("assembleMemorySnapshot", () => {
     expect(team.get("principles/ship-small.md")).toMatchObject({ injectCount: 1 });
   });
 
+  it("keeps pinned files under a small budget and gives the index the room left", async () => {
+    api = await bootTestApi();
+    const { db } = api.providers;
+    await writeFile(db, scope, { path: "preferences/style.md", content: `# Style\n\n${"s".repeat(3_000)} PINNED\n`, pinned: true });
+    for (let i = 0; i < 60; i++) {
+      await writeFile(db, scope, { path: `notes/file-${String(i).padStart(2, "0")}.md`, content: "# Note\n", description: `Note ${i} ${"d".repeat(120)}` });
+    }
+    const budgetChars = 6_000 + renderPrinciplesSection([]).length;
+    const snapshot = await assembleMemorySnapshot(db, scope, { budgetChars });
+    expect(snapshot).toContain("PINNED");
+    expect(snapshot).not.toContain("truncated");
+    expect(snapshot.length).toBeLessThanOrEqual(budgetChars);
+    expect(snapshot).toMatch(/- \d+ older files not listed/);
+    expect(snapshot).toContain("notes/file-59.md");
+  });
+
   it("records no injection for a pinned file the budget drops", async () => {
     api = await bootTestApi();
     const { db } = api.providers;
@@ -199,9 +215,13 @@ describe("memoryIndexLines", () => {
     expect(lines.at(-1)).toMatch(/^- \d+ older files not listed/);
   });
 
-  it("shortens a long description", () => {
+  it("cuts a line at 200 characters, but never cuts the path", () => {
     const [line] = memoryIndexLines([file("long.md", 1, { description: "word ".repeat(60) })], { now: 10 });
-    expect(line.length).toBeLessThan(160);
+    expect(line.length).toBe(200);
+    expect(line.startsWith("- long.md: word")).toBe(true);
     expect(line.endsWith("…")).toBe(true);
+    const path = `notes/${"p".repeat(220)}.md`;
+    const [longPath] = memoryIndexLines([file(path, 1, { description: "About it" })], { now: 10 });
+    expect(longPath).toBe(`- ${path}`);
   });
 });
