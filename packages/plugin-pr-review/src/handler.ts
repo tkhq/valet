@@ -13,7 +13,7 @@ import type { PluginChild, PluginEvent, PluginEventContext, PluginEventHandler, 
 import { cutPatch, type PullRequestDiff } from "./git.js";
 import { githubClient, GitHubError, type GitHubClient, type PullFile, type PullRequest, type ReviewComment, type ReviewThread } from "./github.js";
 import { sameIssue } from "./incremental.js";
-import { commentableLines } from "./linemap.js";
+import { commentableLines, nearestCommentableLine } from "./linemap.js";
 import { buildReviewPrompt } from "./prompt.js";
 import {
   parseFindings,
@@ -321,8 +321,9 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
 
   // 6. Map new findings to diff lines. GitHub refuses a comment on a line outside the diff.
   const anchorable = new Map(files.map((f) => [f.filename, { RIGHT: commentableLines(f.patch ?? "", "RIGHT"), LEFT: commentableLines(f.patch ?? "", "LEFT") }]));
-  let inline = posted.filter((f) => anchorable.get(f.path)?.[f.side ?? "RIGHT"].has(f.line) ?? false);
-  let outside = posted.filter((f) => !inline.includes(f));
+  const placed = posted.map((f) => placeNearDiff(f, anchorable.get(f.path)?.[f.side ?? "RIGHT"]));
+  let inline = placed.filter((f) => anchorable.get(f.path)?.[f.side ?? "RIGHT"].has(f.line) ?? false);
+  let outside = placed.filter((f) => !inline.includes(f));
 
   // 7. Post: one summary review, edited in place, plus inline comments.
   ctx.signal.throwIfAborted();
@@ -522,6 +523,19 @@ async function newCommentIds(gh: GitHubClient, reviewId: number): Promise<Map<st
     for (const id of parseFindings(c.body).keys()) ids.set(id, c.id);
   }
   return ids;
+}
+
+/**
+ * A finding a few lines outside its file's hunks, moved to the nearest line
+ * GitHub can comment on. A suggestion replaces the line it is anchored to,
+ * so a moved finding loses its suggestion. Other findings come back as they are.
+ */
+export function placeNearDiff(f: PostedFinding, commentable: ReadonlySet<number> | undefined): PostedFinding {
+  if (commentable === undefined || commentable.has(f.line)) return f;
+  const near = nearestCommentableLine(commentable, f.line);
+  if (near === undefined) return f;
+  const { suggestion, ...rest } = f;
+  return { ...rest, line: near, body: suggestion !== undefined ? `${rest.body.trim()}\n\nSuggested change for line ${f.line}:\n\n\`\`\`\n${suggestion.replace(/\n+$/, "")}\n\`\`\`` : rest.body };
 }
 
 function pointer(f: Pick<PostedFinding, "id" | "path" | "line" | "side">, status: FindingPointer["status"], ids: { commentId?: number; threadId?: string }): FindingPointer {

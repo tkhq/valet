@@ -50,7 +50,7 @@ export {
   type ReviewStateStore,
   type TrackedFinding,
 } from "./state.js";
-export { commentableLines, mapLine, mapLineThroughHunks, parseHunks, type LineFate } from "./linemap.js";
+export { commentableLines, mapLine, nearestCommentableLine, mapLineThroughHunks, parseHunks, type LineFate } from "./linemap.js";
 export { cutPatch, diffPullRequest, type PullRequestDiff } from "./git.js";
 export { REVIEWER_SYSTEM_PROMPT, buildReviewPrompt } from "./prompt.js";
 export * from "./types.js";

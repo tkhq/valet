@@ -90,3 +90,20 @@ export function commentableLines(patch: string, side: "RIGHT" | "LEFT" = "RIGHT"
   }
   return lines;
 }
+
+/** How far from a hunk a finding can be and still post beside it: the context GitHub's patch keeps. */
+export const NEAR_DIFF_LINES = 3;
+
+/**
+ * The commentable line nearest `line`, at most `NEAR_DIFF_LINES` away, or
+ * undefined. The line above wins a tie. A reviewer anchors a missing
+ * line (a removed setting) where it belongs, which can sit just outside
+ * the hunk that removed it.
+ */
+export function nearestCommentableLine(lines: ReadonlySet<number>, line: number): number | undefined {
+  for (let d = 1; d <= NEAR_DIFF_LINES; d++) {
+    if (lines.has(line - d)) return line - d;
+    if (lines.has(line + d)) return line + d;
+  }
+  return undefined;
+}

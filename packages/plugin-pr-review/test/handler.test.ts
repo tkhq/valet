@@ -18,6 +18,7 @@ import type {
 } from "@valet/engine";
 import {
   commentableLines,
+  nearestCommentableLine,
   createReviewHandler,
   excluded,
   MANUAL_REVIEW_EVENT,
@@ -756,6 +757,25 @@ describe("review-pull-request handler", () => {
     expect(store.pointers()?.findings).toMatchObject([{ id: "f1", line: 42, side: "LEFT" }]);
   });
 
+  it("posts a finding just outside a hunk beside its nearest line, without the suggestion fence", async () => {
+    const gh = new FakeGitHub();
+    // The PR deletes a setting at base line 43; the reviewer anchors it at HEAD line 39, above the hunk.
+    gh.extraFiles = [{ filename: "pod.json", status: "modified", additions: 0, deletions: 1, patch: "@@ -40,6 +40,5 @@\n ctx\n ctx\n ctx\n-  \"automount\": false,\n ctx\n ctx" }];
+    const store = new FakeStore();
+    const threads = new FakeThreads(scripted(reviewOf([
+      finding({ path: "pod.json", line: 39, severity: "critical", title: "Pod spec no longer disables automount", suggestion: "  \"serviceAccountName\": \"w\",\n  \"automount\": false," }),
+      finding({ path: "pod.json", line: 20, title: "Unrelated issue far from the hunk" }),
+    ]), {}));
+    await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1"), context(threads, store));
+    expect(gh.comments).toMatchObject([{ path: "pod.json", line: 40, side: "RIGHT" }]);
+    expect(gh.comments[0].body).not.toContain("```suggestion");
+    expect(gh.comments[0].body).toContain("Suggested change for line 39:");
+    const body = [...gh.reviews.values()][0].body;
+    expect(body).toContain("Findings outside the diff (1)");
+    expect(parseFindings(body).get("f2")?.title).toBe("Unrelated issue far from the hunk");
+    expect(store.pointers()?.findings).toMatchObject([{ id: "f1", line: 40 }, { id: "f2", line: 20 }]);
+  });
+
   it("drops a LEFT finding past the end of the base file", async () => {
     const gh = new FakeGitHub();
     gh.extraFiles = [{ filename: "b.ts", status: "modified", additions: 0, deletions: 3, patch: "@@ -40,4 +40,1 @@\n ctx\n-gone 1\n-gone 2\n-gone 3" }];
@@ -860,6 +880,12 @@ describe("review helpers", () => {
 
   it("lists the lines a review comment can anchor to", () => {
     expect([...commentableLines("@@ -10,3 +10,4 @@\n ctx\n-old\n+new\n+added\n ctx2\n\\ No newline at end of file")]).toEqual([10, 11, 12, 13]);
+  });
+
+  it("finds the commentable line nearest a finding, at most 3 lines away, the line above winning a tie", () => {
+    const lines = new Set([10, 11, 12, 20]);
+    expect([6, 7, 9, 13, 15, 16, 17, 23, 24].map((l) => nearestCommentableLine(lines, l))).toEqual([undefined, 10, 10, 12, 12, undefined, 20, 20, undefined]);
+    expect(nearestCommentableLine(new Set([10, 14]), 12)).toBe(10);
   });
 
   it("lists the deleted and context lines of the old file for the LEFT side", () => {
