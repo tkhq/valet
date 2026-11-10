@@ -262,10 +262,16 @@ export function normalizeGatePath(path: string, cwd: string | undefined): string
   return "/" + parts.join("/");
 }
 
-/** Most lines one `read` result holds. */
+/** Most lines one `read` result holds. Claude Code's Read tool reads
+ * 2,000 lines by default. */
 export const READ_MAX_LINES = 2_000;
-/** Most characters one `read` result holds, about 25k tokens. */
-export const READ_MAX_CHARS = 100_000;
+/** Most tokens one `read` result holds: Claude Code's 25,000-token cap on
+ * one file read. Claude Code counts real tokens and refuses a larger read;
+ * `read` returns the first window and names the next offset. */
+export const READ_MAX_TOKENS = 25_000;
+/** READ_MAX_TOKENS at the engine's 4 characters per token (`estimateTokens`).
+ * Code and JSON run nearer 3, so a full window can exceed 25,000 tokens. */
+export const READ_MAX_CHARS = READ_MAX_TOKENS * 4;
 
 export const readTool = defineTool({
   name: "read",
