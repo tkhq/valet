@@ -1838,7 +1838,7 @@ export class Thread {
     await this.fencedEmit({
       type: "tool_end", threadId: this.id, tool: suspended.toolName, callId: suspended.toolCallId,
       result: toolResultText(replayedResult), isError: false,
-      ...(toolResultNeedsData(replayedResult) ? { resultData: replayedResult } : {}),
+      ...(toolResultNeedsData(replayedResult) ? { resultData: liveResultData(replayedResult) } : {}),
       ...toolOutcome(replayedResult),
     }, { queueItemId: suspended.queueItemId });
     await this.session.providers.store.clearSuspendedTurn(this.session.id, this.id, this.fence);
@@ -7854,7 +7854,7 @@ export class Thread {
             tool: event.toolName,
             callId: event.toolCallId,
             result: resultText,
-            ...(toolResultNeedsData(safeResult) ? { resultData: part?.type === "tool_call" ? part.result : safeResult } : {}),
+            ...(toolResultNeedsData(safeResult) ? { resultData: liveResultData(part?.type === "tool_call" ? part.result : safeResult) } : {}),
             isError: event.isError,
             ...(event.isError ? {} : toolOutcome(safeResult)),
           },
@@ -8564,6 +8564,17 @@ function toolResultNeedsData(result: unknown): boolean {
   if (typeof details !== "object" || details === null) return false;
   return ("ok" in details && details.ok === false)
     || ("label" in details && typeof details.label === "string" && details.label.trim().length > 0);
+}
+
+/** The result a live tool_end event carries: without `details.fullText`, so
+ * a capped result sends its preview. The UI loads the whole text from the
+ * tool-output route. */
+function liveResultData(result: unknown): unknown {
+  if (typeof result !== "object" || result === null || !("details" in result)) return result;
+  const details = result.details;
+  if (typeof details !== "object" || details === null || !("fullText" in details)) return result;
+  const { fullText: _fullText, ...rest } = details;
+  return { ...result, details: rest };
 }
 
 function findMostRecentCompaction(

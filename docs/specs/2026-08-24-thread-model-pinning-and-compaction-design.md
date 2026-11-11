@@ -285,7 +285,8 @@ Two layers fix it:
   - **The UI keeps the whole text.** The bridge stores it in
     `details.fullText`, which rehydration and the summarizer never read.
     REST ships the preview and marks the result trimmed, and the step's
-    tool-output request returns the whole text.
+    tool-output request returns the whole text. The live `tool_end` event
+    also drops `fullText` from `resultData`.
   - **Git.** Each folder the engine saves under `.valet/` holds a
     `.gitignore` of `*`, as the file checkpoint store does, so a `git add -A`
     in a checkout never commits saved results or large inputs.
