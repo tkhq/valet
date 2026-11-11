@@ -205,6 +205,44 @@ describe("thread source citations", () => {
     }
   });
 
+  it("reads no whole thread to number or check sources once the thread stores its source number", async () => {
+    const faux = registerFauxProvider({ provider: "bounded-source-reads" });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("lookup", {}, { id: "lookup-first" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("First [s1]."),
+      fauxAssistantMessage([fauxToolCall("lookup", {}, { id: "lookup-second" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("Second [s2]."),
+    ]);
+    const { engine, providers, events } = setup();
+    const options = { userId: "alice", orgId: "org", workspace: "/", sandbox: {}, model: faux.getModel(), builtinTools: [lookup] };
+    const session = await engine.createSession(options);
+    const wholeReads: string[] = [];
+    const getEntries = providers.store.getEntries.bind(providers.store);
+    providers.store.getEntries = async (sessionId, threadId, opts) => {
+      const bounded = opts?.queueItemId !== undefined || opts?.limit !== undefined || opts?.headLimit !== undefined
+        || opts?.entryIds !== undefined || opts?.entryTypes !== undefined;
+      if (!bounded) wholeReads.push(threadId);
+      return getEntries(sessionId, threadId, opts);
+    };
+    try {
+      const first = await session.prompt("Read the note");
+      await waitForIdle(events, first.queueItemId);
+      session.suspendTimers();
+      const restored = await new Engine({ providers }).restoreSession({ sessionId: session.id, options });
+      try {
+        wholeReads.length = 0;
+        const next = await restored.prompt("Read it again");
+        await waitForIdle(events, next.queueItemId);
+        expect(wholeReads).toEqual([]);
+        expect((await restored.readEntries("web:default")).find(entry => entry.type === "message" && entry.role === "assistant"
+          && entry.queueItemId === next.queueItemId && entry.stopReason === "end_turn")).toMatchObject({ content: "Second [s2]." });
+      } finally { restored.suspendTimers(); }
+    } finally {
+      session.suspendTimers();
+      faux.unregister();
+    }
+  });
+
   it("keeps replayed approval source results identical on the live event and stored entry", async () => {
     const faux = registerFauxProvider({ provider: "replayed-source-citations" });
     const gated = defineTool({
