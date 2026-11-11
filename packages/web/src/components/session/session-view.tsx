@@ -592,22 +592,17 @@ export function SessionView({
             replyTarget={replyTarget}
             onCancelReply={() => setReplyTarget(undefined)}
             {...edit.composer}
-            statusLine={<>
-              {showRunWithoutAsking && (
-                <RunWithoutAskingToggle
-                  sessionId={sessionId}
-                  threadId={effectiveThreadId}
-                  owner={session.data?.owner}
-                  className="mt-1.5"
-                />
-              )}
+            renderFooterControl={showRunWithoutAsking ? (hint, reportError) => (
+              <RunWithoutAskingToggle sessionId={sessionId} threadId={effectiveThreadId} owner={session.data?.owner} fallback={hint} compactLabel onError={reportError} />
+            ) : undefined}
+            statusLine={
               <BackgroundWorkStatusLine
                 sessionId={sessionId}
                 threadId={effectiveThreadId}
                 canCancel={canCancelWork}
                 className="mt-1.5 self-start"
               />
-            </>}
+            }
           />}
           </div>
         </PageDropTarget>

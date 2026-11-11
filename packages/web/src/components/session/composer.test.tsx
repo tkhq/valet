@@ -204,6 +204,43 @@ describe("Composer contextual submission", () => {
   const input = () => screen.getByRole("textbox", { name: "Message" });
   const enter = () => fireEvent.keyDown(input(), { key: "Enter", code: "Enter" });
 
+  it("places the replacement control between attach and Send without a separate row", () => {
+    setup({ agentStatus: "idle", renderFooterControl: () => <button role="switch" aria-checked="false">Run without asking</button> });
+    const toggle = screen.getByRole("switch");
+    const footer = toggle.closest("[data-testid=composer-footer-spacer]")?.parentElement;
+    expect(footer?.contains(screen.getByRole("button", { name: /Attach/ }))).toBe(true);
+    expect(footer?.contains(screen.getByRole("button", { name: "Send" }))).toBe(true);
+    expect(screen.queryByText(/Shift\+Enter for a new line/)).toBeNull();
+    expect(screen.getAllByRole("switch")).toHaveLength(1);
+  });
+
+  it("shows a footer control error below the footer row", () => {
+    setup({ renderFooterControl: (_hint, reportError) => <button role="switch" aria-checked="false" onClick={() => reportError("Could not turn on")}>Run without asking</button> });
+    fireEvent.click(screen.getByRole("switch"));
+    const alert = screen.getByRole("alert");
+    expect(alert.textContent).toBe("Could not turn on");
+    expect(screen.getByRole("switch").parentElement?.contains(alert)).toBe(false);
+  });
+
+  it("keeps a flexible spacer around the footer control when there is no model slot", () => {
+    setup({ agentStatus: "idle", renderFooterControl: () => <button role="switch" aria-checked="true">Run without asking</button> });
+    const spacer = screen.getByRole("switch").closest("[data-testid=composer-footer-spacer]");
+    expect(spacer?.className).toContain("flex-1");
+    expect(spacer?.className).toContain("min-w-0");
+    expect(spacer?.parentElement?.contains(screen.getByRole("button", { name: "Send" }))).toBe(true);
+  });
+
+  it("adds no extra spacer when a model slot owns the free space", () => {
+    setup({ agentStatus: "idle", modelControlRef: () => {}, renderFooterControl: () => <button role="switch" aria-checked="true">Run without asking</button> });
+    expect(screen.queryByTestId("composer-footer-spacer")).toBeNull();
+  });
+
+  it("keeps the desktop hint when the footer control is unavailable", () => {
+    setup({ renderFooterControl: (hint) => hint });
+    expect(screen.getByText(/Shift\+Enter for a new line/)).toBeTruthy();
+    expect(screen.queryByRole("switch")).toBeNull();
+  });
+
   it("sends selected context once without the general send or optimistic message", async () => {
     const onSubmit = vi.fn().mockResolvedValue(true);
     const beforeSend = vi.fn();

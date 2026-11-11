@@ -1,4 +1,4 @@
-import { ArrowLeft, Check, ChevronDown, ChevronRight, Search } from "lucide-react";
+import { ArrowLeft, Check, ChevronDown, ChevronRight, Cpu, Search } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   Button,
@@ -316,6 +316,13 @@ export function ModelPicker({
   const triggerReasoning = currentReasoning
     ? ` · ${reasoningLabelFor(currentReasoning)}`
     : presentation === "trigger" ? " · Default" : "";
+  // A narrow composer swaps the full label for the curated short name
+  // ("Haiku 4.5"), or an icon when the catalog has none or the box is tiny. The full name stays
+  // the accessible name and the title.
+  const resolvedId = triggerId && isSizeTier(triggerId)
+    ? resolveTierModel(triggerId, tierMapQ.data, models)?.id
+    : triggerId;
+  const compactLabel = curatedForCatalogId(resolvedId)?.label;
   const descriptionId = useId();
   const thinkingFieldId = useId();
   const thinkingHelpId = useId();
@@ -382,12 +389,32 @@ export function ModelPicker({
       className={cn("min-w-0 max-w-full font-normal gap-1", presentation === "trigger" ? "rounded-full bg-ink-wash" : "text-muted hover:text-ink data-[state=open]:text-ink")}
       onClick={presentation === "trigger" ? onOpenPanel : undefined}
       aria-label={`Choose model: ${triggerLabel}${triggerReasoning}`}
+      title={`${triggerLabel}${triggerReasoning}`}
       aria-describedby={ariaDescription ? descriptionId : undefined}
     >
-      <span className={presentation === "trigger" ? "truncate text-sm" : "truncate text-xs"}>
-        {triggerLabel}
-        {triggerReasoning}
-      </span>
+      {presentation === "trigger" ? (
+        <>
+          {/* Below 18.75rem even the short name is cut by the Stop button, so
+              the icon stands in; the dropdown chevron stays. */}
+          <span data-icon-picker aria-hidden="true" className={compactLabel ? "[@container(min-width:18.75rem)]:hidden" : "[@container(min-width:34rem)]:hidden"}>
+            <Cpu className="h-3.5 w-3.5" />
+          </span>
+          {compactLabel && (
+            <span data-compact-picker className="hidden truncate text-sm [@container(min-width:18.75rem)]:inline [@container(min-width:34rem)]:hidden">
+              {compactLabel}
+            </span>
+          )}
+          <span className="hidden truncate text-sm [@container(min-width:34rem)]:inline">
+            {triggerLabel}
+            {triggerReasoning}
+          </span>
+        </>
+      ) : (
+        <span className="truncate text-xs">
+          {triggerLabel}
+          {triggerReasoning}
+        </span>
+      )}
       <ChevronDown className="h-3.5 w-3.5 text-muted shrink-0 ml-auto" />
     </Button>
   );

@@ -663,6 +663,33 @@ describe("ModelPicker composer trigger", () => {
   });
 });
 
+describe("ModelPicker compact composer trigger", () => {
+  const renderTrigger = (currentId: string) => render(<TooltipProvider><ModelPicker presentation="trigger" currentId={currentId} currentReasoning="medium" onSelect={vi.fn()} onOpenPanel={vi.fn()} /></TooltipProvider>);
+
+  it("keeps the full accessible name and title; narrow widths get the short name, tiny ones an icon", () => {
+    renderTrigger("anthropic/claude-opus-4-7");
+    const trigger = screen.getByRole("button", { name: /Choose model:.*Opus 4\.7.*Medium/ });
+    expect(trigger.getAttribute("title")).toMatch(/Opus 4\.7.*Medium/);
+    const compact = trigger.querySelector<HTMLElement>("[data-compact-picker]");
+    expect(compact?.textContent).toBe("Opus 4.7");
+    expect(compact?.className).toContain("[@container(min-width:18.75rem)]:inline");
+    expect(compact?.className).toContain("[@container(min-width:34rem)]:hidden");
+    const icon = trigger.querySelector<HTMLElement>("[data-icon-picker]");
+    expect(icon?.className).toContain("[@container(min-width:18.75rem)]:hidden");
+    expect(icon?.querySelector("svg")).not.toBeNull();
+    expect(compact?.nextElementSibling?.className).toContain("hidden");
+  });
+
+  it("falls back to an icon below the full-label width when the model has no curated short name", () => {
+    renderTrigger("custom_1/llama-3");
+    const trigger = screen.getByRole("button", { name: /Choose model: .*Llama 3/ });
+    expect(trigger.querySelector("[data-compact-picker]")).toBeNull();
+    const icon = trigger.querySelector<HTMLElement>("[data-icon-picker]");
+    expect(icon?.className).toContain("[@container(min-width:34rem)]:hidden");
+    expect(icon?.querySelector("svg")).not.toBeNull();
+  });
+});
+
 describe("ModelPicker — new-thread default", () => {
   it("shows the default and saves the current choice as the default when they differ", async () => {
     const user = userEvent.setup();

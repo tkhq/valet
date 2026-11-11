@@ -139,12 +139,15 @@ export function Composer({
   active = true,
   modelControlRef,
   statusLine,
+  renderFooterControl,
   context,
 }: {
   context?: ComposerContext;
   /** A quiet one-line strip under the input box, such as the background
    * work status line. It renders as given and owns its own spacing. */
   statusLine?: ReactNode;
+  /** Replace the keyboard hint, or return it when the control is unavailable. */
+  renderFooterControl?: (hint: ReactNode, reportError: (message: string | null) => void) => ReactNode;
   /** Hidden conversation panels keep their draft without handling keyboard shortcuts. */
   active?: boolean;
   /** The thread header renders its model and thinking control in this slot. */
@@ -1034,6 +1037,18 @@ export function Composer({
     return () => dropChannel.publish(null);
   }, [dropChannel, addFiles, intakeBlocked]);
 
+  const [footerError, setFooterError] = useState<string | null>(null);
+  const footerHint = (
+    <span className={cn("min-w-0 flex-1 truncate text-xs text-muted", modelControlRef && "max-md:hidden")}>
+      {!coarsePointer && (
+        <span className="hidden [@container(min-width:34rem)]:inline">
+          Enter to {ACTION_LABEL[action].toLowerCase()} · Shift+Enter for a new line
+          {text === "" && history.length > 0 && " · ↑ for earlier messages"}
+        </span>
+      )}
+    </span>
+  );
+
   return (
     <form
       ref={formRef}
@@ -1254,14 +1269,13 @@ export function Composer({
             {/* The box's width decides, not the viewport's: the Ask Valet dock
                 is narrow on a wide screen, and a wrapped hint stacked one word
                 per line between the buttons. */}
-            <span className={cn("min-w-0 flex-1 truncate text-xs text-muted", modelControlRef && "max-md:hidden")}>
-              {!coarsePointer && (
-                <span className="hidden [@container(min-width:34rem)]:inline">
-                  Enter to {ACTION_LABEL[action].toLowerCase()} · Shift+Enter for a new line
-                  {text === "" && history.length > 0 && " · ↑ for earlier messages"}
-                </span>
-              )}
-            </span>
+            {/* Without a model slot (a read-only viewer) nothing else has flex-1 or ml-auto, so the
+                footer control gets the spacer the hint used to provide. */}
+            {renderFooterControl
+              ? (modelControlRef
+                ? renderFooterControl(footerHint, setFooterError)
+                : <div data-testid="composer-footer-spacer" className="flex min-w-0 flex-1 items-center">{renderFooterControl(footerHint, setFooterError)}</div>)
+              : footerHint}
             {/* The model and thinking control. A phone gives it the row; a
                 wider screen keeps it beside Send. */}
             {modelControlRef && <div ref={modelControlRef} className="min-w-0 max-md:flex-1 md:ml-auto md:max-w-64" />}
@@ -1312,6 +1326,7 @@ export function Composer({
               <span className="max-md:sr-only">{ACTION_LABEL[action]}</span>
             </Button>
           </div>
+          {footerError && <p role="alert" className="px-2 pb-1 text-xs text-danger-500">{footerError}</p>}
         </div>
       </div>
       {statusLine}
