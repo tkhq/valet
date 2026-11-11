@@ -4,6 +4,7 @@ import {
   Engine, FORK_SEED_APPLIED_KEY, FORK_SEED_PENDING_KEY, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider,
   type MessageQuery,
 } from "../src/index.js";
+import { COMPLETE_SUMMARY } from "./fixtures/compaction-summary.js";
 
 // A whole-thread read on every turn ran the api out of memory on 2026-10-28:
 // the largest threads hold hundreds of MB of payloads. A turn reads by queue
@@ -67,6 +68,93 @@ describe("turn history reads", () => {
     } finally {
       session.suspendTimers();
       snapshots.mockRestore();
+      faux.unregister();
+    }
+  });
+});
+
+// The store reads a long thread three ways. Postgres serves all three; this
+// store adds the two payload-free ones so the test can tell them apart.
+class ScopedReadStore extends InMemorySessionStore {
+  outlineReads = 0;
+  transcriptReads = 0;
+  async getThreadOutline(sessionId: string, threadId: string) {
+    this.outlineReads++;
+    return InMemorySessionStore.prototype.getThreadSnapshot.call(this, sessionId, threadId);
+  }
+  async getTranscriptSnapshot(sessionId: string, threadId: string) {
+    this.transcriptReads++;
+    return InMemorySessionStore.prototype.getThreadSnapshot.call(this, sessionId, threadId);
+  }
+}
+
+describe("compaction reads", () => {
+  // On 2026-11-11 a compaction of a 10,000-entry channel thread held three
+  // payload reads at once and ran the api out of heap.
+  it("reads the full thread once and the live transcript after", async () => {
+    const faux = registerFauxProvider({ provider: "compaction-reads" });
+    const store = new ScopedReadStore();
+    const providers = { store, stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() };
+    const session = await new Engine({ providers }).createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel(),
+      compaction: { tailTurns: 1, autoContinue: false },
+    });
+    const thread = await session.ensureDefaultThread();
+    const contexts: string[] = [];
+    faux.setResponses([
+      fauxAssistantMessage("first answer"),
+      fauxAssistantMessage("second answer"),
+      fauxAssistantMessage(COMPLETE_SUMMARY),
+      (context) => {
+        contexts.push(JSON.stringify(context.messages));
+        return fauxAssistantMessage("third answer");
+      },
+    ]);
+    try {
+      for (const text of ["first question", "second question"]) {
+        const receipt = await thread.submitPrompt(text, {});
+        await thread.awaitResult(receipt.queueItemId);
+      }
+      const snapshots = vi.spyOn(store, "getThreadSnapshot");
+      await thread.compactThread({ mode: "manual" });
+      expect(snapshots.mock.calls.filter(([, id]) => id === thread.id)).toHaveLength(1);
+      expect(store.outlineReads).toBe(1);
+      expect(store.transcriptReads).toBe(1);
+      snapshots.mockRestore();
+
+      const entries = await store.getEntries(session.id, thread.id);
+      expect(entries.some((e) => e.type === "compaction")).toBe(true);
+      // The rebuilt transcript carries the summary in place of the head.
+      const third = await thread.submitPrompt("third question", {});
+      await thread.awaitResult(third.queueItemId);
+      expect(contexts[0]).toContain("previous-context");
+      expect(contexts[0]).not.toContain("first question");
+      expect(contexts[0]).toContain("second question");
+    } finally {
+      session.suspendTimers();
+      faux.unregister();
+    }
+  });
+
+  it("estimates an idle thread's context from the transcript read", async () => {
+    const faux = registerFauxProvider({ provider: "context-usage-reads" });
+    const store = new ScopedReadStore();
+    const providers = { store, stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() };
+    const session = await new Engine({ providers }).createSession({ userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel() });
+    const thread = await session.ensureDefaultThread();
+    faux.setResponses([fauxAssistantMessage("noted")]);
+    try {
+      const receipt = await thread.submitPrompt("remember the blue house", {});
+      await thread.awaitResult(receipt.queueItemId);
+      await vi.waitFor(() => expect(session.releaseIdleTranscripts(Date.now() + 1)).toBe(1));
+      const snapshots = vi.spyOn(store, "getThreadSnapshot");
+      const usage = await thread.contextUsage();
+      expect(usage?.tokens).toBeGreaterThan(0);
+      expect(store.transcriptReads).toBe(1);
+      expect(snapshots.mock.calls.filter(([, id]) => id === thread.id)).toEqual([]);
+      snapshots.mockRestore();
+    } finally {
+      session.suspendTimers();
       faux.unregister();
     }
   });

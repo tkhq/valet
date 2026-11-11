@@ -9,6 +9,7 @@ import { mergeAppearance, readAppearance, type Appearance } from "@valet/shared"
 import { classifyProviderFailure, isNonRetryableProviderFailure, isUsageLimitFailure, isRateLimitedProviderFailure } from "@valet/shared";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { uid } from "./ids.js";
+import { readThreadOutline } from "./thread-outline.js";
 import { capToolResult, TOOL_RESULT_MAX_CHARS, TOOL_RESULT_MAX_TOKENS } from "./tool-result-cap.js";
 import type { AgentContext, AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import { isContextOverflow } from "@earendil-works/pi-ai/compat";
@@ -2475,7 +2476,9 @@ export class Thread {
     let appended = false;
     const append = this.entryAppendTail.then(async () => {
       const store = this.session.providers.store;
-      const snapshot = await store.getThreadSnapshot(this.session.id, this.id);
+      // Only links are read here. A payload read of a long thread can hold
+      // hundreds of megabytes while compaction holds its own copy.
+      const snapshot = await readThreadOutline(store, this.session.id, this.id);
       if (!snapshot) return;
       const leaf = snapshot.thread.activeLeafEntryId ?? null;
       if (anchorId !== undefined && !walkTranscriptDag(snapshot.entries, leaf ?? undefined).some((e) => e.id === anchorId)) return;
@@ -5942,7 +5945,12 @@ export class Thread {
     if (limit === 0) return undefined;
     let messages: readonly AgentMessage[] = this.agent.state.messages;
     if (this.transcriptPending) {
-      const snapshot = await this.session.providers.store.getThreadSnapshot(this.session.id, this.id);
+      // The transcript read, as a turn hydrates it: covered entries come back
+      // as stubs, which `entriesToAgentMessages` skips anyway.
+      const store = this.session.providers.store;
+      const snapshot = store.getTranscriptSnapshot
+        ? await store.getTranscriptSnapshot(this.session.id, this.id)
+        : await store.getThreadSnapshot(this.session.id, this.id);
       messages = snapshot
         ? entriesToAgentMessages(snapshot.entries, model, {
             attributeAuthors: this.attributeAuthors,
@@ -6476,9 +6484,10 @@ export class Thread {
       // success proves the summarizer works again (manual /compact included).
       this.consecutiveCompactionFailures = 0;
 
-      // Step 5: rewrite agent.state.messages. The simplest and most
-      // correct path is to rebuild from the now-augmented DAG.
-      const updatedSnapshot = await this.fullSnapshot();
+      // Step 5: rewrite agent.state.messages from the now-augmented DAG.
+      // The new compaction covers the head, so the transcript read (the one
+      // hydration uses) returns the live context, not the whole history.
+      const updatedSnapshot = await this.transcriptSnapshot(this.taskSourceFor());
       const updatedEntries = updatedSnapshot.entries;
       this.replaceActiveSkillInvocations(updatedEntries);
       this.replaceAgentMessages(entriesToAgentMessages(
