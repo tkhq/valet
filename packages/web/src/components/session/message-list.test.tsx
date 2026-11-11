@@ -184,7 +184,8 @@ describe("MessageList jump-to-bottom", () => {
       scrollTo(el, 300);
       Object.defineProperty(el, "clientHeight", { value: 650, configurable: true });
       act(() => fire());
-      expect(screen.queryByRole("button", { name: "Jump to latest message" })).toBeNull();
+      // Unpinned stays unpinned inside the band, so Latest stays up.
+      expect(screen.getByRole("button", { name: "Jump to latest message" })).toBeTruthy();
       rerender(<MessageList messages={[msg(), msg({ id: "m2" })]} threadId="t1" />);
       expect(el.scrollTop).toBe(300);
       Object.defineProperty(el, "clientHeight", { value: 400, configurable: true });
@@ -197,13 +198,14 @@ describe("MessageList jump-to-bottom", () => {
   describe("viewport resize with scroll anchoring", () => {
     let fire: (entries?: { target: Element; contentRect: { height: number } }[]) => void;
     beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["performance"] });
       vi.stubGlobal("ResizeObserver", class {
         constructor(cb: typeof fire) { fire = (entries = []) => cb(entries); }
         observe() {}
         disconnect() {}
       });
     });
-    afterEach(() => vi.unstubAllGlobals());
+    afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
 
     it("stays pinned through collapse then expand when the scroll event precedes the observer", () => {
       const { container, rerender } = render(<MessageList messages={[msg()]} threadId="t1" />);
@@ -211,7 +213,9 @@ describe("MessageList jump-to-bottom", () => {
       Object.defineProperty(el, "scrollHeight", { value: 1000, configurable: true });
       Object.defineProperty(el, "clientHeight", { value: 400, configurable: true });
       act(() => fire()); // the observer's initial report
-      scrollTo(el, 50); // already within the near-bottom threshold before resize
+      vi.advanceTimersByTime(1000); // the adjustments below are not reader input
+      el.scrollTop = 550; // already within the near-bottom threshold before resize
+      fireEvent.scroll(el);
       expect(screen.queryByRole("button", { name: "Jump to latest message" })).toBeNull();
 
       // Collapse: the viewport grows 250px and anchoring clamps to the end.
@@ -285,7 +289,7 @@ describe("MessageList jump-to-bottom", () => {
       expect(screen.queryByRole("button", { name: "Jump to latest message" })).toBeNull();
     });
 
-    it("pins the G+35 reader on a near-bottom scroll and follows on expand", () => {
+    it("keeps the G+35 reader unpinned through a near-bottom scroll and expand", () => {
       const { container, rerender } = render(<MessageList messages={[msg()]} threadId="t1" />);
       const el = scroller(container);
       Object.defineProperty(el, "scrollHeight", { value: 1600, configurable: true });
@@ -299,9 +303,10 @@ describe("MessageList jump-to-bottom", () => {
       fireEvent.scroll(el);
       Object.defineProperty(el, "clientHeight", { value: 400, configurable: true });
       act(() => fire());
-      expect(el.scrollTop).toBe(1600);
+      // Only the true end resumes following, not the 80px band.
+      expect(el.scrollTop).toBe(720);
       rerender(<MessageList messages={[msg(), msg({ id: "m2" })]} threadId="t1" />);
-      expect(el.scrollTop).toBe(1600);
+      expect(el.scrollTop).toBe(720);
     });
 
     it.each(["grow", "shrink", "width", "combined"])("leaves an unpinned reader to browser anchoring on %s", (change) => {
@@ -545,5 +550,265 @@ describe("MessageList loading", () => {
     render(<MessageList messages={[msg()]} onShowEarlier={onShowEarlier} />);
     fireEvent.click(screen.getByRole("button", { name: "Show earlier messages" }));
     expect(onShowEarlier).toHaveBeenCalled();
+  });
+});
+
+/** Streaming growth must not pull a reader who scrolled up back down. */
+describe("MessageList follow while streaming", () => {
+  function setup() {
+    const view = render(<MessageList messages={[msg({ content: "a" })]} threadId="t1" />);
+    const el = view.container.querySelector(".overflow-y-auto") as HTMLElement;
+    let height = 1000;
+    Object.defineProperty(el, "scrollHeight", { get: () => height, configurable: true });
+    Object.defineProperty(el, "clientHeight", { value: 400, configurable: true });
+    el.scrollTop = 600;
+    fireEvent.scroll(el); // at the bottom
+    const grow = (content: string) => {
+      height += 100;
+      view.rerender(<MessageList messages={[msg({ content })]} threadId="t1" />);
+    };
+    // A thinking or tool-arg update: a new messages array, no added height.
+    const tick = () => {
+      view.rerender(<MessageList messages={[msg({ content: "a" })]} threadId="t1" />);
+    };
+    return { el, grow, tick };
+  }
+
+  it("follows the end while the reader is at the bottom", () => {
+    const { el, grow } = setup();
+    grow("ab");
+    expect(el.scrollTop).toBe(1100);
+  });
+
+  it("holds position when the reader scrolled up and the scroll event was reported", () => {
+    const { el, grow } = setup();
+    el.scrollTop = 200;
+    fireEvent.scroll(el);
+    grow("ab");
+    expect(el.scrollTop).toBe(200);
+  });
+
+  it("holds position when a chunk commits before the reader's scroll event", () => {
+    const { el, grow } = setup();
+    fireEvent.wheel(el, { deltaY: -100 });
+    el.scrollTop = 200; // the browser reports this on the next frame
+    grow("ab");
+    expect(el.scrollTop).toBe(200);
+    fireEvent.scroll(el);
+    grow("abc");
+    expect(el.scrollTop).toBe(200);
+  });
+
+  it("stops following on a small upward scroll inside the near-bottom band", () => {
+    const { el, grow } = setup();
+    fireEvent.wheel(el, { deltaY: -50 });
+    el.scrollTop = 550;
+    fireEvent.scroll(el);
+    grow("ab");
+    expect(el.scrollTop).toBe(550);
+  });
+
+  it("keeps following when scrollTop drops with no reader input (scroll anchoring)", () => {
+    const { el, grow } = setup();
+    el.scrollTop = 550; // browser adjustment, no wheel, touch, key or pointer event
+    fireEvent.scroll(el);
+    grow("ab");
+    expect(el.scrollTop).toBe(1100);
+  });
+
+  it("resumes following once the reader scrolls back to the bottom", () => {
+    const { el, grow } = setup();
+    el.scrollTop = 200;
+    fireEvent.scroll(el);
+    grow("ab");
+    el.scrollTop = 700; // the new end: 1100 - 400
+    fireEvent.scroll(el);
+    grow("abc");
+    expect(el.scrollTop).toBe(1200);
+  });
+
+  describe("slow gestures while streaming", () => {
+    beforeEach(() => { vi.useFakeTimers({ toFake: ["performance"] }); });
+    afterEach(() => vi.useRealTimers());
+
+    it("stays unpinned through many small upward steps with no-growth commits", () => {
+      const { el, tick } = setup();
+      for (let i = 0; i < 30; i++) {
+        fireEvent.touchMove(el);
+        el.scrollTop -= 2;
+        tick(); // the commit can run before the frame's scroll event
+        fireEvent.scroll(el);
+        vi.advanceTimersByTime(16);
+        tick();
+      }
+      expect(el.scrollTop).toBe(600 - 60);
+    });
+
+    it("stays unpinned when a no-move scroll event arrives after the input window", () => {
+      const { el, grow } = setup();
+      fireEvent.touchMove(el);
+      el.scrollTop = 540;
+      fireEvent.scroll(el);
+      vi.advanceTimersByTime(1000);
+      fireEvent.scroll(el); // no movement: momentum settling or anchoring
+      grow("ab");
+      expect(el.scrollTop).toBe(540);
+    });
+
+    it.each(["commit first", "scroll first"])("stays unpinned through 1px steps, %s", (order) => {
+      const { el, tick } = setup();
+      for (let i = 0; i < 30; i++) {
+        fireEvent.touchMove(el);
+        el.scrollTop -= 1;
+        if (order === "commit first") {
+          tick();
+          fireEvent.scroll(el);
+        } else {
+          fireEvent.scroll(el);
+          tick();
+        }
+        vi.advanceTimersByTime(16);
+        tick();
+      }
+      expect(el.scrollTop).toBe(570);
+    });
+
+    describe("own send", () => {
+      const optimistic = (over: Partial<StreamMessage> = {}) =>
+        msg({ id: "user-opt-1", role: "user", persistence: "optimistic", ...over });
+      const scrolledUp = (viewerId = "u1") => {
+        const ui = (messages: StreamMessage[]) => (
+          <MessageList messages={messages} threadId="t1" viewerId={viewerId} />
+        );
+        const view = render(ui([msg()]));
+        const el = view.container.querySelector(".overflow-y-auto") as HTMLElement;
+        let height = 1000;
+        Object.defineProperty(el, "scrollHeight", { get: () => height, configurable: true });
+        Object.defineProperty(el, "clientHeight", { value: 400, configurable: true });
+        el.scrollTop = 600;
+        fireEvent.scroll(el);
+        fireEvent.wheel(el, { deltaY: -10 });
+        el.scrollTop = 590;
+        fireEvent.scroll(el);
+        vi.advanceTimersByTime(1000); // intent expired
+        const send = (messages: StreamMessage[], h = height + 100) => {
+          height = h;
+          view.rerender(ui(messages));
+        };
+        return { el, send };
+      };
+
+      it("pins on an authorless optimistic row sent from this client", () => {
+        const { el, send } = scrolledUp();
+        send([msg(), optimistic()]);
+        expect(el.scrollTop).toBe(1100);
+      });
+
+      it("does not move a reader who scrolled up again when the server row replaces the optimistic one", () => {
+        const { el, send } = scrolledUp();
+        send([msg(), optimistic()]);
+        el.scrollTop = 700; // jsdom does not clamp; a browser would, to scrollHeight - clientHeight
+        fireEvent.scroll(el);
+        fireEvent.wheel(el, { deltaY: -100 });
+        el.scrollTop = 600;
+        fireEvent.scroll(el);
+        vi.advanceTimersByTime(1000);
+        send([msg(), msg({ id: "srv-1", role: "user", author: { id: "u1" } as StreamMessage["author"] })], 1200);
+        expect(el.scrollTop).toBe(600);
+      });
+
+      it("does not pin for a teammate's message", () => {
+        const { el, send } = scrolledUp();
+        send([msg(), msg({ id: "srv-2", role: "user", author: { id: "u2" } as StreamMessage["author"] })]);
+        expect(el.scrollTop).toBe(590);
+      });
+
+      it("does not pin when a queued row reappears", () => {
+        const { el, send } = scrolledUp();
+        send([msg(), optimistic({ queueItemId: "q1" })]);
+        expect(el.scrollTop).toBe(590);
+      });
+    });
+
+    it("stays pinned when the browser clamps scrollTop fractionally below the computed end", () => {
+      const { el, grow } = setup();
+      fireEvent.pointerDown(el);
+      // Content shrinks: computed end is 500, the real fractional end is 499.3.
+      let h = 900;
+      Object.defineProperty(el, "scrollHeight", { get: () => h, configurable: true });
+      el.scrollTop = 499.3;
+      fireEvent.scroll(el);
+      h = 1100;
+      grow("ab");
+      expect(el.scrollTop).toBe(1100);
+    });
+
+    it("re-pins when a resize brings an unpinned reader to the end", () => {
+      let fireResize: () => void = () => {};
+      vi.stubGlobal("ResizeObserver", class {
+        constructor(cb: (entries: []) => void) { fireResize = () => cb([]); }
+        observe() {}
+        disconnect() {}
+      });
+      const view = render(<MessageList messages={[msg()]} threadId="t1" />);
+      const el = view.container.querySelector(".overflow-y-auto") as HTMLElement;
+      let height = 1000;
+      Object.defineProperty(el, "scrollHeight", { get: () => height, configurable: true });
+      Object.defineProperty(el, "clientHeight", { value: 400, configurable: true });
+      el.scrollTop = 600;
+      fireEvent.scroll(el);
+      fireEvent.wheel(el, { deltaY: -100 });
+      el.scrollTop = 500;
+      fireEvent.scroll(el);
+      vi.advanceTimersByTime(1000);
+      height = 902; // a collapse leaves the reader 2px from the end
+      act(() => fireResize());
+      height = 1000;
+      view.rerender(<MessageList messages={[msg({ content: "ab" })]} threadId="t1" />);
+      expect(el.scrollTop).toBe(1000);
+      vi.unstubAllGlobals();
+    });
+
+    it("stays pinned when a recent-input collapse moves scrollTop less than the viewport change", () => {
+      let fireResize: () => void = () => {};
+      vi.stubGlobal("ResizeObserver", class {
+        constructor(cb: (entries: []) => void) { fireResize = () => cb([]); }
+        observe() {}
+        disconnect() {}
+      });
+      const view = render(<MessageList messages={[msg({ content: "a" })]} threadId="t1" />);
+      const el = view.container.querySelector(".overflow-y-auto") as HTMLElement;
+      let ch = 650;
+      Object.defineProperty(el, "scrollHeight", { value: 1000, configurable: true });
+      Object.defineProperty(el, "clientHeight", { get: () => ch, configurable: true });
+      el.scrollTop = 350;
+      fireEvent.scroll(el);
+      act(() => fireResize()); // records the 650px viewport
+      el.scrollTop = 350; // the follow write above went to the end; put the reader back
+      fireEvent.scroll(el);
+      fireEvent.touchMove(el);
+      ch = 400;
+      el.scrollTop = 300;
+      fireEvent.scroll(el);
+      view.rerender(<MessageList messages={[msg({ content: "ab" })]} threadId="t1" />);
+      expect(el.scrollTop).toBe(1000);
+      vi.unstubAllGlobals();
+    });
+
+    it("unpins a 40px upward scroll in the frame the height changes 400 to 370", () => {
+      const view = render(<MessageList messages={[msg({ content: "a" })]} threadId="t1" />);
+      const el = view.container.querySelector(".overflow-y-auto") as HTMLElement;
+      let ch = 400;
+      Object.defineProperty(el, "scrollHeight", { value: 1000, configurable: true });
+      Object.defineProperty(el, "clientHeight", { get: () => ch, configurable: true });
+      el.scrollTop = 600;
+      fireEvent.scroll(el);
+      fireEvent.touchMove(el);
+      ch = 370;
+      el.scrollTop = 560; // 40px up; the new end is 630
+      fireEvent.scroll(el);
+      view.rerender(<MessageList messages={[msg({ content: "ab" })]} threadId="t1" />);
+      expect(el.scrollTop).toBe(560);
+    });
   });
 });
