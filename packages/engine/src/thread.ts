@@ -6109,11 +6109,18 @@ export class Thread {
       : this.effectiveModelLenient());
     const model = cfg?.summarizerModel ?? effectiveModel;
 
-    // Load the full DAG, then follow the active leaf to the root. Other
-    // branches stay durable but must not enter this compaction pass.
-    const snapshot = await this.fullSnapshot();
+    // Read the transcript, then follow the active leaf to the root. Other
+    // branches stay durable but must not enter this compaction pass. An
+    // entry the newest checkpoint covers comes back as a stub: this pass
+    // carries it forward by id and never reads its payload, so the read
+    // grows with the live context and not with the thread's age. The active
+    // task's prompt stays whole because the pass may retain it.
+    const taskSource = this.taskSourceFor();
+    const snapshot = await this.transcriptSnapshot(taskSource);
     const leafAtSnapshot = this.activeLeafEntryId;
     const entries = walkTranscriptDag(snapshot.entries, leafAtSnapshot);
+    const supersededCheckpoint = findMostRecentCompaction(entries);
+    const carriedCoverage = new Set(supersededCheckpoint?.coveredEntryIds ?? []);
 
     // Step 1: pruning pass (cheap, no LLM).
     const protectedTools = new Set<string>();
@@ -6124,7 +6131,9 @@ export class Thread {
     // downstream size math (the fail-safe below) sees post-prune tokens, not
     // the un-mutated `entries`.
     let effectiveEntries: readonly SessionEntry[] = entries;
-    const prunePlan = planPrune({ entries, cfg, protectedTools });
+    // Only live entries are pruned. A covered entry never reaches the model,
+    // and its stub must never be written back over the stored payload.
+    const prunePlan = planPrune({ entries: entries.filter((e) => !carriedCoverage.has(e.id)), cfg, protectedTools });
     if (prunePlan.willCommit) {
       const mutable = entries.map((e) => structuredClone(e)) as SessionEntry[];
       applyPrune(mutable, prunePlan);
@@ -6144,7 +6153,6 @@ export class Thread {
 
     // Step 2: cut-point selection. The active task is retained independently
     // of the summary, so reserve it before choosing the recent tail.
-    const taskSource = this.taskSourceFor();
     const retainedTask = taskSource ? effectiveEntries.find(entry => entry.type === "message"
       && entry.role === "user" && entry.queueItemId === taskSource) : undefined;
     const retainedMessages = retainedTask ? entriesToAgentMessages([retainedTask], effectiveModel, {
@@ -6155,7 +6163,6 @@ export class Thread {
       name: tool.name, description: tool.description, parameters: tool.parameters,
     }))));
     const fixedPrompt = this.modelSystemPrompt(this.agent.state.systemPrompt, effectiveModel);
-    const supersededCheckpoint = findMostRecentCompaction(entries);
     const selectTail = (checkpoint: CompactionEntry | undefined) => {
       const reservedMessages = retainedTask ? entriesToAgentMessages([
         retainedTask, ...(checkpoint ? [checkpoint] : []),
@@ -6218,7 +6225,6 @@ export class Thread {
     // content reaches this summary through `previousSummary`, and
     // `entriesToAgentMessages` reads only the NEWEST checkpoint, so leaving
     // them out would put them back into the context an earlier pass removed.
-    const carriedCoverage = new Set(supersededCheckpoint?.coveredEntryIds ?? []);
     const pendingHead = head.filter((e) => !carriedCoverage.has(e.id));
     if (!pendingHead.some((e) => e.type === "message")) {
       // Nothing left to reclaim: the checkpoint this pass would supersede
@@ -6423,10 +6429,15 @@ export class Thread {
       //
       // `tokenCountBefore` and `fileContext` measure the same covered set, so
       // the compression ratio reports the history this checkpoint replaced
-      // and not the history it left behind.
+      // and not the history it left behind. The carried half is a stub here,
+      // so its share comes from the superseded checkpoint, which measured it
+      // when it was live, and this pass adds the window it summarized.
       const summarized = new Set(headForSummary.map((e) => e.id));
       const covered = new Set([...carriedCoverage, ...summarized]);
       const coveredEntries = entries.filter((e) => covered.has(e.id));
+      const summarizedEntries = entries.filter((e) => summarized.has(e.id));
+      const summarizedFiles = extractFileContext(summarizedEntries);
+      const carriedFiles = supersededCheckpoint?.fileContext;
       const compactionEntry: CompactionEntry = {
         id: uid("c"),
         sessionId: session.id,
@@ -6435,9 +6446,12 @@ export class Thread {
         type: "compaction",
         summary: summaryResult.summary,
         coveredEntryIds: coveredEntries.map((e) => e.id),
-        tokenCountBefore: estimateTotalTokens(coveredEntries),
+        tokenCountBefore: (supersededCheckpoint?.tokenCountBefore ?? 0) + estimateTotalTokens(summarizedEntries),
         tokenCountAfter: estimateTokens(summaryResult.summary) + (retainedTask && covered.has(retainedTask.id) ? retainedTokens : 0),
-        fileContext: extractFileContext(coveredEntries),
+        fileContext: {
+          read: [...new Set([...(carriedFiles?.read ?? []), ...summarizedFiles.read])],
+          modified: [...new Set([...(carriedFiles?.modified ?? []), ...summarizedFiles.modified])],
+        },
         createdAt: Date.now(),
       };
       if (retainedTask && usable > 0) {

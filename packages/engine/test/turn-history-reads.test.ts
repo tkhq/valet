@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import {
   Engine, FORK_SEED_APPLIED_KEY, FORK_SEED_PENDING_KEY, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider,
-  type MessageQuery,
+  estimateTotalTokens, walkTranscriptDag, type CompactionEntry, type MessageQuery, type SessionEntry,
 } from "../src/index.js";
 import { COMPLETE_SUMMARY } from "./fixtures/compaction-summary.js";
 
@@ -91,7 +91,7 @@ class ScopedReadStore extends InMemorySessionStore {
 describe("compaction reads", () => {
   // On 2026-11-11 a compaction of a 10,000-entry channel thread held three
   // payload reads at once and ran the api out of heap.
-  it("reads the full thread once and the live transcript after", async () => {
+  it("reads only the transcript, never the full thread", async () => {
     const faux = registerFauxProvider({ provider: "compaction-reads" });
     const store = new ScopedReadStore();
     const providers = { store, stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() };
@@ -117,9 +117,9 @@ describe("compaction reads", () => {
       }
       const snapshots = vi.spyOn(store, "getThreadSnapshot");
       await thread.compactThread({ mode: "manual" });
-      expect(snapshots.mock.calls.filter(([, id]) => id === thread.id)).toHaveLength(1);
+      expect(snapshots.mock.calls.filter(([, id]) => id === thread.id)).toEqual([]);
       expect(store.outlineReads).toBe(1);
-      expect(store.transcriptReads).toBe(1);
+      expect(store.transcriptReads).toBe(2);
       snapshots.mockRestore();
 
       const entries = await store.getEntries(session.id, thread.id);
@@ -130,6 +130,77 @@ describe("compaction reads", () => {
       expect(contexts[0]).toContain("previous-context");
       expect(contexts[0]).not.toContain("first question");
       expect(contexts[0]).toContain("second question");
+    } finally {
+      session.suspendTimers();
+      faux.unregister();
+    }
+  });
+
+  // A second compaction gets the first checkpoint's entries as stubs, as
+  // the Postgres store returns them. It must carry them forward by id and
+  // measure, never re-read or overwrite them.
+  it("carries covered history forward from the newest checkpoint", async () => {
+    const faux = registerFauxProvider({ provider: "compaction-forward" });
+    const store = new StubbingStore();
+    const providers = { store, stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() };
+    const session = await new Engine({ providers }).createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel(),
+      compaction: { tailTurns: 1, autoContinue: false },
+    });
+    const thread = await session.ensureDefaultThread();
+    const contexts: string[] = [];
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("read", { path: "/notes.md" }, { id: "read-notes" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("first answer"),
+      fauxAssistantMessage("second answer"),
+      fauxAssistantMessage(COMPLETE_SUMMARY),
+      fauxAssistantMessage("third answer"),
+      fauxAssistantMessage(COMPLETE_SUMMARY),
+      (context) => {
+        contexts.push(JSON.stringify(context.messages));
+        return fauxAssistantMessage("fourth answer");
+      },
+    ]);
+    const ask = async (text: string) => {
+      const receipt = await thread.submitPrompt(text, {});
+      await thread.awaitResult(receipt.queueItemId);
+    };
+    const checkpoints = async () => (await store.getEntries(session.id, thread.id))
+      .filter((e): e is CompactionEntry => e.type === "compaction");
+    try {
+      await ask("first question");
+      await ask("second question");
+      await thread.compactThread({ mode: "manual" });
+      const [first] = await checkpoints();
+      expect(first?.fileContext?.read).toEqual(["/notes.md"]);
+
+      await ask("third question");
+      store.fullReads = 0;
+      await thread.compactThread({ mode: "manual" });
+      expect(store.fullReads).toBe(0);
+      const [, second] = await checkpoints();
+      if (!first || !second) throw new Error("Expected two checkpoints");
+
+      const entries = await store.getEntries(session.id, thread.id);
+      const userText = (text: string) => entries.find((e) => e.type === "message" && e.role === "user" && e.content === text);
+      expect(second.coveredEntryIds).toEqual(expect.arrayContaining(first.coveredEntryIds));
+      expect(second.coveredEntryIds).toContain(userText("second question")?.id);
+      expect(second.coveredEntryIds).not.toContain(userText("third question")?.id);
+      const firstCovered = new Set(first.coveredEntryIds);
+      const newlyCovered = entries.filter((e) => second.coveredEntryIds.includes(e.id) && !firstCovered.has(e.id));
+      expect(second.tokenCountBefore).toBe(first.tokenCountBefore + estimateTotalTokens(newlyCovered));
+      expect(second.fileContext?.read).toEqual(["/notes.md"]);
+      // The stubs the pass saw never replaced the stored payloads.
+      expect(userText("first question")).toBeDefined();
+      const readCall = entries.flatMap((e) => e.type === "message" ? e.parts ?? [] : [])
+        .find((part) => part.type === "tool_call" && part.callId === "read-notes");
+      expect(readCall?.type === "tool_call" ? readCall.args : undefined).toEqual({ path: "/notes.md" });
+
+      await ask("fourth question");
+      expect(contexts[0]).toContain("previous-context");
+      expect(contexts[0]).not.toContain("first question");
+      expect(contexts[0]).not.toContain("second question");
+      expect(contexts[0]).toContain("third question");
     } finally {
       session.suspendTimers();
       faux.unregister();
@@ -159,3 +230,34 @@ describe("compaction reads", () => {
     }
   });
 });
+
+// The `getTranscriptSnapshot` contract the Postgres store keeps: an entry the
+// newest compaction on the active branch covers comes back as a stub, except
+// the `keepQueueItemId` prompt.
+class StubbingStore extends InMemorySessionStore {
+  fullReads = 0;
+  async getThreadSnapshot(sessionId: string, threadId: string) {
+    this.fullReads++;
+    return super.getThreadSnapshot(sessionId, threadId);
+  }
+  async getThreadOutline(sessionId: string, threadId: string) {
+    return InMemorySessionStore.prototype.getThreadSnapshot.call(this, sessionId, threadId);
+  }
+  async getTranscriptSnapshot(sessionId: string, threadId: string, opts?: { keepQueueItemId?: string }) {
+    const snapshot = await InMemorySessionStore.prototype.getThreadSnapshot.call(this, sessionId, threadId);
+    if (!snapshot) return null;
+    const path = walkTranscriptDag(snapshot.entries, snapshot.thread.activeLeafEntryId);
+    const newest = path.filter((e): e is CompactionEntry => e.type === "compaction").at(-1);
+    const covered = new Set(newest?.coveredEntryIds ?? []);
+    const stub = (entry: SessionEntry): SessionEntry => {
+      if (!covered.has(entry.id)) return entry;
+      if (entry.type === "message") {
+        if (opts?.keepQueueItemId !== undefined && entry.queueItemId === opts.keepQueueItemId) return entry;
+        return { ...entry, content: "", parts: undefined, metadata: undefined, signal: undefined, author: undefined, channel: undefined };
+      }
+      if (entry.type === "compaction") return { ...entry, summary: "", coveredEntryIds: [], fileContext: undefined, metadata: undefined };
+      return entry;
+    };
+    return { thread: snapshot.thread, entries: snapshot.entries.map(stub) };
+  }
+}
