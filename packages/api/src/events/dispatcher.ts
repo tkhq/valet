@@ -262,13 +262,13 @@ export function eventDeliveryRunId(deliveryId: string): string {
  * threads, Part A step 3). A stored policy always wins. An absent policy
  * reads as:
  *
- * - `new` for a delivery with a channel origin, so each Slack conversation
- *   keeps its own assistant thread.
- * - `subject` for a Slack event with a channel but no reply origin (a
- *   reaction, a channel lifecycle event), so each channel keeps its own
- *   thread and a private channel's gate covers only that channel's thread.
- *   With no natural subject to group by, such an event reads as `new`: it
- *   must never share a thread with another channel's content.
+ * - `new` for a channel message (a mention, a person's message, a DM, or a
+ *   bot post), so each Slack conversation keeps its own assistant thread.
+ * - `subject` for another Slack event with a channel (a reaction, a channel
+ *   lifecycle event), so each channel keeps its own thread and a private
+ *   channel's gate covers only that channel's thread. With no natural
+ *   subject to group by, such an event reads as `new`: it must never share
+ *   a thread with another channel's content.
  * - `own` otherwise.
  *
  * `own` for channel content stays an explicit owner choice.
@@ -276,12 +276,22 @@ export function eventDeliveryRunId(deliveryId: string): string {
  */
 export function deliveryThreadPolicy(
   target: { thread?: unknown },
-  delivery: { channelOrigin: boolean; slackChannel?: boolean; naturalSubject?: boolean },
+  delivery: { channelMessage: boolean; slackChannel?: boolean; naturalSubject?: boolean },
 ): AssistantThreadPolicy {
   if (target.thread !== undefined && target.thread !== null) return readThreadPolicy(target.thread);
-  if (delivery.channelOrigin) return { mode: "new" };
+  if (delivery.channelMessage) return { mode: "new" };
   if (delivery.slackChannel) return delivery.naturalSubject ? { mode: "subject" } : { mode: "new" };
   return { mode: "own" };
+}
+
+/**
+ * A third-party bot's post in a Slack channel, such as an alert. It is a
+ * channel message, but the transport gives it no reply origin, so the agent
+ * answers it through its own tools. Without this check it read as a
+ * reaction, and every post shared one channel thread with all its history.
+ */
+function isSlackBotPost(event: { service: string; eventKey: string }): boolean {
+  return event.service === "slack" && event.eventKey === "slack.bot_message";
 }
 
 /** A stored event's natural subject from the plugin that owns its service, or null (spec Part D). */
@@ -349,8 +359,8 @@ interface SubscriptionTarget {
   config?: unknown;
   /** The assistant thread policy (spec 2026-10-16: delivery threads, Part
    * A). Read through `deliveryThreadPolicy`; absent reads as `new` for a
-   * delivery with a channel origin, `subject` for other Slack channel
-   * events, else `own`. */
+   * channel message, `subject` for other Slack channel events, else
+   * `own`. */
   thread?: unknown;
   workflowId?: string;
   appearance?: Appearance;
@@ -1168,7 +1178,8 @@ export class EventDispatcher {
     const naturalSubject = this.naturalSubject(event);
     return resolveDestination({
       rule: { id: sub.id, kind: "subscription", name: sub.name, policy: deliveryThreadPolicy(target, {
-        channelOrigin: origin !== null, slackChannel: slackEventChannel(event) !== undefined, naturalSubject: naturalSubject !== null,
+        channelMessage: origin !== null || isSlackBotPost(event), slackChannel: slackEventChannel(event) !== undefined,
+        naturalSubject: naturalSubject !== null,
       }) },
       event: {
         deliveryId,

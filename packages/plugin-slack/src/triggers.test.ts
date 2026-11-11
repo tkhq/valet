@@ -218,6 +218,21 @@ describe("slackTriggerDefs toEvent", () => {
     expect(normalized.summary).toBe("message in C9 by U1");
   });
 
+  it.each([
+    ["slack.message", { type: "message", channel: "C9", user: "U1", text: "hi" }],
+    ["slack.bot_message", { type: "message", subtype: "bot_message", bot_id: "BOTHER", app_id: "AOTHER", channel: "C9", text: "Alert firing" }],
+  ] as const)("carries a %s post's ts and thread root into refs", (key, base) => {
+    // A bot post has no reply origin, so its delivery names the post only
+    // through these refs. Without them the agent must search channel history.
+    const trigger = findTrigger(key);
+    const eventType = key === "slack.bot_message" ? "bot_message" : "message";
+    const top = trigger.toEvent({ eventType, deliveryId: "Ev-ts1", payload: { ...base, ts: "1700.5" } });
+    expect(top.refs).toMatchObject({ ts: "1700.5" });
+    expect(top.refs).not.toHaveProperty("thread_ts");
+    const reply = trigger.toEvent({ eventType, deliveryId: "Ev-ts2", payload: { ...base, ts: "1700.9", thread_ts: "1700.5" } });
+    expect(reply.refs).toMatchObject({ ts: "1700.9", thread_ts: "1700.5" });
+  });
+
   it("carries a message event's channel name into refs", () => {
     const trigger = findTrigger("slack.message");
     const event = { type: "message", channel: "C9", channel_name: "alerts-prod", user: "U1", text: "hi", ts: "1700.5" };

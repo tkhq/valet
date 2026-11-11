@@ -362,6 +362,12 @@ The name lands in the stored payload and in `refs.channel_name`, so a prompt
 template can use `{{payload.channel_name}}`, and redelivery matches on the
 name that intake saw.
 
+A message event (`slack.message`, `slack.app_mention`, `slack.bot_message`)
+also carries the post's own `ts` in `refs.ts`, and a thread reply carries its
+root in `refs.thread_ts`. An assistant delivery shows refs as signal
+attributes, so the agent can find the post without a channel history read.
+A bot post has no reply origin, so these refs are its only post reference.
+
 Renames. A cache entry answers for five minutes, then the next event reads
 Slack again. A `channel_rename` or `channel_created` event writes the new name
 into the cache at once, so on the api process that receives it the old name
