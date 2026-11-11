@@ -204,8 +204,9 @@ export function MessageList({
     scrollHeader.syncPosition();
   }, [scrollHeader.syncPosition]);
 
-  // Sending a message is a request to see the reply: a new last message from
-  // optimistic row from this client's composer pins the list, even when they had scrolled up to read.
+  // Sending a message is a request to see the reply. When the new last row is
+  // a user message this client just sent (optimistic, with no queue item id),
+  // the list pins again, even if the reader had scrolled up.
   const lastIdRef = useRef<string | undefined>(undefined);
   useLayoutEffect(() => {
     const el = containerRef.current;
