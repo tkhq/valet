@@ -7250,7 +7250,12 @@ export class Thread {
   async allocateSourceIds(count: number): Promise<string[]> {
     // Forks, duplicates and imports can retain source records without the
     // original sequence metadata. Include abandoned branches so returning
-    // to an older path cannot give one id two meanings.
+    // to an older path cannot give one id two meanings. A stored number is
+    // already above every id on every branch, because each reservation
+    // saves the highest id it saw. Then skip the scan: it reads every
+    // payload on the thread, again after each restart or idle release.
+    const stored = this.threadMetadata?.[THREAD_SOURCE_SEQ_KEY];
+    if (typeof stored === "number" && Number.isSafeInteger(stored) && stored > 0) this.sourceSequenceSeed ??= Promise.resolve(0);
     this.sourceSequenceSeed ??= this.readEntries({ allBranches: true }).then(entries => {
       let highest = 0;
       for (const entry of entries) {
@@ -7623,9 +7628,18 @@ export class Thread {
           if (citationIds.length > 0) {
             // A reserved number is not proof. Only sources on stored tool
             // results on this thread's active path can support a citation.
-            const sourceIds = new Set((await this.readEntries()).flatMap(entry => entry.type === "message"
-              ? (entry.parts ?? []).flatMap(part => part.type === "tool_call" ? readSources(part.result).map(source => source.id) : [])
+            // The tool results in context are on that path, so read the
+            // stored path only for a tag they do not hold. A long thread can
+            // hold hundreds of MB, and a read of all of it on each reply ran
+            // the api out of memory.
+            let sourceIds = new Set(this.agent.state.messages.flatMap(message => message.role === "toolResult"
+              ? readSources(message).map(source => source.id)
               : []));
+            if (citationIds.some(id => !sourceIds.has(id))) {
+              sourceIds = new Set((await this.readEntries()).flatMap(entry => entry.type === "message"
+                ? (entry.parts ?? []).flatMap(part => part.type === "tool_call" ? readSources(part.result).map(source => source.id) : [])
+                : []));
+            }
             const invalidCount = citationIds.filter(id => !sourceIds.has(id)).length;
             if (invalidCount > 0) {
               reportError({ area: "engine", reason: "source_citation_unknown", level: "warn", fields: { count: invalidCount } },
