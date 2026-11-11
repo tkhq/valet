@@ -1,3 +1,5 @@
+import { exceedsProviderImageLimits, imageDimensions } from "./image-limits.js";
+
 /** Image types the model providers accept. */
 export type ImageMediaType = "image/png" | "image/jpeg" | "image/gif" | "image/webp";
 
@@ -50,8 +52,9 @@ export function validatedImageMediaType(bytes: Uint8Array, name: string): ImageM
 
 /**
  * Fix the media type of every image block in provider messages. The bytes win
- * over the declared type. A block with unsupported bytes becomes a text
- * placeholder, so one bad image does not fail every later turn.
+ * over the declared type. A block with unsupported bytes, or a size over a
+ * hard provider limit, becomes a text placeholder, so one bad image does not
+ * fail every later turn.
  */
 export function correctImageBlocks<T>(messages: T[]): T[] {
   return messages.map((m) => {
@@ -61,11 +64,22 @@ export function correctImageBlocks<T>(messages: T[]): T[] {
   });
 }
 
+/** 512 KiB of decoded bytes: enough to reach the frame header behind most JPEG metadata. */
+const JPEG_HEADER_SCAN_CHARS = 699_048;
+
 function correctBlock(block: unknown): unknown {
   const img = block as { type?: string; data?: unknown; mimeType?: string };
   if (img?.type !== "image" || typeof img.data !== "string") return block;
-  // 24 base64 chars decode to 18 bytes, enough for every signature.
-  const sniffed = sniffImageMediaType(Buffer.from(img.data.slice(0, 24), "base64"));
+  // 40 base64 chars decode to 30 bytes: every signature, and the PNG, GIF, and WebP size fields.
+  const head = Buffer.from(img.data.slice(0, 40), "base64");
+  const sniffed = sniffImageMediaType(head);
   if (!sniffed) return { type: "text", text: `[image omitted: ${img.mimeType ?? "unknown type"} data is not a supported image]` };
+  // An image over a hard provider limit fails every request that carries it.
+  // Valet downscales new attachments, so this guards older history and other paths.
+  const size = imageDimensions(head)
+    ?? (sniffed === "image/jpeg" ? imageDimensions(Buffer.from(img.data.slice(0, JPEG_HEADER_SCAN_CHARS), "base64")) : undefined);
+  if (size && exceedsProviderImageLimits(size)) {
+    return { type: "text", text: `[image omitted: ${size.width}x${size.height} px is larger than model providers accept. If you need it, ask the user to send a smaller copy.]` };
+  }
   return sniffed === img.mimeType ? block : { ...img, mimeType: sniffed };
 }
