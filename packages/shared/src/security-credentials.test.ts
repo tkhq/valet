@@ -43,7 +43,7 @@ describe("the vocabulary itself", () => {
     const installed = ["git-credential-valet", "valet-gh", "gh", "valet-secrets", "op", "sec-preflight", "gitleaks", "semgrep"];
     const called = [
       "sh", "bash", "dash", "zsh", "env", "command", "printf", "echo", "cat", "sed", "tr",
-      "cut", "paste", "tail", "wc", "base64", "curl",
+      "cut", "paste", "tail", "wc", "base64", "curl", "node",
     ];
     expect([...RESERVED_CREDENTIAL_LABELS].sort()).toEqual([...installed, ...called].sort());
   });

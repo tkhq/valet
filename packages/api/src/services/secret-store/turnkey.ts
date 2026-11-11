@@ -96,6 +96,10 @@ interface TurnkeySdkModule {
 
 const SDK_SPECIFIER = "@turnkey/sdk-server";
 
+/** `TurnkeyErrorCodes.EXPORT_SECRET_CONSENSUS_NEEDED`. The SDK is loaded at
+ * runtime (see the file comment), so its enum is not imported. */
+const EXPORT_NEEDS_APPROVAL = "EXPORT_SECRET_CONSENSUS_NEEDED";
+
 async function sdkClient(config: TurnkeyConfig): Promise<TurnkeyApiClient> {
   // A non-literal specifier types as `Promise<any>`. The annotation names the
   // shape this file relies on (see the file comment for why).
@@ -191,7 +195,20 @@ export function createTurnkeySecretStore(
     async read(spaceId, name, context) {
       const secretId = await findId(spaceId, name);
       if (!secretId) return null;
-      return (await api()).exportSecret({ organizationId: spaceId, secretId, requestContext: { ...context } });
+      try {
+        return await (await api()).exportSecret({ organizationId: spaceId, secretId, requestContext: { ...context } });
+      } catch (err) {
+        // The broker key is the only root here, so an export needs approval
+        // only if someone added a policy in Turnkey. Valet does not wait for
+        // approvals, so name the cause instead of the generic provider error.
+        if (err instanceof Error && "code" in err && err.code === EXPORT_NEEDS_APPROVAL) {
+          throw new SecretStoreError(
+            "Turnkey needs an approval before it exports this secret, and Valet does not wait for approvals. Remove the approval rule for secret exports in the Turnkey organization, then run again.",
+            "provider",
+          );
+        }
+        throw err;
+      }
     },
   };
 }

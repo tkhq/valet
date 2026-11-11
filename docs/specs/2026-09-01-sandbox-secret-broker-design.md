@@ -276,6 +276,14 @@ than a fallback. `persona.test.ts` pins each of those properties.
   set, so an agent that writes `echo $TOKEN` would print it. The prompt says
   not to. The claim is that the value does not pass through the reply, not
   that the agent is unable to read it.
+- Output redaction (2026-11-11) catches the accidental print. When stdout is
+  not a terminal, `valet-secrets run` starts the command under a Node filter
+  (`engine/secrets-redactor.ts`). The filter replaces each resolved value in
+  stdout and stderr with `[secret:NAME]`, also when a value is split across
+  writes. It matches exact bytes only, so an encoded copy passes through. It
+  skips values under 8 bytes, which also occur in ordinary output. A person at
+  a terminal sees raw output. If `node` is missing, the command runs
+  unfiltered and the script says so on stderr.
 - `base64` must exist in the sandbox image. The script names the fix when it
   does not.
 
@@ -308,6 +316,6 @@ Rules that apply to every provider:
 
 ### Turnkey provider
 
-`services/secret-store/turnkey.ts`. Each space is a Turnkey sub-organization under `VALET_TURNKEY_ORG_ID`. The broker key is its only root, so Valet alone decides access. This is the v1 trust model of the Turnkey Secrets spec. Its hardening step (human root quorum, non-root broker, export policy) is not built. Labels become static properties, and the read context becomes the export's request context. Turnkey records the context with the activity. It does not verify it.
+`services/secret-store/turnkey.ts`. Each space is a Turnkey sub-organization under `VALET_TURNKEY_ORG_ID`. The broker key is its only root, so Valet alone decides access. This is the v1 trust model of the Turnkey Secrets spec. Its hardening step (human root quorum, non-root broker, export policy) is not built. Labels become static properties, and the read context becomes the export's request context. Turnkey records the context with the activity. It does not verify it. Valet does not wait for export approvals. If a Turnkey policy makes an export wait for one, the read fails with an error that names the approval rule.
 
 Known limit: the save route encrypts the value to the Turnkey enclave inside the api process (`importSecret`), so the plaintext passes through the api once. Browser-side encryption is the next step.

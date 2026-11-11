@@ -101,6 +101,28 @@ describe("Turnkey secret store", () => {
     expect(await store.read(space, "oldest", {})).toBeNull();
   });
 
+  it("names an export that waits for approval instead of a generic failure", async () => {
+    const fake = fakeClient();
+    const approval = Object.assign(new Error("Secret export requires consensus."), { code: "EXPORT_SECRET_CONSENSUS_NEEDED" });
+    const client: TurnkeyApiClient = { ...fake.client, exportSecret: async () => Promise.reject(approval) };
+    const store = createTurnkeySecretStore(CONFIG, { client });
+    const space = await store.createSpace({ orgId: "o", ownerType: "user", ownerId: "u1" });
+    await store.put(space, { name: "k", value: "V", labels: {} });
+    const err = await store.read(space, "k", {}).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SecretStoreError);
+    expect((err as SecretStoreError).message).toMatch(/needs an approval.*Remove the approval rule/);
+  });
+
+  it("passes any other export error to the service unchanged", async () => {
+    const fake = fakeClient();
+    const boom = new Error("socket hang up");
+    const client: TurnkeyApiClient = { ...fake.client, exportSecret: async () => Promise.reject(boom) };
+    const store = createTurnkeySecretStore(CONFIG, { client });
+    const space = await store.createSpace({ orgId: "o", ownerType: "user", ownerId: "u1" });
+    await store.put(space, { name: "k", value: "V", labels: {} });
+    expect(await store.read(space, "k", {}).catch((e: unknown) => e)).toBe(boom);
+  });
+
   it("refuses a partial list rather than report a saved secret as missing", async () => {
     const full: TurnkeySecretMetadata[] = Array.from({ length: 100 }, (_, i) => ({
       secretId: `s${i}`,
