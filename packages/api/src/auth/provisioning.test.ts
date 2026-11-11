@@ -5,6 +5,7 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import { eq, sql } from "drizzle-orm";
 import { APIError, type AuthMiddleware } from "better-auth/api";
+import { symmetricEncrypt } from "better-auth/crypto";
 import type { Account, BetterAuthOptions, User } from "better-auth";
 import type { CredentialStore } from "@valet/engine";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
@@ -40,6 +41,11 @@ import { ADMIN_EMAIL_RESERVED_MESSAGE, buildAuthHooks, evaluateAdmission, INVITE
 type DbHookContext = Parameters<
   NonNullable<NonNullable<NonNullable<NonNullable<BetterAuthOptions["databaseHooks"]>["user"]>["create"]>["before"]>
 >[1];
+
+/** A sign-in token as better-auth stores it with `encryptOAuthTokens` on. */
+function stored(token: string): Promise<string> {
+  return symmetricEncrypt({ key: "test-secret", data: token });
+}
 
 function dbHookCtx(partial: { path: string; body?: Record<string, unknown> }): DbHookContext {
   return partial as DbHookContext;
@@ -428,7 +434,7 @@ describe("buildAuthHooks", () => {
       const { databaseHooks } = buildAuthHooks({ db, cfg, credentialStore });
 
       await databaseHooks!.account!.create!.after!(
-        makeAccount({ providerId: "google", userId: "u-new", accessToken: "gtok", refreshToken: "grefresh" }),
+        makeAccount({ providerId: "google", userId: "u-new", accessToken: await stored("gtok"), refreshToken: await stored("grefresh") }),
         dbHookCtx({ path: "/callback/google" }),
       );
 
@@ -444,7 +450,7 @@ describe("buildAuthHooks", () => {
       const expiresAt = new Date("2026-08-01T00:00:00Z");
 
       await databaseHooks!.account!.create!.after!(
-        makeAccount({ providerId: "github", userId: "u-new", accessToken: "htok", accessTokenExpiresAt: expiresAt }),
+        makeAccount({ providerId: "github", userId: "u-new", accessToken: await stored("htok"), accessTokenExpiresAt: expiresAt }),
         dbHookCtx({ path: "/callback/github" }),
       );
 
@@ -463,7 +469,7 @@ describe("buildAuthHooks", () => {
       const { databaseHooks } = buildAuthHooks({ db, cfg, credentialStore });
 
       await databaseHooks!.account!.create!.after!(
-        makeAccount({ providerId: "github", userId: "u-new", accessToken: "htok" }),
+        makeAccount({ providerId: "github", userId: "u-new", accessToken: await stored("htok") }),
         dbHookCtx({ path: "/callback/github" }),
       );
 

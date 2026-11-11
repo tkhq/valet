@@ -14,6 +14,7 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import * as authModule from "./index.js";
 import { users, invites, ssoProvider } from "../schema/index.js";
 import { SSO_ROUTE_REFUSED_MESSAGE } from "./sso-hooks.js";
 import { createInvite } from "./invites.js";
@@ -75,6 +76,18 @@ describe("real better-auth instance + mounting", () => {
     expect(configRes.status).toBe(200);
     const configBody = (await configRes.json()) as AuthConfigResponse;
     expect(configBody).toEqual({ stub: false, password: true, primary: "password", social: [], sso: null });
+  });
+
+  it("stores sign-in access and refresh tokens encrypted", async () => {
+    const buildAuth = authModule.buildAuth;
+    let options: ReturnType<typeof buildAuth>["options"] | undefined;
+    vi.spyOn(authModule, "buildAuth").mockImplementation((opts) => {
+      const auth = buildAuth(opts);
+      options = auth.options;
+      return auth;
+    });
+    api = await bootTestApi({ auth: true });
+    expect(options?.account?.encryptOAuthTokens).toBe(true);
   });
 
   it("refuses email sign-up and sign-in when AUTH_METHODS does not list password", async () => {

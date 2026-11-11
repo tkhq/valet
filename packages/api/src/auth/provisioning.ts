@@ -5,6 +5,7 @@
  * better-auth's verified hook points.
  */
 import { createAuthMiddleware, APIError } from "better-auth/api";
+import { symmetricDecrypt } from "better-auth/crypto";
 import { recordAdminAudit } from "../services/admin-audit.js";
 import type { Account, BetterAuthOptions, User } from "better-auth";
 import { eq, and } from "drizzle-orm";
@@ -337,15 +338,25 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
     }
   };
 
-  const accountCreateAfter = async (account: Account): Promise<void> => {
-    const accessToken = account.accessToken;
-    if (!accessToken) return;
+  const accountCreateAfter = async (
+    account: Account,
+    ctx: { context: { secretConfig: Parameters<typeof symmetricDecrypt>[0]["key"] } } | null,
+  ): Promise<void> => {
+    if (!account.accessToken) return;
+    // `account.encryptOAuthTokens` stores the row's tokens encrypted with the
+    // auth secret, so this hook decrypts them before it copies them into the
+    // credential store, which encrypts them with its own key.
+    const key = ctx?.context?.secretConfig ?? cfg.secret;
+    const accessToken = await symmetricDecrypt({ key, data: account.accessToken });
+    const refreshToken = account.refreshToken
+      ? await symmetricDecrypt({ key, data: account.refreshToken })
+      : undefined;
 
     const owner = { type: "user" as const, id: account.userId };
     const credential = {
       type: "oauth2" as const,
       accessToken,
-      refreshToken: account.refreshToken ?? undefined,
+      refreshToken,
     };
 
     if (account.providerId === "google") {

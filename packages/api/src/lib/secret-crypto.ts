@@ -12,6 +12,31 @@ const ALGORITHM = "aes-256-gcm";
 const IV_LENGTH = 12;
 const FORMAT_PREFIX = "v1";
 
+/** The passphrase a local instance falls back to when no key is set. */
+export const DEV_ENCRYPTION_KEY = "dev-key-not-secure";
+
+/**
+ * The instance passphrase for credential encryption. A local instance may
+ * run on the dev default with a warning. An instance with a public URL
+ * refuses to boot without a key, because the dev default is in this public
+ * repository and decrypts every stored credential.
+ */
+export function instanceEncryptionKey(
+  env: NodeJS.ProcessEnv,
+  publicUrl: string | undefined,
+): { key: string; warning?: string } | { error: string } {
+  if (env.VALET_ENCRYPTION_KEY) return { key: env.VALET_ENCRYPTION_KEY };
+  if (publicUrl) {
+    return {
+      error: `VALET_ENCRYPTION_KEY is unset and this instance serves ${publicUrl}. Set VALET_ENCRYPTION_KEY to a random 32-byte string, then start the server again.`,
+    };
+  }
+  return {
+    key: DEV_ENCRYPTION_KEY,
+    warning: "VALET_ENCRYPTION_KEY is unset, so stored credentials use an insecure default key. Set it before you store real credentials.",
+  };
+}
+
 /** SHA-256 of `passphrase`, used directly as the 32-byte AES-256 key. */
 export function deriveSecretKey(passphrase: string): Buffer {
   return createHash("sha256").update(passphrase, "utf8").digest();

@@ -156,6 +156,36 @@ export interface AuthWiring {
   authConfig?: AuthConfig;
 }
 
+function originOf(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+  try {
+    return new URL(url).origin;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The CORS origin rule: answer only the origins the app is served from.
+ * Those are the auth base URL, the public URL, and the auth config's
+ * trusted origins (always the dev vite origin). The web app is same-origin,
+ * so it needs no CORS grant. Callers without an `Origin` header (CLI,
+ * webhooks) are not affected. Any other origin gets no
+ * `Access-Control-Allow-Origin`, so a foreign page cannot read a credentialed
+ * response.
+ */
+export function corsOriginResolver(
+  authConfig: Pick<AuthConfig, "baseUrl" | "trustedOrigins"> | undefined,
+  env: NodeJS.ProcessEnv,
+): (origin: string) => string | null {
+  const allowed = new Set(authConfig?.trustedOrigins ?? ["http://localhost:5173"]);
+  for (const url of [authConfig?.baseUrl, env.BETTER_AUTH_URL, publicUrlFromEnv(env)]) {
+    const origin = originOf(url);
+    if (origin) allowed.add(origin);
+  }
+  return (origin) => (allowed.has(origin) ? origin : null);
+}
+
 export function createApp(
   providers: Providers,
   authWiring: AuthWiring = {},
@@ -179,7 +209,7 @@ export function createApp(
   app.use(
     "*",
     cors({
-      origin: (origin) => origin ?? "*",
+      origin: corsOriginResolver(authConfig, process.env),
       credentials: true,
     }),
   );
