@@ -161,7 +161,7 @@ start.
 
    | delivery | default |
    |---|---|
-   | has a channel origin (a mention, a message, a DM) | `new` |
+   | has a channel origin (a mention, a message, a DM), or is a third-party bot post (`slack.bot_message`) | `new` |
    | Slack event with a channel and no channel origin (a reaction, a channel lifecycle event) | `subject`, key `subject:slack:<team>/<channel>` |
    | the same, when no natural subject names the channel | `new` |
    | any other event | `own` |
@@ -656,6 +656,18 @@ event wakeups spec Part A.
   word "rule". Deliveries dead-lettered before the change keep the old
   text, so the web treats both texts as the pin problem (`isPinProblem`).
   The subject refusal (Part A step 4) changed for the same reason.
+
+- **A bot post reads as a channel message.** The Slack transport gives a
+  `slack.bot_message` no reply origin, so the first version read it as a
+  reaction and keyed it `subject:slack:<team>/<channel>`. Every alert in a
+  channel then shared one thread and carried all earlier alerts as
+  history. One alert channel's thread reached about 10,000 entries and
+  450 MB, and its compactions exhausted the api heap. A bot post now
+  defaults to `new`, like a person's message, and still has no reply
+  origin: the agent posts through its own tools. Its delivery names the
+  post through `refs.ts` (and `refs.thread_ts` for a thread reply), which
+  the Slack trigger now sets on every message event. A thread that an
+  earlier bot post opened keeps its history and receives no new posts.
 
 ## Errata to other specs
 

@@ -33,7 +33,7 @@ import {
   threadPullRequests,
 } from "../schema/index.js";
 import { OWN_WRITE_SETTLE_MS, recordChannelMessage } from "../services/channel-messages.js";
-import { deliveryThreadPolicy, EventDispatcher, recordSkippedDelivery, type AssistantDeliverFn, type EventDispatcherDeps } from "./dispatcher.js";
+import { deliveryThreadPolicy, EventDispatcher, eventDeliveryDispatchId, recordSkippedDelivery, type AssistantDeliverFn, type EventDispatcherDeps } from "./dispatcher.js";
 import { PinUnavailableError, pinNarrowsMessage } from "./assistant-delivery.js";
 import { waiterMatchDeps } from "./waiters.js";
 import { PgSessionStore } from "@valet/store-postgres";
@@ -442,6 +442,36 @@ describe("EventDispatcher", () => {
     const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
     await new EventDispatcher({ db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToAssistant: deliver, plugins: [slackPlugin] }).pollOnce();
     expect(deliver.mock.calls[0]?.[0].destination).toEqual({ kind: "key", key: "subject:slack:T1/CPRIV", title: "CPRIV", reason: "policy_subject" });
+  });
+
+  it("lands each Slack bot post in its own thread, not its channel's thread", async () => {
+    // A bot post (an alert, a release notice) is a channel message, but the
+    // transport gives it no reply origin. It must still get its own thread,
+    // as a person's message does. In the channel's subject thread, every
+    // post would carry all earlier posts as history and never reset.
+    const posts = [];
+    for (const ts of ["1.2", "1.3"]) {
+      posts.push(await seedDelivery({
+        target: { kind: "assistant" }, ownerType: "org",
+        service: "slack", eventKey: "slack.bot_message", eventKeys: ["slack.bot_message"],
+        refs: { channel: "C1", channel_name: "alerts-slo", ts }, summary: "message in C1 by B1", subjects: ["slack:T1/C1"],
+        payload: { type: "message", subtype: "bot_message", bot_id: "B1", channel: "C1", text: "Alert firing", ts },
+        actor: { externalId: "B1", bot: true },
+      }));
+    }
+    const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
+    await new EventDispatcher({
+      db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToAssistant: deliver, plugins: [slackPlugin],
+      // As the Slack transport does: only a person's message or a mention has a reply origin.
+      resolveChannelOrigin: (_service, eventKey) => eventKey === "slack.bot_message" ? null : { channelType: "slack", threadKey: "slack:C1:1.2" },
+    }).pollOnce();
+    expect(deliver).toHaveBeenCalledTimes(2);
+    for (const { subscriptionId, deliveryId } of posts) {
+      const call = deliver.mock.calls.find(([args]) => args.dispatchId === eventDeliveryDispatchId(deliveryId));
+      expect(call?.[0].destination).toEqual({ kind: "key", key: `sub:${subscriptionId}:${deliveryId}`, title: "message in C1 by B1", reason: "policy_new" });
+      // No reply origin: the agent posts through its own tools, never by an automatic reply.
+      expect(call?.[0].signal.origin).toBeUndefined();
+    }
   });
 
   it("delivers an assistant-target delivery: seam gets SignalContent with signalType = event key; row -> delivered", async () => {
@@ -1714,18 +1744,18 @@ describe("EventDispatcher — team-owned subscriptions", () => {
 });
 
 describe("deliveryThreadPolicy", () => {
-  it("defaults a delivery with a channel origin to its own thread per conversation, else the rule's thread", () => {
-    expect(deliveryThreadPolicy({}, { channelOrigin: true })).toEqual({ mode: "new" });
-    expect(deliveryThreadPolicy({ thread: null }, { channelOrigin: true })).toEqual({ mode: "new" });
-    expect(deliveryThreadPolicy({}, { channelOrigin: false })).toEqual({ mode: "own" });
-    // A Slack channel event with no reply origin keeps one thread per channel,
+  it("defaults a channel message to its own thread per conversation, else the rule's thread", () => {
+    expect(deliveryThreadPolicy({}, { channelMessage: true })).toEqual({ mode: "new" });
+    expect(deliveryThreadPolicy({ thread: null }, { channelMessage: true })).toEqual({ mode: "new" });
+    expect(deliveryThreadPolicy({}, { channelMessage: false })).toEqual({ mode: "own" });
+    // Another Slack channel event (a reaction) keeps one thread per channel,
     // or its own thread when no subject names the channel.
-    expect(deliveryThreadPolicy({}, { channelOrigin: false, slackChannel: true, naturalSubject: true })).toEqual({ mode: "subject" });
-    expect(deliveryThreadPolicy({}, { channelOrigin: false, slackChannel: true, naturalSubject: false })).toEqual({ mode: "new" });
-    expect(deliveryThreadPolicy({}, { channelOrigin: true, slackChannel: true, naturalSubject: true })).toEqual({ mode: "new" });
-    expect(deliveryThreadPolicy({ thread: { mode: "own" } }, { channelOrigin: false, slackChannel: true, naturalSubject: true })).toEqual({ mode: "own" });
+    expect(deliveryThreadPolicy({}, { channelMessage: false, slackChannel: true, naturalSubject: true })).toEqual({ mode: "subject" });
+    expect(deliveryThreadPolicy({}, { channelMessage: false, slackChannel: true, naturalSubject: false })).toEqual({ mode: "new" });
+    expect(deliveryThreadPolicy({}, { channelMessage: true, slackChannel: true, naturalSubject: true })).toEqual({ mode: "new" });
+    expect(deliveryThreadPolicy({ thread: { mode: "own" } }, { channelMessage: false, slackChannel: true, naturalSubject: true })).toEqual({ mode: "own" });
     // A stored policy wins over the default.
-    expect(deliveryThreadPolicy({ thread: { mode: "own" } }, { channelOrigin: true })).toEqual({ mode: "own" });
-    expect(deliveryThreadPolicy({ thread: { mode: "new" } }, { channelOrigin: false })).toEqual({ mode: "new" });
+    expect(deliveryThreadPolicy({ thread: { mode: "own" } }, { channelMessage: true })).toEqual({ mode: "own" });
+    expect(deliveryThreadPolicy({ thread: { mode: "new" } }, { channelMessage: false })).toEqual({ mode: "new" });
   });
 });

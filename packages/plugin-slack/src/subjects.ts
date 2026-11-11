@@ -18,7 +18,7 @@ export interface SlackEventSubjectsResult {
 }
 
 /** Event types that carry their own `ts` / `thread_ts` as a message timestamp. */
-const MESSAGE_LIKE = new Set(["message", "app_mention", "bot_message"]);
+export const MESSAGE_LIKE: ReadonlySet<string> = new Set(["message", "app_mention", "bot_message"]);
 
 /**
  * @param teamId The envelope team (`context.teamId`, from `team_id`). It
