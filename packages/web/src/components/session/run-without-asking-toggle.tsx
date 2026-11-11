@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useSetThreadApprovalBypass, useThreads } from "~/api/queries";
 import { useMe, useTeams } from "~/api/settings";
 import { ConfirmDialog, Switch } from "~/components/primitives";
@@ -8,18 +8,23 @@ import { canAdministerSession } from "./use-can-administer-session";
 import type { AssistantOwner } from "@valet/api/wire";
 
 /**
- * The thread's "Run without asking" switch, shown beside the composer.
+ * The thread's "Run without asking" switch, shown in the composer footer.
  * Turning it on asks first, because Valet then stops asking for approval.
  * Turning it off needs no confirm. It shows nothing when the viewer cannot
  * turn it on and it is off, the same rule the thread menu item used.
  */
-export function RunWithoutAskingToggle({ sessionId, threadId, owner, className, onlyWhenOn = false }: {
+export function RunWithoutAskingToggle({ sessionId, threadId, owner, className, onlyWhenOn = false, fallback = null, compactLabel = false, onError }: {
+  fallback?: ReactNode;
   sessionId: string;
   threadId?: string;
   owner: AssistantOwner | undefined;
   className?: string;
   /** Show nothing while it is off. A read-only thread uses this: the viewer can only turn it off. */
   onlyWhenOn?: boolean;
+  /** Hide the visible text in a narrow `@container` box; the switch keeps its accessible name. */
+  compactLabel?: boolean;
+  /** Receives the mutation error so the caller can show it outside a tight row. Without it the error shows inline. */
+  onError?: (message: string | null) => void;
 }) {
   const me = useMe();
   const teams = useTeams({ enabled: owner?.type === "team" });
@@ -28,7 +33,7 @@ export function RunWithoutAskingToggle({ sessionId, threadId, owner, className, 
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const thread = threads.data?.threads.find((t) => t.id === threadId);
-  if (!thread || !owner) return null;
+  if (!thread || !owner) return fallback;
   const on = thread.approvalBypass === true;
   // The server's rule: the owner of a personal thread, or a team admin.
   // Anyone who sees it on may turn it off.
@@ -36,23 +41,24 @@ export function RunWithoutAskingToggle({ sessionId, threadId, owner, className, 
   const canEnable = owner.type === "user"
     ? owner.id === me.data?.id
     : owner.type === "team" && canAdministerSession(owner, teams.data, me.data);
-  if (!on && (onlyWhenOn || !canEnable)) return null;
+  if (!on && (onlyWhenOn || !canEnable)) return fallback;
 
   function set(next: boolean) {
     if (!thread) return;
     setError(null);
+    onError?.(null);
     bypass.mutate({ threadId: thread.id, on: next }, {
-      onError: (err) => setError(extractActionError(err, next ? "Could not turn on Run without asking. Try again." : "Could not turn off Run without asking. Try again.")),
+      onError: (err) => (onError ?? setError)(extractActionError(err, next ? "Could not turn on Run without asking. Try again." : "Could not turn off Run without asking. Try again.")),
     });
   }
 
   return (
     <>
-      <div className={cn("flex items-center justify-end gap-2 text-xs", className)}>
-        {error && <span role="alert" className="text-danger-500">{error}</span>}
-        <label className="flex cursor-pointer items-center gap-2 text-muted">
-          <span className={cn(on && "font-medium text-warning-fg")}>
-            Run without asking: {on ? "On" : "Off"}
+      <div className={cn("flex shrink-0 items-center gap-2 text-xs", className)}>
+        {error && !onError && <span role="alert" className="text-danger-500">{error}</span>}
+        <label className="flex cursor-pointer items-center gap-2 whitespace-nowrap text-muted">
+          <span className={cn(on && "font-medium text-warning-fg", compactLabel && "hidden [@container(min-width:34rem)]:inline")}>
+            Run without asking
           </span>
           <Switch
             size="sm"
@@ -72,7 +78,7 @@ export function RunWithoutAskingToggle({ sessionId, threadId, owner, className, 
         confirmVariant="primary"
         onConfirm={() => { setConfirming(false); set(true); }}
       >
-        <p className="text-sm text-muted">Valet still asks for critical actions, actions an admin rule names, and a teammate's shared account. Turn it off from the switch below the message box at any time.</p>
+        <p className="text-sm text-muted">Valet still asks for critical actions, actions an admin rule names, and a teammate's shared account. Turn it off from this switch at any time.</p>
       </ConfirmDialog>
     </>
   );

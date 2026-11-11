@@ -96,9 +96,9 @@ vi.mock("./thread-context-panel", () => ({ ThreadContextPanel: ({ onCreate, onRe
 vi.mock("./message-list", () => ({ MessageList: ({ header, emptyState }: { header?: ReactNode; emptyState?: ReactNode }) =>
   <div data-testid="message-list" data-can-reply={Boolean(useThreadReplyTarget())}>{header}{emptyState}<div data-message-id="m1" /></div> }));
 // The stub renders the status line slot, so the background work line shows.
-vi.mock("./composer", () => ({ Composer: ({ statusLine, context, beforeSend }: { statusLine?: ReactNode; context?: ComposerContext; beforeSend?: typeof composerBeforeSend }) => {
+vi.mock("./composer", () => ({ Composer: ({ statusLine, context, beforeSend, renderFooterControl }: { renderFooterControl?: (hint: ReactNode) => ReactNode; statusLine?: ReactNode; context?: ComposerContext; beforeSend?: typeof composerBeforeSend }) => {
   composerBeforeSend = beforeSend;
-  return <div data-testid="composer">{statusLine}{context?.content}<textarea aria-label="Message" placeholder={context?.placeholder} /></div>;
+  return <div data-testid="composer">{statusLine}<div data-testid="footer">{renderFooterControl?.("Keyboard hint")}</div>{context?.content}<textarea aria-label="Message" placeholder={context?.placeholder} /></div>;
 } }));
 vi.mock("./run-without-asking-toggle", () => ({
   RunWithoutAskingToggle: ({ onlyWhenOn }: { onlyWhenOn?: boolean }) => <div data-testid="bypass-switch" data-only-when-on={String(Boolean(onlyWhenOn))} />,
@@ -301,9 +301,11 @@ describe("SessionView header chrome", () => {
     expect(await screen.findByText(readOnlyReason)).toBeTruthy();
     expect(screen.getByTestId("bypass-switch").getAttribute("data-only-when-on")).toBe("true");
   });
-  it("shows the Run without asking switch under the composer on a full page", async () => {
+  it("shows the Run without asking switch in the footer on a full page", async () => {
     renderInRouter("sess-1", false);
-    expect((await screen.findByTestId("composer")).contains(screen.getByTestId("bypass-switch"))).toBe(true);
+    await screen.findByTestId("composer");
+    expect(screen.getByTestId("footer").contains(screen.getByTestId("bypass-switch"))).toBe(true);
+    expect(screen.getAllByTestId("bypass-switch")).toHaveLength(1);
   });
   it("leaves the Run without asking switch out of the Ask Valet dock", async () => {
     renderInRouter("sess-1", true);
