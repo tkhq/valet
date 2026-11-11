@@ -792,6 +792,13 @@ export interface ToolDef<TParams extends TSchema = TSchema> {
    */
   maxResultChars?: number;
   /**
+   * What a capped result shows the model. "head": the first 2,000
+   * characters. "head-tail": the first and last 1,000, for output whose end
+   * carries the outcome, such as `bash` with its exit status. Claude Code
+   * previews bash output the same way. Default "head".
+   */
+  resultPreview?: "head" | "head-tail";
+  /**
    * When true, this tool may execute concurrently with other tool calls in
    * the same assistant response. Default: false — the tool runs
    * sequentially, and one sequential tool serializes its whole batch
@@ -805,6 +812,11 @@ export interface ToolDef<TParams extends TSchema = TSchema> {
 }
 
 export interface ToolResult {
+  /**
+   * The whole result text when `capToolResult` cut `text`. The bridge stores
+   * it in `details.fullText`, which the UI loads and the model never sees.
+   */
+  fullText?: string;
   usageOutcome?: { outcome: "ok" | "error" | "denied" | "pending-approval"; errorCode: string | null; name?: string };
   text: string;
   attachments?: ToolAttachment[];
@@ -2030,7 +2042,12 @@ export type EngineEvent =
       reason: "end_turn" | "tool_use" | "error" | "abort";
     }
   | { type: "tool_start"; threadId: string; tool: string; callId?: string; args: Record<string, unknown> }
-  | { type: "tool_end"; threadId: string; tool: string; callId?: string; result: string; resultData?: unknown; isError: boolean; outcome?: ToolResult["outcome"] }
+  | {
+      type: "tool_end"; threadId: string; tool: string; callId?: string; result: string; resultData?: unknown; isError: boolean; outcome?: ToolResult["outcome"];
+      /** Set when the result was capped: the length of the whole text and the
+       * stored entry the tool-output route loads it from. */
+      resultTrimmed?: { chars: number; entryId: string };
+    }
   | {
       type: "turn_end";
       threadId: string;

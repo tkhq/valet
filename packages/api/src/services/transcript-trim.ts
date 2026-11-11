@@ -50,9 +50,39 @@ function withText(result: unknown, text: string): unknown {
  * The transcript form of one entry's parts: every tool result over the limit
  * is trimmed and marked with the entry that holds the full result.
  */
+/** The whole text the engine kept for a capped result (`details.fullText`,
+ * from `capToolResult`). The model saw a preview; the UI can load this. */
+function fullTextOf(result: unknown): string | undefined {
+  if (!result || typeof result !== "object") return undefined;
+  const details = (result as { details?: unknown }).details;
+  if (!details || typeof details !== "object") return undefined;
+  const full = (details as { fullText?: unknown }).fullText;
+  return typeof full === "string" ? full : undefined;
+}
+
+function withoutFullText(result: unknown): unknown {
+  const record = result as Record<string, unknown>;
+  const { fullText: _full, ...details } = record.details as Record<string, unknown>;
+  return { ...record, details };
+}
+
+/**
+ * The result the tool-output route returns: for a capped result, its whole
+ * text in place of the preview the model saw.
+ */
+export function fullToolResult(result: unknown): unknown {
+  const full = fullTextOf(result);
+  if (full === undefined) return result;
+  return withText(withoutFullText(result), full);
+}
+
 export function trimToolResults(parts: MessagePart[], at: { entryId: string; threadId: string }): MessagePart[] {
   return parts.map((part) => {
     if (part.kind !== "tool_call" || part.result === undefined) return part;
+    // A capped result already shows its preview. Ship that, not the stored
+    // whole text, and let the step load the rest.
+    const full = fullTextOf(part.result);
+    if (full !== undefined) return { ...part, result: withoutFullText(part.result), resultTrimmed: { chars: full.length, ...at } };
     const text = resultTextOf(part.result);
     if (text === undefined || text.length <= TRIM_ABOVE_CHARS) return part;
     return { ...part, result: withText(part.result, trimmedText(text)), resultTrimmed: { chars: text.length, ...at } };

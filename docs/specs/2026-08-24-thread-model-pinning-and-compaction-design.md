@@ -263,19 +263,39 @@ Two layers fix it:
   surfaces a clear error if it overflows.
 - **Tool result cap (2026-11-10).** `Thread.withResultCap` wraps every tool,
   so the assistant, children, workflow steps, and plugin reviews all get it.
-  A result over the tool's `maxResultChars` (default 100,000, Claude Code's
-  `maxResultSizeChars`) or 25,000 estimated tokens (Claude Code's MCP output
-  cap; `estimateResultTokens` counts JSON at 2 characters per token) is saved
-  to `<workspace>/.valet/tool-results/` in the sandbox. The model gets the
-  first 2,000 characters, the size, and the path from `.valet/` on. The host
-  and the sandbox can name the workspace differently (a host folder mounted at
-  `/workspace`), so both this note and the input spill pointer use that
-  relative path, which `read` and `bash` resolve against the working directory. `bash` caps at 30,000
-  characters, Claude Code's `BASH_MAX_OUTPUT_LENGTH`. `read` opts out because
-  it pages its own output: 2,000 lines or 50,000 characters, which is 25,000
-  tokens at 2 characters per token. If the save fails, the model gets the
-  first part and a note that the rest was dropped. Compaction keeps its own
-  4-character estimate (`estimateTokens`).
+  - **Limits.** A result over the tool's `maxResultChars` (default 100,000,
+    Claude Code's `maxResultSizeChars`) or 25,000 estimated tokens (Claude
+    Code's MCP output cap; `estimateResultTokens` counts JSON at 2 characters
+    per token) is capped. `bash` caps at 30,000 characters (Claude Code's
+    `BASH_MAX_OUTPUT_LENGTH`). `read` opts out because it pages itself: 2,000
+    lines or 50,000 characters, which is 25,000 tokens at 2 characters per
+    token. Text attachments count toward the cap, and a thrown tool error's
+    message gets the same cap (`capToolError`), because pi-agent-core puts it
+    into context as the result.
+  - **Preview.** The result is saved to `<workspace>/.valet/tool-results/`,
+    and the model gets 2,000 characters, the size, and the path from `.valet/`
+    on, which `read` and `bash` resolve against the working directory (the
+    host and the sandbox can name the workspace differently). `bash` sets
+    `resultPreview: "head-tail"`: the first and last 1,000 characters, with
+    the note between them, so the exit status and the failure stay visible.
+    Claude Code previews bash output the same way.
+  - **No usable file.** A turn without `read` or `bash` cannot open a saved
+    file, so it gets as much as the cap allows and a note that the rest was
+    dropped. A failed save does the same.
+  - **The UI keeps the whole text.** The bridge stores it in
+    `details.fullText`, which rehydration and the summarizer never read.
+    REST ships the preview and marks the result trimmed, and the step's
+    tool-output request returns the whole text. The live `tool_end` event
+    drops `fullText` from `resultData` and carries `resultTrimmed`, so a live
+    step loads the whole text the same way.
+  - **Git.** Each folder the engine saves under `.valet/` holds a
+    `.gitignore` of `*`, as the file checkpoint store does, so a `git add -A`
+    in a checkout never commits saved results or large inputs.
+  - **Telemetry.** `valet.tool.results_capped` counts capped results by tool
+    and outcome (`saved` or `cut`).
+  - **Known gaps.** Saved files are never deleted. Compaction keeps its
+    4-character estimate (`estimateTokens`). A skill body over the cap is
+    marked loaded although only its preview is in context.
 - **Fail-safe (defense in depth).** For a tail that still exceeds the window
   (a tool that opts out of the result cap, or a spill that could not write), `compactThreadInner`
   checks the kept tail after cut-point selection. It measures the POST-prune
