@@ -109,6 +109,13 @@ describe("busEventToWire", () => {
     }))).toEqual([expect.objectContaining({ result: "Screenshot", resultData })]);
   });
 
+  it("forwards a capped result's trimmed marker with the thread id", () => {
+    expect(busEventToWire(ev({
+      type: "tool_end", threadId: "t1", tool: "bash", callId: "tc1",
+      result: "preview", isError: false, resultTrimmed: { chars: 120_000, entryId: "e1" },
+    }))).toEqual([expect.objectContaining({ resultTrimmed: { chars: 120_000, entryId: "e1", threadId: "t1" } })]);
+  });
+
   it("forwards message_start", () => {
     const out = busEventToWire(ev({ type: "message_start", threadId: "t1", messageId: "m1", role: "assistant" }));
     expect(out).toEqual([{ type: "message_start", threadId: "t1", messageId: "m1", role: "assistant" }]);

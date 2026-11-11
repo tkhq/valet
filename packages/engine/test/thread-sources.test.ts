@@ -113,6 +113,37 @@ describe("thread source citations", () => {
     }
   });
 
+  it("keeps a capped result's whole text out of the live event and names its stored entry", async () => {
+    const faux = registerFauxProvider({ provider: "live-capped-failure" });
+    const whole = "x".repeat(120_000);
+    const failing = defineTool({
+      name: "large_failure", description: "Fail with a long log", intent: "exempt", parameters: Type.Object({}),
+      execute: async () => ({ text: whole, ok: false }),
+    });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall(failing.name, {}, { id: "large-failure" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("The action failed."),
+    ]);
+    const { engine, events } = setup();
+    const session = await engine.createSession({ userId: "alice", orgId: "org", workspace: "/", sandbox: {}, model: faux.getModel(), builtinTools: [failing] });
+    try {
+      const receipt = await session.prompt("Run the action");
+      await waitForIdle(events, receipt.queueItemId);
+      const live = events.map(event => event.event).find(event => event.type === "tool_end");
+      const holder = (await session.readEntries("web:default"))
+        .find(entry => entry.type === "message" && (entry.parts ?? []).some(part => part.type === "tool_call"));
+      const call = holder?.type === "message" ? holder.parts?.find(part => part.type === "tool_call") : undefined;
+      expect(call?.type === "tool_call" && call.result).toMatchObject({ details: { ok: false, fullText: whole } });
+      expect(live?.type === "tool_end" && live.resultTrimmed).toEqual({ chars: whole.length, entryId: holder?.id });
+      expect(live?.type === "tool_end" && live.resultData).toMatchObject({ details: { ok: false } });
+      expect(live?.type === "tool_end" && live.resultData).not.toHaveProperty("details.fullText");
+      expect(JSON.stringify(live).length).toBeLessThan(10_000);
+    } finally {
+      session.suspendTimers();
+      faux.unregister();
+    }
+  });
+
   it("keeps only citations backed by stored tool sources in settled text and broadcast parts", async () => {
     const faux = registerFauxProvider({ provider: "settled-source-citations" });
     let systemPrompt = "";

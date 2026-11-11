@@ -1602,6 +1602,22 @@ describe("streaming tool calls", () => {
       .toMatchObject({ status: "completed", result: resultData });
   });
 
+  it("marks a capped live result trimmed so the step loads the whole text", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, messageStart("m1", 1));
+    ingest(SESSION, {
+      seq: 2, ts: Date.now(), type: "tool_start", threadId: THREAD,
+      toolName: "bash", callId: "big", args: {},
+    });
+    const resultTrimmed = { chars: 120_000, entryId: "e1", threadId: THREAD };
+    ingest(SESSION, {
+      seq: 3, ts: Date.now(), type: "tool_end", threadId: THREAD,
+      toolName: "bash", callId: "big", result: "preview", resultTrimmed, isError: false,
+    });
+    expect(useStreamStore.getState().bySession[SESSION].messages[0].parts[0])
+      .toMatchObject({ status: "completed", result: "preview", resultTrimmed });
+  });
+
   it("message_end abort removes parts still streaming (they were never persisted)", () => {
     const { ingest } = useStreamStore.getState();
     ingest(SESSION, messageStart("m1", 1));

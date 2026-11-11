@@ -1981,6 +1981,8 @@ export type WireEvent =
       result: string;
       resultData?: unknown;
       isError: boolean;
+      /** A capped result: the step loads its whole text (`GET /api/threads/:id/tool-output`). */
+      resultTrimmed?: { chars: number; entryId: string; threadId: string };
     }
   | {
       seq: number;
