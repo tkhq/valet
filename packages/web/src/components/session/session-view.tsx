@@ -557,8 +557,9 @@ export function SessionView({
               different pending gate). */}
           <ThreadRecapDock recap={recap} collapsed={Boolean(pendingGate)} />
           {/* Home (the only view with replies) shows them on every screen size, so "Mark it done?" is one tap on desktop too.
-              They sit right under the question: below the pinned task card they read as answers to the card. */}
-          {(mobile || enableReplies) && <QuickReplies sessionId={sessionId} threadId={effectiveThreadId} messages={stream.messages.filter(m => m.threadId === effectiveThreadId)}
+              They sit right under the question: below the pinned task card they read as answers to the card.
+              A cover (desktop Home's idle view) hides the question, so the chips hide with it. */}
+          {(mobile || enableReplies) && !cover && <QuickReplies sessionId={sessionId} threadId={effectiveThreadId} messages={stream.messages.filter(m => m.threadId === effectiveThreadId)}
             disabled={Boolean(pendingGate) || threadStatus.status !== "idle" || Boolean(session.data?.readOnlyReason)} />}
           <PinnedPlan threadId={effectiveThreadId} live={workingLine} messages={stream.messages} />
           {pendingGate && (
