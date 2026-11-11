@@ -1837,9 +1837,9 @@ export class Thread {
     const replayedResult = await this.persistReplayedToolResult(suspended.queueItemId, suspended.toolCallId, toolResult);
     await this.fencedEmit({
       type: "tool_end", threadId: this.id, tool: suspended.toolName, callId: suspended.toolCallId,
-      result: toolResultText(replayedResult), isError: false,
-      ...(toolResultNeedsData(replayedResult) ? { resultData: liveResultData(replayedResult) } : {}),
-      ...toolOutcome(replayedResult),
+      result: toolResultText(replayedResult.result), isError: false,
+      ...liveToolResult(replayedResult.result, replayedResult.result, replayedResult.entryId),
+      ...toolOutcome(replayedResult.result),
     }, { queueItemId: suspended.queueItemId });
     await this.session.providers.store.clearSuspendedTurn(this.session.id, this.id, this.fence);
     this.blockedGateId = undefined;
@@ -1939,7 +1939,7 @@ export class Thread {
     queueItemId: string,
     toolCallId: string,
     result: { content?: unknown; details?: unknown },
-  ): Promise<Record<string, unknown>> {
+  ): Promise<{ result: Record<string, unknown>; entryId?: string }> {
     const store = this.session.providers.store;
     const safeResult = this.session.providers.sanitizeToolOutput?.(this.session.id, result) ?? result;
     const structured = safeResult && typeof safeResult === "object" ? { ...safeResult } : {};
@@ -1957,10 +1957,10 @@ export class Thread {
         await this.fencedWrite(() =>
           store.updateEntry(this.session.id, this.id, e, this.fence),
         );
-        return persistedResult;
+        return { result: persistedResult, entryId: e.id };
       }
     }
-    return persistedResult;
+    return { result: persistedResult };
   }
 
   /** Only a durable, registered approval is transferable. Abort the old drive without settling or withdrawing it. */
@@ -7854,7 +7854,7 @@ export class Thread {
             tool: event.toolName,
             callId: event.toolCallId,
             result: resultText,
-            ...(toolResultNeedsData(safeResult) ? { resultData: liveResultData(part?.type === "tool_call" ? part.result : safeResult) } : {}),
+            ...liveToolResult(safeResult, part?.type === "tool_call" ? part.result : safeResult, this.currentAssistantEntry?.id),
             isError: event.isError,
             ...(event.isError ? {} : toolOutcome(safeResult)),
           },
@@ -8566,15 +8566,38 @@ function toolResultNeedsData(result: unknown): boolean {
     || ("label" in details && typeof details.label === "string" && details.label.trim().length > 0);
 }
 
-/** The result a live tool_end event carries: without `details.fullText`, so
- * a capped result sends its preview. The UI loads the whole text from the
- * tool-output route. */
-function liveResultData(result: unknown): unknown {
+/** The whole text `capToolResult` kept in `details.fullText`, if any. */
+function fullTextOf(result: unknown): string | undefined {
+  if (typeof result !== "object" || result === null || !("details" in result)) return undefined;
+  const details = result.details;
+  if (typeof details !== "object" || details === null || !("fullText" in details)) return undefined;
+  return typeof details.fullText === "string" ? details.fullText : undefined;
+}
+
+function withoutFullText(result: unknown): unknown {
   if (typeof result !== "object" || result === null || !("details" in result)) return result;
   const details = result.details;
   if (typeof details !== "object" || details === null || !("fullText" in details)) return result;
   const { fullText: _fullText, ...rest } = details;
   return { ...result, details: rest };
+}
+
+/**
+ * The result fields of a live tool_end event. `resultData` drops
+ * `details.fullText`, so a capped result sends its preview. `resultTrimmed`
+ * names the stored entry, so the step loads the whole text from the
+ * tool-output route without a refetch.
+ */
+function liveToolResult(
+  result: unknown,
+  data: unknown,
+  entryId: string | undefined,
+): { resultData?: unknown; resultTrimmed?: { chars: number; entryId: string } } {
+  const full = fullTextOf(result);
+  return {
+    ...(toolResultNeedsData(result) ? { resultData: withoutFullText(data) } : {}),
+    ...(full !== undefined && entryId !== undefined ? { resultTrimmed: { chars: full.length, entryId } } : {}),
+  };
 }
 
 function findMostRecentCompaction(

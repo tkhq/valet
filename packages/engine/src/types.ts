@@ -2042,7 +2042,12 @@ export type EngineEvent =
       reason: "end_turn" | "tool_use" | "error" | "abort";
     }
   | { type: "tool_start"; threadId: string; tool: string; callId?: string; args: Record<string, unknown> }
-  | { type: "tool_end"; threadId: string; tool: string; callId?: string; result: string; resultData?: unknown; isError: boolean; outcome?: ToolResult["outcome"] }
+  | {
+      type: "tool_end"; threadId: string; tool: string; callId?: string; result: string; resultData?: unknown; isError: boolean; outcome?: ToolResult["outcome"];
+      /** Set when the result was capped: the length of the whole text and the
+       * stored entry the tool-output route loads it from. */
+      resultTrimmed?: { chars: number; entryId: string };
+    }
   | {
       type: "turn_end";
       threadId: string;

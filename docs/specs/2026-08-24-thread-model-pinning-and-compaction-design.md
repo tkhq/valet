@@ -286,7 +286,8 @@ Two layers fix it:
     `details.fullText`, which rehydration and the summarizer never read.
     REST ships the preview and marks the result trimmed, and the step's
     tool-output request returns the whole text. The live `tool_end` event
-    also drops `fullText` from `resultData`.
+    drops `fullText` from `resultData` and carries `resultTrimmed`, so a live
+    step loads the whole text the same way.
   - **Git.** Each folder the engine saves under `.valet/` holds a
     `.gitignore` of `*`, as the file checkpoint store does, so a `git add -A`
     in a checkout never commits saved results or large inputs.
