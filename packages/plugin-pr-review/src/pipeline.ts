@@ -8,6 +8,7 @@ import { rankPatch } from "./context/rank.js";
 import { gitFileAt, localRunner } from "./context/repo.js";
 import { git } from "./git.js";
 import { createReviewerSpec, type ReviewerSpecOptions } from "./review.js";
+import type { ReviewFocus } from "./prompt.js";
 import type { Finding, Review } from "./types.js";
 import { createVerifierSpec, decideFinding, type FinalVerdict } from "./verify.js";
 
@@ -65,6 +66,10 @@ export interface PipelineOptions extends ReviewerSpecOptions {
   verifyModel?: string;
   /** Independent reviewer passes, merged by location before verification. Default 1. */
   passes?: number;
+  /** One extra focused pass per entry, run beside the general passes and merged the same way. */
+  focuses?: ReviewFocus[];
+  /** Drop focused-pass findings rated below this confidence (0-1); general findings are untouched. Unset: keep all. */
+  focusMinConfidence?: number;
   /** Character budget of the context pack built before the review. 0 or unset: no pack. */
   contextBudget?: number;
   /** Team memory for the pack's principles and notes. */
@@ -134,15 +139,22 @@ export async function runReviewPipeline(input: PipelineOptions, run: AgentRunner
   const withContext = { ...opts, ...(context ? { contextPack: context.text } : {}) };
   // Passes run in parallel; each samples its own path through the PR, so
   // their union finds more than one pass. Pass 1 keeps the label "review".
+  // Focused passes follow the general ones, so a general finding wins a same-spot merge.
   const passCount = Math.max(1, opts.passes ?? 1);
+  const plan: { label: string; focus?: ReviewFocus }[] = [
+    ...Array.from({ length: passCount }, (_, i) => ({ label: i === 0 ? "review" : `review:${i + 1}` })),
+    ...[...new Set(opts.focuses ?? [])].map((focus) => ({ label: `review:${focus}`, focus })),
+  ];
   const passes = await Promise.all(
-    Array.from({ length: passCount }, async (_, i) => {
-      const reviewer = await createReviewerSpec(withContext);
-      const result = await run({ ...reviewer, label: i === 0 ? "review" : `review:${i + 1}` });
-      return { result, review: result.outcome === "completed" ? reviewer.review() : undefined };
+    plan.map(async ({ label, focus }) => {
+      const reviewer = await createReviewerSpec({ ...withContext, ...(focus ? { focus } : {}) });
+      const result = await run({ ...reviewer, label });
+      return { result, focus, review: result.outcome === "completed" ? reviewer.review() : undefined };
     }),
   );
-  const done = passes.filter((p): p is { result: AgentRunResult; review: Review } => p.review !== undefined);
+  // Findings a focused pass reported, by identity: merge and consolidate keep the objects.
+  const focused = new WeakSet<Finding>(passes.flatMap((p) => (p.focus && p.review ? p.review.findings : [])));
+  const done = passes.filter((p): p is { result: AgentRunResult; focus: ReviewFocus | undefined; review: Review } => p.review !== undefined);
   const reviewRun = done[0]?.result ?? passes[0].result;
   const merged: Review | undefined =
     done.length > 0 ? { ...done[0].review, findings: mergeFindings(done.map((p) => p.review.findings)) } : passes[0].review;
@@ -160,7 +172,8 @@ export async function runReviewPipeline(input: PipelineOptions, run: AgentRunner
     };
   }
   // `draft` stays whole, so a run can score what the threshold cost.
-  const gate = (f: Finding): boolean => confidentEnough(f, opts.minConfidence);
+  const gate = (f: Finding): boolean =>
+    confidentEnough(f, opts.minConfidence) && (!focused.has(f) || confidentEnough(f, opts.focusMinConfidence));
   if (opts.verify !== true || draft.findings.length === 0) {
     return { outcome: "completed", review: { ...draft, findings: draft.findings.filter(gate) }, draft, verdicts: [], ...stages };
   }

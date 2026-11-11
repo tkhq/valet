@@ -2,6 +2,7 @@
  * CLI argument parsing and case filtering (TKAI-333), separated from
  * `cli.ts` so tests can exercise them without running the suite.
  */
+import { REVIEW_FOCUSES, type ReviewFocus } from "@valet/plugin-pr-review";
 import { parseArgs } from "node:util";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -43,6 +44,10 @@ export interface CliOptions {
   verify?: boolean;
   /** Independent code-review passes per case. */
   reviewPasses?: number;
+  /** One extra focused code-review pass per entry (failure, concurrency, tests). */
+  reviewFocus?: ReviewFocus[];
+  /** Drop focused-pass findings rated below this confidence (0-1). */
+  focusMinConfidence?: number;
   /** Drop code-review findings rated below this confidence (0-1). */
   minConfidence?: number;
   /** Context pack budget in tokens for code-review cases (about 4 chars each). 0 or unset: no pack. */
@@ -74,6 +79,8 @@ export function parseCliArgs(argv: string[]): CliOptions {
       "verify-model": { type: "string" },
       verify: { type: "boolean", default: false },
       "review-passes": { type: "string" },
+      "review-focus": { type: "string" },
+      "focus-min-confidence": { type: "string" },
       "min-confidence": { type: "string" },
       "context-budget": { type: "string" },
       "memory-dir": { type: "string" },
@@ -109,6 +116,22 @@ export function parseCliArgs(argv: string[]): CliOptions {
     reviewPasses = Number.parseInt(values["review-passes"], 10);
     if (!Number.isInteger(reviewPasses) || reviewPasses < 1 || reviewPasses > 5) {
       throw new Error(`--review-passes must be an integer from 1 to 5, got \`${values["review-passes"]}\``);
+    }
+  }
+  let reviewFocus: ReviewFocus[] | undefined;
+  if (values["review-focus"] !== undefined) {
+    const names = values["review-focus"].split(",").map((s) => s.trim()).filter(Boolean);
+    const unknown = names.filter((n) => !(REVIEW_FOCUSES as readonly string[]).includes(n));
+    if (names.length === 0 || unknown.length > 0) {
+      throw new Error(`--review-focus takes a comma-separated list of ${REVIEW_FOCUSES.join(", ")}, got \`${values["review-focus"]}\``);
+    }
+    reviewFocus = names as ReviewFocus[];
+  }
+  let focusMinConfidence: number | undefined;
+  if (values["focus-min-confidence"] !== undefined) {
+    focusMinConfidence = Number(values["focus-min-confidence"]);
+    if (!Number.isFinite(focusMinConfidence) || focusMinConfidence < 0 || focusMinConfidence > 1) {
+      throw new Error(`--focus-min-confidence must be a number from 0 to 1, got \`${values["focus-min-confidence"]}\``);
     }
   }
   let minConfidence: number | undefined;
@@ -158,6 +181,8 @@ export function parseCliArgs(argv: string[]): CliOptions {
     ...(values["verify-model"] !== undefined ? { verifyModel: values["verify-model"] } : {}),
     ...(values.verify ? { verify: true } : {}),
     ...(reviewPasses !== undefined ? { reviewPasses } : {}),
+    ...(reviewFocus !== undefined ? { reviewFocus } : {}),
+    ...(focusMinConfidence !== undefined ? { focusMinConfidence } : {}),
     ...(minConfidence !== undefined ? { minConfidence } : {}),
     ...(contextBudget !== undefined ? { contextBudget } : {}),
     ...(values["memory-dir"] !== undefined ? { memoryDir: values["memory-dir"] } : {}),

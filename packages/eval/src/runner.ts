@@ -7,6 +7,7 @@
  * `ANTHROPIC_API_KEY` (or the matching provider env var) through pi-ai's
  * env fallback. Tests use the pi-ai faux provider instead.
  */
+import type { ReviewFocus } from "@valet/plugin-pr-review";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -95,6 +96,10 @@ export interface RunnerOptions {
   verify?: boolean;
   /** Independent code-review passes per case. */
   reviewPasses?: number;
+  /** One extra focused code-review pass per entry (failure, concurrency, tests). */
+  reviewFocus?: ReviewFocus[];
+  /** Drop focused-pass findings rated below this confidence (0-1). */
+  focusMinConfidence?: number;
   /** Drop code-review findings rated below this confidence (0-1). */
   minConfidence?: number;
   /** Context pack budget in tokens for code-review cases (about 4 chars each). 0 or unset: no pack. */

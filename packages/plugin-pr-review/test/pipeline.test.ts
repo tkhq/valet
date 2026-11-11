@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ToolContext } from "@valet/engine";
-import { buildReviewPrompt, anchorProblems, evidenceProblems, buildVerifierPrompt, createReviewerSpec, createVerifierSpec, lineCount, decideFinding, mergeFindings, quoteInFile, runReviewPipeline, type AgentRunner, type AgentSpec } from "../src/index.js";
+import { buildReviewPrompt, FOCUS_PROMPTS, REVIEWER_SYSTEM_PROMPT, anchorProblems, evidenceProblems, buildVerifierPrompt, createReviewerSpec, createVerifierSpec, lineCount, decideFinding, mergeFindings, quoteInFile, runReviewPipeline, type AgentRunner, type AgentSpec } from "../src/index.js";
 
 function repo(): { dir: string; base: string; head: string } {
   const dir = mkdtempSync(join(tmpdir(), "pr-review-pipeline-"));
@@ -92,6 +92,51 @@ describe("runReviewPipeline", () => {
     expect(labels.sort()).toEqual(["review", "review:2"]);
     expect(result.review?.summary).toBe("review");
     expect(result.review?.findings.map((f) => f.title)).toEqual(["Division by zero", "Other file"]);
+  });
+
+  it("adds one focused pass per focus, with its focus section, merged after the general pass", async () => {
+    const { dir, base, head } = repo();
+    const prompts = new Map<string, string>();
+    const run: AgentRunner = async (spec) => {
+      prompts.set(spec.label, spec.systemPrompt);
+      const findings =
+        spec.label === "review"
+          ? [finding("Division by zero")]
+          : spec.label === "review:failure"
+            ? [{ ...finding("Fails open on error"), line: 2 }, { ...finding("Leaked key spends funds"), path: "b.py", line: 1 }]
+            : [];
+      await submit(spec, "submit_review", { summary: spec.label, confidence: 2, findings });
+      return { outcome: "completed" };
+    };
+    const result = await runReviewPipeline(
+      { workspace: dir, base, head, title: "t", body: "", focuses: ["failure", "concurrency", "failure"] },
+      run,
+    );
+    expect([...prompts.keys()].sort()).toEqual(["review", "review:concurrency", "review:failure"]);
+    expect(prompts.get("review")).toBe(REVIEWER_SYSTEM_PROMPT);
+    expect(prompts.get("review:failure")).toContain(FOCUS_PROMPTS.failure);
+    expect(prompts.get("review:concurrency")).toContain(FOCUS_PROMPTS.concurrency);
+    // The general pass owns the summary and wins the same-spot merge.
+    expect(result.review?.summary).toBe("review");
+    expect(result.review?.findings.map((f) => f.title)).toEqual(["Division by zero", "Leaked key spends funds"]);
+  });
+
+  it("drops low-confidence focused findings from the review, keeps general ones, and keeps the whole draft", async () => {
+    const { dir, base, head } = repo();
+    const run: AgentRunner = async (spec) => {
+      const findings =
+        spec.label === "review"
+          ? [{ ...finding("General low"), confidence: 0.2 }]
+          : [{ ...finding("Focused low"), path: "b.py", line: 1, confidence: 0.3 }, { ...finding("Focused high"), line: 1, path: "b.py", title: "Focused high", trigger: "other call", evidence: "b.py:1", confidence: 0.9 }];
+      await submit(spec, "submit_review", { summary: spec.label, confidence: 2, findings });
+      return { outcome: "completed" };
+    };
+    const result = await runReviewPipeline(
+      { workspace: dir, base, head, title: "t", body: "", focuses: ["failure"], focusMinConfidence: 0.5 },
+      run,
+    );
+    expect(result.review?.findings.map((f) => f.title)).toEqual(["General low", "Focused high"]);
+    expect(result.draft?.findings.map((f) => f.title)).toEqual(["General low", "Focused low", "Focused high"]);
   });
 
   it("runs the verifiers on verifyModel and the reviewer on the host's model", async () => {
