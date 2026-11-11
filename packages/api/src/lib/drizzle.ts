@@ -1490,6 +1490,14 @@ WHERE r.status <> 'merged' ORDER BY l.org_id, l.subject_type, l.subject_id, l.di
     sql: 'ALTER TABLE "agent_sessions" ADD COLUMN IF NOT EXISTS "sandbox_reclaimed_at" bigint',
   },
   {
+    // The reaper's idle clock (engine/hibernation-reaper.ts). Null on rows
+    // hibernated before the column existed; the reaper reads `updated_at`
+    // for those.
+    describe: "agent_sessions.sandbox_suspended_at column",
+    probe: { kind: "column", table: "agent_sessions", column: "sandbox_suspended_at" },
+    sql: 'ALTER TABLE "agent_sessions" ADD COLUMN IF NOT EXISTS "sandbox_suspended_at" bigint',
+  },
+  {
     // Per-child CPU and memory overrides. Null means the session continues to
     // use repository or deployment defaults.
     describe: "agent_sessions.sandbox_resource_overrides column",

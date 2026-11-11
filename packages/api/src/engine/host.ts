@@ -505,9 +505,11 @@ export interface EngineHostOpts {
    * regardless of `wasSuspended`. Task 4 wires this to the same
    * "clear `hibernated` -> `active`" write `onWake` performs — the write is
    * conditioned on the row currently being `"hibernated"` (a no-op
-   * otherwise), so firing on every ordinary cold-start is harmless. Errors
-   * are caught and logged, never thrown into the attachment's status-
-   * listener path.
+   * otherwise), so firing on every ordinary cold-start is harmless. It also
+   * clears `sandbox_suspended_at` on any status: the sandbox is running, so
+   * the reaper's idle clock restarts at the next hibernate. Errors are
+   * caught and logged, never thrown into the attachment's status-listener
+   * path.
    */
   onSessionReady?: (sessionId: string) => Promise<void> | void;
   /**

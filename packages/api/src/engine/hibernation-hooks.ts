@@ -14,7 +14,7 @@
  * `EngineHostOpts`) — is a no-op on the vast majority of calls where the
  * row isn't currently hibernated.
  */
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNotNull, sql } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions } from "../schema/index.js";
 import type { EngineHostOpts } from "./host.js";
@@ -32,15 +32,23 @@ export type HibernationHooks = Pick<EngineHostOpts, "onHibernate" | "onWake" | "
  * `sandboxId` is recorded as `hibernated_sandbox_id` — the reaper's destroy
  * handle for sessions an api restart evicts from the host cache — and
  * `sandbox_reclaimed_at` is cleared: every hibernate starts a fresh cycle.
+ *
+ * `sandbox_suspended_at` keeps an existing value. A prompt that never wakes
+ * the sandbox flips the row to `active`, and the next hibernate write finds
+ * the sandbox still suspended; restarting the clock there would keep a
+ * sandbox that has not run for months out of the reaper's reach. Only a
+ * `ready` transition clears it (`clearSandboxSuspended`).
  */
 export async function writeHibernated(db: AppDb, sessionId: string, sandboxId?: string): Promise<void> {
+  const now = Date.now();
   await db
     .update(agentSessions)
     .set({
       status: "hibernated",
       hibernatedSandboxId: sandboxId ?? null,
       sandboxReclaimedAt: null,
-      updatedAt: Date.now(),
+      sandboxSuspendedAt: sql`COALESCE(${agentSessions.sandboxSuspendedAt}, ${now})`,
+      updatedAt: now,
     })
     .where(and(eq(agentSessions.id, sessionId), eq(agentSessions.status, "active")));
 }
@@ -55,11 +63,25 @@ export function buildHibernationHooks(db: AppDb): HibernationHooks {
       .where(and(eq(agentSessions.id, sessionId), eq(agentSessions.status, "hibernated")));
   };
 
+  // Not conditioned on status: a prompt can flip the row to `active` before
+  // the sandbox wakes, and the stale clock must still go.
+  const clearSandboxSuspended = async (sessionId: string): Promise<void> => {
+    await db
+      .update(agentSessions)
+      .set({ sandboxSuspendedAt: null })
+      .where(and(eq(agentSessions.id, sessionId), isNotNull(agentSessions.sandboxSuspendedAt)));
+  };
+
   return {
     onHibernate: async (sessionId: string, sandboxId?: string) => {
       await writeHibernated(db, sessionId, sandboxId);
     },
+    // `onWake` also fires from `markSessionUsed` on every prompt, including
+    // prompts that never touch the sandbox, so it keeps the suspend clock.
     onWake: clearHibernated,
-    onSessionReady: clearHibernated,
+    onSessionReady: async (sessionId: string) => {
+      await clearHibernated(sessionId);
+      await clearSandboxSuspended(sessionId);
+    },
   };
 }

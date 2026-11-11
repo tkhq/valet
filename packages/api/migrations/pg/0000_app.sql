@@ -272,6 +272,7 @@ CREATE TABLE "agent_sessions" (
 	"image_fallback" jsonb,
 	"hibernated_sandbox_id" text,
 	"sandbox_reclaimed_at" bigint,
+	"sandbox_suspended_at" bigint,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL,
 	"last_activity_at" bigint

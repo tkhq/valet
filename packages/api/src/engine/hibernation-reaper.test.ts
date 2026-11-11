@@ -14,6 +14,7 @@ type SessionSeed = {
   status?: "active" | "hibernated" | "archived" | "deleted";
   hibernatedSandboxId?: string | null;
   sandboxReclaimedAt?: number | null;
+  sandboxSuspendedAt?: number | null;
   updatedAt?: number;
 };
 
@@ -34,6 +35,7 @@ describe("HibernationReaper", () => {
       status: seedOpts.status ?? "hibernated",
       hibernatedSandboxId: seedOpts.hibernatedSandboxId === undefined ? `sbx-${id}` : seedOpts.hibernatedSandboxId,
       sandboxReclaimedAt: seedOpts.sandboxReclaimedAt ?? null,
+      sandboxSuspendedAt: seedOpts.sandboxSuspendedAt ?? null,
       createdAt: NOW - 10 * RETENTION_MS,
       updatedAt: seedOpts.updatedAt ?? NOW - 2 * RETENTION_MS,
     });
@@ -44,6 +46,7 @@ describe("HibernationReaper", () => {
     live?: { state: AttachmentState; destroyed: string[] } | null;
     unsettled?: number;
     activityAt?: number | null;
+    leases?: number;
     retentionMs?: number;
     /** `deriveSandboxId` result; defaults to null (backend-assigned ids). */
     derivedId?: string | null;
@@ -77,6 +80,7 @@ describe("HibernationReaper", () => {
       engineStore: {
         listUnsettledSubmissions: async () => new Array(overrides.unsettled ?? 0).fill({}),
         latestActivityAt: async () => overrides.activityAt ?? null,
+        countActiveLeases: async () => overrides.leases ?? 0,
       },
       retentionMs: overrides.retentionMs ?? RETENTION_MS,
     };
@@ -168,6 +172,36 @@ describe("HibernationReaper", () => {
   it("fresh engine activity wins over a stale updated_at", async () => {
     await seed();
     const { deps, destroyedSandboxes } = fakeDeps({ activityAt: NOW - RETENTION_MS + 1 });
+
+    await new HibernationReaper(deps).sweep(NOW);
+
+    expect(destroyedSandboxes).toEqual([]);
+  });
+
+  it("judges by when the sandbox was suspended, not by a fresh updated_at or chat activity", async () => {
+    // A prompt that never wakes the sandbox moves updated_at and adds engine
+    // activity; the sandbox itself has been suspended for longer than the window.
+    const id = await seed({ updatedAt: NOW - 1, sandboxSuspendedAt: NOW - 2 * RETENTION_MS });
+    const { deps, destroyedSandboxes } = fakeDeps({ activityAt: NOW - 1 });
+
+    await new HibernationReaper(deps).sweep(NOW);
+
+    expect(destroyedSandboxes).toEqual([`sbx-${id}`]);
+    expect((await row(id))?.sandboxReclaimedAt).toBe(NOW);
+  });
+
+  it("skips a sandbox suspended inside the window even when updated_at is old", async () => {
+    await seed({ updatedAt: NOW - 2 * RETENTION_MS, sandboxSuspendedAt: NOW - RETENTION_MS + 1 });
+    const { deps, destroyedSandboxes } = fakeDeps();
+
+    await new HibernationReaper(deps).sweep(NOW);
+
+    expect(destroyedSandboxes).toEqual([]);
+  });
+
+  it("an active lease wins", async () => {
+    await seed({ sandboxSuspendedAt: NOW - 2 * RETENTION_MS });
+    const { deps, destroyedSandboxes } = fakeDeps({ leases: 1 });
 
     await new HibernationReaper(deps).sweep(NOW);
 

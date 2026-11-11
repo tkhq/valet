@@ -11,8 +11,15 @@
  * (recorded at hibernate time), falling back to `SandboxProvider.deriveId`
  * for rows hibernated before that column existed. Race rules mirror
  * `ChildWatcher.sweepRetention`.
+ *
+ * The idle clock is `sandbox_suspended_at`: when the sandbox itself was
+ * suspended. Session activity is not the clock. A prompt that never wakes
+ * the sandbox moves `updated_at` and adds engine activity, so either clock
+ * kept sandboxes suspended for months out of reach while their owners
+ * chatted. Rows hibernated before the column existed fall back to
+ * `updated_at` and the engine activity check.
  */
-import { and, eq, isNull, lte, sql } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { recordSandboxDestroyed, type AttachmentState, reportError } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions } from "../schema/index.js";
@@ -46,6 +53,7 @@ export interface HibernationReaperDeps {
   engineStore: {
     listUnsettledSubmissions(sessionId: string): Promise<unknown[]>;
     latestActivityAt(sessionId: string): Promise<number | null>;
+    countActiveLeases(sessionId: string): Promise<number>;
   };
   /** Resolved via `resolveHibernatedRetentionMs` at boot; `<= 0` disables. */
   retentionMs: number;
@@ -73,7 +81,7 @@ export class HibernationReaper {
           // Only isolated executions resume normal destructive retention.
           sql`NOT EXISTS (SELECT 1 FROM assistants a WHERE a.session_id=${agentSessions.id} AND a.owner_type='team')`,
           isNull(agentSessions.sandboxReclaimedAt),
-          lte(agentSessions.updatedAt, cutoff),
+          sql`COALESCE(${agentSessions.sandboxSuspendedAt}, ${agentSessions.updatedAt}) <= ${cutoff}`,
         ),
       );
     for (const row of rows) {
@@ -81,8 +89,12 @@ export class HibernationReaper {
       try {
         const unsettled = await this.deps.engineStore.listUnsettledSubmissions(row.id);
         if (unsettled.length > 0) continue;
-        const activityAt = await this.deps.engineStore.latestActivityAt(row.id);
-        if (activityAt != null && activityAt > cutoff) continue;
+        // A lease holds the sandbox, the same rule as the idle sweep.
+        if ((await this.deps.engineStore.countActiveLeases(row.id)) > 0) continue;
+        if (row.sandboxSuspendedAt == null) {
+          const activityAt = await this.deps.engineStore.latestActivityAt(row.id);
+          if (activityAt != null && activityAt > cutoff) continue;
+        }
 
         const live = this.deps.engineHost.liveSession(row.id);
         if (live) {

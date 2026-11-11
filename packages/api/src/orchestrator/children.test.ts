@@ -5796,6 +5796,36 @@ describe("child sandbox retention", () => {
     expect(tokens[0]?.revokedAt).not.toBeNull();
     expect((await watchRow(api, "child-cold"))?.sandboxReclaimedAt).not.toBeNull();
   });
+
+  it("retention sweep: reclaims an uncached child with no recorded handle via the derived sandbox id", async () => {
+    let parked = "";
+    const derivedKeys: string[] = [];
+    // A deterministic provider: the id is a function of the workspace.
+    const provider = new (class extends HibernatingChildProvider {
+      deriveId(sessionKey: string): string {
+        derivedKeys.push(sessionKey);
+        return parked;
+      }
+    })();
+    api = await bootTestApi({ sandboxProvider: provider });
+    const watcher = testChildWatcher(childrenDeps(api, { retentionMs: RETENTION_MS }));
+    const { engineHost, engineStore, db } = api.providers;
+
+    const { watch } = await seedParkableChild(api, "child-unrecorded", "parent-unrecorded");
+    watcher.arm(watch);
+    await waitFor(async () => provider.suspendCalls.length === 1);
+    parked = provider.suspendCalls[0] ?? "";
+
+    // A child that was not cached when it settled recorded no handle anywhere.
+    engineHost.evictCache("child-unrecorded");
+    await engineStore.clearSessionSandboxId("child-unrecorded", parked);
+    await db.update(childWatches).set({ parkedSandboxId: null }).where(eq(childWatches.childSessionId, "child-unrecorded"));
+
+    await watcher.sweepRetention(Date.now() + RETENTION_MS + 1);
+    expect(derivedKeys).toEqual([(await engineStore.getSession("child-unrecorded"))?.workspace]);
+    expect((await provider.status(parked)).state).toBe("released");
+    expect((await watchRow(api, "child-unrecorded"))?.sandboxReclaimedAt).not.toBeNull();
+  });
 });
 
 
