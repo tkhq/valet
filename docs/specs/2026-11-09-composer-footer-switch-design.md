@@ -6,7 +6,9 @@ The switch keeps its permission rules and confirmation dialog. Personal owners a
 
 When the switch is unavailable, desktop keeps the keyboard hint. Touch keeps the hint hidden. This fallback is an explicit product assumption.
 
-The label does not wrap or truncate. The switch track and thumb show its state. The control keeps its accessible label, switch role, checked state, and keyboard access. At 1280px and 390px, the label and switch remain visible. The model picker can use the remaining width.
+The label does not wrap or truncate. The switch track and thumb show its state. The control keeps its accessible label, switch role, checked state, and keyboard access. At 1280px, the label and switch remain visible. In a composer under 34rem wide, such as at 390px, the label text hides and the switch stays with its accessible name. The model picker can use the remaining width.
+
+The model picker trigger shows the full model name by default. In a composer under 34rem wide it shows the curated short name, and under 18.75rem an icon. A trigger outside a size container keeps the full name.
 
 ## Validation
 

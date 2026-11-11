@@ -394,17 +394,19 @@ export function ModelPicker({
     >
       {presentation === "trigger" ? (
         <>
-          {/* Below 18.75rem even the short name is cut by the Stop button, so
-              the icon stands in; the dropdown chevron stays. */}
-          <span data-icon-picker aria-hidden="true" className={compactLabel ? "[@container(min-width:18.75rem)]:hidden" : "[@container(min-width:34rem)]:hidden"}>
+          {/* The full label is the default, so a trigger outside a size
+              container shows the model name. Under 34rem the short name
+              stands in; under 18.75rem even that is cut by the Stop button,
+              so the icon does. The dropdown chevron stays. */}
+          <span data-icon-picker aria-hidden="true" className={cn("hidden", compactLabel ? "[@container(width<18.75rem)]:inline" : "[@container(width<34rem)]:inline")}>
             <Cpu className="h-3.5 w-3.5" />
           </span>
           {compactLabel && (
-            <span data-compact-picker className="hidden truncate text-sm [@container(min-width:18.75rem)]:inline [@container(min-width:34rem)]:hidden">
+            <span data-compact-picker className="hidden truncate text-sm [@container(18.75rem<=width<34rem)]:inline">
               {compactLabel}
             </span>
           )}
-          <span className="hidden truncate text-sm [@container(min-width:34rem)]:inline">
+          <span data-full-picker className="truncate text-sm [@container(width<34rem)]:hidden">
             {triggerLabel}
             {triggerReasoning}
           </span>

@@ -672,12 +672,22 @@ describe("ModelPicker compact composer trigger", () => {
     expect(trigger.getAttribute("title")).toMatch(/Opus 4\.7.*Medium/);
     const compact = trigger.querySelector<HTMLElement>("[data-compact-picker]");
     expect(compact?.textContent).toBe("Opus 4.7");
-    expect(compact?.className).toContain("[@container(min-width:18.75rem)]:inline");
-    expect(compact?.className).toContain("[@container(min-width:34rem)]:hidden");
+    expect(compact?.className).toContain("[@container(18.75rem<=width<34rem)]:inline");
     const icon = trigger.querySelector<HTMLElement>("[data-icon-picker]");
-    expect(icon?.className).toContain("[@container(min-width:18.75rem)]:hidden");
+    expect(icon?.className).toContain("[@container(width<18.75rem)]:inline");
     expect(icon?.querySelector("svg")).not.toBeNull();
-    expect(compact?.nextElementSibling?.className).toContain("hidden");
+  });
+
+  it("shows the full label by default, so a trigger outside a size container names the model", () => {
+    renderTrigger("anthropic/claude-opus-4-7");
+    const trigger = screen.getByRole("button", { name: /Choose model:.*Opus 4\.7.*Medium/ });
+    const full = trigger.querySelector<HTMLElement>("[data-full-picker]");
+    expect(full?.textContent).toMatch(/Opus 4\.7.*Medium/);
+    // Only width-below queries hide the full label; none match without a container.
+    expect(full?.className.split(" ")).not.toContain("hidden");
+    expect(full?.className).toContain("[@container(width<34rem)]:hidden");
+    expect(trigger.querySelector<HTMLElement>("[data-compact-picker]")?.className.split(" ")).toContain("hidden");
+    expect(trigger.querySelector<HTMLElement>("[data-icon-picker]")?.className.split(" ")).toContain("hidden");
   });
 
   it("falls back to an icon below the full-label width when the model has no curated short name", () => {
@@ -685,7 +695,7 @@ describe("ModelPicker compact composer trigger", () => {
     const trigger = screen.getByRole("button", { name: /Choose model: .*Llama 3/ });
     expect(trigger.querySelector("[data-compact-picker]")).toBeNull();
     const icon = trigger.querySelector<HTMLElement>("[data-icon-picker]");
-    expect(icon?.className).toContain("[@container(min-width:34rem)]:hidden");
+    expect(icon?.className).toContain("[@container(width<34rem)]:inline");
     expect(icon?.querySelector("svg")).not.toBeNull();
   });
 });
