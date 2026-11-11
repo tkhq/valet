@@ -276,6 +276,24 @@ integrations on a user's behalf, in Settings → Integrations.
 |----------|-------------|
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | OAuth client for the Gmail, Google Calendar, and Google Workspace integrations |
 
+### Secret store
+
+Optional. A secret store holds the personal secrets that users save in Settings → Secrets and read in their own sessions with `secret://personal/<name>` references. Valet keeps names, owners, and access rules. The provider holds the values.
+
+| Variable | Description |
+|----------|-------------|
+| `VALET_SECRET_STORE` | The provider. `turnkey` is the only value today. Unset turns the store off. An unknown value stops the api at boot. |
+
+#### Turnkey provider
+
+Required when `VALET_SECRET_STORE=turnkey`. A missing value stops the api at boot.
+
+| Variable | Description |
+|----------|-------------|
+| `VALET_TURNKEY_ORG_ID` | The parent Turnkey organization. Valet creates one sub-organization per user under it. |
+| `VALET_TURNKEY_API_PUBLIC_KEY` / `VALET_TURNKEY_API_PRIVATE_KEY` | The broker's P-256 API key pair. It is the root user of each user's sub-organization. Store it like `VALET_ENCRYPTION_KEY`. |
+| `VALET_TURNKEY_API_BASE_URL` | Optional. Turnkey API URL. Default `https://api.turnkey.com`. |
+
 ### The two Google pairs
 
 Valet reads two Google credential pairs, and they do different jobs:

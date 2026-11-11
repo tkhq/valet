@@ -4239,6 +4239,23 @@ export interface ResolveSandboxSecretsResponse {
   unresolved: string[];
 }
 
+/** One personal secret, as `GET /api/secrets` lists it. Names only: no
+ * route returns a value. */
+export interface SecretSummary {
+  name: string;
+  /** What `valet-secrets run --env NAME=<reference>` takes. */
+  reference: string;
+  createdAt: number;
+}
+
+export interface SecretsListResponse {
+  /** False when this deployment sets no secret store provider. */
+  enabled: boolean;
+  /** The provider's name for users, for example "Turnkey". Null when off. */
+  provider: string | null;
+  secrets: SecretSummary[];
+}
+
 // ── REST: me + models (split-settings design) ─────────────────────────────
 //
 // `/api/me` is the settings-shell's per-user profile surface — distinct

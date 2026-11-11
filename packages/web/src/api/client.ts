@@ -57,6 +57,8 @@ import type {
   CreateTeamRequest,
   CreateTeamResponse,
   ListTeamApiKeysResponse,
+  SecretSummary,
+  SecretsListResponse,
   PatchTeamRequest,
   PatchTeamResponse,
   CreateInviteRequest,
@@ -1469,6 +1471,11 @@ export const api = {
     request<CreateTeamApiKeyResponse>("POST", `/teams/${encodeURIComponent(id)}/api-keys`, body),
   revokeTeamApiKey: (id: string, keyId: string) =>
     request<{ ok: true }>("DELETE", `/teams/${encodeURIComponent(id)}/api-keys/${encodeURIComponent(keyId)}`),
+
+  // Personal secrets in the configured secret store. No call returns a value.
+  listSecrets: () => request<SecretsListResponse>("GET", "/secrets"),
+  saveSecret: (body: { name: string; value: string }) => request<SecretSummary>("POST", "/secrets", body),
+  deleteSecret: (name: string) => request<{ ok: true }>("DELETE", `/secrets?name=${encodeURIComponent(name)}`),
 
   // plugins + credentials (plugin-system-v2 plan Task 15 — connect surface)
   runCodeReview: (body: RunCodeReviewRequest) => request<RunCodeReviewResponse>("POST", "/code-review/runs", body),

@@ -8,6 +8,7 @@ import {
   Cpu,
   GitPullRequest,
   KeyRound,
+  LockKeyhole,
   Plug,
   Shield,
   ShieldCheck,
@@ -162,6 +163,7 @@ const PERSONAL_ITEMS: RailItem[] = [
   { to: "/settings/integrations", label: "Integrations", icon: Plug, active: exact("/settings/integrations") },
   { to: "/settings/usage", label: "Usage", icon: BarChart3, active: exact("/settings/usage") },
   { to: "/settings/api-keys", label: "API keys and proxy", icon: KeyRound, active: exact("/settings/api-keys") },
+  { to: "/settings/secrets", label: "Secrets", icon: LockKeyhole, active: exact("/settings/secrets") },
   { to: "/settings/agent-access", label: "Agent access", icon: Bot, active: exact("/settings/agent-access") },
   { to: "/settings/policies", label: "Policies", icon: Shield, active: exact("/settings/policies") },
   // Read-only and backed by the member-visible models list, so every

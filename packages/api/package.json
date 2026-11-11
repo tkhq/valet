@@ -85,6 +85,7 @@
     "@opentelemetry/resources": "^2.10.0",
     "@opentelemetry/sdk-metrics": "^2.10.0",
     "@opentelemetry/sdk-trace-node": "^2.10.0",
+    "@turnkey/sdk-server": "8.9.0",
     "@valet/engine": "workspace:*",
     "@valet/plugin-assistants": "workspace:*",
     "@valet/plugin-browser": "workspace:*",

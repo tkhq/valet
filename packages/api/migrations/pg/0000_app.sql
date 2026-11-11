@@ -994,6 +994,16 @@ CREATE TABLE "credential_shares" (
 --> statement-breakpoint
 CREATE INDEX "credential_shares_user" ON "credential_shares" USING btree ("user_id","service");
 --> statement-breakpoint
+CREATE TABLE "secret_store_spaces" (
+	"org_id" text NOT NULL,
+	"owner_type" text NOT NULL,
+	"owner_id" text NOT NULL,
+	"provider" text NOT NULL,
+	"space_id" text NOT NULL,
+	"created_at" bigint NOT NULL,
+	PRIMARY KEY("org_id", "owner_type", "owner_id", "provider")
+);
+--> statement-breakpoint
 CREATE TABLE "mcp_oauth_clients" (
 	"service" text PRIMARY KEY NOT NULL,
 	"client_id" text NOT NULL,
