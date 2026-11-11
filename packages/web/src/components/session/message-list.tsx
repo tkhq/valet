@@ -15,6 +15,13 @@ import { NewSinceDivider } from "./thread-recap";
 
 /** Transcript rows a thread's first paint shows. */
 const FIRST_PAINT_ROWS = 16;
+// A scrollTop drop larger than this with recent input is the reader leaving the end.
+// Half a pixel catches 1px-per-frame drags; our own writes only move down.
+const UP_SLOP_PX = 0.5;
+// How long after a wheel, touch, key or pointer event a scroll counts as the reader's.
+const INTENT_WINDOW_MS = 800;
+// Once unpinned, only this close to the true end resumes following.
+const REPIN_PX = 4;
 
 /**
  * Scrolling message list. Auto-scrolls to bottom when new messages arrive
@@ -125,6 +132,16 @@ export function MessageList({
   const contentRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const observedHeightRef = useRef<number | null>(null);
+  // Where the list last sat, from a scroll event or our own write. A reader
+  // scroll is only reported on the next frame, so a content commit or resize
+  // report can run first. Comparing against this tells it the reader left.
+  const lastTopRef = useRef(0);
+  // When the reader last touched, wheeled, pressed or keyed the list. A
+  // scrollTop that drops with no recent input is the browser (scroll anchoring,
+  // a layout shift), not the reader, and must not unpin.
+  const intentAtRef = useRef(-Infinity);
+  const markIntent = useCallback(() => { intentAtRef.current = performance.now(); }, []);
+  const hasIntent = () => performance.now() - intentAtRef.current < INTENT_WINDOW_MS;
   const scrollHeader = useScrollHeader(containerRef, threadId);
   // The ref above drives the auto-scroll effect and must stay a ref: the
   // effect reads it in the same tick a message lands. Latest follows the real
@@ -167,17 +184,42 @@ export function MessageList({
   // after it) does the single scroll write.
   useLayoutEffect(() => {
     stickToBottomRef.current = true;
+    lastTopRef.current = containerRef.current?.scrollTop ?? 0;
     setScrolledAway(false);
   }, [threadId]);
 
+  // Follows the end while pinned. Unpins, and does not scroll, when the reader
+  // scrolled up since the last known position but the scroll event has not
+  // arrived yet: yanking them back would also erase that event's evidence.
+  const followBottom = useCallback((el: HTMLDivElement) => {
+    if (!stickToBottomRef.current) return;
+    const maxTop = Math.max(0, el.scrollHeight - el.clientHeight);
+    if (hasIntent() && el.scrollTop < (lastTopRef.current > maxTop ? maxTop - 1 : lastTopRef.current) - UP_SLOP_PX) {
+      stickToBottomRef.current = false;
+      setScrolledAway(true);
+      return;
+    }
+    el.scrollTop = el.scrollHeight;
+    lastTopRef.current = el.scrollTop;
+    scrollHeader.syncPosition();
+  }, [scrollHeader.syncPosition]);
+
+  // Sending a message is a request to see the reply: a new last message from
+  // optimistic row from this client's composer pins the list, even when they had scrolled up to read.
+  const lastIdRef = useRef<string | undefined>(undefined);
   useLayoutEffect(() => {
     const el = containerRef.current;
+    const last = visible[visible.length - 1];
+    const appended = last !== undefined && lastIdRef.current !== undefined && last.id !== lastIdRef.current;
+    lastIdRef.current = last?.id;
     if (!el) return;
-    if (stickToBottomRef.current) {
-      el.scrollTop = el.scrollHeight;
-      scrollHeader.syncPosition();
+    if (appended && last.role === "user" && last.persistence === "optimistic" && last.queueItemId === undefined) {
+      stickToBottomRef.current = true;
+      lastTopRef.current = el.scrollTop;
+      setScrolledAway(false);
     }
-  }, [visible, complete, scrollHeader.syncPosition]);
+    followBottom(el);
+  }, [visible, complete, followBottom]);
 
   // Pinned readers intentionally follow every resize. The browser handles
   // unpinned positions; a collapse that reaches the end can pin the reader.
@@ -193,18 +235,19 @@ export function MessageList({
         return;
       }
       observedHeightRef.current = el.clientHeight;
-      if (stickToBottomRef.current) {
-        el.scrollTop = el.scrollHeight;
-        scrollHeader.syncPosition();
-      }
+      // A resize can bring an unpinned reader to the true end.
+      const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+      if (!stickToBottomRef.current && dist <= REPIN_PX) stickToBottomRef.current = true;
+      followBottom(el);
       // Content grows on every streamed chunk; keep the state when the side did not flip.
-      const away = el.scrollHeight - el.scrollTop - el.clientHeight >= 80;
+      const away =
+        el.scrollHeight - el.scrollTop - el.clientHeight >= 80 || !stickToBottomRef.current;
       setScrolledAway((prev) => (prev === away ? prev : away));
     });
     observer.observe(el);
     if (contentRef.current) observer.observe(contentRef.current);
     return () => observer.disconnect();
-  }, [hasContent, scrollHeader.syncPosition]);
+  }, [hasContent, followBottom]);
 
   function onScroll() {
     const el = containerRef.current;
@@ -213,25 +256,43 @@ export function MessageList({
     const distanceFromBottom = el.scrollHeight - (el.scrollTop + el.clientHeight);
     const nearBottom = distanceFromBottom < 80; // "near bottom"
     const oldHeight = observedHeightRef.current;
+    // Moving up is the reader leaving, even inside the near-bottom band.
+    // Our own writes only move down, and a shrink clamps to the new end.
+    const maxTop = Math.max(0, el.scrollHeight - el.clientHeight);
+    const lastTop = lastTopRef.current;
+    const movedUp = hasIntent() && el.scrollTop < (lastTop > maxTop ? maxTop - 1 : lastTop) - UP_SLOP_PX;
+    // Momentum and scrollbar drags send scroll events with no input events.
+    if (movedUp) markIntent();
     if (
       stickToBottomRef.current && oldHeight !== null &&
       Math.abs(el.clientHeight - oldHeight) > 2
     ) {
       // Anchoring stays near the end at the old or new height. A same-frame
       // reader scroll can leave both, and must unpin before the resize report.
-      stickToBottomRef.current = nearBottom || el.scrollHeight - el.scrollTop - oldHeight < 80;
-    } else {
+      // A move no larger than the viewport change is the browser keeping its place.
+      const leftEnd = movedUp && lastTop - el.scrollTop > Math.abs(el.clientHeight - oldHeight);
+      stickToBottomRef.current =
+        !leftEnd && (nearBottom || el.scrollHeight - el.scrollTop - oldHeight < 80);
+    } else if (movedUp) {
+      stickToBottomRef.current = false;
+    } else if (stickToBottomRef.current) {
       stickToBottomRef.current = nearBottom;
+    } else {
+      // Unpinned: only the true end, or the Latest button, resumes following.
+      stickToBottomRef.current = distanceFromBottom <= REPIN_PX;
     }
+    lastTopRef.current = el.scrollTop;
     // Return `prev` unchanged when the side did not flip. Scroll fires on
     // every wheel tick, and React skips the re-render on an equal value.
-    setScrolledAway((prev) => (prev === !nearBottom ? prev : !nearBottom));
+    const away = !nearBottom || !stickToBottomRef.current;
+    setScrolledAway((prev) => (prev === away ? prev : away));
   }
 
   function scrollToBottom() {
     const el = containerRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
+    lastTopRef.current = el.scrollTop;
     scrollHeader.syncPosition();
     // Set both here rather than waiting for the scroll event. A programmatic
     // scroll to an already-bottom list fires no event, which would leave the
@@ -246,12 +307,15 @@ export function MessageList({
       <div
         ref={containerRef}
         onScroll={onScroll}
-        onWheelCapture={(event) => scrollHeader.recordIntent(event.target)}
-        onTouchMove={(event) => scrollHeader.recordIntent(event.target)}
-        onPointerDown={(event) => scrollHeader.recordIntent(event.target)}
+        onWheelCapture={(event) => { markIntent(); scrollHeader.recordIntent(event.target); }}
+        onTouchStart={markIntent}
+        onTouchMove={(event) => { markIntent(); scrollHeader.recordIntent(event.target); }}
+        onTouchEnd={markIntent}
+        onPointerDown={(event) => { markIntent(); scrollHeader.recordIntent(event.target); }}
         onPointerMove={(event) => { if (event.buttons) scrollHeader.recordIntent(event.target); }}
         onKeyDown={(event) => {
           if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) {
+            markIntent();
             scrollHeader.recordIntent(event.target);
           }
         }}
