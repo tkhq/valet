@@ -30,6 +30,7 @@ import type { SessionEntry } from "@valet/engine";
 import { interpolateTurnContent, type CaseOutcome, type CaseRunResult } from "./runner.js";
 import { extractTrajectory, findSpawnCallId } from "./trajectory.js";
 import type { EvalCase, Trajectory } from "./types.js";
+import { renderTurnImages } from "./turn-images.js";
 
 const DEFAULT_TIMEOUT_MS = 300_000;
 const POLL_MS = 150;
@@ -276,7 +277,7 @@ export async function runProductCase(evalCase: EvalCase, opts: ProductDriveOptio
       const res = await fetch(`${baseUrl}/api/sessions/${sessionId}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: content }),
+        body: JSON.stringify({ text: content, ...(turn.images ? { attachments: await renderTurnImages(turn.images) } : {}) }),
       });
       if (!res.ok) {
         outcome = "failed";

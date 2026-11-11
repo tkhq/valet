@@ -4,6 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { CaseValidationError, loadCases, parseEvalCase } from "../src/index.js";
+import { renderTurnImages } from "../src/turn-images.js";
 
 const CASES_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "../../../evals/cases");
 
@@ -96,6 +97,16 @@ describe("parseEvalCase", () => {
     const c = parseEvalCase(minimal, "test.yaml");
     expect(c.id).toBe("a-case");
     expect(c.checks).toEqual([{ type: "no_errors" }]);
+  });
+
+  it("parses turn images and rejects a bad size", async () => {
+    const image = { name: "a.png", width: 300, height: 100, texts: [{ text: "CODE AB-1234", y: 60, size: 40 }] };
+    const c = parseEvalCase({ ...minimal, turns: [{ role: "user", content: "read it", images: [image] }] }, "t.yaml");
+    expect(c.turns[0].images).toEqual([image]);
+    const [rendered] = await renderTurnImages(c.turns[0].images ?? []);
+    expect(rendered.url.startsWith("data:image/png;base64,iVBOR")).toBe(true);
+    expect(() => parseEvalCase({ ...minimal, turns: [{ role: "user", content: "x", images: [{ ...image, width: 0 }] }] }, "t.yaml"))
+      .toThrow(CaseValidationError);
   });
 
   it("accepts the citation validity check", () => {

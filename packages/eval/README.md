@@ -55,6 +55,18 @@ checks:
   - type: no_errors
 ```
 
+A turn can attach generated images. The harness renders each one as a PNG
+from its size and text lines, so the case file holds the expected content:
+
+```yaml
+    images:
+      - name: page.png
+        width: 1200
+        height: 6000
+        texts:
+          - { text: "TOP CODE FT-4100", y: 160, size: 96 }
+```
+
 Rules that keep cases trustworthy:
 
 1. Compute every expected value with a script. Never use mental

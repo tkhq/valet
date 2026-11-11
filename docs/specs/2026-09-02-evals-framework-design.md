@@ -78,6 +78,15 @@ cases use a one-element array), `model`, `timeout_ms`, `tools` (restrict
 the toolset), `session_type` (`default` or `orchestrator`), `drive`,
 `profile`, `mock_tools`, `required_credentials`, and `checks`.
 
+A turn may carry `images`: each one has a `name`, a `width`, a `height`,
+an optional `background`, and `texts` (`text`, `y`, `size`, optional `x`
+and `color`). The harness renders each image as a PNG with sharp and sends
+it as an attachment in both drives (`packages/eval/src/turn-images.ts`).
+The case file holds the expected text, so the repository holds no binary
+fixture. The `image-read-*` cases use it to check that the agent reads
+attached images after the model image limits
+(`docs/specs/2026-11-11-model-image-limits-design.md`).
+
 Later user turns may interpolate the previous agent output:
 `{{last_output_match(/id: (\w+)/)}}` resolves to the first capture group.
 

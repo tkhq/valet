@@ -1,0 +1,28 @@
+# Image attachments: a 1200 x 9000 image is over the Anthropic 8000 px side
+# limit, so a provider rejects it as sent. Valet stores a 266 x 2000 copy.
+# The case checks that the turn succeeds and the agent reads both codes.
+# The text is large (150 px) because the copy is 0.22 of the original
+# size; small text in an image this tall is not readable after any resize.
+# Before the image limits change, this turn failed with a provider 400.
+# See docs/specs/2026-11-11-model-image-limits-design.md.
+id: image-read-over-provider-limit
+description: Reads two codes from an attached image taller than the provider side limit.
+turns:
+  - role: user
+    content: >-
+      List every code in the attached image, from top to bottom, one per
+      line, in the form LABEL CODE. Copy each code exactly.
+    images:
+      - name: very-long-page.png
+        width: 1200
+        height: 9000
+        texts:
+          - { text: "TOP QR-1876", y: 220, size: 150 }
+          - { text: "END AT-7757", y: 8880, size: 150 }
+timeout_ms: 120000
+checks:
+  - type: output_contains
+    pattern: 'QR.?1876'
+  - type: output_contains
+    pattern: 'AT.?7757'
+  - type: no_errors
