@@ -7,7 +7,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Value } from "typebox/value";
 import type {
   PluginChild,
@@ -25,6 +25,7 @@ import {
   nearestCommentableLine,
   createReviewHandler,
   excluded,
+  focusRole,
   MANUAL_REVIEW_EVENT,
   manualReviewOptions,
   parseFindings,
@@ -851,6 +852,52 @@ describe("review-pull-request handler", () => {
     expect(threads.records[0].body).toContain("Null deref in parse");
     expect(threads.records[0].body).not.toContain("Past the end");
     expect(threads.records[0].dispatchId).toBe(`ev1:${H1.slice(0, 12)}:shadow-record`);
+  });
+
+  it("runs one reviewer child per focus, merges them after the general review, and drops low-confidence focused findings", async () => {
+    const gh = new FakeGitHub();
+    const answer: Answer = (req) => {
+      if (req.role === "pr-reviewer") return reviewOf([finding({})]);
+      if (req.role === focusRole("failure")) {
+        return reviewOf([
+          finding({ line: 6, title: "Same spot as the general finding", confidence: 0.9 }),
+          finding({ line: 15, title: "Close error fails open", confidence: 0.9 }),
+          finding({ line: 18, title: "Unsure guess", confidence: 0.3 }),
+        ]);
+      }
+      return reviewOf([]);
+    };
+    const threads = new FakeThreads(answer);
+    await createReviewHandler({ fetch: gh.fetch }).handle(
+      event("ev1"),
+      context(threads, new FakeStore(), { shadow: true, contextBudget: 0, focuses: ["failure", "tests"] }),
+    );
+    expect(threads.spawned.map((c) => c.req.role).sort()).toEqual(["pr-reviewer", focusRole("failure"), focusRole("tests")].sort());
+    expect(threads.spawned.map((c) => c.dispatchId)).toContain(`ev1:${H1.slice(0, 12)}:shadow-review:failure`);
+    const body = threads.records[0].body;
+    expect(body).toContain("Null deref in parse");
+    expect(body).toContain("Close error fails open");
+    expect(body).not.toContain("Same spot as the general finding");
+    expect(body).not.toContain("Unsure guess");
+  });
+
+  it("records the general review when a focused child cannot start", async () => {
+    const gh = new FakeGitHub();
+    class CappedThreads extends FakeThreads {
+      override async spawnChild(thread: PluginThreadRef, req: PluginChildRequest, opts: { dispatchId: string }): Promise<PluginChild> {
+        if (req.role !== "pr-reviewer") throw new Error("[child_cap] already has 10 active children");
+        return super.spawnChild(thread, req, opts);
+      }
+    }
+    const threads = new CappedThreads(scripted(reviewOf([finding({})]), {}));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await createReviewHandler({ fetch: gh.fetch }).handle(
+      event("ev1"),
+      context(threads, new FakeStore(), { shadow: true, contextBudget: 0, focuses: ["concurrency"] }),
+    );
+    expect(threads.records[0].body).toContain("Null deref in parse");
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("concurrency reviewer skipped"), expect.stringContaining("child_cap"));
+    warn.mockRestore();
   });
 
   it("shadow-reviews a merged pull request at the given commit", async () => {

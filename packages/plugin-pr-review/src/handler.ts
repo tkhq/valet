@@ -14,10 +14,11 @@ import { cutPatch, type PullRequestDiff } from "./git.js";
 import { githubClient, GitHubError, type GitHubClient, type PullFile, type PullRequest, type ReviewComment, type ReviewThread } from "./github.js";
 import { matchesGlob } from "./context/glob.js";
 import { consolidateFindings } from "./consolidate.js";
+import { confidentEnough, mergeFindings } from "./pipeline.js";
 import { gatherForReview, noteBestEffort, renderConsolidation, type StageOutcome } from "./stages.js";
 import { sameIssue } from "./incremental.js";
 import { commentableLines, nearestCommentableLine } from "./linemap.js";
-import { buildReviewPrompt } from "./prompt.js";
+import { buildReviewPrompt, type ReviewFocus } from "./prompt.js";
 import {
   parseFindings,
   renderFixedComment,
@@ -34,6 +35,11 @@ import { buildVerifierPrompt, decideFinding, VerdictSchema, type Verdict } from 
 import type { ReviewRound } from "./state.js";
 
 export const REVIEWER_ROLE = "pr-reviewer";
+
+/** The role of a reviewer child limited to one defect class (see FOCUS_PROMPTS). */
+export function focusRole(focus: ReviewFocus): string {
+  return `${REVIEWER_ROLE}-${focus}`;
+}
 export const VERIFIER_ROLE = "pr-verifier";
 
 const SEVERITY_ORDER = ["low", "medium", "high", "critical"] as const;
@@ -71,6 +77,18 @@ export const ReviewSettingsSchema = Type.Object(
       default: [],
       maxItems: 100,
       description: "Globs of paths where a defect costs the most in this repository, such as `deploy/**` or `**/rollouts/*.yaml`. A diff over the budget keeps these files first, with auth, keys, migrations and access-control paths.",
+    }),
+    focuses: Type.Array(Type.Union([Type.Literal("failure"), Type.Literal("concurrency"), Type.Literal("tests")]), {
+      default: [],
+      maxItems: 3,
+      uniqueItems: true,
+      description: "Extra reviewer children, each limited to one defect class: `failure` (failure paths and attackers), `concurrency` (races and performance), `tests` (tests, contracts and false text). Each one adds about one review's cost. Empty: the general review only.",
+    }),
+    focusMinConfidence: Type.Number({
+      default: 0.7,
+      minimum: 0,
+      maximum: 1,
+      description: "Drop findings from the `focuses` children rated below this confidence (0-1). Findings from the general review are not affected.",
     }),
     contextBudget: Type.Integer({
       default: 12000,
@@ -279,7 +297,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   });
 
   // 2. Review the PR, or only the new commits, told what is already open.
-  const review = (async () => runReviewerChild(ctx, thread, {
+  const review = (async () => runReviewers(ctx, thread, {
     slug, repoName, pr, base: mergeBase, head, settings,
     diff: from !== undefined ? await incrementDiff(gh, from, head, reviewed, settings.riskPaths) : prDiffFor(prDiff, reviewed, mergeBase, head, settings.riskPaths),
     ...(from !== undefined ? { incrementFrom: from } : {}),
@@ -617,6 +635,34 @@ export function reviewerPrompt(input: { review: string; instructions: string; ex
   ].join("\n");
 }
 
+/**
+ * The general reviewer child plus one child per `settings.focuses` entry,
+ * merged by location with the general findings first. The general child
+ * starts first and its failure fails the delivery. A focused child that
+ * cannot start (the per-session child cap) or ends without a review is
+ * logged and skipped, so a busy moment loses depth, never the review.
+ * Focused findings below `focusMinConfidence` are dropped.
+ */
+async function runReviewers(
+  ctx: PluginEventContext,
+  thread: PluginThreadRef,
+  input: Parameters<typeof runReviewerChild>[2],
+): Promise<Review> {
+  const focuses = [...new Set(input.settings.focuses ?? [])];
+  const general = runReviewerChild(ctx, thread, input);
+  if (focuses.length === 0) return general;
+  const focused = focuses.map((focus) =>
+    runReviewerChild(ctx, thread, { ...input, focus, dispatchId: `${input.dispatchId}:${focus}` }).catch((err: unknown) => {
+      console.warn(`pr-review: ${input.slug} ${focus} reviewer skipped:`, err instanceof Error ? err.message : err);
+      return undefined;
+    }),
+  );
+  const [main, ...extra] = await Promise.all([general, ...focused]);
+  const min = input.settings.focusMinConfidence;
+  const extraFindings = extra.flatMap((r) => (r ? [r.findings.filter((f) => confidentEnough(f, min))] : []));
+  return { ...main, findings: mergeFindings([main.findings, ...extraFindings]) };
+}
+
 /** Start the reviewer child at `head` and read its review. A child without a review fails the delivery. */
 async function runReviewerChild(
   ctx: PluginEventContext,
@@ -626,6 +672,8 @@ async function runReviewerChild(
     incrementFrom?: string; knownFindings: { path: string; line: number; title: string }[]; dispatchId: string;
     /** Gather a context pack first, in the child's sandbox. `patch` is the diff before the budget; unset uses the reviewed diff. */
     context?: { readTrusted: (path: string) => Promise<string | undefined>; patch?: string | undefined };
+    /** Limit this child to one defect class. Unset: the general review. */
+    focus?: ReviewFocus;
   },
 ): Promise<Review> {
   const [owner = "", repo = ""] = input.repoName.split("/");
@@ -676,8 +724,8 @@ async function runReviewerChild(
             },
           }
         : {}),
-      title: `Review ${input.head.slice(0, 7)}`,
-      role: REVIEWER_ROLE,
+      title: input.focus ? `Review ${input.head.slice(0, 7)} (${input.focus})` : `Review ${input.head.slice(0, 7)}`,
+      role: input.focus ? focusRole(input.focus) : REVIEWER_ROLE,
       model: input.settings.model,
       repo: input.repoName,
       ref: input.head,
@@ -741,7 +789,7 @@ async function shadowReview(
   const files = comparison.files ?? [];
   const reviewed = files.filter((f) => !excluded(f.filename, settings.excludePaths));
   const prDiff = (await gh.compareDiff(mergeBase, checkout)) ?? undefined;
-  const draft = await runReviewerChild(ctx, thread, {
+  const draft = await runReviewers(ctx, thread, {
     slug, repoName, pr, base: mergeBase, head: checkout, settings,
     diff: prDiffFor(prDiff, reviewed, mergeBase, checkout, settings.riskPaths),
     knownFindings: [],

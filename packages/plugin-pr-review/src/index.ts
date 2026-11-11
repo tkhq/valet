@@ -66,6 +66,7 @@ export * from "./types.js";
 export {
   createReviewHandler,
   excluded,
+  focusRole,
   MANUAL_REVIEW_EVENT,
   manualReviewOptions,
   POINTERS_COLLECTION,

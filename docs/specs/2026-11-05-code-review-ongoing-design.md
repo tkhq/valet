@@ -76,3 +76,30 @@ the plugin keeps them apart.
 - **Selection is not trust.** Changed paths, the PR title and added lines
   choose which trusted notes and playbooks go into the pack. They never supply
   rule text.
+
+## Focused reviewer passes
+
+A repository's review rule can add focused reviewer children with the
+`focuses` setting. Each entry starts one more reviewer child beside the general
+one, with one extra section in its role prompt that limits it to one defect
+class:
+
+- `failure`: error, cleanup and timeout paths, state transitions, and what an
+  attacker can do with one leaked credential.
+- `concurrency`: races, async misuse, and performance waste.
+- `tests`: tests that cannot fail, broken contracts with callers, and text the
+  change made false.
+
+The general child starts first. Its findings come first when the handler merges
+by location, and its summary is the review's summary. A focused finding within
+three lines of an earlier finding on the same file is a repeat and is dropped.
+Focused findings rated below `focusMinConfidence` (default 0.7) are dropped.
+
+Each focused child adds about one review's cost. The default is no focused
+children. A focused child that cannot start, for example at the per-session
+child cap, is logged and skipped, so the review still posts.
+
+On 2026-11-10 the eval measured all three focuses with the 0.7 threshold. The
+private history suite caught 11 of 20 human-raised issues, against 8 in two
+baseline runs. Martian F1 fell from 53.5 to 48.7. Turn focuses on per
+repository, and measure them in shadow mode first.
