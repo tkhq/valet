@@ -5520,7 +5520,7 @@ export class Thread {
         // response already carries the turn's honest error (TKAI-306).
         let outcome: CompactionOutcome;
         try {
-          outcome = await this.compactThread({ mode: "reactive" });
+          outcome = await this.compactThread({ mode: "reactive", turnInProgress: true });
         } catch (err) {
           this.emitError(
             "compaction_failed",
@@ -6010,7 +6010,7 @@ export class Thread {
         }
         let outcome: CompactionOutcome;
         try {
-          outcome = await this.compactThread({ mode: "proactive", autoContinue: false, signal });
+          outcome = await this.compactThread({ mode: "proactive", autoContinue: false, signal, turnInProgress: true });
         } catch (error) {
           if (signal?.aborted || !(await this.canRunCurrentSubmission())) throw error;
           this.turnCompactionBlocked = true;
@@ -6057,6 +6057,12 @@ export class Thread {
      * pass). Inside a turn the pass uses the turn's model and key.
      */
     turnModel?: ResolvedModel;
+    /**
+     * The turn that owns this pass keeps running after it: the pass runs
+     * before a model call (context preparation) or before the overflow
+     * retry. The summarizer prompt then says the turn is not over.
+     */
+    turnInProgress?: true;
   }): Promise<CompactionOutcome> {
     const cfg = this.session.options.compaction;
     if (cfg?.enabled === false) return "noop";
@@ -6083,6 +6089,7 @@ export class Thread {
       signal?: AbortSignal;
       autoContinue?: false;
       turnModel?: ResolvedModel;
+      turnInProgress?: true;
     },
     span?: Span,
   ): Promise<CompactionOutcome> {
@@ -6329,6 +6336,7 @@ export class Thread {
             messages: prefix.messages,
             hasPreviousSummary: previousSummary !== undefined,
             instructions: opts.instructions,
+            turnInProgress: opts.turnInProgress === true,
             send: async (messages) => {
               const stream = await this.streamModel(prefix.model, { ...prefix.context, messages }, {
                 ...prefix.options,
@@ -6362,6 +6370,7 @@ export class Thread {
             attributeAuthors: this.attributeAuthors,
             previousSummary,
             instructions: opts.instructions,
+            turnInProgress: opts.turnInProgress === true,
             signal: opts.signal,
             // Reactive compaction fires WITHIN a claimed turn (and proactive
             // just after runAgent, still before the turn's finally clears it),

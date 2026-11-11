@@ -742,3 +742,26 @@ clears the provider's cached messages. A tool call, an error, or a summary
 that misses the template fails the cached path, and the pass falls back to
 `summarize` with the bounded windows above. The span attribute
 `valet.compaction.summary_source` reads `cached_prefix` or `prefix_failed`.
+
+## Amendment (2026-11-11): a summary inside a running turn
+
+A pass can run inside a turn: context preparation before a model call, or the
+reactive pass before the overflow retry. The same turn then continues from the
+summary and the verbatim tail. Two summary defects stopped such turns early in
+production:
+
+- The summarizer read its own request as the latest user message. The summary
+  then recorded "the latest request is summary-only", and the resumed turn
+  wrote a summary instead of finishing its work.
+- The summary described the running turn as finished. It also reported an
+  action the turn took, such as a reaction it added, as a state the turn had
+  found. The resumed turn read its own action as another run's work and
+  stopped.
+
+Both summarizer prompts (`summarize` and `summarizeOnPrefix`) now say that the
+summary request comes from the system and is not a user message. When the pass
+runs inside a turn (`compactThread({ turnInProgress: true })`), the prompt
+also says that the turn continues after the summary. The summary must keep the
+task under In Progress and list each external action the turn completed as
+done by this turn. A pass after the turn (the budget and idle passes) does not
+add the second note.
