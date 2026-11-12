@@ -23,6 +23,7 @@ import {
   parseFindings,
   renderFixedComment,
   renderForkNotice,
+  renderWithdrawnComment,
   renderShadowNotice,
   renderShadowReview,
   renderInlineComment,
@@ -31,7 +32,7 @@ import {
 } from "./render.js";
 import { ReviewSchema, type Finding, type Review } from "./types.js";
 import { anchorProblems, lineCount } from "./review.js";
-import { buildVerifierPrompt, decideFinding, VerdictSchema, type Verdict } from "./verify.js";
+import { buildVerifierPrompt, decideFinding, refutationGrounded, VerdictSchema, type Verdict } from "./verify.js";
 import type { ReviewRound } from "./state.js";
 
 export const REVIEWER_ROLE = "pr-reviewer";
@@ -114,13 +115,17 @@ export interface FindingPointer {
   /** The GraphQL id of the comment's review thread, once known. */
   threadId?: string;
   /**
-   * `resolved`: a later commit fixed it, and its thread is resolved.
+   * `resolved`: a recheck refuted it, and its thread is resolved. `fixedIn`
+   * says a later commit changed its code; `withdrawnAt` says the code did
+   * not change, so the reviewer withdrew its own claim.
    * `dismissed`: a person resolved its thread or deleted its comment. It is
    * never posted again.
    */
   status: "open" | "resolved" | "dismissed";
   /** The head that fixed it. */
   fixedIn?: string;
+  /** The head at which the reviewer withdrew it without a code change. */
+  withdrawnAt?: string;
 }
 
 /** Everything the plugin store keeps for one pull request. */
@@ -277,10 +282,11 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   const dispatch = (label: string): string => `${event.id}:${head.slice(0, 12)}:${label}`;
   const prDiff = (await gh.compareDiff(mergeBase, head)) ?? undefined;
 
-  // 1. Recheck open findings whose files changed. Only a refutation fixes one.
+  // 1. Recheck open findings whose files changed. Only a grounded refutation
+  // resolves one. It is a fix only when the code behind it changed.
   const toRecheck = open.live.filter((f) => changedSince === undefined || changedSince.has(f.path));
   const stillOpen = open.live.filter((f) => !toRecheck.includes(f));
-  const fixed: { finding: OpenFinding; reason: string }[] = [];
+  const fixed: { finding: OpenFinding; reason: string; withdrawn: boolean }[] = [];
   const recheck = forEachLimit(toRecheck, CHILD_CONCURRENCY, async (f) => {
     const verdict = await runVerifier(ctx, thread, {
       dispatchId: dispatch(`recheck:${f.id}`),
@@ -290,7 +296,11 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
       repo: repoName,
       head,
     });
-    if (verdict?.verdict === "refuted") fixed.push({ finding: f, reason: verdict.counter_evidence || verdict.refutation_reason || "fixed" });
+    if (verdict?.verdict === "refuted" && refutationGrounded(f, verdict)) {
+      const reason = verdict.counter_evidence || verdict.refutation_reason || "refuted";
+      const changed = prior?.lastReviewedHead === undefined || (await flaggedCodeChanged(gh, f, prior.lastReviewedHead, head, reason, repoName));
+      fixed.push({ finding: f, reason, withdrawn: !changed });
+    }
     // The recheck names the line at HEAD, so a moved finding anchors on the RIGHT side.
     else stillOpen.push(verdict?.current_line !== undefined ? { ...f, line: verdict.current_line, side: "RIGHT" } : f);
   });
@@ -387,7 +397,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
       confidence: draft.confidence,
       inline: [...stillOpen.filter((f) => f.commentId !== undefined), ...reopened, ...inline],
       outsideDiff: [...stillOpen.filter((f) => f.commentId === undefined), ...outside],
-      fixed: fixed.map(({ finding }) => ({ finding, sha: head })),
+      fixed: fixed.map(({ finding, withdrawn }) => ({ finding, sha: head, withdrawn })),
       hidden,
     });
 
@@ -419,13 +429,13 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
 
   const commentIds = inlineReviewId !== undefined && inline.length > 0 ? await newCommentIds(gh, inlineReviewId) : new Map<string, number>();
   const updates: NonNullable<PullPointers["pending"]>["updates"] = [];
-  for (const { finding, reason } of fixed) {
+  for (const { finding, reason, withdrawn } of fixed) {
     if (finding.commentId === undefined) continue;
     const comment = open.comments.get(finding.commentId);
     if (!comment) continue;
     updates.push({
-      pointer: { ...pointer(finding, "resolved", finding), commentId: finding.commentId, fixedIn: head },
-      body: renderFixedComment(comment.body, head, reason),
+      pointer: { ...pointer(finding, "resolved", finding), commentId: finding.commentId, ...resolvedAt(head, withdrawn) },
+      body: withdrawn ? renderWithdrawnComment(comment.body, reason) : renderFixedComment(comment.body, head, reason),
     });
   }
   for (const f of reopened) {
@@ -440,8 +450,8 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
     if (p) byId.set(d.id, { ...p, status: "dismissed" });
   }
   for (const f of stillOpen) byId.set(f.id, pointer(f, "open", f));
-  for (const { finding } of fixed) {
-    if (finding.commentId === undefined) byId.set(finding.id, { ...pointer(finding, "resolved", finding), fixedIn: head });
+  for (const { finding, withdrawn } of fixed) {
+    if (finding.commentId === undefined) byId.set(finding.id, { ...pointer(finding, "resolved", finding), ...resolvedAt(head, withdrawn) });
   }
   for (const f of inline) {
     const commentId = commentIds.get(f.id);
@@ -453,7 +463,8 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
     mode: from !== undefined ? "incremental" : "full",
     at: new Date().toISOString(),
     newFindings: posted.map(f => f.id),
-    resolved: fixed.map(({ finding }) => finding.id),
+    resolved: fixed.filter((r) => !r.withdrawn).map(({ finding }) => finding.id),
+    ...(fixed.some((r) => r.withdrawn) ? { withdrawn: fixed.filter((r) => r.withdrawn).map(({ finding }) => finding.id) } : {}),
   };
   const next: PullPointers = {
     version: 1,
@@ -469,7 +480,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   // a person's dismissal. Pending bodies exist only until the batch completes.
   await save(next);
   await finishPendingUpdates(gh, next, save, ctx.signal);
-  log(slug, `reviewed ${head.slice(0, 7)} (${from ? "follow-up" : "full"}): ${posted.length} new, ${fixed.length} fixed, ${reopened.length} reopened, ${stillOpen.length} still open`);
+  log(slug, `reviewed ${head.slice(0, 7)} (${from ? "follow-up" : "full"}): ${posted.length} new, ${fixed.filter((r) => !r.withdrawn).length} fixed, ${fixed.filter((r) => r.withdrawn).length} withdrawn, ${reopened.length} reopened, ${stillOpen.length} still open`);
 }
 
 async function finishPendingUpdates(
@@ -588,6 +599,55 @@ export function placeNearDiff(f: PostedFinding, commentable: ReadonlySet<number>
   if (near === undefined) return f;
   const { suggestion, ...rest } = f;
   return { ...rest, line: near, body: suggestion !== undefined ? `${rest.body.trim()}\n\nSuggested change for line ${f.line}:\n\n\`\`\`\n${suggestion.replace(/\n+$/, "")}\n\`\`\`` : rest.body };
+}
+
+function resolvedAt(head: string, withdrawn: boolean): Pick<FindingPointer, "fixedIn" | "withdrawnAt"> {
+  return withdrawn ? { withdrawnAt: head } : { fixedIn: head };
+}
+
+/** Lines on each side of a finding that must read the same for its code to count as unchanged. */
+const FLAGGED_CONTEXT = 2;
+/** Files cited in a refutation that are compared, besides the finding's own file. */
+const MAX_CITED_FILES = 3;
+const CITED_PATH = /[\w./-]+\.\w+(?=:\d)/g;
+
+/**
+ * Whether the code behind a refuted finding changed between `from`, the head
+ * it was last open on, and `head`. A refutation on unchanged code withdraws
+ * the finding: the reviewer changed its mind, and no commit fixed anything.
+ * - The finding's own file counts when the lines around the finding are gone
+ *   from it. For a LEFT finding (a deleted line), any change to the file counts.
+ * - A file the refutation cites counts when it changed at all, so a fix in a
+ *   caller or a new test still reads as a fix.
+ * A GitHub read error throws and fails the delivery, like the other reads.
+ */
+export async function flaggedCodeChanged(
+  gh: Pick<GitHubClient, "fileText">,
+  f: Pick<PostedFinding, "path" | "line" | "side">,
+  from: string,
+  head: string,
+  evidence: string,
+  repoName: string,
+): Promise<boolean> {
+  const [before, after] = await Promise.all([gh.fileText(f.path, from), gh.fileText(f.path, head)]);
+  if (f.side === "LEFT" || before === undefined || after === undefined) {
+    if (before !== after) return true;
+  } else {
+    const trimmed = (lines: string[]) => lines.map((l) => l.trim()).join("\n");
+    const flagged = trimmed(before.split("\n").slice(Math.max(0, f.line - 1 - FLAGGED_CONTEXT), f.line + FLAGGED_CONTEXT));
+    if (!`\n${trimmed(after.split("\n"))}\n`.includes(`\n${flagged}\n`)) return true;
+  }
+  // Evidence sometimes prefixes a path with the repository, as `owner/name/` or `name/`.
+  const prefixes = [`${repoName}/`, `${repoName.split("/").pop()}/`];
+  const unprefixed = (path: string): string => prefixes.reduce((p, pre) => (p.startsWith(pre) ? p.slice(pre.length) : p), path);
+  const cited = [...new Set([...evidence.matchAll(CITED_PATH)].map((m) => unprefixed(m[0])))]
+    .filter((path) => path !== f.path)
+    .slice(0, MAX_CITED_FILES);
+  for (const path of cited) {
+    const [a, b] = await Promise.all([gh.fileText(path, from), gh.fileText(path, head)]);
+    if (a !== b) return true;
+  }
+  return false;
 }
 
 function pointer(f: Pick<PostedFinding, "id" | "path" | "line" | "side">, status: FindingPointer["status"], ids: { commentId?: number; threadId?: string }): FindingPointer {

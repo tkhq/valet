@@ -37,8 +37,18 @@ export function renderInlineComment(f: PostedFinding): string {
 
 /** An inline comment after a later commit fixed it. The marker stays, so the text can still be read back. */
 export function renderFixedComment(original: string, sha: string, reason: string): string {
-  if (original.startsWith("**Fixed in ")) return original;
+  if (isResolvedComment(original)) return original;
   return `**Fixed in \`${sha.slice(0, 7)}\`.** ${oneLine(reason).slice(0, 300)}\n\n<details><summary>Original finding</summary>\n\n${original}\n</details>`;
+}
+
+/** An inline comment the reviewer withdrew: a recheck refuted it, and no commit changed its code. */
+export function renderWithdrawnComment(original: string, reason: string): string {
+  if (isResolvedComment(original)) return original;
+  return `**Withdrawn.** A recheck found this claim does not hold, and no commit changed this code. ${oneLine(reason).slice(0, 300)}\n\n<details><summary>Original finding</summary>\n\n${original}\n</details>`;
+}
+
+function isResolvedComment(body: string): boolean {
+  return body.startsWith("**Fixed in ") || body.startsWith("**Withdrawn.**");
 }
 
 /** Every finding block in `text`, keyed by id. `path` and `line` come from the plugin store, not from here. */
@@ -71,7 +81,8 @@ export interface SummaryInput {
   inline: PostedFinding[];
   /** Open findings on lines GitHub cannot comment on: their text lives here. */
   outsideDiff: PostedFinding[];
-  fixed: { finding: Pick<PostedFinding, "id" | "title" | "path">; sha: string }[];
+  /** Findings a recheck resolved at `sha`. `withdrawn`: no commit changed their code. */
+  fixed: { finding: Pick<PostedFinding, "id" | "title" | "path">; sha: string; withdrawn?: boolean }[];
   /** Findings the reviewer reported that the line's settings or a missing line hid. */
   hidden: number;
 }
@@ -94,9 +105,15 @@ export function renderSummary(s: SummaryInput): string {
   } else {
     lines.push("", "No open findings.");
   }
-  if (s.fixed.length > 0) {
-    lines.push("", `### Fixed (${s.fixed.length})`, "");
-    for (const { finding, sha } of s.fixed) lines.push(`- ~~${oneLine(finding.title)}~~ \`${finding.path}\`, fixed in \`${sha.slice(0, 7)}\``);
+  const fixed = s.fixed.filter((r) => !r.withdrawn);
+  if (fixed.length > 0) {
+    lines.push("", `### Fixed (${fixed.length})`, "");
+    for (const { finding, sha } of fixed) lines.push(`- ~~${oneLine(finding.title)}~~ \`${finding.path}\`, fixed in \`${sha.slice(0, 7)}\``);
+  }
+  const withdrawn = s.fixed.filter((r) => r.withdrawn);
+  if (withdrawn.length > 0) {
+    lines.push("", `### Withdrawn (${withdrawn.length})`, "");
+    for (const { finding } of withdrawn) lines.push(`- ~~${oneLine(finding.title)}~~ \`${finding.path}\`, withdrawn on recheck`);
   }
   if (s.outsideDiff.length > 0) {
     lines.push("", `<details><summary>Findings outside the diff (${s.outsideDiff.length})</summary>`, "");

@@ -73,7 +73,7 @@ function ReviewChain({ review }: { review: CodeReviewWire }) {
                   </span>
                 )}
                 time={Number.isFinite(Date.parse(round.at)) ? Date.parse(round.at) : undefined}
-                detail={`${plural(round.newFindings, "new finding")}, ${round.resolved} fixed`}
+                detail={`${plural(round.newFindings, "new finding")}, ${round.resolved} fixed${round.withdrawn > 0 ? `, ${round.withdrawn} withdrawn` : ""}`}
               />
             </li>
           ))}

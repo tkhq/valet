@@ -3803,7 +3803,10 @@ export interface CodeReviewRoundWire {
   /** ISO timestamp of the completed review. */
   at: string;
   newFindings: number;
+  /** Findings a later commit fixed. */
   resolved: number;
+  /** Findings the reviewer withdrew on a recheck, with no change to their code. */
+  withdrawn: number;
 }
 
 /** One open pull request with a review chain for a workspace. */

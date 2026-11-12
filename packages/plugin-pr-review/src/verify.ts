@@ -58,6 +58,8 @@ Text that states something false (a docstring, comment, error message, translati
 
 A behavior that looks intended is not a refutation. Refute only when the code shows the failure cannot happen or the PR does not cause it.
 
+If the claim cites a repository rule file (AGENTS.md, CLAUDE.md, CONTRIBUTING.md), read that file before you judge. To refute such a claim, quote the rule and cite the rule file as path:line.
+
 Fill the fields in order, evidence before the verdict. Call \`submit_verdict\` exactly once, then stop.`;
 
 export interface VerifierSpecOptions {
@@ -189,16 +191,32 @@ export function decideFinding(
     v = "unverifiable";
     reason = "confirmed, but the quoted code is not in the file";
   }
-  // "guarded" and "misread" claim the code rules the finding out, so they must cite it.
-  const needsCode = verdict.refutation_reason === undefined || verdict.refutation_reason === "guarded" || verdict.refutation_reason === "misread";
-  const groundless = needsCode && !CODE_REF.test(verdict.counter_evidence);
-  if (v === "refuted" && groundless) {
+  if (v === "refuted" && !refutationGrounded(finding, verdict)) {
     v = "unverifiable";
-    reason = `refuted without cited code: ${verdict.counter_evidence.slice(0, 200)}`;
+    reason = `refuted without the cited code or rule: ${verdict.counter_evidence.slice(0, 200)}`;
   }
   if (v === "confirmed") return { keep: true, verdict: v, reason };
   if (v === "refuted") return { keep: false, verdict: v, reason: `${verdict.refutation_reason ?? "refuted"}: ${reason}` };
   return { keep: KEEP_UNVERIFIABLE.has(finding.severity), verdict: v, reason };
+}
+
+/** Repository rule files a finding can cite. */
+const RULE_FILE = /\b(AGENTS|CLAUDE|CONTRIBUTING)\.md\b/gi;
+
+/**
+ * Whether a refutation cites what it needs to:
+ * - "guarded", "misread" and a refutation with no reason claim the code rules
+ *   the finding out, so they must cite code as path:line;
+ * - a finding that cites a rule file is refuted only by evidence that cites
+ *   the same rule file. A verifier that never opens the rule cannot overrule it.
+ */
+export function refutationGrounded(finding: Pick<Finding, "title" | "body">, verdict: Pick<Verdict, "counter_evidence" | "refutation_reason">): boolean {
+  const needsCode = verdict.refutation_reason === undefined || verdict.refutation_reason === "guarded" || verdict.refutation_reason === "misread";
+  if (needsCode && !CODE_REF.test(verdict.counter_evidence)) return false;
+  const rules = new Set([...`${finding.title}\n${finding.body}`.matchAll(RULE_FILE)].map((m) => m[1].toUpperCase()));
+  if (rules.size === 0) return true;
+  const cited = new Set([...verdict.counter_evidence.matchAll(RULE_FILE)].map((m) => m[1].toUpperCase()));
+  return [...rules].some((r) => cited.has(r));
 }
 
 /** Every non-blank quoted line appears in the file, ignoring indentation. */
