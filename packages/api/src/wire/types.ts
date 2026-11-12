@@ -1879,6 +1879,9 @@ export interface DecisionGate {
    * this call's `tool_id=` and `args=` lines. A string arg longer than
    * 4000 characters is cut and ends with "…". */
   tool?: { id: string; args?: Record<string, unknown> };
+  /** Present on a `request_secret` card: where the value is saved and under
+   * which name. The card saves the value, then answers with the reference. */
+  secretRequest?: { scope: "personal" | "team"; teamId?: string; name: string; purpose: string };
 }
 
 export interface DecisionResolution {

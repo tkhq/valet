@@ -78,6 +78,7 @@ import { TeamCredentialStore } from "../plugins/team-credential-store.js";
 import { isTeamMember } from "../services/teams.js";
 import { createOnePasswordService } from "../services/onepassword.js";
 import { secretStoreProviderFromEnv } from "../services/secret-store/config.js";
+import { buildSecretTools } from "../engine/secret-tools.js";
 import { createSecretStoreService, disabledSecretStore } from "../services/secret-store/service.js";
 import { ServiceProbes } from "../plugins/service-probe.js";
 import { loadNodeModulesPlugins } from "../plugins/node-modules-loader.js";
@@ -598,6 +599,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       if (!homeDepsRef) throw new Error("home tools invoked before provider wiring completed");
       return homeDepsRef;
     }),
+    ...(secretStore.enabled ? { secretTools: () => buildSecretTools({ secretStore }) } : {}),
     threadLinkTools: () => buildThreadLinkTools(() => {
       if (!homeDepsRef) throw new Error("thread link tools invoked before provider wiring completed");
       return homeDepsRef;

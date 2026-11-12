@@ -24,6 +24,7 @@ import { errorText } from "~/lib/error-text";
 
 import { acceptImages, readImage, filesFromClipboard, toPromptAttachments, IMAGE_ACCEPT_ATTRIBUTE, type ComposerImage } from "./composer-images";
 import { ComposerImageStrip } from "./composer-image-strip";
+import { SecretRequestForm } from "./secret-request-form";
 import { GatePayloadPreview, hasGatePayloadPreview, splitGateBody } from "./gate-payload";
 
 // The gate action id the policy resolver offers on a `require_approval`
@@ -460,6 +461,17 @@ function DecisionGateResponse({
             </div>
           </div>
           </>
+        ) : gate.secretRequest ? (
+          <SecretRequestForm
+            request={gate.secretRequest}
+            inset={inset}
+            busy={busy}
+            onAnswered={async (reference) => {
+              rememberGateChoice(gate.id, "saved");
+              await resolve.mutateAsync({ gateId: gate.id, body: { actionId: "saved", value: reference } });
+            }}
+            onDecline={() => void pickAction("decline")}
+          />
         ) : (
           <div className={cn(inset, "flex flex-wrap items-center gap-2", inNotification ? "justify-start pb-4 pt-1" : "justify-end pb-3")}>
             {canHide && (

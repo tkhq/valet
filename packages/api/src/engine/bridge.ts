@@ -1,3 +1,4 @@
+import { secretRequestOf } from "./secret-tools.js";
 import { MID_TURN_DELIVERY_KEY, toolApprovalGateContext } from "@valet/engine";
 import type {
   CommandResultEntry,
@@ -34,6 +35,8 @@ import { QUEUED_TEXT_MAX } from "../wire/types.js";
  * `oneShot` and `riskLevel` come from the tool approval context the engine
  * stamps (`toolApprovalGateContext`); the bell's bulk answer reads both.
  * `tool` carries the gated call for a payload preview (see `gateTool`).
+ * `secretRequest` carries a `request_secret` card's name and scope; it never
+ * holds a value.
  */
 export function engineGateToWire(g: EngineDecisionGate): WireDecisionGate {
   const provenance = gateProvenance(g.context);
@@ -42,6 +45,7 @@ export function engineGateToWire(g: EngineDecisionGate): WireDecisionGate {
   const oneShot = !isSharedAccountGate(g) && toolContext?.oneShot === true;
   const riskLevel = WIRE_RISK_LEVELS.find((level) => level === toolContext?.riskLevel);
   const tool = gateTool(g.body, toolContext);
+  const secretRequest = g.type === "credential_request" ? secretRequestOf(g.context) : undefined;
   return {
     id: g.id,
     sessionId: g.sessionId,
@@ -60,6 +64,7 @@ export function engineGateToWire(g: EngineDecisionGate): WireDecisionGate {
     ...(oneShot ? { oneShot: true as const } : {}),
     ...(riskLevel ? { riskLevel } : {}),
     ...(tool ? { tool } : {}),
+    ...(secretRequest ? { secretRequest } : {}),
   };
 }
 
