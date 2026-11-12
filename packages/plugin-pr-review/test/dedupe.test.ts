@@ -33,6 +33,15 @@ describe("applyDuplicateGroups", () => {
     expect(result.dropped[0].reason).toBe('same defect as "a.ts:18" at a.ts:18 (same unchecked null)');
   });
 
+  it("prefers a finding that passes the confidence gate over a more severe one below it", () => {
+    const findings = [f("a.ts", 10, { severity: "high", confidence: 0.3 }), f("a.ts", 14, { confidence: 0.9 })];
+    const answer = { groups: [{ findings: [1, 2], reason: "same unchecked null" }] };
+    const gated = applyDuplicateGroups(findings, [[0, 1]], answer, (x) => (x.confidence ?? 1) >= 0.7);
+    expect(gated.kept).toEqual([findings[1]]);
+    // Without a gate, severity still decides.
+    expect(applyDuplicateGroups(findings, [[0, 1]], answer).kept).toEqual([findings[0]]);
+  });
+
   it("ignores a group that crosses clusters or names an unknown finding", () => {
     const findings = [f("a.ts", 10), f("a.ts", 12), f("b.ts", 10), f("b.ts", 12)];
     const clusters = [[0, 1], [2, 3]];

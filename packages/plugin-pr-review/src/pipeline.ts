@@ -222,7 +222,8 @@ async function dedupeFindings(opts: PipelineOptions, findings: Finding[], run: A
   );
   const spec = createDedupeSpec({ title: opts.title, findings, clusters, excerpts, ...(opts.dedupeModel !== undefined ? { model: opts.dedupeModel } : {}) });
   const result = await run(spec);
-  return applyDuplicateGroups(findings, clusters, result.outcome === "completed" ? spec.answer() : undefined);
+  const answer = result.outcome === "completed" ? spec.answer() : undefined;
+  return applyDuplicateGroups(findings, clusters, answer, (f) => confidentEnough(f, opts.minConfidence));
 }
 
 async function mergeBase(workspace: string, base: string, head: string): Promise<string> {

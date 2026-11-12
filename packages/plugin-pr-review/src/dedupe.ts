@@ -106,10 +106,17 @@ const SEVERITY_RANK: Record<Finding["severity"], number> = { low: 0, medium: 1, 
 /**
  * Apply the model's groups. A group is used only when all its numbers name
  * findings in one candidate cluster; others are ignored. Overlapping groups
- * join. Each joined group keeps one finding: the most severe, then the most
- * confident, then the first.
+ * join. Each joined group keeps one finding: one that `eligible` accepts (the
+ * later confidence gate), then the most severe, then the most confident, then
+ * the first. Without the `eligible` rule, a severe finding below the gate can
+ * win its group and then drop, so the defect goes unreported.
  */
-export function applyDuplicateGroups(findings: Finding[], clusters: number[][], answer: DuplicateGroups | undefined): Consolidation {
+export function applyDuplicateGroups(
+  findings: Finding[],
+  clusters: number[][],
+  answer: DuplicateGroups | undefined,
+  eligible: (f: Finding) => boolean = () => true,
+): Consolidation {
   const clusterOf = new Map<number, number>();
   clusters.forEach((cluster, c) => cluster.forEach((i) => clusterOf.set(i, c)));
   const parent = findings.map((_, i) => i);
@@ -126,6 +133,8 @@ export function applyDuplicateGroups(findings: Finding[], clusters: number[][], 
   findings.forEach((_, i) => groups.set(root(i), [...(groups.get(root(i)) ?? []), i]));
   const better = (a: number, b: number): number => {
     const [fa, fb] = [findings[a], findings[b]];
+    const byGate = Number(eligible(fb)) - Number(eligible(fa));
+    if (byGate !== 0) return byGate;
     const bySeverity = SEVERITY_RANK[fb.severity] - SEVERITY_RANK[fa.severity];
     if (bySeverity !== 0) return bySeverity;
     const byConfidence = (fb.confidence ?? 0) - (fa.confidence ?? 0);
