@@ -107,13 +107,13 @@ export function renderSummary(s: SummaryInput): string {
   return lines.join("\n");
 }
 
-/** The summary posted instead of a review on a pull request from a fork. */
+/** The summary posted instead of a review on a pull request from a fork whose author has no access to the base repository. */
 export function renderForkNotice(head: string): string {
   return [
     `<!-- valet-pr-review:summary ${head} -->`,
     "## Valet review",
     "",
-    "Valet does not review pull requests from forks yet. A review child cannot check out a fork's head commit. Push the branch to this repository to get a review.",
+    "Valet reviews a pull request from a fork only when its author is an owner, member or collaborator of this repository. To get a review, push the branch to this repository.",
   ].join("\n");
 }
 

@@ -11,6 +11,8 @@ export interface PullRequest {
   draft: boolean;
   title: string;
   body: string | null;
+  /** The author's relation to the base repository, such as `MEMBER`, `COLLABORATOR` or `NONE`. */
+  author_association?: string;
   head: { sha: string; ref: string; repo: { full_name: string } | null };
   base: { sha: string; ref: string; repo: { full_name: string } };
 }

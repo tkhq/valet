@@ -64,6 +64,7 @@ class FakeGitHub {
   head = H1;
   draft = false;
   forkHead = false;
+  authorAssociation: string | undefined = undefined;
   /** `status` of compare(last reviewed head, head). */
   incrementStatus: "ahead" | "diverged" = "ahead";
   incrementFiles: string[] = ["a.ts"];
@@ -138,6 +139,7 @@ class FakeGitHub {
         title: "Add a.ts",
         body: "Adds a.",
         html_url: "https://github.com/acme/site/pull/7",
+        ...(this.authorAssociation !== undefined ? { author_association: this.authorAssociation } : {}),
         head: { sha: this.head, ref: "feature", repo: { full_name: this.forkHead ? "someone/site" : "acme/site" } },
         base: { sha: BASE, ref: "main", repo: { full_name: "acme/site" } },
       });
@@ -742,14 +744,28 @@ describe("review-pull-request handler", () => {
     expect(threads.spawned).toHaveLength(1);
   });
 
-  it("posts a notice and starts no child for a pull request from a fork", async () => {
+  it.each(["NONE", "CONTRIBUTOR", undefined])("posts a notice and starts no child for a fork pull request by an author with association %s", async (association) => {
     const gh = new FakeGitHub();
     gh.forkHead = true;
+    gh.authorAssociation = association;
     const store = new FakeStore();
     const threads = new FakeThreads(scripted(reviewOf([]), {}));
     await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1"), context(threads, store));
     expect(threads.spawned).toHaveLength(0);
-    expect([...gh.reviews.values()][0].body).toContain("does not review pull requests from forks");
+    expect([...gh.reviews.values()][0].body).toContain("only when its author is an owner, member or collaborator");
+    expect(store.pointers()?.lastReviewedHead).toBe(H1);
+  });
+
+  it.each(["OWNER", "MEMBER", "COLLABORATOR"])("reviews a fork pull request by an author with association %s at the head commit", async (association) => {
+    const gh = new FakeGitHub();
+    gh.forkHead = true;
+    gh.authorAssociation = association;
+    const store = new FakeStore();
+    const threads = new FakeThreads(scripted(reviewOf([]), {}));
+    await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1"), context(threads, store));
+    expect(threads.spawned).toHaveLength(1);
+    expect(threads.spawned[0].req).toMatchObject({ repo: "acme/site", ref: H1 });
+    expect([...gh.reviews.values()][0].body).not.toContain("only when its author");
     expect(store.pointers()?.lastReviewedHead).toBe(H1);
   });
 
@@ -838,6 +854,19 @@ describe("review-pull-request handler", () => {
     await handler.handle(event("ev2", MANUAL_REVIEW_EVENT, { requestedBy: "user-1" }), context(again, store));
     expect(again.spawned.map((s) => s.req.role)).toEqual(["pr-reviewer"]);
     expect(gh.reviews.size).toBe(1);
+  });
+
+  it("shadow-reviews a fork pull request by a member and records a notice for one by an outside author", async () => {
+    for (const [association, reviewed] of [["MEMBER", true], ["NONE", false]] as const) {
+      const gh = new FakeGitHub();
+      gh.forkHead = true;
+      gh.authorAssociation = association;
+      const threads = new FakeThreads(scripted(reviewOf([]), {}));
+      await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1"), context(threads, new FakeStore(), { shadow: true, contextBudget: 0 }));
+      expect(threads.spawned.length > 0).toBe(reviewed);
+      expect(threads.records.some((r) => r.dispatchId.endsWith(":shadow-fork"))).toBe(!reviewed);
+      expect(gh.reviews.size).toBe(0);
+    }
   });
 
   it("records a shadow review in the plugin thread and writes nothing to GitHub or the store", async () => {
