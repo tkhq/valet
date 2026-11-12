@@ -144,8 +144,25 @@ function SaveSecretForm({ target }: { target: SecretTarget }) {
 
 function SecretRow({ secret, target, canWrite }: { secret: SecretSummary; target: SecretTarget; canWrite: boolean }) {
   const [confirming, setConfirming] = useState(false);
+  const [replacing, setReplacing] = useState(false);
+  const [nextValue, setNextValue] = useState("");
   const remove = useDeleteSecret(target);
+  const save = useSaveSecret(target);
   const { copied, copy } = useCopyToClipboard();
+
+  function replace(e: FormEvent) {
+    e.preventDefault();
+    if (!nextValue || save.isPending) return;
+    save.mutate(
+      { name: secret.name, value: nextValue, replace: true },
+      {
+        onSuccess: () => {
+          setNextValue("");
+          setReplacing(false);
+        },
+      },
+    );
+  }
 
   return (
     <div className="py-3">
@@ -158,6 +175,11 @@ function SecretRow({ secret, target, canWrite }: { secret: SecretSummary; target
         <Button type="button" variant="ghost" size="sm" className="shrink-0" onClick={() => void copy(secret.reference)}>
           {copied ? "Copied" : "Copy reference"}
         </Button>
+        {canWrite && !confirming && !replacing && (
+          <Button type="button" variant="ghost" size="sm" className="shrink-0" onClick={() => setReplacing(true)}>
+            Replace
+          </Button>
+        )}
         {canWrite &&
           (confirming ? (
             <span className="flex shrink-0 items-center gap-2">
@@ -180,6 +202,28 @@ function SecretRow({ secret, target, canWrite }: { secret: SecretSummary; target
             </Button>
           ))}
       </div>
+      {replacing && (
+        <form className="mt-2 flex items-center gap-2" onSubmit={replace}>
+          <Input
+            type="password"
+            value={nextValue}
+            onChange={(e) => setNextValue(e.target.value)}
+            placeholder="New value"
+            aria-label={`New value for ${secret.name}`}
+            autoComplete="off"
+            spellCheck={false}
+            size="sm"
+            className="min-w-0 flex-1 font-mono"
+          />
+          <Button type="button" variant="ghost" size="sm" onClick={() => setReplacing(false)} disabled={save.isPending}>
+            Cancel
+          </Button>
+          <Button type="submit" size="sm" disabled={!nextValue || save.isPending}>
+            {save.isPending ? "Saving…" : "Save"}
+          </Button>
+        </form>
+      )}
+      {save.error && <p role="alert" className="mt-1 text-xs text-danger-500">{errorText(save.error)}</p>}
       {remove.error && <p role="alert" className="mt-1 text-xs text-danger-500">{errorText(remove.error)}</p>}
     </div>
   );

@@ -47,7 +47,7 @@ export function SecretRequestForm({
     setError(null);
     const target = request.scope === "team" && request.teamId ? { scope: "team" as const, teamId: request.teamId } : { scope: "personal" as const };
     try {
-      await saveSecretValue(target, request.name, value);
+      await saveSecretValue(target, request.name, value, { replace: request.replace === true });
     } catch (err) {
       // Saved by an earlier attempt: answer with the reference anyway.
       if (!(err instanceof ApiError && err.status === 409)) {
@@ -71,8 +71,14 @@ export function SecretRequestForm({
       <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
         <dt className="text-muted">Name</dt>
         <dd className="min-w-0 break-all font-mono text-ink">{request.name}</dd>
+        {request.sendsTo && (
+          <>
+            <dt className="text-muted">Sent to</dt>
+            <dd className="min-w-0 break-all font-mono text-ink">{request.sendsTo}</dd>
+          </>
+        )}
         <dt className="text-muted">Saved to</dt>
-        <dd className="text-ink">{where}</dd>
+        <dd className="text-ink">{where}{request.replace ? ", replacing the saved value" : ""}</dd>
       </dl>
       <Input
         type="password"

@@ -22,7 +22,7 @@ describe("SecretRequestForm", () => {
     fireEvent.change(field, { target: { value: "sk-the-value" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(onAnswered).toHaveBeenCalledWith("secret://personal/OPENAI_API_KEY"));
-    expect(saveSecretValue).toHaveBeenCalledWith({ scope: "personal" }, "OPENAI_API_KEY", "sk-the-value");
+    expect(saveSecretValue).toHaveBeenCalledWith({ scope: "personal" }, "OPENAI_API_KEY", "sk-the-value", { replace: false });
     expect(JSON.stringify(onAnswered.mock.calls)).not.toContain("sk-the-value");
   });
 
@@ -33,6 +33,20 @@ describe("SecretRequestForm", () => {
     fireEvent.change(screen.getByLabelText("Value for OPENAI_API_KEY"), { target: { value: "v" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(onAnswered).toHaveBeenCalled());
+  });
+
+  it("shows where the value is sent and replaces when the request says so", async () => {
+    saveSecretValue.mockResolvedValueOnce({});
+    const onAnswered = vi.fn(async () => {});
+    render(
+      <SecretRequestForm request={{ ...personal, sendsTo: "api.openai.com", replace: true }} inset="" busy={false} onAnswered={onAnswered} onDecline={vi.fn()} />,
+    );
+    expect(screen.getByText("api.openai.com")).toBeTruthy();
+    expect(screen.getByText(/replacing the saved value/)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Value for OPENAI_API_KEY"), { target: { value: "v2" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onAnswered).toHaveBeenCalled());
+    expect(saveSecretValue).toHaveBeenLastCalledWith({ scope: "personal" }, "OPENAI_API_KEY", "v2", { replace: true });
   });
 
   it("names a team reference with its team id", () => {

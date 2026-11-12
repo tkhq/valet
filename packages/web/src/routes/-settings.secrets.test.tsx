@@ -71,6 +71,21 @@ describe("SecretsPage", () => {
     expect(saveMutate).toHaveBeenCalledWith({ name: "k", value: " v\n" }, expect.anything());
   });
 
+  it("replaces a saved value from its row", () => {
+    data = {
+      enabled: true,
+      provider: "Turnkey",
+      canWrite: true,
+      secrets: [{ name: "K", reference: "secret://personal/K", createdAt: 0 }],
+    };
+    render(<SecretsPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Replace" }));
+    fireEvent.change(screen.getByLabelText("New value for K"), { target: { value: "v2" } });
+    const saves = screen.getAllByRole("button", { name: "Save" });
+    fireEvent.click(saves[saves.length - 1]!);
+    expect(saveMutate).toHaveBeenCalledWith({ name: "K", value: "v2", replace: true }, expect.anything());
+  });
+
   it("offers the caller's teams and the company, and hides the form where the caller cannot write", () => {
     data = { enabled: true, provider: "Turnkey", canWrite: false, secrets: [] };
     render(<SecretsPage />);

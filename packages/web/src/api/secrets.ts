@@ -28,9 +28,20 @@ export function useSecrets(target: SecretTarget) {
   });
 }
 
-/** Seal `value` in the browser and save it as `name` in `target`. */
-export async function saveSecretValue(target: SecretTarget, name: string, value: string): Promise<SecretSummary> {
-  const request = { scope: target.scope, name, ...(target.teamId ? { teamId: target.teamId } : {}) };
+/** Seal `value` in the browser and save it as `name` in `target`. With
+ * `replace`, a secret already saved under `name` gets the new value. */
+export async function saveSecretValue(
+  target: SecretTarget,
+  name: string,
+  value: string,
+  opts: { replace?: boolean } = {},
+): Promise<SecretSummary> {
+  const request = {
+    scope: target.scope,
+    name,
+    ...(target.teamId ? { teamId: target.teamId } : {}),
+    ...(opts.replace ? { replace: true } : {}),
+  };
   const { envelope } = await api.beginSecretSave(request);
   const sealed = await sealSecret(envelope, value);
   return api.finishSecretSave({ ...request, sealed });
@@ -38,8 +49,8 @@ export async function saveSecretValue(target: SecretTarget, name: string, value:
 
 export function useSaveSecret(target: SecretTarget) {
   const qc = useQueryClient();
-  return useMutation<SecretSummary, Error, { name: string; value: string }>({
-    mutationFn: ({ name, value }) => saveSecretValue(target, name, value),
+  return useMutation<SecretSummary, Error, { name: string; value: string; replace?: boolean }>({
+    mutationFn: ({ name, value, replace }) => saveSecretValue(target, name, value, { replace }),
     onSuccess: () => qc.invalidateQueries({ queryKey: qkSecretsAll() }),
   });
 }

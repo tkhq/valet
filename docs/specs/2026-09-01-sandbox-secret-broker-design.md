@@ -280,7 +280,8 @@ than a fallback. `persona.test.ts` pins each of those properties.
   not a terminal, `valet-secrets run` starts the command under a Node filter
   (`engine/secrets-redactor.ts`). The filter replaces each resolved value in
   stdout and stderr with `[secret:NAME]`, also when a value is split across
-  writes. It matches exact bytes only, so an encoded copy passes through. It
+  writes. It matches the exact bytes and the whole value as base64,
+  base64url, hex, or percent-encoding; any other encoding passes through. It
   skips values under 8 bytes, which also occur in ordinary output. A person at
   a terminal sees raw output. If `node` is missing, the command runs
   unfiltered and the script says so on stderr.
@@ -317,11 +318,12 @@ Rules that apply to every provider:
 - No route returns a value. A provider error reaches the user as a fixed message. Only a `SecretStoreError` from the provider passes through with its own text.
 - One failed read fails the request with 502. A name with no secret is reported in `unresolved`.
 - Saves are sealed in the browser. `POST /api/secrets/import/begin` returns the provider's envelope, the web sealer for its `kind` encrypts the value (`web/src/lib/secret-seal/`), and `import/finish` receives only the sealed value. No route accepts a plaintext value.
+- A replace deletes the old value and imports the new one, because providers keep names unique and cannot edit a value in place. A read in that short gap reports the name as missing.
 - Changing the provider gives every user a new, empty personal space. Valet does not move secrets between providers.
 
 ### Getting a credential without the value entering a thread
 
-- **`request_secret`** (`engine/secret-tools.ts`): the agent names the credential and its purpose. The thread shows a card with the name, where it is saved, and a masked field. The card seals and saves the value, then answers the gate with only the reference. The resolve route accepts nothing else on such a gate.
+- **`request_secret`** (`engine/secret-tools.ts`): the agent names the credential, its purpose, and where it will send it. The thread shows a card with the name, the destination, where it is saved, and a masked field. With `replace`, the card replaces a saved value that stopped working. The card seals and saves the value, then answers the gate with only the reference. The resolve route accepts nothing else on such a gate.
 - **Composer**: `detectSecrets` (`@valet/shared`) finds provider key formats and `NAME_KEY=value` assignments in a draft. The composer offers to save the key and swap in the reference, and holds the send until the user decides.
 - **Backstop** (`services/secret-store/inbound-scrub.ts`): a key in a provider format that reaches the api in a user message (web send route, Slack direct message) is saved and replaced before the message is stored or reaches the model. A note in the message names the reference and asks the user to rotate a key shared elsewhere.
 

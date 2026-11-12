@@ -1881,7 +1881,7 @@ export interface DecisionGate {
   tool?: { id: string; args?: Record<string, unknown> };
   /** Present on a `request_secret` card: where the value is saved and under
    * which name. The card saves the value, then answers with the reference. */
-  secretRequest?: { scope: "personal" | "team"; teamId?: string; name: string; purpose: string };
+  secretRequest?: { scope: "personal" | "team"; teamId?: string; name: string; purpose: string; sendsTo?: string; replace?: boolean };
 }
 
 export interface DecisionResolution {
@@ -4269,6 +4269,9 @@ export interface BeginSecretSaveRequest {
   scope: SecretScopeKind;
   teamId?: string;
   name: string;
+  /** Replace the value of a secret with this name. Without it, a name in
+   * use is refused. */
+  replace?: boolean;
 }
 
 /** What the browser seals the value with. `kind` selects the sealer; the

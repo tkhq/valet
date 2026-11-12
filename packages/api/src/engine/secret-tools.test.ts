@@ -93,6 +93,16 @@ describe("request_secret", () => {
     expect(text).toContain("Already saved as secret://personal/OPENAI_API_KEY");
   });
 
+  it("asks again with replace even when the name is saved, and names the destination", async () => {
+    const { ctx, gates } = context({ owner: { type: "user", id: "user-a" } });
+    const [tool] = buildSecretTools({ secretStore: fakeStore(new Set(["personal:OPENAI_API_KEY"])) });
+    await tool!.execute({ name: "OPENAI_API_KEY", purpose: "The old key was revoked.", sends_to: "api.openai.com", replace: true }, ctx);
+    expect(gates).toHaveLength(1);
+    expect(gates[0]!.title).toBe("Replace OPENAI_API_KEY");
+    expect(gates[0]!.body).toContain("It will be sent to api.openai.com.");
+    expect(secretRequestOf(gates[0]!.context)).toMatchObject({ sendsTo: "api.openai.com", replace: true });
+  });
+
   it("tells the agent not to ask in chat after a decline", async () => {
     const { ctx } = context({ owner: { type: "user", id: "user-a" } });
     expect(await run(fakeStore(), ctx)).toContain("Do not ask for it in chat");

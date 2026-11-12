@@ -377,6 +377,17 @@ describe("/api/secrets", () => {
     expect((await fetch(`${api!.baseUrl}/api/secrets?name=gone`, { method: "DELETE" })).status).toBe(404);
   });
 
+  it("replaces a saved value only when asked", async () => {
+    const fake = await bootWithStore();
+    expect((await post("/import/finish", { scope: "personal", name: "K", sealed: seal("old") })).status).toBe(201);
+    const refused = await post("/import/begin", { scope: "personal", name: "K" });
+    expect(refused.status).toBe(409);
+    expect(((await refused.json()) as { error: string }).error).toContain("Replace");
+    expect((await post("/import/begin", { scope: "personal", name: "K", replace: true })).status).toBe(200);
+    expect((await post("/import/finish", { scope: "personal", name: "K", sealed: seal("new"), replace: true })).status).toBe(201);
+    expect([...fake.spaces.values()].flat().map((s) => s.value)).toEqual(["new"]);
+  });
+
   it("has no route that accepts a plaintext value", async () => {
     await bootWithStore();
     const res = await post("", { name: "k", value: "TOP-SECRET" });

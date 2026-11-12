@@ -104,7 +104,7 @@ secretsRouter.post("/import/begin", async (c) => {
   const scope = parseScope(body.scope, body.teamId);
   if (typeof scope === "string") return c.json({ error: scope }, 400);
   try {
-    const envelope = await secretStore.beginSave(actorOf(c), scope, body.name.trim());
+    const envelope = await secretStore.beginSave(actorOf(c), scope, body.name.trim(), { replace: body.replace === true });
     const resp: BeginSecretSaveResponse = { envelope };
     return c.json(resp);
   } catch (err) {
@@ -122,7 +122,7 @@ secretsRouter.post("/import/finish", async (c) => {
   const scope = parseScope(body.scope, body.teamId);
   if (typeof scope === "string") return c.json({ error: scope }, 400);
   try {
-    const saved = await secretStore.finishSave(actorOf(c), scope, body.name.trim(), sealed);
+    const saved = await secretStore.finishSave(actorOf(c), scope, body.name.trim(), sealed, { replace: body.replace === true });
     const resp: SecretSummary = { name: saved.name, reference: saved.reference, createdAt: saved.createdAt };
     return c.json(resp, 201);
   } catch (err) {

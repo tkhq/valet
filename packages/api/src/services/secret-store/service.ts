@@ -96,6 +96,10 @@ export interface SecretReadContext extends SecretActor {
   sessionOwnerId: string;
 }
 
+export interface SaveOptions {
+  replace?: boolean;
+}
+
 export interface SecretSummaryRow extends SecretMeta {
   reference: string;
 }
@@ -105,10 +109,12 @@ export interface SecretStoreService {
   /** The provider's name for users, or null when the store is off. */
   readonly providerLabel: string | null;
   list(actor: SecretActor, scope: SecretScope): Promise<SecretSummaryRow[]>;
-  /** Start a save whose value the browser seals. */
-  beginSave(actor: SecretActor, scope: SecretScope, name: string): Promise<SealEnvelope>;
-  /** Finish a save with the sealed value. */
-  finishSave(actor: SecretActor, scope: SecretScope, name: string, sealed: SealedValue): Promise<SecretSummaryRow>;
+  /** Start a save whose value the browser seals. `replace` allows a name
+   * already in use. */
+  beginSave(actor: SecretActor, scope: SecretScope, name: string, opts?: SaveOptions): Promise<SealEnvelope>;
+  /** Finish a save with the sealed value. With `replace`, the old value is
+   * deleted first: providers keep names unique and cannot edit in place. */
+  finishSave(actor: SecretActor, scope: SecretScope, name: string, sealed: SealedValue, opts?: SaveOptions): Promise<SecretSummaryRow>;
   /** Save a value the api already holds (a key caught in an inbound message). */
   saveValue(actor: SecretActor, scope: SecretScope, name: string, value: string): Promise<SecretSummaryRow>;
   remove(actor: SecretActor, scope: SecretScope, name: string): Promise<void>;
@@ -271,16 +277,17 @@ export function createSecretStoreService(deps: {
   /** Validate, authorize, and refuse a name already in use. A value never
    * changes in place: the check turns a duplicate into an answer that says
    * what to do. */
-  async function prepareSave(actor: SecretActor, scope: SecretScope, name: string): Promise<string> {
+  async function prepareSave(actor: SecretActor, scope: SecretScope, name: string, replace = false): Promise<{ spaceId: string; exists: boolean }> {
     assertName(name);
     await assertMayWrite(actor, scope);
     const spaceId = (await spaceFor(actor, scope, true))!;
     const fullName = `${scopePrefix(scope)}${name}`;
     const existing = await guarded("check the name", () => provider.list(spaceId, fullName));
-    if (existing.some((s) => s.name === fullName)) {
-      throw new SecretStoreError(`A secret named ${name} already exists. Delete it first to replace it.`, "exists");
+    const exists = existing.some((s) => s.name === fullName);
+    if (exists && !replace) {
+      throw new SecretStoreError(`A secret named ${name} already exists. Choose Replace to change its value.`, "exists");
     }
-    return spaceId;
+    return { spaceId, exists };
   }
 
   async function mayRead(ctx: SecretReadContext, scope: SecretScope): Promise<boolean> {
@@ -304,13 +311,15 @@ export function createSecretStoreService(deps: {
       return metas.map((m) => row(scope, m.name.slice(prefix.length), m.createdAt));
     },
 
-    async beginSave(actor, scope, name) {
-      const spaceId = await prepareSave(actor, scope, name);
+    async beginSave(actor, scope, name, opts) {
+      const { spaceId } = await prepareSave(actor, scope, name, opts?.replace);
       return guarded("start the save", () => provider.beginImport(spaceId));
     },
 
-    async finishSave(actor, scope, name, sealed) {
-      const spaceId = await prepareSave(actor, scope, name);
+    async finishSave(actor, scope, name, sealed, opts) {
+      const { spaceId, exists } = await prepareSave(actor, scope, name, opts?.replace);
+      // Delete, then import: a read in the gap reports the name as missing.
+      if (exists) await guarded("replace the secret", () => provider.remove(spaceId, `${scopePrefix(scope)}${name}`));
       await guarded("save the secret", () =>
         provider.finishImport(spaceId, { name: `${scopePrefix(scope)}${name}`, sealed, labels: labelsFor(actor, scope) }),
       );
@@ -319,7 +328,7 @@ export function createSecretStoreService(deps: {
 
     async saveValue(actor, scope, name, value) {
       assertValue(value);
-      const spaceId = await prepareSave(actor, scope, name);
+      const { spaceId } = await prepareSave(actor, scope, name);
       await guarded("save the secret", () =>
         provider.put(spaceId, { name: `${scopePrefix(scope)}${name}`, value, labels: labelsFor(actor, scope) }),
       );

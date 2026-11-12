@@ -39,15 +39,27 @@ export interface SecretRequestContext {
   teamId?: string;
   name: string;
   purpose: string;
+  /** Where the agent will send the value, for example api.openai.com. Shown
+   * on the card so the person can judge the request before saving. */
+  sendsTo?: string;
+  /** The saved value stopped working: the card replaces it. */
+  replace?: boolean;
 }
 
 /** Reads `context.secretRequest` off a gate, or undefined when it is not one. */
 export function secretRequestOf(context: Record<string, unknown> | undefined): SecretRequestContext | undefined {
   const raw = context?.secretRequest;
   if (typeof raw !== "object" || raw === null) return undefined;
-  const { scope, teamId, name, purpose } = raw as Record<string, unknown>;
+  const { scope, teamId, name, purpose, sendsTo, replace } = raw as Record<string, unknown>;
   if ((scope !== "personal" && scope !== "team") || typeof name !== "string" || typeof purpose !== "string") return undefined;
-  return { scope, name, purpose, ...(typeof teamId === "string" ? { teamId } : {}) };
+  return {
+    scope,
+    name,
+    purpose,
+    ...(typeof teamId === "string" ? { teamId } : {}),
+    ...(typeof sendsTo === "string" && sendsTo ? { sendsTo } : {}),
+    ...(replace === true ? { replace: true } : {}),
+  };
 }
 
 function scopeOf(request: SecretRequestContext): SecretScope {
@@ -84,7 +96,9 @@ export function buildSecretTools(deps: { secretStore: SecretStoreService }): Too
       "`valet-secrets run --env NAME=<reference> -- <command>`.",
     parameters: Type.Object({
       name: Type.String({ description: "Name to save it under, in env-var style, for example OPENAI_API_KEY." }),
-      purpose: Type.String({ description: "One sentence: what you will use it for, and where it will be sent." }),
+      purpose: Type.String({ description: "One sentence: what you will use it for." }),
+      sends_to: Type.Optional(Type.String({ description: "The host or service the value will be sent to, for example api.openai.com." })),
+      replace: Type.Optional(Type.Boolean({ description: "True when the saved value stopped working and the user should enter a new one." })),
     }),
     execute: async (args, ctx) => {
       const name = normalizeName(args.name);
@@ -98,22 +112,27 @@ export function buildSecretTools(deps: { secretStore: SecretStoreService }): Too
       if (ctx.unattendedWorkflow) {
         return { text: "A workflow run cannot ask the user for a credential. Ask the user to save it in Settings, Secrets, before the run." };
       }
+      const sendsTo = args.sends_to?.trim().slice(0, 200);
+      const base = {
+        name,
+        purpose: args.purpose.trim(),
+        ...(sendsTo ? { sendsTo } : {}),
+        ...(args.replace ? { replace: true } : {}),
+      };
       const request: SecretRequestContext =
-        owner.type === "team"
-          ? { scope: "team", teamId: owner.id, name, purpose: args.purpose.trim() }
-          : { scope: "personal", name, purpose: args.purpose.trim() };
+        owner.type === "team" ? { scope: "team", teamId: owner.id, ...base } : { scope: "personal", ...base };
       const scope = scopeOf(request);
       const reference = secretReference(scope, name);
       const actor = { orgId: ctx.orgId, userId: ctx.userId };
-      // Already saved: no card, no question.
-      if (await deps.secretStore.exists(actor, scope, name).catch(() => false)) {
+      // Already saved and not being replaced: no card, no question.
+      if (!request.replace && (await deps.secretStore.exists(actor, scope, name).catch(() => false))) {
         return { text: `Already saved as ${reference}. Run commands with valet-secrets run --env ${envName(name)}=${reference} -- <command>.` };
       }
       const where = request.scope === "team" ? "this team's secrets" : "your personal secrets";
       const resolution = await ctx.requestDecision({
         type: "credential_request",
-        title: `Add ${name}`,
-        body: `${request.purpose}\nIt is saved to ${where} and never appears in this conversation.`,
+        title: request.replace ? `Replace ${name}` : `Add ${name}`,
+        body: `${request.purpose}${sendsTo ? `\nIt will be sent to ${sendsTo}.` : ""}\nIt is saved to ${where} and never appears in this conversation.`,
         context: { secretRequest: request },
         actions: [{ id: SECRET_DECLINE_ACTION, label: "Decline" }],
         resumeKey: `${REQUEST_SECRET_TOOL}:${reference}`,
