@@ -440,6 +440,32 @@ export function selectSummaryCheckpointTail(
   return window;
 }
 
+/**
+ * The oldest entries of `entries` that fit `maxTokens`, for one bounded
+ * summary of a head. A checkpoint covers the window, and the newer entries
+ * keep their place in live context after the summary, so the order the
+ * model reads stays oldest first. The window always holds the first entry
+ * the summarizer can read, even when it alone exceeds the budget, and it
+ * takes the zero-cost entries that follow its last one. Pass the payload
+ * ruler as `sizeOf`.
+ */
+export function selectSummaryCheckpointHead(
+  entries: readonly SessionEntry[],
+  maxTokens: number,
+  opts?: Pick<SummaryWindowOptions, "sizeOf">,
+): SessionEntry[] {
+  const sizeOf = opts?.sizeOf ?? estimateEntryTokens;
+  let end = 0;
+  let tokens = 0;
+  while (end < entries.length) {
+    const next = sizeOf(entries[end]);
+    if (next > 0 && tokens > 0 && tokens + next > maxTokens) break;
+    end++;
+    tokens += next;
+  }
+  return entries.slice(0, end);
+}
+
 // ── Turn segmentation ──────────────────────────────────────────────
 
 export interface Turn {

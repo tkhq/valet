@@ -1105,7 +1105,9 @@ A compaction reads no payload that the newest checkpoint covers (2026-11-11). It
 
 The append of the compaction entry checks the active branch with `readThreadOutline`, which reads links only. The rebuild after the append reads `getTranscriptSnapshot` again; the new compaction covers the head, so that read returns the live context. `contextUsage` on a released transcript also reads `getTranscriptSnapshot`. Before this change, every compaction read the whole thread with payloads, and on a channel thread with 451 MB of payloads it held three such reads at once and ran the api out of heap.
 
-Known limit: a rehydrated assistant message carries zero usage, so the first trigger after a reload estimates the whole live transcript with the character ruler. On a thread that runs each delivery with fresh context, that estimate counts earlier runs the model does not read, and it compacts at about 80k tokens of real context. Those compactions are also the only thing that bounds such a thread's live transcript, so a fix to the usage anchor needs a policy for fresh-context history in the same change.
+A reload restores the usage anchor (2026-11-11). The newest assistant entry on the active path keeps its stored usage when its request saw the context the transcript now has: no newer checkpoint, no later prune of output it counted (`prunedAt` entry metadata), and not a fresh-context request (`freshContext` entry metadata). Every other rehydrated assistant message carries zero usage. Before this change, every reload estimated the whole live transcript with the character ruler and without tool definitions.
+
+A thread whose runs use fresh context gets its own bound. The trigger measures the whole live transcript for a fresh-context turn, because that turn's usage counts only its slice. A pass for such a turn covers the history before the turn's prompt with a checkpoint that holds a fixed note, with no model call. A pass inside the turn then compacts the turn's own messages as usual. See the 2026-11-11 amendment in `2026-08-24-thread-model-pinning-and-compaction-design.md`.
 
 #### Auto-continue after compaction
 
