@@ -11,7 +11,7 @@
  * keys, sign, or change policies.
  */
 import type { TurnkeyDeploymentConfig } from "./config.js";
-import { agentSigningPolicy } from "./gate.js";
+import { agentSigningPolicy, parentKeyPolicy } from "./gate.js";
 import type { EnrollmentDoc } from "./store.js";
 import type { RootUserParams, TurnkeyOps } from "./turnkey-client.js";
 
@@ -84,10 +84,14 @@ export async function enrollUser(
   const signingTag = await ops.createPrivateKeyTag({ subOrgId: sub.subOrgId, name: SIGNING_TAG_NAME, privateKeyIds: [] });
   const policy = await ops.createPolicy({ subOrgId: sub.subOrgId, ...agentSigningPolicy(agentTag.tagId, signingTag.tagId) });
 
-  // Find the two root user ids: the passkey stays, the parent key leaves.
+  // Find the two root user ids: the passkey stays, the parent key leaves the
+  // quorum but keeps the narrow grant in `parentKeyPolicy`.
   const roots = await ops.listRootUsers({ subOrgId: sub.subOrgId });
   const passkeyUser = roots.find((u) => u.userName === "passkey");
   if (!passkeyUser) throw new Error("Turnkey sub-organization has no passkey root user.");
+  const parentUser = roots.find((u) => u.userName === PARENT_ROOT_USER_NAME);
+  if (!parentUser) throw new Error("Turnkey sub-organization has no parent root user.");
+  await ops.createPolicy({ subOrgId: sub.subOrgId, ...parentKeyPolicy(parentUser.userId) });
   await ops.updateRootQuorum({ subOrgId: sub.subOrgId, threshold: 1, userIds: [passkeyUser.userId] });
 
   return {

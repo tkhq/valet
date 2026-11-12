@@ -78,9 +78,18 @@ describe("turnkey.request_signing_key", () => {
     expect(s.ctx.gates).toHaveLength(1);
     expect(s.ctx.gates[0]?.body).toContain("Sign commits in tkhq/valet, branch valet/x (pull request #7), valid for 2 h?");
 
-    // Turnkey: one Ed25519 key with the signing tag, in the user's sub-organization.
-    expect(s.turnkey.calls.map((c) => c.op)).toEqual(["createSigningKey"]);
+    // Turnkey: one Ed25519 key with the signing tag, in the user's
+    // sub-organization, then the sandbox's session key, which expires with
+    // the window so Turnkey stops signing when the window ends.
+    expect(s.turnkey.calls.map((c) => c.op)).toEqual(["createSigningKey", "createApiKey"]);
     expect(s.turnkey.calls[0]?.args).toMatchObject({ subOrgId: "suborg-1", tagIds: ["ktag-1"] });
+    expect(s.turnkey.calls[1]?.args).toMatchObject({
+      subOrgId: "suborg-1",
+      name: "session:session-1",
+      publicKey: `02${"ab".repeat(32)}`,
+      expirationSeconds: 120 * 60,
+    });
+    expect(s.ctx.execs.some((c) => c.includes("api-key generate"))).toBe(true);
 
     // GitHub: the OpenSSH line under a title that names the session and expiry.
     const [registered] = [...s.github.keys.values()];
@@ -112,7 +121,7 @@ describe("turnkey.request_signing_key", () => {
     });
 
     // Sandbox: the key id for valet-sign, then git pointed at the public key.
-    expect(s.ctx.execs.some((c) => c.includes("TURNKEY_PRIVATE_KEY_ID") && c.includes("'pk-1'"))).toBe(true);
+    expect(s.ctx.execs.some((c) => c.includes("TURNKEY_PRIVATE_KEY_ID=pk-1") && c.includes("TURNKEY_ORGANIZATION_ID=suborg-1"))).toBe(true);
     expect(s.ctx.execs.some((c) => c.includes(`user.signingkey 'key::${EXPECTED_LINE}'`) && c.includes("commit.gpgsign true"))).toBe(
       true,
     );
@@ -184,6 +193,8 @@ describe("turnkey.revoke_signing_key", () => {
     const index = await s.store.global().list<SigningKeyIndexDoc>(COLLECTIONS.signingKeyIndex);
     expect(index.items[0]?.doc.status).toBe("revoked");
     expect(s.ctx.execs.at(-1)).toContain("--unset commit.gpgsign");
+    // The session key is deleted now, not left to expire with the window.
+    expect(s.turnkey.calls.map((c) => c.op)).toEqual(["createSigningKey", "createApiKey", "deleteApiKeys"]);
   });
 
   it("refuses a fingerprint that is not the user's", async () => {

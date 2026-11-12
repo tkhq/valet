@@ -27,6 +27,7 @@ describe("enrollUser", () => {
       "createPrivateKeyTag",
       "createPolicy",
       "listRootUsers",
+      "createPolicy",
       "updateRootQuorum",
     ]);
     expect(ops.calls[0]?.args).toMatchObject({
@@ -45,8 +46,17 @@ describe("enrollUser", () => {
       condition: "activity.type == 'ACTIVITY_TYPE_SIGN_RAW_PAYLOAD_V2' && private_key.tags.contains('ktag-1')",
       consensus: "approvers.any(user, user.tags.contains('utag-1'))",
     });
+    // Before it leaves the quorum, the parent key gets a grant for exactly
+    // the per-approval calls: the signing key and the session key.
+    expect(ops.calls[6]?.args).toMatchObject({
+      subOrgId: "suborg-1",
+      effect: "EFFECT_ALLOW",
+      consensus: "approvers.any(user, user.id == 'parent-user')",
+      condition:
+        "activity.type in ['ACTIVITY_TYPE_CREATE_PRIVATE_KEYS_V2', 'ACTIVITY_TYPE_CREATE_API_KEYS_V2', 'ACTIVITY_TYPE_DELETE_API_KEYS']",
+    });
     // The parent key leaves: only the passkey remains root.
-    expect(ops.calls[6]?.args).toEqual({ subOrgId: "suborg-1", threshold: 1, userIds: ["passkey-user"] });
+    expect(ops.calls[7]?.args).toEqual({ subOrgId: "suborg-1", threshold: 1, userIds: ["passkey-user"] });
 
     expect(doc).toEqual({
       subOrgId: "suborg-1",

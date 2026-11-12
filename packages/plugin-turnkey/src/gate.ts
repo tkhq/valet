@@ -91,3 +91,27 @@ export function agentSigningPolicy(agentTagId: string, signingTagId: string): {
     notes: "Valet commit signing. The session API key on valet-agent expires with the session.",
   };
 }
+
+/**
+ * The parent key's standing grant in a user's sub-organization. Enrollment
+ * takes the parent key out of the root quorum, so without this policy it
+ * could not create the per-approval signing key or the session API key.
+ * It covers exactly those calls, and the session key delete. It cannot sign,
+ * export, or change users, tags, or policies.
+ */
+export function parentKeyPolicy(parentUserId: string): {
+  policyName: string;
+  effect: "EFFECT_ALLOW";
+  condition: string;
+  consensus: string;
+  notes: string;
+} {
+  return {
+    policyName: "valet-parent: issue signing and session keys",
+    effect: "EFFECT_ALLOW",
+    condition:
+      "activity.type in ['ACTIVITY_TYPE_CREATE_PRIVATE_KEYS_V2', 'ACTIVITY_TYPE_CREATE_API_KEYS_V2', 'ACTIVITY_TYPE_DELETE_API_KEYS']",
+    consensus: `approvers.any(user, user.id == '${parentUserId}')`,
+    notes: "Valet commit signing. Issues one signing key and one expiring session API key per approval.",
+  };
+}

@@ -4,6 +4,7 @@
  * plugin store, a sandbox that records exec commands, and a full-shape
  * `PluginActionContext` with no casts.
  */
+import { SESSION_KEY_FILE } from "../sandbox.js";
 import type {
   Credential,
   DecisionGateRequest,
@@ -189,7 +190,9 @@ export function fakeContext(opts: FakeContextOptions = {}): PluginActionContext 
     ...(opts.pluginStore ? { pluginStore: opts.pluginStore } : {}),
     sandbox: {
       id: "sandbox-1",
-      readFile: async () => notImplemented(),
+      // The session key file `tk api-key generate` writes.
+      readFile: async (path: string) =>
+        path === SESSION_KEY_FILE ? JSON.stringify({ public_key: `02${"ab".repeat(32)}`, private_key: "cd".repeat(32) }) : notImplemented(),
       readBinary: async () => notImplemented(),
       writeFile: async () => notImplemented(),
       writeBinary: async () => notImplemented(),

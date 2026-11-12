@@ -1,10 +1,12 @@
 /**
- * What commit signing puts in a sandbox, and where. Shared by the action
- * (which turns signing on after approval) and the api's prep step (which
- * installs the session key and the git config before the agent runs).
+ * What commit signing puts in a sandbox, and where. The request action
+ * writes all of it after approval; sandbox prep only installs `valet-sign`
+ * and points git at it.
  *
  *   /run/valet/turnkey/session.json   P-256 session API key, 0600, made in
- *                                     the sandbox by `tk api-key generate`.
+ *                                     the sandbox by `tk api-key generate`
+ *                                     and registered in Turnkey with the
+ *                                     approval window as its expiry.
  *   /run/valet/turnkey/env            TURNKEY_* variables `valet-sign` exports.
  *   /usr/local/bin/valet-sign         git's `gpg.ssh.program`: execs `tk ssh git-sign`.
  */
@@ -23,22 +25,61 @@ export function shQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+/** Reads `public_key` out of tk's api-key file. */
+export function publicKeyFromKeyFile(text: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (typeof parsed !== "object" || parsed === null || !("public_key" in parsed)) return null;
+    const value = parsed.public_key;
+    return typeof value === "string" && /^[0-9a-fA-F]{66}$/.test(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Turns signing on for the key just approved: records the Turnkey private
- * key id for `valet-sign`, and points git at the public key. Written after
+ * Makes a new P-256 API key pair in the sandbox with `tk api-key generate`
+ * and returns its public half. The private half stays in the sandbox, in
+ * `SESSION_KEY_FILE` (0600). A previous pair is replaced: each approval gets
+ * its own key, registered with the approval window as its expiry.
+ */
+export async function generateSessionKey(sandbox: Sandbox): Promise<string> {
+  await run(
+    sandbox,
+    `mkdir -p ${TURNKEY_DIR} && chmod 700 ${TURNKEY_DIR} && rm -f ${SESSION_KEY_FILE} && ` +
+      `${TK_PATH} api-key generate --output ${SESSION_KEY_FILE} --message-format json >/dev/null && chmod 600 ${SESSION_KEY_FILE}`,
+    "generating the session key (check that the sandbox image ships /usr/local/bin/tk)",
+  );
+  const publicKey = publicKeyFromKeyFile(await sandbox.readFile(SESSION_KEY_FILE));
+  if (!publicKey) throw new Error(`${SESSION_KEY_FILE} has no P-256 public key.`);
+  return publicKey;
+}
+
+/** The `TURNKEY_*` lines `valet-sign` exports before it execs `tk`. */
+export function envFileText(args: { organizationId: string; apiBaseUrl: string; privateKeyId: string }): string {
+  return [
+    `TURNKEY_ORGANIZATION_ID=${args.organizationId}`,
+    `TURNKEY_API_BASE_URL=${args.apiBaseUrl}`,
+    `${PRIVATE_KEY_ID_VAR}=${args.privateKeyId}`,
+  ].join("\n") + "\n";
+}
+
+/**
+ * Turns signing on for the key just approved: writes the env file
+ * `valet-sign` reads, and points git at the public key. Written after
  * approval, not at prep, so commits before approval stay unsigned instead of
  * failing.
  */
 export async function enableSandboxSigning(
   sandbox: Sandbox,
-  args: { privateKeyId: string; publicKeyLine: string },
+  args: { organizationId: string; apiBaseUrl: string; privateKeyId: string; publicKeyLine: string },
 ): Promise<void> {
-  const setVar =
-    `mkdir -p ${TURNKEY_DIR} && ` +
-    `{ grep -v '^${PRIVATE_KEY_ID_VAR}=' ${ENV_FILE} 2>/dev/null; ` +
-    `printf '%s=%s\\n' ${PRIVATE_KEY_ID_VAR} ${shQuote(args.privateKeyId)}; } > ${ENV_FILE}.tmp && ` +
-    `mv ${ENV_FILE}.tmp ${ENV_FILE}`;
-  await run(sandbox, setVar, "recording the signing key id");
+  await run(
+    sandbox,
+    `mkdir -p ${TURNKEY_DIR} && printf '%s' ${shQuote(envFileText(args))} > ${ENV_FILE}.tmp && ` +
+      `chmod 600 ${ENV_FILE}.tmp && mv ${ENV_FILE}.tmp ${ENV_FILE}`,
+    "recording the signing key id",
+  );
   await run(
     sandbox,
     `git config --global user.signingkey ${shQuote(`key::${args.publicKeyLine}`)} && git config --global commit.gpgsign true`,
@@ -51,7 +92,7 @@ export async function disableSandboxSigning(sandbox: Sandbox): Promise<void> {
   await run(
     sandbox,
     `git config --global --unset commit.gpgsign; git config --global --unset user.signingkey; ` +
-      `{ grep -v '^${PRIVATE_KEY_ID_VAR}=' ${ENV_FILE} 2>/dev/null || true; } > ${ENV_FILE}.tmp && mv ${ENV_FILE}.tmp ${ENV_FILE}; true`,
+      `rm -f ${ENV_FILE} ${SESSION_KEY_FILE}; true`,
     "turning signing off",
   );
 }

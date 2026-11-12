@@ -6,7 +6,7 @@
  * and for `git verify-commit` and `git log --show-signature` as `-Y
  * find-principals` and `-Y check-novalidate`; those are handed to ssh-keygen.
  * The script exports the session's `TURNKEY_*` bundle from the env file the
- * prep step wrote, adds the API key pair from the session key file, and execs
+ * request action wrote, adds the API key pair from the session key file, and execs
  * `tk ssh git-sign` with git's arguments. `tk` signs through Turnkey; no
  * private key is on the runner.
  *
@@ -40,7 +40,7 @@ if [ ! -x "$TK" ]; then
   exit 1
 fi
 if [ ! -f "$ENV_FILE" ] || [ ! -f "$KEY_FILE" ]; then
-  echo "valet-sign: this session has no Turnkey session key. Set up commit signing under Settings, Connected accounts, then start a new session. Or commit with --no-gpg-sign." >&2
+  echo "valet-sign: no signing key for this session. Call turnkey.request_signing_key first, or commit with --no-gpg-sign." >&2
   exit 1
 fi
 
@@ -63,7 +63,8 @@ if [ -z "$TURNKEY_API_PUBLIC_KEY" ] || [ -z "$TURNKEY_API_PRIVATE_KEY" ]; then
 fi
 
 # tk exits non-zero with the activity id when Turnkey parks the signature
-# for approval, and with Turnkey's message when the session key expired.
+# for approval, and with Turnkey's message when the session key expired at
+# the end of the approval window.
 # Both reach git's stderr unchanged; git then fails the commit.
 exec "$TK" ssh git-sign "$@"
 `;

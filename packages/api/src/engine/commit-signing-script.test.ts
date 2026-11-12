@@ -24,7 +24,7 @@ describe("valetSignScript", () => {
 
   it("names the corrective action for each missing piece", () => {
     expect(script).toContain("tk is not installed in this sandbox image");
-    expect(script).toContain("no Turnkey session key");
+    expect(script).toContain("no signing key for this session");
     expect(script).toContain("Call turnkey.request_signing_key first, or commit with --no-gpg-sign.");
   });
 });

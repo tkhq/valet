@@ -92,6 +92,27 @@ export interface TurnkeyOps {
   deleteApiKeys(args: { subOrgId: string; userId: string; apiKeyIds: string[] }): Promise<void>;
 }
 
+/**
+ * The new sub-organization's id. The SDK spreads the result it names over the
+ * raw activity, so the id is at the top level only when that name matches
+ * the result Turnkey sends. `@turnkey/sdk-server` 8.9.0 submits the V8
+ * activity and names `createSubOrganizationResultV9`, so the id reaches only
+ * `activity.result.createSubOrganizationResultV8`.
+ */
+export function subOrganizationIdOf(response: {
+  subOrganizationId?: string;
+  activity?: { result?: Record<string, unknown> };
+}): string | undefined {
+  if (response.subOrganizationId) return response.subOrganizationId;
+  for (const [key, value] of Object.entries(response.activity?.result ?? {})) {
+    if (!key.startsWith("createSubOrganizationResult") || typeof value !== "object" || value === null) continue;
+    if ("subOrganizationId" in value && typeof value.subOrganizationId === "string" && value.subOrganizationId) {
+      return value.subOrganizationId;
+    }
+  }
+  return undefined;
+}
+
 export type TurnkeyOpsFactory = (config: TurnkeyDeploymentConfig) => TurnkeyOps;
 
 export function turnkeyOps(config: TurnkeyDeploymentConfig): TurnkeyOps {
@@ -113,7 +134,9 @@ export function turnkeyOps(config: TurnkeyDeploymentConfig): TurnkeyOps {
         rootUsers,
         rootQuorumThreshold,
       });
-      return { subOrgId: res.subOrganizationId, activityId: res.activity.id };
+      const subOrgId = subOrganizationIdOf(res);
+      if (!subOrgId) throw new Error("Turnkey returned no sub-organization id.");
+      return { subOrgId, activityId: res.activity.id };
     },
     async createUsers({ subOrgId, users }) {
       const res = await api.createUsers({ organizationId: subOrgId, users });
