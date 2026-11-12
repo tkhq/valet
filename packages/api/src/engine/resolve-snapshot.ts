@@ -15,7 +15,6 @@ import { resolvePrebuildImage, contractGateApplies, type OnIncompatibleImage } f
 import { prebuildImagePullable, type PrebuildPreflightOpts } from "../prebuilds/registry.js";
 import { imageSources, bakes } from "../schema/index.js";
 import { reportError } from "@valet/engine";
-import { resolveCommitSigning } from "./commit-signing-resolve.js";
 
 export interface ResolveSnapshotDeps {
   db?: AppDb;
@@ -24,8 +23,6 @@ export interface ResolveSnapshotDeps {
   apiUrl: string;
   stockImage: string;
   preflight?: PrebuildPreflightOpts;
-  /** Names the Turnkey session key and scopes its store row; absent skips commit signing. */
-  sessionId?: string;
   /** Called (best-effort) when the repo bake fails the runtime contract gate. */
   onIncompatible?: OnIncompatibleImage;
 }
@@ -123,17 +120,16 @@ async function resolveBaseImage(
  * bricks provisioning.
  */
 export async function resolveSnapshot(deps: ResolveSnapshotDeps): Promise<ResolveSnapshot> {
-  const { db, provider, meta, apiUrl, stockImage, preflight, onIncompatible, sessionId } = deps;
+  const { db, provider, meta, apiUrl, stockImage, preflight, onIncompatible } = deps;
 
   const repos = meta.repos ?? [];
 
   // Single image lineage: every bake chains on the full base, so repo bakes
   // (prebuilds) are safe for EVERY session shape — docker and full-profile
   // included — and the base lookup needs no per-session profile.
-  const [prebuild, baseBake, commitSigning] = await Promise.all([
+  const [prebuild, baseBake] = await Promise.all([
     resolvePrebuildImage(db, meta, provider, preflight, onIncompatible),
     db ? resolveBaseImage(db, meta.orgId, provider, preflight) : Promise.resolve(null),
-    db && sessionId ? resolveCommitSigning(db, { userId: meta.userId, sessionId }) : Promise.resolve(undefined),
   ]);
 
   return {
@@ -154,6 +150,5 @@ export async function resolveSnapshot(deps: ResolveSnapshotDeps): Promise<Resolv
     repos: repos.map((binding) => ({ ...binding })),
     userName: meta.userName,
     userEmail: meta.userEmail,
-    ...(commitSigning ? { commitSigning } : {}),
   };
 }

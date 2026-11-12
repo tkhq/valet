@@ -14,7 +14,7 @@ import type { ActionPlugin, PluginAction, PluginActionContext, PluginActionResul
 import { loadTurnkeyConfig, NOT_CONFIGURED_MESSAGE } from "../config.js";
 import { clampWindowMinutes, githubKeyTitle, signingGateRequest, signingKeyName, type SigningScope } from "../gate.js";
 import { githubSigningKeys, type GitHubSigningKeys } from "../github-keys.js";
-import { disableSandboxSigning, enableSandboxSigning } from "../sandbox.js";
+import { disableSandboxSigning, enableSandboxSigning, generateSessionKey } from "../sandbox.js";
 import { opensshEd25519PublicKey } from "../ssh.js";
 import {
   COLLECTIONS,
@@ -23,9 +23,10 @@ import {
   signingKeyDocKey,
   type SigningKeyIndexDoc,
   type EnrollmentDoc,
+  type SessionKeyDoc,
   type SigningKeyDoc,
 } from "../store.js";
-import { turnkeyOps, type TurnkeyOpsFactory } from "../turnkey-client.js";
+import { turnkeyOps, type TurnkeyOps, type TurnkeyOpsFactory } from "../turnkey-client.js";
 
 export const NOT_ENROLLED_MESSAGE =
   "Set up commit signing under Settings, Connected accounts (it creates your Turnkey signing organization), then run this again.";
@@ -61,6 +62,15 @@ function action<TParams extends TSchema>(parameters: TParams) {
 }
 
 const fail = (error: string): PluginActionResult => ({ success: false, error });
+
+/** Best effort: the key also expires on its own at the end of its window. */
+async function deleteSessionKey(turnkey: TurnkeyOps, enrollment: EnrollmentDoc, apiKeyId: string): Promise<void> {
+  try {
+    await turnkey.deleteApiKeys({ subOrgId: enrollment.subOrgId, userId: enrollment.agentUserId, apiKeyIds: [apiKeyId] });
+  } catch (err) {
+    console.warn("turnkey: could not delete session key", apiKeyId, err instanceof Error ? err.message : err);
+  }
+}
 
 async function readEnrollment(ctx: PluginActionContext): Promise<EnrollmentDoc | null> {
   const store = ctx.pluginStore;
@@ -108,6 +118,9 @@ export function buildTurnkeyActionPlugin(overrides: Partial<SigningDeps> = {}): 
       const resolution = await ctx.requestDecision(signingGateRequest(scope));
       if (resolution.actionId !== "approve") return fail(REJECTED_MESSAGE);
 
+      // Make the sandbox's session key pair first: a sandbox failure then
+      // leaves no Turnkey key and no GitHub key behind.
+      const sessionPublicKey = await generateSessionKey(ctx.sandbox);
       const createdAt = deps.now();
       const notAfter = new Date(createdAt + scope.windowMinutes * 60_000);
       const turnkey = deps.turnkey(config);
@@ -117,9 +130,9 @@ export function buildTurnkeyActionPlugin(overrides: Partial<SigningDeps> = {}): 
         tagIds: [enrollment.signingTagId],
       });
       const publicKey = opensshEd25519PublicKey(key.publicKeyHex);
-      const registered = await deps
-        .github(github.accessToken)
-        .create(githubKeyTitle(ctx.sessionId, scope, notAfter), publicKey.line);
+      const githubKeys = deps.github(github.accessToken);
+      const registered = await githubKeys.create(githubKeyTitle(ctx.sessionId, scope, notAfter), publicKey.line);
+      const committerEmail = await githubKeys.noreplyEmail();
 
       const doc: SigningKeyDoc = {
         sessionId: ctx.sessionId,
@@ -159,7 +172,34 @@ export function buildTurnkeyActionPlugin(overrides: Partial<SigningDeps> = {}): 
       };
       await store.global().put(COLLECTIONS.signingKeyIndex, userKey, index);
 
-      await enableSandboxSigning(ctx.sandbox, { privateKeyId: key.privateKeyId, publicKeyLine: publicKey.line });
+      // The session API key is the sandbox's signing authority. It is made
+      // now, not at prep, and expires with the window, so Turnkey refuses a
+      // signature after the window whatever the sandbox still holds.
+      const sessionKey = await turnkey.createApiKey({
+        subOrgId: enrollment.subOrgId,
+        userId: enrollment.agentUserId,
+        name: `session:${ctx.sessionId}`,
+        publicKey: sessionPublicKey,
+        expirationSeconds: scope.windowMinutes * 60,
+      });
+      const sessionStore = store.session(ctx.sessionId);
+      const previous = await sessionStore.get<SessionKeyDoc>(COLLECTIONS.sessionKey, DEFAULT_KEY);
+      if (previous) await deleteSessionKey(turnkey, enrollment, previous.doc.apiKeyId);
+      const sessionDoc: SessionKeyDoc = {
+        apiKeyId: sessionKey.apiKeyId,
+        publicKey: sessionPublicKey,
+        createdAt,
+        expiresAt: notAfter.getTime(),
+      };
+      await sessionStore.put(COLLECTIONS.sessionKey, DEFAULT_KEY, sessionDoc);
+
+      await enableSandboxSigning(ctx.sandbox, {
+        organizationId: enrollment.subOrgId,
+        apiBaseUrl: config.apiBaseUrl,
+        privateKeyId: key.privateKeyId,
+        publicKeyLine: publicKey.line,
+        committerEmail,
+      });
 
       return {
         success: true,
@@ -202,7 +242,15 @@ export function buildTurnkeyActionPlugin(overrides: Partial<SigningDeps> = {}): 
         await store.global().put(COLLECTIONS.signingKeyIndex, match.key, { ...indexRow.doc, status: "revoked" });
       }
       if (match.doc.sessionId === ctx.sessionId) {
-        await store.session(ctx.sessionId).delete(COLLECTIONS.signingKeys, CURRENT_KEY);
+        const sessionStore = store.session(ctx.sessionId);
+        await sessionStore.delete(COLLECTIONS.signingKeys, CURRENT_KEY);
+        const sessionKey = await sessionStore.get<SessionKeyDoc>(COLLECTIONS.sessionKey, DEFAULT_KEY);
+        const config = loadTurnkeyConfig(deps.env);
+        const enrollment = await readEnrollment(ctx);
+        if (sessionKey && config && enrollment) {
+          await deleteSessionKey(deps.turnkey(config), enrollment, sessionKey.doc.apiKeyId);
+          await sessionStore.delete(COLLECTIONS.sessionKey, DEFAULT_KEY);
+        }
         await disableSandboxSigning(ctx.sandbox);
       }
       return { success: true, data: { fingerprint: closed.fingerprint, status: closed.status } };

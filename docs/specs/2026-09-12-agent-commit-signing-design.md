@@ -101,13 +101,15 @@ The result `{ subOrgId, passkeyUserId, agentUserId, agentTagId, signingTagId, po
 
 ### Session key
 
-At sandbox prep, a prep step `turnkey-session-key` runs after `git-identity` when the deployment is configured and the user is enrolled (`engine/commit-signing-resolve.ts`, `engine/commit-signing-prep.ts`). Prep runs in the api process with the sandbox handle, so no sandbox-to-api route is needed:
+`turnkey.request_signing_key` makes the session key after approval, in the same call that makes the signing key. Prep makes none:
 
-1. In the sandbox: `tk api-key generate --output /run/valet/turnkey/session.json` (0600). The private half never leaves the sandbox.
-2. The api reads the public half from that file and calls `CREATE_API_KEYS_V2` on `valet-agent` with `api_key_name = session:<sessionId>` and a 24 h expiry. It stores `{ apiKeyId, publicKey, createdAt, expiresAt }` in the plugin store, scope `session`, collection `session_key`.
-3. The step writes `/run/valet/turnkey/env` with `TURNKEY_ORGANIZATION_ID` and `TURNKEY_API_BASE_URL`, mode 0600.
+1. In the sandbox: `tk api-key generate --output /run/valet/turnkey/session.json` (0600). The private half never leaves the sandbox. A previous key file is replaced.
+2. The api reads the public half and calls `CREATE_API_KEYS_V2` on `valet-agent` with `api_key_name = session:<sessionId>`. The expiry is the approval window, so Turnkey refuses a signature after the window, whatever the sandbox still holds. The api deletes the session's previous session key and stores `{ apiKeyId, publicKey, createdAt, expiresAt }` in the plugin store, scope `session`, collection `session_key`.
+3. The action writes `/run/valet/turnkey/env` with `TURNKEY_ORGANIZATION_ID`, `TURNKEY_API_BASE_URL`, and `TURNKEY_PRIVATE_KEY_ID`, mode 0600.
 
-The step is not critical: a Turnkey failure logs and the session starts unsigned. A resumed sandbox that already has a session key keeps it. A session with no enrollment gets no step. `git commit` then produces an unsigned commit, as today.
+`turnkey.revoke_signing_key` deletes the session key at once and removes both files. A session with no approval has no key file, and `git commit` produces an unsigned commit, as today.
+
+The parent API key leaves the root quorum at enrollment. Before it leaves, enrollment adds one policy for it: allow `CREATE_PRIVATE_KEYS_V2`, `CREATE_API_KEYS_V2`, and `DELETE_API_KEYS`. These are the per-approval calls above. The parent key cannot sign, export, or change users, tags, or policies in the sub-organization.
 
 ### Sandbox git config
 
@@ -121,11 +123,11 @@ commit.gpgsign true
 
 `valet-sign` is a generated POSIX script (`engine/commit-signing-script.ts`), installed by the `credential-scripts` step like `valet-secrets`. It reads `/run/valet/turnkey/env` and the session key file, exports the `TURNKEY_*` bundle, and execs `tk ssh git-sign` with git's arguments. `commit.gpgsign` stays off at prep. On approval `turnkey.request_signing_key` appends `TURNKEY_PRIVATE_KEY_ID` to the env file, sets `user.signingkey` to `key::<public key line>`, and turns `commit.gpgsign` on (`plugin-turnkey/src/sandbox.ts`). When no key has been issued `valet-sign` exits 1 with: `No signing key for this session. Call turnkey.request_signing_key first, or commit with --no-gpg-sign.`
 
-The committer email must be an email verified on the GitHub account, or GitHub shows "Unverified" even with a valid signature. The `git-identity` step already sets `user.email` from the Valet user.
+The committer email must be an email verified on the GitHub account that holds the key, or GitHub shows "Unverified" even with a valid signature. The Valet profile email can belong to a different GitHub account. On approval the action sets `committer.email` to the account's `<id>+<login>@users.noreply.github.com` address (`GET /user`), which GitHub always treats as verified for that account. The author stays the Valet identity from `git-identity`, which sets only `user.*` and so does not undo it on resume. Revoke unsets it.
 
 ### Cleanup
 
-`engine/signing-key-sweep.ts` runs every hour: for each index row with status `active` whose `notAfter` has passed, delete the GitHub key with the user's token, then set the user row and the index row to `closed`. A failure (no usable GitHub token, permission removed) logs and leaves the row for the next tick. The Turnkey session API key expires on its own. The Turnkey private key and the rows are never deleted. Closing a key when its pull request merges or closes, through the GitHub plugin's trigger, is a follow-up.
+`engine/signing-key-sweep.ts` runs every hour: for each index row with status `active` whose `notAfter` has passed, delete the GitHub key with the user's token, then set the user row and the index row to `closed`. A failure (no usable GitHub token, permission removed) logs and leaves the row for the next tick. The Turnkey session API key expired at the end of the window. The Turnkey private key and the rows are never deleted. Closing a key when its pull request merges or closes, through the GitHub plugin's trigger, is a follow-up.
 
 ### Audit
 

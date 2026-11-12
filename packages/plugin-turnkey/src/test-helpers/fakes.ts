@@ -4,6 +4,7 @@
  * plugin store, a sandbox that records exec commands, and a full-shape
  * `PluginActionContext` with no casts.
  */
+import { SESSION_KEY_FILE } from "../sandbox.js";
 import type {
   Credential,
   DecisionGateRequest,
@@ -98,6 +99,9 @@ export function fakeGithub(): FakeGitHub {
     },
     async remove(id) {
       keys.delete(id);
+    },
+    async noreplyEmail() {
+      return "100+octo@users.noreply.github.com";
     },
   };
   return fake;
@@ -199,6 +203,10 @@ export function fakeContext(opts: FakeContextOptions = {}): PluginActionContext 
       rm: async () => notImplemented(),
       exec: async (command: string) => {
         execs.push(command);
+        if (command === "id -u; id -g") return { exitCode: 0, stdout: "1000\n1000\n", stderr: "" };
+        if (command === `cat ${SESSION_KEY_FILE}`) {
+          return { exitCode: 0, stdout: JSON.stringify({ public_key: `02${"ab".repeat(32)}`, private_key: "cd".repeat(32) }), stderr: "" };
+        }
         return { exitCode: 0, stdout: "", stderr: "" };
       },
     },
