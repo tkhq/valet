@@ -62,6 +62,17 @@ if [ -z "$TURNKEY_API_PUBLIC_KEY" ] || [ -z "$TURNKEY_API_PRIVATE_KEY" ]; then
   exit 1
 fi
 
+# tk ssh git-sign signs only with keys in tk's registry under $HOME. Register
+# the approved key once; the marker skips the API call on later commits.
+MARK="$(dirname "$ENV_FILE")/registered-\${${PRIVATE_KEY_ID_VAR}}"
+if [ ! -f "$MARK" ]; then
+  if ! "$TK" ssh keys add --private-key-id "\${${PRIVATE_KEY_ID_VAR}}" --non-interactive >/dev/null; then
+    echo "valet-sign: tk could not register the signing key. Call turnkey.request_signing_key again, or commit with --no-gpg-sign." >&2
+    exit 1
+  fi
+  : > "$MARK"
+fi
+
 # tk exits non-zero with the activity id when Turnkey parks the signature
 # for approval, and with Turnkey's message when the session key expired at
 # the end of the approval window.
