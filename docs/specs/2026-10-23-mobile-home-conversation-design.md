@@ -22,6 +22,7 @@ The mobile-only boundary applies to navigation. It does not apply
 to conversation cards, approval previews, durable plans, measured thinking
 time, or agent processing feedback. These are shared thread features.
 Quick replies are shown in the mobile layout and in Home on every screen size.
+They are hidden while desktop Home's idle cover hides the conversation, because the question they answer is not visible.
 
 The mobile conversation shell is shared by Home, `/chat`, `/threads/:id`,
 and `/sessions/:id`. Opening a team thread from the drawer must keep the
