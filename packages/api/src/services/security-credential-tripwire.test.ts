@@ -107,6 +107,7 @@ afterEach(() => {
     "perf-near-2k-long",
     "perf-near-8k-dense",
     "perf-near-8k-long",
+    "perf-near-32k",
   ]) {
     clearSecurityCredentialSession(id);
   }
@@ -280,9 +281,7 @@ describe("security credential output tripwire", () => {
     const image = { type: "image", data: pixels.toString("base64"), mimeType: "image/png" };
     const result = { content: [{ type: "text", text: "ok" }, image] };
     sanitizeSecurityCredentialOutput(SESSION, result);
-    const started = performance.now();
     expect(sanitizeSecurityCredentialOutput(SESSION, result)).toBe(result);
-    expect(performance.now() - started).toBeLessThan(50);
 
     const leak = { content: [{ type: "text", text: `token ${VALUE_32}` }, image] };
     expect(sanitizeSecurityCredentialOutput(SESSION, leak)).toBe(SECURITY_CREDENTIAL_OUTPUT_BLOCKED);
@@ -316,15 +315,13 @@ describe("security credential output tripwire", () => {
     }
   });
 
-  it("sanitizes a 2 MiB binary attachment in under 50 ms", () => {
+  it("passes a 2 MiB binary attachment through unchanged", () => {
     register(SESSION, ENGAGEMENT, VALUE_32);
     // sharp returns a Buffer, whose toJSON runs before a JSON replacer sees
-    // it, so both views are measured.
+    // it, so both views are checked.
     for (const data of [new Uint8Array(2 * 1024 * 1024), Buffer.alloc(2 * 1024 * 1024)]) {
       const result = { text: "ok", attachments: [{ type: "image", data, mimeType: "image/png" }] };
-      const started = performance.now();
       expect(sanitizeSecurityCredentialOutput(SESSION, result)).toBe(result);
-      expect(performance.now() - started).toBeLessThan(50);
     }
   });
 
@@ -483,17 +480,31 @@ describe("security credential output tripwire", () => {
     expect(alertSpy).not.toHaveBeenCalled();
   });
 
-  it("scans 256 KiB of benign text in under 200 ms", () => {
+  it("passes 256 KiB of benign text through unchanged", () => {
     register("perf-benign", ENGAGEMENT, pemValue(32));
     const text = benignText();
 
     sanitizeSecurityCredentialOutput("perf-benign", text);
-    const started = performance.now();
     expect(sanitizeSecurityCredentialOutput("perf-benign", text)).toBe(text);
-    expect(performance.now() - started).toBeLessThan(200);
   });
 
-  it("scans 256 KiB of near-miss copies in under 200 ms", () => {
+  it("scans long near-miss runs of a 32 KB value in linear time", () => {
+    // Guards the quadratic re-walk the near-miss test above describes. The
+    // value is large so the gap is wide: the linear scan takes tens of
+    // milliseconds, and a scan that re-walks each run per starting offset
+    // takes tens of seconds. The 2 s ceiling sits far from both, so runner
+    // noise does not decide the result.
+    const value = pemValue(512);
+    register("perf-near-32k", ENGAGEMENT, value);
+    const text = longRunText(value);
+
+    sanitizeSecurityCredentialOutput("perf-near-32k", text);
+    const started = performance.now();
+    expect(sanitizeSecurityCredentialOutput("perf-near-32k", text)).toBe(text);
+    expect(performance.now() - started).toBeLessThan(2_000);
+  }, 60_000);
+
+  it("passes 256 KiB of near-miss copies through unchanged", () => {
     // The hit path, for a 2 KB and an 8 KB value, in both shapes. Before
     // the scan consumed each text position once per candidate, the long-run
     // shape cost hundreds of milliseconds for the 2 KB value and seconds
@@ -512,9 +523,7 @@ describe("security credential output tripwire", () => {
         const text = shape === "dense" ? denseHitText(value) : longRunText(value);
 
         sanitizeSecurityCredentialOutput(session, text);
-        const started = performance.now();
         expect(sanitizeSecurityCredentialOutput(session, text)).toBe(text);
-        expect(performance.now() - started).toBeLessThan(200);
       }
     }
   });

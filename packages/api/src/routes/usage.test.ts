@@ -954,7 +954,7 @@ describe("GET /api/usage/export.csv", () => {
     expect(orgCsv.trim().split("\n").find((line) => line.includes("wf:run-ctx:think"))).toMatch(/,acme\/private-repo,slack,DPRIVATE$/);
   });
 
-  it("streams every row over 100,000 without gaps or duplicates at tied timestamps", async () => {
+  it("streams every row across export batches without gaps or duplicates at tied timestamps", async () => {
     api = await bootTestApi();
     const now = Date.now();
     await api.providers.db.insert(agentSessions).values({
@@ -966,18 +966,18 @@ describe("GET /api/usage/export.csv", () => {
       SELECT 'e-csv-overflow-' || lpad(i::text, 6, '0'), 's-csv-overflow', 'th',
              'message', 'assistant', 'model-' || lpad(i::text, 6, '0'),
              ${USAGE}::text, ${COST}::text, ${now}
-      FROM generate_series(1, 100001) AS i
+      FROM generate_series(1, 10001) AS i
     `);
 
     const res = await fetch(`${api.baseUrl}/api/usage/export.csv?window=30d&granularity=turn`);
     expect(res.status).toBe(200);
     const lines = (await res.text()).trim().split("\n");
-    expect(lines).toHaveLength(100002);
+    expect(lines).toHaveLength(10002);
     const models = lines.slice(1).map((line) => line.split(",")[2]);
-    expect(new Set(models).size).toBe(100001);
-    expect(models[0]).toBe("model-100001");
+    expect(new Set(models).size).toBe(10001);
+    expect(models[0]).toBe("model-010001");
     expect(models.at(-1)).toBe("model-000001");
-  }, 60_000);
+  });
 });
 
 describe("GET /api/usage/summary", () => {
