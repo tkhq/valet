@@ -2,10 +2,11 @@ import type { ReactNode } from "react";
 import { Button } from "~/components/primitives";
 import { prefillComposerDraft } from "~/stores/composer-drafts";
 
+/** `prefill` is what the message box gets; it can end mid-sentence for the person to finish. */
 const SUGGESTIONS = [
-  "What needs me today?",
-  "Catch me up on Slack since yesterday",
-  "Start a task: ",
+  { label: "What needs me today?", prefill: "What needs me today?" },
+  { label: "Catch me up on Slack since yesterday", prefill: "Catch me up on Slack since yesterday" },
+  { label: "Start a task", prefill: "Start a task: " },
 ];
 
 /**
@@ -16,15 +17,16 @@ const SUGGESTIONS = [
 export function HomeEmptyState({ sessionId, threadId, title = "What should Valet do?", onPick, children }: {
   sessionId: string; threadId: string; title?: string; onPick?: () => void; children?: ReactNode;
 }) {
-  return <div className="m-auto flex w-full max-w-md flex-col items-center gap-4 px-6 py-10 text-center">
+  // The starters get a wider row than the text, so all three fit on one line beside the Tasks panel.
+  return <div className="m-auto flex w-full max-w-2xl flex-col items-center gap-4 px-6 py-10 text-center">
     <h2 className="font-display text-2xl text-ink">{title}</h2>
-    <p className="text-sm text-muted">Ask anything. Bigger jobs run as tasks in the workspace they belong to, and come back here when they finish or need you.</p>
+    <p className="max-w-md text-sm text-muted">Ask anything. Bigger jobs run as tasks in the workspace they belong to, and come back here when they finish or need you.</p>
     <div className="flex flex-wrap justify-center gap-2">
-      {SUGGESTIONS.map(text => <Button key={text} size="sm" variant="secondary" onClick={() => {
-        prefillComposerDraft(sessionId, threadId, text);
+      {SUGGESTIONS.map(({ label, prefill }) => <Button key={label} size="sm" variant="secondary" onClick={() => {
+        prefillComposerDraft(sessionId, threadId, prefill);
         onPick?.();
         document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')?.focus();
-      }}>{text.trim()}</Button>)}
+      }}>{label}</Button>)}
     </div>
     {children}
   </div>;
