@@ -158,6 +158,7 @@ import {
   walkTranscriptDag,
   renderBranchNote,
   selectSummaryCheckpointTail,
+  selectSummaryCheckpointHead,
   type PruneResult,
   type SummarizeResult,
 } from "./compaction.js";
@@ -422,12 +423,13 @@ export function buildSpilledInputMarker(args: {
 
 /**
  * The summarize call itself can overflow the summarizer model. Each retry
- * drops the oldest half of the head entries fed to the summarizer (the
- * CompactionEntry still covers the full head — the previous summary anchors
- * what the truncated input loses). Bounded like Claude Code's
- * prompt-too-long retry (TKAI-306).
+ * keeps the older half of the window fed to the summarizer, and the
+ * checkpoint covers only what the summarizer read. Bounded like Claude
+ * Code's prompt-too-long retry (TKAI-306).
  */
 const MAX_SUMMARIZE_OVERFLOW_RETRIES = 3;
+/** The most bounded summarizer windows one pass runs over a large head. */
+const MAX_SUMMARY_WINDOWS = 4;
 const SUMMARY_CHECKPOINT_TAIL_MAX_TOKENS = 8_000;
 const SUMMARY_INPUT_MAX_TOKENS = 64_000;
 
@@ -3182,15 +3184,6 @@ export class Thread {
     this.rehydrateTranscript(snapshot.entries.map((entry) => entry.id === note.id ? updated : entry));
   }
 
-  /** Every entry, payloads included. Compaction prunes, selects its cut point
-   * and rebuilds from all path entries, so it must not see stubs. */
-  private async fullSnapshot(): Promise<{ thread: ThreadData; entries: SessionEntry[] }> {
-    const snapshot = await this.session.providers.store.getThreadSnapshot(this.session.id, this.id);
-    if (!snapshot) throw new Error(`thread not found: ${this.id}`);
-    this.activeLeafEntryId = snapshot.thread.activeLeafEntryId;
-    return snapshot;
-  }
-
   private async transcriptSnapshot(keepQueueItemId?: string): Promise<{ thread: ThreadData; entries: SessionEntry[] }> {
     const store = this.session.providers.store;
     const snapshot = store.getTranscriptSnapshot
@@ -5506,15 +5499,13 @@ export class Thread {
     await this.agent.waitForIdle();
 
     const last = this.agent.state.messages[this.agent.state.messages.length - 1];
-    if (
-      !this.overflowRetryInProgress &&
-      last &&
-      last.role === "assistant" &&
-      last.stopReason === "error" &&
+    if (reactiveRetryAllowed({
+      retryInProgress: this.overflowRetryInProgress,
+      compactionFailures: this.consecutiveCompactionFailures,
       // The turn's effective model, not the session default — a thread pinned
       // to a smaller-context model must detect ITS overflow (spec decision 4).
-      isContextOverflow(last, this.agent.state.model.contextWindow)
-    ) {
+      contextWindow: this.agent.state.model.contextWindow,
+    }, last)) {
       this.overflowRetryInProgress = true;
       try {
         // A failed reactive compaction must not fail the turn as
@@ -6044,6 +6035,48 @@ export class Thread {
   }
 
   /**
+   * A manual `/compact`. It waits until no turn runs and no other drive holds
+   * the thread, then holds the drive lock (`kicking`) for the pass, as the
+   * idle pass does. A pass during a streaming turn replaced
+   * `agent.state.messages` while the agent loop kept its own copy, so the
+   * turn wrote on top of a context the pass had already replaced. A message
+   * that arrives during the pass runs after it.
+   */
+  async compactBetweenTurns(opts: { instructions?: string } = {}): Promise<CompactionOutcome> {
+    while (this.kicking || this.runningItem) {
+      await this.kickTail.catch(() => undefined);
+      // A gate reconcile can hold the turn outside the drive loop.
+      if (this.kicking || this.runningItem) {
+        await new Promise<void>((resolve) => { setTimeout(resolve, 100).unref?.(); });
+      }
+    }
+    // The session can stop while the pass waits: a destroy or a reclaim by
+    // another owner fences it, and a read-only session must not pay for a
+    // summary. A thread abort alone does not stop /compact on an idle thread.
+    if (this.session.isExecutionFenced || this.session.options.readOnlyReason) {
+      throw new Error("The thread stopped before compaction could run. Run /compact again.");
+    }
+    this.kicking = true;
+    const pass = (async () => {
+      try {
+        // The turn cleared its key when it ended. Resolve it again, as the
+        // idle pass does, so the summarizer does not run on ambient credentials.
+        const turnModel = await this.resolveIdleCompactionModel();
+        return await this.compactThread({
+          mode: "manual",
+          ...(opts.instructions ? { instructions: opts.instructions } : {}),
+          ...(turnModel ? { turnModel } : {}),
+        });
+      } finally {
+        this.kicking = false;
+        void this.kick();
+      }
+    })();
+    this.kickTail = pass.then(() => undefined, () => undefined);
+    return pass;
+  }
+
+  /**
    * Run a compaction pass: prune cheap stale tool outputs, then if the
    * result still doesn't fit, summarize older messages into a
    * CompactionEntry. Persist DAG updates and rewrite agent.state.messages
@@ -6217,9 +6250,9 @@ export class Thread {
 
     // A checkpoint covers what its summary describes, and no more. The
     // summarizer input is a budgeted window, so a head bigger than that
-    // budget is summarized across several passes: this pass takes the newest
-    // part the budget holds, and the older part stays in live context for a
-    // later pass to take (TKAI-461).
+    // budget is summarized in windows, oldest first. A head bigger than the
+    // windows of one pass keeps its newest part in live context for a later
+    // pass to take (TKAI-461).
     //
     // Entries the superseded checkpoint already covered stay covered. Their
     // content reaches this summary through `previousSummary`, and
@@ -6283,23 +6316,21 @@ export class Thread {
       // leaves the head unread, and a window over already-covered entries
       // spends the budget on history `previousSummary` already carries
       // (TKAI-461).
-      let headForSummary = selectSummaryCheckpointTail(pendingHead, summaryInputBudget, {
-        sizeOf: sizeForSummary,
-      });
+      // The bounded summarizer reads the pending head oldest first, one
+      // window at a time (`selectSummaryCheckpointHead`). A window that
+      // took the newest part instead left older raw entries after a
+      // summary of later events.
+      let headForSummary = selectSummaryCheckpointHead(pendingHead, summaryInputBudget, { sizeOf: sizeForSummary });
       // Recent tail evidence anchors the recovery checkpoint in the current
-      // task. It is optional, so it takes the budget the head leaves, and it
-      // is trimmed to what fits rather than dropped whole. A newest entry
+      // task. It is optional, so it takes the budget the window leaves, and
+      // it is trimmed to what fits rather than dropped whole. A newest entry
       // that alone exceeds the evidence budget leaves no evidence. The tail
       // stays verbatim in live context either way.
-      let tailEvidence = selectSummaryCheckpointTail(
+      const tailEvidenceFor = (window: readonly SessionEntry[]) => selectSummaryCheckpointTail(
         effectiveEntries.slice(cut.cutIndex),
         Math.min(
           SUMMARY_CHECKPOINT_TAIL_MAX_TOKENS,
-          Math.max(
-            summaryInputBudget -
-              headForSummary.reduce((total, e) => total + sizeForSummary(e), 0),
-            0,
-          ),
+          Math.max(summaryInputBudget - window.reduce((total, e) => total + sizeForSummary(e), 0), 0),
         ),
         { sizeOf: sizeForSummary, keepNewest: false },
       );
@@ -6313,9 +6344,7 @@ export class Thread {
       // This guard handles the pass that can summarize nothing: the pending
       // head carries no text the summarizer reads, so any checkpoint would
       // describe an empty transcript. It runs before the summarizer call, so
-      // such a pass costs nothing. A pending head that is only PARTLY
-      // readable is not this case. The checkpoint below claims the window
-      // and no more, so the rest keeps its place in live context.
+      // such a pass costs nothing.
       if (!coversHead(headForSummary)) {
         span?.setAttributes({
           "valet.compaction.insufficient_reason": "coverage_gap",
@@ -6352,7 +6381,6 @@ export class Thread {
             },
           });
           headForSummary = [...pendingHead];
-          tailEvidence = [];
           span?.setAttributes({
             "valet.compaction.summary_source": "cached_prefix",
             "valet.compaction.summary_input_tokens": summaryResult.inputTokens,
@@ -6367,53 +6395,82 @@ export class Thread {
           console.warn(`[engine] cached-prefix summary failed, using the bounded summarizer session=${session.id} thread=${this.id}: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
-      for (let attempt = 0; summaryResult === undefined; attempt++) {
-        try {
-          summaryResult = await summarize({
-            headEntries: [...headForSummary, ...tailEvidence],
-            model,
-            toolOutputMaxChars: cfg?.toolOutputMaxChars,
-            attributeAuthors: this.attributeAuthors,
-            previousSummary,
-            instructions: opts.instructions,
-            signal: opts.signal,
-            // Reactive compaction fires WITHIN a claimed turn (and proactive
-            // just after runAgent, still before the turn's finally clears it),
-            // so `turnApiKey` is live here. Without this, a BYO-key session
-            // whose only key comes from the host `resolveModel` seam would fail
-            // the summarizer completion on first context overflow. Undefined
-            // when no resolver is wired (env-fallback path) — behavior unchanged.
-            // The idle pass runs after that finally and passes its own key.
-            apiKey: opts.turnModel ? opts.turnModel.apiKey : this.turnApiKey,
-            fetch: this.session.options.modelFetch?.(model),
-          });
-          break;
-        } catch (err) {
-          if (!(err instanceof SummarizeOverflowError)) throw err;
-          if (attempt + 1 >= MAX_SUMMARIZE_OVERFLOW_RETRIES) throw err;
-          // Shrink in an order that keeps head coverage: the optional tail
-          // evidence first, then the oldest half of the head. No
-          // user-message alignment: `summarize` prepends its own preface, so
-          // an assistant-first slice is a legal payload. Aligning forward to
-          // the next user entry instead threw away context the budget could
-          // still hold, and a slice with no user entry at all left an input
-          // that providers rejected with a plain 400 that aborted this loop
-          // (TKAI-461).
-          if (tailEvidence.length > 0) {
-            tailEvidence = [];
-            continue;
+      if (summaryResult === undefined) {
+        // Each window's summary carries the earlier windows forward as the
+        // previous summary, so one checkpoint can cover several windows in
+        // order. Up to MAX_SUMMARY_WINDOWS run per pass; a head larger than
+        // that keeps its newest part live for the next pass.
+        const summarizedWindows: SessionEntry[] = [];
+        let carried = previousSummary;
+        let window = headForSummary;
+        let inputTokens = 0;
+        let outputTokens = 0;
+        let cacheReadTokens = 0;
+        for (let windowIndex = 0; ; windowIndex++) {
+          // Tail evidence goes with the window that reaches the newest head entry.
+          let evidence = window.at(-1) === pendingHead.at(-1) ? tailEvidenceFor(window) : [];
+          let result: SummarizeResult | undefined;
+          let windowFailed = false;
+          for (let attempt = 0; result === undefined && !windowFailed; attempt++) {
+            try {
+              result = await summarize({
+                headEntries: [...window, ...evidence],
+                model,
+                toolOutputMaxChars: cfg?.toolOutputMaxChars,
+                attributeAuthors: this.attributeAuthors,
+                previousSummary: carried,
+                instructions: opts.instructions,
+                signal: opts.signal,
+                // Reactive compaction fires WITHIN a claimed turn (and proactive
+                // just after runAgent, still before the turn's finally clears it),
+                // so `turnApiKey` is live here. Without this, a BYO-key session
+                // whose only key comes from the host `resolveModel` seam would fail
+                // the summarizer completion on first context overflow. Undefined
+                // when no resolver is wired (env-fallback path) — behavior unchanged.
+                // The idle pass runs after that finally and passes its own key.
+                apiKey: opts.turnModel ? opts.turnModel.apiKey : this.turnApiKey,
+                fetch: this.session.options.modelFetch?.(model),
+              });
+            } catch (err) {
+              // A later window that fails keeps the windows already
+              // summarized: the checkpoint covers them, and the rest stays
+              // live for the next pass.
+              if (windowIndex > 0 && !opts.signal?.aborted) {
+                console.warn(`[engine] summary window ${windowIndex + 1} failed, keeping ${windowIndex} session=${session.id} thread=${this.id}: ${err instanceof Error ? err.message : String(err)}`);
+                windowFailed = true;
+                continue;
+              }
+              if (!(err instanceof SummarizeOverflowError)) throw err;
+              if (attempt + 1 >= MAX_SUMMARIZE_OVERFLOW_RETRIES) throw err;
+              // Shrink in an order that keeps head coverage: the optional tail
+              // evidence first, then the newest half of the window, which
+              // stays live for the next window or pass. No user-message
+              // alignment: `summarize` prepends its own preface, so an
+              // assistant-first slice is a legal payload (TKAI-461).
+              if (evidence.length > 0) {
+                evidence = [];
+                continue;
+              }
+              const truncated = window.slice(0, Math.ceil(window.length / 2));
+              // Coverage is checked BEFORE the retry. A slice that carries no
+              // head content would buy a summary this pass must then discard.
+              if (truncated.length === window.length || !coversHead(truncated)) throw err;
+              window = truncated;
+            }
           }
-          const truncated = headForSummary.slice(Math.floor(headForSummary.length / 2));
-          // Coverage is checked BEFORE the retry. A slice that carries no
-          // head content would buy a summary this pass must then discard,
-          // and both calls are billed. Neither shrink step can drop head
-          // coverage once this passes, so the checkpoint below needs no
-          // second check.
-          if (truncated.length === headForSummary.length || !coversHead(truncated)) {
-            throw err;
-          }
-          headForSummary = truncated;
+          if (windowFailed || result === undefined) break;
+          summarizedWindows.push(...window);
+          span?.setAttribute("valet.compaction.summary_windows", windowIndex + 1);
+          carried = result.summary;
+          inputTokens += result.inputTokens;
+          outputTokens += result.outputTokens;
+          cacheReadTokens += result.cacheReadTokens ?? 0;
+          summaryResult = { ...result, inputTokens, outputTokens, cacheReadTokens };
+          const rest = pendingHead.slice(pendingHead.indexOf(window.at(-1)!) + 1);
+          if (windowIndex + 1 >= MAX_SUMMARY_WINDOWS || !coversHead(rest)) break;
+          window = selectSummaryCheckpointHead(rest, summaryInputBudget, { sizeOf: sizeForSummary });
         }
+        headForSummary = summarizedWindows;
       }
 
       if (summaryResult === undefined) throw new Error("Compaction produced no summary. Run /compact to retry.");
@@ -8869,6 +8926,23 @@ export function freshContextOnly(context: AgentContext, start: AgentMessage | un
 /** The roles `convertToLlm` sends. Custom agent message kinds never reach the model, so context estimates skip them. */
 function isLlmMessage(message: AgentMessage): message is Message {
   return message.role === "user" || message.role === "assistant" || message.role === "toolResult";
+}
+
+/**
+ * Whether an overflowing response gets the one reactive compaction and
+ * retry of its turn. An open breaker gates it like every automatic pass:
+ * without that, a thread whose compaction keeps failing paid for a failed
+ * summary on every overflow. /compact still runs and closes the breaker.
+ * Exported for tests.
+ */
+export function reactiveRetryAllowed(
+  state: { retryInProgress: boolean; compactionFailures: number; contextWindow: number },
+  last: AgentMessage | undefined,
+): boolean {
+  return !state.retryInProgress
+    && state.compactionFailures < MAX_CONSECUTIVE_COMPACTION_FAILURES
+    && last !== undefined && last.role === "assistant" && last.stopReason === "error"
+    && isContextOverflow(last, state.contextWindow);
 }
 
 export function entriesToAgentMessages(

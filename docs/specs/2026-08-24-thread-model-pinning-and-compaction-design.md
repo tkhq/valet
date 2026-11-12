@@ -103,9 +103,8 @@ rehydration) use a lenient helper that falls back without throwing.
 
 ### 4. Budget sites use the thread's effective model
 
-Compaction always runs inside a claimed turn (proactive after `runAgent`,
-reactive inside it, manual via the in-turn command path), so
-`agent.state.model` holds the resolved effective model — including
+Compaction runs inside a claimed turn (proactive after `runAgent`, reactive
+inside it), so `agent.state.model` holds the resolved effective model — including
 resolver-only specs the internal registry cannot resolve. All five budget
 sites switch to it: the proactive trigger (`proactiveCompactionTrigger`), the
 reactive overflow check (`isContextOverflow`), the summarizer fallback model,
@@ -550,8 +549,9 @@ the configured tool-output limit, 2,000 chars by default. A 300,000-char
 assistant run therefore costs about 5,000 tokens of input, not 75,000. A budget
 walk over raw sizes rejected entries whose real payload fits many times over.
 
-A budget cap can cut into a turn. The window keeps that shape: it is the
-newest entries that fit, with no alignment to a user entry. The summarizer
+A budget cap can cut into a turn. The window keeps that shape, with no
+alignment to a user entry. (Since 2026-11-11 the window is the oldest entries
+that fit; see the robustness amendment.) The summarizer
 prepends a synthetic user message when its input starts with an assistant
 message. Several providers reject that shape with a plain 400 error, and that
 error is not an overflow, so it would abort the overflow retry. An earlier
@@ -742,3 +742,42 @@ clears the provider's cached messages. A tool call, an error, or a summary
 that misses the template fails the cached path, and the pass falls back to
 `summarize` with the bounded windows above. The span attribute
 `valet.compaction.summary_source` reads `cached_prefix` or `prefix_failed`.
+
+## Amendment (2026-11-11): compaction robustness
+
+- **The breaker gates the reactive retry.** `MAX_CONSECUTIVE_COMPACTION_FAILURES`
+  stopped proactive passes and context preparation, but not the reactive
+  pass after an overflow. A thread whose compaction kept failing paid for a
+  failed summary on every overflow. `reactiveRetryAllowed` now checks the
+  breaker. The overflow response stands as the turn's error. `/compact`
+  still runs and closes the breaker.
+- **`/compact` waits for the running turn.** It ran during a streaming turn
+  with no drive lock and replaced `agent.state.messages` while the agent
+  loop kept its own copy. `Thread.compactBetweenTurns` now waits until no
+  turn runs and no other drive holds the thread, then holds the drive lock
+  (`kicking`) for the pass. Like the idle pass, it resolves the model and
+  key again, and it refuses when the session is fenced (destroyed or
+  reclaimed by another owner) or read-only. A message that arrives during the pass runs after it. The
+  command answers within the 500 ms window that plugin commands use; after
+  that, its result entry lands when the pass ends. Known limits: the wait
+  has no bound, so `/compact` behind a turn that waits on an approval waits
+  as long. A gate reconcile does not take the drive lock, which the idle
+  pass shares.
+- **Manual compaction outside a turn.** `/compact` now always runs outside
+  a claimed turn. It budgets against the model the host resolver returns, or
+  the thread's effective model (`effectiveModelLenient`) when no resolver is
+  wired.
+- **The bounded summarizer reads the head oldest first.** It summarized the
+  newest part of an oversized head, so older raw entries stayed in live
+  context after a summary of later events. A pass now reads the pending head
+  in windows from the oldest entry (`selectSummaryCheckpointHead`). Each
+  window's summary is the previous summary of the next window, so one
+  checkpoint covers the windows in order. A pass runs up to four windows. A
+  larger head keeps its newest part live after the summary for the next
+  pass. In the first window, the overflow retry keeps the older half of the
+  window. A window always
+  holds the first entry the summarizer can read, even when it alone exceeds
+  the budget. Tail evidence goes with the window that reaches the newest
+  head entry. If a later window fails, the checkpoint keeps the windows
+  already summarized and the rest stays live.
+- `Thread.fullSnapshot` had no callers after #1202 and is deleted.
