@@ -2,13 +2,12 @@ import type { ReactNode } from "react";
 import { Button } from "~/components/primitives";
 import { useSendAsPerson } from "~/components/session/send-as-person";
 
-/** Each starter sends a complete request, so Valet starts right away. An
- * open-ended one asks Valet to ask for the details, as starter prompts in
- * other assistant apps do, instead of leaving half a sentence in the box. */
+/** Each starter sends a complete, concrete request, so Valet starts right
+ * away, as starter prompts in other assistant apps do. */
 const SUGGESTIONS = [
   { label: "What needs me today?", prompt: "What needs me today?" },
   { label: "Catch me up on Slack since yesterday", prompt: "Catch me up on Slack since yesterday" },
-  { label: "Start a task", prompt: "Help me start a new task. Ask me what it is." },
+  { label: "Prep me for my next meeting", prompt: "Prep me for my next meeting: who is in it, what it is about, and anything I should read first." },
 ];
 
 /**

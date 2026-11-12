@@ -32,10 +32,10 @@ it("keeps the idle view up when a send fails, so its error stays visible", async
   expect(onPick).not.toHaveBeenCalled();
 });
 
-it("sends a complete request for the open-ended starter and leaves the message box alone", () => {
+it("sends the meeting prep starter as a complete request and leaves the message box alone", () => {
   render(<HomeEmptyState sessionId="s2" threadId="t2" />);
   expect(screen.queryByRole("button", { name: /:$/ })).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "Start a task" }));
-  expect(reply).toHaveBeenCalledWith("Help me start a new task. Ask me what it is.");
+  fireEvent.click(screen.getByRole("button", { name: "Prep me for my next meeting" }));
+  expect(reply).toHaveBeenCalledWith("Prep me for my next meeting: who is in it, what it is about, and anything I should read first.");
   expect(useComposerDraftStore.getState().byKey[draftKey("s2", "t2")]?.text ?? "").toBe("");
 });
