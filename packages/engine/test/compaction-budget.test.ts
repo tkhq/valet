@@ -477,3 +477,71 @@ describe("compaction budget: when an interactive thread compacts", () => {
     }
   });
 });
+
+/** Text of the summarizer request: the last user message the summarizer received. */
+function summaryRequestText(messages: readonly unknown[]): string {
+  return JSON.stringify(messages.at(-1));
+}
+
+describe("compaction inside a running turn", () => {
+  it("tells the summarizer the turn continues and that its own request is not a user message", async () => {
+    // A 20k window: the tool result pushes the second request past the usable
+    // context, so the context-preparation pass compacts inside the turn.
+    const faux = registerFauxProvider({
+      provider: "midturn-summary",
+      models: [{ id: "small", name: "small", contextWindow: 20_000, maxTokens: 1_000 }],
+    });
+    const { engine, store, events } = makeEngine();
+    const reactions: string[] = [];
+    const tools: ToolDef[] = [{
+      name: "add_reaction", description: "Adds a reaction to a post", parameters: Type.Object({}),
+      execute: async () => { reactions.push("investigating"); return { text: "reaction added " + "r".repeat(30_000) }; },
+    }];
+    const session = await engine.createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel("small")!,
+      compaction: { reserveTokens: 1_000, tailTurns: 1, contextBudgetTokens: 0 },
+      builtinTools: [], tools,
+    });
+    const thread = session.thread();
+    await store.appendEntries(session.id, thread.id, [
+      { id: "e-1", sessionId: session.id, threadId: thread.id, parentId: null, type: "message", role: "user", content: "The codename is Halyard.", createdAt: 1 },
+      { id: "e-2", sessionId: session.id, threadId: thread.id, parentId: "e-1", type: "message", role: "assistant", content: "Noted. " + "x".repeat(50_000), createdAt: 2 },
+    ]);
+    thread.rehydrateTranscript(await store.getEntries(session.id, thread.id));
+    let summaryRequest = "";
+    faux.setResponses([
+      () => fauxAssistantMessage([fauxToolCall("add_reaction", {})], { stopReason: "toolUse" }),
+      (context) => { summaryRequest = summaryRequestText(context.messages); return fauxAssistantMessage(COMPLETE_SUMMARY); },
+      () => fauxAssistantMessage("triage posted"),
+    ]);
+
+    const receipt = await session.prompt("triage the new post");
+    const outcome = await thread.awaitResult(receipt.queueItemId, { timeoutMs: 4000 });
+
+    expect(reactions).toEqual(["investigating"]);
+    expect(JSON.stringify(outcome)).toContain("triage posted");
+    expect((await store.getEntries(session.id, thread.id)).filter((e) => e.type === "compaction")).toHaveLength(1);
+    expect(summaryRequest).toContain("comes from the system, not from the user");
+    expect(summaryRequest).toContain("The newest turn is still running");
+    expect(summaryRequest).toContain("this turn did it");
+    expect(errorCodes(events)).toEqual([]);
+    faux.unregister();
+  });
+
+  it("does not say the turn continues when the pass runs after the turn finished", async () => {
+    const { faux, events, session, thread } = await bigWindowSession("turn-end-summary", { contextBudgetTokens: 15_000, tailTurns: 1 });
+    let summaryRequest = "";
+    faux.setResponses([
+      () => fauxAssistantMessage("third response " + "y".repeat(16_000)),
+      (context) => { summaryRequest = summaryRequestText(context.messages); return fauxAssistantMessage(COMPLETE_SUMMARY); },
+    ]);
+
+    const receipt = await session.prompt("third prompt", { channel: SLACK });
+    await waitFor(() => events.some((e) => e.event.type === "compaction_end" && e.event.threadId === receipt.threadId));
+    await thread.awaitResult(receipt.queueItemId, { timeoutMs: 4000 });
+
+    expect(summaryRequest).toContain("comes from the system, not from the user");
+    expect(summaryRequest).not.toContain("still running");
+    faux.unregister();
+  });
+});
