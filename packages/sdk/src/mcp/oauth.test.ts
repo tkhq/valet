@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { discoverAuthServer } from './oauth.js';
+import { buildAuthorizationUrl, discoverAuthServer, exchangeCodePkce, refreshTokenPkce } from './oauth.js';
 
 // ── fixtures ─────────────────────────────────────────────────────────
 
@@ -78,6 +78,7 @@ describe('discoverAuthServer', () => {
     const meta = await discoverAuthServer('https://mb.example.com/api/metabase-mcp');
     expect(meta.resource_scopes_supported).toEqual(['agent:content:read', 'agent:query:run']);
     expect(meta.scopes_supported).toEqual(['agent:content:read', 'agent:query', 'agent:query:run']);
+    expect(meta.resource).toBe('https://mb.example.com/api/metabase-mcp');
   });
 
   it('returns the resource scopes when the metadata names no authorization server', async () => {
@@ -109,6 +110,7 @@ describe('discoverAuthServer', () => {
 
     const meta = await discoverAuthServer('https://mcp.example.com/api/mcp');
     expect(meta.resource_scopes_supported).toBeUndefined();
+    expect(meta.resource).toBeUndefined();
   });
 
   it('treats a resource that differs by a trailing slash as a different resource', async () => {
@@ -204,5 +206,47 @@ describe('discoverAuthServer', () => {
 
     const meta = await discoverAuthServer('https://mcp.example.com');
     expect(meta.token_endpoint).toBe(AS_METADATA.token_endpoint);
+  });
+});
+
+// ── RFC 8707 resource indicator ──────────────────────────────────────
+
+describe('resource indicator', () => {
+  const resource = 'https://mb.example.com/api/metabase-mcp';
+
+  function captureTokenRequests(): URLSearchParams[] {
+    const bodies: URLSearchParams[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(new URLSearchParams(String(init?.body)));
+      return new Response(JSON.stringify({ access_token: 'at', refresh_token: 'rt' }), { status: 200 });
+    }));
+    return bodies;
+  }
+
+  it('names the resource on the authorize URL, the code exchange, and the refresh', async () => {
+    const url = new URL(buildAuthorizationUrl({
+      authorizationEndpoint: 'https://mb.example.com/oauth/authorize',
+      clientId: 'c1', redirectUri: 'https://valet.example/cb', codeChallenge: 'ch', state: 's',
+      scopes: ['agent:content:read'], resource,
+    }));
+    expect(url.searchParams.get('resource')).toBe(resource);
+
+    const bodies = captureTokenRequests();
+    await exchangeCodePkce({ tokenEndpoint: 'https://mb.example.com/oauth/token', clientId: 'c1', code: 'code', redirectUri: 'https://valet.example/cb', codeVerifier: 'v', resource });
+    await refreshTokenPkce({ tokenEndpoint: 'https://mb.example.com/oauth/token', clientId: 'c1', refreshToken: 'rt', resource });
+    expect(bodies.map((b) => b.get('resource'))).toEqual([resource, resource]);
+  });
+
+  it('sends no resource parameter when none is given', async () => {
+    const url = new URL(buildAuthorizationUrl({
+      authorizationEndpoint: 'https://auth.example.com/authorize',
+      clientId: 'c1', redirectUri: 'https://valet.example/cb', codeChallenge: 'ch', state: 's',
+    }));
+    expect(url.searchParams.has('resource')).toBe(false);
+
+    const bodies = captureTokenRequests();
+    await exchangeCodePkce({ tokenEndpoint: 'https://auth.example.com/token', clientId: 'c1', code: 'code', redirectUri: 'https://valet.example/cb', codeVerifier: 'v' });
+    await refreshTokenPkce({ tokenEndpoint: 'https://auth.example.com/token', clientId: 'c1', refreshToken: 'rt' });
+    expect(bodies.map((b) => b.has('resource'))).toEqual([false, false]);
   });
 });

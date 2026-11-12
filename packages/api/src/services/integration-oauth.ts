@@ -26,6 +26,11 @@ export interface McpClientRow {
   /** The scopes the client registered with, sorted. The authorize request
    * names exactly these; [] sends no scope parameter. */
   scopes: string[];
+  /** The MCP server's resource identifier (RFC 9728). Authorize, code
+   * exchange, and refresh name it as the RFC 8707 `resource`. A server that
+   * separates MCP tokens from its other tokens grants MCP scopes only to a
+   * request that names it. Absent when the server describes no resource. */
+  resource?: string;
 }
 
 /**
@@ -37,13 +42,21 @@ export interface McpClientRow {
 export interface IssuingClient {
   clientId: string;
   tokenEndpoint: string;
+  /** The `resource` the connect named. A refresh names the same one. */
+  resource?: string;
 }
 
 /** Metadata keys that hold the issuing client. Only the server writes them. */
-export const ISSUING_CLIENT_METADATA_KEYS = ["oauthClientId", "oauthTokenEndpoint"] as const;
+export const ISSUING_CLIENT_METADATA_KEYS = ["oauthClientId", "oauthTokenEndpoint", "oauthResource"] as const;
 
-export function issuingClientMetadata(client: IssuingClient): { oauthClientId: string; oauthTokenEndpoint: string } {
-  return { oauthClientId: client.clientId, oauthTokenEndpoint: client.tokenEndpoint };
+export function issuingClientMetadata(
+  client: IssuingClient,
+): { oauthClientId: string; oauthTokenEndpoint: string; oauthResource?: string } {
+  return {
+    oauthClientId: client.clientId,
+    oauthTokenEndpoint: client.tokenEndpoint,
+    ...(client.resource ? { oauthResource: client.resource } : {}),
+  };
 }
 
 /** The recorded issuing client, or null for a credential connected before
@@ -52,7 +65,8 @@ export function readIssuingClient(metadata: Record<string, unknown> | undefined)
   const clientId = metadata?.oauthClientId;
   const tokenEndpoint = metadata?.oauthTokenEndpoint;
   if (typeof clientId !== "string" || typeof tokenEndpoint !== "string" || !clientId || !tokenEndpoint) return null;
-  return { clientId, tokenEndpoint };
+  const resource = metadata?.oauthResource;
+  return { clientId, tokenEndpoint, ...(typeof resource === "string" && resource ? { resource } : {}) };
 }
 
 /** The GitHub service keeps its dedicated App flow (the GitHub plugin's connection routes). */
@@ -142,6 +156,25 @@ export async function ensureMcpOAuthClient(
   const declared = normalizeScopes(scopes);
   const existing = await deps.db.select().from(mcpOauthClients).where(eq(mcpOauthClients.service, service));
   if (existing[0] && sameScopes(existing[0].registeredScopes, declared)) {
+    if (existing[0].resource === null) {
+      // Row from before the resource column: one discovery fills it in.
+      // Fail-soft, like the scopes_supported backfill below: the connect
+      // continues without a resource and the next connect tries again.
+      try {
+        const meta = await discoverAuthServer(serverUrl);
+        const resource = meta.resource ?? "";
+        await deps.db
+          .update(mcpOauthClients)
+          .set({ resource, updatedAt: Date.now() })
+          .where(eq(mcpOauthClients.service, service));
+        existing[0] = { ...existing[0], resource };
+      } catch (err) {
+        console.warn(
+          `MCP OAuth: ${service} resource backfill failed (connect continues):`,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    }
     if (declared.length === 0) {
       let advertised = existing[0].scopesSupported;
       if (advertised === null) {
@@ -188,6 +221,7 @@ export async function ensureMcpOAuthClient(
     registrationEndpoint: meta.registration_endpoint,
     registeredScopes: declared,
     scopesSupported: meta.scopes_supported ?? [],
+    resource: meta.resource ?? "",
     updatedAt: now,
   };
   if (existing[0]) {
@@ -234,6 +268,7 @@ function toRow(r: typeof mcpOauthClients.$inferSelect): McpClientRow {
     authorizationEndpoint: r.authorizationEndpoint,
     tokenEndpoint: r.tokenEndpoint,
     scopes: normalizeScopes(r.registeredScopes ?? undefined),
+    ...(r.resource ? { resource: r.resource } : {}),
   };
 }
 
