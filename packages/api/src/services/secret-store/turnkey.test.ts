@@ -195,6 +195,14 @@ describe("Turnkey secret store", () => {
     expect((err as SecretStoreError).kind).toBe("forbidden");
   });
 
+  it("names an export no policy allows, such as a mismatched context", async () => {
+    const fake = fakeTurnkey();
+    const denied = Object.assign(new Error("Turnkey error 7: You don't have sufficient permissions"), { code: 7 });
+    const store = storeWith(fake, { broker: { exportSecret: async () => Promise.reject(denied) } });
+    await store.put("parent-org", { name: "company/k", value: "V", labels: {} });
+    await expect(store.read("parent-org", "company/k", {})).rejects.toMatchObject({ kind: "forbidden" });
+  });
+
   it("passes any other export error to the service unchanged", async () => {
     const fake = fakeTurnkey();
     const boom = new Error("socket hang up");

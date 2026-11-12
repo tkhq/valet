@@ -182,6 +182,9 @@ const SDK_SPECIFIER = "@turnkey/sdk-server";
 /** `TurnkeyErrorCodes.EXPORT_SECRET_CONSENSUS_NEEDED`. The SDK is loaded at
  * runtime (see the file comment), so its enum is not imported. */
 const EXPORT_NEEDS_APPROVAL = "EXPORT_SECRET_CONSENSUS_NEEDED";
+/** gRPC PERMISSION_DENIED: no policy allows this export, for example because
+ * the request context does not match the secret's labels. */
+const PERMISSION_DENIED = 7;
 
 async function sdkClient(config: TurnkeyConfig, keys: TurnkeyKeyPair): Promise<TurnkeyApiClient> {
   // A non-literal specifier types as `Promise<any>`. The annotation names the
@@ -370,7 +373,7 @@ export function createTurnkeySecretStore(
         // A policy that requires approval, or one that does not match the
         // request context, parks the export. Valet does not wait for
         // approvals, so name the cause instead of the generic provider error.
-        if (err instanceof Error && "code" in err && err.code === EXPORT_NEEDS_APPROVAL) {
+        if (err instanceof Error && "code" in err && (err.code === EXPORT_NEEDS_APPROVAL || err.code === PERMISSION_DENIED)) {
           throw new SecretStoreError(
             "Turnkey did not allow this export. Either a rule needs an approval, or this session may not read the secret. Check the secret's scope, then run again.",
             "forbidden",
