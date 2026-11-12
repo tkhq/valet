@@ -126,13 +126,13 @@ export function buildSecretTools(deps: { secretStore: SecretStoreService }): Too
       const actor = { orgId: ctx.orgId, userId: ctx.userId };
       // Already saved and not being replaced: no card, no question.
       if (!request.replace && (await deps.secretStore.exists(actor, scope, name).catch(() => false))) {
-        return { text: `Already saved as ${reference}. Run commands with valet-secrets run --env ${envName(name)}=${reference} -- <command>.` };
+        return { text: `Saved as ${reference}. Run commands with valet-secrets run --env ${envName(name)}=${reference} -- <command>. Never print the value.` };
       }
       const where = request.scope === "team" ? "this team's secrets" : "your personal secrets";
       const resolution = await ctx.requestDecision({
         type: "credential_request",
         title: request.replace ? `Replace ${name}` : `Add ${name}`,
-        body: `${request.purpose}${sendsTo ? `\nIt will be sent to ${sendsTo}.` : ""}\nIt is saved to ${where} and never appears in this conversation.`,
+        body: `${request.purpose}${sendsTo ? `\nIt will be sent to ${sendsTo}.` : ""}\nIt is saved to ${where} and never appears in this conversation. Enter it only in Valet, never in chat.`,
         context: { secretRequest: request },
         actions: [{ id: SECRET_DECLINE_ACTION, label: "Decline" }],
         resumeKey: `${REQUEST_SECRET_TOOL}:${reference}`,

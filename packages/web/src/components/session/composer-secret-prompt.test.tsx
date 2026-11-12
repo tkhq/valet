@@ -6,16 +6,35 @@ import { detectSecrets } from "@valet/shared";
 const saveSecretValue = vi.fn();
 vi.mock("~/api/secrets", () => ({ saveSecretValue: (...args: unknown[]) => saveSecretValue(...args) }));
 
-import { ComposerSecretPrompt, useSecretGuard } from "./composer-secret-prompt";
+import { ComposerSecretPrompt, ComposerSecretWarning, useSecretGuard } from "./composer-secret-prompt";
 
 const KEY = "sk-proj-" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8s9T0";
 
 describe("useSecretGuard", () => {
   it("holds a draft with a key until the user keeps it", () => {
-    const { result } = renderHook(() => useSecretGuard(`run with ${KEY}`));
+    const { result } = renderHook(() => useSecretGuard(`run with ${KEY}`, "save"));
     expect(result.current.pending).toHaveLength(1);
+    expect(result.current.holdsSend).toBe(true);
     act(() => result.current.keep(KEY));
     expect(result.current.pending).toHaveLength(0);
+  });
+});
+
+describe("without a secret store", () => {
+  it("warns about the key but never holds the send", () => {
+    const { result } = renderHook(() => useSecretGuard(`run with ${KEY}`, "warn"));
+    expect(result.current.pending).toHaveLength(1);
+    expect(result.current.holdsSend).toBe(false);
+  });
+
+  it("says the key stays in the conversation and offers no save", () => {
+    const text = `run with ${KEY}`;
+    const onDismiss = vi.fn();
+    render(<ComposerSecretWarning candidate={detectSecrets(text)[0]!} onDismiss={onDismiss} />);
+    expect(screen.getByText(/stays in this conversation/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Save as secret" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(onDismiss).toHaveBeenCalled();
   });
 });
 

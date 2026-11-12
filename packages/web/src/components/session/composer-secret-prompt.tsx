@@ -7,18 +7,47 @@ import { errorText } from "~/lib/error-text";
 
 /**
  * Keeps a pasted key out of a message. The composer runs every draft through
- * `detectSecrets`; while a match is unhandled, the prompt offers to save it
- * as a secret and send the reference instead, and the composer holds the
- * send. "Keep as text" lets the user send it anyway: the backstop on the api
- * still catches a known key format.
+ * `detectSecrets`. With a secret store, the prompt offers to save a match
+ * and send the reference instead, and the composer holds the send until the
+ * user decides; "Keep as text" sends it anyway, and the api's backstop still
+ * catches a known key format. Without a store, a warning says the key will
+ * stay in the conversation, and nothing is held.
  */
-export function useSecretGuard(text: string) {
+/**
+ * `save`: a secret store is set up and the user may write to it. The prompt
+ * offers to save the key, and the composer holds the send until the user
+ * decides. `warn`: no store, so there is nowhere to save it. The prompt says
+ * the key will stay in the conversation, and the send is never held.
+ */
+export type SecretGuardMode = "save" | "warn";
+
+export function useSecretGuard(text: string, mode: SecretGuardMode) {
   const [kept, setKept] = useState<ReadonlySet<string>>(new Set());
   const pending = useMemo(() => detectSecrets(text).filter((c) => !kept.has(c.value)), [text, kept]);
   return {
+    mode,
     pending,
+    /** True when the composer must not send yet. */
+    holdsSend: mode === "save" && pending.length > 0,
     keep: (value: string) => setKept((prev) => new Set(prev).add(value)),
   };
+}
+
+/** The prompt for a deployment with no secret store: a warning, never a block. */
+export function ComposerSecretWarning({ candidate, onDismiss }: { candidate: SecretCandidate; onDismiss: () => void }) {
+  return (
+    <div role="status" className="mx-3 mb-2 rounded border border-line bg-warning-wash px-3 py-2 text-xs text-ink">
+      <p>
+        This looks like a {candidate.label.toLowerCase()} (<span className="font-mono">{maskSecret(candidate.value)}</span>). If you send it,
+        it stays in this conversation. Remove it unless you mean to share it. An admin can set up a secret store to keep keys out of threads.
+      </p>
+      <div className="mt-2 flex justify-end">
+        <Button type="button" variant="ghost" size="sm" onClick={onDismiss}>
+          Dismiss
+        </Button>
+      </div>
+    </div>
+  );
 }
 
 function referenceFor(target: SecretTarget, name: string): string {

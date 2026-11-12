@@ -90,7 +90,7 @@ describe("request_secret", () => {
     const { ctx, gates } = context({ owner: { type: "user", id: "user-a" } });
     const text = await run(fakeStore(new Set(["personal:OPENAI_API_KEY"])), ctx);
     expect(gates).toHaveLength(0);
-    expect(text).toContain("Already saved as secret://personal/OPENAI_API_KEY");
+    expect(text).toContain("Saved as secret://personal/OPENAI_API_KEY");
   });
 
   it("asks again with replace even when the name is saved, and names the destination", async () => {

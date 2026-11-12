@@ -16,8 +16,8 @@ import {
 } from "react";
 import { ArrowUp, Paperclip, Pencil, Play, Square, X } from "lucide-react";
 import { Button, Textarea } from "~/components/primitives";
-import { ComposerSecretPrompt, useSecretGuard } from "./composer-secret-prompt";
-import type { SecretTarget } from "~/api/secrets";
+import { ComposerSecretPrompt, ComposerSecretWarning, useSecretGuard } from "./composer-secret-prompt";
+import { useSecrets, type SecretTarget } from "~/api/secrets";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { useAbortThread, useCancelQueuedItem, useEditPreview, useResumeThread, useSendPrompt } from "~/api/queries";
 import { FileChangeChoice } from "./file-change-choice";
@@ -202,9 +202,10 @@ export function Composer({
   const setText = (value: string) => useComposerDraftStore.getState().setText(key, value);
   // A pasted key: offer to save it as a secret, and hold the send until the
   // user saves it or keeps it as text.
-  const secretGuard = useSecretGuard(text);
   const workspaceScope = useWorkspaceScope();
   const secretTarget: SecretTarget = workspaceScope.teamId ? { scope: "team", teamId: workspaceScope.teamId } : { scope: "personal" };
+  const secretStoreQ = useSecrets(secretTarget);
+  const secretGuard = useSecretGuard(text, secretStoreQ.data?.enabled === true && secretStoreQ.data.canWrite ? "save" : "warn");
   const localSubmissionLock = useRef(false);
   const submitting = submissionLock ?? localSubmissionLock;
   const [preparing, setPreparing] = useState(false);
@@ -700,7 +701,7 @@ export function Composer({
 
   async function submit() {
     if (submitting.current || send.isPending || !threadId) return;
-    if (secretGuard.pending.length > 0) return;
+    if (secretGuard.holdsSend) return;
     if (activeContext) {
       const slot = key;
       const draft = useComposerDraftStore.getState().byKey[slot];
@@ -1191,7 +1192,14 @@ export function Composer({
             {FILE_UPLOADS_ENABLED ? "Drop the files to attach them." : "Drop the images to attach them."}
           </p>
         )}
-        {secretGuard.pending[0] && (
+        {secretGuard.pending[0] && secretGuard.mode === "warn" && (
+          <ComposerSecretWarning
+            key={secretGuard.pending[0].value}
+            candidate={secretGuard.pending[0]}
+            onDismiss={() => secretGuard.keep(secretGuard.pending[0]!.value)}
+          />
+        )}
+        {secretGuard.pending[0] && secretGuard.mode === "save" && (
           <ComposerSecretPrompt
             key={secretGuard.pending[0].value}
             candidate={secretGuard.pending[0]}

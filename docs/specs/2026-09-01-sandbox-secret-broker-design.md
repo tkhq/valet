@@ -324,7 +324,7 @@ Rules that apply to every provider:
 ### Getting a credential without the value entering a thread
 
 - **`request_secret`** (`engine/secret-tools.ts`): the agent names the credential, its purpose, and where it will send it. The thread shows a card with the name, the destination, where it is saved, and a masked field. With `replace`, the card replaces a saved value that stopped working. The card seals and saves the value, then answers the gate with only the reference. The resolve route accepts nothing else on such a gate.
-- **Composer**: `detectSecrets` (`@valet/shared`) finds provider key formats and `NAME_KEY=value` assignments in a draft. The composer offers to save the key and swap in the reference, and holds the send until the user decides.
+- **Composer**: `detectSecrets` (`@valet/shared`) finds provider key formats and `NAME_KEY=value` assignments in a draft. With a store the user can write to, the composer offers to save the key and swap in the reference, and holds the send until the user decides. Without a store, it warns that the key will stay in the conversation and never holds the send.
 - **Backstop** (`services/secret-store/inbound-scrub.ts`): a key in a provider format that reaches the api in a user message (web send route, Slack direct message) is saved and replaced before the message is stored or reaches the model. A note in the message names the reference and asks the user to rotate a key shared elsewhere.
 
 Limits: a command that receives a value through `valet-secrets run` can print or send it on purpose; output redaction catches exact-byte prints only. Injecting a value at an egress proxy, so commands never hold it, is the next step.
