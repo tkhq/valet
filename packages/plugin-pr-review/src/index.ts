@@ -53,6 +53,19 @@ export {
 export { commentableLines, mapLine, nearestCommentableLine, mapLineThroughHunks, parseHunks, type LineFate } from "./linemap.js";
 export { cutPatch, diffPullRequest, type PullRequestDiff } from "./git.js";
 export { consolidateFindings, sameCitation, type Consolidation } from "./consolidate.js";
+export {
+  applyDuplicateGroups,
+  buildDedupePrompt,
+  clusterExcerpt,
+  createDedupeSpec,
+  DEDUPE_SYSTEM_PROMPT,
+  DEDUPE_WINDOW,
+  duplicateCandidates,
+  DuplicateGroupsSchema,
+  type DedupePromptInput,
+  type DedupeSpec,
+  type DuplicateGroups,
+} from "./dedupe.js";
 export { gatherContext, type GatherInput, type PackMemory } from "./context/gather.js";
 export { buildContextPack, definitionBody, definitionScore, type ContextPack, type PackManifest } from "./context/pack.js";
 export { rankPatch, type DroppedFile, type RankedPatch } from "./context/rank.js";

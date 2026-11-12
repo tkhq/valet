@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ToolDef } from "@valet/engine";
 import { consolidateFindings, type Consolidation } from "./consolidate.js";
+import { applyDuplicateGroups, clusterExcerpt, createDedupeSpec, duplicateCandidates } from "./dedupe.js";
 import { gatherContext, type PackMemory } from "./context/gather.js";
 import type { ContextPack } from "./context/pack.js";
 import { rankPatch } from "./context/rank.js";
@@ -73,6 +74,10 @@ export interface PipelineOptions extends ReviewerSpecOptions {
   repo?: string;
   /** Drop findings the reviewer rated below this confidence (0-1). A finding with no rating stays. Unset: keep all. */
   minConfidence?: number;
+  /** Ask a model which nearby findings report the same defect, and keep one of each. Default false. */
+  dedupe?: boolean;
+  /** provider/model for the dedupe stage. Unset: the reviewer's model. */
+  dedupeModel?: string;
 }
 
 /** Whether a finding clears the confidence threshold. */
@@ -147,7 +152,11 @@ export async function runReviewPipeline(input: PipelineOptions, run: AgentRunner
   const merged: Review | undefined =
     done.length > 0 ? { ...done[0].review, findings: mergeFindings(done.map((p) => p.review.findings)) } : passes[0].review;
   // Consolidate: drop repeats inside the merged review before anything else sees it.
-  const consolidated = merged ? consolidateFindings(merged.findings) : undefined;
+  let consolidated = merged ? consolidateFindings(merged.findings) : undefined;
+  if (consolidated && opts.dedupe === true) {
+    const deduped = await dedupeFindings(opts, consolidated.kept, run);
+    consolidated = { kept: deduped.kept, dropped: [...consolidated.dropped, ...deduped.dropped] };
+  }
   const draft: Review | undefined = merged && consolidated ? { ...merged, findings: consolidated.kept } : merged;
   const stages = { ...(context ? { context } : {}), ...(consolidated ? { consolidation: consolidated.dropped } : {}) };
   if (reviewRun.outcome !== "completed" || draft === undefined) {
@@ -194,6 +203,27 @@ export async function runReviewPipeline(input: PipelineOptions, run: AgentRunner
   );
   const kept = draft.findings.filter((_, i) => verdicts[i]?.kept === true);
   return { outcome: "completed", review: { ...draft, findings: kept }, draft, verdicts: verdicts.filter((v): v is FindingVerdict => v !== undefined), ...stages };
+}
+
+/**
+ * The dedupe stage: one agent compares the findings that sit close together
+ * and names those that report one defect. No close findings: no agent. A
+ * failed agent or no answer keeps every finding.
+ */
+async function dedupeFindings(opts: PipelineOptions, findings: Finding[], run: AgentRunner): Promise<Consolidation> {
+  const clusters = duplicateCandidates(findings);
+  if (clusters.length === 0) return { kept: findings, dropped: [] };
+  const excerpts = await Promise.all(
+    clusters.map(async (cluster) => {
+      const f = findings[cluster[0]];
+      const text = f.side === "LEFT" ? await gitFileAt(opts.workspace, opts.base, f.path) : await readFile(join(opts.workspace, f.path), "utf8").catch(() => undefined);
+      return clusterExcerpt(text, findings, cluster);
+    }),
+  );
+  const spec = createDedupeSpec({ title: opts.title, findings, clusters, excerpts, ...(opts.dedupeModel !== undefined ? { model: opts.dedupeModel } : {}) });
+  const result = await run(spec);
+  const answer = result.outcome === "completed" ? spec.answer() : undefined;
+  return applyDuplicateGroups(findings, clusters, answer, (f) => confidentEnough(f, opts.minConfidence));
 }
 
 async function mergeBase(workspace: string, base: string, head: string): Promise<string> {
