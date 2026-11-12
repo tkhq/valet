@@ -287,6 +287,9 @@ earlier rule that Home changes only below 768px.
 - While Home is idle, an idle view covers the transcript. It shows a
   greeting with the starters and Show conversation. What waits on the person is in the Tasks panel, not here. Typing, a starter, Show conversation, or a running turn removes
   the idle view until the person leaves Home.
+- A starter sends a complete request as the person's message, so Valet starts
+  at once. The open-ended starter (Start a task) asks Valet to ask what the
+  task is, instead of leaving half a sentence in the message box.
 - The thread header has a Tasks button with the count of items that need the
   person. It opens a collapsible Tasks panel beside the conversation. The
   panel header, the thread header, and the sidebar's top row share one height,
