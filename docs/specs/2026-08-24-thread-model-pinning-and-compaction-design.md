@@ -120,7 +120,9 @@ removes the cap). An org admin sets the cap in Settings, Models, Context
 sessions in that process without a rebuild.
 
 The proactive trigger has two levels. "overflow" means the next request does
-not fit the usable context, and the pass behaves as before. "budget" means
+not fit the usable context, and the pass behaves as before, except that a
+pass whose prune alone makes room skips the summary (see the 2026-11-11
+amendment on pruning). "budget" means
 the request fits but exceeds the budget. A budget pass never continues the
 turn. A budget pass that finds nothing to reclaim or fails does not count
 toward the circuit breaker; a failure still emits `compaction_failed`. When it runs depends on who watches the thread:
@@ -843,3 +845,36 @@ Two related fixes:
   context in memory.
 - The cached-prefix summary of an idle pass sends the key the pass resolved,
   not the key of the turn that ended up to 55 minutes earlier.
+
+## Amendment (2026-11-11): a pass that prunes enough ends without a summary
+
+`compactThreadInner` pruned stale tool output and then always summarized
+when the head was not empty. It never measured the pruned context, so a
+pass whose prune alone freed enough still paid for a summary.
+
+A proactive pass now measures the live context after a committed prune. The
+measure is the larger of two estimates:
+
+- The usage-anchored estimate from before the prune, less the tokens the
+  prune freed. It keeps the provider's real count.
+- The character ruler over the pruned messages, plus tool definitions.
+  Elision clears the usage anchors after the first elided output (#979), so
+  the anchored estimate after the prune would be this ruler too.
+
+The pass returns `pruned` with no summary only when the measure is under the
+compaction budget less the tail budget. That is about the headroom a summary
+leaves. A stop just under the budget would trigger again on the next turn.
+The span attributes `valet.compaction.tokens_after_prune` and
+`valet.compaction.prune_target_tokens` record both numbers.
+
+A pass for an "overflow" trigger that ends this way continues the turn, as a
+pass that summarizes does. On a model whose window is 200k or less, every
+turn-end pass is an "overflow" trigger.
+
+Two modes still summarize after a prune:
+
+- A manual `/compact`, because the person asked for a summary.
+- A reactive pass, because the provider just rejected a request that the
+  same estimate let through.
+
+Claude Code also clears old tool output before it writes a full summary.

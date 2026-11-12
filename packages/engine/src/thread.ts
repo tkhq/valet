@@ -153,6 +153,7 @@ import {
   summarizeOnPrefix,
   SummarizeOverflowError,
   compactionBudget,
+  tailBudget,
   idleCompactionDelayMs,
   usableTokens,
   walkTranscriptDag,
@@ -547,6 +548,8 @@ export class Thread {
   private collectTimer: ReturnType<typeof setTimeout> | null = null;
   /** Idle compaction for an interactive thread over the compaction budget (`armIdleCompaction`). */
   private idleCompactionTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The last pass ended after its prune, with no summary (`compactThreadInner`). */
+  private prunedToFit = false;
   /** Guards against the in-process timer and the session sweep both flushing the same window. */
   private flushingCollect = false;
   /** Serializes overheard-digest scans; concurrent admissions coalesce one at a time (TKAI-297). */
@@ -5807,7 +5810,9 @@ export class Thread {
       // context_overflow_unrecoverable, or compaction_coverage_gap.
       this.bumpCompactionFailureBreaker();
     } else if (
-      outcome === "compacted" &&
+      // A pass whose prune made room continues an overflowing turn, as a
+      // summary does.
+      (outcome === "compacted" || (outcome === "pruned" && this.prunedToFit)) &&
       autoContinue !== false &&
       this.session.options.compaction?.autoContinue !== false
     ) {
@@ -6090,8 +6095,9 @@ export class Thread {
 
   /**
    * Run a compaction pass: prune cheap stale tool outputs, then if the
-   * result still doesn't fit, summarize older messages into a
-   * CompactionEntry. Persist DAG updates and rewrite agent.state.messages
+   * result still doesn't fit the compaction budget, summarize older
+   * messages into a CompactionEntry. Manual and reactive passes always
+   * summarize after the prune. Persist DAG updates and rewrite agent.state.messages
    * so the next turn sees a smaller context.
    */
   async compactThread(opts: {
@@ -6190,6 +6196,12 @@ export class Thread {
     // Only live entries are pruned. A covered entry never reaches the model,
     // and its stub must never be written back over the stored payload.
     const prunePlan = planPrune({ entries: entries.filter((e) => !carriedCoverage.has(e.id)), cfg, protectedTools });
+    this.prunedToFit = false;
+    const promptBeforePrune = this.modelSystemPrompt(this.agent.state.systemPrompt, effectiveModel);
+    // Only a proactive pass that commits a prune measures again below.
+    const anchoredBeforePrune = opts.mode === "proactive" && prunePlan.willCommit
+      ? estimateLiveContextTokens(promptBeforePrune, this.agent.state.messages.filter(isLlmMessage))
+      : 0;
     if (prunePlan.willCommit) {
       const mutable = entries.map((e) => structuredClone(e)) as SessionEntry[];
       applyPrune(mutable, prunePlan);
@@ -6205,6 +6217,32 @@ export class Thread {
       // Apply to the live agent transcript:
       this.applyElisionsToAgentMessages(prunePlan);
       effectiveEntries = mutable;
+      // Measure again: the prune alone can bring the context low enough,
+      // and then a summary costs a model call for nothing. Claude Code
+      // clears old tool output before it pays for a summary. A manual pass
+      // still summarizes, because the person asked for it. A reactive pass
+      // does too: the provider just rejected a request this estimate let
+      // through.
+      if (opts.mode === "proactive") {
+        const live = this.agent.state.messages.filter(isLlmMessage);
+        // Two measures, the larger wins. The usage anchor from before the
+        // prune, less what the prune freed, keeps the provider's real count.
+        // Elision cleared the anchors after the first elided output, so the
+        // second measure is the character ruler with tool definitions.
+        const afterPrune = Math.max(
+          anchoredBeforePrune - prunePlan.savedTokens,
+          estimateContextTokens(promptBeforePrune, live) + this.toolDefinitionTokens(),
+        );
+        // Stop only with the headroom a summary leaves (the tail budget),
+        // or the next turn crosses the budget again.
+        const budget = compactionBudget(effectiveModel, cfg);
+        const target = budget - tailBudget(budget, cfg);
+        span?.setAttributes({ "valet.compaction.tokens_after_prune": afterPrune, "valet.compaction.prune_target_tokens": target });
+        if (afterPrune < target) {
+          this.prunedToFit = true;
+          return "pruned";
+        }
+      }
     }
 
     // Step 2: cut-point selection. The active task is retained independently
@@ -6215,10 +6253,8 @@ export class Thread {
       attributeAuthors: this.attributeAuthors,
     }).filter((message): message is Message => message.role === "user" || message.role === "assistant" || message.role === "toolResult") : [];
     const retainedTokens = estimateContextTokens(undefined, retainedMessages);
-    const toolTokens = estimateTokens(JSON.stringify(this.buildTools().map(tool => ({
-      name: tool.name, description: tool.description, parameters: tool.parameters,
-    }))));
-    const fixedPrompt = this.modelSystemPrompt(this.agent.state.systemPrompt, effectiveModel);
+    const toolTokens = this.toolDefinitionTokens();
+    const fixedPrompt = promptBeforePrune;
     const selectTail = (checkpoint: CompactionEntry | undefined) => {
       const reservedMessages = retainedTask ? entriesToAgentMessages([
         retainedTask, ...(checkpoint ? [checkpoint] : []),
@@ -6667,6 +6703,13 @@ export class Thread {
         };
       }
     }
+  }
+
+  /** Estimated tokens of the tool definitions a request sends. */
+  private toolDefinitionTokens(): number {
+    return estimateTokens(JSON.stringify(this.buildTools().map((tool) => ({
+      name: tool.name, description: tool.description, parameters: tool.parameters,
+    }))));
   }
 
   /** Build from the actual stream model after role and agent overrides have applied. */
