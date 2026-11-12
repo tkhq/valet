@@ -611,7 +611,8 @@ describe("DecisionGateCard — collapse", () => {
   beforeEach(() => sessionStorage.clear());
 
   describe("collapsed expiry and deferral", () => {
-    beforeEach(() => vi.useFakeTimers());
+    // Noon, so a deadline seconds away stays on the same day and the description shows a time.
+    beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date(2026, 9, 20, 12, 0)); });
     afterEach(() => { cleanup(); vi.useRealTimers(); });
 
     it("keeps the countdown outside a stable name and in the description", () => {

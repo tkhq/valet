@@ -1,4 +1,4 @@
-import { intersectToolScopes } from "@valet/shared";
+import { intersectToolScopes, markForeignCitations, MAX_SOURCES_PER_CALL, readSources, sourceCitationIds, type SourceInput, type SourceRecord } from "@valet/shared";
 import { toolScopeSchema } from "../tool-scope-schema.js";
 import { Type } from "typebox";
 import {
@@ -16,6 +16,7 @@ import { terminalOutcome } from "./terminal-outcome.js";
 import { defineTool } from "./define.js";
 export { defineTool } from "./define.js";
 import { updatePlanTool } from "./update-plan.js";
+import { fileSource, readFileOrigin } from "./file-source.js";
 export { updatePlanTool } from "./update-plan.js";
 import {
   watchTool,
@@ -261,18 +262,87 @@ export function normalizeGatePath(path: string, cwd: string | undefined): string
   return "/" + parts.join("/");
 }
 
+/** Most characters of one `bash` result in context; more is saved to a
+ * file (`capToolResult`). */
+export const BASH_MAX_RESULT_CHARS = 30_000;
+/** A slice a bash command can print without going over its own cap. */
+const BASH_PAGE_CHARS = 25_000;
+
+/** Most lines one `read` result holds. Claude Code's Read tool reads
+ * 2,000 lines by default. */
+export const READ_MAX_LINES = 2_000;
+/** Most tokens one `read` result holds: Claude Code's 25,000-token cap on
+ * one file read. Claude Code counts real tokens and refuses a larger read;
+ * `read` returns the first window and names the next offset. */
+export const READ_MAX_TOKENS = 25_000;
+/** READ_MAX_TOKENS at 2 characters per token. Measured with the Anthropic
+ * tokenizer, TypeScript runs about 2.5 characters per token, Markdown 3.0
+ * and JSON 2.0, so a full window stays near or under 25,000 tokens. */
+export const READ_MAX_CHARS = READ_MAX_TOKENS * 2;
+
 export const readTool = defineTool({
   name: "read",
   intent: "exempt",
-  description: "Read the contents of a file from the sandbox.",
-  parameters: Type.Object({ path: Type.String() }),
+  // `readWindow` pages the file, so the generic result cap does not apply.
+  maxResultChars: Number.POSITIVE_INFINITY,
+  description:
+    `Read a file from the sandbox. A result holds at most ${READ_MAX_LINES} lines and ${READ_MAX_CHARS} characters. ` +
+    "When a file is longer, the result ends with the next offset; read again with it to continue.",
+  parameters: Type.Object({
+    path: Type.String(),
+    offset: Type.Optional(Type.Integer({ minimum: 1, description: "First line to read, 1-based. Default 1." })),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: READ_MAX_LINES, description: `Most lines to read. Default and maximum ${READ_MAX_LINES}.` })),
+  }),
   concurrencySafe: true,
   execute: async (args, ctx) => {
-    const text = await ctx.sandbox.readFile(args.path);
-    ctx.fileReads?.record(normalizeGatePath(args.path, ctx.cwd), hashFileContent(text));
-    return { text };
+    const path = normalizeGatePath(args.path, ctx.cwd);
+    // The git lookup runs beside the read, so it adds no wait to a fast read.
+    const [text, origin] = await Promise.all([ctx.sandbox.readFile(args.path), readFileOrigin(ctx.sandbox, args.path, ctx.signal)]);
+    // The staleness gate compares whole files, so a partial read records
+    // the hash of the whole file it came from.
+    ctx.fileReads?.record(path, hashFileContent(text));
+    const offset = args.offset ?? 1;
+    const window = readWindow(text, offset, args.limit ?? READ_MAX_LINES);
+    // The source cites the lines the read returned, without the closing note.
+    const lines = window === text ? text : window.replace(/\n?\[read: [^\n]*\]$/, "");
+    return { text: window, sources: [fileSource(args.path, lines, origin, offset)] };
   },
 });
+
+/**
+ * The lines of `text` from `offset` (1-based), at most `limit` lines and
+ * `READ_MAX_CHARS` characters. A window that stops before the end of the
+ * file ends with a note naming the next offset. A whole small file comes
+ * back unchanged.
+ */
+export function readWindow(text: string, offset: number, limit: number): string {
+  const lines = text.split("\n");
+  // A trailing newline ends the last line; it does not start another.
+  const total = text.endsWith("\n") ? lines.length - 1 : lines.length;
+  if (offset === 1 && limit >= total && text.length <= READ_MAX_CHARS) return text;
+  if (offset > Math.max(total, 1)) return `[read: line ${offset} is past the end of the file, which has ${total} lines]`;
+  const start = offset - 1;
+  let end = Math.min(total, start + limit);
+  let chars = 0;
+  for (let i = start; i < end; i++) {
+    chars += lines[i]!.length + 1;
+    if (chars > READ_MAX_CHARS) {
+      end = Math.max(i, start + 1);
+      break;
+    }
+  }
+  let body = lines.slice(start, end).join("\n");
+  // A line longer than the cap alone: line offsets cannot reach the rest of
+  // it, so say so and name a way to read it.
+  if (body.length > READ_MAX_CHARS) {
+    const tail = end < total ? ` Continue with offset ${end + 1}.` : "";
+    return `${body.slice(0, READ_MAX_CHARS)}\n[read: line ${end} is ${body.length} characters; this shows the first ${READ_MAX_CHARS}. Read the rest with bash, e.g. \`cut -c${READ_MAX_CHARS + 1}-${READ_MAX_CHARS + BASH_PAGE_CHARS} <file>\`.${tail}]`;
+  }
+  if (end >= total && start === 0) return body;
+  return end >= total
+    ? `${body}\n[read: lines ${offset}-${total} of ${total}; end of file]`
+    : `${body}\n[read: lines ${offset}-${end} of ${total}; read again with offset ${end + 1} to continue]`;
+}
 
 export const writeTool = defineTool({
   name: "write",
@@ -379,6 +449,10 @@ export const bashTool = defineTool({
   name: "bash",
   sideEffect: "files",
   intent: "exempt",
+  // Claude Code's bash output limit (`BASH_MAX_OUTPUT_LENGTH`, default 30,000).
+  maxResultChars: BASH_MAX_RESULT_CHARS,
+  // The exit status, timeout and truncation notes come last.
+  resultPreview: "head-tail",
   description:
     "Execute a shell command in the sandbox. `timeout` (seconds, default " +
     `${BASH_DEFAULT_TIMEOUT_S}, max 3600) bounds how long the command may ` +
@@ -563,6 +637,38 @@ export const TASK_BATCH_MAX_CHARS = 64;
  */
 export const CHILD_READ_MAX_CHARS = 16_000;
 
+/**
+ * The sources a child cited in the entries read, in citation order, as new
+ * sources for the parent. Each links to the child's thread, where the
+ * child's own citation opens the original. The location names the child's
+ * id so the parent can match it to the marked tag in the transcript.
+ */
+export function childSources(entries: readonly SessionEntry[]): SourceInput[] {
+  const records = new Map<string, { source: SourceRecord; threadId: string }>();
+  const cited: string[] = [];
+  for (const entry of entries) {
+    if (entry.type !== "message") continue;
+    for (const part of entry.parts ?? []) {
+      if (part.type !== "tool_call") continue;
+      for (const source of readSources(part.result)) records.set(source.id, { source, threadId: entry.threadId });
+    }
+    if (entry.role !== "assistant") continue;
+    for (const id of sourceCitationIds(entry.content)) if (!cited.includes(id)) cited.push(id);
+  }
+  return cited.flatMap((id): SourceInput[] => {
+    const record = records.get(id);
+    if (!record) return [];
+    const { service, title, snippet, location } = record.source;
+    return [{
+      service,
+      title,
+      url: `/threads/${encodeURIComponent(record.threadId)}`,
+      ...(snippet ? { snippet } : {}),
+      location: [`child ${id}`, location].filter(Boolean).join(", "),
+    }];
+  }).slice(0, MAX_SOURCES_PER_CALL);
+}
+
 export const childReadTool = defineTool({
   name: "child_read",
   concurrencySafe: true,
@@ -570,7 +676,8 @@ export const childReadTool = defineTool({
     "Read the messages of a child session this session spawned. A " +
     "`child.settled` signal carries only a bounded copy of the child's " +
     "result, so call this when the signal says it was truncated, or when " +
-    "you need the child's working detail rather than its conclusion.",
+    "you need the child's working detail rather than its conclusion. " +
+    "The sources the child cited come back with ids you can cite.",
   parameters: Type.Object({
     child_session_id: Type.String({ description: "The child session to read, as named in the child.settled signal." }),
     limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })),
@@ -597,7 +704,11 @@ export const childReadTool = defineTool({
       };
     }
     if (entries.length === 0) return { text: `(child ${args.child_session_id} has no messages)` };
-    const rendered = renderEntries(`child:${args.child_session_id}`, entries);
+    // The child's [sN] tags are its own thread's ids. The parent cites the
+    // new ids the bridge gives these sources.
+    const rendered = markForeignCitations(renderEntries(`child:${args.child_session_id}`, entries), "child");
+    const sources = childSources(entries);
+    const cited = sources.length > 0 ? { sources } : {};
     // The store's limit counts entries, not bytes — one oversized entry
     // (the exact case the settled-signal ceiling truncates) would flood
     // the parent's context through the recovery path. Keep the most
@@ -610,9 +721,10 @@ export const childReadTool = defineTool({
           `${dropped} older characters were dropped. No \`limit\` value recovers ` +
           `them — \`limit\` only picks how many recent entries are fetched.]\n\n` +
           rendered.slice(-CHILD_READ_MAX_CHARS),
+        ...cited,
       };
     }
-    return { text: rendered };
+    return { text: rendered, ...cited };
   },
 });
 

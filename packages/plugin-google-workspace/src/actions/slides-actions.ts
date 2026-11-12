@@ -6,7 +6,7 @@ const id = Type.String({ minLength: 1, pattern: '^[a-zA-Z0-9_-]+$', description:
 const pageId = Type.String({ minLength: 1, description: 'Slide objectId returned by slides.get_presentation.' });
 
 function action<T extends TSchema>(parameters: T, rest: {
-  id: string; name: string; description: string; riskLevel: PluginAction['riskLevel'];
+  id: string; name: string; description: string; riskLevel: PluginAction['riskLevel']; label?: PluginAction<T>['label'];
   execute: (args: Static<T>, ctx: PluginActionContext) => Promise<PluginActionResult>;
 }): PluginAction<T> { return { parameters, ...rest }; }
 
@@ -75,6 +75,7 @@ export const slidesActions: PluginAction[] = [
   }), {
     id: 'slides.batch_update', name: 'Edit presentation', riskLevel: 'high',
     description: 'Apply up to 100 Google Slides API updates atomically, protected by the required revision. Supports text, formatting, images, shapes, tables, slide creation and deletion. Read current slide IDs first.',
+    label: () => 'Edited a Google Slides presentation',
     execute: ({ presentationId, requiredRevisionId, requests }, ctx) => request(ctx, `/${encodeURIComponent(presentationId)}:batchUpdate`, { requests, writeControl: { requiredRevisionId } }),
   }),
 ];

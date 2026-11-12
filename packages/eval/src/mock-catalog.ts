@@ -86,7 +86,7 @@ export function buildMockCatalogTools(
               error: `${action.id} is not available in this eval case. Add it to mock_tools to enable it.`,
             };
           }
-          return { success: true, data: spec.response };
+          return { success: true, data: spec.response, ...(spec.sources?.length ? { sources: spec.sources } : {}) };
         },
       })),
     }));

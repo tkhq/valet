@@ -13,7 +13,7 @@
  * (e.g. "channel", "item.channel").
  */
 import type { EventCatalogEntry, NormalizedEvent, TriggerDef, VerifiedEvent } from "@valet/engine";
-import { slackEventSubjects } from "./subjects.js";
+import { MESSAGE_LIKE, slackEventSubjects } from "./subjects.js";
 import { verifySlackSignature } from "./transport/verify.js";
 import { SKIP_SUBTYPES } from "./subtypes.js";
 
@@ -124,6 +124,16 @@ function toEvent(event: VerifiedEvent): NormalizedEvent {
 
   const fileId = str(p.file_id) ?? str(rec(p.file)?.id);
   if (fileId) refs.file = fileId;
+
+  // A post names itself by its `ts`, and a thread reply names its root by
+  // `thread_ts`. A bot post has no reply origin, so these refs are the only
+  // way its delivery tells the agent which post started it.
+  if (MESSAGE_LIKE.has(type)) {
+    const ts = str(p.ts);
+    if (ts) refs.ts = ts;
+    const threadTs = str(p.thread_ts);
+    if (threadTs && threadTs !== ts) refs.thread_ts = threadTs;
+  }
 
   let summary: string;
   switch (type) {

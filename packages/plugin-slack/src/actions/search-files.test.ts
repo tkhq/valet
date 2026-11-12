@@ -89,6 +89,27 @@ describe('Slack search and authorized files', () => {
       id: 'F1', name: 'scope.docx', url_private: url, channels: ['C1'], ...extra,
     } }));
   }
+
+  it('cites an authorized file using its Slack permalink and read text', async () => {
+    fileInfo({ permalink: 'https://acme.slack.com/files/U1/F1/scope.docx' });
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(new Response('Ship on Friday.', { headers: { 'Content-Type': 'text/plain' } }));
+
+    const result = await action('slack.fetch_file').execute({ file_id: 'F1' }, pluginCtx());
+
+    expect(result.sources).toEqual([{
+      service: 'slack', title: 'scope.docx', url: 'https://acme.slack.com/files/U1/F1/scope.docx', snippet: 'Ship on Friday.',
+    }]);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not cite the authenticated file download URL when Slack omits a permalink', async () => {
+    fileInfo(); mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(new Response('Ship on Friday.', { headers: { 'Content-Type': 'text/plain' } }));
+    const result = await action('slack.fetch_file').execute({ file_id: 'F1' }, pluginCtx());
+    expect(result.sources ?? []).toEqual([]);
+  });
+
   it('finds ACME anywhere in names and ranks exact matches first across pages', async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, channels: [{ id: 'C1', name: 'lead-acme' }], response_metadata: { next_cursor: 'next' } }));
     fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, channels: [{ id: 'C2', name: 'acme' }, { id: 'C3', name: 'other' }] }));

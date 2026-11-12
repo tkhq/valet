@@ -134,6 +134,10 @@ const ROUTES = [
     ssoTeamGroups: [], allowPublicArtifacts: false, plugins: [], callerRole: "admin",
   })],
   ["GET", /^\/api\/teams$/, () => json({ teams: TEAMS.map(team) })],
+  // A team's settings page, which the Integrations flow opens first.
+  ["GET", /^\/api\/teams\/[^/]+\/members$/, () => json({ members: [{ userId: USER_ID, role: "admin" }] })],
+  ["GET", /^\/api\/teams\/[^/]+\/deletion-requests$/, () => json({ requests: [], nextCursor: null })],
+  ["GET", /^\/api\/teams\/[^/]+\/deletion-requests\/targets$/, () => json({ targets: [] })],
   ["GET", /^\/api\/notifications$/, () => json({ notifications: [] })],
   ["GET", /^\/api\/notifications\/decisions$/, () => json({ items: [] })],
   ["POST", /^\/api\/notifications\/presence$/, () => json({ ok: true })],
@@ -151,6 +155,10 @@ const ROUTES = [
   }],
   ["POST", /^\/api\/home$/, () => json({ sessionId: sessionIdFor("user"), threadId: `${sessionIdFor("user")}-t0` })],
   ["GET", /^\/api\/sessions\/([^/]+)$/, (m) => json(sessionDetail(decodeURIComponent(m[1])))],
+  ["GET", /^\/api\/sessions\/([^/]+)\/thread-defaults$/, (m) => {
+    const scope = workspaceForSession(decodeURIComponent(m[1])) === "user" ? "personal" : "team";
+    return json({ model: "s", reasoning: "medium", scope, reasoningScope: scope });
+  }],
   ["GET", /^\/api\/sessions\/([^/]+)\/threads$/, (m, url) => {
     const sessionId = decodeURIComponent(m[1]);
     const limit = Number(url.searchParams.get("limit") ?? THREADS_PER_SPACE);

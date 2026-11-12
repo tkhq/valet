@@ -65,6 +65,8 @@ export interface GithubFixtureHandlers {
   updateReview?: (ref: PullRef, reviewId: string, body: unknown) => GithubFixtureResponse;
   /** `GET /repos/:owner/:repo/pulls/:pull_number/comments` */
   listReviewComments?: (ref: PullRef) => GithubFixtureResponse;
+  /** `GET /repos/:owner/:repo/commits/:ref` — the commit a ref points at. */
+  getCommit?: (owner: string, repo: string, ref: string) => GithubFixtureResponse;
   /** `GET /repos/:owner/:repo/commits/:ref/check-runs` */
   listCheckRuns?: (owner: string, repo: string, ref: string) => GithubFixtureResponse;
   /** `GET /repos/:owner/:repo/contents/:path` — one file. Answer with a
@@ -142,6 +144,7 @@ const DEFAULTS: Required<GithubFixtureHandlers> = {
   }),
   listReviewComments: () => ({ body: [] }),
   listCheckRuns: () => ({ body: { total_count: 0, check_runs: [] } }),
+  getCommit: () => ({ body: "0123456789abcdef0123456789abcdef01234567" }),
   readFile: (_owner, _repo, path) => ({ body: { type: "file", encoding: "base64", path, size: 0, content: "" } }),
   readBlob: () => ({ body: new Uint8Array() }),
   searchIssues: () => ({ body: { total_count: 0, items: [] } }),
@@ -287,6 +290,15 @@ export function startGithubFixture(handlerOverrides: GithubFixtureHandlers = {})
     record(c, { owner, repo, ref });
     const { status, body } = handlers.listCheckRuns(owner, repo, ref);
     return c.json(body as object, status ?? 200);
+  });
+
+  app.get("/repos/:owner/:repo/commits/:ref", (c) => {
+    const owner = c.req.param("owner");
+    const repo = c.req.param("repo");
+    const ref = c.req.param("ref");
+    record(c, { owner, repo, ref });
+    const { status, body } = handlers.getCommit(owner, repo, ref);
+    return typeof body === "string" ? c.text(body, status ?? 200) : c.json(body as object, status ?? 200);
   });
 
   app.get("/repos/:owner/:repo/git/blobs/:file_sha", (c) => {

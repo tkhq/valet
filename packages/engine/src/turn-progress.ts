@@ -2,6 +2,7 @@ import { readThreadPlan, readTurnPlans, type ThreadPlan, type ProgressStatus, ty
 import { RECORD_ONLY_KEY, type DecisionGate, type QueueItem, type SessionEntry, type SessionStore } from "./types.js";
 
 const MAX_TASKS = 20;
+const MAX_CALLS = 50;
 const ENTRY_TAIL_LIMIT = 64;
 const TOOL_LABELS: Record<string, string> = {
   exec: "Run command", bash: "Run command", read: "Read file", read_file: "Read file",
@@ -84,12 +85,15 @@ export function projectTurnProgress(
   }
   const planIds = new Set(tasks.keys());
   let updatedAt = Math.max(item.updatedAt, turnPlan?.updatedAt ?? 0);
+  const callIds: string[] = [];
   for (const entry of entries) {
     if (entry.queueItemId !== item.id) continue;
     updatedAt = Math.max(updatedAt, entry.createdAt);
-    if (turnPlan || entry.type !== "message") continue;
+    if (entry.type !== "message") continue;
     for (const part of entry.parts ?? []) {
       if (part.type !== "tool_call" || part.toolName === "update_plan") continue;
+      if (!callIds.includes(part.callId)) callIds.push(part.callId);
+      if (turnPlan) continue;
       const failed = part.status === "error" || failedResult(part.result);
       const taskStatus: ProgressStatus = failed ? "error" : part.status === "completed" ? "complete" : interrupted ? "interrupted" : waiting ? "waiting" : terminal ? "interrupted" : "in_progress";
       const id = `tool:${part.callId}`;
@@ -109,7 +113,8 @@ export function projectTurnProgress(
     ...(turnPlan ? { planned: true as const } : {}) };
   // The revision covers only displayed fields. A timestamp or a hidden task
   // change alone must not cause a channel message update.
-  return { ...displayed, updatedAt, revision: progressRevision(JSON.stringify(displayed)) };
+  return { ...displayed, updatedAt, revision: progressRevision(JSON.stringify(displayed)),
+    ...(callIds.length > 0 ? { callIds: callIds.slice(-MAX_CALLS) } : {}) };
 }
 
 export async function readTurnProgress(store: SessionStore, sessionId: string, threadId: string, turnId: string): Promise<TurnProgress | null> {

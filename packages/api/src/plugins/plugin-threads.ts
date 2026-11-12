@@ -182,6 +182,16 @@ export function buildPluginThreads(deps: PluginThreadsDeps, scope: PluginThreads
       return { sessionId: session.id, threadId: thread.id, queueItemId: receipt.queueItemId };
     },
 
+    async record(ref, body, opts) {
+      owned(ref);
+      const { thread } = await openThread(ref.key);
+      // No model call: the message is a record, read on the next turn.
+      await thread.recordSignal(
+        { kind: "signal", signalType: `plugin.${plugin.name}`, body, ...(opts.attributes !== undefined ? { attributes: opts.attributes } : {}) },
+        { dispatchId: `plugin:${plugin.name}:${createHash("sha256").update(ref.key).digest("hex").slice(0, 12)}:${opts.dispatchId}` },
+      );
+    },
+
     async awaitReply(reply, opts) {
       // The host checks the ids it is handed: the reply must sit in one of
       // this plugin's threads in this owner's workspace.
@@ -236,7 +246,9 @@ export function buildPluginThreads(deps: PluginThreadsDeps, scope: PluginThreads
           ...(req.ref !== undefined ? { branch: req.ref } : {}),
           ...(req.profile !== undefined ? { profile: req.profile } : {}),
           ...(req.docker !== undefined ? { docker: req.docker } : {}),
+          ...(req.gitAccess !== undefined ? { gitAccess: req.gitAccess } : {}),
           ...(req.resources !== undefined ? { resources: req.resources } : {}),
+          ...(req.prepare !== undefined ? { prepare: req.prepare } : {}),
         },
         {
           parentSessionId: parent.sessionId,
@@ -246,6 +258,7 @@ export function buildPluginThreads(deps: PluginThreadsDeps, scope: PluginThreads
           unattendedWorkflow: true,
           reportToParent: false,
           pluginDeliveryId: scope.deliveryId,
+          ...(scope.cancelChildren !== undefined ? { cancel: scope.cancelChildren } : {}),
         },
       );
       return stopIfCancelled({ childSessionId: spawned.childSessionId, queueItemId: spawned.queueItemId }, parent);

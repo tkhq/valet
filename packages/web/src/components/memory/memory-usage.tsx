@@ -15,7 +15,8 @@ import { useListOwner } from "~/lib/use-list-owner";
  *
  * "Used" means an agent chose to read the file, or a turn cited it. A file
  * the memory snapshot loads at wake shows that separately: the agent did
- * not choose it, so a load alone is not a use.
+ * not choose it, so a load alone is not a use. It is not "never used"
+ * either: a pinned file is in every prompt, so no agent needs to open it.
  */
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -26,15 +27,21 @@ export const STALE_AFTER_MS = 30 * DAY_MS;
 export type UsageFilter = "all" | "never" | "stale";
 export type UsageSort = "least-recent" | "most-used" | "path";
 
-/** No use and no edit for 30 days. A new file that no agent used yet is
- * not stale: it has not had the chance. Nor is any file before tracking
- * (`usageSince`) has run for 30 days: an old file can be in daily use. */
+/** No use, no load at wake and no edit for 30 days. A new file that no
+ * agent used yet is not stale: it has not had the chance. Nor is any file
+ * before tracking (`usageSince`) has run for 30 days: an old file can be
+ * in daily use. */
 export function isStale(entry: MemoryTreeEntry, now: number, usageSince: number): boolean {
-  return Math.max(entry.lastUsedAt ?? 0, entry.updatedAt, usageSince) < now - STALE_AFTER_MS;
+  return Math.max(entry.lastUsedAt ?? 0, entry.lastLoadedAt ?? 0, entry.updatedAt, usageSince) < now - STALE_AFTER_MS;
+}
+
+/** No agent read it, no turn cited it, and no snapshot loaded it. */
+function isNeverUsed(entry: MemoryTreeEntry): boolean {
+  return entry.lastUsedAt === null && entry.lastLoadedAt === null;
 }
 
 export function filterUsage(entries: MemoryTreeEntry[], filter: UsageFilter, now: number, usageSince: number): MemoryTreeEntry[] {
-  if (filter === "never") return entries.filter((e) => e.lastUsedAt === null);
+  if (filter === "never") return entries.filter(isNeverUsed);
   if (filter === "stale") return entries.filter((e) => isStale(e, now, usageSince));
   return entries;
 }
@@ -61,7 +68,9 @@ export function sortUsage(entries: MemoryTreeEntry[], sort: UsageSort): MemoryTr
 }
 
 export function usageLabel(entry: MemoryTreeEntry, now: number): string {
-  if (entry.lastUsedAt === null) return "Never used";
+  if (entry.lastUsedAt === null) {
+    return entry.lastLoadedAt === null ? "Never used" : `Loaded at wake ${relativeTime(entry.lastLoadedAt, now)}`;
+  }
   return `Used ${relativeTime(entry.lastUsedAt, now)} · ${entry.useCount} ${entry.useCount === 1 ? "use" : "uses"}`;
 }
 
@@ -111,7 +120,7 @@ export function MemoryUsagePanel({ onSelect, now = Date.now() }: {
   );
   // Act only on what the filter shows, so a hidden row is never deleted.
   const chosen = visible.filter((e) => selected.has(e.path)).map((e) => e.path);
-  const neverUsed = entries.filter((e) => e.lastUsedAt === null).length;
+  const neverUsed = entries.filter(isNeverUsed).length;
 
   function toggle(path: string, on: boolean) {
     setSelected((prev) => {
@@ -149,7 +158,7 @@ export function MemoryUsagePanel({ onSelect, now = Date.now() }: {
       <div className="flex flex-col gap-3 border-b border-line p-4">
         <p className="text-sm text-muted">
           {fileCount(entries.length)}, {neverUsed} never used. A file is used when an agent reads it or a
-          turn cites it. Stale means no use and no edit for 30 days. {trackedFor(now, usageSince)}
+          turn cites it. Pinned files and principles load at wake instead. Stale means no use, no load and no edit for 30 days. {trackedFor(now, usageSince)}
         </p>
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <div className="flex items-center gap-2">
@@ -202,8 +211,8 @@ export function MemoryUsagePanel({ onSelect, now = Date.now() }: {
                   <span className="truncate">{entry.path}</span>
                 </button>
                 <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
-                  <span className={cn(entry.lastUsedAt === null && "text-ink")}>{usageLabel(entry, now)}</span>
-                  {entry.lastLoadedAt !== null && <Badge>{`Loaded at wake ${relativeTime(entry.lastLoadedAt, now)}`}</Badge>}
+                  <span className={cn(isNeverUsed(entry) && "text-ink")}>{usageLabel(entry, now)}</span>
+                  {entry.lastUsedAt !== null && entry.lastLoadedAt !== null && <Badge>{`Loaded at wake ${relativeTime(entry.lastLoadedAt, now)}`}</Badge>}
                   <span>{`Edited ${relativeTime(entry.updatedAt, now)}`}</span>
                 </div>
               </div>

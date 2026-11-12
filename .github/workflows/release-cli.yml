@@ -43,10 +43,10 @@ env:
 permissions:
   contents: write # create the GitHub Release + upload assets
 
-# Superseded dev-v2 builds are pointless (the rolling prerelease only keeps
-# the latest); never cancel a tag release build.
+# CI can finish out of commit order. Different source commits must not cancel
+# each other's builds; tag releases keep their shared tag group.
 concurrency:
-  group: release-cli-${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+  group: release-cli-${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || (startsWith(github.ref, 'refs/heads/') && format('{0}-{1}', github.ref, github.sha) || github.ref) }}
   cancel-in-progress: ${{ inputs.release_tag == '' && startsWith(github.ref, 'refs/heads/') }}
 
 jobs:
@@ -185,6 +185,12 @@ jobs:
   publish:
     needs: binaries
     runs-on: ubuntu-latest
+    # Hold one lock from the remote-head check through the asset upload.
+    # Queue all waiting jobs so a late older build cannot replace a pending tip.
+    concurrency:
+      group: release-cli-publish-${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+      cancel-in-progress: false
+      queue: max
     steps:
       - uses: actions/checkout@v4
         with:
@@ -234,8 +240,23 @@ jobs:
       # replaced in place, so download URLs are stable across merges. The
       # release's "source code" links point at whatever commit first created
       # the tag — the body carries the actual SHA.
-      - name: Publish rolling dev-v2 prerelease
+      - name: Check rolling release source
+        id: rolling
         if: ${{ inputs.release_tag == '' && github.ref == 'refs/heads/dev-v2' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          head_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/dev-v2" --jq '.object.sha')
+          if [[ "$head_sha" == "$GITHUB_SHA" ]]; then
+            echo 'current=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'current=false' >> "$GITHUB_OUTPUT"
+            echo "Skipping rolling release: $GITHUB_SHA is not current dev-v2 head $head_sha."
+          fi
+
+      - name: Publish rolling dev-v2 prerelease
+        if: ${{ inputs.release_tag == '' && github.ref == 'refs/heads/dev-v2' && steps.rolling.outputs.current == 'true' }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: dev-v2-latest

@@ -1,11 +1,9 @@
-import { useEffect, useRef, useState } from "react";
 import { useWorkspaceAssistant } from "./workspace-assistant";
 import { Link, useRouterState } from "@tanstack/react-router";
-import { ChevronDown, GitPullRequest, Menu, Sparkles, PanelLeftClose, PanelLeftOpen, Settings, ShieldCheck } from "lucide-react";
+import { ChevronDown, GitPullRequest, Menu, Sparkles, PanelLeftOpen, Settings, ShieldCheck } from "lucide-react";
 import { useChangelog } from "~/api/changelog";
-import { usePlugins } from "~/api/integrations";
 import { useSession } from "~/api/queries";
-import { pluginEnabledForCaller, useMe, useOrg } from "~/api/settings";
+import { pluginEnabledForCaller, pluginLoaded, useMe, useOrg } from "~/api/settings";
 import { REVIEW_PLUGIN } from "~/components/code-review/review-lines";
 import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger, StatusDot } from "~/components/primitives";
 import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
@@ -15,54 +13,11 @@ import { useSidebarControls } from "./app-shell";
 import { NotificationsBell } from "./notifications-bell";
 
 
-/**
- * Top-nav link with a working active state. Text color lives in
- * `activeProps`/`inactiveProps` — NOT the base className — because TanStack
- * Router concatenates `activeProps.className` onto the base, and two
- * conflicting Tailwind text colors resolve by stylesheet order, not by
- * which was added last (the old `text-muted` base + `text-ink` active pair
- * rendered no visible active state at all).
- */
 /** One look for every control in the bar: links, the Plugins menu, and Ask
  * Valet. It matches the `sm` control height with the nav's text size. */
 const NAV_BASE = "inline-flex h-8 shrink-0 items-center whitespace-nowrap rounded px-2 text-sm hover:bg-ink-wash";
 const NAV_ACTIVE = "text-ink font-medium bg-ink-wash";
 const NAV_INACTIVE = "text-muted hover:text-ink";
-
-function NavLink({
-  to,
-  children,
-  active,
-}: {
-  to: string;
-  children: React.ReactNode;
-  /** Force the active state instead of the URL-match default. Used so a
-   * `/sessions/:id` security session lights "Security" —
-   * the URL alone cannot tell the two apart (both live under /sessions). */
-  active?: boolean;
-}) {
-  // `shrink-0` + `whitespace-nowrap`: the row scrolls when it does not fit,
-  // so a link must keep its own width instead of being squeezed into a
-  // wrapped two-line label.
-  const base = NAV_BASE;
-  if (active !== undefined) {
-    return (
-      <Link to={to} className={`${base} ${active ? NAV_ACTIVE : NAV_INACTIVE}`}>
-        {children}
-      </Link>
-    );
-  }
-  return (
-    <Link
-      to={to}
-      className={base}
-      activeProps={{ className: NAV_ACTIVE }}
-      inactiveProps={{ className: NAV_INACTIVE }}
-    >
-      {children}
-    </Link>
-  );
-}
 
 /**
  * The sidebar toggle, at the nav's left edge — the first thing in the row,
@@ -139,10 +94,10 @@ export function TopNav() {
   // link the caller may not have, matching the settings rail's no-flash rule.
   const securityEnabled = pluginEnabledForCaller(orgQ.data, "security") === true;
   // Code review shows once the deployment loads the PR review plugin.
-  const pluginsQ = usePlugins();
+  const reviewLoaded = pluginLoaded(orgQ.data, REVIEW_PLUGIN) === true;
   const pluginPages = [
     ...(securityEnabled ? [{ to: "/security", label: "Valet Security", Icon: ShieldCheck }] : []),
-    ...(pluginsQ.data?.plugins.some((p) => p.name === REVIEW_PLUGIN) === true ? [{ to: "/code-review", label: "Code review", Icon: GitPullRequest }] : []),
+    ...(reviewLoaded ? [{ to: "/code-review", label: "Code review", Icon: GitPullRequest }] : []),
   ];
   const pluginItems = pluginPages.map(({ to, label, Icon }) => (
     <DropdownMenuItem key={to} asChild><Link to={to}><Icon className="h-4 w-4" aria-hidden />{label}</Link></DropdownMenuItem>
@@ -155,8 +110,8 @@ export function TopNav() {
     { to: "/presence", label: "Presence" },
     { to: "/workflows", label: "Workflows" },
   ];
-  // Memory, Skills, Integrations and Usage belong to a space too: the
-  // sidebar lists them in each space's More. A phone's menu keeps them.
+  // Skills belong to a space too, and Integrations and Usage open the
+  // space's settings: the sidebar lists them per space. A phone's menu keeps them.
   const spaceMore: Array<{ to: string; label: string; active?: boolean }> = [
     { to: "/skills", label: "Skills" },
     { to: "/integrations", label: "Integrations" },

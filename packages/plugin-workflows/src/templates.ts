@@ -102,7 +102,7 @@ const nightlyMemorySweep: WorkflowDefinition = {
         "   person's intent, do not touch the file — flag it.",
         "",
         "## Context-budget awareness",
-        "Pinned files and recent journals load at every wake inside a fixed budget. Keep pins few",
+        "Pinned files and the memory index load at every wake inside a fixed budget. Keep pins few",
         "and short. When a pinned file grows, split it: a pinned kernel plus a linked spoke.",
         "",
         "## Hard rules",

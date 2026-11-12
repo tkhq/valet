@@ -20,20 +20,29 @@ import {
   createRouter,
 } from "@tanstack/react-router";
 import { api } from "~/api/client";
+import type { TurnProgress } from "@valet/shared";
+import type { Message } from "@valet/api/wire";
+import { eventWidget } from "~/dev/ui-stress/fixtures/widgets";
+import { qkThreadProgress } from "~/api/thread-progress";
 import { SessionView } from "./session-view";
+import { AssistantPanel } from "./assistant-panel";
+import type { ComposerContext } from "./composer";
 import { ChildPanel } from "./child-panel";
 import { useThreadReplyTarget } from "./send-as-person";
 
 
 let browserActivity = false;
+let progressMessages: Message[] = [];
 let liveStatus: import("~/stores/stream").AgentStatus = "idle";
+let turnStartedAt: number | undefined;
 let queueState: import("@valet/api/wire").WireQueueState | undefined;
 let fullProfile = false;
 let readOnlyReason: string | undefined;
 let mobileLayout = false;
 let pendingGate: import("@valet/api/wire").DecisionGate | undefined;
 let sessionOwner: { type: "user" | "team"; id: string } = { type: "user", id: "u1" };
-beforeEach(() => { pendingGate = undefined; browserActivity = false; fullProfile = false; readOnlyReason = undefined; liveStatus = "idle"; queueState = undefined; mobileLayout = false; sessionOwner = { type: "user", id: "u1" }; announceView.mockClear(); });
+let composerBeforeSend: ((text: string) => Promise<{ text: string; threadId: string }>) | undefined;
+beforeEach(() => { progressMessages = []; turnStartedAt = undefined; pendingGate = undefined; browserActivity = false; fullProfile = false; readOnlyReason = undefined; liveStatus = "idle"; queueState = undefined; mobileLayout = false; sessionOwner = { type: "user", id: "u1" }; announceView.mockClear(); });
 
 
 vi.mock("~/hooks/use-mobile-layout", () => ({ useMobileLayout: () => mobileLayout }));
@@ -63,12 +72,12 @@ vi.mock("~/stores/stream", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/stores/stream")>();
   return {
     ...actual,
-    useSessionStream: () => ({ messages: browserActivity ? [{ id: "browser-call", sessionId: "sess-1", threadId: "t1", role: "assistant", content: "", createdAt: 1, parts: [{kind: "tool_call", callId: "browser", toolName: "browser.execute", status: "completed"}] }] : [], statusByThread: {}, conn: "open" }),
+    useSessionStream: () => ({ messages: browserActivity ? [{ id: "browser-call", sessionId: "sess-1", threadId: "t1", role: "assistant", content: "", createdAt: 1, parts: [{kind: "tool_call", callId: "browser", toolName: "browser.execute", status: "completed"}] }] : progressMessages, statusByThread: {}, conn: "open" }),
     useStreamStore: (selector: (s: { setThreadMessages: () => void; setPendingGates: () => void }) => unknown) =>
       selector({ setThreadMessages: vi.fn(), setPendingGates: vi.fn() }),
     usePendingGateForThread: () => pendingGate,
     useQueueStateForThread: () => queueState,
-    useThreadLiveStatus: () => ({ status: liveStatus }),
+    useThreadLiveStatus: () => ({ status: liveStatus, turnStartedAt }),
   };
 });
 
@@ -84,10 +93,16 @@ vi.mock("./session-header", () => ({
 }));
 vi.mock("./thread-context-panel", () => ({ ThreadContextPanel: ({ onCreate, onReveal }: { onCreate: () => void; onReveal: (messageId: string) => void }) =>
   <div>Thread summary contents<button onClick={onCreate}>Create a file or site</button><button onClick={() => onReveal("m1")}>Show m1</button></div> }));
-vi.mock("./message-list", () => ({ MessageList: ({ header }: { header?: ReactNode }) =>
-  <div data-testid="message-list" data-can-reply={Boolean(useThreadReplyTarget())}>{header}<div data-message-id="m1" /></div> }));
+vi.mock("./message-list", () => ({ MessageList: ({ header, emptyState }: { header?: ReactNode; emptyState?: ReactNode }) =>
+  <div data-testid="message-list" data-can-reply={Boolean(useThreadReplyTarget())}>{header}{emptyState}<div data-message-id="m1" /></div> }));
 // The stub renders the status line slot, so the background work line shows.
-vi.mock("./composer", () => ({ Composer: ({ statusLine }: { statusLine?: ReactNode }) => <div data-testid="composer">{statusLine}<textarea aria-label="Message" /></div> }));
+vi.mock("./composer", () => ({ Composer: ({ statusLine, context, beforeSend, renderFooterControl }: { renderFooterControl?: (hint: ReactNode) => ReactNode; statusLine?: ReactNode; context?: ComposerContext; beforeSend?: typeof composerBeforeSend }) => {
+  composerBeforeSend = beforeSend;
+  return <div data-testid="composer">{statusLine}<div data-testid="footer">{renderFooterControl?.("Keyboard hint")}</div>{context?.content}<textarea aria-label="Message" placeholder={context?.placeholder} /></div>;
+} }));
+vi.mock("./run-without-asking-toggle", () => ({
+  RunWithoutAskingToggle: ({ onlyWhenOn }: { onlyWhenOn?: boolean }) => <div data-testid="bypass-switch" data-only-when-on={String(Boolean(onlyWhenOn))} />,
+}));
 vi.mock("./decision-gate-card", () => ({ DecisionGateCard: () => null }));
 
 vi.mock("./browser/browser-overlay", () => ({ BrowserOverlay: ({ minimized, onMinimize, onRestore, onClose, onExpand }: {
@@ -105,7 +120,7 @@ function renderInRouter(sessionId: string, panel: boolean, onClose?: () => void,
   return renderComponent(() => <SessionView sessionId={sessionId} panel={panel} onClose={onClose} active={active} />);
 }
 
-function renderComponent(component: () => ReactNode) {
+function renderComponent(component: () => ReactNode, qc = new QueryClient()) {
   const rootRoute = createRootRoute({ component });
   const router = createRouter({
     routeTree: rootRoute.addChildren([]),
@@ -113,7 +128,6 @@ function renderComponent(component: () => ReactNode) {
   });
   // SessionView's query hooks need a QueryClient in scope. Provide a scratch
   // client per render so the test shares no cache state.
-  const qc = new QueryClient();
   return render(
     <QueryClientProvider client={qc}>
       <RouterProvider router={router} />
@@ -122,6 +136,19 @@ function renderComponent(component: () => ReactNode) {
 }
 
 describe("SessionView header chrome", () => {
+  it("shows host context and an empty transcript through the assistant panel", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(true);
+    const beforeSend = vi.fn(async (text: string) => ({ text, threadId: "t1" }));
+    renderComponent(() => <AssistantPanel title="Quarterly report" sessionId="sess-1" threadId="t1" onRetry={() => {}}
+      context={{ content: <span>Selected report heading</span>, placeholder: "Ask about this selection…", onSubmit }}
+      beforeSend={beforeSend}
+      emptyState={<p>Ask Valet to update this report.</p>} />);
+    expect(await screen.findByText("Selected report heading")).toBeTruthy();
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveProperty("placeholder", "Ask about this selection…");
+    expect(screen.getByText("Ask Valet to update this report.")).toBeTruthy();
+    expect(screen.getByText("Quarterly report").closest("header")?.className).toContain("h-[--nav-height]");
+    expect(composerBeforeSend).toBe(beforeSend);
+  });
   it("uses Chat, Tasks, and Make for a team thread with a sharing notice, keeping its draft mounted", async () => {
     mobileLayout = true;
     sessionOwner = { type: "team", id: "team-a" };
@@ -268,6 +295,29 @@ describe("SessionView header chrome", () => {
     expect(screen.queryByTestId("composer")).toBeNull();
     expect(screen.getByTestId("message-list").getAttribute("data-can-reply")).toBe("false");
   });
+  it("shows the read-only notice with the Run without asking switch, which hides itself while off", async () => {
+    readOnlyReason = "This thread is read-only.";
+    renderInRouter("sess-1", false);
+    expect(await screen.findByText(readOnlyReason)).toBeTruthy();
+    expect(screen.getByTestId("bypass-switch").getAttribute("data-only-when-on")).toBe("true");
+  });
+  it("shows the Run without asking switch in the footer on a full page", async () => {
+    renderInRouter("sess-1", false);
+    await screen.findByTestId("composer");
+    expect(screen.getByTestId("footer").contains(screen.getByTestId("bypass-switch"))).toBe(true);
+    expect(screen.getAllByTestId("bypass-switch")).toHaveLength(1);
+  });
+  it("leaves the Run without asking switch out of the Ask Valet dock", async () => {
+    renderInRouter("sess-1", true);
+    await screen.findByTestId("composer");
+    expect(screen.queryByTestId("bypass-switch")).toBeNull();
+  });
+  it("leaves the Run without asking switch out of a read-only dock", async () => {
+    readOnlyReason = "This thread is read-only.";
+    renderInRouter("sess-1", true);
+    await screen.findByText(readOnlyReason);
+    expect(screen.queryByTestId("bypass-switch")).toBeNull();
+  });
   it("watches from chat, suspends in the full pane, restores, and returns focus on close", async () => {
     fullProfile = true;
     renderInRouter("sess-1", false);
@@ -390,6 +440,81 @@ it("shows completed browser work in mobile chat-only conversations", async () =>
 });
 
 describe("SessionView processing visibility", () => {
+  const progress: TurnProgress = { turnId: "turn1", title: "Task progress", status: "in_progress", revision: "1", updatedAt: 1, tasks: [], omittedTasks: 0 };
+
+  it.each([false, true])("keeps progress widget replies under the thread's read-only rule (%s)", async (readOnly) => {
+    if (readOnly) readOnlyReason = "This thread is read-only.";
+    progressMessages = [{ id: "widget-message", sessionId: "sess-1", threadId: "t1", role: "assistant", content: "", createdAt: 1,
+      parts: [{ kind: "tool_call", callId: "widget-call", toolName: "show_widget", status: "completed", args: { title: "Invite", spec: eventWidget } }] }];
+    const client = new QueryClient();
+    client.setQueryData(qkThreadProgress("t1"), { progress: { ...progress, callIds: ["widget-call"] } });
+    renderComponent(() => <SessionView sessionId="sess-1" activeThreadId="t1" />, client);
+    const card = await screen.findByRole("region", { name: "Task progress" });
+    fireEvent.click(within(card).getByRole("button", { expanded: false }));
+    fireEvent.click(within(card).getByRole("button", { expanded: false }));
+    expect(within(card).getByRole("button", { name: "Send invite" })).toHaveProperty("disabled", readOnly);
+  });
+
+  it("keeps one mascot and moves the live clock into the active task card", async () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(100_000);
+    try {
+      liveStatus = "thinking";
+      turnStartedAt = 75_000;
+      const client = new QueryClient();
+      client.setQueryData(qkThreadProgress("t1"), { progress });
+      renderComponent(() => <SessionView sessionId="sess-1" activeThreadId="t1" />, client);
+      const card = await screen.findByRole("region", { name: "Task progress" });
+      expect(document.querySelectorAll('img[src="/icons/valet-mascot.webp"]')).toHaveLength(1);
+      expect(within(card).getByText("25s").getAttribute("aria-hidden")).toBe("true");
+      expect(screen.getByText("Valet is thinking…").closest(".sr-only")).toBeTruthy();
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("shows reply chips under the question, above a finished task card", async () => {
+    progressMessages = [{ id: "ask", sessionId: "sess-1", threadId: "t1", role: "assistant", content: "", createdAt: 1, completed: true,
+      parts: [{ kind: "text", text: "Both steps are done. Want me to post the summary?" }] }];
+    const client = new QueryClient();
+    client.setQueryData(qkThreadProgress("t1"), { progress: { ...progress, status: "complete" } });
+    renderComponent(() => <SessionView sessionId="sess-1" activeThreadId="t1" enableReplies />, client);
+    const card = await screen.findByRole("region", { name: "Task progress" });
+    const replies = screen.getByRole("group", { name: "Answer: Want me to post the summary?" });
+    expect(replies.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("hides reply chips while a cover hides the question", async () => {
+    progressMessages = [{ id: "ask", sessionId: "sess-1", threadId: "t1", role: "assistant", content: "", createdAt: 1, completed: true,
+      parts: [{ kind: "text", text: "Both steps are done. Want me to post the summary?" }] }];
+    renderComponent(() => <SessionView sessionId="sess-1" activeThreadId="t1" enableReplies cover={<p>Good evening</p>} />);
+    await screen.findByText("Good evening");
+    expect(screen.queryByRole("group", { name: "Answer: Want me to post the summary?" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Not now" })).toBeNull();
+  });
+
+  it("keeps a new turn's working row outside a finished card", async () => {
+    liveStatus = "thinking";
+    const client = new QueryClient();
+    client.setQueryData(qkThreadProgress("t1"), { progress: { ...progress, status: "complete" } });
+    renderComponent(() => <SessionView sessionId="sess-1" activeThreadId="t1" />, client);
+    const card = await screen.findByRole("region", { name: "Task progress" });
+    const line = screen.getByText("Valet is thinking…");
+    expect(card.contains(line)).toBe(false);
+    expect(line.closest(".sr-only")).toBeNull();
+    expect(document.querySelectorAll('img[src="/icons/valet-mascot.webp"]')).toHaveLength(1);
+  });
+
+  it("keeps the working row visible when a stale progress snapshot fails to reload", async () => {
+    liveStatus = "thinking";
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(qkThreadProgress("t1"), { progress });
+    client.getQueryCache().find({ queryKey: qkThreadProgress("t1") })?.setState({ status: "error", error: new Error("offline") });
+    renderComponent(() => <SessionView sessionId="sess-1" activeThreadId="t1" />, client);
+    await screen.findByText("Progress unavailable. Refresh to retry.");
+    expect(screen.getByText("Valet is thinking…").closest(".sr-only")).toBeNull();
+    expect(document.querySelectorAll('img[src="/icons/valet-mascot.webp"]')).toHaveLength(1);
+  });
+
   it.each([
     ["queued", "Valet is queued"],
     ["thinking", "Valet is thinking…"],

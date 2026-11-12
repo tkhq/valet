@@ -1,17 +1,18 @@
 /**
- * Selection-logic tests for Task 6 (kubernetes-deployment plan) —
- * `VALET_SANDBOX_BACKEND`'s docker/local/kubernetes/invalid branches.
+ * Provider selection and deployment configuration tests for the
+ * docker/local/kubernetes backends.
  * No cluster required: the `kubernetes` case injects a fake-but-structurally
  * -valid `KubeConfig` (`loadFromOptions` against a dummy cluster) so
  * `KubernetesSandboxProvider` construction succeeds without ever making a
- * network call — `buildSandboxProvider` only *constructs* the provider
- * here, it never invokes any of its methods.
+ * network call. Docker configuration tests capture CLI arguments with a
+ * temporary executable instead of contacting a Docker daemon.
  */
 import { describe, it, expect, vi } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as k8s from "@kubernetes/client-node";
+import type { SandboxResources } from "@valet/engine";
 import { DockerSandboxProvider } from "@valet/sandbox-docker";
 import { LocalSandboxProvider } from "@valet/sandbox-local";
 import {
@@ -176,6 +177,113 @@ describe("buildSandboxProvider", () => {
         { kubeConfig: fakeKubeConfig() },
       ),
     ).toThrow(/VALET_SANDBOX_WORKSPACE_STORAGE \(effective "8Gi"\) exceeds VALET_SANDBOX_WORKSPACE_MAX \(effective "4Gi"\)/);
+  });
+});
+
+/** Stop at container creation and capture the real provider's Docker arguments. */
+async function dockerCreateArgs(env: NodeJS.ProcessEnv, resources?: SandboxResources): Promise<string[]> {
+  const root = await mkdtemp(join(tmpdir(), "valet-api-docker-resources-"));
+  const bin = join(root, "bin");
+  const workspace = join(root, "workspace");
+  const argsFile = join(root, "run-args.json");
+  await mkdir(bin);
+  await mkdir(workspace);
+  await writeFile(join(bin, "docker"), `#!${process.execPath}
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+if (args[0] === "info") process.stdout.write("fixture-daemon");
+else if (args[0] === "image" && args[1] === "inspect") process.exit(0);
+else if (args[0] === "run") {
+  fs.writeFileSync(${JSON.stringify(argsFile)}, JSON.stringify(args));
+  process.stderr.write("fixture stopped before container creation");
+  process.exit(1);
+} else process.exit(2);
+`, { mode: 0o755 });
+  vi.stubEnv("PATH", bin);
+  try {
+    const provider = buildSandboxProvider({ ...env, VALET_DATA_DIR: join(root, "data") });
+    await expect(provider.create({ workspace, resources })).rejects.toThrow("fixture stopped before container creation");
+    const args: unknown = JSON.parse(await readFile(argsFile, "utf8"));
+    if (!Array.isArray(args) || !args.every((arg: unknown): arg is string => typeof arg === "string")) {
+      throw new Error("The Docker fixture did not record string arguments.");
+    }
+    return args;
+  } finally {
+    vi.unstubAllEnvs();
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+describe("Docker deployment resource configuration", () => {
+  it("forwards a trimmed parent and CPU/memory defaults into container creation", async () => {
+    const args = await dockerCreateArgs({
+      VALET_DOCKER_CGROUP_PARENT: "  valet-sandboxes.slice  ",
+      VALET_SANDBOX_CPU: " 2 ",
+      VALET_SANDBOX_MEMORY: " 2Gi ",
+    });
+    expect(args[args.indexOf("--cgroup-parent") + 1]).toBe("valet-sandboxes.slice");
+    expect(args[args.indexOf("--cpus") + 1]).toBe("2");
+    expect(args[args.indexOf("--memory") + 1]).toBe("2147483648");
+  });
+
+  it.each([
+    { env: {}, cpu: undefined, memory: undefined },
+    { env: { VALET_SANDBOX_CPU: "", VALET_SANDBOX_MEMORY: " " }, cpu: undefined, memory: undefined },
+    { env: { VALET_SANDBOX_CPU: "0.5" }, cpu: "0.5", memory: undefined },
+    { env: { VALET_SANDBOX_MEMORY: "500Mi" }, cpu: undefined, memory: "524288000" },
+  ])("keeps unconfigured fields absent: $env", async ({ env, cpu, memory }) => {
+    const args = await dockerCreateArgs(env);
+    expect(args).not.toContain("--cgroup-parent");
+    if (cpu === undefined) expect(args).not.toContain("--cpus");
+    else expect(args[args.indexOf("--cpus") + 1]).toBe(cpu);
+    if (memory === undefined) expect(args).not.toContain("--memory");
+    else expect(args[args.indexOf("--memory") + 1]).toBe(memory);
+  });
+
+  it.each([
+    { resources: { cpu: 0.5 }, cpu: "0.5", memory: "2147483648" },
+    { resources: { memory: "500Mi" }, cpu: "2", memory: "524288000" },
+  ])("keeps the other deployment default when creation overrides $resources", async ({ resources, cpu, memory }) => {
+    const args = await dockerCreateArgs({ VALET_SANDBOX_CPU: "2", VALET_SANDBOX_MEMORY: "2Gi" }, resources);
+    expect(args[args.indexOf("--cpus") + 1]).toBe(cpu);
+    expect(args[args.indexOf("--memory") + 1]).toBe(memory);
+  });
+
+  it.each(["", "   ", "\tvalet.slice", "valet.slice\n", "valet\0.slice", "valet\u007f.slice", "valet\u0085.slice"])(
+    "rejects an explicit blank or control-character parent %j with corrective guidance",
+    (parent) => {
+      expect(() => buildSandboxProvider({ VALET_DOCKER_CGROUP_PARENT: parent })).toThrow(
+        /VALET_DOCKER_CGROUP_PARENT.*Set.*non-empty.*control characters/s,
+      );
+    },
+  );
+
+  it.each([
+    { VALET_SANDBOX_CPU: "0" },
+    { VALET_SANDBOX_CPU: "65" },
+    { VALET_SANDBOX_CPU: "many" },
+    { VALET_SANDBOX_MEMORY: "0" },
+    { VALET_SANDBOX_MEMORY: "2GB" },
+  ])("rejects invalid Docker resource defaults at boot: %j", (env) => {
+    expect(() => buildSandboxProvider(env)).toThrow(/VALET_SANDBOX_(CPU|MEMORY).*\b(Set|Use)\b/s);
+  });
+
+  it("ignores Kubernetes-only ephemeral-storage settings for Docker", async () => {
+    const args = await dockerCreateArgs({
+      VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST: "invalid",
+      VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT: "invalid",
+      VALET_SANDBOX_CPU: "1",
+    });
+    expect(args[args.indexOf("--cpus") + 1]).toBe("1");
+  });
+
+  it("ignores Docker-only parent validation for Local and Kubernetes", () => {
+    expect(buildSandboxProvider({ VALET_SANDBOX_BACKEND: "local", VALET_DOCKER_CGROUP_PARENT: "" })).toBeInstanceOf(LocalSandboxProvider);
+    expect(buildSandboxProvider({
+      VALET_SANDBOX_BACKEND: "kubernetes",
+      VALET_SANDBOX_IMAGE: "fixture:latest",
+      VALET_DOCKER_CGROUP_PARENT: "\n",
+    }, { kubeConfig: fakeKubeConfig() })).toBeInstanceOf(KubernetesSandboxProvider);
   });
 });
 

@@ -21,7 +21,8 @@ access rules.
 The mobile-only boundary applies to navigation. It does not apply
 to conversation cards, approval previews, durable plans, measured thinking
 time, or agent processing feedback. These are shared thread features.
-Quick replies are shown only in the mobile layout.
+Quick replies are shown in the mobile layout and in Home on every screen size.
+They are hidden while desktop Home's idle cover hides the conversation, because the question they answer is not visible.
 
 The mobile conversation shell is shared by Home, `/chat`, `/threads/:id`,
 and `/sessions/:id`. Opening a team thread from the drawer must keep the
@@ -43,11 +44,30 @@ Home uses the `home` thread in the person's personal assistant session.
 Changing the workspace switcher does not change this conversation. It is
 private to that person; it is not a team chat.
 
-Tasks collects work across accessible workspaces. Needs you appears before
-working tasks, unread replies, and finished tasks started from Home. Each
-row names its workspace and opens its thread. Task rows can show plan
+Tasks collects work across accessible workspaces, in three sections:
+Waiting on you, In progress, and Done. Done holds tasks started from Home
+that finished and that the person has not marked done. It starts collapsed.
+An unread reply without a question is not a task, so Tasks does not list
+it; the thread list shows it. Each row names its workspace and opens its
+thread.
+
+Only the person marks a task done, as in Claude Duet. Every row has a Mark
+done control, so the person can cross out a task that is done or no longer
+relevant. Crossing out writes a `home_task_dismissals` row and marks a saved
+Home task done. It does not stop running work. The thread stays out of Tasks
+until a question, approval, or failure newer than the cross-out needs the
+person. When a Home task finishes, Valet asks "Mark it done?" in Home. The
+`mark_task_done` tool crosses the task out, and it runs only on a turn the
+person wrote. Task rows can show plan
 progress, pull requests, and shared files. Approvals live in Tasks and have
-a compact shortcut above the Home composer when action is needed.
+a compact shortcut above the Home composer when action is needed. On a phone,
+the shortcut shows only approvals from the person's personal workspace. Team and org
+approvals appear in the team's own threads and in Tasks.
+
+A swipe to the right opens the phone drawer, which sits at the left edge. A
+swipe to the left closes it. Mostly vertical moves, moves that start in a text
+field or a horizontally scrollable element, moves that start within 24px of
+the left edge, and moves under an open modal dialog are ignored.
 
 Make provides routes to workflows, skills, memory, and files. It also links
 to Presence and integrations. These browse the selected workspace. Settings
@@ -82,10 +102,17 @@ Home. Reports name the task and outcome. Home must call the access-checked
 `read_task` tool to fetch a result. Reports stay quiet while the person is
 viewing the task. Background-only reports have a ten-minute minimum gap.
 
-On first Home use, Valet creates a daily morning brief at 08:00 in the
-person's timezone, or UTC if none is set. It posts into Home and can be
-edited or paused as a routine. Briefs and task reports cover personal work
-as well as team work; a team is not required.
+Home creates no routine. The Tasks tab shows what is in progress and what
+needs the person. When the person asks what is going on, Home calls
+`list_tasks` and shows the answer with `show_brief`. Briefs and task reports
+cover personal work as well as team work; a team is not required.
+
+Earlier builds created a daily 08:00 "Morning brief" routine that posted into
+Home. Each run sent the whole Home conversation to the model again, after the
+prompt cache expired. In production, one run cost $1.10 to $1.47 for its first
+request as Home grew from 136k to 183k tokens. At startup,
+`removeStockMorningBriefs` deletes each of those routines that nobody changed.
+A paused routine, or one with an edited name, prompt, cron, or thread, stays.
 
 ## Shared conversation components
 
@@ -131,8 +158,9 @@ both people are viewing. Private Home does not expose teammate presence.
 ## Storage and verification
 
 `home_tasks` records the requesting user, organization, workspace owner,
-session, thread, and report state. The Postgres schema and startup repairs
-create the table and indexes. Plans and thinking timing use engine metadata.
+session, thread, and report state. `home_task_dismissals` records when each
+person crossed a thread out of Tasks. The Postgres schema and startup repairs
+create the tables and indexes. Plans and thinking timing use engine metadata.
 
 Regression tests cover the exact media-query breakpoint, switching back to
 desktop, saved-task audience changes, active-work paging, requester versus
@@ -192,9 +220,6 @@ The host marks a linked person's direct channel input separately from background
 Only that verified input supplies an interactive actor; replay retains its original channel context.
 Workflow and child turns cannot inherit this authority.
 
-Home records the morning-brief offer in persistent thread metadata before provisioning it once.
-Opening Home never overwrites an existing prompt or restores a renamed or deleted routine.
-If initial provisioning fails, Home remains available and logs the failure without retrying on later opens.
 
 Widget validation rejects cycles, more than 100 elements, nesting beyond 24 levels, and expansions beyond 256 elements.
 The web checks persisted widget specs with the same validator before rendering them.

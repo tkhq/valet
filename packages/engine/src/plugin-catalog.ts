@@ -1,4 +1,4 @@
-import { TOOL_INTENT_SCHEMA, actionInScope, scopeRefusal } from "@valet/shared";
+import { TOOL_INTENT_SCHEMA, actionInScope, deriveActionLabel, scopeRefusal, type SourceInput } from "@valet/shared";
 import { IsObject, ObjectOptions, Type } from "typebox";
 import { Value } from "typebox/value";
 import type { Static, TSchema } from "typebox";
@@ -75,6 +75,12 @@ export interface PluginAction<TParams extends TSchema = TSchema> {
     args: Static<TParams>,
     ctx: PluginActionContext,
   ) => Promise<PluginActionResult>;
+  /**
+   * One past-tense line for the thread's step, with the key inputs
+   * ("Searched Slack for “deploy”"). Read only after a successful call; the
+   * model never sees it. Without one, the step names the service and action.
+   */
+  label?: (args: Static<TParams>) => string | undefined;
 }
 
 /**
@@ -101,6 +107,9 @@ export interface PluginActionResult {
   error?: string;
   /** Attachments to inject into the LLM's vision context or store via BlobStore. */
   attachments?: ToolAttachment[];
+  /** Items the action read: a message permalink, a file at a commit. The
+   * engine gives each a thread-scoped id the model can cite. */
+  sources?: SourceInput[];
 }
 
 export type ApprovalMode = "allow" | "require_approval" | "deny";
@@ -355,7 +364,7 @@ export function pluginCatalogTools(opts: PluginCatalogOptions): ToolDef[] {
  * (`ToolResult` text vs. a `command_result` markdown output).
  */
 export type InvokeActionResult =
-  | { kind: "ok"; result: PluginActionResult; automatic?: true }
+  | { kind: "ok"; result: PluginActionResult; automatic?: true; label?: string }
   | { kind: "unknown"; toolId: string }
   | { kind: "invalid-args"; error: string }
   /** `shared_account`: the action needs a teammate's shared account, and
@@ -1121,6 +1130,11 @@ async function resolveDynamic(
   catalog: Catalog,
   plugin: ActionPlugin,
   ctx: ToolContext,
+  /** False for a broad `list_tools` search. Discovery that would ask a
+   * person (a teammate's shared account, or an approval rule) then opens no
+   * card and throws {@link DiscoveryNeedsApproval}. The card opens only when
+   * the model names the service. */
+  mayAsk = true,
 ): Promise<ResolvedDynamic> {
   const now = catalog.now();
   const cacheKey = JSON.stringify([plugin.service, ctx.userId, ctx.threadId, ctx.externalSender === true]);
@@ -1151,6 +1165,10 @@ async function resolveDynamic(
       },
     };
     const entry: CatalogEntry = { service: plugin.service, plugin, action };
+    if (!mayAsk) {
+      const reason = await discoveryApprovalReason(ctx, plugin, action.id);
+      if (reason) throw new DiscoveryNeedsApproval(reason);
+    }
     const outcome = await invokeAction(
       { ...catalog, entries: [entry], byId: new Map([[action.id, entry]]), dynamicPlugins: [] },
       action.id, {}, ctx.toolScope?.actions ? { ...ctx, toolScope: { ...ctx.toolScope, actions: [...ctx.toolScope.actions, action.id] } } : ctx, `Read the list of ${label} tools this account can use.`,
@@ -1181,6 +1199,46 @@ async function resolveDynamic(
   }
   catalog.resolved.set(cacheKey, result);
   return result;
+}
+
+/** A broad search skipped a service because listing its tools would ask a
+ * person. The message says how to ask on purpose. */
+class DiscoveryNeedsApproval extends Error {}
+
+/**
+ * Why discovery for `plugin` would open an approval card now, or undefined
+ * when it would not. It reads the policy decision and opens no gate. Like a
+ * read-only lookup in Claude Code, a broad search must not ask anyone: a
+ * teammate gets a card only when the model asks for their service by name.
+ */
+async function discoveryApprovalReason(ctx: ToolContext, plugin: ActionPlugin, actionId: string): Promise<string | undefined> {
+  const resolver = ctx.policyResolver;
+  if (!resolver) return undefined;
+  let decision: PolicyDecision;
+  try {
+    decision = await resolver.resolve({
+      teamId: ctx.owner?.type === "team" ? ctx.owner.id : undefined,
+      service: plugin.service,
+      actionId,
+      riskLevel: "low",
+      params: {},
+      userId: ctx.userId,
+      orgId: ctx.orgId,
+      sessionId: ctx.sessionId,
+      threadId: ctx.threadId,
+      ...(ctx.queueItemId ? { queueItemId: ctx.queueItemId } : {}),
+      appliesIn: "session",
+      ...(ctx.externalSender ? { externalSender: true } : {}),
+    });
+  } catch {
+    // The normal discovery path reports the failed policy check.
+    return undefined;
+  }
+  if (decision.mode !== "require_approval") return undefined;
+  const ask = `Call list_tools with service "${plugin.service}" to ask.`;
+  if (!decision.approver) return `tools not listed: listing them needs approval. ${ask}`;
+  const who = decision.approver.name ?? "a teammate";
+  return `tools not listed: listing them uses ${who}'s shared account, and ${who} must approve. ${ask}`;
 }
 
 // ── list_tools ───────────────────────────────────────────────────
@@ -1335,13 +1393,17 @@ function makeListTool(
         if (discoveryScope?.actions && !discoveryScope.actions.some((id) => id.startsWith(`${plugin.service}.`))) continue;
         dynamicServicesConsidered.add(plugin.service);
         try {
-          const resolvedDyn = await resolveDynamic(catalog, plugin, discoveryCtx);
+          const resolvedDyn = await resolveDynamic(catalog, plugin, discoveryCtx, a.service === plugin.service);
           const dynEntries =
             query.hasInput
               ? resolvedDyn.entries.filter((e) => matchesQuery(e.action))
               : resolvedDyn.entries;
           entries = entries.concat(dynEntries.filter((entry) => actionInScope(discoveryScope, qualifiedId(entry))));
         } catch (err) {
+          if (err instanceof DiscoveryNeedsApproval) {
+            warnings.push({ service: plugin.service, reason: err.message });
+            continue;
+          }
           const message = err instanceof Error ? err.message : String(err);
           warnings.push({ service: plugin.service, reason: `action discovery failed: ${message}` });
         }
@@ -1561,7 +1623,8 @@ function renderInvokeOutcome(outcome: InvokeActionResult, toolId: string, simila
 function renderInvokeResult(outcome: InvokeActionResult, toolId: string, similar: readonly string[] = []): ToolResult {
   switch (outcome.kind) {
     case "ok":
-      return { ...actionResultToToolResult(outcome.result, toolId), ...(outcome.automatic ? { approval: "automatic" as const } : {}) };
+      return { ...actionResultToToolResult(outcome.result, toolId), ...(outcome.automatic ? { approval: "automatic" as const } : {}),
+        ...(outcome.label ? { label: outcome.label } : {}) };
     case "unknown":
       return {
         text: `unknown tool_id: "${toolId}".${similar.length ? ` Did you mean ${similar.map((id) => `"${id}"`).join(" or ")}?` : ""} Use list_tools to find available actions.`,
@@ -1905,7 +1968,8 @@ async function executeAction(
         result,
       });
     }
-    return { kind: "ok", result };
+    const label = result.success ? actionLabel(entry.action, prepared.args, entry.service) : undefined;
+    return { kind: "ok", result, ...(label ? { label } : {}) };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (audit) {
@@ -2044,6 +2108,26 @@ function scopedCredentialProvider(
   };
 }
 
+/**
+ * The step line for a finished call: the action's own `label`, else one built
+ * from the action name and key arguments. A label that throws or says nothing
+ * falls through. Exported so a test can check every registered action.
+ */
+export function actionLabel(action: PluginAction, args: unknown, service: string): string | undefined {
+  const clean = (value: string | undefined) => value?.replace(/\s+/g, " ").trim().slice(0, 160) || undefined;
+  try {
+    const own = clean(action.label?.(args as never));
+    if (own) return own;
+  } catch {
+    // Fall through to the derived line.
+  }
+  try {
+    return clean(deriveActionLabel(service, action.id, args));
+  } catch {
+    return undefined;
+  }
+}
+
 function actionResultToToolResult(
   result: PluginActionResult,
   toolId: string,
@@ -2069,6 +2153,7 @@ function actionResultToToolResult(
     text: typeof result.data === "string" ? result.data : encodeToolOutput(result.data),
     attachments: attachments && attachments.length > 0 ? attachments : undefined,
     ok: true,
+    ...(result.sources?.length ? { sources: result.sources } : {}),
     // Usage counts terminal PRs from bash parts only; the action has its own fact.
     ...(createdPullRequest ? { outcome: { kind: "pull_request_created" as const, url: createdPullRequest } } : {}),
   };

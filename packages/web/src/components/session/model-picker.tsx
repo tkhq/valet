@@ -1,4 +1,4 @@
-import { ArrowLeft, Check, ChevronDown, ChevronRight, Search } from "lucide-react";
+import { ArrowLeft, Check, ChevronDown, ChevronRight, Cpu, Search } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   Button,
@@ -94,6 +94,9 @@ export interface ModelPickerProps {
   /** Called when the user picks a model or a size tier. Returns the model
    * id, or the bare tier token ("xs"|"s"|"m"|"l"|"xl"). */
   onSelect: (id: string) => void;
+  /** Called after a model or size row is picked, so a host that wraps the
+   * picker in a dialog can close it. Not called for reasoning changes. */
+  onPicked?: () => void;
   /** Current reasoning/thinking level, or undefined for "Default". */
   currentReasoning?: string;
   /** Called when the user picks a reasoning level; `null` means "Default".
@@ -101,6 +104,25 @@ export interface ModelPickerProps {
   onSelectReasoning?: (level: string | null) => void;
   /** Disable interactions (e.g. while a mutation is in flight). */
   disabled?: boolean;
+  /** The model and reasoning a new thread starts with. The footer shows it,
+   * and offers `onMakeDefault` when the current choice differs. */
+  newThreadDefault?: NewThreadDefault;
+}
+
+export interface NewThreadDefault {
+  model: string;
+  reasoning?: string;
+  /** Saves the thread's choice as the default. Present only when the viewer
+   * may change the default and the save would change what new threads get. */
+  onMakeDefault?: () => void;
+  /** Whose default the save changes: the viewer's own, or every team
+   * member's. A team change asks for confirmation in a dialog, so the menu
+   * closes first. */
+  scope?: "personal" | "team";
+  saving?: boolean;
+  /** Why no save is offered although this thread differs from the default:
+   * the assistant's own setting outranks the defaults. */
+  blockedReason?: string;
 }
 
 function isAnthropic(id: string): boolean {
@@ -167,9 +189,11 @@ export function ModelPicker({
   displayId,
   ariaDescription,
   onSelect,
+  onPicked,
   currentReasoning,
   onSelectReasoning,
   disabled,
+  newThreadDefault,
 }: ModelPickerProps) {
   const panel = presentation === "panel";
   const [open, setOpen] = useState(false);
@@ -292,6 +316,13 @@ export function ModelPicker({
   const triggerReasoning = currentReasoning
     ? ` · ${reasoningLabelFor(currentReasoning)}`
     : presentation === "trigger" ? " · Default" : "";
+  // A narrow composer swaps the full label for the curated short name
+  // ("Haiku 4.5"), or an icon when the catalog has none or the box is tiny. The full name stays
+  // the accessible name and the title.
+  const resolvedId = triggerId && isSizeTier(triggerId)
+    ? resolveTierModel(triggerId, tierMapQ.data, models)?.id
+    : triggerId;
+  const compactLabel = curatedForCatalogId(resolvedId)?.label;
   const descriptionId = useId();
   const thinkingFieldId = useId();
   const thinkingHelpId = useId();
@@ -303,10 +334,15 @@ export function ModelPicker({
     return !activeThinkingLevels.includes(level);
   }
 
+  function pick(id: string) {
+    onSelect(id);
+    onPicked?.();
+  }
+
   function commitHighlighted() {
     const entry = flat[highlightIndex];
     if (!entry || disabled) return;
-    onSelect(entry.kind === "tier" ? entry.tier : entry.model.id);
+    pick(entry.kind === "tier" ? entry.tier : entry.model.id);
     setOpen(false);
   }
 
@@ -319,6 +355,8 @@ export function ModelPicker({
       e.preventDefault();
       setHighlightIndex((i) => Math.max(i - 1, 0));
     } else if (e.key === "Enter") {
+      // A footer button handles its own Enter; only the list commits a row.
+      if (e.target instanceof HTMLButtonElement) return;
       e.preventDefault();
       commitHighlighted();
     } else if (e.key === "/" && document.activeElement !== searchRef.current) {
@@ -351,12 +389,34 @@ export function ModelPicker({
       className={cn("min-w-0 max-w-full font-normal gap-1", presentation === "trigger" ? "rounded-full bg-ink-wash" : "text-muted hover:text-ink data-[state=open]:text-ink")}
       onClick={presentation === "trigger" ? onOpenPanel : undefined}
       aria-label={`Choose model: ${triggerLabel}${triggerReasoning}`}
+      title={`${triggerLabel}${triggerReasoning}`}
       aria-describedby={ariaDescription ? descriptionId : undefined}
     >
-      <span className={presentation === "trigger" ? "truncate text-sm" : "truncate text-xs"}>
-        {triggerLabel}
-        {triggerReasoning}
-      </span>
+      {presentation === "trigger" ? (
+        <>
+          {/* The full label is the default, so a trigger outside a size
+              container shows the model name. Under 34rem the short name
+              stands in; under 18.75rem even that is cut by the Stop button,
+              so the icon does. The dropdown chevron stays. */}
+          <span data-icon-picker aria-hidden="true" className={cn("hidden", compactLabel ? "[@container(width<18.75rem)]:inline" : "[@container(width<34rem)]:inline")}>
+            <Cpu className="h-3.5 w-3.5" />
+          </span>
+          {compactLabel && (
+            <span data-compact-picker className="hidden truncate text-sm [@container(18.75rem<=width<34rem)]:inline">
+              {compactLabel}
+            </span>
+          )}
+          <span data-full-picker className="truncate text-sm [@container(width<34rem)]:hidden">
+            {triggerLabel}
+            {triggerReasoning}
+          </span>
+        </>
+      ) : (
+        <span className="truncate text-xs">
+          {triggerLabel}
+          {triggerReasoning}
+        </span>
+      )}
       <ChevronDown className="h-3.5 w-3.5 text-muted shrink-0 ml-auto" />
     </Button>
   );
@@ -366,7 +426,7 @@ export function ModelPicker({
     <div className="min-w-0 space-y-4" role="group" aria-label="Model and thinking settings">
       {(modelsQ.isLoading || !approvalScopeResolved) && <p className="text-sm text-muted">Loading models…</p>}
       {(modelsQ.error || approvedModelsQ.error) && <p role="alert" className="text-sm text-muted">Could not load models. Close settings and try again.</p>}
-      <ModelSizeList selectedId={currentId} onSelect={onSelect} choices={SIZE_TIERS.map(tier => ({
+      <ModelSizeList selectedId={currentId} onSelect={pick} choices={SIZE_TIERS.map(tier => ({
         id: tier,
         label: TIER_LABELS[tier],
         description: tierSubtitle(tier, tierMapQ.data, models),
@@ -427,13 +487,13 @@ export function ModelPicker({
                     data-row-kind="tier"
                     onMouseEnter={() => setHighlightIndex(idx)}
                     disabled={disabled}
-                    onClick={panel ? () => onSelect(tier) : undefined}
+                    onClick={panel ? () => pick(tier) : undefined}
                     onMouseDown={(e) => {
                       if (panel) return;
                       // Prevent input blur from stealing focus before we
                       // commit — otherwise the click can race the close.
                       e.preventDefault();
-                      onSelect(tier);
+                      pick(tier);
                       setOpen(false);
                     }}
                     className={cn(
@@ -481,13 +541,13 @@ export function ModelPicker({
                     data-row-kind="model"
                     onMouseEnter={() => setHighlightIndex(idx)}
                     disabled={disabled}
-                    onClick={panel ? () => onSelect(m.id) : undefined}
+                    onClick={panel ? () => pick(m.id) : undefined}
                     onMouseDown={(e) => {
                       if (panel) return;
                       // Prevent input blur from stealing focus before we
                       // commit — otherwise the click can race the close.
                       e.preventDefault();
-                      onSelect(m.id);
+                      pick(m.id);
                       setOpen(false);
                     }}
                     className={cn(
@@ -580,6 +640,33 @@ export function ModelPicker({
               })}
             </div>
           ))}
+          {newThreadDefault && (
+            <div className="flex items-center gap-2 px-3 py-1.5 border-b border-line text-[10px] text-muted">
+              <span className="min-w-0 flex-1 truncate">
+                New threads: {selectionLabel(newThreadDefault.model, tierMapQ.data, models)}
+                {newThreadDefault.reasoning ? ` · ${reasoningLabelFor(newThreadDefault.reasoning)}` : ""}
+              </span>
+              {newThreadDefault.onMakeDefault && (
+                <button
+                  type="button"
+                  disabled={disabled || newThreadDefault.saving}
+                  className="shrink-0 max-sm:min-h-11 rounded-full border border-line px-2 py-0.5 text-ink hover:bg-moss-wash disabled:opacity-50"
+                  // Keep focus in the menu on click; Enter and Space still activate it.
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => {
+                    // A dialog cannot take focus from an open menu.
+                    if (newThreadDefault.scope === "team") setOpen(false);
+                    newThreadDefault.onMakeDefault?.();
+                  }}
+                >
+                  {newThreadDefault.saving ? "Saving…" : newThreadDefault.scope === "team" ? "Make team default" : "Make my default"}
+                </button>
+              )}
+            </div>
+          )}
+          {newThreadDefault?.blockedReason && !newThreadDefault.onMakeDefault && (
+            <p className="px-3 py-1.5 border-b border-line text-[10px] text-muted">{newThreadDefault.blockedReason}</p>
+          )}
           <div className="px-3 py-1.5 text-[10px] text-muted">
             <span>
               {filteredModels.length} of {roleScoped.length} models

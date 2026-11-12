@@ -12,12 +12,15 @@ import { parse } from "yaml";
 import {
   CHECK_TYPES,
   REASONING_LEVELS,
+  REVIEW_CASE_KINDS,
   REVIEW_PROFILES,
   type Check,
   type GoldenComment,
+  type ReviewCaseKind,
   type PullRequestSpec,
   type EvalCase,
   type EvalTurn,
+  type MockSource,
   type MockToolSpec,
 } from "./types.js";
 
@@ -174,6 +177,7 @@ function parseCheck(raw: unknown, i: number, source: string): Check {
     }
     case "all_terminal":
     case "no_errors":
+    case "citation_validity":
       return { type };
     case "max_turns": {
       const perSubmission = raw.per_submission;
@@ -270,14 +274,29 @@ function parseCheck(raw: unknown, i: number, source: string): Check {
     }
     case "review_match": {
       const golden = raw.golden;
-      if (!Array.isArray(golden) || golden.length === 0) {
-        throw new CaseValidationError(source, `\`${at}.golden\` must be a non-empty array of {comment, category}`);
+      const kind = optString("kind");
+      if (kind !== undefined && !(REVIEW_CASE_KINDS as readonly string[]).includes(kind)) {
+        throw new CaseValidationError(source, `\`${at}.kind\` must be one of: ${REVIEW_CASE_KINDS.join(", ")}`);
+      }
+      // A control or setup PR has no planted defect, so it may list none.
+      const mayBeEmpty = kind === "control" || kind === "setup";
+      if (!Array.isArray(golden) || (golden.length === 0 && !mayBeEmpty)) {
+        throw new CaseValidationError(
+          source,
+          `\`${at}.golden\` must be a non-empty array of {comment, category}. Only a \`kind: control\` or \`kind: setup\` case may leave it empty.`,
+        );
       }
       const parsedGolden: GoldenComment[] = golden.map((g, gi) => {
         if (!isRecord(g) || typeof g.comment !== "string" || typeof g.category !== "string") {
           throw new CaseValidationError(source, `\`${at}.golden[${gi}]\` needs string \`comment\` and \`category\``);
         }
-        return { comment: g.comment, category: g.category, ...(typeof g.severity === "string" ? { severity: g.severity } : {}) };
+        return {
+          comment: g.comment,
+          category: g.category,
+          ...(typeof g.severity === "string" ? { severity: g.severity } : {}),
+          ...(g.cross_repo === true ? { cross_repo: true } : {}),
+          ...(typeof g.fix === "string" ? { fix: g.fix } : {}),
+        };
       });
       const profile = optString("profile");
       if (profile !== undefined && !(REVIEW_PROFILES as readonly string[]).includes(profile)) {
@@ -292,6 +311,7 @@ function parseCheck(raw: unknown, i: number, source: string): Check {
       return {
         type,
         golden: parsedGolden,
+        ...(kind !== undefined ? { kind: kind as ReviewCaseKind } : {}),
         ...(profile !== undefined ? { profile: profile as ReviewProfileName } : {}),
         ...(minRecall !== undefined ? { min_recall: minRecall } : {}),
         ...(judgeModel !== undefined ? { judge_model: judgeModel } : {}),
@@ -349,6 +369,16 @@ function parsePullRequest(raw: Record<string, unknown>, source: string): PullReq
     throw new CaseValidationError(source, "`pull_request.repo` must be a simple name (letters, digits, . _ -)");
   }
   if (typeof v.body === "string") spec.body = v.body;
+  if (v.private !== undefined) {
+    if (typeof v.private !== "boolean") throw new CaseValidationError(source, "`pull_request.private` must be true or false");
+    spec.private = v.private;
+  }
+  if (v.number !== undefined) {
+    if (typeof v.number !== "number" || !Number.isInteger(v.number) || v.number < 1) {
+      throw new CaseValidationError(source, "`pull_request.number` must be a positive integer");
+    }
+    spec.number = v.number;
+  }
   if (v.verify !== undefined) {
     if (typeof v.verify !== "boolean") throw new CaseValidationError(source, "`pull_request.verify` must be true or false");
     spec.verify = v.verify;
@@ -368,9 +398,28 @@ function parseMockTools(
     if (!isRecord(spec) || typeof spec.response !== "string") {
       throw new CaseValidationError(source, `\`mock_tools.${tool}.response\` must be a string`);
     }
-    out[tool] = { response: spec.response };
+    const sources = parseMockSources(spec.sources, `mock_tools.${tool}`, source);
+    out[tool] = { response: spec.response, ...(sources ? { sources } : {}) };
   }
   return out;
+}
+
+function parseMockSources(raw: unknown, path: string, source: string): MockSource[] | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw)) throw new CaseValidationError(source, `\`${path}.sources\` must be a list`);
+  return raw.map((item, i): MockSource => {
+    if (!isRecord(item) || typeof item.service !== "string" || typeof item.title !== "string") {
+      throw new CaseValidationError(source, `\`${path}.sources[${i}]\` needs string \`service\` and \`title\``);
+    }
+    const out: MockSource = { service: item.service, title: item.title };
+    for (const key of ["url", "snippet", "location"] as const) {
+      const v = item[key];
+      if (v === undefined) continue;
+      if (typeof v !== "string") throw new CaseValidationError(source, `\`${path}.sources[${i}].${key}\` must be a string`);
+      out[key] = v;
+    }
+    return out;
+  });
 }
 
 /**
@@ -434,6 +483,15 @@ export function parseEvalCase(raw: unknown, source: string): EvalCase {
     }
     if (drive === "product") {
       throw new CaseValidationError(source, "`context_budget_tokens` needs `drive: engine` (it sets the in-process session's compaction budget)");
+    }
+  }
+  const contextWindowTokens = optionalNumber(raw, "context_window_tokens", source);
+  if (contextWindowTokens !== undefined) {
+    if (!Number.isInteger(contextWindowTokens) || contextWindowTokens < 1) {
+      throw new CaseValidationError(source, "`context_window_tokens` must be a positive integer");
+    }
+    if (drive === "product") {
+      throw new CaseValidationError(source, "`context_window_tokens` needs `drive: engine` (it sets the in-process session's model window)");
     }
   }
   const allowedActions = optionalStringArray(raw, "allowed_actions", source);
@@ -522,6 +580,7 @@ export function parseEvalCase(raw: unknown, source: string): EvalCase {
   if (tools !== undefined) evalCase.tools = tools;
   if (sessionType !== undefined) evalCase.session_type = sessionType as EvalCase["session_type"];
   if (contextBudgetTokens !== undefined) evalCase.context_budget_tokens = contextBudgetTokens;
+  if (contextWindowTokens !== undefined) evalCase.context_window_tokens = contextWindowTokens;
   if (drive !== undefined) evalCase.drive = drive;
   if (allowedActions !== undefined) evalCase.allowed_actions = allowedActions;
   if (profile !== undefined) evalCase.profile = profile as EvalCase["profile"];

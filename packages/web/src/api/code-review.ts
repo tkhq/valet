@@ -3,8 +3,8 @@
  * one workspace (`GET /api/code-review/reviews`). The lines that turn
  * reviews on are event subscriptions (`~/api/events`).
  */
-import { useQuery } from "@tanstack/react-query";
-import type { ListCodeReviewsResponse } from "@valet/api/wire";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import type { ListCodeReviewsResponse, RunCodeReviewRequest, RunCodeReviewResponse } from "@valet/api/wire";
 import { api } from "./client";
 
 export const qkCodeReview = {
@@ -19,5 +19,14 @@ export function useCodeReviews(teamId?: string) {
     queryKey: qkCodeReview.reviews(teamId),
     queryFn: () => api.listCodeReviews(teamId),
     refetchInterval: REVIEWS_POLL_MS,
+  });
+}
+
+/** Review one pull request now (`POST /api/code-review/runs`). */
+export function useRunCodeReview() {
+  const qc = useQueryClient();
+  return useMutation<RunCodeReviewResponse, Error, RunCodeReviewRequest>({
+    mutationFn: (body) => api.runCodeReview(body),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["code-review", "reviews"] }),
   });
 }

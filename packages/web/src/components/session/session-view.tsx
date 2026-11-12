@@ -27,7 +27,7 @@ import {
   useCompactingForThread,
   type StreamMessage,
 } from "~/stores/stream";
-import { Composer } from "~/components/session/composer";
+import { Composer, type ComposerContext } from "~/components/session/composer";
 import { useThreadEdit } from "~/components/session/use-thread-edit";
 import { errorText } from "~/lib/error-text";
 import {
@@ -52,6 +52,7 @@ import { BackgroundWorkStatusLine } from "~/components/session/background-work";
 import { useCanAdministerSession } from "~/components/session/use-can-administer-session";
 import { draftKey, useComposerDraftStore } from "~/stores/composer-drafts";
 import { SessionHeader } from "~/components/session/session-header";
+import { RunWithoutAskingToggle } from "~/components/session/run-without-asking-toggle";
 import { useMe } from "~/api/settings";
 import { useInvalidateSessionOnModelSwitch } from "~/hooks/use-invalidate-session-on-model-switch";
 import { useInvalidateMessagesOnCompaction } from "~/hooks/use-invalidate-messages-on-compaction";
@@ -66,6 +67,7 @@ import { ChildGateCards } from "./child-gate-cards";
 import { AgentsLine } from "./agents-line";
 import { ThreadReplyContext } from "./send-as-person";
 import { ChildTitlesContext } from "./work-group";
+import { ThreadSourcesProvider } from "./citations";
 import { MobileConversationLayout, MobileConversationToolbar, type MobileConversationView } from "~/components/home/mobile-conversation-layout";
 
 /**
@@ -108,7 +110,11 @@ export function SessionView({
   emptyState,
   cover,
   headerActions,
+  context,
+  beforeSend,
 }: {
+  context?: ComposerContext;
+  beforeSend?: (text: string) => Promise<{ text: string; threadId: string }>;
   /** Shown above the composer, under the thread's own pending gate. Home
    * uses it for approvals from work in other threads. */
   composerAccessory?: ReactNode;
@@ -177,6 +183,8 @@ export function SessionView({
   const mobile = useMobileLayout();
   const mobileNavigation = mobile && !panel;
   const mobileConversation = mobile && (!panel || sharedConversationChrome);
+  // The switch lives where the thread menu did: not in the Ask Valet dock.
+  const showRunWithoutAsking = !panel || mobileConversation;
   const [mobileView, setMobileView] = useState<MobileConversationView>("chat");
   useEffect(() => setMobileView("chat"), [sessionId, activeThreadId, mobileNavigation]);
   const chatActive = active && (!mobileNavigation || mobileView === "chat");
@@ -474,6 +482,7 @@ export function SessionView({
   );
 
   const content = (
+    <ThreadSourcesProvider threadId={effectiveThreadId} messages={stream.messages}>
     <ComposerDropContext.Provider value={dropChannel}>
     <div ref={viewRef} className="flex-1 flex flex-col min-h-0 min-w-0">
       {mobileConversation && <MobileConversationToolbar>{sessionHeader}</MobileConversationToolbar>}
@@ -486,10 +495,10 @@ export function SessionView({
       {tab === "chat" ? (
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <ThreadReplyContext.Provider value={widgetReplyTarget}>
+        <ChildTitlesContext.Provider value={childTitles}>
         <PageDropTarget>
           <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-            <ThreadReplyContext.Provider value={widgetReplyTarget}>
-            <ChildTitlesContext.Provider value={childTitles}>
             {cover ? <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
               {!(panel || mobileNavigation) && <div className="sticky top-0 z-20 shrink-0 bg-paper">{sessionHeader}{sandboxTabs}</div>}
               {cover}
@@ -516,8 +525,6 @@ export function SessionView({
                 emptyState={emptyState}
               />
             )}
-            </ChildTitlesContext.Provider>
-            </ThreadReplyContext.Provider>
             {chatActive && !mobileBrowser && !hideBrowser && (browserWatch.mode === "open" || browserWatch.mode === "minimized") && (
               <BrowserOverlay
                 key={JSON.stringify([sessionId, effectiveThreadId])}
@@ -549,14 +556,17 @@ export function SessionView({
               over when the pending gate changes (e.g. a thread switch to a
               different pending gate). */}
           <ThreadRecapDock recap={recap} collapsed={Boolean(pendingGate)} />
-          <PinnedPlan threadId={effectiveThreadId} live={workingLine} />
+          {/* Home (the only view with replies) shows them on every screen size, so "Mark it done?" is one tap on desktop too.
+              They sit right under the question: below the pinned task card they read as answers to the card.
+              A cover (desktop Home's idle view) hides the question, so the chips hide with it. */}
+          {(mobile || enableReplies) && !cover && <QuickReplies sessionId={sessionId} threadId={effectiveThreadId} messages={stream.messages.filter(m => m.threadId === effectiveThreadId)}
+            disabled={Boolean(pendingGate) || threadStatus.status !== "idle" || Boolean(session.data?.readOnlyReason)} />}
+          <PinnedPlan threadId={effectiveThreadId} live={workingLine} messages={stream.messages} />
           {pendingGate && (
             <DecisionGateCard key={pendingGate.id} sessionId={sessionId} gate={pendingGate} collapsible />
           )}
           {!pendingGate && resolvedGate && <ResolvedGateNotice label={resolvedGate.label} title={resolvedGate.gate.title} className="mx-auto w-full max-w-[52rem]" />}
           <ChildGateCards children={childWork} threadId={effectiveThreadId} onOpenChild={onOpenChild} />
-          {mobile && <QuickReplies sessionId={sessionId} threadId={effectiveThreadId} messages={stream.messages.filter(m => m.threadId === effectiveThreadId)}
-            disabled={Boolean(pendingGate) || threadStatus.status !== "idle" || Boolean(session.data?.readOnlyReason)} />}
           <div className={mobile && pendingGate ? "hidden" : "contents"} aria-hidden={mobile && pendingGate ? true : undefined}>{composerAccessory}</div>
           <TypingLine viewers={viewers} />
           {/* While the task card shows a running turn, it carries this line: one row, one mascot. */}
@@ -565,17 +575,27 @@ export function SessionView({
               a thread switch swaps the draft without a remount (a remount
               would orphan in-flight uploads). */}
           <div className={responseFormActive ? "hidden" : "contents"} aria-hidden={responseFormActive || undefined}>
-          {session.data?.readOnlyReason ? <p className="border-t border-border px-4 py-3 text-sm text-muted" role="status">{session.data.readOnlyReason}</p> : <Composer
+          {session.data?.readOnlyReason ? <div className="border-t border-border px-4 py-3">
+            <p className="text-sm text-muted" role="status">{session.data.readOnlyReason}</p>
+            {showRunWithoutAsking && (
+              <RunWithoutAskingToggle sessionId={sessionId} threadId={effectiveThreadId} owner={session.data.owner} className="mt-1.5" onlyWhenOn />
+            )}
+          </div> : <Composer
             modelControlRef={(mobileConversation || !panel) && canCancelWork ? setComposerModelTarget : undefined}
             active={chatActive && !responseFormActive}
             sessionId={sessionId}
             threadId={effectiveThreadId}
             agentStatus={threadStatus.status}
+            context={context}
+            beforeSend={beforeSend}
             queuedMessages={queuedMessages}
             queuedItemCount={threadQueueState?.pendingIds.length ?? 0}
             replyTarget={replyTarget}
             onCancelReply={() => setReplyTarget(undefined)}
             {...edit.composer}
+            renderFooterControl={showRunWithoutAsking ? (hint, reportError) => (
+              <RunWithoutAskingToggle sessionId={sessionId} threadId={effectiveThreadId} owner={session.data?.owner} fallback={hint} compactLabel onError={reportError} />
+            ) : undefined}
             statusLine={
               <BackgroundWorkStatusLine
                 sessionId={sessionId}
@@ -587,12 +607,15 @@ export function SessionView({
           />}
           </div>
         </PageDropTarget>
+        </ChildTitlesContext.Provider>
+        </ThreadReplyContext.Provider>
         </div>
 
         </div>
       ) : null}
     </div>
     </ComposerDropContext.Provider>
+    </ThreadSourcesProvider>
   );
   return mobileNavigation
     ? <MobileConversationLayout view={mobileView} onViewChange={setMobileView}>{content}</MobileConversationLayout>

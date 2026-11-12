@@ -358,6 +358,12 @@ are stored through Organization settings.
 |----------|-------------|
 | `VALET_INSTANCE` | Named instance profile to target (client subcommands) |
 | `VALET_DATA_DIR` | Also locates `~/.valet/config.json` for the CLI |
+| `VALET_CLI_DOWNLOAD_DIR` | Optional directory of matching native CLI binaries served at `/cli/downloads/`. Names are `valet-{darwin,linux}-{arm64,x64}`. Without it, downloads use the upstream rolling release. |
+
+The public `/cli/install.sh` installer downloads from this instance and installs
+the matching platform binary in `~/.local/bin`. Set `VALET_CLI_DOWNLOAD_DIR` when
+piloting CLI changes that the upstream release does not contain. A missing local
+binary returns an error instead of installing a different release.
 
 ## Test-only
 

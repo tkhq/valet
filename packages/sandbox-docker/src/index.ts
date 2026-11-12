@@ -2,6 +2,7 @@ export {
   DockerSandbox,
   DockerSandboxProvider,
   buildDockerRunArgs,
+  releaseWorkspaceArgs,
   createSandboxWorkspace,
   sandboxWorkspaceRoot,
   writeCredsFiles,

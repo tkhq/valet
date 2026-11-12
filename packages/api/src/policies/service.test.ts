@@ -37,6 +37,8 @@ import {
   GATE_ACTION_ALWAYS_ALLOW,
   GATE_ACTION_ALWAYS_ALLOW_OWNER,
   GATE_ACTION_APPROVE_SESSION,
+  GATE_ACTION_APPROVE_THREAD,
+  writeThreadGrant,
   ownerAlwaysAllowRefusal,
 } from "./service.js";
 
@@ -344,15 +346,44 @@ describe("buildPolicyResolver", () => {
     userId: MEMBER, orgId: ORG, sessionId: SESSION, threadId: "t1", appliesIn: "session",
   };
 
-  it("offers approve_session + always_allow on a require_approval decision", async () => {
+  it("offers approve_thread + always_allow on a require_approval decision", async () => {
     const d = await resolver.resolve(input);
     expect(d.mode).toBe("require_approval");
     const ids = (d.extraGateActions ?? []).map((a) => a.id);
-    expect(ids).toEqual([GATE_ACTION_APPROVE_SESSION, GATE_ACTION_ALWAYS_ALLOW]);
+    expect(ids).toEqual([GATE_ACTION_APPROVE_THREAD, GATE_ACTION_ALWAYS_ALLOW]);
+    expect((d.extraGateActions ?? []).find((a) => a.id === GATE_ACTION_APPROVE_THREAD)?.label).toBe("Allow in this thread");
     expect((d.extraGateActions ?? []).every((a) => a.approves)).toBe(true);
   });
 
-  it("approve_session resolution writes a session grant; the next resolve runs grant-clean", async () => {
+  it("approve_thread writes a thread grant: the same thread runs, another thread still asks", async () => {
+    const d = await resolver.resolve(input);
+    await resolver.onResolution?.(input, d, { actionId: GATE_ACTION_APPROVE_THREAD, resolvedBy: MEMBER, resolvedAt: 1, gateOrdinal: 0 });
+    // A replayed resolution writes no second row.
+    await resolver.onResolution?.(input, d, { actionId: GATE_ACTION_APPROVE_THREAD, resolvedBy: MEMBER, resolvedAt: 1, gateOrdinal: 0 });
+    const grants = await db.select().from(runtimeGrants).where(eq(runtimeGrants.sessionId, SESSION));
+    expect(grants).toMatchObject([{ threadId: "t1", policyKey: "github.create_issue" }]);
+    expect(await resolver.resolve(input)).toMatchObject({ mode: "allow", provenance: { source: "runtime_grant" } });
+    expect(await resolver.resolve({ ...input, threadId: "t2" })).toMatchObject({ mode: "require_approval" });
+    // A newcomer's turn in the same thread does not use it.
+    expect(await resolver.resolve({ ...input, externalSender: true })).toMatchObject({ mode: "require_approval" });
+  });
+
+  it("a thread grant and a session grant for one action can both be live", async () => {
+    const g = { orgId: ORG, service: "github", actionId: "create_issue", grantedBy: MEMBER, now: 1 };
+    await writeThreadGrant(db, SESSION, "t1", g);
+    await writeSessionGrant(db, SESSION, g);
+    await writeSessionGrant(db, SESSION, g);
+    expect(await db.select().from(runtimeGrants).where(eq(runtimeGrants.sessionId, SESSION))).toHaveLength(2);
+    expect(await resolver.resolve({ ...input, threadId: "t2" })).toMatchObject({ mode: "allow", provenance: { source: "runtime_grant" } });
+  });
+
+  it("an org deny still wins over a thread grant", async () => {
+    await writeThreadGrant(db, SESSION, "t1", { orgId: ORG, service: "github", actionId: "create_issue", grantedBy: MEMBER, now: 1 });
+    await db.insert(actionPolicies).values({ id: "org-deny", orgId: ORG, principalType: "org", principalId: ORG, actionId: "create_issue", mode: "deny", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 1, updatedAt: 1 });
+    expect(await resolver.resolve(input)).toMatchObject({ mode: "deny", provenance: { source: "org_policy" } });
+  });
+
+  it("a card opened before the change still resolves approve_session to a session grant", async () => {
     const d = await resolver.resolve(input);
     const resolution: DecisionResolution = { actionId: GATE_ACTION_APPROVE_SESSION, resolvedBy: MEMBER, resolvedAt: 1, gateOrdinal: 0 };
     await resolver.onResolution?.(input, d, resolution);
@@ -709,12 +740,12 @@ describe("always allow for the session's owner", () => {
     expect(await db.select().from(actionPolicyOverrides)).toEqual([]);
   });
 
-  it("lets any team member stop the asking for the whole team, without the session option", async () => {
+  it("lets any team member stop the asking for the whole team", async () => {
     await teamSession();
     const teamInput = { ...input, teamId: TEAM };
     const decision = await resolver.resolve(teamInput);
     expect(ownerOption(decision)?.label).toBe("Always allow for this team");
-    expect((decision.extraGateActions ?? []).map((action) => action.id)).toEqual([GATE_ACTION_ALWAYS_ALLOW_OWNER, GATE_ACTION_ALWAYS_ALLOW]);
+    expect((decision.extraGateActions ?? []).map((action) => action.id)).toEqual([GATE_ACTION_APPROVE_THREAD, GATE_ACTION_ALWAYS_ALLOW_OWNER, GATE_ACTION_ALWAYS_ALLOW]);
     expect(await ownerAlwaysAllowRefusal(db, { orgId: ORG, sessionId: SESSION, riskLevel: "high", service: "slack", actionId: SEND }, MEMBER)).toBeUndefined();
     // A gate that does not name its action is refused, since the team's rules cannot be checked.
     expect(await ownerAlwaysAllowRefusal(db, { orgId: ORG, sessionId: SESSION, riskLevel: "high" }, MEMBER)).toBe("A team rule covers this action, and only a team admin can change it. Approve it once, or ask a team admin.");
@@ -744,7 +775,7 @@ describe("always allow for the session's owner", () => {
     expect(decision.provenance.source).toBe("team_policy");
     expect(ownerOption(decision)?.label).toBe("Always allow for this team");
     // The member keeps a lasting choice they may pick.
-    expect((decision.extraGateActions ?? []).map((action) => action.id)).toContain(GATE_ACTION_APPROVE_SESSION);
+    expect((decision.extraGateActions ?? []).map((action) => action.id)).toContain(GATE_ACTION_APPROVE_THREAD);
     const action = { orgId: ORG, sessionId: SESSION, riskLevel: "high" as const, service: "slack", actionId: SEND };
     expect(await ownerAlwaysAllowRefusal(db, action, MEMBER)).toBe("A team rule covers this action, and only a team admin can change it. Approve it once, or ask a team admin.");
     await expect(resolver.onResolution?.(teamInput, decision, resolution(MEMBER))).rejects.toThrow("only a team admin can change it");
@@ -834,7 +865,7 @@ describe("always allow for the session's owner", () => {
     expect(ownerOption(decision)?.label).toBe("Always allow for this team");
     // A member's allow would outrank the C1 rule, so only a team admin may write it.
     await expect(resolver.onResolution?.(otherChannel, decision, resolution(MEMBER))).rejects.toThrow("only a team admin can change it");
-    expect((decision.extraGateActions ?? []).map((action) => action.id)).toContain(GATE_ACTION_APPROVE_SESSION);
+    expect((decision.extraGateActions ?? []).map((action) => action.id)).toContain(GATE_ACTION_APPROVE_THREAD);
     await resolver.onResolution?.(otherChannel, decision, resolution(TEAM_ADMIN));
     expect(await resolver.resolve(otherChannel)).toMatchObject({ mode: "allow", provenance: { source: "team_policy" } });
   });
@@ -844,6 +875,6 @@ describe("always allow for the session's owner", () => {
     await db.insert(actionPolicies).values({ id: "org-ask", orgId: ORG, principalType: "org", principalId: ORG, actionId: SEND, mode: "require_approval", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 1, updatedAt: 1 });
     const decision = await resolver.resolve(input);
     expect(decision.mode).toBe("require_approval");
-    expect((decision.extraGateActions ?? []).map((action) => action.id)).toEqual([GATE_ACTION_APPROVE_SESSION, GATE_ACTION_ALWAYS_ALLOW]);
+    expect((decision.extraGateActions ?? []).map((action) => action.id)).toEqual([GATE_ACTION_APPROVE_THREAD, GATE_ACTION_ALWAYS_ALLOW]);
   });
 });

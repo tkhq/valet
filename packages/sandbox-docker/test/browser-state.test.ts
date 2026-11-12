@@ -67,8 +67,15 @@ describe("browser container boundary", () => {
     expect(args).toContain("seccomp=/profiles/browser.json");
     expect(args).toContain("127.0.0.1::9000");
     expect(args.join(" ")).not.toContain("unconfined");
+    expect(args.join(" ")).not.toContain("apparmor=");
     expect(args.join(" ")).not.toContain("--privileged");
     expect(args.join(" ")).toContain("VALET_BROWSER_ENABLED=1");
+  });
+  it("applies the configured host AppArmor profile to browser containers only", () => {
+    const opts = { ...base, browserSeccompProfile: "/profiles/browser.json", browserAppArmorProfile: "valet-browser" };
+    const args = buildDockerRunArgs({ ...opts, browser: { enabled: true } });
+    expect(args.join(" ")).toContain("--security-opt apparmor=valet-browser");
+    expect(buildDockerRunArgs(opts).join(" ")).not.toContain("apparmor=");
   });
   it("fails closed when browser isolation is missing or conflicts with DinD", () => {
     expect(() =>

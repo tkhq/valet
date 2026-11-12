@@ -16,7 +16,7 @@ import type { ServiceProbes } from "../plugins/service-probe.js";
 import type { Model } from "@earendil-works/pi-ai/compat";
 import { and, eq, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readdir, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import {
@@ -188,8 +188,6 @@ import {
 import { egressHostInScope } from "@valet/plugin-security";
 import { isValidTimezone } from "../lib/timezone.js";
 import { assembleMemorySnapshot, DELEGATED_SNAPSHOT_BUDGET_CHARS } from "../orchestrator/snapshot.js";
-import { ensureTodayJournal } from "../orchestrator/bootstrap.js";
-import { journalCompactionHook } from "../orchestrator/compaction.js";
 import { readOwnFile, type MemoryScope } from "../services/memory.js";
 import { limitPlugins, loadIntegrationLimit } from "../assistants/integration-limit.js";
 import { effectivePersonality, loadLegacyAssistantModel, loadLegacyAssistantProfile } from "../assistants/legacy-profile.js";
@@ -1610,6 +1608,11 @@ export class EngineHost {
    */
   isPluginLoaded(name: string): boolean {
     return (this.opts.plugins ?? []).some((p) => p.name === name);
+  }
+
+  /** The names of every plugin in the same loaded set `isPluginLoaded` reads. */
+  loadedPluginNames(): string[] {
+    return (this.opts.plugins ?? []).map((p) => p.name);
   }
 
   /**
@@ -3105,8 +3108,8 @@ export class EngineHost {
    * `CreateSessionOptions` is reconstructed from configuration on every
    * wake (persona, memory snapshot, tools, toolConfig), not from whatever
    * was persisted at creation time, per the orchestrator spec's "instant
-   * wake" section — so a restored session gets a freshly-assembled snapshot
-   * and today's journal, same as a brand-new one.
+   * wake" section — so a restored session gets a freshly-assembled
+   * snapshot, same as a brand-new one.
    */
   async assistantSessionFor(
     assistantId: string,
@@ -3240,7 +3243,6 @@ export class EngineHost {
     await mkdir(workspace, { recursive: true });
 
     const scope: MemoryScope = { owner: principal, actorUserId: runtimeUserId, ...(principal.type === "team" ? { namespace: await assistantMemoryNamespace(db, sessionId, principal.id, meta.orgId) } : {}) };
-    await ensureTodayJournal(db, scope);
     const snapshotContent = await assembleMemorySnapshot(db, scope);
     const personaPrefix = await this.resolvePersonaPrefix(db, meta.orgId, scope, assistant.id);
     // The owner's human name, so the persona names the workspace instead of
@@ -3412,7 +3414,6 @@ export class EngineHost {
       // which forces the next `assistantSessionFor` call back through
       // this method to reassemble it.
       systemContext: [{ name: "memory-snapshot", content: snapshotContent, order: 10 }],
-      compactionHooks: [journalCompactionHook(db, scope)],
       // Orchestrator sessions are sandbox-less by default (orchestrator
       // spec, "Sandbox-less by default"): the sandbox must provision only
       // when a turn actually touches the filesystem, via the lazy
@@ -3810,6 +3811,18 @@ export class EngineHost {
    * `child_watches.parkedSandboxId` recorded at park time is the only
    * remaining handle.
    */
+  /**
+   * Empty a working directory whose sandbox is gone, and keep the directory
+   * for a revival. A provider whose directory outlives `destroy` deletes
+   * the files as the sandbox user; elsewhere the api user owns them.
+   */
+  async releaseWorkspace(hostPath: string): Promise<void> {
+    const image = this.stockImage();
+    if (this.opts.sandboxProvider.releaseWorkspace && image) return this.opts.sandboxProvider.releaseWorkspace(hostPath, { image });
+    const entries = await readdir(hostPath).catch(() => [] as string[]);
+    await Promise.all(entries.map((name) => rm(join(hostPath, name), { recursive: true, force: true })));
+  }
+
   async destroySandbox(sandboxId: string): Promise<void> {
     await this.stopBrowserBefore(sandboxId, 'destroy');
     await this.opts.sandboxProvider.destroy(sandboxId);
@@ -4315,6 +4328,34 @@ export class EngineHost {
       assistantDefault: legacy.reasoning,
     });
     return { model: spec, reasoning };
+  }
+
+  /**
+   * What a new thread gets now, and where a saved default goes for each
+   * field. A carried assistant model outranks the personal and team defaults
+   * while it still resolves, and any carried reasoning outranks them too, so
+   * a default for that field would not reach new threads.
+   */
+  async newThreadDefaults(
+    sessionId: string,
+    meta: SessionMeta,
+    actorUserId: string,
+  ): Promise<{ model: string; reasoning: ReasoningLevel; scope: "personal" | "team" | null; reasoningScope: "personal" | "team" | null }> {
+    const settings = await this.resolveFreshThreadSettings(sessionId, meta, actorUserId);
+    const { userId, ownerTeamId, legacy } = await this.freshThreadPrefs(sessionId, meta, actorUserId);
+    let carried = false;
+    if (legacy.model) {
+      try {
+        await this.resolveModelObject(meta.orgId, legacy.model);
+        carried = true;
+      } catch {
+        // The carried model no longer resolves, so the next default applies.
+      }
+    }
+    const owner = userId ? "personal" : ownerTeamId ? "team" : null;
+    // `resolveReasoningForBuild` puts any carried level ahead of both defaults.
+    const reasoningCarried = legacy.reasoning !== undefined && legacy.reasoning !== null;
+    return { ...settings, scope: carried ? null : owner, reasoningScope: reasoningCarried ? null : owner };
   }
 
   /**

@@ -26,7 +26,7 @@ export function FieldRow({
       </div>
       <div className="min-w-0">
         {children}
-        {error && <p role="alert" className="mt-1.5 text-xs text-danger-500">{error}</p>}
+        {error && <p role="alert" className="mt-1.5 text-xs text-danger-text">{error}</p>}
       </div>
     </div>
   );

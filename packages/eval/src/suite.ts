@@ -3,6 +3,7 @@
  * runner, score each trajectory, compare to baselines, and optionally save
  * new baselines. `cli.ts` is a thin argv wrapper around `runSuite`.
  */
+import type { ReviewFocus } from "@valet/plugin-pr-review";
 import type { Model, SandboxProvider, ValetPlugin } from "@valet/engine";
 import {
   compareToBaseline,
@@ -14,6 +15,7 @@ import {
 import { runChecks, type JudgeRunner } from "./checks/index.js";
 import type { ReviewMatcher } from "./checks/review-match.js";
 import type { LlmGateway } from "./gateway.js";
+import { privateRemoteAccess } from "./private-pull-request.js";
 import { runProductCase } from "./product-drive.js";
 import { runCase } from "./runner.js";
 import { aggregateUsage } from "./trajectory.js";
@@ -60,6 +62,18 @@ export interface SuiteOptions {
   verify?: boolean;
   /** Independent code-review passes per case. */
   reviewPasses?: number;
+  /** One extra focused code-review pass per entry (failure, concurrency, tests). */
+  reviewFocus?: ReviewFocus[];
+  /** Drop focused-pass findings rated below this confidence (0-1). */
+  focusMinConfidence?: number;
+  /** Drop code-review findings rated below this confidence (0-1). */
+  minConfidence?: number;
+  /** Merge code-review findings that report the same defect at nearby lines (one model call per review). */
+  reviewDedupe?: boolean;
+  /** Context pack budget in tokens for code-review cases (about 4 chars each). 0 or unset: no pack. */
+  contextBudget?: number;
+  /** A directory of memory files the code-review pack reads as team memory. */
+  memoryDir?: string;
   /** Save each finished case's trajectory as a new baseline. */
   saveBaselines?: boolean;
   /**
@@ -121,6 +135,17 @@ export async function runSuite(cases: EvalCase[], opts: SuiteOptions): Promise<S
       skip("code-review cases run on a Valet key. Set VALET_LLM_GATEWAY_URL and VALET_API_KEY (or VALET_API_KEY_FILE).");
       return;
     }
+    if (evalCase.pull_request?.private === true) {
+      const access = await privateRemoteAccess(evalCase.pull_request.remote);
+      if (access.kind === "denied") {
+        skip(access.reason);
+        return;
+      }
+      if (access.kind === "error") {
+        entries.push({ caseId: evalCase.id, status: "fail", durationMs: 0, checkResults: [], error: access.message });
+        return;
+      }
+    }
 
     if (profile === "integration" || profile === "full") {
       // Missing credentials SKIP, never FAIL: an eval box without a GitHub
@@ -176,6 +201,12 @@ export async function runSuite(cases: EvalCase[], opts: SuiteOptions): Promise<S
                 ...(opts.verifyModel !== undefined ? { verifyModel: opts.verifyModel } : {}),
                 ...(opts.verify !== undefined ? { verify: opts.verify } : {}),
                 ...(opts.reviewPasses !== undefined ? { reviewPasses: opts.reviewPasses } : {}),
+                ...(opts.reviewFocus !== undefined ? { reviewFocus: opts.reviewFocus } : {}),
+                ...(opts.focusMinConfidence !== undefined ? { focusMinConfidence: opts.focusMinConfidence } : {}),
+                ...(opts.minConfidence !== undefined ? { minConfidence: opts.minConfidence } : {}),
+                ...(opts.reviewDedupe ? { reviewDedupe: true } : {}),
+                ...(opts.contextBudget !== undefined ? { contextBudget: opts.contextBudget } : {}),
+                ...(opts.memoryDir !== undefined ? { memoryDir: opts.memoryDir } : {}),
                 ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
                 ...(opts.gateway !== undefined ? { gateway: opts.gateway } : {}),
                 ...(opts.mockPlugins !== undefined ? { mockPlugins: opts.mockPlugins } : {}),

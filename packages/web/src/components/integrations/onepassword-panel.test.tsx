@@ -62,7 +62,7 @@ describe("OnePasswordPanel", () => {
     expect(screen.getByRole("group", { name: "Organization token" })).toBeTruthy();
     expect(screen.queryByRole("group", { name: "Personal token" })).toBeNull();
     expect(screen.getByRole("link", { name: "Integrations" }).getAttribute("href")).toBe(
-      "/integrations?workspace=user",
+      "/settings/integrations",
     );
   });
 

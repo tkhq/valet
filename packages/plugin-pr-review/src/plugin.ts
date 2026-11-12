@@ -1,6 +1,6 @@
 import type { ValetPlugin } from "@valet/engine";
-import { CHILD_ANSWER_NOTE, createReviewHandler, REVIEWER_ROLE, VERIFIER_ROLE } from "./handler.js";
-import { REVIEWER_SYSTEM_PROMPT } from "./prompt.js";
+import { CHILD_ANSWER_NOTE, createReviewHandler, focusRole, REVIEWER_ROLE, VERIFIER_ROLE } from "./handler.js";
+import { FOCUS_PROMPTS, REVIEW_FOCUSES, REVIEWER_SYSTEM_PROMPT } from "./prompt.js";
 import { VERIFIER_SYSTEM_PROMPT } from "./verify.js";
 
 const plugin: ValetPlugin = {
@@ -18,6 +18,12 @@ const plugin: ValetPlugin = {
       content: `${REVIEWER_SYSTEM_PROMPT}\n\n${CHILD_ANSWER_NOTE("submit_review")}`,
       source: "plugin",
     },
+    ...REVIEW_FOCUSES.map((focus) => ({
+      name: focusRole(focus),
+      description: `Reviews a pull request for one defect class (${focus}) and answers with findings JSON.`,
+      content: `${REVIEWER_SYSTEM_PROMPT}\n\n${FOCUS_PROMPTS[focus]}\n\n${CHILD_ANSWER_NOTE("submit_review")}`,
+      source: "plugin" as const,
+    })),
     {
       name: VERIFIER_ROLE,
       description: "Checks one review finding against the code and answers with a verdict JSON.",

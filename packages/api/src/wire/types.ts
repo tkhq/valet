@@ -885,9 +885,9 @@ export interface WakeupSummary {
   fireAt?: number;
   /** `event`: the canonical subject it waits on, e.g. `github:acme/x#1`. */
   subject?: string;
-  /** `event`: the subject's display label, from the owning plugin's `eventSubjects.label`. */
+  /** `event`: the visible child task's title, or the owning plugin's subject label. */
   subjectLabel?: string;
-  /** `event`: the subject's link, from `eventSubjects.url`. Absent when the plugin returns none. */
+  /** `event`: the visible child task's link, or the owning plugin's subject URL when available. */
   subjectUrl?: string;
   /** `event`: the number of match clauses it waits on. */
   clauseCount?: number;
@@ -1139,6 +1139,21 @@ export interface ThreadContextResponse {
     /** False when the session disables automatic compaction. */
     autoCompact: boolean;
   } | null;
+}
+
+/** `GET /api/sessions/:id/thread-defaults` — the model and reasoning a new
+ * thread in this session starts with now. */
+export interface ThreadDefaultsResponse {
+  /** Model spec: a catalog id or a size tier token. */
+  model: string;
+  reasoning: string;
+  /** Where a saved model default goes: the session owner's personal default
+   * or the team default. Null when the assistant's own carried model
+   * outranks both, so a model default would not reach new threads. */
+  scope: "personal" | "team" | null;
+  /** The same for reasoning. Null when the assistant carries its own
+   * reasoning level, which outranks both defaults. */
+  reasoningScope: "personal" | "team" | null;
 }
 
 /** A channel as a thread names it. */
@@ -1966,6 +1981,8 @@ export type WireEvent =
       result: string;
       resultData?: unknown;
       isError: boolean;
+      /** A capped result: the step loads its whole text (`GET /api/threads/:id/tool-output`). */
+      resultTrimmed?: { chars: number; entryId: string; threadId: string };
     }
   | {
       seq: number;
@@ -2462,7 +2479,11 @@ export interface ListNotificationsResponse {
 
 export interface ListNotificationDecisionsResponse {
   nextCursor?: string | null;
-  items: Array<{ sessionId: string; title: string; gate: DecisionGate; canOpenThread?: boolean }>;
+  items: Array<{
+    sessionId: string; title: string; gate: DecisionGate; canOpenThread?: boolean;
+    /** The workspace that owns the work: a team, an org, or the caller's personal workspace. */
+    owner: { type: "user" | "team" | "org"; id: string };
+  }>;
 }
 
 export interface WebPresenceRequest {
@@ -2819,6 +2840,12 @@ export interface WorkflowRunDetail {
   /** Steps whose models changed since the previous run with the same steps.
    * Empty for a first run and for a run after an edit. */
   modelChanges?: WorkflowModelChange[];
+  /** For a completed run: the steps that a re-run of its changed steps
+   * (`from: "changed_steps"`) runs, from the current saved workflow.
+   * Empty when no step changed since the run. Absent for other runs. */
+  rerunSteps?: WorkflowRerunStep[];
+  /** Saved definition used by rerunSteps. Send it when confirming changed_steps. */
+  rerunDefinitionVersionId?: string;
   run: WorkflowRunSummary & {
     waitingOn: unknown[];
     definition: unknown;
@@ -2863,14 +2890,30 @@ export interface CancelWorkflowRunResponse {
 
 /** `POST /api/workflows/runs/:runId/retry`. An empty body retries from the start with the original input. */
 export interface RetryWorkflowRunRequest {
-  /** `failed_step` reuses the finished steps before the failure. Default `start`. */
-  from?: "start" | "failed_step";
+  /** For a failed or cancelled run: `failed_step` reuses the finished steps
+   * before the failure, and `start` (the default) runs every step. For a
+   * completed run: `changed_steps` reuses every step not edited since the
+   * run, so only the edited steps and the steps after them run again. */
+  from?: "start" | "failed_step" | "changed_steps";
   /** Trigger input values that replace the original ones. Only with `from: "start"`. */
   input?: Record<string, unknown>;
+  /** Required for changed_steps: the version returned with the confirmed rerunSteps preview. */
+  rerunDefinitionVersionId?: string;
 }
 
 export interface RetryWorkflowRunResponse {
   runId: string;
+  /** With `changed_steps`: the steps that run, in workflow order. */
+  rerunSteps?: WorkflowRerunStep[];
+}
+
+/** A step that a re-run of a completed run's changed steps runs. */
+export interface WorkflowRerunStep {
+  nodeId: string;
+  /** For a tool step, the action it does as `service.action`, read from the
+   * current workflow. The step does this action again, for example it
+   * sends a message again. */
+  action?: string;
 }
 
 // ── Workflow permissions preview ──────────────────────────────────────────
@@ -3648,6 +3691,11 @@ export interface PluginServiceSummary {
   health?: {
     /** Epoch ms the access token expires, when the grant reports one. */
     expiresAt?: number;
+    /** The row holds a refresh token the provider has not refused, so a
+     * past `expiresAt` renews on the next use and needs no reconnect. The
+     * catalog reads rows as stored and does not refresh them. Absent on
+     * older APIs, which refreshed on this read. */
+    renews?: boolean;
     /** The connected account, e.g. an email or login handle. Shown so a
      * user with two accounts knows which one is wired up. */
     login?: string;
@@ -3785,6 +3833,26 @@ export interface CodeReviewWire {
 /** `GET /api/code-review/reviews` — newest first. */
 export interface ListCodeReviewsResponse {
   reviews: CodeReviewWire[];
+}
+
+/** `POST /api/code-review/runs`: review one pull request now, through the workspace's line for its repository. */
+export interface RunCodeReviewRequest {
+  /** `https://github.com/<owner>/<repo>/pull/<number>`. */
+  url: string;
+  /** Run in this team workspace. Absent: the personal workspace. */
+  teamId?: string;
+  /** Record the review in the plugin thread only. Nothing is posted on GitHub. */
+  shadow?: boolean;
+  /** Review the files at this commit (a merged or closed pull request). Needs `shadow`. */
+  commit?: string;
+}
+
+export interface RunCodeReviewResponse {
+  eventId: string;
+  deliveryId: string;
+  /** The line that runs the review. */
+  subscriptionId: string;
+  shadow: boolean;
 }
 
 // ── REST: skills ─────────────────────────────────────────────────────────
@@ -4365,6 +4433,38 @@ export interface ArtifactListItem {
   updatedAt: number;
 }
 
+/** A preview selection, or an exact source range with UTF-16 offsets. */
+export interface ArtifactSelection {
+  kind?: "text" | "element";
+  text: string;
+  start?: number;
+  end?: number;
+  vdid?: string;
+}
+
+/** Latest metadata plus the selected working or historical snapshot. */
+export interface ArtifactEditorResponse {
+  artifact: ArtifactListItem;
+  version: number;
+  content: string;
+  rendered: string;
+  description: string;
+  icon: string;
+  canEdit: boolean;
+  sourceSessionId?: string;
+  sourceThreadId?: string;
+}
+
+export interface RequestArtifactEditRequest {
+  baseVersion: number;
+  instruction: string;
+  selection: ArtifactSelection;
+}
+
+export interface RequestArtifactEditResponse { requestId: string; sent: boolean }
+export interface ApplyArtifactEditRequest { requestId: string; replacement: string }
+export interface RestoreArtifactRequest { version: number; baseVersion: number }
+
 export interface ListArtifactsResponse {
   artifacts: ArtifactListItem[];
   /** Present for paged owner lists; null on the last page. */
@@ -4821,6 +4921,12 @@ export interface OrgResponse {
    * no loaded plugin declares a `gate`.
    */
   plugins: OrgPluginWire[];
+  /**
+   * The names of every plugin this deployment loaded, gated or not. A nav
+   * item for a plugin page reads this, so the app shell does not load the
+   * full plugin catalog on every page. Absent on older APIs.
+   */
+  loadedPlugins?: string[];
   callerRole: "admin" | "member";
 }
 
@@ -6806,8 +6912,8 @@ export interface HomeTaskItem {
   threadId: string;
   title: string;
   workspace: HomeWorkspaceRef;
-  /** `waiting`: Valet replied and the person has not answered. `done`: a task
-   * started from home whose first run ended and that is not marked done. */
+  /** `waiting`: Valet asked the person a question. `done`: a task started
+   * from home whose run ended and that is not marked done. */
   state: "needs_you" | "working" | "failed" | "waiting" | "done";
   /** Valet's question, or the last sentence of its reply, as plain text. */
   detail?: string;
@@ -6837,8 +6943,13 @@ export interface HomeTaskOutput {
 export interface HomeTasksResponse {
   needsYou: HomeTaskItem[];
   working: HomeTaskItem[];
-  updates: HomeTaskItem[];
   finished: HomeTaskItem[];
+}
+
+/** `POST /api/home/tasks/dismiss`: cross a thread out of Tasks. */
+export interface DismissHomeTaskRequest {
+  sessionId: string;
+  threadId: string;
 }
 
 // ── In-app tour (`/api/tutorial`) ──

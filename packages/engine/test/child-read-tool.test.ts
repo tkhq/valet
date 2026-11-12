@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import {
   builtinTools,
   childReadTool,
+  childSources,
   CHILD_READ_MAX_CHARS,
   RENDERED_TOOL_RESULT_MAX_CHARS,
 } from "../src/builtin-tools/index.js";
@@ -187,5 +188,33 @@ describe("childReadTool", () => {
     expect(result.text.length).toBeLessThanOrEqual(CHILD_READ_MAX_CHARS + 200);
     expect(result.text).toContain("[Truncated:");
     expect(result.text).toContain("THE-VERY-END");
+  });
+
+  it("carries the sources the child cited, linked to the child thread, and marks the child's tags", async () => {
+    const slack = { id: "s1", service: "slack", title: "Message in #launch", url: "https://acme.slack.com/archives/C1/p1", snippet: "Launch is Tuesday.", location: "2026-11-04 10:00 UTC" };
+    const github = { id: "s2", service: "github", title: "acme/app/README.md", url: "https://github.com/acme/app/blob/abc/README.md#L1-L3" };
+    const unused = { id: "s3", service: "memory", title: "notes/x.md" };
+    const reader: ChildReader = async () => [
+      messageEntry("", "e1", {
+        parts: [{ type: "tool_call", callId: "c1", toolName: "call_tool", status: "completed",
+          result: { text: "messages\n\nSources:\n[s1] Message in #launch", details: { sources: [slack, github, unused] } } }],
+      }),
+      messageEntry("The readme says hello [s2]. Launch is Tuesday [s1]. Again [s2]. Unknown [s9].", "e2"),
+    ];
+    const result = await childReadTool.execute({ child_session_id: "child_abc" }, makeCtx(reader));
+    expect(result.sources).toEqual([
+      { service: "github", title: "acme/app/README.md", url: "/threads/th1", location: "child s2" },
+      { service: "slack", title: "Message in #launch", url: "/threads/th1", snippet: "Launch is Tuesday.", location: "child s1, 2026-11-04 10:00 UTC" },
+    ]);
+    expect(result.text).toContain("The readme says hello [child s2]. Launch is Tuesday [child s1].");
+    expect(result.text).toContain("[child s1] Message in #launch");
+    expect(result.text).not.toMatch(/\[s\d+\]/);
+  });
+
+  it("returns no sources when the child cited none", async () => {
+    const reader: ChildReader = async () => [messageEntry("No citations here.")];
+    const result = await childReadTool.execute({ child_session_id: "child_abc" }, makeCtx(reader));
+    expect(result.sources).toBeUndefined();
+    expect(childSources([messageEntry("Cited [s1] but no record.")])).toEqual([]);
   });
 });

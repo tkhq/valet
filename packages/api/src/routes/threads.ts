@@ -13,6 +13,7 @@ import { authorizedWorkspaceOwner } from "./workspace-runtime.js";
 import { keepVisibleThreads, threadEntry, threadsVisibleTo } from "./_thread-access.js";
 import { ensureDefaultAssistantSession, findDefaultAssistant } from "../assistants/service.js";
 import { readOptionalJsonObject } from "../lib/optional-json-body.js";
+import { fullToolResult } from "../services/transcript-trim.js";
 import {
   abortThread, branchPreview, cancelQueuedItem, createThread, duplicateThread, editPreview, forkThread, moveThread, getThreadChannelActivity, getThreadContext, getThreadRecap, listDecisions, listMessages,
   listThreads, loadDecisionSession, patchThread, readThreads, resolveDecision, resumeThread, returnToBranch,
@@ -169,7 +170,7 @@ threadsRouter.get("/:threadId/tool-output", c => inThread(c, async (c, sessionId
     ? parts.find((p: unknown) => typeof p === "object" && p !== null && (p as { type?: unknown }).type === "tool_call" && (p as { callId?: unknown }).callId === callId)
     : undefined;
   if (!part) return c.json({ error: "This output is no longer in the thread. Reload the thread." }, 404);
-  const body: ToolOutputResponse = { result: (part as { result?: unknown }).result };
+  const body: ToolOutputResponse = { result: fullToolResult((part as { result?: unknown }).result) };
   return c.json(body);
 }, "content", "read"));
 threadsRouter.post("/:threadId/messages", c => inThread(c, sendPrompt, "content", "reply"));

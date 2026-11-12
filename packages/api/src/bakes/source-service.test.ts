@@ -12,7 +12,7 @@ import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { startGithubFixture, type GithubFixture, type GithubFixtureResponse } from "../test-helpers/github-fixture.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { orgs, imageSources, bakes, agentSessions, sessionRepos } from "../schema/index.js";
+import { orgs, imageSources, bakes, agentSessions, childWatches, sessionRepos } from "../schema/index.js";
 import { GitHubAuthError, type GitHubTokenDeps } from "../services/github-tokens.js";
 import { reorderWaitingBuilds } from "../prebuilds/builder.js";
 import type { BuildStatus, ImageBuilder, PrebuildSpec } from "../prebuilds/builder.js";
@@ -85,12 +85,6 @@ class FakeImageBuilder implements ImageBuilder {
 /** The scheduler's contract logic runs only on the kubernetes backend. */
 class K8sFakeImageBuilder extends FakeImageBuilder {
   override readonly backend = "kubernetes";
-}
-
-/** Waits until a service's off-path fallback work (bake request or contract
- * re-read) has settled. */
-async function fallbackSettled(svc: SourceService): Promise<void> {
-  await vi.waitFor(() => expect((svc as unknown as { fallbackWork: Map<string, unknown> }).fallbackWork.size).toBe(0));
 }
 
 class QueueImageBuilder extends FakeImageBuilder {
@@ -251,9 +245,11 @@ async function seedBakeSession(
   db: AppDb,
   bakeId: string,
   status: "active" | "hibernated" | "archived" | "deleted",
-): Promise<void> {
+  extra: { sandboxReclaimedAt?: number } = {},
+): Promise<string> {
+  const id = `s_${Math.random().toString(36).slice(2)}`;
   await db.insert(agentSessions).values({
-    id: `s_${Math.random().toString(36).slice(2)}`,
+    id,
     userId: "u1",
     orgId,
     workspace: "/workspace",
@@ -262,8 +258,19 @@ async function seedBakeSession(
     ownerId: "u1",
     profile: "headless",
     bakeId,
+    sandboxReclaimedAt: extra.sandboxReclaimedAt ?? null,
     createdAt: NOW,
     updatedAt: NOW,
+  });
+  return id;
+}
+
+// Seeds the child watch of a child session. `reclaimedAt` set means the
+// child settled and its retention sweep destroyed the sandbox.
+async function seedChildWatch(db: AppDb, childSessionId: string, reclaimedAt: number | null): Promise<void> {
+  await db.insert(childWatches).values({
+    childSessionId, queueItemId: `q_${childSessionId}`, parentSessionId: "parent", parentThreadId: "t",
+    actorUserId: "u1", orgId, settled: reclaimedAt !== null, sandboxReclaimedAt: reclaimedAt, createdAt: NOW,
   });
 }
 
@@ -419,13 +426,16 @@ describe("SourceService", () => {
       const src = await seedRepoSource(db);
       await seedBake(db, src, { id: "bad", contractVersion: 0, contractSource: "missing" });
       const svc = makeService();
+      const bakeRequest = vi.spyOn(svc, "startBake");
       const event = { sessionId: "s1", sourceId: src, bakeId: "bad", contract: 0, repoFullName: "acme/widgets" };
       await svc.handleImageFallback(event);
       await svc.handleImageFallback(event); // second sweep of the same session
       await svc.handleImageFallback({ ...event, sessionId: "s2" }); // another session on the same source
-      await fallbackSettled(svc);
+      await vi.waitFor(() => expect(builder.specs).toHaveLength(1));
       await svc.handleImageFallback(event); // a later sweep sees the active bake
-      await fallbackSettled(svc);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(bakeRequest).toHaveBeenCalledTimes(1);
+      bakeRequest.mockRestore();
       expect(builder.specs).toHaveLength(1);
       const row = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
       expect(row.health).toBe("incompatible");
@@ -437,14 +447,17 @@ describe("SourceService", () => {
       const src = await seedRepoSource(db);
       await seedBake(db, src, { id: "bad", contractVersion: 0, contractSource: "missing" });
       const svc = makeService();
+      const bakeRequest = vi.spyOn(svc, "startBake");
       const event = { sessionId: "s1", sourceId: src, bakeId: "bad", contract: 0, repoFullName: "acme/widgets" };
       await svc.handleImageFallback(event);
-      await fallbackSettled(svc);
+      await vi.waitFor(() => expect(builder.specs).toHaveLength(1));
       expect(builder.specs).toHaveLength(1);
       builder.setState(builder.buildIds[0], { state: "failed", error: "npm ci exploded" });
       await svc.syncActiveBuilds();
       await svc.handleImageFallback(event);
-      await fallbackSettled(svc);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(bakeRequest).toHaveBeenCalledTimes(1);
+      bakeRequest.mockRestore();
       expect(builder.specs).toHaveLength(1);
       const row = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
       expect(row.health).toBe("failing");
@@ -457,13 +470,14 @@ describe("SourceService", () => {
       await seedBake(db, src, { id: "bad", contractVersion: 0, contractSource: "missing" });
       let t = NOW;
       const svc = makeService({ now: () => t });
+      const bakeRequest = vi.spyOn(svc, "startBake");
       await svc.setSourceHealth(src, "failing", "credentials", "no org credential");
       t = NOW + 60_000;
       const event = { sessionId: "s1", sourceId: src, bakeId: "bad", contract: 0, repoFullName: "acme/widgets" };
       await svc.handleImageFallback(event);
       await svc.handleImageFallback(event);
       await new Promise((r) => setImmediate(r));
-      await fallbackSettled(svc);
+      expect(bakeRequest).not.toHaveBeenCalled();
       expect(builder.specs).toHaveLength(0);
       const failing = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
       expect(failing).toMatchObject({ health: "failing", healthReason: "credentials", healthCheckedAt: NOW });
@@ -474,7 +488,8 @@ describe("SourceService", () => {
       await svc.handleImageFallback(event);
       await svc.handleImageFallback(event);
       await new Promise((r) => setImmediate(r));
-      await fallbackSettled(svc);
+      await vi.waitFor(() => expect(bakeRequest.mock.settledResults[0]?.type).toBe("rejected"));
+      bakeRequest.mockRestore();
       expect(builder.specs).toHaveLength(0);
       expect((await db.select().from(bakes).where(eq(bakes.sourceId, src))).map((b) => b.id)).toEqual(["bad"]);
       const marked = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
@@ -486,14 +501,17 @@ describe("SourceService", () => {
       await seedBake(db, src, { id: "bad", contractVersion: 0, contractSource: "missing" });
       const svc = makeService();
       await svc.setSourceHealth(src, "stale", "waiting_for_base", null);
+      const bakeRequest = vi.spyOn(svc, "startBake");
       const event = { sessionId: "s1", sourceId: src, bakeId: "bad", contract: 0, repoFullName: "acme/widgets" };
       await svc.handleImageFallback(event);
-      await fallbackSettled(svc);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(bakeRequest).not.toHaveBeenCalled();
       expect(builder.specs).toHaveLength(0);
       expect((await db.select().from(imageSources).where(eq(imageSources.id, src)))[0]).toMatchObject({ health: "stale", healthReason: "waiting_for_base" });
       await svc.setSourceHealth(src, "incompatible", "contract", "scheduler detail");
       await svc.handleImageFallback(event);
-      await fallbackSettled(svc);
+      await vi.waitFor(() => expect(builder.specs).toHaveLength(1));
+      bakeRequest.mockRestore();
       expect((await db.select().from(imageSources).where(eq(imageSources.id, src)))[0]).toMatchObject({ health: "incompatible", healthDetail: "scheduler detail" });
     });
 
@@ -504,7 +522,7 @@ describe("SourceService", () => {
       let reads = 0;
       const svc = makeService({ contractReader: async () => { reads++; return { ok: true, version: 3 }; } });
       await svc.handleImageFallback({ sessionId: "s1", sourceId: src, bakeId: "unread", contract: null, repoFullName: "acme/widgets" });
-      await fallbackSettled(svc);
+      await vi.waitFor(async () => expect(await svc.currentBake(src)).toMatchObject({ contractVersion: 3, contractSource: "label" }));
       expect(reads).toBe(1);
       expect(builder.specs).toHaveLength(0);
       const stamped = (await db.select().from(bakes).where(eq(bakes.id, "unread")))[0];
@@ -518,7 +536,6 @@ describe("SourceService", () => {
       const svc = makeService();
       const before = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
       await svc.handleImageFallback({ sessionId: "s1", sourceId: src, bakeId: "bad", contract: 0, repoFullName: "acme/widgets" });
-      await fallbackSettled(svc);
       expect(builder.specs).toHaveLength(0);
       const after = (await db.select().from(imageSources).where(eq(imageSources.id, src)))[0];
       expect(after).toMatchObject({ health: before.health, healthReason: before.healthReason, healthCheckedAt: before.healthCheckedAt });
@@ -2335,6 +2352,33 @@ describe("SourceService", () => {
       // evictable protected-set miss — the ceiling deletes it.
       expect(remaining.has("b_dead")).toBe(false);
       expect(retentionCalls.flatMap((c) => c.imageRefs)).toEqual(["ref/dead"]);
+    });
+
+    it("a session whose sandbox was reclaimed no longer protects its bake", async () => {
+      const svc = makeService({ env: { VALET_PREBUILD_CACHE_BUDGET_GB: "1" } });
+      // Each bake has a newer sibling, so only the session reference could protect it.
+      const bakeFor = async (name: string, at: number) => {
+        const src = await seedRepoSource(db, { id: `src_${name}`, repoFullName: `acme/${name}` });
+        await seedBake(db, src, { id: name, imageRef: `ref/${name}`, sizeBytes: 2 * GB, createdAt: at });
+        await seedBake(db, src, { id: `${name}_newer`, imageRef: `ref/${name}-newer`, sizeBytes: 0, createdAt: at + 500 });
+      };
+      await bakeFor("reaped_hib", NOW - 9000);
+      await bakeFor("reclaimed_child", NOW - 8000);
+      await bakeFor("running_child", NOW - 7000);
+      await seedBakeSession(db, "reaped_hib", "hibernated", { sandboxReclaimedAt: NOW - 100 });
+      // Children stay `active` after they finish; their watch says whether the sandbox is gone.
+      await seedChildWatch(db, await seedBakeSession(db, "reclaimed_child", "active"), NOW - 100);
+      await seedChildWatch(db, await seedBakeSession(db, "running_child", "active"), null);
+      retentionCalls = [];
+
+      const srcTrigger = await seedRepoSource(db, { id: "src_trigger", repoFullName: "acme/trigger" });
+      await pushBakeWithSize(svc, srcTrigger, "sha-new", 0);
+
+      const remaining = await idsRemaining();
+      expect(remaining.has("reaped_hib")).toBe(false);
+      expect(remaining.has("reclaimed_child")).toBe(false);
+      expect(remaining.has("running_child")).toBe(true);
+      expect(retentionCalls.flatMap((c) => c.imageRefs)).toEqual(["ref/reaped_hib", "ref/reclaimed_child"]);
     });
 
     it("all-protected over budget → warns once, zero retention calls, zero row deletes", async () => {

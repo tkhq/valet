@@ -4,7 +4,7 @@ import type { LeaseSummary, ListSessionWakeupsResponse, ListThreadFeedersRespons
 import { ApiError } from "~/api/client";
 import { useCancelSessionWakeup, useSessionWakeups } from "~/api/queries";
 import { useThreadFeeders } from "~/api/presence-feeders";
-import { Button, ConfirmDialog, Popover, PopoverContent, PopoverTrigger, Tooltip } from "~/components/primitives";
+import { Button, ConfirmDialog, Popover, PopoverContent, PopoverTrigger } from "~/components/primitives";
 import { Ref } from "~/components/presence/ref";
 import { cn } from "~/lib/cn";
 import { formatWhen } from "~/lib/format-when";
@@ -141,7 +141,7 @@ export interface EventWaitLine {
   moreCount: number;
 }
 
-/** The status line's content: the soonest event, the open thread's counts per kind, and a count of the rest. */
+/** The status line's content: the open thread's soonest event and its counts per kind. */
 export interface StatusLine {
   next?: string;
   kinds: Array<{ kind: BackgroundItem["kind"]; label: string }>;
@@ -151,18 +151,15 @@ export interface StatusLine {
    * label>", or "waiting on <subject label> +N more" for several.
    */
   eventWait?: EventWaitLine;
-  /** Items outside the open thread. The line counts them and never names them. */
-  otherCount: number;
 }
 
 /**
- * Pure: the composer status line for the open thread. The soonest event
- * comes from the open thread's items, or from all items when the open
- * thread has none.
+ * Pure: the composer status line for the open thread. It reads only the
+ * open thread's items, so no other thread's countdown can appear.
  */
 export function statusLine(items: BackgroundItem[], threadId: string | undefined, now: number = Date.now()): StatusLine {
-  const { own, other } = splitByThread(items, threadId);
-  const next = nextEventLabel(own.length > 0 ? own : items, now);
+  const { own } = splitByThread(items, threadId);
+  const next = nextEventLabel(own, now);
   const kinds = KIND_ORDER.flatMap((kind) => {
     const count = own.filter((i) => i.kind === kind).length;
     if (count === 0) return [];
@@ -175,7 +172,7 @@ export function statusLine(items: BackgroundItem[], threadId: string | undefined
   const [oldest] = eventItems;
   const eventWait: EventWaitLine | undefined =
     oldest === undefined ? undefined : { id: oldest.id, label: oldest.subjectLabel ?? oldest.reason, moreCount: eventItems.length - 1 };
-  return { ...(next !== undefined ? { next } : {}), kinds, ...(eventWait !== undefined ? { eventWait } : {}), otherCount: other.length };
+  return { ...(next !== undefined ? { next } : {}), kinds, ...(eventWait !== undefined ? { eventWait } : {}) };
 }
 
 /** Pure: the text form of an event-wait line: "waiting on X" or "waiting on X +2 more". */
@@ -183,13 +180,12 @@ export function eventWaitText(wait: EventWaitLine): string {
   return wait.moreCount > 0 ? `waiting on ${wait.label} +${wait.moreCount} more` : `waiting on ${wait.label}`;
 }
 
-/** Pure: the status line as one string, such as "next wakeup in 26m · 1 process · +2 in other threads". */
+/** Pure: the status line as one string, such as "next wakeup in 26m · 1 process". */
 export function statusLineText(line: StatusLine): string {
   return [
     ...(line.next !== undefined ? [line.next] : []),
     ...line.kinds.map((k) => k.label),
     ...(line.eventWait !== undefined ? [eventWaitText(line.eventWait)] : []),
-    ...(line.otherCount > 0 ? [`+${line.otherCount} in other threads`] : []),
   ].join(" · ");
 }
 
@@ -301,40 +297,6 @@ export function itemTimeTitle(item: BackgroundItem): string | undefined {
   return undefined;
 }
 
-/** Pure: the soonest timer fire time of each thread. Only timers count; other kinds get no thread-list line. */
-export function threadTimerWaits(data: ListSessionWakeupsResponse | undefined): Map<string, number> {
-  const waits = new Map<string, number>();
-  for (const w of data?.wakeups ?? []) {
-    if (w.kind !== "timer" || w.fireAt === undefined) continue;
-    const current = waits.get(w.threadId);
-    if (current === undefined || w.fireAt < current) waits.set(w.threadId, w.fireAt);
-  }
-  return waits;
-}
-
-/** One thread's event waits for its list row: the oldest waiter's subject label and how many others wait. */
-export interface ThreadEventWait {
-  label: string;
-  moreCount: number;
-}
-
-/** Pure: each thread's event waits, named by the oldest waiter, like the composer line. */
-export function threadEventWaits(data: ListSessionWakeupsResponse | undefined): Map<string, ThreadEventWait> {
-  const byThread = new Map<string, Array<{ createdAt: number; label: string }>>();
-  for (const w of data?.wakeups ?? []) {
-    if (w.kind !== "event" || w.subjectLabel === undefined) continue;
-    const list = byThread.get(w.threadId) ?? [];
-    list.push({ createdAt: w.createdAt, label: w.subjectLabel });
-    byThread.set(w.threadId, list);
-  }
-  const waits = new Map<string, ThreadEventWait>();
-  for (const [threadId, list] of byThread) {
-    const oldest = list.reduce((a, b) => (b.createdAt < a.createdAt ? b : a));
-    waits.set(threadId, { label: oldest.label, moreCount: list.length - 1 });
-  }
-  return waits;
-}
-
 /** The current time, refreshed every 30 seconds while `active`, so relative times stay current between polls. */
 function useNow(active: boolean): number {
   const [now, setNow] = useState(() => Date.now());
@@ -443,11 +405,10 @@ function ManageList({
 
 /**
  * Composer status line for background work (spec 2026-10-08, review UI
- * placement): "next wakeup in 26m · 1 process · 1 hold · +2 in other
- * threads". It counts the open thread's work per kind and counts the rest
- * without names. It opens a list of the work, with a Cancel per row when
- * the person may stop it. Renders nothing while the session has no
- * background work.
+ * placement): "next wakeup in 26m · 1 process · 1 hold". It counts the
+ * open thread's work per kind. It opens a list of the work, with a Cancel
+ * per row when the person may stop it. Renders nothing while the open
+ * thread has no background work of its own.
  */
 export function BackgroundWorkStatusLine({
   sessionId,
@@ -463,12 +424,13 @@ export function BackgroundWorkStatusLine({
 }) {
   const { data } = useSessionWakeups(sessionId);
   const items = backgroundItems(data);
-  const now = useNow(items.length > 0);
+  const { own, other } = splitByThread(items, threadId);
+  const now = useNow(own.length > 0);
   const { ask, dialog } = useBackgroundWorkCancel(sessionId);
-  if (items.length === 0) return <>{dialog}</>;
+  // Only the open thread's own work shows a line; other threads' work never does.
+  if (own.length === 0) return <>{dialog}</>;
 
   const line = statusLine(items, threadId, now);
-  const { own, other } = splitByThread(items, threadId);
   const segments: ReactNode[] = [
     ...(line.next !== undefined
       ? [<span key="next" className="inline-flex items-center gap-1"><Clock className="h-3.5 w-3.5 shrink-0" aria-hidden />{line.next}</span>]
@@ -479,7 +441,6 @@ export function BackgroundWorkStatusLine({
     ...(line.eventWait !== undefined
       ? [<span key={`event-${line.eventWait.id}`} className="inline-flex items-center gap-1"><KindIcon kind="event" />{eventWaitText(line.eventWait)}</span>]
       : []),
-    ...(line.otherCount > 0 ? [<span key="other">+{line.otherCount} in other threads</span>] : []),
   ];
 
   return (
@@ -587,33 +548,5 @@ export function BackgroundWorkSection({
       {feedById === undefined && <FeedByLine feeders={feeders.data} />}
       {dialog}
     </section>
-  );
-}
-
-/**
- * The thread list's quiet line under a thread that waits on a timer:
- * "Waiting · next wakeup in 26m". The exact fire time shows on hover.
- */
-export function ThreadTimerLine({ fireAt, className }: { fireAt: number; className?: string }) {
-  const now = useNow(true);
-  return (
-    <Tooltip content={`Fires ${formatWhen(fireAt)}`}>
-      <p className={cn("truncate text-[11px] leading-4 text-muted", className)}>
-        Waiting · next wakeup {timeUntil(fireAt, now)}
-      </p>
-    </Tooltip>
-  );
-}
-
-/**
- * The thread list's quiet line under a thread that waits on an event:
- * "Waiting on <subject label>", plus "+N more" when the thread has other
- * event waits (spec Part H).
- */
-export function ThreadEventLine({ label, moreCount = 0, className }: { label: string; moreCount?: number; className?: string }) {
-  return (
-    <p className={cn("truncate text-[11px] leading-4 text-muted", className)}>
-      {moreCount > 0 ? `Waiting on ${label} +${moreCount} more` : `Waiting on ${label}`}
-    </p>
   );
 }

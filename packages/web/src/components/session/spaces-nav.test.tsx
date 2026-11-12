@@ -23,7 +23,7 @@ const team = (id: string, name: string): TeamSummary =>
 
 function mount(path: string) {
   const root = createRootRoute({ component: () => <WorkspaceScopeProvider><SpacesNav /><Outlet /></WorkspaceScopeProvider> });
-  const routes = ["/", "/chat", "/workflows", "/presence", "/artifacts", "/overview", "/memory", "/skills", "/integrations", "/usage", "/security"].map(p => createRoute({ getParentRoute: () => root, path: p, component: () => null }));
+  const routes = ["/", "/chat", "/workflows", "/presence", "/artifacts", "/overview", "/memory", "/skills", "/security", "/settings/integrations", "/settings/teams/$teamId"].map(p => createRoute({ getParentRoute: () => root, path: p, component: () => null }));
   // An editor with unsaved edits that refuses to be left.
   const editor = createRoute({ getParentRoute: () => root, path: "/workflows/$id", component: function Editor() { useBlocker({ shouldBlockFn: () => true }); return null; } });
   const router = createRouter({ routeTree: root.addChildren([...routes, editor]), history: createMemoryHistory({ initialEntries: [path] }) });
@@ -42,7 +42,7 @@ describe("SpacesNav", () => {
   it("lists a solo caller's Personal space with its pages", async () => {
     mount("/workflows");
     const pages = await screen.findByRole("list", { name: "Personal pages" });
-    expect(within(pages).getAllByRole("link").map((link) => link.textContent)).toEqual(["Threads", "Workflows", "Presence", "Artifacts"]);
+    expect(within(pages).getAllByRole("link").map((link) => link.textContent)).toEqual(["Threads", "Workflows", "Presence", "Artifacts", "Skills", "Memory", "Settings"]);
     expect(within(pages).getByRole("link", { name: "Workflows" }).getAttribute("aria-current")).toBe("page");
   });
 
@@ -176,10 +176,10 @@ describe("SpacesNav", () => {
 
   it("keeps the page when switching space from a space page", async () => {
     teams = [team("t1", "Engineering"), team("t2", "Sales")];
-    const router = mount("/integrations?workspace=t1");
+    const router = mount("/skills?workspace=t1");
     await userEvent.click(await screen.findByRole("link", { name: "Sales" }));
     await waitFor(() => expect(router.state.location.search).toEqual({ workspace: "t2" }));
-    expect(router.state.location.pathname).toBe("/integrations");
+    expect(router.state.location.pathname).toBe("/skills");
     expect(window.sessionStorage.getItem("valet:workspace")).toBe("t2");
   });
 
@@ -198,45 +198,23 @@ describe("SpacesNav", () => {
     expect(router.state.location.pathname).toBe("/chat");
   });
 
-  it("keeps a space's settings behind its Settings row, closed until opened, and remembers it", async () => {
-    mount("/chat");
-    await screen.findByRole("list", { name: "Personal pages" });
-    expect(screen.queryByRole("list", { name: "Personal settings" })).toBeNull();
-    await userEvent.click(screen.getByRole("button", { name: "Show Personal settings" }));
-    const settings = screen.getByRole("list", { name: "Personal settings" });
-    expect(within(settings).getAllByRole("link").map((link) => [link.textContent, link.getAttribute("href")])).toEqual([
-      ["Integrations", "/integrations?workspace=user"], ["Skills", "/skills?workspace=user"],
-      ["Memory", "/memory?workspace=user"], ["Usage", "/usage?workspace=user"],
-    ]);
-    expect(JSON.parse(window.localStorage.getItem("valet:spaces-settings-expanded") ?? "{}")).toEqual({ user: true });
-  });
-
-  it("indents the settings pages one level past the Settings row", async () => {
-    mount("/memory");
-    const settings = await screen.findByRole("list", { name: "Personal settings" });
-    const indent = (link: HTMLElement) => link.className.split(/\s+/).filter((name) => /^pl-/.test(name));
-    for (const link of within(settings).getAllByRole("link")) expect(indent(link)).toEqual(["pl-12"]);
-    expect(indent(within(screen.getByRole("list", { name: "Personal pages" })).getByRole("link", { name: "Workflows" }))).toEqual(["pl-8"]);
-    // The Settings row holds no fill of its own, so nothing spreads under its open pages.
-    expect(screen.getByRole("button", { name: "Hide Personal settings" }).className.split(/\s+/)).not.toContain("bg-ink-wash-strong");
-  });
-
-  it("opens Settings and selects the row on one of its pages", async () => {
+  it("opens a team's settings page from its Settings row", async () => {
     teams = [team("t1", "Platform")];
-    mount("/memory?workspace=t1");
-    const settings = await screen.findByRole("list", { name: "Platform settings" });
-    const memory = within(settings).getByRole("link", { name: "Memory" });
-    expect(memory.getAttribute("aria-current")).toBe("page");
-    expect(memory.className.split(/\s+/)).toContain("bg-ink-wash-strong");
-    expect(screen.getByRole("button", { name: "Hide Platform settings" }).getAttribute("aria-expanded")).toBe("true");
+    mount("/chat?workspace=t1");
+    const settings = await screen.findByRole("link", { name: "Platform settings" });
+    expect(settings.getAttribute("href")).toBe("/settings/teams/t1");
+    expect(settings.getAttribute("data-tour")).toBe("space-settings");
+  });
+
+  it("opens your own Integrations from Personal's Settings row", async () => {
+    mount("/chat");
+    expect((await screen.findByRole("link", { name: "Personal settings" })).getAttribute("href")).toBe("/settings/integrations");
   });
 
   it("lists neither Security nor Overview in a space, even with the plugin", async () => {
     plugins = [{ name: "security", enabledForCaller: true }];
     mount("/security");
-    await userEvent.click(await screen.findByRole("button", { name: "Show Personal settings" }));
-    const rows = [screen.getByRole("list", { name: "Personal pages" }), screen.getByRole("list", { name: "Personal settings" })]
-      .flatMap((list) => within(list).getAllByRole("link").map((link) => link.textContent));
+    const rows = within(await screen.findByRole("list", { name: "Personal pages" })).getAllByRole("link").map((link) => link.textContent);
     expect(rows).not.toContain("Security");
     expect(rows).not.toContain("Overview");
   });
@@ -246,7 +224,7 @@ describe("SpacesNav", () => {
     mount("/chat");
     await userEvent.click(await screen.findByRole("button", { name: "Show Platform pages" }));
     const items = (await screen.findAllByRole("menuitem")).map((item) => item.textContent);
-    expect(items).toEqual(["Threads", "Workflows", "Presence", "Artifacts", "Integrations", "Skills", "Memory", "Usage"]);
+    expect(items).toEqual(["Threads", "Workflows", "Presence", "Artifacts", "Skills", "Memory", "Settings"]);
   });
 
   it("maps paths to the space page they belong to", () => {
@@ -256,7 +234,8 @@ describe("SpacesNav", () => {
     expect(spacePageFor("/presence/activity")).toBe("/presence");
     expect(spacePageFor("/artifacts")).toBe("/artifacts");
     expect(spacePageFor("/memory/graph")).toBe("/memory");
-    expect(spacePageFor("/integrations")).toBe("/integrations");
+    expect(spacePageFor("/skills/review")).toBe("/skills");
+    expect(spacePageFor("/integrations")).toBeUndefined();
     expect(spacePageFor("/changelog")).toBeUndefined();
     expect(spacePageFor("/overview")).toBeUndefined();
     expect(spacePageFor("/security")).toBeUndefined();

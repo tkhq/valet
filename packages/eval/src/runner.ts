@@ -7,6 +7,7 @@
  * `ANTHROPIC_API_KEY` (or the matching provider env var) through pi-ai's
  * env fallback. Tests use the pi-ai faux provider instead.
  */
+import type { ReviewFocus } from "@valet/plugin-pr-review";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,6 +21,7 @@ import {
   VirtualSandboxProvider,
   builtinTools,
   resolveModelId,
+  type ChildReader,
   type ChildSpawner,
   type Model,
   type Principal,
@@ -29,6 +31,7 @@ import {
   type ToolDef,
   type ValetPlugin,
 } from "@valet/engine";
+import { childCitationNote, markForeignCitations } from "@valet/shared";
 import { gatewayModelResolver, viaGateway, type LlmGateway } from "./gateway.js";
 import { buildRealCatalogTools } from "./integration.js";
 import { EvalMemoryStore, buildEvalMemoryTools } from "./memory-tools.js";
@@ -40,6 +43,9 @@ import type { EvalCase, ReasoningLevel, Trajectory, VerificationResult } from ".
 const DEFAULT_TIMEOUT_MS = 300_000;
 const EVAL_USER_ID = "eval-user";
 const EVAL_ORG_ID = "eval-org";
+
+/** Output reserve under a case window (`EvalCase.context_window_tokens`). */
+const CASE_WINDOW_RESERVE_TOKENS = 10_000;
 
 /** Submission outcomes the runner reports. Mirrors the engine's settlement outcomes. */
 export type CaseOutcome = "completed" | "failed" | "aborted" | "superseded" | "merged" | "timeout";
@@ -93,6 +99,18 @@ export interface RunnerOptions {
   verify?: boolean;
   /** Independent code-review passes per case. */
   reviewPasses?: number;
+  /** One extra focused code-review pass per entry (failure, concurrency, tests). */
+  reviewFocus?: ReviewFocus[];
+  /** Drop focused-pass findings rated below this confidence (0-1). */
+  focusMinConfidence?: number;
+  /** Drop code-review findings rated below this confidence (0-1). */
+  minConfidence?: number;
+  /** Merge code-review findings that report the same defect at nearby lines (one model call per review). */
+  reviewDedupe?: boolean;
+  /** Context pack budget in tokens for code-review cases (about 4 chars each). 0 or unset: no pack. */
+  contextBudget?: number;
+  /** A directory of memory files the code-review pack reads as team memory. */
+  memoryDir?: string;
   /**
    * Send every model call through this Valet LLM gateway with its `vlt_`
    * key, instead of provider keys from the environment.
@@ -281,6 +299,13 @@ async function runCaseInner(evalCase: EvalCase, opts: RunnerOptions): Promise<Ca
     return { childSessionId: child.id, queueItemId: receipt.queueItemId };
   };
 
+  // Mirrors the api's buildChildReader: only this run's children, default thread.
+  const childReader: ChildReader = async (req, ctx) => {
+    const child = children.find((c) => c.session.id === req.childSessionId && ctx.parentSessionId === session.id);
+    if (!child) return null;
+    return store.getEntries(child.session.id, child.session.thread().id, { limit: req.limit ?? 30, includeCompacted: true });
+  };
+
   // Restriction applies across builtins and custom tools alike; the engine
   // assembles `session.builtinTools + options.tools`.
   const allTools = [...builtinTools, ...customTools];
@@ -294,24 +319,32 @@ async function runCaseInner(evalCase: EvalCase, opts: RunnerOptions): Promise<Ca
       ? { workspace: await mkdtemp(join(tmpdir(), `valet-eval-${evalCase.id}-`)) }
       : {};
 
+  // A case window changes only what the engine budgets against.
+  const caseModel = evalCase.context_window_tokens !== undefined
+    ? { ...model, contextWindow: evalCase.context_window_tokens }
+    : model;
+  const compaction = {
+    ...(evalCase.context_budget_tokens !== undefined
+      // Idle delay 0: a case's turns arrive back to back, so it compacts at
+      // each turn end instead of waiting for an idle thread.
+      ? { contextBudgetTokens: evalCase.context_budget_tokens, idleCompactionMs: 0 }
+      : {}),
+    ...(evalCase.context_window_tokens !== undefined ? { reserveTokens: CASE_WINDOW_RESERVE_TOKENS } : {}),
+  };
   const session = await engine.createSession({
     userId: EVAL_USER_ID,
     orgId: EVAL_ORG_ID,
     workspace: "/workspace",
     purpose: isOrchestrator ? "orchestrator" : "interactive",
     sandbox: sandboxOpts,
-    model: opts.gateway !== undefined ? viaGateway(model, opts.gateway) : model,
+    model: opts.gateway !== undefined ? viaGateway(caseModel, opts.gateway) : caseModel,
     modelSpec,
     ...(opts.gateway !== undefined ? { resolveModel: gatewayModelResolver(opts.gateway) } : {}),
     owner,
     builtinTools: restricted.filter((t) => builtinNames.has(t.name)),
     tools: restricted.filter((t) => !builtinNames.has(t.name)),
     warmSandboxOnClaim: false,
-    ...(evalCase.context_budget_tokens !== undefined
-      // Idle delay 0: a case's turns arrive back to back, so it compacts at
-      // each turn end instead of waiting for an idle thread.
-      ? { compaction: { contextBudgetTokens: evalCase.context_budget_tokens, idleCompactionMs: 0 } }
-      : {}),
+    ...(Object.keys(compaction).length > 0 ? { compaction } : {}),
     ...(evalCase.temperature !== undefined || evalCase.reasoning !== undefined || opts.reasoning !== undefined
       ? {
           sampling: {
@@ -323,7 +356,7 @@ async function runCaseInner(evalCase: EvalCase, opts: RunnerOptions): Promise<Ca
         }
       : {}),
     systemPrompt: opts.systemPrompt ?? (isOrchestrator ? EVAL_PERSONA : undefined),
-    ...(isOrchestrator ? { toolConfig: { childSpawner } } : {}),
+    ...(isOrchestrator ? { toolConfig: { childSpawner, childReader } } : {}),
     // Evals are unattended, but retries would blur cost/duration numbers —
     // measure the single attempt.
     turnRetry: { maxAttempts: 1 },
@@ -368,10 +401,11 @@ async function runCaseInner(evalCase: EvalCase, opts: RunnerOptions): Promise<Ca
         const res = await next.session.thread().awaitResult(next.queueItemId, { timeoutMs: remaining() });
         next.settledAt = Date.now();
         childOutcome = res.outcome;
+        // Same citation marking as the api's resultBody, without its ceiling.
         body =
           res.outcome === "failed" || res.outcome === "aborted"
-            ? (res.error ?? res.text ?? `child submission ${res.outcome}`)
-            : (res.text ?? "");
+            ? markForeignCitations(res.error ?? res.text ?? `child submission ${res.outcome}`, "child")
+            : markForeignCitations(res.text ?? "", "child") + childCitationNote(res.text ?? "", next.session.id);
       } catch (err) {
         if (err instanceof TimeoutError) {
           outcome = "timeout";

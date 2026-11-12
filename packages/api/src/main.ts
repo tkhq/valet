@@ -65,6 +65,7 @@ import {
   type InstallationSweepHandle,
 } from "./services/github-installation-sweep.js";
 import { deriveSecretKey } from "./lib/secret-crypto.js";
+import { registerPluginLineMetrics, reportUnloadedPluginLines } from "./observability/plugin-line-metrics.js";
 
 /** Handle returned by `startServer`: a graceful `close()` plus the resolved
  * values the boot actually used. */
@@ -640,6 +641,10 @@ async function runBootChain(): Promise<void> {
   // freshly-ingested ones between nudges) get delivered.
   configureSlackIngress(providers);
   providers.eventDispatcher.start();
+  // A deploy that drops a plugin leaves lines whose deliveries all fail.
+  // Report them now and keep a gauge for the alert; nothing repairs them.
+  registerPluginLineMetrics(providers.db, providers.plugins);
+  void reportUnloadedPluginLines(providers.db, providers.plugins).catch((err) => console.error("boot: unloaded plugin line check failed:", err));
   providers.onlineStatusWatcher.start();
 
   // Repository content sync: re-reads every tracked repository on its own

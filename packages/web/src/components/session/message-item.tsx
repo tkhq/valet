@@ -16,6 +16,7 @@ import { ToolCallBlock } from "./tool-call-block";
 import { ReasoningLine, segmentParts, withExtraWork, WorkGroup, workKey, type WorkPart } from "./work-group";
 import { extractSkillInvocation, type SkillBlock } from "./tool-renderers/skill";
 import { cn } from "~/lib/cn";
+import { stripArtifactConversationContext } from "~/lib/artifact-conversation-context";
 import { shortModelLabel } from "~/lib/models";
 import { useRateMessage, useSessionRatings } from "~/api/queries";
 import { RatingButtons } from "./rating-buttons";
@@ -213,7 +214,7 @@ export const MessageItem = memo(function MessageItem({
               <UserAttachmentStrip attachments={message.attachments} />
             )}
             {message.parts.length === 0 && message.content && (
-              <TextBlock text={message.content} skillMeta={isUser ? message.skill : undefined} detectSkill={isUser} collapseStructured={collapseStructured} />
+              <TextBlock text={message.content} skillMeta={isUser ? message.skill : undefined} detectSkill={isUser} citations={message.role === "assistant"} collapseStructured={collapseStructured} />
             )}
             {segments.map((segment, i) => segment.kind === "work"
               // Work lines and tool cards hold per-mount state (open or
@@ -228,6 +229,7 @@ export const MessageItem = memo(function MessageItem({
                   readOnly={readOnly}
                   skillMeta={isUser ? message.skill : undefined}
                   detectSkill={isUser}
+                  citations={message.role === "assistant"}
                   collapseStructured={collapseStructured}
                 />)}
             {!suppressEmptyPlaceholder && isEmptyAssistantMessage(message) && (message.errorMessage?.trim()
@@ -344,13 +346,15 @@ export function messageCopyText(message: StreamMessage): string {
     .filter((p): p is Extract<MessagePart, { kind: "text" }> => p.kind === "text")
     .map((p) => p.text.trim())
     .filter(Boolean);
-  const raw = texts.length > 0 ? texts.join("\n\n") : (message.content?.trim() ?? "");
+  const body = texts.length > 0 ? texts.join("\n\n") : (message.content?.trim() ?? "");
+  const raw = message.role === "user" ? stripArtifactConversationContext(body).trim() : body;
   // A skill-invocation user message displays as a card plus the typed
   // arguments — copying the raw multi-KB expansion would paste internal
   // markup that, re-sent, bypasses dispatch and persists the stale skill
   // body. Copy the re-sendable command form instead.
   if (message.role === "user" && raw) {
-    const block = extractSkillInvocation(raw, message.skill);
+    const skill = message.skill && { ...message.skill, args: stripArtifactConversationContext(message.skill.args ?? "") };
+    const block = extractSkillInvocation(raw, skill);
     if (block) return `/skill:${block.name}${block.rest ? ` ${block.rest}` : ""}`;
   }
   return raw;
@@ -378,6 +382,7 @@ function PartView({
   part,
   skillMeta,
   detectSkill,
+  citations,
   collapseStructured,
   readOnly,
 }: {
@@ -385,11 +390,12 @@ function PartView({
   part: MessagePart;
   skillMeta?: MessageSkillInvocation;
   detectSkill?: boolean;
+  citations?: boolean;
   collapseStructured?: boolean;
 }) {
   switch (part.kind) {
     case "text":
-      return <TextBlock text={part.text} skillMeta={skillMeta} detectSkill={detectSkill} collapseStructured={collapseStructured} />;
+      return <TextBlock text={part.text} skillMeta={skillMeta} detectSkill={detectSkill} citations={citations} collapseStructured={collapseStructured} />;
     case "thinking":
       return <ReasoningLine part={part} live={false} />;
     case "tool_call":
@@ -398,9 +404,10 @@ function PartView({
 }
 
 function TextBlock({
-  text,
+  text: rawText,
   skillMeta,
   detectSkill = false,
+  citations = false,
   collapseStructured = false,
 }: {
   text: string;
@@ -409,12 +416,18 @@ function TextBlock({
   /** True only for user messages — the dispatcher writes skill blocks
    *  nowhere else, and assistant prose that quotes one must stay prose. */
   detectSkill?: boolean;
+  citations?: boolean;
   collapseStructured?: boolean;
 }) {
+  const text = detectSkill ? stripArtifactConversationContext(rawText) : rawText;
   // Memoized so streaming re-renders elsewhere in the thread don't re-run
   // the extraction on static user text every frame.
   const block = useMemo(
-    () => (detectSkill ? extractSkillInvocation(text, skillMeta) : null),
+    () => {
+      if (!detectSkill) return null;
+      const skill = skillMeta && { ...skillMeta, args: stripArtifactConversationContext(skillMeta.args ?? "") };
+      return extractSkillInvocation(text, skill);
+    },
     [text, skillMeta, detectSkill],
   );
   const structured = useMemo(
@@ -433,7 +446,7 @@ function TextBlock({
   }
   // Assistant text fills a centered column, so its tables may grow past
   // it. A user message sits in a bubble at one side.
-  return <Markdown wideTables={!detectSkill}>{text}</Markdown>;
+  return <Markdown wideTables={!detectSkill} citations={citations}>{text}</Markdown>;
 }
 
 interface StructuredText {

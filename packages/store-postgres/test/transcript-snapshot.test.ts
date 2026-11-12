@@ -75,6 +75,9 @@ describe("getTranscriptSnapshot", () => {
     const { live, render, full } = await both("q1");
     const prompt = live.entries.find((e) => e.id === "m1");
     expect(prompt?.type === "message" ? prompt.content : "").toContain("m1 ");
+    // The task's later entries stay stubs: only the prompt is kept.
+    const reply = live.entries.find((e) => e.id === "m2");
+    expect(reply?.type === "message" ? [reply.content, reply.parts] : null).toEqual(["", undefined]);
     expect(render(live.entries)).toEqual(render(full.entries));
   });
 

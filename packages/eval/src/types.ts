@@ -172,6 +172,8 @@ export type DeterministicCheck =
   | { type: "output_not_contains"; value?: string; pattern?: string }
   | { type: "all_terminal" }
   | { type: "no_errors" }
+  /** Require at least one source tag, with every tag backed by a tool result. */
+  | { type: "citation_validity" }
   | {
       type: "max_turns";
       value: number;
@@ -279,7 +281,19 @@ export interface GoldenComment {
   severity?: string;
   /** Martian category: bug, security, concurrency, data, api, perf, test_gap, doc_defect, style, speculative. */
   category: string;
+  /** The defect shows only in another repository, e.g. a consumer of a changed wire format. */
+  cross_repo?: boolean;
+  /** The fix the human reviewer proposed or the author merged, for fix-match scoring. `review_match` ignores it. */
+  fix?: string;
 }
+
+/**
+ * What a review case holds: a planted defect to find, a control with no
+ * defect (every finding counts as a false positive), or a setup PR that
+ * lays down fixtures for later cases.
+ */
+export const REVIEW_CASE_KINDS = ["planted", "control", "setup"] as const;
+export type ReviewCaseKind = (typeof REVIEW_CASE_KINDS)[number];
 
 /** Martian scoring profiles: which golden categories count toward TP and FN. */
 export const REVIEW_PROFILES = ["strict", "core", "all"] as const;
@@ -294,7 +308,10 @@ export type ReviewProfile = (typeof REVIEW_PROFILES)[number];
  */
 export interface ReviewMatchCheck {
   type: "review_match";
+  /** Empty only for a `control` or `setup` case. */
   golden: GoldenComment[];
+  /** Unset for Martian cases: every case has golden comments. */
+  kind?: ReviewCaseKind;
   /** Default `core`, Martian's primary metric. */
   profile?: ReviewProfile;
   /** Pass when recall on this case reaches this fraction. Default 0: any submitted review passes. */
@@ -333,6 +350,7 @@ export const CHECK_TYPES = [
   "output_not_contains",
   "all_terminal",
   "no_errors",
+  "citation_validity",
   "max_turns",
   "max_tokens",
   "min_compactions",
@@ -391,6 +409,17 @@ export type EvalProfile = "unit" | "mock" | "integration" | "full";
 /** Canned response for one mocked tool (`profile: mock`). */
 export interface MockToolSpec {
   response: string;
+  /** Sources the mocked read returns; the engine numbers them (s1, s2…) like a real tool. */
+  sources?: MockSource[];
+}
+
+/** One source a mocked tool returns. Same shape a plugin action returns. */
+export interface MockSource {
+  service: string;
+  title: string;
+  url?: string;
+  snippet?: string;
+  location?: string;
 }
 
 /**
@@ -408,6 +437,13 @@ export interface PullRequestSpec {
   head: string;
   title: string;
   body?: string;
+  /**
+   * The remote is private. Without read access the case SKIPs, and the case
+   * file holds no code or description text.
+   */
+  private?: boolean;
+  /** Pull request number on the remote's GitHub repo. With no `body`, the runner reads the description from GitHub. */
+  number?: number;
   /** Check each finding with a verifier agent before scoring. Default true. */
   verify?: boolean;
 }
@@ -462,6 +498,14 @@ export interface EvalCase {
    * compaction. Engine drive only.
    */
   context_budget_tokens?: number;
+  /**
+   * The context window the engine assumes for the case model, with a 10,000
+   * token output reserve. The provider's real window does not change. A
+   * small value makes one long turn compact before a model call, which
+   * `context_budget_tokens` cannot do: that budget applies between turns.
+   * Engine drive only.
+   */
+  context_window_tokens?: number;
   /**
    * How the case is driven. `engine` (default): in-process engine with
    * eval stand-ins — fast, cheap, lab conditions. `product`: boots the

@@ -5,12 +5,29 @@
  * too, but is never *called* there — the composition root passes the Bun
  * adapter when `isBunRuntime()`.
  */
+import { Server as HttpServer } from "node:http";
 import type { Socket } from "node:net";
 import { serve } from "@hono/node-server";
 import { createNodeWebSocket } from "@hono/node-ws";
 import type { Hono } from "hono";
 import type { AppEnv } from "./env.js";
 import type { RunningServer, ServeOptions, ServerAdapter, WebSocketBinding } from "./server-adapter.js";
+
+/**
+ * Idle keep-alive time, above ingress-nginx's 60 s upstream keep-alive.
+ * With Node's 5 s default, nginx reused a connection Node had just closed,
+ * got "connection reset by peer", and answered 502. nginx does not retry a
+ * POST, so a GitHub webhook was lost (agents-dev, 2026-11-09 15:49Z).
+ */
+export const KEEP_ALIVE_TIMEOUT_MS = 65_000;
+/** Above the keep-alive time, as Node requires for the timeouts to apply in order. */
+export const HEADERS_TIMEOUT_MS = 66_000;
+
+/** Keep idle connections open longer than the proxy in front of the api. */
+export function configureKeepAlive(server: HttpServer): void {
+  server.keepAliveTimeout = KEEP_ALIVE_TIMEOUT_MS;
+  server.headersTimeout = HEADERS_TIMEOUT_MS;
+}
 
 export const nodeServerAdapter: ServerAdapter = {
   runtime: "node",
@@ -35,6 +52,7 @@ export const nodeServerAdapter: ServerAdapter = {
           boundPort = info.port;
           opts.onListen?.(info.port);
         });
+        if (server instanceof HttpServer) configureKeepAlive(server);
         // Attach the WS upgrade handler to the running http server.
         injectWebSocket(server);
         // Every open socket, upgraded WebSockets included. `server.close()`

@@ -12,3 +12,12 @@ export const CONTROL_SIZE: Record<ControlSize, string> = {
   sm: "h-8 text-xs max-sm:min-h-11 max-sm:text-base",
   md: "h-9 text-sm max-sm:min-h-11 max-sm:text-base",
 };
+
+/**
+ * The one keyboard focus ring for a control: a 2px moss ring with a 2px gap
+ * in the page color. `Button` (every variant), `Switch`, `Checkbox`, and
+ * `RadioCard` use it. Moss on `--paper` passes the 3:1 non-text floor
+ * (WCAG 1.4.11) in every palette; the grey ring it replaced measured 2.49:1.
+ */
+export const FOCUS_RING =
+  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss focus-visible:ring-offset-2 focus-visible:ring-offset-[--bg]";

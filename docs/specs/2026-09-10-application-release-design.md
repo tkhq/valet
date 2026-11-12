@@ -9,6 +9,14 @@ The workflow calls the existing CLI and Docker workflows with the new tag. Reusa
 The publishers check out the tag and use that tag for artifact metadata. The release run reports publisher failures.
 A failed publisher can be rerun from its failed job without allocating another version.
 
+Branch publishers use the source SHA in their concurrency groups. Checks can finish out of commit order without canceling another commit's artifacts.
+Tag publishers retain their tag concurrency groups and do not cancel active tag builds.
+CLI uploads share a separate publication lock. The queue preserves up to 100 waiting jobs instead of replacing a pending publisher.
+Immediately before a rolling upload, the publisher reads the remote `dev-v2` head. It uploads only when that head matches the build SHA.
+The lock covers this check and the complete upload. An older build cannot overwrite a newer rolling release after waiting for the lock.
+If the branch advances during an upload, its publisher waits for that upload before checking the head again.
+A failed head lookup fails publication. Versioned release uploads do not use this rolling-release check.
+
 The product changelog accepts only stable application tags. Chart tags never create product checkpoints or comparison boundaries.
 The committed manifest is rebuilt from application tags to remove historical chart checkpoints. Rolling builds include changes since the last application release.
 

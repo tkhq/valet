@@ -40,7 +40,7 @@ function argText(args: unknown, key: string): string | undefined {
 /** Where the task stands now, from Tasks: in progress, needs the person, or finished. */
 function liveItem(threadId: string, tasks: ReturnType<typeof useHomeTasks>["data"]): HomeTaskItem | undefined {
   if (!tasks) return undefined;
-  return [...tasks.needsYou, ...tasks.working, ...tasks.updates, ...tasks.finished].find(item => item.threadId === threadId);
+  return [...tasks.needsYou, ...tasks.working, ...tasks.finished].find(item => item.threadId === threadId);
 }
 
 /**

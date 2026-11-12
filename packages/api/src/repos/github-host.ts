@@ -174,6 +174,27 @@ async function fetchRepoPage(
   return list.filter(isRawGitHubRepo);
 }
 
+/** GitHub's largest page for `GET /installation/repositories`. */
+const INSTALLATION_PAGE_SIZE = 100;
+/** Pages read per installation: up to 1,000 repositories. */
+const MAX_INSTALLATION_PAGES = 10;
+
+/**
+ * Every repository one installation can reach, page by page. A failed
+ * first page returns null; a failed later page keeps the pages before it.
+ */
+async function installationRepos(ctx: RepoHostContext, token: string, accountLogin: string): Promise<RawGitHubRepo[] | null> {
+  const repos: RawGitHubRepo[] = [];
+  for (let page = 1; page <= MAX_INSTALLATION_PAGES; page++) {
+    const batch = await fetchRepoPage(ctx, `/installation/repositories?per_page=${INSTALLATION_PAGE_SIZE}&page=${page}`, token);
+    if (!batch) return page === 1 ? null : repos;
+    repos.push(...batch);
+    if (batch.length < INSTALLATION_PAGE_SIZE) return repos;
+  }
+  console.warn(`github-host: installation ${accountLogin} reaches more than ${MAX_INSTALLATION_PAGES * INSTALLATION_PAGE_SIZE} repositories; the list shows the first ${repos.length}`);
+  return repos;
+}
+
 async function listInstallationRepos(ctx: RepoHostContext): Promise<RepoListItem[]> {
   const appDeps: GithubAppDeps = {
     db: ctx.deps.db,
@@ -198,7 +219,7 @@ async function listInstallationRepos(ctx: RepoHostContext): Promise<RepoListItem
         return [];
       }
       if (!token) return [];
-      const repos = await fetchRepoPage(ctx, "/installation/repositories?per_page=100", token);
+      const repos = await installationRepos(ctx, token, row.accountLogin);
       return repos ? repos.map(mapGitHubRepo) : [];
     }),
   );

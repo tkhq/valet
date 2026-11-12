@@ -236,54 +236,86 @@ permissions (`0600`).
 The MCP tools let a local agent delegate work and follow it. See
 [MCP agent tools](./specs/2026-10-07-mcp-agent-tools-design.md).
 
-### `valet proxy setup|token|remove <harness> [--no-wait] [--force] [--rotate]`
+### `valet proxy setup|status|token|remove <harness>`
 
-Send a local coding tool's model calls through the instance's LLM proxy, so
-Valet records them and bills them to you. The supported harness is
-`claude-code`.
+Send a local coding tool's model calls through the instance's LLM proxy.
+Valet records the calls under your proxy key.
 
 ```bash
-valet proxy setup claude-code    # ask for a key, then configure Claude Code
-valet proxy remove claude-code   # undo setup and revoke the key
+valet proxy list
+valet proxy setup claude-code
+valet proxy setup codex
+valet proxy setup opencode
+valet proxy status codex
+valet proxy remove codex
 ```
 
-`setup` needs a `valet login` browser sign-in, and an org proxy in centralized
-mode. It works like this:
+`setup` needs a `valet login` browser sign-in and a centralized org proxy.
+Pass `--instance <name>` to select an instance profile.
 
-1. The CLI asks for a proxy key, shows a code, and opens `/cli/device`.
-2. You approve the key in the browser. Only your own account can approve it.
-3. The CLI stores the key in the instance profile in `config.json`.
-4. The CLI runs the key helper once and checks that it prints the key.
-5. The CLI writes `env.ANTHROPIC_BASE_URL` and `apiKeyHelper` to
-   `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR/settings.json`).
+1. The CLI checks the tool version, local config, and proxy mode.
+2. The CLI shows a code and opens the approval page.
+3. You approve the proxy key in the browser.
+4. The CLI stores the key in its private instance profile.
+5. The CLI checks the key helper and writes the tool config.
 
-An agent whose commands time out runs `valet proxy setup claude-code
---no-wait`. That starts the request, prints the code, and exits. After you
-approve it, the agent runs setup again to finish.
+| Tool | Setup writes | Start command |
+| --- | --- | --- |
+| Claude Code | `env.ANTHROPIC_BASE_URL` and `apiKeyHelper` in `~/.claude/settings.json` | `claude` |
+| Codex CLI 0.164.0 or later | A separate `$CODEX_HOME/valet.config.toml` profile with command-based authentication | `codex --profile valet` |
+| OpenCode 1.x | Native Anthropic and OpenAI provider options in its global JSON or JSONC config | `opencode` |
+| OpenCode 2.x | Valet Anthropic and Valet OpenAI provider aliases in its global JSON or JSONC config | `opencode` |
 
-The key works only at the proxy. It cannot call the Valet API. It stays valid
-until you run `valet proxy remove` or `valet logout`, or revoke it in Settings >
-API keys. Disconnecting the CLI does not revoke it. If you revoke it in
-Settings, run setup again: setup checks the stored key and asks for a new one.
+Codex keeps its default config and ChatGPT login. The Valet profile inherits
+its selected model. Choose a model that your org's OpenAI provider supports.
 
-The key helper ranks above a claude.ai login, so after setup your Claude Code
-model use bills through Valet, not your Claude subscription. Setup stops
-before it changes anything in these cases:
+OpenCode keeps JSONC comments, model settings, and unrelated providers.
+OpenCode 2.x keeps native provider credentials and adds separate Valet aliases.
+Setup reads OpenCode’s native model catalog through an isolated local process.
+The aliases list actual native models, including on a fresh config.
+If you selected a native Anthropic or OpenAI model, setup selects its matching
+Valet alias. In `/models`, choose Valet Anthropic or Valet OpenAI when needed.
+Other providers keep their existing endpoints.
 
-- Your shell exports `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`. Claude Code
-  uses those before the key helper. Remove the export, or pass `--force`.
-- The settings file holds a value that setup did not write. `--force` replaces
-  it after it saves `settings.json.valet-backup`.
-- Claude Code managed settings (`managed-settings.json` or
-  `managed-settings.d/`) set `forceLoginMethod`, `forceLoginOrgUUID`,
-  `apiKeyHelper`, `env.ANTHROPIC_BASE_URL`, or an `allowedProviders` list
-  without `customEndpoint`. Setup cannot read MDM profiles or server-managed
-  settings. Ask your Claude Code admin if `claude` refuses to start after setup.
+OpenCode reads the key through a private file reference. The key file is under
+`~/.valet/proxy-keys`, or `$VALET_DATA_DIR/proxy-keys`. It has mode 0600.
+Setup supports `OPENCODE_CONFIG` and `XDG_CONFIG_HOME`. If both global config
+formats exist, set `OPENCODE_CONFIG` to the active file.
 
-A repository's `.claude/settings.json` or `.claude/settings.local.json` can
-override these values in that repository. `--rotate` replaces the stored key
-with a new one and revokes the old key. `token` prints the stored key. Claude
-Code runs it as its key helper.
+OpenCode 1.x OAuth plugins can bypass custom proxy endpoints. If setup finds a
+saved Anthropic or OpenAI OAuth account, disconnect it with `opencode auth logout`.
+Then run setup again. Setup does not delete account credentials.
+OpenCode 2.x aliases use separate provider IDs and keep native accounts available.
+
+`status` checks the config, key helper, credential file, key validity, and proxy
+mode. It does not send a model request. Send a model request, then check
+**Usage > Proxy** to confirm that Valet recorded it. Project config, plugins,
+and managed settings can change the tool's effective configuration.
+
+For a command that cannot wait for approval, add `--no-wait`. After approval,
+run the same setup command again. The CLI resumes the pending request.
+
+Setup refuses conflicting settings before requesting a key. `--force` replaces
+them after saving a private `.valet-backup` file. Later backups use a numeric
+suffix. Setup also refuses files changed during the approval wait.
+`--rotate` requests a new key and revokes the old key after setup succeeds.
+
+For Claude Code, exported `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` values
+outrank the helper. Remove those exports, or use `--force` and resolve the warning.
+The helper outranks a claude.ai login, so model use through this setup bills
+through Valet. `CLAUDE_CONFIG_DIR` can select another settings directory.
+Claude Code managed policies can block the helper or the proxy endpoint.
+Ask your Claude Code admin to change those policies.
+
+`remove` removes proxy settings that belong to the selected instance. It keeps
+changed user settings. For Codex, an edited Valet profile stays in place.
+For OpenCode 2.x, alias metadata and custom models stay available after removal.
+The command revokes the key and removes its local credential file when unused.
+`valet logout` performs the same cleanup for each stored tool key.
+
+A proxy key cannot call the Valet API. It remains valid until you revoke it,
+remove setup, or log out. `token` prints the stored key for tool helpers.
+Setup and status do not print the key. Keep `token` output out of shared logs.
 
 ### `valet tools search|describe|call`
 

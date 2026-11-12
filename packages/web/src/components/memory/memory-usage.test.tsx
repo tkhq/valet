@@ -39,13 +39,16 @@ describe("usage helpers", () => {
   const old = entry("notes/old.md", { lastUsedAt: NOW - 45 * DAY, useCount: 9 });
   const never = entry("notes/never.md");
   const newNever = entry("notes/new.md", { updatedAt: NOW - DAY });
+  // A pinned file is in every prompt, so the agent never needs to open it.
+  const loaded = entry("preferences/pinned.md", { pinned: true, lastLoadedAt: NOW - DAY });
 
-  it("calls a file stale when nothing used or edited it for 30 days", () => {
+  it("calls a file stale when nothing used, loaded or edited it for 30 days", () => {
     expect(isStale(recent, NOW, 0)).toBe(false);
     expect(isStale(old, NOW, 0)).toBe(true);
     expect(isStale(never, NOW, 0)).toBe(true);
     // Never used, but written yesterday: it has not had the chance yet.
     expect(isStale(newNever, NOW, 0)).toBe(false);
+    expect(isStale(loaded, NOW, 0)).toBe(false);
   });
 
   it("calls nothing stale until tracking has run for 30 days", () => {
@@ -54,11 +57,11 @@ describe("usage helpers", () => {
     expect(isStale(old, NOW, NOW - 10 * DAY)).toBe(false);
   });
 
-  it("filters to never-used and stale files", () => {
-    const all = [recent, old, never, newNever];
+  it("filters to never-used and stale files, and a file loaded at wake is neither", () => {
+    const all = [recent, old, never, newNever, loaded];
     expect(filterUsage(all, "never", NOW, 0).map((e) => e.path)).toEqual(["notes/never.md", "notes/new.md"]);
     expect(filterUsage(all, "stale", NOW, 0).map((e) => e.path)).toEqual(["notes/old.md", "notes/never.md"]);
-    expect(filterUsage(all, "all", NOW, 0)).toHaveLength(4);
+    expect(filterUsage(all, "all", NOW, 0)).toHaveLength(5);
   });
 
   it("sorts least recently used first, never-used files at the top", () => {
@@ -70,6 +73,7 @@ describe("usage helpers", () => {
 
   it("labels the last use", () => {
     expect(usageLabel(never, NOW)).toBe("Never used");
+    expect(usageLabel(loaded, NOW)).toBe("Loaded at wake 1d ago");
     expect(usageLabel(recent, NOW)).toBe("Used 2d ago · 4 uses");
     expect(usageLabel(entry("a.md", { lastUsedAt: NOW - DAY, useCount: 1 }), NOW)).toBe("Used 1d ago · 1 use");
   });
@@ -102,8 +106,10 @@ describe("MemoryUsagePanel", () => {
     const recentRow = screen.getByRole("listitem", { name: "notes/recent.md" });
     expect(within(recentRow).getByText("Used 2d ago · 4 uses")).toBeTruthy();
     const pinnedRow = screen.getByRole("listitem", { name: "preferences/pinned.md" });
-    expect(within(pinnedRow).getByText("Never used")).toBeTruthy();
-    expect(within(pinnedRow).getByText("Loaded at wake 1d ago")).toBeTruthy();
+    expect(within(pinnedRow).queryByText("Never used")).toBeNull();
+    expect(within(pinnedRow).getAllByText("Loaded at wake 1d ago")).toHaveLength(1);
+    // Only the file no agent used or loaded counts as never used.
+    expect(screen.getByText(/4 files, 2 never used/)).toBeTruthy();
   });
 
   it("says when tracking began, and that nothing is stale before 30 days of it", () => {

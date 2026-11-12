@@ -494,20 +494,24 @@ describe('validateWorkflowDefinition', () => {
     });
 
     it('accepts "run" and "step" for thread and rejects any other value', () => {
-      const withThread = (thread: unknown) => validateWorkflowDefinition(
-        definition({
-          nodes: [
-            { id: 'trigger', type: 'trigger' },
-            // Deliberately unchecked: the validator must reject what the type cannot hold.
-            { id: 'ask', type: 'orchestrator', prompt: 'do the thing', thread } as unknown as ThreadNode,
-            { id: 'stop', type: 'stop' },
-          ],
-          edges: [
-            { from: 'trigger', to: 'ask' },
-            { from: 'ask', to: 'stop' },
-          ],
-        }),
-      );
+      const withThread = (thread: unknown) => {
+        const ask: ThreadNode = { id: 'ask', type: 'orchestrator', prompt: 'do the thing' };
+        // Supply unchecked input to exercise the runtime validator.
+        Reflect.set(ask, 'thread', thread);
+        return validateWorkflowDefinition(
+          definition({
+            nodes: [
+              { id: 'trigger', type: 'trigger' },
+              ask,
+              { id: 'stop', type: 'stop' },
+            ],
+            edges: [
+              { from: 'trigger', to: 'ask' },
+              { from: 'ask', to: 'stop' },
+            ],
+          }),
+        );
+      };
       expect(withThread('run')).toEqual({ ok: true });
       expect(withThread('step')).toEqual({ ok: true });
       const result = withThread('iteration');

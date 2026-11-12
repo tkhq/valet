@@ -1,11 +1,15 @@
-import { createContext, useContext, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useRef, type ReactNode } from "react";
 import { AlertCircle, Bot, Brain, CheckCheck, Lightbulb } from "lucide-react";
 import type { MessagePart } from "@valet/api/wire";
 import { serviceDisplayName } from "@valet/api/service-display-name";
+import { deriveActionLabel, deriveMcpToolLabel, readSources } from "@valet/shared";
 import { Markdown } from "~/components/markdown";
-import { brandMark, pluginGlyph } from "~/components/service-icon";
+import { ServiceGlyph } from "~/components/service-icon";
 import { TraceLine, TraceList, TraceStep, type TraceStatus } from "~/components/primitives";
 import { getToolCardDefault } from "~/lib/preferences";
+import { SourceList } from "./source-list";
+import { useThreadSources } from "./citations";
+import { resultText } from "./tool-renderers/types";
 import { ToolCallBlock, type ToolCallPart } from "./tool-call-block";
 import { pickRenderer } from "./tool-renderers";
 import { prettyToolName } from "./tool-renderers/tool-shell";
@@ -127,11 +131,62 @@ const BUILTIN: Record<string, [present: string, past: string]> = {
   wakeup_list: ["Checking wake-ups", "Checked wake-ups"],
   wakeup_cancel: ["Canceling a wake-up", "Canceled a wake-up"],
   artifact_publish: ["Publishing", "Published"],
+  artifact_edit: ["Editing the artifact", "Edited the artifact"],
   switch_model: ["Switching the model", "Switched the model"],
+  ask_approval: ["Asking for approval", "Asked for approval"],
+  hold_sandbox: ["Keeping the sandbox running", "Kept the sandbox running"],
+  list_threads: ["Listing threads", "Listed threads"],
+  list_linked_threads: ["Listing linked threads", "Listed linked threads"],
+  message_linked_thread: ["Messaging a linked thread", "Messaged a linked thread"],
+  list_tasks: ["Listing tasks", "Listed tasks"],
+  read_task: ["Reading a task", "Read a task"],
+  start_task: ["Starting a task", "Started a task"],
+  message_task: ["Messaging a task", "Messaged a task"],
+  mark_task_done: ["Marking a task done", "Marked a task done"],
+  show_brief: ["Showing the brief", "Showed the brief"],
+  show_widget: ["Showing a widget", "Showed a widget"],
+  mem_copy_to_team: ["Copying memory to the team", "Copied memory to the team"],
+  mem_copy_from_team: ["Copying memory from the team", "Copied memory from the team"],
+  mem_links: ["Reading memory links", "Read memory links"],
+  mem_move: ["Moving memory", "Moved memory"],
+  mem_rm: ["Removing memory", "Removed memory"],
+  mem_share: ["Sharing memory", "Shared memory"],
+  save_principle: ["Saving a principle", "Saved a principle"],
+  artifact_comments: ["Reading page comments", "Read page comments"],
+  artifact_copy_to_team: ["Copying a page to the team", "Copied a page to the team"],
+  process_read: ["Reading process output", "Read process output"],
+  wait_for_event: ["Waiting for an event", "Waited for an event"],
+  watch: ["Watching a command", "Watched a command"],
+  file_attach: ["Attaching a file", "Attached a file"],
+  skill_script: ["Running a skill script", "Ran a skill script"],
+  call_tool: ["Calling a tool", "Called a tool"],
+  sec_start: ["Starting a security run", "Started a security run"],
+  sec_status: ["Checking the security run", "Checked the security run"],
+  sec_close: ["Closing the security run", "Closed the security run"],
+  sec_plan_set: ["Setting the security plan", "Set the security plan"],
+  sec_dispatch: ["Dispatching security cells", "Dispatched security cells"],
+  sec_handoff: ["Handing off security work", "Handed off security work"],
+  sec_protocol_read: ["Reading the security protocol", "Read the security protocol"],
+  sec_fs_list: ["Listing security files", "Listed security files"],
+  sec_fs_read: ["Reading a security file", "Read a security file"],
+  sec_fs_write: ["Writing a security file", "Wrote a security file"],
+  sec_cell_complete: ["Completing a security cell", "Completed a security cell"],
+  sec_cell_fail: ["Failing a security cell", "Marked a security cell failed"],
+  sec_need_report: ["Reporting a security need", "Reported a security need"],
+  sec_finding_report: ["Reporting a security finding", "Reported a security finding"],
+  sec_finding_review: ["Reviewing a security finding", "Reviewed a security finding"],
+  sec_findings_list: ["Listing security findings", "Listed security findings"],
+  sec_coverage_report: ["Reporting security coverage", "Reported security coverage"],
+  sec_report_write: ["Writing the security report", "Wrote the security report"],
 };
 
 /** Tools whose target says nothing a reader needs: the verb is the whole line. */
-const NO_TARGET = new Set(["list_tools", "focus_tools", "thread_read", "update_plan", "wakeup_list", "switch_model", "ask_question"]);
+const NO_TARGET = new Set([
+  "list_tools", "focus_tools", "thread_read", "update_plan", "wakeup_list", "switch_model", "ask_question",
+  "ask_approval", "hold_sandbox", "list_threads", "list_linked_threads", "message_linked_thread", "list_tasks", "read_task",
+  "start_task", "message_task", "mark_task_done", "show_brief", "show_widget", "process_read", "wait_for_event", "watch", "call_tool", "skill_script",
+  "mem_copy_to_team", "mem_copy_from_team", "save_principle", "artifact_copy_to_team", "file_attach",
+]);
 
 const CHILD_VERBS: Record<string, [present: string, past: string]> = {
   child_send: ["Messaging", "Messaged"],
@@ -148,14 +203,9 @@ export interface StepView {
 }
 
 function stepStatus(part: ToolCallPart): TraceStatus {
-  return part.status === "error" ? "error" : part.status === "completed" ? "done" : "running";
-}
-
-function ServiceGlyph({ service, fallback }: { service: string; fallback: ReactNode }) {
-  const mark = brandMark(service);
-  if (mark) return <svg viewBox="0 0 24 24" fill="currentColor" focusable="false"><path d={mark.path} /></svg>;
-  const Glyph = pluginGlyph(service);
-  return Glyph ? <Glyph focusable="false" /> : <>{fallback}</>;
+  const result = record(part.result);
+  const failed = result?.ok === false || record(result?.details)?.ok === false;
+  return part.status === "error" || failed ? "error" : part.status === "completed" ? "done" : "running";
 }
 
 /** Pure-ish: the line a call shows, from its name, its args, and the children of this thread. */
@@ -166,26 +216,44 @@ export function approvedAutomatically(part: ToolCallPart): boolean {
   return record(result?.details)?.approval === "automatic";
 }
 
+/** Pure: the line the action wrote for its finished call (`details.label`
+ * from the engine): what it did, with the key inputs. */
+export function actionLabel(part: ToolCallPart): string | undefined {
+  return part.status === "completed" ? str(record(record(part.result)?.details)?.label) : undefined;
+}
+
 export function stepView(part: ToolCallPart, childTitles: ReadonlyMap<string, string>): StepView {
   const renderer = pickRenderer(part.toolName, part.args);
   const status = stepStatus(part);
   const running = status === "running";
   const args = record(part.args);
   const Icon = renderer.Icon;
-  const error = status === "error" ? str(part.error?.split("\n")[0], 90) : undefined;
+  const error = status === "error" ? str((part.error || resultText(part.result)).split("\n")[0], 90) : undefined;
   const summary = status === "done" ? renderer.formatSummary?.(part.args, part.result, part.status, part.toolName) : undefined;
   const detail = error ?? summary;
 
   const action = pluginAction(part);
   if (action) {
-    const [present, past] = VERB_TEXT[actionVerb(action.action)];
     const name = serviceDisplayName(action.service);
-    // The agent writes a one-line purpose for each plugin call. It says more than the action id.
+    // A finished call shows the action's own line, else the line built from
+    // the action name and args. A running call shows the agent's one-line
+    // purpose first, because the action has not written its line yet. The
+    // tool name is the last resort.
+    // A failed call did not do the thing, so its line stays in the present
+    // tense and the error shows beside it, as the engine reports it.
+    const tense = status === "done" ? "past" : "present";
+    const params = part.toolName === "call_tool" ? record(args?.params) : args;
     const purpose = str(args?.summary, 120);
+    const derived = deriveActionLabel(action.service, `${action.service}.${action.action}`, params, tense);
+    const label = running
+      ? purpose ?? derived ?? deriveMcpToolLabel(action.service, action.action, params, tense)
+      : status === "error"
+        ? derived ?? purpose ?? deriveMcpToolLabel(action.service, action.action, params, tense)
+        : actionLabel(part) ?? derived ?? purpose ?? deriveMcpToolLabel(action.service, action.action, params, tense);
     return {
       icon: <ServiceGlyph service={action.service} fallback={<Icon />} />,
-      title: purpose ?? `${running ? present : past} ${name} · ${action.action.replace(/[_-]+/g, " ")}`,
-      detail: [detail ?? (purpose ? name : undefined), approvedAutomatically(part) ? "Approved automatically" : undefined].filter(Boolean).join(" · ") || undefined,
+      title: label,
+      detail: [detail ?? name, approvedAutomatically(part) ? "Approved automatically" : undefined].filter(Boolean).join(" · ") || undefined,
       status,
     };
   }
@@ -202,7 +270,10 @@ export function stepView(part: ToolCallPart, childTitles: ReadonlyMap<string, st
   }
 
   // Streaming args are jagged until the call starts, so the target waits for them.
-  const target = NO_TARGET.has(part.toolName) || part.status === "streaming" ? undefined : renderer.formatTarget(part.args, part.toolName);
+  // Destructive memory calls name the files they touch.
+  const memPath = part.toolName === "mem_rm" ? str(args?.path, 120)
+    : part.toolName === "mem_move" && str(args?.from, 120) && str(args?.to, 120) ? `${str(args?.from, 120)} → ${str(args?.to, 120)}` : undefined;
+  const target = NO_TARGET.has(part.toolName) || part.status === "streaming" ? undefined : memPath ?? renderer.formatTarget(part.args, part.toolName);
   if (part.toolName === "skill") {
     return { icon: <Icon />, title: `${running ? "Using" : "Used"} ${target ? `the ${target} skill` : "a skill"}`, detail, status };
   }
@@ -225,7 +296,8 @@ export function summaryPhrase(part: ToolCallPart): Phrase {
     case "bash": return { key: "bash", text: n => n === 1 ? "ran a command" : `ran ${n} commands` };
     case "read": return { key: "read", text: n => n === 1 ? "read a file" : `read ${n} files` };
     case "write": case "edit": case "find_replace": return { key: "edit", text: n => n === 1 ? "edited a file" : `edited ${n} files` };
-    case "mem_read": case "mem_search": return { key: "mem-read", text: () => "checked memory" };
+    case "mem_read": return { key: "mem-read", text: n => n === 1 ? "read a memory file" : `read ${n} memory files` };
+    case "mem_search": return { key: "mem-search", text: n => n === 1 ? "searched memory" : `searched memory ${n} times` };
     case "mem_write": case "mem_patch": return { key: "mem-write", text: () => "updated memory" };
     case "skill": {
       const name = str(record(part.args)?.name);
@@ -238,7 +310,11 @@ export function summaryPhrase(part: ToolCallPart): Phrase {
     case "child_stop": return { key: "child-stop", text: n => n === 1 ? "stopped an agent" : `stopped ${n} agents` };
     case "update_plan": return { key: "plan", text: () => "updated the plan" };
     case "thread_read": return { key: "thread", text: n => n === 1 ? "read a thread" : `read ${n} threads` };
-    default: return { key: `tool:${part.toolName}`, text: n => `used ${prettyToolName(part.toolName)}${n > 1 ? ` ${n} times` : ""}` };
+    default: {
+      const verbs = BUILTIN[part.toolName];
+      if (verbs) return { key: `tool:${part.toolName}`, text: n => `${verbs[1].toLowerCase()}${n > 1 ? ` ${n} times` : ""}` };
+      return { key: `tool:${part.toolName}`, text: n => `used ${prettyToolName(part.toolName)}${n > 1 ? ` ${n} times` : ""}` };
+    }
   }
 }
 
@@ -308,6 +384,7 @@ export function ReasoningLine({ part, live }: { part: ThinkingPart; live: boolea
  */
 export function WorkGroup({ parts, live, readOnly = false }: { parts: readonly WorkPart[]; live: boolean; readOnly?: boolean }) {
   const childTitles = useContext(ChildTitlesContext);
+  const { reveal } = useThreadSources();
   const calls = parts.filter((part): part is ToolCallPart => part.kind === "tool_call");
   if (calls.length === 0) {
     const thinking = parts.filter((part): part is ThinkingPart => part.kind === "thinking");
@@ -323,7 +400,7 @@ export function WorkGroup({ parts, live, readOnly = false }: { parts: readonly W
   if (parts.length === 1) return <CallStep part={calls[0]!} childTitles={childTitles} readOnly={readOnly} single />;
 
   const running = calls.find(call => call.status === "running" || call.status === "streaming");
-  const failed = calls.filter(call => call.status === "error").length;
+  const failed = calls.filter(call => stepStatus(call) === "error").length;
   const automatic = calls.filter(approvedAutomatically).length;
   const status: TraceStatus = running ? "running" : "done";
   const title = running ? `${stepView(running, childTitles).title}…` : workSummary(parts);
@@ -332,7 +409,7 @@ export function WorkGroup({ parts, live, readOnly = false }: { parts: readonly W
     detail={failed > 0 ? <span className="text-danger-600 dark:text-danger-500">{failed} failed</span>
       : [calls.length === 1 ? "1 step" : `${calls.length} steps`, automatic > 0 ? `${automatic} approved automatically` : undefined].filter(Boolean).join(" · ")}
     keepDetail={failed > 0}
-    defaultOpen={expanded}>
+    defaultOpen={expanded} revealKey={reveal && calls.some(call => call.callId === reveal.callId) ? reveal.key : undefined}>
     <TraceList>
       {parts.map((part, i) => part.kind === "thinking"
         ? reasoningText(part) || part.durationMs !== undefined ? <TraceStep key={`t-${i}`} icon={<Lightbulb />} title={reasoningTitle(part)} label="Show the thought process">
@@ -343,12 +420,56 @@ export function WorkGroup({ parts, live, readOnly = false }: { parts: readonly W
   </TraceLine>;
 }
 
+/** Pure: runs of calls that add the same phrase to a summary ("read 4 memory files"). */
+export function groupCalls(calls: readonly ToolCallPart[]): ToolCallPart[][] {
+  const groups: ToolCallPart[][] = [];
+  for (const call of calls) {
+    const last = groups.at(-1);
+    if (last && summaryPhrase(last[0]!).key === summaryPhrase(call).key) last.push(call);
+    else groups.push([call]);
+  }
+  return groups;
+}
+
+/**
+ * A turn's calls as a timeline, for the task card. Repeated calls fold into
+ * one step that opens to each call; a call opens into its full card.
+ */
+export function CallSteps({ calls, readOnly = false }: { calls: readonly ToolCallPart[]; readOnly?: boolean }) {
+  const childTitles = useContext(ChildTitlesContext);
+  const { reveal } = useThreadSources();
+  const expanded = getToolCardDefault() === "always-expanded";
+  return <TraceList>
+    {groupCalls(calls).map(group => {
+      const first = group[0]!;
+      if (group.length === 1) return <CallStep key={first.callId} part={first} childTitles={childTitles} readOnly={readOnly} />;
+      const running = group.find(call => call.status === "running" || call.status === "streaming");
+      const failed = group.filter(call => stepStatus(call) === "error").length;
+      return <TraceStep key={first.callId} icon={stepView(first, childTitles).icon} status={running ? "running" : "done"}
+        title={running ? `${stepView(running, childTitles).title}…` : workSummary(group)}
+        detail={failed > 0 ? <span className="text-danger-600 dark:text-danger-500">{failed} failed</span> : `${group.length} steps`}
+        keepDetail={failed > 0} defaultOpen={expanded} revealKey={reveal && group.some(call => call.callId === reveal.callId) ? reveal.key : undefined}>
+        <TraceList>{group.map(call => <CallStep key={call.callId} part={call} childTitles={childTitles} readOnly={readOnly} />)}</TraceList>
+      </TraceStep>;
+    })}
+  </TraceList>;
+}
+
 /** One call as a step that opens into its full card. */
 function CallStep({ part, childTitles, single = false, readOnly = false }: { part: ToolCallPart; childTitles: ReadonlyMap<string, string>; single?: boolean; readOnly?: boolean }) {
+  const { reveal, focusStep } = useThreadSources();
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const revealKey = reveal?.callId === part.callId ? reveal.key : undefined;
+  useEffect(() => {
+    if (revealKey !== undefined && reveal && buttonRef.current) focusStep(buttonRef.current, reveal);
+  }, [revealKey, reveal, focusStep]);
   const view = stepView(part, childTitles);
+  const sources = readSources(part.result);
+  const detail = [view.detail, sources.length === 1 ? "1 source" : sources.length > 1 ? `${sources.length} sources` : undefined].filter(Boolean).join(" · ");
   const Line = single ? TraceLine : TraceStep;
-  return <Line icon={view.status === "error" ? <AlertCircle /> : view.icon} title={view.title} detail={view.detail} status={view.status}
-    defaultOpen={getToolCardDefault() === "always-expanded"}>
-    <ToolCallBlock part={part} readOnly={readOnly} />
+  return <Line icon={view.status === "error" ? <AlertCircle /> : view.icon} title={view.title} detail={detail || undefined} status={view.status}
+    defaultOpen={getToolCardDefault() === "always-expanded"} revealKey={revealKey} buttonRef={buttonRef}>
+    <SourceList sources={sources} revealSourceId={revealKey !== undefined ? reveal?.sourceId : undefined} revealKey={revealKey} />
+    <ToolCallBlock part={view.status === "error" ? { ...part, status: "error", error: part.error || resultText(part.result) || undefined } : part} readOnly={readOnly} revealKey={revealKey} />
   </Line>;
 }

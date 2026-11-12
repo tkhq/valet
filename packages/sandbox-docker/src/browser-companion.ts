@@ -4,9 +4,12 @@ import { dockerBrowserOwnerLabels, type DockerInventoryRecord } from './inventor
 export function buildBrowserCompanionArgs(options: {
   owner: DockerInventoryRecord;
   seccompProfile: string;
+  /** Host AppArmor profile. Unset keeps Docker's default profile. */
+  appArmorProfile?: string;
   uid: number;
   gid: number;
   devPorts?: string;
+  cgroupParent?: string;
 }): string[] {
   const { owner, seccompProfile, uid, gid } = options;
   const companion = owner.browserCompanion;
@@ -22,6 +25,8 @@ export function buildBrowserCompanionArgs(options: {
     '-v', `${owner.runtimeStateDir}:/var/lib/valet`,
     '-v', `${owner.workspace}:/workspace:ro`,
   ];
+  if (options.appArmorProfile) args.push('--security-opt', `apparmor=${options.appArmorProfile}`);
+  if (options.cgroupParent) args.push('--cgroup-parent', options.cgroupParent);
   for (const [key, value] of Object.entries(dockerBrowserOwnerLabels(owner))) args.push('--label', `${key}=${value}`);
   for (const [key, value] of Object.entries({
     VALET_SESSION_ID: owner.sessionId,

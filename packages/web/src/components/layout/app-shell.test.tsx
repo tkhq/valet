@@ -221,3 +221,58 @@ describe("AppShell — icon rail", () => {
     expect(screen.getByTestId("collapsed").textContent).toBe("false");
   });
 });
+
+describe("AppShell — drawer swipe", () => {
+  function swipe(target: Element, dx: number, dy = 0, startX = 100) {
+    const point = { clientX: startX, clientY: 300 };
+    fireEvent.touchStart(target, { touches: [point], changedTouches: [point] });
+    fireEvent.touchEnd(target, { changedTouches: [{ clientX: startX + dx, clientY: 300 + dy }] });
+  }
+
+  it("opens on a swipe right and closes on a swipe left on a phone", () => {
+    phoneLayout = true;
+    renderShell();
+    swipe(screen.getByText("content"), 120);
+    expect(screen.getByRole("dialog", { name: "Valet" })).toBeDefined();
+    swipe(screen.getByRole("dialog", { name: "Valet" }), -120);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("ignores a vertical scroll, a swipe left, and a swipe that starts in a text field", () => {
+    phoneLayout = true;
+    render(<AppShell topNav={<NavProbe />} sidebar={<nav>menu</nav>}><textarea aria-label="note" /><div>content</div></AppShell>);
+    swipe(screen.getByText("content"), 80, 200);
+    swipe(screen.getByText("content"), -120);
+    swipe(screen.getByLabelText("note"), 120);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("does nothing off a phone", () => {
+    renderShell();
+    swipe(screen.getByText("content"), 120);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("opens past an inline dialog such as a decision gate card", () => {
+    phoneLayout = true;
+    render(<AppShell topNav={<NavProbe />} sidebar={<nav>menu</nav>}><div role="dialog" aria-label="gate" aria-live="polite">approve?</div></AppShell>);
+    swipe(screen.getByText("approve?"), 120);
+    expect(screen.getByRole("dialog", { name: "Valet" })).toBeDefined();
+  });
+
+  it("does not open under an open modal dialog", () => {
+    phoneLayout = true;
+    render(<AppShell topNav={<NavProbe />} sidebar={<nav>menu</nav>}><div role="dialog" data-state="open" aria-label="other">modal</div></AppShell>);
+    swipe(screen.getByText("modal"), 120);
+    expect(screen.queryByRole("dialog", { name: "Valet" })).toBeNull();
+  });
+
+  it("ignores a swipe that starts at the left screen edge", () => {
+    phoneLayout = true;
+    renderShell();
+    swipe(screen.getByText("content"), 120, 0, 10);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    swipe(screen.getByText("content"), 120, 0, 30);
+    expect(screen.getByRole("dialog", { name: "Valet" })).toBeDefined();
+  });
+});

@@ -1,7 +1,7 @@
 import type { Session } from "./session.js";
 import type { TSchema, Static } from "typebox";
 import type { Model } from "@earendil-works/pi-ai/compat";
-import type { ThreadPlan, ThreadPlanItem, ToolUsageFact, ToolScope, BrowserAuditEntry, BrowserPolicyService, ProviderFailureKind } from "@valet/shared";
+import type { SourceInput, ThreadPlan, ThreadPlanItem, ToolUsageFact, ToolScope, BrowserAuditEntry, BrowserPolicyService, ProviderFailureKind } from "@valet/shared";
 // Type-only import — erased at runtime, so the plugin-catalog ↔ types cycle
 // exists only for the type checker (both directions are `import type`).
 import type { ApprovalMode } from "./plugin-catalog.js";
@@ -148,6 +148,22 @@ export const MID_TURN_DELIVERY_KEY = "midTurnDelivery";
  * without starting a reply (docs/specs/2026-10-22-thread-edit-fork-design.md).
  */
 export const RECORD_ONLY_KEY = "recordOnly";
+
+/**
+ * Queue item metadata flag for a turn that sends the model only its own
+ * messages: the system prompt, the tools, this submission, and what the turn
+ * adds. The turn's entries still join the transcript, so later turns read
+ * them. A daily routine into a long thread uses it, because a request a day
+ * apart misses the prompt cache and re-writes the whole history.
+ */
+export const FRESH_CONTEXT_KEY = "freshContext";
+
+/**
+ * Entry metadata key: when a compaction prune last elided tool output on
+ * this entry (epoch ms). A stored response usage from before that time
+ * counted the output, so a reload does not use it as the usage anchor.
+ */
+export const PRUNED_AT_KEY = "prunedAt";
 export type ThreadStatus = "active" | "paused" | "archived";
 export type QueueStatus = "idle" | "queued" | "running" | "blocked_on_decision_gate" | "paused";
 
@@ -393,6 +409,12 @@ export type PromptAttachment =
   | { type: "audio"; url?: string; data?: Uint8Array; mimeType: string; name?: string };
 
 export interface PromptOptions {
+  /**
+   * Aborts the admission. A prompt cancelled before admission is refused; a
+   * cancel that lands while the store admits it settles the item `aborted`
+   * before any turn can claim it. Either way the call throws an `AbortError`.
+   */
+  cancel?: AbortSignal;
   /** Request-scoped host operation; must enforce the source thread permissions. */
   forkThread?: (threadId: string, prompt: string) => Promise<string>;
   /**
@@ -770,6 +792,20 @@ export interface ToolDef<TParams extends TSchema = TSchema> {
   /** When true, this tool's outputs are exempt from pruning during compaction. */
   protectedFromPruning?: boolean;
   /**
+   * Most characters of one result that go into context. A larger result is
+   * saved to a file and the model gets a preview (`capToolResult`). Default
+   * `TOOL_RESULT_MAX_CHARS`. `Infinity` turns the cap off for a tool that
+   * pages its own output, such as `read`.
+   */
+  maxResultChars?: number;
+  /**
+   * What a capped result shows the model. "head": the first 2,000
+   * characters. "head-tail": the first and last 1,000, for output whose end
+   * carries the outcome, such as `bash` with its exit status. Claude Code
+   * previews bash output the same way. Default "head".
+   */
+  resultPreview?: "head" | "head-tail";
+  /**
    * When true, this tool may execute concurrently with other tool calls in
    * the same assistant response. Default: false — the tool runs
    * sequentially, and one sequential tool serializes its whole batch
@@ -783,6 +819,11 @@ export interface ToolDef<TParams extends TSchema = TSchema> {
 }
 
 export interface ToolResult {
+  /**
+   * The whole result text when `capToolResult` cut `text`. The bridge stores
+   * it in `details.fullText`, which the UI loads and the model never sees.
+   */
+  fullText?: string;
   usageOutcome?: { outcome: "ok" | "error" | "denied" | "pending-approval"; errorCode: string | null; name?: string };
   text: string;
   attachments?: ToolAttachment[];
@@ -799,6 +840,12 @@ export interface ToolResult {
   /** "automatic" when the action needed approval and ran without a card
    * because the thread runs without asking. The UI names it on the step. */
   approval?: "automatic";
+  /** What the call did, in the action's own words ("Searched Slack for
+   * “deploy”"). Set by an action-backed tool when the action supplies one. */
+  label?: string;
+  /** Items the call read. The tool bridge gives each a thread-scoped id,
+   * lists the ids in the model's text, and stores the records on the event. */
+  sources?: SourceInput[];
 }
 
 export type ToolAttachment =
@@ -838,6 +885,8 @@ export interface ToolContext {
   setToolFocus?: (scope: ToolScope | undefined) => Promise<void>;
   /** Replace this thread's plan in thread metadata (`update_plan`). Absent on a context built by hand. */
   setThreadPlan?: (items: ThreadPlanItem[], title?: string) => Promise<ThreadPlan>;
+  /** Reserve `count` thread-scoped source ids ("s4", "s5"). Absent on a context built by hand. */
+  allocateSourceIds?: (count: number) => Promise<string[]>;
   /** Seed this thread's plan from a playbook skill, unless an open plan exists. Absent on a context built by hand. */
   seedPlaybookPlan?: (skill: SkillSource) => Promise<PlaybookSeedResult>;
   /** The current request offers native image generation; duplicate plugin actions are hidden. */
@@ -888,6 +937,12 @@ export interface ToolContext {
   repo?: { url?: string; branch?: string; ref?: string; provider?: string };
   credentials: CredentialProvider;
   sandbox: Sandbox;
+  /**
+   * True when this skill's body, at this version, is already in the
+   * thread's live context from an earlier skill read: it is not covered by
+   * a compaction and was not elided. Absent on a context built by hand.
+   */
+  skillBodyInContext?: (skill: SkillSource) => boolean;
   /** Record a model-tool skill invocation in the current thread. */
   recordSkillInvocation?: (
     skill: SkillSource,
@@ -1845,6 +1900,14 @@ export interface SandboxProvider {
    */
   release?(id: string): Promise<void>;
   /**
+   * Empty a working directory that a destroyed sandbox mounted from the
+   * host, and keep the directory. Only providers whose working directory
+   * outlives `destroy` implement it (docker: a host bind mount). Files the
+   * sandbox wrote can belong to the sandbox user, so the provider deletes
+   * them as that user. `image` is an image the provider can run.
+   */
+  releaseWorkspace?(hostPath: string, opts: { image: string }): Promise<void>;
+  /**
    * Optional deterministic-id seam. Providers whose sandbox ids are a pure
    * function of the session key (sandbox-kubernetes: `sandboxCrName`)
    * implement this so reapers can recompute a destroy handle that was never
@@ -1986,7 +2049,12 @@ export type EngineEvent =
       reason: "end_turn" | "tool_use" | "error" | "abort";
     }
   | { type: "tool_start"; threadId: string; tool: string; callId?: string; args: Record<string, unknown> }
-  | { type: "tool_end"; threadId: string; tool: string; callId?: string; result: string; resultData?: unknown; isError: boolean; outcome?: ToolResult["outcome"] }
+  | {
+      type: "tool_end"; threadId: string; tool: string; callId?: string; result: string; resultData?: unknown; isError: boolean; outcome?: ToolResult["outcome"];
+      /** Set when the result was capped: the length of the whole text and the
+       * stored entry the tool-output route loads it from. */
+      resultTrimmed?: { chars: number; entryId: string };
+    }
   | {
       type: "turn_end";
       threadId: string;
@@ -2215,7 +2283,8 @@ export interface SessionStore {
    * compaction on the active branch comes back as a stub: ids, links, type,
    * role and queue item, without content, parts or other payload. The
    * transcript never reads a covered entry's payload, except the task-source
-   * prompt, which `keepQueueItemId` keeps whole. On a long, compacted thread
+   * prompt (the submission's user entries), which `keepQueueItemId` keeps
+   * whole. On a long, compacted thread
    * this reads the live context instead of the whole history. Optional: a
    * store without it serves the full snapshot.
    */
@@ -3338,13 +3407,43 @@ export interface CompactionConfig {
 // ── Child spawning (`task` built-in, Phase 4 decision 10) ──────────
 
 /** Request payload for the `task` built-in tool. `repo` interpretation is host policy. */
+/** One command's result from a child's sandbox (`ChildCommandRunner.run`). */
+export interface ChildCommandResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  /** Output passed `maxOutputBytes`; the middle is missing (head and tail stay). */
+  truncated: boolean;
+  timedOut: boolean;
+}
+
+/**
+ * Runs deterministic commands, with no model, in one child's sandbox before
+ * its first turn. Each command runs in a shell from the child's primary
+ * checkout (the sandbox workspace when the child has no repository). The
+ * host caps each command's time and output and the whole step's time.
+ */
+export interface ChildCommandRunner {
+  run(command: string, opts?: { stdin?: string; timeoutMs?: number; maxOutputBytes?: number }): Promise<ChildCommandResult>;
+}
+
 export interface SpawnChildRequest {
   toolScope?: ToolScope;
   prompt: string;
+  /**
+   * Work to do in the child's sandbox before its first turn, without a
+   * model. The host starts the sandbox (the repository checked out at
+   * `branch`), calls `prepare` with a runner scoped to this child, and sends
+   * the prompt it returns instead of `prompt`. A throw fails the spawn and
+   * removes the child. In-process callers only; the `task` tool never sets it.
+   */
+  prepare?: (runner: ChildCommandRunner, prompt: string) => Promise<string>;
   title?: string;
   repo?: string;
   branch?: string;
   model?: string;
+  /** `read`: the sandbox git credential clones and fetches, never pushes. */
+  gitAccess?: "read";
   /** CPU, memory, and scratch overrides for the child's sandbox. Omitted fields use host defaults. */
   resources?: Pick<SandboxResources, "cpu" | "memory" | "scratch">;
   /** Interactive-service profile for the child's sandbox (default "headless"). */
@@ -3405,6 +3504,9 @@ export type ChildSpawner = (
     /** The plugin event delivery that started the child. Cancelling that
      * delivery stops the child. Absent for every other child. */
     pluginDeliveryId?: string;
+    /** Aborts when the spawning work is cancelled for good. A spawn that is
+     * still in its `prepare` step stops, removes the child and queues no prompt. */
+    cancel?: AbortSignal;
   },
 ) => Promise<SpawnChildResult>;
 

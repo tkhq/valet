@@ -262,6 +262,7 @@ CREATE TABLE "agent_sessions" (
 	"owner_type" text DEFAULT 'user' NOT NULL,
 	"owner_id" text DEFAULT '' NOT NULL,
 	"credential_owner_mode" text,
+	"git_access" text,
 	"profile" text DEFAULT 'headless' NOT NULL,
 	"docker" boolean DEFAULT false NOT NULL,
 	"kubernetes" boolean DEFAULT false NOT NULL,
@@ -1001,6 +1002,7 @@ CREATE TABLE "mcp_oauth_clients" (
 	"registration_endpoint" text,
 	"registered_scopes" jsonb,
 	"scopes_supported" jsonb,
+	"resource" text,
 	"metadata" jsonb,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL
@@ -1033,6 +1035,7 @@ CREATE TABLE "runtime_grants" (
 	"org_id" text NOT NULL,
 	"session_id" text,
 	"workflow_execution_id" text,
+	"thread_id" text,
 	"policy_key" text NOT NULL,
 	"mode" text DEFAULT 'allow' NOT NULL,
 	"granted_by" text NOT NULL,
@@ -1041,7 +1044,9 @@ CREATE TABLE "runtime_grants" (
 	CONSTRAINT "runtime_grants_one_of_scope" CHECK ((("session_id" IS NOT NULL)::int + ("workflow_execution_id" IS NOT NULL)::int) = 1)
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX "runtime_grants_session_policy_key" ON "runtime_grants" ("org_id","session_id","policy_key") WHERE "session_id" IS NOT NULL AND "revoked_at" IS NULL;
+CREATE UNIQUE INDEX "runtime_grants_session_wide_policy_key" ON "runtime_grants" ("org_id","session_id","policy_key") WHERE "session_id" IS NOT NULL AND "thread_id" IS NULL AND "revoked_at" IS NULL;
+--> statement-breakpoint
+CREATE UNIQUE INDEX "runtime_grants_thread_policy_key" ON "runtime_grants" ("org_id","session_id","thread_id","policy_key") WHERE "thread_id" IS NOT NULL AND "revoked_at" IS NULL;
 --> statement-breakpoint
 CREATE UNIQUE INDEX "runtime_grants_execution_policy_key" ON "runtime_grants" ("org_id","workflow_execution_id","policy_key") WHERE "workflow_execution_id" IS NOT NULL AND "revoked_at" IS NULL;
 --> statement-breakpoint
@@ -2757,7 +2762,9 @@ END $member$;
 -- A deployed database gets this view only from the completed repair
 -- (lib/usage-step-attribution.ts): no install section other repairs run
 -- creates it, so an interrupted backfill stays pending until it finishes.
-CREATE OR REPLACE VIEW usage_step_attribution_ready AS SELECT 1 AS version WHERE false;
+-- The name carries the rule's version: a database that ran the first rule
+-- has `usage_step_attribution_ready` and still needs this repair.
+CREATE OR REPLACE VIEW usage_step_attribution_v2_ready AS SELECT 1 AS version WHERE false;
 
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "event_receipts" (
@@ -2935,6 +2942,12 @@ CREATE TABLE IF NOT EXISTS "home_tasks" (
 CREATE INDEX IF NOT EXISTS "home_tasks_user" ON "home_tasks" ("user_id", "created_at");
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "home_tasks_thread" ON "home_tasks" ("session_id", "thread_id");
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "home_task_dismissals" (
+  "user_id" text NOT NULL, "org_id" text NOT NULL, "session_id" text NOT NULL, "thread_id" text NOT NULL,
+  "dismissed_at" bigint NOT NULL,
+  PRIMARY KEY ("user_id", "session_id", "thread_id")
+);
 
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "channel_progress_deliveries" (

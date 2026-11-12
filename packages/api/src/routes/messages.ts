@@ -51,6 +51,7 @@ import type {
   ListThreadsResponse,
   ThreadChannelActivity,
   ThreadContextResponse,
+  ThreadDefaultsResponse,
   ThreadRecapResponse,
   MarkThreadsReadRequest,
   Message,
@@ -94,6 +95,7 @@ import { assertReasoningSelectable } from "../services/reasoning.js";
 import { recordSessionActivity, recordThreadActivityBestEffort, recordThreadUserActivity } from "../services/thread-activity.js";
 import { readOptionalJsonObject } from "../lib/optional-json-body.js";
 import { trimToolResults } from "../services/transcript-trim.js";
+import { changeThreadProjects, readThreadProjects } from "../services/thread-projects.js";
 import { isThreadShareMode, setThreadShare } from "../services/thread-share.js";
 import { setThreadApprovalBypass } from "../services/thread-approval-bypass.js";
 import { canAdministerTeam, isTeamMember } from "../services/teams.js";
@@ -173,7 +175,11 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
       },
     };
   }
-  if (e.type === "branch_summary") return branchNoteToMessage(e, sessionId, threadId);
+  if (e.type === "branch_summary") {
+    // A move keeps its note for the model and the file copy, but the thread
+    // did not branch, so people see no divider for it.
+    return readBranchNote(e.metadata)?.moved ? null : branchNoteToMessage(e, sessionId, threadId);
+  }
   if (e.type !== "message") return null;
   // Engine has 4 roles: user/assistant/tool/system. We forward as-is.
   const role: MessageRole = e.role;
@@ -675,6 +681,17 @@ export async function getThreadContext(c: Context<AppEnv>, sessionId: string, th
   const thread = await visibleThread(c, result.session, result.engineSession, threadId);
   if (!thread) return c.json({ error: "Thread not found. Refresh the thread list." }, 404);
   const body: ThreadContextResponse = { context: (await thread.contextUsage()) ?? null };
+  return c.json(body);
+}
+
+/** The model and reasoning a new thread in this session starts with. Reading them never wakes the sandbox. */
+messagesRouter.get("/:id/thread-defaults", (c) => getThreadDefaults(c, c.req.param("id")));
+
+export async function getThreadDefaults(c: Context<AppEnv>, sessionId: string) {
+  const session = await loadOwnedSession(c, sessionId);
+  if (!session) return c.json({ error: "session not found" }, 404);
+  const { db, engineHost } = c.var.providers;
+  const body: ThreadDefaultsResponse = await engineHost.newThreadDefaults(session.id, await loadSessionMeta(db, session), c.var.user.id);
   return c.json(body);
 }
 
@@ -1887,8 +1904,9 @@ export async function forkThread(c: Context<AppEnv>, sessionId: string, threadId
 
 /**
  * Moves a thread to another workspace (docs/specs/2026-10-22-thread-edit-fork-design.md):
- * the whole conversation and its files are copied there, as a fork is, and
- * the source is archived with a pointer to the copy. A thread moves to the
+ * the whole conversation and its files are copied there and the source is
+ * archived with a pointer to the copy. A move is not a branch: the copy has
+ * no fork link and shows no branch divider. A thread moves to the
  * mover's private threads or to any team the mover is on. When a team thread
  * leaves its team, teammates lose it, so only a person who wrote every
  * message in it, or a team admin, may move it. A move into a team shows the
@@ -1935,7 +1953,7 @@ export async function moveThread(c: Context<AppEnv>, sessionId: string, threadId
 
   const [titled] = await db.select({ title: sessionThreads.title }).from(sessionThreads)
     .where(and(eq(sessionThreads.sessionId, sessionId), eq(sessionThreads.id, threadId))).limit(1);
-  const result = await forkThreadAt(c, sessionId, threadId, { whole: true }, { destination, ...(titled?.title ? { title: titled.title } : {}) });
+  const result = await forkThreadAt(c, sessionId, threadId, { whole: true }, { destination, moved: true, ...(titled?.title ? { title: titled.title } : {}) });
   if (result instanceof Response) return result;
   await thread.setMetadataValue(MOVED_TO_METADATA_KEY, { sessionId: result.thread.sessionId, threadId: result.thread.id });
   // The note links the copy only when everyone who reads this thread can
@@ -1978,7 +1996,21 @@ export async function duplicateThread(c: Context<AppEnv>, sessionId: string, thr
   const suffix = " (copy)";
   const base = (titled?.title?.replace(/(?: \(copy\))+$/, "") || "Untitled thread").slice(0, MAX_THREAD_TITLE_CHARS - suffix.length).trimEnd();
   const result = await forkThreadAt(c, sessionId, threadId, { whole: true }, { destination: "here", title: `${base}${suffix}` });
-  return result instanceof Response ? result : c.json(result, 201);
+  if (result instanceof Response) return result;
+  // The copy goes in the source's project folder, in the sidebar of the
+  // person who made it. Folders are each person's own (`services/thread-projects.ts`).
+  const scope = { orgId: c.var.user.orgId, userId: c.var.user.id, sessionId: await workspaceRuntimeId(db, sessionId) };
+  const projectId = (await readThreadProjects(db, scope)).value.assignments[threadId];
+  if (projectId) await changeThreadProjects(db, scope, [{ type: "assign", threadId: result.thread.id, projectId }]);
+  return c.json(result, 201);
+}
+
+/** The workspace runtime a thread's session belongs to: the assistant's session for an execution session, else the session itself. */
+async function workspaceRuntimeId(db: Providers["db"], sessionId: string): Promise<string> {
+  const [execution] = await db.select({ runtimeId: assistants.sessionId }).from(assistantExecutions)
+    .innerJoin(assistants, eq(assistants.id, assistantExecutions.assistantId))
+    .where(eq(assistantExecutions.sessionId, sessionId)).limit(1);
+  return execution?.runtimeId ?? sessionId;
 }
 
 /** Where a fork lands: the source's workspace, the person's private threads, or a team (a move only). */
@@ -1988,7 +2020,7 @@ type ForkDestination = "here" | "private" | { teamId: string };
 async function forkThreadAt(
   c: Context<AppEnv>, sessionId: string, threadId: string,
   selection: { entryId: string } | { latest: true; prompt: string } | { whole: true },
-  opts: { destination?: ForkDestination; title?: string } = {},
+  opts: { destination?: ForkDestination; title?: string; moved?: boolean } = {},
 ): Promise<ForkThreadResponse | Response> {
   const destination = opts.destination ?? "here";
   const loaded = await loadEngineSession(c, sessionId);
@@ -2053,10 +2085,8 @@ async function forkThreadAt(
   // from the person's own runtime, and a move to a team from that team's.
   let home: Exclude<Awaited<ReturnType<typeof loadEngineSession>>, { error: Response }>;
   if (destination === "here") {
-    const [execution] = await db.select({ runtimeId: assistants.sessionId }).from(assistantExecutions)
-      .innerJoin(assistants, eq(assistants.id, assistantExecutions.assistantId))
-      .where(eq(assistantExecutions.sessionId, sessionId)).limit(1);
-    const here = execution && execution.runtimeId !== sessionId ? await loadEngineSession(c, execution.runtimeId) : loaded;
+    const runtimeId = await workspaceRuntimeId(db, sessionId);
+    const here = runtimeId !== sessionId ? await loadEngineSession(c, runtimeId) : loaded;
     if ("error" in here) return here.error;
     home = here;
   } else {
@@ -2088,11 +2118,12 @@ async function forkThreadAt(
   // them on the visible thread too, before any history or files are copied.
   for (const channel of channels) await thread.addToMetadataList(SLACK_CHANNELS_METADATA_KEY, channel);
   // Two threads a fork links may message each other (`services/thread-links.ts`).
-  await thread.setMetadataValue(FORK_OF_METADATA_KEY, { sessionId, threadId });
+  // A moved thread is the same conversation, not a fork, so it has no link.
+  if (!opts.moved) await thread.setMetadataValue(FORK_OF_METADATA_KEY, { sessionId, threadId });
   // A fork in its own working directory (a team conversation) takes the
   // source's files at the fork point along, as git bundles in the blob store.
   const seed = summary.sessionId !== sessionId ? await exportForkSeed(c, loaded.engineSession, path, thread.id) : undefined;
-  await thread.copyPath(path, { source: { sessionId, threadId }, actorId: c.var.user.id, ...(seed ? { seed } : {}) });
+  await thread.copyPath(path, { source: { sessionId, threadId }, actorId: c.var.user.id, ...(seed ? { seed } : {}), ...(opts.moved ? { moved: true } : {}) });
   const response: ForkThreadResponse = {
     thread: summary,
     workspace: destination === "here" ? (loaded.session.ownerType === "team" ? loaded.session.ownerId : "user") : destination === "private" ? "user" : destination.teamId,

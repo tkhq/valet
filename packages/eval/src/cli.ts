@@ -14,6 +14,12 @@
  *   --verify-model <spec> model for code-review verifiers (default: --model)
  *   --verify             check each code-review finding with a verifier (default: off)
  *   --review-passes <n>  independent code-review passes per case (default 1)
+ *   --review-focus <list> extra focused code-review passes: failure,concurrency,tests
+ *   --focus-min-confidence <x> drop focused-pass findings rated below x (0-1)
+ *   --min-confidence <x> drop code-review findings rated below x (0-1)
+ *   --review-dedupe      merge code-review findings that report the same defect
+ *   --context-budget <tokens>  context pack built before each code review (default 0: none)
+ *   --memory-dir <dir>   memory files the context pack reads as team memory
  *
  * With VALET_LLM_GATEWAY_URL and VALET_API_KEY (or VALET_API_KEY_FILE) set,
  * every model call goes through that Valet gateway with the Valet key, and
@@ -70,6 +76,10 @@ async function main(): Promise<number> {
     return 0;
   }
 
+  if (opts.casesSkip !== undefined) {
+    console.log(`SKIP ${opts.casesSkip}`);
+    return 0;
+  }
   const allCases = await loadCases(opts.casesDir);
   const cases = filterCases(allCases, opts.filter);
   if (cases.length === 0) {
@@ -110,6 +120,12 @@ async function main(): Promise<number> {
     ...(opts.verifyModel !== undefined ? { verifyModel: opts.verifyModel } : {}),
     ...(opts.verify !== undefined ? { verify: opts.verify } : {}),
     ...(opts.reviewPasses !== undefined ? { reviewPasses: opts.reviewPasses } : {}),
+    ...(opts.reviewFocus !== undefined ? { reviewFocus: opts.reviewFocus } : {}),
+    ...(opts.focusMinConfidence !== undefined ? { focusMinConfidence: opts.focusMinConfidence } : {}),
+    ...(opts.minConfidence !== undefined ? { minConfidence: opts.minConfidence } : {}),
+    ...(opts.reviewDedupe ? { reviewDedupe: true } : {}),
+    ...(opts.contextBudget !== undefined ? { contextBudget: opts.contextBudget } : {}),
+    ...(opts.memoryDir !== undefined ? { memoryDir: opts.memoryDir } : {}),
     saveBaselines: opts.saveBaseline,
     allowLiveBaselines: opts.allowLiveBaselines,
     onCaseStart: (evalCase, index, total) => {

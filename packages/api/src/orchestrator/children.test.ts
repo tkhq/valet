@@ -8,7 +8,7 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { CONTINUATION_SOURCE_ITEM_KEY, INHERIT_TOOL_SCOPE_KEY, UNATTENDED_WORKFLOW_KEY, WORKFLOW_STEP_KEY } from "@valet/shared";
 import { RegistryCapacityError } from "../bakes/registry-health.js";
-import { mkdtempSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { eq, and, sql } from "drizzle-orm";
@@ -59,8 +59,10 @@ import {
   CHILD_RESULT_MAX_CHARS,
 } from "./children.js";
 import { MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR, DEFAULT_ORG_ACTIVE_SESSION_CEILING } from "./limits.js";
+import { childWorkspaceCounts, reclaimedActiveChildren } from "../observability/child-lifecycle-metrics.js";
 import { agentSessions, bakes, childEventOutbox, childReplyDeliveries, childWatches, eventReceipts, events, eventDeliveries, eventSubscriptions, eventDropLog, imageSources, sandboxTokens, sessionRepos, teams, teamMembers } from "../schema/index.js";
 import { PendingCapError, ValidationError as EngineValidationError } from "@valet/engine";
+import type { SpawnChildRequest } from "@valet/engine";
 import { isScratchRequestError } from "@valet/shared";
 import { admitSignal, SignalEdgeDeniedError } from "./signals.js";
 import { submitSessionPrompt } from "../routes/messages.js";
@@ -619,6 +621,142 @@ describe("buildChildSpawner", () => {
     await expect(spawn(req, ctx)).resolves.toMatchObject({ childSessionId: req.sessionId });
     await expect(spawn(req, ctx)).rejects.toThrow("already belongs to an existing session");
     expect(await deps.engineStore.getSession(req.sessionId)).not.toBeNull();
+  });
+
+  it("runs a prepare step in the child's sandbox before its first turn and sends the prompt it returns", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const parent = await deps.engineHost.sessionFor("parent-prepare", { userId: "local-user", orgId: "local-org", workspace: "/tmp" });
+    const prompts: string[] = [];
+    const original = deps.engineHost.childSessionFor.bind(deps.engineHost);
+    vi.spyOn(deps.engineHost, "childSessionFor").mockImplementation(async (...args) => {
+      const child = await original(...args);
+      const send = child.prompt.bind(child);
+      vi.spyOn(child, "prompt").mockImplementation(async (content, opts) => {
+        prompts.push(String(content));
+        return send(content, opts);
+      });
+      return child;
+    });
+    const results: { exitCode: number; stdout: string; truncated: boolean }[] = [];
+    const spawn = buildChildSpawner(deps, testChildWatcher(deps));
+    await spawn(
+      {
+        prompt: "review",
+        prepare: async (runner, prompt) => {
+          const r = await runner.run("echo scanned");
+          results.push(r);
+          return `${prompt}\n\n${r.stdout.trim()}`;
+        },
+      },
+      { parentSessionId: parent.id, parentThreadId: parent.thread("web:default").id, actorUserId: "local-user", owner: { type: "user", id: "local-user" } },
+    );
+    expect(results).toEqual([expect.objectContaining({ exitCode: 0, stdout: "scanned\n", truncated: false })]);
+    expect(prompts).toEqual(["review\n\nscanned"]);
+    vi.mocked(deps.engineHost.childSessionFor).mockRestore();
+  });
+
+  it("removes the child when its prepare step throws", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const parent = await deps.engineHost.sessionFor("parent-prepare-fail", { userId: "local-user", orgId: "local-org", workspace: "/tmp" });
+    const spawn = buildChildSpawner(deps, testChildWatcher(deps));
+    const req = { sessionId: "child-prepare-fail", prompt: "review", prepare: async () => { throw new Error("scan failed"); } };
+    await expect(spawn(req, { parentSessionId: parent.id, parentThreadId: parent.thread("web:default").id, actorUserId: "local-user", owner: { type: "user" as const, id: "local-user" } }))
+      .rejects.toThrow("scan failed");
+    expect(await deps.engineStore.getSession(req.sessionId)).toBeNull();
+    expect(await deps.db.select().from(agentSessions).where(eq(agentSessions.id, req.sessionId))).toHaveLength(0);
+    expect(await deps.db.select().from(childWatches).where(eq(childWatches.childSessionId, req.sessionId))).toHaveLength(0);
+  });
+
+  it("stops a spawn that is cancelled while its prepare step runs, and queues no prompt", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const parent = await deps.engineHost.sessionFor("parent-prepare-cancel", { userId: "local-user", orgId: "local-org", workspace: "/tmp" });
+    const prompts: string[] = [];
+    const original = deps.engineHost.childSessionFor.bind(deps.engineHost);
+    vi.spyOn(deps.engineHost, "childSessionFor").mockImplementation(async (...args) => {
+      const child = await original(...args);
+      const send = child.prompt.bind(child);
+      vi.spyOn(child, "prompt").mockImplementation(async (content, opts) => {
+        prompts.push(String(content));
+        return send(content, opts);
+      });
+      return child;
+    });
+    const cancel = new AbortController();
+    let started!: () => void;
+    const scanning = new Promise<void>((resolve) => { started = resolve; });
+    let ranAfterCancel = false;
+    const spawn = buildChildSpawner(deps, testChildWatcher(deps));
+    const req: SpawnChildRequest = {
+      sessionId: "child-prepare-cancel",
+      prompt: "review",
+      // Blocks until the test cancels, as a long repository scan would.
+      prepare: async (runner, prompt) => {
+        started();
+        await new Promise<void>((resolve) => cancel.signal.addEventListener("abort", () => resolve(), { once: true }));
+        await runner.run("echo late").then(() => { ranAfterCancel = true; }, () => undefined);
+        return prompt;
+      },
+    };
+    const spawned = spawn(req, { parentSessionId: parent.id, parentThreadId: parent.thread("web:default").id, actorUserId: "local-user", owner: { type: "user", id: "local-user" }, cancel: cancel.signal });
+    await scanning;
+    cancel.abort();
+    await expect(spawned).rejects.toMatchObject({ name: "AbortError" });
+    // Let the abandoned prepare step finish its last command attempt.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(prompts).toEqual([]);
+    expect(ranAfterCancel).toBe(false);
+    expect(await deps.engineStore.getSession("child-prepare-cancel")).toBeNull();
+    expect(await deps.db.select().from(agentSessions).where(eq(agentSessions.id, "child-prepare-cancel"))).toHaveLength(0);
+    expect(await deps.db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-prepare-cancel"))).toHaveLength(0);
+    vi.mocked(deps.engineHost.childSessionFor).mockRestore();
+  });
+
+  it("settles a first prompt cancelled while the store admits it, and starts no turn", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const parent = await deps.engineHost.sessionFor("parent-admit-cancel", { userId: "local-user", orgId: "local-org", workspace: "/tmp" });
+    const childId = "child-admit-cancel";
+    const store = deps.engineStore;
+    const admit = store.admitSubmission.bind(store);
+    const claim = store.claimSubmission.bind(store);
+    let entered!: () => void;
+    const admitting = new Promise<void>((resolve) => { entered = resolve; });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    // Hold the child's admission open, as a slow database write would.
+    vi.spyOn(store, "admitSubmission").mockImplementation(async (...args) => {
+      if (args[0] === childId) {
+        entered();
+        await gate;
+      }
+      return admit(...args);
+    });
+    const claimed: string[] = [];
+    vi.spyOn(store, "claimSubmission").mockImplementation(async (c) => {
+      const item = await claim(c);
+      if (item && c.sessionId === childId) claimed.push(item.id);
+      return item;
+    });
+    const cancel = new AbortController();
+    const spawn = buildChildSpawner(deps, testChildWatcher(deps));
+    const spawned = spawn(
+      { sessionId: childId, prompt: "review" },
+      { parentSessionId: parent.id, parentThreadId: parent.thread("web:default").id, actorUserId: "local-user", owner: { type: "user", id: "local-user" }, cancel: cancel.signal },
+    );
+    await admitting;
+    cancel.abort();
+    release();
+    await expect(spawned).rejects.toMatchObject({ name: "AbortError" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(claimed).toEqual([]);
+    expect(await store.listUnsettledSubmissions(childId)).toEqual([]);
+    expect(await store.getSession(childId)).toBeNull();
+    expect(await deps.db.select().from(childWatches).where(eq(childWatches.childSessionId, childId))).toHaveLength(0);
+    vi.mocked(store.admitSubmission).mockRestore();
+    vi.mocked(store.claimSubmission).mockRestore();
   });
 
   it("full-profile child resolves its sandbox image with the child's profile — not the headless default", async () => {
@@ -2977,6 +3115,71 @@ describe("ChildWatcher", () => {
     expect(childData).not.toBeNull();
   });
 
+  async function settledChild(name: string, deps: ChildrenDeps) {
+    const { engineHost, engineStore, db } = api!.providers;
+    const parent = await engineHost.sessionFor(`parent-${name}`, { userId: "local-user", orgId: "local-org", workspace: "/tmp" });
+    const parentThread = parent.thread("web:default");
+    await parent.pause();
+    const childId = `child-${name}`;
+    const workspace = join(deps.workspaceRoot!, childId);
+    mkdirSync(join(workspace, "repo"), { recursive: true });
+    writeFileSync(join(workspace, "repo", "file.txt"), "work");
+    const child = await engineHost.childSessionFor(childId, {
+      parentSessionId: `parent-${name}`, parentThreadId: parentThread.id, actorUserId: "local-user", orgId: "local-org",
+      owner: { type: "user", id: "local-user" }, workspace,
+    });
+    await db.insert(agentSessions).values({
+      id: childId, userId: "local-user", orgId: "local-org", workspace, status: "active",
+      ownerType: "user", ownerId: "local-user", profile: "headless", createdAt: Date.now(), updatedAt: Date.now(),
+    });
+    const childThread = child.thread("web:default");
+    await child.attachment.ensureReady({ timeoutMs: 5_000 });
+    // The virtual sandbox's own destroy leaves it in the provider's map; a real provider reports it released.
+    vi.spyOn(engineHost, "sandboxStatus").mockResolvedValue({ id: "vsb", state: "released" });
+    const itemId = `qi-${name}-1`;
+    await engineStore.admitSubmission(childId, childThread.id, queuedItem(itemId, childThread.id, "work"));
+    await appendTerminalResult(engineStore, childId, childThread.id, itemId);
+    await engineStore.settleUnclaimed(childId, childThread.id, itemId, { outcome: "completed" });
+    const watch = { childSessionId: childId, queueItemId: itemId, parentSessionId: `parent-${name}`, parentThreadId: parentThread.id, actorUserId: "local-user", orgId: "local-org" };
+    await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now(), reportToParent: false });
+    return { childId, workspace, watch };
+  }
+
+  it("retires a reclaimed child: empties its working directory and leaves the session hibernated", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const watcher = testChildWatcher(deps);
+    const { childId, workspace, watch } = await settledChild("retire", deps);
+    watcher.arm(watch);
+    await waitFor(async () => {
+      const [row] = await api!.providers.db.select().from(agentSessions).where(eq(agentSessions.id, childId));
+      return row?.status === "hibernated";
+    });
+    const [row] = await api.providers.db.select().from(agentSessions).where(eq(agentSessions.id, childId));
+    expect(row?.sandboxReclaimedAt).toEqual(expect.any(Number));
+    // Emptied, not removed: the engine rebuilds a revived child in it.
+    expect(readdirSync(workspace)).toEqual([]);
+    expect(await reclaimedActiveChildren(api.providers.db)).toBe(0);
+    expect(await childWorkspaceCounts(api.providers.db, deps.workspaceRoot!)).toEqual({ live: 0, retired: 0 });
+  });
+
+  it("still hibernates a reclaimed child when its working directory cannot be released, and counts it", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const release = vi.spyOn(api.providers.engineHost, "releaseWorkspace").mockRejectedValue(new Error("EACCES: permission denied"));
+    const watcher = testChildWatcher(deps);
+    const { childId, workspace, watch } = await settledChild("retire-fail", deps);
+    watcher.arm(watch);
+    await waitFor(async () => {
+      const [row] = await api!.providers.db.select().from(agentSessions).where(eq(agentSessions.id, childId));
+      return row?.status === "hibernated";
+    });
+    expect(release).toHaveBeenCalledWith(workspace);
+    expect(existsSync(join(workspace, "repo", "file.txt"))).toBe(true);
+    // The directory outlived its reclaim, so the gauge behind the alert shows it.
+    expect(await childWorkspaceCounts(api.providers.db, deps.workspaceRoot!)).toEqual({ live: 0, retired: 1 });
+  });
+
   it("tears down a plugin child's sandbox on settle, so it stops counting against the child cap", async () => {
     api = await bootTestApi();
     const watcher = testChildWatcher(childrenDeps(api));
@@ -3208,6 +3411,15 @@ describe("resultBody", () => {
   it("passes a short result through untouched", () => {
     const body = resultBody({ queueItemId: "q1", outcome: "completed", text: "all done" }, childId);
     expect(body).toBe("all done");
+  });
+
+  it("marks the child's citation tags and tells the parent to read the child to cite them", () => {
+    const body = resultBody({ queueItemId: "q1", outcome: "completed", text: "Launch is Tuesday [s3]. Owner is Mira [s3][s4]." }, childId);
+    expect(body).toBe("Launch is Tuesday [child s3]. Owner is Mira [child s3][child s4].\n\n" +
+      `[The child cited 2 sources. To cite them here, call child_read with child_session_id "${childId}".]`);
+    const truncated = resultBody({ queueItemId: "q1", outcome: "completed", text: "Fact [s1]." + "x".repeat(CHILD_RESULT_MAX_CHARS) }, childId);
+    expect(truncated).toContain("Fact [child s1].");
+    expect(truncated.endsWith(`[The child cited 1 source. To cite it here, call child_read with child_session_id "${childId}".]`)).toBe(true);
   });
 
   it("bounds a result that is over the ceiling", () => {

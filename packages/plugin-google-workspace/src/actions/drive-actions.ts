@@ -18,6 +18,7 @@ import {
   type PluginAction,
   type PluginActionContext,
   type PluginActionResult,
+  type SourceInput,
 } from '@valet/engine';
 import { DEFAULT_MAX_UPLOAD_BYTES } from '@valet/shared';
 import { insertMarkdown } from './docs-markdown.js';
@@ -49,7 +50,7 @@ const WORKSPACE_EXPORT_DEFAULTS: Record<string, string> = {
 };
 
 const LIST_FILE_FIELDS =
-  'id,name,mimeType,size,modifiedTime,createdTime,webViewLink,owners(displayName,emailAddress)';
+  'id,name,mimeType,description,size,modifiedTime,createdTime,webViewLink,owners(displayName,emailAddress)';
 
 // ─── Shared Helpers ─────────────────────────────────────────────────────────
 
@@ -211,6 +212,15 @@ interface DriveFile {
   parents?: string[];
 }
 
+function driveSources(files: DriveFile[], content?: string): Pick<PluginActionResult, 'sources'> {
+  const sources: SourceInput[] = files.flatMap((file) => {
+    const snippet = (content ?? file.description)?.trim();
+    if (!file.webViewLink || !snippet) return [];
+    return [{ service: 'google_drive', title: file.name, url: file.webViewLink, snippet: snippet.slice(0, 500) }];
+  });
+  return sources.length ? { sources } : {};
+}
+
 /**
  * Curried action builder. The first call binds T from the parameters
  * schema; the second call types `execute`'s args via Static<T>. Splitting
@@ -223,6 +233,7 @@ function action<TParams extends TSchema>(parameters: TParams) {
     name: string;
     description: string;
     riskLevel: PluginAction['riskLevel'];
+    label?: PluginAction<TParams>["label"];
     execute: (
       args: Static<TParams>,
       ctx: PluginActionContext,
@@ -332,6 +343,7 @@ const listFiles = action(
       return {
         success: true,
         data: { files, total: files.length, nextPageToken: data.nextPageToken },
+        ...driveSources(data.files || []),
       };
     } catch (error) {
       return { success: false, error: String(error) };
@@ -437,6 +449,7 @@ const searchFiles = action(
       return {
         success: true,
         data: { files, total: files.length, nextPageToken: data.nextPageToken, hasMore: !!data.nextPageToken },
+        ...driveSources(data.files || []),
       };
     } catch (error) {
       return { success: false, error: String(error) };
@@ -487,7 +500,7 @@ const listDocuments = action(
 
       const qs = new URLSearchParams({
         q: finalQuery,
-        fields: `nextPageToken,files(id,name,modifiedTime,createdTime,webViewLink,owners(displayName,emailAddress))`,
+        fields: `nextPageToken,files(id,name,description,modifiedTime,createdTime,webViewLink,owners(displayName,emailAddress))`,
         pageSize: String(p.maxResults || 20),
         supportsAllDrives: 'true',
         includeItemsFromAllDrives: 'true',
@@ -508,6 +521,7 @@ const listDocuments = action(
       return {
         success: true,
         data: { documents, total: documents.length, nextPageToken: data.nextPageToken },
+        ...driveSources(data.files || []),
       };
     } catch (error) {
       return { success: false, error: String(error) };
@@ -564,7 +578,7 @@ const searchDocuments = action(
 
       const qs = new URLSearchParams({
         q: finalQuery,
-        fields: `nextPageToken,files(id,name,modifiedTime,createdTime,webViewLink,owners(displayName))`,
+        fields: `nextPageToken,files(id,name,description,modifiedTime,createdTime,webViewLink,owners(displayName))`,
         pageSize: String(p.maxResults || 10),
         supportsAllDrives: 'true',
         includeItemsFromAllDrives: 'true',
@@ -585,6 +599,7 @@ const searchDocuments = action(
       return {
         success: true,
         data: { documents, total: documents.length, nextPageToken: data.nextPageToken },
+        ...driveSources(data.files || []),
       };
     } catch (error) {
       return { success: false, error: String(error) };
@@ -681,6 +696,7 @@ const getDocumentInfo = action(
           url: file.webViewLink,
           description: file.description || null,
         },
+        ...driveSources([file]),
       };
     } catch (error) {
       return { success: false, error: String(error) };
@@ -1024,7 +1040,7 @@ const downloadFile = action(
 
       // Get metadata to check type and size
       const metaQs = new URLSearchParams({
-        fields: 'id,name,mimeType,size',
+        fields: 'id,name,mimeType,size,webViewLink',
         supportsAllDrives: 'true',
       });
       const metaRes = await driveFetch(`/files/${encodeURIComponent(fileId)}?${metaQs}`, token, { signal: ctx.signal });
@@ -1061,6 +1077,7 @@ const downloadFile = action(
         return {
           success: true,
           data: { name: meta.name, mimeType: meta.mimeType, exportedAs: exportMime, content: downloaded.text },
+          ...driveSources([meta], downloaded.text),
         };
       }
 
@@ -1113,6 +1130,7 @@ const downloadFile = action(
         return {
           success: true,
           data: { name: meta.name, mimeType: docx ? DOCX_DOCUMENT_MIME : mediaMime || meta.mimeType, content: read.content },
+          ...driveSources([meta], read.content),
         };
       }
 
@@ -1131,6 +1149,7 @@ const downloadFile = action(
       return {
         success: true,
         data: { name: meta.name, mimeType: mediaMime, content: downloaded.text },
+        ...driveSources([meta], downloaded.text),
       };
     } catch (error) {
       return { success: false, error: String(error) };
@@ -1155,6 +1174,7 @@ const createFromTemplate = action(
   description:
     'Creates a new document by copying a template and optionally replacing placeholder text.',
   riskLevel: 'medium',
+  label: (args) => (args.title ? `Created Google Drive document “${String(args.title).slice(0, 80)}” from a template` : 'Created a Google Drive document from a template'),
   execute: async (args, ctx) => {
     const p = args;
     const token = await getAccessToken(ctx);

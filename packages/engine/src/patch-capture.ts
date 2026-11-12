@@ -49,7 +49,7 @@ export interface PatchCaptureContext {
 
 /** POSIX single-quote escaping for values interpolated into `sh` command
  * strings (same idiom as the api's workspace prep). */
-function shQuote(value: string): string {
+export function shQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 

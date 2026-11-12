@@ -7,7 +7,8 @@
 import { describe, expect, it } from "vitest";
 import { Hono } from "hono";
 import { isBunRuntime, selectServerAdapter } from "./server-adapter.js";
-import { nodeServerAdapter } from "./server-adapter.node.js";
+import { createServer } from "node:http";
+import { configureKeepAlive, HEADERS_TIMEOUT_MS, KEEP_ALIVE_TIMEOUT_MS, nodeServerAdapter } from "./server-adapter.node.js";
 import type { AppEnv } from "./env.js";
 
 describe("isBunRuntime", () => {
@@ -101,5 +102,16 @@ describe("bunServerAdapter", () => {
     } finally {
       delete g.Bun;
     }
+  });
+});
+
+describe("configureKeepAlive", () => {
+  it("keeps idle connections open past nginx's 60 s upstream keep-alive", () => {
+    const server = createServer();
+    configureKeepAlive(server);
+    expect(server.keepAliveTimeout).toBe(KEEP_ALIVE_TIMEOUT_MS);
+    expect(KEEP_ALIVE_TIMEOUT_MS).toBeGreaterThan(60_000);
+    expect(server.headersTimeout).toBe(HEADERS_TIMEOUT_MS);
+    expect(HEADERS_TIMEOUT_MS).toBeGreaterThan(KEEP_ALIVE_TIMEOUT_MS);
   });
 });

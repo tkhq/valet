@@ -26,6 +26,8 @@ export interface FakeOAuthServer {
   tokenFailure?: number;
   /** The error body a failure returns. Default: `{ error: "invalid_grant" }`. */
   tokenFailureBody?: Record<string, unknown>;
+  /** Headers a failure returns, such as `Retry-After`. */
+  tokenFailureHeaders?: Record<string, string>;
   /** The protected resource's `scopes_supported` (RFC 9728). Undefined
    * serves no protected-resource metadata. Settable, because a server
    * upgrade changes it. */
@@ -55,6 +57,7 @@ export function startFakeOAuthServer(opts?: {
     tokenResponse: Record<string, unknown>;
     tokenFailure?: number;
     tokenFailureBody?: Record<string, unknown>;
+    tokenFailureHeaders?: Record<string, string>;
     resourceScopesSupported?: string[];
   } = {
     tokenResponse: { access_token: "at-1", refresh_token: "rt-1", expires_in: 3600, token_type: "bearer" },
@@ -95,7 +98,7 @@ export function startFakeOAuthServer(opts?: {
     for (const [k, v] of Object.entries(form)) if (typeof v === "string") entries[k] = v;
     tokenRequests.push(entries);
     if (state.tokenFailure) {
-      return c.json(state.tokenFailureBody ?? { error: "invalid_grant" }, state.tokenFailure as ContentfulStatusCode);
+      return c.json(state.tokenFailureBody ?? { error: "invalid_grant" }, state.tokenFailure as ContentfulStatusCode, state.tokenFailureHeaders);
     }
     if (entries.grant_type === "refresh_token") {
       const issuedTo = refreshTokenClients.get(entries.refresh_token ?? "");
@@ -127,6 +130,12 @@ export function startFakeOAuthServer(opts?: {
     },
     set tokenFailure(v) {
       state.tokenFailure = v;
+    },
+    get tokenFailureHeaders() {
+      return state.tokenFailureHeaders;
+    },
+    set tokenFailureHeaders(v) {
+      state.tokenFailureHeaders = v;
     },
     get tokenFailureBody() {
       return state.tokenFailureBody;

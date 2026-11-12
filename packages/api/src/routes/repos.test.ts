@@ -176,6 +176,47 @@ describe("GET /api/repos", () => {
     expect(two?.installed).toBeUndefined();
   });
 
+  it("reads every page of an installation's repositories, not only the first 100", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const pages: number[] = [];
+    useFixture({
+      listInstallations: () => ({ body: [] }),
+      convertManifest: () => ({
+        body: {
+          id: 42,
+          slug: "valet-acme",
+          name: "Valet Acme",
+          client_id: "Iv1.client",
+          client_secret: "oauth-client-secret",
+          webhook_secret: "the-webhook-secret",
+          pem: TEST_PEM,
+          html_url: "https://github.com/apps/valet-acme",
+        },
+      }),
+      createInstallationToken: () => ({
+        body: { token: "installation-secret-token", expires_at: new Date(Date.now() + 3600_000).toISOString() },
+      }),
+      // 150 repositories: a full first page, then 50.
+      listInstallationRepositories: (_auth, page) => {
+        pages.push(page);
+        const ids = page === 1 ? Array.from({ length: 100 }, (_, i) => i + 1) : page === 2 ? Array.from({ length: 50 }, (_, i) => i + 101) : [];
+        return { body: { total_count: 150, repositories: ids.map((id) => rawRepo({ id, full_name: `acme/repo-${id}` })) } };
+      },
+      listUserRepos: () => ({ body: [] }),
+    });
+    await configureOrgApp(api.baseUrl);
+    await seedInstallationRow();
+    await saveUserCredential("user-secret-token", "local-user-login");
+
+    const res = await fetch(`${api.baseUrl}/api/repos`, { headers: HEADERS });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as GetReposResponse;
+    expect(body.repos).toHaveLength(150);
+    expect(body.repos.some((r) => r.fullName === "acme/repo-150")).toBe(true);
+    // A short page ends the read.
+    expect(pages).toEqual([1, 2]);
+  });
+
   it("soft-degrades when the installation-repositories call fails: still 200, partial results", async () => {
     api = await bootTestApi({ plugins: [githubPlugin] });
     useFixture({

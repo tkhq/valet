@@ -26,7 +26,7 @@ import { prepareMemberActivity, MEMBER_ACTIVITY_PUBLISH_SQL } from "./usage-memb
 import { prepareAuxUsageRollups, prepareSkillCompanionUsage, SKILL_COMPANION_USAGE_SQL, AUX_USAGE_PUBLISH_SQL } from "./usage-aux-rollups.js";
 import { prepareUsageDaily, prepareUsageHourly, usageHourlyPublishSql } from "./usage-hourly-migration.js";
 import { prepareUsageAnalytics, usageAnalyticsPublishSql, projectedCostViewSql, taggingAccountingPublishSql } from "./usage-analytics-migration.js";
-import { prepareUsageStepAttribution, USAGE_STEP_ATTRIBUTION_PUBLISH_SQL, WORKFLOW_RUN_ORG_BACKFILL, WORKFLOW_RUN_ORG_SQL } from "./usage-step-attribution.js";
+import { prepareUsageStepAttribution, USAGE_STEP_ATTRIBUTION_PUBLISH_SQL, USAGE_STEP_ATTRIBUTION_READY, WORKFLOW_RUN_ORG_BACKFILL, WORKFLOW_RUN_ORG_SQL } from "./usage-step-attribution.js";
 import * as schema from "../schema/index.js";
 
 /** Application Drizzle handle. The engine's session store has its own
@@ -140,6 +140,7 @@ export async function applyAppMigrations(db: PgDb, pgDataDir?: string): Promise<
   await expandLegacySlackWildcards(db);
   await stripRetiredAssistantTargets(db);
   await normalizeLegacyWorkflowDefinitions(db);
+  await removeStockMorningBriefs(db);
   await syncAssistantSessionStatus(db);
   await reportRetiredAssistantSettings(db);
 }
@@ -279,6 +280,34 @@ export async function stripRetiredAssistantTargets(db: PgDb): Promise<void> {
   await db.query(
     `UPDATE event_subscriptions SET target = target - 'assistantId', updated_at = $1 WHERE target ? 'assistantId'`,
     [Date.now()],
+  );
+}
+
+/** The prompt of the retired automatic morning brief, exactly as Home created it. */
+export const RETIRED_MORNING_BRIEF_PROMPT = [
+  "Write the person's morning brief in this conversation.",
+  "1. Call list_tasks to see what is in progress and what needs the person across their workspaces.",
+  "2. If calendar or email tools are connected, check today's meetings and unread mail that need a reply. Skip this step if they are not connected.",
+  "3. Call show_brief once. The headline counts what is in progress and what needs them, such as \"Morning. 4 in progress, 2 need you.\" Add at most six items, the ones that need them first. Each item has a short topic and one line that says what is ready or what you need from them. Give an item the thread_id from list_tasks when it is about a task.",
+  "Write nothing else after show_brief. If nothing needs the person, the headline says so and the brief has no items.",
+].join("\n");
+
+/**
+ * Home no longer creates a daily morning brief: the Tasks tab shows the same
+ * tasks, and each run re-sent the whole Home conversation to the model.
+ * Delete the routines Home created that nobody changed: same name, prompt,
+ * and 08:00 cron, still posting into the owner's Home thread. A routine a
+ * person edited or paused stays. Idempotent: a later boot finds no match.
+ */
+export async function removeStockMorningBriefs(db: PgDb): Promise<void> {
+  await db.query(
+    `DELETE FROM workflow_schedules s
+      WHERE s.owner_type = 'user' AND s.target_kind IN ('assistant', 'orchestrator') AND s.enabled
+        AND s.name = 'Morning brief' AND s.cron = '0 8 * * *' AND s.prompt = $1
+        AND s.thread_policy->>'mode' = 'existing'
+        AND EXISTS (SELECT 1 FROM engine_threads t WHERE t.id = s.thread_policy->>'threadId'
+          AND t.session_id = s.thread_policy->>'sessionId' AND t.key = 'home')`,
+    [RETIRED_MORNING_BRIEF_PROMPT],
   );
 }
 
@@ -684,6 +713,11 @@ WHERE r.status <> 'merged' ORDER BY l.org_id, l.subject_type, l.subject_id, l.di
 )` },
   { describe: "home_tasks_user", probe: { kind: "index", index: "home_tasks_user" }, sql: 'CREATE INDEX IF NOT EXISTS "home_tasks_user" ON "home_tasks" ("user_id", "created_at")' },
   { describe: "home_tasks_thread", probe: { kind: "index", index: "home_tasks_thread" }, sql: 'CREATE INDEX IF NOT EXISTS "home_tasks_thread" ON "home_tasks" ("session_id", "thread_id")' },
+  { describe: "home task dismissals", probe: { kind: "table", table: "home_task_dismissals" }, sql: `CREATE TABLE IF NOT EXISTS "home_task_dismissals" (
+  "user_id" text NOT NULL, "org_id" text NOT NULL, "session_id" text NOT NULL, "thread_id" text NOT NULL,
+  "dismissed_at" bigint NOT NULL,
+  PRIMARY KEY ("user_id", "session_id", "thread_id")
+)` },
   // The thread that opened the pull request. A delegating thread's copy names
   // its child here; rows recorded before this column stay null.
   { describe: "thread_pull_requests.opened_session_id column", probe: { kind: "column", table: "thread_pull_requests", column: "opened_session_id" }, sql: 'ALTER TABLE "thread_pull_requests" ADD COLUMN IF NOT EXISTS "opened_session_id" text' },
@@ -703,6 +737,17 @@ WHERE r.status <> 'merged' ORDER BY l.org_id, l.subject_type, l.subject_id, l.di
     before: 'DROP INDEX IF EXISTS "channel_messages_provider_message"',
     sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "channel_messages_session_message" ON "channel_messages" ("org_id", "session_id", "channel_key", "provider_message_id", "direction")',
   },
+  { describe: "runtime_grants.thread_id", probe: { kind: "column", table: "runtime_grants", column: "thread_id" }, sql: 'ALTER TABLE "runtime_grants" ADD COLUMN IF NOT EXISTS "thread_id" text' },
+  {
+    // A thread grant and a session-wide grant for one action can both be
+    // live, so the session key leaves out thread rows. The old key goes in
+    // the same transaction, so the table always keeps one of them.
+    describe: "runtime_grants_session_wide_policy_key",
+    probe: { kind: "index", index: "runtime_grants_session_wide_policy_key" },
+    before: 'DROP INDEX IF EXISTS "runtime_grants_session_policy_key"',
+    sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "runtime_grants_session_wide_policy_key" ON "runtime_grants" ("org_id", "session_id", "policy_key") WHERE "session_id" IS NOT NULL AND "thread_id" IS NULL AND "revoked_at" IS NULL',
+  },
+  { describe: "runtime_grants_thread_policy_key", probe: { kind: "index", index: "runtime_grants_thread_policy_key" }, sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "runtime_grants_thread_policy_key" ON "runtime_grants" ("org_id", "session_id", "thread_id", "policy_key") WHERE "thread_id" IS NOT NULL AND "revoked_at" IS NULL' },
   { describe: "channel_messages_channel", probe: { kind: "index", index: "channel_messages_channel" }, sql: 'CREATE INDEX IF NOT EXISTS "channel_messages_channel" ON "channel_messages" ("org_id", "channel_key", "created_at")' },
   { describe: "channel_messages_thread", probe: { kind: "index", index: "channel_messages_thread" }, sql: 'CREATE INDEX IF NOT EXISTS "channel_messages_thread" ON "channel_messages" ("session_id", "thread_id", "created_at")' },
   { describe: "slack channel privacy", probe: { kind: "table", table: "slack_channel_privacy" }, sql: `CREATE TABLE IF NOT EXISTS "slack_channel_privacy" (
@@ -1482,6 +1527,14 @@ WHERE r.status <> 'merged' ORDER BY l.org_id, l.subject_type, l.subject_id, l.di
     describe: "mcp_oauth_clients.scopes_supported column",
     probe: { kind: "column", table: "mcp_oauth_clients", column: "scopes_supported" },
     sql: 'ALTER TABLE "mcp_oauth_clients" ADD COLUMN IF NOT EXISTS "scopes_supported" jsonb',
+  },
+  {
+    // The MCP server's resource identifier, sent as the RFC 8707 `resource`
+    // on authorize, code exchange, and refresh (integration-oauth.ts). Null on
+    // rows from before the column existed, which the next connect backfills.
+    describe: "mcp_oauth_clients.resource column",
+    probe: { kind: "column", table: "mcp_oauth_clients", column: "resource" },
+    sql: 'ALTER TABLE "mcp_oauth_clients" ADD COLUMN IF NOT EXISTS "resource" text',
   },
   {
     // The LLM recording gateway's request log (#432). The gateway writes a row
@@ -2327,6 +2380,13 @@ WHERE r.status <> 'merged' ORDER BY l.org_id, l.subject_type, l.subject_id, l.di
       `WHERE "owner_type" = 'team' AND "credential_owner_mode" IS NULL RETURNING "id"`,
   },
   {
+    // `read`: the sandbox git credential can clone and fetch, never push
+    // (plugin review children). Nullable; null keeps the full credential.
+    describe: "agent_sessions.git_access column",
+    probe: { kind: "column", table: "agent_sessions", column: "git_access" },
+    sql: 'ALTER TABLE "agent_sessions" ADD COLUMN IF NOT EXISTS "git_access" text',
+  },
+  {
     // Before the usage repairs: the action fact rule reads it.
     describe: "action_invocations.queue_item_id column",
     probe: { kind: "column", table: "action_invocations", column: "queue_item_id" },
@@ -2398,8 +2458,8 @@ WHERE r.status <> 'merged' ORDER BY l.org_id, l.subject_type, l.subject_id, l.di
   { describe: "event delivery queue items", probe: { kind: "column", table: "event_deliveries", column: "queue_item_id" }, sql: 'ALTER TABLE "event_deliveries" ADD COLUMN "queue_item_id" text' },
   { describe: "recent delivered event deliveries", probe: { kind: "index", index: "event_deliveries_delivered" }, sql: `CREATE INDEX "event_deliveries_delivered" ON "event_deliveries" ("delivered_at") WHERE "status" = 'delivered'` },
   // After every rollup and its views: the backfill moves facts, and their
-  // triggers move the hours and days.
-  { describe: "usage workflow step attribution", probe: { kind: "column", table: "usage_step_attribution_ready", column: "version" }, prepare: prepareUsageStepAttribution, sql: USAGE_STEP_ATTRIBUTION_PUBLISH_SQL },
+  // triggers move the hours and days. The probe names the rule's version.
+  { describe: "usage workflow step attribution", probe: { kind: "column", table: USAGE_STEP_ATTRIBUTION_READY, column: "version" }, prepare: prepareUsageStepAttribution, sql: USAGE_STEP_ATTRIBUTION_PUBLISH_SQL },
 
   {
     // Normalized subjects on the stored event (spec 2026-10-15: event

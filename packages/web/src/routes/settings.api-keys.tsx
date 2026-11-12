@@ -22,12 +22,12 @@ export function PersonalAccessPage() {
   );
 }
 
-/** API keys, then proxy, for whichever scope the caller pinned. */
+/** Coding-tool setup, then API keys, for whichever scope the caller pinned. */
 export function AccessSections() {
   return (
     <div className="space-y-10">
-      <ApiKeysPage />
       <SettingsProxyPage />
+      <ApiKeysPage />
     </div>
   );
 }
@@ -36,7 +36,7 @@ export function ApiKeysPage() {
   return (
     <Section
       title="API keys"
-      description="Create keys to call the Valet API from scripts. To connect a coding agent such as Claude Code, use Agent access instead."
+      description="Use the proxy setup above for model traffic from coding tools. API keys below let scripts call the Valet API. Agent access connects tools to Valet through MCP."
     >
       <ApiKeysSection />
     </Section>

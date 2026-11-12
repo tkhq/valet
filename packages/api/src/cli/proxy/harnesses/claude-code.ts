@@ -18,11 +18,12 @@
  * The merge functions are pure over a settings object; the file read and
  * write is a thin shell around them.
  */
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { ConfigError } from "../../exit.js";
 import type { HarnessAdapter, HarnessPlan, HarnessPreflight, HarnessTarget, HarnessUnapplyReport } from "./index.js";
+import { assertUnchanged, backupSettings, readText } from "./files.js";
 
 type Settings = Record<string, unknown>;
 
@@ -78,7 +79,7 @@ export function planClaudeSettings(current: Settings, target: HarnessTarget): Se
   const nextEnv: Record<string, unknown> = { ...env };
 
   if (env.ANTHROPIC_BASE_URL !== baseUrl) {
-    if (env.ANTHROPIC_BASE_URL !== undefined) conflicts.push(`env.ANTHROPIC_BASE_URL is set to ${String(env.ANTHROPIC_BASE_URL)}`);
+    if (env.ANTHROPIC_BASE_URL !== undefined) conflicts.push("env.ANTHROPIC_BASE_URL is set to another endpoint");
     changes.push(`env.ANTHROPIC_BASE_URL = ${baseUrl}`);
     nextEnv.ANTHROPIC_BASE_URL = baseUrl;
   }
@@ -91,7 +92,7 @@ export function planClaudeSettings(current: Settings, target: HarnessTarget): Se
   }
   if (current.apiKeyHelper !== target.helperCommand) {
     if (current.apiKeyHelper !== undefined && !isOwnHelper(current.apiKeyHelper, target.helperArgs)) {
-      conflicts.push(`apiKeyHelper is set to ${String(current.apiKeyHelper)}`);
+      conflicts.push("apiKeyHelper is set to another command");
     }
     changes.push(`apiKeyHelper = ${target.helperCommand}`);
   }
@@ -123,7 +124,7 @@ export function unapplyClaudeSettings(
       else next.env = env;
       removed.push("env.ANTHROPIC_BASE_URL");
     } else {
-      kept.push(`env.ANTHROPIC_BASE_URL (set to ${String(current.env.ANTHROPIC_BASE_URL)}, not this instance's proxy)`);
+      kept.push("env.ANTHROPIC_BASE_URL (it points to another endpoint)");
     }
   }
   return { next, removed, kept };
@@ -227,6 +228,7 @@ export const claudeCodeAdapter: HarnessAdapter = {
 
   plan(target: HarnessTarget): HarnessPlan {
     const path = claudeSettingsPath(process.env);
+    const original = readText(path);
     const current = readClaudeSettings(path);
     const { next, changes, conflicts } = planClaudeSettings(current, target);
     return {
@@ -234,13 +236,12 @@ export const claudeCodeAdapter: HarnessAdapter = {
       changes,
       conflicts,
       apply({ force }) {
+        assertUnchanged(path, original);
         if (changes.length === 0) return [`${path} is already set up.`];
         if (conflicts.length > 0 && !force) throw new ConfigError(`${path} has conflicts. Run again with --force to replace them.`);
         const lines: string[] = [];
         if (conflicts.length > 0 && existsSync(path)) {
-          const backup = `${path}.valet-backup`;
-          copyFileSync(path, backup);
-          lines.push(`Saved the old settings to ${backup}.`);
+          lines.push(backupSettings(path));
         }
         writeClaudeSettings(path, next);
         lines.push(`Updated ${path}:`, ...changes.map((change) => `  ${change}`));

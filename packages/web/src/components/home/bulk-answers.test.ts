@@ -7,7 +7,7 @@ type DecisionItem = ListNotificationDecisionsResponse["items"][number];
 
 function decision(id: string, gate: Partial<DecisionGate> = {}): DecisionItem {
   return {
-    sessionId: `session-${id}`, title: `Thread ${id}`,
+    sessionId: `session-${id}`, title: `Thread ${id}`, owner: { type: "user", id: "me" },
     gate: { id, sessionId: `session-${id}`, threadId: `thread-${id}`, type: "approval", title: `Approve ${id}?`, status: "pending", oneShot: true,
       createdAt: 1, updatedAt: 1, actions: [{ id: "approve", label: "Approve" }, { id: "deny", label: "Deny" }], ...gate },
   };

@@ -85,12 +85,35 @@ Check types: `tool_called`, `tool_not_called`, `tool_result_matches`,
 `output_not_contains`, `all_terminal`, `no_errors`, `max_turns`,
 `max_tokens`, `min_compactions`, `max_cost`, `max_duration`,
 `verify_command`, `workflow_definition`, `judge_output`,
-`judge_trajectory`, `judge_equivalence`. Field details: `src/types.ts`.
+`judge_trajectory`, `judge_equivalence`, `citation_validity`. Field details: `src/types.ts`.
+
+Citation cases live in `evals/cases/citations/`. Run them with
+`make eval EVAL_ARGS="--cases evals/cases/citations --model <provider/model>"`.
+`citation_validity` checks source existence and reports citation counts.
+A `profile: mock` case can give a mocked tool `sources` (`service`, `title`, and optional `url`, `snippet`, `location`).
+The engine numbers them `s1`, `s2`… in the tool result, as it does for a real tool:
+
+```yaml
+mock_tools:
+  slack.read_history:
+    response: '{"messages":[]}'
+    sources:
+      - service: slack
+        title: Message in #launch
+        url: https://acme.slack.com/archives/C1/p1
+```
+
+`multi-source-attribution.yaml` checks separate Slack and GitHub facts against their own sources. Its prompt and the Gmail prompt do not request citations.
+These cases mock real static actions. They do not test live integrations. The integration profile excludes dynamic MCP actions, including Linear.
+The case's judge checks whether each factual claim has supporting evidence.
+Compare the same case across models before drawing conclusions about citation reliability.
 
 Compaction recall cases live in `evals/cases/compaction/`. Each one sets
 a small `context_budget_tokens`, so the thread compacts between turns.
 Each case also checks `min_compactions`, so a run that never compacts
-fails. Run them with
+fails. `compaction-midturn-task.yaml` sets `context_window_tokens`
+instead: the engine assumes that window for the model, so one long turn
+compacts before a model call. Run them with
 `make eval EVAL_ARGS="--cases evals/cases/compaction"`.
 
 `drive: product` cases can list action services in `connected:`. The
@@ -138,6 +161,87 @@ gateway is not set, the code-review cases SKIP.
   `--review-passes <n>` merges n independent reviewer passes.
 - One full run costs about $5 for the reviews on Sonnet 5.5, plus the
   judge calls. `--verify` roughly doubles the review cost.
+- `--min-confidence <x>` drops findings the reviewer rated below x. The
+  scorecard then also scores the unfiltered draft as "valet (before
+  verify)", so one run shows what the threshold cost.
+- `--review-dedupe` runs the dedupe stage: one model call compares the
+  findings that sit on one file within 20 lines of each other and keeps
+  one finding of each defect. The trajectory lists each merged finding
+  with its reason.
+
+Two more suites use the same case shape and scoring:
+
+- `evals/cases/turnkey-trial/` holds the 21 PRs of the Turnkey review
+  trial in the private repos `tkhq/test-sdk`, `tkhq/test-go-sdk` and
+  `tkhq/test-rust-sdk`. 12 PRs carry one planted defect (2 are visible
+  only in another repo), 6 are clean controls, and 3 lay down fixtures.
+  Each case declares `kind: planted`, `control` or `setup`. On a control
+  or setup PR every issue is a false positive. The scorecard adds a TRIAL
+  table: planted recall, control and setup false positives, and
+  cross-repo recall. The `coderabbit` reference row is CodeRabbit's
+  review from the trial, scored with the same judge. To run it, sign in
+  `gh` with read access to the three repos. To regenerate the cases, run
+  `pnpm --filter @valet/eval import:trial`.
+- `evals/cases/swr-bench/` holds 80 PRs from SWR-Bench (Peking
+  University, FSE 2026, MIT, github.com/ZZR0/SWRench): 60 PRs with a
+  functional defect that a human reviewer raised and the author fixed,
+  and 20 clean PRs as controls, from 12 Python projects. Only functional
+  (F.*) defects count toward recall. All 12 projects are SWE-bench
+  repos, so expect some training-data contamination. To regenerate the
+  cases, run `pnpm --filter @valet/eval import:swr`.
+- `--context-budget <tokens>` builds a context pack before each review:
+  repository conventions, domain notes, definitions, callers, tests and
+  team notes, from one scan of the checkout at HEAD. The trajectory
+  metadata keeps the pack, its manifest and the consolidate drops. The
+  plugin default is 12000. `0` or no flag runs without a pack.
+- `--memory-dir <dir>` gives the pack a directory of memory files as
+  team memory, mounted at `lib/` the way a content source syncs it, for
+  example a source repo's `.valet/memory`. Notes under
+  `lib/code-review/notes/` become review rules; other notes are
+  background.
+
+### Private suites
+
+Suites whose cases name private production repositories or describe
+their defects are not committed here. The Turnkey history suite (merged
+production PRs at the commit a human reviewed) and its held-out set are
+kept outside the repo.
+
+1. Set `VALET_EVAL_PRIVATE_CASES` to the directory that holds the suite
+   directories.
+2. Run with `--cases private:<suite>`, for example
+   `--cases private:turnkey-history`.
+
+If the variable is unset or the suite is missing, the run prints SKIP and
+exits 0. A case with `pull_request.private: true` SKIPs when `git
+ls-remote` reports no read access, and fails on any other error. With
+`pull_request.number` and no `body`, the runner reads the description
+through `gh`; a failed read fails the case. A golden comment may carry
+`fix`, the fix the human reviewer proposed, for a later fix-match scorer.
+
+### Reviewer matrix
+
+`src/review-matrix-cli.ts` lists every issue any reviewer raised on each
+case and who raised it: the golden comments, one column per recorded
+Valet run, and one per reference reviewer.
+
+```bash
+pnpm --silent --filter @valet/eval start --cases private:turnkey-history \
+  --save-baseline --allow-live-baselines --baselines /tmp/tkh-valet
+pnpm --filter @valet/eval exec tsx src/review-matrix-cli.ts \
+  --cases private:turnkey-history --run valet=/tmp/tkh-valet --out /tmp/matrix.md
+```
+
+- Keep the baselines directory out of the repo: trajectories carry code.
+- `--model` names the reviewer model whose saved baselines the matrix reads, for cases that name no model. `--judge-model` picks the model that matches issues across reviewers; it defaults to `DEFAULT_REVIEW_JUDGE_MODEL`.
+- Reference reviewers with text and links come from
+  `<cases>/reference/<case id>.json`. Reference tools with only `matched`
+  and `fp` counts (Martian, the trial suite) mark golden rows and add a
+  count of their other issues.
+- Each row has a status: `human` (a golden comment), `acted` (the author
+  changed the code under a reference comment), `corroborated` (two or
+  more reviewers; Valet runs count as one), `unconfirmed`, or `noise` (a
+  person marked the reference finding wrong).
 
 ## Compare models
 

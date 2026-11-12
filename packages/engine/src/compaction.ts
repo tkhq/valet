@@ -1,6 +1,6 @@
 import { failedToolResultText } from "./tool-result-text.js";
 import { completeSimple, isContextOverflow } from "@earendil-works/pi-ai/compat";
-import type { Message, Model } from "@earendil-works/pi-ai/compat";
+import type { AssistantMessage, Message, Model } from "@earendil-works/pi-ai/compat";
 import { attributedAuthor, formatSenderLine, type AuthorAttribution } from "./submission.js";
 import { entryMessageTime, messageTimeLine } from "./model-context.js";
 import type { CompactionConfig, CreateSessionOptions, SessionEntry } from "./types.js";
@@ -440,6 +440,32 @@ export function selectSummaryCheckpointTail(
   return window;
 }
 
+/**
+ * The oldest entries of `entries` that fit `maxTokens`, for one bounded
+ * summary of a head. A checkpoint covers the window, and the newer entries
+ * keep their place in live context after the summary, so the order the
+ * model reads stays oldest first. The window always holds the first entry
+ * the summarizer can read, even when it alone exceeds the budget, and it
+ * takes the zero-cost entries that follow its last one. Pass the payload
+ * ruler as `sizeOf`.
+ */
+export function selectSummaryCheckpointHead(
+  entries: readonly SessionEntry[],
+  maxTokens: number,
+  opts?: Pick<SummaryWindowOptions, "sizeOf">,
+): SessionEntry[] {
+  const sizeOf = opts?.sizeOf ?? estimateEntryTokens;
+  let end = 0;
+  let tokens = 0;
+  while (end < entries.length) {
+    const next = sizeOf(entries[end]);
+    if (next > 0 && tokens > 0 && tokens + next > maxTokens) break;
+    end++;
+    tokens += next;
+  }
+  return entries.slice(0, end);
+}
+
 // ── Turn segmentation ──────────────────────────────────────────────
 
 export interface Turn {
@@ -875,12 +901,20 @@ export interface SummarizeOptions {
    * (`Thread.attributeAuthors`).
    */
   attributeAuthors?: AuthorAttribution;
+  /**
+   * The newest turn keeps running after this pass (a compaction inside a
+   * turn). The prompt then tells the summarizer that the turn is not over
+   * (`SUMMARY_TURN_CONTINUES`).
+   */
+  turnInProgress?: boolean;
 }
 
 export interface SummarizeResult {
   summary: string;
   inputTokens: number;
   outputTokens: number;
+  /** Input tokens the provider served from the prompt cache. Set by `summarizeOnPrefix`. */
+  cacheReadTokens?: number;
 }
 
 /**
@@ -920,6 +954,28 @@ export function stripAnalysisScratchpad(text: string): string {
 const SUMMARY_MIDTURN_PREFACE =
   "The conversation history below starts in the middle of a turn. The user message that started that turn is not included.";
 
+/**
+ * Said to every summarizer. The summarizer reads its own request as the last
+ * user message, so without this line a summary can list the request as the
+ * latest user message and tell the resumed agent to write only a summary.
+ */
+const SUMMARY_REQUEST_NOT_FROM_USER =
+  "This request to summarize comes from the system, not from the user. Do not list it under User Messages, and do not record it as the goal, a constraint, or the latest request.";
+
+/**
+ * Said when the newest turn keeps running after the pass. Without it, a
+ * summary can describe the running turn as finished, or report an action the
+ * turn took (a posted message, a reaction) as something it found already
+ * done. The resumed turn then stops before it finishes its work.
+ */
+const SUMMARY_TURN_CONTINUES =
+  "The newest turn is still running. When this summary is stored, that same turn continues from where it stopped. Record its task under Progress > In Progress, not Done, and do not write that it stopped, ended, or was paused. Under Progress > Done, list each action this turn already completed that changed something outside the conversation (a message posted, a reaction added, a file written), and say that this turn did it.";
+
+/** The lines every summarizer prompt carries about its own request and the turn. */
+function summaryRequestNotes(turnInProgress: boolean | undefined): string {
+  return turnInProgress ? `${SUMMARY_REQUEST_NOT_FROM_USER}\n${SUMMARY_TURN_CONTINUES}` : SUMMARY_REQUEST_NOT_FROM_USER;
+}
+
 export async function summarize(opts: SummarizeOptions): Promise<SummarizeResult> {
   const messages = entriesToSummaryMessages(opts.headEntries, {
     toolOutputMaxChars: opts.toolOutputMaxChars ?? DEFAULTS.toolOutputMaxChars,
@@ -956,64 +1012,147 @@ export async function summarize(opts: SummarizeOptions): Promise<SummarizeResult
   const steer = opts.instructions
     ? `\n\nThe user gave these instructions for this compaction — follow them when deciding what to keep:\n${opts.instructions}`
     : "";
-  const prompt = `${anchor}\n\n${SUMMARY_TEMPLATE}${steer}`;
+  const prompt = `${anchor}\n\n${summaryRequestNotes(opts.turnInProgress)}\n\n${SUMMARY_TEMPLATE}${steer}`;
+  let inputTokens = 0;
+  let outputTokens = 0;
 
-  const result = await completeSimple(opts.model, {
-    systemPrompt:
-      "You are a session compaction summarizer. Produce a concise, structured summary that lets a coding agent resume work without the original transcript.",
-    messages: [
-      ...messages,
-      { role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() },
-    ],
-  }, {
-    apiKey: opts.apiKey,
-    signal: opts.signal,
-    ...(opts.fetch ? { fetch: opts.fetch } : {}),
-    // Side calls fail fast (TKAI-319): one transport retry, short delay
-    // cap. Nobody waits on a summarizer during a capacity event — the
-    // compaction failure paths (breaker, overflow retry) own recovery.
-    maxRetries: 1,
-    maxRetryDelayMs: 15_000,
-  });
+  const completeSummary = async (promptText: string): Promise<string> => {
+    const result = await completeSimple(opts.model, {
+      systemPrompt:
+        "You are a session compaction summarizer. Produce a concise, structured summary that lets a coding agent resume work without the original transcript.",
+      messages: [
+        ...messages,
+        { role: "user", content: [{ type: "text", text: promptText }], timestamp: Date.now() },
+      ],
+    }, {
+      apiKey: opts.apiKey,
+      signal: opts.signal,
+      ...(opts.fetch ? { fetch: opts.fetch } : {}),
+      // Side calls fail fast (TKAI-319): one transport retry, short delay
+      // cap. Nobody waits on a summarizer during a capacity event — the
+      // compaction failure paths (breaker, overflow retry) own recovery.
+      maxRetries: 1,
+      maxRetryDelayMs: 15_000,
+    });
 
-  // pi-ai returns API failures as an assistant message with stopReason
-  // "error", not a throw. Without this check an errored completion produced
-  // an empty summary that was silently persisted as the CompactionEntry.
-  // "length" fails too: a maxTokens-truncated summary is garbage (often an
-  // unclosed <analysis> block), and the caller can retry with less input.
-  // The contextWindow argument matches the reactive path's overflow check.
-  if (
-    result.stopReason !== "stop" || result.content.some(block => block.type === "toolCall")
-  ) {
-    if (isContextOverflow(result, opts.model.contextWindow)) {
-      throw new SummarizeOverflowError(result.errorMessage);
+    // pi-ai returns API failures as an assistant message with stopReason
+    // "error", not a throw. Without this check an errored completion produced
+    // an empty summary that was silently persisted as the CompactionEntry.
+    // "length" fails too: a maxTokens-truncated summary is garbage (often an
+    // unclosed <analysis> block), and the caller can retry with less input.
+    // The contextWindow argument matches the reactive path's overflow check.
+    if (
+      result.stopReason !== "stop" || result.content.some(block => block.type === "toolCall")
+    ) {
+      if (isContextOverflow(result, opts.model.contextWindow)) {
+        throw new SummarizeOverflowError(result.errorMessage);
+      }
+      throw new Error(
+        result.errorMessage ??
+          `The summarizer completion failed (${result.stopReason}). Run /compact to retry.`,
+      );
     }
-    throw new Error(
-      result.errorMessage ??
-        `The summarizer completion failed (${result.stopReason}). Run /compact to retry.`,
-    );
+    inputTokens += result.usage.input + result.usage.cacheRead;
+    outputTokens += result.usage.output;
+
+    const text = result.content
+      .filter((b): b is { type: "text"; text: string } => b.type === "text")
+      .map((b) => b.text)
+      .join("");
+
+    const summary = stripAnalysisScratchpad(text);
+    if (summary.length === 0) {
+      // A blank summary would silently replace the whole head with nothing.
+      throw new Error(
+        "The summarizer returned no summary text. Run /compact to retry.",
+      );
+    }
+    return summary;
+  };
+
+  let summary = await completeSummary(prompt);
+  try {
+    validateSummaryStructure(summary);
+  } catch {
+    opts.signal?.throwIfAborted();
+    // Completed model output can miss the template. Regenerate once from
+    // the same source, without adding the invalid draft to the input.
+    summary = await completeSummary(`${prompt}\n\nThe previous response did not match the required summary format. Generate the summary again from the original conversation and anchored summary above. Output every template section exactly once, in order, with content in every leaf section. Use "(none)" or "(unknown)" when appropriate. Do not omit, merge, or rename sections. Preserve the user's facts, constraints, and instructions.`);
+    validateSummaryStructure(summary);
   }
-
-  const text = result.content
-    .filter((b): b is { type: "text"; text: string } => b.type === "text")
-    .map((b) => b.text)
-    .join("");
-
-  const summary = stripAnalysisScratchpad(text);
-  if (summary.length === 0) {
-    // A blank summary would silently replace the whole head with nothing.
-    throw new Error(
-      "The summarizer returned no summary text. Run /compact to retry.",
-    );
-  }
-
-  validateSummaryStructure(summary);
 
   return {
     summary,
-    inputTokens: result.usage.input + result.usage.cacheRead,
-    outputTokens: result.usage.output,
+    inputTokens,
+    outputTokens,
   };
+}
+
+export interface PrefixSummarizeOptions {
+  /** The thread's latest request messages and its response, in order. */
+  messages: Message[];
+  /** Sends one request with these messages and the thread's own system
+   * prompt, tools, and request options, so the prompt cache serves the
+   * prefix. */
+  send: (messages: Message[]) => Promise<AssistantMessage>;
+  /** The conversation already opens with an earlier summary. */
+  hasPreviousSummary: boolean;
+  instructions?: string;
+  /** The newest turn keeps running after this pass (`SummarizeOptions.turnInProgress`). */
+  turnInProgress?: boolean;
+}
+
+/**
+ * Summarize from the thread's own cached prefix. The request repeats the
+ * thread's latest request (same system prompt, tools, and messages) and
+ * adds its response and the summary prompt. The provider serves the
+ * repeated part from the prompt cache, so this costs cache reads instead
+ * of a full-price read of the history. `summarize` sends its own system
+ * prompt and no tools, which no cache entry matches.
+ *
+ * It keeps the tools: a changed `tool_choice` clears the provider's cached
+ * messages. The prompt asks for text only, and a tool call fails the pass,
+ * so the caller falls back to `summarize`.
+ */
+export async function summarizeOnPrefix(opts: PrefixSummarizeOptions): Promise<SummarizeResult> {
+  const anchor = opts.hasPreviousSummary
+    ? "Update the anchored summary at the start of this conversation using everything after it. Preserve still-true details, remove stale details, and merge in the new facts."
+    : "Create a new anchored summary of this conversation.";
+  const steer = opts.instructions
+    ? `\n\nThe user gave these instructions for this compaction — follow them when deciding what to keep:\n${opts.instructions}`
+    : "";
+  const prompt = [
+    "Pause the task to compact this conversation. Do not call any tools. Reply with text only.",
+    `${anchor} The summary replaces the earlier messages; the most recent messages stay verbatim after it.`,
+    summaryRequestNotes(opts.turnInProgress),
+    `${SUMMARY_TEMPLATE}${steer}`,
+  ].join("\n\n");
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let cacheReadTokens = 0;
+  const complete = async (text: string): Promise<string> => {
+    const result = await opts.send([...opts.messages, { role: "user", content: [{ type: "text", text }], timestamp: Date.now() }]);
+    inputTokens += result.usage.input + result.usage.cacheRead + result.usage.cacheWrite;
+    cacheReadTokens += result.usage.cacheRead;
+    outputTokens += result.usage.output;
+    if (result.stopReason !== "stop" || result.content.some((block) => block.type === "toolCall")) {
+      throw new Error(result.errorMessage ?? `The cached-prefix summary failed (${result.stopReason}).`);
+    }
+    const summary = stripAnalysisScratchpad(result.content
+      .filter((b): b is { type: "text"; text: string } => b.type === "text")
+      .map((b) => b.text)
+      .join(""));
+    if (summary.length === 0) throw new Error("The cached-prefix summary returned no text.");
+    return summary;
+  };
+  let summary = await complete(prompt);
+  try {
+    validateSummaryStructure(summary);
+  } catch {
+    summary = await complete(`${prompt}\n\nThe previous response did not match the required summary format. Output every template section exactly once, in order, with content in every leaf section. Use "(none)" or "(unknown)" when appropriate.`);
+    validateSummaryStructure(summary);
+  }
+  return { summary, inputTokens, outputTokens, cacheReadTokens };
 }
 
 /**

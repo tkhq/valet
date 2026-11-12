@@ -7,6 +7,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { bundledModel } from "@valet/engine/model-catalog";
 import { fauxAssistantMessage, registerFauxProvider } from "@valet/engine/test-helpers";
 import { parseCliArgs, parseEvalCase, resolveEvalModel, runSuite } from "../src/index.js";
 import type { EvalCase } from "../src/index.js";
@@ -81,8 +82,10 @@ describe("catalog resolution", () => {
     expect(m?.cost).toEqual({ input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5 });
   });
 
-  it("does not resolve disabled Astra", () => {
-    expect(resolveEvalModel("openai/gpt-6-astra")).toBeUndefined();
+  it("resolves enabled Astra with the bundled SDK metadata", () => {
+    const model = resolveEvalModel("openai/gpt-6-astra");
+    expect(model).toMatchObject({ id: "gpt-6-astra", provider: "openai", api: "openai-responses", reasoning: true });
+    expect(model).toEqual(bundledModel("openai", "gpt-6-astra"));
   });
 
   it("still resolves catalog specs and rejects unknowns", () => {

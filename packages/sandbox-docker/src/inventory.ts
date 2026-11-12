@@ -38,6 +38,7 @@ export interface DockerContainerOwner {
   mounts: { source: string; destination: string; readOnly?: boolean }[];
   running: boolean;
   networkMode?: string;
+  cgroupParent?: string;
 }
 function record(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -293,6 +294,8 @@ export function parseDockerInspection(value: unknown): DockerContainerOwner {
     !Array.isArray(item.Mounts)
   )
     return invalid();
+  if (record(item.HostConfig) && item.HostConfig.CgroupParent !== undefined && typeof item.HostConfig.CgroupParent !== "string")
+    return invalid();
   const labels: Record<string, string> = {};
   for (const [key, label] of Object.entries(item.Config.Labels)) {
     if (typeof label !== "string") return invalid();
@@ -314,6 +317,7 @@ export function parseDockerInspection(value: unknown): DockerContainerOwner {
     labels,
     mounts,
     running: item.State.Running,
+    ...(record(item.HostConfig) && typeof item.HostConfig.CgroupParent === "string" ? { cgroupParent: item.HostConfig.CgroupParent } : {}),
     ...(record(item.HostConfig) && typeof item.HostConfig.NetworkMode === "string" ? { networkMode: item.HostConfig.NetworkMode } : {}),
   };
 }

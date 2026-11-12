@@ -1,0 +1,26 @@
+id: slack-source-citations
+description: Cite the Slack message that states a launch date.
+profile: mock
+turns:
+  - role: user
+    content: >-
+      Read the recent messages in Slack channel C0LAUNCH and tell me when the launch is. Cite the returned source id after the fact.
+timeout_ms: 120000
+mock_tools:
+  slack.read_history:
+    response: '{"channel":"C0LAUNCH","channel_name":"launch","messages":[{"ts":"1730800000.000100","user":"U1","text":"Launch is moving to Tuesday, Nov 12."}]}'
+    sources:
+      - service: slack
+        title: Message in #launch
+        url: https://acme.slack.com/archives/C0LAUNCH/p1730800000000100
+        snippet: Launch is moving to Tuesday, Nov 12.
+checks:
+  - type: tool_called
+    tool: slack.read_history
+  - type: citation_validity
+  - type: judge_output
+    rubric: >-
+      The reply says the launch is on Tuesday, Nov 12, and cites the Slack message source. Score 5 only if the fact has a citation. Uncited facts score at most 2.
+      A caveat about the source, such as that it reports a cause nobody verified or that it may be out of date, is not an uncited fact and does not lower the score.
+      A bracketed id such as [s1] cites the tool source with that id; the reply does not need to name the source in words.
+  - type: no_errors

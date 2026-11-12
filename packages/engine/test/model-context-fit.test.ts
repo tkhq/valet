@@ -35,7 +35,9 @@ describe("provider request context protection", () => {
     const session = await engine.createSession({ userId: "u", orgId: "o", workspace: "/", sandbox: {},
       model: faux.getModel("model")!,
       compaction: { enabled, tailTurns: 1, autoContinue: false, summarizerModel: summarizer.getModel() },
+      // Opts out of the result cap, so the oversized result reaches the context check.
       tools: [{ name: "collect_evidence", description: "Collect evidence once", parameters: Type.Object({}), protectedFromPruning: true,
+        maxResultChars: Number.POSITIVE_INFINITY,
         execute: async () => { effects++; return { text: evidence }; } }],
     });
     faux.setResponses([fauxAssistantMessage("old inspection " + "x".repeat(500_000))]);

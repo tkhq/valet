@@ -752,6 +752,20 @@ describe("github.search_issues", () => {
   });
 });
 
+describe("github.get_pull_request sources", () => {
+  it("cites the pull request page with its repo, number and state", async () => {
+    useFixture();
+    const result = await findAction("github.get_pull_request").execute(
+      { owner: "acme", repo: "widgets", pullNumber: 7 },
+      fakeActionContext("test-token"),
+    );
+    expect(result.success).toBe(true);
+    expect(result.sources).toEqual([
+      { service: "github", title: "acme/widgets #7 fixture pull request", url: "https://github.com/acme/widgets/pull/7", location: "pull request, open" },
+    ]);
+  });
+});
+
 describe("github.read_repo_file", () => {
   async function read(path: string) {
     return findAction("github.read_repo_file").execute(
@@ -808,7 +822,7 @@ describe("github.read_repo_file", () => {
     const result = await read(".github/reviewer-routing.csv");
 
     expect(Date.now() - started).toBeLessThan(5_000);
-    expect(server.calls).toHaveLength(1);
+    expect(server.calls.filter(call => call.path.includes("/contents/"))).toHaveLength(1);
     expect(result.success).toBe(false);
     if (result.success) return;
     expect(result.error).toContain("rate limit for this account is used up");
@@ -836,7 +850,7 @@ describe("github.read_repo_file", () => {
 
     const result = await read(".github/reviewer-routing.csv");
 
-    expect(server.calls).toHaveLength(2);
+    expect(server.calls.filter(call => call.path.includes("/contents/"))).toHaveLength(2);
     expect(result.success).toBe(true);
   });
 
@@ -852,7 +866,7 @@ describe("github.read_repo_file", () => {
     );
 
     expect(Date.now() - started).toBeLessThan(5_000);
-    expect(server.calls).toHaveLength(1);
+    expect(server.calls.filter(call => call.path.includes("/contents/"))).toHaveLength(1);
     expect(result.success).toBe(false);
   });
 
@@ -863,7 +877,7 @@ describe("github.read_repo_file", () => {
     const result = await read(".github/reviewer-routing.csv");
 
     expect(Date.now() - started).toBeLessThan(5_000);
-    expect(server.calls).toHaveLength(1);
+    expect(server.calls.filter(call => call.path.includes("/contents/"))).toHaveLength(1);
     expect(result.success).toBe(false);
     if (result.success) return;
     expect(result.error).toContain("in about 2 min");
@@ -909,8 +923,8 @@ describe("github.read_repo_file", () => {
         { ...fakeActionContext("test-token"), signal: controller.signal, extractDocument: async () => ({ markdown: "# NDA" }) },
       );
       expect(result.success).toBe(true);
-      expect(signals).toHaveLength(2);
-      expect(signals).toEqual([controller.signal, controller.signal]);
+      expect(signals).toHaveLength(3);
+      expect(signals).toEqual([controller.signal, controller.signal, controller.signal]);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -933,9 +947,10 @@ describe("github.read_repo_file", () => {
     );
 
     expect(result).toMatchObject({ success: true, data: { content: "# Large PDF" } });
-    expect(fixture?.calls).toHaveLength(2);
-    expect(fixture?.calls[1].acceptHeader).toContain(".raw");
-    expect(fixture?.calls[1].path).toBe("/repos/acme/handbook/git/blobs/metadata-sha");
+    expect(fixture?.calls).toHaveLength(3);
+    const raw = fixture?.calls.find(call => call.path.includes("/git/blobs/"));
+    expect(raw?.acceptHeader).toContain(".raw");
+    expect(raw?.path).toBe("/repos/acme/handbook/git/blobs/metadata-sha");
   });
 
   it("reads an extensionless inline PDF through the extractor", async () => {
@@ -1510,5 +1525,54 @@ describe("expandRelativeDates", () => {
 
   it("leaves other @ words alone", () => {
     expect(expandRelativeDates("mentions:@nowhere author:@today-team is:pr", NOW)).toBe("mentions:@nowhere author:@today-team is:pr");
+  });
+});
+
+describe("github.read_repo_file sources", () => {
+  it("resolves a mutable ref before reading and reads the exact commit the source cites", async () => {
+    const sha = "abcdef0123456789abcdef0123456789abcdef01";
+    let resolved = false;
+    const server = useFixture({
+      getCommit: () => { resolved = true; return { body: sha }; },
+      readFile: (_owner, _repo, path) => ({ body: {
+        type: "file", encoding: "base64", path, size: 3,
+        content: Buffer.from(resolved ? "new" : "old").toString("base64"),
+      } }),
+    });
+    const result = await findAction("github.read_repo_file").execute({ owner: "acme", repo: "handbook", path: "note.md", ref: "main" }, fakeActionContext("test-token"));
+    expect(result.data).toMatchObject({ content: "new" });
+    expect(server.calls.find(call => call.path.endsWith("/contents/note.md"))?.query.ref).toBe(sha);
+    expect(result.sources?.[0]?.url).toBe(`https://github.com/acme/handbook/blob/${sha}/note.md#L1-L1`);
+  });
+
+  it("links the file at the commit its ref points at, with the lines read", async () => {
+    const text = "line one\nline two\nline three\n";
+    useFixture({
+      readFile: (_owner, _repo, path) => ({
+        body: { type: "file", encoding: "base64", path, size: text.length, content: Buffer.from(text).toString("base64"),
+          html_url: `https://github.example.com/acme/handbook/blob/feat/x/${path}` },
+      }),
+      getCommit: (_owner, _repo, ref) => ({ body: ref === "feat/x" ? "abcdef0123456789abcdef0123456789abcdef01" : "wrong" }),
+    });
+    const result = await findAction("github.read_repo_file").execute({ owner: "acme", repo: "handbook", path: "docs/a b.md", ref: "feat/x" }, fakeActionContext("test-token"));
+    expect(result.sources).toEqual([{
+      service: "github", title: "acme/handbook/docs/a b.md", snippet: text,
+      url: "https://github.example.com/acme/handbook/blob/abcdef0123456789abcdef0123456789abcdef01/docs/a%20b.md#L1-L3",
+      location: "L1-L3 at abcdef0",
+    }]);
+  });
+
+  it("keeps the ref in the link when GitHub does not name the commit", async () => {
+    useFixture({ getCommit: () => ({ status: 404, body: { message: "Not Found" } }) });
+    const result = await findAction("github.read_repo_file").execute({ owner: "acme", repo: "handbook", path: "empty.md", ref: "main" }, fakeActionContext("test-token"));
+    expect(result.success).toBe(true);
+    expect(result.sources?.[0]?.url).toBe("https://github.com/acme/handbook/blob/main/empty.md");
+  });
+});
+
+describe("step labels", () => {
+  it("names the file or query a read or search used", () => {
+    expect(findAction("github.read_repo_file").label?.({ owner: "acme", repo: "widgets", path: "src/app.ts" })).toBe("Read src/app.ts in acme/widgets");
+    expect(findAction("github.search_code").label?.({ q: "retryDelay repo:acme/widgets" })).toBe("Searched GitHub code for “retryDelay repo:acme/widgets”");
   });
 });

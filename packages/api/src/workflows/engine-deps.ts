@@ -37,7 +37,7 @@ import { mergeAppearance, readAppearance, type Appearance } from "@valet/shared"
 
 import { runEventChannel, slackEventsThreadKey } from "../services/thread-access.js";
 import type { Usage } from "@earendil-works/pi-ai/compat";
-import { completeSimple } from "@earendil-works/pi-ai/compat";
+import { completeSimple, isContextOverflow } from "@earendil-works/pi-ai/compat";
 import {
   isUnattendedWorkflowRefusal,
   parsePrincipal,
@@ -548,6 +548,18 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       }).catch((err: unknown) => {
         console.error(`[workflow] Cannot record usage for step ${req.nodeId} of run ${req.runId}; Usage omits this call.`, err);
       });
+      // An llm step makes one call with no compaction, so a prompt larger
+      // than the window can only fail. Name the step and the fix: a session
+      // step saves a too-large prompt to a file and reads it in parts. Only a
+      // failed call counts: pi-ai also flags a completed call whose input
+      // exceeds the configured window, and a custom model's window can be
+      // set lower than its real one, so that answer is kept.
+      if (result.stopReason === "error" && isContextOverflow(result, resolved.model.contextWindow)) {
+        throw new Error(
+          `Step "${req.nodeId}" sent the model a prompt larger than its context window. ` +
+          "Pass less data into this step, or make it a session step, which saves a large input to a file and reads it in parts.",
+        );
+      }
       if (result.stopReason === "error" || result.stopReason === "aborted") {
         throw new Error(`Workflow model "${req.model}" ${result.stopReason}: ${result.errorMessage || "The provider did not complete the request."}`);
       }

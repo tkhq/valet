@@ -9,7 +9,7 @@ export interface FlowLocation {
 const PAGE_FLOWS: Record<string, FlowName> = {
   "/workflows": "workflows.open",
   "/presence": "presence.open",
-  "/integrations": "integrations.open",
+  "/settings/integrations": "integrations.open",
 };
 
 /**
@@ -26,7 +26,7 @@ export function flowForNavigation(from: FlowLocation | undefined, to: FlowLocati
     return "space.switch";
   }
   if (path === "/" && to.search.view === "tasks" && from?.search.view !== "tasks") return "tasks.open";
-  const page = PAGE_FLOWS[path];
+  const page = PAGE_FLOWS[path] ?? (/^\/settings\/teams\/[^/]+\/integrations$/.test(path) ? "integrations.open" : undefined);
   if (page) return page;
   return `route:${path}`;
 }

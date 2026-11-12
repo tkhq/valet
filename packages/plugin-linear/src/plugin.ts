@@ -3,6 +3,7 @@ import type { ValetPlugin } from '@valet/engine';
 import { linearConnectionRoutes } from './connection.js';
 import { LINEAR_TEAMS_SOURCE, makeLinearTeamsResolver } from './filter-options.js';
 import { linearHttpRoutes } from './http.js';
+import { linearSources } from './sources.js';
 import { linearStatusResolver } from './status-resolver.js';
 import { linearNaturalSubject, linearSubjects } from './subjects.js';
 import { linearTemplates } from './templates.js';
@@ -28,6 +29,7 @@ const plugin: ValetPlugin = {
       appCredentialService: LINEAR_APP_CREDENTIAL_SERVICE,
       displayName: LINEAR_DISPLAY_NAME,
       appConnectHint: 'Settings, Organization, Linear',
+      sources: linearSources,
     }),
   ],
   triggers: linearTriggerDefs,

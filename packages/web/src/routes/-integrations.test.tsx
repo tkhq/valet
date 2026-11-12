@@ -1419,7 +1419,7 @@ describe("IntegrationsPage — the search box", () => {
         await vi.advanceTimersByTimeAsync(SEARCH_DEBOUNCE_MS);
       });
       expect(navigate).toHaveBeenCalledTimes(1);
-      expect(navigate).toHaveBeenCalledWith({ to: "/integrations", search: { q: "slack" } });
+      expect(navigate).toHaveBeenCalledWith({ to: "/settings/integrations", search: { q: "slack" } });
     } finally {
       vi.useRealTimers();
     }

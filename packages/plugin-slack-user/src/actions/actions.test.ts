@@ -227,6 +227,19 @@ describe("slack_user.search_messages", () => {
       score: 0.5,
     });
     expect(data.matches[1].channel).toBe("D1");
+    expect(result.sources).toEqual([
+      { service: "slack", title: "Message in #general", url: "https://slack/p1", snippet: "hello world", location: "1970-01-01 00:00 UTC" },
+      { service: "slack", title: "Slack message", url: "https://slack/p2", snippet: "dm match", location: "1970-01-01 00:00 UTC" },
+    ]);
+  });
+
+  it("names a direct or group message for what it is, not by the user id Slack puts in its channel name", async () => {
+    const match = (channel: Record<string, unknown>) => ({ channel, user: "U1", ts: "1.1", text: "hi", permalink: `https://slack/${String(channel.id)}` });
+    mocks.slackGet.mockResolvedValueOnce(slackOk({ messages: { total: 3, matches: [
+      match({ id: "D1", name: "U0AKSEHH0HM", is_im: true }), match({ id: "D2", name: "U0BBBBBBB" }), match({ id: "G1", name: "mpdm-a--b-1", is_mpim: true }),
+    ] } }));
+    const result = await run("slack_user.search_messages", { query: "hi" }, ctxWithToken());
+    expect(result.sources?.map((source) => source.title)).toEqual(["Direct message", "Direct message", "Group message"]);
   });
 
   it("surfaces a reconnect error and skips the result on token_revoked", async () => {
@@ -241,6 +254,30 @@ describe("slack_user.search_messages", () => {
     const result = await run("slack_user.search_messages", { query: "q" }, ctxWithToken());
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/reconnect/i);
+  });
+});
+
+describe("slack_user.read_history and read_thread sources", () => {
+  const messages = [{ user: "U1", text: "parent", ts: "1700000000.000100", thread_ts: "1700000000.000100" }, { user: "U2", text: "reply", ts: "1700000005.000200", thread_ts: "1700000000.000100" }];
+
+  it("links each message with text through the workspace URL", async () => {
+    mocks.slackGet.mockResolvedValueOnce(slackOk({ messages })).mockResolvedValueOnce(slackOk({ url: "https://acme.slack.com/" }));
+    const result = await run("slack_user.read_thread", { channel: "C1", thread_ts: "1700000000.000100" }, ctxWithToken());
+    expect(mocks.slackGet.mock.calls[1][0]).toBe("auth.test");
+    expect(result.sources?.map((s) => [s.title, s.url])).toEqual([
+      ["Slack message", "https://acme.slack.com/archives/C1/p1700000000000100"],
+      ["Slack reply", "https://acme.slack.com/archives/C1/p1700000005000200?thread_ts=1700000000.000100&cid=C1"],
+    ]);
+  });
+
+  it("names a direct message and keeps the history result when auth.test fails", async () => {
+    mocks.slackGet.mockResolvedValueOnce(slackOk({ messages: [{ text: "hi", ts: "1700000000.000100" }] })).mockResolvedValueOnce(slackOk({ url: "https://acme.slack.com/" }));
+    const dm = await run("slack_user.read_history", { channel: "D1" }, ctxWithToken());
+    expect(dm.sources?.[0]).toMatchObject({ title: "Direct message", url: "https://acme.slack.com/archives/D1/p1700000000000100" });
+    mocks.slackGet.mockResolvedValueOnce(slackOk({ messages })).mockRejectedValueOnce(new Error("network"));
+    const failed = await run("slack_user.read_history", { channel: "C1" }, ctxWithToken());
+    expect(failed.success).toBe(true);
+    expect(failed.sources).toBeUndefined();
   });
 });
 

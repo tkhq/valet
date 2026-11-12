@@ -4,7 +4,7 @@ import { readFile, writeFile, searchFiles } from "../services/memory.js";
 import { PGlite } from "@electric-sql/pglite";
 import { applyEngineMigrations, pgDbFromPglite } from "@valet/store-postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { applyAppMigrations, missingSchemaRepairs, normalizeLegacyWorkflowDefinitions, reportRetiredAssistantSettings, stripRetiredAssistantTargets } from "./drizzle.js";
+import { applyAppMigrations, missingSchemaRepairs, normalizeLegacyWorkflowDefinitions, removeStockMorningBriefs, reportRetiredAssistantSettings, RETIRED_MORNING_BRIEF_PROMPT, stripRetiredAssistantTargets } from "./drizzle.js";
 
 describe("workspace singleton repair on an already migrated database", () => {
   const pglite = new PGlite();
@@ -428,6 +428,33 @@ describe("workspace singleton repair on an already migrated database", () => {
     } finally {
       await db.query("DELETE FROM workflow_checkpoints WHERE run_id LIKE 'preserve-%'");
       for (const table of [...allTables].reverse()) await db.query(`DELETE FROM ${table} WHERE id LIKE 'preserve-%'`);
+    }
+  });
+
+  it("deletes only the morning briefs Home created that nobody changed or paused", async () => {
+    await db.query(`INSERT INTO engine_threads(id, session_id, key, status, queue_mode, created_at, updated_at)
+      VALUES ('brief-home', 'brief-session', 'home', 'active', 'followup', 1, 1), ('brief-other', 'brief-session', 'web:other', 'active', 'followup', 1, 1)`);
+    const home = JSON.stringify({ mode: "existing", sessionId: "brief-session", threadId: "brief-home" });
+    const other = JSON.stringify({ mode: "existing", sessionId: "brief-session", threadId: "brief-other" });
+    const rows: Array<[string, string, string, string, boolean]> = [
+      ["brief-stock", "Morning brief", RETIRED_MORNING_BRIEF_PROMPT, home, true],
+      ["brief-edited", "Morning brief", `${RETIRED_MORNING_BRIEF_PROMPT}\nSkip email.`, home, true],
+      ["brief-renamed", "My summary", RETIRED_MORNING_BRIEF_PROMPT, home, true],
+      ["brief-moved", "Morning brief", RETIRED_MORNING_BRIEF_PROMPT, other, true],
+      ["brief-paused", "Morning brief", RETIRED_MORNING_BRIEF_PROMPT, home, false],
+    ];
+    for (const [id, name, prompt, policy, enabled] of rows) {
+      await db.query(`INSERT INTO workflow_schedules(id, org_id, owner_type, owner_id, target_kind, prompt, thread_policy, name, cron, enabled, next_fire_at, created_by, created_at, updated_at)
+        VALUES ($1, 'brief-org', 'user', 'u', 'assistant', $2, $3, $4, '0 8 * * *', $5, 1, 'u', 1, 1)`, [id, prompt, policy, name, enabled]);
+    }
+    try {
+      await removeStockMorningBriefs(db);
+      await removeStockMorningBriefs(db);
+      const left = await db.query("SELECT id FROM workflow_schedules WHERE id LIKE 'brief-%' ORDER BY id");
+      expect(left.rows).toEqual([{ id: "brief-edited" }, { id: "brief-moved" }, { id: "brief-paused" }, { id: "brief-renamed" }]);
+    } finally {
+      await db.query("DELETE FROM workflow_schedules WHERE id LIKE 'brief-%'");
+      await db.query("DELETE FROM engine_threads WHERE id LIKE 'brief-%'");
     }
   });
 

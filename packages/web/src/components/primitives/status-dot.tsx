@@ -10,7 +10,9 @@ const TONE: Record<Tone, string> = {
   // Amber is the palette's "waiting on a person" colour (see theme.css).
   warning: "bg-amber-500",
   danger: "bg-danger-500",
-  success: "bg-moss",
+  // Green in every palette. It was `bg-moss`, which is blue on the default
+  // palette and so read as the `info` tone.
+  success: "bg-success-500",
   neutral: "bg-neutral-400",
   current: "bg-current",
   outline: "border border-muted",

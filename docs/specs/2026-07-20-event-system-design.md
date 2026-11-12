@@ -151,6 +151,12 @@ it. Presence shows them as "is not", "doesn't start with", and "doesn't
 match". A line that must skip some sources, such as some alert bots, puts
 them in an exclusion filter, so an excluded event starts no assistant turn.
 
+For `github.*` events, `repo` identifies the repository at
+`repository.full_name`. Its `eq`, `in`, and `not_in` comparisons ignore case,
+so `Acme/Valet` and `acme/valet` name the same repository. Pattern operators
+still match the original text with case sensitivity. Other fields and event
+services keep case-sensitive comparisons.
+
 A value is absent when the event's catalog entry does not declare the field,
 or when the payload holds no text or number at the field's path. An absent
 value fails `eq`, `in`, `prefix`, `contains`, and `regex`. It passes
@@ -368,6 +374,33 @@ Superseded on 2026-09-29 by "Organization Linear application setup" below. The o
   workflow targets on different workflows never collide (intentional
   fan-out); a workflow↔orchestrator pair warns but never blocks. Disabled
   rows are skipped — they cannot fire — and enabling one re-runs the gate.
+- Plugin handler proposals: `events.propose_subscription` takes an optional
+  `plugin_handler` (`plugin`, `handler`, optional `config`) and stores a
+  `target.kind: "plugin"` line, such as code review on one repository
+  (`pr-review` / `review-pull-request` with the filter `repo eq owner/name`).
+  It makes the checks the POST route makes for a plugin line: the handler
+  must exist, the org must admit the plugin for the workspace, and a team
+  line needs team membership and stores `target.teamId`. Without
+  `event_keys`, the line takes the events the handler accepts. The action
+  refuses the assistant-only inputs (`follow`, `delivery_policy`,
+  `pause_on_overlap`, `presence`, both prompts, `replaces`). The line is
+  stored disabled, like any proposal, so a person turns it on in Presence or
+  on the Code review page before it acts. An agent cannot arm a handler that
+  posts on GitHub or spends model calls by itself.
+- Turning a line on or off from a thread: `events.set_subscription_enabled`
+  turns any line in the workspace off, and turns a plugin handler line on.
+  It is `riskLevel: "medium"`: the person's request in the thread is the
+  approval, so the default policy shows no card, and an org or team policy
+  can still require one. Work with no person behind it cannot use it:
+  unattended team runs, workflow steps and child sessions are refused. A
+  turn-on makes the checks the PATCH route
+  makes for a line's switch: the org still admits the plugin, the row still
+  validates, a line on Linear events needs a ready Linear connection, and a
+  blocking collision refuses it unless the call sets `allow_collision`, the
+  action's form of Turn on anyway, after the person agrees. Assistant lines stay with
+  Presence, because their replacement, pause and thread rules live in the
+  PATCH route. The `events` service is internal, so an external MCP client
+  reaches both actions through `start_thread`.
 - Replacement proposals: `events.propose_subscription` takes an optional
   `replaces`, the ID of an enabled assistant subscription
   (`target.kind: "assistant"`; rows written before the 2026-10-16 presence hub rename store `"orchestrator"`) with the same owner, and stores it as

@@ -11,6 +11,11 @@ export interface AuthServerMetadata {
    * (RFC 9728), not the issuer's. These are the scopes the server checks
    * on its tools; the issuer may also list scopes for other resources. */
   resource_scopes_supported?: string[];
+  /** The MCP server's resource identifier from its protected resource
+   * metadata (RFC 9728), when that document describes this server. Token
+   * requests name it as the RFC 8707 `resource` so the token is issued for
+   * this server. Absent when the server publishes no such document. */
+  resource?: string;
   code_challenge_methods_supported?: string[];
   grant_types_supported?: string[];
   token_endpoint_auth_methods_supported?: string[];
@@ -118,6 +123,7 @@ export async function discoverAuthServer(mcpServerUrl: string): Promise<AuthServ
   // the server checks. Absent PRM, the MCP server URL itself is the issuer.
   let issuer = base;
   let resourceScopes: string[] | undefined;
+  let resource: string | undefined;
   for (const url of wellKnownUrls(base, 'oauth-protected-resource')) {
     const prm = (await fetchWellKnown(url)) as ProtectedResourceMetadata | null;
     // RFC 9728 makes authorization_servers optional, so the scopes count
@@ -125,7 +131,10 @@ export async function discoverAuthServer(mcpServerUrl: string): Promise<AuthServ
     // document describes this server (§3.3): a root document for another
     // resource must not add its scopes.
     const describesServer = typeof prm?.resource === 'string' && sameUrl(prm.resource, mcpServerUrl);
-    if (describesServer) resourceScopes ??= optStrArr(prm?.scopes_supported);
+    if (describesServer) {
+      resourceScopes ??= optStrArr(prm?.scopes_supported);
+      resource ??= prm?.resource;
+    }
     const advertised = prm?.authorization_servers?.[0];
     if (typeof advertised === 'string' && advertised.length > 0) {
       issuer = advertised;
@@ -153,6 +162,7 @@ export async function discoverAuthServer(mcpServerUrl: string): Promise<AuthServ
         registration_endpoint: optStr(meta.registration_endpoint),
         scopes_supported: optStrArr(meta.scopes_supported),
         resource_scopes_supported: resourceScopes,
+        ...(resource !== undefined ? { resource } : {}),
         code_challenge_methods_supported: optStrArr(meta.code_challenge_methods_supported),
         grant_types_supported: optStrArr(meta.grant_types_supported),
         token_endpoint_auth_methods_supported: optStrArr(
@@ -219,6 +229,8 @@ export function buildAuthorizationUrl(params: {
   codeChallenge: string;
   state: string;
   scopes?: string[];
+  /** RFC 8707 resource indicator: the MCP server the token is for. */
+  resource?: string;
 }): string {
   const query = new URLSearchParams({
     client_id: params.clientId,
@@ -231,6 +243,7 @@ export function buildAuthorizationUrl(params: {
   if (params.scopes?.length) {
     query.set('scope', params.scopes.join(' '));
   }
+  if (params.resource) query.set('resource', params.resource);
   return `${params.authorizationEndpoint}?${query}`;
 }
 
@@ -243,6 +256,8 @@ export async function exchangeCodePkce(params: {
   code: string;
   redirectUri: string;
   codeVerifier: string;
+  /** RFC 8707 resource indicator. Send the value the authorize request named. */
+  resource?: string;
 }): Promise<TokenResponse> {
   const res = await fetch(params.tokenEndpoint, {
     method: 'POST',
@@ -253,6 +268,7 @@ export async function exchangeCodePkce(params: {
       code: params.code,
       redirect_uri: params.redirectUri,
       code_verifier: params.codeVerifier,
+      ...(params.resource ? { resource: params.resource } : {}),
     }),
   });
   if (!res.ok) {
@@ -265,10 +281,20 @@ export async function exchangeCodePkce(params: {
 /** A token endpoint answered with an HTTP error. `status` tells a refusal
  * (400 or 401: the grant is no longer valid) from a temporary failure. */
 export class OAuthTokenError extends Error {
-  constructor(message: string, readonly status: number) {
+  /** `retryAfterMs` is the wait the response's `Retry-After` header asks for, if it has one. */
+  constructor(message: string, readonly status: number, readonly retryAfterMs?: number) {
     super(message);
     this.name = 'OAuthTokenError';
   }
+}
+
+/** The wait a `Retry-After` header asks for (delay-seconds or an HTTP date), in ms. */
+export function retryAfterMs(header: string | null, now: number = Date.now()): number | undefined {
+  if (!header) return undefined;
+  const value = header.trim();
+  if (/^\d+$/.test(value)) return Number(value) * 1000;
+  const date = Date.parse(value);
+  return Number.isNaN(date) ? undefined : Math.max(0, date - now);
 }
 
 /** Refresh a token for a public client. */
@@ -276,6 +302,8 @@ export async function refreshTokenPkce(params: {
   tokenEndpoint: string;
   clientId: string;
   refreshToken: string;
+  /** RFC 8707 resource indicator the connect named, if any. */
+  resource?: string;
 }): Promise<TokenResponse> {
   const res = await fetch(params.tokenEndpoint, {
     method: 'POST',
@@ -284,11 +312,12 @@ export async function refreshTokenPkce(params: {
       grant_type: 'refresh_token',
       client_id: params.clientId,
       refresh_token: params.refreshToken,
+      ...(params.resource ? { resource: params.resource } : {}),
     }),
   });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    throw new OAuthTokenError(`MCP PKCE token refresh failed: ${res.status} ${body.slice(0, 200)}`, res.status);
+    throw new OAuthTokenError(`MCP PKCE token refresh failed: ${res.status} ${body.slice(0, 200)}`, res.status, retryAfterMs(res.headers.get('retry-after')));
   }
   return (await res.json()) as TokenResponse;
 }

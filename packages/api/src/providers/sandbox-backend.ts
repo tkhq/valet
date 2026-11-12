@@ -344,6 +344,19 @@ export function resolveSandboxMemory(env: NodeJS.ProcessEnv): string | undefined
   return trimmed;
 }
 
+/** The operator provisions this optional parent on the actual Docker host. */
+function resolveDockerCgroupParent(env: NodeJS.ProcessEnv): string | undefined {
+  const raw = env.VALET_DOCKER_CGROUP_PARENT;
+  if (raw === undefined) return undefined;
+  const parent = raw.trim();
+  if (parent === "" || /\p{Cc}/u.test(raw)) {
+    throw new Error(
+      "Invalid VALET_DOCKER_CGROUP_PARENT. Set a non-empty Docker cgroup parent without control characters, or unset VALET_DOCKER_CGROUP_PARENT.",
+    );
+  }
+  return parent;
+}
+
 /** Resolves all deployment-wide sandbox resource defaults. The Kubernetes
  * manifest merges repository declarations over this object per field. */
 export function resolveSandboxResources(env: NodeJS.ProcessEnv): SandboxResources {
@@ -590,13 +603,24 @@ export function buildSandboxProvider(
   // above the deploy cap) must fail loud here, not only under kubernetes.
   resolveScratchCaps(env);
   switch (backend) {
-    case "docker":
+    case "docker": {
+      const cgroupParent = resolveDockerCgroupParent(env);
+      const cpu = resolveSandboxCpu(env);
+      const memory = resolveSandboxMemory(env);
+      const defaultResources: SandboxResources = {
+        ...(cpu !== undefined ? { cpu } : {}),
+        ...(memory !== undefined ? { memory } : {}),
+      };
       return new DockerSandboxProvider({
         inventoryRoot: join(env.VALET_DATA_DIR || join(homedir(), ".valet"), "docker-runtime"),
         browserEnabled: env.VALET_BROWSER_ENABLED === '1',
         browserImage: env.VALET_FULL_BASE_IMAGE ?? env.VALET_SANDBOX_IMAGE ?? DEFAULT_FULL_BASE_IMAGE,
         ...(env.VALET_BROWSER_SECCOMP_PROFILE ? { browserSeccompProfile: env.VALET_BROWSER_SECCOMP_PROFILE } : {}),
+        ...(env.VALET_BROWSER_APPARMOR_PROFILE ? { browserAppArmorProfile: env.VALET_BROWSER_APPARMOR_PROFILE } : {}),
+        ...(cgroupParent !== undefined ? { cgroupParent } : {}),
+        ...(cpu !== undefined || memory !== undefined ? { defaultResources } : {}),
       });
+    }
     case "local":
       return new LocalSandboxProvider();
     case "kubernetes": {

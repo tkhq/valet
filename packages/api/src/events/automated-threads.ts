@@ -51,3 +51,20 @@ export function isAutomatedDeliveryThread(thread: { key: string; metadata?: Reco
   if (isLegacyAutomatedKey(thread.key)) return true;
   return POLICY_THREAD_KEY.test(thread.key) && thread.metadata?.[CONVERSATIONAL_THREAD_KEY] !== true;
 }
+
+/**
+ * True when an unattended delivery here runs as a fresh-context turn: the
+ * model gets the system prompt, the tools, and the delivery, but not the
+ * thread's earlier turns. A rule's own thread (`sub:<rule>`,
+ * `schedule:<rule>`) and the legacy `events` firehose collect one job per
+ * delivery, and a delivery an hour or more after the last one misses the
+ * prompt cache, so carrying the history re-wrote it at the cache-write rate
+ * every time. The entries still join the thread. A thread a person joined
+ * (`CONVERSATIONAL_THREAD_KEY`) keeps its history, and so does a subject
+ * thread or a Slack channel thread, whose earlier turns are about the same
+ * pull request, issue, or conversation.
+ */
+export function deliveryRunsWithoutHistory(thread: { key: string; metadata?: Record<string, unknown> }): boolean {
+  if (thread.key === EVENTS_THREAD_KEY) return true;
+  return /^(sub|schedule):/.test(thread.key) && thread.metadata?.[CONVERSATIONAL_THREAD_KEY] !== true;
+}

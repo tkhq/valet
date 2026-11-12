@@ -9,6 +9,7 @@ import { useActiveViewers } from "~/api/active-viewers";
 import { TypingLine, ViewerFaces } from "./viewer-faces";
 import { Badge, LoadingRow } from "~/components/primitives";
 import { Composer } from "~/components/session/composer";
+import { ThreadSourcesProvider } from "./citations";
 import { PinnedPlan } from "~/components/session/thread-plan";
 import { MessageList } from "~/components/session/message-list";
 import { useThreadEdit } from "~/components/session/use-thread-edit";
@@ -84,10 +85,11 @@ export function SharedThreadView({ address, guest }: {
   );
 
   return (
+    <ThreadSourcesProvider threadId={threadId} messages={stream.messages}>
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <MessageList header={header} messages={stream.messages} threadId={threadId} agentBusy={busy}
         pendingIds={queueState?.pendingIds} viewerId={me.data?.id} ratings={false} {...edit.list} />
-      <PinnedPlan threadId={threadId} />
+      <PinnedPlan threadId={threadId} messages={stream.messages} />
       {pendingGate && (
         <p role="status" className="border-t border-line px-4 py-2 text-xs text-muted">
           Waiting for {guest.ownerName} to {pendingGate.type === "approval"
@@ -105,5 +107,6 @@ export function SharedThreadView({ address, guest }: {
         </p>
       )}
     </div>
+    </ThreadSourcesProvider>
   );
 }

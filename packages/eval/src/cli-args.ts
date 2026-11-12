@@ -2,9 +2,11 @@
  * CLI argument parsing and case filtering (TKAI-333), separated from
  * `cli.ts` so tests can exercise them without running the suite.
  */
+import { REVIEW_FOCUSES, type ReviewFocus } from "@valet/plugin-pr-review";
 import { parseArgs } from "node:util";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolvePrivateCases } from "./private-pull-request.js";
 import { REASONING_LEVELS, type EvalCase, type ReasoningLevel } from "./types.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -19,6 +21,8 @@ export interface CliOptions {
   verbose: boolean;
   timeoutMs?: number;
   casesDir: string;
+  /** `--cases private:<suite>` whose suite is not on this machine: why the run SKIPs. */
+  casesSkip?: string;
   baselinesDir: string;
   /** Pull thumbs-rated sessions into the corpus instead of running cases. */
   pullFlagged: boolean;
@@ -40,6 +44,18 @@ export interface CliOptions {
   verify?: boolean;
   /** Independent code-review passes per case. */
   reviewPasses?: number;
+  /** One extra focused code-review pass per entry (failure, concurrency, tests). */
+  reviewFocus?: ReviewFocus[];
+  /** Drop focused-pass findings rated below this confidence (0-1). */
+  focusMinConfidence?: number;
+  /** Drop code-review findings rated below this confidence (0-1). */
+  minConfidence?: number;
+  /** Merge code-review findings that report the same defect at nearby lines (one model call per review). */
+  reviewDedupe?: boolean;
+  /** Context pack budget in tokens for code-review cases (about 4 chars each). 0 or unset: no pack. */
+  contextBudget?: number;
+  /** A directory of memory files the code-review pack reads as team memory. */
+  memoryDir?: string;
 }
 
 /** Parse argv (no process side effects; throws on invalid input). */
@@ -65,6 +81,12 @@ export function parseCliArgs(argv: string[]): CliOptions {
       "verify-model": { type: "string" },
       verify: { type: "boolean", default: false },
       "review-passes": { type: "string" },
+      "review-focus": { type: "string" },
+      "focus-min-confidence": { type: "string" },
+      "min-confidence": { type: "string" },
+      "review-dedupe": { type: "boolean", default: false },
+      "context-budget": { type: "string" },
+      "memory-dir": { type: "string" },
     },
   });
   const reasoning = values.reasoning;
@@ -85,11 +107,41 @@ export function parseCliArgs(argv: string[]): CliOptions {
       throw new Error(`--runs must be an integer from 1 to 25, got \`${values.runs}\``);
     }
   }
+  let contextBudget: number | undefined;
+  if (values["context-budget"] !== undefined) {
+    contextBudget = Number.parseInt(values["context-budget"], 10);
+    if (!Number.isInteger(contextBudget) || contextBudget < 0 || contextBudget > 100_000) {
+      throw new Error(`--context-budget must be a token count from 0 to 100000, got \`${values["context-budget"]}\``);
+    }
+  }
   let reviewPasses: number | undefined;
   if (values["review-passes"] !== undefined) {
     reviewPasses = Number.parseInt(values["review-passes"], 10);
     if (!Number.isInteger(reviewPasses) || reviewPasses < 1 || reviewPasses > 5) {
       throw new Error(`--review-passes must be an integer from 1 to 5, got \`${values["review-passes"]}\``);
+    }
+  }
+  let reviewFocus: ReviewFocus[] | undefined;
+  if (values["review-focus"] !== undefined) {
+    const names = values["review-focus"].split(",").map((s) => s.trim()).filter(Boolean);
+    const unknown = names.filter((n) => !(REVIEW_FOCUSES as readonly string[]).includes(n));
+    if (names.length === 0 || unknown.length > 0) {
+      throw new Error(`--review-focus takes a comma-separated list of ${REVIEW_FOCUSES.join(", ")}, got \`${values["review-focus"]}\``);
+    }
+    reviewFocus = names as ReviewFocus[];
+  }
+  let focusMinConfidence: number | undefined;
+  if (values["focus-min-confidence"] !== undefined) {
+    focusMinConfidence = Number(values["focus-min-confidence"]);
+    if (!Number.isFinite(focusMinConfidence) || focusMinConfidence < 0 || focusMinConfidence > 1) {
+      throw new Error(`--focus-min-confidence must be a number from 0 to 1, got \`${values["focus-min-confidence"]}\``);
+    }
+  }
+  let minConfidence: number | undefined;
+  if (values["min-confidence"] !== undefined) {
+    minConfidence = Number(values["min-confidence"]);
+    if (!Number.isFinite(minConfidence) || minConfidence < 0 || minConfidence > 1) {
+      throw new Error(`--min-confidence must be a number from 0 to 1, got \`${values["min-confidence"]}\``);
     }
   }
   const pullRating = values.rating ?? "positive";
@@ -120,7 +172,7 @@ export function parseCliArgs(argv: string[]): CliOptions {
     // Relative paths resolve against the repo root, not the process cwd:
     // `make eval` runs the CLI through pnpm with cwd packages/eval, so a
     // documented flag like `--cases evals/cases/hard` must not resolve there.
-    casesDir: resolve(REPO_ROOT, values.cases ?? "evals/cases"),
+    ...privateCasesOrDir(values.cases ?? "evals/cases"),
     baselinesDir: resolve(REPO_ROOT, values.baselines ?? "evals/baselines"),
     pullFlagged: values["pull-flagged"],
     pullRating,
@@ -132,6 +184,12 @@ export function parseCliArgs(argv: string[]): CliOptions {
     ...(values["verify-model"] !== undefined ? { verifyModel: values["verify-model"] } : {}),
     ...(values.verify ? { verify: true } : {}),
     ...(reviewPasses !== undefined ? { reviewPasses } : {}),
+    ...(reviewFocus !== undefined ? { reviewFocus } : {}),
+    ...(focusMinConfidence !== undefined ? { focusMinConfidence } : {}),
+    ...(minConfidence !== undefined ? { minConfidence } : {}),
+    ...(values["review-dedupe"] ? { reviewDedupe: true } : {}),
+    ...(contextBudget !== undefined ? { contextBudget } : {}),
+    ...(values["memory-dir"] !== undefined ? { memoryDir: values["memory-dir"] } : {}),
   };
 }
 
@@ -145,4 +203,11 @@ export function filterCases(cases: EvalCase[], pattern: string | undefined): Eva
     re = null;
   }
   return cases.filter((c) => c.id.includes(pattern) || (re !== null && re.test(c.id)));
+}
+
+/** `--cases private:<suite>` reads the suite from VALET_EVAL_PRIVATE_CASES; other values are repo-relative paths. */
+function privateCasesOrDir(cases: string): { casesDir: string; casesSkip?: string } {
+  const p = resolvePrivateCases(cases);
+  if (p === undefined) return { casesDir: resolve(REPO_ROOT, cases) };
+  return "dir" in p ? { casesDir: p.dir } : { casesDir: "", casesSkip: p.skip };
 }

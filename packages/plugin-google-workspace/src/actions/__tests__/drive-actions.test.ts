@@ -73,6 +73,48 @@ describe('drive actions', () => {
     vi.unstubAllGlobals();
   });
 
+  it.each([
+    ['drive.list_files', {}], ['drive.search_files', { query: 'release' }],
+    ['drive.list_documents', {}], ['drive.search_documents', { query: 'release' }],
+  ])('%s cites returned file descriptions and primary links', async (id, args) => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { files: [
+      { id: 'f1', name: 'Release plan', webViewLink: 'https://docs.google.com/document/d/f1/edit', description: 'Ship on Friday.' },
+      { id: 'f2', name: 'No excerpt', webViewLink: 'https://drive.google.com/file/d/f2/view' },
+      { id: 'f3', name: 'No link', description: 'Private document.' },
+    ] }));
+
+    const result = await action(id).execute(args, pluginCtx());
+
+    expect(result.sources).toEqual([{
+      service: 'google_drive', title: 'Release plan', url: 'https://docs.google.com/document/d/f1/edit', snippet: 'Ship on Friday.',
+    }]);
+    expect(new URL(String(fetchMock.mock.calls[0][0])).searchParams.get('fields')).toContain('description');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('get_document_info cites only the returned document', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, {
+      id: 'f1', name: 'Release plan', webViewLink: 'https://docs.google.com/document/d/f1/edit', description: 'Ship on Friday.',
+    }));
+    const result = await action('drive.get_document_info').execute({ fileId: 'f1' }, pluginCtx());
+    expect(result.sources).toEqual([{
+      service: 'google_drive', title: 'Release plan', url: 'https://docs.google.com/document/d/f1/edit', snippet: 'Ship on Friday.',
+    }]);
+  });
+
+  it.each(['text/plain', 'application/vnd.google-apps.document'])('download_file cites read %s content', async (mimeType) => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, {
+      id: 'f1', name: 'Release plan', mimeType, webViewLink: 'https://drive.google.com/file/d/f1/view',
+    }));
+    fetchMock.mockResolvedValueOnce(new Response('Ship on Friday.', { headers: { 'Content-Type': 'text/plain' } }));
+    const result = await action('drive.download_file').execute({ fileId: 'f1' }, pluginCtx());
+    expect(result.sources).toEqual([{
+      service: 'google_drive', title: 'Release plan', url: 'https://drive.google.com/file/d/f1/view', snippet: 'Ship on Friday.',
+    }]);
+    expect(new URL(String(fetchMock.mock.calls[0][0])).searchParams.get('fields')).toContain('webViewLink');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it('list_files queries Drive with trashed=false and maps results', async () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse(200, {
@@ -376,7 +418,7 @@ describe('drive actions', () => {
         owners: [{ displayName: 'Bob' }],
         lastModifyingUser: { displayName: 'Bob' },
         shared: true,
-        webViewLink: 'url1',
+        webViewLink: 'https://docs.google.com/document/d/f1/edit',
         description: 'desc',
       }),
     );
@@ -389,6 +431,7 @@ describe('drive actions', () => {
     );
     expect(result).toEqual({
       success: true,
+      sources: [{ service: 'google_drive', title: 'Doc', url: 'https://docs.google.com/document/d/f1/edit', snippet: 'desc' }],
       data: {
         id: 'f1',
         name: 'Doc',
@@ -398,7 +441,7 @@ describe('drive actions', () => {
         owner: 'Bob',
         lastModifyingUser: 'Bob',
         shared: true,
-        url: 'url1',
+        url: 'https://docs.google.com/document/d/f1/edit',
         description: 'desc',
       },
     });

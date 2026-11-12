@@ -164,6 +164,57 @@ describe("compaction budget: a finished turn above the budget", () => {
     faux.unregister();
   });
 
+  it("summarizes by repeating the turn's last request, so the prompt cache serves it", async () => {
+    const { faux, store, events, session, thread } = await bigWindowSession("budget-cached-prefix", { contextBudgetTokens: 15_000, tailTurns: 1 });
+    const seen: Array<{ systemPrompt: unknown; tools: string; messages: unknown[] }> = [];
+    const record = (reply: ReturnType<typeof fauxAssistantMessage>) => (context: { systemPrompt?: unknown; tools?: unknown; messages: unknown[] }) => {
+      seen.push({ systemPrompt: context.systemPrompt, tools: JSON.stringify(context.tools ?? []), messages: [...context.messages] });
+      return reply;
+    };
+    faux.setResponses([
+      record(fauxAssistantMessage("third response " + "y".repeat(16_000))),
+      record(fauxAssistantMessage(COMPLETE_SUMMARY)),
+    ]);
+
+    const receipt = await session.prompt("third prompt", { channel: SLACK });
+    await waitFor(() => events.some((e) => e.event.type === "compaction_end" && e.event.threadId === receipt.threadId));
+    await thread.awaitResult(receipt.queueItemId, { timeoutMs: 4000 });
+
+    expect(seen).toHaveLength(2);
+    const [turn, summary] = seen;
+    // Same system prompt and tools, and the turn's messages as a prefix.
+    expect(summary.systemPrompt).toEqual(turn.systemPrompt);
+    expect(summary.tools).toBe(turn.tools);
+    expect(JSON.stringify(summary.messages.slice(0, turn.messages.length))).toBe(JSON.stringify(turn.messages));
+    // Then the turn's response and the summary prompt.
+    expect(JSON.stringify(summary.messages.at(-2))).toContain("third response");
+    expect(JSON.stringify(summary.messages.at(-1))).toContain("Do not call any tools");
+    const checkpoint = (await store.getEntries(session.id, thread.id)).find((e) => e.type === "compaction");
+    expect(checkpoint?.type === "compaction" && checkpoint.coveredEntryIds).toEqual(expect.arrayContaining(["e-1", "e-2"]));
+    expect(errorCodes(events)).toEqual([]);
+    faux.unregister();
+  });
+
+  it("falls back to the bounded summarizer when the cached-prefix summary calls a tool", async () => {
+    const { faux, store, events, session, thread } = await bigWindowSession("budget-prefix-fallback", { contextBudgetTokens: 15_000, tailTurns: 1 });
+    let calls = 0;
+    faux.setResponses([
+      () => { calls++; return fauxAssistantMessage("third response " + "y".repeat(16_000)); },
+      () => { calls++; return fauxAssistantMessage([fauxToolCall("lookup", {}, { id: "tc-1" })]); },
+      () => { calls++; return fauxAssistantMessage(COMPLETE_SUMMARY); },
+    ]);
+
+    const receipt = await session.prompt("third prompt", { channel: SLACK });
+    await waitFor(() => events.some((e) => e.event.type === "compaction_end" && e.event.threadId === receipt.threadId));
+    await thread.awaitResult(receipt.queueItemId, { timeoutMs: 4000 });
+
+    expect(calls).toBe(3);
+    const checkpoints = (await store.getEntries(session.id, thread.id)).filter((e) => e.type === "compaction");
+    expect(checkpoints).toHaveLength(1);
+    expect(errorCodes(events)).toEqual([]);
+    faux.unregister();
+  });
+
   it("sends the summary and the newest turn verbatim on the next request", async () => {
     const { faux, events, session, thread } = await bigWindowSession("budget-next-request", { contextBudgetTokens: 15_000, tailTurns: 1, idleCompactionMs: 0 });
     let nextRequest = "";
@@ -282,6 +333,81 @@ describe("compaction budget: a finished turn above the budget", () => {
   });
 });
 
+describe("compaction budget: prune before a summary", () => {
+  /** A Slack thread over its 15k budget: two old 10k-token tool outputs, plus `prose` characters of plain reply. */
+  async function prunableThread(provider: string, prose: number) {
+    const faux = registerFauxProvider({
+      provider,
+      models: [{ id: "big", name: "big", contextWindow: MILLION, maxTokens: 64_000 }],
+    });
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel("big")!,
+      compaction: { contextBudgetTokens: 15_000, tailTurns: 1, pruneProtectTokens: 1_000, pruneMinimumTokens: 1_000 },
+    });
+    const thread = session.thread();
+    const toolTurn = (n: number, parent: string | null): SessionEntry[] => [
+      { id: `u-${n}`, sessionId: session.id, threadId: thread.id, parentId: parent, type: "message", role: "user", content: `read log ${n}`, createdAt: n * 10 },
+      { id: `a-${n}`, sessionId: session.id, threadId: thread.id, parentId: `u-${n}`, type: "message", role: "assistant", content: "", createdAt: n * 10 + 1,
+        parts: [{ type: "tool_call", callId: `c-${n}`, toolName: "read", args: { path: `/log-${n}` }, status: "completed", result: { text: "line ".repeat(8_000) } }] },
+    ];
+    await store.appendEntries(session.id, thread.id, [
+      { id: "u-0", sessionId: session.id, threadId: thread.id, parentId: null, type: "message", role: "user", content: "notes?", createdAt: 1 },
+      { id: "a-0", sessionId: session.id, threadId: thread.id, parentId: "u-0", type: "message", role: "assistant", content: "n".repeat(prose), createdAt: 2 },
+      ...toolTurn(1, "a-0"), ...toolTurn(2, "a-1"),
+    ]);
+    thread.rehydrateTranscript(await store.getEntries(session.id, thread.id));
+    return { faux, store, events, session, thread };
+  }
+
+  it("ends the pass without a summary when clearing old tool output leaves headroom", async () => {
+    const { faux, store, events, session, thread } = await prunableThread("prune-fits", 100);
+    let calls = 0;
+    faux.setResponses([
+      () => { calls++; return fauxAssistantMessage("checked"); },
+      () => { calls++; return fauxAssistantMessage(COMPLETE_SUMMARY); },
+    ]);
+
+    const receipt = await session.prompt("anything new?", { channel: SLACK });
+    await thread.awaitResult(receipt.queueItemId, { timeoutMs: 4000 });
+    await waitFor(() => !thread.hasActiveRun);
+
+    const entries = await store.getEntries(session.id, thread.id);
+    expect(calls).toBe(1);
+    expect(entries.filter((e) => e.type === "compaction")).toHaveLength(0);
+    const parts = entries.flatMap((e) => (e.type === "message" ? e.parts ?? [] : []));
+    expect(parts.some((p) => p.type === "tool_call" && p.elided === true)).toBe(true);
+    expect((await thread.contextUsage())!.tokens).toBeLessThan(15_000);
+    expect(errorCodes(events)).toEqual([]);
+    faux.unregister();
+  });
+
+  it("still summarizes when the prune leaves the context near the budget", async () => {
+    // About 12.5k tokens of prose survive the prune: under the 15k budget,
+    // over the 11.25k target that leaves a summary's headroom.
+    const { faux, store, events, session, thread } = await prunableThread("prune-near-budget", 50_000);
+    let summaries = 0;
+    const respond = (context: { messages: readonly unknown[] }) => {
+      const last = JSON.stringify(context.messages.at(-1));
+      if (last.includes("compact this conversation") || last.includes("<template>")) {
+        summaries++;
+        return fauxAssistantMessage(COMPLETE_SUMMARY);
+      }
+      return fauxAssistantMessage("checked");
+    };
+    faux.setResponses([respond, respond, respond]);
+
+    const receipt = await session.prompt("anything new?", { channel: SLACK });
+    await thread.awaitResult(receipt.queueItemId, { timeoutMs: 4000 });
+    await waitFor(() => !thread.hasActiveRun);
+
+    expect(summaries).toBe(1);
+    expect((await store.getEntries(session.id, thread.id)).filter((e) => e.type === "compaction")).toHaveLength(1);
+    expect(errorCodes(events)).toEqual([]);
+    faux.unregister();
+  });
+});
+
 describe("compaction budget: when an interactive thread compacts", () => {
   it("keeps the full context through a turn, then compacts once the thread is idle", async () => {
     const { faux, store, events, session, thread } = await bigWindowSession(
@@ -306,6 +432,43 @@ describe("compaction budget: when an interactive thread compacts", () => {
     expect(calls).toBe(2);
     expect(entries.some((e) => e.type === "message" && e.metadata?.compaction_continue === true)).toBe(false);
     expect(errorCodes(events)).toEqual([]);
+    faux.unregister();
+  });
+
+  it("keeps the transcript for an armed idle pass, so the pass reuses the cached prefix", async () => {
+    // The host releases idle transcripts after 30 minutes and the idle pass
+    // runs at 55. A released transcript has no last response to repeat, so
+    // the pass fell back to the bounded summarizer at full input price.
+    // Each resolution returns a new key, as after a rotation.
+    let resolutions = 0;
+    const { faux, store, events, session, thread } = await bigWindowSession(
+      "budget-idle-keeps-transcript",
+      { contextBudgetTokens: 15_000, tailTurns: 1, idleCompactionMs: 300 },
+      { resolveModel: async (): Promise<ResolvedModel | null> => ({ model: faux.getModel("big")!, apiKey: `key-${resolutions++}` }) },
+    );
+    let summaryRequest = "";
+    let summaryKey: string | undefined;
+    faux.setResponses([
+      () => fauxAssistantMessage("third response " + "y".repeat(16_000)),
+      (context, opts) => { summaryRequest = JSON.stringify(context.messages.at(-1)); summaryKey = opts?.apiKey; return fauxAssistantMessage(COMPLETE_SUMMARY); },
+    ]);
+
+    const receipt = await session.prompt("third prompt");
+    await thread.awaitResult(receipt.queueItemId, { timeoutMs: 4000 });
+    await waitFor(() => !thread.hasActiveRun);
+    await new Promise((r) => setTimeout(r, 50));
+    // The host's idle sweep runs before the idle pass.
+    expect(session.releaseIdleTranscripts(Date.now() + 1)).toBe(0);
+    await waitFor(() => events.some((e) => e.event.type === "compaction_end" && e.event.threadId === receipt.threadId));
+    await thread.kick();
+
+    expect((await store.getEntries(session.id, thread.id)).filter((e) => e.type === "compaction")).toHaveLength(1);
+    expect(summaryRequest).toContain("compact this conversation");
+    expect(summaryKey).toBe(`key-${resolutions - 1}`);
+    expect(summaryKey).not.toBe("key-0");
+    expect(errorCodes(events)).toEqual([]);
+    // With the pass done, a later sweep may release the transcript.
+    expect(session.releaseIdleTranscripts(Date.now() + 1)).toBe(1);
     faux.unregister();
   });
 
@@ -424,5 +587,73 @@ describe("compaction budget: when an interactive thread compacts", () => {
       await thread.abort();
       faux.unregister();
     }
+  });
+});
+
+/** Text of the summarizer request: the last user message the summarizer received. */
+function summaryRequestText(messages: readonly unknown[]): string {
+  return JSON.stringify(messages.at(-1));
+}
+
+describe("compaction inside a running turn", () => {
+  it("tells the summarizer the turn continues and that its own request is not a user message", async () => {
+    // A 20k window: the tool result pushes the second request past the usable
+    // context, so the context-preparation pass compacts inside the turn.
+    const faux = registerFauxProvider({
+      provider: "midturn-summary",
+      models: [{ id: "small", name: "small", contextWindow: 20_000, maxTokens: 1_000 }],
+    });
+    const { engine, store, events } = makeEngine();
+    const reactions: string[] = [];
+    const tools: ToolDef[] = [{
+      name: "add_reaction", description: "Adds a reaction to a post", parameters: Type.Object({}),
+      execute: async () => { reactions.push("investigating"); return { text: "reaction added " + "r".repeat(30_000) }; },
+    }];
+    const session = await engine.createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel("small")!,
+      compaction: { reserveTokens: 1_000, tailTurns: 1, contextBudgetTokens: 0 },
+      builtinTools: [], tools,
+    });
+    const thread = session.thread();
+    await store.appendEntries(session.id, thread.id, [
+      { id: "e-1", sessionId: session.id, threadId: thread.id, parentId: null, type: "message", role: "user", content: "The codename is Halyard.", createdAt: 1 },
+      { id: "e-2", sessionId: session.id, threadId: thread.id, parentId: "e-1", type: "message", role: "assistant", content: "Noted. " + "x".repeat(50_000), createdAt: 2 },
+    ]);
+    thread.rehydrateTranscript(await store.getEntries(session.id, thread.id));
+    let summaryRequest = "";
+    faux.setResponses([
+      () => fauxAssistantMessage([fauxToolCall("add_reaction", {})], { stopReason: "toolUse" }),
+      (context) => { summaryRequest = summaryRequestText(context.messages); return fauxAssistantMessage(COMPLETE_SUMMARY); },
+      () => fauxAssistantMessage("triage posted"),
+    ]);
+
+    const receipt = await session.prompt("triage the new post");
+    const outcome = await thread.awaitResult(receipt.queueItemId, { timeoutMs: 4000 });
+
+    expect(reactions).toEqual(["investigating"]);
+    expect(JSON.stringify(outcome)).toContain("triage posted");
+    expect((await store.getEntries(session.id, thread.id)).filter((e) => e.type === "compaction")).toHaveLength(1);
+    expect(summaryRequest).toContain("comes from the system, not from the user");
+    expect(summaryRequest).toContain("The newest turn is still running");
+    expect(summaryRequest).toContain("this turn did it");
+    expect(errorCodes(events)).toEqual([]);
+    faux.unregister();
+  });
+
+  it("does not say the turn continues when the pass runs after the turn finished", async () => {
+    const { faux, events, session, thread } = await bigWindowSession("turn-end-summary", { contextBudgetTokens: 15_000, tailTurns: 1 });
+    let summaryRequest = "";
+    faux.setResponses([
+      () => fauxAssistantMessage("third response " + "y".repeat(16_000)),
+      (context) => { summaryRequest = summaryRequestText(context.messages); return fauxAssistantMessage(COMPLETE_SUMMARY); },
+    ]);
+
+    const receipt = await session.prompt("third prompt", { channel: SLACK });
+    await waitFor(() => events.some((e) => e.event.type === "compaction_end" && e.event.threadId === receipt.threadId));
+    await thread.awaitResult(receipt.queueItemId, { timeoutMs: 4000 });
+
+    expect(summaryRequest).toContain("comes from the system, not from the user");
+    expect(summaryRequest).not.toContain("still running");
+    faux.unregister();
   });
 });

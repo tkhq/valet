@@ -1,13 +1,14 @@
 import type { ReactNode } from "react";
 import { cn } from "~/lib/cn";
+import { FOCUS_RING } from "./control.js";
 
 /**
  * A single radio option rendered as a quiet card: title + one-line
- * description, moss ring when selected. Use it for every selectable card,
- * such as a theme, a member role, or a review method. Callers compose a
- * `role="radiogroup"` wrapper around a row of these; each card is itself
- * `role="radio"`. `children` shows below the description, such as the
- * passes of a review method.
+ * description, a moss border and wash when selected. Use it for every
+ * selectable card, such as a theme, a member role, or a review method.
+ * Callers compose a `role="radiogroup"` wrapper around a row of these; each
+ * card is itself `role="radio"`. `children` shows below the description,
+ * such as the passes of a review method.
  */
 export function RadioCard({
   title,
@@ -42,10 +43,13 @@ export function RadioCard({
       onClick={onSelect}
       className={cn(
         "flex flex-1 flex-col items-start gap-2 rounded border bg-[--bg] px-4 py-3 text-left transition-colors",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss/40",
+        FOCUS_RING,
         "disabled:cursor-not-allowed disabled:opacity-60",
+        // Selected is a moss border on a moss wash, with no ring, so the
+        // focus ring stays the only ring on the card. `moss-text` and
+        // `muted` hold 4.5:1 on the wash (`theme.tokens.test.ts`).
         selected
-          ? "border-moss ring-1 ring-moss"
+          ? "border-moss bg-moss-wash"
           : "border-line hover:border-moss/50",
         className,
       )}
@@ -56,7 +60,7 @@ export function RadioCard({
             {icon}
           </span>
         )}
-        <span className={cn("text-sm font-medium", selected ? "text-moss" : "text-ink")}>
+        <span className={cn("text-sm font-medium", selected ? "text-moss-text" : "text-ink")}>
           {title}
         </span>
       </div>

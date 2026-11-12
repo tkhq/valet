@@ -80,6 +80,7 @@ interface Instruments {
   cacheBreaks: Counter;
   compactionCoverageGaps: Counter;
   toolStopTimeouts: Counter;
+  toolResultsCapped: Counter;
   wakeupsTotal: Counter;
   wakeupSignalsLost: Counter;
   wakeupKillsFailed: Counter;
@@ -186,6 +187,9 @@ function inst(): Instruments {
     toolStopTimeouts: meter.createCounter("valet.tool.stop_timeouts", {
       description:
         "Tool calls still running after their turn was stopped and the grace period ended. The turn stopped waiting and the call kept running detached. Any rate means a tool ignores its abort signal: fix that tool.",
+    }),
+    toolResultsCapped: meter.createCounter("valet.tool.results_capped", {
+      description: "Tool results over their cap. outcome=saved: saved to a file with a preview; outcome=cut: kept in part, with no file.",
     }),
     wakeupsTotal: meter.createCounter("valet.wakeups.total", {
       description:
@@ -327,6 +331,12 @@ export function recordToolExecution(tool: string, durationMs: number, ok: boolea
  * any rate: the call keeps running after its turn ended. */
 export function recordToolStopTimeout(tool: string): void {
   inst().toolStopTimeouts.add(1, { tool });
+}
+
+/** A tool result over its cap (`capToolResult`). A high `cut` rate means
+ * saves are failing or sessions lack the tools to read a saved file. */
+export function recordToolResultCapped(tool: string, outcome: "saved" | "cut"): void {
+  inst().toolResultsCapped.add(1, { tool, outcome });
 }
 
 export function recordCacheBreak(cause: string, model?: string): void {

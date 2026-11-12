@@ -57,7 +57,8 @@ export interface ProxyDeps {
   env: NodeJS.ProcessEnv;
 }
 
-const USAGE = `usage: valet proxy <setup|token|remove> <harness> [--instance <name>]
+const USAGE = `usage: valet proxy <setup|status|token|remove> <harness> [--instance <name>]
+       valet proxy list
 
   setup   Ask for a proxy key and point the harness at the Valet proxy
           --no-wait  start the key request, print the code, and exit;
@@ -66,7 +67,9 @@ const USAGE = `usage: valet proxy <setup|token|remove> <harness> [--instance <na
                      and skip the check for exported keys
           --rotate   replace the stored key with a new one
   token   Print the stored key (the harness's key helper runs this)
+  status  Check the settings, key helper, and stored key without printing it
   remove  Remove the harness settings, and revoke and forget the key
+  list    List supported tools and proxy modes
 
 Harnesses: ${harnessIds().join(", ")}`;
 
@@ -146,7 +149,14 @@ export async function runProxy(args: string[], config: ValetConfig, deps: ProxyD
     printLine(USAGE);
     return ExitCode.OK;
   }
-  if (opts.sub !== "setup" && opts.sub !== "token" && opts.sub !== "remove") {
+  if (opts.sub === "list") {
+    for (const id of harnessIds()) {
+      const adapter = deps.adapter(id) ?? harnessAdapter(id);
+      if (adapter) printLine(`${id}  ${adapter.label}  (${adapter.modes.join(", ")})`);
+    }
+    return ExitCode.OK;
+  }
+  if (opts.sub !== "setup" && opts.sub !== "status" && opts.sub !== "token" && opts.sub !== "remove") {
     printErr(USAGE);
     return ExitCode.Usage;
   }
@@ -173,7 +183,56 @@ export async function runProxy(args: string[], config: ValetConfig, deps: ProxyD
     await removeProxySetup(instance, profile, adapter, deps);
     return ExitCode.OK;
   }
+  if (opts.sub === "status") return status(instance, profile, adapter, deps);
   return setup(opts, config, instance, profile, adapter, deps);
+}
+
+async function status(instance: ResolvedInstance, profile: ProfileConfig | undefined, adapter: HarnessAdapter, deps: ProxyDeps): Promise<number> {
+  const fix = `Run \`valet proxy setup ${adapter.id} --instance ${shellWord(instance.name)}\`.`;
+  const key = profile?.proxyKeys?.[adapter.id];
+  if (!key) {
+    printErr(`No stored proxy key for ${adapter.label}. ${fix}`);
+    return ExitCode.AuthFailure;
+  }
+  const valetPath = deps.valetPath();
+  if (!valetPath) {
+    printErr(`Put \`valet\` on your PATH. ${fix}`);
+    return ExitCode.Failure;
+  }
+  const target = {
+    instanceUrl: instance.url.replace(/\/$/, ""),
+    helperCommand: helperCommand(valetPath, adapter.id, instance.name, deps.env),
+    helperArgs: helperArgs(adapter.id, instance.name),
+  };
+  const preflight = adapter.preflight(deps.env);
+  if (preflight.blockers.length > 0 || preflight.shellBlockers.length > 0) {
+    for (const line of [...preflight.blockers, ...preflight.shellBlockers]) printErr(line);
+    return ExitCode.Failure;
+  }
+  const plan = adapter.plan(target);
+  if (plan.changes.length > 0 || plan.conflicts.length > 0 || (plan.checkKey && !plan.checkKey(key.key))) {
+    printErr(`${adapter.label} settings or credential file need an update. ${fix}`);
+    return ExitCode.Failure;
+  }
+  const helper = await deps.runHelper(target.helperCommand);
+  if (!helper.ok || helper.stdout.trim() !== key.key) {
+    printErr(`${adapter.label}'s key helper failed its check. ${fix}`);
+    return ExitCode.Failure;
+  }
+  const client = deps.client(instance);
+  if (!(await keyStillWorks(client, key))) {
+    printErr(`The stored proxy key was revoked or expired. ${fix}`);
+    return ExitCode.AuthFailure;
+  }
+  const settings = await client.proxySettings();
+  if (!settings.enabled || !adapter.modes.includes(settings.mode)) {
+    printErr("Your org's proxy settings do not support this setup. Ask an org admin to enable centralized mode in Settings > Proxy.");
+    return ExitCode.Failure;
+  }
+  for (const warning of preflight.warnings) printErr(`warning: ${warning}`);
+  printLine(`${adapter.label} is configured. The key helper works, and the proxy key is active.`);
+  printLine("Send a model request, then check Usage > Proxy to confirm that Valet recorded it.");
+  return ExitCode.OK;
 }
 
 async function setup(
@@ -213,7 +272,7 @@ async function setup(
   if (preflight.blockers.length > 0) {
     printErr(`${adapter.label} cannot use the Valet proxy on this computer:`);
     for (const blocker of preflight.blockers) printErr(`  ${blocker}`);
-    printErr(`Ask your ${adapter.label} admin to change the policy.`);
+    printErr("Resolve these issues, then run setup again.");
     return ExitCode.Failure;
   }
   if (preflight.shellBlockers.length > 0 && !opts.force) {
@@ -255,12 +314,12 @@ async function setup(
   if (!helper.ok || helper.stdout.trim() !== key.key) {
     printErr(`The key helper did not print the stored key, so ${adapter.label} would fail. Setup left ${plan.path} unchanged.`);
     printErr(`  command: ${target.helperCommand}`);
-    if (!helper.ok) printErr(`  error: ${helper.error}`);
+    if (!helper.ok) printErr(`  error: ${helper.error.replaceAll(key.key, "[redacted]").replace(/\b(?:vlt_|sk-)[\w-]+/g, "[redacted]")}`);
     else printErr("  It printed something else. Check that the command runs this version of valet.");
     return ExitCode.Failure;
   }
 
-  for (const line of plan.apply({ force: opts.force })) printLine(line);
+  for (const line of plan.apply({ force: opts.force, key: key.key })) printLine(line);
   if (opts.rotate && stored && stored.id !== key.id) {
     if (await revokeKey(client, stored)) printLine(`Revoked the old proxy key ${stored.name}.`);
   }

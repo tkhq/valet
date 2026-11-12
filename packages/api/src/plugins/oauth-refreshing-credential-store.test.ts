@@ -7,7 +7,8 @@ import { isUnusableOAuthCredential } from "../services/credential-resolution.js"
 import { PgCredentialStore } from "./credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import type { PgQueryable } from "@valet/store-postgres";
-import { OAuthRefreshingCredentialStore, refreshErrorText } from "./oauth-refreshing-credential-store.js";
+import { OAuthRefreshingCredentialStore, RATE_LIMIT_HOLD_MS, RETRY_AFTER_FAILURE_MS, refreshErrorText } from "./oauth-refreshing-credential-store.js";
+import { retryAfterMs } from "@valet/sdk";
 
 const OWNER: CredentialOwner = { type: "user", id: "u1" };
 const NOW = 1_800_000_000_000;
@@ -226,7 +227,7 @@ describe("OAuthRefreshingCredentialStore", () => {
     const inner = memoryStore();
     await inner.save(OWNER, "linear", {
       type: "oauth2", accessToken: "stale", refreshToken: "rt", expiresAt: NOW - 1,
-      metadata: { refreshFailedAt: NOW - 1000, refreshRefused: true, refreshError: "400 invalid_grant" },
+      metadata: { refreshFailedAt: NOW - RETRY_AFTER_FAILURE_MS, refreshError: "503 unavailable" },
     });
     const store = new OAuthRefreshingCredentialStore(inner, { db: testDb.appDb, plugins: mcpPlugins(), env: {}, now: () => NOW });
     await store.get(OWNER, "linear");
@@ -310,6 +311,98 @@ describe("OAuthRefreshingCredentialStore", () => {
     const persisted = await inner.get(OWNER, "linear");
     expect(persisted?.metadata?.refreshFailedAt).toBe(NOW);
     expect(persisted?.metadata?.refreshRefused).toBeUndefined();
+  });
+
+  it("does not call the provider again for a refused credential", async () => {
+    await seedMcpClient();
+    const inner = memoryStore();
+    const refused: StoredCredential = {
+      type: "oauth2", accessToken: "stale", refreshToken: "rt", expiresAt: NOW - 1,
+      metadata: { refreshFailedAt: NOW - 24 * 60 * 60 * 1000, refreshRefused: true, refreshError: "400 invalid_grant" },
+    };
+    await inner.save(OWNER, "linear", refused);
+    const store = new OAuthRefreshingCredentialStore(inner, { db: testDb.appDb, plugins: mcpPlugins(), env: {}, now: () => NOW });
+
+    expect(await store.get(OWNER, "linear")).toBe(refused);
+    expect(fake.tokenRequests).toHaveLength(0);
+  });
+
+  it("waits out the retry window after a temporary failure", async () => {
+    await seedMcpClient();
+    const inner = memoryStore();
+    await inner.save(OWNER, "linear", { type: "oauth2", accessToken: "stale", refreshToken: "rt", expiresAt: NOW - 1 });
+    fake.tokenFailure = 503;
+    let now = NOW;
+    const store = new OAuthRefreshingCredentialStore(inner, { db: testDb.appDb, plugins: mcpPlugins(), env: {}, now: () => now });
+
+    await store.get(OWNER, "linear");
+    expect(fake.tokenRequests).toHaveLength(1);
+    // Reads inside the window return the stamped row without a token request.
+    now = NOW + RETRY_AFTER_FAILURE_MS - 1;
+    const held = await store.get(OWNER, "linear");
+    expect(held?.metadata?.refreshFailedAt).toBe(NOW);
+    expect(fake.tokenRequests).toHaveLength(1);
+
+    fake.tokenFailure = undefined;
+    fake.tokenResponse = { access_token: "at-new", expires_in: 3600 };
+    now = NOW + RETRY_AFTER_FAILURE_MS;
+    expect((await store.get(OWNER, "linear"))?.accessToken).toBe("at-new");
+    expect(fake.tokenRequests).toHaveLength(2);
+  });
+
+  describe("after a 429", () => {
+    const OTHER: CredentialOwner = { type: "user", id: "u2" };
+    const expired = (refreshToken: string): StoredCredential => ({ type: "oauth2", accessToken: "stale", refreshToken, expiresAt: NOW - 1 });
+
+    async function rateLimited(headers?: Record<string, string>) {
+      await seedMcpClient();
+      const inner = memoryStore();
+      await inner.save(OWNER, "linear", expired("rt-a"));
+      await inner.save(OTHER, "linear", expired("rt-b"));
+      await inner.save(OWNER, "widget", expired("rt-c"));
+      fake.tokenFailure = 429;
+      fake.tokenFailureHeaders = headers;
+      const clock = { now: NOW };
+      const store = new OAuthRefreshingCredentialStore(inner, {
+        db: testDb.appDb, plugins: [...mcpPlugins(), ...authCodePlugins()], env: { X_ID: "cid", X_SECRET: "secret" }, now: () => clock.now,
+      });
+      await store.get(OWNER, "linear");
+      expect(fake.tokenRequests).toHaveLength(1);
+      fake.tokenFailure = undefined;
+      fake.tokenResponse = { access_token: "at-new", expires_in: 3600 };
+      return { store, clock };
+    }
+
+    it("holds the service's refreshes on every account and leaves other services alone", async () => {
+      const { store, clock } = await rateLimited();
+
+      // Past the per-credential window, still inside the service hold.
+      clock.now = NOW + RATE_LIMIT_HOLD_MS - 1;
+      expect((await store.get(OTHER, "linear"))?.accessToken).toBe("stale");
+      expect((await store.get(OWNER, "linear"))?.accessToken).toBe("stale");
+      expect(fake.tokenRequests).toHaveLength(1);
+      expect((await store.get(OWNER, "widget"))?.accessToken).toBe("at-new");
+      expect(fake.tokenRequests).toHaveLength(2);
+
+      clock.now = NOW + RATE_LIMIT_HOLD_MS;
+      expect((await store.get(OTHER, "linear"))?.accessToken).toBe("at-new");
+    });
+
+    it("holds for the Retry-After the provider sends", async () => {
+      const { store, clock } = await rateLimited({ "Retry-After": "600" });
+
+      clock.now = NOW + 600_000 - 1;
+      expect((await store.get(OTHER, "linear"))?.accessToken).toBe("stale");
+      clock.now = NOW + 600_000;
+      expect((await store.get(OTHER, "linear"))?.accessToken).toBe("at-new");
+    });
+  });
+
+  it("reads Retry-After as seconds or an HTTP date", () => {
+    expect(retryAfterMs("120", NOW)).toBe(120_000);
+    expect(retryAfterMs(new Date(NOW + 30_000).toUTCString(), NOW)).toBe(30_000);
+    expect(retryAfterMs("soon", NOW)).toBeUndefined();
+    expect(retryAfterMs(null, NOW)).toBeUndefined();
   });
 
   it("keeps a reconnect that lands while a refresh is in flight", async () => {

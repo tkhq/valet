@@ -50,6 +50,16 @@ notificationsRouter.post("/presence", async c => {
 });
 
 /** Read durable gates without waking their sessions or relying on notification read state. */
+type WireOwnerType = "user" | "team" | "org";
+/** Maps a stored owner type to the wire type. Unknown values count as personal. */
+function wireOwnerType(ownerType: string): WireOwnerType {
+  switch (ownerType) {
+    case "team": return "team";
+    case "org": return "org";
+    default: return "user";
+  }
+}
+
 notificationsRouter.get("/decisions", async (c) => {
   const { db, engineStore } = c.var.providers;
   const caller = c.var.principal;
@@ -125,7 +135,8 @@ notificationsRouter.get("/decisions", async (c) => {
         : runVisible(c, { ownerType: row.ownerType, origin: row.origin, actorUserId: row.actorUserId, params: { input: row.input } }));
       const canOpenThread = await visibility.get(key) ?? false;
       if (!approver && !canOpenThread) return null;
-      return { canOpenThread, sessionId, title: row.kind === "app" ? row.session.title || "Thread approval" : row.title,
+      const owner = { type: wireOwnerType(session.ownerType), id: session.ownerId };
+      return { canOpenThread, sessionId, owner, title: row.kind === "app" ? row.session.title || "Thread approval" : row.title,
         gate: engineGateToWire(gate) };
     }));
     items.push(...batch.filter(item => item !== null));

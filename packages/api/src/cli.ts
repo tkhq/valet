@@ -54,10 +54,9 @@ const COMMANDS: Record<string, CommandImporter> = {
 /** Commands that never call an instance with the selected profile's credential. */
 const NO_INSTANCE_COMMANDS = new Set(["serve", "login", "logout", "instance", "config", "reset", "validate"]);
 
-/** Whether the command skips the device sign-in refresh. `valet proxy token`
- * is a harness key helper: it must print the key fast, with no network call. */
+/** Local proxy discovery and the harness key helper never refresh a sign-in. */
 function skipsRefresh(command: string, rest: string[]): boolean {
-  return NO_INSTANCE_COMMANDS.has(command) || (command === "proxy" && rest[0] === "token");
+  return NO_INSTANCE_COMMANDS.has(command) || (command === "proxy" && (rest[0] === "token" || rest[0] === "list"));
 }
 
 const USAGE = `valet <command> [options]
@@ -80,7 +79,7 @@ Commands:
   tools       Search, describe, and call Valet-brokered tools
   reset       Reset local state
   prebuild    Test a repo's .valet/prebuild.yaml locally (plan / docker build)
-  proxy       Point a local coding tool (claude-code) at the Valet LLM proxy
+  proxy       Connect Claude Code, Codex, or OpenCode to the Valet proxy
   validate    Check a brain repository's skills, playbooks, memory, and workflows
 
 Global options:

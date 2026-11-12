@@ -6,13 +6,45 @@ import { NeedsYouDock } from "./needs-you-dock";
 
 const question: DecisionGate = { id: "question-1", sessionId: "session-1", threadId: "thread-1", type: "question", title: "Which website?", actions: [], status: "pending", createdAt: 0, updatedAt: 0 };
 let gates = [question];
-vi.mock("~/api/queries", () => ({ useResolveDecision: () => ({ isPending: false, mutateAsync: vi.fn() }), useWithdrawDecision: () => ({ isPending: false, mutateAsync: vi.fn() }), useNotificationDecisions: () => ({ data: { items: gates.map(gate => ({ gate, title: "Assistant", sessionId: gate.sessionId })) } }) }));
-vi.mock("~/api/workflows", () => ({ useWorkflowActionRequired: () => ({ data: { count: 0 } }) }));
+let owners: Record<string, "user" | "team" | "org"> = {};
+let workflowItems: Array<{ owner: { type: "user" | "team" | "org"; id: string } }> = [];
+vi.mock("~/api/queries", () => ({ useResolveDecision: () => ({ isPending: false, mutateAsync: vi.fn() }), useWithdrawDecision: () => ({ isPending: false, mutateAsync: vi.fn() }), useNotificationDecisions: () => ({ data: { items: gates.map(gate => ({ gate, title: "Assistant", sessionId: gate.sessionId, owner: { type: owners[gate.id] ?? "user", id: "o" } })) } }) }));
+vi.mock("~/api/workflows", () => ({ useWorkflowActionRequired: () => ({ data: { count: workflowItems.length, items: workflowItems } }) }));
 vi.mock("~/api/settings", () => ({ useMe: () => ({ data: { id: "me", orgRole: "member" } }) }));
 vi.mock("~/components/session/gate-outcome", () => ({ rememberGateChoice: vi.fn(), useResolvedGateNotice: () => undefined, ResolvedGateNotice: () => null }));
 
 describe("NeedsYouDock", () => {
-  beforeEach(() => { gates = [question]; });
+  beforeEach(() => { gates = [question]; owners = {}; workflowItems = []; });
+  it("hides team approvals on a phone Home but keeps personal ones", () => {
+    gates = [{ ...question, id: "team-gate", type: "approval", actions: [{ id: "approve", label: "Approve once" }] }, { ...question, id: "mine" }];
+    owners = { "team-gate": "team" };
+    render(<NeedsYouDock personalOnly onOpenTasks={() => {}} />);
+    expect(screen.getByText("Question 1 of 1 · Assistant")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Approve once" })).toBeNull();
+  });
+  it("hides org-owned approvals and org-owned workflow gates on a phone Home", () => {
+    owners = { "question-1": "org" };
+    workflowItems = [{ owner: { type: "org", id: "o" } }];
+    const { container } = render(<NeedsYouDock personalOnly onOpenTasks={() => {}} />);
+    expect(container.textContent).toBe("");
+  });
+  it("counts personal workflow gates on a phone Home", () => {
+    owners = { "question-1": "team" };
+    workflowItems = [{ owner: { type: "user", id: "me" } }, { owner: { type: "org", id: "o" } }];
+    render(<NeedsYouDock personalOnly onOpenTasks={() => {}} />);
+    expect(screen.getByText("1 request is waiting")).toBeTruthy();
+  });
+  it("renders nothing on a phone Home when only team work waits", () => {
+    owners = { "question-1": "team" };
+    workflowItems = [{ owner: { type: "team", id: "t" } }];
+    const { container } = render(<NeedsYouDock personalOnly onOpenTasks={() => {}} />);
+    expect(container.textContent).toBe("");
+  });
+  it("still shows team approvals when not personal only", () => {
+    owners = { "question-1": "team" };
+    render(<NeedsYouDock onOpenTasks={() => {}} />);
+    expect(screen.getByText("Question 1 of 1 · Assistant")).toBeTruthy();
+  });
   it("labels questions accurately and restores the composer after deferring", () => {
     const expanded = vi.fn();
     render(<NeedsYouDock onOpenTasks={() => {}} onQuestionExpandedChange={expanded} />);

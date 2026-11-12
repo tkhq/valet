@@ -38,7 +38,9 @@ export function serviceHealth(service: PluginServiceSummary, now: number = Date.
   const health = service.health;
   if (!health) return "connected";
   if (health.refreshFailed) return "refresh-failed";
-  if (typeof health.expiresAt === "number" && health.expiresAt <= now) return "expired";
+  // A past expiry with a refresh token renews on the next use, as in
+  // `credentialRowHealth`. The catalog no longer refreshes on read.
+  if (typeof health.expiresAt === "number" && health.expiresAt <= now && !health.renews) return "expired";
   if (health.rejected) return "rejected";
   if (health.identityOnly) return "identity-only";
   if (health.missingScopes && health.missingScopes.length > 0) return "missing-scope";

@@ -52,6 +52,7 @@ describe("PinnedPlan", () => {
   it("names the step in progress for the working line", () => {
     const client = new QueryClient();
     client.setQueryData<ThreadPlanResponse>(["thread-plan", "t1"], { plan: PLAN });
+    client.setQueryData(["thread-progress", "t1"], { progress: null });
     const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
     expect(renderHook(() => useCurrentStep("t1"), { wrapper }).result.current).toContain("Run the full suite");
   });

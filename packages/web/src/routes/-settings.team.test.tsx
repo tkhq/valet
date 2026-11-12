@@ -90,6 +90,15 @@ describe("team settings pages", () => {
     expect(screen.getByRole("link", { name: "API keys and proxy" }).getAttribute("aria-current")).toBe("page");
   });
 
+  it("holds the team's Integrations and Usage beside its other settings", () => {
+    pathname = "/settings/teams/t1/integrations";
+    render(<TeamSettingsShell teamId="t1" />);
+    expect(screen.getAllByRole("link").map((link) => link.textContent).filter((label) => label !== "Open team threads"))
+      .toEqual(["General", "Integrations", "Usage", "API keys and proxy", "Policies"]);
+    expect(screen.getByRole("link", { name: "Integrations" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("link", { name: "General" }).getAttribute("aria-current")).toBeNull();
+  });
+
   it("refuses a team the caller is not on", () => {
     render(<TeamSettingsShell teamId="t9" />);
     expect(screen.getByText(/not a member of this team/)).toBeTruthy();

@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import { Link, useRouterState } from "@tanstack/react-router";
-import { BarChart3, Brain, ChevronDown, ChevronRight, FileText, MessageSquare, Plug, Radio, Settings, Sparkles, User, Workflow, type LucideIcon } from "lucide-react";
+import { Brain, ChevronDown, ChevronRight, FileText, MessageSquare, Radio, Settings, Sparkles, User, Workflow, type LucideIcon } from "lucide-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "~/components/primitives";
 import { useWorkspaceOptions, type WorkspaceOption } from "~/components/layout/workspace-options";
 import { cn } from "~/lib/cn";
@@ -9,7 +9,7 @@ import { CHROME_BUTTON, HOVER_CHROME, NESTED_IDLE, NESTED_ROW, SELECTED_ROW, SID
 
 type SpacePage = {
   label: string;
-  to: "/chat" | "/workflows" | "/presence" | "/artifacts" | "/integrations" | "/skills" | "/memory" | "/usage";
+  to: "/chat" | "/workflows" | "/presence" | "/artifacts" | "/skills" | "/memory";
   icon: LucideIcon;
   /** The tour step that points at this page's row (`components/tour`). */
   tour?: string;
@@ -21,48 +21,14 @@ export const SPACE_PAGES: readonly SpacePage[] = [
   { label: "Workflows", to: "/workflows", icon: Workflow, tour: "workflows" },
   { label: "Presence", to: "/presence", icon: Radio, tour: "presence" },
   { label: "Artifacts", to: "/artifacts", icon: FileText },
-];
-
-/**
- * A space's settings pages, behind its Settings row. Security is an admin
- * setting: the Settings page links it.
- */
-export const SPACE_SETTINGS_PAGES: readonly SpacePage[] = [
-  { label: "Integrations", to: "/integrations", icon: Plug },
   { label: "Skills", to: "/skills", icon: Sparkles },
   { label: "Memory", to: "/memory", icon: Brain },
-  { label: "Usage", to: "/usage", icon: BarChart3 },
 ];
 
 /** Pure: the space page a path belongs to. Home counts as Threads. */
 export function spacePageFor(pathname: string): SpacePage["to"] | undefined {
   if (pathname === "/" || pathname === "/chat" || pathname.startsWith("/threads/")) return "/chat";
-  return [...SPACE_PAGES, ...SPACE_SETTINGS_PAGES].find((page) => page.to !== "/chat" && (pathname === page.to || pathname.startsWith(`${page.to}/`)))?.to;
-}
-
-function isSettingsPage(page: string | undefined): boolean {
-  return SPACE_SETTINGS_PAGES.some((candidate) => candidate.to === page);
-}
-
-const SETTINGS_EXPANDED_KEY = "valet:spaces-settings-expanded";
-
-function loadExpanded(): Record<string, boolean> {
-  try {
-    const parsed: unknown = JSON.parse(window.localStorage.getItem(SETTINGS_EXPANDED_KEY) ?? "{}");
-    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
-      ? Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, boolean] => typeof entry[1] === "boolean"))
-      : {};
-  } catch {
-    return {};
-  }
-}
-
-function storeExpanded(value: Record<string, boolean>): void {
-  try {
-    window.localStorage.setItem(SETTINGS_EXPANDED_KEY, JSON.stringify(value));
-  } catch {
-    // Without storage a Settings row opens only on its own pages after a reload.
-  }
+  return SPACE_PAGES.find((page) => page.to !== "/chat" && (pathname === page.to || pathname.startsWith(`${page.to}/`)))?.to;
 }
 
 /** Muted tints for team marks. Static strings, so Tailwind emits each one. */
@@ -116,10 +82,10 @@ function teamLabelsOf(options: readonly WorkspaceOption[]): string[] {
  * that page with `?workspace=` naming the space, so the URL stays the one
  * source of truth for scope. Only the active space opens on load. A space
  * the person opens or closes stays that way until they go to another space.
- * Each open space also has a Settings row (Integrations, Skills, Memory,
- * Usage), closed until opened or until one of them is the current page; this
- * browser remembers it per space. A closed space shows all its pages in a
- * menu on hover or from its chevron. Its name opens the same page in that
+ * Each open space ends with a Settings row that opens the space's one
+ * settings home: a team's settings page, or your own workspace's
+ * Integrations (Linear's team settings). A closed space shows all its pages
+ * in a menu on hover or from its chevron. Its name opens the same page in that
  * space, or its Threads from Home and threads.
  */
 export function SpacesNav() {
@@ -137,45 +103,25 @@ export function SpacesNav() {
   }
   const isOpen = (key: string) => (manualScope === scope.key ? manualOpen[key] : undefined) ?? key === scope.key;
   const setOpen = (key: string, open: boolean) => setManualOpen((current) => ({ ...current, [key]: open }));
-  const [settingsStored, setSettingsStored] = useState(() => loadExpanded());
-  const setSettingsOpen = (key: string, open: boolean) => {
-    setSettingsStored((current) => {
-      const next = { ...current, [key]: open };
-      storeExpanded(next);
-      return next;
-    });
-  };
-  // Arriving on one of a space's settings pages opens its Settings row, so
-  // the current row shows. The person can close it again while they stay.
-  const onSettingsPage = isSettingsPage(page);
-  useEffect(() => {
-    if (onSettingsPage && settingsStored[scope.key] !== true) setSettingsOpen(scope.key, true);
-    // Runs on arrival only: a manual close while on the page must hold.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [onSettingsPage, page, scope.key]);
   const teamLabels = teamLabelsOf(options);
   // A space's name opens the page you are on in that space, so switching
-  // keeps your place (Eng / Integrations to Sales / Integrations). From
+  // keeps your place (Eng / Skills to Sales / Skills). From
   // Home, a thread, or a page no space owns, it opens the space's Threads.
   const nameTarget = page ?? "/chat";
   return <section aria-label="Spaces" data-tour="spaces">
     <p className={SIDEBAR_LABEL}>Spaces</p>
     <ul className="space-y-0.5">
       {options.map((option) => <SpaceRow key={option.key} option={option} teamLabels={teamLabels} nameTarget={nameTarget}
-        open={isOpen(option.key)} activePage={option.key === scope.key ? page : undefined} onOpenChange={(open) => setOpen(option.key, open)}
-        settingsOpen={settingsStored[option.key] ?? (option.key === scope.key && onSettingsPage)} onSettingsOpenChange={(open) => setSettingsOpen(option.key, open)} />)}
+        open={isOpen(option.key)} activePage={option.key === scope.key ? page : undefined} onOpenChange={(open) => setOpen(option.key, open)} />)}
     </ul>
   </section>;
 }
 
-function SpaceRow({ option, teamLabels, nameTarget, open, activePage, onOpenChange, settingsOpen, onSettingsOpenChange }: {
+function SpaceRow({ option, teamLabels, nameTarget, open, activePage, onOpenChange }: {
   option: WorkspaceOption; teamLabels: readonly string[]; nameTarget: SpacePage["to"];
   open: boolean; activePage: string | undefined; onOpenChange: (open: boolean) => void;
-  settingsOpen: boolean; onSettingsOpenChange: (open: boolean) => void;
 }) {
-  // `inSettings` indents a row 16px past the Settings icon, so the four
-  // settings pages read as its contents, not its siblings.
-  const pageRow = (page: SpacePage, inSettings = false) => {
+  const pageRow = (page: SpacePage) => {
     const current = page.to === activePage;
     // On Threads the open thread (or Home) holds the selected fill, so
     // its page shows as current with primary text only: one highlighted
@@ -183,7 +129,7 @@ function SpaceRow({ option, teamLabels, nameTarget, open, activePage, onOpenChan
     const filled = current && page.to !== "/chat";
     return <li key={page.to}>
       <Link to={page.to} search={{ workspace: option.key }} aria-current={current ? "page" : undefined} data-tour={page.tour}
-        className={cn(NESTED_ROW, "gap-2 pr-2 focus-visible:bg-ink-wash focus-visible:outline-none", inSettings ? "pl-12" : "pl-8",
+        className={cn(NESTED_ROW, "gap-2 pl-8 pr-2 focus-visible:bg-ink-wash focus-visible:outline-none",
           filled ? SELECTED_ROW : current ? "text-ink hover:bg-ink-wash" : NESTED_IDLE)}>
         <page.icon aria-hidden className="h-3.5 w-3.5 shrink-0 text-muted" />
         {page.label}
@@ -208,17 +154,12 @@ function SpaceRow({ option, teamLabels, nameTarget, open, activePage, onOpenChan
     {open && <ul aria-label={`${option.label} pages`} className="mt-0.5 space-y-0.5">
       {SPACE_PAGES.map((page) => pageRow(page))}
       <li>
-        <button type="button" data-tour="space-settings" aria-expanded={settingsOpen} aria-label={`${settingsOpen ? "Hide" : "Show"} ${option.label} settings`} onClick={() => onSettingsOpenChange(!settingsOpen)}
-          className={cn(NESTED_ROW, "group w-[calc(100%-1rem)] gap-2 pl-8 pr-1 text-left focus-visible:bg-ink-wash focus-visible:outline-none", NESTED_IDLE)}>
+        <SpaceSettingsLink option={option} data-tour="space-settings" aria-label={`${option.label} settings`}
+          className={cn(NESTED_ROW, "gap-2 pl-8 pr-2 focus-visible:bg-ink-wash focus-visible:outline-none", NESTED_IDLE)}>
           <Settings aria-hidden className="h-3.5 w-3.5 shrink-0 text-muted" />
-          <span className="flex-1">Settings</span>
-          <ChevronRight aria-hidden className={cn("mr-1 h-3.5 w-3.5 text-muted transition-transform", HOVER_CHROME, settingsOpen && "rotate-90")} />
-        </button>
+          Settings
+        </SpaceSettingsLink>
       </li>
-      {/* A faint guide runs down the Settings icon's column (8px inset + 32px + half the 14px icon). */}
-      {settingsOpen && <li><ul aria-label={`${option.label} settings`}
-        className="relative space-y-0.5 before:absolute before:inset-y-0 before:left-[47px] before:w-px before:bg-line/50">
-        {SPACE_SETTINGS_PAGES.map((page) => pageRow(page, true))}</ul></li>}
     </ul>}
   </li>;
 }
@@ -247,9 +188,22 @@ export function SpacePagesMenu({ option, children }: { option: WorkspaceOption; 
       <DropdownMenuLabel className="text-xs font-normal text-muted">{option.label}</DropdownMenuLabel>
       {SPACE_PAGES.map((page) => <SpacePageItem key={page.to} option={option} page={page} />)}
       <DropdownMenuSeparator />
-      {SPACE_SETTINGS_PAGES.map((page) => <SpacePageItem key={page.to} option={option} page={page} />)}
+      <DropdownMenuItem asChild>
+        <SpaceSettingsLink option={option}><Settings aria-hidden className="h-4 w-4" />Settings</SpaceSettingsLink>
+      </DropdownMenuItem>
     </DropdownMenuContent>
   </DropdownMenu>;
+}
+
+/**
+ * A link to a space's settings home: the team's settings page, or your own
+ * workspace's Integrations. Settings pins the scope from the URL, so the
+ * link carries no `?workspace=`.
+ */
+function SpaceSettingsLink({ option, ...props }: { option: WorkspaceOption } & Omit<ComponentProps<typeof Link>, "to" | "params" | "search">) {
+  return option.isTeam
+    ? <Link {...props} to="/settings/teams/$teamId" params={{ teamId: option.key }} />
+    : <Link {...props} to="/settings/integrations" />;
 }
 
 function SpacePageItem({ option, page }: { option: WorkspaceOption; page: SpacePage }) {

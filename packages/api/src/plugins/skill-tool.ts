@@ -62,7 +62,7 @@ function describeSkills(skills: SkillSource[]): string {
   });
   return [
     "Read an installed skill: a playbook with detailed instructions for one integration or task.",
-    "Call this before you use an integration's tools for the first time in a turn.",
+    "Call this before you use an integration's tools for the first time in this conversation. A skill you read stays in context; reading it again returns a short note while it is loaded.",
     "Omit path to read the protected SKILL.md body and file manifest. Path reads are not protected from pruning.",
     "Read references with path, offset (byte offset, default 0), and limit (bytes, default and maximum 65536).",
     "Pages end at UTF-8 character boundaries. The footer reports total_bytes, next_offset, and end. Use next_offset to continue.",
@@ -192,6 +192,14 @@ export function buildSkillTool(
       }
       if (args.path === undefined && (args.offset !== undefined || args.limit !== undefined)) {
         return { text: "[skill_bad_range] Supply path when using offset or limit." };
+      }
+      // A body read that repeats one still in context adds nothing but
+      // tokens: the earlier copy is protected from pruning and stays until
+      // a compaction covers it. Templated bodies depend on their arguments,
+      // so they always render.
+      const loaded = args.path === undefined && args.args === undefined ? current().get(args.name) : undefined;
+      if (loaded && !loaded.argsSchema && ctx.skillBodyInContext?.(loaded)) {
+        return { text: `[skill_already_loaded] The "${args.name}" skill is already in this conversation, unchanged, in an earlier skill result. Follow that text. It stays loaded until a compaction.` };
       }
       let rendered;
       try { rendered = await renderSkillResult(current(), args.name, args.args ?? {}, args.path, args.offset, args.limit); }

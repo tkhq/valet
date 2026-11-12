@@ -1,4 +1,4 @@
-import { parseToolIntent, requiresToolIntent, stripToolIntent, withToolIntentSchema, actionInScope, toolInScope, scopeRefusal } from "@valet/shared";
+import { MAX_SOURCES_PER_CALL, normalizeSource, type SourceRecord, parseToolIntent, requiresToolIntent, stripToolIntent, withToolIntentSchema, actionInScope, toolInScope, scopeRefusal } from "@valet/shared";
 import { IsObject } from "typebox";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { TextContent, ImageContent } from "@earendil-works/pi-ai/compat";
@@ -139,7 +139,8 @@ export function toAgentTool<TParams extends import("typebox").TSchema>(
             if (result.attachments?.length) {
               span.setAttribute("valet.tool.attachments", result.attachments.length);
             }
-            return toAgentToolResult(result, def.name);
+            const sources = await citeSources(result, ctx, def.name);
+            return toAgentToolResult(sources.result, def.name, sources.records);
           } catch (err) {
             recordToolExecution(def.name, Date.now() - startedAt, false);
             span.setAttribute(
@@ -154,7 +155,27 @@ export function toAgentTool<TParams extends import("typebox").TSchema>(
   };
 }
 
-function toAgentToolResult(result: ToolResult, toolName: string): AgentToolResult<unknown> {
+/**
+ * Give a result's sources thread-scoped ids and list them in the model's
+ * text, so a reply can cite them. Without an allocator, or when it fails,
+ * the sources are dropped: an id the model cannot cite would mislead.
+ */
+export async function citeSources(result: ToolResult, ctx: ToolContext, toolName: string): Promise<{ result: ToolResult; records: SourceRecord[] }> {
+  const inputs = (result.sources ?? []).flatMap((source) => normalizeSource(source) ?? []).slice(0, MAX_SOURCES_PER_CALL);
+  if (inputs.length === 0 || !ctx.allocateSourceIds) return { result, records: [] };
+  let ids: string[];
+  try {
+    ids = await ctx.allocateSourceIds(inputs.length);
+  } catch (err) {
+    console.warn(`[engine] ${toolName} sources were dropped: ${err instanceof Error ? err.message : String(err)}`);
+    return { result, records: [] };
+  }
+  const records = inputs.flatMap((source, index) => ids[index] ? [{ id: ids[index], ...source }] : []);
+  const list = records.map((source) => `[${source.id}] ${source.title}${source.location ? ` (${source.location})` : ""}`).join("\n");
+  return { result: { ...result, text: `${result.text}\n\nSources:\n${list}` }, records };
+}
+
+function toAgentToolResult(result: ToolResult, toolName: string, sources: readonly SourceRecord[] = []): AgentToolResult<unknown> {
   const content: (TextContent | ImageContent)[] = [];
   if (result.text) content.push({ type: "text", text: result.text });
   for (const att of result.attachments ?? []) {
@@ -173,8 +194,18 @@ function toAgentToolResult(result: ToolResult, toolName: string): AgentToolResul
     ...(result.ok === undefined ? {} : { ok: result.ok }),
     ...(result.outcome === undefined ? {} : { outcome: result.outcome }),
     ...(result.approval === undefined ? {} : { approval: result.approval }),
+    ...(result.label === undefined ? {} : { label: result.label }),
+    ...(sources.length === 0 ? {} : { sources }),
+    ...(result.fullText === undefined ? {} : { fullText: result.fullText }),
   };
   return { content, details: Object.keys(details).length === 0 ? undefined : details };
+}
+
+/** The text a text attachment puts into the model's context. `capToolResult`
+ * counts it toward the result cap. */
+export function textAttachmentText(att: Extract<ToolAttachment, { type: "text" }>): string {
+  const lang = att.language ? ` (${att.language})` : "";
+  return `--- ${att.name ?? "attachment"}${lang} ---\n${att.content}`;
 }
 
 function attachmentToContent(att: ToolAttachment): TextContent | ImageContent | null {
@@ -185,10 +216,7 @@ function attachmentToContent(att: ToolAttachment): TextContent | ImageContent | 
       mimeType: att.mimeType,
     };
   }
-  if (att.type === "text") {
-    const lang = att.language ? ` (${att.language})` : "";
-    return { type: "text", text: `--- ${att.name ?? "attachment"}${lang} ---\n${att.content}` };
-  }
+  if (att.type === "text") return { type: "text", text: textAttachmentText(att) };
   // file: omit raw bytes from LLM context — engine should have stored via BlobStore
   return { type: "text", text: `[file attachment: ${att.name}]` };
 }

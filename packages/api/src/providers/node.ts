@@ -34,8 +34,10 @@ import {
   buildChildStopper,
   buildChildSpawner,
   buildChildStatusReader,
+  childWorkspaceRoot,
   ChildWatcher,
 } from "../orchestrator/children.js";
+import { registerChildLifecycleMetrics } from "../observability/child-lifecycle-metrics.js";
 import { HibernationReaper } from "../engine/hibernation-reaper.js";
 import { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
 import { IdleHibernationSweep } from "../engine/idle-hibernation-sweep.js";
@@ -430,8 +432,8 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   const eventsActions: ValetPlugin = {
     name: "events-actions",
     version: "0.1.0",
-    description: "Agent-facing received event diagnostics.",
-    actions: [eventsActionPlugin(db, () => plugins)],
+    description: "Agent-facing event subscriptions and received event diagnostics.",
+    actions: [eventsActionPlugin(db, () => plugins, () => engineCredentials)],
   };
   const diagnosticsActions: ValetPlugin = {
     name: "diagnostics-actions",
@@ -504,9 +506,12 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // token; this layer mints a replacement before it expires.
   const linearAppCredentials = new LinearAppTokenStore(refreshingCredentials, { env: process.env });
   const engineCredentials = new TeamCredentialStore(linearAppCredentials);
+  // The same rows with the team read rule but no refresh layer, for paths
+  // that only show a row's state (`Providers.storedCredentials`).
+  const storedCredentials = new TeamCredentialStore(baseCredentials);
   // One cache of dynamic (MCP) tool listings, shared by `/api/plugins`, the
   // policy routes, and the engine host's policy resolver.
-  const serviceProbes = new ServiceProbes({ credentials: engineCredentials });
+  const serviceProbes = new ServiceProbes({ credentials: engineCredentials, storedCredentials });
 
   // 1Password reference-credential service (1Password credential provider
   // plan, Task 1/2) — the same instance is threaded into `EngineHost`'s
@@ -625,6 +630,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     nudgeChildEvents: (ids: string[]) => wakeWatcher.nudge(ids),
   };
   const childWatcher = new ChildWatcher(childrenDeps);
+  registerChildLifecycleMetrics(db, childWorkspaceRoot(undefined));
   spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
   readerRef = buildChildReader(childrenDeps);
   senderRef = buildChildSender(childrenDeps, childWatcher);
@@ -1011,6 +1017,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     imageBuilder,
     eventStream,
     engineCredentials,
+    storedCredentials,
     onePassword,
     engineHost,
     autoTitleHost,

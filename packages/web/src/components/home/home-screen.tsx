@@ -29,7 +29,7 @@ export function HomeScreen({ view, onViewChange, wide = false }: { view: HomeVie
     <Button variant="secondary" onClick={() => void home.refetch()}>Retry</Button>
   </div>;
   if (!home.data) return <div className="flex flex-1 items-center justify-center"><LoadingRow label="Opening Valet…" /></div>;
-  const dock = <NeedsYouDock homeThreadId={home.data.threadId} onQuestionExpandedChange={setAnswering} onOpenTasks={() => onViewChange("tasks")} />;
+  const dock = <NeedsYouDock homeThreadId={home.data.threadId} personalOnly={!wide} onQuestionExpandedChange={setAnswering} onOpenTasks={() => onViewChange("tasks")} />;
   const empty = <HomeEmptyState sessionId={home.data.sessionId} threadId={home.data.threadId} />;
   if (wide) return <HomeDesktop sessionId={home.data.sessionId} threadId={home.data.threadId} dock={dock} empty={empty}
     tasksRequested={view === "tasks"} onTasksClosed={() => { if (view === "tasks") onViewChange("chat"); }} />;

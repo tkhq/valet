@@ -8,6 +8,7 @@ import {
   Cpu,
   GitPullRequest,
   KeyRound,
+  Plug,
   Shield,
   ShieldCheck,
   SlidersHorizontal,
@@ -16,8 +17,7 @@ import {
   type LucideIcon,
   BarChart3,
 } from "lucide-react";
-import { usePlugins } from "~/api/integrations";
-import { pluginEnabledForCaller, useOrg, useTeams } from "~/api/settings";
+import { pluginEnabledForCaller, pluginLoaded, useOrg, useTeams } from "~/api/settings";
 import { REVIEW_PLUGIN } from "~/components/code-review/review-lines";
 import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger, type AppPath } from "~/components/primitives";
 import { eligibleTeams } from "~/components/session/assistant-rail";
@@ -30,8 +30,8 @@ import { cn } from "~/lib/cn";
  * workspace switcher:
  *
  * - **Account**: you.
- * - **Personal workspace**: your own workspace's keys, proxy, agent access,
- *   and policies.
+ * - **Personal workspace**: your own workspace's integrations, usage, keys,
+ *   proxy, agent access, and policies.
  * - **Your teams**: one item per team you belong to, each opening its own
  *   `/settings/teams/$teamId` pages.
  * - **Plugins**: Valet Security, for a caller with the plugin, and Code
@@ -159,6 +159,8 @@ const ACCOUNT_ITEMS: RailItem[] = [
 ];
 
 const PERSONAL_ITEMS: RailItem[] = [
+  { to: "/settings/integrations", label: "Integrations", icon: Plug, active: exact("/settings/integrations") },
+  { to: "/settings/usage", label: "Usage", icon: BarChart3, active: exact("/settings/usage") },
   { to: "/settings/api-keys", label: "API keys and proxy", icon: KeyRound, active: exact("/settings/api-keys") },
   { to: "/settings/agent-access", label: "Agent access", icon: Bot, active: exact("/settings/agent-access") },
   { to: "/settings/policies", label: "Policies", icon: Shield, active: exact("/settings/policies") },
@@ -202,7 +204,6 @@ export function SettingsRail() {
   const sectionMenu = useResponsiveOverlay("sm");
   const orgQ = useOrg();
   const teamsQ = useTeams();
-  const pluginsQ = usePlugins();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const organizationsOn = orgQ.data?.features.organizations === true;
   const orgAdmin = orgQ.data?.callerRole === "admin";
@@ -224,7 +225,7 @@ export function SettingsRail() {
 
   const pluginItems = [
     ...(pluginEnabledForCaller(orgQ.data, "security") === true ? [SECURITY_ITEM] : []),
-    ...(pluginsQ.data?.plugins.some((p) => p.name === REVIEW_PLUGIN) === true ? [CODE_REVIEW_ITEM] : []),
+    ...(pluginLoaded(orgQ.data, REVIEW_PLUGIN) === true ? [CODE_REVIEW_ITEM] : []),
   ];
   const groups: RailGroupSpec[] = [
     { label: "Account", items: ACCOUNT_ITEMS },

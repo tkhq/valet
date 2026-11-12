@@ -215,7 +215,7 @@ export function IntegrationRow({ plugin, search, onOpen, tools }: {
     <li>
       {/* py-2 around the compact row's 32px makes a 48px touch target. */}
       <Link
-        to="/integrations"
+        to="/settings/integrations"
         search={{ ...search, service: plugin.name }}
         onClick={(event) => {
           // A modified click opens a new tab and pushes nothing here.

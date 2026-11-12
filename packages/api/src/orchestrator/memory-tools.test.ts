@@ -102,6 +102,7 @@ describe("buildMemoryTools", () => {
       "mem_links",
       "mem_share",
       "artifact_publish",
+      "artifact_edit",
       "artifact_comments",
       "mem_rm",
     ]);
@@ -139,7 +140,7 @@ describe("buildMemoryTools", () => {
 describe("mem_* tools: apiBaseUrl/internalToken not configured", () => {
   it("mem_write returns [memory_unavailable] without throwing", async () => {
     const ctx = makeCtx();
-    const result = await memWriteTool.execute({ path: "notes/a.md", content: "hi" }, ctx);
+    const result = await memWriteTool.execute({ description: "Test file.", path: "notes/a.md", content: "hi" }, ctx);
     expect(result.text).toBe("[memory_unavailable] memory endpoint not configured");
   });
 
@@ -198,13 +199,14 @@ describe("mem_* tools: real HTTP round trip", () => {
     });
 
     const writeResult = await memWriteTool.execute(
-      { path: "notes/hello.md", content: "# Hello\n\nWorld.\n" },
+      { path: "notes/hello.md", content: "# Hello\n\nWorld.\n", description: "A short greeting." },
       ctx,
     );
     expect(writeResult.text).toBe("wrote notes/hello.md (v1)");
 
     const readResult = await memReadTool.execute({ path: "notes/hello.md" }, ctx);
     expect(readResult.text).toContain("World.");
+    expect(readResult.sources).toEqual([{ service: "memory", title: "Hello", url: "/memory/notes/hello.md", snippet: "A short greeting." }]);
   });
 
   it("save_principle writes a principle the Principles index lists", async () => {
@@ -239,7 +241,7 @@ describe("mem_* tools: real HTTP round trip", () => {
     });
 
     const result = await memWriteTool.execute(
-      { path: "notes/echo.md", content: "---\nvalet:\n  bogus_key: x\n---\nBody.\n" },
+      { description: "Test file.", path: "notes/echo.md", content: "---\nvalet:\n  bogus_key: x\n---\nBody.\n" },
       ctx,
     );
     expect(result.text).toContain("⚠");
@@ -254,7 +256,7 @@ describe("mem_* tools: real HTTP round trip", () => {
       owner: { type: "user", id: "local-user" },
     });
 
-    await memWriteTool.execute({ path: "notes/patchable.md", content: "# T\n\nAlpha.\n" }, ctx);
+    await memWriteTool.execute({ description: "Test file.", path: "notes/patchable.md", content: "# T\n\nAlpha.\n" }, ctx);
     const patchResult = await memPatchTool.execute(
       { path: "notes/patchable.md", oldString: "Alpha", newString: "Beta" },
       ctx,
@@ -273,8 +275,8 @@ describe("mem_* tools: real HTTP round trip", () => {
       config: { apiBaseUrl: api.baseUrl, internalToken: internalToken() },
       owner: { type: "user", id: "local-user" },
     });
-    await memWriteTool.execute({ path: "principles/a.md", content: "# A\n\nOld rule.\n" }, ctx);
-    await memWriteTool.execute({ path: "notes/b.md", content: "# B\n\nOld note.\n" }, ctx);
+    await memWriteTool.execute({ description: "Test file.", path: "principles/a.md", content: "# A\n\nOld rule.\n" }, ctx);
+    await memWriteTool.execute({ description: "Test file.", path: "notes/b.md", content: "# B\n\nOld note.\n" }, ctx);
 
     const ok = await memPatchTool.execute({ patches: [
       { path: "principles/a.md", oldString: "Old rule", newString: "New rule" },
@@ -294,7 +296,7 @@ describe("mem_* tools: real HTTP round trip", () => {
     expect(mixed.text).toMatch(/^\[memory_error\] Send either/);
   });
 
-  it("mem_patch with oldString '' creates a new file (journal-append idiom)", async () => {
+  it("mem_patch refuses to create a file and names mem_write", async () => {
     api = await bootTestApi();
     const ctx = makeCtx({
       userId: "local-user",
@@ -303,7 +305,10 @@ describe("mem_* tools: real HTTP round trip", () => {
     });
 
     const result = await memPatchTool.execute({ path: "journal/2026-07-13.md", oldString: "", newString: "# Entry\n" }, ctx);
-    expect(result.text).toBe("patched journal/2026-07-13.md (v1)");
+    expect(result.text).toContain("[memory_error]");
+    expect(result.text).toContain("Create it with mem_write and a one-line description");
+    const unnamed = await memWriteTool.execute({ path: "notes/bare.md", content: "# Bare\n" }, ctx);
+    expect(unnamed.text).toContain("needs a one-line description");
   });
 
   it("mem_read on a directory returns the virtual index", async () => {
@@ -313,10 +318,11 @@ describe("mem_* tools: real HTTP round trip", () => {
       config: { apiBaseUrl: api.baseUrl, internalToken: internalToken() },
       owner: { type: "user", id: "local-user" },
     });
-    await memWriteTool.execute({ path: "notes/one.md", content: "# One\n" }, ctx);
+    await memWriteTool.execute({ description: "Test file.", path: "notes/one.md", content: "# One\n" }, ctx);
 
     const result = await memReadTool.execute({ path: "notes/" }, ctx);
     expect(result.text).toContain("one.md");
+    expect(result.sources).toBeUndefined();
   });
 
   it("mem_move renames a file, rewrites the referencer, and relays the type warning", async () => {
@@ -327,8 +333,8 @@ describe("mem_* tools: real HTTP round trip", () => {
       owner: { type: "user", id: "local-user" },
     });
 
-    await memWriteTool.execute({ path: "people/dana.md", content: "# Dana\n" }, ctx);
-    await memWriteTool.execute({ path: "notes/ref.md", content: "see [Dana](/people/dana.md)\n" }, ctx);
+    await memWriteTool.execute({ description: "Test file.", path: "people/dana.md", content: "# Dana\n" }, ctx);
+    await memWriteTool.execute({ description: "Test file.", path: "notes/ref.md", content: "see [Dana](/people/dana.md)\n" }, ctx);
 
     const moveResult = await memMoveTool.execute({ from: "people/dana.md", to: "workflows/dana.md" }, ctx);
     expect(moveResult.text).toContain("moved people/dana.md → workflows/dana.md (v2)");
@@ -348,9 +354,9 @@ describe("mem_* tools: real HTTP round trip", () => {
       owner: { type: "user", id: "local-user" },
     });
 
-    await memWriteTool.execute({ path: "people/erin.md", content: "# Erin\n" }, ctx);
+    await memWriteTool.execute({ description: "Test file.", path: "people/erin.md", content: "# Erin\n" }, ctx);
     await memWriteTool.execute(
-      { path: "projects/x/hub.md", content: "# Hub\n\n[Erin](/people/erin.md) and [gone](/notes/gone.md)\n" },
+      { description: "Test file.", path: "projects/x/hub.md", content: "# Hub\n\n[Erin](/people/erin.md) and [gone](/notes/gone.md)\n" },
       ctx,
     );
 
@@ -385,10 +391,13 @@ describe("mem_* tools: real HTTP round trip", () => {
       config: { apiBaseUrl: api.baseUrl, internalToken: internalToken() },
       owner: { type: "user", id: "local-user" },
     });
-    await memWriteTool.execute({ path: "notes/searchable.md", content: "# Searchable\n\nUnique needle text.\n" }, ctx);
+    await memWriteTool.execute({ description: "Test file.", path: "notes/searchable.md", content: "# Searchable\n\nUnique needle text.\n" }, ctx);
 
     const result = await memSearchTool.execute({ query: "needle" }, ctx);
     expect(result.text).toContain("notes/searchable.md");
+    // A result line is a description, not the file. The next step says to
+    // open what the answer depends on, which is also what records a use.
+    expect(result.text).toContain("mem_read each file your answer depends on");
   });
 
   it("mem_search with no matches reports emptiness instead of an empty string", async () => {
@@ -410,7 +419,7 @@ describe("mem_* tools: real HTTP round trip", () => {
       config: { apiBaseUrl: api.baseUrl, internalToken: internalToken() },
       owner: { type: "user", id: "local-user" },
     });
-    await memWriteTool.execute({ path: "notes/doomed.md", content: "# Doomed\n" }, ctx);
+    await memWriteTool.execute({ description: "Test file.", path: "notes/doomed.md", content: "# Doomed\n" }, ctx);
 
     const rmResult = await memRmTool.execute({ path: "notes/doomed.md" }, ctx);
     expect(rmResult.text).toBe("removed notes/doomed.md");
@@ -427,7 +436,7 @@ describe("mem_* tools: real HTTP round trip", () => {
       owner: { type: "user", id: "local-user" },
     });
 
-    const result = await memWriteTool.execute({ path: "notes/never-created.md" }, ctx);
+    const result = await memWriteTool.execute({ description: "Test file.", path: "notes/never-created.md" }, ctx);
     expect(result.text).toMatch(/^\[memory_error\]/);
     expect(result.text).toContain("does not exist");
   });
@@ -441,7 +450,7 @@ describe("mem_* tools: real HTTP round trip", () => {
     });
 
     await seedPublishingContext(api, ctx);
-    const writeResult = await memWriteTool.execute({ path: "notes/team.md", content: "# Team note\n" }, ctx);
+    const writeResult = await memWriteTool.execute({ description: "Test file.", path: "notes/team.md", content: "# Team note\n" }, ctx);
     // The result names the scope the server wrote. A team-owned session has
     // always written its team here; it just used to report a bare path, so
     // the agent could not tell the user where the file landed.
@@ -466,7 +475,7 @@ describe("mem_* tools: real HTTP round trip", () => {
       owner: { type: "user", id: "local-user" },
     });
 
-    await memWriteTool.execute({ path: "artifacts/report.md", content: "# Report\n\nBody.\n" }, ctx);
+    await memWriteTool.execute({ description: "Test file.", path: "artifacts/report.md", content: "# Report\n\nBody.\n" }, ctx);
 
     await seedPublishingContext(api, ctx);
     const shared = await memShareTool.execute({ path: "artifacts/report.md" }, ctx);
@@ -648,7 +657,7 @@ describe("copy-to-team tools", () => {
     const ctx = makeCtx({ userId: "local-user", owner: { type: "user", id: "local-user" },
       config: { apiBaseUrl: api.baseUrl, internalToken: internalToken() } });
     const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Copy team", creatorUserId: "local-user" });
-    await memWriteTool.execute({ path: "notes/source.md", content: "# Source\n\nExact content.\n" }, ctx);
+    await memWriteTool.execute({ description: "Test file.", path: "notes/source.md", content: "# Source\n\nExact content.\n" }, ctx);
     const args = { from: "notes/source.md", to: "notes/team.md", teamId: team.id };
     const result = await memCopyToTeamTool.execute(args, ctx);
     expect(decode(result.text)).toMatchObject({
@@ -671,7 +680,7 @@ describe("copy-to-team tools", () => {
       config: { apiBaseUrl: api.baseUrl, internalToken: internalToken() } });
 
     const wrote = await memWriteTool.execute(
-      { path: "knowledge/runbook.md", content: "# Runbook\n\nTeam knowledge.\n", teamId: team.id },
+      { description: "Test file.", path: "knowledge/runbook.md", content: "# Runbook\n\nTeam knowledge.\n", teamId: team.id },
       ctx,
     );
     expect(wrote.text).toBe(`wrote team:${team.id}/knowledge/runbook.md (v1)`);
@@ -690,17 +699,17 @@ describe("copy-to-team tools", () => {
       config: { apiBaseUrl: api.baseUrl, internalToken: internalToken() } });
 
     const refused = await memWriteTool.execute(
-      { path: "knowledge/x.md", content: "nope", teamId: team.id },
+      { description: "Test file.", path: "knowledge/x.md", content: "nope", teamId: team.id },
       outsider,
     );
     expect(refused.text).toContain("[memory_error]");
 
     // A member writes, then leaves: the next write stops resolving.
     await api.providers.db.insert(teamMembers).values({ teamId: team.id, userId: "test-member", role: "member" });
-    expect((await memWriteTool.execute({ path: "knowledge/x.md", content: "yes", teamId: team.id }, outsider)).text)
+    expect((await memWriteTool.execute({ description: "Test file.", path: "knowledge/x.md", content: "yes", teamId: team.id }, outsider)).text)
       .toBe(`wrote team:${team.id}/knowledge/x.md (v1)`);
     await api.providers.db.delete(teamMembers).where(eq(teamMembers.teamId, team.id));
-    expect((await memWriteTool.execute({ path: "knowledge/y.md", content: "no", teamId: team.id }, outsider)).text)
+    expect((await memWriteTool.execute({ description: "Test file.", path: "knowledge/y.md", content: "no", teamId: team.id }, outsider)).text)
       .toContain("[memory_error]");
   });
 
@@ -708,7 +717,7 @@ describe("copy-to-team tools", () => {
     api = await bootTestApi();
     const ctx = makeCtx({ userId: "local-user", owner: { type: "user", id: "local-user" },
       config: { apiBaseUrl: api.baseUrl, internalToken: internalToken() } });
-    const wrote = await memWriteTool.execute({ path: "notes/mine.md", content: "# Mine\n" }, ctx);
+    const wrote = await memWriteTool.execute({ description: "Test file.", path: "notes/mine.md", content: "# Mine\n" }, ctx);
     // No `team:` prefix: the default scope is unchanged by this feature.
     expect(wrote.text).toBe("wrote notes/mine.md (v1)");
   });
@@ -720,9 +729,9 @@ describe("copy-to-team tools", () => {
     const ctx = makeCtx({ userId: "test-member", owner: { type: "user", id: "test-member" },
       config: { apiBaseUrl: api.baseUrl, internalToken: internalToken() } });
 
-    expect((await memPatchTool.execute(
-      { path: "journal/today.md", oldString: "", newString: "first line\n", teamId: team.id }, ctx)).text)
-      .toBe(`patched team:${team.id}/journal/today.md (v1)`);
+    expect((await memWriteTool.execute(
+      { path: "journal/today.md", content: "first line\n", description: "Team log.", teamId: team.id }, ctx)).text)
+      .toContain(`team:${team.id}/journal/today.md (v1)`);
     expect((await memPatchTool.execute(
       { path: "journal/today.md", oldString: "first line", newString: "first line\nsecond line", teamId: team.id }, ctx)).text)
       .toBe(`patched team:${team.id}/journal/today.md (v2)`);
@@ -761,7 +770,7 @@ describe("mem_copy_from_team", () => {
     const ctx = makeCtx({ userId: "local-user", owner: { type: "user", id: "local-user" },
       config: { apiBaseUrl: api.baseUrl, internalToken: internalToken() } });
     const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Knowledge", creatorUserId: "local-user" });
-    await memWriteTool.execute({ path: "knowledge/source.md", content: "# Transfer\n\nExact knowledge.\n" }, ctx);
+    await memWriteTool.execute({ description: "Test file.", path: "knowledge/source.md", content: "# Transfer\n\nExact knowledge.\n" }, ctx);
     await memCopyToTeamTool.execute({ from: "knowledge/source.md", to: "knowledge/team.md", teamId: team.id }, ctx);
     expect((await memReadTool.execute({ path: "" }, ctx)).text).toContain(`team:${team.id}`);
     expect((await memReadTool.execute({ path: `team:${team.id}/knowledge/` }, ctx)).text).toContain("team.md");

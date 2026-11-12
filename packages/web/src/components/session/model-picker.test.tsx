@@ -7,7 +7,7 @@
  * fallen out of the catalog still labels instead of crashing.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { TooltipProvider } from "~/components/primitives";
 import type { GetModelTiersResponse, GetOrgReasoningResponse, MeResponse, ModelInfo } from "@valet/api/wire";
@@ -541,19 +541,45 @@ describe("ModelPicker — reasoning row", () => {
 
 
 describe("ModelPicker — phone settings panel", () => {
-  it("shows model and thinking controls directly, and stays open after a selection", async () => {
+  it("shows model and thinking controls directly, and reports a size pick but not a thinking change", async () => {
     const onSelect = vi.fn();
+    const onPicked = vi.fn();
     const onSelectReasoning = vi.fn();
-    renderPicker({ presentation: "panel", currentId: "custom_1/llama-3", onSelect, onSelectReasoning });
+    renderPicker({ presentation: "panel", currentId: "custom_1/llama-3", onSelect, onPicked, onSelectReasoning });
     expect(screen.queryByRole("button", { name: /^Choose model:/ })).toBeNull();
     expect(screen.queryByRole("textbox", { name: "Search models" })).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "Small" }));
     expect(onSelect).toHaveBeenCalledWith("s");
+    expect(onPicked).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("button", { name: "High reasoning" })).toBeNull();
     await userEvent.selectOptions(screen.getByRole("combobox", { name: "Thinking level" }), "high");
     expect(onSelectReasoning).toHaveBeenCalledWith("high");
+    expect(onPicked).toHaveBeenCalledTimes(1);
     expect(onSelect).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("reports a catalog pick but not typing in the search box", async () => {
+    const onSelect = vi.fn();
+    const onPicked = vi.fn();
+    renderPicker({ presentation: "panel", onSelect, onPicked });
+    await userEvent.click(screen.getByRole("button", { name: "More models" }));
+    await userEvent.type(screen.getByRole("textbox", { name: "Search models" }), "Llama");
+    expect(onPicked).not.toHaveBeenCalled();
+    await userEvent.keyboard("{Enter}");
+    expect(onSelect).toHaveBeenCalledWith("custom_1/llama-3");
+    expect(onPicked).toHaveBeenCalledTimes(1);
+  });
+
+  it("commits a tapped catalog row and reports it", async () => {
+    const onSelect = vi.fn();
+    const onPicked = vi.fn();
+    renderPicker({ presentation: "panel", onSelect, onPicked });
+    await userEvent.click(screen.getByRole("button", { name: "More models" }));
+    await userEvent.type(screen.getByRole("textbox", { name: "Search models" }), "Llama");
+    await userEvent.click(screen.getByRole("button", { name: /Llama 3/ }));
+    expect(onSelect).toHaveBeenCalledWith("custom_1/llama-3");
+    expect(onPicked).toHaveBeenCalledTimes(1);
   });
 
   it("uses native keyboard activation for thinking without selecting a highlighted model", () => {
@@ -634,5 +660,95 @@ describe("ModelPicker composer trigger", () => {
     await userEvent.click(trigger);
     expect(open).toHaveBeenCalledOnce();
     expect(screen.queryByRole("menu")).toBeNull();
+  });
+});
+
+describe("ModelPicker compact composer trigger", () => {
+  const renderTrigger = (currentId: string) => render(<TooltipProvider><ModelPicker presentation="trigger" currentId={currentId} currentReasoning="medium" onSelect={vi.fn()} onOpenPanel={vi.fn()} /></TooltipProvider>);
+
+  it("keeps the full accessible name and title; narrow widths get the short name, tiny ones an icon", () => {
+    renderTrigger("anthropic/claude-opus-4-7");
+    const trigger = screen.getByRole("button", { name: /Choose model:.*Opus 4\.7.*Medium/ });
+    expect(trigger.getAttribute("title")).toMatch(/Opus 4\.7.*Medium/);
+    const compact = trigger.querySelector<HTMLElement>("[data-compact-picker]");
+    expect(compact?.textContent).toBe("Opus 4.7");
+    expect(compact?.className).toContain("[@container(18.75rem<=width<34rem)]:inline");
+    const icon = trigger.querySelector<HTMLElement>("[data-icon-picker]");
+    expect(icon?.className).toContain("[@container(width<18.75rem)]:inline");
+    expect(icon?.querySelector("svg")).not.toBeNull();
+  });
+
+  it("shows the full label by default, so a trigger outside a size container names the model", () => {
+    renderTrigger("anthropic/claude-opus-4-7");
+    const trigger = screen.getByRole("button", { name: /Choose model:.*Opus 4\.7.*Medium/ });
+    const full = trigger.querySelector<HTMLElement>("[data-full-picker]");
+    expect(full?.textContent).toMatch(/Opus 4\.7.*Medium/);
+    // Only width-below queries hide the full label; none match without a container.
+    expect(full?.className.split(" ")).not.toContain("hidden");
+    expect(full?.className).toContain("[@container(width<34rem)]:hidden");
+    expect(trigger.querySelector<HTMLElement>("[data-compact-picker]")?.className.split(" ")).toContain("hidden");
+    expect(trigger.querySelector<HTMLElement>("[data-icon-picker]")?.className.split(" ")).toContain("hidden");
+  });
+
+  it("falls back to an icon below the full-label width when the model has no curated short name", () => {
+    renderTrigger("custom_1/llama-3");
+    const trigger = screen.getByRole("button", { name: /Choose model: .*Llama 3/ });
+    expect(trigger.querySelector("[data-compact-picker]")).toBeNull();
+    const icon = trigger.querySelector<HTMLElement>("[data-icon-picker]");
+    expect(icon?.className).toContain("[@container(width<34rem)]:inline");
+    expect(icon?.querySelector("svg")).not.toBeNull();
+  });
+});
+
+describe("ModelPicker — new-thread default", () => {
+  it("shows the default and saves the current choice as the default when they differ", async () => {
+    const user = userEvent.setup();
+    const onMakeDefault = vi.fn();
+    renderPicker({ currentId: "anthropic/claude-sonnet-4-5", currentReasoning: "high", newThreadDefault: { model: "custom_1/llama-3", reasoning: "medium", onMakeDefault } });
+
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
+    expect(screen.getByText(/New threads: Llama 3 · Medium/)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Make my default" }));
+    expect(onMakeDefault).toHaveBeenCalledOnce();
+  });
+
+  it("names a team default, and closes the menu so the confirmation can open", async () => {
+    const user = userEvent.setup();
+    const onMakeDefault = vi.fn();
+    renderPicker({ currentId: "anthropic/claude-sonnet-4-5", newThreadDefault: { model: "custom_1/llama-3", scope: "team", onMakeDefault } });
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
+    await user.click(screen.getByRole("button", { name: "Make team default" }));
+    expect(onMakeDefault).toHaveBeenCalledOnce();
+    expect(screen.queryByText(/New threads:/)).toBeNull();
+  });
+
+  it("says why no save is offered when the assistant's own setting outranks defaults", async () => {
+    const user = userEvent.setup();
+    renderPicker({ currentId: "anthropic/claude-sonnet-4-5", newThreadDefault: { model: "custom_1/llama-3", blockedReason: "The assistant's own model setting outranks defaults, so new threads keep it." } });
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
+    expect(screen.getByText(/own model setting outranks defaults/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Make .*default$/ })).toBeNull();
+  });
+
+  it("offers no save without a save handler", async () => {
+    const user = userEvent.setup();
+    renderPicker({ currentId: "anthropic/claude-sonnet-4-5", newThreadDefault: { model: "custom_1/llama-3", reasoning: "medium" } });
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
+    expect(screen.getByText(/New threads: Llama 3/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Make .*default$/ })).toBeNull();
+  });
+
+  it("saves the default on Enter instead of picking the highlighted model", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    const onMakeDefault = vi.fn();
+    renderPicker({ onSelect, currentId: "anthropic/claude-sonnet-4-5", newThreadDefault: { model: "custom_1/llama-3", onMakeDefault } });
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
+    // The menu focuses its search box on the next frame; move focus after that.
+    await waitFor(() => expect(document.activeElement?.tagName).toBe("INPUT"));
+    screen.getByRole("button", { name: "Make my default" }).focus();
+    await user.keyboard("{Enter}");
+    expect(onMakeDefault).toHaveBeenCalledOnce();
+    expect(onSelect).not.toHaveBeenCalled();
   });
 });

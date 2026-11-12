@@ -9,7 +9,7 @@
  * as a string, so a stray escape in the TS template literal would otherwise
  * only fail at view time.
  */
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { ARTIFACT_DS_RUNTIME_JS, ARTIFACT_RUNTIME_JS } from "@valet/shared";
 
 type BridgeMessage = { type: string } & Record<string, unknown>;
@@ -79,6 +79,60 @@ describe("artifact comment runtime", () => {
     const divs = [...document.querySelectorAll("div")];
     expect(divs[0]?.getAttribute("data-vdid")).toBeTruthy();
     expect(divs[1]?.hasAttribute("data-vdid")).toBe(false);
+  });
+
+  it("reports a selected text range only when selection editing is enabled", async () => {
+    const paragraph = document.querySelector("p");
+    if (!paragraph?.firstChild) throw new Error("paragraph did not mount");
+    const range = document.createRange();
+    range.setStart(paragraph.firstChild, 0);
+    range.setEnd(paragraph.firstChild, 16);
+    Object.defineProperty(range, "getBoundingClientRect", { value: undefined });
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    paragraph.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    await flush();
+    expect(received.some((message) => message.type === "valet-artifact:selection")).toBe(false);
+    window.postMessage({ type: "valet-artifact:mode", picking: false, selecting: true }, "*");
+    await flush();
+    document.dispatchEvent(new Event("selectionchange"));
+    const selected = await waitFor("valet-artifact:selection");
+    expect(selected.text).toBe("Reasoning effort");
+    expect(selected.vdid).toBe(paragraph.getAttribute("data-vdid"));
+    expect(selected).not.toHaveProperty("rect");
+    selection?.removeAllRanges();
+  });
+
+  it("reports selection geometry and coalesces updates as the preview scrolls", async () => {
+    const paragraph = document.querySelector("p");
+    if (!paragraph?.firstChild) throw new Error("paragraph did not mount");
+    const range = document.createRange();
+    range.setStart(paragraph.firstChild, 0);
+    range.setEnd(paragraph.firstChild, 16);
+    let top = 80;
+    const measure = vi.fn(() => ({ top, left: 40, width: 160, height: 22 }));
+    Object.defineProperty(range, "getBoundingClientRect", { value: measure });
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    window.postMessage({ type: "valet-artifact:mode", picking: false, selecting: true }, "*");
+    await flush();
+    received.length = 0;
+    document.dispatchEvent(new Event("selectionchange"));
+    expect(await waitFor("valet-artifact:selection")).toEqual({
+      type: "valet-artifact:selection", text: "Reasoning effort", vdid: paragraph.getAttribute("data-vdid"),
+      rect: { top: 80, left: 40, width: 160, height: 22 },
+    });
+    received.length = 0;
+    measure.mockClear();
+    top = 24;
+    window.dispatchEvent(new Event("scroll"));
+    window.dispatchEvent(new Event("scroll"));
+    window.dispatchEvent(new Event("resize"));
+    expect((await waitFor("valet-artifact:selection")).rect).toEqual({ top: 24, left: 40, width: 160, height: 22 });
+    expect(measure).toHaveBeenCalledTimes(1);
+    selection?.removeAllRanges();
   });
 
   it("reports rects for requested anchors that exist, and omits the rest", async () => {

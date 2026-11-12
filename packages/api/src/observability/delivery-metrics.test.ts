@@ -26,7 +26,9 @@ describe("delivery destination metrics", () => {
     metrics.setGlobalMeterProvider(provider);
     // Load a fresh module after this test installs its recordable provider.
     vi.resetModules();
-    const { recordDeliveryDestination, destinationMetricReason, recordAttentionDeliveryFailure, recordAttentionDeliveryRejected } = await import("./delivery-metrics.js");
+    const {
+      recordDeliveryDestination, destinationMetricReason, recordAttentionDeliveryFailure, recordAttentionDeliveryRejected, recordPluginDeliveryOutcome,
+    } = await import("./delivery-metrics.js");
 
     recordDeliveryDestination(destinationMetricReason({ kind: "key", key: "sub:r1", title: "R1", reason: "policy_own" }));
     recordDeliveryDestination(destinationMetricReason({ kind: "key", key: "sub:r1", title: "R1", reason: "policy_own" }));
@@ -36,6 +38,9 @@ describe("delivery destination metrics", () => {
     recordAttentionDeliveryFailure(true);
     recordAttentionDeliveryRejected("telegram", "bot_blocked");
     recordAttentionDeliveryRejected("slack", "user_not_found");
+    recordPluginDeliveryOutcome("reviewer", "review", "delivered");
+    recordPluginDeliveryOutcome("reviewer", "review", "dead");
+    recordPluginDeliveryOutcome("reviewer", "review", "dead");
     await provider.forceFlush();
 
     const metric = exporter
@@ -57,6 +62,12 @@ describe("delivery destination metrics", () => {
     if (!rejections || rejections.dataPointType !== DataPointType.SUM) throw new Error("expected a rejection counter");
     expect(rejections.dataPoints.map(point => ({ channel: point.attributes.channel, reason: point.attributes.reason, value: point.value })))
       .toEqual([{ channel: "telegram", reason: "bot_blocked", value: 1 }, { channel: "slack", reason: "user_not_found", value: 1 }]);
+
+    const plugin = exporter.getMetrics().flatMap(resource => resource.scopeMetrics).flatMap(scope => scope.metrics)
+      .find(candidate => candidate.descriptor.name === "valet_plugin_delivery_outcomes");
+    if (!plugin || plugin.dataPointType !== DataPointType.SUM) throw new Error("expected a plugin delivery outcome counter");
+    expect(plugin.dataPoints.map(point => ({ ...point.attributes, value: point.value })))
+      .toEqual([{ plugin: "reviewer", handler: "review", outcome: "delivered", value: 1 }, { plugin: "reviewer", handler: "review", outcome: "dead", value: 2 }]);
 
     await provider.shutdown();
   });
@@ -93,5 +104,6 @@ it.each(["future-grace", "overdue"])("samples only time past the delivery deadli
     const alerts = readFileSync(fileURLToPath(new URL("../../../../deploy/chart/valet/alerts/events.yaml", import.meta.url)), "utf8");
     expect(alerts).toContain("max(valet_attention_oldest_job_age_seconds) > 1800");
     expect(alerts).toContain('valet_attention_delivery_failures_total{retry="true"}');
+    expect(alerts).toContain('valet_plugin_delivery_outcomes_total{outcome="dead"}');
   } finally { clock.mockRestore(); await provider.shutdown(); }
 });

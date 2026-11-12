@@ -24,6 +24,7 @@ import type {
   PresencePlaceDetailResponse,
   ThreadChannelActivity,
   ThreadContextResponse,
+  ThreadDefaultsResponse,
   ActiveViewersResponse,
   ThreadPlanResponse,
   ThreadProgressResponse,
@@ -87,6 +88,10 @@ import type {
   ListWorkspaceConversationsResponse,
   WorkspaceRuntimeInfoResponse,
   GetArtifactResponse,
+  ArtifactEditorResponse,
+  RequestArtifactEditRequest,
+  RequestArtifactEditResponse,
+  RestoreArtifactRequest,
   GetChangelogResponse,
   GetGithubAppResponse,
   GetGithubOrgStatusResponse,
@@ -156,6 +161,8 @@ import type {
   ListNotificationDecisionsResponse,
   ListModelsResponse,
   ListCodeReviewsResponse,
+  RunCodeReviewRequest,
+  RunCodeReviewResponse,
   ListPluginsResponse,
   ListSessionsResponse,
   ListSkillsResponse,
@@ -508,7 +515,7 @@ function uploadProfilePicture(path: string, file: File): Promise<ProfilePictureU
   return requestForm<ProfilePictureUploadResponse>(path, form);
 }
 
-async function request<T>(method: string, path: string, body?: unknown, callerSignal?: AbortSignal): Promise<T> {
+async function request<T>(method: string, path: string, body?: unknown, callerSignal?: AbortSignal, headers?: Record<string, string>): Promise<T> {
   const controller = new AbortController();
   let timedOut = false;
   const forwardAbort = () => controller.abort(callerSignal?.reason);
@@ -522,7 +529,7 @@ async function request<T>(method: string, path: string, body?: unknown, callerSi
   try {
     const res = await fetch(`${BASE}${path}`, {
       method,
-      headers: body ? { "Content-Type": "application/json" } : undefined,
+      headers: { ...(body ? { "Content-Type": "application/json" } : {}), ...headers },
       body: body ? JSON.stringify(body) : undefined,
       // The signal also covers reading the body below, so a response whose
       // stream stalls part way is cut off on the same deadline.
@@ -670,6 +677,9 @@ export const api = {
   /** How full the thread's model context is. Reading it never wakes the sandbox. */
   getThreadContext: (threadId: string) =>
     request<ThreadContextResponse>("GET", `/threads/${encodeURIComponent(threadId)}/context`),
+  /** The model and reasoning a new thread in the session starts with. */
+  getThreadDefaults: (sessionId: string) =>
+    request<ThreadDefaultsResponse>("GET", `/sessions/${encodeURIComponent(sessionId)}/thread-defaults`),
   getActiveViewers: (workspace: string) =>
     request<ActiveViewersResponse>("GET", `/threads/viewers?workspace=${encodeURIComponent(workspace)}`),
   /** The checklist the model keeps with `update_plan`. */
@@ -844,7 +854,7 @@ export const api = {
     request<ListWorkspaceConversationsResponse>("GET", `/workspaces/${encodeURIComponent(workspace)}/conversations`),
   ensureHomeConversation: () => request<HomeConversationResponse>("POST", "/home"),
   getHomeTasks: () => request<HomeTasksResponse>("GET", "/home/tasks"),
-  markHomeTaskDone: (taskId: string) => request<void>("POST", `/home/tasks/${encodeURIComponent(taskId)}/done`),
+  dismissHomeTask: (body: import("@valet/api/wire").DismissHomeTaskRequest) => request<void>("POST", "/home/tasks/dismiss", body),
   ensureWorkspaceRuntime: (workspace: string) =>
     request<EnsureWorkspaceRuntimeResponse>("POST", `/workspaces/${encodeURIComponent(workspace)}/runtime`),
   getWorkspaceRuntimeInfo: (workspace: string) =>
@@ -872,6 +882,17 @@ export const api = {
   // for signed-out callers, which the central 401 redirect handles.
   getArtifact: (token: string) =>
     request<GetArtifactResponse>("GET", `/artifacts/${encodeURIComponent(token)}`),
+  getArtifactEditor: (id: string, version?: number) =>
+    request<ArtifactEditorResponse>("GET", `/artifacts/${encodeURIComponent(id)}/editor${version === undefined ? "" : `?version=${version}`}`),
+  requestArtifactEdit: (id: string, body: RequestArtifactEditRequest) =>
+    request<RequestArtifactEditResponse>("POST", `/artifacts/${encodeURIComponent(id)}/edit-requests`, body),
+  restoreArtifact: (id: string, body: RestoreArtifactRequest) =>
+    request<ArtifactEditorResponse>("POST", `/artifacts/${encodeURIComponent(id)}/restore`, body),
+  createArtifactFromTemplate: (body: ShareArtifactRequest, owner: OwnerFilter, source: { sessionId: string; threadId: string }) =>
+    request<ShareArtifactResponse>("POST", `/artifacts/share${ownerQuery(owner)}`, body, undefined, {
+      "x-valet-session-id": source.sessionId,
+      "x-valet-thread-id": source.threadId,
+    }),
   shareArtifact: (body: ShareArtifactRequest) =>
     request<ShareArtifactResponse>("POST", "/artifacts/share", body),
   // `mine=1` is the caller-scoped gallery view (server-filtered — see the
@@ -1457,6 +1478,7 @@ export const api = {
     request<{ ok: true }>("DELETE", `/teams/${encodeURIComponent(id)}/api-keys/${encodeURIComponent(keyId)}`),
 
   // plugins + credentials (plugin-system-v2 plan Task 15 — connect surface)
+  runCodeReview: (body: RunCodeReviewRequest) => request<RunCodeReviewResponse>("POST", "/code-review/runs", body),
   listCodeReviews: (teamId?: string) =>
     request<ListCodeReviewsResponse>(
       "GET",

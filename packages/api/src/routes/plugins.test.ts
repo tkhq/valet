@@ -266,6 +266,48 @@ describe("GET /api/plugins health", () => {
   });
 });
 
+describe("GET /api/plugins token refresh", () => {
+  const OWNER = { type: "user", id: "local-user" } as const;
+
+  it("reads health from the stored row, with no refreshing read, and says an expired token renews", async () => {
+    api = await bootTestApi({ plugins: [FIXTURE_PLUGIN] });
+    const expiresAt = Date.now() - 60_000;
+    await api.providers.engineCredentials.save(OWNER, "fixture", {
+      type: "oauth2",
+      accessToken: "a-1",
+      refreshToken: "r-1",
+      expiresAt,
+    });
+    // Any read through the refreshing store fails the request.
+    const refreshing = api.providers.engineCredentials;
+    api.providers.engineCredentials = Object.assign(Object.create(refreshing) as typeof refreshing, {
+      get: async () => {
+        throw new Error("the catalog read went through the refreshing store");
+      },
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/plugins`);
+    expect(res.status).toBe(200);
+    const { plugins } = (await res.json()) as ListPluginsResponse;
+    expect(plugins.find((p) => p.name === "fixture-plugin")?.services[0]?.health).toEqual({ expiresAt, renews: true });
+  });
+
+  it("does not say a token renews after the provider refused its refresh token", async () => {
+    api = await bootTestApi({ plugins: [FIXTURE_PLUGIN] });
+    await api.providers.engineCredentials.save(OWNER, "fixture", {
+      type: "oauth2",
+      accessToken: "a-1",
+      refreshToken: "r-1",
+      expiresAt: 1,
+      metadata: { refreshFailedAt: 2, refreshRefused: true },
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/plugins`);
+    const { plugins } = (await res.json()) as ListPluginsResponse;
+    expect(plugins.find((p) => p.name === "fixture-plugin")?.services[0]?.health).toEqual({ expiresAt: 1, refreshFailed: true });
+  });
+});
+
 describe("GET /api/plugins connect mode", () => {
   it("reports oauth for mcp-mode declarations and manual otherwise", async () => {
     const plugins: ValetPlugin[] = [

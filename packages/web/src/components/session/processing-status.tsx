@@ -118,14 +118,13 @@ export function ProcessingStatus({ inCard = false, ...input }: WorkingLineInput 
   const { label, busy, elapsed } = useWorkingLine(input);
   // Keep the live region mounted so status changes are announced once. The
   // clock sits outside it: a reader should not hear it every second.
-  if (inCard) return <span role="status" aria-live="polite" aria-atomic="true" className="sr-only">{label}</span>;
   return (
-    <div className="mx-auto w-full min-w-0 max-w-[52rem] shrink-0 px-5 sm:px-8">
+    <div className={inCard ? "sr-only" : "mx-auto w-full min-w-0 max-w-[52rem] shrink-0 px-5 sm:px-8"}>
       {/* One quiet line, not a card: the plan above it is the only box. */}
       <div className={cn("flex min-w-0 items-center gap-2 px-1 text-xs text-muted md:text-[13px]", label && "my-3 md:my-2")}>
-        {label && <img src="/icons/valet-mascot.webp" alt="" width={20} height={20} className={cn("h-5 w-5 shrink-0 object-contain", busy && "motion-safe:animate-pulse")} />}
+        {!inCard && label && <img src="/icons/valet-mascot.webp" alt="" width={20} height={20} className={cn("h-5 w-5 shrink-0 object-contain", busy && "motion-safe:animate-pulse")} />}
         <span role="status" aria-live="polite" aria-atomic="true" className="min-w-0 truncate">{label}</span>
-        {elapsed && <span aria-hidden className="shrink-0 tabular-nums">{elapsed}</span>}
+        {!inCard && elapsed && <span aria-hidden className="shrink-0 tabular-nums">{elapsed}</span>}
       </div>
     </div>
   );

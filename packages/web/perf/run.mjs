@@ -40,7 +40,7 @@ const RUNS = Number(args.runs);
 const PORT = Number(args.port);
 const CPU_SLOWDOWN = Number(args.cpu);
 /** Median time of `calibrationWorkload` on the reference machine, unthrottled. */
-const REFERENCE_WORKLOAD_MS = 12.7;
+const REFERENCE_WORKLOAD_MS = 24.3;
 const ORIGIN = `http://127.0.0.1:${PORT}`;
 
 // Budgets live in TypeScript; node strips the types on import (Node >= 22.18).
@@ -94,11 +94,13 @@ const FLOWS = [
   {
     flow: "message.send",
     kinds: ["interaction"],
-    async run(page) {
+    async run(page, vp) {
       const box = page.getByPlaceholder(COMPOSER).last();
       await box.fill(`Perf probe ${Date.now()}`);
       await settle(page);
-      await box.press("Enter");
+      // On a touch screen Return inserts a newline, so a phone user taps Send.
+      if (vp.hasTouch) await page.locator('[data-perf-flow="message.send"]').last().tap();
+      else await box.press("Enter");
     },
     async done(page) {
       await page.getByText(/^Perf probe \d+$/).last().waitFor();
@@ -134,15 +136,14 @@ const FLOWS = [
   {
     flow: "integrations.open",
     kinds: ["route", "data"],
+    // The space's Settings row opens the team page; its Integrations tab is the flow.
     async prepare(page, vp) {
       const scope = await nav(page, vp);
-      const settings = scope.getByRole("button", { name: "Show Platform settings" });
-      if (await settings.count()) await settings.click();
-      if (vp.name === "mobile") await page.keyboard.press("Escape");
+      await scope.getByRole("link", { name: "Platform settings" }).click();
+      await page.getByRole("navigation", { name: "Platform settings" }).waitFor();
     },
-    async run(page, vp) {
-      const scope = await nav(page, vp);
-      await scope.getByRole("list", { name: "Platform settings" }).getByRole("link", { name: "Integrations" }).click();
+    async run(page) {
+      await page.getByRole("navigation", { name: "Platform settings" }).getByRole("link", { name: "Integrations" }).click();
     },
   },
   {
@@ -167,20 +168,46 @@ const FLOWS = [
   },
 ];
 
-/** Script and DOM work, a rough stand-in for a render. */
+/**
+ * DOM building, selector matching and flex layout, a rough stand-in for a
+ * render. Keep script-only loops out of it: newer server CPUs run them
+ * relatively much faster than they run this app's renders. When the
+ * workload was mostly a `JSON.stringify` loop, runners with those CPUs got
+ * about 20% too much throttle, and data flows went over budget with no code
+ * change. DOM and layout work speed up across CPUs by about as much as the
+ * app does. If you change the workload, measure it again on the reference
+ * machine and update `REFERENCE_WORKLOAD_MS`.
+ */
 function calibrationWorkload() {
   const t0 = performance.now();
-  let total = 0;
-  for (let i = 0; i < 200_000; i++) total += JSON.stringify({ i, t: `row ${i}` }).length;
   const root = document.body;
   root.textContent = "";
-  for (let i = 0; i < 2000; i++) {
+  for (let i = 0; i < 8000; i++) {
     const div = document.createElement("div");
     div.textContent = `x${i}`;
     root.appendChild(div);
   }
   void root.offsetHeight;
-  return performance.now() - t0 + (total % 1);
+  if (!document.getElementById("calibration-style")) {
+    const style = document.createElement("style");
+    style.id = "calibration-style";
+    style.textContent = Array.from({ length: 300 }, (_, i) => `.c${i} > span:not(.x) { padding: ${i % 7}px; margin-left: ${i % 5}px; }`).join("\n")
+      + "\n.row { display: flex; gap: 4px; }\n.row span { flex: 1; }";
+    document.head.appendChild(style);
+  }
+  root.textContent = "";
+  for (let i = 0; i < 800; i++) {
+    const row = document.createElement("div");
+    row.className = `row c${i % 300}`;
+    for (let j = 0; j < 4; j++) {
+      const span = document.createElement("span");
+      span.textContent = `cell ${i}.${j}`;
+      row.appendChild(span);
+    }
+    root.appendChild(row);
+  }
+  void root.offsetHeight;
+  return performance.now() - t0;
 }
 
 /** The CDP throttle rate that makes this machine `CPU_SLOWDOWN` times slower than the reference. */

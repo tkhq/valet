@@ -161,7 +161,7 @@ start.
 
    | delivery | default |
    |---|---|
-   | has a channel origin (a mention, a message, a DM) | `new` |
+   | has a channel origin (a mention, a message, a DM), or is a third-party bot post (`slack.bot_message`) | `new` |
    | Slack event with a channel and no channel origin (a reaction, a channel lifecycle event) | `subject`, key `subject:slack:<team>/<channel>` |
    | the same, when no natural subject names the channel | `new` |
    | any other event | `own` |
@@ -657,6 +657,18 @@ event wakeups spec Part A.
   text, so the web treats both texts as the pin problem (`isPinProblem`).
   The subject refusal (Part A step 4) changed for the same reason.
 
+- **A bot post reads as a channel message.** The Slack transport gives a
+  `slack.bot_message` no reply origin, so the first version read it as a
+  reaction and keyed it `subject:slack:<team>/<channel>`. Every alert in a
+  channel then shared one thread and carried all earlier alerts as
+  history. One alert channel's thread reached about 10,000 entries and
+  450 MB, and its compactions exhausted the api heap. A bot post now
+  defaults to `new`, like a person's message, and still has no reply
+  origin: the agent posts through its own tools. Its delivery names the
+  post through `refs.ts` (and `refs.thread_ts` for a thread reply), which
+  the Slack trigger now sets on every message event. A thread that an
+  earlier bot post opened keeps its history and receives no new posts.
+
 ## Errata to other specs
 
 - Event wakeups Part E: the mention rule paragraph is replaced by a pointer
@@ -669,3 +681,4 @@ event wakeups spec Part A.
   (Part A step 2).
 
 - **Unattended turns follow the policy's thread keys (2026-10-20).** dev-v2 #972 marks every turn a person did not type on a delivery thread as unattended (`isAutomatedDeliveryThread`, the host's `automatedThread`). The rule names the keys this policy writes: `sub:<rule>`, `sub:<rule>:<delivery>`, `schedule:<rule>`, `schedule:<rule>:<fire>`, and `subject:<natural subject>`, and keeps `events` and `slack-events:<channel>` for rows written before the policy. A pinned existing thread keeps its own key, so a person's thread is never marked. A policy key does not prove that nobody waits: a Slack mention under an absent policy lands on `sub:<rule>:<delivery>`, and the dispatcher leaves `unattended` unset for a channel conversation. So `deliverToAssistantThread` records `conversational: true` in thread metadata (`Thread.setMetadataFlag`, through the one metadata patch path) when it lands a delivery without `unattended` on a key the rule covers (`isAutomatedThreadKey` in `automated-threads.ts`: `sub:`, `schedule:`, `subject:`, `events`, and `slack-events:<channel>`). A pinned thread and a `slack:` thread never read the flag, so the delivery writes no metadata there. The host passes thread metadata to `automatedThread`, and a policy thread marked conversational is attended from then on, even if an unattended delivery opened it. A turn that carries the unattended delivery flag still refuses questions. The legacy `events` and `slack-events:<channel>` threads stay automated, because a mention never landed there.
+- **Rule threads run deliveries without their history (2026-11-09).** An unattended delivery on a rule's own thread (`sub:<rule>`, `schedule:<rule>`) or on the legacy `events` firehose admits its queue item with `FRESH_CONTEXT_KEY` (`deliveryRunsWithoutHistory` in `automated-threads.ts`). The turn's requests carry the system prompt, the tools, the delivery, and what the turn adds, but not the thread's earlier turns; its entries still join the thread. These threads collect one job per delivery, and a delivery an hour or more after the last one missed the prompt cache, so carrying the history re-wrote up to the 200k compaction budget at the cache-write rate on every delivery. A rule that needs state across deliveries keeps it in memory or reads it with tools; a routine's signal also names the previous fire time. A thread marked `conversational`, a `subject:` thread, and a `slack-events:<channel>` thread keep their history, because their earlier turns are about the same pull request, issue, or conversation. A pinned existing thread keeps its history too. Limit: after a fresh-context turn, the context meter and the turn-end budget check read that turn's reported usage until a full turn reports again; the overflow check before each request still estimates the whole transcript.

@@ -66,6 +66,8 @@ export interface BranchNote {
   files?: BranchNoteRepoFiles[];
   /** The person whose action wrote the note. */
   actorId?: string;
+  /** Fork notes only: the copy is a move to another workspace, not a branch. The thread shows no divider for it. */
+  moved?: boolean;
   /** Fork notes only: the thread the history came from. */
   source?: { sessionId: string; threadId: string; sameWorkingDirectory: boolean };
   /** Fork notes only: repositories whose files come to the new working directory before the first turn. */
@@ -158,6 +160,7 @@ export function readBranchNote(metadata: Record<string, unknown> | undefined): B
     ...(Array.isArray(v.fileContext) ? { fileContext: strings(v.fileContext) } : {}),
     ...(files && files.length > 0 ? { files } : {}),
     ...(typeof v.actorId === "string" ? { actorId: v.actorId } : {}),
+    ...(v.moved === true ? { moved: true } : {}),
     ...(source ? { source } : {}),
     ...(seed && seed.length > 0 ? { seed } : {}),
     ...(typeof v.seedSkipped === "string" ? { seedSkipped: v.seedSkipped } : {}),
@@ -365,7 +368,9 @@ function filesText(files: readonly BranchNoteRepoFiles[], verb: string, left: st
 export function branchNoteText(note: BranchNote): string {
   if (note.kind === "fork") {
     const lines = [
-      "This thread is a branch of another thread. The history above is a copy, and the original thread continues on its own.",
+      note.moved
+        ? "This thread moved here from another workspace. The history above is the whole conversation, and the thread it came from is archived."
+        : "This thread is a branch of another thread. The history above is a copy, and the original thread continues on its own.",
       "Everything in the copied history already ran and still stands.",
     ];
     if (note.source?.sameWorkingDirectory) {

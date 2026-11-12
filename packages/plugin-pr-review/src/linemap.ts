@@ -57,23 +57,53 @@ export async function mapLine(cwd: string, from: string, to: string, path: strin
 }
 
 /**
- * The lines of the new file that a GitHub review comment can anchor to:
- * every added or context line inside the patch's hunks (the RIGHT side).
+ * The lines a GitHub review comment can anchor to inside the patch's hunks.
+ * RIGHT: added and context lines, numbered in the new file. LEFT: deleted
+ * and context lines, numbered in the old file.
  */
-export function commentableLines(patch: string): Set<number> {
+export function commentableLines(patch: string, side: "RIGHT" | "LEFT" = "RIGHT"): Set<number> {
   const lines = new Set<number>();
+  let left = 0;
   let right = 0;
   let inHunk = false;
   for (const line of patch.split("\n")) {
     const m = HUNK_RE.exec(line);
     if (m) {
+      left = Number(m[1]);
       right = Number(m[3]);
       inHunk = true;
       continue;
     }
     if (!inHunk) continue;
-    if (line.startsWith("+") || line.startsWith(" ")) lines.add(right++);
-    else if (line.startsWith("diff --git ")) inHunk = false;
+    if (line.startsWith("diff --git ")) inHunk = false;
+    else if (line.startsWith("+")) {
+      if (side === "RIGHT") lines.add(right);
+      right++;
+    } else if (line.startsWith("-")) {
+      if (side === "LEFT") lines.add(left);
+      left++;
+    } else if (line.startsWith(" ")) {
+      lines.add(side === "RIGHT" ? right : left);
+      left++;
+      right++;
+    }
   }
   return lines;
+}
+
+/** How far from a hunk a finding can be and still post beside it: the context GitHub's patch keeps. */
+export const NEAR_DIFF_LINES = 3;
+
+/**
+ * The commentable line nearest `line`, at most `NEAR_DIFF_LINES` away, or
+ * undefined. The line above wins a tie. A reviewer anchors a missing
+ * line (a removed setting) where it belongs, which can sit just outside
+ * the hunk that removed it.
+ */
+export function nearestCommentableLine(lines: ReadonlySet<number>, line: number): number | undefined {
+  for (let d = 1; d <= NEAR_DIFF_LINES; d++) {
+    if (lines.has(line - d)) return line - d;
+    if (lines.has(line + d)) return line + d;
+  }
+  return undefined;
 }

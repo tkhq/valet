@@ -31,6 +31,7 @@ describe("yesNoQuestion", () => {
     ["I can split it. Shall I?", true],
     ["Which repository should I use?", false],
     ["Done. The report is in Drive.", false],
+    ["The call summary is in your notes. Mark it done?", true],
   ])("reads %s", (text, expected) => {
     expect(Boolean(yesNoQuestion([assistant(text)]))).toBe(expected);
   });
@@ -94,7 +95,7 @@ describe("BriefCard", () => {
 describe("TasksSummary and OutputCards", () => {
   it("leaves out zero counts", () => {
     const { container, rerender } = render(<TasksSummary needsYou={1} working={0} finished={3} />);
-    expect(container.textContent).toBe("1 needs you3 finished");
+    expect(container.textContent).toBe("1 waiting on you3 done");
     rerender(<TasksSummary needsYou={0} working={0} finished={0} />);
     expect(container.textContent).toBe("Nothing in flight.");
   });

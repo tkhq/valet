@@ -1,4 +1,4 @@
-import { CONTINUATION_SOURCE_ITEM_KEY, intersectToolScopes, readToolScope, TOOL_SCOPE_KEY, UNATTENDED_WORKFLOW_KEY, WORKFLOW_STEP_KEY, type ToolScope } from "@valet/shared";
+import { CONTINUATION_SOURCE_ITEM_KEY, childCitationNote, intersectToolScopes, markForeignCitations, readToolScope, TOOL_SCOPE_KEY, UNATTENDED_WORKFLOW_KEY, WORKFLOW_STEP_KEY, type ToolScope } from "@valet/shared";
 import { withChildDelivery, discardChildDelivery } from "./child-delivery.js";
 import { submissionWorkflowStep, type WorkflowStepRef } from "../workflows/step-grants.js";
 /**
@@ -27,6 +27,7 @@ import {
   PendingCapError,
   stripNul,
   recordSandboxDestroyed,
+  reportError,
   recordChildTerminalSignalAbandoned,
   recordChildResultRecovered,
   recordScratchRefused,
@@ -48,6 +49,9 @@ import {
   type Principal,
   type SessionStore,
   type SpawnChildRequest,
+  type ChildCommandRunner,
+  type ExecOpts,
+  type ExecResult,
   type SpawnChildResult,
   type SubmissionResult,
   readThreadOutline,
@@ -56,6 +60,7 @@ import {
 } from "@valet/engine";
 import { isScratchRequestError, parseResourceQuantity, validateScratchRequest, type ScratchCaps } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
+import { recordChildReclaimFailure } from "../observability/child-lifecycle-metrics.js";
 import { sandboxReclaimBackoff } from "../lib/retry-backoff.js";
 import { agentSessions, childEventOutbox, childReplyDeliveries, childWatches, eventDropLog, sessionRepos, type ChildWatchRow } from "../schema/index.js";
 import type { EngineHost } from "../engine/host.js";
@@ -169,6 +174,59 @@ export class ChildLimitError extends Error {
   }
 }
 
+/** How long a child's sandbox may take to start (repository clone included) before `prepare` gives up. */
+const PREPARE_READY_TIMEOUT_MS = 10 * 60_000;
+/** The whole `prepare` step, sandbox start excluded. */
+const PREPARE_DEADLINE_MS = 5 * 60_000;
+const PREPARE_COMMAND_TIMEOUT_MS = { default: 60_000, max: 180_000 };
+const PREPARE_OUTPUT_BYTES = { default: 4 * 1024 * 1024, max: 32 * 1024 * 1024 };
+
+/**
+ * Run a spawn request's `prepare` in the child's sandbox and return the
+ * prompt it builds. Commands run from the child's primary checkout, each
+ * under its own time and output caps and one deadline for the step.
+ */
+async function runChildPrepare(
+  session: { attachment: { ensureReady(opts: { timeoutMs: number }): Promise<{ sandbox: { exec(command: string, opts?: ExecOpts): Promise<ExecResult> } }> } },
+  targetDir: string | undefined,
+  prepare: NonNullable<SpawnChildRequest["prepare"]>,
+  prompt: string,
+  cancel: AbortSignal | undefined,
+): Promise<string> {
+  // A cancel ends the wait at once; the caller then destroys the child and its sandbox, which stops any command still running.
+  const untilCancelled = <T>(work: Promise<T>): Promise<T> => {
+    if (!cancel) return work;
+    if (cancel.aborted) return Promise.reject(spawnCancelled());
+    return new Promise<T>((resolve, reject) => {
+      const onAbort = (): void => reject(spawnCancelled());
+      cancel.addEventListener("abort", onAbort, { once: true });
+      work.then(
+        (value) => { cancel.removeEventListener("abort", onAbort); resolve(value); },
+        (error: unknown) => { cancel.removeEventListener("abort", onAbort); reject(error); },
+      );
+    });
+  };
+  const { sandbox } = await untilCancelled(session.attachment.ensureReady({ timeoutMs: PREPARE_READY_TIMEOUT_MS }));
+  const deadline = Date.now() + PREPARE_DEADLINE_MS;
+  const cd = targetDir && targetDir !== "." ? `cd -- '${targetDir.replace(/'/g, "'\\''")}' && ` : "";
+  const runner: ChildCommandRunner = {
+    async run(command, opts) {
+      if (cancel?.aborted) throw spawnCancelled();
+      const left = deadline - Date.now();
+      if (left <= 0) throw new Error(`The child's prepare step passed its ${PREPARE_DEADLINE_MS / 1000} s deadline. Make the step cheaper or split it.`);
+      const timeout = Math.min(opts?.timeoutMs ?? PREPARE_COMMAND_TIMEOUT_MS.default, PREPARE_COMMAND_TIMEOUT_MS.max, left);
+      const maxOutputBytes = Math.min(opts?.maxOutputBytes ?? PREPARE_OUTPUT_BYTES.default, PREPARE_OUTPUT_BYTES.max);
+      const result = await untilCancelled(sandbox.exec(`${cd}${command}`, { timeout, maxOutputBytes, ...(opts?.stdin !== undefined ? { stdin: opts.stdin } : {}) }));
+      return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr, truncated: result.truncated === true, timedOut: result.timedOut === true };
+    },
+  };
+  return untilCancelled(prepare(runner, prompt));
+}
+
+function spawnCancelled(): DOMException {
+  return new DOMException("The child's spawn was cancelled before its first turn. No prompt was queued.", "AbortError");
+}
+
 function newChildSessionId(): string {
   return `child_${randomUUID()}`;
 }
@@ -223,6 +281,11 @@ export function parseTaskRepo(repo: string, branch?: string): RepoBinding | unde
     ...(branch !== undefined ? { ref: branch } : {}),
     auth: "auto",
   };
+}
+
+/** Where child working directories live on the api host: `{root}/{childSessionId}`. */
+export function childWorkspaceRoot(workspaceRoot: string | undefined): string {
+  return workspaceRoot ?? join(homedir(), ".valet", "children");
 }
 
 /**
@@ -516,6 +579,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       parentQueueItemId?: string;
       reportToParent?: boolean;
       pluginDeliveryId?: string;
+      cancel?: AbortSignal;
     },
   ): Promise<SpawnChildResult> => {
     const parentData = await deps.engineStore.getSession(ctx.parentSessionId);
@@ -576,7 +640,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
     // A pre-assigned id (the security dispatch's cell-claim seam) wins so
     // the caller's durable claim row names the session this spawn builds.
     const childSessionId = req.sessionId ?? newChildSessionId();
-    const workspace = join(deps.workspaceRoot ?? join(homedir(), ".valet", "children"), childSessionId);
+    const workspace = join(childWorkspaceRoot(deps.workspaceRoot), childSessionId);
 
     // A child resolves credentials the way its parent does. A team
     // orchestrator from before owner-mode resolution keeps acting as the
@@ -618,6 +682,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
           docker: req.docker === true,
           kubernetes: false,
           sandboxResourceOverrides: req.resources ?? null,
+          gitAccess: req.gitAccess ?? null,
           status: "active",
           ownerType: ctx.owner.type,
           ownerId: ctx.owner.id,
@@ -681,7 +746,17 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
     await watcher.ensureSubscription({ childSessionId, parentSessionId: ctx.parentSessionId, parentThreadId: ctx.parentThreadId })
       .catch((error: unknown) => cleanupFailedSpawn(deps, childSessionId, workspace, error));
 
-    const receipt = await childSession.prompt(req.prompt, {
+    // A plugin's deterministic pre-turn step (for example a repository scan) builds the first prompt.
+    const prompt = req.prepare
+      ? await runChildPrepare(childSession, binding ? computeTargetDirs([binding])[0] : undefined, req.prepare, req.prompt, ctx.cancel)
+          .catch((error: unknown) => cleanupFailedSpawn(deps, childSessionId, workspace, error))
+      : req.prompt;
+    // No child_watches row exists yet, so a cancel in this window has no other way to stop the child.
+    if (ctx.cancel?.aborted) await cleanupFailedSpawn(deps, childSessionId, workspace, spawnCancelled());
+
+    const receipt = await childSession.prompt(prompt, {
+      // A cancel while the store admits the prompt settles it before its turn starts.
+      ...(ctx.cancel !== undefined ? { cancel: ctx.cancel } : {}),
       // Per-turn role overlay (the security dispatch names the persona
       // role; the claimed child's build registered it in options.roles).
       ...(req.role !== undefined ? { role: req.role } : {}),
@@ -1746,6 +1821,28 @@ export class ChildWatcher {
         eq(childWatches.settled, true), isNull(childWatches.sandboxReclaimedAt)));
   }
 
+  /**
+   * The one step after a child's sandbox is reclaimed: empty its working
+   * directory and leave the session hibernated with the reclaim stamped,
+   * as the hibernation reaper leaves a reaped session. The empty directory
+   * stays, because the engine rebuilds a revived child in it. A wake makes
+   * the session active again. A failed release is
+   * reported and counted; `valet_child_workspaces{state="retired"}` keeps
+   * it visible. Nothing retries it in the background.
+   */
+  private async retireChild(childSessionId: string, now: number): Promise<void> {
+    try {
+      await this.deps.engineHost.releaseWorkspace(join(childWorkspaceRoot(this.deps.workspaceRoot), childSessionId));
+    } catch (err) {
+      recordChildReclaimFailure("workspace");
+      reportError({ area: "sandbox", reason: "child_workspace_release", level: "error" },
+        `Releasing the working directory of child ${childSessionId} failed. Check the sandbox backend, then delete the directory.`, err);
+    }
+    await this.deps.db.update(agentSessions)
+      .set({ status: "hibernated", sandboxReclaimedAt: now, updatedAt: now })
+      .where(and(eq(agentSessions.id, childSessionId), eq(agentSessions.status, "active")));
+  }
+
   private async forgetDestroyedSandbox(childSessionId: string, sandboxId: string): Promise<boolean> {
     // Clear both durable handles before revoke. Its retry must not destroy
     // or count the same sandbox again, even after restart.
@@ -1803,6 +1900,7 @@ export class ChildWatcher {
         if (destroyedId && !await this.forgetDestroyedSandbox(childSessionId, destroyedId)) return false;
         await revokeSandboxTokens(this.deps.db, childSessionId);
         await this.markReclaimed(childSessionId, now, cycle);
+        await this.retireChild(childSessionId, now);
         if (!live) this.deps.engineHost.evictCache(childSessionId, current);
         return true;
       } finally {
@@ -1893,7 +1991,9 @@ export class ChildWatcher {
       const sandboxId = live.attachment.sandboxId ?? (await this.deps.engineStore.getSession(childSessionId))?.sandboxId;
       if (watch) await this.destroyChildSandbox(childSessionId, sandboxId, "child_settled", watch, Date.now(), deliveryLocked);
     } catch (err) {
-      console.error(`ChildWatcher: sandbox park failed for settled child ${childSessionId}:`, err);
+      recordChildReclaimFailure("park");
+      reportError({ area: "sandbox", reason: "child_sandbox_park", level: "error" },
+        `Parking or reclaiming the sandbox of settled child ${childSessionId} failed. The retention sweep retries it.`, err);
     }
   }
 
@@ -1959,7 +2059,9 @@ export class ChildWatcher {
         this.retentionBackoff.succeeded(row.childSessionId);
       } catch (err) {
         const waitMs = this.retentionBackoff.failed(row.childSessionId, now);
-        console.error(`ChildWatcher: retention reclaim failed for child ${row.childSessionId}; next attempt in ${Math.round(waitMs / 60_000)} min:`, err);
+        recordChildReclaimFailure("retention");
+        reportError({ area: "sandbox", reason: "child_retention_reclaim", level: "error" },
+          `Retention reclaim failed for child ${row.childSessionId}. The next attempt is in ${Math.round(waitMs / 60_000)} min.`, err);
       }
     }
     for (const [key, gap] of this.pendingTerminalAdmissions) {
@@ -2642,9 +2744,12 @@ export function resultBody(
       `Call child_read with child_session_id "${childSessionId}" to read the child's transcript.]`
     );
   }
-  const full = isFailure
+  // The child's [sN] tags are its own thread's ids. child_read gives the
+  // sources new ids that this thread can cite.
+  const full = markForeignCitations(isFailure
     ? (result.error ?? result.text ?? `child submission ${result.outcome}`)
-    : (result.text ?? "");
+    : (result.text ?? ""), "child");
+  const sourcesNote = isFailure ? "" : childCitationNote(result.text ?? "", childSessionId);
   const checkpointHeader = continuationCheckpoint
     ? `\n\n## Continuation checkpoint (${continuationCheckpoint.id})\n`
     : "";
@@ -2655,8 +2760,8 @@ export function resultBody(
     : checkpointHeader + codePointPrefix(checkpointSummary, checkpointMaxChars) +
       `\n\n[Checkpoint truncated. Call child_read with child_session_id ` +
       `"${childSessionId}" for the complete recovery state.]`;
-  const available = Math.max(0, CHILD_RESULT_MAX_CHARS - checkpoint.length);
-  if (full.length <= available) return full + checkpoint;
+  const available = Math.max(0, CHILD_RESULT_MAX_CHARS - checkpoint.length - sourcesNote.length);
+  if (full.length <= available) return full + sourcesNote + checkpoint;
 
   const prefix = codePointPrefix(full, available);
   const dropped = full.length - prefix.length;
@@ -2672,6 +2777,7 @@ export function resultBody(
   return (
     prefix +
     `\n\n[Truncated. ${dropped} more characters follow this point. To read the ` +
-    `full result, call child_read with child_session_id "${childSessionId}".]`
+    `full result, call child_read with child_session_id "${childSessionId}".]` +
+    sourcesNote
   );
 }

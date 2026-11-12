@@ -184,6 +184,48 @@ describe("team approvals wait on the person who asked", () => {
   });
 });
 
+describe("team approvals wait on the person who asked", () => {
+  const plugin: ActionPlugin = { service: "chat", defaultApprovalMode: "require_approval", actions: [{
+    id: "chat.post", name: "Post", description: "Post", riskLevel: "medium",
+    parameters: Type.Object({}), execute: async () => ({ success: true }),
+  }] };
+
+  it("names the asker on a team session's approval, and keeps personal approvals open", async () => {
+    const requests: DecisionGateRequest[] = [];
+    const requestDecision = async (request: DecisionGateRequest) => { requests.push(request); return { actionId: "approve", resolvedBy: "asker", resolvedAt: 1 }; };
+    await invokeAction(buildPluginCatalog([plugin]), "chat.post", {}, makeCtx({
+      userId: "runtime", owner: { type: "team", id: "team-1" }, interactiveActor: { id: "asker" }, actor: { id: "asker", name: "Asker Name" }, requestDecision,
+    }), "Post");
+    await invokeAction(buildPluginCatalog([plugin]), "chat.post", {}, makeCtx({
+      userId: "me", owner: { type: "user", id: "me" }, interactiveActor: { id: "me" }, requestDecision,
+    }), "Post");
+    await invokeAction(buildPluginCatalog([plugin]), "chat.post", {}, makeCtx({
+      userId: "runtime", owner: { type: "team", id: "team-1" }, requestDecision,
+    }), "Post");
+    expect(requests.map((request) => request.context?.approver)).toEqual([{ userId: "asker", name: "Asker Name" }, undefined, undefined]);
+  });
+
+  it.each(["lender", "asker", "another-member"])("requires the account lender's consent when %s answers", async (resolvedBy) => {
+    const onResolution = vi.fn(async () => {});
+    const execute = vi.fn(async () => ({ success: true }));
+    const catalog = buildPluginCatalog([{ ...plugin, actions: [{ ...plugin.actions[0], execute }] }]);
+    const result = await invokeAction(catalog, "chat.post", {}, makeCtx({
+      userId: "runtime", owner: { type: "team", id: "team-1" }, interactiveActor: { id: "asker" },
+      policyResolver: {
+        resolve: async () => ({ mode: "require_approval", provenance: { baseMode: "allow", source: "shared_account" }, approver: { userId: "lender" } }),
+        onResolution,
+      },
+      requestDecision: async (request) => {
+        expect(request.context?.approver).toEqual({ userId: "lender" });
+        return { actionId: "approve", resolvedBy, resolvedAt: 1 };
+      },
+    }), "Post");
+    expect(result.kind).toBe(resolvedBy === "lender" ? "ok" : "denied-approval");
+    expect(onResolution).toHaveBeenCalledTimes(resolvedBy === "lender" ? 1 : 0);
+    expect(execute).toHaveBeenCalledTimes(resolvedBy === "lender" ? 1 : 0);
+  });
+});
+
 it("scopes live availability reads for actions and filtered discovery", async () => {
   const plugin: ActionPlugin = {
     service: "one",
@@ -1599,6 +1641,48 @@ describe("pluginCatalogTools: dynamic actions (resolveActions)", () => {
     expect(resolveActions).toHaveBeenCalledTimes(answer === "approve" ? 1 : 0);
   });
 
+  // A broad search is a read-only lookup: it must not send a teammate a
+  // card for a service the model never asked about.
+  it.each([
+    ["shared account", { approver: { userId: "lender", name: "Lee" } }, "uses Lee's shared account, and Lee must approve"],
+    ["approval rule", {}, "listing them needs approval"],
+  ] as const)("a broad search skips discovery that would ask (%s)", async (_label, extra, expected) => {
+    const resolveActions = vi.fn(async () => []);
+    const requestDecision = vi.fn(async (): Promise<DecisionResolution> => ({ actionId: "approve", resolvedBy: "lender", resolvedAt: 1 }));
+    const [list] = pluginCatalogTools({ plugins: [makeDynamicPlugin("remote", resolveActions)] });
+    const result = await list.execute({ query: "issue" }, makeCtx({ owner: { type: "team", id: "team" }, requestDecision,
+      policyResolver: { resolve: async () => ({ mode: "require_approval", provenance: { baseMode: "allow", source: "shared_account" }, ...extra }) } }));
+    expect(requestDecision).not.toHaveBeenCalled();
+    expect(resolveActions).not.toHaveBeenCalled();
+    const payload = decode(result.text) as { warnings?: Array<{ service: string; reason: string }> };
+    const reason = payload.warnings?.find((w) => w.service === "remote")?.reason;
+    expect(reason).toContain(expected);
+    expect(reason).toContain(`Call list_tools with service "remote" to ask.`);
+    expect(reason).not.toContain("action discovery failed");
+  });
+
+  it("a broad search still lists a team service that needs no approval", async () => {
+    const resolveActions = vi.fn(async () => [{ id: "remote.read", name: "Read", description: "Read", riskLevel: "low" as const,
+      parameters: Type.Object({}), execute: async () => ({ success: true }) }]);
+    const requestDecision = vi.fn(async (): Promise<DecisionResolution> => ({ actionId: "approve", resolvedBy: "u1", resolvedAt: 1 }));
+    const [list] = pluginCatalogTools({ plugins: [makeDynamicPlugin("remote", resolveActions)] });
+    const result = await list.execute({}, makeCtx({ owner: { type: "team", id: "team" }, requestDecision,
+      policyResolver: { resolve: async () => ({ mode: "allow", provenance: { baseMode: "allow", source: "risk_default" } }) } }));
+    expect(requestDecision).not.toHaveBeenCalled();
+    expect(resolveActions).toHaveBeenCalledOnce();
+    const payload = decode(result.text) as { tools: Array<{ tool_id: string }> };
+    expect(payload.tools.map((t) => t.tool_id)).toContain("remote.read");
+  });
+
+  it("calling a skipped service's tool by name still asks the account owner", async () => {
+    const requestDecision = vi.fn(async (): Promise<DecisionResolution> => ({ actionId: "deny", resolvedBy: "lender", resolvedAt: 1 }));
+    const context = makeCtx({ owner: { type: "team", id: "team" }, requestDecision,
+      policyResolver: { resolve: async () => ({ mode: "require_approval", provenance: { baseMode: "allow", source: "shared_account" }, approver: { userId: "lender" } }) } });
+    const outcome = await invokeAction(buildPluginCatalog([makeDynamicPlugin("remote", vi.fn(async () => []))]), "remote.read", {}, context, "Read");
+    expect(requestDecision).toHaveBeenCalledOnce();
+    expect(outcome.kind).toBe("resolve-failed");
+  });
+
   it("team discovery reports a pending approval as waiting, not denied", async () => {
     const [list] = pluginCatalogTools({ plugins: [makeDynamicPlugin("remote", vi.fn(async () => []))] });
     const result = await list.execute({ service: "remote" }, makeCtx({ owner: { type: "team", id: "team" },
@@ -2634,4 +2718,40 @@ it("keeps account-sharing summary model-authored when invokeAction has no thread
   } });
   await invokeAction(buildPluginCatalog([plugin]), "github.create_issue", {}, ctx, "Create an issue for the reported failure.");
   expect(request).toMatchObject({ agentReason: "Create an issue for the reported failure.", context: { summary: "Create an issue for the reported failure." } });
+});
+
+describe("action step labels", () => {
+  const search = (label: PluginAction["label"], success = true): ActionPlugin => ({ service: "slack", defaultApprovalMode: "allow", actions: [{
+    id: "slack.search", name: "Search", description: "Search messages", riskLevel: "low",
+    parameters: Type.Object({ query: Type.String() }), label,
+    execute: async () => (success ? { success: true, data: { matches: [] } } : { success: false, error: "rate limited" }),
+  }] });
+  const call = (plugin: ActionPlugin) => pluginCatalogTools({ plugins: [plugin] })[1]!.execute(
+    { tool_id: "slack.search", params: { query: "deploy" }, summary: "Find the deploy thread" }, makeCtx());
+
+  it("returns the action's label for a successful call, built from its validated args", async () => {
+    const result = await call(search((args) => `Searched Slack for “${(args as { query: string }).query}”`));
+    expect(result.label).toBe("Searched Slack for “deploy”");
+    expect(result.text).not.toContain("Searched Slack");
+  });
+
+  it("gives no label for a failed call", async () => {
+    expect((await call(search(() => "Searched Slack", false))).label).toBeUndefined();
+  });
+
+  it("builds a label from the action name and args when the action has none or its label throws", async () => {
+    expect((await call(search(undefined))).label).toBe("Searched Slack for “deploy”");
+    const result = await call(search(() => { throw new Error("bad label"); }));
+    expect(result.ok).toBe(true);
+    expect(result.label).toBe("Searched Slack for “deploy”");
+  });
+
+  it("gives no label when the action name has no known verb", async () => {
+    const plugin: ActionPlugin = { service: "slack", defaultApprovalMode: "allow", actions: [{
+      id: "slack.whoami", name: "Who am I", description: "x", riskLevel: "low", parameters: Type.Object({}),
+      execute: async () => ({ success: true, data: "me" }),
+    }] };
+    const result = await pluginCatalogTools({ plugins: [plugin] })[1]!.execute({ tool_id: "slack.whoami", params: {}, summary: "x" }, makeCtx());
+    expect(result.label).toBeUndefined();
+  });
 });

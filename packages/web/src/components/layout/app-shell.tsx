@@ -13,7 +13,7 @@ import { Dialog, DialogClose, DialogContent, DialogTitle } from "~/components/pr
 import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
 import { useMobileLayout } from "~/hooks/use-mobile-layout";
 import { useMobileAppViewport } from "~/hooks/use-mobile-app-viewport";
-import { useSwipeDismiss } from "~/hooks/use-swipe-dismiss";
+import { useDrawerSwipe } from "~/hooks/use-drawer-swipe";
 import { cn } from "~/lib/cn";
 import { useResizablePane } from "~/lib/use-resizable-pane";
 
@@ -114,8 +114,6 @@ export function AppShell({
   const shellRef = useRef<HTMLDivElement>(null);
   useMobileAppViewport(shellRef, mobile);
   const { open: mobileOpen, setOpen: setMobileOpen } = useResponsiveOverlay("md");
-  // The phone drawer slides in from the left, so a swipe left closes it.
-  const drawerSwipe = useSwipeDismiss("left", () => setMobileOpen(false));
   const sidebarPane = useResizablePane({
     storageKey: "valet:sidebar-width", cssVar: "--sidebar-width",
     defaultWidth: 288, min: 200, max: 480, side: "left",
@@ -160,6 +158,13 @@ export function AppShell({
     [sidebar, collapsed, setAndStoreCollapsed, setMobileOpen, closeDrawer],
   );
 
+  useDrawerSwipe({
+    enabled: mobile && sidebar != null,
+    open: mobileOpen,
+    onOpen: controls.openDrawer,
+    onClose: closeDrawer,
+  });
+
   return (
     <SidebarControlsContext.Provider value={controls}>
       <div ref={shellRef} data-mobile-app-shell={mobile ? "" : undefined} className={cn("h-dvh w-full min-w-0 overflow-hidden flex flex-col bg-[--bg] text-[--fg]", className)}>
@@ -197,7 +202,6 @@ export function AppShell({
                   aria-describedby={undefined}
                   hideClose
                   className="left-0 top-0 h-dvh max-h-none w-full max-w-none translate-x-0 translate-y-0 rounded-none border-0 bg-paper p-0 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] flex flex-col gap-0 data-[state=open]:animate-in data-[state=open]:slide-in-from-left motion-reduce:animate-none"
-                  {...drawerSwipe}
                   onClick={onDrawerClick}
                   onCloseAutoFocus={(event) => {
                     event.preventDefault();

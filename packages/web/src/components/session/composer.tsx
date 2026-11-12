@@ -29,10 +29,11 @@ import {
   type StreamMessage,
 } from "~/stores/stream";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
-import { draftKey, reusableSendKey, useComposerDraft, useComposerDraftStore } from "~/stores/composer-drafts";
+import { draftKey, reusableSendKey, useComposerDraft, useComposerDraftStore, type SendKey } from "~/stores/composer-drafts";
 import { useCommands } from "~/hooks/use-commands";
 import { cn } from "~/lib/cn";
 import { useAutosizeTextarea } from "~/hooks/use-autosize-textarea";
+import { useCoarsePointer } from "~/hooks/use-coarse-pointer";
 import {
   readCommandRecency,
   recordCommandUse,
@@ -108,6 +109,17 @@ const ACTION_PLACEHOLDER: Record<SubmitAction, string> = {
   queue: "Add a follow-up…",
 };
 
+export interface ComposerContext {
+  content: ReactNode;
+  placeholder?: string;
+  maxLength?: number;
+  disabled?: boolean;
+  /** Changes only when the host asks to focus a newly attached context. */
+  focusKey?: string;
+  /** True means the request was delivered and its unchanged draft can clear. */
+  onSubmit(text: string): Promise<boolean>;
+}
+
 export function Composer({
   sessionId,
   threadId,
@@ -127,10 +139,15 @@ export function Composer({
   active = true,
   modelControlRef,
   statusLine,
+  renderFooterControl,
+  context,
 }: {
+  context?: ComposerContext;
   /** A quiet one-line strip under the input box, such as the background
    * work status line. It renders as given and owns its own spacing. */
   statusLine?: ReactNode;
+  /** Replace the keyboard hint, or return it when the control is unavailable. */
+  renderFooterControl?: (hint: ReactNode, reportError: (message: string | null) => void) => ReactNode;
   /** Hidden conversation panels keep their draft without handling keyboard shortcuts. */
   active?: boolean;
   /** The thread header renders its model and thinking control in this slot. */
@@ -175,6 +192,8 @@ export function Composer({
   // still land in the thread it started on. See stores/composer-drafts.ts.
   // Store actions are reached through `getState()` inside handlers so
   // callback identities do not churn per keystroke.
+  // On a touch screen Return inserts a newline and only Send sends.
+  const coarsePointer = useCoarsePointer();
   const key = draftKey(sessionId, threadId);
   const { text, images, files, imageErrors, fileErrors, recall } = useComposerDraft(key);
   const setText = (value: string) => useComposerDraftStore.getState().setText(key, value);
@@ -182,23 +201,14 @@ export function Composer({
   const submitting = submissionLock ?? localSubmissionLock;
   const [preparing, setPreparing] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const [selected, setSelected] = useState(false);
-  // True from a pointer press outside the composer that took focus from it
-  // until that press's click has fired. See `onBlurCapture`.
-  const [holdOpen, setHoldOpen] = useState(false);
-  const pointerPressed = useRef(false);
+  const activeContext = editTarget ? undefined : context;
+  const contextFocusKey = activeContext?.focusKey;
+  const focusedContextKey = useRef<string | undefined>(undefined);
   useEffect(() => {
-    const press = () => { pointerPressed.current = true; };
-    const release = () => { pointerPressed.current = false; };
-    window.addEventListener("pointerdown", press, true);
-    window.addEventListener("pointerup", release, true);
-    window.addEventListener("pointercancel", release, true);
-    return () => {
-      window.removeEventListener("pointerdown", press, true);
-      window.removeEventListener("pointerup", release, true);
-      window.removeEventListener("pointercancel", release, true);
-    };
-  }, []);
+    if (!active || contextFocusKey === undefined || focusedContextKey.current === contextFocusKey) return;
+    focusedContextKey.current = contextFocusKey;
+    inputRef.current?.focus();
+  }, [active, contextFocusKey]);
   useAutosizeTextarea(inputRef, text);
   // Up and Down step through the person's earlier prompts in this thread
   // (`stepHistory`). The recalled index lives in the draft slot, which the
@@ -346,8 +356,8 @@ export function Composer({
   // as an optimistic `/review` that persists as `/skill:review`.
   const recalledIndex = recall ?? null;
   const showingRecall = recalledIndex !== null;
-  const popupOpen = !dismissed && !showingRecall && popupItems.length > 0;
-  const noticeOpen = !dismissed && !showingRecall && !popupOpen && argNotice !== undefined;
+  const popupOpen = !activeContext && !dismissed && !showingRecall && popupItems.length > 0;
+  const noticeOpen = !activeContext && !dismissed && !showingRecall && !popupOpen && argNotice !== undefined;
   // Reset selection and dismissed flag when the query changes (user typed new chars).
   useEffect(() => {
     setSelectedIndex(0);
@@ -467,7 +477,7 @@ export function Composer({
   // Mid-turn: first Enter queues. After a self-queued item, an empty
   // composer steers that item in place. New text queues another followup.
   // An edit always sends: it stops a running turn rather than queueing.
-  const action: SubmitAction = !working || editTarget
+  const action: SubmitAction = !working || editTarget || activeContext
     ? "send"
     : queuedFollowup && text.trim().length === 0 && images.length === 0 && files.length === 0
       ? "steer"
@@ -476,17 +486,26 @@ export function Composer({
   // exist yet), so the button waits for the uploads. Steer is the empty
   // Enter that promotes the already-queued item, so it does not need text.
   const uploadsPending = files.some(isFileUploading);
+  const contextLengthError = activeContext?.maxLength !== undefined && text.length > activeContext.maxLength
+    ? `Shorten the request to ${activeContext.maxLength} characters or fewer.`
+    : undefined;
+  const contextAttachmentError = activeContext && (images.length > 0 || files.length > 0)
+    ? "Remove the attachments or clear the selection to send this request."
+    : undefined;
   const canSend =
     !send.isPending &&
     !!threadId &&
     !uploadsPending &&
     !editRefusal &&
+    !activeContext?.disabled &&
+    !contextLengthError &&
+    !contextAttachmentError &&
     (action === "steer" || text.trim().length > 0 || images.length > 0 || toFileRefs(files).length > 0);
   const sendTitle = working ? ACTION_HINT[action] || undefined : uploadsPending ? "Wait for the file uploads to finish." : undefined;
 
   /** True while the composer refuses new files. */
   const intakeBlocked =
-    guest || (!IMAGE_ATTACHMENTS_ENABLED && !FILE_UPLOADS_ENABLED) || send.isPending || !threadId;
+    !!activeContext || guest || (!IMAGE_ATTACHMENTS_ENABLED && !FILE_UPLOADS_ENABLED) || send.isPending || !threadId;
 
   /**
    * Take files from a paste, a drop, or the picker. Refused files leave a
@@ -672,7 +691,32 @@ export function Composer({
   }
 
   async function submit() {
-    if (submitting.current || send.isPending || !threadId || uploadsPending) return;
+    if (submitting.current || send.isPending || !threadId) return;
+    if (activeContext) {
+      const slot = key;
+      const draft = useComposerDraftStore.getState().byKey[slot];
+      const submittedText = draft?.text ?? "";
+      const request = submittedText.trim();
+      if (!active || activeContext.disabled || !request
+        || (activeContext.maxLength !== undefined && submittedText.length > activeContext.maxLength)
+        || (draft?.images.length ?? 0) > 0 || (draft?.files.length ?? 0) > 0) return;
+      submitting.current = true;
+      setPreparing(true);
+      setSubmitError(null);
+      lastUsedComposer = identity.current;
+      try {
+        const delivered = await activeContext.onSubmit(request);
+        const drafts = useComposerDraftStore.getState();
+        if (delivered && drafts.byKey[slot]?.text === submittedText) drafts.setText(slot, "");
+      } catch (err) {
+        setSubmitError(`The request did not send. ${errorText(err, "Unknown error.")} Try again.`);
+      } finally {
+        submitting.current = false;
+        setPreparing(false);
+      }
+      return;
+    }
+    if (uploadsPending) return;
     // A send uses this composer even when its text came from a prefill.
     lastUsedComposer = identity.current;
 
@@ -707,10 +751,15 @@ export function Composer({
       ? allCommands.find((c) => c.name.toLowerCase() === typedName)?.name
       : undefined;
     const attachmentIds = [...pendingImages.map((i) => i.id), ...pendingFiles.flatMap((f) => (f.attachmentRef ? [f.id] : []))];
+    const previousSendKey = useComposerDraftStore.getState().byKey[slot]?.sendKey;
+    const reusableId = reusableSendKey(previousSendKey, t, attachmentIds);
     const clientMessageId = editTarget || canonical
       ? undefined
-      : reusableSendKey(useComposerDraftStore.getState().byKey[slot]?.sendKey, t, attachmentIds) ?? crypto.randomUUID();
-    const sendKey = clientMessageId ? { id: clientMessageId, text: t, attachments: attachmentIds } : undefined;
+      : reusableId ?? crypto.randomUUID();
+    let sendKey: SendKey | undefined = clientMessageId ? {
+      id: clientMessageId, text: t, attachments: attachmentIds,
+      ...(reusableId && previousSendKey?.target ? { target: previousSendKey.target } : {}),
+    } : undefined;
     useComposerDraftStore.getState().clear(slot);
     if (sendKey) useComposerDraftStore.getState().setSendKey(slot, sendKey);
     announceTyping(sessionId, threadId, false);
@@ -722,7 +771,11 @@ export function Composer({
     submitting.current = true;
     setPreparing(true);
     try {
-      const target = beforeSend ? await beforeSend(t) : { text: t, threadId };
+      const target = sendKey?.target ?? (beforeSend ? await beforeSend(t) : { text: t, threadId });
+      if (sendKey && beforeSend && !sendKey.target) {
+        sendKey = { ...sendKey, target: { text: target.text, threadId: target.threadId } };
+        useComposerDraftStore.getState().setSendKey(slot, sendKey);
+      }
       if (editTarget) onEditSubmit?.(editTarget.messageId);
       const localId = addUserMessage(sessionId, t, target.threadId, attachments, editTarget ? undefined : replyTarget);
       const res = await send.mutateAsync({
@@ -959,9 +1012,12 @@ export function Composer({
 
     // Enter submits; Shift+Enter inserts a newline. Skip while an IME
     // composition is active so Enter confirms the composition instead of
-    // sending a half-finished message.
+    // sending a half-finished message. On a touch screen Return keeps its
+    // default: a newline, and the Send button sends. Cmd or Ctrl+Enter still
+    // sends, for a tablet with a hardware keyboard.
     if (e.key !== "Enter") return;
     if (e.shiftKey || e.nativeEvent.isComposing) return;
+    if (coarsePointer && !e.metaKey && !e.ctrlKey) return;
     e.preventDefault();
     void submit();
   }
@@ -981,62 +1037,21 @@ export function Composer({
     return () => dropChannel.publish(null);
   }, [dropChannel, addFiles, intakeBlocked]);
 
-  // Removing a focused attachment action does not emit blur in every browser.
-  // Reconcile selection after DOM updates and the submission focus restoration.
-  useEffect(() => {
-    if (selected && !send.isPending && !formRef.current?.contains(document.activeElement)) {
-      setSelected(false);
-    }
-  });
-
-  const expanded =
-    selected ||
-    holdOpen ||
-    text.length > 0 ||
-    images.length > 0 ||
-    files.length > 0 ||
-    !!replyTarget ||
-    !!editTarget ||
-    imageErrors.length > 0 ||
-    fileErrors.length > 0 ||
-    Boolean(submitError) ||
-    dragActive ||
-    send.isPending;
+  const [footerError, setFooterError] = useState<string | null>(null);
+  const footerHint = (
+    <span className={cn("min-w-0 flex-1 truncate text-xs text-muted", modelControlRef && "max-md:hidden")}>
+      {!coarsePointer && (
+        <span className="hidden [@container(min-width:34rem)]:inline">
+          Enter to {ACTION_LABEL[action].toLowerCase()} · Shift+Enter for a new line
+          {text === "" && history.length > 0 && " · ↑ for earlier messages"}
+        </span>
+      )}
+    </span>
+  );
 
   return (
     <form
       ref={formRef}
-      data-expanded={expanded}
-      onMouseDownCapture={(event) => {
-        // Safari does not focus buttons on pointer activation. Focus them before
-        // the textarea blurs, so its action row cannot move during the click.
-        const button = event.target instanceof Element ? event.target.closest("button") : null;
-        if (button && !button.disabled && event.button === 0) {
-          event.preventDefault();
-          button.focus({ preventScroll: true });
-        }
-      }}
-      onBlurCapture={(event) => {
-        // Keep action targets in place while focus moves within the composer.
-        // Submission temporarily disables the input before restoring its focus.
-        if (!event.currentTarget.contains(event.relatedTarget) && !send.isPending) {
-          setSelected(false);
-          // A press outside blurs the composer on pointerdown. Collapsing then
-          // moves everything that rests on it, such as a decision card, so the
-          // release lands off the target and its click never fires. Stay open
-          // until the press ends; the click fires in the same task as pointerup.
-          if (pointerPressed.current) {
-            setHoldOpen(true);
-            const release = () => {
-              window.removeEventListener("pointerup", release, true);
-              window.removeEventListener("pointercancel", release, true);
-              setTimeout(() => setHoldOpen(false), 0);
-            };
-            window.addEventListener("pointerup", release, true);
-            window.addEventListener("pointercancel", release, true);
-          }
-        }
-      }}
       onSubmit={(e) => {
         e.preventDefault();
         void submit();
@@ -1097,19 +1112,19 @@ export function Composer({
       )}
       <div
         onMouseDown={(event) => {
-          // A press on the box's padding or hint text moved focus to the page
-          // and collapsed the box, so the next keystrokes went nowhere. Keep
-          // focus in the message field unless the press is on a control.
+          // A press on the box's padding or hint text moved focus to the page,
+          // so the next keystrokes went nowhere. Keep focus in the message
+          // field unless the press is on a control.
           const target = event.target instanceof Element ? event.target : null;
           if (event.button !== 0 || target?.closest("button, a, input, textarea, select, label, [role=button], [contenteditable]")) return;
           event.preventDefault();
           inputRef.current?.focus({ preventScroll: true });
         }}
         className={cn(
-          "flex min-h-0 flex-col rounded-2xl border border-line bg-paper shadow-sm [container-type:inline-size] transition-[border-color,box-shadow] duration-150 focus-within:border-moss focus-within:ring-4 focus-within:ring-moss-wash motion-reduce:transition-none",
-          expanded ? "p-2" : "p-1",
+          "flex min-h-0 flex-col rounded-2xl border border-line bg-paper p-2 shadow-sm [container-type:inline-size] transition-[border-color,box-shadow] duration-150 focus-within:border-moss focus-within:ring-4 focus-within:ring-moss-wash motion-reduce:transition-none",
         )}
       >
+        {activeContext && <div className="mb-1 px-3 pt-2">{activeContext.content}</div>}
         <QueueIndicator queueState={queueState} />
         {editTarget && (
           <div className="mb-2 flex items-start gap-2 rounded-xl border border-line bg-moss-wash px-3 py-2 text-xs">
@@ -1180,11 +1195,12 @@ export function Composer({
           messages={submitError ? [submitError] : []}
           onDismiss={() => setSubmitError(null)}
         />
-        <ComposerFileStrip files={files} onRemove={removeFile} onRetry={retryFile} />
+        {(contextLengthError || contextAttachmentError) && <p role="alert" className="mb-2 px-3 text-xs text-danger-600">{contextLengthError ?? contextAttachmentError}</p>}
+        <ComposerFileStrip files={files} onRemove={removeFile} onRetry={activeContext ? undefined : retryFile} />
         {working && ACTION_HINT[action] && <p className="mb-2 px-3 pt-1 text-xs leading-5 text-muted">{ACTION_HINT[action]}</p>}
         {/* `relative` anchors the command popup to the input row, so the hint
             above it never moves the popup. */}
-        <div className={cn("relative flex min-h-0 max-md:flex-col max-md:items-stretch", expanded ? "flex-col" : "items-end")}>
+        <div className="relative flex min-h-0 flex-col">
           {(popupOpen || noticeOpen) && (
             <CommandPopup
               items={popupOpen ? popupItems : []}
@@ -1209,21 +1225,20 @@ export function Composer({
               // The people in the thread see "typing"; the text never leaves.
               if (threadId) announceTyping(sessionId, threadId, e.target.value.trim().length > 0);
             }}
-            onFocus={() => { lastUsedComposer = identity.current; setSelected(true); }}
+            onFocus={() => { lastUsedComposer = identity.current; }}
             onKeyDown={onKeyDown}
             onPaste={onPaste}
-            placeholder={threadId ? ACTION_PLACEHOLDER[action] : "Loading thread…"}
+            placeholder={threadId ? activeContext?.placeholder ?? ACTION_PLACEHOLDER[action] : "Loading thread…"}
+            maxLength={activeContext?.maxLength}
             aria-label="Message"
             rows={1}
             className={cn(
               "block w-full min-w-0 resize-none overflow-y-auto overscroll-contain rounded-none border-0 bg-transparent px-3 text-base leading-6 shadow-none caret-moss focus-visible:border-transparent focus-visible:ring-0 max-sm:rounded-none max-sm:px-3 max-sm:shadow-none max-sm:focus-visible:ring-0",
-              expanded
-                ? "min-h-20 max-md:min-h-11 max-h-[min(14rem,35dvh)] py-3 max-sm:py-3"
-                : "min-h-11 max-h-11 flex-1 py-2.5 max-sm:py-2.5 max-md:flex-none",
+              "min-h-11 max-h-[min(14rem,35dvh)] py-2.5 max-sm:py-2.5",
             )}
-            disabled={preparing || send.isPending || !threadId}
+            disabled={(!activeContext && preparing) || send.isPending || !threadId}
           />
-          <div className={cn("flex shrink-0 items-center gap-2 max-md:px-1 max-md:pb-1 max-md:pt-1", expanded && "px-1 pb-1 pt-1")}>
+          <div className="flex shrink-0 items-center gap-2 px-1 pb-1 pt-1">
             {!guest && (IMAGE_ATTACHMENTS_ENABLED || FILE_UPLOADS_ENABLED) && (
               <>
                 <input
@@ -1254,12 +1269,13 @@ export function Composer({
             {/* The box's width decides, not the viewport's: the Ask Valet dock
                 is narrow on a wide screen, and a wrapped hint stacked one word
                 per line between the buttons. */}
-            <span className={cn("min-w-0 flex-1 truncate text-xs text-muted", !expanded && "hidden max-md:block", modelControlRef && "max-md:hidden")}>
-              <span className="hidden [@container(min-width:34rem)]:inline">
-                Enter to {ACTION_LABEL[action].toLowerCase()} · Shift+Enter for a new line
-                {text === "" && history.length > 0 && " · ↑ for earlier messages"}
-              </span>
-            </span>
+            {/* Without a model slot (a read-only viewer) nothing else has flex-1 or ml-auto, so the
+                footer control gets the spacer the hint used to provide. */}
+            {renderFooterControl
+              ? (modelControlRef
+                ? renderFooterControl(footerHint, setFooterError)
+                : <div data-testid="composer-footer-spacer" className="flex min-w-0 flex-1 items-center">{renderFooterControl(footerHint, setFooterError)}</div>)
+              : footerHint}
             {/* The model and thinking control. A phone gives it the row; a
                 wider screen keeps it beside Send. */}
             {modelControlRef && <div ref={modelControlRef} className="min-w-0 max-md:flex-1 md:ml-auto md:max-w-64" />}
@@ -1269,17 +1285,14 @@ export function Composer({
                 type="button"
                 variant="secondary"
                 size="lg"
-                className={cn(
-                  "h-11 shrink-0 rounded-full text-danger-600 hover:text-danger-500 dark:text-danger-500",
-                  expanded ? "px-3 max-md:w-11 max-md:p-0" : "w-11 p-0",
-                )}
+                className="h-11 shrink-0 rounded-full px-3 text-danger-600 hover:text-danger-500 dark:text-danger-500 max-md:w-11 max-md:p-0"
                 onClick={() => void stop()}
                 disabled={!threadId || abort.isPending}
                 aria-label="Stop"
                 title="Stop (Esc)"
               >
                 <Square className="h-3.5 w-3.5 fill-current" />
-                <span className={cn("max-md:sr-only", !expanded && "sr-only")}>Stop</span>
+                <span className="max-md:sr-only">Stop</span>
               </Button>
             )}
             {working && !queueState?.activeItemId && (queueState?.pendingIds.length ?? 0) > 0 && (
@@ -1287,14 +1300,14 @@ export function Composer({
                 type="button"
                 variant="secondary"
                 size="lg"
-                className={cn("h-11 shrink-0 rounded-full", expanded ? "px-3 max-md:w-11 max-md:p-0" : "w-11 p-0")}
+                className="h-11 shrink-0 rounded-full px-3 max-md:w-11 max-md:p-0"
                 onClick={() => void runQueue()}
                 disabled={!threadId || resume.isPending}
                 aria-label="Run queued messages"
                 title="Run queued messages"
               >
                 <Play className="h-3.5 w-3.5 fill-current" aria-hidden />
-                <span className={cn("max-md:sr-only", !expanded && "sr-only")}>Run queue</span>
+                <span className="max-md:sr-only">Run queue</span>
               </Button>
             )}
             <Button
@@ -1305,14 +1318,15 @@ export function Composer({
               title={sendTitle}
               className={cn(
                 "h-11 shrink-0 rounded-full transition-colors motion-reduce:transition-none",
-                expanded ? "px-4 max-md:w-11 max-md:p-0" : "w-11 p-0",
+                "px-4 max-md:w-11 max-md:p-0",
                 !canSend && "bg-ink-wash text-muted disabled:opacity-100",
               )}
             >
               <ArrowUp className="h-4 w-4" aria-hidden />
-              <span className={cn("max-md:sr-only", !expanded && "sr-only")}>{ACTION_LABEL[action]}</span>
+              <span className="max-md:sr-only">{ACTION_LABEL[action]}</span>
             </Button>
           </div>
+          {footerError && <p role="alert" className="px-2 pb-1 text-xs text-danger-500">{footerError}</p>}
         </div>
       </div>
       {statusLine}

@@ -37,7 +37,7 @@ export function OnePasswordPanel() {
         <p className="text-sm text-muted">
           The organization token reads vaults every member's runtimes can use. Your own token
           is on{" "}
-          <a className="text-moss underline" href="/integrations?workspace=user">
+          <a className="text-moss underline" href="/settings/integrations">
             Integrations
           </a>
           .

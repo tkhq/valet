@@ -58,7 +58,7 @@ describe("auth middleware ladder — stub-mode boots", () => {
         "x-valet-sandbox": token,
         "x-valet-owner": "user:someone-else",
       },
-      body: JSON.stringify({ path: "notes/from-sandbox.md", content: "hello from sandbox" }),
+      body: JSON.stringify({ path: "notes/from-sandbox.md", description: "Test note.", content: "hello from sandbox" }),
     });
     expect(putRes.status).toBe(200);
 

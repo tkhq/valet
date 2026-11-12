@@ -434,6 +434,10 @@ export const agentSessions = pgTable(
     // team rows that predate the column, and no writer sets it since.
     // NULL reads as `owner`. Ignored for user- and org-owned rows.
     credentialOwnerMode: text("credential_owner_mode", { enum: ["owner", "actor"] }),
+    // `read`: the sandbox git credential clones and fetches, never pushes
+    // (`routes/sandbox-git-credential.ts`). Plugin review children set it.
+    // NULL keeps the full credential.
+    gitAccess: text("git_access", { enum: ["read"] }),
     // Interactive-service profile (sandbox auth gateway plan, Task 5).
     // "headless" (default) is agent-only; "full" additionally runs
     // ttyd + code-server + the auth gateway inside the sandbox.
@@ -1662,6 +1666,10 @@ export const mcpOauthClients = pgTable("mcp_oauth_clients", {
   // (or lazily backfilled). Drives the scopeless-entry warning on every
   // connect. [] = the server advertises none; null = not yet captured.
   scopesSupported: jsonb("scopes_supported").$type<string[]>(),
+  // The server's RFC 9728 resource identifier, which every token request
+  // names as the RFC 8707 `resource`. Captured at registration (or lazily
+  // backfilled). "" = the server describes no resource; null = not yet captured.
+  resource: text("resource"),
   metadata: jsonb("metadata"),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
   updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
@@ -1727,6 +1735,9 @@ export const runtimeGrants = pgTable(
     orgId: text("org_id").notNull(),
     sessionId: text("session_id"),
     workflowExecutionId: text("workflow_execution_id"),
+    /** Set for "Allow in this thread": the grant matches only this thread of
+     * the session. Null: the grant covers the whole session or run. */
+    threadId: text("thread_id"),
     policyKey: text("policy_key").notNull(),
     mode: text("mode", { enum: ["allow"] }).notNull().default("allow"),
     grantedBy: text("granted_by").notNull(),
@@ -3313,6 +3324,18 @@ export const homeTasks = pgTable("home_tasks", {
   reportedAt: bigint("reported_at", { mode: "number" }),
   doneAt: bigint("done_at", { mode: "number" }),
 }, (t) => [index("home_tasks_user").on(t.userId, t.createdAt), index("home_tasks_thread").on(t.sessionId, t.threadId)]);
+
+/**
+ * A thread the person crossed out of Tasks. It stays out until it next needs
+ * them: a question, approval, or failure newer than `dismissedAt`.
+ */
+export const homeTaskDismissals = pgTable("home_task_dismissals", {
+  userId: text("user_id").notNull(),
+  orgId: text("org_id").notNull(),
+  sessionId: text("session_id").notNull(),
+  threadId: text("thread_id").notNull(),
+  dismissedAt: bigint("dismissed_at", { mode: "number" }).notNull(),
+}, (t) => [primaryKey({ columns: [t.userId, t.sessionId, t.threadId] })]);
 
 /** Durable progress intent; create_started survives an uncertain provider outcome. */
 export const channelProgressDeliveries = pgTable("channel_progress_deliveries", {

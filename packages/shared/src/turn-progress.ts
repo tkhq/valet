@@ -20,4 +20,8 @@ export interface TurnProgress {
   /** Set when the tasks are the turn's plan (`update_plan`). Otherwise they
    * are the turn's tool calls and approvals, which the activity line covers. */
   planned?: true;
+  /** The turn's tool calls, oldest first and bounded, planned or not. Ids
+   * only: a client that can read the thread joins them to its own tool
+   * parts. The revision does not cover them. */
+  callIds?: string[];
 }

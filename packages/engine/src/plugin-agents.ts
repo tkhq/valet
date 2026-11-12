@@ -15,7 +15,7 @@
 import type { TSchema } from "typebox";
 import type { NormalizedEvent } from "./valet-plugin.js";
 import type { ToolScope } from "@valet/shared";
-import type { Principal, SandboxResources, ScopedPluginStore, SubmissionResult } from "./types.js";
+import type { ChildCommandRunner, Principal, SandboxResources, ScopedPluginStore, SubmissionResult } from "./types.js";
 
 /** A plugin's thread in the owner's assistant. */
 export interface PluginThreadRef {
@@ -43,8 +43,22 @@ export interface PluginChildRequest {
   profile?: "headless" | "full";
   /** A Docker daemon in the child's sandbox, to run the project's own containers. */
   docker?: boolean;
+  /**
+   * `read`: the child's git credential can clone and fetch, never push.
+   * Use it for a child that only reads a repository, such as a reviewer.
+   */
+  gitAccess?: "read";
   /** CPU, memory and scratch for this child only. */
   resources?: Pick<SandboxResources, "cpu" | "memory" | "scratch">;
+  /**
+   * Deterministic work in the child's sandbox before its first turn, such
+   * as scanning the checked-out repository. The host starts the sandbox,
+   * calls `prepare` with a runner scoped to this child (time and output
+   * caps per command, one deadline for the step), and sends the prompt it
+   * returns. A retried dispatch that finds the child already started does
+   * not call it again. A throw fails `spawnChild`.
+   */
+  prepare?: (runner: ChildCommandRunner, prompt: string) => Promise<string>;
 }
 
 export interface PluginChild {
@@ -75,6 +89,12 @@ export interface PluginThreads {
     body: string,
     opts: { dispatchId: string; attributes?: Record<string, string>; resultSchema?: TSchema },
   ): Promise<PluginReply>;
+  /**
+   * Add a message to the thread without a model call. People read it in
+   * the thread, and the assistant reads it on its next turn. Idempotent
+   * per `dispatchId`. Use it for a record, such as a review nobody posted.
+   */
+  record(thread: PluginThreadRef, body: string, opts: { dispatchId: string; attributes?: Record<string, string> }): Promise<void>;
   /**
    * Wait for the assistant's answer to a `post`. With `resultSchema`, the
    * answer's JSON is validated into `output`; pass the same schema to `post`

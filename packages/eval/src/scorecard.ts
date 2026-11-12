@@ -111,6 +111,8 @@ export function formatScorecard(
 
   const review = formatReviewSummary(entries);
   if (review !== undefined) lines.push("", review);
+  const trial = formatTrialSummary(entries);
+  if (trial !== undefined) lines.push("", trial);
 
   const comparisons = opts.comparisons ?? [];
   if (comparisons.length > 0) {
@@ -213,6 +215,79 @@ export function formatReviewSummary(entries: ScorecardEntry[]): string | undefin
   for (const x of rows) {
     lines.push(
       `  ${x.tool.padEnd(width)}  ${String(x.t.cases).padStart(5)}  ${pct(x.p)}  ${pct(x.r)}  ${pct(x.f1)}  ${pct(x.f2)}  ${String(x.t.tp).padStart(4)}  ${String(x.t.fp).padStart(4)}  ${String(x.t.fn).padStart(4)}`,
+    );
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Trial totals for cases that declare a `kind`: recall on planted defects,
+ * false positives on controls and on setup PRs (any issue there is a false
+ * positive), and recall on cross-repo golden comments. One row per tool.
+ */
+export function formatTrialSummary(entries: ScorecardEntry[]): string | undefined {
+  interface Row {
+    tp: number;
+    fn: number;
+    controlFp: number;
+    controls: number;
+    controlsFlagged: number;
+    setupFp: number;
+    setups: number;
+    setupsFlagged: number;
+    crossTp: number;
+    crossFn: number;
+  }
+  const rows = new Map<string, Row>();
+  const row = (tool: string): Row => {
+    const r = rows.get(tool) ?? { tp: 0, fn: 0, controlFp: 0, controls: 0, controlsFlagged: 0, setupFp: 0, setups: 0, setupsFlagged: 0, crossTp: 0, crossFn: 0 };
+    rows.set(tool, r);
+    return r;
+  };
+  for (const entry of entries) {
+    const result = entry.checkResults.find((r) => r.check.type === "review_match");
+    const m = result?.metrics;
+    const kind = result?.check.type === "review_match" ? result.check.kind : undefined;
+    if (m === undefined || kind === undefined) continue;
+    const tools: { tool: string; key: (k: string) => string; cross: (k: string) => string }[] = [
+      { tool: "valet", key: (k) => k, cross: (k) => `cross:${k}` },
+      ...Object.keys(m).flatMap((k) => {
+        const tool = /^ref:(.+):tp$/.exec(k)?.[1];
+        return tool !== undefined ? [{ tool, key: (x: string) => `ref:${tool}:${x}`, cross: (x: string) => `ref:${tool}:cross_${x}` }] : [];
+      }),
+    ];
+    for (const t of tools) {
+      const r = row(t.tool);
+      const fp = num(m[t.key("fp")]);
+      if (kind === "planted") {
+        r.tp += num(m[t.key("tp")]);
+        r.fn += num(m[t.key("fn")]);
+      } else if (kind === "control") {
+        r.controls++;
+        r.controlFp += fp;
+        if (fp > 0) r.controlsFlagged++;
+      } else {
+        r.setups++;
+        r.setupFp += fp;
+        if (fp > 0) r.setupsFlagged++;
+      }
+      r.crossTp += num(m[t.cross("tp")]);
+      r.crossFn += num(m[t.cross("fn")]);
+    }
+  }
+  if (rows.size === 0) return undefined;
+  const width = Math.max(6, ...[...rows.keys()].map((t) => t.length));
+  const frac = (a: number, b: number): string => (b > 0 ? `${a}/${b}` : "-").padStart(7);
+  const lines = [
+    "TRIAL (planted defects, controls, setup PRs)",
+    "",
+    `  ${"tool".padEnd(width)}  planted  recall  control FP  controls flagged  setup FP  setups flagged  cross-repo`,
+  ];
+  const order = (tool: string): number => (tool === "valet" ? 0 : 1);
+  for (const [tool, r] of [...rows.entries()].sort((a, b) => order(a[0]) - order(b[0]) || a[0].localeCompare(b[0]))) {
+    const recall = r.tp + r.fn > 0 ? `${((r.tp / (r.tp + r.fn)) * 100).toFixed(1)}`.padStart(6) : "     -";
+    lines.push(
+      `  ${tool.padEnd(width)}  ${frac(r.tp, r.tp + r.fn)}  ${recall}  ${String(r.controlFp).padStart(10)}  ${frac(r.controlsFlagged, r.controls).padStart(16)}  ${String(r.setupFp).padStart(8)}  ${frac(r.setupsFlagged, r.setups).padStart(14)}  ${frac(r.crossTp, r.crossTp + r.crossFn).padStart(10)}`,
     );
   }
   return lines.join("\n");

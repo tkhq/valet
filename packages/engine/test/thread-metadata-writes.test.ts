@@ -76,4 +76,18 @@ describe("thread metadata writes", () => {
       expect((await store.getThread(session.id, thread.id))?.metadata).toMatchObject({ slackChannels: ["T1/C1"], conversational: true });
     } finally { faux.unregister(); }
   });
+
+  it("gives parallel calls distinct source ids and keeps counting after a restore", async () => {
+    const faux = registerFauxProvider({ provider: "source-ids" });
+    try {
+      const providers = { store: new InMemorySessionStore(), stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() };
+      const options = { userId: "alice", orgId: "org", workspace: "/", sandbox: {}, model: faux.getModel(), builtinTools: [] };
+      const session = await new Engine({ providers }).createSession(options);
+      const thread = await session.createThread("sources");
+      const [first, second] = await Promise.all([thread.allocateSourceIds(2), thread.allocateSourceIds(1)]);
+      expect([...first, ...second]).toEqual(["s1", "s2", "s3"]);
+      const restored = await new Engine({ providers }).restoreSession({ sessionId: session.id, options });
+      expect(await (await restored.threadByKey("sources"))?.allocateSourceIds(1)).toEqual(["s4"]);
+    } finally { faux.unregister(); }
+  });
 });

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { PluginActionContext, Sandbox } from "@valet/engine";
 import type {
+  BrowserOperationReceipt,
   BrowserPolicyRequest,
   BrowserRequest,
   BrowserResponse,
@@ -42,7 +43,12 @@ const artifact = {
 };
 
 function fixture(
-  options: { denied?: boolean; image?: boolean; authorized?: boolean } = {},
+  options: {
+    denied?: boolean;
+    image?: boolean;
+    authorized?: boolean;
+    operations?: BrowserOperationReceipt[];
+  } = {},
 ) {
   const requests: BrowserRequest[] = [];
   const decisions: string[] = [];
@@ -92,7 +98,7 @@ function fixture(
           runtimeId: "run",
           threadId: "t",
           status: "completed",
-          operations: [],
+          operations: options.operations ?? [],
         };
         response.events = [
           { type: "text", text: "done", timestamp: 2, cursor: 2 },
@@ -112,7 +118,7 @@ function fixture(
           runtimeId: "run",
           threadId: "t",
           status: "completed",
-          operations: [],
+          operations: options.operations ?? [],
         };
       if (request.command === "export")
         response.artifact = {
@@ -288,5 +294,44 @@ describe("browser action integration", () => {
       data: { text: "done\nlast page" },
     });
     expect(pages).toBe(2);
+  });
+  it("returns a source for each page the cell read", async () => {
+    const page = {
+      snapshotId: "snap",
+      runtimeId: "run",
+      tabId: "tab",
+      documentId: "doc",
+      capturedAt: Date.UTC(2026, 10, 9, 14, 3),
+      url: "https://example.com/pricing",
+      title: "Pricing",
+      source: "playwright-aria",
+      text: '- heading "Pricing" [level=1] [ref=e1]\n- paragraph [ref=e2]: Team plan is $20 a seat.',
+      refs: [],
+      viewport: { width: 1, height: 1, deviceScaleFactor: 1, scrollX: 0, scrollY: 0 },
+      truncated: false,
+      limitations: [],
+    };
+    const f = fixture({
+      operations: [
+        { operationId: "a", cellId: "cell", method: "tab.goto", hash: "h", status: "completed" },
+        { operationId: "b", cellId: "cell", method: "tab.getAXState", hash: "h", status: "completed", result: page },
+      ],
+    });
+    await expect(f.run()).resolves.toMatchObject({
+      success: true,
+      sources: [
+        {
+          service: "web",
+          title: "Pricing",
+          url: "https://example.com/pricing",
+          snippet: "Pricing Team plan is $20 a seat.",
+          location: "Read 2026-11-09 14:03 UTC",
+        },
+      ],
+    });
+  });
+  it("returns no source when the cell read no page", async () => {
+    const result = await fixture().run();
+    expect(result.sources).toBeUndefined();
   });
 });
