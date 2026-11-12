@@ -3,6 +3,7 @@
  * runner, score each trajectory, compare to baselines, and optionally save
  * new baselines. `cli.ts` is a thin argv wrapper around `runSuite`.
  */
+import type { ReviewFocus } from "@valet/plugin-pr-review";
 import type { Model, SandboxProvider, ValetPlugin } from "@valet/engine";
 import {
   compareToBaseline,
@@ -61,6 +62,10 @@ export interface SuiteOptions {
   verify?: boolean;
   /** Independent code-review passes per case. */
   reviewPasses?: number;
+  /** One extra focused code-review pass per entry (failure, concurrency, tests). */
+  reviewFocus?: ReviewFocus[];
+  /** Drop focused-pass findings rated below this confidence (0-1). */
+  focusMinConfidence?: number;
   /** Drop code-review findings rated below this confidence (0-1). */
   minConfidence?: number;
   /** Merge code-review findings that report the same defect at nearby lines (one model call per review). */
@@ -196,6 +201,8 @@ export async function runSuite(cases: EvalCase[], opts: SuiteOptions): Promise<S
                 ...(opts.verifyModel !== undefined ? { verifyModel: opts.verifyModel } : {}),
                 ...(opts.verify !== undefined ? { verify: opts.verify } : {}),
                 ...(opts.reviewPasses !== undefined ? { reviewPasses: opts.reviewPasses } : {}),
+                ...(opts.reviewFocus !== undefined ? { reviewFocus: opts.reviewFocus } : {}),
+                ...(opts.focusMinConfidence !== undefined ? { focusMinConfidence: opts.focusMinConfidence } : {}),
                 ...(opts.minConfidence !== undefined ? { minConfidence: opts.minConfidence } : {}),
                 ...(opts.reviewDedupe ? { reviewDedupe: true } : {}),
                 ...(opts.contextBudget !== undefined ? { contextBudget: opts.contextBudget } : {}),

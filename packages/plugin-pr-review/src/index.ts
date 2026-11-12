@@ -74,11 +74,12 @@ export { gitFileAt, localRunner, type RepoRunner } from "./context/repo.js";
 export { diffSymbols, parseDiff, type DiffSymbols } from "./context/symbols.js";
 export { noteMatch, parseNote, type DomainNote } from "./context/notes.js";
 export { directoryMemory } from "./context/memory-dir.js";
-export { REVIEWER_SYSTEM_PROMPT, buildReviewPrompt } from "./prompt.js";
+export { FOCUS_PROMPTS, REVIEW_FOCUSES, REVIEWER_SYSTEM_PROMPT, buildReviewPrompt, type ReviewFocus } from "./prompt.js";
 export * from "./types.js";
 export {
   createReviewHandler,
   excluded,
+  focusRole,
   MANUAL_REVIEW_EVENT,
   manualReviewOptions,
   POINTERS_COLLECTION,

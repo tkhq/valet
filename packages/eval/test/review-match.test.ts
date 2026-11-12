@@ -142,6 +142,11 @@ describe("--verify-model", () => {
     expect(parseCliArgs([]).verifyModel).toBeUndefined();
   });
 
+  it("parses --review-focus and refuses an unknown focus", () => {
+    expect(parseCliArgs(["--review-focus", "failure, tests"])).toMatchObject({ reviewFocus: ["failure", "tests"] });
+    expect(() => parseCliArgs(["--review-focus", "style"])).toThrow(/--review-focus/);
+  });
+
   it("parses --verify and --review-passes", () => {
     expect(parseCliArgs(["--verify", "--review-passes", "2"])).toMatchObject({ verify: true, reviewPasses: 2 });
     expect(parseCliArgs([]).verify).toBeUndefined();

@@ -38,6 +38,37 @@ The summary says in 1-3 sentences what the PR changes. Do not describe defects o
 
 When you finish, call \`submit_review\` exactly once with your summary, merge confidence and findings, then stop. An empty findings list is a valid result for a clean PR.`;
 
+/** A narrow lens for one extra reviewer pass. The general pass always runs; focused passes add depth where one pass reads too little. */
+export type ReviewFocus = "failure" | "concurrency" | "tests";
+
+export const REVIEW_FOCUSES: readonly ReviewFocus[] = ["failure", "concurrency", "tests"];
+
+/** Focus sections appended to the reviewer system prompt. Each pass reports only its own defect class, so the union adds depth without repeating the general pass. */
+export const FOCUS_PROMPTS: Record<ReviewFocus, string> = {
+  failure: `## This pass: failure paths and attackers
+
+Another reviewer covers the rest of the PR. In this pass, report only defects of these kinds, and spend your tool calls tracing them through the code:
+- Error, close, cleanup and timeout paths: an error that is swallowed, logged and ignored, or that lets the operation succeed anyway (fails open); a resource or lock not released on the error path; a retry loop with no end.
+- State transitions: what happens to existing records, limits, flags and permissions when a plan, version, setting or schema changes, including downgrades, migrations, partial rollouts and removed keys that nothing re-adds.
+- An attacker or a caller with less privilege: what they can reach or spend with one leaked key, token or credential plus the inputs this code accepts; missing authorization on a new path; trust in data the caller controls.
+- A change whose diff hides its effect: a change only to secrets, generated files or config that alters behavior elsewhere.
+For each candidate, follow the path end to end in the code before you report it. If none of these defects exist, submit an empty findings list.`,
+  concurrency: `## This pass: concurrency and performance
+
+Another reviewer covers the rest of the PR. In this pass, report only defects of these kinds, and spend your tool calls tracing them through the code:
+- Races: check-then-act or read-modify-write without a lock, transaction or atomic update; shared mutable state (module-level, class-level, cached, lazily initialized) touched by concurrent requests or threads; a lock that moved, narrowed or went away; ordering that depends on timing.
+- Async misuse: a promise or future that is never awaited, an async callback in forEach, a goroutine or task that outlives its owner, a cancellation that is ignored.
+- Performance and waste: work repeated in a loop that could run once, an N+1 query, an unbounded collection or result set, a resource that is never closed, a blocking call on a hot or async path, work built and thrown away.
+For each candidate, name the concurrent callers or the input size that triggers it. If none of these defects exist, submit an empty findings list.`,
+  tests: `## This pass: tests, contracts and false text
+
+Another reviewer covers the rest of the PR. In this pass, report only defects of these kinds, and spend your tool calls tracing them through the code:
+- Tests: a test that cannot fail (a mock that replaces the code under test, an assertion on the mock, a wrong expected value), a changed behavior with no test that exercises it where nearby code is tested, a parameter the test never reaches.
+- Contracts: a changed signature, return value, error type, default, field name or event name that callers in this repo still use the old way; grep every caller of each changed public function, type, route or message.
+- False text: a docstring, comment, log line, error message, README or translation that the change made untrue.
+Real low-severity defects count in this pass; report each one. If none of these defects exist, submit an empty findings list.`,
+};
+
 export interface PullRequestContext {
   title: string;
   body: string;

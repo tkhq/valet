@@ -18,7 +18,7 @@ import { Value } from "typebox/value";
 import { reviewerBashTool } from "./bash.js";
 import { diffPullRequest, git } from "./git.js";
 import { runReviewPipeline, type AgentRunner, type AgentRunResult, type AgentSpec } from "./pipeline.js";
-import { buildReviewPrompt, REVIEWER_SYSTEM_PROMPT } from "./prompt.js";
+import { buildReviewPrompt, FOCUS_PROMPTS, REVIEWER_SYSTEM_PROMPT, type ReviewFocus } from "./prompt.js";
 import { ReviewSchema, type Finding, type Review, type ReviewRun, type ReviewUsage } from "./types.js";
 
 /** Built-in tools the reviewer keeps. Everything that writes or delegates is dropped; bash is the reviewer's own. */
@@ -85,6 +85,8 @@ export interface ReviewerSpecOptions {
   knownFindings?: { path: string; line: number; title: string }[];
   /** The gather stage's context pack, put in the first prompt. */
   contextPack?: string;
+  /** Narrow this pass to one defect class (see FOCUS_PROMPTS). Unset: the general review. */
+  focus?: ReviewFocus;
 }
 
 /** Lines in a file's text; a trailing newline does not start another line. */
@@ -217,7 +219,7 @@ export async function createReviewerSpec(opts: ReviewerSpecOptions): Promise<Rev
   };
   return {
     label: "review",
-    systemPrompt: REVIEWER_SYSTEM_PROMPT,
+    systemPrompt: opts.focus ? `${REVIEWER_SYSTEM_PROMPT}\n\n${FOCUS_PROMPTS[opts.focus]}` : REVIEWER_SYSTEM_PROMPT,
     builtinToolNames: REVIEWER_BUILTINS,
     tools: [reviewerBashTool(opts.workspace), submitReview],
     prompt: buildReviewPrompt({

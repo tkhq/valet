@@ -195,6 +195,8 @@ async function reviewInWorkspace(
       verify,
       ...(opts.verifyModel !== undefined ? { verifyModel: opts.verifyModel } : {}),
       ...(opts.reviewPasses !== undefined ? { passes: opts.reviewPasses } : {}),
+      ...(opts.reviewFocus !== undefined ? { focuses: opts.reviewFocus } : {}),
+      ...(opts.focusMinConfidence !== undefined ? { focusMinConfidence: opts.focusMinConfidence } : {}),
       ...(opts.minConfidence !== undefined ? { minConfidence: opts.minConfidence } : {}),
       ...(opts.reviewDedupe ? { dedupe: true } : {}),
       ...(opts.contextBudget ? { contextBudget: opts.contextBudget * 4 } : {}),
