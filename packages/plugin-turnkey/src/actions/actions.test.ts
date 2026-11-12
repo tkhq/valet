@@ -167,7 +167,8 @@ describe("turnkey.request_signing_key", () => {
     await expect(s.request.execute(scope, s.ctx)).rejects.toThrow(/SSH signing keys/);
     const current = await s.store.session("session-1").get(COLLECTIONS.signingKeys, CURRENT_KEY);
     expect(current).toBeNull();
-    expect(s.ctx.execs).toHaveLength(0);
+    // The session key pair was made first; signing was never turned on.
+    expect(s.ctx.execs.some((c) => c.includes("commit.gpgsign true"))).toBe(false);
   });
 
   it("clamps the window to 24 hours", async () => {

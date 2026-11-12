@@ -118,6 +118,9 @@ export function buildTurnkeyActionPlugin(overrides: Partial<SigningDeps> = {}): 
       const resolution = await ctx.requestDecision(signingGateRequest(scope));
       if (resolution.actionId !== "approve") return fail(REJECTED_MESSAGE);
 
+      // Make the sandbox's session key pair first: a sandbox failure then
+      // leaves no Turnkey key and no GitHub key behind.
+      const sessionPublicKey = await generateSessionKey(ctx.sandbox);
       const createdAt = deps.now();
       const notAfter = new Date(createdAt + scope.windowMinutes * 60_000);
       const turnkey = deps.turnkey(config);
@@ -172,7 +175,6 @@ export function buildTurnkeyActionPlugin(overrides: Partial<SigningDeps> = {}): 
       // The session API key is the sandbox's signing authority. It is made
       // now, not at prep, and expires with the window, so Turnkey refuses a
       // signature after the window whatever the sandbox still holds.
-      const sessionPublicKey = await generateSessionKey(ctx.sandbox);
       const sessionKey = await turnkey.createApiKey({
         subOrgId: enrollment.subOrgId,
         userId: enrollment.agentUserId,

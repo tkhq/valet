@@ -44,13 +44,24 @@ export function publicKeyFromKeyFile(text: string): string | null {
  * its own key, registered with the approval window as its expiry.
  */
 export async function generateSessionKey(sandbox: Sandbox): Promise<string> {
+  // /run is root-owned. A privileged exec makes the directory and gives it to
+  // the user that ordinary execs (and git) run as.
+  const who = await sandbox.exec("id -u; id -g");
+  const [uid, gid] = who.stdout.trim().split(/\s+/);
+  if (who.exitCode !== 0 || !uid || !gid || !/^\d+$/.test(uid) || !/^\d+$/.test(gid)) {
+    throw new Error(`reading the sandbox user failed (exit ${who.exitCode}): ${who.stderr.trim() || who.stdout.trim()}`);
+  }
+  await run(sandbox, `install -d -m 700 -o ${uid} -g ${gid} ${TURNKEY_DIR}`, "creating the signing directory", { privileged: true });
   await run(
     sandbox,
-    `mkdir -p ${TURNKEY_DIR} && chmod 700 ${TURNKEY_DIR} && rm -f ${SESSION_KEY_FILE} && ` +
+    `rm -f ${SESSION_KEY_FILE} && ` +
       `${TK_PATH} api-key generate --output ${SESSION_KEY_FILE} --message-format json >/dev/null && chmod 600 ${SESSION_KEY_FILE}`,
     "generating the session key (check that the sandbox image ships /usr/local/bin/tk)",
   );
-  const publicKey = publicKeyFromKeyFile(await sandbox.readFile(SESSION_KEY_FILE));
+  // Read through exec: Sandbox.readFile resolves an absolute path outside the
+  // workspace on the host for some backends.
+  const read = await sandbox.exec(`cat ${SESSION_KEY_FILE}`);
+  const publicKey = read.exitCode === 0 ? publicKeyFromKeyFile(read.stdout) : null;
   if (!publicKey) throw new Error(`${SESSION_KEY_FILE} has no P-256 public key.`);
   return publicKey;
 }
@@ -101,8 +112,8 @@ export async function disableSandboxSigning(sandbox: Sandbox): Promise<void> {
   );
 }
 
-async function run(sandbox: Sandbox, command: string, what: string): Promise<void> {
-  const res = await sandbox.exec(command);
+async function run(sandbox: Sandbox, command: string, what: string, opts?: { privileged?: boolean }): Promise<void> {
+  const res = await sandbox.exec(command, opts);
   if (res.exitCode !== 0) {
     throw new Error(`${what} failed in the sandbox (exit ${res.exitCode}): ${res.stderr.trim() || res.stdout.trim()}`);
   }
