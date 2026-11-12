@@ -440,6 +440,32 @@ export function selectSummaryCheckpointTail(
   return window;
 }
 
+/**
+ * The oldest entries of `entries` that fit `maxTokens`, for one bounded
+ * summary of a head. A checkpoint covers the window, and the newer entries
+ * keep their place in live context after the summary, so the order the
+ * model reads stays oldest first. The window always holds the first entry
+ * the summarizer can read, even when it alone exceeds the budget, and it
+ * takes the zero-cost entries that follow its last one. Pass the payload
+ * ruler as `sizeOf`.
+ */
+export function selectSummaryCheckpointHead(
+  entries: readonly SessionEntry[],
+  maxTokens: number,
+  opts?: Pick<SummaryWindowOptions, "sizeOf">,
+): SessionEntry[] {
+  const sizeOf = opts?.sizeOf ?? estimateEntryTokens;
+  let end = 0;
+  let tokens = 0;
+  while (end < entries.length) {
+    const next = sizeOf(entries[end]);
+    if (next > 0 && tokens > 0 && tokens + next > maxTokens) break;
+    end++;
+    tokens += next;
+  }
+  return entries.slice(0, end);
+}
+
 // ── Turn segmentation ──────────────────────────────────────────────
 
 export interface Turn {
@@ -875,6 +901,12 @@ export interface SummarizeOptions {
    * (`Thread.attributeAuthors`).
    */
   attributeAuthors?: AuthorAttribution;
+  /**
+   * The newest turn keeps running after this pass (a compaction inside a
+   * turn). The prompt then tells the summarizer that the turn is not over
+   * (`SUMMARY_TURN_CONTINUES`).
+   */
+  turnInProgress?: boolean;
 }
 
 export interface SummarizeResult {
@@ -922,6 +954,28 @@ export function stripAnalysisScratchpad(text: string): string {
 const SUMMARY_MIDTURN_PREFACE =
   "The conversation history below starts in the middle of a turn. The user message that started that turn is not included.";
 
+/**
+ * Said to every summarizer. The summarizer reads its own request as the last
+ * user message, so without this line a summary can list the request as the
+ * latest user message and tell the resumed agent to write only a summary.
+ */
+const SUMMARY_REQUEST_NOT_FROM_USER =
+  "This request to summarize comes from the system, not from the user. Do not list it under User Messages, and do not record it as the goal, a constraint, or the latest request.";
+
+/**
+ * Said when the newest turn keeps running after the pass. Without it, a
+ * summary can describe the running turn as finished, or report an action the
+ * turn took (a posted message, a reaction) as something it found already
+ * done. The resumed turn then stops before it finishes its work.
+ */
+const SUMMARY_TURN_CONTINUES =
+  "The newest turn is still running. When this summary is stored, that same turn continues from where it stopped. Record its task under Progress > In Progress, not Done, and do not write that it stopped, ended, or was paused. Under Progress > Done, list each action this turn already completed that changed something outside the conversation (a message posted, a reaction added, a file written), and say that this turn did it.";
+
+/** The lines every summarizer prompt carries about its own request and the turn. */
+function summaryRequestNotes(turnInProgress: boolean | undefined): string {
+  return turnInProgress ? `${SUMMARY_REQUEST_NOT_FROM_USER}\n${SUMMARY_TURN_CONTINUES}` : SUMMARY_REQUEST_NOT_FROM_USER;
+}
+
 export async function summarize(opts: SummarizeOptions): Promise<SummarizeResult> {
   const messages = entriesToSummaryMessages(opts.headEntries, {
     toolOutputMaxChars: opts.toolOutputMaxChars ?? DEFAULTS.toolOutputMaxChars,
@@ -958,7 +1012,7 @@ export async function summarize(opts: SummarizeOptions): Promise<SummarizeResult
   const steer = opts.instructions
     ? `\n\nThe user gave these instructions for this compaction — follow them when deciding what to keep:\n${opts.instructions}`
     : "";
-  const prompt = `${anchor}\n\n${SUMMARY_TEMPLATE}${steer}`;
+  const prompt = `${anchor}\n\n${summaryRequestNotes(opts.turnInProgress)}\n\n${SUMMARY_TEMPLATE}${steer}`;
   let inputTokens = 0;
   let outputTokens = 0;
 
@@ -1044,6 +1098,8 @@ export interface PrefixSummarizeOptions {
   /** The conversation already opens with an earlier summary. */
   hasPreviousSummary: boolean;
   instructions?: string;
+  /** The newest turn keeps running after this pass (`SummarizeOptions.turnInProgress`). */
+  turnInProgress?: boolean;
 }
 
 /**
@@ -1068,6 +1124,7 @@ export async function summarizeOnPrefix(opts: PrefixSummarizeOptions): Promise<S
   const prompt = [
     "Pause the task to compact this conversation. Do not call any tools. Reply with text only.",
     `${anchor} The summary replaces the earlier messages; the most recent messages stay verbatim after it.`,
+    summaryRequestNotes(opts.turnInProgress),
     `${SUMMARY_TEMPLATE}${steer}`,
   ].join("\n\n");
   let inputTokens = 0;

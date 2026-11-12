@@ -62,6 +62,9 @@ interface OAuthConnectState {
   /** mcp mode: the dynamic client the authorize request used. The code
    * belongs to it, so the callback refuses a different stored client. */
   clientId?: string;
+  /** mcp mode: the RFC 8707 resource the authorize request named. The code
+   * exchange names the same one, and the credential records it. */
+  resource?: string;
   /** Validated web origin to land back on, e.g. "http://localhost:5173".
    * Empty/absent → relative redirect (prod same-origin serving). */
   returnTo?: string;
@@ -85,12 +88,13 @@ async function mayConnectTeam(db: AppQueryable, teamId: string, userId: string):
 export function verifyOAuthConnectState(state: string, key: Buffer, nowMs: number): OAuthConnectState | null {
   return verifyState<OAuthConnectState>("integration-connect", state, key, (payload) => {
     if (!isRecord(payload)) return null;
-    const { userId, service, codeVerifier, clientId, returnTo, nonce, exp, teamId, orgId, reconnect, scopes, added } = payload;
+    const { userId, service, codeVerifier, clientId, resource, returnTo, nonce, exp, teamId, orgId, reconnect, scopes, added } = payload;
     if (teamId !== undefined && (typeof teamId !== "string" || !teamId || typeof orgId !== "string" || !orgId)) return null;
     if (typeof userId !== "string" || typeof service !== "string") return null;
     if (typeof nonce !== "string" || typeof exp !== "number") return null;
     if (codeVerifier !== undefined && typeof codeVerifier !== "string") return null;
     if (clientId !== undefined && typeof clientId !== "string") return null;
+    if (resource !== undefined && typeof resource !== "string") return null;
     if (returnTo !== undefined && typeof returnTo !== "string") return null;
     if (reconnect !== undefined && (reconnect !== true || typeof teamId !== "string")) return null;
     if (scopes !== undefined && (!Array.isArray(scopes) || !scopes.every((s) => typeof s === "string"))) return null;
@@ -99,6 +103,7 @@ export function verifyOAuthConnectState(state: string, key: Buffer, nowMs: numbe
     return {
       userId, service, codeVerifier, returnTo, nonce, exp,
       ...(typeof clientId === "string" ? { clientId } : {}),
+      ...(typeof resource === "string" && resource ? { resource } : {}),
       ...(typeof teamId === "string" && typeof orgId === "string" ? { teamId, orgId } : {}),
       ...(reconnect === true ? { reconnect } : {}),
       ...(Array.isArray(scopes) ? { scopes: scopes.filter((s): s is string => typeof s === "string") } : {}),
@@ -234,7 +239,11 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
     const scopes = addScopes ? [...new Set([...clientRow.scopes, ...addScopes])].sort() : clientRow.scopes;
     const state = signState<OAuthConnectState>(
       "integration-connect",
-      { ...base, codeVerifier, clientId: clientRow.clientId, ...(addScopes ? { scopes, added: addScopes } : {}) },
+      {
+        ...base, codeVerifier, clientId: clientRow.clientId,
+        ...(clientRow.resource ? { resource: clientRow.resource } : {}),
+        ...(addScopes ? { scopes, added: addScopes } : {}),
+      },
       key,
     );
     const url = buildAuthorizationUrl({
@@ -244,6 +253,7 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
       codeChallenge,
       state,
       scopes,
+      ...(clientRow.resource ? { resource: clientRow.resource } : {}),
     });
     return c.redirect(url, 302);
   }
@@ -350,6 +360,9 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
         code,
         redirectUri,
         codeVerifier: verified.codeVerifier,
+        // The resource the authorize request named, not the row's: a connect
+        // in between may have backfilled the row.
+        ...(verified.resource ? { resource: verified.resource } : {}),
       });
       saved = {
         accessToken: tokens.access_token,
@@ -357,7 +370,10 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
         expiresAt: typeof tokens.expires_in === "number" ? now + tokens.expires_in * 1000 : undefined,
         scopes: grantedScopes(tokens.scope, verified.scopes ?? (clientRow.scopes.length > 0 ? clientRow.scopes : undefined)),
         // Refreshes use this client, not whichever one is stored later.
-        metadata: { connectedVia: "oauth", ...issuingClientMetadata(clientRow) },
+        metadata: {
+          connectedVia: "oauth",
+          ...issuingClientMetadata({ clientId: clientRow.clientId, tokenEndpoint: clientRow.tokenEndpoint, resource: verified.resource }),
+        },
       };
     } else if (found.oauth.interpretTokenResponse) {
       const raw = await exchangeAuthorizationCodeRaw({ oauth: found.oauth, env: process.env, code, redirectUri });

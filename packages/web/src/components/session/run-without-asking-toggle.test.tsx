@@ -36,7 +36,7 @@ describe("RunWithoutAskingToggle", () => {
     renderToggle();
     const toggle = screen.getByRole("switch", { name: "Run without asking" });
     expect(toggle.getAttribute("aria-checked")).toBe("false");
-    expect(screen.getByText("Run without asking: Off")).toBeTruthy();
+    expect(screen.getByText("Run without asking")).toBeTruthy();
     await userEvent.click(toggle);
     expect(bypassMutate).not.toHaveBeenCalled();
     await userEvent.click(await screen.findByRole("button", { name: "Run without asking" }));
@@ -47,7 +47,7 @@ describe("RunWithoutAskingToggle", () => {
     me = { id: "u1" };
     threads = [{ id: "t1", sessionId: "sess-1", createdAt: 1, approvalBypass: true }];
     renderToggle();
-    expect(screen.getByText("Run without asking: On")).toBeTruthy();
+    expect(screen.getByText("Run without asking")).toBeTruthy();
     await userEvent.tab();
     expect(document.activeElement).toBe(screen.getByRole("switch", { name: "Run without asking" }));
     await userEvent.keyboard(" ");
@@ -58,6 +58,14 @@ describe("RunWithoutAskingToggle", () => {
     me = { id: "someone-else" };
     threads = [{ id: "t1", sessionId: "sess-1", createdAt: 1 }];
     renderToggle();
+    expect(screen.queryByRole("switch")).toBeNull();
+  });
+
+  it("returns the hint when permission hides the switch", () => {
+    me = { id: "someone-else" };
+    threads = [{ id: "t1", sessionId: "sess-1", createdAt: 1 }];
+    render(<RunWithoutAskingToggle sessionId="sess-1" threadId="t1" owner={owner} fallback={<span>Enter to send</span>} />);
+    expect(screen.getByText("Enter to send")).toBeTruthy();
     expect(screen.queryByRole("switch")).toBeNull();
   });
 
@@ -77,6 +85,27 @@ describe("RunWithoutAskingToggle", () => {
     threads = [{ id: "t1", sessionId: "sess-1", createdAt: 1, approvalBypass: true }];
     renderToggle(owner, true);
     expect(screen.getByRole("switch", { name: "Run without asking" }).getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("hides only the visible text at narrow widths and keeps the accessible name", () => {
+    me = { id: "u1" };
+    threads = [{ id: "t1", sessionId: "sess-1", createdAt: 1 }];
+    render(<RunWithoutAskingToggle sessionId="sess-1" threadId="t1" owner={owner} compactLabel />);
+    const text = screen.getByText("Run without asking");
+    expect(text.className).toContain("hidden");
+    expect(text.className).toContain("@container(min-width:34rem)");
+    expect(screen.getByRole("switch", { name: "Run without asking" }).getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("hands a mutation error to onError instead of rendering it beside the switch", async () => {
+    me = { id: "u1" };
+    threads = [{ id: "t1", sessionId: "sess-1", createdAt: 1, approvalBypass: true }];
+    bypassMutate.mockImplementation((_v, opts) => opts.onError(new Error("boom")));
+    const onError = vi.fn();
+    render(<RunWithoutAskingToggle sessionId="sess-1" threadId="t1" owner={owner} onError={onError} />);
+    await userEvent.click(screen.getByRole("switch", { name: "Run without asking" }));
+    expect(onError).toHaveBeenLastCalledWith(expect.stringContaining("boom"));
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   describe("who may turn it on", () => {

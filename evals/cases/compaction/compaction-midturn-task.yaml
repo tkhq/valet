@@ -1,0 +1,172 @@
+# Compaction inside one turn: a long triage turn crosses the window, and
+# the pass before the next model call summarizes the turn's own start. The
+# resumed turn must still know its task, must not repeat the reaction it
+# already added, and must not mistake its own reaction for another run's.
+# `context_window_tokens` makes the engine assume a small window, so the
+# pass runs inside the turn.
+id: compaction-midturn-task
+description: A compaction inside a long turn keeps the task and the calls already made.
+profile: mock
+context_window_tokens: 30000
+turns:
+  - role: user
+    content: >-
+      Alert 4711 fired in channel C0PROD (post ts 1700000000.000100). Do these
+      steps in order. 1. Add the reaction "eyes" to that post (slack.add_reaction
+      with channel C0PROD, timestamp 1700000000.000100, name eyes). This marks
+      the alert as yours. 2. Read the recent history of channels C0API,
+      C0WORKER, C0BILLING and C0SEARCH, one slack.read_history call each, one
+      call at a time. 3. Check the post's reactions with slack.get_reactions.
+      If it has an "eyes" reaction that you did not add in this turn, another
+      run owns the alert: stop and post nothing. 4. Otherwise reply in the
+      alert's thread with one slack.send_message call (channel C0PROD,
+      thread_ts 1700000000.000100) whose text is exactly
+      "Triage 4711: worker errors confirmed. Runbook RB-7f3a9c21-e4b8-4d2a-9b61."
+      with nothing added or changed. Do not post anything else.
+timeout_ms: 300000
+mock_tools:
+  slack.add_reaction:
+    response: '{"ok":true}'
+  slack.read_history:
+    response: |
+      {"messages":[
+      {"ts":"1794300000.0001","user":"U0BOT","text":"ERROR worker-0 job 1000 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300001.0001","user":"U0BOT","text":"ERROR worker-1 job 1001 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300002.0001","user":"U0BOT","text":"ERROR worker-2 job 1002 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300003.0001","user":"U0BOT","text":"ERROR worker-3 job 1003 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300004.0001","user":"U0BOT","text":"ERROR worker-4 job 1004 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300005.0001","user":"U0BOT","text":"ERROR worker-5 job 1005 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300006.0001","user":"U0BOT","text":"ERROR worker-6 job 1006 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300007.0001","user":"U0BOT","text":"ERROR worker-0 job 1007 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300008.0001","user":"U0BOT","text":"ERROR worker-1 job 1008 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300009.0001","user":"U0BOT","text":"ERROR worker-2 job 1009 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300010.0001","user":"U0BOT","text":"ERROR worker-3 job 1010 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300011.0001","user":"U0BOT","text":"ERROR worker-4 job 1011 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300012.0001","user":"U0BOT","text":"ERROR worker-5 job 1012 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300013.0001","user":"U0BOT","text":"ERROR worker-6 job 1013 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300014.0001","user":"U0BOT","text":"ERROR worker-0 job 1014 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300015.0001","user":"U0BOT","text":"ERROR worker-1 job 1015 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300016.0001","user":"U0BOT","text":"ERROR worker-2 job 1016 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300017.0001","user":"U0BOT","text":"ERROR worker-3 job 1017 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300018.0001","user":"U0BOT","text":"ERROR worker-4 job 1018 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300019.0001","user":"U0BOT","text":"ERROR worker-5 job 1019 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300020.0001","user":"U0BOT","text":"ERROR worker-6 job 1020 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300021.0001","user":"U0BOT","text":"ERROR worker-0 job 1021 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300022.0001","user":"U0BOT","text":"ERROR worker-1 job 1022 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300023.0001","user":"U0BOT","text":"ERROR worker-2 job 1023 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300024.0001","user":"U0BOT","text":"ERROR worker-3 job 1024 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300025.0001","user":"U0BOT","text":"ERROR worker-4 job 1025 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300026.0001","user":"U0BOT","text":"ERROR worker-5 job 1026 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300027.0001","user":"U0BOT","text":"ERROR worker-6 job 1027 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300028.0001","user":"U0BOT","text":"ERROR worker-0 job 1028 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300029.0001","user":"U0BOT","text":"ERROR worker-1 job 1029 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300030.0001","user":"U0BOT","text":"ERROR worker-2 job 1030 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300031.0001","user":"U0BOT","text":"ERROR worker-3 job 1031 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300032.0001","user":"U0BOT","text":"ERROR worker-4 job 1032 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300033.0001","user":"U0BOT","text":"ERROR worker-5 job 1033 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300034.0001","user":"U0BOT","text":"ERROR worker-6 job 1034 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300035.0001","user":"U0BOT","text":"ERROR worker-0 job 1035 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300036.0001","user":"U0BOT","text":"ERROR worker-1 job 1036 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300037.0001","user":"U0BOT","text":"ERROR worker-2 job 1037 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300038.0001","user":"U0BOT","text":"ERROR worker-3 job 1038 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300039.0001","user":"U0BOT","text":"ERROR worker-4 job 1039 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300040.0001","user":"U0BOT","text":"ERROR worker-5 job 1040 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300041.0001","user":"U0BOT","text":"ERROR worker-6 job 1041 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300042.0001","user":"U0BOT","text":"ERROR worker-0 job 1042 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300043.0001","user":"U0BOT","text":"ERROR worker-1 job 1043 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300044.0001","user":"U0BOT","text":"ERROR worker-2 job 1044 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300045.0001","user":"U0BOT","text":"ERROR worker-3 job 1045 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300046.0001","user":"U0BOT","text":"ERROR worker-4 job 1046 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300047.0001","user":"U0BOT","text":"ERROR worker-5 job 1047 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300048.0001","user":"U0BOT","text":"ERROR worker-6 job 1048 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300049.0001","user":"U0BOT","text":"ERROR worker-0 job 1049 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300050.0001","user":"U0BOT","text":"ERROR worker-1 job 1050 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300051.0001","user":"U0BOT","text":"ERROR worker-2 job 1051 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300052.0001","user":"U0BOT","text":"ERROR worker-3 job 1052 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300053.0001","user":"U0BOT","text":"ERROR worker-4 job 1053 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300054.0001","user":"U0BOT","text":"ERROR worker-5 job 1054 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300055.0001","user":"U0BOT","text":"ERROR worker-6 job 1055 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300056.0001","user":"U0BOT","text":"ERROR worker-0 job 1056 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300057.0001","user":"U0BOT","text":"ERROR worker-1 job 1057 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300058.0001","user":"U0BOT","text":"ERROR worker-2 job 1058 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300059.0001","user":"U0BOT","text":"ERROR worker-3 job 1059 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300060.0001","user":"U0BOT","text":"ERROR worker-4 job 1060 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300061.0001","user":"U0BOT","text":"ERROR worker-5 job 1061 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300062.0001","user":"U0BOT","text":"ERROR worker-6 job 1062 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300063.0001","user":"U0BOT","text":"ERROR worker-0 job 1063 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300064.0001","user":"U0BOT","text":"ERROR worker-1 job 1064 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300065.0001","user":"U0BOT","text":"ERROR worker-2 job 1065 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300066.0001","user":"U0BOT","text":"ERROR worker-3 job 1066 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300067.0001","user":"U0BOT","text":"ERROR worker-4 job 1067 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300068.0001","user":"U0BOT","text":"ERROR worker-5 job 1068 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300069.0001","user":"U0BOT","text":"ERROR worker-6 job 1069 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300070.0001","user":"U0BOT","text":"ERROR worker-0 job 1070 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300071.0001","user":"U0BOT","text":"ERROR worker-1 job 1071 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300072.0001","user":"U0BOT","text":"ERROR worker-2 job 1072 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300073.0001","user":"U0BOT","text":"ERROR worker-3 job 1073 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300074.0001","user":"U0BOT","text":"ERROR worker-4 job 1074 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300075.0001","user":"U0BOT","text":"ERROR worker-5 job 1075 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300076.0001","user":"U0BOT","text":"ERROR worker-6 job 1076 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300077.0001","user":"U0BOT","text":"ERROR worker-0 job 1077 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300078.0001","user":"U0BOT","text":"ERROR worker-1 job 1078 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300079.0001","user":"U0BOT","text":"ERROR worker-2 job 1079 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300080.0001","user":"U0BOT","text":"ERROR worker-3 job 1080 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300081.0001","user":"U0BOT","text":"ERROR worker-4 job 1081 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300082.0001","user":"U0BOT","text":"ERROR worker-5 job 1082 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300083.0001","user":"U0BOT","text":"ERROR worker-6 job 1083 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300084.0001","user":"U0BOT","text":"ERROR worker-0 job 1084 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300085.0001","user":"U0BOT","text":"ERROR worker-1 job 1085 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300086.0001","user":"U0BOT","text":"ERROR worker-2 job 1086 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300087.0001","user":"U0BOT","text":"ERROR worker-3 job 1087 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300088.0001","user":"U0BOT","text":"ERROR worker-4 job 1088 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300089.0001","user":"U0BOT","text":"ERROR worker-5 job 1089 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300090.0001","user":"U0BOT","text":"ERROR worker-6 job 1090 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300091.0001","user":"U0BOT","text":"ERROR worker-0 job 1091 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300092.0001","user":"U0BOT","text":"ERROR worker-1 job 1092 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300093.0001","user":"U0BOT","text":"ERROR worker-2 job 1093 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300094.0001","user":"U0BOT","text":"ERROR worker-3 job 1094 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300095.0001","user":"U0BOT","text":"ERROR worker-4 job 1095 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300096.0001","user":"U0BOT","text":"ERROR worker-5 job 1096 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300097.0001","user":"U0BOT","text":"ERROR worker-6 job 1097 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300098.0001","user":"U0BOT","text":"ERROR worker-0 job 1098 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300099.0001","user":"U0BOT","text":"ERROR worker-1 job 1099 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300100.0001","user":"U0BOT","text":"ERROR worker-2 job 1100 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300101.0001","user":"U0BOT","text":"ERROR worker-3 job 1101 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300102.0001","user":"U0BOT","text":"ERROR worker-4 job 1102 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300103.0001","user":"U0BOT","text":"ERROR worker-5 job 1103 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300104.0001","user":"U0BOT","text":"ERROR worker-6 job 1104 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300105.0001","user":"U0BOT","text":"ERROR worker-0 job 1105 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300106.0001","user":"U0BOT","text":"ERROR worker-1 job 1106 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794300107.0001","user":"U0BOT","text":"ERROR worker-2 job 1107 failed: upstream timeout after 30s (retry 2)"},
+      {"ts":"1794300108.0001","user":"U0BOT","text":"ERROR worker-3 job 1108 failed: upstream timeout after 30s (retry 0)"},
+      {"ts":"1794300109.0001","user":"U0BOT","text":"ERROR worker-4 job 1109 failed: upstream timeout after 30s (retry 1)"},
+      {"ts":"1794399999.0001","user":"U0BOT","text":"end of history"}
+      ],"has_more":false}
+  slack.get_reactions:
+    response: '{"ok":true,"message":{"reactions":[{"name":"eyes","count":1,"users":["U0VALET"]}]}}'
+  slack.send_message:
+    response: '{"ok":true,"ts":"1794365700.000100"}'
+checks:
+  - type: min_compactions
+    value: 1
+  - type: tool_called
+    tool: slack.add_reaction
+    count: 1
+  - type: tool_called
+    tool: slack.read_history
+    min: 4
+  - type: tool_called
+    tool: slack.send_message
+    count: 1
+  - type: tool_args_match
+    tool: slack.send_message
+    args:
+      channel: C0PROD
+      thread_ts: "1700000000.000100"
+      text: "Triage 4711: worker errors confirmed. Runbook RB-7f3a9c21-e4b8-4d2a-9b61."
+  - type: tool_args_match
+    tool: slack.add_reaction
+    args:
+      channel: C0PROD
+      timestamp: "1700000000.000100"
+  - type: no_errors

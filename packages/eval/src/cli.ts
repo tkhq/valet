@@ -17,6 +17,7 @@
  *   --review-focus <list> extra focused code-review passes: failure,concurrency,tests
  *   --focus-min-confidence <x> drop focused-pass findings rated below x (0-1)
  *   --min-confidence <x> drop code-review findings rated below x (0-1)
+ *   --review-dedupe      merge code-review findings that report the same defect
  *   --context-budget <tokens>  context pack built before each code review (default 0: none)
  *   --memory-dir <dir>   memory files the context pack reads as team memory
  *
@@ -122,6 +123,7 @@ async function main(): Promise<number> {
     ...(opts.reviewFocus !== undefined ? { reviewFocus: opts.reviewFocus } : {}),
     ...(opts.focusMinConfidence !== undefined ? { focusMinConfidence: opts.focusMinConfidence } : {}),
     ...(opts.minConfidence !== undefined ? { minConfidence: opts.minConfidence } : {}),
+    ...(opts.reviewDedupe ? { reviewDedupe: true } : {}),
     ...(opts.contextBudget !== undefined ? { contextBudget: opts.contextBudget } : {}),
     ...(opts.memoryDir !== undefined ? { memoryDir: opts.memoryDir } : {}),
     saveBaselines: opts.saveBaseline,

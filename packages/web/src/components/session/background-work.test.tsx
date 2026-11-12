@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 /**
  * Background work in the web UI (spec 2026-10-08, review UI placement):
- * the composer status line ("next wakeup in 26m · 1 process · +1 in other
- * threads"), its list of the work with a Cancel per row behind a confirm
+ * the composer status line ("next wakeup in 26m · 1 process · 1 hold"),
+ * its list of the work with a Cancel per row behind a confirm
  * step that names the reason, and the thread card section.
  */
 import type { ReactNode } from "react";
@@ -121,20 +121,20 @@ describe("background work helpers", () => {
     expect(backgroundItems(undefined)).toEqual([]);
   });
 
-  it("counts the open thread's work per kind and counts the rest without names", () => {
+  it("counts the open thread's work per kind without naming other threads' work", () => {
     const line = statusLine(backgroundItems(listing(NOW)), "th-1", NOW);
     // The timer fires in 2h, before the hold's 3h deadline.
-    expect(statusLineText(line)).toBe("next wakeup in 2h · 1 process · 1 timer · 1 hold · +1 in other threads");
+    expect(statusLineText(line)).toBe("next wakeup in 2h · 1 process · 1 timer · 1 hold");
     expect(statusLineText(line)).not.toContain("secret deploy watch");
   });
 
-  it("puts every item in the other-thread count when another thread is open", () => {
+  it("shows only the open thread's work per kind when another thread is open", () => {
     const line = statusLine(backgroundItems(listing(NOW)), "th-2", NOW);
-    expect(statusLineText(line)).toBe("next deadline in 4h · 1 watch · +3 in other threads");
+    expect(statusLineText(line)).toBe("next deadline in 4h · 1 watch");
   });
 
-  it("names the soonest event of all work when the open thread has none", () => {
-    expect(statusLineText(statusLine(backgroundItems(listing(NOW)), "th-9", NOW))).toBe("next wakeup in 2h · +4 in other threads");
+  it("shows nothing of other threads' work when the open thread has none", () => {
+    expect(statusLineText(statusLine(backgroundItems(listing(NOW)), "th-9", NOW))).toBe("");
     expect(nextEventLabel([], NOW)).toBeUndefined();
   });
 
@@ -208,15 +208,15 @@ describe("background work helpers", () => {
     expect(statusLineText(line)).toContain("waiting on acme/third#9 +2 more");
   });
 
-  it("counts other threads' work the same whether the open thread has one or several event waiters", () => {
+  it("names no other thread's work whether the open thread has one or several event waiters", () => {
     const data = eventListing(NOW);
     data.wakeups.push(
       { id: "wk_e2", threadId: "th-1", kind: "event", status: "running", reason: "wait 2", subjectLabel: "acme/other#1", deadlineAt: NOW + 5 * HOUR, createdAt: NOW + MINUTE },
       { id: "wk_other", threadId: "th-2", kind: "watch", status: "running", reason: "other thread watch", deadlineAt: NOW + 4 * HOUR, createdAt: NOW },
     );
     const line = statusLine(backgroundItems(data), "th-1", NOW);
-    expect(line.otherCount).toBe(1);
     expect(statusLineText(line)).not.toContain("acme/other#1");
+    expect(statusLineText(line)).not.toContain("other thread watch");
   });
 
   it("the card section's event detail names the subject, clause count, and deadline", () => {
@@ -247,6 +247,15 @@ describe("BackgroundWorkStatusLine", () => {
     expect(container.textContent).toBe("");
   });
 
+  it("renders no line when all the work is in another thread", async () => {
+    const list = vi.spyOn(api, "listSessionWakeups").mockResolvedValue(listing(Date.now()));
+    const { container } = renderLine("th-9");
+    await waitFor(() => expect(list).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.queryByRole("button", { name: /Background work/ })).toBeNull();
+    expect(container.textContent).toBe("");
+  });
+
   it("appears with work and disappears when the work ends", async () => {
     const list = vi.spyOn(api, "listSessionWakeups").mockResolvedValue(listing(Date.now()));
     const { client } = renderLine();
@@ -254,7 +263,7 @@ describe("BackgroundWorkStatusLine", () => {
     expect(line.textContent).toContain("next wakeup in 2h");
     expect(line.textContent).toContain("1 process");
     expect(line.textContent).toContain("1 hold");
-    expect(line.textContent).toContain("+1 in other threads");
+    expect(line.textContent).not.toContain("in other threads");
 
     list.mockResolvedValue({ wakeups: [], leases: [] });
     await act(() => client.invalidateQueries({ queryKey: qk.wakeups("s-1") }));

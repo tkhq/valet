@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { MessagePart } from "../wire/types.js";
-import { TRIM_ABOVE_CHARS, trimToolResults } from "./transcript-trim.js";
+import { fullToolResult, TRIM_ABOVE_CHARS, trimToolResults } from "./transcript-trim.js";
 
 const call = (result: unknown): MessagePart => ({ kind: "tool_call", callId: "c1", toolName: "bash", status: "completed", result });
 
@@ -26,5 +26,17 @@ describe("trimToolResults", () => {
     expect(plain?.kind === "tool_call" && typeof plain.result === "string" && plain.result.endsWith("END")).toBe(true);
     const [engineShape] = trimToolResults([call({ text, ok: true })], { entryId: "e3", threadId: "t1" });
     expect(engineShape?.kind === "tool_call" && (engineShape.result as { text: string }).text.startsWith("START")).toBe(true);
+  });
+
+  it("ships a capped result's preview without its stored whole text, marked for loading", () => {
+    const full = "x".repeat(150_000);
+    const result = { content: [{ type: "text", text: "preview [lookup output too large]" }], details: { ok: true, fullText: full } };
+    const [part] = trimToolResults([call(result)], { entryId: "e1", threadId: "t1" });
+    if (part?.kind !== "tool_call") throw new Error("expected a tool call");
+    expect(part.resultTrimmed).toEqual({ chars: 150_000, entryId: "e1", threadId: "t1" });
+    expect(part.result).toEqual({ content: [{ type: "text", text: "preview [lookup output too large]" }], details: { ok: true } });
+    // The tool-output route returns the whole text in the result's own shape.
+    expect(fullToolResult(result)).toEqual({ content: [{ type: "text", text: full }], details: { ok: true } });
+    expect(fullToolResult({ content: [{ type: "text", text: "small" }] })).toEqual({ content: [{ type: "text", text: "small" }] });
   });
 });

@@ -113,6 +113,37 @@ describe("thread source citations", () => {
     }
   });
 
+  it("keeps a capped result's whole text out of the live event and names its stored entry", async () => {
+    const faux = registerFauxProvider({ provider: "live-capped-failure" });
+    const whole = "x".repeat(120_000);
+    const failing = defineTool({
+      name: "large_failure", description: "Fail with a long log", intent: "exempt", parameters: Type.Object({}),
+      execute: async () => ({ text: whole, ok: false }),
+    });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall(failing.name, {}, { id: "large-failure" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("The action failed."),
+    ]);
+    const { engine, events } = setup();
+    const session = await engine.createSession({ userId: "alice", orgId: "org", workspace: "/", sandbox: {}, model: faux.getModel(), builtinTools: [failing] });
+    try {
+      const receipt = await session.prompt("Run the action");
+      await waitForIdle(events, receipt.queueItemId);
+      const live = events.map(event => event.event).find(event => event.type === "tool_end");
+      const holder = (await session.readEntries("web:default"))
+        .find(entry => entry.type === "message" && (entry.parts ?? []).some(part => part.type === "tool_call"));
+      const call = holder?.type === "message" ? holder.parts?.find(part => part.type === "tool_call") : undefined;
+      expect(call?.type === "tool_call" && call.result).toMatchObject({ details: { ok: false, fullText: whole } });
+      expect(live?.type === "tool_end" && live.resultTrimmed).toEqual({ chars: whole.length, entryId: holder?.id });
+      expect(live?.type === "tool_end" && live.resultData).toMatchObject({ details: { ok: false } });
+      expect(live?.type === "tool_end" && live.resultData).not.toHaveProperty("details.fullText");
+      expect(JSON.stringify(live).length).toBeLessThan(10_000);
+    } finally {
+      session.suspendTimers();
+      faux.unregister();
+    }
+  });
+
   it("keeps only citations backed by stored tool sources in settled text and broadcast parts", async () => {
     const faux = registerFauxProvider({ provider: "settled-source-citations" });
     let systemPrompt = "";
@@ -198,6 +229,44 @@ describe("thread source citations", () => {
         await waitForIdle(events, other.queueItemId);
         expect((await restored.readEntries("other")).find(entry => entry.type === "message" && entry.role === "assistant"))
           .toMatchObject({ content: "Another thread ." });
+      } finally { restored.suspendTimers(); }
+    } finally {
+      session.suspendTimers();
+      faux.unregister();
+    }
+  });
+
+  it("reads no whole thread to number or check sources once the thread stores its source number", async () => {
+    const faux = registerFauxProvider({ provider: "bounded-source-reads" });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("lookup", {}, { id: "lookup-first" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("First [s1]."),
+      fauxAssistantMessage([fauxToolCall("lookup", {}, { id: "lookup-second" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("Second [s2]."),
+    ]);
+    const { engine, providers, events } = setup();
+    const options = { userId: "alice", orgId: "org", workspace: "/", sandbox: {}, model: faux.getModel(), builtinTools: [lookup] };
+    const session = await engine.createSession(options);
+    const wholeReads: string[] = [];
+    const getEntries = providers.store.getEntries.bind(providers.store);
+    providers.store.getEntries = async (sessionId, threadId, opts) => {
+      const bounded = opts?.queueItemId !== undefined || opts?.limit !== undefined || opts?.headLimit !== undefined
+        || opts?.entryIds !== undefined || opts?.entryTypes !== undefined;
+      if (!bounded) wholeReads.push(threadId);
+      return getEntries(sessionId, threadId, opts);
+    };
+    try {
+      const first = await session.prompt("Read the note");
+      await waitForIdle(events, first.queueItemId);
+      session.suspendTimers();
+      const restored = await new Engine({ providers }).restoreSession({ sessionId: session.id, options });
+      try {
+        wholeReads.length = 0;
+        const next = await restored.prompt("Read it again");
+        await waitForIdle(events, next.queueItemId);
+        expect(wholeReads).toEqual([]);
+        expect((await restored.readEntries("web:default")).find(entry => entry.type === "message" && entry.role === "assistant"
+          && entry.queueItemId === next.queueItemId && entry.stopReason === "end_turn")).toMatchObject({ content: "Second [s2]." });
       } finally { restored.suspendTimers(); }
     } finally {
       session.suspendTimers();

@@ -530,7 +530,7 @@ credentialsRouter.put("/:service", async (c) => {
   const bodyMetadata = body.metadata;
   if (bodyMetadata && typeof bodyMetadata === "object" && !Array.isArray(bodyMetadata) &&
       ISSUING_CLIENT_METADATA_KEYS.some((k) => k in bodyMetadata)) {
-    return c.json({ error: `metadata.${ISSUING_CLIENT_METADATA_KEYS.join(" and metadata.")} are reserved. Valet sets them when an OAuth connect completes.` }, 400);
+    return c.json({ error: `${ISSUING_CLIENT_METADATA_KEYS.map((k) => `metadata.${k}`).join(", ")} are reserved. Valet sets them when an OAuth connect completes.` }, 400);
   }
   // `metadata.githubId` links a personal GitHub App installation to the
   // member who owns that GitHub account (`services/github-app.ts`). Only the

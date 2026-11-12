@@ -9,7 +9,8 @@ import { mergeAppearance, readAppearance, type Appearance } from "@valet/shared"
 import { classifyProviderFailure, isNonRetryableProviderFailure, isUsageLimitFailure, isRateLimitedProviderFailure } from "@valet/shared";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { uid } from "./ids.js";
-import { capToolResult, TOOL_RESULT_MAX_CHARS, TOOL_RESULT_MAX_TOKENS } from "./tool-result-cap.js";
+import { readThreadOutline } from "./thread-outline.js";
+import { capToolError, capToolResult, TOOL_RESULT_MAX_CHARS, TOOL_RESULT_MAX_TOKENS } from "./tool-result-cap.js";
 import type { AgentContext, AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import { isContextOverflow } from "@earendil-works/pi-ai/compat";
 // Root import (not /compat): the transient classifier lives in pi-ai's
@@ -22,7 +23,7 @@ import { NativeImageBridge, NATIVE_IMAGE_RESULT_TOOL, NATIVE_IMAGE_PLUGIN_ACTION
 import { isToolDiscoveryApproval, recordHostedActionInvocation, resolveUngatedAction, type HostedActionGrant } from "./plugin-catalog.js";
 import { bundledModel } from "./model-catalog.js";
 import { appendRuntimeModelContext, entryMessageTime, messageTimeLine, threadStartedSection, type MessageTime } from "./model-context.js";
-import { recordCacheBreak } from "./metrics.js";
+import { recordCacheBreak, recordToolResultCapped } from "./metrics.js";
 import type { Api, AssistantMessage, ImageContent, JsonObject, Message, Model, TextContent, ThinkingContent, ToolCall } from "@earendil-works/pi-ai/compat";
 import type { AssistantMessageEventStream, SimpleStreamOptions, TranscriptContext } from "@earendil-works/pi-ai";
 
@@ -152,11 +153,13 @@ import {
   summarizeOnPrefix,
   SummarizeOverflowError,
   compactionBudget,
+  tailBudget,
   idleCompactionDelayMs,
   usableTokens,
   walkTranscriptDag,
   renderBranchNote,
   selectSummaryCheckpointTail,
+  selectSummaryCheckpointHead,
   type PruneResult,
   type SummarizeResult,
 } from "./compaction.js";
@@ -206,7 +209,7 @@ import type {
   ToolResult,
   WriteFence,
 } from "./types.js";
-import { ENTRY_USER_TIMEZONE_KEY, FRESH_CONTEXT_KEY, MESSAGE_TURN_ERROR_KEY, MID_TURN_DELIVERY_KEY, RECORD_ONLY_KEY, THREAD_USER_TIMEZONE_KEY } from "./types.js";
+import { ENTRY_USER_TIMEZONE_KEY, FRESH_CONTEXT_KEY, MESSAGE_TURN_ERROR_KEY, MID_TURN_DELIVERY_KEY, PRUNED_AT_KEY, RECORD_ONLY_KEY, THREAD_USER_TIMEZONE_KEY } from "./types.js";
 import { correctImageBlocks } from "./image-media-type.js";
 import { reportError } from "./error-report.js";
 
@@ -421,12 +424,15 @@ export function buildSpilledInputMarker(args: {
 
 /**
  * The summarize call itself can overflow the summarizer model. Each retry
- * drops the oldest half of the head entries fed to the summarizer (the
- * CompactionEntry still covers the full head — the previous summary anchors
- * what the truncated input loses). Bounded like Claude Code's
- * prompt-too-long retry (TKAI-306).
+ * keeps the older half of the window fed to the summarizer, and the
+ * checkpoint covers only what the summarizer read. Bounded like Claude
+ * Code's prompt-too-long retry (TKAI-306).
  */
 const MAX_SUMMARIZE_OVERFLOW_RETRIES = 3;
+/** Heading of the fixed note that covers history no fresh-context run reads. */
+const UNREAD_HISTORY_HEADING = "## Earlier automated runs";
+/** The most bounded summarizer windows one pass runs over a large head. */
+const MAX_SUMMARY_WINDOWS = 4;
 const SUMMARY_CHECKPOINT_TAIL_MAX_TOKENS = 8_000;
 const SUMMARY_INPUT_MAX_TOKENS = 64_000;
 
@@ -546,6 +552,8 @@ export class Thread {
   private collectTimer: ReturnType<typeof setTimeout> | null = null;
   /** Idle compaction for an interactive thread over the compaction budget (`armIdleCompaction`). */
   private idleCompactionTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The last pass ended after its prune, with no summary (`compactThreadInner`). */
+  private prunedToFit = false;
   /** Guards against the in-process timer and the session sweep both flushing the same window. */
   private flushingCollect = false;
   /** Serializes overheard-digest scans; concurrent admissions coalesce one at a time (TKAI-297). */
@@ -1837,9 +1845,9 @@ export class Thread {
     const replayedResult = await this.persistReplayedToolResult(suspended.queueItemId, suspended.toolCallId, toolResult);
     await this.fencedEmit({
       type: "tool_end", threadId: this.id, tool: suspended.toolName, callId: suspended.toolCallId,
-      result: toolResultText(replayedResult), isError: false,
-      ...(toolResultNeedsData(replayedResult) ? { resultData: replayedResult } : {}),
-      ...toolOutcome(replayedResult),
+      result: toolResultText(replayedResult.result), isError: false,
+      ...liveToolResult(replayedResult.result, replayedResult.result, replayedResult.entryId),
+      ...toolOutcome(replayedResult.result),
     }, { queueItemId: suspended.queueItemId });
     await this.session.providers.store.clearSuspendedTurn(this.session.id, this.id, this.fence);
     this.blockedGateId = undefined;
@@ -1939,7 +1947,7 @@ export class Thread {
     queueItemId: string,
     toolCallId: string,
     result: { content?: unknown; details?: unknown },
-  ): Promise<Record<string, unknown>> {
+  ): Promise<{ result: Record<string, unknown>; entryId?: string }> {
     const store = this.session.providers.store;
     const safeResult = this.session.providers.sanitizeToolOutput?.(this.session.id, result) ?? result;
     const structured = safeResult && typeof safeResult === "object" ? { ...safeResult } : {};
@@ -1957,10 +1965,10 @@ export class Thread {
         await this.fencedWrite(() =>
           store.updateEntry(this.session.id, this.id, e, this.fence),
         );
-        return persistedResult;
+        return { result: persistedResult, entryId: e.id };
       }
     }
-    return persistedResult;
+    return { result: persistedResult };
   }
 
   /** Only a durable, registered approval is transferable. Abort the old drive without settling or withdrawing it. */
@@ -2475,7 +2483,9 @@ export class Thread {
     let appended = false;
     const append = this.entryAppendTail.then(async () => {
       const store = this.session.providers.store;
-      const snapshot = await store.getThreadSnapshot(this.session.id, this.id);
+      // Only links are read here. A payload read of a long thread can hold
+      // hundreds of megabytes while compaction holds its own copy.
+      const snapshot = await readThreadOutline(store, this.session.id, this.id);
       if (!snapshot) return;
       const leaf = snapshot.thread.activeLeafEntryId ?? null;
       if (anchorId !== undefined && !walkTranscriptDag(snapshot.entries, leaf ?? undefined).some((e) => e.id === anchorId)) return;
@@ -3179,15 +3189,6 @@ export class Thread {
     this.rehydrateTranscript(snapshot.entries.map((entry) => entry.id === note.id ? updated : entry));
   }
 
-  /** Every entry, payloads included. Compaction prunes, selects its cut point
-   * and rebuilds from all path entries, so it must not see stubs. */
-  private async fullSnapshot(): Promise<{ thread: ThreadData; entries: SessionEntry[] }> {
-    const snapshot = await this.session.providers.store.getThreadSnapshot(this.session.id, this.id);
-    if (!snapshot) throw new Error(`thread not found: ${this.id}`);
-    this.activeLeafEntryId = snapshot.thread.activeLeafEntryId;
-    return snapshot;
-  }
-
   private async transcriptSnapshot(keepQueueItemId?: string): Promise<{ thread: ThreadData; entries: SessionEntry[] }> {
     const store = this.session.providers.store;
     const snapshot = store.getTranscriptSnapshot
@@ -3228,10 +3229,17 @@ export class Thread {
    * history: the next turn, gate reconcile or compaction reloads it through
    * `ensureTranscript`, as after a restart. Without this, a cached assistant
    * session holds every transcript it loaded until the process exits.
+   *
+   * A thread with an armed idle compaction keeps its transcript until that
+   * pass runs. The pass needs the live context: it summarizes on the
+   * thread's cached prefix (`prefixForSummary`) and measures from the last
+   * response's usage. After a reload it would pay full input price for a
+   * bounded summary instead.
    */
   releaseIdleTranscript(idleSince: number): boolean {
     if (this.transcriptPending || this.transcriptLoad || this.runningItem || this.kicking
-      || this.backgroundDrives > 0 || this.collectTimer || this.transcriptUsedAt > idleSince) return false;
+      || this.backgroundDrives > 0 || this.collectTimer || this.idleCompactionTimer
+      || this.transcriptUsedAt > idleSince) return false;
     this.replaceAgentMessages([]);
     this.transcriptPending = true;
     // Mid-turn ids only matter while their turn runs.
@@ -3252,12 +3260,14 @@ export class Thread {
    */
   rehydrateTranscript(entries: SessionEntry[]): void {
     this.replaceActiveSkillInvocations(entries);
+    const source = this.taskSourceFor();
     this.replaceAgentMessages(entriesToAgentMessages(entries, this.effectiveModelLenient(), {
       attributeAuthors: this.attributeAuthors,
       threadKey: this.key,
       activeLeafEntryId: this.activeLeafEntryId,
-      taskSourceQueueItemId: this.taskSourceFor(),
-    }), this.taskSourceFor());
+      taskSourceQueueItemId: source,
+      turnCallsQueueItemId: this.runningItem?.id,
+    }), this.retainedSourceFor(entries, source));
     // Arm the pre-turn proactive check (spec decision 5) so the first
     // post-restart turn is protected. The trigger estimates the rehydrated
     // transcript directly (TKAI-305), so no usage seeding is needed and a
@@ -4469,7 +4479,8 @@ export class Thread {
       this.replaceAgentMessages(entriesToAgentMessages(snapshot.entries, this.effectiveModelLenient(), {
         attributeAuthors: this.attributeAuthors, threadKey: this.key,
         activeLeafEntryId: this.activeLeafEntryId, taskSourceQueueItemId: taskSource,
-      }), taskSource);
+        turnCallsQueueItemId: item.id,
+      }), this.retainedSourceFor(snapshot.entries, taskSource, item));
     }
     const store = this.session.providers.store;
     const attemptId = uid("att");
@@ -4672,8 +4683,9 @@ export class Thread {
           threadKey: this.key,
           activeLeafEntryId: this.activeLeafEntryId,
           taskSourceQueueItemId: this.taskSourceFor(),
+          turnCallsQueueItemId: this.runningItem?.id,
         },
-      ), this.taskSourceFor());
+      ), this.retainedSourceFor(entries, this.taskSourceFor()));
       this.transcriptPending = false;
       this.agent.state.tools = this.buildTools();
 
@@ -4993,7 +5005,7 @@ export class Thread {
     const dir = `${root}/.valet/large-inputs`;
     const path = `${dir}/${entryId}.txt`;
     try {
-      await this.session.sandbox.mkdir(dir);
+      await this.ensureEngineDir(dir);
       await this.session.sandbox.writeFile(path, content);
       return path;
     } catch (err) {
@@ -5184,7 +5196,8 @@ export class Thread {
     // Restore a compacted active task before appending its next message.
     // A repair can reference an older task without retention metadata.
     // Retire an injected contract before an unrelated submission runs.
-    const taskSource = this.taskSourceFor(item);
+    // An ordinary prompt is not appended yet, so only a contract applies.
+    const taskSource = this.taskContractFor(item);
     if (taskSource || this.retainedTaskSourceQueueItemId) {
       // Keep the task's covered prompt whole: the rebuild below restores it.
       const snapshot = await this.transcriptSnapshot(taskSource);
@@ -5327,14 +5340,52 @@ export class Thread {
     }];
   }
 
-  private taskSourceFor(item: QueueItem | null = this.runningItem): string | undefined {
+  /**
+   * The workflow task contract of a submission (`metadata.preserveTask`): its
+   * own prompt, or the original prompt a repair names. A pass after the turn
+   * keeps only a contract, and the turn start restores a covered contract.
+   */
+  private taskContractFor(item: QueueItem | null = this.runningItem): string | undefined {
     if (item?.metadata?.preserveTask !== true) return undefined;
     const source = item.metadata.taskSourceQueueItemId;
     return typeof source === "string" ? source : item.id;
   }
 
+  /** The running submission when it is a fresh-context turn (`FRESH_CONTEXT_KEY`). */
+  private freshContextItem(): QueueItem | undefined {
+    return this.runningItem?.metadata?.[FRESH_CONTEXT_KEY] === true ? this.runningItem : undefined;
+  }
+
+  /**
+   * The prompt a compaction keeps verbatim while `item`'s turn runs: the
+   * task contract, or else the submission's own prompt. A pass inside a turn
+   * can summarize the turn's own start. Without the prompt, the resumed turn
+   * knows its task only from the summary.
+   */
+  private taskSourceFor(item: QueueItem | null = this.runningItem): string | undefined {
+    return this.taskContractFor(item) ?? item?.id;
+  }
+
+  /**
+   * The task source to record as retained after a render: a contract, or an
+   * ordinary prompt that the render kept after a checkpoint. A recorded
+   * ordinary prompt is retired before the next submission, like a contract.
+   * Its turn may have stopped before an answer, and the note after it says
+   * the request is still in progress.
+   */
+  private retainedSourceFor(entries: readonly SessionEntry[], source: string | undefined, item: QueueItem | null = this.runningItem): string | undefined {
+    const contract = this.taskContractFor(item);
+    if (contract) return contract;
+    return source && retainsTask(entries, source, this.activeLeafEntryId) ? source : undefined;
+  }
+
   private replaceAgentMessages(messages: AgentMessage[], taskSourceQueueItemId?: string): void {
     this.retainedTaskSourceQueueItemId = taskSourceQueueItemId;
+    // New message objects no longer match the last request, so a summary
+    // cannot repeat it (`prefixForSummary`). Drop it: it holds that
+    // request's whole context, which a released transcript must not pin.
+    this.lastModelRequest = undefined;
+    this.lastModelResponse = undefined;
     const system = getCurrentSystemMessage(this.agent.state.messages);
     this.agent.state.messages = system ? [system, ...messages] : messages;
   }
@@ -5503,15 +5554,13 @@ export class Thread {
     await this.agent.waitForIdle();
 
     const last = this.agent.state.messages[this.agent.state.messages.length - 1];
-    if (
-      !this.overflowRetryInProgress &&
-      last &&
-      last.role === "assistant" &&
-      last.stopReason === "error" &&
+    if (reactiveRetryAllowed({
+      retryInProgress: this.overflowRetryInProgress,
+      compactionFailures: this.consecutiveCompactionFailures,
       // The turn's effective model, not the session default — a thread pinned
       // to a smaller-context model must detect ITS overflow (spec decision 4).
-      isContextOverflow(last, this.agent.state.model.contextWindow)
-    ) {
+      contextWindow: this.agent.state.model.contextWindow,
+    }, last)) {
       this.overflowRetryInProgress = true;
       try {
         // A failed reactive compaction must not fail the turn as
@@ -5520,7 +5569,7 @@ export class Thread {
         // response already carries the turn's honest error (TKAI-306).
         let outcome: CompactionOutcome;
         try {
-          outcome = await this.compactThread({ mode: "reactive" });
+          outcome = await this.compactThread({ mode: "reactive", turnInProgress: true });
         } catch (err) {
           this.emitError(
             "compaction_failed",
@@ -5725,7 +5774,9 @@ export class Thread {
   ): Promise<void> {
     // A budget pass runs after the turn finished its work, so it never
     // continues the turn. The next submission reads the compacted context.
-    const autoContinue = trigger === "budget" ? false : continueTurn;
+    // Nor does a pass for a fresh-context turn: that pass covers history the
+    // turn never read, so the turn's own work did not run short.
+    const autoContinue = trigger === "budget" || this.freshContextItem() ? false : continueTurn;
     let outcome: CompactionOutcome;
     try {
       outcome = await this.compactThread({
@@ -5759,7 +5810,9 @@ export class Thread {
       // context_overflow_unrecoverable, or compaction_coverage_gap.
       this.bumpCompactionFailureBreaker();
     } else if (
-      outcome === "compacted" &&
+      // A pass whose prune made room continues an overflowing turn, as a
+      // summary does.
+      (outcome === "compacted" || (outcome === "pruned" && this.prunedToFit)) &&
       autoContinue !== false &&
       this.session.options.compaction?.autoContinue !== false
     ) {
@@ -5829,10 +5882,14 @@ export class Thread {
     // appended since are estimated with the cut-point budget's char ruler.
     // This runs before the turn's finally-block restores the baseline
     // prompt, so the fallback estimate sees the overlays the turn used.
-    const estimated = estimateLiveContextTokens(
-      this.modelSystemPrompt(this.agent.state.systemPrompt, this.agent.state.model),
-      this.agent.state.messages.filter(isLlmMessage),
-    );
+    // A fresh-context turn's last usage counts only its own slice, so it
+    // cannot anchor the whole live transcript. Measure all of it: this is
+    // what bounds a thread whose runs never read their history.
+    const prompt = this.modelSystemPrompt(this.agent.state.systemPrompt, this.agent.state.model);
+    const live = this.agent.state.messages.filter(isLlmMessage);
+    const estimated = this.freshContextItem()
+      ? estimateContextTokens(prompt, live)
+      : estimateLiveContextTokens(prompt, live);
     if (estimated >= usable) return "overflow";
     if (estimated >= compactionBudget(this.agent.state.model, cfg)) return "budget";
     return undefined;
@@ -5942,7 +5999,12 @@ export class Thread {
     if (limit === 0) return undefined;
     let messages: readonly AgentMessage[] = this.agent.state.messages;
     if (this.transcriptPending) {
-      const snapshot = await this.session.providers.store.getThreadSnapshot(this.session.id, this.id);
+      // The transcript read, as a turn hydrates it: covered entries come back
+      // as stubs, which `entriesToAgentMessages` skips anyway.
+      const store = this.session.providers.store;
+      const snapshot = store.getTranscriptSnapshot
+        ? await store.getTranscriptSnapshot(this.session.id, this.id)
+        : await store.getThreadSnapshot(this.session.id, this.id);
       messages = snapshot
         ? entriesToAgentMessages(snapshot.entries, model, {
             attributeAuthors: this.attributeAuthors,
@@ -6010,7 +6072,7 @@ export class Thread {
         }
         let outcome: CompactionOutcome;
         try {
-          outcome = await this.compactThread({ mode: "proactive", autoContinue: false, signal });
+          outcome = await this.compactThread({ mode: "proactive", autoContinue: false, signal, turnInProgress: true });
         } catch (error) {
           if (signal?.aborted || !(await this.canRunCurrentSubmission())) throw error;
           this.turnCompactionBlocked = true;
@@ -6036,9 +6098,52 @@ export class Thread {
   }
 
   /**
+   * A manual `/compact`. It waits until no turn runs and no other drive holds
+   * the thread, then holds the drive lock (`kicking`) for the pass, as the
+   * idle pass does. A pass during a streaming turn replaced
+   * `agent.state.messages` while the agent loop kept its own copy, so the
+   * turn wrote on top of a context the pass had already replaced. A message
+   * that arrives during the pass runs after it.
+   */
+  async compactBetweenTurns(opts: { instructions?: string } = {}): Promise<CompactionOutcome> {
+    while (this.kicking || this.runningItem) {
+      await this.kickTail.catch(() => undefined);
+      // A gate reconcile can hold the turn outside the drive loop.
+      if (this.kicking || this.runningItem) {
+        await new Promise<void>((resolve) => { setTimeout(resolve, 100).unref?.(); });
+      }
+    }
+    // The session can stop while the pass waits: a destroy or a reclaim by
+    // another owner fences it, and a read-only session must not pay for a
+    // summary. A thread abort alone does not stop /compact on an idle thread.
+    if (this.session.isExecutionFenced || this.session.options.readOnlyReason) {
+      throw new Error("The thread stopped before compaction could run. Run /compact again.");
+    }
+    this.kicking = true;
+    const pass = (async () => {
+      try {
+        // The turn cleared its key when it ended. Resolve it again, as the
+        // idle pass does, so the summarizer does not run on ambient credentials.
+        const turnModel = await this.resolveIdleCompactionModel();
+        return await this.compactThread({
+          mode: "manual",
+          ...(opts.instructions ? { instructions: opts.instructions } : {}),
+          ...(turnModel ? { turnModel } : {}),
+        });
+      } finally {
+        this.kicking = false;
+        void this.kick();
+      }
+    })();
+    this.kickTail = pass.then(() => undefined, () => undefined);
+    return pass;
+  }
+
+  /**
    * Run a compaction pass: prune cheap stale tool outputs, then if the
-   * result still doesn't fit, summarize older messages into a
-   * CompactionEntry. Persist DAG updates and rewrite agent.state.messages
+   * result still doesn't fit the compaction budget, summarize older
+   * messages into a CompactionEntry. Manual and reactive passes always
+   * summarize after the prune. Persist DAG updates and rewrite agent.state.messages
    * so the next turn sees a smaller context.
    */
   async compactThread(opts: {
@@ -6057,6 +6162,14 @@ export class Thread {
      * pass). Inside a turn the pass uses the turn's model and key.
      */
     turnModel?: ResolvedModel;
+    /**
+     * The turn that owns this pass keeps running after it: the pass runs
+     * before a model call (context preparation) or before the overflow
+     * retry. The pass then keeps the running submission's prompt and
+     * records the calls it covered from that turn (`TURN_CALLS_KEY`), and
+     * the summarizer prompt says the turn is not over.
+     */
+    turnInProgress?: true;
   }): Promise<CompactionOutcome> {
     const cfg = this.session.options.compaction;
     if (cfg?.enabled === false) return "noop";
@@ -6083,6 +6196,7 @@ export class Thread {
       signal?: AbortSignal;
       autoContinue?: false;
       turnModel?: ResolvedModel;
+      turnInProgress?: true;
     },
     span?: Span,
   ): Promise<CompactionOutcome> {
@@ -6101,11 +6215,45 @@ export class Thread {
       : this.effectiveModelLenient());
     const model = cfg?.summarizerModel ?? effectiveModel;
 
-    // Load the full DAG, then follow the active leaf to the root. Other
-    // branches stay durable but must not enter this compaction pass.
-    const snapshot = await this.fullSnapshot();
+    // Read the transcript, then follow the active leaf to the root. Other
+    // branches stay durable but must not enter this compaction pass. An
+    // entry the newest checkpoint covers comes back as a stub: this pass
+    // carries it forward by id and never reads its payload, so the read
+    // grows with the live context and not with the thread's age. The active
+    // task's prompt stays whole because the pass may retain it. A pass inside
+    // a turn keeps the running submission's prompt; a pass after the turn
+    // keeps only a workflow contract, because that turn's work is done.
+    const taskSource = opts.turnInProgress ? this.taskSourceFor() : this.taskContractFor();
+    const snapshot = await this.transcriptSnapshot(taskSource);
     const leafAtSnapshot = this.activeLeafEntryId;
     const entries = walkTranscriptDag(snapshot.entries, leafAtSnapshot);
+    const supersededCheckpoint = findMostRecentCompaction(entries);
+    const carriedCoverage = new Set(supersededCheckpoint?.coveredEntryIds ?? []);
+
+    // Step 0: a fresh-context turn reads none of the history before its
+    // prompt, and neither do the runs after it. An LLM summary of that
+    // history buys nothing, so a checkpoint covers it with a fixed note. A
+    // pass inside the turn then compacts the turn's own messages, which the
+    // turn does read. A manual pass summarizes, because the person asked.
+    const freshItem = opts.mode === "manual" ? undefined : this.freshContextItem();
+    if (freshItem) {
+      const prompt = entries.findIndex((e) => e.type === "message" && e.role === "user" && e.queueItemId === freshItem.id);
+      const unread = entries.slice(0, prompt < 0 ? entries.length : prompt)
+        .filter((e) => e.type === "message" && !carriedCoverage.has(e.id));
+      // Only history made of automated deliveries (signals). A person who
+      // wrote in this thread gets a real summary: a later turn may read it.
+      const automatedOnly = unread.every((e) => e.type !== "message" || e.role !== "user" || e.signal !== undefined);
+      if (unread.length > 0 && automatedOnly) {
+        const covered = await this.coverUnreadHistory(leafAtSnapshot, supersededCheckpoint, unread,
+          opts.turnInProgress ? this.taskSourceFor() : this.taskContractFor(), opts.turnInProgress === true, span);
+        if (!covered) return "noop";
+        if (!opts.turnInProgress) return "compacted";
+        // The note already shrank the context, so any outcome of the second
+        // pass still counts as progress. The caller measures again.
+        const next = await this.compactThreadInner(opts, span);
+        return next === "noop" || next === "pruned" || next === "insufficient" || next === "coverage_gap" ? "compacted" : next;
+      }
+    }
 
     // Step 1: pruning pass (cheap, no LLM).
     const protectedTools = new Set<string>();
@@ -6116,7 +6264,15 @@ export class Thread {
     // downstream size math (the fail-safe below) sees post-prune tokens, not
     // the un-mutated `entries`.
     let effectiveEntries: readonly SessionEntry[] = entries;
-    const prunePlan = planPrune({ entries, cfg, protectedTools });
+    // Only live entries are pruned. A covered entry never reaches the model,
+    // and its stub must never be written back over the stored payload.
+    const prunePlan = planPrune({ entries: entries.filter((e) => !carriedCoverage.has(e.id)), cfg, protectedTools });
+    this.prunedToFit = false;
+    const promptBeforePrune = this.modelSystemPrompt(this.agent.state.systemPrompt, effectiveModel);
+    // Only a proactive pass that commits a prune measures again below.
+    const anchoredBeforePrune = opts.mode === "proactive" && prunePlan.willCommit
+      ? estimateLiveContextTokens(promptBeforePrune, this.agent.state.messages.filter(isLlmMessage))
+      : 0;
     if (prunePlan.willCommit) {
       const mutable = entries.map((e) => structuredClone(e)) as SessionEntry[];
       applyPrune(mutable, prunePlan);
@@ -6125,29 +6281,53 @@ export class Thread {
       // reactive-overflow path in runAgent), so `this.fence` names the current
       // attempt — thread it through so a superseding successor's fence still
       // wins over these writes.
+      const prunedAt = Date.now();
       for (const entry of mutable) {
         if (!prunePlan.toElide.has(entry.id)) continue;
+        entry.metadata = { ...entry.metadata, [PRUNED_AT_KEY]: prunedAt };
         await store.updateEntry(session.id, this.id, entry, this.fence);
       }
       // Apply to the live agent transcript:
       this.applyElisionsToAgentMessages(prunePlan);
       effectiveEntries = mutable;
+      // Measure again: the prune alone can bring the context low enough,
+      // and then a summary costs a model call for nothing. Claude Code
+      // clears old tool output before it pays for a summary. A manual pass
+      // still summarizes, because the person asked for it. A reactive pass
+      // does too: the provider just rejected a request this estimate let
+      // through.
+      if (opts.mode === "proactive") {
+        const live = this.agent.state.messages.filter(isLlmMessage);
+        // Two measures, the larger wins. The usage anchor from before the
+        // prune, less what the prune freed, keeps the provider's real count.
+        // Elision cleared the anchors after the first elided output, so the
+        // second measure is the character ruler with tool definitions.
+        const afterPrune = Math.max(
+          anchoredBeforePrune - prunePlan.savedTokens,
+          estimateContextTokens(promptBeforePrune, live) + this.toolDefinitionTokens(),
+        );
+        // Stop only with the headroom a summary leaves (the tail budget),
+        // or the next turn crosses the budget again.
+        const budget = compactionBudget(effectiveModel, cfg);
+        const target = budget - tailBudget(budget, cfg);
+        span?.setAttributes({ "valet.compaction.tokens_after_prune": afterPrune, "valet.compaction.prune_target_tokens": target });
+        if (afterPrune < target) {
+          this.prunedToFit = true;
+          return "pruned";
+        }
+      }
     }
 
     // Step 2: cut-point selection. The active task is retained independently
     // of the summary, so reserve it before choosing the recent tail.
-    const taskSource = this.taskSourceFor();
     const retainedTask = taskSource ? effectiveEntries.find(entry => entry.type === "message"
       && entry.role === "user" && entry.queueItemId === taskSource) : undefined;
     const retainedMessages = retainedTask ? entriesToAgentMessages([retainedTask], effectiveModel, {
       attributeAuthors: this.attributeAuthors,
     }).filter((message): message is Message => message.role === "user" || message.role === "assistant" || message.role === "toolResult") : [];
     const retainedTokens = estimateContextTokens(undefined, retainedMessages);
-    const toolTokens = estimateTokens(JSON.stringify(this.buildTools().map(tool => ({
-      name: tool.name, description: tool.description, parameters: tool.parameters,
-    }))));
-    const fixedPrompt = this.modelSystemPrompt(this.agent.state.systemPrompt, effectiveModel);
-    const supersededCheckpoint = findMostRecentCompaction(entries);
+    const toolTokens = this.toolDefinitionTokens();
+    const fixedPrompt = promptBeforePrune;
     const selectTail = (checkpoint: CompactionEntry | undefined) => {
       const reservedMessages = retainedTask ? entriesToAgentMessages([
         retainedTask, ...(checkpoint ? [checkpoint] : []),
@@ -6158,6 +6338,16 @@ export class Thread {
           tokenize: (entry: SessionEntry) => entry.id === retainedTask.id || entry.type === "compaction" ? 0 : estimateEntryTokens(entry) } : {}),
       });
     };
+    // A retained task reserves the fixed instructions and tool definitions.
+    // When those alone fill the usable context, no summary can make the
+    // request fit, so the pass must not pay for one.
+    const usableForTask = usableTokens(effectiveModel, cfg);
+    if (retainedTask && usableForTask > 0 && estimateContextTokens(fixedPrompt, []) + toolTokens >= usableForTask) {
+      span?.setAttribute("valet.compaction.insufficient_reason", "fixed_context_too_large");
+      this.emitError("context_overflow_unrecoverable",
+        "The instructions and tool definitions alone fill the selected model's context. Choose a model with a larger context or turn off tools.");
+      return "insufficient";
+    }
     let cut = selectTail(supersededCheckpoint);
     if (cut.cutIndex === 0 || cut.cutIndex === entries.length) {
       // Nothing to compact: either the tail already fits everything, or
@@ -6202,15 +6392,14 @@ export class Thread {
 
     // A checkpoint covers what its summary describes, and no more. The
     // summarizer input is a budgeted window, so a head bigger than that
-    // budget is summarized across several passes: this pass takes the newest
-    // part the budget holds, and the older part stays in live context for a
-    // later pass to take (TKAI-461).
+    // budget is summarized in windows, oldest first. A head bigger than the
+    // windows of one pass keeps its newest part in live context for a later
+    // pass to take (TKAI-461).
     //
     // Entries the superseded checkpoint already covered stay covered. Their
     // content reaches this summary through `previousSummary`, and
     // `entriesToAgentMessages` reads only the NEWEST checkpoint, so leaving
     // them out would put them back into the context an earlier pass removed.
-    const carriedCoverage = new Set(supersededCheckpoint?.coveredEntryIds ?? []);
     const pendingHead = head.filter((e) => !carriedCoverage.has(e.id));
     if (!pendingHead.some((e) => e.type === "message")) {
       // Nothing left to reclaim: the checkpoint this pass would supersede
@@ -6269,23 +6458,21 @@ export class Thread {
       // leaves the head unread, and a window over already-covered entries
       // spends the budget on history `previousSummary` already carries
       // (TKAI-461).
-      let headForSummary = selectSummaryCheckpointTail(pendingHead, summaryInputBudget, {
-        sizeOf: sizeForSummary,
-      });
+      // The bounded summarizer reads the pending head oldest first, one
+      // window at a time (`selectSummaryCheckpointHead`). A window that
+      // took the newest part instead left older raw entries after a
+      // summary of later events.
+      let headForSummary = selectSummaryCheckpointHead(pendingHead, summaryInputBudget, { sizeOf: sizeForSummary });
       // Recent tail evidence anchors the recovery checkpoint in the current
-      // task. It is optional, so it takes the budget the head leaves, and it
-      // is trimmed to what fits rather than dropped whole. A newest entry
+      // task. It is optional, so it takes the budget the window leaves, and
+      // it is trimmed to what fits rather than dropped whole. A newest entry
       // that alone exceeds the evidence budget leaves no evidence. The tail
       // stays verbatim in live context either way.
-      let tailEvidence = selectSummaryCheckpointTail(
+      const tailEvidenceFor = (window: readonly SessionEntry[]) => selectSummaryCheckpointTail(
         effectiveEntries.slice(cut.cutIndex),
         Math.min(
           SUMMARY_CHECKPOINT_TAIL_MAX_TOKENS,
-          Math.max(
-            summaryInputBudget -
-              headForSummary.reduce((total, e) => total + sizeForSummary(e), 0),
-            0,
-          ),
+          Math.max(summaryInputBudget - window.reduce((total, e) => total + sizeForSummary(e), 0), 0),
         ),
         { sizeOf: sizeForSummary, keepNewest: false },
       );
@@ -6299,9 +6486,7 @@ export class Thread {
       // This guard handles the pass that can summarize nothing: the pending
       // head carries no text the summarizer reads, so any checkpoint would
       // describe an empty transcript. It runs before the summarizer call, so
-      // such a pass costs nothing. A pending head that is only PARTLY
-      // readable is not this case. The checkpoint below claims the window
-      // and no more, so the rest keeps its place in live context.
+      // such a pass costs nothing.
       if (!coversHead(headForSummary)) {
         span?.setAttributes({
           "valet.compaction.insufficient_reason": "coverage_gap",
@@ -6329,16 +6514,18 @@ export class Thread {
             messages: prefix.messages,
             hasPreviousSummary: previousSummary !== undefined,
             instructions: opts.instructions,
+            turnInProgress: opts.turnInProgress === true,
             send: async (messages) => {
               const stream = await this.streamModel(prefix.model, { ...prefix.context, messages }, {
                 ...prefix.options,
+                // The idle pass resolved its key again; the turn's key can be stale.
+                ...(opts.turnModel ? { apiKey: opts.turnModel.apiKey } : {}),
                 ...(opts.signal ? { signal: opts.signal } : { signal: undefined }),
               });
               return stream.result();
             },
           });
           headForSummary = [...pendingHead];
-          tailEvidence = [];
           span?.setAttributes({
             "valet.compaction.summary_source": "cached_prefix",
             "valet.compaction.summary_input_tokens": summaryResult.inputTokens,
@@ -6353,53 +6540,83 @@ export class Thread {
           console.warn(`[engine] cached-prefix summary failed, using the bounded summarizer session=${session.id} thread=${this.id}: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
-      for (let attempt = 0; summaryResult === undefined; attempt++) {
-        try {
-          summaryResult = await summarize({
-            headEntries: [...headForSummary, ...tailEvidence],
-            model,
-            toolOutputMaxChars: cfg?.toolOutputMaxChars,
-            attributeAuthors: this.attributeAuthors,
-            previousSummary,
-            instructions: opts.instructions,
-            signal: opts.signal,
-            // Reactive compaction fires WITHIN a claimed turn (and proactive
-            // just after runAgent, still before the turn's finally clears it),
-            // so `turnApiKey` is live here. Without this, a BYO-key session
-            // whose only key comes from the host `resolveModel` seam would fail
-            // the summarizer completion on first context overflow. Undefined
-            // when no resolver is wired (env-fallback path) — behavior unchanged.
-            // The idle pass runs after that finally and passes its own key.
-            apiKey: opts.turnModel ? opts.turnModel.apiKey : this.turnApiKey,
-            fetch: this.session.options.modelFetch?.(model),
-          });
-          break;
-        } catch (err) {
-          if (!(err instanceof SummarizeOverflowError)) throw err;
-          if (attempt + 1 >= MAX_SUMMARIZE_OVERFLOW_RETRIES) throw err;
-          // Shrink in an order that keeps head coverage: the optional tail
-          // evidence first, then the oldest half of the head. No
-          // user-message alignment: `summarize` prepends its own preface, so
-          // an assistant-first slice is a legal payload. Aligning forward to
-          // the next user entry instead threw away context the budget could
-          // still hold, and a slice with no user entry at all left an input
-          // that providers rejected with a plain 400 that aborted this loop
-          // (TKAI-461).
-          if (tailEvidence.length > 0) {
-            tailEvidence = [];
-            continue;
+      if (summaryResult === undefined) {
+        // Each window's summary carries the earlier windows forward as the
+        // previous summary, so one checkpoint can cover several windows in
+        // order. Up to MAX_SUMMARY_WINDOWS run per pass; a head larger than
+        // that keeps its newest part live for the next pass.
+        const summarizedWindows: SessionEntry[] = [];
+        let carried = previousSummary;
+        let window = headForSummary;
+        let inputTokens = 0;
+        let outputTokens = 0;
+        let cacheReadTokens = 0;
+        for (let windowIndex = 0; ; windowIndex++) {
+          // Tail evidence goes with the window that reaches the newest head entry.
+          let evidence = window.at(-1) === pendingHead.at(-1) ? tailEvidenceFor(window) : [];
+          let result: SummarizeResult | undefined;
+          let windowFailed = false;
+          for (let attempt = 0; result === undefined && !windowFailed; attempt++) {
+            try {
+              result = await summarize({
+                headEntries: [...window, ...evidence],
+                model,
+                toolOutputMaxChars: cfg?.toolOutputMaxChars,
+                attributeAuthors: this.attributeAuthors,
+                previousSummary: carried,
+                instructions: opts.instructions,
+                turnInProgress: opts.turnInProgress === true,
+                signal: opts.signal,
+                // Reactive compaction fires WITHIN a claimed turn (and proactive
+                // just after runAgent, still before the turn's finally clears it),
+                // so `turnApiKey` is live here. Without this, a BYO-key session
+                // whose only key comes from the host `resolveModel` seam would fail
+                // the summarizer completion on first context overflow. Undefined
+                // when no resolver is wired (env-fallback path) — behavior unchanged.
+                // The idle pass runs after that finally and passes its own key.
+                apiKey: opts.turnModel ? opts.turnModel.apiKey : this.turnApiKey,
+                fetch: this.session.options.modelFetch?.(model),
+              });
+            } catch (err) {
+              // A later window that fails keeps the windows already
+              // summarized: the checkpoint covers them, and the rest stays
+              // live for the next pass.
+              if (windowIndex > 0 && !opts.signal?.aborted) {
+                console.warn(`[engine] summary window ${windowIndex + 1} failed, keeping ${windowIndex} session=${session.id} thread=${this.id}: ${err instanceof Error ? err.message : String(err)}`);
+                windowFailed = true;
+                continue;
+              }
+              if (!(err instanceof SummarizeOverflowError)) throw err;
+              if (attempt + 1 >= MAX_SUMMARIZE_OVERFLOW_RETRIES) throw err;
+              // Shrink in an order that keeps head coverage: the optional tail
+              // evidence first, then the newest half of the window, which
+              // stays live for the next window or pass. No user-message
+              // alignment: `summarize` prepends its own preface, so an
+              // assistant-first slice is a legal payload (TKAI-461).
+              if (evidence.length > 0) {
+                evidence = [];
+                continue;
+              }
+              const truncated = window.slice(0, Math.ceil(window.length / 2));
+              // Coverage is checked BEFORE the retry. A slice that carries no
+              // head content would buy a summary this pass must then discard.
+              if (truncated.length === window.length || !coversHead(truncated)) throw err;
+              window = truncated;
+            }
           }
-          const truncated = headForSummary.slice(Math.floor(headForSummary.length / 2));
-          // Coverage is checked BEFORE the retry. A slice that carries no
-          // head content would buy a summary this pass must then discard,
-          // and both calls are billed. Neither shrink step can drop head
-          // coverage once this passes, so the checkpoint below needs no
-          // second check.
-          if (truncated.length === headForSummary.length || !coversHead(truncated)) {
-            throw err;
-          }
-          headForSummary = truncated;
+          if (windowFailed || result === undefined) break;
+          summarizedWindows.push(...window);
+          span?.setAttribute("valet.compaction.summary_windows", windowIndex + 1);
+          carried = result.summary;
+          inputTokens += result.inputTokens;
+          outputTokens += result.outputTokens;
+          cacheReadTokens += result.cacheReadTokens ?? 0;
+          summaryResult = { ...result, inputTokens, outputTokens, cacheReadTokens };
+          const rest = pendingHead.slice(pendingHead.indexOf(window.at(-1)!) + 1);
+          if (windowIndex + 1 >= MAX_SUMMARY_WINDOWS || !coversHead(rest)) break;
+          window = selectSummaryCheckpointHead(rest, summaryInputBudget, { sizeOf: sizeForSummary });
         }
+        headForSummary = summarizedWindows;
       }
 
       if (summaryResult === undefined) throw new Error("Compaction produced no summary. Run /compact to retry.");
@@ -6415,10 +6632,21 @@ export class Thread {
       //
       // `tokenCountBefore` and `fileContext` measure the same covered set, so
       // the compression ratio reports the history this checkpoint replaced
-      // and not the history it left behind.
+      // and not the history it left behind. The carried half is a stub here,
+      // so its share comes from the superseded checkpoint, which measured it
+      // when it was live, and this pass adds the window it summarized.
       const summarized = new Set(headForSummary.map((e) => e.id));
       const covered = new Set([...carriedCoverage, ...summarized]);
       const coveredEntries = entries.filter((e) => covered.has(e.id));
+      const summarizedEntries = entries.filter((e) => summarized.has(e.id));
+      // A pass inside a turn records the calls it covered from that turn,
+      // added to what an earlier pass in the same turn recorded.
+      const running = opts.turnInProgress ? this.runningItem : null;
+      const turnCalls = running
+        ? mergeTurnCalls(readTurnCalls(supersededCheckpoint?.metadata), running.id, turnCallLines(summarizedEntries, running.id, this.branchNoteTools().silent))
+        : undefined;
+      const summarizedFiles = extractFileContext(summarizedEntries);
+      const carriedFiles = supersededCheckpoint?.fileContext;
       const compactionEntry: CompactionEntry = {
         id: uid("c"),
         sessionId: session.id,
@@ -6427,9 +6655,13 @@ export class Thread {
         type: "compaction",
         summary: summaryResult.summary,
         coveredEntryIds: coveredEntries.map((e) => e.id),
-        tokenCountBefore: estimateTotalTokens(coveredEntries),
+        tokenCountBefore: (supersededCheckpoint?.tokenCountBefore ?? 0) + estimateTotalTokens(summarizedEntries),
         tokenCountAfter: estimateTokens(summaryResult.summary) + (retainedTask && covered.has(retainedTask.id) ? retainedTokens : 0),
-        fileContext: extractFileContext(coveredEntries),
+        fileContext: {
+          read: [...new Set([...(carriedFiles?.read ?? []), ...summarizedFiles.read])],
+          modified: [...new Set([...(carriedFiles?.modified ?? []), ...summarizedFiles.modified])],
+        },
+        ...(turnCalls ? { metadata: { [TURN_CALLS_KEY]: turnCalls } } : {}),
         createdAt: Date.now(),
       };
       if (retainedTask && usable > 0) {
@@ -6441,7 +6673,8 @@ export class Thread {
         const required = entriesToAgentMessages([
           ...(!tail.some(entry => entry.id === retainedTask.id) ? [retainedTask] : []),
           ...tail, compactionEntry,
-        ], effectiveModel, { attributeAuthors: this.attributeAuthors, threadKey: this.key, taskSourceQueueItemId: taskSource })
+        ], effectiveModel, { attributeAuthors: this.attributeAuthors, threadKey: this.key, taskSourceQueueItemId: taskSource,
+          ...(opts.turnInProgress ? { turnCallsQueueItemId: this.runningItem?.id } : {}) })
           .filter((message): message is Message => message.role === "user" || message.role === "assistant" || message.role === "toolResult");
         const requiredTokens = estimateContextTokens(fixedPrompt, required) + toolTokens;
         if (requiredTokens >= usable) {
@@ -6476,9 +6709,12 @@ export class Thread {
       // success proves the summarizer works again (manual /compact included).
       this.consecutiveCompactionFailures = 0;
 
-      // Step 5: rewrite agent.state.messages. The simplest and most
-      // correct path is to rebuild from the now-augmented DAG.
-      const updatedSnapshot = await this.fullSnapshot();
+      // Step 5: rewrite agent.state.messages from the now-augmented DAG.
+      // The new compaction covers the head, so the transcript read (the one
+      // hydration uses) returns the live context, not the whole history.
+      // Read the task source again: the turn can end while the summarizer runs.
+      const rebuildSource = opts.turnInProgress ? this.taskSourceFor() : this.taskContractFor();
+      const updatedSnapshot = await this.transcriptSnapshot(rebuildSource);
       const updatedEntries = updatedSnapshot.entries;
       this.replaceActiveSkillInvocations(updatedEntries);
       this.replaceAgentMessages(entriesToAgentMessages(
@@ -6492,9 +6728,10 @@ export class Thread {
           attributeAuthors: this.attributeAuthors,
           threadKey: this.key,
           activeLeafEntryId: this.activeLeafEntryId,
-          taskSourceQueueItemId: this.taskSourceFor(),
+          taskSourceQueueItemId: rebuildSource,
+          ...(opts.turnInProgress ? { turnCallsQueueItemId: this.runningItem?.id } : {}),
         },
-      ), this.taskSourceFor());
+      ), this.retainedSourceFor(updatedEntries, rebuildSource));
       // Compaction legitimately rewrites the prefix — the next turn's cache
       // reads SHOULD drop. Reset the break-detector baseline so the expected
       // drop is not counted as a break (TKAI-320).
@@ -6563,6 +6800,70 @@ export class Thread {
         };
       }
     }
+  }
+
+  /** Estimated tokens of the tool definitions a request sends. */
+  private toolDefinitionTokens(): number {
+    return estimateTokens(JSON.stringify(this.buildTools().map((tool) => ({
+      name: tool.name, description: tool.description, parameters: tool.parameters,
+    }))));
+  }
+
+  /**
+   * Write a checkpoint that covers `unread`, history no fresh-context run
+   * reads, with a fixed note and no model call. The checkpoint carries the
+   * superseded one's coverage forward. Returns false when the thread moved
+   * to another branch first.
+   */
+  private async coverUnreadHistory(
+    leafAtSnapshot: string | undefined,
+    superseded: CompactionEntry | undefined,
+    unread: readonly SessionEntry[],
+    taskSource: string | undefined,
+    turnInProgress: boolean,
+    span?: Span,
+  ): Promise<boolean> {
+    const covered = [...new Set([...(superseded?.coveredEntryIds ?? []), ...unread.map((e) => e.id)])];
+    const note = [
+      UNREAD_HISTORY_HEADING,
+      `This thread runs each delivery with only its own messages, so no run reads the runs before it. The automated runs in the ${covered.length} earlier entries are not summarized here.`,
+    ].join("\n");
+    // An LLM summary the superseded checkpoint carried (a conversation a
+    // person had here) stays, ahead of the note. A note does not pile up.
+    const earlier = superseded?.summary.split(`\n\n${UNREAD_HISTORY_HEADING}`)[0];
+    const summary = earlier && !earlier.startsWith(UNREAD_HISTORY_HEADING) ? `${earlier}\n\n${note}` : note;
+    const checkpoint: CompactionEntry = {
+      id: uid("c"),
+      sessionId: this.session.id,
+      threadId: this.id,
+      parentId: null,
+      type: "compaction",
+      summary,
+      coveredEntryIds: covered,
+      tokenCountBefore: (superseded?.tokenCountBefore ?? 0) + estimateTotalTokens(unread),
+      tokenCountAfter: estimateTokens(summary),
+      fileContext: superseded?.fileContext ?? { read: [], modified: [] },
+      ...(superseded?.metadata?.[TURN_CALLS_KEY] !== undefined ? { metadata: { [TURN_CALLS_KEY]: superseded.metadata[TURN_CALLS_KEY] } } : {}),
+      createdAt: Date.now(),
+    };
+    span?.setAttributes({ "valet.compaction.summary_source": "unread_history", "valet.compaction.entries_covered": covered.length });
+    if (!(await this.appendOnPath(checkpoint, leafAtSnapshot, this.fence))) {
+      span?.setAttribute("valet.compaction.dropped", "branch_switched");
+      return false;
+    }
+    // No breaker reset: a pass with no model call proves nothing about the
+    // summarizer, and the summary pass that follows may still fail.
+    const snapshot = await this.transcriptSnapshot(taskSource);
+    this.replaceActiveSkillInvocations(snapshot.entries);
+    this.replaceAgentMessages(entriesToAgentMessages(snapshot.entries, this.agent.state.model, {
+      attributeAuthors: this.attributeAuthors,
+      threadKey: this.key,
+      activeLeafEntryId: this.activeLeafEntryId,
+      taskSourceQueueItemId: taskSource,
+      ...(turnInProgress ? { turnCallsQueueItemId: this.runningItem?.id } : {}),
+    }), this.retainedSourceFor(snapshot.entries, taskSource));
+    this.prevCacheSnapshot = undefined;
+    return true;
   }
 
   /** Build from the actual stream model after role and agent overrides have applied. */
@@ -7063,13 +7364,48 @@ export class Thread {
     if (maxChars === Number.POSITIVE_INFINITY) return def;
     return {
       ...def,
-      execute: async (args, ctx) => capToolResult(await def.execute(args, ctx), {
-        toolName: def.name,
-        maxChars,
-        maxTokens: TOOL_RESULT_MAX_TOKENS,
-        save: (text) => this.saveLargeToolResult(def.name, text),
-      }),
+      execute: async (args, ctx) => {
+        let saved: boolean | undefined;
+        const opts = {
+          toolName: def.name, maxChars, maxTokens: TOOL_RESULT_MAX_TOKENS, preview: def.resultPreview,
+          // A session without read or bash cannot open a saved file, so it
+          // keeps as much as the cap allows instead of a pointer it cannot use.
+          save: async (text: string) => {
+            const path = this.canReadSavedResults() ? await this.saveLargeToolResult(def.name, text) : undefined;
+            saved = path !== undefined;
+            return path;
+          },
+        };
+        const recordCap = () => { if (saved !== undefined) recordToolResultCapped(def.name, saved ? "saved" : "cut"); };
+        let result: ToolResult;
+        try {
+          result = await def.execute(args, ctx);
+        } catch (err) {
+          // A thrown message reaches context as the result, so it gets the cap too.
+          const capped = await capToolError(err, opts);
+          recordCap();
+          throw capped;
+        }
+        const capped = await capToolResult(result, opts);
+        recordCap();
+        return capped;
+      },
     };
+  }
+
+  /** The turn can open a saved result: it has `read` or `bash`. */
+  private canReadSavedResults(): boolean {
+    const scope = this.effectiveToolScope();
+    return toolInScope(scope, "read") || toolInScope(scope, "bash");
+  }
+
+  /** Create a folder for files the engine saves under `.valet/`, with a
+   * `.gitignore` of `*`: the folder can sit inside a repository checkout,
+   * and a `git add -A` must not commit what the engine saved. The file
+   * checkpoint store protects itself the same way. */
+  private async ensureEngineDir(dir: string): Promise<void> {
+    await this.session.sandbox.mkdir(dir);
+    await this.session.sandbox.writeFile(`${dir}/.gitignore`, "*\n");
   }
 
   /** Save a tool result too large for context under the workspace, where
@@ -7080,7 +7416,7 @@ export class Thread {
     const dir = `${root}/.valet/tool-results`;
     const path = `${dir}/${uid(toolName.replace(/[^a-zA-Z0-9_-]/g, "_"))}.txt`;
     try {
-      await this.session.sandbox.mkdir(dir);
+      await this.ensureEngineDir(dir);
       await this.session.sandbox.writeFile(path, text);
       return workingDirectoryPath(path);
     } catch (err) {
@@ -7250,7 +7586,12 @@ export class Thread {
   async allocateSourceIds(count: number): Promise<string[]> {
     // Forks, duplicates and imports can retain source records without the
     // original sequence metadata. Include abandoned branches so returning
-    // to an older path cannot give one id two meanings.
+    // to an older path cannot give one id two meanings. A stored number is
+    // already above every id on every branch, because each reservation
+    // saves the highest id it saw. Then skip the scan: it reads every
+    // payload on the thread, again after each restart or idle release.
+    const stored = this.threadMetadata?.[THREAD_SOURCE_SEQ_KEY];
+    if (typeof stored === "number" && Number.isSafeInteger(stored) && stored > 0) this.sourceSequenceSeed ??= Promise.resolve(0);
     this.sourceSequenceSeed ??= this.readEntries({ allBranches: true }).then(entries => {
       let highest = 0;
       for (const entry of entries) {
@@ -7623,9 +7964,18 @@ export class Thread {
           if (citationIds.length > 0) {
             // A reserved number is not proof. Only sources on stored tool
             // results on this thread's active path can support a citation.
-            const sourceIds = new Set((await this.readEntries()).flatMap(entry => entry.type === "message"
-              ? (entry.parts ?? []).flatMap(part => part.type === "tool_call" ? readSources(part.result).map(source => source.id) : [])
+            // The tool results in context are on that path, so read the
+            // stored path only for a tag they do not hold. A long thread can
+            // hold hundreds of MB, and a read of all of it on each reply ran
+            // the api out of memory.
+            let sourceIds = new Set(this.agent.state.messages.flatMap(message => message.role === "toolResult"
+              ? readSources(message).map(source => source.id)
               : []));
+            if (citationIds.some(id => !sourceIds.has(id))) {
+              sourceIds = new Set((await this.readEntries()).flatMap(entry => entry.type === "message"
+                ? (entry.parts ?? []).flatMap(part => part.type === "tool_call" ? readSources(part.result).map(source => source.id) : [])
+                : []));
+            }
             const invalidCount = citationIds.filter(id => !sourceIds.has(id)).length;
             if (invalidCount > 0) {
               reportError({ area: "engine", reason: "source_citation_unknown", level: "warn", fields: { count: invalidCount } },
@@ -7805,7 +8155,7 @@ export class Thread {
             tool: event.toolName,
             callId: event.toolCallId,
             result: resultText,
-            ...(toolResultNeedsData(safeResult) ? { resultData: part?.type === "tool_call" ? part.result : safeResult } : {}),
+            ...liveToolResult(safeResult, part?.type === "tool_call" ? part.result : safeResult, this.currentAssistantEntry?.id),
             isError: event.isError,
             ...(event.isError ? {} : toolOutcome(safeResult)),
           },
@@ -7871,6 +8221,9 @@ export class Thread {
             const entry = this.currentAssistantEntry;
             entry.usage = turnUsage;
             if (turnCost) entry.cost = turnCost;
+            // This usage counts a fresh-context slice, not the transcript.
+            // A reload must not anchor on it (`entriesToAgentMessages`).
+            if (this.freshContextStart) entry.metadata = { ...entry.metadata, [FRESH_CONTEXT_KEY]: true };
             await this.fencedWrite(() =>
               this.session.providers.store.updateEntry(this.session.id, this.id, entry, this.fence),
             );
@@ -8517,6 +8870,40 @@ function toolResultNeedsData(result: unknown): boolean {
     || ("label" in details && typeof details.label === "string" && details.label.trim().length > 0);
 }
 
+/** The whole text `capToolResult` kept in `details.fullText`, if any. */
+function fullTextOf(result: unknown): string | undefined {
+  if (typeof result !== "object" || result === null || !("details" in result)) return undefined;
+  const details = result.details;
+  if (typeof details !== "object" || details === null || !("fullText" in details)) return undefined;
+  return typeof details.fullText === "string" ? details.fullText : undefined;
+}
+
+function withoutFullText(result: unknown): unknown {
+  if (typeof result !== "object" || result === null || !("details" in result)) return result;
+  const details = result.details;
+  if (typeof details !== "object" || details === null || !("fullText" in details)) return result;
+  const { fullText: _fullText, ...rest } = details;
+  return { ...result, details: rest };
+}
+
+/**
+ * The result fields of a live tool_end event. `resultData` drops
+ * `details.fullText`, so a capped result sends its preview. `resultTrimmed`
+ * names the stored entry, so the step loads the whole text from the
+ * tool-output route without a refetch.
+ */
+function liveToolResult(
+  result: unknown,
+  data: unknown,
+  entryId: string | undefined,
+): { resultData?: unknown; resultTrimmed?: { chars: number; entryId: string } } {
+  const full = fullTextOf(result);
+  return {
+    ...(toolResultNeedsData(result) ? { resultData: withoutFullText(data) } : {}),
+    ...(full !== undefined && entryId !== undefined ? { resultTrimmed: { chars: full.length, entryId } } : {}),
+  };
+}
+
 function findMostRecentCompaction(
   entries: readonly SessionEntry[],
 ): CompactionEntry | undefined {
@@ -8765,6 +9152,179 @@ function isLlmMessage(message: AgentMessage): message is Message {
   return message.role === "user" || message.role === "assistant" || message.role === "toolResult";
 }
 
+/** A user entry as the model reads it. */
+function userEntryMessage(e: MessageEntry, attributeAuthors: AuthorAttribution | undefined): AgentMessage {
+  // A spilled entry keeps the full paste in `content` but must reach the
+  // LLM as the pointer, so a rehydrated transcript agrees with the hot
+  // path and does not re-overflow on the oversized text. Signals never
+  // spill, so the two branches never collide.
+  const spillPath = e.metadata?.[SPILLED_INPUT_PATH_KEY];
+  const text =
+    typeof spillPath === "string"
+      ? renderReplyContext(
+          buildSpilledInputMarker({
+            path: spillPath,
+            tokens: estimateTokens(e.content),
+            chars: e.content.length,
+          }),
+          e.metadata,
+        )
+      : e.signal
+      ? renderSignalEnvelope(e.signal, e.content)
+      : renderReplyContext(e.content, e.metadata);
+  const sender = e.signal ? undefined : attributedAuthor(attributeAuthors, e.author);
+  return { role: "user", content: userContentBlocks(text, e.attachments, sender, entryMessageTime(e)), timestamp: e.createdAt };
+}
+
+/** Compaction metadata key for the calls a running turn made before the checkpoint (`TurnCalls`). */
+export const TURN_CALLS_KEY = "turnCalls";
+
+/**
+ * The tool calls of a running turn that checkpoints covered, as note lines:
+ * the first ones, the newest ones, and a count of the rest. A pass inside a
+ * turn writes it into the checkpoint's metadata, and the rebuilt context
+ * shows it after the retained task (`turnCallsNote`).
+ */
+export interface TurnCalls {
+  queueItemId: string;
+  first: string[];
+  last: string[];
+  omitted: number;
+}
+
+/** The most first and newest call lines `TurnCalls` keeps. */
+const TURN_CALLS_FIRST = 10;
+const TURN_CALLS_LAST = 20;
+/** The most characters of one call's arguments in a note line. */
+const TURN_CALL_ARGS_CHARS = 200;
+/** The most characters of one string argument value in a note line. */
+const TURN_CALL_VALUE_CHARS = 80;
+
+/** A call's arguments, short: long strings cut, the whole cut to `TURN_CALL_ARGS_CHARS`. */
+function shortArgs(args: unknown): string {
+  const text = JSON.stringify(args ?? {}, (_key, value: unknown) =>
+    typeof value === "string" && value.length > TURN_CALL_VALUE_CHARS ? `${value.slice(0, TURN_CALL_VALUE_CHARS)}…` : value) ?? "{}";
+  return text.length > TURN_CALL_ARGS_CHARS ? `${text.slice(0, TURN_CALL_ARGS_CHARS)}…` : text;
+}
+
+/**
+ * One line per finished tool call in `entries` that belongs to
+ * `queueItemId`: the tool name and short arguments, marked when it failed.
+ * Calls of `silentTools` change nothing outside the conversation, so they
+ * are left out. Exported for tests.
+ */
+export function turnCallLines(entries: readonly SessionEntry[], queueItemId: string, silentTools?: ReadonlySet<string>): string[] {
+  const lines: string[] = [];
+  for (const entry of entries) {
+    if (entry.type !== "message" || entry.role !== "assistant" || entry.queueItemId !== queueItemId) continue;
+    for (const part of entry.parts ?? []) {
+      if (part.type !== "tool_call" || (part.status !== "completed" && part.status !== "error")) continue;
+      if (silentTools?.has(part.toolName)) continue;
+      lines.push(`- ${part.toolName} ${shortArgs(part.args)}${part.status === "error" ? " (failed)" : ""}`);
+    }
+  }
+  return lines;
+}
+
+/** Add `lines` to the calls an earlier checkpoint kept for the same turn. Exported for tests. */
+export function mergeTurnCalls(previous: TurnCalls | undefined, queueItemId: string, lines: readonly string[]): TurnCalls {
+  const prior = previous?.queueItemId === queueItemId ? previous : undefined;
+  if (!prior || prior.omitted === 0) {
+    const all = [...(prior?.first ?? []), ...(prior?.last ?? []), ...lines];
+    if (all.length <= TURN_CALLS_FIRST + TURN_CALLS_LAST) {
+      return { queueItemId, first: all.slice(0, TURN_CALLS_FIRST), last: all.slice(TURN_CALLS_FIRST), omitted: 0 };
+    }
+    return { queueItemId, first: all.slice(0, TURN_CALLS_FIRST), last: all.slice(-TURN_CALLS_LAST), omitted: all.length - TURN_CALLS_FIRST - TURN_CALLS_LAST };
+  }
+  const rest = [...prior.last, ...lines];
+  return { queueItemId, first: prior.first, last: rest.slice(-TURN_CALLS_LAST), omitted: prior.omitted + Math.max(0, rest.length - TURN_CALLS_LAST) };
+}
+
+/** The `TurnCalls` in checkpoint metadata, or undefined when it is absent or malformed. */
+export function readTurnCalls(metadata: Record<string, unknown> | undefined): TurnCalls | undefined {
+  const value = metadata?.[TURN_CALLS_KEY];
+  if (typeof value !== "object" || value === null) return undefined;
+  const { queueItemId, first, last, omitted } = value as Record<string, unknown>; // narrowed field by field below
+  const lines = (v: unknown): v is string[] => Array.isArray(v) && v.every((line) => typeof line === "string");
+  if (typeof queueItemId !== "string" || !lines(first) || !lines(last) || typeof omitted !== "number") return undefined;
+  return { queueItemId, first, last, omitted };
+}
+
+/**
+ * The note after a retained task: the calls its turn already made before
+ * the checkpoint. The engine builds it from stored calls with no model
+ * call, so it does not depend on what the summary says. Undefined when the
+ * turn made no listed call. Exported for tests.
+ */
+export function turnCallsNote(calls: TurnCalls): string | undefined {
+  if (calls.first.length + calls.last.length === 0) return undefined;
+  return [
+    "[Compaction note] The request above is still in progress. The summary covers how this turn started.",
+    "This turn already made the tool calls below. What they changed (a posted message, a reaction, a written file) is this turn's own work, not another run's. Do not repeat a call unless the request needs it again:",
+    ...calls.first,
+    ...(calls.omitted > 0 ? [`- … ${calls.omitted} more calls`] : []),
+    ...calls.last,
+  ].join("\n");
+}
+
+/**
+ * True when the newest checkpoint on the active path covers the first user
+ * entry of `taskSourceQueueItemId`, so a render with that source retains it.
+ */
+export function retainsTask(entries: readonly SessionEntry[], taskSourceQueueItemId: string, activeLeafEntryId?: string): boolean {
+  const active = walkTranscriptDag(entries, activeLeafEntryId);
+  const checkpoint = findMostRecentCompaction(active);
+  if (!checkpoint) return false;
+  const task = active.find((entry) => entry.type === "message" && entry.role === "user" && entry.queueItemId === taskSourceQueueItemId);
+  return task !== undefined && checkpoint.coveredEntryIds.includes(task.id);
+}
+
+/**
+ * The response whose stored usage still measures the live context after a
+ * reload: the newest assistant entry on the active path, when its request
+ * saw the context the transcript now has. That is not so when a newer
+ * checkpoint replaced history, a later prune elided output it counted
+ * (`PRUNED_AT_KEY`), or a fresh-context request counted only its own slice
+ * (`FRESH_CONTEXT_KEY`). Codex restores the last token count on resume for
+ * the same reason. Exported for tests.
+ */
+export function usageAnchorEntryId(activeEntries: readonly SessionEntry[], covered?: ReadonlySet<string>): string | undefined {
+  let newest: Extract<SessionEntry, { type: "message" }> | undefined;
+  for (let i = activeEntries.length - 1; i >= 0; i--) {
+    const entry = activeEntries[i]!;
+    if (entry.type === "compaction") return undefined;
+    if (entry.type === "message" && entry.role === "assistant" && !covered?.has(entry.id)) {
+      newest = entry;
+      break;
+    }
+  }
+  // The input side must be reported: an output-only usage would anchor a
+  // large undercount.
+  const input = newest?.usage ? newest.usage.input + newest.usage.cacheRead + newest.usage.cacheWrite : 0;
+  if (!newest || input <= 0 || newest.metadata?.[FRESH_CONTEXT_KEY] === true) return undefined;
+  const at = newest.createdAt;
+  const prunedLater = activeEntries.some((entry) => entry.type === "message" && !covered?.has(entry.id)
+    && typeof entry.metadata?.[PRUNED_AT_KEY] === "number" && entry.metadata[PRUNED_AT_KEY] >= at);
+  return prunedLater ? undefined : newest.id;
+}
+
+/**
+ * Whether an overflowing response gets the one reactive compaction and
+ * retry of its turn. An open breaker gates it like every automatic pass:
+ * without that, a thread whose compaction keeps failing paid for a failed
+ * summary on every overflow. /compact still runs and closes the breaker.
+ * Exported for tests.
+ */
+export function reactiveRetryAllowed(
+  state: { retryInProgress: boolean; compactionFailures: number; contextWindow: number },
+  last: AgentMessage | undefined,
+): boolean {
+  return !state.retryInProgress
+    && state.compactionFailures < MAX_CONSECUTIVE_COMPACTION_FAILURES
+    && last !== undefined && last.role === "assistant" && last.stopReason === "error"
+    && isContextOverflow(last, state.contextWindow);
+}
+
 export function entriesToAgentMessages(
   entries: readonly SessionEntry[],
   modelHint: { api: string; provider: string; id: string },
@@ -8787,15 +9347,21 @@ export function entriesToAgentMessages(
     activeLeafEntryId?: string;
     /** Original task of the active submission or repair. Omit for settled history. */
     taskSourceQueueItemId?: string;
+    /**
+     * The submission whose turn continues after this render. When the
+     * newest checkpoint holds that turn's calls (`TURN_CALLS_KEY`), a note
+     * lists them after the retained task. Omit outside a running turn.
+     */
+    turnCallsQueueItemId?: string;
   },
 ): AgentMessage[] {
   const activeEntries = walkTranscriptDag(entries, opts?.activeLeafEntryId);
   // 1. Find the most recent CompactionEntry. Everything in its coveredEntryIds is dropped.
-  let activeCompaction: { summary: string; covered: Set<string> } | undefined;
+  let activeCompaction: { summary: string; covered: Set<string>; turnCalls?: TurnCalls } | undefined;
   for (let i = activeEntries.length - 1; i >= 0; i--) {
     const e = activeEntries[i];
     if (e.type === "compaction") {
-      activeCompaction = { summary: e.summary, covered: new Set(e.coveredEntryIds) };
+      activeCompaction = { summary: e.summary, covered: new Set(e.coveredEntryIds), turnCalls: readTurnCalls(e.metadata) };
       break;
     }
   }
@@ -8806,6 +9372,8 @@ export function entriesToAgentMessages(
     ? activeEntries.find(entry => entry.type === "message" && entry.role === "user"
       && entry.queueItemId === opts.taskSourceQueueItemId)?.id
     : undefined;
+
+  const anchorEntryId = usageAnchorEntryId(activeEntries, activeCompaction?.covered);
 
   const out: AgentMessage[] = [];
   if (activeCompaction) {
@@ -8833,34 +9401,21 @@ export function entriesToAgentMessages(
       continue;
     }
     if (e.type !== "message") continue;
-    if (activeCompaction?.covered.has(e.id) && e.id !== taskEntryId) continue;
+    if (e.id === taskEntryId && activeCompaction) {
+      // The covered task comes back verbatim. While its turn runs, a note of
+      // the calls the turn already made follows. The summary may describe
+      // those calls loosely or not at all, and a resumed turn must not
+      // repeat a post or a reaction.
+      out.push(userEntryMessage(e, opts?.attributeAuthors));
+      const calls = activeCompaction.turnCalls;
+      const done = calls && calls.queueItemId === opts?.turnCallsQueueItemId ? turnCallsNote(calls) : undefined;
+      if (done) out.push({ role: "user", content: [{ type: "text", text: done }], timestamp: e.createdAt });
+      continue;
+    }
+    if (activeCompaction?.covered.has(e.id)) continue;
 
     if (e.role === "user") {
-      // A spilled entry keeps the full paste in `content` but must reach the
-      // LLM as the pointer, so a rehydrated transcript agrees with the hot
-      // path and does not re-overflow on the oversized text. Signals never
-      // spill, so the two branches never collide.
-      const spillPath = e.metadata?.[SPILLED_INPUT_PATH_KEY];
-      const text =
-        typeof spillPath === "string"
-          ? renderReplyContext(
-              buildSpilledInputMarker({
-                path: spillPath,
-                tokens: estimateTokens(e.content),
-                chars: e.content.length,
-              }),
-              e.metadata,
-            )
-          : e.signal
-          ? renderSignalEnvelope(e.signal, e.content)
-          : renderReplyContext(e.content, e.metadata);
-      const sender = e.signal ? undefined : attributedAuthor(opts?.attributeAuthors, e.author);
-      const contentBlocks = userContentBlocks(text, e.attachments, sender, entryMessageTime(e));
-      out.push({
-        role: "user",
-        content: contentBlocks,
-        timestamp: e.createdAt,
-      });
+      out.push(userEntryMessage(e, opts?.attributeAuthors));
       continue;
     }
     if (e.role === "assistant") {
@@ -8888,12 +9443,14 @@ export function entriesToAgentMessages(
         api: modelHint.api,
         provider: modelHint.provider,
         model: e.model ?? modelHint.id,
+        // One response keeps its stored usage as the anchor of the next
+        // estimate (`estimateLiveContextTokens`). The others carry none.
         usage: {
-          input: 0,
-          output: 0,
-          cacheRead: 0,
-          cacheWrite: 0,
-          totalTokens: 0,
+          input: e.id === anchorEntryId ? e.usage?.input ?? 0 : 0,
+          output: e.id === anchorEntryId ? e.usage?.output ?? 0 : 0,
+          cacheRead: e.id === anchorEntryId ? e.usage?.cacheRead ?? 0 : 0,
+          cacheWrite: e.id === anchorEntryId ? e.usage?.cacheWrite ?? 0 : 0,
+          totalTokens: e.id === anchorEntryId ? e.usage?.total ?? 0 : 0,
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
         },
         stopReason: "stop",

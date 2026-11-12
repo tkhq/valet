@@ -171,6 +171,7 @@ export class OAuthRefreshingCredentialStore implements CredentialStore {
           tokenEndpoint: client.tokenEndpoint,
           clientId: client.clientId,
           refreshToken: stored.refreshToken,
+          ...(client.resource ? { resource: client.resource } : {}),
         });
       } else {
         tokens = await refreshAuthorizationCodeToken({

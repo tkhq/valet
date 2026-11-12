@@ -1623,9 +1623,9 @@ describe("compaction: summarizer input covers the head", () => {
     });
     const thread = session.thread();
     // e-2 costs about 60_000 tokens of summarizer input, past the
-    // 8_000-token budget, and the zero-token c-3 sits behind it. The window
-    // stops on c-3, which renders into nothing, so it must step back to the
-    // newest entry the summarizer can actually read (TKAI-461).
+    // 8_000-token budget, and the zero-token c-3 sits behind it. The head is
+    // read oldest first: one window holds e-1, the next holds e-2 alone with
+    // the zero-cost c-3 after it.
     await store.appendEntries(session.id, thread.id, [
       { id: "e-1", sessionId: session.id, threadId: thread.id, parentId: null, type: "message", role: "user", content: "marker-e-1 start the long turn", createdAt: 1 },
       {
@@ -1641,20 +1641,22 @@ describe("compaction: summarizer input covers the head", () => {
       { id: "e-5", sessionId: session.id, threadId: thread.id, parentId: "e-4", type: "message", role: "assistant", content: "marker-e-5 second response", createdAt: 5 },
     ]);
 
+    faux.appendResponses([(ctx: { messages: unknown[] }) => {
+      summarizerInputs.push(JSON.stringify(ctx.messages));
+      return fauxAssistantMessage(SUMMARY_RESPONSE);
+    }]);
     const outcome = await thread.compactThread({ mode: "manual" });
     expect(outcome).toBe("compacted");
 
     const entries = await store.getEntries(session.id, thread.id);
     const compaction = entries.find((e): e is CompactionEntry => e.type === "compaction");
-    // The step-back window is [e-2, c-3], and the checkpoint claims exactly
-    // it. e-1 never reached the summarizer, so it keeps its place in live
-    // context for the next pass.
-    expect(compaction!.coveredEntryIds).toEqual(["e-2", "c-3"]);
-    expect(summarizerInputs).toHaveLength(1);
-    // A head larger than the budget is summarized from the part that fit.
-    // The summary must still be written from head content, never from the
-    // prompt template alone.
-    expectSummarized(summarizerInputs[0], ["e-2"]);
+    expect(compaction!.coveredEntryIds).toEqual(["e-1", "e-2", "c-3"]);
+    expect(summarizerInputs).toHaveLength(2);
+    // Each window is written from head content, never from the prompt
+    // template alone.
+    expectSummarized(summarizerInputs[0], ["e-1"]);
+    expect(summarizerInputs[0]).not.toContain("marker-e-2");
+    expectSummarized(summarizerInputs[1], ["e-2"]);
     faux.unregister();
   });
 
@@ -1724,14 +1726,14 @@ describe("compaction: summarizer input covers the head", () => {
       compaction: { tailTurns: 1, autoContinue: false },
     });
     const thread = session.thread();
-    // head = [e-1, c-2]. The first retry drops the optional tail evidence.
-    // The second would halve the head down to the command result, which
-    // renders into nothing, so the pass must stop instead of buying a
-    // summary the checkpoint cannot use.
+    // head = [c-1, e-2]. The first retry drops the optional tail evidence.
+    // The second would halve the window down to its older half, the command
+    // result, which renders into nothing, so the pass must stop instead of
+    // buying a summary the checkpoint cannot use.
     await store.appendEntries(session.id, thread.id, [
-      { id: "e-1", sessionId: session.id, threadId: thread.id, parentId: null, type: "message", role: "user", content: "marker-e-1 first prompt", createdAt: 1 },
-      { id: "c-2", sessionId: session.id, threadId: thread.id, parentId: "e-1", type: "command_result", command: "/status", source: "builtin", ok: true, output: "ready", createdAt: 2 },
-      { id: "e-3", sessionId: session.id, threadId: thread.id, parentId: "c-2", type: "message", role: "user", content: "marker-e-3 second prompt", createdAt: 3 },
+      { id: "c-1", sessionId: session.id, threadId: thread.id, parentId: null, type: "command_result", command: "/status", source: "builtin", ok: true, output: "ready", createdAt: 1 },
+      { id: "e-2", sessionId: session.id, threadId: thread.id, parentId: "c-1", type: "message", role: "user", content: "marker-e-2 first prompt", createdAt: 2 },
+      { id: "e-3", sessionId: session.id, threadId: thread.id, parentId: "e-2", type: "message", role: "user", content: "marker-e-3 second prompt", createdAt: 3 },
       { id: "e-4", sessionId: session.id, threadId: thread.id, parentId: "e-3", type: "message", role: "assistant", content: "marker-e-4 second response", createdAt: 4 },
     ]);
 
@@ -2112,18 +2114,16 @@ describe("compaction: coverage narrows to what the summarizer read", () => {
     ];
   }
 
-  it("leaves a head entry the summarizer never read in the model context", async () => {
+  it("covers an oversized head oldest first, one window at a time", async () => {
     const summarizerInputs: string[] = [];
     const faux = registerFauxProvider({
       provider: "compact-coverage-narrow",
       models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
     });
-    faux.setResponses([
-      (ctx: { messages: unknown[] }) => {
-        summarizerInputs.push(JSON.stringify(ctx.messages));
-        return fauxAssistantMessage(SUMMARY_RESPONSE);
-      },
-    ]);
+    faux.setResponses(Array.from({ length: 3 }, () => (ctx: { messages: unknown[] }) => {
+      summarizerInputs.push(JSON.stringify(ctx.messages));
+      return fauxAssistantMessage(SUMMARY_RESPONSE);
+    }));
     const { engine, store } = makeEngine();
     const session = await engine.createSession({
       userId: "u",
@@ -2140,22 +2140,88 @@ describe("compaction: coverage narrows to what the summarizer read", () => {
 
     const entries = await store.getEntries(session.id, thread.id);
     const compaction = entries.find((e): e is CompactionEntry => e.type === "compaction");
-    // The summarizer read e-3 and e-4. e-1 and e-2 never reached it, so the
-    // checkpoint does not claim them.
-    expect(compaction!.coveredEntryIds).toEqual(["e-3", "e-4"]);
-    expect(summarizerInputs[0]).toContain("marker-e-3");
+    // Three windows in order: [e-1], [e-2] alone, [e-3, e-4]. Each summary
+    // carries the earlier windows forward, so one checkpoint covers them all.
+    expect(compaction!.coveredEntryIds).toEqual(["e-1", "e-2", "e-3", "e-4"]);
+    expect(summarizerInputs).toHaveLength(3);
+    expect(summarizerInputs[0]).toContain("marker-e-1");
     expect(summarizerInputs[0]).not.toContain("marker-e-2");
-    // The size the checkpoint reports is the history it replaced, not the
-    // history it left behind: e-2 alone estimates over 10_000 tokens.
-    expect(compaction!.tokenCountBefore).toBeLessThan(1_000);
+    expect(summarizerInputs[1]).toContain("marker-e-2");
+    expect(summarizerInputs[2]).toContain("marker-e-3");
+    expect(summarizerInputs[2]).not.toContain("marker-e-1 ");
 
     const { entriesToAgentMessages } = await import("../src/thread.js");
     const rebuilt = JSON.stringify(
       entriesToAgentMessages(entries, { api: "anthropic-messages", provider: "anthropic", id: "tiny" }),
     );
-    // The unread head stays in live context; the summarized head does not.
-    expect(rebuilt).toContain("marker-e-2");
-    expect(rebuilt).not.toContain("marker-e-4");
+    for (const id of ["e-1", "e-2", "e-3", "e-4"]) expect(rebuilt).not.toContain(`marker-${id}`);
+    expect(rebuilt).toContain("marker-e-5");
+    faux.unregister();
+  });
+
+  it("keeps the windows already summarized when a later window fails", async () => {
+    const faux = registerFauxProvider({
+      provider: "compact-coverage-window-fails",
+      models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
+    });
+    faux.setResponses([
+      fauxAssistantMessage(SUMMARY_RESPONSE),
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "summarizer down" }),
+    ]);
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel("tiny")!,
+      compaction: { tailTurns: 1, autoContinue: false },
+    });
+    const thread = session.thread();
+    await store.appendEntries(session.id, thread.id, partialCoverageEntries(session.id, thread.id));
+
+    expect(await thread.compactThread({ mode: "manual" })).toBe("compacted");
+
+    const compaction = (await store.getEntries(session.id, thread.id)).find((e): e is CompactionEntry => e.type === "compaction");
+    // The first window [e-1] was paid for and kept; e-2 onward stays live.
+    expect(compaction!.coveredEntryIds).toEqual(["e-1"]);
+    faux.unregister();
+  });
+
+  it("keeps the newest part of a head past four windows live, after the summary", async () => {
+    const faux = registerFauxProvider({
+      provider: "compact-coverage-windows",
+      models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
+    });
+    faux.setResponses(Array.from({ length: 4 }, () => fauxAssistantMessage(SUMMARY_RESPONSE)));
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel("tiny")!,
+      compaction: { tailTurns: 1, autoContinue: false },
+    });
+    const thread = session.thread();
+    const ids = { sessionId: session.id, threadId: thread.id, type: "message" as const };
+    const big = (n: number, parent: string): SessionEntry => ({
+      ...ids, id: `a-${n}`, parentId: parent, role: "assistant", content: "", createdAt: 10 + n,
+      parts: Array.from({ length: 12 }, (_, i) => ({ type: "text" as const, text: `marker-a-${n} step ${i} ${OVERSIZED_STEP}` })),
+    });
+    await store.appendEntries(session.id, thread.id, [
+      { ...ids, id: "u-1", parentId: null, role: "user", content: "marker-u-1 long task", createdAt: 1 },
+      big(1, "u-1"), big(2, "a-1"), big(3, "a-2"), big(4, "a-3"),
+      { ...ids, id: "u-2", parentId: "a-4", role: "user", content: "marker-u-2 next", createdAt: 20 },
+      { ...ids, id: "a-9", parentId: "u-2", role: "assistant", content: "marker-a-9 reply", createdAt: 21 },
+    ]);
+
+    expect(await thread.compactThread({ mode: "manual" })).toBe("compacted");
+
+    const entries = await store.getEntries(session.id, thread.id);
+    const compaction = entries.find((e): e is CompactionEntry => e.type === "compaction");
+    // Four windows: [u-1], [a-1], [a-2], [a-3]. a-4 waits for the next pass.
+    expect(compaction!.coveredEntryIds).toEqual(["u-1", "a-1", "a-2", "a-3"]);
+    const { entriesToAgentMessages } = await import("../src/thread.js");
+    const rebuilt = JSON.stringify(
+      entriesToAgentMessages(entries, { api: "anthropic-messages", provider: "anthropic", id: "tiny" }),
+    );
+    // The live part is newer than everything the summary covers, and it
+    // follows the summary.
+    expect(rebuilt).not.toContain("marker-a-1 ");
+    expect(rebuilt.indexOf("<previous-context>")).toBeLessThan(rebuilt.indexOf("marker-a-4"));
     faux.unregister();
   });
 
@@ -2188,13 +2254,11 @@ describe("compaction: coverage narrows to what the summarizer read", () => {
       if (outcome !== "compacted") break;
     }
 
-    // Three passes reach the whole head, each one strictly further back than
-    // the last. A repeated pass cannot spin: the fourth finds every readable
-    // head entry already covered and reclaims nothing.
-    expect(outcomes).toEqual(["compacted", "compacted", "compacted", "noop"]);
+    // One pass reads the whole head in windows. A repeated pass cannot
+    // spin: the second finds every readable head entry already covered and
+    // reclaims nothing.
+    expect(outcomes).toEqual(["compacted", "noop"]);
     expect(covered).toEqual([
-      ["e-3", "e-4"],
-      ["e-2", "e-3", "e-4"],
       ["e-1", "e-2", "e-3", "e-4"],
       ["e-1", "e-2", "e-3", "e-4"],
     ]);

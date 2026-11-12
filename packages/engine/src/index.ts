@@ -461,4 +461,4 @@ export { MAX_IMAGE_BYTES, IMAGE_FORMATS, imageDecoder, validateImage, imageAttac
 export { MODEL_RESPONSE_METADATA_KEY, modelResponseMetadata, readModelResponseMetadata } from "./model-response.js";
 export { sniffImageMediaType, isSafeSvg, validatedImageMediaType, correctImageBlocks, type ImageMediaType } from "./image-media-type.js";
 export { projectTurnProgress, readTurnProgress, readLatestTurnProgress } from "./turn-progress.js";
-export { capToolResult, estimateResultTokens, TOOL_RESULT_MAX_CHARS, TOOL_RESULT_MAX_TOKENS, TOOL_RESULT_PREVIEW_CHARS } from "./tool-result-cap.js";
+export { capToolError, capToolResult, estimateResultTokens, TOOL_RESULT_MAX_CHARS, TOOL_RESULT_MAX_TOKENS, TOOL_RESULT_PREVIEW_CHARS } from "./tool-result-cap.js";

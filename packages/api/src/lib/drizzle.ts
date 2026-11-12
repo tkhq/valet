@@ -1529,6 +1529,14 @@ WHERE r.status <> 'merged' ORDER BY l.org_id, l.subject_type, l.subject_id, l.di
     sql: 'ALTER TABLE "mcp_oauth_clients" ADD COLUMN IF NOT EXISTS "scopes_supported" jsonb',
   },
   {
+    // The MCP server's resource identifier, sent as the RFC 8707 `resource`
+    // on authorize, code exchange, and refresh (integration-oauth.ts). Null on
+    // rows from before the column existed, which the next connect backfills.
+    describe: "mcp_oauth_clients.resource column",
+    probe: { kind: "column", table: "mcp_oauth_clients", column: "resource" },
+    sql: 'ALTER TABLE "mcp_oauth_clients" ADD COLUMN IF NOT EXISTS "resource" text',
+  },
+  {
     // The LLM recording gateway's request log (#432). The gateway writes a row
     // here on every recorded call, so an already-migrated DB without it 500s
     // at runtime. Columns are in lockstep with `llm_proxy_requests` in

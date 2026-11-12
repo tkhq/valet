@@ -1097,6 +1097,17 @@ The `thread.hydrate` span records `valet.thread.entries_loaded` with session and
 PostgreSQL entry reads emit `store.entries.read` with `valet.entries.loaded` and `valet.entries.parts_bytes` before parsing returned parts. Byte counts use stored UTF-8 JSON without serializing hydrated objects.
 Active threads still load full history and retain their transcript. This change does not establish a per-thread byte ceiling or a cache memory budget.
 A transcript load reads `SessionStore.getTranscriptSnapshot` when the store has it (2026-10-28). It returns the same entries as `getThreadSnapshot`, but a message or compaction covered by the newest compaction on the active branch comes back as a stub without its payload. The transcript and skill-invocation rebuilds never read a covered entry's payload. The one exception is the task-source prompt, which the caller keeps whole through `keepQueueItemId`. A branch that left before that compaction stubs nothing. On agents-dev, a Slack channel thread held 205.7 MB of entries with 1.1 MB of live context, and every load parsed all of it. The PostgreSQL store reads stubs first, walks the active branch with `walkTranscriptDag`, and then reads full rows for uncovered entries only. `store.transcript_snapshot` records `valet.entries.loaded` and `valet.entries.stubbed`.
+A compaction reads no payload that the newest checkpoint covers (2026-11-11). It reads `getTranscriptSnapshot`, the hydration read, so covered entries arrive as stubs, and it works forward from that checkpoint:
+
+- Pruning and the cut point see live entries only. A covered entry never reaches the model, so neither pass needs it, and the prune pass never writes a stub back over a stored payload.
+- The new checkpoint carries the covered ids forward from the superseded one and adds the window it summarized.
+- `tokenCountBefore` is the superseded checkpoint's value plus the estimate of that window. `fileContext` is the union of both. Each figure still describes the whole covered history, as before.
+
+The append of the compaction entry checks the active branch with `readThreadOutline`, which reads links only. The rebuild after the append reads `getTranscriptSnapshot` again; the new compaction covers the head, so that read returns the live context. `contextUsage` on a released transcript also reads `getTranscriptSnapshot`. Before this change, every compaction read the whole thread with payloads, and on a channel thread with 451 MB of payloads it held three such reads at once and ran the api out of heap.
+
+A reload restores the usage anchor (2026-11-11). The newest assistant entry on the active path keeps its stored usage when its request saw the context the transcript now has: no newer checkpoint, no later prune of output it counted (`prunedAt` entry metadata), and not a fresh-context request (`freshContext` entry metadata). Every other rehydrated assistant message carries zero usage. Before this change, every reload estimated the whole live transcript with the character ruler and without tool definitions.
+
+A thread whose runs use fresh context gets its own bound. The trigger measures the whole live transcript for a fresh-context turn, because that turn's usage counts only its slice. A pass for such a turn covers the history before the turn's prompt with a checkpoint that holds a fixed note, with no model call. A pass inside the turn then compacts the turn's own messages as usual. See the 2026-11-11 amendment in `2026-08-24-thread-model-pinning-and-compaction-design.md`.
 
 #### Auto-continue after compaction
 

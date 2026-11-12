@@ -499,6 +499,14 @@ export interface EvalCase {
    */
   context_budget_tokens?: number;
   /**
+   * The context window the engine assumes for the case model, with a 10,000
+   * token output reserve. The provider's real window does not change. A
+   * small value makes one long turn compact before a model call, which
+   * `context_budget_tokens` cannot do: that budget applies between turns.
+   * Engine drive only.
+   */
+  context_window_tokens?: number;
+  /**
    * How the case is driven. `engine` (default): in-process engine with
    * eval stand-ins — fast, cheap, lab conditions. `product`: boots the
    * real api per case and drives the REAL orchestrator session over its

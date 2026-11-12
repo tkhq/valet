@@ -1666,6 +1666,10 @@ export const mcpOauthClients = pgTable("mcp_oauth_clients", {
   // (or lazily backfilled). Drives the scopeless-entry warning on every
   // connect. [] = the server advertises none; null = not yet captured.
   scopesSupported: jsonb("scopes_supported").$type<string[]>(),
+  // The server's RFC 9728 resource identifier, which every token request
+  // names as the RFC 8707 `resource`. Captured at registration (or lazily
+  // backfilled). "" = the server describes no resource; null = not yet captured.
+  resource: text("resource"),
   metadata: jsonb("metadata"),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
   updatedAt: bigint("updated_at", { mode: "number" }).notNull(),

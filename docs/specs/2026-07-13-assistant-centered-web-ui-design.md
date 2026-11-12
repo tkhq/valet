@@ -114,14 +114,14 @@ A new mouse press outside that radius or after 600ms removes the listeners and p
 A keyboard click also removes them and passes through. Unmount removes them too.
 OS repeat clicks have no time limit, and keyboard toggles do not arm the listeners.
 
-Each scroll sets the pin from the current distance to the end, using the existing 80-pixel threshold.
-Reveal, focus, find-in-page, keyboard, and scrollbar movement follow the same rule. No input timer gates the pin.
-During a pending viewport height change greater than two pixels, a pinned reader stays pinned if near the old or new end.
+Pinning has three rules. The pin decides whether streamed content moves the list.
+An upward scroll unpins only inside an 800ms window after a wheel, touch, key, or pointer event. Our own writes only move down, so any drop over half a pixel in that window counts, which includes 1px-per-frame drags. A drop with no recent input (scroll anchoring, a layout shift) does not unpin. A scroll event that reports upward movement renews the window, so momentum and scrollbar drags stay unpinned.
+Once unpinned, the list re-pins only in these cases: within 4px of the true end, when the reader uses Latest, when this client sends a message (a new last optimistic user row with no queue item id, so a server echo, a teammate's message, or a reappearing queued row does not pin), or when a resize leaves the reader within 4px of the end. The 80px near-bottom threshold applies only to a pinned list that did not move up.
+During a pending viewport height change greater than two pixels, a pinned reader stays pinned if near the old or new end. It unpins only if scrollTop dropped by more than the height change; a drop no larger than the height change does not unpin.
 A same-frame scroll away from both ends unpins before the resize report.
 Pinned readers stay at the bottom through viewport and content resizes. This trade-off applies to every container resize, not only gate toggles.
-A collapse scroll that brings a reader near the end pins them. On expansion they stay at the bottom, rather than returning to the pre-collapse offset.
-Otherwise the browser keeps an unpinned reader's place. The transcript does not write that reader's scroll position.
-The Latest button uses the actual distance from the end. A hidden mounted transcript ignores zero-height resize reports and scroll events.
+An unpinned reader's place is kept by the browser. The transcript does not write that reader's scroll position.
+The Latest button shows whenever the list is unpinned, or the reader is 80px or more from the end. A hidden mounted transcript ignores zero-height resize reports and scroll events.
 
 ### `/memory` and `/memory/$` — memory explorer
 

@@ -198,6 +198,7 @@ async function reviewInWorkspace(
       ...(opts.reviewFocus !== undefined ? { focuses: opts.reviewFocus } : {}),
       ...(opts.focusMinConfidence !== undefined ? { focusMinConfidence: opts.focusMinConfidence } : {}),
       ...(opts.minConfidence !== undefined ? { minConfidence: opts.minConfidence } : {}),
+      ...(opts.reviewDedupe ? { dedupe: true } : {}),
       ...(opts.contextBudget ? { contextBudget: opts.contextBudget * 4 } : {}),
       ...(opts.memoryDir !== undefined ? { memory: directoryMemory(opts.memoryDir, "lib") } : {}),
       ...(githubRepo(spec.remote) ? { repo: githubRepo(spec.remote) } : {}),

@@ -103,9 +103,8 @@ rehydration) use a lenient helper that falls back without throwing.
 
 ### 4. Budget sites use the thread's effective model
 
-Compaction always runs inside a claimed turn (proactive after `runAgent`,
-reactive inside it, manual via the in-turn command path), so
-`agent.state.model` holds the resolved effective model — including
+Compaction runs inside a claimed turn (proactive after `runAgent`, reactive
+inside it), so `agent.state.model` holds the resolved effective model — including
 resolver-only specs the internal registry cannot resolve. All five budget
 sites switch to it: the proactive trigger (`proactiveCompactionTrigger`), the
 reactive overflow check (`isContextOverflow`), the summarizer fallback model,
@@ -120,7 +119,9 @@ removes the cap). An org admin sets the cap in Settings, Models, Context
 sessions in that process without a rebuild.
 
 The proactive trigger has two levels. "overflow" means the next request does
-not fit the usable context, and the pass behaves as before. "budget" means
+not fit the usable context, and the pass behaves as before, except that a
+pass whose prune alone makes room skips the summary (see the 2026-11-11
+amendment on pruning). "budget" means
 the request fits but exceeds the budget. A budget pass never continues the
 turn. A budget pass that finds nothing to reclaim or fails does not count
 toward the circuit breaker; a failure still emits `compaction_failed`. When it runs depends on who watches the thread:
@@ -263,19 +264,39 @@ Two layers fix it:
   surfaces a clear error if it overflows.
 - **Tool result cap (2026-11-10).** `Thread.withResultCap` wraps every tool,
   so the assistant, children, workflow steps, and plugin reviews all get it.
-  A result over the tool's `maxResultChars` (default 100,000, Claude Code's
-  `maxResultSizeChars`) or 25,000 estimated tokens (Claude Code's MCP output
-  cap; `estimateResultTokens` counts JSON at 2 characters per token) is saved
-  to `<workspace>/.valet/tool-results/` in the sandbox. The model gets the
-  first 2,000 characters, the size, and the path from `.valet/` on. The host
-  and the sandbox can name the workspace differently (a host folder mounted at
-  `/workspace`), so both this note and the input spill pointer use that
-  relative path, which `read` and `bash` resolve against the working directory. `bash` caps at 30,000
-  characters, Claude Code's `BASH_MAX_OUTPUT_LENGTH`. `read` opts out because
-  it pages its own output: 2,000 lines or 50,000 characters, which is 25,000
-  tokens at 2 characters per token. If the save fails, the model gets the
-  first part and a note that the rest was dropped. Compaction keeps its own
-  4-character estimate (`estimateTokens`).
+  - **Limits.** A result over the tool's `maxResultChars` (default 100,000,
+    Claude Code's `maxResultSizeChars`) or 25,000 estimated tokens (Claude
+    Code's MCP output cap; `estimateResultTokens` counts JSON at 2 characters
+    per token) is capped. `bash` caps at 30,000 characters (Claude Code's
+    `BASH_MAX_OUTPUT_LENGTH`). `read` opts out because it pages itself: 2,000
+    lines or 50,000 characters, which is 25,000 tokens at 2 characters per
+    token. Text attachments count toward the cap, and a thrown tool error's
+    message gets the same cap (`capToolError`), because pi-agent-core puts it
+    into context as the result.
+  - **Preview.** The result is saved to `<workspace>/.valet/tool-results/`,
+    and the model gets 2,000 characters, the size, and the path from `.valet/`
+    on, which `read` and `bash` resolve against the working directory (the
+    host and the sandbox can name the workspace differently). `bash` sets
+    `resultPreview: "head-tail"`: the first and last 1,000 characters, with
+    the note between them, so the exit status and the failure stay visible.
+    Claude Code previews bash output the same way.
+  - **No usable file.** A turn without `read` or `bash` cannot open a saved
+    file, so it gets as much as the cap allows and a note that the rest was
+    dropped. A failed save does the same.
+  - **The UI keeps the whole text.** The bridge stores it in
+    `details.fullText`, which rehydration and the summarizer never read.
+    REST ships the preview and marks the result trimmed, and the step's
+    tool-output request returns the whole text. The live `tool_end` event
+    drops `fullText` from `resultData` and carries `resultTrimmed`, so a live
+    step loads the whole text the same way.
+  - **Git.** Each folder the engine saves under `.valet/` holds a
+    `.gitignore` of `*`, as the file checkpoint store does, so a `git add -A`
+    in a checkout never commits saved results or large inputs.
+  - **Telemetry.** `valet.tool.results_capped` counts capped results by tool
+    and outcome (`saved` or `cut`).
+  - **Known gaps.** Saved files are never deleted. Compaction keeps its
+    4-character estimate (`estimateTokens`). A skill body over the cap is
+    marked loaded although only its preview is in context.
 - **Fail-safe (defense in depth).** For a tail that still exceeds the window
   (a tool that opts out of the result cap, or a spill that could not write), `compactThreadInner`
   checks the kept tail after cut-point selection. It measures the POST-prune
@@ -530,8 +551,9 @@ the configured tool-output limit, 2,000 chars by default. A 300,000-char
 assistant run therefore costs about 5,000 tokens of input, not 75,000. A budget
 walk over raw sizes rejected entries whose real payload fits many times over.
 
-A budget cap can cut into a turn. The window keeps that shape: it is the
-newest entries that fit, with no alignment to a user entry. The summarizer
+A budget cap can cut into a turn. The window keeps that shape, with no
+alignment to a user entry. (Since 2026-11-11 the window is the oldest entries
+that fit; see the robustness amendment.) The summarizer
 prepends a synthetic user message when its input starts with an assistant
 message. Several providers reject that shape with a plain 400 error, and that
 error is not an overflow, so it would abort the overflow retry. An earlier
@@ -722,3 +744,247 @@ clears the provider's cached messages. A tool call, an error, or a summary
 that misses the template fails the cached path, and the pass falls back to
 `summarize` with the bounded windows above. The span attribute
 `valet.compaction.summary_source` reads `cached_prefix` or `prefix_failed`.
+
+## Amendment (2026-11-11): a summary inside a running turn
+
+A pass can run inside a turn: context preparation before a model call, or the
+reactive pass before the overflow retry. The same turn then continues from the
+summary and the verbatim tail. Two summary defects stopped such turns early in
+production:
+
+- The summarizer read its own request as the latest user message. The summary
+  then recorded "the latest request is summary-only", and the resumed turn
+  wrote a summary instead of finishing its work.
+- The summary described the running turn as finished. It also reported an
+  action the turn took, such as a reaction it added, as a state the turn had
+  found. The resumed turn read its own action as another run's work and
+  stopped.
+
+Both summarizer prompts (`summarize` and `summarizeOnPrefix`) now say that the
+summary request comes from the system and is not a user message. When the pass
+runs inside a turn (`compactThread({ turnInProgress: true })`), the prompt
+also says that the turn continues after the summary. The summary must keep the
+task under In Progress and list each external action the turn completed as
+done by this turn. A pass after the turn (the budget and idle passes) does not
+add the second note.
+
+## Amendment (2026-11-11): a pass inside a turn keeps the turn's task
+
+A pass inside a turn (context preparation before a model call, or the
+overflow retry) can cut into the running turn. The cut-point rules split the
+newest turn when it is larger than the tail budget. Before this change, the
+summary then replaced the turn's own prompt, and the resumed turn knew its
+task only from the summary. In production, resumed turns answered with a
+summary, or stopped because they read their own reaction as proof that
+another run had the work.
+
+The task retention path from the 2026-10-16 amendment now covers every
+running submission during a pass inside a turn:
+
+- `Thread.taskContractFor` is the old rule: a workflow contract
+  (`metadata.preserveTask`) or the original prompt that a repair names.
+- `Thread.taskSourceFor` is the contract, or else the running submission's
+  own prompt. Passes with `turnInProgress` use it, and so do restart,
+  interrupted continuation, and gate replay of a running submission.
+- A pass after the turn ends (the post-turn proactive pass, the idle pass,
+  `/compact` between turns) keeps only a contract.
+- When a render kept an ordinary prompt after a checkpoint, the thread
+  records it like a contract (`retainedSourceFor`). The turn start retires
+  it before the next submission. The turn may have stopped before an answer,
+  and the note after it says that the request is still in progress.
+
+A pass inside a turn also records the tool calls it covered from the
+running turn in the checkpoint metadata (`turnCalls`). Each line is the tool
+name and short arguments: string values are cut at 80 characters, and one
+call's arguments at 200. A failed call is marked `(failed)`. Tools that
+change nothing outside the conversation (`Thread.branchNoteTools().silent`)
+are left out. A later pass in the same turn adds its lines. The record keeps
+the first 10 and the newest 20 lines and counts the rest. The engine builds
+the record from stored calls with no model call, so it does not depend on
+what the summary says. For a workflow repair, the record lists the repair's
+own calls, not those of the original submission.
+
+While that turn runs, the rebuilt context has the summary, then the retained
+task word for word, then a note made from the record. A render outside the
+turn shows no note.
+
+`getTranscriptSnapshot` with `keepQueueItemId` keeps only the submission's
+user entries whole. Its other covered entries stay stubs, so a pass inside
+a long turn does not read the turn's stored tool results again.
+
+The retained task reserves the fixed instructions and tool definitions. When
+those alone fill the usable context, the pass returns `insufficient` with a
+`context_overflow_unrecoverable` error, because no summary can make the
+request fit.
+
+Known limit: a message that a mid-turn delivery adds to the running turn has
+its own queue item. A pass inside the turn can still summarize it.
+
+Codex keeps the newest user messages verbatim after a compaction for the same
+reason (up to about 20,000 tokens).
+
+## Amendment (2026-11-11): the idle pass keeps a warm transcript
+
+The host's idle sweep releases a thread's in-memory transcript after 30
+minutes (`releaseIdleTranscript`). An assistant's idle pass runs at 55
+minutes. The release did not check for an armed idle pass, so the pass
+reloaded the thread from the store. The reload has no last response, so
+`prefixForSummary` returned nothing and the pass used the bounded summarizer
+at full input price. The estimate also lost its usage anchor.
+
+`releaseIdleTranscript` now refuses while the idle compaction timer is armed.
+The pass runs on the live transcript and logs `cached-prefix summary`. The
+timer clears when the pass starts. A pass that compacts uses the transcript,
+so the thread releases about one idle window later.
+
+Two related fixes:
+
+- Every transcript replacement (release, rebuild, reload) drops the record of
+  the last model request and response. The new messages no longer match it,
+  so the cached-prefix path cannot use it, and it held the whole request
+  context in memory.
+- The cached-prefix summary of an idle pass sends the key the pass resolved,
+  not the key of the turn that ended up to 55 minutes earlier.
+
+## Amendment (2026-11-11): a pass that prunes enough ends without a summary
+
+`compactThreadInner` pruned stale tool output and then always summarized
+when the head was not empty. It never measured the pruned context, so a
+pass whose prune alone freed enough still paid for a summary.
+
+A proactive pass now measures the live context after a committed prune. The
+measure is the larger of two estimates:
+
+- The usage-anchored estimate from before the prune, less the tokens the
+  prune freed. It keeps the provider's real count.
+- The character ruler over the pruned messages, plus tool definitions.
+  Elision clears the usage anchors after the first elided output (#979), so
+  the anchored estimate after the prune would be this ruler too.
+
+The pass returns `pruned` with no summary only when the measure is under the
+compaction budget less the tail budget. That is about the headroom a summary
+leaves. A stop just under the budget would trigger again on the next turn.
+The span attributes `valet.compaction.tokens_after_prune` and
+`valet.compaction.prune_target_tokens` record both numbers.
+
+A pass for an "overflow" trigger that ends this way continues the turn, as a
+pass that summarizes does. On a model whose window is 200k or less, every
+turn-end pass is an "overflow" trigger.
+
+Two modes still summarize after a prune:
+
+- A manual `/compact`, because the person asked for a summary.
+- A reactive pass, because the provider just rejected a request that the
+  same estimate let through.
+
+Claude Code also clears old tool output before it writes a full summary.
+
+## Amendment (2026-11-11): usage anchor after a reload, and fresh-context history
+
+`entriesToAgentMessages` wrote zero usage on every rehydrated assistant
+message. After any reload, the estimate was the character ruler over all
+uncovered history, with no tool definitions. Codex restores the last token
+count on resume instead.
+
+The newest assistant entry on the active path now keeps its stored usage as
+the anchor (`usageAnchorEntryId`) when all of these hold:
+
+- No checkpoint is newer than it. A checkpoint replaced the history that
+  request read.
+- No prune elided output at or after its time. A prune stamps `prunedAt` in
+  the metadata of each entry it elides.
+- It did not come from a fresh-context request. A turn with
+  `freshContext` stamps the same key in the metadata of its responses,
+  because that usage counts only the turn's slice.
+
+The anchor is never taken from an older response, and it needs a reported
+input side (input plus cache reads and writes), because an output-only usage
+would anchor a large undercount.
+
+The old zero usage was also what bounded a thread whose deliveries run with
+fresh context (`deliveryRunsWithoutHistory`), so this change gives those
+threads their own policy:
+
+- The trigger measures the whole live transcript with the character ruler
+  when the running submission is a fresh-context turn.
+- A pass for a fresh-context turn first covers the history before the
+  turn's prompt with a checkpoint whose summary is a fixed note, with no
+  model call. No run reads that history, so an LLM summary of it bought
+  nothing. A pass at turn start covers all history, because the prompt is
+  not appended yet.
+- The note applies only when every unread user entry is an automated
+  delivery (a signal). A reply that a person typed into the thread does not
+  set `CONVERSATIONAL_THREAD_KEY`, so the delivery stays fresh; that history
+  gets a normal LLM summary instead, because a later turn may read it. A
+  later note checkpoint keeps that summary text ahead of the note, and a
+  note does not repeat.
+- A pass after the turn stops there and never continues the turn. On a model
+  whose window is 200k or less the post-turn trigger reads "overflow", which
+  would otherwise run a continuation call on a finished delivery.
+- A pass inside the turn then runs the normal path over the turn's own
+  messages, which the turn does read, with the note as the previous summary.
+  Any outcome of that second pass counts as progress, because the note
+  already shrank the context.
+- The note pass makes no model call, so it does not reset the failure
+  breaker.
+- A manual `/compact` summarizes as before.
+
+This also ends the case where a fresh-context turn sent the whole history
+after an in-turn compaction. `fitContextBeforeRequest` returns the rebuilt
+messages unscoped, and `freshContextOnly` cannot find the rebuilt prompt.
+Now the rebuilt messages hold no earlier run, because the pass covered them
+first.
+
+Known limits:
+
+- The covered automated runs stay readable only with `thread_read`.
+- While the failure breaker is open, the trigger is off, so the note pass
+  does not run either, although it cannot fail. `/compact` closes the
+  breaker.
+- Responses stored before this change carry no `freshContext` stamp. After a
+  reload, such a response can anchor a fresh-context slice until the
+  thread's next response. Context preparation still measures the larger of
+  the anchor and the character ruler, so a request cannot overflow on it.
+- `contextUsage` (the context meter and the idle check) does not use the
+  fresh-context rule.
+- A resumed or gate-replayed fresh-context turn sends the uncovered history
+  until a pass runs.
+
+## Amendment (2026-11-11): compaction robustness
+
+- **The breaker gates the reactive retry.** `MAX_CONSECUTIVE_COMPACTION_FAILURES`
+  stopped proactive passes and context preparation, but not the reactive
+  pass after an overflow. A thread whose compaction kept failing paid for a
+  failed summary on every overflow. `reactiveRetryAllowed` now checks the
+  breaker. The overflow response stands as the turn's error. `/compact`
+  still runs and closes the breaker.
+- **`/compact` waits for the running turn.** It ran during a streaming turn
+  with no drive lock and replaced `agent.state.messages` while the agent
+  loop kept its own copy. `Thread.compactBetweenTurns` now waits until no
+  turn runs and no other drive holds the thread, then holds the drive lock
+  (`kicking`) for the pass. Like the idle pass, it resolves the model and
+  key again, and it refuses when the session is fenced (destroyed or
+  reclaimed by another owner) or read-only. A message that arrives during the pass runs after it. The
+  command answers within the 500 ms window that plugin commands use; after
+  that, its result entry lands when the pass ends. Known limits: the wait
+  has no bound, so `/compact` behind a turn that waits on an approval waits
+  as long. A gate reconcile does not take the drive lock, which the idle
+  pass shares.
+- **Manual compaction outside a turn.** `/compact` now always runs outside
+  a claimed turn. It budgets against the model the host resolver returns, or
+  the thread's effective model (`effectiveModelLenient`) when no resolver is
+  wired.
+- **The bounded summarizer reads the head oldest first.** It summarized the
+  newest part of an oversized head, so older raw entries stayed in live
+  context after a summary of later events. A pass now reads the pending head
+  in windows from the oldest entry (`selectSummaryCheckpointHead`). Each
+  window's summary is the previous summary of the next window, so one
+  checkpoint covers the windows in order. A pass runs up to four windows. A
+  larger head keeps its newest part live after the summary for the next
+  pass. In the first window, the overflow retry keeps the older half of the
+  window. A window always
+  holds the first entry the summarizer can read, even when it alone exceeds
+  the budget. Tail evidence goes with the window that reaches the newest
+  head entry. If a later window fails, the checkpoint keeps the windows
+  already summarized and the rest stays live.
+- `Thread.fullSnapshot` had no callers after #1202 and is deleted.

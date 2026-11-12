@@ -1953,7 +1953,7 @@ describe("team credential scope (TKAI-205)", () => {
     });
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({
-      error: "metadata.oauthClientId and metadata.oauthTokenEndpoint are reserved. Valet sets them when an OAuth connect completes.",
+      error: "metadata.oauthClientId, metadata.oauthTokenEndpoint, metadata.oauthResource are reserved. Valet sets them when an OAuth connect completes.",
     });
   });
 
