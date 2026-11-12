@@ -13,6 +13,7 @@ vi.mock("@tanstack/react-router", () => ({
   Link: ({ children, to }: { children: React.ReactNode; to: string }) => <a href={to}>{children}</a>,
 }));
 vi.mock("~/api/home", () => ({ useHomeConversation: () => home() }));
+vi.mock("~/components/session/send-as-person", () => ({ useSendAsPerson: () => ({ reply: vi.fn(async () => true), pending: false, error: undefined }) }));
 vi.mock("~/components/home/tasks-panel", () => ({
   TasksPanel: () => <div data-testid="tasks" />,
   useNeedsYouCount: () => needsYou(),
