@@ -197,8 +197,8 @@ Two more suites use the same case shape and scoring:
 - `--memory-dir <dir>` gives the pack a directory of memory files as
   team memory, mounted at `lib/` the way a content source syncs it, for
   example a source repo's `.valet/memory`. Notes under
-  `lib/code-review/notes/` become review rules; other notes are
-  background.
+  `lib/code-review/notes/` become review rules: the pack lists and
+  matches every one of them. Other notes are background.
 
 ### Private suites
 

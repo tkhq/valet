@@ -2,7 +2,8 @@
  * Team memory from a local directory of Markdown files, for the eval and
  * the CLI. It stands in for the plugin host's memory port: `search` ranks
  * files by how many query words their path, title, description and body
- * hold, and `read` returns a file by its memory path.
+ * hold, `read` returns a file by its memory path, and `list` returns the
+ * files under a path prefix.
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
@@ -54,6 +55,13 @@ export function directoryMemory(root: string, mount = ""): PackMemory {
         .sort((a, b) => b.score - a.score || a.f.path.localeCompare(b.f.path))
         .slice(0, opts?.limit ?? 10)
         .map(({ f }) => ({ path: f.path, title: f.title, description: f.description, snippet: f.content.replace(/^---[\s\S]*?---\n?/, "").slice(0, 200) }));
+    },
+    async list(prefix, opts) {
+      return load()
+        .filter((f) => f.path.startsWith(prefix))
+        .sort((a, b) => a.path.localeCompare(b.path))
+        .slice(0, opts?.limit ?? 200)
+        .map((f) => ({ path: f.path, title: f.title, description: f.description }));
     },
     async read(path) {
       const f = load().find((x) => x.path === path);
