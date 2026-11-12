@@ -40,6 +40,11 @@ Decisions:
   filter persists in the clone's git config.
 - SHA-pinned refs still work: the filter omits only blobs, so the detached
   `git checkout <sha>` finds the commit and back-fills its tree's blobs.
+- A pinned commit that no fetched ref contains, such as the head of a pull
+  request from a fork (`refs/pull/<n>/head` on GitHub), is fetched by SHA
+  before the checkout: `git fetch origin <sha>`. A blobless clone can get the
+  commit by lazy fetch, but a prebuilt clone has no promisor remote, so
+  `fetchCommitIfMissing` fetches it on every clone path.
 - Prebuilt (baked) clones are out of scope: the bake Dockerfile clones at
   image-build time, off the workspace PVC.
 

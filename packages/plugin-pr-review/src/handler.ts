@@ -244,15 +244,14 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   // A person who asks for a review gets one, even of a head already reviewed.
   if (manual === undefined && prior?.lastReviewedHead === head) return log(slug, `skipped: ${head.slice(0, 7)} is already reviewed`);
 
-  if (pr.head.repo?.full_name !== pr.base.repo.full_name) {
-    // A child cannot check out a fork's head yet (refs/pull/N/head).
+  if (await untrustedFork(gh, pr)) {
     ctx.signal.throwIfAborted();
     const notice = renderForkNotice(head);
     const reviewId = prior?.reviewId !== undefined && (await gh.review(prior.reviewId))
       ? (await gh.updateReview(prior.reviewId, notice)).id
       : (await gh.createReview({ commitId: head, body: notice, comments: [] })).id;
     await save({ version: 1, reviewId, lastReviewedHead: head, findings: prior?.findings ?? [], nextId: prior?.nextId ?? 1, ...(prior?.rounds ? { rounds: prior.rounds } : {}) });
-    return log(slug, "skipped: pull request from a fork");
+    return log(slug, `skipped: pull request from a fork by ${pr.user?.login ?? "an unknown author"}, who has no write access (association ${pr.author_association ?? "unknown"})`);
   }
 
   const files = await gh.pullFiles();
@@ -778,9 +777,9 @@ async function shadowReview(
   const checkout = where.commit ?? (pr.merged && pr.merge_commit_sha ? pr.merge_commit_sha : pr.head.sha);
   const thread = await ctx.threads.ensure(slug, { title: `Review ${slug}` });
   const dispatch = (label: string): string => `${event.id}:${checkout.slice(0, 12)}:${label}`;
-  if (!pr.merged && pr.head.repo?.full_name !== pr.base.repo.full_name && where.commit === undefined) {
-    await ctx.threads.record(thread, renderShadowNotice(slug, "Valet cannot check out the head of a pull request from a fork. Pass a commit that a branch of this repository contains."), { dispatchId: dispatch("shadow-fork") });
-    return log(slug, "shadow review skipped: pull request from a fork");
+  if (!pr.merged && where.commit === undefined && (await untrustedFork(gh, pr))) {
+    await ctx.threads.record(thread, renderShadowNotice(slug, "The pull request comes from a fork, and its author has no write access to this repository. Pass a commit to review it."), { dispatchId: dispatch("shadow-fork") });
+    return log(slug, "shadow review skipped: pull request from a fork by an untrusted author");
   }
   const from = await shadowBase(gh, pr, checkout);
   const comparison = await gh.compare(from, checkout);
@@ -908,6 +907,27 @@ function fileDiff(patch: string | undefined, path: string): string {
 async function teamNotes(ctx: PluginEventContext, repo: string): Promise<string> {
   const hits = await ctx.memory.search(repo, { limit: 5 });
   return hits.map((h) => `- ${h.title}: ${h.snippet.replace(/\s+/g, " ").trim()}`).join("\n");
+}
+
+/** Author associations that show access to the base repository. */
+const TRUSTED_FORK_AUTHORS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+/** Repository roles that can push a branch to the base repository. */
+const PUSH_ROLES = new Set(["admin", "maintain", "write"]);
+
+/**
+ * Whether the pull request comes from a fork whose author could not push the
+ * branch to the base repository. Anyone can open a pull request from a fork of
+ * a public repository, and a review child runs tools in a sandbox with a token
+ * for the base repository, so only authors with that access get a review.
+ * GitHub computes `author_association` for the caller, and an app token sees a
+ * private org member as `CONTRIBUTOR`, so the author's role decides when the
+ * association does not show access.
+ */
+async function untrustedFork(gh: GitHubClient, pr: PullRequest): Promise<boolean> {
+  if (pr.head.repo?.full_name === pr.base.repo.full_name) return false;
+  if (TRUSTED_FORK_AUTHORS.has(pr.author_association ?? "")) return false;
+  const role = pr.user ? await gh.permission(pr.user.login) : undefined;
+  return role === undefined || !PUSH_ROLES.has(role);
 }
 
 /** Whether `path` matches one of the exclude globs (see `matchesGlob`). */

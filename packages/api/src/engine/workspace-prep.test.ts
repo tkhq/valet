@@ -277,6 +277,36 @@ describe("prepBinding", () => {
     expect(commands).toContain(`git checkout --detach '${sha}' --`);
   });
 
+  it("fetches a SHA ref that no branch holds before the checkout (fork pull request head)", async () => {
+    const sandbox = new RecordingSandbox();
+    const sha = PINNED_SHA;
+    sandbox.setResult(`git cat-file -e '${sha}^{commit}'`, { stdout: "", stderr: "fatal: Not a valid object name", exitCode: 128 });
+    await prepBinding(sandbox, ".", binding({ ref: sha }));
+    const commands = sandbox.execCalls.map((c) => c.command);
+    const fetchAt = commands.indexOf(`git fetch origin '${sha}'`);
+    expect(fetchAt).toBeGreaterThan(-1);
+    expect(fetchAt).toBeLessThan(commands.indexOf(`git checkout --detach '${sha}' --`));
+  });
+
+  it("does not fetch a SHA ref the clone already has", async () => {
+    const sandbox = new RecordingSandbox();
+    await prepBinding(sandbox, ".", binding({ ref: PINNED_SHA }));
+    expect(sandbox.execCalls.map((c) => c.command)).not.toContain(`git fetch origin '${PINNED_SHA}'`);
+  });
+
+  it("fetches a missing resolved start-ref before the checkout, on a fresh clone and on a refresh", async () => {
+    for (const existing of [false, true]) {
+      const sandbox = new RecordingSandbox();
+      if (existing) sandbox.markExistingClone(".");
+      sandbox.setResult(`git cat-file -e '${PINNED_SHA}^{commit}'`, { stdout: "", stderr: "fatal: Not a valid object name", exitCode: 128 });
+      await prepBinding(sandbox, ".", binding({ ref: PINNED_SHA, resolvedRef: PINNED_SHA }));
+      const commands = sandbox.execCalls.map((c) => c.command);
+      const fetchAt = commands.indexOf(`git fetch origin '${PINNED_SHA}'`);
+      expect(fetchAt).toBeGreaterThan(-1);
+      expect(fetchAt).toBeLessThan(commands.indexOf(`git checkout --detach '${PINNED_SHA}' --`));
+    }
+  });
+
   it.each(["release-v1", "HEAD"])("keeps a pinned %s detached", async (ref) => {
     const sandbox = new RecordingSandbox();
     if (ref !== "HEAD") sandbox.setResult(
@@ -575,6 +605,21 @@ describe("prepPrebuiltBinding", () => {
     expect(commands).toContain(`git checkout -B 'main' '${PINNED_SHA}' --`);
     expect(commands).toContain("git branch --set-upstream-to='origin/main' -- 'main'");
     expect(commands).not.toContain("git checkout -B 'main' 'origin/main'");
+  });
+
+  it("cold workspace fetches a pinned commit the baked clone lacks before checking it out", async () => {
+    const MISSING = { stdout: "", stderr: "fatal: Not a valid object name", exitCode: 128 };
+    // A legacy SHA ref (no resolved start-ref) and a resolved start-ref both fetch the commit first.
+    for (const pinned of [binding({ ref: PINNED_SHA }), binding({ ref: PINNED_SHA, resolvedRef: PINNED_SHA })]) {
+      const sandbox = new RecordingSandbox();
+      sandbox.setResult(`git cat-file -e '${PINNED_SHA}^{commit}'`, MISSING);
+      await prepPrebuiltBinding(sandbox, ".", pinned, { bakedSha: "bakedsha", recipe: [] });
+      const commands = sandbox.execCalls.map((c) => c.command);
+      const fetchAt = commands.indexOf(`git fetch origin '${PINNED_SHA}'`);
+      const checkoutAt = commands.findIndex((c) => c.startsWith("git checkout") && c.includes(PINNED_SHA));
+      expect(fetchAt).toBeGreaterThan(-1);
+      expect(checkoutAt).toBeGreaterThan(fetchAt);
+    }
   });
 
   it("cold workspace, no ref pinned: resolves origin/HEAD's default branch and force-checks-out origin's head", async () => {
