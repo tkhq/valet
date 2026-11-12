@@ -23,7 +23,7 @@ import { classifySecurityBrokerCaller, loadEngagementCredentialRefs } from "../s
 import { registerSecurityCredentialValue } from "../services/security-credential-tripwire.js";
 import { getTeamInOrg } from "../services/teams.js";
 import { SecretStoreError } from "../services/secret-store/provider.js";
-import { isSecretReference, parsePersonalReference } from "../services/secret-store/service.js";
+import { isSecretReference, parseSecretReference, readRefusal, type SecretReadContext } from "../services/secret-store/service.js";
 import { workflowSessionOwner } from "../workflows/session-owner.js";
 import type { AppQueryable } from "../lib/drizzle.js";
 import type { ResolveSandboxSecretsResponse } from "../wire/types.js";
@@ -110,11 +110,11 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
   // Every bad reference, not the first: the CLI rejects the whole batch on
   // this error, and naming one of several sends the reader to debug a
   // reference that was fine.
-  const unsupported = references.filter((r) => !isOnePasswordReference(r) && !parsePersonalReference(r));
+  const unsupported = references.filter((r) => !isOnePasswordReference(r) && !parseSecretReference(r));
   if (unsupported.length > 0) {
     return c.json(
       {
-        error: `not a supported secret reference: ${unsupported.join(", ")}. Use op://vault/item/field or secret://personal/name.`,
+        error: `not a supported secret reference: ${unsupported.join(", ")}. Use op://vault/item/field, or secret://personal/NAME, secret://team/TEAM_ID/NAME, or secret://company/NAME.`,
       },
       400,
     );
@@ -149,10 +149,19 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
   const scopes = narrowed.scopes;
   const ctx = { orgId: sandbox.orgId, userId: sandbox.userId, teamId };
 
-  // A personal secret follows the personal 1Password rule: only in a session
-  // the token holder owns personally. Refused before any provider call, and
-  // for the whole batch, so the command never starts with some of its secrets.
+  // Each secret:// reference is checked against the session before any read,
+  // and the batch fails on the first refusal, so the command never starts
+  // with only some of its secrets. The read context comes from the token and
+  // the session row, never from the request body. A personal scope follows
+  // the personal 1Password rule: the token holder must own the session.
   const { secretStore } = c.var.providers;
+  const readCtx: SecretReadContext = {
+    orgId: sandbox.orgId,
+    userId: sandbox.userId,
+    sessionId: sandbox.sessionId,
+    sessionOwnerType: teamId ? "team" : isOwnUserSession ? "user" : "org",
+    sessionOwnerId: teamId ?? (isOwnUserSession ? sandbox.userId : sandbox.orgId),
+  };
   if (references.some(isSecretReference)) {
     if (!secretStore.enabled) {
       return c.json(
@@ -160,14 +169,11 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
         503,
       );
     }
-    if (!isOwnUserSession) {
-      return c.json(
-        {
-          error:
-            "A secret://personal reference resolves only in a session you own personally. Start a personal session, then run again.",
-        },
-        403,
-      );
+    for (const reference of references) {
+      const parsed = parseSecretReference(reference);
+      if (parsed && !(await secretStore.mayRead(readCtx, parsed.scope))) {
+        return c.json({ error: readRefusal(parsed.scope) }, 403);
+      }
     }
   }
 
@@ -217,20 +223,10 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
   const storeErrors: SecretStoreError[] = [];
   const values = await Promise.all(
     references.map(async (reference): Promise<string | null> => {
-      const personal = parsePersonalReference(reference);
-      if (personal) {
+      const parsed = parseSecretReference(reference);
+      if (parsed) {
         try {
-          // The token holder owns this session: the owner check above passed.
-          const value = await secretStore.readPersonal(
-            {
-              orgId: sandbox.orgId,
-              userId: sandbox.userId,
-              sessionId: sandbox.sessionId,
-              sessionOwnerType: "user",
-              sessionOwnerId: sandbox.userId,
-            },
-            personal.name,
-          );
+          const value = await secretStore.read(readCtx, parsed.scope, parsed.name);
           return value === null ? null : Buffer.from(value, "utf8").toString("base64");
         } catch (err) {
           if (!(err instanceof SecretStoreError)) throw err;

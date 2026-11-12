@@ -4239,8 +4239,11 @@ export interface ResolveSandboxSecretsResponse {
   unresolved: string[];
 }
 
-/** One personal secret, as `GET /api/secrets` lists it. Names only: no
- * route returns a value. */
+/** Where a secret lives. `teamId` is set only for the team scope. */
+export type SecretScopeKind = "personal" | "team" | "company";
+
+/** One secret, as `GET /api/secrets` lists it. Names only: no route returns
+ * a value. */
 export interface SecretSummary {
   name: string;
   /** What `valet-secrets run --env NAME=<reference>` takes. */
@@ -4253,7 +4256,33 @@ export interface SecretsListResponse {
   enabled: boolean;
   /** The provider's name for users, for example "Turnkey". Null when off. */
   provider: string | null;
+  /** True when the caller may save and delete in this scope. */
+  canWrite: boolean;
   secrets: SecretSummary[];
+}
+
+/** `POST /api/secrets/import/begin`. */
+export interface BeginSecretSaveRequest {
+  scope: SecretScopeKind;
+  teamId?: string;
+  name: string;
+}
+
+/** What the browser seals the value with. `kind` selects the sealer; the
+ * other fields are the provider's and opaque to generic code. */
+export interface SecretSealEnvelope {
+  kind: string;
+  [field: string]: unknown;
+}
+
+export interface BeginSecretSaveResponse {
+  envelope: SecretSealEnvelope;
+}
+
+/** `POST /api/secrets/import/finish`. The value arrives sealed; the api
+ * never sees the plaintext on this path. */
+export interface FinishSecretSaveRequest extends BeginSecretSaveRequest {
+  sealed: { kind: string; [field: string]: unknown };
 }
 
 // ── REST: me + models (split-settings design) ─────────────────────────────
