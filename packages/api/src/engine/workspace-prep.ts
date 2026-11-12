@@ -392,12 +392,33 @@ async function assertCloneTargetEmpty(sandbox: Sandbox, dir: string): Promise<vo
   }
 }
 
+/**
+ * Fetches a commit that no fetched ref contains. A clone and `git fetch
+ * origin` get branches and tags only, so a pinned commit outside them is
+ * missing: the head of a pull request from a fork lives under
+ * `refs/pull/<n>/head` on GitHub. GitHub serves a commit by its SHA when a
+ * ref of the repository reaches it. A failed fetch is logged; the checkout
+ * that follows then fails with git's own error.
+ */
+async function fetchCommitIfMissing(sandbox: Sandbox, dir: string, sha: string, fullName: string): Promise<void> {
+  const present = await safeExec(sandbox, `git cat-file -e ${shQuote(`${sha}^{commit}`)}`, { cwd: dir, timeout: GIT_REFRESH_TIMEOUT_MS });
+  if (present.exitCode === 0) return;
+  const fetched = await safeExecGrowRetry(
+    sandbox, `git fetch origin ${shQuote(sha)}`, { cwd: dir, timeout: GIT_REFRESH_TIMEOUT_MS },
+    `git fetch ${sha} for ${fullName}`,
+  );
+  if (fetched.exitCode !== 0) {
+    console.error(`workspace prep: git fetch origin ${sha} failed for ${fullName} (${dir}): ${fetched.stderr || fetched.stdout}`);
+  }
+}
+
 async function checkoutResolvedRef(
   sandbox: Sandbox,
   dir: string,
   binding: RepoBinding,
 ): Promise<{ command: string; result: ExecResult }> {
   const sha = binding.resolvedRef!;
+  await fetchCommitIfMissing(sandbox, dir, sha, binding.fullName);
   const ref = binding.ref;
   let branch = false;
   if (ref && ref !== "HEAD" && !isCommitSha(ref)) {
@@ -437,6 +458,7 @@ async function refreshExistingClone(sandbox: Sandbox, dir: string, binding: Repo
       `workspace prep: git fetch origin failed for ${binding.fullName} (${dir}) — continuing: ${fetch.stderr || fetch.stdout}`,
     );
   }
+  if (!binding.resolvedRef && binding.ref && isCommitSha(binding.ref)) await fetchCommitIfMissing(sandbox, dir, binding.ref, binding.fullName);
   const checkout = binding.resolvedRef
     ? await checkoutResolvedRef(sandbox, dir, binding)
     : binding.ref
@@ -527,6 +549,7 @@ async function refreshStagedPrebuild(sandbox: Sandbox, dir: string, binding: Rep
     return true;
   }
   const pinned = isCommitSha(ref);
+  if (pinned) await fetchCommitIfMissing(sandbox, dir, ref, binding.fullName);
   const command = pinned
     ? `git checkout ${shQuote(ref)}`
     : `git checkout -B ${shQuote(ref)} ${shQuote(`origin/${ref}`)}`;
@@ -548,7 +571,8 @@ async function refreshStagedPrebuild(sandbox: Sandbox, dir: string, binding: Rep
  * ("Remote branch <sha> not found in upstream origin") — the flag takes a
  * branch or tag name only. Security engagements pin the ref to a resolved
  * SHA for determinism (every persona reads an identical tree), so a SHA ref
- * clones the default branch and checks the commit out of fetched history. */
+ * clones the default branch and checks the commit out of fetched history,
+ * fetching the commit by SHA when no branch holds it (see fetchCommitIfMissing). */
 function isCommitSha(ref: string): boolean {
   return /^[0-9a-f]{40}$/i.test(ref);
 }
@@ -586,6 +610,7 @@ async function cloneFresh(sandbox: Sandbox, dir: string, binding: RepoBinding): 
     throw new Error(execFailureMessage(`workspace prep: git clone failed for ${binding.fullName}`, result));
   }
 
+  if (!binding.resolvedRef && refIsSha) await fetchCommitIfMissing(sandbox, dir, binding.ref!, binding.fullName);
   const checkout = binding.resolvedRef
     ? await checkoutResolvedRef(sandbox, dir, binding)
     : refIsSha
