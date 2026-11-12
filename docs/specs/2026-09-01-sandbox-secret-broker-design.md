@@ -329,6 +329,15 @@ Rules that apply to every provider:
 
 Limits: a command that receives a value through `valet-secrets run` can print or send it on purpose; output redaction catches exact-byte prints only. Injecting a value at an egress proxy, so commands never hold it, is the next step.
 
+### Credential keys (2026-11-12)
+
+`services/secret-store/credential-keys.ts`. With `VALET_CREDENTIAL_KEYS=secret-store`, the `credentials` table (OAuth tokens, refresh tokens, API keys) is encrypted with one random 32-byte key per owner instead of the instance key. Each key is a secret in the deployment space named `keys/credentials/<type>/<id>`, labeled `scope=credential_key` and `valet_key_owner=<type>:<id>`, and the broker's policy releases it only to a read whose context names the same owner. Every key read is a provider activity. The database and the instance key alone no longer expose the tokens, and deleting an owner's key makes their tokens unreadable.
+
+- Tokens stay in Postgres. A refresh writes Postgres only. Keys are cached in api memory for 10 minutes, at most 1000 owners.
+- Owner-key ciphertext starts with `ek1:`. `PgCredentialStore` reads both forms whenever a secret store is set, and rewrites a row in the current form after reading it, through the same compare-and-swap a refresh uses. Direct row readers use `providers.credentialCipher`.
+- All owner keys live in the deployment space, including users' keys, so the one broker policy covers them and no personal sub-organization needs a policy change.
+- Limit: if the provider is unreachable and a key is not cached, that owner's integrations fail until it returns.
+
 ### Turnkey provider
 
 `services/secret-store/turnkey.ts`. Two ordinary, non-root Turnkey users act for Valet: the provisioner (`valet-root`) creates sub-organizations and imports or deletes secrets, and the broker (`valet-broker`) exports. Their policies in the deployment organization come from root-authorized bootstrap (`docs/environment-variables.md`). Each personal space is a sub-organization: the provisioner creates it with both users as roots at threshold 1, adds one policy for each, then sets a 2-of-2 root quorum, so neither key alone can bypass a policy there. Labels become static properties, and the read context becomes the export's request context. The export policies compare the two, so an export with the wrong context fails in Turnkey. These checks catch Valet mistakes; they are not a boundary against a stolen broker key, which writes its own context.

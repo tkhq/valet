@@ -1,4 +1,5 @@
 import { deleteTeamCredential } from "../services/team-resource-deletion.js";
+import type { CredentialCipher } from "../services/secret-store/credential-keys.js";
 import { auditRequest } from "./_admin-audit.js";
 /**
  * `/api/credentials` — manual token entry + connection summary for the
@@ -69,7 +70,6 @@ import { isDeadConnection, isUnusableOAuthCredential } from "../services/credent
 import { deleteSharesFrom, listShareTeamsFrom, listTeamShares, revokeShare, shareCredential } from "../services/credential-shares.js";
 import { GITHUB_CREDENTIAL_SERVICE, checkGithubUserRow, isUsableGithubUserRow } from "../services/github-tokens.js";
 import { credentials } from "../schema/index.js";
-import { deriveSecretKey, decryptSecret } from "../lib/secret-crypto.js";
 import { serviceDisplayName } from "../lib/service-display-name.js";
 import { ISSUING_CLIENT_METADATA_KEYS } from "../services/integration-oauth.js";
 import type {
@@ -123,22 +123,22 @@ function usableByTeamRead(stored: StoredCredential): boolean {
  * Takes the raw row and refreshes no token. An encrypted empty refresh
  * token has the same meaning as a missing refresh token.
  */
-function teamRowUnusable(
-  encryptionKey: string,
+async function teamRowUnusable(
+  cipher: CredentialCipher,
   row: typeof credentials.$inferSelect,
   now: number,
-): boolean {
+): Promise<boolean> {
+  const owner = { type: "team" as const, id: row.ownerId };
+  const decrypt = (value: string | null) => (value ? cipher.decrypt(owner, value) : Promise.resolve(undefined));
   if (row.service !== GITHUB_CREDENTIAL_SERVICE) {
-    const refreshToken = row.refreshTokenEnc ? decryptSecret(row.refreshTokenEnc, deriveSecretKey(encryptionKey)) : undefined;
+    const refreshToken = await decrypt(row.refreshTokenEnc);
     return isUnusableOAuthCredential({ ...row, refreshTokenEnc: undefined, refreshToken }, now);
   }
   const metadata = fromJsonbColumn<Record<string, unknown>>(row.metadata);
   if (onePasswordMeta({ type: row.type, metadata }) !== null) return false;
-  const key = deriveSecretKey(encryptionKey);
-  const secret = row.accessTokenEnc ?? row.apiKeyEnc;
   return !isUsableGithubUserRow({
-    accessToken: secret ? decryptSecret(secret, key) : undefined,
-    refreshToken: row.refreshTokenEnc ? decryptSecret(row.refreshTokenEnc, key) : undefined,
+    accessToken: await decrypt(row.accessTokenEnc ?? row.apiKeyEnc),
+    refreshToken: await decrypt(row.refreshTokenEnc),
     expiresAt: row.expiresAt ?? undefined,
     metadata,
   }, now);
@@ -393,7 +393,7 @@ credentialsRouter.get("/", async (c) => {
         },
         new Date(row.createdAt).toISOString(),
         // The share pickers read this to agree with the delegate route.
-        teamRowUnusable(c.var.providers.encryptionKey, row, Date.now()) ? { unusable: true } : undefined,
+        (await teamRowUnusable(c.var.providers.credentialCipher, row, Date.now())) ? { unusable: true } : undefined,
       );
       if (summary) listed.push(summary);
     }
@@ -820,7 +820,7 @@ credentialsRouter.post("/:service/delegate", async (c) => {
     const [teamRow] = await tx.select().from(credentials).where(and(
       eq(credentials.ownerType, "team"), eq(credentials.ownerId, body.teamId), eq(credentials.service, service),
     )).limit(1);
-    if (teamRow && !teamRowUnusable(c.var.providers.encryptionKey, teamRow, Date.now())) {
+    if (teamRow && !(await teamRowUnusable(c.var.providers.credentialCipher, teamRow, Date.now()))) {
       return { kind: "blocked" as const, dead: isDeadConnection(teamRow, Date.now()) };
     }
     await shareCredential(tx, { teamId: body.teamId, service, userId: user.id, createdAt: Date.now() });

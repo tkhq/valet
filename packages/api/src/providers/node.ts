@@ -79,6 +79,7 @@ import { isTeamMember } from "../services/teams.js";
 import { createOnePasswordService } from "../services/onepassword.js";
 import { secretStoreProviderFromEnv } from "../services/secret-store/config.js";
 import { buildSecretTools } from "../engine/secret-tools.js";
+import { createCredentialKeyring, credentialCipher } from "../services/secret-store/credential-keys.js";
 import { createSecretStoreService, disabledSecretStore } from "../services/secret-store/service.js";
 import { ServiceProbes } from "../plugins/service-probe.js";
 import { loadNodeModulesPlugins } from "../plugins/node-modules-loader.js";
@@ -529,6 +530,20 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   const secretStore = secretStoreProvider
     ? createSecretStoreService({ db, provider: secretStoreProvider })
     : disabledSecretStore();
+  // Owner keys for the credentials table (`services/secret-store/credential-keys.ts`).
+  // With a secret store, reads accept owner-key ciphertext; writes use owner
+  // keys only when VALET_CREDENTIAL_KEYS=secret-store.
+  const credentialKeysMode = process.env.VALET_CREDENTIAL_KEYS?.trim();
+  if (credentialKeysMode && credentialKeysMode !== "secret-store") {
+    throw new Error(`VALET_CREDENTIAL_KEYS=${credentialKeysMode} is not known. Use secret-store, or unset it.`);
+  }
+  if (credentialKeysMode === "secret-store" && !secretStoreProvider) {
+    throw new Error("VALET_CREDENTIAL_KEYS=secret-store needs a secret store. Set VALET_SECRET_STORE and its keys, or unset VALET_CREDENTIAL_KEYS.");
+  }
+  if (secretStoreProvider) {
+    const keyring = createCredentialKeyring({ provider: secretStoreProvider, db, orgId: () => resolveOrgId(db) });
+    baseCredentials.useCipher(credentialCipher(deriveSecretKey(opts.encryptionKey), keyring, credentialKeysMode === "secret-store"));
+  }
 
   // Circular construction: EngineHost needs the ChildSpawner at construction
   // time (it's baked into every orchestrator session's toolConfig), but the
@@ -1031,6 +1046,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     storedCredentials,
     onePassword,
     secretStore,
+    credentialCipher: baseCredentials.fieldCipher,
     engineHost,
     autoTitleHost,
     childWatcher,
