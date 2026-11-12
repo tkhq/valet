@@ -1,0 +1,31 @@
+# Image attachments: a tall page screenshot (1200 x 6000, 7.2 MP) is over
+# the 2.56 MP model-copy limit but under the hard provider limits. Valet
+# stores a 400 x 2000 copy. The case checks that the agent still reads text
+# at the top, middle, and bottom. Anthropic resizes any image over 1568 px
+# on its long side, so the copy keeps the detail the model gets anyway.
+# See docs/specs/2026-11-11-model-image-limits-design.md.
+id: image-read-tall
+description: Reads three codes from the top, middle, and bottom of a tall attached image.
+turns:
+  - role: user
+    content: >-
+      The attached image is a long page screenshot. List every code it
+      shows, from top to bottom, one per line, in the form LABEL CODE.
+      Copy each code exactly.
+    images:
+      - name: long-page.png
+        width: 1200
+        height: 6000
+        texts:
+          - { text: "TOP CODE FT-4100", y: 160, size: 96 }
+          - { text: "MIDDLE CODE FX-7507", y: 3000, size: 72 }
+          - { text: "BOTTOM CODE BS-5221", y: 5900, size: 96 }
+timeout_ms: 120000
+checks:
+  - type: output_contains
+    pattern: 'FT.?4100'
+  - type: output_contains
+    pattern: 'FX.?7507'
+  - type: output_contains
+    pattern: 'BS.?5221'
+  - type: no_errors

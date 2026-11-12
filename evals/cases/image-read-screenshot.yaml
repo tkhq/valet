@@ -1,0 +1,33 @@
+# Image attachments: a screenshot-sized image (1440 x 900) is under every
+# model image limit, so Valet sends it unchanged. The case checks that the
+# agent reads small text in it. See docs/specs/2026-11-11-model-image-limits-design.md.
+id: image-read-screenshot
+description: Reads a service name, a count, and an error code from an attached dashboard screenshot.
+turns:
+  - role: user
+    content: >-
+      The attached screenshot is from our deploy dashboard. Reply with the
+      service name, the failed check count, the error code, and the build
+      number, one per line. Copy each value exactly as the image shows it.
+    images:
+      - name: deploy-dashboard.png
+        width: 1440
+        height: 900
+        background: "#f6f7f9"
+        texts:
+          - { text: "Deploy dashboard", y: 90, size: 48 }
+          - { text: "Service: ledger-sync", y: 260, size: 36 }
+          - { text: "Failed checks: 19 of 65", y: 360, size: 32 }
+          - { text: "Error code: FH-6355", y: 460, size: 28, color: "#b42318" }
+          - { text: "Build 4229", y: 860, size: 20, color: "#555555" }
+timeout_ms: 120000
+checks:
+  - type: output_contains
+    value: ledger-sync
+  - type: output_contains
+    pattern: '19 of 65'
+  - type: output_contains
+    pattern: 'FH.?6355'
+  - type: output_contains
+    value: "4229"
+  - type: no_errors

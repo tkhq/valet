@@ -391,6 +391,27 @@ export interface EvalTurn {
    * runner between turns.
    */
   content: string;
+  /** Images attached to this turn, rendered by the harness (`turn-images.ts`). */
+  images?: EvalTurnImage[];
+}
+
+/** One generated image: a canvas with text lines at fixed positions. */
+export interface EvalTurnImage {
+  name: string;
+  width: number;
+  height: number;
+  /** Fill color. Default white. */
+  background?: string;
+  texts: EvalTurnImageText[];
+}
+
+/** One text line in a generated image. `y` is the baseline in pixels. */
+export interface EvalTurnImageText {
+  text: string;
+  x?: number;
+  y: number;
+  size: number;
+  color?: string;
 }
 
 /** Reasoning effort levels, mirroring pi-ai's ThinkingLevel. */

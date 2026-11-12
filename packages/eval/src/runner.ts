@@ -38,6 +38,7 @@ import { buildMockCatalogTools } from "./mock-catalog.js";
 import { runPullRequestCase } from "./pull-request.js";
 import { extractTrajectory, findSpawnCallId } from "./trajectory.js";
 import type { EvalCase, ReasoningLevel, Trajectory, VerificationResult } from "./types.js";
+import { renderTurnImages } from "./turn-images.js";
 
 const DEFAULT_TIMEOUT_MS = 300_000;
 const EVAL_USER_ID = "eval-user";
@@ -422,7 +423,8 @@ async function runCaseInner(evalCase: EvalCase, opts: RunnerOptions): Promise<Ca
       error = `turn ${i + 1}: ${err instanceof Error ? err.message : String(err)}`;
       break;
     }
-    const receipt = await session.prompt(content);
+    const attachments = turn.images ? await renderTurnImages(turn.images) : [];
+    const receipt = await session.prompt(attachments.length > 0 ? { text: content, attachments } : content);
     if (!(await awaitSubmission(receipt.queueItemId))) break;
     if (!(await drainChildren())) break;
   }

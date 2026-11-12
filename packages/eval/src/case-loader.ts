@@ -20,6 +20,7 @@ import {
   type PullRequestSpec,
   type EvalCase,
   type EvalTurn,
+  type EvalTurnImage,
   type MockSource,
   type MockToolSpec,
 } from "./types.js";
@@ -82,7 +83,51 @@ function parseTurns(raw: Record<string, unknown>, source: string): EvalTurn[] {
     if (typeof t.content !== "string" || t.content.length === 0) {
       throw new CaseValidationError(source, `\`turns[${i}].content\` must be a non-empty string`);
     }
-    return { role: "user", content: t.content };
+    const images = parseTurnImages(t.images, i, source);
+    return { role: "user", content: t.content, ...(images ? { images } : {}) };
+  });
+}
+
+const MAX_IMAGE_SIDE = 20_000;
+
+function parseTurnImages(raw: unknown, turn: number, source: string): EvalTurnImage[] | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  const at = `\`turns[${turn}].images\``;
+  if (!Array.isArray(raw) || raw.length === 0) throw new CaseValidationError(source, `${at} must be a non-empty array`);
+  return raw.map((image, i) => {
+    const where = `${at}[${i}]`;
+    if (!isRecord(image)) throw new CaseValidationError(source, `${where} must be an object`);
+    if (typeof image.name !== "string" || !image.name) throw new CaseValidationError(source, `${where}.name must be a non-empty string`);
+    for (const key of ["width", "height"] as const) {
+      const n = image[key];
+      if (typeof n !== "number" || !Number.isInteger(n) || n < 1 || n > MAX_IMAGE_SIDE) {
+        throw new CaseValidationError(source, `${where}.${key} must be an integer from 1 to ${MAX_IMAGE_SIDE}`);
+      }
+    }
+    if (image.background !== undefined && typeof image.background !== "string") {
+      throw new CaseValidationError(source, `${where}.background must be a string`);
+    }
+    if (!Array.isArray(image.texts) || image.texts.length === 0) {
+      throw new CaseValidationError(source, `${where}.texts must be a non-empty array`);
+    }
+    const texts = image.texts.map((t, j) => {
+      const tw = `${where}.texts[${j}]`;
+      if (!isRecord(t) || typeof t.text !== "string" || !t.text) throw new CaseValidationError(source, `${tw}.text must be a non-empty string`);
+      if (typeof t.y !== "number" || typeof t.size !== "number" || t.size <= 0) {
+        throw new CaseValidationError(source, `${tw} needs a numeric y and a positive size`);
+      }
+      if ((t.x !== undefined && typeof t.x !== "number") || (t.color !== undefined && typeof t.color !== "string")) {
+        throw new CaseValidationError(source, `${tw}.x must be a number and ${tw}.color a string`);
+      }
+      return { text: t.text, y: t.y, size: t.size, ...(t.x !== undefined ? { x: t.x } : {}), ...(t.color !== undefined ? { color: t.color } : {}) };
+    });
+    return {
+      name: image.name,
+      width: image.width as number,
+      height: image.height as number,
+      ...(image.background !== undefined ? { background: image.background } : {}),
+      texts,
+    };
   });
 }
 

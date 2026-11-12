@@ -209,6 +209,7 @@ import type {
 } from "./types.js";
 import { ENTRY_USER_TIMEZONE_KEY, FRESH_CONTEXT_KEY, MESSAGE_TURN_ERROR_KEY, MID_TURN_DELIVERY_KEY, RECORD_ONLY_KEY, THREAD_USER_TIMEZONE_KEY } from "./types.js";
 import { correctImageBlocks } from "./image-media-type.js";
+import { fitImageAttachments, IMAGE_REJECTED_KEY, isImageRejection, withoutImageBlocks } from "./image-limits.js";
 import { reportError } from "./error-report.js";
 
 /** Bound on `awaitResult`'s merged-constituent delegation chain (Task 6). */
@@ -4935,6 +4936,10 @@ export class Thread {
       }
     }
 
+    // Store the copy the model can take, so no later turn resends an
+    // oversized image (docs/specs/2026-11-11-model-image-limits-design.md).
+    attachments = await fitImageAttachments(attachments);
+
     // QueueItem.metadata flows through onto the entry so synthetic flags like
     // compaction_continue survive into the DAG for client UIs and for later
     // restoration.
@@ -5559,10 +5564,51 @@ export class Thread {
         this.overflowRetryInProgress = false;
       }
       await this.retryTransientTurnError();
+      await this.recoverFromImageRejection();
       return;
     }
 
     await this.retryTransientTurnError();
+    await this.recoverFromImageRejection();
+  }
+
+  /**
+   * A provider that rejects an image rejects every later request that resends
+   * it. The error does not say which image, so remove every image the failed
+   * request carried, mark the turn's user entry for reloads
+   * (`entriesToAgentMessages`), and continue the turn once without them.
+   */
+  private async recoverFromImageRejection(): Promise<void> {
+    if (this.nativeImages.savedInRequest) return;
+    const messages = this.agent.state.messages;
+    const last = messages[messages.length - 1];
+    if (!last || last.role !== "assistant" || last.stopReason !== "error" || !isImageRejection(last.errorMessage)) return;
+    const prior = messages.slice(0, -1);
+    const stripped = withoutImageBlocks(prior);
+    if (stripped === prior) return;
+    console.warn(`[engine] provider rejected an image session=${this.session.id} thread=${this.id}; continuing without images`);
+    await this.markImageRejected();
+    if (!(await this.canRunCurrentSubmission())) return;
+    this.agent.state.messages = stripped;
+    this.prevCacheSnapshot = undefined;
+    await this.agent.continue();
+    await this.agent.waitForIdle();
+    await this.retryTransientTurnError();
+  }
+
+  private async markImageRejected(): Promise<void> {
+    const entryId = this.turnUserEntryId;
+    if (!entryId) return;
+    const store = this.session.providers.store;
+    try {
+      const entries = await store.getEntries(this.session.id, this.id, this.runningItem ? { queueItemId: this.runningItem.id } : undefined);
+      const entry = entries.find((candidate) => candidate.id === entryId);
+      if (entry?.type !== "message" || entry.metadata?.[IMAGE_REJECTED_KEY] === true) return;
+      const updated: MessageEntry = { ...entry, metadata: { ...entry.metadata, [IMAGE_REJECTED_KEY]: true } };
+      await this.fencedWrite(() => store.updateEntry(this.session.id, this.id, updated, this.fence));
+    } catch (err) {
+      reportError({ area: "engine", reason: "image_rejected_mark" }, `[engine] image rejection not recorded session=${this.session.id} thread=${this.id}`, err);
+    }
   }
 
   private isUserPrompt(): boolean {
@@ -8922,6 +8968,17 @@ export function entriesToAgentMessages(
       && entry.queueItemId === opts.taskSourceQueueItemId)?.id
     : undefined;
 
+  // A provider rejected an image in a marked entry's turn. That request
+  // carried every image up to the end of the turn, so a reload removes the
+  // same images (`Thread.recoverFromImageRejection`).
+  let lastRejected = -1;
+  activeEntries.forEach((entry, index) => {
+    if (entry.type === "message" && entry.role === "user" && entry.metadata?.[IMAGE_REJECTED_KEY] === true) lastRejected = index;
+  });
+  const rejectedTurnEnd = lastRejected < 0 ? -1 : activeEntries.findIndex((entry, index) =>
+    index > lastRejected && entry.type === "message" && entry.role === "user");
+  let imageCut = lastRejected < 0 ? 0 : undefined;
+
   const out: AgentMessage[] = [];
   if (activeCompaction) {
     // thread_read returns the newest `limit` entries (max 200), so this can
@@ -8942,7 +8999,8 @@ export function entriesToAgentMessages(
     });
   }
 
-  for (const e of activeEntries) {
+  for (const [index, e] of activeEntries.entries()) {
+    if (index === rejectedTurnEnd) imageCut = out.length;
     if (e.type === "branch_summary" && !activeCompaction?.covered.has(e.id)) {
       out.push({ role: "user", content: [{ type: "text", text: renderBranchNote(e.summary) }], timestamp: e.createdAt });
       continue;
@@ -9050,7 +9108,8 @@ export function entriesToAgentMessages(
       }
     }
   }
-  return out;
+  imageCut ??= out.length;
+  return imageCut === 0 ? out : [...withoutImageBlocks(out.slice(0, imageCut)), ...out.slice(imageCut)];
 }
 
 /** The confirmed side effect a tool reported in its result details, if any. */
