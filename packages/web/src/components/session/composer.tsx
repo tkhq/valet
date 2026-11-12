@@ -16,6 +16,9 @@ import {
 } from "react";
 import { ArrowUp, Paperclip, Pencil, Play, Square, X } from "lucide-react";
 import { Button, Textarea } from "~/components/primitives";
+import { ComposerSecretPrompt, useSecretGuard } from "./composer-secret-prompt";
+import type { SecretTarget } from "~/api/secrets";
+import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { useAbortThread, useCancelQueuedItem, useEditPreview, useResumeThread, useSendPrompt } from "~/api/queries";
 import { FileChangeChoice } from "./file-change-choice";
 import { ApiError } from "~/api/client";
@@ -197,6 +200,11 @@ export function Composer({
   const key = draftKey(sessionId, threadId);
   const { text, images, files, imageErrors, fileErrors, recall } = useComposerDraft(key);
   const setText = (value: string) => useComposerDraftStore.getState().setText(key, value);
+  // A pasted key: offer to save it as a secret, and hold the send until the
+  // user saves it or keeps it as text.
+  const secretGuard = useSecretGuard(text);
+  const workspaceScope = useWorkspaceScope();
+  const secretTarget: SecretTarget = workspaceScope.teamId ? { scope: "team", teamId: workspaceScope.teamId } : { scope: "personal" };
   const localSubmissionLock = useRef(false);
   const submitting = submissionLock ?? localSubmissionLock;
   const [preparing, setPreparing] = useState(false);
@@ -692,6 +700,7 @@ export function Composer({
 
   async function submit() {
     if (submitting.current || send.isPending || !threadId) return;
+    if (secretGuard.pending.length > 0) return;
     if (activeContext) {
       const slot = key;
       const draft = useComposerDraftStore.getState().byKey[slot];
@@ -1181,6 +1190,16 @@ export function Composer({
           <p className="mb-2 px-3 pt-1 text-xs leading-5 text-muted">
             {FILE_UPLOADS_ENABLED ? "Drop the files to attach them." : "Drop the images to attach them."}
           </p>
+        )}
+        {secretGuard.pending[0] && (
+          <ComposerSecretPrompt
+            key={secretGuard.pending[0].value}
+            candidate={secretGuard.pending[0]}
+            text={text}
+            target={secretTarget}
+            onReplace={setText}
+            onKeep={() => secretGuard.keep(secretGuard.pending[0]!.value)}
+          />
         )}
         <ComposerImageErrors
           messages={imageErrors}
