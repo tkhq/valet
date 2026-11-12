@@ -278,7 +278,7 @@ integrations on a user's behalf, in Settings → Integrations.
 
 ### Secret store
 
-Optional. A secret store holds the personal secrets that users save in Settings → Secrets and read in their own sessions with `secret://personal/<name>` references. Valet keeps names, owners, and access rules. The provider holds the values.
+Optional. A secret store holds company, team, and personal secrets. Sessions read them with `secret://company/NAME`, `secret://team/TEAM_ID/NAME`, and `secret://personal/NAME`. Valet keeps names, scopes, and access rules. The provider holds the values.
 
 | Variable | Description |
 |----------|-------------|
@@ -290,9 +290,36 @@ Required when `VALET_SECRET_STORE=turnkey`. A missing value stops the api at boo
 
 | Variable | Description |
 |----------|-------------|
-| `VALET_TURNKEY_ORG_ID` | The parent Turnkey organization. Valet creates one sub-organization per user under it. |
-| `VALET_TURNKEY_API_PUBLIC_KEY` / `VALET_TURNKEY_API_PRIVATE_KEY` | The broker's P-256 API key pair. It is the root user of each user's sub-organization. Store it like `VALET_ENCRYPTION_KEY`. |
+| `VALET_TURNKEY_ORG_ID` | The deployment's Turnkey organization. It holds company and team secrets, and each user's personal sub-organization is created under it. |
+| `VALET_TURNKEY_PROVISIONER_API_PUBLIC_KEY` / `VALET_TURNKEY_PROVISIONER_API_PRIVATE_KEY` | The P-256 API key of the ordinary user `valet-root`. It creates sub-organizations and imports or deletes secrets. Store it like `VALET_ENCRYPTION_KEY`. |
+| `VALET_TURNKEY_BROKER_API_PUBLIC_KEY` / `VALET_TURNKEY_BROKER_API_PRIVATE_KEY` | The P-256 API key of the ordinary user `valet-broker`. It exports secrets. It must differ from the provisioner key. |
 | `VALET_TURNKEY_API_BASE_URL` | Optional. Turnkey API URL. Default `https://api.turnkey.com`. |
+
+Neither user is a Turnkey root. A person with root authority in the organization runs the bootstrap once:
+
+1. Generate one API key for each user: `tk api-key generate --output ./valet-root.json`, then the same for `valet-broker`.
+2. Create the users with those public keys: `tk user create --user-name valet-root --public-key <KEY>`, then `valet-broker`.
+3. Create the provisioning policy for `valet-root`:
+
+   ```sh
+   tk policy create --name "valet-root: provision" --effect allow \
+     --consensus "approvers.any(u, u.id == 'VALET_ROOT_USER_ID')" \
+     --condition "activity.type in ['ACTIVITY_TYPE_CREATE_SUB_ORGANIZATION_V7', 'ACTIVITY_TYPE_CREATE_SUB_ORGANIZATION_V8', 'ACTIVITY_TYPE_CREATE_SUB_ORGANIZATION_V9', 'ACTIVITY_TYPE_INIT_IMPORT_SECRETS', 'ACTIVITY_TYPE_IMPORT_SECRETS', 'ACTIVITY_TYPE_DELETE_SECRETS']"
+   ```
+
+4. Create the two export policies for `valet-broker`:
+
+   ```sh
+   tk policy create --name "valet-broker: export company secrets" --effect allow \
+     --consensus "approvers.any(u, u.id == 'VALET_BROKER_USER_ID')" \
+     --condition "activity.type == 'ACTIVITY_TYPE_EXPORT_SECRETS' && secret.static_properties['scope'] == 'company' && request_context['valet_company_org_id'] == secret.static_properties['valet_company_org_id']"
+
+   tk policy create --name "valet-broker: export team secrets" --effect allow \
+     --consensus "approvers.any(u, u.id == 'VALET_BROKER_USER_ID')" \
+     --condition "activity.type == 'ACTIVITY_TYPE_EXPORT_SECRETS' && secret.static_properties['scope'] == 'team' && request_context['valet_company_org_id'] == secret.static_properties['valet_company_org_id'] && request_context['valet_owner_team_id'] == secret.static_properties['valet_owner_team_id']"
+   ```
+
+Valet sets up each personal sub-organization itself: both users as roots, one policy for each, then a 2-of-2 root quorum.
 
 ### The two Google pairs
 

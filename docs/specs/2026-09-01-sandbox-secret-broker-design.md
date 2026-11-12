@@ -295,27 +295,38 @@ The generated command wrapper refuses multiple matches and preserves the scope
 of a unique match. Explicit stored references and repo-pinned references remain
 supported. These changes do not alter the arbitrary-command plaintext limit above.
 
-## Personal secrets in a secret store (2026-11-10)
+## Secrets in a secret store (2026-11-10, scopes 2026-11-12)
 
-The broker also resolves `secret://personal/<name>`. A user saves these secrets in Settings → Secrets (`/api/secrets`). They live in a pluggable secret store, and `VALET_SECRET_STORE` picks the provider. Unset turns the store off.
+The broker also resolves `secret://` references in three scopes. They live in a pluggable secret store, and `VALET_SECRET_STORE` picks the provider. Unset turns the store off.
+
+| Scope | Reference | Read in | Write |
+|-------|-----------|---------|-------|
+| company | `secret://company/NAME` | any session in the organization | org admins |
+| team | `secret://team/TEAM_ID/NAME` | the team's sessions, and a member's own personal sessions | team members |
+| personal | `secret://personal/NAME` | a session the token holder owns personally | the owner |
 
 Valet and the provider split the work:
 
-- **Valet** (`services/secret-store/service.ts`) owns the reference grammar, name and size limits, the owner rule, and error text. It also creates one space per owner and provider (table `secret_store_spaces`).
-- **The provider** (`SecretStoreProvider` in `services/secret-store/provider.ts`) stores and encrypts values. It keeps each owner's secrets in one space and lists, reads, writes, and deletes by name. A provider registers in `services/secret-store/config.ts`.
+- **Valet** (`services/secret-store/service.ts`) owns the reference grammar, name and size limits, the access rules above, and error text. It creates one personal space per user and provider (table `secret_store_spaces`). Company and team secrets live in the provider's deployment space under the names `company/NAME` and `team/TEAM_ID/NAME`.
+- **The provider** (`SecretStoreProvider` in `services/secret-store/provider.ts`) stores and encrypts values, and applies the checks it can. A provider registers in `services/secret-store/config.ts`.
 
 Rules that apply to every provider:
 
-- A `secret://` reference resolves only in a session the token holder owns personally. This is the personal 1Password rule. The check runs before any provider call, for the whole batch.
-- A space holds one owner's secrets, so a name lookup cannot return another owner's secret.
-- Valet sends labels on every save (`scope`, `valet_org_id`, `valet_owner_type`, `valet_owner_id`, `valet_created_by_user_id`). It sends a read context on every read: org, user, session, and session owner. A provider with policy or audit support records them.
+- The broker checks every `secret://` reference against the session before any read, and fails the batch on the first refusal. The read context comes from the token and the session row, never the request body.
+- Valet sends labels on every save: `scope`, `valet_company_org_id`, `valet_created_by_user_id`, and `valet_owner_user_id` or `valet_owner_team_id`. It sends a read context on every read: org, user, session, session owner type and id, and the team for a team read.
 - No route returns a value. A provider error reaches the user as a fixed message. Only a `SecretStoreError` from the provider passes through with its own text.
 - One failed read fails the request with 502. A name with no secret is reported in `unresolved`.
-- `find` does not search the secret store. Settings → Secrets lists the names and their references.
-- Changing the provider gives every owner a new, empty space. Valet does not move secrets between providers.
+- Saves are sealed in the browser. `POST /api/secrets/import/begin` returns the provider's envelope, the web sealer for its `kind` encrypts the value (`web/src/lib/secret-seal/`), and `import/finish` receives only the sealed value. No route accepts a plaintext value.
+- Changing the provider gives every user a new, empty personal space. Valet does not move secrets between providers.
+
+### Getting a credential without the value entering a thread
+
+- **`request_secret`** (`engine/secret-tools.ts`): the agent names the credential and its purpose. The thread shows a card with the name, where it is saved, and a masked field. The card seals and saves the value, then answers the gate with only the reference. The resolve route accepts nothing else on such a gate.
+- **Composer**: `detectSecrets` (`@valet/shared`) finds provider key formats and `NAME_KEY=value` assignments in a draft. The composer offers to save the key and swap in the reference, and holds the send until the user decides.
+- **Backstop** (`services/secret-store/inbound-scrub.ts`): a key in a provider format that reaches the api in a user message (web send route, Slack direct message) is saved and replaced before the message is stored or reaches the model. A note in the message names the reference and asks the user to rotate a key shared elsewhere.
+
+Limits: a command that receives a value through `valet-secrets run` can print or send it on purpose; output redaction catches exact-byte prints only. Injecting a value at an egress proxy, so commands never hold it, is the next step.
 
 ### Turnkey provider
 
-`services/secret-store/turnkey.ts`. Each space is a Turnkey sub-organization under `VALET_TURNKEY_ORG_ID`. The broker key is its only root, so Valet alone decides access. This is the v1 trust model of the Turnkey Secrets spec. Its hardening step (human root quorum, non-root broker, export policy) is not built. Labels become static properties, and the read context becomes the export's request context. Turnkey records the context with the activity. It does not verify it. Valet does not wait for export approvals. If a Turnkey policy makes an export wait for one, the read fails with an error that names the approval rule.
-
-Known limit: the save route encrypts the value to the Turnkey enclave inside the api process (`importSecret`), so the plaintext passes through the api once. Browser-side encryption is the next step.
+`services/secret-store/turnkey.ts`. Two ordinary, non-root Turnkey users act for Valet: the provisioner (`valet-root`) creates sub-organizations and imports or deletes secrets, and the broker (`valet-broker`) exports. Their policies in the deployment organization come from root-authorized bootstrap (`docs/environment-variables.md`). Each personal space is a sub-organization: the provisioner creates it with both users as roots at threshold 1, adds one policy for each, then sets a 2-of-2 root quorum, so neither key alone can bypass a policy there. Labels become static properties, and the read context becomes the export's request context. The export policies compare the two, so an export with the wrong context fails in Turnkey. These checks catch Valet mistakes; they are not a boundary against a stolen broker key, which writes its own context.
