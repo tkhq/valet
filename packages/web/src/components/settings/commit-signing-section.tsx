@@ -26,14 +26,14 @@ export function CommitSigningSection() {
 
   if (signingQ.isLoading) {
     return (
-      <FieldRow label="Commit signing">
+      <FieldRow label="Status">
         <Spinner size={14} />
       </FieldRow>
     );
   }
   if (signingQ.error || !signingQ.data) {
     return (
-      <FieldRow label="Commit signing">
+      <FieldRow label="Status">
         <p className="text-sm text-danger-500">Failed to load commit signing.</p>
       </FieldRow>
     );
@@ -42,7 +42,7 @@ export function CommitSigningSection() {
 
   if (!data.configured) {
     return (
-      <FieldRow label="Commit signing">
+      <FieldRow label="Status">
         <p className="text-sm text-muted">
           Commit signing is not configured for this deployment. An admin can set the VALET_TURNKEY_* variables.
         </p>
@@ -69,7 +69,7 @@ export function CommitSigningSection() {
   if (!data.enrolled) {
     return (
       <FieldRow
-        label="Commit signing"
+        label="Status"
         hint="Agents sign commits with a key held in Turnkey after you approve each pull request. Your passkey is the root of that Turnkey organization."
         {...(error ? { error } : {})}
       >
@@ -82,13 +82,15 @@ export function CommitSigningSection() {
 
   return (
     <>
-      <FieldRow label="Commit signing">
-        <div className="space-y-1 text-sm text-ink">
+      <FieldRow label="Status">
+        <div className="space-y-1.5 text-sm text-ink">
           <div className="flex items-center gap-2">
-            <Badge>Ready</Badge>
-            <span className="text-xs text-muted">Turnkey organization {data.subOrgId}</span>
+            <Badge variant="success" className="shrink-0 whitespace-nowrap">Ready</Badge>
+            {data.enrolledAt && <span className="text-xs text-muted">Set up {formatDateOr(data.enrolledAt, "")}</span>}
           </div>
-          {data.enrolledAt && <div className="text-xs text-muted">Set up {formatDateOr(data.enrolledAt, "")}</div>}
+          <div className="text-xs text-muted">
+            Turnkey organization <span className="break-all font-mono">{data.subOrgId}</span>
+          </div>
         </div>
       </FieldRow>
       {data.keys.length > 0 && (
@@ -109,11 +111,11 @@ function SigningKeyRow({ item }: { item: CommitSigningKeySummary }) {
   return (
     <li className="space-y-0.5">
       <div className="flex items-center gap-2">
-        <span>
+        <span className="min-w-0 break-words">
           {item.repo}
           {pr} · {item.branch}
         </span>
-        <Badge>{item.status}</Badge>
+        <Badge className="shrink-0 whitespace-nowrap">{item.status}</Badge>
       </div>
       <div className="text-xs text-muted">
         {item.fingerprint} · valid {formatDateOr(item.notBefore, "")} to {formatDateOr(item.notAfter, "")}
