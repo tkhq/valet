@@ -23,7 +23,7 @@ export function HomeEmptyState({ sessionId, threadId, title = "What should Valet
     <p className="max-w-md text-sm text-muted">Ask anything. Bigger jobs run as tasks in the workspace they belong to, and come back here when they finish or need you.</p>
     <div className="flex flex-wrap justify-center gap-2">
       {SUGGESTIONS.map(({ label, prefill }) => <Button key={label} size="sm" variant="secondary" onClick={() => {
-        prefillComposerDraft(sessionId, threadId, prefill);
+        prefillComposerDraft(sessionId, threadId, prefill, SUGGESTIONS.map((s) => s.prefill));
         onPick?.();
         document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')?.focus();
       }}>{label}</Button>)}
