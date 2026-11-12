@@ -94,6 +94,53 @@ describe("runReviewPipeline", () => {
     expect(result.review?.findings.map((f) => f.title)).toEqual(["Division by zero", "Other file"]);
   });
 
+  it("dedupe merges nearby findings the model groups and records why", async () => {
+    const { dir, base, head } = repo();
+    const labels: string[] = [];
+    const run: AgentRunner = async (spec) => {
+      labels.push(spec.label);
+      if (spec.label === "review") {
+        // Different triggers and evidence, so consolidate keeps both.
+        await submit(spec, "submit_review", {
+          summary: "s",
+          confidence: 2,
+          findings: [
+            { ...finding("Divides by zero"), evidence: "a.py:1" },
+            { ...finding("x is zero, so y fails"), severity: "critical", trigger: "import" },
+            { ...finding("Other file"), path: "b.py", line: 1 },
+          ],
+        });
+      } else {
+        expect(spec.label).toBe("dedupe");
+        expect(spec.builtinToolNames.size).toBe(0);
+        expect(spec.prompt).toContain("y = x / 0");
+        expect(spec.prompt).not.toContain("Other file");
+        await submit(spec, "submit_duplicates", { groups: [{ findings: [1, 2], reason: "one division by zero" }] });
+      }
+      return { outcome: "completed" };
+    };
+    const result = await runReviewPipeline({ workspace: dir, base, head, title: "t", body: "", dedupe: true }, run);
+    expect(labels).toEqual(["review", "dedupe"]);
+    expect(result.review?.findings.map((f) => f.title)).toEqual(["x is zero, so y fails", "Other file"]);
+    expect(result.consolidation?.map((d) => d.reason)).toEqual(['same defect as "x is zero, so y fails" at a.py:2 (one division by zero)']);
+  });
+
+  it("dedupe starts no agent when no findings sit close, and keeps all when it fails", async () => {
+    const { dir, base, head } = repo();
+    const labels: string[] = [];
+    const review = (findings: unknown[]): AgentRunner => async (spec) => {
+      labels.push(spec.label);
+      if (spec.label === "review") await submit(spec, "submit_review", { summary: "s", confidence: 2, findings });
+      return spec.label === "review" ? { outcome: "completed" } : { outcome: "failed", error: "down" };
+    };
+    await runReviewPipeline({ workspace: dir, base, head, title: "t", body: "", dedupe: true }, review([finding("A"), { ...finding("B"), path: "b.py" }]));
+    expect(labels).toEqual(["review"]);
+    const close = [{ ...finding("A"), evidence: "a.py:1" }, { ...finding("B"), trigger: "import" }];
+    const result = await runReviewPipeline({ workspace: dir, base, head, title: "t", body: "", dedupe: true }, review(close));
+    expect(labels).toEqual(["review", "review", "dedupe"]);
+    expect(result.review?.findings.map((f) => f.title)).toEqual(["A", "B"]);
+  });
+
   it("runs the verifiers on verifyModel and the reviewer on the host's model", async () => {
     const { dir, base, head } = repo();
     const models: Record<string, string | undefined> = {};

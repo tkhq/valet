@@ -196,6 +196,7 @@ async function reviewInWorkspace(
       ...(opts.verifyModel !== undefined ? { verifyModel: opts.verifyModel } : {}),
       ...(opts.reviewPasses !== undefined ? { passes: opts.reviewPasses } : {}),
       ...(opts.minConfidence !== undefined ? { minConfidence: opts.minConfidence } : {}),
+      ...(opts.reviewDedupe ? { dedupe: true } : {}),
       ...(opts.contextBudget ? { contextBudget: opts.contextBudget * 4 } : {}),
       ...(opts.memoryDir !== undefined ? { memory: directoryMemory(opts.memoryDir, "lib") } : {}),
       ...(githubRepo(spec.remote) ? { repo: githubRepo(spec.remote) } : {}),

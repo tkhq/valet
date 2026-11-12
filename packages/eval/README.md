@@ -162,6 +162,10 @@ gateway is not set, the code-review cases SKIP.
 - `--min-confidence <x>` drops findings the reviewer rated below x. The
   scorecard then also scores the unfiltered draft as "valet (before
   verify)", so one run shows what the threshold cost.
+- `--review-dedupe` runs the dedupe stage: one model call compares the
+  findings that sit on one file within 20 lines of each other and keeps
+  one finding of each defect. The trajectory lists each merged finding
+  with its reason.
 
 Two more suites use the same case shape and scoring:
 

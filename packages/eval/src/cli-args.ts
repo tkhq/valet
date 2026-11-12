@@ -45,6 +45,8 @@ export interface CliOptions {
   reviewPasses?: number;
   /** Drop code-review findings rated below this confidence (0-1). */
   minConfidence?: number;
+  /** Merge code-review findings that report the same defect at nearby lines (one model call per review). */
+  reviewDedupe?: boolean;
   /** Context pack budget in tokens for code-review cases (about 4 chars each). 0 or unset: no pack. */
   contextBudget?: number;
   /** A directory of memory files the code-review pack reads as team memory. */
@@ -75,6 +77,7 @@ export function parseCliArgs(argv: string[]): CliOptions {
       verify: { type: "boolean", default: false },
       "review-passes": { type: "string" },
       "min-confidence": { type: "string" },
+      "review-dedupe": { type: "boolean", default: false },
       "context-budget": { type: "string" },
       "memory-dir": { type: "string" },
     },
@@ -159,6 +162,7 @@ export function parseCliArgs(argv: string[]): CliOptions {
     ...(values.verify ? { verify: true } : {}),
     ...(reviewPasses !== undefined ? { reviewPasses } : {}),
     ...(minConfidence !== undefined ? { minConfidence } : {}),
+    ...(values["review-dedupe"] ? { reviewDedupe: true } : {}),
     ...(contextBudget !== undefined ? { contextBudget } : {}),
     ...(values["memory-dir"] !== undefined ? { memoryDir: values["memory-dir"] } : {}),
   };
