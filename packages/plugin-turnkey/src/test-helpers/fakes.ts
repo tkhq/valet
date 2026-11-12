@@ -100,6 +100,9 @@ export function fakeGithub(): FakeGitHub {
     async remove(id) {
       keys.delete(id);
     },
+    async noreplyEmail() {
+      return "100+octo@users.noreply.github.com";
+    },
   };
   return fake;
 }

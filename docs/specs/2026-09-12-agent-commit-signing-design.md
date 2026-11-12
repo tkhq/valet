@@ -123,7 +123,7 @@ commit.gpgsign true
 
 `valet-sign` is a generated POSIX script (`engine/commit-signing-script.ts`), installed by the `credential-scripts` step like `valet-secrets`. It reads `/run/valet/turnkey/env` and the session key file, exports the `TURNKEY_*` bundle, and execs `tk ssh git-sign` with git's arguments. `commit.gpgsign` stays off at prep. On approval `turnkey.request_signing_key` appends `TURNKEY_PRIVATE_KEY_ID` to the env file, sets `user.signingkey` to `key::<public key line>`, and turns `commit.gpgsign` on (`plugin-turnkey/src/sandbox.ts`). When no key has been issued `valet-sign` exits 1 with: `No signing key for this session. Call turnkey.request_signing_key first, or commit with --no-gpg-sign.`
 
-The committer email must be an email verified on the GitHub account, or GitHub shows "Unverified" even with a valid signature. The `git-identity` step already sets `user.email` from the Valet user.
+The committer email must be an email verified on the GitHub account that holds the key, or GitHub shows "Unverified" even with a valid signature. The Valet profile email can belong to a different GitHub account. On approval the action sets `committer.email` to the account's `<id>+<login>@users.noreply.github.com` address (`GET /user`), which GitHub always treats as verified for that account. The author stays the Valet identity from `git-identity`, which sets only `user.*` and so does not undo it on resume. Revoke unsets it.
 
 ### Cleanup
 

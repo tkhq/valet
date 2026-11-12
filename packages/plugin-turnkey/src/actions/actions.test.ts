@@ -122,7 +122,7 @@ describe("turnkey.request_signing_key", () => {
 
     // Sandbox: the key id for valet-sign, then git pointed at the public key.
     expect(s.ctx.execs.some((c) => c.includes("TURNKEY_PRIVATE_KEY_ID=pk-1") && c.includes("TURNKEY_ORGANIZATION_ID=suborg-1"))).toBe(true);
-    expect(s.ctx.execs.some((c) => c.includes(`user.signingkey 'key::${EXPECTED_LINE}'`) && c.includes("commit.gpgsign true"))).toBe(
+    expect(s.ctx.execs.some((c) => c.includes(`user.signingkey 'key::${EXPECTED_LINE}'`) && c.includes("committer.email '100+octo@users.noreply.github.com'") && c.includes("commit.gpgsign true"))).toBe(
       true,
     );
   });

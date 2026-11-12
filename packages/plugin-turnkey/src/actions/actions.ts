@@ -127,9 +127,9 @@ export function buildTurnkeyActionPlugin(overrides: Partial<SigningDeps> = {}): 
         tagIds: [enrollment.signingTagId],
       });
       const publicKey = opensshEd25519PublicKey(key.publicKeyHex);
-      const registered = await deps
-        .github(github.accessToken)
-        .create(githubKeyTitle(ctx.sessionId, scope, notAfter), publicKey.line);
+      const githubKeys = deps.github(github.accessToken);
+      const registered = await githubKeys.create(githubKeyTitle(ctx.sessionId, scope, notAfter), publicKey.line);
+      const committerEmail = await githubKeys.noreplyEmail();
 
       const doc: SigningKeyDoc = {
         sessionId: ctx.sessionId,
@@ -196,6 +196,7 @@ export function buildTurnkeyActionPlugin(overrides: Partial<SigningDeps> = {}): 
         apiBaseUrl: config.apiBaseUrl,
         privateKeyId: key.privateKeyId,
         publicKeyLine: publicKey.line,
+        committerEmail,
       });
 
       return {

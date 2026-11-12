@@ -72,7 +72,7 @@ export function envFileText(args: { organizationId: string; apiBaseUrl: string; 
  */
 export async function enableSandboxSigning(
   sandbox: Sandbox,
-  args: { organizationId: string; apiBaseUrl: string; privateKeyId: string; publicKeyLine: string },
+  args: { organizationId: string; apiBaseUrl: string; privateKeyId: string; publicKeyLine: string; committerEmail: string },
 ): Promise<void> {
   await run(
     sandbox,
@@ -82,7 +82,10 @@ export async function enableSandboxSigning(
   );
   await run(
     sandbox,
-    `git config --global user.signingkey ${shQuote(`key::${args.publicKeyLine}`)} && git config --global commit.gpgsign true`,
+    // committer.email, not user.email: the author stays the Valet identity,
+    // and prep's git-identity step (user.*) does not undo it on resume.
+    `git config --global user.signingkey ${shQuote(`key::${args.publicKeyLine}`)} && ` +
+      `git config --global committer.email ${shQuote(args.committerEmail)} && git config --global commit.gpgsign true`,
     "pointing git at the signing key",
   );
 }
@@ -92,6 +95,7 @@ export async function disableSandboxSigning(sandbox: Sandbox): Promise<void> {
   await run(
     sandbox,
     `git config --global --unset commit.gpgsign; git config --global --unset user.signingkey; ` +
+      `git config --global --unset committer.email; ` +
       `rm -f ${ENV_FILE} ${SESSION_KEY_FILE}; true`,
     "turning signing off",
   );
