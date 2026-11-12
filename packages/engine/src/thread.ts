@@ -207,7 +207,7 @@ import type {
   ToolResult,
   WriteFence,
 } from "./types.js";
-import { ENTRY_USER_TIMEZONE_KEY, FRESH_CONTEXT_KEY, MESSAGE_TURN_ERROR_KEY, MID_TURN_DELIVERY_KEY, RECORD_ONLY_KEY, THREAD_USER_TIMEZONE_KEY } from "./types.js";
+import { ENTRY_USER_TIMEZONE_KEY, FRESH_CONTEXT_KEY, MESSAGE_TURN_ERROR_KEY, MID_TURN_DELIVERY_KEY, PRUNED_AT_KEY, RECORD_ONLY_KEY, THREAD_USER_TIMEZONE_KEY } from "./types.js";
 import { correctImageBlocks } from "./image-media-type.js";
 import { reportError } from "./error-report.js";
 
@@ -428,6 +428,8 @@ export function buildSpilledInputMarker(args: {
  * prompt-too-long retry (TKAI-306).
  */
 const MAX_SUMMARIZE_OVERFLOW_RETRIES = 3;
+/** Heading of the fixed note that covers history no fresh-context run reads. */
+const UNREAD_HISTORY_HEADING = "## Earlier automated runs";
 const SUMMARY_CHECKPOINT_TAIL_MAX_TOKENS = 8_000;
 const SUMMARY_INPUT_MAX_TOKENS = 64_000;
 
@@ -5346,6 +5348,11 @@ export class Thread {
     return typeof source === "string" ? source : item.id;
   }
 
+  /** The running submission when it is a fresh-context turn (`FRESH_CONTEXT_KEY`). */
+  private freshContextItem(): QueueItem | undefined {
+    return this.runningItem?.metadata?.[FRESH_CONTEXT_KEY] === true ? this.runningItem : undefined;
+  }
+
   /**
    * The prompt a compaction keeps verbatim while `item`'s turn runs: the
    * task contract, or else the submission's own prompt. A pass inside a turn
@@ -5761,7 +5768,9 @@ export class Thread {
   ): Promise<void> {
     // A budget pass runs after the turn finished its work, so it never
     // continues the turn. The next submission reads the compacted context.
-    const autoContinue = trigger === "budget" ? false : continueTurn;
+    // Nor does a pass for a fresh-context turn: that pass covers history the
+    // turn never read, so the turn's own work did not run short.
+    const autoContinue = trigger === "budget" || this.freshContextItem() ? false : continueTurn;
     let outcome: CompactionOutcome;
     try {
       outcome = await this.compactThread({
@@ -5865,10 +5874,14 @@ export class Thread {
     // appended since are estimated with the cut-point budget's char ruler.
     // This runs before the turn's finally-block restores the baseline
     // prompt, so the fallback estimate sees the overlays the turn used.
-    const estimated = estimateLiveContextTokens(
-      this.modelSystemPrompt(this.agent.state.systemPrompt, this.agent.state.model),
-      this.agent.state.messages.filter(isLlmMessage),
-    );
+    // A fresh-context turn's last usage counts only its own slice, so it
+    // cannot anchor the whole live transcript. Measure all of it: this is
+    // what bounds a thread whose runs never read their history.
+    const prompt = this.modelSystemPrompt(this.agent.state.systemPrompt, this.agent.state.model);
+    const live = this.agent.state.messages.filter(isLlmMessage);
+    const estimated = this.freshContextItem()
+      ? estimateContextTokens(prompt, live)
+      : estimateLiveContextTokens(prompt, live);
     if (estimated >= usable) return "overflow";
     if (estimated >= compactionBudget(this.agent.state.model, cfg)) return "budget";
     return undefined;
@@ -6165,6 +6178,31 @@ export class Thread {
     const supersededCheckpoint = findMostRecentCompaction(entries);
     const carriedCoverage = new Set(supersededCheckpoint?.coveredEntryIds ?? []);
 
+    // Step 0: a fresh-context turn reads none of the history before its
+    // prompt, and neither do the runs after it. An LLM summary of that
+    // history buys nothing, so a checkpoint covers it with a fixed note. A
+    // pass inside the turn then compacts the turn's own messages, which the
+    // turn does read. A manual pass summarizes, because the person asked.
+    const freshItem = opts.mode === "manual" ? undefined : this.freshContextItem();
+    if (freshItem) {
+      const prompt = entries.findIndex((e) => e.type === "message" && e.role === "user" && e.queueItemId === freshItem.id);
+      const unread = entries.slice(0, prompt < 0 ? entries.length : prompt)
+        .filter((e) => e.type === "message" && !carriedCoverage.has(e.id));
+      // Only history made of automated deliveries (signals). A person who
+      // wrote in this thread gets a real summary: a later turn may read it.
+      const automatedOnly = unread.every((e) => e.type !== "message" || e.role !== "user" || e.signal !== undefined);
+      if (unread.length > 0 && automatedOnly) {
+        const covered = await this.coverUnreadHistory(leafAtSnapshot, supersededCheckpoint, unread,
+          opts.turnInProgress ? this.taskSourceFor() : this.taskContractFor(), opts.turnInProgress === true, span);
+        if (!covered) return "noop";
+        if (!opts.turnInProgress) return "compacted";
+        // The note already shrank the context, so any outcome of the second
+        // pass still counts as progress. The caller measures again.
+        const next = await this.compactThreadInner(opts, span);
+        return next === "noop" || next === "pruned" || next === "insufficient" || next === "coverage_gap" ? "compacted" : next;
+      }
+    }
+
     // Step 1: pruning pass (cheap, no LLM).
     const protectedTools = new Set<string>();
     for (const t of [...session.builtinTools, ...(session.options.tools ?? [])]) {
@@ -6185,8 +6223,10 @@ export class Thread {
       // reactive-overflow path in runAgent), so `this.fence` names the current
       // attempt — thread it through so a superseding successor's fence still
       // wins over these writes.
+      const prunedAt = Date.now();
       for (const entry of mutable) {
         if (!prunePlan.toElide.has(entry.id)) continue;
+        entry.metadata = { ...entry.metadata, [PRUNED_AT_KEY]: prunedAt };
         await store.updateEntry(session.id, this.id, entry, this.fence);
       }
       // Apply to the live agent transcript:
@@ -6650,6 +6690,63 @@ export class Thread {
         };
       }
     }
+  }
+
+  /**
+   * Write a checkpoint that covers `unread`, history no fresh-context run
+   * reads, with a fixed note and no model call. The checkpoint carries the
+   * superseded one's coverage forward. Returns false when the thread moved
+   * to another branch first.
+   */
+  private async coverUnreadHistory(
+    leafAtSnapshot: string | undefined,
+    superseded: CompactionEntry | undefined,
+    unread: readonly SessionEntry[],
+    taskSource: string | undefined,
+    turnInProgress: boolean,
+    span?: Span,
+  ): Promise<boolean> {
+    const covered = [...new Set([...(superseded?.coveredEntryIds ?? []), ...unread.map((e) => e.id)])];
+    const note = [
+      UNREAD_HISTORY_HEADING,
+      `This thread runs each delivery with only its own messages, so no run reads the runs before it. The automated runs in the ${covered.length} earlier entries are not summarized here.`,
+    ].join("\n");
+    // An LLM summary the superseded checkpoint carried (a conversation a
+    // person had here) stays, ahead of the note. A note does not pile up.
+    const earlier = superseded?.summary.split(`\n\n${UNREAD_HISTORY_HEADING}`)[0];
+    const summary = earlier && !earlier.startsWith(UNREAD_HISTORY_HEADING) ? `${earlier}\n\n${note}` : note;
+    const checkpoint: CompactionEntry = {
+      id: uid("c"),
+      sessionId: this.session.id,
+      threadId: this.id,
+      parentId: null,
+      type: "compaction",
+      summary,
+      coveredEntryIds: covered,
+      tokenCountBefore: (superseded?.tokenCountBefore ?? 0) + estimateTotalTokens(unread),
+      tokenCountAfter: estimateTokens(summary),
+      fileContext: superseded?.fileContext ?? { read: [], modified: [] },
+      ...(superseded?.metadata?.[TURN_CALLS_KEY] !== undefined ? { metadata: { [TURN_CALLS_KEY]: superseded.metadata[TURN_CALLS_KEY] } } : {}),
+      createdAt: Date.now(),
+    };
+    span?.setAttributes({ "valet.compaction.summary_source": "unread_history", "valet.compaction.entries_covered": covered.length });
+    if (!(await this.appendOnPath(checkpoint, leafAtSnapshot, this.fence))) {
+      span?.setAttribute("valet.compaction.dropped", "branch_switched");
+      return false;
+    }
+    // No breaker reset: a pass with no model call proves nothing about the
+    // summarizer, and the summary pass that follows may still fail.
+    const snapshot = await this.transcriptSnapshot(taskSource);
+    this.replaceActiveSkillInvocations(snapshot.entries);
+    this.replaceAgentMessages(entriesToAgentMessages(snapshot.entries, this.agent.state.model, {
+      attributeAuthors: this.attributeAuthors,
+      threadKey: this.key,
+      activeLeafEntryId: this.activeLeafEntryId,
+      taskSourceQueueItemId: taskSource,
+      ...(turnInProgress ? { turnCallsQueueItemId: this.runningItem?.id } : {}),
+    }), this.retainedSourceFor(snapshot.entries, taskSource));
+    this.prevCacheSnapshot = undefined;
+    return true;
   }
 
   /** Build from the actual stream model after role and agent overrides have applied. */
@@ -8007,6 +8104,9 @@ export class Thread {
             const entry = this.currentAssistantEntry;
             entry.usage = turnUsage;
             if (turnCost) entry.cost = turnCost;
+            // This usage counts a fresh-context slice, not the transcript.
+            // A reload must not anchor on it (`entriesToAgentMessages`).
+            if (this.freshContextStart) entry.metadata = { ...entry.metadata, [FRESH_CONTEXT_KEY]: true };
             await this.fencedWrite(() =>
               this.session.providers.store.updateEntry(this.session.id, this.id, entry, this.fence),
             );
@@ -9062,6 +9162,35 @@ export function retainsTask(entries: readonly SessionEntry[], taskSourceQueueIte
   return task !== undefined && checkpoint.coveredEntryIds.includes(task.id);
 }
 
+/**
+ * The response whose stored usage still measures the live context after a
+ * reload: the newest assistant entry on the active path, when its request
+ * saw the context the transcript now has. That is not so when a newer
+ * checkpoint replaced history, a later prune elided output it counted
+ * (`PRUNED_AT_KEY`), or a fresh-context request counted only its own slice
+ * (`FRESH_CONTEXT_KEY`). Codex restores the last token count on resume for
+ * the same reason. Exported for tests.
+ */
+export function usageAnchorEntryId(activeEntries: readonly SessionEntry[], covered?: ReadonlySet<string>): string | undefined {
+  let newest: Extract<SessionEntry, { type: "message" }> | undefined;
+  for (let i = activeEntries.length - 1; i >= 0; i--) {
+    const entry = activeEntries[i]!;
+    if (entry.type === "compaction") return undefined;
+    if (entry.type === "message" && entry.role === "assistant" && !covered?.has(entry.id)) {
+      newest = entry;
+      break;
+    }
+  }
+  // The input side must be reported: an output-only usage would anchor a
+  // large undercount.
+  const input = newest?.usage ? newest.usage.input + newest.usage.cacheRead + newest.usage.cacheWrite : 0;
+  if (!newest || input <= 0 || newest.metadata?.[FRESH_CONTEXT_KEY] === true) return undefined;
+  const at = newest.createdAt;
+  const prunedLater = activeEntries.some((entry) => entry.type === "message" && !covered?.has(entry.id)
+    && typeof entry.metadata?.[PRUNED_AT_KEY] === "number" && entry.metadata[PRUNED_AT_KEY] >= at);
+  return prunedLater ? undefined : newest.id;
+}
+
 export function entriesToAgentMessages(
   entries: readonly SessionEntry[],
   modelHint: { api: string; provider: string; id: string },
@@ -9109,6 +9238,8 @@ export function entriesToAgentMessages(
     ? activeEntries.find(entry => entry.type === "message" && entry.role === "user"
       && entry.queueItemId === opts.taskSourceQueueItemId)?.id
     : undefined;
+
+  const anchorEntryId = usageAnchorEntryId(activeEntries, activeCompaction?.covered);
 
   const out: AgentMessage[] = [];
   if (activeCompaction) {
@@ -9178,12 +9309,14 @@ export function entriesToAgentMessages(
         api: modelHint.api,
         provider: modelHint.provider,
         model: e.model ?? modelHint.id,
+        // One response keeps its stored usage as the anchor of the next
+        // estimate (`estimateLiveContextTokens`). The others carry none.
         usage: {
-          input: 0,
-          output: 0,
-          cacheRead: 0,
-          cacheWrite: 0,
-          totalTokens: 0,
+          input: e.id === anchorEntryId ? e.usage?.input ?? 0 : 0,
+          output: e.id === anchorEntryId ? e.usage?.output ?? 0 : 0,
+          cacheRead: e.id === anchorEntryId ? e.usage?.cacheRead ?? 0 : 0,
+          cacheWrite: e.id === anchorEntryId ? e.usage?.cacheWrite ?? 0 : 0,
+          totalTokens: e.id === anchorEntryId ? e.usage?.total ?? 0 : 0,
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
         },
         stopReason: "stop",

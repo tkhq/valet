@@ -797,3 +797,74 @@ its own queue item. A pass inside the turn can still summarize it.
 
 Codex keeps the newest user messages verbatim after a compaction for the same
 reason (up to about 20,000 tokens).
+
+## Amendment (2026-11-11): usage anchor after a reload, and fresh-context history
+
+`entriesToAgentMessages` wrote zero usage on every rehydrated assistant
+message. After any reload, the estimate was the character ruler over all
+uncovered history, with no tool definitions. Codex restores the last token
+count on resume instead.
+
+The newest assistant entry on the active path now keeps its stored usage as
+the anchor (`usageAnchorEntryId`) when all of these hold:
+
+- No checkpoint is newer than it. A checkpoint replaced the history that
+  request read.
+- No prune elided output at or after its time. A prune stamps `prunedAt` in
+  the metadata of each entry it elides.
+- It did not come from a fresh-context request. A turn with
+  `freshContext` stamps the same key in the metadata of its responses,
+  because that usage counts only the turn's slice.
+
+The anchor is never taken from an older response, and it needs a reported
+input side (input plus cache reads and writes), because an output-only usage
+would anchor a large undercount.
+
+The old zero usage was also what bounded a thread whose deliveries run with
+fresh context (`deliveryRunsWithoutHistory`), so this change gives those
+threads their own policy:
+
+- The trigger measures the whole live transcript with the character ruler
+  when the running submission is a fresh-context turn.
+- A pass for a fresh-context turn first covers the history before the
+  turn's prompt with a checkpoint whose summary is a fixed note, with no
+  model call. No run reads that history, so an LLM summary of it bought
+  nothing. A pass at turn start covers all history, because the prompt is
+  not appended yet.
+- The note applies only when every unread user entry is an automated
+  delivery (a signal). A reply that a person typed into the thread does not
+  set `CONVERSATIONAL_THREAD_KEY`, so the delivery stays fresh; that history
+  gets a normal LLM summary instead, because a later turn may read it. A
+  later note checkpoint keeps that summary text ahead of the note, and a
+  note does not repeat.
+- A pass after the turn stops there and never continues the turn. On a model
+  whose window is 200k or less the post-turn trigger reads "overflow", which
+  would otherwise run a continuation call on a finished delivery.
+- A pass inside the turn then runs the normal path over the turn's own
+  messages, which the turn does read, with the note as the previous summary.
+  Any outcome of that second pass counts as progress, because the note
+  already shrank the context.
+- The note pass makes no model call, so it does not reset the failure
+  breaker.
+- A manual `/compact` summarizes as before.
+
+This also ends the case where a fresh-context turn sent the whole history
+after an in-turn compaction. `fitContextBeforeRequest` returns the rebuilt
+messages unscoped, and `freshContextOnly` cannot find the rebuilt prompt.
+Now the rebuilt messages hold no earlier run, because the pass covered them
+first.
+
+Known limits:
+
+- The covered automated runs stay readable only with `thread_read`.
+- While the failure breaker is open, the trigger is off, so the note pass
+  does not run either, although it cannot fail. `/compact` closes the
+  breaker.
+- Responses stored before this change carry no `freshContext` stamp. After a
+  reload, such a response can anchor a fresh-context slice until the
+  thread's next response. Context preparation still measures the larger of
+  the anchor and the character ruler, so a request cannot overflow on it.
+- `contextUsage` (the context meter and the idle check) does not use the
+  fresh-context rule.
+- A resumed or gate-replayed fresh-context turn sends the uncovered history
+  until a pass runs.
