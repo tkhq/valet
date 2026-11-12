@@ -244,6 +244,7 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
       codeChallenge,
       state,
       scopes,
+      ...(clientRow.resource ? { resource: clientRow.resource } : {}),
     });
     return c.redirect(url, 302);
   }
@@ -350,6 +351,7 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
         code,
         redirectUri,
         codeVerifier: verified.codeVerifier,
+        ...(clientRow.resource ? { resource: clientRow.resource } : {}),
       });
       saved = {
         accessToken: tokens.access_token,

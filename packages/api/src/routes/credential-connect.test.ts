@@ -420,6 +420,50 @@ describe("GET /api/credentials/oauth/callback", () => {
     expect(refreshed?.metadata).not.toHaveProperty("refreshFailedAt");
   });
 
+  it("mcp mode: names the server's resource on authorize, code exchange, and refresh", async () => {
+    // A server that separates MCP tokens from its other tokens (Metabase
+    // 1.65) grants MCP scopes only to a request that names the MCP resource.
+    fake.resourceScopesSupported = ["agent:content:read"];
+    const plugins = [mcpPlugin(fake.url, ["agent:content:read"])];
+    api = await bootTestApi({ plugins });
+    const authUrl = await startConnect(api.baseUrl, "linear");
+    expect(authUrl.searchParams.get("resource")).toBe(fake.url);
+    const state = authUrl.searchParams.get("state") ?? "";
+    await fetch(`${api.baseUrl}/api/credentials/oauth/callback?code=c&state=${encodeURIComponent(state)}`, { redirect: "manual" });
+    expect(fake.tokenRequests.at(-1)).toMatchObject({ grant_type: "authorization_code", resource: fake.url });
+
+    const owner = { type: "user" as const, id: "local-user" };
+    const connected = await api.providers.engineCredentials.get(owner, "linear");
+    if (!connected) throw new Error("connect saved no credential");
+    expect(connected.metadata).toMatchObject({ oauthClientId: "client-1", oauthResource: fake.url });
+
+    await api.providers.engineCredentials.save(owner, "linear", { ...connected, expiresAt: Date.now() });
+    const refreshing = new OAuthRefreshingCredentialStore(api.providers.engineCredentials, { db: api.providers.db, plugins, env: {} });
+    await refreshing.get(owner, "linear");
+    expect(fake.tokenRequests.at(-1)).toMatchObject({ grant_type: "refresh_token", client_id: "client-1", resource: fake.url });
+  });
+
+  it("mcp mode: a client stored before the resource column gets its resource on the next connect", async () => {
+    fake.resourceScopesSupported = ["agent:content:read"];
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url, ["agent:content:read"])] });
+    await ensureMcpOAuthClient({ db: api.providers.db }, "linear", fake.url, "http://localhost/cb", ["agent:content:read"]);
+    await api.providers.db.update(mcpOauthClients).set({ resource: null }).where(eq(mcpOauthClients.service, "linear"));
+
+    const authUrl = await startConnect(api.baseUrl, "linear");
+    expect(authUrl.searchParams.get("client_id")).toBe("client-1");
+    expect(authUrl.searchParams.get("resource")).toBe(fake.url);
+    expect((await getMcpOAuthClient({ db: api.providers.db }, "linear")).resource).toBe(fake.url);
+  });
+
+  it("mcp mode: a server with no protected resource metadata gets no resource parameter", async () => {
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url)] });
+    const authUrl = await startConnect(api.baseUrl, "linear");
+    expect(authUrl.searchParams.has("resource")).toBe(false);
+    const state = authUrl.searchParams.get("state") ?? "";
+    await fetch(`${api.baseUrl}/api/credentials/oauth/callback?code=c&state=${encodeURIComponent(state)}`, { redirect: "manual" });
+    expect(fake.tokenRequests.at(-1)).not.toHaveProperty("resource");
+  });
+
   it("mcp mode: a state minted before client binding still completes", async () => {
     api = await bootTestApi({ plugins: [mcpPlugin(fake.url)] });
     const key = deriveSecretKey(api.providers.encryptionKey);

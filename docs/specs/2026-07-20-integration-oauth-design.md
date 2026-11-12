@@ -121,6 +121,7 @@ CREATE TABLE mcp_oauth_clients (
   registration_endpoint TEXT,
   registered_scopes JSONB,           -- RFC 7591 scope set (sorted); NULL = registered pre-scopes
   scopes_supported JSONB,            -- discovery's scopes_supported; [] = none; NULL = not yet captured
+  resource TEXT,                     -- RFC 9728 resource of the MCP server; '' = none; NULL = not yet captured
   metadata JSONB,
   created_at BIGINT NOT NULL,
   updated_at BIGINT NOT NULL
@@ -301,3 +302,11 @@ An MCP server answers a call that needs a scope the token lacks with HTTP 403 an
 No team step-up. A team connection is shared, so a member who signs in with added scopes replaces it with their own account, and the whole team then acts as that member. Review found that a link alone could make that swap happen without a Valet warning, because the provider may skip its consent screen. A team step-up needs a Valet confirmation page that shows who the team will act as before the sign-in starts. Until then, a team connection's missing scope is an admin fix, which also covers every member at once.
 
 Limits: the person retries by asking again; the turn does not wait for the grant. An unattended run gets the same message. The link is relative, so it opens in the web app, not in Slack. The health probe's missing-scope note is unchanged and still says to ask an admin.
+
+### Resource indicator (2026-11-12)
+
+Every MCP token request names the server as the RFC 8707 `resource`: the authorize URL, the code exchange, and the refresh. The MCP authorization spec requires it. The value is the `resource` of the server's protected resource metadata (RFC 9728), taken only from a document that describes the server URL. `discoverAuthServer` returns it, and `mcp_oauth_clients.resource` stores it at registration. A row from before the column gets one fail-soft discovery on its next connect. A server with no such document gets no `resource` parameter, the same as the MCP SDK.
+
+The callback records the resource on the credential (`metadata.oauthResource`) with the issuing client, and a refresh names the recorded value. A credential connected before this change has no record and refreshes without one, which matches its grant. `PUT /api/credentials/:service` refuses the key, like the other issuing-client keys.
+
+Precedent (2026-11-12): Metabase 1.65 separates MCP tokens from REST tokens. A request that names no resource gets a REST token, with every MCP scope removed. Each connect then minted a token that the MCP server refused on `tools/list`, so the Integrations page showed Rejected after every reconnect. Existing connections must reconnect once after the fix deploys.
