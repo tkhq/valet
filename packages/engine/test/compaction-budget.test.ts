@@ -333,6 +333,81 @@ describe("compaction budget: a finished turn above the budget", () => {
   });
 });
 
+describe("compaction budget: prune before a summary", () => {
+  /** A Slack thread over its 15k budget: two old 10k-token tool outputs, plus `prose` characters of plain reply. */
+  async function prunableThread(provider: string, prose: number) {
+    const faux = registerFauxProvider({
+      provider,
+      models: [{ id: "big", name: "big", contextWindow: MILLION, maxTokens: 64_000 }],
+    });
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel("big")!,
+      compaction: { contextBudgetTokens: 15_000, tailTurns: 1, pruneProtectTokens: 1_000, pruneMinimumTokens: 1_000 },
+    });
+    const thread = session.thread();
+    const toolTurn = (n: number, parent: string | null): SessionEntry[] => [
+      { id: `u-${n}`, sessionId: session.id, threadId: thread.id, parentId: parent, type: "message", role: "user", content: `read log ${n}`, createdAt: n * 10 },
+      { id: `a-${n}`, sessionId: session.id, threadId: thread.id, parentId: `u-${n}`, type: "message", role: "assistant", content: "", createdAt: n * 10 + 1,
+        parts: [{ type: "tool_call", callId: `c-${n}`, toolName: "read", args: { path: `/log-${n}` }, status: "completed", result: { text: "line ".repeat(8_000) } }] },
+    ];
+    await store.appendEntries(session.id, thread.id, [
+      { id: "u-0", sessionId: session.id, threadId: thread.id, parentId: null, type: "message", role: "user", content: "notes?", createdAt: 1 },
+      { id: "a-0", sessionId: session.id, threadId: thread.id, parentId: "u-0", type: "message", role: "assistant", content: "n".repeat(prose), createdAt: 2 },
+      ...toolTurn(1, "a-0"), ...toolTurn(2, "a-1"),
+    ]);
+    thread.rehydrateTranscript(await store.getEntries(session.id, thread.id));
+    return { faux, store, events, session, thread };
+  }
+
+  it("ends the pass without a summary when clearing old tool output leaves headroom", async () => {
+    const { faux, store, events, session, thread } = await prunableThread("prune-fits", 100);
+    let calls = 0;
+    faux.setResponses([
+      () => { calls++; return fauxAssistantMessage("checked"); },
+      () => { calls++; return fauxAssistantMessage(COMPLETE_SUMMARY); },
+    ]);
+
+    const receipt = await session.prompt("anything new?", { channel: SLACK });
+    await thread.awaitResult(receipt.queueItemId, { timeoutMs: 4000 });
+    await waitFor(() => !thread.hasActiveRun);
+
+    const entries = await store.getEntries(session.id, thread.id);
+    expect(calls).toBe(1);
+    expect(entries.filter((e) => e.type === "compaction")).toHaveLength(0);
+    const parts = entries.flatMap((e) => (e.type === "message" ? e.parts ?? [] : []));
+    expect(parts.some((p) => p.type === "tool_call" && p.elided === true)).toBe(true);
+    expect((await thread.contextUsage())!.tokens).toBeLessThan(15_000);
+    expect(errorCodes(events)).toEqual([]);
+    faux.unregister();
+  });
+
+  it("still summarizes when the prune leaves the context near the budget", async () => {
+    // About 12.5k tokens of prose survive the prune: under the 15k budget,
+    // over the 11.25k target that leaves a summary's headroom.
+    const { faux, store, events, session, thread } = await prunableThread("prune-near-budget", 50_000);
+    let summaries = 0;
+    const respond = (context: { messages: readonly unknown[] }) => {
+      const last = JSON.stringify(context.messages.at(-1));
+      if (last.includes("compact this conversation") || last.includes("<template>")) {
+        summaries++;
+        return fauxAssistantMessage(COMPLETE_SUMMARY);
+      }
+      return fauxAssistantMessage("checked");
+    };
+    faux.setResponses([respond, respond, respond]);
+
+    const receipt = await session.prompt("anything new?", { channel: SLACK });
+    await thread.awaitResult(receipt.queueItemId, { timeoutMs: 4000 });
+    await waitFor(() => !thread.hasActiveRun);
+
+    expect(summaries).toBe(1);
+    expect((await store.getEntries(session.id, thread.id)).filter((e) => e.type === "compaction")).toHaveLength(1);
+    expect(errorCodes(events)).toEqual([]);
+    faux.unregister();
+  });
+});
+
 describe("compaction budget: when an interactive thread compacts", () => {
   it("keeps the full context through a turn, then compacts once the thread is idle", async () => {
     const { faux, store, events, session, thread } = await bigWindowSession(

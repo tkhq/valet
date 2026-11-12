@@ -1201,15 +1201,32 @@ export class Session {
       // (e.g. /compact when the summarizer provider errors) must persist an
       // ok:false command_result next to the already-persisted echo entry,
       // not reject the whole submission into a raw HTTP 500 (TKAI-306).
-      try {
-        result = name === "fork" && forkThread
-          ? { ok: true, output: await forkThread(thread.id, raw.replace(/^\/\S+[ \t\n]?/, "").trim()) }
-          : await executeBuiltin(name, args, this, this.options.commandContext, thread);
-      } catch (err) {
-        result = {
-          ok: false,
-          output: err instanceof Error ? err.message : String(err),
-        };
+      const run = async (): Promise<{ ok: boolean; output: string }> => {
+        try {
+          return name === "fork" && forkThread
+            ? { ok: true, output: await forkThread(thread.id, raw.replace(/^\/\S+[ \t\n]?/, "").trim()) }
+            : await executeBuiltin(name, args, this, this.options.commandContext, thread);
+        } catch (err) {
+          return { ok: false, output: err instanceof Error ? err.message : String(err) };
+        }
+      };
+      if (name === "compact") {
+        // /compact waits for a running turn to end. Do not hold the caller
+        // (an HTTP request) for that: the result lands when the pass ends,
+        // through the same persist path as a slow plugin command.
+        const pending = run();
+        const fast = await Promise.race([pending, commandGrace()]);
+        if (fast === null) {
+          void pending
+            .then((r) => this.persistCommandResult(thread, name, source, r, echoAt, channel))
+            .catch((err: unknown) => {
+              console.error(`[engine] /compact result could not be saved session=${this.id} thread=${thread.id}: ${err instanceof Error ? err.message : String(err)}`);
+            });
+          return { sessionId: this.id, threadId: thread.id, queueItemId: "", status: "queued", command: { name, source } };
+        }
+        result = fast;
+      } else {
+        result = await run();
       }
     } else if (resolved.source === "plugin") {
       source = "plugin";
@@ -1219,11 +1236,7 @@ export class Session {
       // grace window, then let it complete in the background — the
       // command_result entry lands via the same persist+emit path either way.
       const pending = this.executePluginCommand(thread, resolved.pluginName, resolved.def, raw);
-      const grace = new Promise<null>((resolve) => {
-        const t = setTimeout(() => resolve(null), 500) as { unref?: () => void };
-        if (typeof t.unref === "function") t.unref();
-      });
-      const fast = await Promise.race([pending, grace]);
+      const fast = await Promise.race([pending, commandGrace()]);
       if (fast === null) {
         const bgName = name;
         void pending
@@ -2028,4 +2041,12 @@ export class Session {
       },
     };
   }
+}
+
+/** Resolves to null after the window a command gets before it moves to the background. */
+function commandGrace(): Promise<null> {
+  return new Promise<null>((resolve) => {
+    const t = setTimeout(() => resolve(null), 500) as { unref?: () => void };
+    if (typeof t.unref === "function") t.unref();
+  });
 }

@@ -173,10 +173,7 @@ async function modelCommand(
 
 async function compactCommand(args: string[], thread: Thread): Promise<BuiltinResult> {
   const instructions = args.join(" ").trim();
-  const outcome = await thread.compactThread({
-    mode: "manual",
-    ...(instructions ? { instructions } : {}),
-  });
+  const outcome = await thread.compactBetweenTurns(instructions ? { instructions } : {});
   // Report what actually happened. "Compacted." on a pass that summarized
   // nothing misleads a user the circuit breaker told to retry manually.
   if (outcome === "noop") {

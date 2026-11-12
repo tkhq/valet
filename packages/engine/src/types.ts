@@ -157,6 +157,13 @@ export const RECORD_ONLY_KEY = "recordOnly";
  * apart misses the prompt cache and re-writes the whole history.
  */
 export const FRESH_CONTEXT_KEY = "freshContext";
+
+/**
+ * Entry metadata key: when a compaction prune last elided tool output on
+ * this entry (epoch ms). A stored response usage from before that time
+ * counted the output, so a reload does not use it as the usage anchor.
+ */
+export const PRUNED_AT_KEY = "prunedAt";
 export type ThreadStatus = "active" | "paused" | "archived";
 export type QueueStatus = "idle" | "queued" | "running" | "blocked_on_decision_gate" | "paused";
 
