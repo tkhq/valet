@@ -742,3 +742,58 @@ clears the provider's cached messages. A tool call, an error, or a summary
 that misses the template fails the cached path, and the pass falls back to
 `summarize` with the bounded windows above. The span attribute
 `valet.compaction.summary_source` reads `cached_prefix` or `prefix_failed`.
+
+## Amendment (2026-11-11): a pass inside a turn keeps the turn's task
+
+A pass inside a turn (context preparation before a model call, or the
+overflow retry) can cut into the running turn. The cut-point rules split the
+newest turn when it is larger than the tail budget. Before this change, the
+summary then replaced the turn's own prompt, and the resumed turn knew its
+task only from the summary. In production, resumed turns answered with a
+summary, or stopped because they read their own reaction as proof that
+another run had the work.
+
+The task retention path from the 2026-10-16 amendment now covers every
+running submission during a pass inside a turn:
+
+- `Thread.taskContractFor` is the old rule: a workflow contract
+  (`metadata.preserveTask`) or the original prompt that a repair names.
+- `Thread.taskSourceFor` is the contract, or else the running submission's
+  own prompt. Passes with `turnInProgress` use it, and so do restart,
+  interrupted continuation, and gate replay of a running submission.
+- A pass after the turn ends (the post-turn proactive pass, the idle pass,
+  `/compact` between turns) keeps only a contract.
+- When a render kept an ordinary prompt after a checkpoint, the thread
+  records it like a contract (`retainedSourceFor`). The turn start retires
+  it before the next submission. The turn may have stopped before an answer,
+  and the note after it says that the request is still in progress.
+
+A pass inside a turn also records the tool calls it covered from the
+running turn in the checkpoint metadata (`turnCalls`). Each line is the tool
+name and short arguments: string values are cut at 80 characters, and one
+call's arguments at 200. A failed call is marked `(failed)`. Tools that
+change nothing outside the conversation (`Thread.branchNoteTools().silent`)
+are left out. A later pass in the same turn adds its lines. The record keeps
+the first 10 and the newest 20 lines and counts the rest. The engine builds
+the record from stored calls with no model call, so it does not depend on
+what the summary says. For a workflow repair, the record lists the repair's
+own calls, not those of the original submission.
+
+While that turn runs, the rebuilt context has the summary, then the retained
+task word for word, then a note made from the record. A render outside the
+turn shows no note.
+
+`getTranscriptSnapshot` with `keepQueueItemId` keeps only the submission's
+user entries whole. Its other covered entries stay stubs, so a pass inside
+a long turn does not read the turn's stored tool results again.
+
+The retained task reserves the fixed instructions and tool definitions. When
+those alone fill the usable context, the pass returns `insufficient` with a
+`context_overflow_unrecoverable` error, because no summary can make the
+request fit.
+
+Known limit: a message that a mid-turn delivery adds to the running turn has
+its own queue item. A pass inside the turn can still summarize it.
+
+Codex keeps the newest user messages verbatim after a compaction for the same
+reason (up to about 20,000 tokens).

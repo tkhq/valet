@@ -3255,12 +3255,14 @@ export class Thread {
    */
   rehydrateTranscript(entries: SessionEntry[]): void {
     this.replaceActiveSkillInvocations(entries);
+    const source = this.taskSourceFor();
     this.replaceAgentMessages(entriesToAgentMessages(entries, this.effectiveModelLenient(), {
       attributeAuthors: this.attributeAuthors,
       threadKey: this.key,
       activeLeafEntryId: this.activeLeafEntryId,
-      taskSourceQueueItemId: this.taskSourceFor(),
-    }), this.taskSourceFor());
+      taskSourceQueueItemId: source,
+      turnCallsQueueItemId: this.runningItem?.id,
+    }), this.retainedSourceFor(entries, source));
     // Arm the pre-turn proactive check (spec decision 5) so the first
     // post-restart turn is protected. The trigger estimates the rehydrated
     // transcript directly (TKAI-305), so no usage seeding is needed and a
@@ -4472,7 +4474,8 @@ export class Thread {
       this.replaceAgentMessages(entriesToAgentMessages(snapshot.entries, this.effectiveModelLenient(), {
         attributeAuthors: this.attributeAuthors, threadKey: this.key,
         activeLeafEntryId: this.activeLeafEntryId, taskSourceQueueItemId: taskSource,
-      }), taskSource);
+        turnCallsQueueItemId: item.id,
+      }), this.retainedSourceFor(snapshot.entries, taskSource, item));
     }
     const store = this.session.providers.store;
     const attemptId = uid("att");
@@ -4675,8 +4678,9 @@ export class Thread {
           threadKey: this.key,
           activeLeafEntryId: this.activeLeafEntryId,
           taskSourceQueueItemId: this.taskSourceFor(),
+          turnCallsQueueItemId: this.runningItem?.id,
         },
-      ), this.taskSourceFor());
+      ), this.retainedSourceFor(entries, this.taskSourceFor()));
       this.transcriptPending = false;
       this.agent.state.tools = this.buildTools();
 
@@ -5187,7 +5191,8 @@ export class Thread {
     // Restore a compacted active task before appending its next message.
     // A repair can reference an older task without retention metadata.
     // Retire an injected contract before an unrelated submission runs.
-    const taskSource = this.taskSourceFor(item);
+    // An ordinary prompt is not appended yet, so only a contract applies.
+    const taskSource = this.taskContractFor(item);
     if (taskSource || this.retainedTaskSourceQueueItemId) {
       // Keep the task's covered prompt whole: the rebuild below restores it.
       const snapshot = await this.transcriptSnapshot(taskSource);
@@ -5330,10 +5335,38 @@ export class Thread {
     }];
   }
 
-  private taskSourceFor(item: QueueItem | null = this.runningItem): string | undefined {
+  /**
+   * The workflow task contract of a submission (`metadata.preserveTask`): its
+   * own prompt, or the original prompt a repair names. A pass after the turn
+   * keeps only a contract, and the turn start restores a covered contract.
+   */
+  private taskContractFor(item: QueueItem | null = this.runningItem): string | undefined {
     if (item?.metadata?.preserveTask !== true) return undefined;
     const source = item.metadata.taskSourceQueueItemId;
     return typeof source === "string" ? source : item.id;
+  }
+
+  /**
+   * The prompt a compaction keeps verbatim while `item`'s turn runs: the
+   * task contract, or else the submission's own prompt. A pass inside a turn
+   * can summarize the turn's own start. Without the prompt, the resumed turn
+   * knows its task only from the summary.
+   */
+  private taskSourceFor(item: QueueItem | null = this.runningItem): string | undefined {
+    return this.taskContractFor(item) ?? item?.id;
+  }
+
+  /**
+   * The task source to record as retained after a render: a contract, or an
+   * ordinary prompt that the render kept after a checkpoint. A recorded
+   * ordinary prompt is retired before the next submission, like a contract.
+   * Its turn may have stopped before an answer, and the note after it says
+   * the request is still in progress.
+   */
+  private retainedSourceFor(entries: readonly SessionEntry[], source: string | undefined, item: QueueItem | null = this.runningItem): string | undefined {
+    const contract = this.taskContractFor(item);
+    if (contract) return contract;
+    return source && retainsTask(entries, source, this.activeLeafEntryId) ? source : undefined;
   }
 
   private replaceAgentMessages(messages: AgentMessage[], taskSourceQueueItemId?: string): void {
@@ -5523,7 +5556,7 @@ export class Thread {
         // response already carries the turn's honest error (TKAI-306).
         let outcome: CompactionOutcome;
         try {
-          outcome = await this.compactThread({ mode: "reactive" });
+          outcome = await this.compactThread({ mode: "reactive", turnInProgress: true });
         } catch (err) {
           this.emitError(
             "compaction_failed",
@@ -6018,7 +6051,7 @@ export class Thread {
         }
         let outcome: CompactionOutcome;
         try {
-          outcome = await this.compactThread({ mode: "proactive", autoContinue: false, signal });
+          outcome = await this.compactThread({ mode: "proactive", autoContinue: false, signal, turnInProgress: true });
         } catch (error) {
           if (signal?.aborted || !(await this.canRunCurrentSubmission())) throw error;
           this.turnCompactionBlocked = true;
@@ -6065,6 +6098,13 @@ export class Thread {
      * pass). Inside a turn the pass uses the turn's model and key.
      */
     turnModel?: ResolvedModel;
+    /**
+     * The turn that owns this pass keeps running after it: the pass runs
+     * before a model call (context preparation) or before the overflow
+     * retry. The pass then keeps the running submission's prompt and
+     * records the calls it covered from that turn (`TURN_CALLS_KEY`).
+     */
+    turnInProgress?: true;
   }): Promise<CompactionOutcome> {
     const cfg = this.session.options.compaction;
     if (cfg?.enabled === false) return "noop";
@@ -6091,6 +6131,7 @@ export class Thread {
       signal?: AbortSignal;
       autoContinue?: false;
       turnModel?: ResolvedModel;
+      turnInProgress?: true;
     },
     span?: Span,
   ): Promise<CompactionOutcome> {
@@ -6114,8 +6155,10 @@ export class Thread {
     // entry the newest checkpoint covers comes back as a stub: this pass
     // carries it forward by id and never reads its payload, so the read
     // grows with the live context and not with the thread's age. The active
-    // task's prompt stays whole because the pass may retain it.
-    const taskSource = this.taskSourceFor();
+    // task's prompt stays whole because the pass may retain it. A pass inside
+    // a turn keeps the running submission's prompt; a pass after the turn
+    // keeps only a workflow contract, because that turn's work is done.
+    const taskSource = opts.turnInProgress ? this.taskSourceFor() : this.taskContractFor();
     const snapshot = await this.transcriptSnapshot(taskSource);
     const leafAtSnapshot = this.activeLeafEntryId;
     const entries = walkTranscriptDag(snapshot.entries, leafAtSnapshot);
@@ -6173,6 +6216,16 @@ export class Thread {
           tokenize: (entry: SessionEntry) => entry.id === retainedTask.id || entry.type === "compaction" ? 0 : estimateEntryTokens(entry) } : {}),
       });
     };
+    // A retained task reserves the fixed instructions and tool definitions.
+    // When those alone fill the usable context, no summary can make the
+    // request fit, so the pass must not pay for one.
+    const usableForTask = usableTokens(effectiveModel, cfg);
+    if (retainedTask && usableForTask > 0 && estimateContextTokens(fixedPrompt, []) + toolTokens >= usableForTask) {
+      span?.setAttribute("valet.compaction.insufficient_reason", "fixed_context_too_large");
+      this.emitError("context_overflow_unrecoverable",
+        "The instructions and tool definitions alone fill the selected model's context. Choose a model with a larger context or turn off tools.");
+      return "insufficient";
+    }
     let cut = selectTail(supersededCheckpoint);
     if (cut.cutIndex === 0 || cut.cutIndex === entries.length) {
       // Nothing to compact: either the tail already fits everything, or
@@ -6436,6 +6489,12 @@ export class Thread {
       const covered = new Set([...carriedCoverage, ...summarized]);
       const coveredEntries = entries.filter((e) => covered.has(e.id));
       const summarizedEntries = entries.filter((e) => summarized.has(e.id));
+      // A pass inside a turn records the calls it covered from that turn,
+      // added to what an earlier pass in the same turn recorded.
+      const running = opts.turnInProgress ? this.runningItem : null;
+      const turnCalls = running
+        ? mergeTurnCalls(readTurnCalls(supersededCheckpoint?.metadata), running.id, turnCallLines(summarizedEntries, running.id, this.branchNoteTools().silent))
+        : undefined;
       const summarizedFiles = extractFileContext(summarizedEntries);
       const carriedFiles = supersededCheckpoint?.fileContext;
       const compactionEntry: CompactionEntry = {
@@ -6452,6 +6511,7 @@ export class Thread {
           read: [...new Set([...(carriedFiles?.read ?? []), ...summarizedFiles.read])],
           modified: [...new Set([...(carriedFiles?.modified ?? []), ...summarizedFiles.modified])],
         },
+        ...(turnCalls ? { metadata: { [TURN_CALLS_KEY]: turnCalls } } : {}),
         createdAt: Date.now(),
       };
       if (retainedTask && usable > 0) {
@@ -6463,7 +6523,8 @@ export class Thread {
         const required = entriesToAgentMessages([
           ...(!tail.some(entry => entry.id === retainedTask.id) ? [retainedTask] : []),
           ...tail, compactionEntry,
-        ], effectiveModel, { attributeAuthors: this.attributeAuthors, threadKey: this.key, taskSourceQueueItemId: taskSource })
+        ], effectiveModel, { attributeAuthors: this.attributeAuthors, threadKey: this.key, taskSourceQueueItemId: taskSource,
+          ...(opts.turnInProgress ? { turnCallsQueueItemId: this.runningItem?.id } : {}) })
           .filter((message): message is Message => message.role === "user" || message.role === "assistant" || message.role === "toolResult");
         const requiredTokens = estimateContextTokens(fixedPrompt, required) + toolTokens;
         if (requiredTokens >= usable) {
@@ -6501,7 +6562,9 @@ export class Thread {
       // Step 5: rewrite agent.state.messages from the now-augmented DAG.
       // The new compaction covers the head, so the transcript read (the one
       // hydration uses) returns the live context, not the whole history.
-      const updatedSnapshot = await this.transcriptSnapshot(this.taskSourceFor());
+      // Read the task source again: the turn can end while the summarizer runs.
+      const rebuildSource = opts.turnInProgress ? this.taskSourceFor() : this.taskContractFor();
+      const updatedSnapshot = await this.transcriptSnapshot(rebuildSource);
       const updatedEntries = updatedSnapshot.entries;
       this.replaceActiveSkillInvocations(updatedEntries);
       this.replaceAgentMessages(entriesToAgentMessages(
@@ -6515,9 +6578,10 @@ export class Thread {
           attributeAuthors: this.attributeAuthors,
           threadKey: this.key,
           activeLeafEntryId: this.activeLeafEntryId,
-          taskSourceQueueItemId: this.taskSourceFor(),
+          taskSourceQueueItemId: rebuildSource,
+          ...(opts.turnInProgress ? { turnCallsQueueItemId: this.runningItem?.id } : {}),
         },
-      ), this.taskSourceFor());
+      ), this.retainedSourceFor(updatedEntries, rebuildSource));
       // Compaction legitimately rewrites the prefix — the next turn's cache
       // reads SHOULD drop. Reset the break-detector baseline so the expected
       // drop is not counted as a break (TKAI-320).
@@ -8871,6 +8935,133 @@ function isLlmMessage(message: AgentMessage): message is Message {
   return message.role === "user" || message.role === "assistant" || message.role === "toolResult";
 }
 
+/** A user entry as the model reads it. */
+function userEntryMessage(e: MessageEntry, attributeAuthors: AuthorAttribution | undefined): AgentMessage {
+  // A spilled entry keeps the full paste in `content` but must reach the
+  // LLM as the pointer, so a rehydrated transcript agrees with the hot
+  // path and does not re-overflow on the oversized text. Signals never
+  // spill, so the two branches never collide.
+  const spillPath = e.metadata?.[SPILLED_INPUT_PATH_KEY];
+  const text =
+    typeof spillPath === "string"
+      ? renderReplyContext(
+          buildSpilledInputMarker({
+            path: spillPath,
+            tokens: estimateTokens(e.content),
+            chars: e.content.length,
+          }),
+          e.metadata,
+        )
+      : e.signal
+      ? renderSignalEnvelope(e.signal, e.content)
+      : renderReplyContext(e.content, e.metadata);
+  const sender = e.signal ? undefined : attributedAuthor(attributeAuthors, e.author);
+  return { role: "user", content: userContentBlocks(text, e.attachments, sender, entryMessageTime(e)), timestamp: e.createdAt };
+}
+
+/** Compaction metadata key for the calls a running turn made before the checkpoint (`TurnCalls`). */
+export const TURN_CALLS_KEY = "turnCalls";
+
+/**
+ * The tool calls of a running turn that checkpoints covered, as note lines:
+ * the first ones, the newest ones, and a count of the rest. A pass inside a
+ * turn writes it into the checkpoint's metadata, and the rebuilt context
+ * shows it after the retained task (`turnCallsNote`).
+ */
+export interface TurnCalls {
+  queueItemId: string;
+  first: string[];
+  last: string[];
+  omitted: number;
+}
+
+/** The most first and newest call lines `TurnCalls` keeps. */
+const TURN_CALLS_FIRST = 10;
+const TURN_CALLS_LAST = 20;
+/** The most characters of one call's arguments in a note line. */
+const TURN_CALL_ARGS_CHARS = 200;
+/** The most characters of one string argument value in a note line. */
+const TURN_CALL_VALUE_CHARS = 80;
+
+/** A call's arguments, short: long strings cut, the whole cut to `TURN_CALL_ARGS_CHARS`. */
+function shortArgs(args: unknown): string {
+  const text = JSON.stringify(args ?? {}, (_key, value: unknown) =>
+    typeof value === "string" && value.length > TURN_CALL_VALUE_CHARS ? `${value.slice(0, TURN_CALL_VALUE_CHARS)}…` : value) ?? "{}";
+  return text.length > TURN_CALL_ARGS_CHARS ? `${text.slice(0, TURN_CALL_ARGS_CHARS)}…` : text;
+}
+
+/**
+ * One line per finished tool call in `entries` that belongs to
+ * `queueItemId`: the tool name and short arguments, marked when it failed.
+ * Calls of `silentTools` change nothing outside the conversation, so they
+ * are left out. Exported for tests.
+ */
+export function turnCallLines(entries: readonly SessionEntry[], queueItemId: string, silentTools?: ReadonlySet<string>): string[] {
+  const lines: string[] = [];
+  for (const entry of entries) {
+    if (entry.type !== "message" || entry.role !== "assistant" || entry.queueItemId !== queueItemId) continue;
+    for (const part of entry.parts ?? []) {
+      if (part.type !== "tool_call" || (part.status !== "completed" && part.status !== "error")) continue;
+      if (silentTools?.has(part.toolName)) continue;
+      lines.push(`- ${part.toolName} ${shortArgs(part.args)}${part.status === "error" ? " (failed)" : ""}`);
+    }
+  }
+  return lines;
+}
+
+/** Add `lines` to the calls an earlier checkpoint kept for the same turn. Exported for tests. */
+export function mergeTurnCalls(previous: TurnCalls | undefined, queueItemId: string, lines: readonly string[]): TurnCalls {
+  const prior = previous?.queueItemId === queueItemId ? previous : undefined;
+  if (!prior || prior.omitted === 0) {
+    const all = [...(prior?.first ?? []), ...(prior?.last ?? []), ...lines];
+    if (all.length <= TURN_CALLS_FIRST + TURN_CALLS_LAST) {
+      return { queueItemId, first: all.slice(0, TURN_CALLS_FIRST), last: all.slice(TURN_CALLS_FIRST), omitted: 0 };
+    }
+    return { queueItemId, first: all.slice(0, TURN_CALLS_FIRST), last: all.slice(-TURN_CALLS_LAST), omitted: all.length - TURN_CALLS_FIRST - TURN_CALLS_LAST };
+  }
+  const rest = [...prior.last, ...lines];
+  return { queueItemId, first: prior.first, last: rest.slice(-TURN_CALLS_LAST), omitted: prior.omitted + Math.max(0, rest.length - TURN_CALLS_LAST) };
+}
+
+/** The `TurnCalls` in checkpoint metadata, or undefined when it is absent or malformed. */
+export function readTurnCalls(metadata: Record<string, unknown> | undefined): TurnCalls | undefined {
+  const value = metadata?.[TURN_CALLS_KEY];
+  if (typeof value !== "object" || value === null) return undefined;
+  const { queueItemId, first, last, omitted } = value as Record<string, unknown>; // narrowed field by field below
+  const lines = (v: unknown): v is string[] => Array.isArray(v) && v.every((line) => typeof line === "string");
+  if (typeof queueItemId !== "string" || !lines(first) || !lines(last) || typeof omitted !== "number") return undefined;
+  return { queueItemId, first, last, omitted };
+}
+
+/**
+ * The note after a retained task: the calls its turn already made before
+ * the checkpoint. The engine builds it from stored calls with no model
+ * call, so it does not depend on what the summary says. Undefined when the
+ * turn made no listed call. Exported for tests.
+ */
+export function turnCallsNote(calls: TurnCalls): string | undefined {
+  if (calls.first.length + calls.last.length === 0) return undefined;
+  return [
+    "[Compaction note] The request above is still in progress. The summary covers how this turn started.",
+    "This turn already made the tool calls below. What they changed (a posted message, a reaction, a written file) is this turn's own work, not another run's. Do not repeat a call unless the request needs it again:",
+    ...calls.first,
+    ...(calls.omitted > 0 ? [`- … ${calls.omitted} more calls`] : []),
+    ...calls.last,
+  ].join("\n");
+}
+
+/**
+ * True when the newest checkpoint on the active path covers the first user
+ * entry of `taskSourceQueueItemId`, so a render with that source retains it.
+ */
+export function retainsTask(entries: readonly SessionEntry[], taskSourceQueueItemId: string, activeLeafEntryId?: string): boolean {
+  const active = walkTranscriptDag(entries, activeLeafEntryId);
+  const checkpoint = findMostRecentCompaction(active);
+  if (!checkpoint) return false;
+  const task = active.find((entry) => entry.type === "message" && entry.role === "user" && entry.queueItemId === taskSourceQueueItemId);
+  return task !== undefined && checkpoint.coveredEntryIds.includes(task.id);
+}
+
 export function entriesToAgentMessages(
   entries: readonly SessionEntry[],
   modelHint: { api: string; provider: string; id: string },
@@ -8893,15 +9084,21 @@ export function entriesToAgentMessages(
     activeLeafEntryId?: string;
     /** Original task of the active submission or repair. Omit for settled history. */
     taskSourceQueueItemId?: string;
+    /**
+     * The submission whose turn continues after this render. When the
+     * newest checkpoint holds that turn's calls (`TURN_CALLS_KEY`), a note
+     * lists them after the retained task. Omit outside a running turn.
+     */
+    turnCallsQueueItemId?: string;
   },
 ): AgentMessage[] {
   const activeEntries = walkTranscriptDag(entries, opts?.activeLeafEntryId);
   // 1. Find the most recent CompactionEntry. Everything in its coveredEntryIds is dropped.
-  let activeCompaction: { summary: string; covered: Set<string> } | undefined;
+  let activeCompaction: { summary: string; covered: Set<string>; turnCalls?: TurnCalls } | undefined;
   for (let i = activeEntries.length - 1; i >= 0; i--) {
     const e = activeEntries[i];
     if (e.type === "compaction") {
-      activeCompaction = { summary: e.summary, covered: new Set(e.coveredEntryIds) };
+      activeCompaction = { summary: e.summary, covered: new Set(e.coveredEntryIds), turnCalls: readTurnCalls(e.metadata) };
       break;
     }
   }
@@ -8939,34 +9136,21 @@ export function entriesToAgentMessages(
       continue;
     }
     if (e.type !== "message") continue;
-    if (activeCompaction?.covered.has(e.id) && e.id !== taskEntryId) continue;
+    if (e.id === taskEntryId && activeCompaction) {
+      // The covered task comes back verbatim. While its turn runs, a note of
+      // the calls the turn already made follows. The summary may describe
+      // those calls loosely or not at all, and a resumed turn must not
+      // repeat a post or a reaction.
+      out.push(userEntryMessage(e, opts?.attributeAuthors));
+      const calls = activeCompaction.turnCalls;
+      const done = calls && calls.queueItemId === opts?.turnCallsQueueItemId ? turnCallsNote(calls) : undefined;
+      if (done) out.push({ role: "user", content: [{ type: "text", text: done }], timestamp: e.createdAt });
+      continue;
+    }
+    if (activeCompaction?.covered.has(e.id)) continue;
 
     if (e.role === "user") {
-      // A spilled entry keeps the full paste in `content` but must reach the
-      // LLM as the pointer, so a rehydrated transcript agrees with the hot
-      // path and does not re-overflow on the oversized text. Signals never
-      // spill, so the two branches never collide.
-      const spillPath = e.metadata?.[SPILLED_INPUT_PATH_KEY];
-      const text =
-        typeof spillPath === "string"
-          ? renderReplyContext(
-              buildSpilledInputMarker({
-                path: spillPath,
-                tokens: estimateTokens(e.content),
-                chars: e.content.length,
-              }),
-              e.metadata,
-            )
-          : e.signal
-          ? renderSignalEnvelope(e.signal, e.content)
-          : renderReplyContext(e.content, e.metadata);
-      const sender = e.signal ? undefined : attributedAuthor(opts?.attributeAuthors, e.author);
-      const contentBlocks = userContentBlocks(text, e.attachments, sender, entryMessageTime(e));
-      out.push({
-        role: "user",
-        content: contentBlocks,
-        timestamp: e.createdAt,
-      });
+      out.push(userEntryMessage(e, opts?.attributeAuthors));
       continue;
     }
     if (e.role === "assistant") {

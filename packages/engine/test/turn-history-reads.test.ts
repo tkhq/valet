@@ -252,7 +252,7 @@ class StubbingStore extends InMemorySessionStore {
     const stub = (entry: SessionEntry): SessionEntry => {
       if (!covered.has(entry.id)) return entry;
       if (entry.type === "message") {
-        if (opts?.keepQueueItemId !== undefined && entry.queueItemId === opts.keepQueueItemId) return entry;
+        if (entry.role === "user" && opts?.keepQueueItemId !== undefined && entry.queueItemId === opts.keepQueueItemId) return entry;
         return { ...entry, content: "", parts: undefined, metadata: undefined, signal: undefined, author: undefined, channel: undefined };
       }
       if (entry.type === "compaction") return { ...entry, summary: "", coveredEntryIds: [], fileContext: undefined, metadata: undefined };

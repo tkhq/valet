@@ -828,7 +828,8 @@ export class PgSessionStore implements SessionStore {
         const rawCovered: unknown = covered?.rows[0]?.covered_entry_ids;
         const coveredIds = new Set(parseJson<string[]>(typeof rawCovered === "string" ? rawCovered : null) ?? []);
         for (const stub of stubs) {
-          if (stub.type === "message" && opts?.keepQueueItemId !== undefined && stub.queueItemId === opts.keepQueueItemId) coveredIds.delete(stub.id);
+          // Only the prompt: the task's later entries stay stubs.
+          if (stub.type === "message" && stub.role === "user" && opts?.keepQueueItemId !== undefined && stub.queueItemId === opts.keepQueueItemId) coveredIds.delete(stub.id);
         }
         // A broken walk keeps the full read: the engine reports the DAG error itself.
         const full = await tx.query(
