@@ -93,7 +93,10 @@ class:
 The general child starts first. Its findings come first when the handler merges
 by location, and its summary is the review's summary. A focused finding within
 three lines of an earlier finding on the same file is a repeat and is dropped.
-Focused findings rated below `focusMinConfidence` (default 0.7) are dropped.
+Focused findings rated below `focusMinConfidence` (default 0.7) are dropped
+before the merge, so a low-confidence repeat cannot hide a confident finding.
+The eval pipeline keeps them in its draft, but a dropped finding never makes an
+accepted one a repeat.
 
 Each focused child adds about one review's cost. The default is no focused
 children. A focused child that cannot start, for example at the per-session

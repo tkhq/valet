@@ -186,6 +186,25 @@ describe("runReviewPipeline", () => {
     expect(result.review?.findings.map((f) => f.title)).toEqual(["A", "B"]);
   });
 
+  it("a low-confidence focused finding does not hide a confident one at the same spot", async () => {
+    const { dir, base, head } = repo();
+    const run: AgentRunner = async (spec) => {
+      const findings =
+        spec.label === "review:failure"
+          ? [{ ...finding("Focused low"), line: 1, confidence: 0.3 }]
+          : spec.label === "review:concurrency"
+            ? [{ ...finding("Focused high"), line: 2, trigger: "two requests", confidence: 0.9 }]
+            : [];
+      await submit(spec, "submit_review", { summary: spec.label, confidence: 2, findings });
+      return { outcome: "completed" };
+    };
+    const result = await runReviewPipeline(
+      { workspace: dir, base, head, title: "t", body: "", focuses: ["failure", "concurrency"], focusMinConfidence: 0.5 },
+      run,
+    );
+    expect(result.review?.findings.map((f) => f.title)).toEqual(["Focused high"]);
+  });
+
   it("dedupe keeps a general finding over a focused duplicate below the focus threshold", async () => {
     const { dir, base, head } = repo();
     const run: AgentRunner = async (spec) => {

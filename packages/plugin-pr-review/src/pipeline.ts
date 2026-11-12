@@ -100,15 +100,19 @@ const SAME_SPOT_LINES = 3;
  * Union of the passes' findings, in pass order. A finding on the same file
  * within SAME_SPOT_LINES of one an earlier pass reported is a repeat and is
  * dropped: it would read, and score, as a second comment. Findings within
- * one pass are all kept; the reviewer already split them as distinct.
+ * one pass are all kept; the reviewer already split them as distinct. A
+ * finding `accepted` rejects (the confidence gate) never makes an accepted
+ * one a repeat.
  */
-export function mergeFindings(passes: Finding[][]): Finding[] {
+export function mergeFindings(passes: Finding[][], accepted: (f: Finding) => boolean = () => true): Finding[] {
   const kept: Finding[] = [];
   for (const findings of passes) {
     const earlier = [...kept];
     for (const f of findings) {
       // LEFT and RIGHT lines number different files, so only the same side can repeat.
-      const sameSpot = (k: Finding): boolean => k.path === f.path && (k.side ?? "RIGHT") === (f.side ?? "RIGHT") && Math.abs(k.line - f.line) <= SAME_SPOT_LINES;
+      // An earlier finding the gate drops does not stand in for one it accepts.
+      const sameSpot = (k: Finding): boolean =>
+        k.path === f.path && (k.side ?? "RIGHT") === (f.side ?? "RIGHT") && Math.abs(k.line - f.line) <= SAME_SPOT_LINES && (accepted(k) || !accepted(f));
       if (!earlier.some(sameSpot)) kept.push(f);
     }
   }
@@ -161,11 +165,12 @@ export async function runReviewPipeline(input: PipelineOptions, run: AgentRunner
   const focused = new WeakSet<Finding>(passes.flatMap((p) => (p.focus && p.review ? p.review.findings : [])));
   const done = passes.filter((p): p is { result: AgentRunResult; focus: ReviewFocus | undefined; review: Review } => p.review !== undefined);
   const reviewRun = done[0]?.result ?? passes[0].result;
-  const merged: Review | undefined =
-    done.length > 0 ? { ...done[0].review, findings: mergeFindings(done.map((p) => p.review.findings)) } : passes[0].review;
-  // The confidence gate. Dedupe uses it to pick a keeper the gate accepts.
+  // The confidence gate. Merge and dedupe never let a finding the gate drops
+  // stand in for one it accepts, so a low-confidence repeat cannot hide a defect.
   const gate = (f: Finding): boolean =>
     confidentEnough(f, opts.minConfidence) && (!focused.has(f) || confidentEnough(f, opts.focusMinConfidence));
+  const merged: Review | undefined =
+    done.length > 0 ? { ...done[0].review, findings: mergeFindings(done.map((p) => p.review.findings), gate) } : passes[0].review;
   // Consolidate: drop repeats inside the merged review before anything else sees it.
   let consolidated = merged ? consolidateFindings(merged.findings) : undefined;
   if (consolidated && opts.dedupe === true) {
