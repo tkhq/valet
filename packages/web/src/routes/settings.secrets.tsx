@@ -1,69 +1,100 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useState, type FormEvent } from "react";
+import { useId, useState, type FormEvent } from "react";
 import type { SecretSummary } from "@valet/api/wire";
-import { Button, Input, Spinner, Textarea } from "~/components/primitives";
+import { Button, Input, Spinner, TabBar, Textarea, tabPanelId, type TabDef } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
-import { useDeleteSecret, useSaveSecret, useSecrets } from "~/api/secrets";
+import { useDeleteSecret, useSaveSecret, useSecrets, type SecretTarget } from "~/api/secrets";
+import { useTeams } from "~/api/settings";
 import { errorText } from "~/lib/error-text";
 import { formatDateOr } from "~/lib/format-when";
 import { useCopyToClipboard } from "~/lib/use-copy";
 
 /**
- * `/settings/secrets` — the caller's personal secrets in the deployment's
- * secret store. A saved value is never shown again. A session the caller
- * owns reads it with
- * `valet-secrets run --env NAME=secret://personal/<name> -- <command>`.
+ * `/settings/secrets` — secrets in the deployment's secret store, by scope:
+ * the caller's own, each team they belong to, and the company's. A saved
+ * value is never shown again. A session reads one with
+ * `valet-secrets run --env NAME=<reference> -- <command>`.
  */
 export const Route = createFileRoute("/settings/secrets")({
-  component: PersonalSecretsPage,
+  component: SecretsPage,
 });
 
-export function PersonalSecretsPage() {
-  const secretsQ = useSecrets();
-  const data = secretsQ.data;
+const SCOPE_TEXT = {
+  personal: "Only sessions you own personally can use these.",
+  team: "This team's sessions, and your own sessions, can use these. Team members can change them.",
+  company: "Every session in the organization can use these. Organization admins can change them.",
+} as const;
+
+export function SecretsPage() {
+  const teamsQ = useTeams();
+  const myTeams = (teamsQ.data?.teams ?? []).filter((t) => t.callerRole !== null);
+  const tabs: TabDef<string>[] = [
+    { id: "personal", label: "Personal" },
+    ...myTeams.map((t) => ({ id: `team:${t.id}`, label: t.name })),
+    { id: "company", label: "Company" },
+  ];
+  const [active, setActive] = useState("personal");
+  const label = useId();
+  const target: SecretTarget = active.startsWith("team:")
+    ? { scope: "team", teamId: active.slice("team:".length) }
+    : { scope: active === "company" ? "company" : "personal" };
+
   return (
-    <Section
-      title="Secrets"
-      description="Development credentials for your own sessions. Only sessions you own can use them, and Valet never shows a saved value."
-    >
-      {secretsQ.isLoading && (
-        <div className="flex items-center gap-2 py-4 text-sm text-muted">
-          <Spinner size={14} /> Loading…
-        </div>
-      )}
-      {secretsQ.error && <p role="alert" className="py-4 text-sm text-danger-500">{errorText(secretsQ.error)}</p>}
-      {data && !data.enabled && (
-        <p className="py-4 text-sm text-muted">
-          The secret store is not set up on this Valet. An operator sets VALET_SECRET_STORE to turn it on.
-        </p>
-      )}
-      {data?.enabled && (
-        <div className="min-w-0 max-w-full space-y-4">
-          <SaveSecretForm />
-          {data.secrets.length === 0 ? (
-            <p className="py-4 text-sm text-muted">No secrets yet. Save one above, then use its reference in a session.</p>
-          ) : (
-            <div className="divide-y divide-line border-t border-line">
-              {data.secrets.map((secret) => (
-                <SecretRow key={secret.name} secret={secret} />
-              ))}
-            </div>
-          )}
-          <p className="text-xs text-muted">
-            In a session you own, run{" "}
-            <code className="font-mono">valet-secrets run --env NAME=&lt;reference&gt; -- &lt;command&gt;</code>.
-            {data.provider && ` Values are stored in ${data.provider}.`}
-          </p>
-        </div>
-      )}
+    <Section title="Secrets" description="Credentials sessions can use without the value ever appearing in a thread. Valet never shows a saved value.">
+      <TabBar tabs={tabs} active={active} onSelect={setActive} label="Secret scope" id={label} size="sm" />
+      <div role="tabpanel" id={tabPanelId(label, active)} className="pt-3">
+        <ScopePanel key={active} target={target} />
+      </div>
     </Section>
   );
 }
 
-function SaveSecretForm() {
+function ScopePanel({ target }: { target: SecretTarget }) {
+  const secretsQ = useSecrets(target);
+  const data = secretsQ.data;
+  if (secretsQ.isLoading) {
+    return (
+      <div className="flex items-center gap-2 py-4 text-sm text-muted">
+        <Spinner size={14} /> Loading…
+      </div>
+    );
+  }
+  if (secretsQ.error) return <p role="alert" className="py-4 text-sm text-danger-500">{errorText(secretsQ.error)}</p>;
+  if (!data) return null;
+  if (!data.enabled) {
+    return (
+      <p className="py-4 text-sm text-muted">
+        The secret store is not set up on this Valet. An operator sets VALET_SECRET_STORE to turn it on.
+      </p>
+    );
+  }
+  return (
+    <div className="min-w-0 max-w-full space-y-4">
+      <p className="text-xs text-muted">{SCOPE_TEXT[target.scope]}</p>
+      {data.canWrite && <SaveSecretForm target={target} />}
+      {data.secrets.length === 0 ? (
+        <p className="py-4 text-sm text-muted">
+          {data.canWrite ? "No secrets yet. Save one above, then use its reference in a session." : "No secrets here yet."}
+        </p>
+      ) : (
+        <div className="divide-y divide-line border-t border-line">
+          {data.secrets.map((secret) => (
+            <SecretRow key={secret.name} secret={secret} target={target} canWrite={data.canWrite} />
+          ))}
+        </div>
+      )}
+      <p className="text-xs text-muted">
+        In a session, run <code className="font-mono">valet-secrets run --env NAME=&lt;reference&gt; -- &lt;command&gt;</code>.
+        {data.provider && ` Values are encrypted in your browser and stored in ${data.provider}.`}
+      </p>
+    </div>
+  );
+}
+
+function SaveSecretForm({ target }: { target: SecretTarget }) {
   const [name, setName] = useState("");
   const [value, setValue] = useState("");
-  const save = useSaveSecret();
+  const save = useSaveSecret(target);
   const trimmed = name.trim();
   const canSave = trimmed.length > 0 && value.length > 0 && !save.isPending;
 
@@ -86,7 +117,7 @@ function SaveSecretForm() {
       <Input
         value={name}
         onChange={(e) => setName(e.target.value)}
-        placeholder="Name, for example granola/api-key"
+        placeholder="Name, for example OPENAI_API_KEY"
         aria-label="Secret name"
         autoComplete="off"
         spellCheck={false}
@@ -111,9 +142,9 @@ function SaveSecretForm() {
   );
 }
 
-function SecretRow({ secret }: { secret: SecretSummary }) {
+function SecretRow({ secret, target, canWrite }: { secret: SecretSummary; target: SecretTarget; canWrite: boolean }) {
   const [confirming, setConfirming] = useState(false);
-  const remove = useDeleteSecret();
+  const remove = useDeleteSecret(target);
   const { copied, copy } = useCopyToClipboard();
 
   return (
@@ -127,26 +158,27 @@ function SecretRow({ secret }: { secret: SecretSummary }) {
         <Button type="button" variant="ghost" size="sm" className="shrink-0" onClick={() => void copy(secret.reference)}>
           {copied ? "Copied" : "Copy reference"}
         </Button>
-        {confirming ? (
-          <span className="flex shrink-0 items-center gap-2">
-            <Button type="button" variant="ghost" size="sm" onClick={() => setConfirming(false)} disabled={remove.isPending}>
-              Cancel
+        {canWrite &&
+          (confirming ? (
+            <span className="flex shrink-0 items-center gap-2">
+              <Button type="button" variant="ghost" size="sm" onClick={() => setConfirming(false)} disabled={remove.isPending}>
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                variant="danger"
+                size="sm"
+                disabled={remove.isPending}
+                onClick={() => remove.mutate(secret.name, { onSuccess: () => setConfirming(false) })}
+              >
+                {remove.isPending ? "Deleting…" : "Confirm delete"}
+              </Button>
+            </span>
+          ) : (
+            <Button type="button" variant="ghost" size="sm" className="shrink-0" onClick={() => setConfirming(true)}>
+              Delete
             </Button>
-            <Button
-              type="button"
-              variant="danger"
-              size="sm"
-              disabled={remove.isPending}
-              onClick={() => remove.mutate(secret.name, { onSuccess: () => setConfirming(false) })}
-            >
-              {remove.isPending ? "Deleting…" : "Confirm delete"}
-            </Button>
-          </span>
-        ) : (
-          <Button type="button" variant="ghost" size="sm" className="shrink-0" onClick={() => setConfirming(true)}>
-            Delete
-          </Button>
-        )}
+          ))}
       </div>
       {remove.error && <p role="alert" className="mt-1 text-xs text-danger-500">{errorText(remove.error)}</p>}
     </div>

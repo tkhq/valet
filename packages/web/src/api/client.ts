@@ -57,6 +57,10 @@ import type {
   CreateTeamRequest,
   CreateTeamResponse,
   ListTeamApiKeysResponse,
+  BeginSecretSaveRequest,
+  BeginSecretSaveResponse,
+  FinishSecretSaveRequest,
+  SecretScopeKind,
   SecretSummary,
   SecretsListResponse,
   PatchTeamRequest,
@@ -613,6 +617,11 @@ export function usagePeriodSearchParams(period: UsagePeriodSelection): URLSearch
   if (period.kind === "lookback") return new URLSearchParams({ window: period.window });
   if (period.kind === "month") return new URLSearchParams({ month: period.month });
   return new URLSearchParams({ start: period.start, end: period.end });
+}
+
+/** `scope=…` and, for a team, `teamId=…`. */
+function secretScopeQuery(scope: SecretScopeKind, teamId?: string): string {
+  return scope === "team" && teamId ? `scope=team&teamId=${encodeURIComponent(teamId)}` : `scope=${scope}`;
 }
 
 export const api = {
@@ -1473,9 +1482,12 @@ export const api = {
     request<{ ok: true }>("DELETE", `/teams/${encodeURIComponent(id)}/api-keys/${encodeURIComponent(keyId)}`),
 
   // Personal secrets in the configured secret store. No call returns a value.
-  listSecrets: () => request<SecretsListResponse>("GET", "/secrets"),
-  saveSecret: (body: { name: string; value: string }) => request<SecretSummary>("POST", "/secrets", body),
-  deleteSecret: (name: string) => request<{ ok: true }>("DELETE", `/secrets?name=${encodeURIComponent(name)}`),
+  listSecrets: (scope: SecretScopeKind, teamId?: string) =>
+    request<SecretsListResponse>("GET", `/secrets?${secretScopeQuery(scope, teamId)}`),
+  beginSecretSave: (body: BeginSecretSaveRequest) => request<BeginSecretSaveResponse>("POST", "/secrets/import/begin", body),
+  finishSecretSave: (body: FinishSecretSaveRequest) => request<SecretSummary>("POST", "/secrets/import/finish", body),
+  deleteSecret: (scope: SecretScopeKind, teamId: string | undefined, name: string) =>
+    request<{ ok: true }>("DELETE", `/secrets?${secretScopeQuery(scope, teamId)}&name=${encodeURIComponent(name)}`),
 
   // plugins + credentials (plugin-system-v2 plan Task 15 — connect surface)
   runCodeReview: (body: RunCodeReviewRequest) => request<RunCodeReviewResponse>("POST", "/code-review/runs", body),

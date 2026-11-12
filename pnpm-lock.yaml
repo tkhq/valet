@@ -1337,6 +1337,9 @@ importers:
       '@toon-format/toon':
         specifier: ^2.1.0
         version: 2.1.0
+      '@turnkey/crypto':
+        specifier: 2.13.4
+        version: 2.13.4
       '@valet/api':
         specifier: workspace:*
         version: link:../api
@@ -10167,7 +10170,7 @@ snapshots:
 
   '@scure/bip32@1.7.0':
     dependencies:
-      '@noble/curves': 1.9.1
+      '@noble/curves': 1.9.7
       '@noble/hashes': 1.8.0
       '@scure/base': 1.2.6
     optional: true

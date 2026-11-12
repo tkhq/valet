@@ -1,34 +1,55 @@
 /**
- * TanStack Query hooks for the caller's personal secrets. Names only: the
- * API never returns a value.
+ * Secrets in the deployment's secret store: company, team, and personal.
+ * Names only: the API never returns a value.
+ *
+ * Every save goes through `saveSecretValue`: the api authorizes the scope
+ * and name and returns an envelope, the browser seals the value to it, and
+ * the api receives only the sealed value. The Settings page, the secret
+ * request card in a thread, and the composer's paste prompt all use it.
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { SecretSummary, SecretsListResponse } from "@valet/api/wire";
+import type { SecretScopeKind, SecretSummary, SecretsListResponse } from "@valet/api/wire";
+import { sealSecret } from "~/lib/secret-seal";
 import { api } from "./client";
 
-export const qkSecrets = () => ["settings", "secrets"] as const;
+export interface SecretTarget {
+  scope: SecretScopeKind;
+  /** Set only for the team scope. */
+  teamId?: string;
+}
 
-export function useSecrets() {
+export const qkSecretsAll = () => ["settings", "secrets"] as const;
+export const qkSecrets = (target: SecretTarget) => ["settings", "secrets", target.scope, target.teamId ?? ""] as const;
+
+export function useSecrets(target: SecretTarget) {
   return useQuery<SecretsListResponse>({
-    queryKey: qkSecrets(),
-    queryFn: () => api.listSecrets(),
+    queryKey: qkSecrets(target),
+    queryFn: () => api.listSecrets(target.scope, target.teamId),
   });
 }
 
-export function useSaveSecret() {
+/** Seal `value` in the browser and save it as `name` in `target`. */
+export async function saveSecretValue(target: SecretTarget, name: string, value: string): Promise<SecretSummary> {
+  const request = { scope: target.scope, name, ...(target.teamId ? { teamId: target.teamId } : {}) };
+  const { envelope } = await api.beginSecretSave(request);
+  const sealed = await sealSecret(envelope, value);
+  return api.finishSecretSave({ ...request, sealed });
+}
+
+export function useSaveSecret(target: SecretTarget) {
   const qc = useQueryClient();
   return useMutation<SecretSummary, Error, { name: string; value: string }>({
-    mutationFn: (body) => api.saveSecret(body),
-    onSuccess: () => qc.invalidateQueries({ queryKey: qkSecrets() }),
+    mutationFn: ({ name, value }) => saveSecretValue(target, name, value),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qkSecretsAll() }),
   });
 }
 
-export function useDeleteSecret() {
+export function useDeleteSecret(target: SecretTarget) {
   const qc = useQueryClient();
   return useMutation<void, Error, string>({
     mutationFn: async (name) => {
-      await api.deleteSecret(name);
+      await api.deleteSecret(target.scope, target.teamId, name);
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: qkSecrets() }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qkSecretsAll() }),
   });
 }
