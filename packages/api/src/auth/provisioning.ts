@@ -189,6 +189,20 @@ function readInviteCode(body: Record<string, unknown> | null | undefined): strin
 }
 
 /**
+ * Reads a token from an `account` row. Uses the same rule as better-auth's
+ * own token read: a value that is not ciphertext (hex, or `$ba$`-prefixed)
+ * was stored before encryption was on, or by a path that does not encrypt,
+ * and is returned as is.
+ */
+async function readStoredToken(
+  key: Parameters<typeof symmetricDecrypt>[0]["key"],
+  token: string,
+): Promise<string> {
+  const looksEncrypted = token.startsWith("$ba$") || (token.length % 2 === 0 && /^[0-9a-f]+$/i.test(token));
+  return looksEncrypted ? symmetricDecrypt({ key, data: token }) : token;
+}
+
+/**
  * Builds the better-auth hook set that enforces the admission rule end to
  * end: the signup invite gate (`hooks.before`), the OAuth/SSO creation gate
  * + role stamping (`databaseHooks.user.create.before`), post-create org
@@ -347,10 +361,8 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
     // auth secret, so this hook decrypts them before it copies them into the
     // credential store, which encrypts them with its own key.
     const key = ctx?.context?.secretConfig ?? cfg.secret;
-    const accessToken = await symmetricDecrypt({ key, data: account.accessToken });
-    const refreshToken = account.refreshToken
-      ? await symmetricDecrypt({ key, data: account.refreshToken })
-      : undefined;
+    const accessToken = await readStoredToken(key, account.accessToken);
+    const refreshToken = account.refreshToken ? await readStoredToken(key, account.refreshToken) : undefined;
 
     const owner = { type: "user" as const, id: account.userId };
     const credential = {

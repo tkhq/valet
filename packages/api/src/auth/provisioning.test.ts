@@ -444,6 +444,19 @@ describe("buildAuthHooks", () => {
       expect(workspaceCred).toEqual({ type: "oauth2", accessToken: "gtok", refreshToken: "grefresh" });
     });
 
+    it("passes plaintext tokens through unchanged", async () => {
+      const cfg = baseConfig();
+      const { databaseHooks } = buildAuthHooks({ db, cfg, credentialStore });
+
+      await databaseHooks!.account!.create!.after!(
+        makeAccount({ providerId: "google", userId: "u-new", accessToken: "ya29.plain-token", refreshToken: "1//plain-refresh" }),
+        dbHookCtx({ path: "/callback/google" }),
+      );
+
+      const cred = await credentialStore.get({ type: "user", id: "u-new" }, "google_calendar");
+      expect(cred).toEqual({ type: "oauth2", accessToken: "ya29.plain-token", refreshToken: "1//plain-refresh" });
+    });
+
     it("writes github tokens as identity-only, capturing expiresAt from the account row", async () => {
       const cfg = baseConfig();
       const { databaseHooks } = buildAuthHooks({ db, cfg, credentialStore });
