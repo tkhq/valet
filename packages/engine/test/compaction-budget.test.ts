@@ -360,6 +360,43 @@ describe("compaction budget: when an interactive thread compacts", () => {
     faux.unregister();
   });
 
+  it("keeps the transcript for an armed idle pass, so the pass reuses the cached prefix", async () => {
+    // The host releases idle transcripts after 30 minutes and the idle pass
+    // runs at 55. A released transcript has no last response to repeat, so
+    // the pass fell back to the bounded summarizer at full input price.
+    // Each resolution returns a new key, as after a rotation.
+    let resolutions = 0;
+    const { faux, store, events, session, thread } = await bigWindowSession(
+      "budget-idle-keeps-transcript",
+      { contextBudgetTokens: 15_000, tailTurns: 1, idleCompactionMs: 300 },
+      { resolveModel: async (): Promise<ResolvedModel | null> => ({ model: faux.getModel("big")!, apiKey: `key-${resolutions++}` }) },
+    );
+    let summaryRequest = "";
+    let summaryKey: string | undefined;
+    faux.setResponses([
+      () => fauxAssistantMessage("third response " + "y".repeat(16_000)),
+      (context, opts) => { summaryRequest = JSON.stringify(context.messages.at(-1)); summaryKey = opts?.apiKey; return fauxAssistantMessage(COMPLETE_SUMMARY); },
+    ]);
+
+    const receipt = await session.prompt("third prompt");
+    await thread.awaitResult(receipt.queueItemId, { timeoutMs: 4000 });
+    await waitFor(() => !thread.hasActiveRun);
+    await new Promise((r) => setTimeout(r, 50));
+    // The host's idle sweep runs before the idle pass.
+    expect(session.releaseIdleTranscripts(Date.now() + 1)).toBe(0);
+    await waitFor(() => events.some((e) => e.event.type === "compaction_end" && e.event.threadId === receipt.threadId));
+    await thread.kick();
+
+    expect((await store.getEntries(session.id, thread.id)).filter((e) => e.type === "compaction")).toHaveLength(1);
+    expect(summaryRequest).toContain("compact this conversation");
+    expect(summaryKey).toBe(`key-${resolutions - 1}`);
+    expect(summaryKey).not.toBe("key-0");
+    expect(errorCodes(events)).toEqual([]);
+    // With the pass done, a later sweep may release the transcript.
+    expect(session.releaseIdleTranscripts(Date.now() + 1)).toBe(1);
+    faux.unregister();
+  });
+
   it("runs the idle pass with the key the model resolver supplies", async () => {
     // The turn clears its resolver key when it ends. The idle pass must
     // resolve the key again, or a session whose only key comes from the

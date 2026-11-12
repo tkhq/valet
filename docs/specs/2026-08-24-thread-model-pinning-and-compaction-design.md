@@ -820,3 +820,26 @@ its own queue item. A pass inside the turn can still summarize it.
 
 Codex keeps the newest user messages verbatim after a compaction for the same
 reason (up to about 20,000 tokens).
+
+## Amendment (2026-11-11): the idle pass keeps a warm transcript
+
+The host's idle sweep releases a thread's in-memory transcript after 30
+minutes (`releaseIdleTranscript`). An assistant's idle pass runs at 55
+minutes. The release did not check for an armed idle pass, so the pass
+reloaded the thread from the store. The reload has no last response, so
+`prefixForSummary` returned nothing and the pass used the bounded summarizer
+at full input price. The estimate also lost its usage anchor.
+
+`releaseIdleTranscript` now refuses while the idle compaction timer is armed.
+The pass runs on the live transcript and logs `cached-prefix summary`. The
+timer clears when the pass starts. A pass that compacts uses the transcript,
+so the thread releases about one idle window later.
+
+Two related fixes:
+
+- Every transcript replacement (release, rebuild, reload) drops the record of
+  the last model request and response. The new messages no longer match it,
+  so the cached-prefix path cannot use it, and it held the whole request
+  context in memory.
+- The cached-prefix summary of an idle pass sends the key the pass resolved,
+  not the key of the turn that ended up to 55 minutes earlier.

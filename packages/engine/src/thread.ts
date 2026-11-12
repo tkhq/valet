@@ -3231,10 +3231,17 @@ export class Thread {
    * history: the next turn, gate reconcile or compaction reloads it through
    * `ensureTranscript`, as after a restart. Without this, a cached assistant
    * session holds every transcript it loaded until the process exits.
+   *
+   * A thread with an armed idle compaction keeps its transcript until that
+   * pass runs. The pass needs the live context: it summarizes on the
+   * thread's cached prefix (`prefixForSummary`) and measures from the last
+   * response's usage. After a reload it would pay full input price for a
+   * bounded summary instead.
    */
   releaseIdleTranscript(idleSince: number): boolean {
     if (this.transcriptPending || this.transcriptLoad || this.runningItem || this.kicking
-      || this.backgroundDrives > 0 || this.collectTimer || this.transcriptUsedAt > idleSince) return false;
+      || this.backgroundDrives > 0 || this.collectTimer || this.idleCompactionTimer
+      || this.transcriptUsedAt > idleSince) return false;
     this.replaceAgentMessages([]);
     this.transcriptPending = true;
     // Mid-turn ids only matter while their turn runs.
@@ -5371,6 +5378,11 @@ export class Thread {
 
   private replaceAgentMessages(messages: AgentMessage[], taskSourceQueueItemId?: string): void {
     this.retainedTaskSourceQueueItemId = taskSourceQueueItemId;
+    // New message objects no longer match the last request, so a summary
+    // cannot repeat it (`prefixForSummary`). Drop it: it holds that
+    // request's whole context, which a released transcript must not pin.
+    this.lastModelRequest = undefined;
+    this.lastModelResponse = undefined;
     const system = getCurrentSystemMessage(this.agent.state.messages);
     this.agent.state.messages = system ? [system, ...messages] : messages;
   }
@@ -6401,6 +6413,8 @@ export class Thread {
             send: async (messages) => {
               const stream = await this.streamModel(prefix.model, { ...prefix.context, messages }, {
                 ...prefix.options,
+                // The idle pass resolved its key again; the turn's key can be stale.
+                ...(opts.turnModel ? { apiKey: opts.turnModel.apiKey } : {}),
                 ...(opts.signal ? { signal: opts.signal } : { signal: undefined }),
               });
               return stream.result();
