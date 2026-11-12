@@ -25,9 +25,9 @@ export function HomeEmptyState({ sessionId, threadId, title = "What should Valet
     <h2 className="font-display text-2xl text-ink">{title}</h2>
     <p className="max-w-md text-sm text-muted">Ask anything. Bigger jobs run as tasks in the workspace they belong to, and come back here when they finish or need you.</p>
     <div className="flex flex-wrap justify-center gap-2">
+      {/* The idle view stays until the send succeeds: it shows the error when the send fails. */}
       {SUGGESTIONS.map(({ label, prompt }) => <Button key={label} size="sm" variant="secondary" disabled={pending} onClick={() => {
-        void reply(prompt);
-        onPick?.();
+        void reply(prompt).then((sent) => { if (sent) onPick?.(); });
       }}>{label}</Button>)}
     </div>
     {error && <p role="alert" className="text-xs text-danger-500">{error}</p>}

@@ -15,16 +15,19 @@ export function useSendAsPerson(sessionId: string, threadId: string | undefined,
   const addUserMessage = useStreamStore(s => s.addUserMessage);
   const setMessageQueueItemId = useStreamStore(s => s.setMessageQueueItemId);
   const discardOptimisticMessage = useStreamStore(s => s.discardOptimisticMessage);
-  async function reply(text: string) {
-    if (!threadId || send.isPending) return;
+  /** Resolves true once the message is queued, false when nothing was sent. */
+  async function reply(text: string): Promise<boolean> {
+    if (!threadId || send.isPending) return false;
     setError(undefined);
     const localId = addUserMessage(sessionId, text, threadId);
     try {
       const res = await send.mutateAsync({ text, threadId });
       if (res.messageId) setMessageQueueItemId(sessionId, localId, res.messageId);
+      return true;
     } catch (err) {
       discardOptimisticMessage(sessionId, localId);
       setError(errorText(err, fallback));
+      return false;
     }
   }
   return { reply, pending: send.isPending, error };
