@@ -11,8 +11,12 @@ export interface PullRequest {
   draft: boolean;
   title: string;
   body: string | null;
-  /** The author's relation to the base repository, such as `MEMBER`, `COLLABORATOR` or `NONE`. */
+  /**
+   * The author's relation to the base repository, such as `MEMBER`, `COLLABORATOR` or `NONE`.
+   * GitHub computes it for the caller: an app token sees a private org member as `CONTRIBUTOR`.
+   */
   author_association?: string;
+  user: { login: string } | null;
   head: { sha: string; ref: string; repo: { full_name: string } | null };
   base: { sha: string; ref: string; repo: { full_name: string } };
 }
@@ -76,6 +80,8 @@ export class GitHubError extends Error {
 
 export interface GitHubClient {
   pull(): Promise<PullRequest>;
+  /** The user's role on the repository (`admin`, `maintain`, `write`, `triage` or `read`), or undefined when GitHub gives none. */
+  permission(user: string): Promise<string | undefined>;
   compare(base: string, head: string): Promise<Comparison | null>;
   /** The unified diff from the merge-base of `base` and `head` to `head`, or null when GitHub will not render it. */
   compareDiff(base: string, head: string): Promise<string | null>;
@@ -170,6 +176,14 @@ export function githubClient(opts: { token: string; owner: string; repo: string;
 
   return {
     pull: () => json<PullRequest>("GET", pullPath, "read pull request"),
+    async permission(user) {
+      const res = await call("GET", `${repoPath}/collaborators/${encodeURIComponent(user)}/permission`);
+      // Not a collaborator, or a token that may not read it: no role.
+      if (res.status === 404 || res.status === 403) return undefined;
+      if (!res.ok) throw await failed(res, `read the repository permission of ${user}`);
+      const body = (await res.json()) as { role_name?: string; permission?: string };
+      return body.role_name ?? body.permission;
+    },
     async compare(base, head) {
       const res = await call("GET", `${repoPath}/compare/${base}...${head}?per_page=${PAGE}`);
       // A commit that a force-push dropped is gone: there is nothing to compare.
