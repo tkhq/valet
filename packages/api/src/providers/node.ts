@@ -762,6 +762,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     publicUrl: publicUrlFromEnv(process.env),
     resolveOrgId: () => resolveOrgId(db),
     onePassword,
+    secretStore,
   });
   const workflowEngineDeps = buildWorkflowEngineDeps({
     host: engineHost,

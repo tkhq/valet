@@ -1,4 +1,6 @@
 import { mergeAppearance, readAppearance } from "@valet/shared";
+import { scrubInboundSecrets } from "../services/secret-store/inbound-scrub.js";
+import type { SecretStoreService } from "../services/secret-store/service.js";
 import { HOME_THREAD_KEY } from "../home/context.js";
 import { slackEditSignal } from "./slack-edit.js";
 import { bindConversation, findConversationBinding, findPriorConversationThread, type ConversationScope } from "./conversation-bindings.js";
@@ -114,6 +116,9 @@ export interface ChannelHostDeps {
    * rows then pass through raw, byte-identical to before this task.
    */
   onePassword?: OnePasswordService;
+  /** Saves a key found in an inbound direct message as a secret and replaces
+   * it with the reference (`services/secret-store/inbound-scrub.ts`). */
+  secretStore?: SecretStoreService;
 }
 
 const DEDUP_CAP = 2048;
@@ -1878,6 +1883,15 @@ export class ChannelHost {
     let admitted = false;
     try {
       let text = event.text ?? "";
+      if (this.deps.secretStore?.enabled) {
+        text = (await scrubInboundSecrets({
+          store: this.deps.secretStore,
+          actor: { orgId, userId },
+          scope: { kind: "personal" },
+          text,
+          channel: "channel",
+        })).text;
+      }
       const attachments: PromptAttachment[] = [];
       for (const media of event.media ?? []) {
         const fetched = transport?.fetchMedia ? await transport.fetchMedia(media) : null;

@@ -1,4 +1,6 @@
 import { HOME_THREAD_KEY, HOME_THREAD_TITLE } from "../home/context.js";
+import { secretRequestAnswerRefusal, secretRequestOf } from "../engine/secret-tools.js";
+import { scrubInboundSecrets } from "../services/secret-store/inbound-scrub.js";
 import { readAppPageHint, type AppPageHint } from "@valet/shared";
 /**
  * Messages + threads routes — the agent loop entry points.
@@ -1677,6 +1679,19 @@ export async function sendPrompt(c: Context<AppEnv>, sessionId: string, threadId
     }
   }
 
+  // A key in the message text is saved as a secret and replaced with its
+  // reference before the message is stored or reaches the model.
+  if (!promoteItemId && typeof body.text === "string" && c.var.providers.secretStore.enabled) {
+    const scrubbed = await scrubInboundSecrets({
+      store: c.var.providers.secretStore,
+      actor: { orgId: row.orgId, userId: c.var.user.id },
+      scope: row.ownerType === "team" && row.ownerId ? { kind: "team", teamId: row.ownerId } : { kind: "personal" },
+      text: body.text,
+      channel: "web",
+    });
+    body.text = scrubbed.text;
+  }
+
   try {
     let replyTo: MessageReplyReference | undefined;
     if (body.replyToMessageId !== undefined) {
@@ -2390,6 +2405,14 @@ export async function resolveDecision(c: Context<AppEnv>, sessionId: string, thr
   // require_approval policy would let one agent approve another's actions.
   if (isAgentCaller(c.var.authVia) && gate.type !== "question") {
     return c.json({ error: "A person must approve this request. Open the thread in Valet to approve or deny it." }, 403);
+  }
+  // A secret request is answered by the card after it saved the value: the
+  // only answers are the reference it asked for, or a decline. A value typed
+  // into any other client must not land in the gate or the transcript.
+  const secretRequest = secretRequestOf(gate.context);
+  if (secretRequest) {
+    const refusal = secretRequestAnswerRefusal(secretRequest, { actionId: body.actionId, value: body.value });
+    if (refusal) return c.json({ error: refusal }, 400);
   }
   if (body.attachments?.length && gate.type !== "question") {
     return c.json({ error: "Images can only answer questions. Use the approval buttons for this request." }, 400);
