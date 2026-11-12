@@ -98,3 +98,18 @@ describe("valet-secrets run", () => {
     expect(run.status).toBe(0);
   });
 });
+
+describe("encoded copies of a value", () => {
+  it("replaces the value printed as base64, base64url, hex, and percent-encoded", () => {
+    const value = "sk-live-AB/CD+ef?12";
+    const forms = [
+      Buffer.from(value).toString("base64"),
+      Buffer.from(value).toString("base64url"),
+      Buffer.from(value).toString("hex"),
+      Buffer.from(value).toString("hex").toUpperCase(),
+      encodeURIComponent(value),
+    ];
+    const run = redacted(`printf '%s\\n' ${forms.map((f) => `'${f}'`).join(" ")}`, { KEY: value });
+    expect(run.stdout).toBe("[secret:KEY]\n".repeat(forms.length));
+  });
+});

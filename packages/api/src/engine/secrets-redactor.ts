@@ -9,8 +9,9 @@
  * leaves the sandbox.
  *
  * Limits, stated where the filter lives:
- * - It matches exact bytes only. An encoded copy of a value (base64, URL or
- *   JSON escaping) passes through.
+ * - It matches the exact bytes and the whole value encoded as base64,
+ *   base64url, hex, or percent-encoding. Any other encoding (JSON escaping,
+ *   a base64 of a longer string that contains the value, `od`) passes through.
  * - Values shorter than 8 bytes are not matched: a short value also occurs in
  *   ordinary output, and replacing it would corrupt that output.
  * - It catches accidents. A command written to leak a value can still leak it
@@ -29,6 +30,19 @@ const MIN_BYTES = 8;
 const raw = process.env.VALET_SECRETS_REDACT || "";
 delete process.env.VALET_SECRETS_REDACT;
 const secrets = [];
+const seen = new Set();
+// The value and the encodings a command most often prints it in: base64
+// (padded and not), base64url, hex in either case, and percent-encoding.
+// Only an encoding of the whole value matches, from its first byte.
+function encodedForms(bytes) {
+  const text = bytes.toString("utf8");
+  const b64 = bytes.toString("base64");
+  const hex = bytes.toString("hex");
+  const forms = [bytes, Buffer.from(b64), Buffer.from(b64.replace(/=+$/, "")), Buffer.from(bytes.toString("base64url")), Buffer.from(hex), Buffer.from(hex.toUpperCase())];
+  const pct = encodeURIComponent(text);
+  if (pct !== text) forms.push(Buffer.from(pct));
+  return forms;
+}
 for (const line of raw.split("\n")) {
   const space = line.indexOf(" ");
   if (space < 1) continue;
@@ -39,7 +53,13 @@ for (const line of raw.split("\n")) {
   // A value saved from a file often ends in a newline that the command does
   // not print. Match the value with and without it.
   for (const bytes of end < value.length ? [value, value.subarray(0, end)] : [value]) {
-    if (bytes.length >= MIN_BYTES) secrets.push({ bytes, mark });
+    if (bytes.length < MIN_BYTES) continue;
+    for (const form of encodedForms(bytes)) {
+      const key = form.toString("latin1");
+      if (seen.has(key)) continue;
+      seen.add(key);
+      secrets.push({ bytes: form, mark });
+    }
   }
 }
 // Longest first, so a value that contains another value wins.
