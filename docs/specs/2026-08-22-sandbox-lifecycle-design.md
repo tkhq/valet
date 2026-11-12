@@ -215,6 +215,32 @@ defects. Both are fixed; decision 6 (no age-based kill) stands.
    the git operation once. See
    `docs/specs/2026-09-03-sandbox-workspace-fit-design.md`.
 
+## Update (2026-11-11): two retention sweeps stopped short
+
+A deployed cluster held suspended sandboxes that both retention sweeps
+should have destroyed. Two defects caused it.
+
+1. **The child retention sweep derives the sandbox id.** A child that was
+   not cached when it settled records no handle: the engine session has no
+   `sandboxId` and `child_watches.parked_sandbox_id` is null. The sweep
+   stamped those rows reclaimed and destroyed nothing. It now falls back to
+   `deriveSandboxId` on the child's workspace, the same rule as the
+   hibernation reaper. A name that matches nothing is a tolerated 404.
+2. **The hibernation reaper uses a sandbox clock.** The reaper judged
+   idleness by `agent_sessions.updated_at` and the engine activity clock. A
+   prompt that never wakes the sandbox moves both: `markSessionUsed` flips
+   the row to `active`, and the idle sweep finds the sandbox still
+   suspended and stamps the row `hibernated` again with a new `updated_at`.
+   Sandboxes suspended for months stayed out of reach while their owners
+   chatted. The new column `agent_sessions.sandbox_suspended_at` records
+   when the sandbox was suspended. `writeHibernated` keeps an existing
+   value, `onWake` keeps it, and only `onSessionReady` clears it (on any
+   status). The reaper reads `COALESCE(sandbox_suspended_at, updated_at)`,
+   skips the engine activity check when the column is set, and skips a
+   session with an active lease, the same rule as the idle sweep. Rows
+   hibernated before the column existed keep the old rules until their
+   next hibernate write.
+
 ## Deviations & notes
 
 - The TTL destroy rule (recommendation D.3 in the incident doc) was

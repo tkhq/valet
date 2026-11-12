@@ -2042,7 +2042,14 @@ export class ChildWatcher {
         if (retentionMs <= 0 && await this.recentHumanActivity(row.childSessionId, row.queueItemId, now)) continue;
         if (await this.holdsBackgroundWork(row.childSessionId, now)) continue;
         const live = this.deps.engineHost.liveSession(row.childSessionId);
-        const sandboxId = (await this.deps.engineStore.getSession(row.childSessionId))?.sandboxId ?? row.parkedSandboxId;
+        const durable = await this.deps.engineStore.getSession(row.childSessionId);
+        // Recorded handles first. A child that was not cached when it
+        // settled never recorded one, so fall back to the id a
+        // deterministic provider derives from the child's workspace (the
+        // hibernation reaper's rule). A name that matches nothing is a
+        // tolerated 404.
+        const sandboxId = durable?.sandboxId ?? row.parkedSandboxId
+          ?? this.deps.engineHost.deriveSandboxId(durable?.workspace ?? join(childWorkspaceRoot(this.deps.workspaceRoot), row.childSessionId));
         if (live) {
           // Race rule (mirrors `maybeSuspendIdleSession`): re-check
           // immediately before the destroy — a submission admitted since
@@ -2053,7 +2060,7 @@ export class ChildWatcher {
           if (await this.holdsBackgroundWork(row.childSessionId, now)) continue;
         }
         if (!live && !sandboxId) console.warn(
-          `ChildWatcher: retention reclaim for ${row.childSessionId} found no live session and no parked sandbox id; stamping reclaimed without a destroy`,
+          `ChildWatcher: retention reclaim for ${row.childSessionId} found no live session, no recorded sandbox id and no derivable one; stamping reclaimed without a destroy`,
         );
         await this.destroyChildSandbox(row.childSessionId, sandboxId, "child_retention", row, now);
         this.retentionBackoff.succeeded(row.childSessionId);

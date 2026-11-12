@@ -474,6 +474,12 @@ export const agentSessions = pgTable(
     // Stamped once the reaper has destroyed the hibernated sandbox, so the
     // row stops sweeping. Cleared by the next hibernate write.
     sandboxReclaimedAt: bigint("sandbox_reclaimed_at", { mode: "number" }),
+    // When the sandbox was suspended: the reaper's idle clock. A prompt that
+    // never wakes the sandbox flips the row to `active`, and the idle sweep
+    // then stamps it `hibernated` again; both keep this value. Cleared when
+    // the sandbox reaches `ready`. Null on rows hibernated before the column
+    // existed (the reaper falls back to `updated_at`).
+    sandboxSuspendedAt: bigint("sandbox_suspended_at", { mode: "number" }),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
     // Epoch ms of the most recent user or agent activity in this session.
