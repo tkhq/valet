@@ -65,6 +65,10 @@ the plugin keeps them apart.
   finds only background notes, so a search that returns other notes first
   cannot hide a rule. One drop-log line counts the rule notes that do not
   match.
+- **Matched rules fill the pack first.** Matched rule notes take budget
+  before conventions and code sections, with no section share. The pack cuts
+  a matched rule only when the rules alone pass the budget, and it logs the
+  cut.
 - **The PR head is data.** The author controls the PR head. The plugin scans it
   only for code facts: definitions, callers and tests. The scan runs in the
   reviewer child's sandbox before its first turn (`spawnChild` `prepare`), on

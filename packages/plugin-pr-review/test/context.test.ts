@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ToolContext } from "@valet/engine";
 import {
+  buildContextPack,
   consolidateFindings,
   definitionScore,
   diffSymbols,
@@ -20,7 +21,9 @@ import {
   parseNote,
   rankPatch,
   scanRepo,
+  type DomainNote,
   type Finding,
+  type Hit,
   type PackMemory,
 } from "../src/index.js";
 import { matchesGlob } from "../src/context/glob.js";
@@ -313,6 +316,48 @@ describe("gatherContext", () => {
     expect(pack.text.length).toBeLessThan(1_500);
     expect(pack.manifest.dropped.some((d) => d.reason.startsWith("budget ("))).toBe(true);
     expect(pack.text).toContain("### Left out of this pack");
+  });
+});
+
+describe("buildContextPack", () => {
+  const filler = (n: number, width: number): string[] => Array.from({ length: n }, (_, i) => `  const v${i} = ${"x".repeat(width)};`);
+  const note = (name: string, chars: number): { note: DomainNote; why: string } => ({
+    note: { name, title: `Rule ${name}`, paths: ["src/**"], terms: [], body: "r".repeat(chars), origin: "memory", path: `lib/code-review/notes/${name}.md` },
+    why: "path src/a.ts",
+  });
+  /** A code-heavy change: twelve used definitions and six changed symbols with callers, each about 1,000 chars. */
+  const codeHeavy = (notes: { note: DomainNote; why: string }[], budgetChars: number) => {
+    const used = Array.from({ length: 12 }, (_, i) => `helper${i}`);
+    const changed = Array.from({ length: 6 }, (_, i) => `changed${i}`);
+    const hits: Hit[] = [
+      ...used.map((word, i): Hit => ({ word, path: `lib/h${i}.ts`, line: 1, text: "", def: true, context: [`export function ${word}() {`, ...filler(20, 40)], contextStart: 1 })),
+      ...changed.map((word, i): Hit => ({ word, path: `app/c${i}.ts`, line: 4, text: "", def: false, context: filler(24, 40), contextStart: 1 })),
+    ];
+    return buildContextPack({
+      scan: { paths: [], fileCount: 30, hits, counts: new Map(changed.map((w) => [w, 1])), skipped: { noise: 0 }, incomplete: [] },
+      lines: new Map(),
+      symbols: { changed: changed.map((name) => ({ name, path: "src/a.ts", change: "changed" as const })), used, paths: ["src/a.ts"], headPaths: ["src/a.ts"] },
+      conventions: [0, 1, 2].map((i) => ({ path: `dir${i}/AGENTS.md`, text: "c".repeat(900), why: `applies to dir${i}/` })),
+      changedConventions: [],
+      notes,
+      memory: [],
+      diffDropped: [],
+      budgetChars,
+    });
+  };
+
+  it("keeps matched rule notes when definitions and callers fill the budget", () => {
+    const pack = codeHeavy([note("a", 1500), note("b", 1500)], 10_000);
+    expect(pack.manifest.items.filter((i) => i.section === "notes").map((i) => i.ref)).toEqual(["lib/code-review/notes/a.md", "lib/code-review/notes/b.md"]);
+    // The pack was full: code sections lost items to the budget.
+    expect(pack.manifest.dropped.some((d) => d.section === "definitions" && d.reason.startsWith("budget ("))).toBe(true);
+  });
+
+  it("cuts and logs a rule note only when the rules alone pass the budget", () => {
+    const pack = codeHeavy([note("a", 1500), note("b", 1500)], 2_500);
+    expect(pack.manifest.items.filter((i) => i.section === "notes").map((i) => i.ref)).toEqual(["lib/code-review/notes/a.md"]);
+    expect(pack.manifest.dropped).toEqual(expect.arrayContaining([{ section: "notes", ref: "lib/code-review/notes/b.md", reason: expect.stringMatching(/^budget \(/) }]));
+    expect(pack.text).toContain("- notes: lib/code-review/notes/b.md (budget (");
   });
 });
 
