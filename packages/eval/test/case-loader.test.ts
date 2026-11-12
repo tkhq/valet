@@ -202,6 +202,14 @@ describe("parseEvalCase", () => {
     ).toThrow(/drive: engine/);
   });
 
+  it("reads context_window_tokens and rejects a product-driven one", () => {
+    expect(parseEvalCase({ ...minimal, context_window_tokens: 30000 }, "t.yaml").context_window_tokens).toBe(30000);
+    expect(() => parseEvalCase({ ...minimal, context_window_tokens: 1.5 }, "t.yaml")).toThrow(/positive integer/);
+    expect(() =>
+      parseEvalCase({ ...minimal, session_type: "orchestrator", drive: "product", context_window_tokens: 30000 }, "t.yaml"),
+    ).toThrow(/drive: engine/);
+  });
+
   it("rejects max_turns without a numeric value", () => {
     expect(() =>
       parseEvalCase({ ...minimal, checks: [{ type: "max_turns", value: "three" }] }, "t.yaml"),

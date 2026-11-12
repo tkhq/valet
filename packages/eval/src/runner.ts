@@ -43,6 +43,9 @@ const DEFAULT_TIMEOUT_MS = 300_000;
 const EVAL_USER_ID = "eval-user";
 const EVAL_ORG_ID = "eval-org";
 
+/** Output reserve under a case window (`EvalCase.context_window_tokens`). */
+const CASE_WINDOW_RESERVE_TOKENS = 10_000;
+
 /** Submission outcomes the runner reports. Mirrors the engine's settlement outcomes. */
 export type CaseOutcome = "completed" | "failed" | "aborted" | "superseded" | "merged" | "timeout";
 
@@ -309,24 +312,32 @@ async function runCaseInner(evalCase: EvalCase, opts: RunnerOptions): Promise<Ca
       ? { workspace: await mkdtemp(join(tmpdir(), `valet-eval-${evalCase.id}-`)) }
       : {};
 
+  // A case window changes only what the engine budgets against.
+  const caseModel = evalCase.context_window_tokens !== undefined
+    ? { ...model, contextWindow: evalCase.context_window_tokens }
+    : model;
+  const compaction = {
+    ...(evalCase.context_budget_tokens !== undefined
+      // Idle delay 0: a case's turns arrive back to back, so it compacts at
+      // each turn end instead of waiting for an idle thread.
+      ? { contextBudgetTokens: evalCase.context_budget_tokens, idleCompactionMs: 0 }
+      : {}),
+    ...(evalCase.context_window_tokens !== undefined ? { reserveTokens: CASE_WINDOW_RESERVE_TOKENS } : {}),
+  };
   const session = await engine.createSession({
     userId: EVAL_USER_ID,
     orgId: EVAL_ORG_ID,
     workspace: "/workspace",
     purpose: isOrchestrator ? "orchestrator" : "interactive",
     sandbox: sandboxOpts,
-    model: opts.gateway !== undefined ? viaGateway(model, opts.gateway) : model,
+    model: opts.gateway !== undefined ? viaGateway(caseModel, opts.gateway) : caseModel,
     modelSpec,
     ...(opts.gateway !== undefined ? { resolveModel: gatewayModelResolver(opts.gateway) } : {}),
     owner,
     builtinTools: restricted.filter((t) => builtinNames.has(t.name)),
     tools: restricted.filter((t) => !builtinNames.has(t.name)),
     warmSandboxOnClaim: false,
-    ...(evalCase.context_budget_tokens !== undefined
-      // Idle delay 0: a case's turns arrive back to back, so it compacts at
-      // each turn end instead of waiting for an idle thread.
-      ? { compaction: { contextBudgetTokens: evalCase.context_budget_tokens, idleCompactionMs: 0 } }
-      : {}),
+    ...(Object.keys(compaction).length > 0 ? { compaction } : {}),
     ...(evalCase.temperature !== undefined || evalCase.reasoning !== undefined || opts.reasoning !== undefined
       ? {
           sampling: {
