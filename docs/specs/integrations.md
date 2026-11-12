@@ -190,6 +190,11 @@ The registry creates **fresh instances** each time — credentials must be set b
 - Same auto token refresh pattern as Gmail.
 - OAuth scopes: `calendar`, `calendar.events`.
 
+**Figma (`plugin-figma`):**
+- Native REST actions; Figma's hosted MCP server only admits allowlisted OAuth clients.
+- `render_frames` renders at most 4 nodes per call and returns the PNGs through `ActionResult.images` (1 MiB each); `list_frames` returns pages and their top-level frames.
+- OAuth: `FIGMA_CLIENT_ID` / `FIGMA_CLIENT_SECRET`, HTTP Basic client auth at `/v1/oauth/token` for both code exchange and refresh. Scopes: `file_content:read`, `current_user:read`.
+
 ## GitHub (Production Path)
 
 GitHub has a **dual integration architecture**. The generic framework class exists for data sync, but the production GitHub functionality is implemented through dedicated routes and services, using OAuth tokens stored in D1 (not the integration framework's DO).
