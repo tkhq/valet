@@ -20,7 +20,6 @@ import { TasksSummary } from "~/components/home/tasks-summary";
 import { ProcessingStatus } from "~/components/session/processing-status";
 import { ExpiryCountdown } from "~/components/session/expiry-countdown";
 import { ResolvedGateNotice } from "~/components/session/gate-outcome";
-import { QuickReplies } from "~/components/session/quick-replies";
 import { DecisionGateCard } from "~/components/session/decision-gate-card";
 import { PinnedPlan } from "~/components/session/thread-plan";
 import { MessageList } from "~/components/session/message-list";
@@ -150,11 +149,6 @@ export default function UiStressGallery() {
               <Frame label="Outputs (OutputCards)" className="p-4"><OutputCards outputs={stressHomeTasks.finished[1]?.outputs} /></Frame>
               <Frame label="Tasks summary (TasksSummary)" className="space-y-2 p-4">
                 <TasksSummary needsYou={2} working={4} finished={3} /><TasksSummary needsYou={0} working={0} finished={0} />
-              </Frame>
-              <Frame label="Quick replies (QuickReplies)" className="py-2">
-                <QuickReplies sessionId={stressHomeConversation.sessionId} threadId={HOME_THREAD_ID}
-                  messages={[{ id: "quick-reply-fixture", role: "assistant", content: "Design review at 3, then nothing. Want prep notes?",
-                    parts: [{ kind: "text", text: "Design review at 3, then nothing. Want prep notes?" }], createdAt: 1, completed: true, threadId: HOME_THREAD_ID, sessionId: stressHomeConversation.sessionId }]} />
               </Frame>
               <Frame label="Approval countdown and answered line" className="space-y-2 p-4">
                 <ExpiryCountdown expiresAt={Date.now() + 8 * 60_000} /><ExpiryCountdown expiresAt={Date.now() + 70_000} />
