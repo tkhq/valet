@@ -133,6 +133,19 @@ does not replace separate action-policy permission.
 persist in tool results and render on replay. A widget button submits its
 reply as a normal user message; it cannot bypass tool approval policy.
 
+`show_brief` shows a status summary as a card in any assistant thread,
+personal or team. It ships beside `show_widget`, not with the Home tools. The
+web draws it with the Home brief card: a headline, then one row per item with
+a state dot (amber needs you, blue in progress, green done, outline for
+information), a bold topic, and one line. A row with a `thread_id` opens that
+thread. A row with an `http` or `https` `href` opens the link in a new tab.
+The tool description tells the model to use it for status lists and
+summaries of work, and a Markdown table or `show_widget` for other rows.
+A channel shows no cards. On a channel turn, the tool result holds the brief
+as Markdown: the bold headline, then one list line per item with a colored
+circle, the bold topic, the text, and the link. The model posts that text
+with the reply.
+
 Thinking duration comes from measured provider events and saved timing
 metadata. Adjacent reasoning intervals combine into one timing line.
 Historical messages without timing metadata do not receive invented times.

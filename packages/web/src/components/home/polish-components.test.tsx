@@ -90,6 +90,26 @@ describe("BriefCard", () => {
     expect(screen.getByRole("link").getAttribute("href")).toBe("/threads/th-1");
     expect(screen.getByLabelText("Needs you")).toBeTruthy();
   });
+
+  it("opens an item's web link in a new tab, and drops a link with another scheme", () => {
+    const brief = briefFromArgs({ headline: "This week", items: [
+      { topic: "Docs", text: "Review the pull request.", state: "needs_you", href: "https://github.com/example/app/pull/42" },
+      { topic: "Sweep", text: "Running.", state: "working", thread_id: "th-2", href: "https://example.com" },
+      { topic: "Bad", text: "Not a web link.", state: "done", href: "javascript:alert(1)" },
+    ] });
+    expect(brief?.items).toEqual([
+      { topic: "Docs", text: "Review the pull request.", state: "needs_you", href: "https://github.com/example/app/pull/42" },
+      { topic: "Sweep", text: "Running.", state: "working", threadId: "th-2" },
+      { topic: "Bad", text: "Not a web link.", state: "done" },
+    ]);
+    render(<BriefCard headline={brief!.headline} items={brief!.items} />);
+    const links = screen.getAllByRole("link");
+    expect(links.map((link) => [link.getAttribute("href"), link.getAttribute("target")])).toEqual([
+      ["https://github.com/example/app/pull/42", "_blank"], ["/threads/th-2", null],
+    ]);
+    expect(screen.getByLabelText("In progress").className).toContain("bg-blue-500");
+    expect(screen.getByLabelText("Done").className).toContain("bg-success-500");
+  });
 });
 
 describe("TasksSummary and OutputCards", () => {

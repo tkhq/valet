@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { WIDGET_TOOL_DESCRIPTION, WIDGET_TOOL_NAME, widgetSpecProblems } from "./catalog.js";
+import { Value } from "typebox/value";
+import { buildHomeTools } from "../home/tools.js";
 import { buildWidgetTools } from "./tools.js";
 
 const transactions = {
@@ -100,5 +102,56 @@ describe("show_widget", () => {
     const result = await tool!.execute({ spec: { root: "a", elements: { a: { type: "Gauge", props: {}, children: [] } } } } as never, {} as never);
     expect(result.ok).toBe(false);
     expect(result.text).toContain("call show_widget again");
+  });
+});
+
+describe("show_brief", () => {
+  const brief = buildWidgetTools().find((tool) => tool.name === "show_brief");
+  const args = {
+    headline: "Morning. 1 in progress, 2 need you.",
+    items: [
+      { topic: "10 AM overlap", text: "Sales kickoff overlaps the walkthrough.", state: "needs_you" },
+      { topic: "Composer hint", text: "Show the hint only while typing?", state: "needs_you", href: "https://github.com/example/app/pull/12" },
+      { topic: "Sweep", text: "The action-item sweep is running.", state: "working", thread_id: "th-1" },
+      { topic: "Notes", text: "Posted.", state: "done" },
+    ],
+  };
+
+  it("ships beside show_widget, so every assistant thread can show a brief", () => {
+    expect(brief).toBeDefined();
+    // A personal assistant also loads the Home tools; two tools with one name would clash.
+    expect(buildHomeTools(() => { throw new Error("unused"); }).map((tool) => tool.name)).not.toContain("show_brief");
+    expect(brief!.description).toContain("what needs them, or for the status of several pieces of work");
+    expect(brief!.description).toContain("Use a Markdown table or show_widget for other rows of data");
+  });
+
+  it("accepts web links and refuses another scheme", () => {
+    expect(Value.Check(brief!.parameters, args)).toBe(true);
+    const script = { ...args, items: [{ topic: "x", text: "y", state: "fyi", href: "javascript:alert(1)" }] };
+    expect(Value.Check(brief!.parameters, script)).toBe(false);
+  });
+
+  it("confirms a web turn in one line", async () => {
+    const result = await brief!.execute(args as never, {} as never);
+    expect(result.text).toBe("Brief shown: Morning. 1 in progress, 2 need you. (4 items). The card is the answer: write nothing after it.");
+  });
+
+  it("gives a Slack turn the brief as Markdown to post", async () => {
+    const result = await brief!.execute(args as never, { origin: { channelType: "slack", threadKey: "slack:C1:1.2" } } as never);
+    expect(result.ok).toBeUndefined();
+    expect(result.text).toContain("call_tool slack.reply_to_origin");
+    expect(result.text.split(":\n\n")[1]).toBe([
+      "**Morning. 1 in progress, 2 need you.**",
+      "- 🟠 **10 AM overlap:** Sales kickoff overlaps the walkthrough.",
+      "- 🟠 **Composer hint:** Show the hint only while typing? [Open](https://github.com/example/app/pull/12)",
+      "- 🔵 **Sweep:** The action-item sweep is running.",
+      "- 🟢 **Notes:** Posted.",
+    ].join("\n"));
+  });
+
+  it("gives another channel the same text", async () => {
+    const result = await brief!.execute(args as never, { origin: { channelType: "email", threadKey: "email:1" } } as never);
+    expect(result.text).toContain("Answer there with this text instead");
+    expect(result.text).toContain("- 🔵 **Sweep:** The action-item sweep is running.");
   });
 });

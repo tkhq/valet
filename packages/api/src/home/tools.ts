@@ -104,25 +104,6 @@ export function buildHomeTools(getDeps: () => HomeDeps): ToolDef[] {
     },
   });
 
-  const showBrief = defineTool({
-    name: "show_brief",
-    ownerOnly: true,
-    concurrencySafe: true,
-    description:
-      "Show the person a brief as a card in this conversation: a one-line headline and up to six items, the ones that need them first. " +
-      "Use it when the person asks what is going on. The card is the whole answer: write nothing after it.",
-    parameters: Type.Object({
-      headline: Type.String({ minLength: 1, maxLength: 160, description: "One line, such as \"4 in progress, 2 need you.\"" }),
-      items: Type.Array(Type.Object({
-        topic: Type.String({ minLength: 1, maxLength: 40, description: "Two to four words, such as \"Series A\" or \"TKAI-512\"." }),
-        text: Type.String({ minLength: 1, maxLength: 240, description: "One line: what is ready, or what you need from them." }),
-        state: Type.Union([Type.Literal("needs_you"), Type.Literal("working"), Type.Literal("done"), Type.Literal("fyi")]),
-        thread_id: Type.Optional(Type.String({ description: "The task's thread id from list_tasks, when the item is about a task." })),
-      }), { maxItems: 6 }),
-    }),
-    execute: async (args) => ({ text: `Brief shown: ${args.headline} (${args.items.length} items).` }),
-  });
-
   const readTask = defineTool({
     name: "read_task",
     ownerOnly: true,
@@ -163,5 +144,5 @@ export function buildHomeTools(getDeps: () => HomeDeps): ToolDef[] {
     },
   });
 
-  return [startTask, listTasks, messageTask, showBrief, readTask, markTaskDone];
+  return [startTask, listTasks, messageTask, readTask, markTaskDone];
 }
