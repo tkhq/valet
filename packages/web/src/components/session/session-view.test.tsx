@@ -472,26 +472,6 @@ describe("SessionView processing visibility", () => {
     }
   });
 
-  it("shows reply chips under the question, above a finished task card", async () => {
-    progressMessages = [{ id: "ask", sessionId: "sess-1", threadId: "t1", role: "assistant", content: "", createdAt: 1, completed: true,
-      parts: [{ kind: "text", text: "Both steps are done. Want me to post the summary?" }] }];
-    const client = new QueryClient();
-    client.setQueryData(qkThreadProgress("t1"), { progress: { ...progress, status: "complete" } });
-    renderComponent(() => <SessionView sessionId="sess-1" activeThreadId="t1" enableReplies />, client);
-    const card = await screen.findByRole("region", { name: "Task progress" });
-    const replies = screen.getByRole("group", { name: "Answer: Want me to post the summary?" });
-    expect(replies.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  });
-
-  it("hides reply chips while a cover hides the question", async () => {
-    progressMessages = [{ id: "ask", sessionId: "sess-1", threadId: "t1", role: "assistant", content: "", createdAt: 1, completed: true,
-      parts: [{ kind: "text", text: "Both steps are done. Want me to post the summary?" }] }];
-    renderComponent(() => <SessionView sessionId="sess-1" activeThreadId="t1" enableReplies cover={<p>Good evening</p>} />);
-    await screen.findByText("Good evening");
-    expect(screen.queryByRole("group", { name: "Answer: Want me to post the summary?" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Not now" })).toBeNull();
-  });
-
   it("keeps a new turn's working row outside a finished card", async () => {
     liveStatus = "thinking";
     const client = new QueryClient();

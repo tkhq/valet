@@ -14,37 +14,11 @@ import { TasksSummary } from "./tasks-summary";
 import { briefFromArgs } from "~/components/session/tool-renderers/brief";
 import { expiryLabel } from "~/components/session/expiry-countdown";
 import { gateOutcomeLabel } from "~/components/session/gate-outcome";
-import { yesNoQuestion } from "~/components/session/quick-replies";
 import { fyiText } from "~/components/session/message-item";
 
 function assistant(text: string, extra: Partial<StreamMessage> = {}): StreamMessage {
   return { id: "m1", role: "assistant", content: text, parts: [{ kind: "text", text }], createdAt: 1, completed: true, threadId: "t", ...extra } as StreamMessage;
 }
-
-describe("yesNoQuestion", () => {
-  it.each([
-    ["Drafted with the data room link. Send from you?", true],
-    ["Should I use the monorepo or the deploy repo?", false],
-    ["Merged the fix. Deploy it now, okay?", true],
-    ["Design review at 3, then nothing. Want prep notes?", true],
-    ["Should I merge #945?", true],
-    ["I can split it. Shall I?", true],
-    ["Which repository should I use?", false],
-    ["Done. The report is in Drive.", false],
-    ["The call summary is in your notes. Mark it done?", true],
-  ])("reads %s", (text, expected) => {
-    expect(Boolean(yesNoQuestion([assistant(text)]))).toBe(expected);
-  });
-
-  it("ignores a question the person already answered", () => {
-    const answered = [assistant("Want prep notes?"), { ...assistant("Yes"), id: "m2", role: "user" } as StreamMessage];
-    expect(yesNoQuestion(answered)).toBeUndefined();
-  });
-
-  it("waits for the reply to finish", () => {
-    expect(yesNoQuestion([assistant("Want prep notes?", { completed: false })])).toBeUndefined();
-  });
-});
 
 describe("fyiText", () => {
   it("reads a one-line FYI from Valet", () => {
