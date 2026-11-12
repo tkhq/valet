@@ -111,7 +111,9 @@ Compare the same case across models before drawing conclusions about citation re
 Compaction recall cases live in `evals/cases/compaction/`. Each one sets
 a small `context_budget_tokens`, so the thread compacts between turns.
 Each case also checks `min_compactions`, so a run that never compacts
-fails. Run them with
+fails. `compaction-midturn-task.yaml` sets `context_window_tokens`
+instead: the engine assumes that window for the model, so one long turn
+compacts before a model call. Run them with
 `make eval EVAL_ARGS="--cases evals/cases/compaction"`.
 
 `drive: product` cases can list action services in `connected:`. The

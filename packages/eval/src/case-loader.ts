@@ -485,6 +485,15 @@ export function parseEvalCase(raw: unknown, source: string): EvalCase {
       throw new CaseValidationError(source, "`context_budget_tokens` needs `drive: engine` (it sets the in-process session's compaction budget)");
     }
   }
+  const contextWindowTokens = optionalNumber(raw, "context_window_tokens", source);
+  if (contextWindowTokens !== undefined) {
+    if (!Number.isInteger(contextWindowTokens) || contextWindowTokens < 1) {
+      throw new CaseValidationError(source, "`context_window_tokens` must be a positive integer");
+    }
+    if (drive === "product") {
+      throw new CaseValidationError(source, "`context_window_tokens` needs `drive: engine` (it sets the in-process session's model window)");
+    }
+  }
   const allowedActions = optionalStringArray(raw, "allowed_actions", source);
   if (allowedActions !== undefined) {
     for (const id of allowedActions) {
@@ -571,6 +580,7 @@ export function parseEvalCase(raw: unknown, source: string): EvalCase {
   if (tools !== undefined) evalCase.tools = tools;
   if (sessionType !== undefined) evalCase.session_type = sessionType as EvalCase["session_type"];
   if (contextBudgetTokens !== undefined) evalCase.context_budget_tokens = contextBudgetTokens;
+  if (contextWindowTokens !== undefined) evalCase.context_window_tokens = contextWindowTokens;
   if (drive !== undefined) evalCase.drive = drive;
   if (allowedActions !== undefined) evalCase.allowed_actions = allowedActions;
   if (profile !== undefined) evalCase.profile = profile as EvalCase["profile"];
