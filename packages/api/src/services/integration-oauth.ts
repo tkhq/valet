@@ -293,10 +293,24 @@ export function authCodeEnvReady(oauth: AuthCodeDecl, env: Record<string, string
   return Boolean(env[oauth.clientIdEnv] && env[oauth.clientSecretEnv]);
 }
 
-async function tokenPostRaw(tokenUrl: string, form: Record<string, string>): Promise<unknown> {
+/** The form fields and headers that authenticate the client at a token
+ * endpoint, per the declaration's `tokenAuth`. */
+function clientAuth(
+  oauth: AuthCodeDecl,
+  env: Record<string, string | undefined>,
+): { form: Record<string, string>; headers: Record<string, string> } {
+  const { clientId, clientSecret } = resolveClientEnv(oauth, env);
+  if (oauth.tokenAuth === "client_secret_basic") {
+    const basic = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
+    return { form: {}, headers: { Authorization: `Basic ${basic}` } };
+  }
+  return { form: { client_id: clientId, client_secret: clientSecret }, headers: {} };
+}
+
+async function tokenPostRaw(tokenUrl: string, form: Record<string, string>, headers: Record<string, string> = {}): Promise<unknown> {
   const res = await fetch(tokenUrl, {
     method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json", ...headers },
     body: new URLSearchParams(form),
   });
   if (!res.ok) {
@@ -306,8 +320,8 @@ async function tokenPostRaw(tokenUrl: string, form: Record<string, string>): Pro
   return res.json();
 }
 
-async function tokenPost(tokenUrl: string, form: Record<string, string>): Promise<TokenResponse> {
-  const payload = await tokenPostRaw(tokenUrl, form);
+async function tokenPost(tokenUrl: string, form: Record<string, string>, headers: Record<string, string> = {}): Promise<TokenResponse> {
+  const payload = await tokenPostRaw(tokenUrl, form, headers);
   if (
     typeof payload !== "object" ||
     payload === null ||
@@ -324,14 +338,13 @@ export async function exchangeAuthorizationCodeRaw(params: {
   code: string;
   redirectUri: string;
 }): Promise<unknown> {
-  const { clientId, clientSecret } = resolveClientEnv(params.oauth, params.env);
+  const auth = clientAuth(params.oauth, params.env);
   return tokenPostRaw(params.oauth.tokenUrl, {
     grant_type: "authorization_code",
-    client_id: clientId,
-    client_secret: clientSecret,
+    ...auth.form,
     code: params.code,
     redirect_uri: params.redirectUri,
-  });
+  }, auth.headers);
 }
 
 export async function exchangeAuthorizationCode(params: {
@@ -340,14 +353,13 @@ export async function exchangeAuthorizationCode(params: {
   code: string;
   redirectUri: string;
 }): Promise<TokenResponse> {
-  const { clientId, clientSecret } = resolveClientEnv(params.oauth, params.env);
+  const auth = clientAuth(params.oauth, params.env);
   return tokenPost(params.oauth.tokenUrl, {
     grant_type: "authorization_code",
-    client_id: clientId,
-    client_secret: clientSecret,
+    ...auth.form,
     code: params.code,
     redirect_uri: params.redirectUri,
-  });
+  }, auth.headers);
 }
 
 export async function refreshAuthorizationCodeToken(params: {
@@ -355,11 +367,10 @@ export async function refreshAuthorizationCodeToken(params: {
   env: Record<string, string | undefined>;
   refreshToken: string;
 }): Promise<TokenResponse> {
-  const { clientId, clientSecret } = resolveClientEnv(params.oauth, params.env);
-  return tokenPost(params.oauth.tokenUrl, {
+  const auth = clientAuth(params.oauth, params.env);
+  return tokenPost(params.oauth.refreshUrl ?? params.oauth.tokenUrl, {
     grant_type: "refresh_token",
-    client_id: clientId,
-    client_secret: clientSecret,
+    ...auth.form,
     refresh_token: params.refreshToken,
-  });
+  }, auth.headers);
 }

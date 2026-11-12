@@ -92,10 +92,15 @@ export function startFakeOAuthServer(opts?: {
     return c.json({ client_id: `client-${registrations.length}` }, 201);
   });
 
-  app.post("/token", async (c) => {
+  app.post("/:endpoint{token|refresh}", async (c) => {
     const form = await c.req.parseBody();
     const entries: Record<string, string> = {};
     for (const [k, v] of Object.entries(form)) if (typeof v === "string") entries[k] = v;
+    // Recorded beside the form fields: which endpoint was hit (refresh is
+    // a separate URL for some providers) and any HTTP Basic client auth.
+    if (c.req.param("endpoint") === "refresh") entries._endpoint = "refresh";
+    const authorization = c.req.header("authorization");
+    if (authorization) entries._authorization = authorization;
     tokenRequests.push(entries);
     if (state.tokenFailure) {
       return c.json(state.tokenFailureBody ?? { error: "invalid_grant" }, state.tokenFailure as ContentfulStatusCode, state.tokenFailureHeaders);
