@@ -256,7 +256,7 @@ describe("company and team secrets through the broker", () => {
       const body = (await (await resolve(["secret://company/DATABASE_URL"], token)).json()) as Resp;
       expect(decode(body.values[0])).toBe("postgres://x");
     }
-    expect(fake.reads.every((r) => r.spaceId === "deploy" && r.name === "company/DATABASE_URL")).toBe(true);
+    expect(fake.reads.every((r) => r.spaceId === "deploy" && r.name === "company/local-org/DATABASE_URL")).toBe(true);
     expect(fake.spaces.get("deploy")![0]!.labels).toEqual({
       scope: "company",
       valet_company_org_id: "local-org",
@@ -312,6 +312,36 @@ describe("secret store service", () => {
     await svc.remove(as("user-a"), personal, "k");
     await svc.saveValue(as("user-a"), personal, "k", "new");
     expect(await svc.list(as("user-a"), personal)).toHaveLength(1);
+  });
+
+  it("keeps the old value when a replace fails to import, and reads the newest value after a replace", async () => {
+    const fake = await bootWithStore();
+    const svc = api!.providers.secretStore;
+    await svc.saveValue(as("user-a"), personal, "K", "first");
+    const token = await userSession("sess-r", "user-a");
+    const read = async () => decode(((await (await resolve(["secret://personal/K"], token)).json()) as Resp).values[0]!);
+    const finish = fake.provider.finishImport;
+    fake.provider.finishImport = async () => {
+      throw new Error("network down");
+    };
+    await expect(svc.finishSave(as("user-a"), personal, "K", seal("second"), { replace: true })).rejects.toMatchObject({ kind: "provider" });
+    expect(await read()).toBe("first");
+    fake.provider.finishImport = finish;
+    await new Promise((r) => setTimeout(r, 2));
+    await svc.finishSave(as("user-a"), personal, "K", seal("second"), { replace: true });
+    expect(await read()).toBe("second");
+    // One secret, one row, after the old version is gone.
+    expect((await svc.list(as("user-a"), personal)).map((r) => r.name)).toEqual(["K"]);
+    expect([...fake.spaces.values()].flat().map((s) => s.value)).toEqual(["second"]);
+  });
+
+  it("keeps two orgs' company secrets apart in the shared deployment space", async () => {
+    const fake = await bootWithStore();
+    const svc = api!.providers.secretStore;
+    await svc.saveValue(as("local-user"), company, "DB", "org-a-value");
+    expect(fake.spaces.get("deploy")!.map((s) => s.name)).toEqual(["company/local-org/DB"]);
+    // Another org's admin sees no company secret named DB and can save its own.
+    expect(await svc.list({ orgId: "other-org", userId: "x" }, company)).toEqual([]);
   });
 
   it("lets only org admins write company secrets and only members write team secrets", async () => {

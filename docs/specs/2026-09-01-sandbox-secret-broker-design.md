@@ -308,7 +308,7 @@ The broker also resolves `secret://` references in three scopes. They live in a 
 
 Valet and the provider split the work:
 
-- **Valet** (`services/secret-store/service.ts`) owns the reference grammar, name and size limits, the access rules above, and error text. It creates one personal space per user and provider (table `secret_store_spaces`). Company and team secrets live in the provider's deployment space under the names `company/NAME` and `team/TEAM_ID/NAME`.
+- **Valet** (`services/secret-store/service.ts`) owns the reference grammar, name and size limits, the access rules above, and error text. It creates one personal space per user and provider (table `secret_store_spaces`). Company and team secrets live in the provider's deployment space under the names `company/ORG_ID/NAME` and `team/TEAM_ID/NAME`; the org id keeps the orgs of one deployment apart.
 - **The provider** (`SecretStoreProvider` in `services/secret-store/provider.ts`) stores and encrypts values, and applies the checks it can. A provider registers in `services/secret-store/config.ts`.
 
 Rules that apply to every provider:
@@ -318,7 +318,7 @@ Rules that apply to every provider:
 - No route returns a value. A provider error reaches the user as a fixed message. Only a `SecretStoreError` from the provider passes through with its own text.
 - One failed read fails the request with 502. A name with no secret is reported in `unresolved`.
 - Saves are sealed in the browser. `POST /api/secrets/import/begin` returns the provider's envelope, the web sealer for its `kind` encrypts the value (`web/src/lib/secret-seal/`), and `import/finish` receives only the sealed value. No route accepts a plaintext value.
-- A replace deletes the old value and imports the new one, because providers keep names unique and cannot edit a value in place. A read in that short gap reports the name as missing.
+- A replace imports the new value as `<name>@r<time>`, then deletes the old versions, because providers keep names unique and cannot edit a value in place. A failed import keeps the old value. Reads and lists use the newest version.
 - Changing the provider gives every user a new, empty personal space. Valet does not move secrets between providers.
 
 ### Getting a credential without the value entering a thread

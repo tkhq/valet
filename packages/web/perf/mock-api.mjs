@@ -134,6 +134,8 @@ const ROUTES = [
     ssoTeamGroups: [], allowPublicArtifacts: false, plugins: [], callerRole: "admin",
   })],
   ["GET", /^\/api\/teams$/, () => json({ teams: TEAMS.map(team) })],
+  // The composer asks whether a secret store is set up. The perf deployment has none.
+  ["GET", /^\/api\/secrets$/, () => json({ enabled: false, provider: null, canWrite: false, secrets: [] })],
   // A team's settings page, which the Integrations flow opens first.
   ["GET", /^\/api\/teams\/[^/]+\/members$/, () => json({ members: [{ userId: USER_ID, role: "admin" }] })],
   ["GET", /^\/api\/teams\/[^/]+\/deletion-requests$/, () => json({ requests: [], nextCursor: null })],

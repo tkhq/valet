@@ -73,13 +73,35 @@ export function parseSecretReference(reference: string): { scope: SecretScope; n
   return null;
 }
 
-/** The path inside a space, which is also the reference after `secret://`. */
-function scopePrefix(scope: SecretScope): string {
+/** The reference path after `secret://`. */
+function referencePrefix(scope: SecretScope): string {
   return scope.kind === "team" ? `team/${scope.teamId}/` : `${scope.kind}/`;
 }
 
+/** The name prefix inside a space. Company secrets carry the org id, because
+ * every org of a deployment shares the deployment space; team ids are
+ * already unique across orgs. */
+function scopePrefix(scope: SecretScope, orgId: string): string {
+  return scope.kind === "company" ? `company/${orgId}/` : referencePrefix(scope);
+}
+
+/** A replace imports the new value as `<name>@r<time>` before it deletes the
+ * old one, so a failed import keeps the old value. `@` is not allowed in a
+ * name, so a version never collides with another secret. */
+const VERSION_SEPARATOR = "@r";
+
+function baseName(stored: string): string {
+  const at = stored.indexOf(VERSION_SEPARATOR);
+  return at === -1 ? stored : stored.slice(0, at);
+}
+
+/** The stored names for one secret, newest first. */
+function versionsOf(metas: SecretMeta[], fullName: string): SecretMeta[] {
+  return metas.filter((m) => baseName(m.name) === fullName).sort((a, b) => b.createdAt - a.createdAt);
+}
+
 export function secretReference(scope: SecretScope, name: string): string {
-  return `${SECRET_REFERENCE_PREFIX}${scopePrefix(scope)}${name}`;
+  return `${SECRET_REFERENCE_PREFIX}${referencePrefix(scope)}${name}`;
 }
 
 /** The user who lists, saves, or deletes. Comes from the signed-in session. */
@@ -276,18 +298,30 @@ export function createSecretStoreService(deps: {
 
   /** Validate, authorize, and refuse a name already in use. A value never
    * changes in place: the check turns a duplicate into an answer that says
-   * what to do. */
-  async function prepareSave(actor: SecretActor, scope: SecretScope, name: string, replace = false): Promise<{ spaceId: string; exists: boolean }> {
+   * what to do. Returns the stored names of the secret, newest first. */
+  async function prepareSave(
+    actor: SecretActor,
+    scope: SecretScope,
+    name: string,
+    replace = false,
+  ): Promise<{ spaceId: string; fullName: string; versions: SecretMeta[] }> {
     assertName(name);
     await assertMayWrite(actor, scope);
     const spaceId = (await spaceFor(actor, scope, true))!;
-    const fullName = `${scopePrefix(scope)}${name}`;
-    const existing = await guarded("check the name", () => provider.list(spaceId, fullName));
-    const exists = existing.some((s) => s.name === fullName);
-    if (exists && !replace) {
+    const fullName = `${scopePrefix(scope, actor.orgId)}${name}`;
+    const versions = versionsOf(await guarded("check the name", () => provider.list(spaceId, fullName)), fullName);
+    if (versions.length > 0 && !replace) {
       throw new SecretStoreError(`A secret named ${name} already exists. Choose Replace to change its value.`, "exists");
     }
-    return { spaceId, exists };
+    return { spaceId, fullName, versions };
+  }
+
+  /** Delete each stored version. One failed delete leaves a stale version
+   * that reads ignore, since they pick the newest. */
+  async function removeVersions(spaceId: string, versions: SecretMeta[]): Promise<void> {
+    for (const version of versions) {
+      await guarded("remove the old value", () => provider.remove(spaceId, version.name));
+    }
   }
 
   async function mayRead(ctx: SecretReadContext, scope: SecretScope): Promise<boolean> {
@@ -306,9 +340,16 @@ export function createSecretStoreService(deps: {
       if (scope.kind === "team") await assertTeam(actor, scope.teamId);
       const spaceId = await spaceFor(actor, scope, false);
       if (!spaceId) return [];
-      const prefix = scopePrefix(scope);
+      const prefix = scopePrefix(scope, actor.orgId);
       const metas = await guarded("list secrets", () => provider.list(spaceId, prefix));
-      return metas.map((m) => row(scope, m.name.slice(prefix.length), m.createdAt));
+      // One row per secret: the newest version of a replaced value.
+      const newest = new Map<string, SecretMeta>();
+      for (const meta of metas) {
+        const base = baseName(meta.name);
+        const seen = newest.get(base);
+        if (!seen || meta.createdAt > seen.createdAt) newest.set(base, meta);
+      }
+      return [...newest.entries()].map(([base, meta]) => row(scope, base.slice(prefix.length), meta.createdAt));
     },
 
     async beginSave(actor, scope, name, opts) {
@@ -317,21 +358,19 @@ export function createSecretStoreService(deps: {
     },
 
     async finishSave(actor, scope, name, sealed, opts) {
-      const { spaceId, exists } = await prepareSave(actor, scope, name, opts?.replace);
-      // Delete, then import: a read in the gap reports the name as missing.
-      if (exists) await guarded("replace the secret", () => provider.remove(spaceId, `${scopePrefix(scope)}${name}`));
-      await guarded("save the secret", () =>
-        provider.finishImport(spaceId, { name: `${scopePrefix(scope)}${name}`, sealed, labels: labelsFor(actor, scope) }),
-      );
+      const { spaceId, fullName, versions } = await prepareSave(actor, scope, name, opts?.replace);
+      // Import first, under a new version name, then delete the old ones:
+      // a failed import leaves the old value in place.
+      const storedName = versions.length > 0 ? `${fullName}${VERSION_SEPARATOR}${now()}` : fullName;
+      await guarded("save the secret", () => provider.finishImport(spaceId, { name: storedName, sealed, labels: labelsFor(actor, scope) }));
+      await removeVersions(spaceId, versions);
       return row(scope, name, now());
     },
 
     async saveValue(actor, scope, name, value) {
       assertValue(value);
-      const { spaceId } = await prepareSave(actor, scope, name);
-      await guarded("save the secret", () =>
-        provider.put(spaceId, { name: `${scopePrefix(scope)}${name}`, value, labels: labelsFor(actor, scope) }),
-      );
+      const { spaceId, fullName } = await prepareSave(actor, scope, name);
+      await guarded("save the secret", () => provider.put(spaceId, { name: fullName, value, labels: labelsFor(actor, scope) }));
       return row(scope, name, now());
     },
 
@@ -341,8 +380,10 @@ export function createSecretStoreService(deps: {
       const notFound = new SecretStoreError(`No secret named ${name}.`, "not_found");
       const spaceId = await spaceFor(actor, scope, false);
       if (!spaceId) throw notFound;
-      const removed = await guarded("delete the secret", () => provider.remove(spaceId, `${scopePrefix(scope)}${name}`));
-      if (!removed) throw notFound;
+      const fullName = `${scopePrefix(scope, actor.orgId)}${name}`;
+      const versions = versionsOf(await guarded("find the secret", () => provider.list(spaceId, fullName)), fullName);
+      if (versions.length === 0) throw notFound;
+      await removeVersions(spaceId, versions);
     },
 
     async exists(actor, scope, name) {
@@ -357,8 +398,11 @@ export function createSecretStoreService(deps: {
       if (!(await mayRead(ctx, scope))) throw new SecretStoreError(readRefusal(scope), "forbidden");
       const spaceId = await spaceFor(ctx, scope, false);
       if (!spaceId) return null;
+      const fullName = `${scopePrefix(scope, ctx.orgId)}${name}`;
+      const newest = versionsOf(await guarded("find the secret", () => provider.list(spaceId, fullName)), fullName)[0];
+      if (!newest) return null;
       return guarded("read the secret", () =>
-        provider.read(spaceId, `${scopePrefix(scope)}${name}`, {
+        provider.read(spaceId, newest.name, {
           valet_company_org_id: ctx.orgId,
           valet_user_id: ctx.userId,
           valet_session_id: ctx.sessionId,
