@@ -47,6 +47,28 @@ export function turnkeyConfigFromEnv(env: NodeJS.ProcessEnv): TurnkeyConfig {
   };
 }
 
+/**
+ * What `createSubOrganization` returns. The SDK spreads the result it names
+ * over the raw activity, so the id is at the top level only when that name
+ * matches the result Turnkey sends. `@turnkey/sdk-server` 8.9.0 submits the
+ * V8 activity and names `createSubOrganizationResultV9`, so Turnkey's
+ * `createSubOrganizationResultV8` reaches only `activity.result`.
+ */
+export interface CreateSubOrganizationResponse {
+  subOrganizationId?: string;
+  activity?: { result?: Record<string, { subOrganizationId?: string } | undefined> };
+}
+
+/** The new sub-organization's id, wherever this SDK version puts it. */
+export function subOrganizationIdOf(response: CreateSubOrganizationResponse): string | undefined {
+  if (response.subOrganizationId) return response.subOrganizationId;
+  const result = response.activity?.result ?? {};
+  for (const [key, value] of Object.entries(result)) {
+    if (key.startsWith("createSubOrganizationResult") && value?.subOrganizationId) return value.subOrganizationId;
+  }
+  return undefined;
+}
+
 export interface TurnkeySecretMetadata {
   secretId: string;
   name?: string;
@@ -65,7 +87,7 @@ export interface TurnkeyApiClient {
       authenticators: never[];
       oauthProviders: never[];
     }[];
-  }): Promise<{ subOrganizationId?: string }>;
+  }): Promise<CreateSubOrganizationResponse>;
   importSecret(params: {
     organizationId: string;
     name: string;
@@ -166,8 +188,9 @@ export function createTurnkeySecretStore(
           },
         ],
       });
-      if (!result.subOrganizationId) throw new Error("Turnkey returned no sub-organization id");
-      return result.subOrganizationId;
+      const subOrganizationId = subOrganizationIdOf(result);
+      if (!subOrganizationId) throw new Error("Turnkey returned no sub-organization id");
+      return subOrganizationId;
     },
 
     async list(spaceId) {

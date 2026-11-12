@@ -76,6 +76,26 @@ describe("Turnkey secret store", () => {
     });
   });
 
+  it("reads the sub-organization id from the activity when the SDK names another result version", async () => {
+    // @turnkey/sdk-server 8.9.0 submits the V8 activity and reads ResultV9,
+    // so its response carries the id only inside the activity.
+    const fake = fakeClient();
+    fake.client.createSubOrganization = async () => ({
+      activity: { result: { createSubOrganizationResultV8: { subOrganizationId: "sub-v8" } } },
+    });
+    const store = createTurnkeySecretStore(CONFIG, { client: fake.client });
+    expect(await store.createSpace({ orgId: "o", ownerType: "user", ownerId: "u1" })).toBe("sub-v8");
+  });
+
+  it("fails when Turnkey returns no sub-organization id", async () => {
+    const fake = fakeClient();
+    fake.client.createSubOrganization = async () => ({ activity: { result: {} } });
+    const store = createTurnkeySecretStore(CONFIG, { client: fake.client });
+    await expect(store.createSpace({ orgId: "o", ownerType: "user", ownerId: "u1" })).rejects.toThrow(
+      "Turnkey returned no sub-organization id",
+    );
+  });
+
   it("sends labels as static properties and the read context as request context", async () => {
     const fake = fakeClient();
     const store = createTurnkeySecretStore(CONFIG, { client: fake.client });
