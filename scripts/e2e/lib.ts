@@ -181,6 +181,7 @@ export const INTEGRATION_LIST_FILES = { core: INTEGRATION_CORE_FILES, agent: INT
 export const TESTED_PLUGINS = [
   "@valet/plugin-browser",
   "@valet/plugin-github",
+  "@valet/plugin-figma",
   "@valet/plugin-gmail",
   "@valet/plugin-google-calendar",
   "@valet/plugin-google-workspace",

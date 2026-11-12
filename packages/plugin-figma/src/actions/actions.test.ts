@@ -1,11 +1,55 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { ActionContext } from '@valet/sdk';
-import { figmaActions, parseFigmaFile, normalizeNodeId } from './actions.js';
+import type {
+  Credential,
+  CredentialProvider,
+  DecisionGateRequest,
+  DecisionResolution,
+  MessageQuery,
+  PluginActionResult,
+  Sandbox,
+  SessionEntry,
+  ToolContext,
+} from '@valet/engine';
+import { figmaPlugin, parseFigmaFile, normalizeNodeId } from './actions.js';
 
 const fetchMock = vi.fn<typeof fetch>();
 
-function ctx(): ActionContext {
-  return { credentials: { access_token: 'figma-token' }, userId: 'user-1' };
+type FakeSandbox = Partial<Sandbox> & { id: string };
+
+function makeCredentials(token: string | null): CredentialProvider {
+  return {
+    get: async (): Promise<Credential | null> => (token === null ? null : { accessToken: token }),
+    request: async (): Promise<Credential> => {
+      throw new Error('not implemented in test stub');
+    },
+  };
+}
+
+function ctx(token: string | null = 'figma-token') {
+  const sandbox: FakeSandbox = { id: 'sb-1' };
+  const base: ToolContext = {
+    userId: 'u1',
+    orgId: 'o1',
+    sessionId: 's1',
+    threadId: 't1',
+    credentials: makeCredentials(token),
+    sandbox: sandbox as Sandbox,
+    requestDecision: async (_gate: DecisionGateRequest): Promise<DecisionResolution> => {
+      throw new Error('not implemented in test stub');
+    },
+    signal: new AbortController().signal,
+    threadRead: async (_key: string, _opts?: MessageQuery): Promise<SessionEntry[]> => [],
+    listThreads: async () => [],
+    setModel: async ({ model }: { model: string }) => ({ fromModel: model, toModel: model }),
+  };
+  return { ...base, actionId: '', service: 'figma' };
+}
+
+/** Run one action the way the catalog does, after schema validation. */
+async function run(id: string, args: Record<string, unknown>, token: string | null = 'figma-token'): Promise<PluginActionResult> {
+  const found = figmaPlugin.actions.find((a) => a.id === id);
+  if (!found) throw new Error(`action not found: ${id}`);
+  return found.execute(args as never, ctx(token));
 }
 
 function json(body: unknown, init?: ResponseInit): Response {
@@ -69,16 +113,12 @@ describe('parseFigmaFile', () => {
 });
 
 describe('figma.render_frames', () => {
-  it('renders the URL node and returns the PNG in images, not data', async () => {
+  it('renders the URL node and returns the PNG as an attachment, not in data', async () => {
     fetchMock
       .mockResolvedValueOnce(json({ err: null, images: { '1:2': 'https://cdn.example/1.png' } }))
       .mockResolvedValueOnce(png(10));
 
-    const result = await figmaActions.execute(
-      'figma.render_frames',
-      { file: 'https://www.figma.com/design/AbC123/File?node-id=1-2', scale: 2 },
-      ctx(),
-    );
+    const result = await run('figma.render_frames', { file: 'https://www.figma.com/design/AbC123/File?node-id=1-2', scale: 2 });
 
     expect(result.success).toBe(true);
     const api = new URL(requestUrl(0));
@@ -91,11 +131,10 @@ describe('figma.render_frames', () => {
     expect(requestUrl(1)).toBe('https://cdn.example/1.png');
     expect(requestHeaders(1).get('Authorization')).toBeNull();
 
-    expect(result.images).toEqual([
-      { data: btoa(String.fromCharCode(...new Uint8Array(10).fill(7))), mimeType: 'image/png', description: expect.stringContaining('1:2') },
+    expect(result.attachments).toEqual([
+      { type: 'image', data: new Uint8Array(10).fill(7), mimeType: 'image/png', name: 'figma-AbC123-1-2.png' },
     ]);
     expect(result.data).toEqual({ file_key: 'AbC123', scale: 2, rendered: [{ node_id: '1:2', bytes: 10 }], failed: [] });
-    expect(JSON.stringify(result.data)).not.toContain(result.images?.[0].data);
   });
 
   it('prefers node_ids over the URL node and normalizes them', async () => {
@@ -104,37 +143,29 @@ describe('figma.render_frames', () => {
       .mockResolvedValueOnce(png(4))
       .mockResolvedValueOnce(png(4));
 
-    const result = await figmaActions.execute(
-      'figma.render_frames',
-      { file: 'https://www.figma.com/design/AbC123/File?node-id=1-2', node_ids: ['3-4', '5:6', '3:4'] },
-      ctx(),
-    );
+    const result = await run('figma.render_frames', { file: 'https://www.figma.com/design/AbC123/File?node-id=1-2', node_ids: ['3-4', '5:6', '3:4'] });
 
     expect(new URL(requestUrl(0)).searchParams.get('ids')).toBe('3:4,5:6');
     expect(new URL(requestUrl(0)).searchParams.get('scale')).toBe('1');
-    expect(result.images).toHaveLength(2);
+    expect(result.attachments).toHaveLength(2);
   });
 
   it('asks for list_frames when no node is given and never calls Figma', async () => {
-    const result = await figmaActions.execute('figma.render_frames', { file: 'AbC123' }, ctx());
+    const result = await run('figma.render_frames', { file: 'AbC123' });
     expect(result.success).toBe(false);
     expect(result.error).toContain('figma.list_frames');
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('rejects more than 4 nodes', async () => {
-    const result = await figmaActions.execute(
-      'figma.render_frames',
-      { file: 'AbC123', node_ids: ['1:1', '1:2', '1:3', '1:4', '1:5'] },
-      ctx(),
-    );
+    const result = await run('figma.render_frames', { file: 'AbC123', node_ids: ['1:1', '1:2', '1:3', '1:4', '1:5'] });
     expect(result.success).toBe(false);
     expect(result.error).toContain('At most 4');
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('rejects a scale outside 0.01–4', async () => {
-    const result = await figmaActions.execute('figma.render_frames', { file: 'AbC123', node_ids: ['1:2'], scale: 5 }, ctx());
+    const result = await run('figma.render_frames', { file: 'AbC123', node_ids: ['1:2'], scale: 5 });
     expect(result.success).toBe(false);
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -144,10 +175,10 @@ describe('figma.render_frames', () => {
       .mockResolvedValueOnce(json({ images: { '1:2': 'https://cdn.example/ok.png', '3:4': null } }))
       .mockResolvedValueOnce(png(8));
 
-    const result = await figmaActions.execute('figma.render_frames', { file: 'AbC123', node_ids: ['1:2', '3:4'] }, ctx());
+    const result = await run('figma.render_frames', { file: 'AbC123', node_ids: ['1:2', '3:4'] });
 
     expect(result.success).toBe(true);
-    expect(result.images).toHaveLength(1);
+    expect(result.attachments).toHaveLength(1);
     expect(result.data).toMatchObject({
       rendered: [{ node_id: '1:2', bytes: 8 }],
       failed: [{ node_id: '3:4', error: expect.stringContaining('could not render') }],
@@ -160,12 +191,12 @@ describe('figma.render_frames', () => {
       .mockResolvedValueOnce(json({ images: { '1:2': null, '3:4': 'https://cdn.example/x.png' } }))
       .mockResolvedValueOnce(new Response('gone', { status: 403 }));
 
-    const result = await figmaActions.execute('figma.render_frames', { file: 'AbC123', node_ids: ['1:2', '3:4'] }, ctx());
+    const result = await run('figma.render_frames', { file: 'AbC123', node_ids: ['1:2', '3:4'] });
 
     expect(result.success).toBe(false);
     expect(result.error).toContain('1:2: Figma could not render');
     expect(result.error).toContain('3:4: Image download failed: HTTP 403');
-    expect(result.images).toBeUndefined();
+    expect(result.attachments).toBeUndefined();
   });
 
   it('returns a lower-scale hint when a PNG is over 1 MiB', async () => {
@@ -173,7 +204,7 @@ describe('figma.render_frames', () => {
       .mockResolvedValueOnce(json({ images: { '1:2': 'https://cdn.example/big.png' } }))
       .mockResolvedValueOnce(png(4 * 1024 * 1024));
 
-    const result = await figmaActions.execute('figma.render_frames', { file: 'AbC123', node_ids: ['1:2'], scale: 2 }, ctx());
+    const result = await run('figma.render_frames', { file: 'AbC123', node_ids: ['1:2'], scale: 2 });
 
     expect(result.success).toBe(false);
     expect(result.error).toContain('over the 1 MiB limit');
@@ -185,7 +216,7 @@ describe('figma.render_frames', () => {
       .mockResolvedValueOnce(json({ images: { '1:2': 'https://cdn.example/big.png' } }))
       .mockResolvedValueOnce(new Response(new Uint8Array(1024 * 1024 + 1), { status: 200 }));
 
-    const result = await figmaActions.execute('figma.render_frames', { file: 'AbC123', node_ids: ['1:2'] }, ctx());
+    const result = await run('figma.render_frames', { file: 'AbC123', node_ids: ['1:2'] });
 
     expect(result.success).toBe(false);
     expect(result.error).toContain('over the 1 MiB limit');
@@ -193,7 +224,7 @@ describe('figma.render_frames', () => {
 
   it('surfaces Figma render errors in the response body', async () => {
     fetchMock.mockResolvedValueOnce(json({ err: 'Render timeout', images: {} }));
-    const result = await figmaActions.execute('figma.render_frames', { file: 'AbC123', node_ids: ['1:2'] }, ctx());
+    const result = await run('figma.render_frames', { file: 'AbC123', node_ids: ['1:2'] });
     expect(result).toEqual({ success: false, error: 'Figma render failed: Render timeout' });
   });
 
@@ -203,16 +234,18 @@ describe('figma.render_frames', () => {
     [429, { 'Retry-After': '60' }, 'Retry after 60 seconds'],
   ])('maps HTTP %i to an actionable error', async (status, headers, message) => {
     fetchMock.mockResolvedValueOnce(json({ status, err: 'Invalid token' }, { status, headers }));
-    const result = await figmaActions.execute('figma.render_frames', { file: 'AbC123', node_ids: ['1:2'] }, ctx());
+    const result = await run('figma.render_frames', { file: 'AbC123', node_ids: ['1:2'] });
     expect(result.success).toBe(false);
     expect(result.error).toContain(message);
     expect(result.error).toContain('Figma said: Invalid token');
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('requires an access token', async () => {
-    const result = await figmaActions.execute('figma.render_frames', { file: 'AbC123', node_ids: ['1:2'] }, { credentials: {}, userId: 'u' });
-    expect(result).toEqual({ success: false, error: 'Missing access_token' });
+  it('names the fix when no Figma token is connected', async () => {
+    const result = await run('figma.render_frames', { file: 'AbC123', node_ids: ['1:2'] }, null);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Integrations page');
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 
@@ -243,7 +276,7 @@ describe('figma.list_frames', () => {
   it('returns pages with top-level frames only', async () => {
     fetchMock.mockResolvedValueOnce(json(file));
 
-    const result = await figmaActions.execute('figma.list_frames', { file: 'https://www.figma.com/design/AbC123/x?node-id=1-1' }, ctx());
+    const result = await run('figma.list_frames', { file: 'https://www.figma.com/design/AbC123/x?node-id=1-1' });
 
     const url = new URL(requestUrl(0));
     expect(url.pathname).toBe('/v1/files/AbC123');
@@ -271,7 +304,7 @@ describe('figma.list_frames', () => {
 
   it('filters to one page', async () => {
     fetchMock.mockResolvedValueOnce(json(file));
-    const result = await figmaActions.execute('figma.list_frames', { file: 'AbC123', page_id: '0-2' }, ctx());
+    const result = await run('figma.list_frames', { file: 'AbC123', page_id: '0-2' });
     expect(result.data).toEqual({
       file_key: 'AbC123',
       name: 'Design System',
@@ -281,14 +314,14 @@ describe('figma.list_frames', () => {
 
   it('lists available pages when page_id is unknown', async () => {
     fetchMock.mockResolvedValueOnce(json(file));
-    const result = await figmaActions.execute('figma.list_frames', { file: 'AbC123', page_id: '7:7' }, ctx());
+    const result = await run('figma.list_frames', { file: 'AbC123', page_id: '7:7' });
     expect(result.success).toBe(false);
     expect(result.error).toContain('0:1 (Page 1), 0:2 (Archive)');
   });
 
   it('maps a 404', async () => {
     fetchMock.mockResolvedValueOnce(json({ status: 404, err: 'Not found' }, { status: 404 }));
-    const result = await figmaActions.execute('figma.list_frames', { file: 'AbC123' }, ctx());
+    const result = await run('figma.list_frames', { file: 'AbC123' });
     expect(result.success).toBe(false);
     expect(result.error).toContain('file or node not found');
   });

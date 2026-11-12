@@ -1,10 +1,17 @@
-import { z } from 'zod';
-import type { ActionDefinition, ActionSource, ActionContext, ActionResult } from '@valet/sdk';
+import { Type } from 'typebox';
+import type { Static, TSchema } from 'typebox';
+import type {
+  ActionPlugin,
+  PluginAction,
+  PluginActionContext,
+  PluginActionResult,
+  ToolAttachment,
+} from '@valet/engine';
 import { figmaGet, figmaErrorMessage } from './api.js';
 
 const MAX_NODES = 4;
 const MAX_IMAGE_BYTES = 1024 * 1024;
-// The runner gives up on a tool call after 30 s; leave headroom for the worker.
+// A tool call has a 30 s limit; leave room for the rest of the call.
 const REQUEST_BUDGET_MS = 20_000;
 
 const FILE_KEY_RE = /^[A-Za-z0-9]+$/;
@@ -27,7 +34,7 @@ export function parseFigmaFile(input: string): { fileKey: string; nodeId?: strin
   try {
     url = new URL(trimmed);
   } catch {
-    throw new Error(`Not a Figma URL or file key: "${trimmed}"`);
+    throw new Error(`Not a Figma URL or file key: "${trimmed}". Pass a figma.com/design/... link or a file key.`);
   }
   const parts = url.pathname.split('/').filter(Boolean);
   const isFigmaHost = url.hostname === 'figma.com' || url.hostname.endsWith('.figma.com');
@@ -42,88 +49,53 @@ export function parseFigmaFile(input: string): { fileKey: string; nodeId?: strin
   return nodeParam ? { fileKey, nodeId: normalizeNodeId(nodeParam) } : { fileKey };
 }
 
-function toBase64(bytes: Uint8Array): string {
-  let binary = '';
-  for (let i = 0; i < bytes.length; i += 0x8000) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-  }
-  return btoa(binary);
+// ─── Action builder ──────────────────────────────────────────────────────────
+
+/** Curried builder: the first call binds the schema, the second types `execute`. */
+function action<TParams extends TSchema>(parameters: TParams) {
+  return (rest: {
+    id: string;
+    name: string;
+    description: string;
+    riskLevel: PluginAction['riskLevel'];
+    label?: PluginAction<TParams>['label'];
+    execute: (args: Static<TParams>, ctx: PluginActionContext) => Promise<PluginActionResult>;
+  }): PluginAction<TParams> => ({ ...rest, parameters });
 }
 
-// ─── Action Definitions ──────────────────────────────────────────────────────
-
-const fileParam = z.string().describe('Figma file URL (figma.com/design/... or figma.com/file/...) or file key');
-
-const renderFramesParams = z.object({
-  file: fileParam,
-  node_ids: z.array(z.string()).optional().describe('Node ids to render, e.g. ["1:2", "3:4"]. Defaults to the node-id in the URL.'),
-  scale: z.number().min(0.01).max(4).optional().describe('Render scale, 0.01 to 4. Default 1.'),
+const fileParam = Type.String({
+  description: 'Figma file URL (figma.com/design/... or figma.com/file/...) or file key',
 });
 
-const listFramesParams = z.object({
-  file: fileParam,
-  page_id: z.string().optional().describe('Only list this page, e.g. "0:1"'),
-});
+/**
+ * Run `fn` with the caller's token under one time budget. A missing token,
+ * a bad URL, and the timeout all come back as errors the model can act on.
+ */
+async function withFigma(
+  ctx: PluginActionContext,
+  fn: (token: string, signal: AbortSignal) => Promise<PluginActionResult>,
+): Promise<PluginActionResult> {
+  const cred = await ctx.credentials.get();
+  const token = cred?.accessToken ?? '';
+  if (!token) {
+    return {
+      success: false,
+      error: 'Figma is not connected. Ask the user to connect Figma on the Integrations page.',
+    };
+  }
+  const budget = AbortSignal.timeout(REQUEST_BUDGET_MS);
+  const signal = ctx.signal ? AbortSignal.any([ctx.signal, budget]) : budget;
+  try {
+    return await fn(token, signal);
+  } catch (error) {
+    if (budget.aborted) {
+      return { success: false, error: `Figma did not respond within ${REQUEST_BUDGET_MS / 1000} s. Try fewer nodes or a lower scale.` };
+    }
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
 
-const renderFrames: ActionDefinition = {
-  id: 'figma.render_frames',
-  name: 'Render Frames',
-  description: `Render Figma nodes (frames, components, sections) to PNG images you can see. Pass a Figma URL that contains node-id, or a file plus node_ids from figma.list_frames. At most ${MAX_NODES} nodes per call, and each PNG must be under 1 MiB; lower scale for large frames.`,
-  riskLevel: 'low',
-  params: renderFramesParams,
-  outputSchema: {
-    type: 'object',
-    description: 'Metadata only; the PNGs are delivered to vision.',
-    properties: {
-      file_key: { type: 'string' },
-      scale: { type: 'number' },
-      rendered: {
-        type: 'array',
-        items: { type: 'object', properties: { node_id: { type: 'string' }, bytes: { type: 'number' } } },
-      },
-      failed: {
-        type: 'array',
-        items: { type: 'object', properties: { node_id: { type: 'string' }, error: { type: 'string' } } },
-      },
-    },
-  },
-};
-
-const listFrames: ActionDefinition = {
-  id: 'figma.list_frames',
-  name: 'List Frames',
-  description: 'List the pages of a Figma file and the top-level frames, components and sections on each page. Use this to find node ids for figma.render_frames when the URL has no node-id.',
-  riskLevel: 'low',
-  params: listFramesParams,
-  outputSchema: {
-    type: 'object',
-    properties: {
-      file_key: { type: 'string' },
-      name: { type: 'string' },
-      pages: {
-        type: 'array',
-        items: {
-          type: 'object',
-          properties: {
-            id: { type: 'string' },
-            name: { type: 'string' },
-            frames: {
-              type: 'array',
-              items: {
-                type: 'object',
-                properties: { id: { type: 'string' }, name: { type: 'string' }, type: { type: 'string' } },
-              },
-            },
-          },
-        },
-      },
-    },
-  },
-};
-
-const allActions: ActionDefinition[] = [renderFrames, listFrames];
-
-// ─── Handlers ────────────────────────────────────────────────────────────────
+// ─── render_frames ───────────────────────────────────────────────────────────
 
 type Download =
   | { ok: true; nodeId: string; bytes: Uint8Array }
@@ -160,57 +132,81 @@ async function downloadRender(
   return { ok: true, nodeId, bytes };
 }
 
-async function executeRenderFrames(params: unknown, token: string, signal: AbortSignal): Promise<ActionResult> {
-  const p = renderFramesParams.parse(params);
-  const { fileKey, nodeId } = parseFigmaFile(p.file);
-  const requested = p.node_ids?.length ? p.node_ids : nodeId ? [nodeId] : [];
-  const ids = [...new Set(requested.map(normalizeNodeId))];
+const renderFrames = action(
+  Type.Object({
+    file: fileParam,
+    node_ids: Type.Optional(
+      Type.Array(Type.String(), {
+        description: 'Node ids to render, e.g. ["1:2", "3:4"]. Defaults to the node-id in the URL.',
+      }),
+    ),
+    scale: Type.Optional(Type.Number({ minimum: 0.01, maximum: 4, description: 'Render scale, 0.01 to 4. Default 1.' })),
+  }),
+)({
+  id: 'figma.render_frames',
+  name: 'Render Frames',
+  description: `Render Figma nodes (frames, components, sections) to PNG images you can see. Pass a Figma URL that contains node-id, or a file plus node_ids from figma.list_frames. At most ${MAX_NODES} nodes per call, and each PNG must be under 1 MiB; lower the scale for large frames.`,
+  riskLevel: 'low',
+  label: (args) => `Rendered ${args.node_ids?.length ?? 1} Figma frame${(args.node_ids?.length ?? 1) === 1 ? '' : 's'}`,
+  execute: (args, ctx) =>
+    withFigma(ctx, async (token, signal) => {
+      const { fileKey, nodeId } = parseFigmaFile(args.file);
+      const requested = args.node_ids?.length ? args.node_ids : nodeId ? [nodeId] : [];
+      const ids = [...new Set(requested.map(normalizeNodeId))];
 
-  if (ids.length === 0) {
-    return { success: false, error: 'No node ids given. Call figma.list_frames to find frame ids, then pass a few as node_ids. Whole files are not rendered.' };
-  }
-  if (ids.length > MAX_NODES) {
-    return { success: false, error: `At most ${MAX_NODES} nodes per call (got ${ids.length}). Pick the most relevant frames or split into several calls.` };
-  }
-  const invalid = ids.filter((id) => !NODE_ID_RE.test(id));
-  if (invalid.length > 0) {
-    return { success: false, error: `Invalid node ids: ${invalid.join(', ')}. Expected ids like "1:2".` };
-  }
+      if (ids.length === 0) {
+        return { success: false, error: 'No node ids given. Call figma.list_frames to find frame ids, then pass a few as node_ids. Whole files are not rendered.' };
+      }
+      if (ids.length > MAX_NODES) {
+        return { success: false, error: `At most ${MAX_NODES} nodes per call (got ${ids.length}). Pick the most relevant frames or split them into several calls.` };
+      }
+      const invalid = ids.filter((id) => !NODE_ID_RE.test(id));
+      if (invalid.length > 0) {
+        return { success: false, error: `Invalid node ids: ${invalid.join(', ')}. Expected ids like "1:2".` };
+      }
 
-  const scale = p.scale ?? 1;
-  const query = new URLSearchParams({ ids: ids.join(','), format: 'png', scale: String(scale) });
-  const res = await figmaGet(`/images/${fileKey}?${query}`, token, signal);
-  if (!res.ok) return { success: false, error: await figmaErrorMessage(res) };
+      const scale = args.scale ?? 1;
+      if (!(scale >= 0.01 && scale <= 4)) {
+        return { success: false, error: `Scale ${scale} is out of range. Use a scale from 0.01 to 4.` };
+      }
+      const query = new URLSearchParams({ ids: ids.join(','), format: 'png', scale: String(scale) });
+      const res = await figmaGet(`/images/${fileKey}?${query}`, token, signal);
+      if (!res.ok) return { success: false, error: await figmaErrorMessage(res) };
 
-  const body = (await res.json()) as { err?: string | null; images?: Record<string, string | null> };
-  if (body.err) return { success: false, error: `Figma render failed: ${body.err}` };
-  const urls = body.images ?? {};
+      const body = (await res.json()) as { err?: string | null; images?: Record<string, string | null> };
+      if (body.err) return { success: false, error: `Figma render failed: ${body.err}` };
+      const urls = body.images ?? {};
 
-  const downloads = await Promise.all(ids.map((id) => downloadRender(id, urls[id], scale, signal)));
-  const rendered = downloads.filter((d): d is Extract<Download, { ok: true }> => d.ok);
-  const failed = downloads
-    .filter((d): d is Extract<Download, { ok: false }> => !d.ok)
-    .map((d) => ({ node_id: d.nodeId, error: d.error }));
+      const downloads = await Promise.all(ids.map((id) => downloadRender(id, urls[id], scale, signal)));
+      const rendered = downloads.filter((d): d is Extract<Download, { ok: true }> => d.ok);
+      const failed = downloads
+        .filter((d): d is Extract<Download, { ok: false }> => !d.ok)
+        .map((d) => ({ node_id: d.nodeId, error: d.error }));
 
-  if (rendered.length === 0) {
-    return { success: false, error: failed.map((f) => `${f.node_id}: ${f.error}`).join(' ') };
-  }
+      if (rendered.length === 0) {
+        return { success: false, error: failed.map((f) => `${f.node_id}: ${f.error}`).join(' ') };
+      }
 
-  return {
-    success: true,
-    data: {
-      file_key: fileKey,
-      scale,
-      rendered: rendered.map((r) => ({ node_id: r.nodeId, bytes: r.bytes.byteLength })),
-      failed,
-    },
-    images: rendered.map((r) => ({
-      data: toBase64(r.bytes),
-      mimeType: 'image/png',
-      description: `Figma node ${r.nodeId} in file ${fileKey} (scale ${scale})`,
-    })),
-  };
-}
+      const attachments: ToolAttachment[] = rendered.map((r) => ({
+        type: 'image',
+        data: r.bytes,
+        mimeType: 'image/png',
+        name: `figma-${fileKey}-${r.nodeId.replace(/[:;]/g, '-')}.png`,
+      }));
+      return {
+        success: true,
+        data: {
+          file_key: fileKey,
+          scale,
+          rendered: rendered.map((r) => ({ node_id: r.nodeId, bytes: r.bytes.byteLength })),
+          failed,
+        },
+        attachments,
+      };
+    }),
+});
+
+// ─── list_frames ─────────────────────────────────────────────────────────────
 
 interface FigmaNode {
   id: string;
@@ -219,71 +215,55 @@ interface FigmaNode {
   children?: FigmaNode[];
 }
 
-async function executeListFrames(params: unknown, token: string, signal: AbortSignal): Promise<ActionResult> {
-  const p = listFramesParams.parse(params);
-  const { fileKey } = parseFigmaFile(p.file);
+const listFrames = action(
+  Type.Object({
+    file: fileParam,
+    page_id: Type.Optional(Type.String({ description: 'Only list this page, e.g. "0:1"' })),
+  }),
+)({
+  id: 'figma.list_frames',
+  name: 'List Frames',
+  description: 'List the pages of a Figma file and the top-level frames, components and sections on each page. Use this to find node ids for figma.render_frames when the URL has no node-id.',
+  riskLevel: 'low',
+  label: () => 'Listed Figma frames',
+  execute: (args, ctx) =>
+    withFigma(ctx, async (token, signal) => {
+      const { fileKey } = parseFigmaFile(args.file);
+      const res = await figmaGet(`/files/${fileKey}?depth=2`, token, signal);
+      if (!res.ok) return { success: false, error: await figmaErrorMessage(res) };
 
-  const res = await figmaGet(`/files/${fileKey}?depth=2`, token, signal);
-  if (!res.ok) return { success: false, error: await figmaErrorMessage(res) };
+      const body = (await res.json()) as { name?: string; document?: { children?: FigmaNode[] } };
+      let pages = (body.document?.children ?? []).filter((n) => n.type === 'CANVAS');
+      if (args.page_id) {
+        const pageId = normalizeNodeId(args.page_id);
+        const match = pages.filter((pg) => pg.id === pageId);
+        if (match.length === 0) {
+          return { success: false, error: `Page ${pageId} not found. Pages: ${pages.map((pg) => `${pg.id} (${pg.name})`).join(', ')}` };
+        }
+        pages = match;
+      }
 
-  const body = (await res.json()) as { name?: string; document?: { children?: FigmaNode[] } };
-  let pages = (body.document?.children ?? []).filter((n) => n.type === 'CANVAS');
-  if (p.page_id) {
-    const pageId = normalizeNodeId(p.page_id);
-    const match = pages.filter((pg) => pg.id === pageId);
-    if (match.length === 0) {
-      return { success: false, error: `Page ${pageId} not found. Pages: ${pages.map((pg) => `${pg.id} (${pg.name})`).join(', ')}` };
-    }
-    pages = match;
-  }
+      return {
+        success: true,
+        data: {
+          file_key: fileKey,
+          name: body.name ?? '',
+          pages: pages.map((pg) => ({
+            id: pg.id,
+            name: pg.name,
+            frames: (pg.children ?? [])
+              .filter((n) => FRAME_TYPES.has(n.type))
+              .map((n) => ({ id: n.id, name: n.name, type: n.type })),
+          })),
+        },
+      };
+    }),
+});
 
-  return {
-    success: true,
-    data: {
-      file_key: fileKey,
-      name: body.name ?? '',
-      pages: pages.map((pg) => ({
-        id: pg.id,
-        name: pg.name,
-        frames: (pg.children ?? [])
-          .filter((n) => FRAME_TYPES.has(n.type))
-          .map((n) => ({ id: n.id, name: n.name, type: n.type })),
-      })),
-    },
-  };
-}
-
-// ─── Action Execution ────────────────────────────────────────────────────────
-
-async function executeAction(
-  actionId: string,
-  params: unknown,
-  ctx: ActionContext,
-): Promise<ActionResult> {
-  const token = ctx.credentials.access_token || '';
-  if (!token) return { success: false, error: 'Missing access_token' };
-
-  const signal = AbortSignal.timeout(REQUEST_BUDGET_MS);
-  try {
-    switch (actionId) {
-      case 'figma.render_frames':
-        return await executeRenderFrames(params, token, signal);
-      case 'figma.list_frames':
-        return await executeListFrames(params, token, signal);
-      default:
-        return { success: false, error: `Unknown action: ${actionId}` };
-    }
-  } catch (error) {
-    if (signal.aborted) {
-      return { success: false, error: `Figma did not respond within ${REQUEST_BUDGET_MS / 1000} s. Try fewer nodes or a lower scale.` };
-    }
-    return { success: false, error: error instanceof Error ? error.message : String(error) };
-  }
-}
-
-// ─── Export ──────────────────────────────────────────────────────────────────
-
-export const figmaActions: ActionSource = {
-  listActions: () => allActions,
-  execute: executeAction,
+export const figmaPlugin: ActionPlugin = {
+  service: 'figma',
+  displayName: 'Figma',
+  description: 'Figma: render frames to images and list a file\'s frames.',
+  requiresCredential: true,
+  actions: [renderFrames, listFrames],
 };

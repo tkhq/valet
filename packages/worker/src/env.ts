@@ -46,10 +46,6 @@ export interface Env {
   SLACK_CLIENT_ID?: string;
   SLACK_CLIENT_SECRET?: string;
 
-  // Figma OAuth app (plugin-figma)
-  FIGMA_CLIENT_ID?: string;
-  FIGMA_CLIENT_SECRET?: string;
-
   // Email allowlist (comma-separated). If unset, all emails are allowed.
   ALLOWED_EMAILS?: string;
 }

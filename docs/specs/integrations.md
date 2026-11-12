@@ -192,8 +192,8 @@ The registry creates **fresh instances** each time — credentials must be set b
 
 **Figma (`plugin-figma`):**
 - Native REST actions; Figma's hosted MCP server only admits allowlisted OAuth clients.
-- `render_frames` renders at most 4 nodes per call and returns the PNGs through `ActionResult.images` (1 MiB each); `list_frames` returns pages and their top-level frames.
-- OAuth: `FIGMA_CLIENT_ID` / `FIGMA_CLIENT_SECRET`, HTTP Basic client auth at `/v1/oauth/token` for both code exchange and refresh. Scopes: `file_content:read`, `current_user:read`.
+- `render_frames` renders at most 4 nodes per call and returns the PNGs as image attachments (1 MiB each); `list_frames` returns pages and their top-level frames.
+- Connects through a private Figma OAuth app (`FIGMA_CLIENT_ID` / `FIGMA_CLIENT_SECRET`, scope `file_content:read`), OAuth only. Figma authenticates the client with HTTP Basic at `/v1/oauth/token` and refreshes at `/v1/oauth/refresh`, which returns no new refresh token. API calls send `Authorization: Bearer`. The app's redirect URL is the instance's `/api/credentials/oauth/callback`.
 
 ## GitHub (Production Path)
 

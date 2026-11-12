@@ -1,6 +1,6 @@
 export const FIGMA_API = 'https://api.figma.com/v1';
 
-/** Authenticated GET against the Figma REST API. */
+/** GET against the Figma REST API with an OAuth access token. */
 export function figmaGet(path: string, token: string, signal?: AbortSignal): Promise<Response> {
   return fetch(`${FIGMA_API}${path}`, {
     headers: { Authorization: `Bearer ${token}` },
@@ -22,9 +22,9 @@ export async function figmaErrorMessage(res: Response): Promise<string> {
 
   switch (res.status) {
     case 403:
-      // Worded without "token ... expired" so the shared 401 retry regex does not
-      // treat every 403 (including no access to the file) as a refresh trigger.
-      return `Figma returned 403: the Figma connection may have expired, or this account cannot open the file. Ask the user to reconnect Figma if they can open the file in Figma.${said}`;
+      // Figma answers 403 both for an expired or revoked connection and for a
+      // file this account cannot open, so the message names both fixes.
+      return `Figma returned 403: the Figma connection may have expired, or this account cannot open the file. If the user can open the file in Figma, ask them to reconnect Figma on the Integrations page.${said}`;
     case 404:
       return `Figma returned 404: file or node not found. Check the file key and node ids.${said}`;
     case 429: {
