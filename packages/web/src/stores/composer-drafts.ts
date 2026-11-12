@@ -289,12 +289,18 @@ export function useComposerDraft(key: string): ComposerDraft {
   return useComposerDraftStore((s) => s.byKey[key] ?? EMPTY_DRAFT);
 }
 
-/** Starter buttons fill an empty draft; repeated clicks never append or erase user text. */
-export function prefillComposerDraft(sessionId: string, threadId: string, prompt: string): void {
+/**
+ * Starter buttons fill an empty draft; repeated clicks never append or erase
+ * user text. `replaceable` names other starters' prefills: a draft that is
+ * still exactly one of them is a starter the person did not edit, so the new
+ * starter replaces it.
+ */
+export function prefillComposerDraft(sessionId: string, threadId: string, prompt: string, replaceable: readonly string[] = []): void {
   const store = useComposerDraftStore.getState();
   const key = draftKey(sessionId, threadId);
   const existing = store.byKey[key]?.text;
-  if (!existing?.trim() || existing.split("\n\n").every((part) => part.trim() === prompt)) {
+  const untouchedStarter = existing !== undefined && replaceable.some((starter) => existing.trim() === starter.trim());
+  if (!existing?.trim() || untouchedStarter || existing.split("\n\n").every((part) => part.trim() === prompt)) {
     store.setText(key, prompt);
   }
 }
