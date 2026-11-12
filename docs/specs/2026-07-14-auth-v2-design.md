@@ -261,3 +261,9 @@ ORDER BY a.created_at;
 `AUTH_ALLOW_SIGNUP=1` admits uninvited users only when `AUTH_ALLOWED_EMAIL_DOMAINS` is empty. A configured domain allowlist still restricts signup. The default remains invitation/domain admission. Enable it only on a deployment that means to accept any account.
 
 The first-user administrator bootstrap and explicit invitation roles keep their existing behavior. Other unrestricted signups receive the member role. Existing login, sessions, account records, and integration connections remain unchanged. Set the flag to `0` or remove it to require invitations again. Existing accounts remain valid after that change.
+
+## Update (2026-11-11): origins, sign-in tokens and the instance key
+
+- **CORS.** The api answers CORS only for the origins the app is served from: the `BETTER_AUTH_URL` origin, the public URL, and `trustedOrigins` (always the dev vite origin). The web app is same-origin and needs no grant. A request from any other origin gets no `Access-Control-Allow-Origin`, so a foreign page cannot read a credentialed response. Before this change the api reflected every origin with credentials.
+- **Sign-in tokens.** better-auth runs with `account.encryptOAuthTokens`, so the `account` row stores access and refresh tokens encrypted with the auth secret. A token stored before the change reads as plaintext until the next sign-in or refresh writes it again. The `account.create.after` hook decrypts the tokens before it copies Google and GitHub tokens into the credential store.
+- **Instance key.** The api refuses to boot without `VALET_ENCRYPTION_KEY` when it has a public URL. The dev default is in this repository, so it protects nothing on a deployed instance. A local instance keeps the default and logs a warning.

@@ -197,6 +197,10 @@ export function buildAuth(opts: BuildAuthOpts): ValetAuth {
     // Keep eligibility freshness tied to this explicit session lifetime.
     // This value is Better Auth's documented default, not a new duration.
     session: { expiresIn: AUTH_SESSION_LIFETIME_SECONDS },
+    // Sign-in access and refresh tokens are stored encrypted with the auth
+    // secret. better-auth reads a token stored before this setting as
+    // plaintext, and encrypts it at the next sign-in or refresh.
+    account: { encryptOAuthTokens: true },
     // Off unless AUTH_METHODS lists `password`: better-auth then refuses
     // email sign-in and sign-up at the endpoint, not only on the login page.
     emailAndPassword: { enabled: cfg.methods.includes("password") },

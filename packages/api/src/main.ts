@@ -63,7 +63,7 @@ import {
   startInstallationSweep,
   type InstallationSweepHandle,
 } from "./services/github-installation-sweep.js";
-import { deriveSecretKey } from "./lib/secret-crypto.js";
+import { deriveSecretKey, instanceEncryptionKey } from "./lib/secret-crypto.js";
 import { registerPluginLineMetrics, reportUnloadedPluginLines } from "./observability/plugin-line-metrics.js";
 
 /** Handle returned by `startServer`: a graceful `close()` plus the resolved
@@ -186,10 +186,13 @@ const dataDir = process.env.VALET_DATA_DIR ?? resolve(homedir(), ".valet");
 const databaseUrl = process.env.DATABASE_URL;
 const pgDataDir = process.env.VALET_PG_DATA_DIR ?? resolve(dataDir, "pg");
 const blobsRoot = process.env.VALET_BLOBS_DIR ?? resolve(dataDir, "blobs");
-if (!process.env.VALET_ENCRYPTION_KEY) {
-  console.warn("VALET_ENCRYPTION_KEY is unset — using an insecure default. Set it before storing real credentials.");
+const encryptionKeyResult = instanceEncryptionKey(process.env, publicUrlFromEnv(process.env));
+if ("error" in encryptionKeyResult) {
+  console.error(encryptionKeyResult.error);
+  process.exit(1);
 }
-const encryptionKey = process.env.VALET_ENCRYPTION_KEY ?? "dev-key-not-secure";
+if (encryptionKeyResult.warning) console.warn(encryptionKeyResult.warning);
+const encryptionKey = encryptionKeyResult.key;
 const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
 
 if (!anthropicApiKey) {
