@@ -107,6 +107,7 @@ afterEach(() => {
     "perf-near-2k-long",
     "perf-near-8k-dense",
     "perf-near-8k-long",
+    "perf-near-32k",
   ]) {
     clearSecurityCredentialSession(id);
   }
@@ -486,6 +487,22 @@ describe("security credential output tripwire", () => {
     sanitizeSecurityCredentialOutput("perf-benign", text);
     expect(sanitizeSecurityCredentialOutput("perf-benign", text)).toBe(text);
   });
+
+  it("scans long near-miss runs of a 32 KB value in linear time", () => {
+    // Guards the quadratic re-walk the near-miss test above describes. The
+    // value is large so the gap is wide: the linear scan takes tens of
+    // milliseconds, and a scan that re-walks each run per starting offset
+    // takes tens of seconds. The 2 s ceiling sits far from both, so runner
+    // noise does not decide the result.
+    const value = pemValue(512);
+    register("perf-near-32k", ENGAGEMENT, value);
+    const text = longRunText(value);
+
+    sanitizeSecurityCredentialOutput("perf-near-32k", text);
+    const started = performance.now();
+    expect(sanitizeSecurityCredentialOutput("perf-near-32k", text)).toBe(text);
+    expect(performance.now() - started).toBeLessThan(2_000);
+  }, 60_000);
 
   it("passes 256 KiB of near-miss copies through unchanged", () => {
     // The hit path, for a 2 KB and an 8 KB value, in both shapes. Before
