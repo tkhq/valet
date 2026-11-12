@@ -75,20 +75,6 @@ RUN curl -fsSL -o /usr/local/bin/cloudflared \
     "https://github.com/cloudflare/cloudflared/releases/download/2026.2.0/cloudflared-linux-amd64" \
     && chmod +x /usr/local/bin/cloudflared
 
-# ─── tk (Turnkey CLI) build stage ───────────────────────────────────────
-# `valet-sign` (git's gpg.ssh.program, installed by sandbox prep) execs
-# `tk ssh git-sign`, which signs commits with a key held in Turnkey
-# (docs/specs/2026-09-12-agent-commit-signing-design.md). tkhq/tk publishes
-# no release binaries yet, so the CLI is built from a pinned commit.
-FROM rust:1-bookworm AS tk-build
-ARG TK_GIT_REV=1b893111f425
-RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev git \
-    && rm -rf /var/lib/apt/lists/* \
-    && git clone https://github.com/tkhq/tk.git /src/tk \
-    && git -C /src/tk checkout "${TK_GIT_REV}" \
-    && cargo build --release --manifest-path /src/tk/Cargo.toml -p tk \
-    && install -m 0755 /src/tk/target/release/tk /out-tk
-
 # ─── Runner Build ──────────────────────────────────────────────────────
 
 FROM base AS runner-build
@@ -104,8 +90,24 @@ RUN bun build src/bin.ts --outdir dist --target bun
 
 FROM base
 
-# Turnkey CLI for commit signing; see the tk-build stage above.
-COPY --from=tk-build /out-tk /usr/local/bin/tk
+# Turnkey CLI for commit signing. `valet-sign` (git's gpg.ssh.program,
+# installed by sandbox prep) execs `tk ssh git-sign`, which signs with a key
+# held in Turnkey (docs/specs/2026-09-12-agent-commit-signing-design.md).
+# Pinned release asset, checked against its published SHA-256.
+ARG TK_VERSION=0.8.0
+ARG TARGETARCH
+RUN case "${TARGETARCH:-amd64}" in \
+      amd64) TK_ARCH=x86_64; TK_SHA256=cd2866b326a629737bf13069bd7faa604658435833265b13a8e101733a75242f ;; \
+      arm64) TK_ARCH=aarch64; TK_SHA256=be20690bb05ace976aaf3970b7d4ab204f964c337bd5df94c2d53a6e408430bb ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+    && TK_TGZ="tk-${TK_ARCH}-unknown-linux-musl-v${TK_VERSION}.tar.gz" \
+    && curl -fsSL -o "/tmp/${TK_TGZ}" "https://github.com/tkhq/tk/releases/download/v${TK_VERSION}/${TK_TGZ}" \
+    && echo "${TK_SHA256}  /tmp/${TK_TGZ}" | sha256sum -c - \
+    && mkdir -p /tmp/tk && tar -xzf "/tmp/${TK_TGZ}" -C /tmp/tk \
+    && install -m 0755 "$(find /tmp/tk -type f -name tk | head -n 1)" /usr/local/bin/tk \
+    && rm -rf /tmp/tk "/tmp/${TK_TGZ}" \
+    && tk --version
 
 WORKDIR /runner
 COPY --from=runner-build /build/runner/dist ./dist
