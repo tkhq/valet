@@ -455,6 +455,24 @@ describe("GET /api/credentials/oauth/callback", () => {
     expect((await getMcpOAuthClient({ db: api.providers.db }, "linear")).resource).toBe(fake.url);
   });
 
+  it("mcp mode: the code exchange names the resource the authorize request named", async () => {
+    // A sign-in starts before the row has a resource. Another connect then
+    // backfills it. The exchange and the record still match the authorize.
+    fake.resourceScopesSupported = ["agent:content:read"];
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url, ["agent:content:read"])] });
+    await ensureMcpOAuthClient({ db: api.providers.db }, "linear", fake.url, "http://localhost/cb", ["agent:content:read"]);
+    await api.providers.db.update(mcpOauthClients).set({ resource: "" }).where(eq(mcpOauthClients.service, "linear"));
+    const authUrl = await startConnect(api.baseUrl, "linear");
+    expect(authUrl.searchParams.has("resource")).toBe(false);
+    await api.providers.db.update(mcpOauthClients).set({ resource: fake.url }).where(eq(mcpOauthClients.service, "linear"));
+
+    const state = authUrl.searchParams.get("state") ?? "";
+    await fetch(`${api.baseUrl}/api/credentials/oauth/callback?code=c&state=${encodeURIComponent(state)}`, { redirect: "manual" });
+    expect(fake.tokenRequests.at(-1)).not.toHaveProperty("resource");
+    const saved = await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "linear");
+    expect(saved?.metadata).not.toHaveProperty("oauthResource");
+  });
+
   it("mcp mode: a server with no protected resource metadata gets no resource parameter", async () => {
     api = await bootTestApi({ plugins: [mcpPlugin(fake.url)] });
     const authUrl = await startConnect(api.baseUrl, "linear");
