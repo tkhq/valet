@@ -6,6 +6,7 @@
  * elsewhere) so these tests assert on the routes' own logic — request
  * shaping, owner scoping, signal writes — without paying for the poll loop.
  */
+import { workflowApprovalPort } from "../channels/workflow-gates.js";
 import type { RunHost, RunStartOptions, WorkflowDefinition } from "@valet/workflow";
 import type { DecisionGateRequest, PluginActionContext } from "@valet/engine";
 import { RESOLVED_GATE_NEXT_ELSEWHERE, resolvedGateStillWaiting, workflowsActionPlugin } from "../workflows/actions.js";
@@ -1713,6 +1714,35 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
       { runId, nodeId: "gate", approved: true, via: "agent" },
     );
     expect(result).toBe("human_only");
+  });
+
+  describe("a channel card answers a step through the run page's checks", () => {
+    async function parked() {
+      const { localApi, runId } = await setupRun({ nodeType: "tool", service: "widgets", action: "nuke" });
+      api = localApi;
+      await localApi.providers.workflowStore.parkRun(runId, 1, [
+        { kind: "signal", signalType: "approval:gate", nodeId: "gate" },
+      ]);
+      const { db, workflowStore, workflowRunHost, engineStore, engineCredentials } = localApi.providers;
+      return { localApi, runId, port: workflowApprovalPort(() => ({ db, workflowStore, workflowRunHost, engineStore, credentials: engineCredentials })) };
+    }
+
+    it("offers buttons to the run's owner and records the click as a channel answer", async () => {
+      const { localApi, runId, port } = await parked();
+      const person = { userId: "local-user", orgId: "local-org" };
+      const gate = { runId, nodeId: "gate", iteration: 0 };
+      expect(await port.mayResolve(person, gate)).toBe(true);
+      expect(await port.resolve(person, gate, true)).toBe("ok");
+      const signals = await localApi.providers.workflowStore.listSignals(runId);
+      expect(signals.find((sig) => sig.signalType === "approval:gate")?.payload)
+        .toMatchObject({ approved: true, resolvedBy: "local-user", resolvedVia: "channel", scope: "once" });
+      expect(await port.resolve(person, gate, false)).toBe("already_resolved");
+    });
+
+    it("offers no buttons to someone outside the run's audience", async () => {
+      const { runId, port } = await parked();
+      expect(await port.mayResolve({ userId: "stranger", orgId: "local-org" }, { runId, nodeId: "gate", iteration: 0 })).toBe(false);
+    });
   });
 
   describe("workflows.resolve_approval asks a person in the thread", () => {

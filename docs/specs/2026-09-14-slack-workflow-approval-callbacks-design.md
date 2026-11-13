@@ -21,7 +21,28 @@ Drop logs retain the internal failure category for diagnosis: malformed, missing
 A workflow category applies only to a `wf:` session id. A click on any other id whose session row is absent is logged as unauthorized.
 
 These callbacks resolve engine decision gates inside workflow sessions.
-Authored workflow approval nodes continue to use workflow approval signals and the workflow run page.
+
+## Workflow step cards
+
+A `tool` step held by policy and an `approval` step wait on a run checkpoint, not on an engine decision gate.
+Until 2026-11-13, their attention DM was a plain summary, so a scheduled run could be answered only on the run page.
+
+The attention DM for such a step is now a card with two buttons: Approve once and Deny.
+Scoped choices (this run, this workflow, a shared account for the team) stay on the run page.
+The channel host gets the run page's checks through a port (`channels/workflow-gates.ts`):
+
+- `mayResolve` runs the access part of `resolveWorkflowApproval`. Only a recipient it accepts gets buttons. Every other recipient gets the plain summary.
+- `resolve` calls `resolveWorkflowApproval` as the clicker, with scope `once` and `via: "channel"`. The run page's checks apply unchanged: run audience, named account approver, gate occurrence, and timeout.
+
+The card's prompt key names the run, step, iteration, and gate occurrence.
+The host records the card's callback address under that key, as it does for a decision gate, and saves it in `engine_decision_gate_refs`.
+A restarted host restores the address only while the step still waits. It deletes the saved address of a finished step.
+
+A click that decides the step settles every card for it.
+A click on a step that another answer already finished also settles the card, and the reply says where to look.
+A click that `resolveWorkflowApproval` refuses keeps the card, and the reply names who can answer.
+
+Limitation: an answer on the run page does not edit the cards. A later click on such a card reports that the step was already answered and then settles that card.
 
 ## Rejections are visible on Slack
 
