@@ -57,6 +57,14 @@ export type OAuthDeclaration =
       tokenUrl: string;
       clientIdEnv: string;
       clientSecretEnv: string;
+      /** How the client authenticates at the token and refresh endpoints.
+       *  Default "client_secret_post": client_id and client_secret in the
+       *  form body. "client_secret_basic": an HTTP Basic header (RFC 6749
+       *  section 2.3.1), which Figma requires. */
+      tokenAuth?: "client_secret_post" | "client_secret_basic";
+      /** Refresh endpoint, when the provider uses a URL other than
+       *  `tokenUrl` (Figma refreshes at /v1/oauth/refresh). Default `tokenUrl`. */
+      refreshUrl?: string;
       /** Extra authorize-URL params, e.g. Google's access_type=offline&prompt=consent. */
       extraAuthParams?: Record<string, string>;
       /** Query param that carries the scope list. Default "scope".
@@ -961,7 +969,7 @@ export function validateValetPlugin(
         if (typeof oauth.serverUrl !== "string" || oauth.serverUrl.length === 0) {
           issues.push({ path: `${path}.oauth.serverUrl`, message: "required non-empty string" });
         }
-        for (const field of ["scopesParam", "interpretTokenResponse"] as const) {
+        for (const field of ["scopesParam", "interpretTokenResponse", "tokenAuth", "refreshUrl"] as const) {
           if (oauth[field] !== undefined) {
             issues.push({ path: `${path}.oauth.${field}`, message: "only valid on authorization_code mode" });
           }
@@ -983,6 +991,12 @@ export function validateValetPlugin(
         }
         if (oauth.interpretTokenResponse !== undefined && typeof oauth.interpretTokenResponse !== "function") {
           issues.push({ path: `${path}.oauth.interpretTokenResponse`, message: "must be a function when present" });
+        }
+        if (oauth.tokenAuth !== undefined && oauth.tokenAuth !== "client_secret_post" && oauth.tokenAuth !== "client_secret_basic") {
+          issues.push({ path: `${path}.oauth.tokenAuth`, message: "must be \"client_secret_post\" or \"client_secret_basic\" when present" });
+        }
+        if (oauth.refreshUrl !== undefined && (typeof oauth.refreshUrl !== "string" || oauth.refreshUrl === "")) {
+          issues.push({ path: `${path}.oauth.refreshUrl`, message: "must be a non-empty string when present" });
         }
       } else {
         issues.push({ path: `${path}.oauth.mode`, message: "must be \"mcp\" or \"authorization_code\"" });

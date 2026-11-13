@@ -293,6 +293,34 @@ describe("exchangeAuthorizationCode / refreshAuthorizationCodeToken", () => {
       exchangeAuthorizationCode({ oauth: oauth(fake.url), env, code: "c", redirectUri: "r" }),
     ).rejects.toThrow(/400/);
   });
+
+  // Figma's shape: HTTP Basic client auth, and refresh at a separate URL.
+  const basic = (url: string) => ({
+    ...oauth(url),
+    tokenAuth: "client_secret_basic" as const,
+    refreshUrl: `${url}/refresh`,
+  });
+  const basicHeader = `Basic ${Buffer.from("cid:shh").toString("base64")}`;
+
+  it("client_secret_basic sends the client in a Basic header, not the body", async () => {
+    await exchangeAuthorizationCode({ oauth: basic(fake.url), env, code: "code-1", redirectUri: "https://valet.example/cb" });
+    expect(fake.tokenRequests[0]).toMatchObject({ grant_type: "authorization_code", code: "code-1", _authorization: basicHeader });
+    expect(fake.tokenRequests[0]).not.toHaveProperty("client_id");
+    expect(fake.tokenRequests[0]).not.toHaveProperty("client_secret");
+    expect(fake.tokenRequests[0]).not.toHaveProperty("_endpoint");
+  });
+
+  it("refreshes at refreshUrl with the same Basic client auth", async () => {
+    await refreshAuthorizationCodeToken({ oauth: basic(fake.url), env, refreshToken: "rt-old" });
+    expect(fake.tokenRequests[0]).toMatchObject({ _endpoint: "refresh", refresh_token: "rt-old", _authorization: basicHeader });
+    expect(fake.tokenRequests[0]).not.toHaveProperty("client_secret");
+  });
+
+  it("the raw exchange honors client_secret_basic too", async () => {
+    await exchangeAuthorizationCodeRaw({ oauth: basic(fake.url), env, code: "c", redirectUri: "r" });
+    expect(fake.tokenRequests[0]).toMatchObject({ _authorization: basicHeader });
+    expect(fake.tokenRequests[0]).not.toHaveProperty("client_secret");
+  });
 });
 
 describe("findOAuthDeclaration", () => {
