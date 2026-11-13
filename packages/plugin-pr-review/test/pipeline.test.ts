@@ -306,6 +306,14 @@ describe("decideFinding", () => {
     ).toMatchObject({ keep: true, verdict: "unverifiable" });
   });
 
+  it("refutes a finding that cites a rule file only with evidence that cites the same rule", () => {
+    const ruled = { ...high, body: "src/rust/AGENTS.md requires #[expect] with a reason." };
+    const refuted = { ...base, verdict: "refuted" as const, refutation_reason: "style" as const };
+    expect(decideFinding(ruled, { ...refuted, counter_evidence: "mock.rs:1 uses a bare allow" }, file)).toMatchObject({ keep: true, verdict: "unverifiable" });
+    expect(decideFinding(ruled, { ...refuted, counter_evidence: "src/rust/AGENTS.md:8 applies to new suppressions only" }, file).keep).toBe(false);
+    expect(decideFinding(high, { ...refuted, counter_evidence: "" }, file).keep).toBe(false);
+  });
+
   it("keeps unverifiable findings only at high or critical severity", () => {
     expect(decideFinding(high, { ...base, verdict: "unverifiable" }, file).keep).toBe(true);
     expect(decideFinding(low, { ...base, verdict: "unverifiable" }, file).keep).toBe(false);

@@ -21,7 +21,10 @@ export interface ReviewRound {
   mode: "full" | "incremental";
   at: string;
   newFindings: string[];
+  /** Findings a later commit fixed. */
   resolved: string[];
+  /** Findings a recheck refuted with no change to their code. Absent: none. */
+  withdrawn?: string[];
 }
 
 /** Everything the reviewer remembers about one pull request. */

@@ -25,6 +25,7 @@ import {
   nearestCommentableLine,
   createReviewHandler,
   excluded,
+  flaggedCodeChanged,
   focusRole,
   MANUAL_REVIEW_EVENT,
   manualReviewOptions,
@@ -45,6 +46,7 @@ const SLUG = "acme/site#7";
 const BASE = "b".repeat(40);
 const H1 = "1".repeat(40);
 const H2 = "2".repeat(40);
+const H3 = "3".repeat(40);
 
 /** a.ts lines 1-20 are in the diff's one hunk; b.ts is not changed. */
 const PATCH_A = "@@ -1,3 +1,20 @@\n" + Array.from({ length: 20 }, (_, i) => `+line ${i + 1}`).join("\n");
@@ -310,6 +312,11 @@ const verdict = (v: Verdict["verdict"], over: Partial<Verdict> = {}): Verdict =>
   ...over,
 });
 
+/** The default a.ts text with line `n` rewritten: a commit that changes the code behind a finding. */
+function editedA(n: number): string {
+  return Array.from({ length: 60 }, (_, i) => (i + 1 === n ? "guarded line" : `line ${i + 1}`)).join("\n");
+}
+
 /** Answers from a script: the reviewer returns `review`; each verifier answers by finding title. */
 function scripted(review: Review, verdicts: Record<string, Verdict>): Answer {
   return (req) => {
@@ -414,6 +421,7 @@ describe("review-pull-request handler", () => {
     const commentId = gh.comments[0].id;
 
     gh.head = H2;
+    gh.contentsAt[H2] = { "a.ts": editedA(5) };
     const second = new FakeThreads(
       scripted(reviewOf([finding({ line: 12, title: "Leaked handle in close", severity: "medium" })]), {
         "Null deref in parse": verdict("refuted", { counter_evidence: "a.ts:4 now returns early" }),
@@ -525,6 +533,7 @@ describe("review-pull-request handler", () => {
     await handler.handle(event("ev1"), context(new FakeThreads(scripted(reviewOf([finding({})]), {})), store));
     const commentId = gh.comments[0].id;
     gh.head = H2;
+    gh.contentsAt[H2] = { "a.ts": editedA(5) };
     if (failure === "comment") gh.failCommentEdit = true;
     else gh.failThreadEditFor = commentId;
     const second = new FakeThreads(scripted(reviewOf([finding({ line: 12, title: "Leaked handle in close" })]), {
@@ -689,6 +698,138 @@ describe("review-pull-request handler", () => {
     expect(store.pointers()?.findings[0].status).toBe("dismissed");
     expect(gh.resolved.has(gh.comments[0].id)).toBe(true);
     expect(gh.comments).toHaveLength(1);
+  });
+
+  it("withdraws, not fixes, a finding whose recheck is refuted while its code is unchanged", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const handler = createReviewHandler({ fetch: gh.fetch });
+    await handler.handle(event("ev1"), context(new FakeThreads(scripted(reviewOf([finding({})]), {})), store));
+    const summaryId = store.pointers()?.reviewId;
+    const commentId = gh.comments[0].id;
+
+    // The push changes a.ts far from line 5, so the flagged lines read the same.
+    gh.head = H2;
+    gh.contentsAt[H2] = { "a.ts": editedA(40) };
+    await handler.handle(event("ev2"), context(new FakeThreads(scripted(reviewOf([]), {
+      "Null deref in parse": verdict("refuted", { counter_evidence: "a.ts:4 returns early on empty input" }),
+    })), store));
+
+    const body = gh.comments.find((c) => c.id === commentId)?.body ?? "";
+    expect(body).toMatch(/^\*\*Withdrawn\.\*\* A recheck found this claim does not hold, and no commit changed this code\. a\.ts:4 returns early/);
+    expect(body).not.toContain("Fixed in");
+    expect(body).toContain("valet-pr-review:finding f1");
+    expect(gh.resolved.has(commentId)).toBe(true);
+    const summary = gh.reviews.get(summaryId ?? -1)?.body ?? "";
+    expect(summary).toContain("Withdrawn (1)");
+    expect(summary).not.toContain("Fixed (");
+    const saved = store.pointers();
+    expect(saved?.findings[0]).toMatchObject({ id: "f1", status: "resolved", withdrawnAt: H2 });
+    expect(saved?.findings[0].fixedIn).toBeUndefined();
+    expect(saved?.rounds?.[1]).toMatchObject({ head: H2, resolved: [], withdrawn: ["f1"] });
+  });
+
+  it("counts a change in a file the refutation cites as a fix", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const handler = createReviewHandler({ fetch: gh.fetch });
+    await handler.handle(event("ev1"), context(new FakeThreads(scripted(reviewOf([finding({ title: "parse has no test", category: "test_gap" })]), {})), store));
+    const commentId = gh.comments[0].id;
+
+    // a.ts is unchanged; the fix is a new test file that the refutation cites.
+    gh.head = H2;
+    gh.contentsAt[H1] = { "a.ts": editedA(0) };
+    gh.contentsAt[H2] = { "a.ts": editedA(0), "a.test.ts": "it('parses empty input')\n" };
+    await handler.handle(event("ev2"), context(new FakeThreads(scripted(reviewOf([]), {
+      "parse has no test": verdict("refuted", { counter_evidence: "acme/site/a.test.ts:1 covers empty input" }),
+    })), store));
+
+    expect(gh.comments.find((c) => c.id === commentId)?.body).toMatch(/^\*\*Fixed in `2222222`\.\*\*/);
+    expect(store.pointers()?.findings[0]).toMatchObject({ id: "f1", status: "resolved", fixedIn: H2 });
+  });
+
+  it("counts a cited guard further up the same file as a fix", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const handler = createReviewHandler({ fetch: gh.fetch });
+    await handler.handle(event("ev1"), context(new FakeThreads(scripted(reviewOf([finding({ line: 15 })]), {})), store));
+
+    // Line 5 gains a guard; the lines around line 15 read the same.
+    gh.head = H2;
+    gh.contentsAt[H2] = { "a.ts": editedA(5) };
+    await handler.handle(event("ev2"), context(new FakeThreads(scripted(reviewOf([]), {
+      "Null deref in parse": verdict("refuted", { counter_evidence: "a.ts:5 returns early on empty input" }),
+    })), store));
+    expect(store.pointers()?.findings[0]).toMatchObject({ id: "f1", status: "resolved", fixedIn: H2 });
+  });
+
+  it("ignores a cited line past the end of the file or on blank lines", async () => {
+    const files: Record<string, Record<string, string>> = {
+      old: { "a.ts": "one\ntwo\nthree\nfour\nfive", "b.ts": "x\n\n\ny" },
+      new: { "a.ts": "one\ntwo\nthree\nfour\nfive", "b.ts": "x\n\n\n\ny" },
+    };
+    const gh = { fileText: async (path: string, ref: string) => files[ref]?.[path] };
+    const f = { path: "a.ts", line: 2 };
+    expect(await flaggedCodeChanged(gh, f, "old", "new", "a.ts:90 returns early", "acme/site")).toBe(false);
+    expect(await flaggedCodeChanged(gh, f, "old", "new", "b.ts:3 is blank", "acme/site")).toBe(false);
+    expect(await flaggedCodeChanged(gh, f, "old", "new", "a.ts:4 reads four", "acme/site")).toBe(false);
+  });
+
+  it("does not count an unrelated edit in a cited file as a fix", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const handler = createReviewHandler({ fetch: gh.fetch });
+    gh.contentsAt[H1] = { "a.ts": editedA(0), "b.ts": editedA(0) };
+    await handler.handle(event("ev1"), context(new FakeThreads(scripted(reviewOf([finding({})]), {})), store));
+
+    // b.ts changes at line 40; the refutation cites b.ts:3, which reads the same.
+    gh.head = H2;
+    gh.contentsAt[H2] = { "a.ts": editedA(0), "b.ts": editedA(40) };
+    await handler.handle(event("ev2"), context(new FakeThreads(scripted(reviewOf([]), {
+      "Null deref in parse": verdict("refuted", { counter_evidence: "b.ts:3 validates input before parse runs" }),
+    })), store));
+    expect(store.pointers()?.findings[0]).toMatchObject({ id: "f1", status: "resolved", withdrawnAt: H2 });
+  });
+
+  it("withdraws a finding that cites a rule file only when the refutation cites that rule", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const handler = createReviewHandler({ fetch: gh.fetch });
+    const ruled = finding({ title: "Bare allow breaks the lint rule", body: "src/AGENTS.md requires expect with a reason, not a bare allow." });
+    await handler.handle(event("ev1"), context(new FakeThreads(scripted(reviewOf([ruled]), {})), store));
+    const commentId = gh.comments[0].id;
+
+    // b.ts exists at neither head, so only a.ts can count as changed.
+    gh.contentsAt[H1] = { "a.ts": editedA(0) };
+    gh.head = H2;
+    gh.contentsAt[H2] = { "a.ts": editedA(40) };
+    await handler.handle(event("ev2"), context(new FakeThreads(scripted(reviewOf([]), {
+      "Bare allow breaks the lint rule": verdict("refuted", { counter_evidence: "a.ts:1 and b.ts:3 use bare allow too" }),
+    })), store));
+    expect(store.pointers()?.findings[0]).toMatchObject({ id: "f1", status: "open" });
+    expect(gh.resolved.has(commentId)).toBe(false);
+
+    gh.head = H3;
+    gh.contentsAt[H3] = { "a.ts": editedA(41) };
+    await handler.handle(event("ev3"), context(new FakeThreads(scripted(reviewOf([]), {
+      "Bare allow breaks the lint rule": verdict("refuted", { counter_evidence: "src/AGENTS.md:8 covers new suppressions only; a.ts:5 is not new" }),
+    })), store));
+    expect(store.pointers()?.findings[0]).toMatchObject({ id: "f1", status: "resolved", withdrawnAt: H3 });
+  });
+
+  it("fixes a finding that cites a rule file when its code changed, without a rule quote", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const handler = createReviewHandler({ fetch: gh.fetch });
+    const ruled = finding({ title: "Bare allow breaks the lint rule", body: "src/AGENTS.md requires expect with a reason, not a bare allow." });
+    await handler.handle(event("ev1"), context(new FakeThreads(scripted(reviewOf([ruled]), {})), store));
+
+    gh.head = H2;
+    gh.contentsAt[H2] = { "a.ts": editedA(5) };
+    await handler.handle(event("ev2"), context(new FakeThreads(scripted(reviewOf([]), {
+      "Bare allow breaks the lint rule": verdict("refuted", { counter_evidence: "a.ts:5 now uses expect with a reason" }),
+    })), store));
+    expect(store.pointers()?.findings[0]).toMatchObject({ id: "f1", status: "resolved", fixedIn: H2 });
   });
 
   it("keeps an open finding in an unchanged file without a recheck", async () => {

@@ -25,7 +25,7 @@ const SLUG = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)#([1-9]\d*)$/;
 
 type ReviewDocument = Pick<PullPointers, "lastReviewedHead"> & {
   reviewId?: number;
-  findings: Array<{ status: string }>;
+  findings: Array<{ status: string; withdrawnAt?: string }>;
   rounds?: ReviewRound[];
 };
 interface ReviewRecord {
@@ -195,12 +195,12 @@ codeReviewRouter.get("/reviews", async (c) => {
       repo: record.repo, number: record.number, title: pr.title, url: pr.url, state: "open",
       status: record.deliveryStatus === "pending" || record.deliveryStatus === "failed" ? "running" : record.deliveryStatus === "dead" ? "failed" : "complete",
       rounds: rounds.map(round => ({
-        head: round.head, mode: round.mode, at: round.at, newFindings: round.newFindings.length, resolved: round.resolved.length,
+        head: round.head, mode: round.mode, at: round.at, newFindings: round.newFindings.length, resolved: round.resolved.length, withdrawn: round.withdrawn?.length ?? 0,
       })),
       ...(doc?.reviewId !== undefined ? { reviewId: doc.reviewId } : {}),
       ...(doc?.lastReviewedHead !== undefined ? { head: doc.lastReviewedHead } : {}),
       openFindings: findings.filter(f => f.status === "open").length,
-      resolvedFindings: findings.filter(f => f.status === "resolved").length,
+      resolvedFindings: findings.filter(f => f.status === "resolved" && f.withdrawnAt === undefined).length,
       updatedAt: record.updatedAt,
       ...(threadId !== undefined ? { threadId } : {}),
     }];
