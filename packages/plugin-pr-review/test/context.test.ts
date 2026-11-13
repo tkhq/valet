@@ -234,6 +234,8 @@ describe("gatherContext", () => {
     expect(packRules("## Context pack\nnothing")).toBe("");
     const learned = "### Learned from past reviews (team feedback, not repository rules)\n\nThe formatter hook formats on commit.\n";
     expect(packRules(`## Context pack\n\n${learned}### Tests that touch the change (PR head, untrusted code)\n\nx\n`)).toBe(learned.trim());
+    const convention = "### Repository conventions (target branch, at the merge base)\n\n#### AGENTS.md (repo root)\n\n### Commits\n\nUse one Changelog line.\n";
+    expect(packRules(`## Context pack\n\n${convention}### Left out of this pack\n- tests: x (budget)\n`)).toBe(convention.trim());
   });
 
   it("adds a team-memory note whose terms match the added lines, and ships no notes of its own", async () => {
