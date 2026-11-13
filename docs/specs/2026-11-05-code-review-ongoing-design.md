@@ -164,6 +164,9 @@ matches them by paths and terms like rule notes, and puts them in their own
 section after the team rules: "Learned from past reviews". A lesson with no
 paths or terms applies to every change in the repository. A lesson with
 `Status: retired` is skipped. The pack tells the reviewer that a repository
-rule wins over a learned lesson. The pack also lists the owner's own
-principles, so a learned principle reaches the next review. A person edits or
+rule wins over a learned lesson. A learned principle
+(`principles/review-*.md`) loads in the same section with its full text, as
+a lesson for every change in every repository. The owner's other principles
+are listed by title. Keyword search skips learned files, so a lesson does not
+appear twice. A person edits or
 deletes a lesson in Memory like any other file.

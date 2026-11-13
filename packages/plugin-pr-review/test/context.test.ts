@@ -340,7 +340,7 @@ describe("gatherContext", () => {
     expect(pack.text).toContain("Do not report what a \"do not report this\" lesson covers");
     expect(pack.text).not.toContain("Old lesson");
     expect(pack.text).not.toContain("acme/other");
-    expect(pack.text).toContain("Document every exported function");
+    expect(pack.text).toContain("#### Document every exported function (learned principles/review-document-exports.md; check for this; matched: learned principle, applies to every change)\nEvery export has a doc comment.");
   });
 
   it("does not take a note under a nested lib/ directory, which agents can write, as a rule", async () => {

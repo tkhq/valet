@@ -5,7 +5,7 @@
  */
 import { matchesGlob } from "./glob.js";
 import { noteMatch, parseNote, type DomainNote } from "./notes.js";
-import { LEARNED_DIR, parseLearnedNote } from "../learn.js";
+import { LEARNED_DIR, LEARNED_PRINCIPLE_PREFIX, parseLearnedNote } from "../learn.js";
 import { buildContextPack, isTestPath, MAX_CALLER_REFS, type ContextPack, type ConventionFile, type MemoryItem, type PackDrop } from "./pack.js";
 import { instructionPath, noiseKind, PLAYBOOK, ROOT_CONVENTIONS, NESTED_CONVENTIONS } from "./paths.js";
 import type { DroppedFile } from "./rank.js";
@@ -180,7 +180,8 @@ export async function gatherContext(input: GatherInput): Promise<ContextPack> {
       }
     };
     const principles = new Map<string, { title: string; description: string }>();
-    for (const p of await listing("principles/")) principles.set(p.path, p);
+    // Learned principles load in full below, as lessons; the index lists the rest.
+    for (const p of await listing("principles/")) if (!p.path.startsWith(LEARNED_PRINCIPLE_PREFIX)) principles.set(p.path, p);
     for (const h of await search("principle", 40)) if (/(^|\/)principles\//.test(h.path) && !principles.has(h.path)) principles.set(h.path, h);
     for (const [path, p] of [...principles.entries()].slice(0, MAX_PRINCIPLES)) memory.push({ path, title: p.title, text: p.description, kind: "principle" });
     const read = async (path: string): Promise<{ path: string; content: string } | null> => {
@@ -234,6 +235,15 @@ export async function gatherContext(input: GatherInput): Promise<ContextPack> {
         if (why) learned.push({ note, why, kind: parsed.kind });
       }
     }
+    // Principles learned from review feedback are team rules for every repository: load their text, not only their title.
+    for (const f of await listing(LEARNED_PRINCIPLE_PREFIX)) {
+      const file = await read(f.path);
+      if (!file) continue;
+      const body = file.content.replace(/^---\n[\s\S]*?\n---\n?/, "");
+      const title = /^#\s+(.+)$/m.exec(body)?.[1]?.trim() ?? f.title;
+      const note: DomainNote = { name: baseName(f.path), title, paths: [], terms: [], body: body.replace(/^#\s+.+$/m, "").trim(), origin: "memory", path: f.path };
+      learned.push({ note, why: "learned principle, applies to every change", kind: "check" });
+    }
 
     // Background notes and playbooks found by what the change names:
     // repository, paths, symbols, distinctive terms in added lines, and
@@ -251,7 +261,9 @@ export async function gatherContext(input: GatherInput): Promise<ContextPack> {
     const hits = new Map<string, { title: string }>();
     for (const q of queries.slice(0, MAX_MEMORY_QUERIES)) {
       for (const h of await search(q, 5)) {
-        if (!/(^|\/)principles\//.test(h.path) && !RULE_NOTES.test(h.path)) hits.set(h.path, { title: h.title });
+        // Rule notes and learned lessons load above; a search hit on one would repeat it as background.
+        const learnedPath = h.path.replace(/^(team|org):[^/]+\//, "").startsWith(LEARNED_DIR);
+        if (!/(^|\/)principles\//.test(h.path) && !RULE_NOTES.test(h.path) && !learnedPath) hits.set(h.path, { title: h.title });
       }
     }
     for (const [path, { title }] of [...hits.entries()].slice(0, MAX_MEMORY_READS)) {
