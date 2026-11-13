@@ -124,6 +124,40 @@ describe.each(["user", "team"] as const)("%s task scopes", (ownerType) => {
   });
 });
 
+describe("catalog tools under an action scope", () => {
+  /** Runs one team workflow step that calls call_tool, then write_record, under `toolScope`. */
+  async function runStep(provider: string, toolScope: Record<string, unknown>) {
+    const faux = registerFauxProvider({ provider });
+    const called: string[] = [];
+    try {
+      const store = new InMemorySessionStore();
+      const engine = new Engine({ providers: { store, stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() } });
+      const stub = (name: string): ToolDef => ({ name, description: name,
+        // Like the real call_tool, the stub takes the caller's summary in place of an intent.
+        ...(name === "call_tool" ? { intent: "summary" as const, parameters: Type.Object({ summary: Type.Optional(Type.String()) }) } : { parameters: Type.Object({}) }),
+        execute: async () => { called.push(name); return { text: "ok" }; } });
+      const session = await engine.createSession({ userId: "alice", orgId: "org", owner: { type: "team", id: "team" }, workspace: "/", sandbox: {}, purpose: "workflow",
+        model: faux.getModel(), builtinTools: [], tools: [stub("mem_read"), stub("call_tool"), stub("write_record")] });
+      faux.setResponses([
+        fauxAssistantMessage([fauxToolCall("call_tool", {})], { stopReason: "toolUse" }),
+        fauxAssistantMessage([fauxToolCall("write_record", {})], { stopReason: "toolUse" }),
+        fauxAssistantMessage("done"),
+      ]);
+      const receipt = await session.prompt("post the update", { metadata: { toolScope } });
+      await session.thread().awaitResult(receipt.queueItemId);
+      return called;
+    } finally { faux.unregister(); }
+  }
+
+  it("gives a step that lists actions call_tool even when its tool list leaves it out", async () => {
+    expect(await runStep("scope-catalog-granted", { tools: ["mem_read"], actions: ["slack.send_message"] })).toEqual(["call_tool"]);
+  });
+
+  it("keeps call_tool out of a step whose scope grants no actions", async () => {
+    expect(await runStep("scope-catalog-none", { tools: ["mem_read"], actions: [] })).toEqual([]);
+  });
+});
+
 describe("unattended workflow tasks", () => {
   const askQuestion = builtinTools.find((tool) => tool.name === "ask_question");
   /** Runs one turn whose tool asks for a decision. An attended turn only reports its flag. */

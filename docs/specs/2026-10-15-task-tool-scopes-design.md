@@ -6,6 +6,7 @@ Valet narrows tools by task. Scopes reduce unrelated choices. Existing authoriza
 
 - A scope lists native tool names and integration action IDs. `service.*` selects one service's actions.
 - An omitted list adds no restriction. An empty list permits no entries in that list.
+- A scope whose `actions` list is not empty also permits `list_tools` and `call_tool`, named in `tools` or not. They are the only route to those actions in team sessions, so a step that listed `slack.send_message` but left `call_tool` out of its `tools` reached nothing and its run still completed. This adds no reach: `list_tools` lists only in-scope actions, and `invokeAction` refuses every call outside `actions`.
 - Session ceilings, submission ceilings, and thread focus intersect. A child inherits the parent's ceilings, not its thread focus. Focus is the parent's own reversible choice, so a child that inherited it lost tools that neither the parent nor a policy had refused. The parent narrows a child with the task's own scope.
 - Persist scopes in existing session, thread, submission, and run metadata. Restore them before execution.
 - An invalid stored scope permits no tools. A missing scope keeps existing behavior.
