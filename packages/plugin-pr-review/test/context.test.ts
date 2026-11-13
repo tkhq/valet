@@ -295,6 +295,18 @@ describe("gatherContext", () => {
     expect(pack.manifest.dropped).toEqual(expect.arrayContaining([{ section: "notes", ref: "1 rule note(s)", reason: "their paths, terms and title pattern do not match this change" }]));
   });
 
+  it("warns that rule notes may be missing when the listing is full, even if most entries are not rule notes", async () => {
+    const r = repo({ "a.ts": "export const a = 1;\n" }, { "a.ts": "export const a = 2;\n" });
+    // 100 entries come back, all in a subdirectory, so none passes the rule-note filter.
+    const mem: PackMemory = {
+      search: async () => [],
+      read: async () => null,
+      list: async () => Array.from({ length: 100 }, (_, i) => ({ path: `lib/code-review/notes/archive/n${i}.md`, title: `n${i}`, description: "" })),
+    };
+    const pack = await gatherContext({ runner: localRunner(r.dir), readTrusted: (p) => gitFileAt(r.dir, r.base, p), patch: r.patch, diffDropped: [], title: "t", memory: mem, budgetChars: 10_000 });
+    expect(pack.manifest.dropped).toEqual(expect.arrayContaining([{ section: "notes", ref: "lib/code-review/notes/", reason: "listed the first 100 files; more rule notes may exist" }]));
+  });
+
   it("does not take a note under a nested lib/ directory, which agents can write, as a rule", async () => {
     const r = repo({ "apps/vivo/gate.yaml": "kind: AnalysisTemplate\n" }, { "apps/vivo/gate.yaml": "kind: AnalysisTemplate\nfailureLimit: 1\n" });
     const pack = await gatherContext({

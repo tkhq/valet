@@ -188,11 +188,13 @@ export async function gatherContext(input: GatherInput): Promise<ContextPack> {
     // terms and title pattern, so a rule never depends on a keyword search.
     let listed: { path: string }[] = [];
     try {
-      listed = (await mem.list(RULE_DIR, { limit: MAX_RULE_NOTES })).filter((f) => RULE_NOTES.test(f.path));
+      const all = await mem.list(RULE_DIR, { limit: MAX_RULE_NOTES });
+      // The limit counts every listed file, so a full page can hide rule notes even after the filter.
+      if (all.length >= MAX_RULE_NOTES) extraDrops.push({ section: "notes", ref: RULE_DIR, reason: `listed the first ${MAX_RULE_NOTES} files; more rule notes may exist` });
+      listed = all.filter((f) => RULE_NOTES.test(f.path));
     } catch (err) {
       extraDrops.push({ section: "notes", ref: `list ${RULE_DIR}`, reason: `failed: ${err instanceof Error ? err.message : String(err)}` });
     }
-    if (listed.length >= MAX_RULE_NOTES) extraDrops.push({ section: "notes", ref: RULE_DIR, reason: `listed the first ${MAX_RULE_NOTES} rule notes; more may exist` });
     let unmatchedRules = 0;
     for (const { path } of listed) {
       const file = await read(path);
