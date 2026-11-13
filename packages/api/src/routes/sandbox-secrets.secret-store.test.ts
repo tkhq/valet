@@ -349,6 +349,29 @@ describe("secret store service", () => {
     expect(decode(body.values[0])).toBe("second");
   });
 
+  it("deletes the oldest version first, so a failed delete never brings back an older value", async () => {
+    const fake = await bootWithStore();
+    const svc = api!.providers.secretStore;
+    await svc.saveValue(as("user-a"), personal, "K", "first");
+    const remove = fake.provider.remove;
+    fake.provider.remove = async () => {
+      throw new Error("transient");
+    };
+    await new Promise((r) => setTimeout(r, 2));
+    await svc.finishSave(as("user-a"), personal, "K", seal("second"), { replace: true });
+    fake.provider.remove = remove;
+    // Two versions are stored. The second delete fails.
+    let calls = 0;
+    fake.provider.remove = async (spaceId, name) => {
+      if (++calls === 2) throw new Error("transient");
+      return remove(spaceId, name);
+    };
+    await expect(svc.remove(as("user-a"), personal, "K")).rejects.toMatchObject({ kind: "provider" });
+    const token = await userSession("sess-r3", "user-a");
+    const body = (await (await resolve(["secret://personal/K"], token)).json()) as Resp;
+    expect(decode(body.values[0])).toBe("second");
+  });
+
   it("keeps two orgs' company secrets apart in the shared deployment space", async () => {
     const fake = await bootWithStore();
     const svc = api!.providers.secretStore;

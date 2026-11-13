@@ -26,13 +26,26 @@ describe("SecretRequestForm", () => {
     expect(JSON.stringify(onAnswered.mock.calls)).not.toContain("sk-the-value");
   });
 
-  it("answers with the reference when an earlier attempt already saved it", async () => {
+  it("does not answer the gate when the name already exists, because the typed value was not stored", async () => {
     saveSecretValue.mockRejectedValueOnce(new ApiError(409, "exists"));
     const onAnswered = vi.fn(async () => {});
     render(<SecretRequestForm request={personal} inset="" busy={false} onAnswered={onAnswered} onDecline={vi.fn()} />);
     fireEvent.change(screen.getByLabelText("Value for OPENAI_API_KEY"), { target: { value: "v" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(onAnswered).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toMatch(/already exists.*replace it or use another name/));
+    expect(onAnswered).not.toHaveBeenCalled();
+  });
+
+  it("retries only the answer after a save that succeeded", async () => {
+    saveSecretValue.mockReset().mockResolvedValueOnce({});
+    const onAnswered = vi.fn(async () => {}).mockRejectedValueOnce(new Error("socket closed"));
+    render(<SecretRequestForm request={personal} inset="" busy={false} onAnswered={onAnswered} onDecline={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("Value for OPENAI_API_KEY"), { target: { value: "v" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(screen.getByRole("alert")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onAnswered).toHaveBeenCalledTimes(2));
+    expect(saveSecretValue).toHaveBeenCalledTimes(1);
   });
 
   it("shows where the value is sent and replaces when the request says so", async () => {

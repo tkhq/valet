@@ -316,9 +316,11 @@ export function createSecretStoreService(deps: {
     return { spaceId, fullName, versions };
   }
 
-  /** Delete each stored version. */
+  /** Delete each stored version, oldest first. If a delete fails, the
+   * versions left are newer than the ones deleted, so reads still return
+   * the newest value and never an older one. */
   async function removeVersions(spaceId: string, versions: SecretMeta[]): Promise<void> {
-    for (const version of versions) {
+    for (const version of [...versions].reverse()) {
       await guarded("remove the old value", () => provider.remove(spaceId, version.name));
     }
   }

@@ -37,26 +37,32 @@ export function SecretRequestForm({
   const [value, setValue] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Set after this card stored the value: a retry only answers the gate.
+  const [saved, setSaved] = useState(false);
   const where = request.scope === "team" ? "This team's secrets" : "Your personal secrets";
   const disabled = busy || saving;
 
   async function submit(e: FormEvent) {
     e.preventDefault();
-    if (disabled || value.length === 0) return;
+    if (disabled || (!saved && value.length === 0)) return;
     setSaving(true);
     setError(null);
-    const target = request.scope === "team" && request.teamId ? { scope: "team" as const, teamId: request.teamId } : { scope: "personal" as const };
-    try {
-      await saveSecretValue(target, request.name, value, { replace: request.replace === true });
-    } catch (err) {
-      // Saved by an earlier attempt: answer with the reference anyway.
-      if (!(err instanceof ApiError && err.status === 409)) {
-        setError(errorText(err, "Could not save the value. Try again."));
+    if (!saved) {
+      const target = request.scope === "team" && request.teamId ? { scope: "team" as const, teamId: request.teamId } : { scope: "personal" as const };
+      try {
+        await saveSecretValue(target, request.name, value, { replace: request.replace === true });
+      } catch (err) {
+        setError(
+          err instanceof ApiError && err.status === 409
+            ? `A secret named ${request.name} already exists. Decline, then ask the agent to replace it or use another name.`
+            : errorText(err, "Could not save the value. Try again."),
+        );
         setSaving(false);
         return;
       }
+      setSaved(true);
+      setValue("");
     }
-    setValue("");
     try {
       await onAnswered(requestedReference(request));
     } catch (err) {
@@ -97,7 +103,7 @@ export function SecretRequestForm({
         <Button type="button" variant="ghost" size="sm" onClick={onDecline} disabled={disabled}>
           Decline
         </Button>
-        <Button type="submit" size="sm" disabled={disabled || value.length === 0}>
+        <Button type="submit" size="sm" disabled={disabled || (!saved && value.length === 0)}>
           {saving ? <Spinner size={14} /> : "Save"}
         </Button>
       </div>
