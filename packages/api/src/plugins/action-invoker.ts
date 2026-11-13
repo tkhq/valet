@@ -49,7 +49,7 @@ import {
 import type { WorkflowInvokeActionRequest, WorkflowInvokeActionResult } from "@valet/workflow";
 import type { Static } from "typebox";
 import type { AppDb } from "../lib/drizzle.js";
-import { qualifiedActionId } from "./action-id.js";
+import { actionIdResolver, canonicalActionIdFor, qualifiedActionId } from "./action-id.js";
 import { workspaceSenderIdentity } from "../services/workspace-sender.js";
 import { withSlackOwnerMetadata } from "../channels/identity-links.js";
 import { type ConnectMode, connectModeFor, findCredentialDeclaration } from "../services/integration-availability.js";
@@ -213,7 +213,9 @@ export function buildActionInvoker(opts: ActionInvokerOpts): ActionInvoker {
   const clock = opts.clock ?? Date.now;
 
   return async (req, ctx) => {
-    const actionId = req.action.includes(".") ? req.action : `${req.service}.${req.action}`;
+    // The scope holds canonical ids (`workflowStepToolScope`), so compare the
+    // canonical id of the requested action, resolved through the registry.
+    const actionId = canonicalActionIdFor(actionIdResolver(opts.actionPluginByService), req.service, req.action);
     if (!actionInScope(ctx.toolScope, actionId)) return { ok: false, error: scopeRefusal(actionId), errorCode: "policy_denied" };
     const existing = await selectStoredResult(opts.db, req.invocationId);
     if (existing) return existing;
@@ -316,7 +318,7 @@ export async function recordAttemptAudit(
   await persistInvocationAudit(opts.db, {
     invocationId: key,
     service: req.service,
-    actionId: actionId ?? (req.action.includes(".") ? req.action : `${req.service}.${req.action}`),
+    actionId: actionId ?? qualifiedActionId(req.service, { id: req.action }),
     ...(parked ? { resolvedMode: "require_approval" as const } : {}),
     status: result.ok ? "completed" : parked ? "pending" : "error",
     ...(!result.ok && "error" in result ? { error: result.error } : {}),
@@ -970,8 +972,7 @@ export async function externalActionMode(
 export function findAction(actions: PluginAction[], service: string, actionId: string): PluginAction | undefined {
   return actions.find((a) => {
     if (a.id === actionId) return true;
-    const fqid = a.id.includes(".") ? a.id : `${service}.${a.id}`;
-    return fqid === `${service}.${actionId}`;
+    return qualifiedActionId(service, a) === actionId || qualifiedActionId(service, a) === `${service}.${actionId}`;
   });
 }
 

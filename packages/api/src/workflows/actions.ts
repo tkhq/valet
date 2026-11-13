@@ -16,7 +16,7 @@ import {
 import { TeamAdminRequiredError } from "../services/team-deletion-access.js";
 import { submitDeletionRequest } from "../services/team-deletion-requests.js";
 import { proposalResult } from "../events/proposals.js";
-import { ValetError } from "@valet/shared";
+import { ValetError, qualifiedActionId } from "@valet/shared";
 import { WorkflowCursorError, type ValidateEnvironment, type WorkflowDefinition, type WorkflowEdge, type WorkflowRun } from "@valet/workflow";
 import type { Static, TSchema } from "typebox";
 import { Type } from "typebox";
@@ -1012,7 +1012,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       const checkpoint = (await deps.workflowStore.getCheckpoints(run_id)).find(cp => cp.nodeId === node_id && cp.iteration === (iteration ?? 0) && cp.status === "intent");
       const gateId = typeof checkpoint?.effects?.gateId === "string" ? checkpoint.effects.gateId : undefined;
       const step = node?.type === "tool" && typeof node.service === "string" && typeof node.action === "string"
-        ? (node.action.includes(".") ? node.action : `${node.service}.${node.action}`)
+        ? qualifiedActionId(node.service, node.action)
         : `step ${node_id}`;
       // A gate exists for a person. The agent relays the request, and the
       // person who answers this card resolves the gate under their own access,

@@ -1,4 +1,4 @@
-import { TOOL_INTENT_SCHEMA, actionInScope, deriveActionLabel, scopeRefusal, type SourceInput } from "@valet/shared";
+import { TOOL_INTENT_SCHEMA, actionInScope, deriveActionLabel, qualifiedActionId, scopeRefusal, type SourceInput } from "@valet/shared";
 import { IsObject, ObjectOptions, Type } from "typebox";
 import { Value } from "typebox/value";
 import type { Static, TSchema } from "typebox";
@@ -1022,7 +1022,7 @@ function buildEntries(
     }
     const entry: CatalogEntry = { service, plugin, action };
     entries.push(entry);
-    const fqid = action.id.includes(".") ? action.id : `${service}.${action.id}`;
+    const fqid = qualifiedActionId(service, action.id);
     byId.set(fqid, entry);
     // Allow a bare id lookup when unambiguous.
     if (action.id !== fqid && !byId.has(action.id)) byId.set(action.id, entry);
@@ -1042,7 +1042,7 @@ function buildCatalog(
     for (const action of plugin.actions) {
       const entry: CatalogEntry = { service: plugin.service, plugin, action };
       entries.push(entry);
-      const fqid = action.id.includes(".") ? action.id : `${plugin.service}.${action.id}`;
+      const fqid = qualifiedActionId(plugin.service, action.id);
       byId.set(fqid, entry);
       // Allow a bare id lookup when unambiguous.
       if (action.id !== fqid && !byId.has(action.id)) byId.set(action.id, entry);
@@ -2050,7 +2050,7 @@ function approvalModeFor(entry: CatalogEntry): ApprovalMode {
 }
 
 function qualifiedId(entry: CatalogEntry): string {
-  return entry.action.id.includes(".") ? entry.action.id : `${entry.service}.${entry.action.id}`;
+  return qualifiedActionId(entry.service, entry.action.id);
 }
 
 const serviceKey = (service: string) => service.toLowerCase().replaceAll("-", "_");

@@ -106,6 +106,27 @@ describe("POST /api/sandbox/actions/:toolId/invoke", () => {
     expect(await result.json()).toMatchObject({ status: "completed", result: { files: [] } });
   });
 
+  it("lets a step that names the service-prefixed spelling call its own action (2026-11-12 regression)", async () => {
+    // The step allows `google_workspace.drive.search_files`; the script calls
+    // the same action under either spelling. Before canonical ids, the route
+    // passed the prefixed spelling and the invoker then refused the canonical
+    // id `drive.search_files` as "outside this task's tool scope".
+    const definition: WorkflowDefinition = { version: "dag/v1", nodes: [
+      { id: "trigger", type: "trigger" },
+      { id: "fetch", type: "session", mode: "start", prompt: "Inspect", toolScope: { tools: ["bash"], actions: ["google_workspace.drive.search_files"] } },
+      { id: "stop", type: "stop" },
+    ], edges: [{ from: "trigger", to: "fetch" }, { from: "fetch", to: "stop" }] };
+    const token = await seed({ definition });
+    for (const spelling of ["google_workspace.drive.search_files", "drive.search_files"]) {
+      const result = await invoke(token, spelling);
+      expect(result.status, spelling).toBe(200);
+      expect(await result.json(), spelling).toMatchObject({ status: "completed", result: { files: [] } });
+    }
+    const denied = await invoke(token, "demo.echo");
+    expect(denied.status).toBe(403);
+    expect(echoCalls).toBe(0);
+  });
+
   it("refuses a script action outside its persisted step ceiling", async () => {
     const token = await seed();
     if (!api) throw new Error("test API missing");

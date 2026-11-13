@@ -1,5 +1,6 @@
-import { actionInScope, intersectToolScopes, readToolScope, scopeRefusal, TOOL_SCOPE_KEY } from "@valet/shared";
+import { actionInScope, canonicalizeToolScope, intersectToolScopes, readToolScope, scopeRefusal, TOOL_SCOPE_KEY } from "@valet/shared";
 import { workflowStepToolScope } from "../workflows/tool-scope.js";
+import { actionIdResolver, canonicalActionIdFor } from "../plugins/action-id.js";
 /**
  * `POST /api/sandbox/actions/:toolId/invoke`: a workflow step's script calls
  * an integration action with the same power as the step's agent.
@@ -67,9 +68,15 @@ sandboxActionsRouter.post("/actions/:toolId/invoke", async (c) => {
   }
   const session = await c.var.providers.engineStore.getSession(sandbox.sessionId);
   const threads = await c.var.providers.engineStore.listThreads(sandbox.sessionId);
-  const scope = intersectToolScopes(workflowStepToolScope(run.params, run.definition, nodeId), readToolScope(session?.metadata?.[TOOL_SCOPE_KEY]),
-    ...threads.map((thread) => readToolScope(thread.metadata?.[TOOL_SCOPE_KEY])));
-  if (!actionInScope(scope, toolId)) return c.json({ error: scopeRefusal(toolId) }, 403);
+  // Every layer and the requested action use canonical ids, so a script may
+  // name `google_workspace.sheets.write_spreadsheet` or
+  // `sheets.write_spreadsheet` and get the same answer the invoker gives.
+  const resolver = actionIdResolver(c.var.providers.actionPluginByService);
+  const scope = intersectToolScopes(workflowStepToolScope(run.params, run.definition, nodeId, resolver),
+    canonicalizeToolScope(readToolScope(session?.metadata?.[TOOL_SCOPE_KEY]), resolver),
+    ...threads.map((thread) => canonicalizeToolScope(readToolScope(thread.metadata?.[TOOL_SCOPE_KEY]), resolver)));
+  const actionId = canonicalActionIdFor(resolver, parsed.service, parsed.action);
+  if (!actionInScope(scope, actionId)) return c.json({ error: scopeRefusal(actionId) }, 403);
   // A key is namespaced by run, step, tool, and params, as the broker does.
   const invocationId = `wf:${runId}:${nodeId}:script:${typeof key === "string" ? `${toolId}:${paramsDigest(params)}:${key}` : randomUUID()}`;
   const result = await invokeOnce(c.var.providers.db, invocationId, typeof key === "string", (id) => buildActionInvoker(invokerOpts(c))(
