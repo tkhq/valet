@@ -747,6 +747,37 @@ describe("review-pull-request handler", () => {
     expect(store.pointers()?.findings[0]).toMatchObject({ id: "f1", status: "resolved", fixedIn: H2 });
   });
 
+  it("counts a cited guard further up the same file as a fix", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const handler = createReviewHandler({ fetch: gh.fetch });
+    await handler.handle(event("ev1"), context(new FakeThreads(scripted(reviewOf([finding({ line: 15 })]), {})), store));
+
+    // Line 5 gains a guard; the lines around line 15 read the same.
+    gh.head = H2;
+    gh.contentsAt[H2] = { "a.ts": editedA(5) };
+    await handler.handle(event("ev2"), context(new FakeThreads(scripted(reviewOf([]), {
+      "Null deref in parse": verdict("refuted", { counter_evidence: "a.ts:5 returns early on empty input" }),
+    })), store));
+    expect(store.pointers()?.findings[0]).toMatchObject({ id: "f1", status: "resolved", fixedIn: H2 });
+  });
+
+  it("does not count an unrelated edit in a cited file as a fix", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const handler = createReviewHandler({ fetch: gh.fetch });
+    gh.contentsAt[H1] = { "a.ts": editedA(0), "b.ts": editedA(0) };
+    await handler.handle(event("ev1"), context(new FakeThreads(scripted(reviewOf([finding({})]), {})), store));
+
+    // b.ts changes at line 40; the refutation cites b.ts:3, which reads the same.
+    gh.head = H2;
+    gh.contentsAt[H2] = { "a.ts": editedA(0), "b.ts": editedA(40) };
+    await handler.handle(event("ev2"), context(new FakeThreads(scripted(reviewOf([]), {
+      "Null deref in parse": verdict("refuted", { counter_evidence: "b.ts:3 validates input before parse runs" }),
+    })), store));
+    expect(store.pointers()?.findings[0]).toMatchObject({ id: "f1", status: "resolved", withdrawnAt: H2 });
+  });
+
   it("withdraws a finding that cites a rule file only when the refutation cites that rule", async () => {
     const gh = new FakeGitHub();
     const store = new FakeStore();

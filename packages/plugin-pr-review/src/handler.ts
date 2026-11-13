@@ -610,18 +610,32 @@ function resolvedAt(head: string, withdrawn: boolean): Pick<FindingPointer, "fix
 
 /** Lines on each side of a finding that must read the same for its code to count as unchanged. */
 const FLAGGED_CONTEXT = 2;
-/** Files cited in a refutation that are compared, besides the finding's own file. */
-const MAX_CITED_FILES = 3;
-const CITED_PATH = /[\w./-]+\.\w+(?=:\d)/g;
+/** Lines on each side of a line the refutation cites, compared the same way. */
+const CITED_CONTEXT = 1;
+/** Lines cited in a refutation that are compared. */
+const MAX_CITED_LINES = 4;
+const CITED_LINE = /([\w./-]+\.\w+):(\d+)/g;
+
+/** The lines around 1-based `line`, trimmed and joined. */
+function linesAround(text: string, line: number, context: number): string {
+  return text.split("\n").slice(Math.max(0, line - 1 - context), line + context).map((l) => l.trim()).join("\n");
+}
+
+/** Whether `block` (from `linesAround`) appears in `text` as whole lines, ignoring indentation. */
+function hasBlock(text: string, block: string): boolean {
+  return `\n${text.split("\n").map((l) => l.trim()).join("\n")}\n`.includes(`\n${block}\n`);
+}
 
 /**
  * Whether the code behind a refuted finding changed between `from`, the head
  * it was last open on, and `head`. A refutation on unchanged code withdraws
  * the finding: the reviewer changed its mind, and no commit fixed anything.
- * - The finding's own file counts when the lines around the finding are gone
- *   from it. For a LEFT finding (a deleted line), any change to the file counts.
- * - A file the refutation cites counts when it changed at all, so a fix in a
- *   caller or a new test still reads as a fix.
+ * - The lines around the finding are gone from its file. For a LEFT finding
+ *   (a deleted line), any change to the file counts.
+ * - A line the refutation cites as path:line at HEAD, with its neighbours, is
+ *   new since `from`, in any file. So a guard added further up the same
+ *   function, a fix in a caller, or a new test reads as a fix, and an
+ *   unrelated edit elsewhere in a cited file does not.
  * A GitHub read error throws and fails the delivery, like the other reads.
  */
 export async function flaggedCodeChanged(
@@ -632,23 +646,29 @@ export async function flaggedCodeChanged(
   evidence: string,
   repoName: string,
 ): Promise<boolean> {
-  const [before, after] = await Promise.all([gh.fileText(f.path, from), gh.fileText(f.path, head)]);
+  const texts = new Map<string, Promise<[string | undefined, string | undefined]>>();
+  const read = (path: string) => {
+    let pair = texts.get(path);
+    if (!pair) texts.set(path, (pair = Promise.all([gh.fileText(path, from), gh.fileText(path, head)])));
+    return pair;
+  };
+  const [before, after] = await read(f.path);
   if (f.side === "LEFT" || before === undefined || after === undefined) {
     if (before !== after) return true;
-  } else {
-    const trimmed = (lines: string[]) => lines.map((l) => l.trim()).join("\n");
-    const flagged = trimmed(before.split("\n").slice(Math.max(0, f.line - 1 - FLAGGED_CONTEXT), f.line + FLAGGED_CONTEXT));
-    if (!`\n${trimmed(after.split("\n"))}\n`.includes(`\n${flagged}\n`)) return true;
+  } else if (!hasBlock(after, linesAround(before, f.line, FLAGGED_CONTEXT))) {
+    return true;
   }
   // Evidence sometimes prefixes a path with the repository, as `owner/name/` or `name/`.
   const prefixes = [`${repoName}/`, `${repoName.split("/").pop()}/`];
   const unprefixed = (path: string): string => prefixes.reduce((p, pre) => (p.startsWith(pre) ? p.slice(pre.length) : p), path);
-  const cited = [...new Set([...evidence.matchAll(CITED_PATH)].map((m) => unprefixed(m[0])))]
-    .filter((path) => path !== f.path)
-    .slice(0, MAX_CITED_FILES);
-  for (const path of cited) {
-    const [a, b] = await Promise.all([gh.fileText(path, from), gh.fileText(path, head)]);
-    if (a !== b) return true;
+  const cited = [...new Map([...evidence.matchAll(CITED_LINE)].map((m) => {
+    const path = unprefixed(m[1]);
+    return [`${path}:${m[2]}`, { path, line: Number(m[2]) }] as const;
+  })).values()].slice(0, MAX_CITED_LINES);
+  for (const { path, line } of cited) {
+    const [a, b] = await read(path);
+    if (b === undefined) continue;
+    if (a === undefined || !hasBlock(a, linesAround(b, line, CITED_CONTEXT))) return true;
   }
   return false;
 }
