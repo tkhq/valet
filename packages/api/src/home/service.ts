@@ -339,8 +339,7 @@ export async function listHomeTasks(deps: HomeDeps, user: HomeUser): Promise<Hom
       const finishedTask = !thread.question && startedByThread.has(key);
       const row = decorate({ id: `waiting:${key}`, sessionId: thread.sessionId, threadId: thread.threadId, title: thread.title,
         workspace: wsRef(ws), state: finishedTask ? "done" : "waiting", updatedAt: thread.lastAgentActivityAt,
-        ...(thread.question ? { detail: thread.question, question: true } : thread.preview ? { detail: thread.preview } : {}),
-        ...(thread.unread ? { unread: true } : {}) });
+        ...(thread.question ? { detail: thread.question, question: true } : thread.preview ? { detail: thread.preview } : {}) });
       // A reply without a question is not a task: the thread list shows it.
       if (!thread.question && !finishedTask) continue;
       (thread.question ? needsYou : finishedFromReplies).push(row);

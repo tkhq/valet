@@ -46,7 +46,6 @@ export {
   fileReviewState,
   memoryReviewState,
   openFindings,
-  pluginStoreReviewState,
   type PullRequestReviewState,
   type ReviewRound,
   type ReviewStateStore,

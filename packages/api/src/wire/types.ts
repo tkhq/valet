@@ -6975,7 +6975,6 @@ export interface HomeTaskItem {
   /** Valet's question, or the last sentence of its reply, as plain text. */
   detail?: string;
   question?: boolean;
-  unread?: boolean;
   updatedAt: number;
   /** Set for work the person started from home. Only they can mark it done. */
   homeTaskId?: string;
