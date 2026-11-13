@@ -321,6 +321,7 @@ const verdict = (v: Verdict["verdict"], over: Partial<Verdict> = {}): Verdict =>
   evidence: "a.ts:5 reads input[0]",
   trigger: "empty input",
   introduced_by_pr: true,
+  refutation_attempt: "checked callers",
   counter_evidence: v === "refuted" ? "a.ts:4 returns early on empty input" : "",
   verdict: v,
   ...(v === "refuted" ? { refutation_reason: "guarded" as const } : {}),
@@ -424,6 +425,41 @@ describe("review-pull-request handler", () => {
         { id: "f2", path: "a.ts", line: 40, status: "open" },
       ],
     });
+  });
+
+  it("lists a finding the verifier cannot confirm in the summary only, and keeps it there", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const answers = scripted(
+      reviewOf([finding({ title: "Null deref in parse" }), finding({ line: 9, severity: "low", title: "Unclear retry in fetch" })]),
+      { "Unclear retry in fetch": verdict("unverifiable", { evidence: "the retry policy lives in an external client" }) },
+    );
+    const threads = new FakeThreads(answers);
+    const handler = createReviewHandler({ fetch: gh.fetch });
+    await handler.handle(event("ev1", "github.pull_request.opened"), context(threads, store, { verify: true, contextBudget: 0, instructions: "Prefer typed errors." }));
+
+    const [review] = [...gh.reviews.values()];
+    expect(gh.comments.map((c) => c.line)).toEqual([5]);
+    expect(review.body).toContain("Open findings (2)");
+    expect(review.body).toContain("Unclear retry in fetch (not confirmed)");
+    expect(review.body).toContain("Findings the verifier could not confirm (1)");
+    expect(parseFindings(review.body).get("f2")?.title).toBe("Unclear retry in fetch");
+    expect(store.pointers()?.findings).toContainEqual({ id: "f2", path: "a.ts", line: 9, status: "open", unconfirmed: true });
+
+    // The verifier sees the PR as the reviewer did: the description, the diff and the line's instructions.
+    const verifier = threads.spawned.find((s) => s.req.role === "pr-verifier");
+    expect(verifier?.req.prompt).toMatch(/<pr-description>\nAdds a\.\n<\/pr-description>/);
+    expect(verifier?.req.prompt).toContain("+++ b/a.ts");
+    expect(verifier?.req.prompt).toContain("Prefer typed errors.");
+
+    // A later review rechecks it and keeps it in the summary.
+    const again = new FakeThreads(answers);
+    await handler.handle(event("ev2", MANUAL_REVIEW_EVENT, { requestedBy: "user-1" }), context(again, store, { verify: true, contextBudget: 0 }));
+    expect(again.spawned.some((c) => c.dispatchId.endsWith(":recheck:f2"))).toBe(true);
+    const body = gh.reviews.get(review.id)?.body ?? "";
+    expect(body).toContain("Findings the verifier could not confirm (1)");
+    expect(body).not.toContain("Findings outside the diff");
+    expect(gh.comments.map((c) => c.line)).toEqual([5]);
   });
 
   it("edits the same review on the next push, marks fixed findings and reviews only new commits", async () => {
@@ -1207,6 +1243,9 @@ describe("review helpers", () => {
 
   it("lists the lines a review comment can anchor to", () => {
     expect([...commentableLines("@@ -10,3 +10,4 @@\n ctx\n-old\n+new\n+added\n ctx2\n\\ No newline at end of file")]).toEqual([10, 11, 12, 13]);
+    // Without context lines: only the lines the PR adds, so an unchanged context line can still be pre-existing.
+    expect([...commentableLines("@@ -10,3 +10,4 @@\n ctx\n-old\n+new\n+added\n ctx2", "RIGHT", false)]).toEqual([11, 12]);
+    expect([...commentableLines("@@ -10,4 +10,3 @@\n ctx\n-old\n-gone\n+new\n ctx2", "LEFT", false)]).toEqual([11, 12]);
   });
 
   it("finds the commentable line nearest a finding, at most 3 lines away, the line above winning a tie", () => {
@@ -1271,6 +1310,24 @@ describe("review-pull-request handler stages", () => {
     const summary = [...gh.reviews.values()][0].body;
     expect(summary).toContain("<details><summary>Team rules and lessons applied (1)</summary>\n\n- `lib/code-review/notes/parse.md`");
     expect(store.pointers()?.rounds?.[0]).toMatchObject({ rules: ["lib/code-review/notes/parse.md"] });
+  });
+
+  it("gives a recheck the pack's rules, waiting for the reviewer child to gather them", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const handler = createReviewHandler({ fetch: gh.fetch });
+    await handler.handle(event("ev1"), context(new FakeThreads(scripted(reviewOf([finding({})]), {})), store, { contextBudget: 0 }));
+
+    gh.head = H2;
+    gh.contentsAt[H2] = { "a.ts": editedA(40) };
+    gh.contentsAt[BASE] = { ...gh.contentsAt[BASE], "AGENTS.md": "Always validate parse input.\n" };
+    const threads = new FakeThreads(scripted(reviewOf([]), {}));
+    threads.checkout = repoOf({ "AGENTS.md": "Always validate parse input.\n", "a.ts": "export function parse() {}\n" });
+    await handler.handle(event("ev2"), context(threads, store));
+
+    const recheck = threads.spawned.find((s) => s.dispatchId.endsWith(":recheck:f1"));
+    expect(recheck?.req.prompt).toContain("## Rules the reviewer had");
+    expect(recheck?.req.prompt).toContain("Always validate parse input.");
   });
 
   it("runs the repo-wide team-notes search only when no pack replaces the prompt", async () => {

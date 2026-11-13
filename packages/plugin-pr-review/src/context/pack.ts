@@ -96,6 +96,20 @@ const SECTION_TITLE: Record<SectionName, string> = {
   memory: "Team principles and notes (background, not review rules)",
 };
 
+/**
+ * The rule sections of a rendered pack: repository conventions, domain notes
+ * and learned lessons. The verifier gets these, not the code sections it can
+ * read itself.
+ */
+export function packRules(text: string): string {
+  const wanted = new Set([SECTION_TITLE.conventions, SECTION_TITLE.notes, SECTION_TITLE.learned]);
+  return text
+    .split(/^(?=### )/m)
+    .filter((chunk) => wanted.has(chunk.slice(4, chunk.indexOf("\n") === -1 ? undefined : chunk.indexOf("\n")).trim()))
+    .join("")
+    .trim();
+}
+
 const ORDER: SectionName[] = ["conventions", "notes", "learned", "definitions", "callers", "tests", "memory"];
 
 /** A symbol with more references than this is not expanded into callers: its references say nothing about one change. */

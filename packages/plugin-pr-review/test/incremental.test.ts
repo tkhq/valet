@@ -44,7 +44,7 @@ async function submit(spec: AgentSpec, name: string, args: unknown): Promise<voi
   await tool.execute(args as never, {} as ToolContext);
 }
 
-const confirm = { located_code: "x", evidence: "e", trigger: "t", introduced_by_pr: true, counter_evidence: "", verdict: "unverifiable" };
+const confirm = { located_code: "x", evidence: "e", trigger: "t", introduced_by_pr: true, refutation_attempt: "r", counter_evidence: "", verdict: "unverifiable" };
 
 /** Scripted agents: the reviewer posts `findings`; verifiers keep everything; rechecks refute when told to. */
 function agents(findings: ReturnType<typeof finding>[], opts: { refuteRecheck?: boolean; prompts?: string[] } = {}): AgentRunner {

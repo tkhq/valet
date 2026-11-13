@@ -27,6 +27,7 @@ import {
   type PackMemory,
 } from "../src/index.js";
 import { matchesGlob } from "../src/context/glob.js";
+import { packRules } from "../src/context/pack.js";
 
 /** A git repo with one base commit and one head commit; a `null` in `change` deletes that file. */
 function repo(files: Record<string, string>, change: Record<string, string | null>): { dir: string; base: string; head: string; patch: string } {
@@ -218,6 +219,21 @@ describe("gatherContext", () => {
     expect(pack.text).toContain("- diff: gen/x.pb.go (generated)");
     expect(pack.manifest.items.map((i) => i.section)).toEqual(expect.arrayContaining(["conventions", "definitions", "callers", "tests", "memory"]));
     expect(pack.manifest.dropped).toEqual(expect.arrayContaining([{ section: "conventions", ref: "1 playbook(s)", reason: "no match with the changed paths or title" }]));
+  });
+
+  it("gives the verifier only the pack's rule sections", async () => {
+    const r = repo(BASE_FILES, {
+      "src/cart.ts": "import { parseAmount } from \"./money\";\n\nexport function cartTotal(items: string[], tax = 0): number {\n  return items.reduce((sum, raw) => sum + parseAmount(raw), 0) * (1 + tax);\n}\n",
+    });
+    const pack = await gatherContext({ runner: localRunner(r.dir), readTrusted: (p) => gitFileAt(r.dir, r.base, p), patch: r.patch, diffDropped: [], title: "Add tax to cart payments total", budgetChars: 20_000 });
+    const rules = packRules(pack.text);
+    expect(rules).toMatch(/^### Repository conventions/);
+    expect(rules).toContain("#### AGENTS.md (repo root)");
+    expect(rules).not.toContain("parseAmount` at src/money.ts:1");
+    expect(rules).not.toContain("test/cart.test.ts");
+    expect(packRules("## Context pack\nnothing")).toBe("");
+    const learned = "### Learned from past reviews (team feedback, not repository rules)\n\nThe formatter hook formats on commit.\n";
+    expect(packRules(`## Context pack\n\n${learned}### Tests that touch the change (PR head, untrusted code)\n\nx\n`)).toBe(learned.trim());
   });
 
   it("adds a team-memory note whose terms match the added lines, and ships no notes of its own", async () => {

@@ -73,6 +73,7 @@ export async function reviewPullRequestIncrement(
       base: mergeBase,
       head,
       title: opts.title,
+      body: opts.body,
       finding: f,
       label: `recheck:${i}`,
       ...(from !== undefined ? { recheckFrom: from } : {}),

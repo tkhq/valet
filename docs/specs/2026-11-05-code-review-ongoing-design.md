@@ -170,3 +170,75 @@ a lesson for every change in every repository. The owner's other principles
 are listed by title. Keyword search skips learned files, so a lesson does not
 appear twice. A person edits or
 deletes a lesson in Memory like any other file.
+
+## Verifier
+
+Every review rechecks each open finding on a file the new commits changed.
+A recheck that refutes the claim resolves the finding as fixed or withdrawn.
+With `verify` on, each new finding also gets a check before it posts. The
+verifier is a fact-checker. It answers one question: is the claim true at the
+PR head? It does not judge severity, style, or whether the finding is worth
+posting. Other review tools found that a model that rates the worth of its
+own findings does little better than chance. That judgment belongs to the
+team, through review feedback.
+
+- **Same inputs as the reviewer.** The verifier prompt carries the PR title,
+  the PR description, the whole PR diff with the claim's file first (60,000
+  characters), the line's instructions, and the context pack's conventions,
+  domain notes and learned lessons. It reads code at the PR head with read-only tools.
+- **Three verdicts.** `confirmed` names the trigger and wrong result, or
+  quotes a false statement and the code it contradicts. `refuted` needs one
+  reason: `not_found`, `guarded` or `misread` (both cite code as path:line),
+  or `pre_existing`. `unverifiable` says what the repository does not show.
+  A small or intended-looking problem that is true is confirmed.
+- **The handler checks the verifier.** A confirmation whose quoted code is
+  not in the file is unverifiable. A `pre_existing` refutation of a line
+  the PR adds or deletes breaks the scope rule. With a quoted line and a trigger it
+  counts as confirmed, else as unverifiable. A refutation of a claim that
+  cites a rule file must cite the same file.
+- **Verdicts set where a finding goes.** Confirmed findings, and findings
+  with no verdict, post inline. Refuted findings are dropped. Unverifiable
+  findings post inline at high or critical severity. Below that, the summary
+  lists them under "Findings the verifier could not confirm", with no inline
+  comment. The pointer keeps `unconfirmed`, so later reviews keep them there.
+- **The verifier must try to refute before it confirms.** It looks for
+  formatter and CI config, module versions and release rules, library
+  behavior, and whether the trigger is reachable, and records the search. A
+  confirmation with no refutation attempt is unverifiable.
+
+On 2026-11-13 a replay scored the verifier against 57 live findings with
+human labels, with three single runs of each prompt:
+
+| | Previous verifier | Without the refutation step | With it |
+|---|---|---|---|
+| Real low findings kept (of 11) | 7 | 11, 11, 11 | 10, 11, 11 |
+| Real medium or higher kept (of 11) | 8 | 10, 11, 11 | 9, 11, 10 |
+| Wrong low findings off inline (of 6) | 4 | 1, 4, 2 | 3, 3, 4 |
+
+Identical runs disagree on 10 of the 57 findings. A majority vote of three
+runs scored the same as the middle single run, at three times the cost, so
+the verifier runs once. Repeated runs of one model share its errors, so a
+vote cannot remove a wrong verdict that every run reaches. On the real
+findings, the verifier refutes fewer claims than the previous one did (0 to
+3 per run, against 7). That matters because rechecks run on every line, and
+a refuted recheck withdraws a finding. The two wrong low findings that every
+run confirms depend on team conventions: a formatter hook, and the release
+rules of v0 modules. Learned review lessons cover those better than a
+second model can. The bar is 5 of 6, so keep `verify` off on live lines.
+
+## Measuring reviews
+
+Hand labels do not scale, and a replay of 57 findings cannot separate a
+small change from noise. The eval package's `review-outcomes` command
+measures every live review without labels. For each review comment on a
+merged pull request, it checks whether the author changed the flagged lines
+before the merge. The address rate is the share of comments the author
+acted on. Other review tools use the same signal: the share of flagged
+problems that the author resolves before merge.
+
+A changed line does not prove the comment right, and an ignored comment can
+be correct. Use the address rate to compare reviewer versions, verifier
+settings and other reviewers on the same repositories and dates. Each row
+also carries the PR and the comment's commit, so it can become a replay
+case. Address-rate rows start to cover a reviewer version only after its
+pull requests merge.

@@ -24,6 +24,7 @@ export {
 } from "./pipeline.js";
 export {
   buildVerifierPrompt,
+  claimDiff,
   createVerifierSpec,
   decideFinding,
   quoteInFile,
@@ -31,6 +32,7 @@ export {
   VerdictSchema,
   type FinalVerdict,
   type Verdict,
+  type FindingTier,
   type VerifierPromptInput,
   type VerifierSpec,
 } from "./verify.js";
