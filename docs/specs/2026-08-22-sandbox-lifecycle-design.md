@@ -193,8 +193,10 @@ defects. Both are fixed; decision 6 (no age-based kill) stands.
    the session `hibernated` with `sandbox_reclaimed_at`, the state the
    hibernation reaper leaves. A wake makes it `active` again. A failed release is reported (`child_workspace_release`) and
    counted. `valet_children_reclaimed_active`,
-   `valet_child_workspaces{state}`, `valet_child_workspace_bytes` and
-   `valet_child_reclaim_failures_total` feed two alerts. Nothing retries a
+   `valet_child_workspaces{state}` and
+   `valet_child_reclaim_failures_total` feed two alerts. A byte gauge over
+   the root walked every child's files every 10 minutes and fed no alert, so
+   it was removed (2026-11-13). Nothing retries a
    failed release in the background.
 4. **The `/workspace` claim drops to 1Gi and is finally configurable.**
    `K8sProviderConfig.defaultStorage` existed but nothing ever set it, so

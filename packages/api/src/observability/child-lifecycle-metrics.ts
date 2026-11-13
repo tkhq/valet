@@ -10,8 +10,6 @@
  * - `valet_child_workspaces{state}`: working directories on the api host,
  *   `live` (sandbox not reclaimed) or `retired` (reclaimed, but files are
  *   still in it; retire empties it). Expected `retired` = 0.
- * - `valet_child_workspace_bytes`: bytes under the working-directory root,
- *   sampled every 10 minutes.
  *
  * Alert on them; no code repairs them (repo rule: alert, don't auto-repair).
  */
@@ -59,19 +57,6 @@ export async function childWorkspaceCounts(db: AppDb, root: string): Promise<{ l
   return { live: names.length - retired.size, retired: notEmpty };
 }
 
-/** Bytes under `dir`. Entries the api user cannot read count as 0. */
-export async function directoryBytes(dir: string): Promise<number> {
-  let total = 0;
-  const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
-  for (const entry of entries) {
-    const path = join(dir, entry.name);
-    if (entry.isDirectory()) total += await directoryBytes(path);
-    else total += (await fs.lstat(path).catch(() => null))?.size ?? 0;
-  }
-  return total;
-}
-
-const BYTES_SAMPLE_MS = 10 * 60_000;
 const registered = new WeakSet<AppDb>();
 
 export function registerChildLifecycleMetrics(db: AppDb, root: string): void {
@@ -88,12 +73,4 @@ export function registerChildLifecycleMetrics(db: AppDb, root: string): void {
     result.observe(counts.live, { state: "live" });
     result.observe(counts.retired, { state: "retired" });
   });
-  // A walk of a large root is slow, so it runs on its own timer and the gauge reports the last sample.
-  let bytes = 0;
-  const sample = () => void directoryBytes(root).then((n) => { bytes = n; }, () => undefined);
-  sample();
-  setInterval(sample, BYTES_SAMPLE_MS).unref();
-  meter.createObservableGauge("valet_child_workspace_bytes", {
-    unit: "By", description: "Bytes under the child working-directory root, sampled every 10 minutes",
-  }).addCallback((result) => result.observe(bytes));
 }
