@@ -4,7 +4,7 @@ import { normalizeGatePath } from "./builtin-tools/index.js";
 import { skillFileManifest } from "./roles-skills/loader.js";
 import { failedToolResultText, toolResultText } from "./tool-result-text.js";
 import { renderAppPageHint } from "./app-page-hint.js";
-import { stripToolIntent, type ToolUsageFact, CONTINUATION_SOURCE_ITEM_KEY, actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, MODEL_CALL_LIMIT_KEY, readModelCallLimit, readThreadPlan, readTurnPlans, TURN_PLAN_HISTORY_KEY, TURN_PLAN_HISTORY_LIMIT, readToolScope, THREAD_PLAN_KEY, toolInScope, TOOL_SCOPE_KEY, THREAD_SOURCE_SEQ_KEY, UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY, type ThreadPlan, type ThreadPlanItem, type ToolScope } from "@valet/shared";
+import { stripToolIntent, type ToolUsageFact, CONTINUATION_SOURCE_ITEM_KEY, actionInScope, canonicalizeToolScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, MODEL_CALL_LIMIT_KEY, readModelCallLimit, readThreadPlan, readTurnPlans, TURN_PLAN_HISTORY_KEY, TURN_PLAN_HISTORY_LIMIT, readToolScope, THREAD_PLAN_KEY, toolInScope, TOOL_SCOPE_KEY, THREAD_SOURCE_SEQ_KEY, UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY, type ThreadPlan, type ThreadPlanItem, type ToolScope } from "@valet/shared";
 import { mergeAppearance, readAppearance, type Appearance } from "@valet/shared";
 import { classifyProviderFailure, isNonRetryableProviderFailure, isUsageLimitFailure, isRateLimitedProviderFailure } from "@valet/shared";
 import { Agent } from "@earendil-works/pi-agent-core";
@@ -20,7 +20,7 @@ import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import { getCurrentSystemMessage } from "@earendil-works/pi-ai/utils/transcript";
 import { classifyCacheBreak, type CacheTurnSnapshot } from "./cache-telemetry.js";
 import { NativeImageBridge, NATIVE_IMAGE_RESULT_TOOL, NATIVE_IMAGE_PLUGIN_ACTION, NATIVE_IMAGE_EDIT_ACTION, NATIVE_IMAGE_TOOL_PARAMS } from "./native-images.js";
-import { isToolDiscoveryApproval, recordHostedActionInvocation, resolveUngatedAction, type HostedActionGrant } from "./plugin-catalog.js";
+import { catalogActionIdResolver, isToolDiscoveryApproval, recordHostedActionInvocation, resolveUngatedAction, type HostedActionGrant } from "./plugin-catalog.js";
 import { bundledModel } from "./model-catalog.js";
 import { appendRuntimeModelContext, entryMessageTime, messageTimeLine, threadStartedSection, type MessageTime } from "./model-context.js";
 import { recordCacheBreak, recordToolResultCapped } from "./metrics.js";
@@ -1086,7 +1086,7 @@ export class Thread {
       model: newest.model,
       role: newest.role,
       author: newest.author,
-      metadata: { overheardDigest: digest, ...(presence ? { presence } : {}), ...scopeMetadata(coalescible.map((item) => item.metadata)) },
+      metadata: { overheardDigest: digest, ...(presence ? { presence } : {}), ...scopeMetadata(coalescible.map((item) => item.metadata), (scope) => this.canonicalToolScope(scope)) },
     });
     const { item: admittedMerged } = await store.admitSubmission(this.session.id, this.id, merged);
     for (const constituent of coalescible) {
@@ -1360,7 +1360,7 @@ export class Thread {
         replyTarget: collecting[0].replyTarget,
         model: collecting[0].model,
         metadata: { collect: { constituentIds: collecting.map((i) => i.id) },
-          ...scopeMetadata(collecting.map((item) => item.metadata)) },
+          ...scopeMetadata(collecting.map((item) => item.metadata), (scope) => this.canonicalToolScope(scope)) },
       });
       const { item: admittedMerged } = await store.admitSubmission(this.session.id, this.id, merged);
       for (const constituent of collecting) {
@@ -7507,13 +7507,28 @@ export class Thread {
   }
 
   toolScopeCeiling(): ToolScope | undefined {
-    return intersectToolScopes(this.session.options.toolScope, readToolScope(this.runningItem?.metadata?.[TOOL_SCOPE_KEY]),
-      this.runningItem?.metadata?.[INHERIT_TOOL_SCOPE_KEY] === true ? readToolScope(this.threadMetadata?.[CONTINUATION_TOOL_SCOPE_KEY]) : undefined);
+    return intersectToolScopes(this.canonicalToolScope(this.session.options.toolScope),
+      this.canonicalToolScope(readToolScope(this.runningItem?.metadata?.[TOOL_SCOPE_KEY])),
+      this.runningItem?.metadata?.[INHERIT_TOOL_SCOPE_KEY] === true
+        ? this.canonicalToolScope(readToolScope(this.threadMetadata?.[CONTINUATION_TOOL_SCOPE_KEY])) : undefined);
   }
 
   effectiveToolScope(): ToolScope | undefined {
     return intersectToolScopes(this.toolScopeCeiling(),
-      readToolScope(this.threadMetadata?.[TOOL_SCOPE_KEY]));
+      this.canonicalToolScope(readToolScope(this.threadMetadata?.[TOOL_SCOPE_KEY])));
+  }
+
+  /**
+   * One scope layer in canonical action ids. Each layer is canonicalized
+   * before the layers intersect: `google_workspace.*` and
+   * `sheets.write_spreadsheet` name the same action only once both are
+   * canonical (`@valet/shared` action-id rule 3). Every tool context reads
+   * its scope through `effectiveToolScope`, so this is the one place an
+   * agent's scope is canonicalized.
+   */
+  canonicalToolScope(scope: ToolScope | undefined): ToolScope | undefined {
+    const catalog = this.session.options.pluginCatalog;
+    return catalog ? canonicalizeToolScope(scope, catalogActionIdResolver(catalog)) : scope;
   }
 
   /**
@@ -7662,6 +7677,7 @@ export class Thread {
     return {
       get toolScope() { return thread.effectiveToolScope(); },
       get toolScopeCeiling() { return thread.toolScopeCeiling(); },
+      canonicalToolScope: (scope) => thread.canonicalToolScope(scope),
       setToolFocus: (scope) => this.setToolFocus(scope),
       setThreadPlan: (items, title) => this.setPlan(items, title),
       allocateSourceIds: (count) => this.allocateSourceIds(count),
@@ -9544,8 +9560,8 @@ function refuseOutsideAuthors(def: ToolDef): ToolDef {
   };
 }
 
-function scopeMetadata(items: (Record<string, unknown> | undefined)[]): Record<string, unknown> {
-  const toolScope = intersectToolScopes(...items.map((metadata) => readToolScope(metadata?.[TOOL_SCOPE_KEY])));
+function scopeMetadata(items: (Record<string, unknown> | undefined)[], canonical: (scope: ToolScope | undefined) => ToolScope | undefined): Record<string, unknown> {
+  const toolScope = intersectToolScopes(...items.map((metadata) => canonical(readToolScope(metadata?.[TOOL_SCOPE_KEY]))));
   return toolScope ? { [TOOL_SCOPE_KEY]: toolScope } : {};
 }
 

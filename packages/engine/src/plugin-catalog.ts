@@ -1,4 +1,4 @@
-import { TOOL_INTENT_SCHEMA, actionInScope, deriveActionLabel, qualifiedActionId, scopeRefusal, type SourceInput } from "@valet/shared";
+import { TOOL_INTENT_SCHEMA, actionInScope, buildActionIdResolver, deriveActionLabel, qualifiedActionId, scopeRefusal, type ActionIdResolver, type SourceInput } from "@valet/shared";
 import { IsObject, ObjectOptions, Type } from "typebox";
 import { Value } from "typebox/value";
 import type { Static, TSchema } from "typebox";
@@ -2053,29 +2053,37 @@ function qualifiedId(entry: CatalogEntry): string {
   return qualifiedActionId(entry.service, entry.action.id);
 }
 
-const serviceKey = (service: string) => service.toLowerCase().replaceAll("-", "_");
+const catalogResolvers = new WeakMap<Catalog, ActionIdResolver>();
 
 /**
- * The catalog id for a tool id written with the service name that
- * `list_tools` reports. Some services name their tools under another
- * prefix (`google_calendar` has `calendar.list_events`, `google_workspace`
- * has `drive.search_files`, `slack-user` has `slack_user.set_status`), and
- * agents write `google_calendar.list_events` or
- * `google_workspace.drive.search_files`. Those name one tool, so they run
- * as it, and every scope and policy check sees the catalog id. An id that
- * fits no tool, or more than one, is returned unchanged.
+ * The catalog's `ActionIdResolver`: the shared `buildActionIdResolver` over
+ * its static actions and runtime services, so the engine accepts the same
+ * spellings the api does. Every scope and policy check reads the canonical
+ * id it gives.
  */
+export function catalogActionIdResolver(catalog: PluginCatalog): ActionIdResolver {
+  const cached = catalogResolvers.get(catalog);
+  if (cached) return cached;
+  const services = new Map<string, { service: string; declaredIds: string[]; dynamic: boolean }>();
+  const serviceFor = (service: string) => {
+    let entry = services.get(service);
+    if (!entry) { entry = { service, declaredIds: [], dynamic: false }; services.set(service, entry); }
+    return entry;
+  };
+  for (const entry of catalog.entries) serviceFor(entry.service).declaredIds.push(entry.action.id);
+  for (const plugin of catalog.dynamicPlugins) serviceFor(plugin.service).dynamic = true;
+  const resolver = buildActionIdResolver([...services.values()]);
+  catalogResolvers.set(catalog, resolver);
+  return resolver;
+}
+
+/** The catalog id for any accepted spelling. A bare id the catalog holds
+ * maps to its qualified id. An id that names no tool is returned unchanged. */
 function canonicalActionId(catalog: Catalog, actionId: string): string {
-  if (catalog.byId.has(actionId)) return actionId;
-  const dot = actionId.indexOf(".");
-  if (dot <= 0) return actionId;
-  const service = serviceKey(actionId.slice(0, dot));
-  const rest = actionId.slice(dot + 1);
-  const entries = catalog.entries.filter((entry) => serviceKey(entry.service) === service);
-  const exact = entries.find((entry) => qualifiedId(entry) === rest);
-  if (exact) return qualifiedId(exact);
-  const named = entries.filter((entry) => qualifiedId(entry).endsWith(`.${rest}`));
-  return named.length === 1 ? qualifiedId(named[0]!) : actionId;
+  const resolved = catalogActionIdResolver(catalog).resolve(actionId);
+  if (resolved) return resolved.canonical;
+  const bare = catalog.byId.get(actionId);
+  return bare ? qualifiedId(bare) : actionId;
 }
 
 /** Catalog tools with the same action name as an unknown id, for the error's "Did you mean". */
