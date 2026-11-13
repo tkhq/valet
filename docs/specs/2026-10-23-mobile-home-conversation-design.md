@@ -63,10 +63,16 @@ a compact shortcut above the Home composer when action is needed. On a phone,
 the shortcut shows only approvals from the person's personal workspace. Team and org
 approvals appear in the team's own threads and in Tasks.
 
-When the person answers the last waiting request in the shortcut, Home opens
-that request's thread, where the work continues. While other requests still
-wait, Home stays, and the answered request's notice links to its thread. A
-request whose thread the person may not open never navigates.
+When the person answers the last waiting request, in the shortcut or in
+Tasks, Home opens that request's thread, where the work continues. While
+other requests still wait, Home stays, and the shortcut's notice for the
+answered request links to its thread. A request whose thread the person may
+not open never navigates.
+
+Tasks shows finished work the person has not marked done as Ready for
+review, open by default. In every Tasks section, a row untouched for seven
+days folds behind "Show N older", so stale work does not crowd out current
+work. Notices show the five newest; the rest wait behind "Show N more".
 
 The progress card above the composer hides once a turn settles with no tasks
 and no tool calls. A finished card with tasks or calls stays, so the person

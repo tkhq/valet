@@ -9,6 +9,7 @@ import { DecisionGateCard } from "~/components/session/decision-gate-card";
 import { cn } from "~/lib/cn";
 import { listedKeys } from "./bulk-answers";
 import { NeedsActionHeader, useBulkAnswerRun } from "./needs-action-header";
+import { useOpenAfterAnswer } from "./open-after-answer";
 
 /** Unread updates, newest first, one row per title: a workflow that fails
  * every few minutes is one row with a count, not a list. Read updates leave
@@ -38,7 +39,8 @@ export function usePendingApprovalCount(): { count: number; partial: boolean } {
  * Every approval and question waiting on the person, across all workspaces:
  * thread decisions and workflow approvals, with "Approve all" and "Deny
  * all" for the ones a bulk answer may cover. Renders nothing when nothing
- * waits, so Tasks shows only what needs the person.
+ * waits, so Tasks shows only what needs the person. Answering the last
+ * waiting request opens its thread (`useOpenAfterAnswer`).
  */
 export function ApprovalsInbox() {
   const workflows = useWorkflowActionRequired();
@@ -50,6 +52,7 @@ export function ApprovalsInbox() {
   const partialCount = !!summary.data?.nextCursor;
   const pendingCount = (workflows.data?.count ?? 0) + (summary.data?.items.length ?? 0);
   const loading = workflows.isLoading || decisions.isLoading;
+  const { answered } = useOpenAfterAnswer(pendingCount);
   const failed = workflows.isError || decisions.isError;
   // After a bulk run, refetch the lists it covered. An item still listed was
   // not answered, whatever its response said.
@@ -76,14 +79,19 @@ export function ApprovalsInbox() {
             Open thread <ArrowUpRight aria-hidden className="h-3 w-3" />
           </a>}
         </div>
-        <DecisionGateCard sessionId={item.sessionId} gate={item.gate} placement="notification" />
+        <DecisionGateCard sessionId={item.sessionId} gate={item.gate} placement="notification" onAnswered={() => answered(item)} />
       </article>)}
     </section>
   );
 }
 
-/** Unread notices (a failed workflow, a stuck turn), one row per title. */
+/** Notices shown before "Show N more". */
+const NOTICE_LIMIT = 5;
+
+/** Unread notices (a failed workflow, a stuck turn), one row per title,
+ * newest first. Past five, the rest wait behind "Show N more". */
 export function UpdatesList() {
+  const [showAll, setShowAll] = useState(false);
   const notifications = useNotifications();
   const markRead = useMarkNotificationRead();
   const markAllRead = useMarkAllNotificationsRead();
@@ -101,11 +109,12 @@ export function UpdatesList() {
         {updates.length > 0 && <button type="button" className={cn(textLinkClass, "text-xs max-sm:min-h-11")} onClick={() => markAllRead.mutate()}>Mark all read</button>}
       </div>
       {notifications.isError && <p role="alert" className="text-sm text-danger-500">Could not load notices. <button type="button" className={textLinkClass} onClick={() => void notifications.refetch()}>Retry</button></p>}
-      {updates.map(group => <button type="button" key={group.latest.id} onClick={() => void openUpdate(group)} className="block w-full rounded-md p-2 text-left hover:bg-ink-wash max-sm:min-h-11">
+      {(showAll ? updates : updates.slice(0, NOTICE_LIMIT)).map(group => <button type="button" key={group.latest.id} onClick={() => void openUpdate(group)} className="block w-full rounded-md p-2 text-left hover:bg-ink-wash max-sm:min-h-11">
         <span className="flex items-center gap-2"><StatusDot tone="info" size="sm" /><span className="min-w-0 truncate text-sm font-medium" title={group.latest.title}>{group.latest.title}</span>
           {group.ids.length > 1 && <Badge variant="neutral">{group.ids.length}</Badge>}</span>
         <Time ts={group.latest.createdAt} className="text-xs text-muted" />
       </button>)}
+      {!showAll && updates.length > NOTICE_LIMIT && <button type="button" className={cn(textLinkClass, "text-xs max-sm:min-h-11")} onClick={() => setShowAll(true)}>Show {updates.length - NOTICE_LIMIT} more</button>}
     </section>
   );
 }
