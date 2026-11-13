@@ -198,6 +198,7 @@ import { unavailableServiceInventory } from "../services/integration-availabilit
 import { orgAllowsPluginForUser } from "../services/plugin-entitlements.js";
 import { isTeamMember } from "../services/teams.js";
 import { PINNED_ACTIONS } from "../plugins/pinned-actions.js";
+import { actionIdResolver } from "../plugins/action-id.js";
 
 
 /**
@@ -2193,7 +2194,8 @@ export class EngineHost {
     if (!this.opts.db) return undefined;
     const plugins = this.opts.actionPluginByService;
     return resolveWorkflowStepGrant({ db: this.opts.db, engineStore: this.opts.engineStore,
-      credentialServiceFor: (service) => plugins?.get(service)?.actionPlugin.credentialService ?? service }, input);
+      credentialServiceFor: (service) => plugins?.get(service)?.actionPlugin.credentialService ?? service,
+      ...(plugins ? { resolver: actionIdResolver(plugins) } : {}) }, input);
   }
 
   /** Whether a team read may use `memberId`'s shared account. A workflow

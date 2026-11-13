@@ -1,4 +1,6 @@
 import { loadAssistantBySessionId } from "../assistants/service.js";
+import { actionIdResolver, canonicalActionIdFor } from "../plugins/action-id.js";
+import { canonicalizeDefinitionScopes } from "./tool-scope.js";
 import { prepareWorkflowPermissions, persistWorkflowPermissions } from "./permissions.js";
 /**
  * Owner-scoped workflow definition/run operations, shared by the HTTP
@@ -626,6 +628,8 @@ export async function createWorkflowDefinition(
   owner: WorkflowOwner,
   input: { name: string; definition: unknown; teamId?: string },
 ): Promise<WorkflowDefinitionSummary> {
+  // Store canonical action ids, and refuse an id that no plugin owns.
+  input = { ...input, definition: canonicalizeDefinitionScopes(input.definition, deps.actionPluginByService ? actionIdResolver(deps.actionPluginByService) : undefined) };
   const now = Date.now();
   const id = newWorkflowId("wf");
   const values = { id, orgId: owner.orgId, name: input.name, definition: input.definition, createdAt: now, updatedAt: now };
@@ -793,6 +797,8 @@ async function updateLockedWorkflowDefinition(
   const now = Date.now();
   if (input.definition !== undefined) {
     rejectAssistantRouting(input.definition);
+    // Store canonical action ids, and refuse an id that no plugin owns.
+    input = { ...input, definition: canonicalizeDefinitionScopes(input.definition, deps.actionPluginByService ? actionIdResolver(deps.actionPluginByService) : undefined) };
   }
   const stepsChange = input.definition !== undefined && !sameWorkflowSteps(input.definition, row.definition);
   // A grant covers the steps a person reviewed. Any step change ends it, so
@@ -2168,7 +2174,7 @@ export async function resolveWorkflowApproval(
       .where(eq(workflowDefinitions.id, run.params.workflowId)).limit(1);
     if (!current || !sameWorkflowSteps(current.definition, run.definition)) return "stale_workflow";
     if (!accountForWorkflow) {
-      const actionId = node.action.includes(".") ? node.action : `${node.service}.${node.action}`;
+      const actionId = canonicalActionIdFor(deps.actionPluginByService ? actionIdResolver(deps.actionPluginByService) : undefined, node.service, node.action);
       // The gate records the risk the run read and why policy held it. A
       // default can be granted here even for a dynamic action the review
       // cannot resolve. An explicit rule cannot, now or at run time.
@@ -2240,7 +2246,7 @@ export async function resolveWorkflowApproval(
       if (input.approved && isPolicyGate && input.scope === "run") {
         const service = typeof node.service === "string" ? node.service : "";
         const action = typeof node.action === "string" ? node.action : "";
-        const actionId = action.includes(".") ? action : `${service}.${action}`;
+        const actionId = canonicalActionIdFor(deps.actionPluginByService ? actionIdResolver(deps.actionPluginByService) : undefined, service, action);
         await writeExecutionGrant(tx, input.runId, { orgId, service, actionId, grantedBy: owner.userId, now: Date.now() });
       }
       if (isPolicyGate) {

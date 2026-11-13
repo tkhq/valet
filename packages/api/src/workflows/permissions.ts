@@ -16,7 +16,8 @@ import { isRiskLevel } from "../policies/admin.js";
 import { isDeadConnection } from "../services/credential-resolution.js";
 import { prepareActionArgs } from "@valet/engine";
 import { findAction, qualifiedActionId } from "../plugins/action-invoker.js";
-import { readToolScope } from "@valet/shared";
+import { readToolScope, type ActionIdResolver } from "@valet/shared";
+import { actionIdResolver, canonicalActionIdFor } from "../plugins/action-id.js";
 import { entryService, isAgentStep, isExactAction } from "./tool-scope.js";
 import type {
   AllowWorkflowPermissionsResponse,
@@ -99,17 +100,32 @@ function agentStepNodes(definition: unknown): { nodeId: string; entries: string[
   return steps;
 }
 
-/** The exact actions agent steps declare. A `service.*` entry gets no grant. */
-function agentStepRefs(definition: unknown): ToolNodeRef[] {
-  return agentStepNodes(definition).flatMap(({ nodeId, entries }) => entries.filter(isExactAction).map((entry) => ({
-    nodeId, service: entryService(entry), action: entry.slice(entry.indexOf(".") + 1), params: undefined, agentStep: true as const,
-  })));
+/** The registry resolver, when the deps carry a plugin map. */
+function resolverOf(deps: WorkflowPermissionDeps): ActionIdResolver | undefined {
+  return deps.actionPluginByService ? actionIdResolver(deps.actionPluginByService) : undefined;
+}
+
+/** The exact actions agent steps declare. A `service.*` entry gets no grant.
+ * The service comes from the registry, not from the text before the first
+ * dot: `sheets.write_spreadsheet` belongs to `google_workspace`. */
+function agentStepRefs(definition: unknown, resolver?: ActionIdResolver): ToolNodeRef[] {
+  return agentStepNodes(definition).flatMap(({ nodeId, entries }) => entries.filter(isExactAction).map((entry) => {
+    const resolved = resolver?.resolve(entry);
+    const service = resolved?.service ?? entryService(entry);
+    // `action` is the id without the service prefix, as a tool step spells it:
+    // `send_message`, `query`, or `sheets.write_spreadsheet`.
+    const action = resolved
+      ? (resolved.canonical.startsWith(`${service}.`) ? resolved.canonical.slice(service.length + 1) : resolved.canonical)
+      : entry.slice(entry.indexOf(".") + 1);
+    return { nodeId, service, action, params: undefined, agentStep: true as const };
+  }));
 }
 
 /** Credential services referenced by tool steps, including dynamic tools, and by every agent-step entry. */
 export function workflowCredentialServices(deps: WorkflowPermissionDeps, definition: unknown): string[] {
+  const resolver = resolverOf(deps);
   const services = [...toolNodeRefs(definition).map((ref) => ref.service),
-    ...agentStepNodes(definition).flatMap((step) => step.entries.map(entryService))];
+    ...agentStepNodes(definition).flatMap((step) => step.entries.map((entry) => entryService(entry, resolver)))];
   return [...new Set(services.map((service) =>
     deps.actionPluginByService?.get(service)?.actionPlugin.credentialService ?? service))].filter(service => service !== "github");
 }
@@ -183,7 +199,7 @@ export async function analyzeDefinitionPermissions(
   owner: WorkflowOwner,
   summary: Pick<WorkflowDefinitionSummary, "id" | "ownerType" | "ownerId" | "definition">,
 ): Promise<WorkflowNodePermissionWire[]> {
-  const refs = [...toolNodeRefs(summary.definition), ...agentStepRefs(summary.definition)];
+  const refs = [...toolNodeRefs(summary.definition), ...agentStepRefs(summary.definition, resolverOf(deps))];
   if (refs.length === 0) return [];
 
   const now = Date.now();
@@ -232,8 +248,8 @@ export async function analyzeDefinitionPermissions(
       // An agent step names a dynamic action exactly, so its id is known. A
       // tool step's grant comes from a parked run's card, under the id the
       // run read (`isParkedDynamicStep`); the row keeps a null actionId.
-      const actionId = ref.agentStep ? `${ref.service}.${ref.action}` : null;
-      const grantId = actionId ?? (ref.action.includes(".") ? ref.action : `${ref.service}.${ref.action}`);
+      const actionId = ref.agentStep ? canonicalActionIdFor(resolverOf(deps), ref.service, ref.action) : null;
+      const grantId = actionId ?? canonicalActionIdFor(resolverOf(deps), ref.service, ref.action);
       nodes.push({ nodeId: ref.nodeId, service: ref.service, action: ref.action, actionId,
         mode: "unknown", ...agentStep, ...(sharedAccount ? { sharedAccount: true as const } : {}),
         ...(dynamicActionGranted(rows, ref.service, grantId, now) ? { granted: true as const } : {}) });
@@ -313,7 +329,7 @@ const DEFAULT_SOURCES: ReadonlySet<string> = new Set(["risk_default", "plugin_de
  * foreach's id, and a grant covers the action in every step, so this
  * matches by action. */
 function isParkedDynamicStep(node: WorkflowNodePermissionWire, parked: ParkedToolGate): boolean {
-  const actionId = node.action.includes(".") ? node.action : `${node.service}.${node.action}`;
+  const actionId = qualifiedActionId(node.service, { id: node.action });
   return node.mode === "unknown" && node.agentStep !== true && actionId === parked.actionId;
 }
 

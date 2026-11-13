@@ -7,6 +7,7 @@ import type { AppQueryable } from "../lib/drizzle.js";
 import { workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { policyOwner } from "../policies/service.js";
 import { sameWorkflowSteps } from "./definition-version.js";
+import type { ActionIdResolver } from "@valet/shared";
 import { agentStepEntries, entryService, isExactAction } from "./tool-scope.js";
 
 export interface WorkflowStepRef {
@@ -61,7 +62,7 @@ export async function submissionWorkflowStep(
  * run owner, and the run not started by an agent on its own.
  */
 export async function resolveWorkflowStepGrant(
-  deps: { db: AppQueryable; engineStore: Pick<SessionStore, "getQueueItem">; credentialServiceFor: (service: string) => string },
+  deps: { db: AppQueryable; engineStore: Pick<SessionStore, "getQueueItem">; credentialServiceFor: (service: string) => string; resolver?: ActionIdResolver },
   input: { orgId: string; sessionId: string; queueItemId?: string; teamId?: string; userId?: string },
 ): Promise<WorkflowStepGrant | undefined> {
   const step = await submissionWorkflowStep(deps.engineStore, input.sessionId, input.queueItemId);
@@ -73,7 +74,7 @@ export async function resolveWorkflowStepGrant(
   if (!run || run.status === "settled") return undefined;
   const params = run.params as { startedBy?: unknown } | null;
   if (params?.startedBy === "agent") return undefined;
-  const entries = agentStepEntries(run.definition, step.nodeId);
+  const entries = agentStepEntries(run.definition, step.nodeId, deps.resolver);
   if (!entries) return undefined;
   const [saved] = await deps.db.select({ ownerType: workflowDefinitions.ownerType, ownerId: workflowDefinitions.ownerId, definition: workflowDefinitions.definition })
     .from(workflowDefinitions)
@@ -85,5 +86,5 @@ export async function resolveWorkflowStepGrant(
   const sameOwner = run.ownerType === "team" ? owner.teamId === run.ownerId : owner.teamId === undefined && owner.userId === run.ownerId;
   if (!sameOwner || !sameWorkflowSteps(saved.definition, run.definition)) return undefined;
   return { workflowId: run.workflowId, runId: step.runId, actions: entries.filter(isExactAction),
-    services: [...new Set(entries.map((entry) => deps.credentialServiceFor(entryService(entry))))] };
+    services: [...new Set(entries.map((entry) => deps.credentialServiceFor(entryService(entry, deps.resolver))))] };
 }

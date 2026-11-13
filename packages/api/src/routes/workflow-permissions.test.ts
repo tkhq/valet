@@ -593,6 +593,18 @@ describe("agent step permissions", () => {
     expect((await check(true)).mode).toBe("require_approval");
   });
 
+  it("reviews a registered discovered-tools action under its own id, not a doubled one", async () => {
+    const boxes: ValetPlugin = { name: "boxes", version: "0.0.1", actions: [{ service: "boxes", actions: [], resolveActions: async () => [] }] };
+    api = await bootTestApi({ plugins: [widgetsPlugin(), boxes] });
+    const wfId = await insertWorkflow(api, { definition: {
+      version: "dag/v1",
+      nodes: [{ id: "trigger", type: "trigger" }, { id: "writer", type: "session", mode: "start", prompt: "Read.", toolScope: { actions: ["boxes.open_box"] } }],
+      edges: [{ from: "trigger", to: "writer" }],
+    } });
+    const body = (await (await fetch(`${api.baseUrl}/api/workflows/${wfId}/permissions`)).json()) as GetWorkflowPermissionsResponse;
+    expect(body.nodes.map((n) => [n.nodeId, n.service, n.actionId, n.mode])).toEqual([["writer", "boxes", "boxes.open_box", "unknown"]]);
+  });
+
   it("does not call a dynamic agent-step action granted while a risk rule could gate it", async () => {
     api = await bootTestApi({ plugins: [widgetsPlugin()] });
     const wfId = await insertWorkflow(api, { definition: AGENT_DEFINITION });
