@@ -397,6 +397,9 @@ grep -q 'checksum/secret:' "$TMP_DIR/deploy-key-one.yaml" \
 grep -q 'checksum/config:' "$TMP_DIR/deploy-key-one.yaml" \
   || fail "api pod template missing checksum/config — a changed ConfigMap would not roll the pod"
 pass "api pod template carries checksum/secret + checksum/config"
+grep -q 'cluster-autoscaler.kubernetes.io/safe-to-evict: "false"' "$TMP_DIR/deploy-key-one.yaml" \
+  || fail "api pod template missing safe-to-evict=false: cluster-autoscaler could move the single api pod"
+pass "api pod template blocks autoscaler scale-down eviction"
 
 # Both digests must be identical for identical input. The chart generates
 # BETTER_AUTH_SECRET, VALET_ENCRYPTION_KEY and the bundled postgres password

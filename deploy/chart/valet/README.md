@@ -67,6 +67,8 @@ The chart and the api keep this window short and make it answer with a retry hin
 
 Callers still get an ingress error or a refused connection for two short spans: while the new pod is scheduled, and while the process loads its modules before the boot listener binds.
 
+The api pod carries `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`, so cluster-autoscaler does not remove its node during scale-down. Node drains, such as node group upgrades, still evict the pod.
+
 ### Moving to RollingUpdate
 
 `RollingUpdate` with `maxSurge: 1` and `maxUnavailable: 0` removes the window: the old pod serves traffic until the new pod is ready.

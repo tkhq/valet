@@ -24,6 +24,10 @@ spec:
   template:
     metadata:
       annotations:
+        # One replica on Recreate: cluster-autoscaler must not remove the
+        # api's node to consolidate, because every move is an outage. Node
+        # drains for upgrades still evict the pod.
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
         # The api reads its config and secrets through envFrom/secretKeyRef,
         # and Kubernetes injects those once, at pod start. Without these two
         # digests in the pod template, an upgrade that only rotates a key
