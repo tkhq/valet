@@ -19,6 +19,8 @@
 export interface SecretMeta {
   /** The full name in the space, with its scope prefix. */
   name: string;
+  /** The provider's id for this secret, when it has one. `readById` takes it. */
+  id?: string;
   /** Epoch milliseconds. */
   createdAt: number;
 }
@@ -67,6 +69,9 @@ export interface SecretStoreProvider {
    * session that asked; a provider with policy support checks it against
    * the secret's labels, and its audit log records it. */
   read(spaceId: string, name: string, context: SecretLabels): Promise<string | null>;
+  /** Optional: read a secret by the id a `list` returned, which saves the
+   * name lookup. */
+  readById?(spaceId: string, id: string, context: SecretLabels): Promise<string | null>;
 }
 
 export type SecretStoreErrorKind =

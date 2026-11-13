@@ -335,6 +335,20 @@ describe("secret store service", () => {
     expect([...fake.spaces.values()].flat().map((s) => s.value)).toEqual(["second"]);
   });
 
+  it("reports a replace as saved when only the old version's delete fails", async () => {
+    const fake = await bootWithStore();
+    const svc = api!.providers.secretStore;
+    await svc.saveValue(as("user-a"), personal, "K", "first");
+    fake.provider.remove = async () => {
+      throw new Error("transient");
+    };
+    await new Promise((r) => setTimeout(r, 2));
+    await expect(svc.finishSave(as("user-a"), personal, "K", seal("second"), { replace: true })).resolves.toMatchObject({ name: "K" });
+    const token = await userSession("sess-r2", "user-a");
+    const body = (await (await resolve(["secret://personal/K"], token)).json()) as Resp;
+    expect(decode(body.values[0])).toBe("second");
+  });
+
   it("keeps two orgs' company secrets apart in the shared deployment space", async () => {
     const fake = await bootWithStore();
     const svc = api!.providers.secretStore;

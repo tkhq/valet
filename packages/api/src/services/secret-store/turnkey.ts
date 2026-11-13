@@ -308,7 +308,7 @@ export function createTurnkeySecretStore(
     async list(spaceId, prefix) {
       return (await listAll(spaceId))
         .filter((s) => (s.name ?? "").startsWith(prefix))
-        .map((s): SecretMeta => ({ name: s.name ?? "", createdAt: Number(s.createdAtUnixMs) }));
+        .map((s): SecretMeta => ({ name: s.name ?? "", id: s.secretId, createdAt: Number(s.createdAtUnixMs) }));
     },
 
     async put(spaceId, { name, value, labels }) {
@@ -367,20 +367,28 @@ export function createTurnkeySecretStore(
     async read(spaceId, name, context) {
       const secretId = await findId(spaceId, name);
       if (!secretId) return null;
-      try {
-        return await (await broker()).exportSecret({ organizationId: spaceId, secretId, requestContext: { ...context } });
-      } catch (err) {
-        // A policy that requires approval, or one that does not match the
-        // request context, parks the export. Valet does not wait for
-        // approvals, so name the cause instead of the generic provider error.
-        if (err instanceof Error && "code" in err && (err.code === EXPORT_NEEDS_APPROVAL || err.code === PERMISSION_DENIED)) {
-          throw new SecretStoreError(
-            "Turnkey did not allow this export. Either a rule needs an approval, or this session may not read the secret. Check the secret's scope, then run again.",
-            "forbidden",
-          );
-        }
-        throw err;
-      }
+      return exportById(spaceId, secretId, context);
+    },
+
+    async readById(spaceId, secretId, context) {
+      return exportById(spaceId, secretId, context);
     },
   };
+
+  async function exportById(spaceId: string, secretId: string, context: Record<string, string>): Promise<string> {
+    try {
+      return await (await broker()).exportSecret({ organizationId: spaceId, secretId, requestContext: { ...context } });
+    } catch (err) {
+      // A policy that requires approval, or one that does not match the
+      // request context, parks the export. Valet does not wait for
+      // approvals, so name the cause instead of the generic provider error.
+      if (err instanceof Error && "code" in err && (err.code === EXPORT_NEEDS_APPROVAL || err.code === PERMISSION_DENIED)) {
+        throw new SecretStoreError(
+          "Turnkey did not allow this export. Either a rule needs an approval, or this session may not read the secret. Check the secret's scope, then run again.",
+          "forbidden",
+        );
+      }
+      throw err;
+    }
+  }
 }

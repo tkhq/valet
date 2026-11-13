@@ -185,6 +185,17 @@ describe("Turnkey secret store", () => {
     expect(await store.read("parent-org", "company/oldest", {})).toBeNull();
   });
 
+  it("lists provider ids and reads by id without a second listing", async () => {
+    const fake = fakeTurnkey();
+    const store = storeWith(fake);
+    await store.put("parent-org", { name: "company/o/k", value: "V", labels: {} });
+    const [meta] = await store.list("parent-org", "company/");
+    expect(meta?.id).toBe("sec-1");
+    const listsBefore = fake.calls.filter((c) => c.method === "getSecrets").length;
+    expect(await store.readById!("parent-org", meta!.id!, { valet_session_id: "s" })).toBe("V");
+    expect(fake.calls.filter((c) => c.method === "getSecrets").length).toBe(listsBefore);
+  });
+
   it("names a refused export instead of a generic failure", async () => {
     const fake = fakeTurnkey();
     const parked = Object.assign(new Error("Secret export requires consensus."), { code: "EXPORT_SECRET_CONSENSUS_NEEDED" });

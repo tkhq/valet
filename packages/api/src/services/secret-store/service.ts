@@ -316,11 +316,19 @@ export function createSecretStoreService(deps: {
     return { spaceId, fullName, versions };
   }
 
-  /** Delete each stored version. One failed delete leaves a stale version
-   * that reads ignore, since they pick the newest. */
+  /** Delete each stored version. */
   async function removeVersions(spaceId: string, versions: SecretMeta[]): Promise<void> {
     for (const version of versions) {
       await guarded("remove the old value", () => provider.remove(spaceId, version.name));
+    }
+  }
+
+  /** After a replace stored the new value: an old version left by a failed
+   * delete is harmless, because reads pick the newest. Log it, do not fail
+   * a save that succeeded. */
+  async function removeOldVersions(spaceId: string, versions: SecretMeta[]): Promise<void> {
+    for (const version of versions) {
+      await provider.remove(spaceId, version.name).catch((err: unknown) => log(`removing old version ${version.name} failed`, err));
     }
   }
 
@@ -363,7 +371,7 @@ export function createSecretStoreService(deps: {
       // a failed import leaves the old value in place.
       const storedName = versions.length > 0 ? `${fullName}${VERSION_SEPARATOR}${now()}` : fullName;
       await guarded("save the secret", () => provider.finishImport(spaceId, { name: storedName, sealed, labels: labelsFor(actor, scope) }));
-      await removeVersions(spaceId, versions);
+      await removeOldVersions(spaceId, versions);
       return row(scope, name, now());
     },
 
@@ -401,15 +409,18 @@ export function createSecretStoreService(deps: {
       const fullName = `${scopePrefix(scope, ctx.orgId)}${name}`;
       const newest = versionsOf(await guarded("find the secret", () => provider.list(spaceId, fullName)), fullName)[0];
       if (!newest) return null;
+      const context = {
+        valet_company_org_id: ctx.orgId,
+        valet_user_id: ctx.userId,
+        valet_session_id: ctx.sessionId,
+        valet_session_owner_type: ctx.sessionOwnerType,
+        valet_session_owner_id: ctx.sessionOwnerId,
+        ...(scope.kind === "team" ? { valet_owner_team_id: scope.teamId } : {}),
+      };
+      // The listing found the secret; reading by its id saves a second lookup.
+      const { readById } = provider;
       return guarded("read the secret", () =>
-        provider.read(spaceId, newest.name, {
-          valet_company_org_id: ctx.orgId,
-          valet_user_id: ctx.userId,
-          valet_session_id: ctx.sessionId,
-          valet_session_owner_type: ctx.sessionOwnerType,
-          valet_session_owner_id: ctx.sessionOwnerId,
-          ...(scope.kind === "team" ? { valet_owner_team_id: scope.teamId } : {}),
-        }),
+        newest.id && readById ? readById.call(provider, spaceId, newest.id, context) : provider.read(spaceId, newest.name, context),
       );
     },
   };
