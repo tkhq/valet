@@ -12,6 +12,7 @@ import { describe, expect, it } from "vitest";
 import { MESSAGE_TURN_ERROR_KEY, type CommandResultEntry, type CompactionEntry, type MessageEntry } from "@valet/engine";
 import { entryToMessage, promptAuthorFromUser } from "./messages.js";
 import type { AuthVia } from "../lib/request-principal.js";
+import { BRIEF_TOOL_NAME } from "../widgets/brief.js";
 
 describe("HTTP prompt author provenance", () => {
   it.each(["session", "stub", "apiKey", "cli", "mcp", undefined] satisfies Array<AuthVia | undefined>)("marks only authenticated direct human auth (%s)", (via) => {
@@ -413,4 +414,24 @@ it("preserves interruption state when loading message history", () => {
   expect(aborted).toMatchObject({ completed: false, stopReason: "abort" });
   const failed = entryToMessage(baseEntry({ role: "assistant", content: "", stopReason: "error" }), "sess", "th");
   expect(failed).toMatchObject({ completed: false, stopReason: "error" });
+});
+
+describe("entryToMessage — brief cards on reload", () => {
+  it("keeps a show_brief call's args, so the web draws the same card from history", () => {
+    const args = {
+      headline: "Morning. 1 in progress, 1 needs you.",
+      items: [
+        { topic: "Composer hint", text: "Show it only while typing?", state: "needs_you", href: "https://example.com/pr/1" },
+        { topic: "Sweep", text: "Running.", state: "working", thread_id: "th-9" },
+      ],
+    };
+    // The store keeps parts as JSON, so the entry comes back from a JSON round trip.
+    const stored: MessageEntry = JSON.parse(JSON.stringify(baseEntry({ role: "assistant", content: "", parts: [
+      { type: "tool_call", callId: "b1", toolName: BRIEF_TOOL_NAME, status: "completed", args, result: { content: [{ type: "text", text: "Brief shown: Morning. 1 in progress, 1 needs you. (2 items)." }] } },
+    ] })));
+    expect(entryToMessage(stored, "sess", "th")?.parts).toEqual([expect.objectContaining({
+      kind: "tool_call", toolName: "show_brief", status: "completed", args,
+      result: { content: [{ type: "text", text: "Brief shown: Morning. 1 in progress, 1 needs you. (2 items)." }] },
+    })]);
+  });
 });

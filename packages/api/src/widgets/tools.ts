@@ -4,15 +4,18 @@
  * the call's args and the web draws it from there, so the result only
  * confirms. A spec that does not match the catalog comes back as an error
  * that names what to fix. A Slack turn gets the way to post a chart there.
+ * `show_brief` (./brief.ts) ships with it, so every assistant thread has both.
  */
 import { Type, type TSchema } from "typebox";
 import type { ToolDef } from "@valet/engine";
+import { buildBriefTool } from "./brief.js";
 import { WIDGET_TOOL_DESCRIPTION, WIDGET_TOOL_NAME, widgetSpecProblems } from "./catalog.js";
 
 function defineTool<T extends TSchema>(def: ToolDef<T>): ToolDef<T> {
   return def;
 }
 
+/** `show_widget` and `show_brief`, the cards an assistant shows in a thread. */
 export function buildWidgetTools(): ToolDef[] {
   return [defineTool({
     name: WIDGET_TOOL_NAME,
@@ -38,5 +41,5 @@ export function buildWidgetTools(): ToolDef[] {
       }
       return { text: "The card is in the thread. Don't repeat what it shows." };
     },
-  })];
+  }), buildBriefTool()];
 }
