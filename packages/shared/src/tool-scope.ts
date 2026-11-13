@@ -70,8 +70,19 @@ export function actionInScope(scope: ToolScope | undefined, action: string): boo
   return scope?.actions === undefined || scope.actions.some((pattern) => includesAction(pattern, action));
 }
 
+/** The catalog tools that reach a scope's actions: discovery and the call itself. */
+export const CATALOG_TOOLS: readonly string[] = ["list_tools", "call_tool"];
+
+/**
+ * A scope that grants actions also grants the catalog tools that reach them,
+ * named in `tools` or not. Without them a step whose `tools` list omits
+ * `call_tool` cannot reach any action its `actions` list allows. This adds no
+ * reach: `list_tools` lists only in-scope actions and `invokeAction` refuses
+ * every call outside `actions`.
+ */
 export function toolInScope(scope: ToolScope | undefined, tool: string): boolean {
-  return scope?.tools === undefined || scope.tools.includes(tool);
+  if (scope?.tools === undefined || scope.tools.includes(tool)) return true;
+  return CATALOG_TOOLS.includes(tool) && (scope.actions?.length ?? 0) > 0;
 }
 
 /** Every layer can only narrow the preceding layer. */

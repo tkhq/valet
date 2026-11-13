@@ -7,6 +7,14 @@ describe("task tool scopes", () => {
     expect(actionInScope({ actions: [] }, "slack.post")).toBe(false);
     expect(toolInScope({ tools: [] }, "bash")).toBe(false);
   });
+  it("grants the catalog tools to a scope that grants actions, and only then", () => {
+    const step = { tools: ["mem_read"], actions: ["slack.send_message"] };
+    expect(toolInScope(step, "call_tool")).toBe(true);
+    expect(toolInScope(step, "list_tools")).toBe(true);
+    expect(toolInScope(step, "bash")).toBe(false);
+    expect(toolInScope({ tools: ["mem_read"], actions: [] }, "call_tool")).toBe(false);
+    expect(toolInScope({ tools: ["mem_read"] }, "call_tool")).toBe(false);
+  });
   it("matches complete service names without accepting neighboring prefixes", () => {
     expect(actionInScope({ actions: ["slack.*"] }, "slack.search")).toBe(true);
     expect(actionInScope({ actions: ["slack.*"] }, "slack_user.search")).toBe(false);
