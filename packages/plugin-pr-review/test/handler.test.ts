@@ -25,6 +25,7 @@ import {
   nearestCommentableLine,
   createReviewHandler,
   excluded,
+  flaggedCodeChanged,
   focusRole,
   MANUAL_REVIEW_EVENT,
   manualReviewOptions,
@@ -760,6 +761,18 @@ describe("review-pull-request handler", () => {
       "Null deref in parse": verdict("refuted", { counter_evidence: "a.ts:5 returns early on empty input" }),
     })), store));
     expect(store.pointers()?.findings[0]).toMatchObject({ id: "f1", status: "resolved", fixedIn: H2 });
+  });
+
+  it("ignores a cited line past the end of the file or on blank lines", async () => {
+    const files: Record<string, Record<string, string>> = {
+      old: { "a.ts": "one\ntwo\nthree\nfour\nfive", "b.ts": "x\n\n\ny" },
+      new: { "a.ts": "one\ntwo\nthree\nfour\nfive", "b.ts": "x\n\n\n\ny" },
+    };
+    const gh = { fileText: async (path: string, ref: string) => files[ref]?.[path] };
+    const f = { path: "a.ts", line: 2 };
+    expect(await flaggedCodeChanged(gh, f, "old", "new", "a.ts:90 returns early", "acme/site")).toBe(false);
+    expect(await flaggedCodeChanged(gh, f, "old", "new", "b.ts:3 is blank", "acme/site")).toBe(false);
+    expect(await flaggedCodeChanged(gh, f, "old", "new", "a.ts:4 reads four", "acme/site")).toBe(false);
   });
 
   it("does not count an unrelated edit in a cited file as a fix", async () => {

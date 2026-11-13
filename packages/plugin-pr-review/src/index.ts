@@ -79,6 +79,7 @@ export * from "./types.js";
 export {
   createReviewHandler,
   excluded,
+  flaggedCodeChanged,
   focusRole,
   MANUAL_REVIEW_EVENT,
   manualReviewOptions,

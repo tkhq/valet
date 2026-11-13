@@ -667,8 +667,10 @@ export async function flaggedCodeChanged(
   })).values()].slice(0, MAX_CITED_LINES);
   for (const { path, line } of cited) {
     const [a, b] = await read(path);
-    if (b === undefined) continue;
-    if (a === undefined || !hasBlock(a, linesAround(b, line, CITED_CONTEXT))) return true;
+    // A citation past the end of the file or on blank lines shows nothing either way.
+    const block = b === undefined ? "" : linesAround(b, line, CITED_CONTEXT);
+    if (b === undefined || line > b.split("\n").length || block.replace(/\n/g, "") === "") continue;
+    if (a === undefined || !hasBlock(a, block)) return true;
   }
   return false;
 }
