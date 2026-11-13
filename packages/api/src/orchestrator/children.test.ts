@@ -5609,10 +5609,12 @@ describe("child sandbox retention", () => {
     await waitFor(async () => provider.suspendCalls.length === 1);
     const sandboxId = provider.suspendCalls[0] ?? "";
 
-    // Inside the window: nothing reclaimed.
+    // Inside the window: nothing reclaimed. Parking left the session hibernated.
     await watcher.sweepRetention(Date.now());
     expect((await watchRow(api, "child-sweep"))?.sandboxReclaimedAt).toBeNull();
     expect(engineHost.liveSession("child-sweep")).not.toBeNull();
+    const sessionRow = async () => (await db.select().from(agentSessions).where(eq(agentSessions.id, "child-sweep")))[0];
+    expect((await sessionRow())?.status).toBe("hibernated");
 
     // Past the window: reclaimed for real.
     await watcher.sweepRetention(Date.now() + RETENTION_MS + 1);
@@ -5621,6 +5623,9 @@ describe("child sandbox retention", () => {
     const tokens = await db.select().from(sandboxTokens).where(eq(sandboxTokens.sessionId, "child-sweep"));
     expect(tokens[0]?.revokedAt).not.toBeNull();
     expect((await watchRow(api, "child-sweep"))?.sandboxReclaimedAt).not.toBeNull();
+    // The session row carries the stamp too, so the hibernation reaper never
+    // destroys and counts this sandbox a second time.
+    expect(await sessionRow()).toMatchObject({ status: "hibernated", hibernatedSandboxId: null, sandboxReclaimedAt: expect.any(Number) });
 
     // Idempotent: a second pass finds nothing to do.
     await watcher.sweepRetention(Date.now() + RETENTION_MS + 2);

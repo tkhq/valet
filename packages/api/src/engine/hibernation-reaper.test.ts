@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
+import * as sandboxMetrics from "@valet/engine";
 import type { AttachmentState } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
@@ -50,6 +51,8 @@ describe("HibernationReaper", () => {
     retentionMs?: number;
     /** `deriveSandboxId` result; defaults to null (backend-assigned ids). */
     derivedId?: string | null;
+    /** Sandbox ids the provider no longer holds. */
+    released?: string[];
   } = {}) {
     const destroyedSandboxes: string[] = [];
     const evicted: string[] = [];
@@ -72,6 +75,7 @@ describe("HibernationReaper", () => {
         destroySandbox: async (sandboxId) => {
           destroyedSandboxes.push(sandboxId);
         },
+        sandboxStatus: async (sandboxId) => ({ state: overrides.released?.includes(sandboxId) ? "released" : "running" }),
         deriveSandboxId: () => overrides.derivedId ?? null,
         evictCache: (sessionId) => {
           evicted.push(sessionId);
@@ -102,6 +106,19 @@ describe("HibernationReaper", () => {
     const after = await row(id);
     expect(after?.sandboxReclaimedAt).toBe(NOW);
     expect(after?.status).toBe("hibernated");
+  });
+
+  it("counts a destroy only when the sandbox was still there", async () => {
+    const gone = await seed({ id: "gone", hibernatedSandboxId: null });
+    const { deps, destroyedSandboxes } = fakeDeps({ derivedId: "sbx-derived", released: ["sbx-derived"] });
+    const destroyed = vi.spyOn(sandboxMetrics, "recordSandboxDestroyed").mockImplementation(() => undefined);
+    try {
+      await new HibernationReaper(deps).sweep(NOW);
+      // The provider destroy still runs: a 404 is tolerated and cheap.
+      expect(destroyedSandboxes).toEqual(["sbx-derived"]);
+      expect(destroyed).not.toHaveBeenCalled();
+      expect((await row(gone))?.sandboxReclaimedAt).toBe(NOW);
+    } finally { destroyed.mockRestore(); }
   });
 
   it("retains legacy team root files while isolated executions expire normally", async () => {
