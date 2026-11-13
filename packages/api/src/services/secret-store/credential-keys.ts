@@ -74,16 +74,21 @@ export function createCredentialKeyring(deps: {
     const org = await deps.orgId();
     const label = keyOwnerLabel(owner);
     const context = { valet_company_org_id: org, valet_key_owner: label };
+    const decode = (stored: string): Buffer => {
+      const key = Buffer.from(stored, "base64");
+      if (key.length !== KEY_BYTES) throw new Error(`The stored credential key for ${label} is damaged.`);
+      return key;
+    };
+    // An existing key needs no lock, so no database connection waits on
+    // the provider. Only the first key for an owner takes the lock below.
+    const existing = await deps.provider.read(space, name, context);
+    if (existing !== null) return decode(existing);
     // One creator per owner across api processes: two first writes wait for
     // each other, and the second reads the key the first stored.
     return deps.db.transaction(async (tx) => {
       await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`credential-key:${label}`}))`);
-      const existing = await deps.provider.read(space, name, context);
-      if (existing !== null) {
-        const key = Buffer.from(existing, "base64");
-        if (key.length !== KEY_BYTES) throw new Error(`The stored credential key for ${label} is damaged.`);
-        return key;
-      }
+      const created = await deps.provider.read(space, name, context);
+      if (created !== null) return decode(created);
       const key = randomBytes(KEY_BYTES);
       await deps.provider.put(space, {
         name,

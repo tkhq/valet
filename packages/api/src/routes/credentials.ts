@@ -392,8 +392,13 @@ credentialsRouter.get("/", async (c) => {
           metadata: fromJsonbColumn<Record<string, unknown>>(row.metadata),
         },
         new Date(row.createdAt).toISOString(),
-        // The share pickers read this to agree with the delegate route.
-        (await teamRowUnusable(c.var.providers.credentialCipher, row, Date.now())) ? { unusable: true } : undefined,
+        // The share pickers read this to agree with the delegate route. If
+        // the row's key cannot be read now, list the row without the mark:
+        // one unreadable row must not fail the whole list.
+        (await teamRowUnusable(c.var.providers.credentialCipher, row, Date.now()).catch((err: unknown) => {
+          console.warn(`[credentials] could not check team ${owner.id}'s ${row.service} connection: ${err instanceof Error ? err.message : String(err)}`);
+          return false;
+        })) ? { unusable: true } : undefined,
       );
       if (summary) listed.push(summary);
     }

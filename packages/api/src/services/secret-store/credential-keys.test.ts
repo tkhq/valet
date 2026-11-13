@@ -77,6 +77,20 @@ describe("credential keyring", () => {
     expect(team.equals(a)).toBe(false);
   });
 
+  it("reads an existing key without a database transaction, and two processes creating at once store one key", async () => {
+    const fake = memoryProvider();
+    const first = createCredentialKeyring({ provider: fake.provider, db, orgId: async () => "org-1" });
+    const second = createCredentialKeyring({ provider: fake.provider, db, orgId: async () => "org-1" });
+    const owner = { type: "org" as const, id: "o-race" };
+    const [a, b] = await Promise.all([first.keyFor(owner), second.keyFor(owner)]);
+    expect(b.equals(a)).toBe(true);
+    // A db whose transactions fail: only the create path may use one.
+    const noTransactions: typeof db = Object.create(db);
+    noTransactions.transaction = () => Promise.reject(new Error("no transaction expected"));
+    const third = createCredentialKeyring({ provider: fake.provider, db: noTransactions, orgId: async () => "org-1" });
+    expect((await third.keyFor(owner)).equals(a)).toBe(true);
+  });
+
   it("serves a cached key without a provider read until it expires", async () => {
     const fake = memoryProvider();
     let clock = 0;
