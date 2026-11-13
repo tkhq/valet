@@ -1428,6 +1428,27 @@ describe("team credential scope (TKAI-205)", () => {
     expect((await list()).map((row) => row.delegatedFrom)).toEqual(["local-user"]);
   });
 
+  it("lists a team row without the unusable mark when its key cannot be read, instead of failing the list", async () => {
+    const team = await teamWithMember();
+    await api!.providers.engineCredentials.save({ type: "team", id: team.id }, "linear", {
+      type: "oauth2", accessToken: "expired", refreshToken: "", expiresAt: 1,
+    });
+    const cipher = api!.providers.credentialCipher;
+    const decrypt = cipher.decrypt;
+    cipher.decrypt = async () => {
+      throw new Error("The secret store is unreachable.");
+    };
+    try {
+      const listed = await fetch(`${api!.baseUrl}/api/credentials?scope=team&teamId=${team.id}`, { headers: MEMBER_HEADERS });
+      expect(listed.status).toBe(200);
+      const rows = ((await listed.json()) as ListCredentialsResponse).credentials;
+      expect(rows).toEqual([expect.objectContaining({ service: "linear" })]);
+      expect(rows[0]!.unusable).toBeUndefined();
+    } finally {
+      cipher.decrypt = decrypt;
+    }
+  });
+
   it("treats an encrypted empty refresh token like a missing token for admission and the team list", async () => {
     const team = await teamWithMember();
     await api!.providers.engineCredentials.save({ type: "team", id: team.id }, "linear", {

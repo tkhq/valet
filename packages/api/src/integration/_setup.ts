@@ -630,6 +630,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     storedCredentials: engineCredentials,
     onePassword,
     secretStore: opts.secretStore ?? disabledSecretStore(),
+    credentialCipher: engineCredentials.fieldCipher,
     engineHost,
     autoTitleHost,
     childWatcher,

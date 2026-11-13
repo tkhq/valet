@@ -21,7 +21,7 @@ import { isDeepStrictEqual } from "node:util";
 import { CREDENTIAL_INVALIDATION_SQL } from "../services/content-sync/invalidation.js";
 import { fromJsonbColumn, jsonbToParam, type PgQueryable } from "@valet/store-postgres";
 import type { CredentialOwner, CredentialStore, StoredCredential } from "@valet/engine";
-import { decryptSecret, encryptSecret } from "../lib/secret-crypto.js";
+import { credentialCipher, type CredentialCipher } from "../services/secret-store/credential-keys.js";
 
 interface CredentialRow {
   ownerType: string;
@@ -79,18 +79,37 @@ function rawToCredentialRow(raw: Record<string, unknown>): CredentialRow {
 }
 
 export class PgCredentialStore implements CredentialStore {
+  private cipher: CredentialCipher;
+
   constructor(
     private readonly db: PgQueryable,
-    private readonly key: Buffer,
+    key: Buffer,
     private readonly clock: () => number = () => Date.now(),
-  ) {}
-
-  private encrypt(value: string | undefined): string | null {
-    return value === undefined ? null : encryptSecret(value, this.key);
+    private readonly log: (msg: string, err: unknown) => void = (msg, err) =>
+      console.warn(`[credentials] ${msg}`, err instanceof Error ? err.message : err),
+  ) {
+    this.cipher = credentialCipher(key);
   }
 
-  private decrypt(value: string | null): string | undefined {
-    return value === null ? undefined : decryptSecret(value, this.key);
+  /** Switch to owner keys held in the secret store
+   * (`services/secret-store/credential-keys.ts`). Set once at boot, after
+   * the secret store is built. */
+  useCipher(cipher: CredentialCipher): void {
+    this.cipher = cipher;
+  }
+
+  /** The cipher this store reads and writes with, for code that reads rows
+   * directly. */
+  get fieldCipher(): CredentialCipher {
+    return this.cipher;
+  }
+
+  private async encrypt(owner: CredentialOwner, value: string | undefined): Promise<string | null> {
+    return value === undefined ? null : this.cipher.encrypt(owner, value);
+  }
+
+  private async decrypt(owner: CredentialOwner, value: string | null): Promise<string | undefined> {
+    return value === null ? undefined : this.cipher.decrypt(owner, value);
   }
 
   async get(owner: CredentialOwner, service: string): Promise<StoredCredential | null> {
@@ -101,15 +120,22 @@ export class PgCredentialStore implements CredentialStore {
     const raw = result.rows[0];
     if (!raw) return null;
     const row = rawToCredentialRow(raw);
-    return this.toCredential(row);
+    const credential = await this.toCredential(owner, row);
+    // A row in the older form is rewritten in the current one, through the
+    // same compare-and-swap a refresh uses, so a concurrent write wins.
+    const stale = [row.accessTokenEnc, row.refreshTokenEnc, row.apiKeyEnc].some((v) => v !== null && !this.cipher.isCurrent(v));
+    if (stale) {
+      void this.compareAndSwap(owner, service, credential, credential).catch((err: unknown) => this.log(`re-encrypting ${service} failed`, err));
+    }
+    return credential;
   }
 
-  private toCredential(row: CredentialRow): StoredCredential {
+  private async toCredential(owner: CredentialOwner, row: CredentialRow): Promise<StoredCredential> {
     return {
       type: row.type,
-      accessToken: this.decrypt(row.accessTokenEnc),
-      refreshToken: this.decrypt(row.refreshTokenEnc),
-      apiKey: this.decrypt(row.apiKeyEnc),
+      accessToken: await this.decrypt(owner, row.accessTokenEnc),
+      refreshToken: await this.decrypt(owner, row.refreshTokenEnc),
+      apiKey: await this.decrypt(owner, row.apiKeyEnc),
       expiresAt: row.expiresAt ?? undefined,
       scopes: fromJsonbColumn<string[]>(row.scopes),
       metadata: fromJsonbColumn<Record<string, unknown>>(row.metadata),
@@ -138,9 +164,9 @@ export class PgCredentialStore implements CredentialStore {
         owner.id,
         service,
         credential.type,
-        this.encrypt(credential.accessToken),
-        this.encrypt(credential.refreshToken),
-        this.encrypt(credential.apiKey),
+        await this.encrypt(owner, credential.accessToken),
+        await this.encrypt(owner, credential.refreshToken),
+        await this.encrypt(owner, credential.apiKey),
         credential.expiresAt ?? null,
         jsonbToParam(credential.scopes),
         jsonbToParam(credential.metadata),
@@ -162,7 +188,7 @@ export class PgCredentialStore implements CredentialStore {
       type: expected.type, accessToken: expected.accessToken, refreshToken: expected.refreshToken,
       apiKey: expected.apiKey, expiresAt: expected.expiresAt, scopes: expected.scopes, metadata: expected.metadata,
     };
-    if (!isDeepStrictEqual(this.toCredential(row), normalizedExpected)) return false;
+    if (!isDeepStrictEqual(await this.toCredential(owner, row), normalizedExpected)) return false;
     // Compare the persisted ciphertext snapshot, not newly encrypted expected
     // tokens. Encryption uses random nonces. A concurrent reconnect or delete
     // makes this UPDATE affect zero rows, even when writes share a timestamp.
@@ -181,8 +207,8 @@ export class PgCredentialStore implements CredentialStore {
       RETURNING owner_type, owner_id, service
     ), invalidated AS (${CREDENTIAL_INVALIDATION_SQL} RETURNING source.id)
     SELECT service FROM written`, [
-      owner.type, owner.id, service, next.type, this.encrypt(next.accessToken), this.encrypt(next.refreshToken),
-      this.encrypt(next.apiKey), next.expiresAt ?? null, jsonbToParam(next.scopes), jsonbToParam(next.metadata), this.clock(),
+      owner.type, owner.id, service, next.type, await this.encrypt(owner, next.accessToken), await this.encrypt(owner, next.refreshToken),
+      await this.encrypt(owner, next.apiKey), next.expiresAt ?? null, jsonbToParam(next.scopes), jsonbToParam(next.metadata), this.clock(),
       row.type, row.accessTokenEnc, row.refreshTokenEnc, row.apiKeyEnc, row.expiresAt,
       jsonbToParam(fromJsonbColumn(row.scopes)), jsonbToParam(fromJsonbColumn(row.metadata)), row.updatedAt, row.createdAt,
     ]);

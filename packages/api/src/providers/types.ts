@@ -1,4 +1,5 @@
 import type { OnlineStatusWatcher } from "../services/online-status-watch.js";
+import type { CredentialCipher } from "../services/secret-store/credential-keys.js";
 import type {
   ActionPlugin,
   BlobStore,
@@ -63,6 +64,9 @@ export interface Providers {
    * (`VALET_SECRET_STORE`). `enabled: false` when none is set; every method
    * then refuses by name. */
   secretStore: SecretStoreService;
+  /** Encrypts and decrypts `credentials` columns for code that reads rows
+   * directly. Owner keys when a secret store holds them, else the instance key. */
+  credentialCipher: CredentialCipher;
   /** Sandbox-image prebuild backend (sandbox images v2 plan). `null` when
    * unresolvable for the configured `VALET_SANDBOX_BACKEND`/
    * `VALET_IMAGE_BUILDER` (e.g. `local`, or `kubernetes` pre-T5) — callers

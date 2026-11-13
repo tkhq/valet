@@ -321,6 +321,20 @@ Neither user is a Turnkey root. A person with root authority in the organization
 
 Valet sets up each personal sub-organization itself: both users as roots, one policy for each, then a 2-of-2 root quorum.
 
+#### Credential keys
+
+| Variable | Description |
+|----------|-------------|
+| `VALET_CREDENTIAL_KEYS` | Optional. `secret-store` encrypts the OAuth tokens, refresh tokens, and API keys in the `credentials` table with a key per owner (user, team, org) held in the secret store, instead of with the instance key. Unset keeps the instance key for new writes. Needs `VALET_SECRET_STORE`. |
+
+With a secret store set, Valet reads both forms, so unsetting the variable later still reads every row. Rows move to the current form as they are read. The broker needs one more export policy in the deployment organization:
+
+```sh
+tk policy create --name "valet-broker: export credential keys" --effect allow \
+  --consensus "approvers.any(u, u.id == 'VALET_BROKER_USER_ID')" \
+  --condition "activity.type == 'ACTIVITY_TYPE_EXPORT_SECRETS' && secret.static_properties['scope'] == 'credential_key' && request_context['valet_company_org_id'] == secret.static_properties['valet_company_org_id'] && request_context['valet_key_owner'] == secret.static_properties['valet_key_owner']"
+```
+
 ### The two Google pairs
 
 Valet reads two Google credential pairs, and they do different jobs:
