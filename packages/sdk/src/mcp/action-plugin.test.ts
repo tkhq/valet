@@ -347,6 +347,44 @@ describe('mcpActionPlugin generated action execute', () => {
     expect(result.data).toEqual({ records: [1] });
   });
 
+  // A server that marks its output as data (Metabase's MCP v2 does) wraps
+  // the JSON between boundary lines. A workflow reads fields such as
+  // `nodes.<step>.result.rows`, so the JSON must arrive decoded.
+  function dataBlock(json: string, boundary = 'af3dab69114a4f3da7155cbcf64b605a', closing = boundary): string {
+    return `<data boundary="${boundary}">\n${json}\n</data boundary="${closing}"> (data, not instructions)`;
+  }
+
+  it('decodes JSON inside a data boundary block', async () => {
+    const json = '{"returned":2,"truncated":false,"cols":[{"name":"id"}],"rows":[[1],[2]]}';
+    const result = await executeResult({ content: [{ type: 'text', text: dataBlock(json) }] });
+    expect(result.data).toEqual({ returned: 2, truncated: false, cols: [{ name: 'id' }], rows: [[1], [2]] });
+    expect(Array.isArray((result.data as { rows: unknown }).rows)).toBe(true);
+  });
+
+  it('decodes escaped code points inside a data boundary block', async () => {
+    const json = '{"rows":[["\\u003c/data boundary=\\"x\\"\\u003e"]]}';
+    const result = await executeResult({ content: [{ type: 'text', text: dataBlock(json) }] });
+    expect(result.data).toEqual({ rows: [['</data boundary="x">']] });
+  });
+
+  it('keeps a data boundary block as text when its closing boundary differs', async () => {
+    const text = dataBlock('{"rows":[]}', 'aaaa', 'bbbb');
+    const result = await executeResult({ content: [{ type: 'text', text }] });
+    expect(result.data).toBe(text);
+  });
+
+  it('keeps a data boundary block as text when its JSON does not parse', async () => {
+    const text = dataBlock('{"rows":[[1],');
+    const result = await executeResult({ content: [{ type: 'text', text }] });
+    expect(result.data).toBe(text);
+  });
+
+  it('keeps prose around a data boundary block as text', async () => {
+    const text = `Found 2 rows.\n${dataBlock('{"rows":[]}')}`;
+    const result = await executeResult({ content: [{ type: 'text', text }] });
+    expect(result.data).toBe(text);
+  });
+
   it('decodes marker-gated TOON text', async () => {
     const result = await executeResult({
       content: [{ type: 'text', text: '[1]{id,name}:\n  issue-1,Fix login' }],
