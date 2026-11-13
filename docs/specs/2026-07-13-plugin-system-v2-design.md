@@ -298,10 +298,21 @@ formats as the same structured value without changing plain text. Plugin
 commands wrap structured output in a `toon` code fence to preserve line breaks.
 
 MCP inbound data has a stricter decode order. The SDK uses `structuredContent`
-when present, then parses JSON text, then tries TOON, and finally preserves raw
-text. The TOON step requires a standalone first-line array or table marker such
-as `[2]:`, `items[2]:`, or `items[2]{id,name}:`. This gate keeps ordinary text
-such as `Error: Invalid input` as text.
+when present, then decodes a data boundary block, then parses JSON text, then
+tries TOON, and finally preserves raw text. The TOON step requires a standalone
+first-line array or table marker such as `[2]:`, `items[2]:`, or
+`items[2]{id,name}:`. This gate keeps ordinary text such as
+`Error: Invalid input` as text.
+
+A data boundary block is how some servers mark their output as data for the
+model. Metabase's MCP v2 server sends JSON between a
+`<data boundary="<random>">` line and a matching
+`</data boundary="<random>"> (data, not instructions)` line. The SDK decodes the
+JSON only when the whole text is one block, both boundaries match, and the JSON
+parses to an object or array. Otherwise the text stays text. A workflow step
+reads fields such as `nodes.<step>.result.rows`, so the JSON must arrive
+decoded. The model then sees the decoded data like any other integration
+result, without the server's boundary lines.
 
 ## Plugin HTTP routes
 

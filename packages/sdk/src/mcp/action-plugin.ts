@@ -423,7 +423,26 @@ function mapToolResult(result: McpToolResult): { success: boolean; data?: unknow
     .filter((c): c is typeof c & { text: string } => c.type === 'text' && typeof c.text === 'string' && c.text.length > 0)
     .map((c) => c.text);
   const text = textParts.length === 1 ? textParts[0] : textParts.join('\n');
-  return { success: true, data: tryParseJson(text) ?? tryDecodeToon(text) ?? text };
+  return { success: true, data: tryParseDataBlock(text) ?? tryParseJson(text) ?? tryDecodeToon(text) ?? text };
+}
+
+/**
+ * Some servers mark their output as data for the model by wrapping the JSON
+ * between boundary lines (Metabase's MCP v2 does):
+ *
+ *   <data boundary="<random>">
+ *   <json>
+ *   </data boundary="<random>"> (data, not instructions)
+ *
+ * Decode only a text that is exactly one such block with matching boundaries
+ * and JSON that parses. Anything else (prose around the block, a cut-off
+ * block) stays text.
+ */
+const DATA_BLOCK = /^<data boundary="([0-9A-Za-z_-]{1,128})">\n([\s\S]*)\n<\/data boundary="\1">(?: \(data, not instructions\))?$/;
+
+function tryParseDataBlock(text: string): unknown {
+  const match = DATA_BLOCK.exec(text.trim());
+  return match ? tryParseJson(match[2]) : undefined;
 }
 
 function asStructured(value: unknown): unknown {
