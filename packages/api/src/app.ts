@@ -81,6 +81,7 @@ import { modelTiersRouter } from "./routes/model-tiers.js";
 import { approvedModelsRouter } from "./routes/approved-models.js";
 import { orgReasoningRouter } from "./routes/org-reasoning.js";
 import { llmProvidersRouter } from "./routes/llm-providers.js";
+import { commitSigningRouter, orgAllowedSignersRouter } from "./routes/commit-signing.js";
 import { reposRouter } from "./routes/repos.js";
 import { sourcesRouter } from "./routes/sources.js";
 import { sandboxGitCredentialRouter } from "./routes/sandbox-git-credential.js";
@@ -442,6 +443,8 @@ export function createApp(
   // a catch-all route that could shadow /api/me/identity-links.
   app.route("/api/me/agent-access", agentAccessRouter);
   app.route("/api/me/identity-links", identityLinksRouter);
+  app.route("/api/me/commit-signing", commitSigningRouter);
+  app.route("/api/org/allowed-signers", orgAllowedSignersRouter);
   app.route("/api/me", meRouter);
   app.route("/api/tutorial", tutorialRouter);
   app.route("/api/models", modelsRouter);

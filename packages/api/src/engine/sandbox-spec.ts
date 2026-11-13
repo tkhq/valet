@@ -13,6 +13,7 @@ import type { RepoBinding } from "../wire/types.js";
 import type { RecipeStep } from "../prebuilds/recipe.js";
 import { gitCredentialHelperScript, ghWrapperScript } from "./git-credential-helper.js";
 import { commandWrapperScript, opShimScript, secretsCliScript } from "./secrets-cli-script.js";
+import { valetSignScript } from "./commit-signing-script.js";
 import type { CredentialCommand } from "./credential-commands.js";
 
 // Increment when the prep logic changes in a way that requires re-running all
@@ -124,6 +125,8 @@ export function computeSpec(snap: ResolveSnapshot): SandboxSpec {
     // declarations has to re-run it. Hashing the generated scripts rather
     // than the config means a rename or a changed reference reinstalls.
     (snap.credentialCommands ?? []).map(commandWrapperScript).join("") +
+    // `valet-sign` is installed by the same step, so it belongs in the same hash.
+    valetSignScript() +
     String(PREP_VERSION);
   steps.push({ id: "credential-scripts", hash: sha256(credInput), critical: true });
 

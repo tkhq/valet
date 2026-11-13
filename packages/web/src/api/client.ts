@@ -32,6 +32,9 @@ import type {
   AbortThreadRequest,
   AddTeamMemberRequest,
   AuthConfigResponse,
+  GetCommitSigningResponse,
+  PostCommitSigningEnrollRequest,
+  PostCommitSigningEnrollResponse,
   AllowWorkflowPermissionsRequest,
   AllowWorkflowPermissionsResponse,
   CancelWorkflowRunResponse,
@@ -1298,6 +1301,10 @@ export const api = {
 
   // settings shell (split-settings design): per-user profile, org, models
   getMe: () => request<MeResponse>("GET", "/me"),
+  // Commit signing (agent commit signing design).
+  getCommitSigning: () => request<GetCommitSigningResponse>("GET", "/me/commit-signing"),
+  enrollCommitSigning: (body: PostCommitSigningEnrollRequest) =>
+    request<PostCommitSigningEnrollResponse>("POST", "/me/commit-signing/enroll", body),
   getThreadProjects: (sessionId: string, expectedViewerId: string, signal?: AbortSignal) => request<ThreadProjectsResponse>("GET", `/me/thread-projects/${encodeURIComponent(sessionId)}?expectedViewerId=${encodeURIComponent(expectedViewerId)}`, undefined, signal),
   changeThreadProjects: (sessionId: string, operations: ThreadProjectsOperation[], expectedViewerId: string, signal?: AbortSignal) =>
     request<ThreadProjectsResponse>("PATCH", `/me/thread-projects/${encodeURIComponent(sessionId)}`, { expectedViewerId, operations }, signal),

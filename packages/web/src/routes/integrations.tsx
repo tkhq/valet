@@ -5,6 +5,7 @@ import { useOrg, useTeams } from "~/api/settings";
 import { Dialog, DialogContent, DialogTitle, Spinner } from "~/components/primitives";
 import { SearchInput } from "~/components/search-input";
 import { Section, SectionHeading } from "~/components/settings/section";
+import { CommitSigningSection } from "~/components/settings/commit-signing-section";
 import { hasPanel, IntegrationDetail, IntegrationRow, integrationGroup } from "~/components/integrations/integration-row";
 import { IntegrationList } from "~/components/integrations/integration-card";
 import { OrphanCredentials } from "~/components/integrations/orphan-credentials";
@@ -298,6 +299,7 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
           </div>
         )}
         {!isLoading && !error && <OrphanCredentials plugins={plugins} />}
+        <Section title="Commit signing"><CommitSigningSection /></Section>
         <Dialog
           open={detail !== undefined}
           onOpenChange={(open) => {
