@@ -1838,9 +1838,12 @@ export class ChildWatcher {
       reportError({ area: "sandbox", reason: "child_workspace_release", level: "error" },
         `Releasing the working directory of child ${childSessionId} failed. Check the sandbox backend, then delete the directory.`, err);
     }
+    // A parked child is already `hibernated` (`parkChildSandbox`). Stamp it
+    // too: this is the one owner of a retired child's reclaim stamp, and an
+    // unstamped row would let the hibernation reaper destroy it again.
     await this.deps.db.update(agentSessions)
-      .set({ status: "hibernated", sandboxReclaimedAt: now, updatedAt: now })
-      .where(and(eq(agentSessions.id, childSessionId), eq(agentSessions.status, "active")));
+      .set({ status: "hibernated", hibernatedSandboxId: null, sandboxReclaimedAt: now, updatedAt: now })
+      .where(and(eq(agentSessions.id, childSessionId), inArray(agentSessions.status, ["active", "hibernated"])));
   }
 
   private async forgetDestroyedSandbox(childSessionId: string, sandboxId: string): Promise<boolean> {
