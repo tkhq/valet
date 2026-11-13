@@ -25,6 +25,8 @@ export interface ReviewRound {
   resolved: string[];
   /** Findings a recheck refuted with no change to their code. Absent: none. */
   withdrawn?: string[];
+  /** Memory paths of the team rules the reviewer was given. Absent: none. */
+  rules?: string[];
 }
 
 /** Everything the reviewer remembers about one pull request. */

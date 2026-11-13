@@ -83,6 +83,8 @@ export interface SummaryInput {
   outsideDiff: PostedFinding[];
   /** Findings a recheck resolved at `sha`. `withdrawn`: no commit changed their code. */
   fixed: { finding: Pick<PostedFinding, "id" | "title" | "path">; sha: string; withdrawn?: boolean }[];
+  /** Memory paths of the team rules the reviewer was given for this review. */
+  rules?: string[];
   /** Findings the reviewer reported that the line's settings or a missing line hid. */
   hidden: number;
 }
@@ -121,6 +123,11 @@ export function renderSummary(s: SummaryInput): string {
     lines.push("</details>");
   }
   if (s.hidden > 0) lines.push("", `${s.hidden} finding(s) are not shown: below the line's minimum severity, in excluded paths, or on a line that does not exist at this head.`);
+  if (s.rules && s.rules.length > 0) {
+    lines.push("", `<details><summary>Team rules applied (${s.rules.length})</summary>`, "");
+    for (const path of s.rules) lines.push(`- \`${path}\``);
+    lines.push("", "</details>");
+  }
   return lines.join("\n");
 }
 
@@ -139,7 +146,7 @@ function oneLine(s: string): string {
 }
 
 /** A review recorded in the plugin thread only. Nothing of it is on GitHub. */
-export function renderShadowReview(r: { slug: string; commit: string; summary: string; confidence: number; findings: Finding[]; hidden: number }): string {
+export function renderShadowReview(r: { slug: string; commit: string; summary: string; confidence: number; findings: Finding[]; hidden: number; rules?: string[] }): string {
   const sorted = [...r.findings].sort((a, b) => SEVERITIES.indexOf(a.severity) - SEVERITIES.indexOf(b.severity));
   const lines = [
     `## Shadow review of ${r.slug} at \`${r.commit.slice(0, 7)}\``,
@@ -155,6 +162,7 @@ export function renderShadowReview(r: { slug: string; commit: string; summary: s
     if (f.suggestion) lines.push("", "```suggestion", f.suggestion.replace(/\n+$/, ""), "```");
   }
   if (r.hidden > 0) lines.push("", `${r.hidden} finding(s) are not shown: below the line's minimum severity, in excluded paths, or on a line that does not exist at this commit.`);
+  if (r.rules && r.rules.length > 0) lines.push("", `Team rules applied (${r.rules.length}): ${r.rules.map((p) => `\`${p}\``).join(", ")}`);
   return lines.join("\n");
 }
 

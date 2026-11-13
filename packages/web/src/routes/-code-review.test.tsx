@@ -325,8 +325,8 @@ describe("CodeReviewPage", () => {
       repo: "acme/site", number: 7, title: "Fix checkout retries", url: "https://github.com/acme/site/pull/7", state: "open", status: "complete",
       reviewId: 41, head: "abc1234def", openFindings: 2, resolvedFindings: 1, updatedAt: Date.now(), threadId: "t-7",
       rounds: [
-        { head: "111aaaa", mode: "full", at: "2026-11-04T12:00:00Z", newFindings: 3, resolved: 0, withdrawn: 0 },
-        { head: "abc1234def", mode: "incremental", at: "2026-11-05T12:00:00Z", newFindings: 0, resolved: 1, withdrawn: 1 },
+        { head: "111aaaa", mode: "full", at: "2026-11-04T12:00:00Z", newFindings: 3, resolved: 0, withdrawn: 0, rules: 2 },
+        { head: "abc1234def", mode: "incremental", at: "2026-11-05T12:00:00Z", newFindings: 0, resolved: 1, withdrawn: 1, rules: 0 },
       ],
     }];
     renderPage();
@@ -340,7 +340,7 @@ describe("CodeReviewPage", () => {
     expect(within(ongoing).getByText("Incremental review")).toBeTruthy();
     expect(within(ongoing).getByRole("link", { name: "111aaaa" }).getAttribute("href")).toBe("https://github.com/acme/site/commit/111aaaa");
     expect(within(ongoing).getByText(/0 new findings, 1 fixed, 1 withdrawn/)).toBeTruthy();
-    expect(within(ongoing).getByText(/3 new findings, 0 fixed(?!, )/)).toBeTruthy();
+    expect(within(ongoing).getByText(/3 new findings, 0 fixed, 2 team rules/)).toBeTruthy();
   });
 
   it("shows a first review while it runs before any completed rounds exist", () => {
