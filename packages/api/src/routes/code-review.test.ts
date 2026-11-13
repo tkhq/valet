@@ -61,7 +61,7 @@ it("lists the workspace's reviewed pull requests, newest first, with counts and 
       { id: "f3", path: "b.ts", line: 2, status: "dismissed" },
       { id: "f4", path: "b.ts", line: 5, status: "resolved", withdrawnAt: "abc123" },
     ],
-    rounds: [{ head: "abc123", mode: "full", at: "2026-11-05T12:00:00.000Z", newFindings: ["f1", "f2", "f4"], resolved: ["f2"], withdrawn: ["f4"] }],
+    rounds: [{ head: "abc123", mode: "full", at: "2026-11-05T12:00:00.000Z", newFindings: ["f1", "f2", "f4"], resolved: ["f2"], withdrawn: ["f4"], rules: ["lib/code-review/notes/money.md"] }],
   }));
   await store.put("pulls", "acme/site#8", pointers({}));
   // Another workspace's record and a key that names no pull request stay out.
@@ -75,7 +75,7 @@ it("lists the workspace's reviewed pull requests, newest first, with counts and 
   const { status, body } = await reviews();
   expect(status).toBe(200);
   expect(body.reviews.map((r) => `${r.repo}#${r.number}`)).toEqual(["acme/site#8", "acme/site#7"]);
-  expect(body.reviews[1]).toMatchObject({ repo: "acme/site", number: 7, reviewId: 41, head: "abc123", openFindings: 1, resolvedFindings: 1, threadId: thread.id, state: "open", title: "Pull request 7", url: "https://github.com/acme/site/pull/7", status: "complete", rounds: [{ head: "abc123", mode: "full", at: "2026-11-05T12:00:00.000Z", newFindings: 3, resolved: 1, withdrawn: 1 }] });
+  expect(body.reviews[1]).toMatchObject({ repo: "acme/site", number: 7, reviewId: 41, head: "abc123", openFindings: 1, resolvedFindings: 1, threadId: thread.id, state: "open", title: "Pull request 7", url: "https://github.com/acme/site/pull/7", status: "complete", rounds: [{ head: "abc123", mode: "full", at: "2026-11-05T12:00:00.000Z", newFindings: 3, resolved: 1, withdrawn: 1, rules: 1 }] });
   expect(body.reviews[0]).toMatchObject({ repo: "acme/site", number: 8, openFindings: 0, resolvedFindings: 0, updatedAt: expect.any(Number) });
 });
 
@@ -125,8 +125,8 @@ it("reads legacy review rounds without a pointer record", async () => {
   expect((await reviews()).body.reviews).toEqual([expect.objectContaining({
     number: 7, head: "head2", openFindings: 1, resolvedFindings: 1,
     rounds: [
-      { head: "head1", mode: "full", at: "2026-11-04T12:00:00.000Z", newFindings: 1, resolved: 0, withdrawn: 0 },
-      { head: "head2", mode: "incremental", at: "2026-11-05T12:00:00.000Z", newFindings: 1, resolved: 1, withdrawn: 0 },
+      { head: "head1", mode: "full", at: "2026-11-04T12:00:00.000Z", newFindings: 1, resolved: 0, withdrawn: 0, rules: 0 },
+      { head: "head2", mode: "incremental", at: "2026-11-05T12:00:00.000Z", newFindings: 1, resolved: 1, withdrawn: 0, rules: 0 },
     ],
   })]);
   await pluginStore(local.providers.db, "pr-review").user(owner.id).put("pulls", "acme/site#7", pointers({
@@ -134,9 +134,9 @@ it("reads legacy review rounds without a pointer record", async () => {
     rounds: [{ head: "head3", mode: "incremental", at: "2026-11-05T13:00:00.000Z", newFindings: [], resolved: ["f2"] }],
   }));
   expect((await reviews()).body.reviews[0]?.rounds).toEqual([
-    { head: "head1", mode: "full", at: "2026-11-04T12:00:00.000Z", newFindings: 1, resolved: 0, withdrawn: 0 },
-    { head: "head2", mode: "incremental", at: "2026-11-05T12:00:00.000Z", newFindings: 1, resolved: 1, withdrawn: 0 },
-    { head: "head3", mode: "incremental", at: "2026-11-05T13:00:00.000Z", newFindings: 0, resolved: 1, withdrawn: 0 },
+    { head: "head1", mode: "full", at: "2026-11-04T12:00:00.000Z", newFindings: 1, resolved: 0, withdrawn: 0, rules: 0 },
+    { head: "head2", mode: "incremental", at: "2026-11-05T12:00:00.000Z", newFindings: 1, resolved: 1, withdrawn: 0, rules: 0 },
+    { head: "head3", mode: "incremental", at: "2026-11-05T13:00:00.000Z", newFindings: 0, resolved: 1, withdrawn: 0, rules: 0 },
   ]);
 });
 

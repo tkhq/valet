@@ -309,7 +309,9 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   });
 
   // 2. Review the PR, or only the new commits, told what is already open.
+  const rules = new Set<string>();
   const review = (async () => runReviewers(ctx, thread, {
+    onRules: (paths) => paths.forEach((p) => rules.add(p)),
     slug, repoName, pr, base: mergeBase, head, settings,
     diff: from !== undefined ? await incrementDiff(gh, from, head, reviewed, settings.riskPaths) : prDiffFor(prDiff, reviewed, mergeBase, head, settings.riskPaths),
     ...(from !== undefined ? { incrementFrom: from } : {}),
@@ -401,6 +403,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
       inline: [...stillOpen.filter((f) => f.commentId !== undefined), ...reopened, ...inline],
       outsideDiff: [...stillOpen.filter((f) => f.commentId === undefined), ...outside],
       fixed: fixed.map(({ finding, withdrawn }) => ({ finding, sha: head, withdrawn })),
+      rules: [...rules].sort(),
       hidden,
     });
 
@@ -468,6 +471,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
     newFindings: posted.map(f => f.id),
     resolved: fixed.filter((r) => !r.withdrawn).map(({ finding }) => finding.id),
     ...(fixed.some((r) => r.withdrawn) ? { withdrawn: fixed.filter((r) => r.withdrawn).map(({ finding }) => finding.id) } : {}),
+    ...(rules.size > 0 ? { rules: [...rules].sort() } : {}),
   };
   const next: PullPointers = {
     version: 1,
@@ -758,6 +762,8 @@ async function runReviewerChild(
     context?: { readTrusted: (path: string) => Promise<string | undefined>; patch?: string | undefined };
     /** Limit this child to one defect class. Unset: the general review. */
     focus?: ReviewFocus;
+    /** Told the memory paths of the team rules the context pack carried. */
+    onRules?: (paths: string[]) => void;
   },
 ): Promise<Review> {
   const [owner = "", repo = ""] = input.repoName.split("/");
@@ -804,6 +810,7 @@ async function runReviewerChild(
                 thread,
                 dispatchId: `${input.dispatchId}:context`,
               });
+              if (pack) input.onRules?.(pack.manifest.items.filter((i) => i.section === "notes").map((i) => i.ref));
               return pack ? promptWith(pack.text, "") : fallback();
             },
           }
@@ -873,7 +880,9 @@ async function shadowReview(
   const files = comparison.files ?? [];
   const reviewed = files.filter((f) => !excluded(f.filename, settings.excludePaths));
   const prDiff = (await gh.compareDiff(mergeBase, checkout)) ?? undefined;
+  const rules = new Set<string>();
   const draft = await runReviewers(ctx, thread, {
+    onRules: (paths) => paths.forEach((p) => rules.add(p)),
     slug, repoName, pr, base: mergeBase, head: checkout, settings,
     diff: prDiffFor(prDiff, reviewed, mergeBase, checkout, settings.riskPaths),
     knownFindings: [],
@@ -886,7 +895,7 @@ async function shadowReview(
   ctx.signal.throwIfAborted();
   await ctx.threads.record(
     thread,
-    renderShadowReview({ slug, commit: checkout, summary: draft.summary, confidence: draft.confidence, findings: shown, hidden: draft.findings.length - shown.length }),
+    renderShadowReview({ slug, commit: checkout, summary: draft.summary, confidence: draft.confidence, findings: shown, hidden: draft.findings.length - shown.length, rules: [...rules].sort() }),
     { dispatchId: dispatch("shadow-record") },
   );
   log(slug, `shadow review of ${checkout.slice(0, 7)} recorded in the plugin thread: ${shown.length} finding(s)`);

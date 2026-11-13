@@ -307,6 +307,19 @@ describe("gatherContext", () => {
     expect(pack.manifest.dropped).toEqual(expect.arrayContaining([{ section: "notes", ref: "lib/code-review/notes/", reason: "listed the first 100 files; more rule notes may exist" }]));
   });
 
+  it("applies a rule note with no paths, terms or title pattern to every change", async () => {
+    const r = repo({ "a.ts": "export const a = 1;\n" }, { "a.ts": "export const a = 2;\n" });
+    const always = '---\ntitle: "Name the corrective action"\n---\n\nEvery error message names what to do.';
+    const mem: PackMemory = {
+      search: async () => [],
+      read: async (path) => (path === "lib/code-review/notes/errors.md" ? { path, content: always } : null),
+      list: async () => [{ path: "lib/code-review/notes/errors.md", title: "Name the corrective action", description: "" }],
+    };
+    const pack = await gatherContext({ runner: localRunner(r.dir), readTrusted: (p) => gitFileAt(r.dir, r.base, p), patch: r.patch, diffDropped: [], title: "t", memory: mem, budgetChars: 10_000 });
+    expect(pack.text).toContain("#### Name the corrective action (team memory lib/code-review/notes/errors.md; matched: applies to every change)");
+    expect(pack.manifest.items).toEqual(expect.arrayContaining([expect.objectContaining({ section: "notes", ref: "lib/code-review/notes/errors.md" })]));
+  });
+
   it("does not take a note under a nested lib/ directory, which agents can write, as a rule", async () => {
     const r = repo({ "apps/vivo/gate.yaml": "kind: AnalysisTemplate\n" }, { "apps/vivo/gate.yaml": "kind: AnalysisTemplate\nfailureLimit: 1\n" });
     const pack = await gatherContext({

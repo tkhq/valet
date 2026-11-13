@@ -195,7 +195,7 @@ codeReviewRouter.get("/reviews", async (c) => {
       repo: record.repo, number: record.number, title: pr.title, url: pr.url, state: "open",
       status: record.deliveryStatus === "pending" || record.deliveryStatus === "failed" ? "running" : record.deliveryStatus === "dead" ? "failed" : "complete",
       rounds: rounds.map(round => ({
-        head: round.head, mode: round.mode, at: round.at, newFindings: round.newFindings.length, resolved: round.resolved.length, withdrawn: round.withdrawn?.length ?? 0,
+        head: round.head, mode: round.mode, at: round.at, newFindings: round.newFindings.length, resolved: round.resolved.length, withdrawn: round.withdrawn?.length ?? 0, rules: round.rules?.length ?? 0,
       })),
       ...(doc?.reviewId !== undefined ? { reviewId: doc.reviewId } : {}),
       ...(doc?.lastReviewedHead !== undefined ? { head: doc.lastReviewedHead } : {}),

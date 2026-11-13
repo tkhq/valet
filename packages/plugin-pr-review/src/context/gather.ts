@@ -200,9 +200,9 @@ export async function gatherContext(input: GatherInput): Promise<ContextPack> {
       const file = await read(path);
       const note = file ? parse(path, file.content) : undefined;
       if (!note) continue;
-      const why = hasRule(note) ? noteMatch(note, change, matchesGlob) : undefined;
+      // A rule note with no paths, terms or title pattern is a rule for every change.
+      const why = hasRule(note) ? noteMatch(note, change, matchesGlob) : "applies to every change";
       if (why) notes.push({ note, why });
-      else if (!hasRule(note)) memory.push({ path, title: note.title, text: note.body, kind: "note" });
       else unmatchedRules++;
     }
     if (unmatchedRules > 0) extraDrops.push({ section: "notes", ref: `${unmatchedRules} rule note(s)`, reason: "their paths, terms and title pattern do not match this change" });

@@ -61,10 +61,14 @@ the plugin keeps them apart.
 - **Every rule note is checked.** The plugin lists every note in the rule
   directory through the read-only memory port's `list`, which uses the same
   org scope as `search` and `read`. It reads at most 100 notes and matches
-  each one by its own paths, terms and title pattern. A keyword search
-  finds only background notes, so a search that returns other notes first
-  cannot hide a rule. One drop-log line counts the rule notes that do not
-  match.
+  each one by its own paths, terms and title pattern. A rule note with no
+  paths, terms or title pattern applies to every change, like a root
+  convention file. A keyword search finds only background notes, so a
+  search that returns other notes first cannot hide a rule. One drop-log
+  line counts the rule notes that do not match.
+- **The team sees which rules applied.** The summary review lists the
+  memory path of each rule note the reviewer was given, and the review round
+  records them (`rules`). The Code review page shows the count per round.
 - **Matched rules fill the pack first.** Matched rule notes take budget
   before conventions and code sections, with no section share. The pack cuts
   a matched rule only when the rules alone pass the budget, and it logs the

@@ -3807,6 +3807,8 @@ export interface CodeReviewRoundWire {
   resolved: number;
   /** Findings the reviewer withdrew on a recheck, with no change to their code. */
   withdrawn: number;
+  /** Team rules from memory that the reviewer was given for this review. */
+  rules: number;
 }
 
 /** One open pull request with a review chain for a workspace. */

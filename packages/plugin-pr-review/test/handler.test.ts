@@ -1239,6 +1239,24 @@ describe("review-pull-request handler stages", () => {
     expect(threads.records[1].body).toContain('→ dropped: repeats "Null deref in parse" at a.ts:5 (same evidence a.ts:5)');
   });
 
+  it("lists the team rules the reviewer was given in the summary and the round", async () => {
+    const gh = new FakeGitHub();
+    gh.contentsAt[BASE] = { "AGENTS.md": "Always validate parse input.\n" };
+    const threads = new FakeThreads(scripted(reviewOf([]), {}));
+    threads.checkout = repoOf({ "AGENTS.md": "Always validate parse input.\n", "a.ts": "export function parse() {}\n" });
+    const rule = '---\ntitle: "Validate parse input"\npaths: "[\\"a.ts\\"]"\n---\n\nEvery parse checks its input.';
+    const store = new FakeStore();
+    const ctx = { ...context(threads, store), memory: {
+      search: async () => [],
+      read: async (path: string) => (path === "lib/code-review/notes/parse.md" ? { path, content: rule } : null),
+      list: async () => [{ path: "lib/code-review/notes/parse.md", title: "Validate parse input", description: "" }],
+    } };
+    await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1", "github.pull_request.opened"), ctx);
+    const summary = [...gh.reviews.values()][0].body;
+    expect(summary).toContain("<details><summary>Team rules applied (1)</summary>\n\n- `lib/code-review/notes/parse.md`");
+    expect(store.pointers()?.rounds?.[0]).toMatchObject({ rules: ["lib/code-review/notes/parse.md"] });
+  });
+
   it("runs the repo-wide team-notes search only when no pack replaces the prompt", async () => {
     const gh = new FakeGitHub();
     gh.contentsAt[BASE] = { "AGENTS.md": "Always validate parse input.\n" };
