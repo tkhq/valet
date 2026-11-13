@@ -124,3 +124,49 @@ On 2026-11-10 the eval measured all three focuses with the 0.7 threshold. The
 private history suite caught 11 of 20 human-raised issues, against 8 in two
 baseline runs. Martian F1 fell from 53.5 to 48.7. Turn focuses on per
 repository, and measure them in shadow mode first.
+
+## Learning from review feedback
+
+When a reviewed pull request closes (`github.pull_request.closed`), the handler
+learns from what people did with the review. The `learn` setting turns this on
+and is on by default. A shadow line does not learn. A line made before
+2026-11-13 lists only the review events, so add `github.pull_request.closed`
+to its event keys to turn learning on.
+
+1. The handler reads the feedback from people with push access (write,
+   maintain or admin role). Anyone can comment on a public repository, so the
+   handler ignores everyone else. A finding counts when such a person replied
+   to it, reacted with a thumbs-up or thumbs-down, or resolved its thread with
+   no fix. A comment of theirs that starts a thread counts as a miss, with
+   whether a later commit changed its lines.
+2. With no such feedback, the pass ends without a model call.
+3. A `pr-learner` child reads the feedback, the existing lessons for the
+   repository, the learned principles, and the titles of the other
+   principles. It answers with at most five lessons, each a `create` or an
+   `update`, with a kind: `check` (flag this) or `skip` (do not flag this).
+4. The plugin writes each lesson to the line owner's memory through the
+   plugin memory port:
+   - A repository lesson goes to
+     `code-review/learned/<owner>/<repo>/<slug>.md`. Memory keeps no
+     frontmatter from a plugin write, so `Kind:`, `Paths:`, `Terms:` and
+     `Evidence:` are lines in the body.
+   - A general lesson goes to `principles/review-<slug>.md`. It is a real
+     principle: every agent of the owner lists it at its next wake.
+   - An update may replace only an existing learned note of the repository or
+     a learned principle. A person's own notes and principles are never
+     overwritten.
+5. The plugin thread gets a note that lists what was written or skipped. The
+   pointers record `learnedHead`, so a retry or a second close does not learn
+   twice.
+
+At review time, the context pack lists the repository's learned lessons,
+matches them by paths and terms like rule notes, and puts them in their own
+section after the team rules: "Learned from past reviews". A lesson with no
+paths or terms applies to every change in the repository. A lesson with
+`Status: retired` is skipped. The pack tells the reviewer that a repository
+rule wins over a learned lesson. A learned principle
+(`principles/review-*.md`) loads in the same section with its full text, as
+a lesson for every change in every repository. The owner's other principles
+are listed by title. Keyword search skips learned files, so a lesson does not
+appear twice. A person edits or
+deletes a lesson in Memory like any other file.

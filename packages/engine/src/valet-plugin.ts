@@ -712,6 +712,12 @@ export interface ValetPlugin {
   skills?: SkillSource[];
   roles?: RoleSpec[];
   credentials?: CredentialDeclaration[];
+  /**
+   * Memory directories this plugin's event handlers may write in the line
+   * owner's memory, each ending in `/`, such as `principles/`. The host
+   * refuses a write anywhere else, and `lib/` is never writable.
+   */
+  memoryWrites?: string[];
   transports?: ChannelTransportFactory[];
   /** Action-backed slash commands this plugin exposes. */
   commands?: CommandDef[];

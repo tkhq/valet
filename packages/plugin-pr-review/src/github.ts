@@ -42,6 +42,21 @@ export interface ReviewComment {
   id: number;
   body: string;
   pull_request_review_id: number | null;
+  user?: { login: string; type?: string } | null;
+  /** The comment this one replies to. Absent or null: it starts a thread. */
+  in_reply_to_id?: number | null;
+  path?: string;
+  line?: number | null;
+  original_line?: number | null;
+  /** The commit the comment was made on. */
+  original_commit_id?: string;
+  html_url?: string;
+}
+
+/** One emoji reaction on a review comment. */
+export interface Reaction {
+  content: string;
+  user?: { login: string } | null;
 }
 
 export interface Review {
@@ -94,6 +109,8 @@ export interface GitHubClient {
   createReview(input: { commitId: string; body: string; comments: NewReviewComment[] }): Promise<Review>;
   updateReview(id: number, body: string): Promise<Review>;
   reviewComments(): Promise<ReviewComment[]>;
+  /** Emoji reactions on one review comment. */
+  commentReactions(commentId: number): Promise<Reaction[]>;
   updateComment(id: number, body: string): Promise<void>;
   reviewThreads(): Promise<ReviewThread[]>;
   /** Resolve or unresolve a review thread. Needs the App's pull requests write permission. */
@@ -231,6 +248,7 @@ export function githubClient(opts: { token: string; owner: string; repo: string;
       }),
     updateReview: (id, body) => json<Review>("PUT", `${pullPath}/reviews/${id}`, "update review", { body }),
     reviewComments: () => pages<ReviewComment>(`${pullPath}/comments`, "list review comments"),
+    commentReactions: (commentId) => pages<Reaction>(`${repoPath}/pulls/comments/${commentId}/reactions`, "list review comment reactions"),
     async updateComment(id, body) {
       await json<unknown>("PATCH", `${repoPath}/pulls/comments/${id}`, "update review comment", { body });
     },

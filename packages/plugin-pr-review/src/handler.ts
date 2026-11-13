@@ -34,6 +34,7 @@ import { ReviewSchema, type Finding, type Review } from "./types.js";
 import { anchorProblems, lineCount } from "./review.js";
 import { buildVerifierPrompt, decideFinding, refutationCitesRules, refutationGrounded, VerdictSchema, type Verdict } from "./verify.js";
 import type { ReviewRound } from "./state.js";
+import { buildLearnerPrompt, collectFeedback, existingLessons, runLearner, writeLessons, type LearnOutcome } from "./learn.js";
 
 export const REVIEWER_ROLE = "pr-reviewer";
 
@@ -91,6 +92,10 @@ export const ReviewSettingsSchema = Type.Object(
       maximum: 1,
       description: "Drop findings from the `focuses` children rated below this confidence (0-1). Findings from the general review are not affected.",
     }),
+    learn: Type.Boolean({
+      default: true,
+      description: "When a reviewed pull request closes, learn from what people with write access did with the findings and what they flagged that Valet missed. Lessons go to memory: repository notes under code-review/learned/ and general principles under principles/.",
+    }),
     contextBudget: Type.Integer({
       default: 12000,
       minimum: 0,
@@ -138,6 +143,8 @@ export interface PullPointers {
   nextId: number;
   /** The latest 100 completed reviews, oldest first. */
   rounds?: ReviewRound[];
+  /** The head the learning pass ran on when the pull request closed. A retry or a second close does not learn twice. */
+  learnedHead?: string;
   /** Temporary retry journal, cleared after all GitHub comment/thread edits succeed. */
   pending?: {
     head: string;
@@ -191,7 +198,7 @@ export function createReviewHandler(opts: ReviewHandlerOptions = {}): PluginEven
   return {
     id: "review-pull-request",
     description: "Review each push to a pull request and keep one review per pull request, edited in place.",
-    events: ["github.pull_request.opened", "github.pull_request.synchronize", "github.pull_request.ready_for_review", "github.pull_request.reopened"],
+    events: ["github.pull_request.opened", "github.pull_request.synchronize", "github.pull_request.ready_for_review", "github.pull_request.reopened", "github.pull_request.closed"],
     configSchema: ReviewSettingsSchema,
     concurrency: "supersede",
     handle: (event, ctx) => reviewPullRequestEvent(event, ctx, opts),
@@ -235,6 +242,10 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   const pr = await gh.pull();
   const head = pr.head.sha;
   const manual = manualReviewOptions(event);
+  if (event.key === "github.pull_request.closed") {
+    if (!settings.learn || settings.shadow) return log(slug, "skipped: learning is off for this line");
+    return learnFromPullRequest(event, ctx, gh, pr, settings, { slug, repoName, number: target.number });
+  }
   if (settings.shadow || manual?.shadow) return shadowReview(event, ctx, gh, pr, settings, { slug, repoName, commit: manual?.commit });
   if (pr.state !== "open") return log(slug, `skipped: the pull request is ${pr.state}`);
   if (pr.draft && !settings.reviewDrafts) return log(slug, "skipped: draft pull request");
@@ -810,7 +821,7 @@ async function runReviewerChild(
                 thread,
                 dispatchId: `${input.dispatchId}:context`,
               });
-              if (pack) input.onRules?.(pack.manifest.items.filter((i) => i.section === "notes").map((i) => i.ref));
+              if (pack) input.onRules?.(pack.manifest.items.filter((i) => i.section === "notes" || i.section === "learned").map((i) => i.ref));
               return pack ? promptWith(pack.text, "") : fallback();
             },
           }
@@ -1034,6 +1045,64 @@ async function forEachLimit<T>(items: T[], limit: number, fn: (item: T) => Promi
       while (next < items.length) await fn(items[next++]);
     }),
   );
+}
+
+/**
+ * The learning pass on a closed pull request: read the feedback from people
+ * with write access, ask the learner child for lessons, and write them to
+ * the owner's memory. A pull request with no such feedback costs no model call.
+ */
+async function learnFromPullRequest(
+  event: PluginEvent,
+  ctx: PluginEventContext,
+  gh: GitHubClient,
+  pr: PullRequest,
+  settings: ReviewSettings,
+  where: { slug: string; repoName: string; number: number },
+): Promise<void> {
+  const { slug, repoName } = where;
+  const stored = await ctx.store.get<PullPointers>(POINTERS_COLLECTION, slug);
+  const prior = stored?.doc;
+  if (!prior || prior.findings.length === 0 && prior.reviewId === undefined) return log(slug, "skipped learning: Valet did not review this pull request");
+  const head = pr.head.sha;
+  if (prior.learnedHead === head) return log(slug, `skipped learning: already learned at ${head.slice(0, 7)}`);
+  const markLearned = async (): Promise<void> => {
+    await ctx.store.put(POINTERS_COLLECTION, slug, { ...prior, learnedHead: head }, stored ? { ifRevision: stored.revision } : undefined);
+  };
+  const feedback = await collectFeedback({
+    gh,
+    pointers: prior.findings,
+    head,
+    changed: (path, line, from, to) => flaggedCodeChanged(gh, { path, line }, from, to, "", repoName),
+  });
+  if (feedback.length === 0) {
+    await markLearned();
+    return log(slug, "learned nothing: no feedback from people with write access");
+  }
+  ctx.signal.throwIfAborted();
+  const existing = await existingLessons(ctx.memory, repoName);
+  const thread = await ctx.threads.ensure(slug, { title: `Review ${slug}` });
+  const lessons = await runLearner(ctx, thread, {
+    dispatchId: `${event.id}:learn`,
+    model: settings.model,
+    prompt: buildLearnerPrompt({ repo: repoName, number: where.number, title: pr.title, feedback, existing: existing.lessons, principles: existing.principles }),
+    title: `Learn from ${slug}`,
+    repo: repoName,
+    head,
+  });
+  const outcome = await writeLessons(ctx.memory, repoName, lessons, new Set(existing.lessons.map((l) => l.path)));
+  await noteBestEffort(ctx, thread, renderLearnOutcome(slug, feedback.length, outcome), `${event.id}:learned`);
+  await markLearned();
+  log(slug, `learned from ${feedback.length} feedback item(s): ${outcome.written.length} written, ${outcome.skipped.length} skipped`);
+}
+
+/** The learning pass as a note in the plugin thread. */
+export function renderLearnOutcome(slug: string, feedbackCount: number, outcome: LearnOutcome): string {
+  const lines = [`**Learned from ${slug}** (${feedbackCount} feedback item(s) from people with write access)`];
+  if (outcome.written.length === 0) lines.push("", "No lesson generalized beyond this pull request.");
+  for (const w of outcome.written) lines.push(`- ${w.action === "create" ? "Wrote" : "Updated"} \`${w.path}\``);
+  for (const s of outcome.skipped) lines.push(`- Skipped "${s.title}": ${s.reason}`);
+  return lines.join("\n");
 }
 
 function log(slug: string, message: string): void {

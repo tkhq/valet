@@ -120,7 +120,11 @@ export interface PluginThreads {
   stopChild(child: PluginChild): Promise<{ stopped: number }>;
 }
 
-/** The owner's memory, read-only. A plugin puts what it finds into a child's prompt. */
+/**
+ * The owner's memory. A plugin reads what a task needs and puts it into a
+ * child's prompt. It writes only under the directories its manifest lists in
+ * `memoryWrites`; the host refuses any other path.
+ */
 export interface PluginMemory {
   /** Full-text search over the owner's memory files. */
   search(query: string, opts?: { limit?: number }): Promise<{ path: string; title: string; description: string; snippet: string }[]>;
@@ -133,6 +137,13 @@ export interface PluginMemory {
    * `search` returns it.
    */
   list(prefix: string, opts?: { limit?: number }): Promise<{ path: string; title: string; description: string }[]>;
+  /**
+   * Create or replace one file in the owner's own memory. `path` must be
+   * under a directory the plugin's manifest lists in `memoryWrites`.
+   * `description` is the one line the memory index shows. A `principles/`
+   * path is a principle, which every agent of the owner sees at its next wake.
+   */
+  write(path: string, file: { content: string; description: string }): Promise<void>;
 }
 
 /** What a plugin event handler receives besides the event. */
@@ -151,7 +162,7 @@ export interface PluginEventContext {
   config: Record<string, unknown>;
   /** This plugin's store, scoped to `owner`. Keep pointers here, not content. */
   store: ScopedPluginStore;
-  /** The owner's memory, read-only (a team's shared memory, or the person's own). */
+  /** The owner's memory (a team's shared memory, or the person's own). Writes stay in the manifest's `memoryWrites`. */
   memory: PluginMemory;
   /**
    * The org's app credential for one of this plugin's services, or null when

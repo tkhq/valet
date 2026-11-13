@@ -40,6 +40,18 @@ describe("buildPluginMemory", () => {
     expect(await memory.list("notes/")).toEqual([]);
   });
 
+  it("writes only under the plugin's declared directories, never lib/", async () => {
+    const owner = { type: "user" as const, id: "u1" };
+    const memory = buildPluginMemory(db, owner, "u1", orgId, { name: "pr-review", memoryWrites: ["principles/", "code-review/learned/", "lib/x/"] });
+    await memory.write("principles/review-round-money.md", { content: "# Round money with Math.round\n\nRound cents with Math.round.", description: "Round money in cents with Math.round." });
+    const file = await memory.read("principles/review-round-money.md");
+    expect(file?.content).toContain("Round cents with Math.round.");
+    await expect(memory.write("notes/elsewhere.md", { content: "x", description: "x" })).rejects.toThrow("may write only under principles/, code-review/learned/");
+    await expect(memory.write("lib/x/a.md", { content: "x", description: "x" })).rejects.toThrow("cannot write lib/x/a.md");
+    await expect(memory.write("code-review/learned/../../notes/a.md", { content: "x", description: "x" })).rejects.toThrow("cannot write");
+    await expect(buildPluginMemory(db, owner, "u1", orgId, { name: "other" }).write("principles/a.md", { content: "x", description: "x" })).rejects.toThrow("Declare the directory in the plugin manifest's memoryWrites");
+  });
+
   it("keeps a person's line to the line's org: no teams or org memory from their other orgs", async () => {
     const otherOrg = "org-other";
     await db.insert(orgs).values({ id: otherOrg, name: "Other", createdAt: Date.now() });

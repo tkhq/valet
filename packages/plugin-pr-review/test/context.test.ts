@@ -320,6 +320,29 @@ describe("gatherContext", () => {
     expect(pack.manifest.items).toEqual(expect.arrayContaining([expect.objectContaining({ section: "notes", ref: "lib/code-review/notes/errors.md" })]));
   });
 
+  it("puts a learned lesson for this repository in its own section and lists a learned principle", async () => {
+    const r = repo({ "a.ts": "export const a = 1;\n" }, { "a.ts": "export const a = parseInt(x);\n" });
+    const lesson = "# Allow parseInt without a radix\n\nKind: skip\nPaths: a.ts\nTerms: \"parseInt\"\nEvidence: https://github.com/c/1\n\nInputs here are always decimal strings.";
+    const retired = "# Old lesson\n\nKind: check\nPaths:\nTerms:\nStatus: retired\n\nNo longer true.";
+    const files: Record<string, string> = {
+      "code-review/learned/acme/site/parseint.md": lesson,
+      "code-review/learned/acme/site/old.md": retired,
+      "code-review/learned/acme/other/elsewhere.md": lesson,
+      "principles/review-document-exports.md": "# Document every exported function\n\nEvery export has a doc comment.",
+    };
+    const mem: PackMemory = {
+      search: async () => [],
+      read: async (path) => (files[path] !== undefined ? { path, content: files[path] } : null),
+      list: async (prefix) => Object.keys(files).filter((p) => p.startsWith(prefix)).sort().map((path) => ({ path, title: files[path].split("\n")[0].slice(2), description: path.includes("principles") ? "Every export has a doc comment." : "" })),
+    };
+    const pack = await gatherContext({ runner: localRunner(r.dir), readTrusted: (p) => gitFileAt(r.dir, r.base, p), patch: r.patch, diffDropped: [], title: "t", repo: "acme/site", memory: mem, budgetChars: 10_000 });
+    expect(pack.text).toContain("### Learned from past reviews (team feedback, not repository rules)\n#### Allow parseInt without a radix (learned code-review/learned/acme/site/parseint.md; do not report this; matched: path a.ts)");
+    expect(pack.text).toContain("Do not report what a \"do not report this\" lesson covers");
+    expect(pack.text).not.toContain("Old lesson");
+    expect(pack.text).not.toContain("acme/other");
+    expect(pack.text).toContain("#### Document every exported function (learned principles/review-document-exports.md; check for this; matched: learned principle, applies to every change)\nEvery export has a doc comment.");
+  });
+
   it("does not take a note under a nested lib/ directory, which agents can write, as a rule", async () => {
     const r = repo({ "apps/vivo/gate.yaml": "kind: AnalysisTemplate\n" }, { "apps/vivo/gate.yaml": "kind: AnalysisTemplate\nfailureLimit: 1\n" });
     const pack = await gatherContext({
