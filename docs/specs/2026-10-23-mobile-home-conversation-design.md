@@ -109,9 +109,12 @@ cover personal work as well as team work; a team is not required.
 Earlier builds created a daily 08:00 "Morning brief" routine that posted into
 Home. Each run sent the whole Home conversation to the model again, after the
 prompt cache expired. In production, one run cost $1.10 to $1.47 for its first
-request as Home grew from 136k to 183k tokens. At startup,
-`removeStockMorningBriefs` deletes each of those routines that nobody changed.
-A paused routine, or one with an edited name, prompt, cron, or thread, stays.
+request as Home grew from 136k to 183k tokens. A one-time startup cleanup
+deleted each of those routines that nobody changed; it shipped on 2026-11-10
+and has since been removed, because it matched a routine whose only edit was
+its timezone and deleted it on every restart. A routine a person kept or
+edited stays, like any other routine. A brief is opt-in: the person asks Home
+what is going on, or creates a routine.
 
 ## Shared conversation components
 
