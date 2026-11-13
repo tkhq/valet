@@ -1,3 +1,4 @@
+import { actionIdResolver } from "../plugins/action-id.js";
 import { githubInstallationTokenFor } from "../events/derive.js";
 import { buildPluginThreads, stopPluginDeliveryChildren } from "../plugins/plugin-threads.js";
 import { externalUsageRetention } from "../services/external-usage.js";
@@ -630,6 +631,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   const childrenDeps = {
     sandboxBacked: sandboxProvider.capabilities().isolated === true,
     db,
+    actionIds: actionIdResolver(actionPluginByService),
     engineHost,
     engineStore,
     prebuildService,
