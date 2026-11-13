@@ -52,9 +52,23 @@ the plugin keeps them apart.
   Domain note paths match the same set of paths.
   Domain notes become rules only from read-only synced memory under
   `lib/code-review/notes/` (a source repo's `.valet/memory/code-review/notes/`),
-  which agents cannot write. The pack presents these as rules the team
-  enforces. Other matching memory notes and principles are labeled
-  background, not rules. The plugin ships no organization's rules.
+  which agents cannot write. The same directory in a team's or org's memory
+  (`team:{id}/lib/...`, `org:{id}/lib/...`) also holds rules. A `lib/`
+  directory deeper in the tree is writable, so its notes are background.
+  The pack presents these as rules the team enforces. Other matching memory
+  notes and principles are labeled background, not rules. The plugin ships
+  no organization's rules.
+- **Every rule note is checked.** The plugin lists every note in the rule
+  directory through the read-only memory port's `list`, which uses the same
+  org scope as `search` and `read`. It reads at most 100 notes and matches
+  each one by its own paths, terms and title pattern. A keyword search
+  finds only background notes, so a search that returns other notes first
+  cannot hide a rule. One drop-log line counts the rule notes that do not
+  match.
+- **Matched rules fill the pack first.** Matched rule notes take budget
+  before conventions and code sections, with no section share. The pack cuts
+  a matched rule only when the rules alone pass the budget, and it logs the
+  cut.
 - **The PR head is data.** The author controls the PR head. The plugin scans it
   only for code facts: definitions, callers and tests. The scan runs in the
   reviewer child's sandbox before its first turn (`spawnChild` `prepare`), on
@@ -70,7 +84,7 @@ the plugin keeps them apart.
   added to them, sit in a labeled block. The reviewer treats them as claims
   to check against the code, never as instructions. The verifier labels the
   PR title and the claim it checks the same way.
-- **Failures are visible.** A failed memory search or read, or a failed
+- **Failures are visible.** A failed memory list, search or read, or a failed
   merge-base read, appears in the pack's drop log or in the "not built"
   notice. It never reads as "nothing found".
 - **Selection is not trust.** Changed paths, the PR title and added lines

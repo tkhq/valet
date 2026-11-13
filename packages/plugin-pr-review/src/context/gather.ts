@@ -16,6 +16,7 @@ import { diffSymbols, langOf, parseDiff } from "./symbols.js";
 export interface PackMemory {
   search(query: string, opts?: { limit?: number }): Promise<{ path: string; title: string; description: string; snippet: string }[]>;
   read(path: string): Promise<{ path: string; content: string } | null>;
+  list(prefix: string, opts?: { limit?: number }): Promise<{ path: string; title: string; description: string }[]>;
 }
 
 export interface GatherInput {
@@ -54,10 +55,15 @@ const MAX_MEMORY_QUERIES = 16;
 /**
  * Where review rules live in memory: notes a content source syncs read-only
  * (a source repo's `.valet/memory/code-review/notes/` mounts at
- * `lib/code-review/notes/`). Agents cannot write under `lib/`, so a rule
- * there has a person behind it. Other matching notes are background only.
+ * `lib/code-review/notes/`). Agents cannot write under a top-level `lib/`,
+ * so a rule there has a person behind it. A team's or org's copy carries a
+ * `team:{id}/` or `org:{id}/` prefix. A deeper `lib/` (`notes/lib/...`) is
+ * writable, so it is not a rule. Other matching notes are background only.
  */
-const RULE_NOTES = /(^|\/)lib\/code-review\/notes\/[^/]+\.md$/;
+const RULE_DIR = "lib/code-review/notes/";
+const RULE_NOTES = /^((team|org):[^/]+\/)?lib\/code-review\/notes\/[^/]+\.md$/;
+/** Rule notes listed at most. An org keeps a few, so every one is read and matched. */
+const MAX_RULE_NOTES = 100;
 const MAX_MEMORY_READS = 12;
 
 export async function gatherContext(input: GatherInput): Promise<ContextPack> {
@@ -161,9 +167,50 @@ export async function gatherContext(input: GatherInput): Promise<ContextPack> {
     // Principles: listed by title, read on demand.
     const principles = (await search("principle", 40)).filter((h) => /(^|\/)principles\//.test(h.path));
     for (const p of principles) memory.push({ path: p.path, title: p.title, text: p.description, kind: "principle" });
-    // Notes and playbooks found by what the change names: repository, paths,
-    // symbols, distinctive terms in added lines, and title words. A note's own
-    // paths, terms and title pattern then decide whether it applies.
+    const read = async (path: string): Promise<{ path: string; content: string } | null> => {
+      try {
+        return await mem.read(path);
+      } catch (err) {
+        extraDrops.push({ section: "memory", ref: path, reason: `read failed: ${err instanceof Error ? err.message : String(err)}` });
+        return null;
+      }
+    };
+    // One broken note is skipped and logged; it must not drop the whole pack.
+    const parse = (path: string, content: string): DomainNote | undefined => {
+      const note = parseNote(baseName(path), content, "memory", path);
+      if (!note.invalid) return note;
+      extraDrops.push({ section: "memory", ref: path, reason: `skipped: ${note.invalid}` });
+      return undefined;
+    };
+    const hasRule = (note: DomainNote): boolean => note.paths.length > 0 || note.terms.length > 0 || note.titlePattern !== undefined;
+
+    // Rule notes: every one is listed, read and matched by its own paths,
+    // terms and title pattern, so a rule never depends on a keyword search.
+    let listed: { path: string }[] = [];
+    try {
+      const all = await mem.list(RULE_DIR, { limit: MAX_RULE_NOTES });
+      // The limit counts every listed file, so a full page can hide rule notes even after the filter.
+      if (all.length >= MAX_RULE_NOTES) extraDrops.push({ section: "notes", ref: RULE_DIR, reason: `listed the first ${MAX_RULE_NOTES} files; more rule notes may exist` });
+      listed = all.filter((f) => RULE_NOTES.test(f.path));
+    } catch (err) {
+      extraDrops.push({ section: "notes", ref: `list ${RULE_DIR}`, reason: `failed: ${err instanceof Error ? err.message : String(err)}` });
+    }
+    let unmatchedRules = 0;
+    for (const { path } of listed) {
+      const file = await read(path);
+      const note = file ? parse(path, file.content) : undefined;
+      if (!note) continue;
+      const why = hasRule(note) ? noteMatch(note, change, matchesGlob) : undefined;
+      if (why) notes.push({ note, why });
+      else if (!hasRule(note)) memory.push({ path, title: note.title, text: note.body, kind: "note" });
+      else unmatchedRules++;
+    }
+    if (unmatchedRules > 0) extraDrops.push({ section: "notes", ref: `${unmatchedRules} rule note(s)`, reason: "their paths, terms and title pattern do not match this change" });
+
+    // Background notes and playbooks found by what the change names:
+    // repository, paths, symbols, distinctive terms in added lines, and
+    // title words. A note's own paths, terms and title pattern then decide
+    // whether it applies. Only the listed rule notes above become rules.
     const queries = [...new Set([
       input.repo ?? "",
       input.repo?.split("/")[1] ?? "",
@@ -176,29 +223,16 @@ export async function gatherContext(input: GatherInput): Promise<ContextPack> {
     const hits = new Map<string, { title: string }>();
     for (const q of queries.slice(0, MAX_MEMORY_QUERIES)) {
       for (const h of await search(q, 5)) {
-        if (!/(^|\/)principles\//.test(h.path)) hits.set(h.path, { title: h.title });
+        if (!/(^|\/)principles\//.test(h.path) && !RULE_NOTES.test(h.path)) hits.set(h.path, { title: h.title });
       }
     }
     for (const [path, { title }] of [...hits.entries()].slice(0, MAX_MEMORY_READS)) {
-      let file: { path: string; content: string } | null;
-      try {
-        file = await mem.read(path);
-      } catch (err) {
-        extraDrops.push({ section: "memory", ref: path, reason: `read failed: ${err instanceof Error ? err.message : String(err)}` });
-        continue;
-      }
-      if (!file) continue;
-      const note = parseNote(baseName(path), file.content, "memory", path);
-      // One broken note is skipped and logged; it must not drop the whole pack.
-      if (note.invalid) {
-        extraDrops.push({ section: "memory", ref: path, reason: `skipped: ${note.invalid}` });
-        continue;
-      }
-      const ruled = note.paths.length > 0 || note.terms.length > 0 || note.titlePattern !== undefined;
+      const file = await read(path);
+      const note = file ? parse(path, file.content) : undefined;
+      if (!note) continue;
+      const ruled = hasRule(note);
       const why = ruled ? noteMatch(note, change, matchesGlob) : undefined;
-      // Only a person can change synced, read-only notes, so only they become review rules.
-      if (why && RULE_NOTES.test(path)) notes.push({ note, why });
-      else if (why) memory.push({ path, title: note.title, text: note.body, kind: "note" });
+      if (why) memory.push({ path, title: note.title, text: note.body, kind: "note" });
       else if (!ruled && /playbook|convention|review|runbook/i.test(path)) memory.push({ path, title, text: note.body, kind: "note" });
       else extraDrops.push({ section: "memory", ref: path, reason: ruled ? "its paths and terms do not match this change" : "search match with no path rule" });
     }

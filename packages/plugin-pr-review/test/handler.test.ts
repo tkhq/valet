@@ -347,7 +347,7 @@ function context(threads: PluginThreads, store: ScopedPluginStore, config: Recor
     // As the host passes it: checked against the schema with defaults filled in.
     config: Value.Default(ReviewSettingsSchema, structuredClone(config)) as Record<string, unknown>,
     store,
-    memory: { search: async () => [], read: async () => null },
+    memory: { search: async () => [], read: async () => null, list: async () => [] },
     appToken: async (service) => (service === "github" ? "ghs_test" : null),
     signal: new AbortController().signal,
   };
@@ -1245,7 +1245,7 @@ describe("review-pull-request handler stages", () => {
     const threads = new FakeThreads(scripted(reviewOf([]), {}));
     threads.checkout = repoOf({ "AGENTS.md": "Always validate parse input.\n", "a.ts": "export function parse() {}\n" });
     const queries: string[] = [];
-    const ctx = { ...context(threads, new FakeStore()), memory: { search: async (q: string) => { queries.push(q); return []; }, read: async () => null } };
+    const ctx = { ...context(threads, new FakeStore()), memory: { search: async (q: string) => { queries.push(q); return []; }, read: async () => null, list: async () => [] } };
     await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1", "github.pull_request.opened"), ctx);
     expect(threads.spawned.find((s) => s.req.role === "pr-reviewer")?.req.prompt).toContain("## Context pack");
     // Once, from the gather's own queries; the fallback prompt's search did not run.

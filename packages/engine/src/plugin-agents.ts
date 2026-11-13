@@ -126,6 +126,13 @@ export interface PluginMemory {
   search(query: string, opts?: { limit?: number }): Promise<{ path: string; title: string; description: string; snippet: string }[]>;
   /** One file's rendered text, or null when there is no file at `path`. */
   read(path: string): Promise<{ path: string; content: string } | null>;
+  /**
+   * Files under the directory `prefix`, sorted by path, without their text.
+   * A file in a team's or org's memory matches by its path inside that
+   * memory and comes back under its `team:{id}/` or `org:{id}/` path, as
+   * `search` returns it.
+   */
+  list(prefix: string, opts?: { limit?: number }): Promise<{ path: string; title: string; description: string }[]>;
 }
 
 /** What a plugin event handler receives besides the event. */

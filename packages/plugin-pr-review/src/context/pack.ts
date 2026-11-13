@@ -1,9 +1,10 @@
 /**
  * The context pack: what the reviewer reads before the diff, built without
  * a model. Every code item is a real excerpt with its path and HEAD line
- * numbers. Sections fill in priority order under one character budget, each
- * with its own cap, and every item left out is logged with its reason. The
- * pack goes into the reviewer's first prompt, which compaction never drops.
+ * numbers. Matched domain notes (team rules) fill first. The other sections
+ * then fill under the same character budget, each with its own cap, and
+ * every item left out is logged with its reason. The pack goes into the
+ * reviewer's first prompt, which compaction never drops.
  */
 import type { DroppedFile } from "./rank.js";
 import type { Hit, LineStore, ScanResult } from "./scan.js";
@@ -69,10 +70,13 @@ export interface ContextPack {
 
 export type SectionName = "conventions" | "notes" | "definitions" | "callers" | "tests" | "memory";
 
-/** Share of the budget each section may take on the first pass. Leftover budget goes to dropped items in section order. */
-const SECTION_SHARE: Record<SectionName, number> = {
+/**
+ * Share of the budget each section may take on the first pass. Leftover
+ * budget goes to dropped items in section order. Domain notes have no share:
+ * they fill before the first pass, so code never pushes out a matched rule.
+ */
+const SECTION_SHARE: Record<Exclude<SectionName, "notes">, number> = {
   conventions: 0.2,
-  notes: 0.1,
   definitions: 0.3,
   callers: 0.25,
   tests: 0.1,
@@ -211,12 +215,21 @@ export function buildContextPack(input: PackInput): ContextPack {
     candidates.push({ section: "memory", ref: m.path, text: `#### ${m.title} (team memory ${m.path})\n${m.text.slice(0, NOTE_CHARS)}` });
   }
 
-  // First pass: each section up to its share. Second pass: leftover budget, in section order.
+  // Domain notes first: a matched rule is cut only when the rules alone pass the budget.
+  // First pass: each other section up to its share. Second pass: leftover budget, in section order.
   const budget = input.budgetChars;
-  const spent: Record<SectionName, number> = { conventions: 0, notes: 0, definitions: 0, callers: 0, tests: 0, memory: 0 };
+  const spent: Record<Exclude<SectionName, "notes">, number> = { conventions: 0, definitions: 0, callers: 0, tests: 0, memory: 0 };
   const chosen = new Set<Candidate>();
   let used = 0;
   for (const c of candidates) {
+    const cost = c.text.length + 2;
+    if (c.section === "notes" && used + cost <= budget) {
+      chosen.add(c);
+      used += cost;
+    }
+  }
+  for (const c of candidates) {
+    if (c.section === "notes") continue;
     const cost = c.text.length + 2;
     if (spent[c.section] + cost <= SECTION_SHARE[c.section] * budget && used + cost <= budget) {
       chosen.add(c);

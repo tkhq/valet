@@ -36,6 +36,8 @@ describe("buildPluginMemory", () => {
     const file = await memory.read("conventions/review.md");
     expect(file?.content).toContain("Flag missing awaits in handlers.");
     expect(await memory.read("conventions/missing.md")).toBeNull();
+    expect(await memory.list("conventions/")).toEqual([{ path: "conventions/review.md", title: expect.any(String), description: expect.any(String) }]);
+    expect(await memory.list("notes/")).toEqual([]);
   });
 
   it("keeps a person's line to the line's org: no teams or org memory from their other orgs", async () => {
@@ -54,5 +56,7 @@ describe("buildPluginMemory", () => {
     expect(paths).toEqual([`team:${here.id}/conventions/a.md`]);
     expect(await memory.read(`team:${there.id}/conventions/b.md`)).toBeNull();
     expect(await memory.read(`team:${here.id}/conventions/a.md`)).not.toBeNull();
+    // A team's file matches by its path inside the team's memory and keeps its team prefix.
+    expect((await memory.list("conventions/")).map((f) => f.path)).toEqual([`team:${here.id}/conventions/a.md`]);
   });
 });
