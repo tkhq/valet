@@ -63,6 +63,15 @@ a compact shortcut above the Home composer when action is needed. On a phone,
 the shortcut shows only approvals from the person's personal workspace. Team and org
 approvals appear in the team's own threads and in Tasks.
 
+When the person answers the last waiting request in the shortcut, Home opens
+that request's thread, where the work continues. While other requests still
+wait, Home stays, and the answered request's notice links to its thread. A
+request whose thread the person may not open never navigates.
+
+The progress card above the composer hides once a turn settles with no tasks
+and no tool calls. A finished card with tasks or calls stays, so the person
+can review the steps and their sources.
+
 A swipe to the right opens the phone drawer, which sits at the left edge. A
 swipe to the left closes it. Mostly vertical moves, moves that start in a text
 field or a horizontally scrollable element, moves that start within 24px of

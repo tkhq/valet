@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { useNotificationDecisions } from "~/api/queries";
 import { useWorkflowActionRequired } from "~/api/workflows";
 import { cn } from "~/lib/cn";
@@ -17,6 +18,10 @@ function isPersonal(item: { owner: { type: "user" | "team" | "org" } }): boolean
  * with "1 of 3", and folds to one line on "Not now". The home thread's own
  * gate docks through `SessionView`, so it is left out here.
  *
+ * After the person answers the last waiting request, Home opens that
+ * request's thread, where the work continues. While other requests still
+ * wait, the dock stays and the answered one gets an "Open thread" link.
+ *
  * With `personalOnly`, only approvals from the personal workspace show; team and org approvals stay out of the dock: a phone answers
  * them in the team's own thread, and Tasks still lists them.
  */
@@ -34,10 +39,21 @@ export function NeedsYouDock({ homeThreadId, personalOnly = false, onOpenTasks, 
   useEffect(() => { if (index >= total) setIndex(Math.max(0, total - 1)); }, [index, total]);
   const current = items[Math.min(index, total - 1)];
   const resolved = useResolvedGateNotice(current?.gate);
+  const navigate = useNavigate();
+  // Gates answered here whose thread the person may open.
+  const openable = useRef(new Set<string>());
+  const answered = (item: typeof items[number]) => {
+    if (item.canOpenThread === false) return;
+    openable.current.add(item.gate.id);
+    if (items.length <= 1) void navigate({ to: "/threads/$threadId", params: { threadId: item.gate.threadId } });
+  };
+  const openLink = resolved && openable.current.has(resolved.gate.id)
+    ? <Link to="/threads/$threadId" params={{ threadId: resolved.gate.threadId }} className="shrink-0 text-xs text-muted hover:text-ink hover:underline">Open thread</Link>
+    : undefined;
   const expanded = !folded && current?.gate.type === "question";
   useEffect(() => { onQuestionExpandedChange?.(expanded); }, [expanded, onQuestionExpandedChange]);
   useEffect(() => () => onQuestionExpandedChange?.(false), [onQuestionExpandedChange]);
-  if (total === 0 && workflowCount === 0) return resolved ? <ResolvedGateNotice label={resolved.label} title={resolved.gate.title} className="border-t border-line" /> : null;
+  if (total === 0 && workflowCount === 0) return resolved ? <ResolvedGateNotice label={resolved.label} title={resolved.gate.title} className="border-t border-line" action={openLink} /> : null;
   const label = total > 0 ? `${current?.gate.type === "question" ? "Question" : "Approval"} ${Math.min(index, total - 1) + 1} of ${total}` : "";
   const waiting = total + workflowCount;
   const summary = <div className="flex items-center gap-2 border-t border-line px-4 py-1.5 text-xs text-muted">
@@ -49,13 +65,13 @@ export function NeedsYouDock({ homeThreadId, personalOnly = false, onOpenTasks, 
   return <>
   {folded && summary}
   <section aria-label="Approvals from your work" aria-hidden={folded || undefined} className={cn("min-h-0 shrink overflow-y-auto overscroll-contain border-t border-line max-md:max-h-[min(70dvh,calc(var(--app-viewport-height,100dvh)-8rem))] max-md:pb-[env(safe-area-inset-bottom)]", folded && "hidden")}>
-    {resolved && <ResolvedGateNotice label={resolved.label} title={resolved.gate.title} />}
+    {resolved && <ResolvedGateNotice label={resolved.label} title={resolved.gate.title} action={openLink} />}
     <div className="flex items-center gap-2 px-4 pt-2 text-xs text-muted">
       <span className="min-w-0 flex-1 truncate">{label} · {current.title}</span>
       {total > 1 && <Button size="sm" variant="ghost" onClick={() => setIndex((index + 1) % total)}>Next</Button>}
       <Button size="sm" variant="ghost" onClick={() => setFolded(true)}>Not now</Button>
     </div>
-    <DecisionGateCard key={current.gate.id} sessionId={current.sessionId} gate={current.gate} placement="notification" mobileScroll />
+    <DecisionGateCard key={current.gate.id} sessionId={current.sessionId} gate={current.gate} placement="notification" mobileScroll onAnswered={() => answered(current)} />
   </section>
   </>;
 }

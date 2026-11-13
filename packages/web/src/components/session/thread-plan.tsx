@@ -76,7 +76,13 @@ export function PinnedPlan({ threadId, live, messages = [], readOnly = false }: 
   if (progress.isError) return <ProgressNotice>Progress unavailable. Refresh to retry.</ProgressNotice>;
   // Most threads have neither progress nor a plan, so nothing shows while it loads.
   if (progress.isPending) return null;
-  if (progress.data.progress) return <PinnedProgress key={`${threadId}:${progress.data.progress.turnId}`} progress={progress.data.progress} live={live} messages={messages} readOnly={readOnly} />;
+  const current = progress.data.progress;
+  if (current) {
+    // A settled turn with no tasks and no calls has nothing to show; its
+    // card would read "Complete" over "No tasks yet" until the next turn.
+    if (!activeProgress(current) && current.tasks.length === 0 && current.omittedTasks === 0 && turnCalls(current, messages).length === 0) return null;
+    return <PinnedProgress key={`${threadId}:${current.turnId}`} progress={current} live={live} messages={messages} readOnly={readOnly} />;
+  }
   return <LegacyPinnedPlan threadId={threadId} />;
 }
 

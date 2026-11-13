@@ -472,10 +472,20 @@ describe("SessionView processing visibility", () => {
     }
   });
 
-  it("keeps a new turn's working row outside a finished card", async () => {
+  it("hides a finished card that has no tasks and no calls", async () => {
     liveStatus = "thinking";
     const client = new QueryClient();
     client.setQueryData(qkThreadProgress("t1"), { progress: { ...progress, status: "complete" } });
+    renderComponent(() => <SessionView sessionId="sess-1" activeThreadId="t1" />, client);
+    await screen.findByText("Valet is thinking…");
+    expect(screen.queryByRole("region", { name: "Task progress" })).toBeNull();
+    expect(screen.queryByText("No tasks yet.")).toBeNull();
+  });
+
+  it("keeps a new turn's working row outside a finished card", async () => {
+    liveStatus = "thinking";
+    const client = new QueryClient();
+    client.setQueryData(qkThreadProgress("t1"), { progress: { ...progress, status: "complete", tasks: [{ id: "task-1", title: "Read the repo", status: "complete" }] } });
     renderComponent(() => <SessionView sessionId="sess-1" activeThreadId="t1" />, client);
     const card = await screen.findByRole("region", { name: "Task progress" });
     const line = screen.getByText("Valet is thinking…");
