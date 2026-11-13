@@ -69,7 +69,7 @@ describe("BriefCard", () => {
 describe("TasksSummary and OutputCards", () => {
   it("leaves out zero counts", () => {
     const { container, rerender } = render(<TasksSummary needsYou={1} working={0} finished={3} />);
-    expect(container.textContent).toBe("1 waiting on you3 done");
+    expect(container.textContent).toBe("1 waiting on you3 ready for review");
     rerender(<TasksSummary needsYou={0} working={0} finished={0} />);
     expect(container.textContent).toBe("Nothing in flight.");
   });

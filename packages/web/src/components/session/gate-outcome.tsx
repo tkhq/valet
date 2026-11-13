@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Check } from "lucide-react";
 import type { DecisionGate } from "@valet/api/wire";
 import { cn } from "~/lib/cn";
@@ -55,11 +55,13 @@ export function useResolvedGateNotice(pending: DecisionGate | undefined, holdMs 
   return notice;
 }
 
-export function ResolvedGateNotice({ label, title, className }: { label: string; title: string; className?: string }) {
+/** `action` is an optional trailing control, such as a link to the gate's thread. */
+export function ResolvedGateNotice({ label, title, className, action }: { label: string; title: string; className?: string; action?: ReactNode }) {
   const negative = label === "Denied";
   return <p role="status" className={cn("flex min-w-0 items-center gap-1.5 px-5 py-2 text-sm sm:px-8", className)}>
     <Check aria-hidden className={cn("h-4 w-4 shrink-0", negative ? "text-muted" : "text-moss")} />
     <span className={cn("shrink-0 font-medium", negative ? "text-muted" : "text-ink")}>{label}</span>
-    <span className="min-w-0 truncate text-muted">· {title}</span>
+    <span className="min-w-0 flex-1 truncate text-muted">· {title}</span>
+    {action}
   </p>;
 }

@@ -69,6 +69,8 @@ export function DecisionGateCard(props: {
   /** Docked above the composer only: shows the collapse toggle. */
   collapsible?: boolean;
   mobileScroll?: boolean;
+  /** Runs after the person's answer or choice is accepted, not after a cancel. */
+  onAnswered?: () => void;
 }) {
   return <DecisionGateResponse key={`${props.sessionId}:${props.gate.id}`} {...props} />;
 }
@@ -79,12 +81,14 @@ function DecisionGateResponse({
   placement = "thread",
   mobileScroll = false,
   collapsible = false,
+  onAnswered,
 }: {
   sessionId: string;
   gate: DecisionGate;
   placement?: "thread" | "notification";
   mobileScroll?: boolean;
   collapsible?: boolean;
+  onAnswered?: () => void;
 }) {
   const inNotification = placement === "notification";
   const columnClass = inNotification ? "min-w-0 w-full" : gateColumnClass;
@@ -222,6 +226,7 @@ function DecisionGateResponse({
     try {
       rememberGateChoice(gate.id, actionId);
       await resolve.mutateAsync({ gateId: gate.id, body: { actionId, ...imageBody } });
+      onAnswered?.();
     } catch (err) {
       failAction(err);
     }
@@ -236,6 +241,7 @@ function DecisionGateResponse({
       await resolve.mutateAsync({ gateId: gate.id, body: { value: v, ...imageBody } });
       setValue("");
       setImages([]);
+      onAnswered?.();
     } catch (err) {
       failAction(err);
     }
