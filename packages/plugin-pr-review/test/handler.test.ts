@@ -747,7 +747,7 @@ describe("review-pull-request handler", () => {
     expect(store.pointers()?.findings[0]).toMatchObject({ id: "f1", status: "resolved", fixedIn: H2 });
   });
 
-  it("keeps open a finding that cites a rule file when the refutation does not cite that rule", async () => {
+  it("withdraws a finding that cites a rule file only when the refutation cites that rule", async () => {
     const gh = new FakeGitHub();
     const store = new FakeStore();
     const handler = createReviewHandler({ fetch: gh.fetch });
@@ -755,8 +755,10 @@ describe("review-pull-request handler", () => {
     await handler.handle(event("ev1"), context(new FakeThreads(scripted(reviewOf([ruled]), {})), store));
     const commentId = gh.comments[0].id;
 
+    // b.ts exists at neither head, so only a.ts can count as changed.
+    gh.contentsAt[H1] = { "a.ts": editedA(0) };
     gh.head = H2;
-    gh.contentsAt[H2] = { "a.ts": editedA(5) };
+    gh.contentsAt[H2] = { "a.ts": editedA(40) };
     await handler.handle(event("ev2"), context(new FakeThreads(scripted(reviewOf([]), {
       "Bare allow breaks the lint rule": verdict("refuted", { counter_evidence: "a.ts:1 and b.ts:3 use bare allow too" }),
     })), store));
@@ -764,11 +766,26 @@ describe("review-pull-request handler", () => {
     expect(gh.resolved.has(commentId)).toBe(false);
 
     gh.head = H3;
-    gh.contentsAt[H3] = { "a.ts": editedA(5) };
+    gh.contentsAt[H3] = { "a.ts": editedA(41) };
     await handler.handle(event("ev3"), context(new FakeThreads(scripted(reviewOf([]), {
       "Bare allow breaks the lint rule": verdict("refuted", { counter_evidence: "src/AGENTS.md:8 covers new suppressions only; a.ts:5 is not new" }),
     })), store));
     expect(store.pointers()?.findings[0]).toMatchObject({ id: "f1", status: "resolved", withdrawnAt: H3 });
+  });
+
+  it("fixes a finding that cites a rule file when its code changed, without a rule quote", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const handler = createReviewHandler({ fetch: gh.fetch });
+    const ruled = finding({ title: "Bare allow breaks the lint rule", body: "src/AGENTS.md requires expect with a reason, not a bare allow." });
+    await handler.handle(event("ev1"), context(new FakeThreads(scripted(reviewOf([ruled]), {})), store));
+
+    gh.head = H2;
+    gh.contentsAt[H2] = { "a.ts": editedA(5) };
+    await handler.handle(event("ev2"), context(new FakeThreads(scripted(reviewOf([]), {
+      "Bare allow breaks the lint rule": verdict("refuted", { counter_evidence: "a.ts:5 now uses expect with a reason" }),
+    })), store));
+    expect(store.pointers()?.findings[0]).toMatchObject({ id: "f1", status: "resolved", fixedIn: H2 });
   });
 
   it("keeps an open finding in an unchanged file without a recheck", async () => {

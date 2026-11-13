@@ -191,7 +191,7 @@ export function decideFinding(
     v = "unverifiable";
     reason = "confirmed, but the quoted code is not in the file";
   }
-  if (v === "refuted" && !refutationGrounded(finding, verdict)) {
+  if (v === "refuted" && !(refutationGrounded(verdict) && refutationCitesRules(finding, verdict))) {
     v = "unverifiable";
     reason = `refuted without the cited code or rule: ${verdict.counter_evidence.slice(0, 200)}`;
   }
@@ -204,15 +204,22 @@ export function decideFinding(
 const RULE_FILE = /\b(AGENTS|CLAUDE|CONTRIBUTING)\.md\b/gi;
 
 /**
- * Whether a refutation cites what it needs to:
- * - "guarded", "misread" and a refutation with no reason claim the code rules
- *   the finding out, so they must cite code as path:line;
- * - a finding that cites a rule file is refuted only by evidence that cites
- *   the same rule file. A verifier that never opens the rule cannot overrule it.
+ * Whether a refutation cites code where its reason needs it: "guarded",
+ * "misread" and a refutation with no reason claim the code rules the finding
+ * out, so they must cite code as path:line.
  */
-export function refutationGrounded(finding: Pick<Finding, "title" | "body">, verdict: Pick<Verdict, "counter_evidence" | "refutation_reason">): boolean {
+export function refutationGrounded(verdict: Pick<Verdict, "counter_evidence" | "refutation_reason">): boolean {
   const needsCode = verdict.refutation_reason === undefined || verdict.refutation_reason === "guarded" || verdict.refutation_reason === "misread";
-  if (needsCode && !CODE_REF.test(verdict.counter_evidence)) return false;
+  return !needsCode || CODE_REF.test(verdict.counter_evidence);
+}
+
+/**
+ * Whether a refutation of a finding that cites a rule file cites the same
+ * rule file. A verifier that never opens the rule cannot overrule it. This
+ * applies when the refutation overturns the claim itself: in the verify step,
+ * and in a recheck where the code did not change. A fix needs no rule quote.
+ */
+export function refutationCitesRules(finding: Pick<Finding, "title" | "body">, verdict: Pick<Verdict, "counter_evidence">): boolean {
   const rules = new Set([...`${finding.title}\n${finding.body}`.matchAll(RULE_FILE)].map((m) => m[1].toUpperCase()));
   if (rules.size === 0) return true;
   const cited = new Set([...verdict.counter_evidence.matchAll(RULE_FILE)].map((m) => m[1].toUpperCase()));

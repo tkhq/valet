@@ -32,7 +32,7 @@ import {
 } from "./render.js";
 import { ReviewSchema, type Finding, type Review } from "./types.js";
 import { anchorProblems, lineCount } from "./review.js";
-import { buildVerifierPrompt, decideFinding, refutationGrounded, VerdictSchema, type Verdict } from "./verify.js";
+import { buildVerifierPrompt, decideFinding, refutationCitesRules, refutationGrounded, VerdictSchema, type Verdict } from "./verify.js";
 import type { ReviewRound } from "./state.js";
 
 export const REVIEWER_ROLE = "pr-reviewer";
@@ -296,9 +296,12 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
       repo: repoName,
       head,
     });
-    if (verdict?.verdict === "refuted" && refutationGrounded(f, verdict)) {
-      const reason = verdict.counter_evidence || verdict.refutation_reason || "refuted";
-      const changed = prior?.lastReviewedHead === undefined || (await flaggedCodeChanged(gh, f, prior.lastReviewedHead, head, reason, repoName));
+    const reason = verdict?.counter_evidence || verdict?.refutation_reason || "refuted";
+    const changed = verdict?.verdict === "refuted" && refutationGrounded(verdict)
+      ? prior?.lastReviewedHead === undefined || (await flaggedCodeChanged(gh, f, prior.lastReviewedHead, head, reason, repoName))
+      : undefined;
+    // A withdrawal overturns the claim on unchanged code, so it must also cite any rule the claim cites.
+    if (verdict !== undefined && changed !== undefined && (changed || refutationCitesRules(f, verdict))) {
       fixed.push({ finding: f, reason, withdrawn: !changed });
     }
     // The recheck names the line at HEAD, so a moved finding anchors on the RIGHT side.
