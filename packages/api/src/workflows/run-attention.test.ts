@@ -183,6 +183,15 @@ describe("buildRunSettledAttention", () => {
       .toEqual(['Approval needed: linear.save_project for "Onboarding: Valet Test Hire (Engineering)"']);
   });
 
+  it("names a canonical action id once in the approval title", async () => {
+    const workflowStore = new InMemoryWorkflowStore();
+    await workflowStore.createRun("run-canonical", { workflowId: "wf-1", definitionVersionId: "v1" },
+      { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "user", ownerId: "u-1" });
+    await buildRunApprovalAttention({ db, store: workflowStore })({ runId: "run-canonical", nodeId: "post", kind: "policy_gate",
+      gateId: "approval:post:gate:1", service: "slack-user", action: "slack_user.post_message", params: {} });
+    expect((await db.select().from(notifications)).map(row => row.title)).toEqual(["Approval needed: slack_user.post_message"]);
+  });
+
   it("keeps a parameter label from becoming a Slack link in the approval title", async () => {
     const workflowStore = new InMemoryWorkflowStore();
     await workflowStore.createRun("run-link", { workflowId: "wf-1", definitionVersionId: "v1" },

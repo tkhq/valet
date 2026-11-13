@@ -15,21 +15,24 @@ export async function attentionGatePending(deps: AttentionDeps, event: Attention
       .where(sql`id = ${event.gate.id} AND session_id = ${event.sessionId}`).limit(1);
     if (rows[0]?.status !== "pending") return false;
   }
-  if (event.workflowGate) {
-    const gate = event.workflowGate;
-    const [run] = await deps.db.select({ status: workflowRuns.status }).from(workflowRuns).where(eq(workflowRuns.id, gate.runId)).limit(1);
-    if (!run || run.status === "settled" || run.status === "terminalizing") return false;
-    const [checkpoint] = await deps.db.select().from(workflowCheckpoints).where(and(
-      eq(workflowCheckpoints.runId, gate.runId), eq(workflowCheckpoints.nodeId, gate.nodeId), eq(workflowCheckpoints.iteration, gate.iteration),
-    )).limit(1);
-    if (checkpoint?.status !== "intent") return false;
-    const effects = checkpoint.effects && typeof checkpoint.effects === "object" && !Array.isArray(checkpoint.effects)
-      ? Object.fromEntries(Object.entries(checkpoint.effects)) : undefined;
-    if (gate.gateId && (effects?.gateId !== gate.gateId)) return false;
-    const signalType = `approval:${gate.nodeId}${gate.iteration > 0 ? `:${gate.iteration}` : ""}`;
-    const signals = await deps.db.select().from(workflowSignals).where(and(eq(workflowSignals.runId, gate.runId), eq(workflowSignals.signalType, signalType)));
-    if (signals.some(signal => matchesGateOccurrence({ runId: signal.runId, signalId: signal.signalId, signalType: signal.signalType, payload: signal.payload, createdAt: signal.createdAt }, effects))) return false;
-  }
+  if (event.workflowGate && !(await workflowGatePending(deps.db, event.workflowGate))) return false;
+  return true;
+}
+
+/** A workflow step still waits for this occurrence's answer. */
+export async function workflowGatePending(db: AppDb, gate: NonNullable<AttentionEvent["workflowGate"]>): Promise<boolean> {
+  const [run] = await db.select({ status: workflowRuns.status }).from(workflowRuns).where(eq(workflowRuns.id, gate.runId)).limit(1);
+  if (!run || run.status === "settled" || run.status === "terminalizing") return false;
+  const [checkpoint] = await db.select().from(workflowCheckpoints).where(and(
+    eq(workflowCheckpoints.runId, gate.runId), eq(workflowCheckpoints.nodeId, gate.nodeId), eq(workflowCheckpoints.iteration, gate.iteration),
+  )).limit(1);
+  if (checkpoint?.status !== "intent") return false;
+  const effects = checkpoint.effects && typeof checkpoint.effects === "object" && !Array.isArray(checkpoint.effects)
+    ? Object.fromEntries(Object.entries(checkpoint.effects)) : undefined;
+  if (gate.gateId && (effects?.gateId !== gate.gateId)) return false;
+  const signalType = `approval:${gate.nodeId}${gate.iteration > 0 ? `:${gate.iteration}` : ""}`;
+  const signals = await db.select().from(workflowSignals).where(and(eq(workflowSignals.runId, gate.runId), eq(workflowSignals.signalType, signalType)));
+  if (signals.some(signal => matchesGateOccurrence({ runId: signal.runId, signalId: signal.signalId, signalType: signal.signalType, payload: signal.payload, createdAt: signal.createdAt }, effects))) return false;
   return true;
 }
 

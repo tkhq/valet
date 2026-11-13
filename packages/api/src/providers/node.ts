@@ -71,6 +71,7 @@ import { buildValidateEnvironment } from "../workflows/validation-env.js";
 import { GitHubSkillRepoReader } from "../services/skill-repo-reader.js";
 import { skillRepoReaderFactory } from "../services/content-source-credential.js";
 import type { WorkflowServiceDeps } from "../workflows/service.js";
+import { workflowApprovalPort } from "../channels/workflow-gates.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { OAuthRefreshingCredentialStore } from "../plugins/oauth-refreshing-credential-store.js";
 import { LinearAppTokenStore } from "../plugins/linear-app-token-store.js";
@@ -749,6 +750,9 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     plugins,
     workflowStore,
     actionPluginByService,
+    // The run host exists only after the channel host, so the port reads the
+    // workflow deps when a card is sent or clicked.
+    workflowApprovals: workflowApprovalPort(() => workflowsDepsRef.current),
     publicUrl: publicUrlFromEnv(process.env),
     resolveOrgId: () => resolveOrgId(db),
     onePassword,

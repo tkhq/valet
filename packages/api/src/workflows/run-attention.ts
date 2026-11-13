@@ -46,7 +46,9 @@ export function workflowApprovalHref(runId: string, nodeId: string): string {
  * space after "]" keeps "[text](url)" from becoming a disguised link. */
 function policyGateTitle(info: { service?: string; action?: string; params?: unknown }): string {
   const label = actionParamsLabel(info.params)?.value.replaceAll("](", "] (");
-  return `Approval needed: ${info.service ?? "?"}.${info.action ?? "?"}${label ? ` for "${label}"` : ""}`;
+  // A canonical action id already names its service ("slack_user.post_message").
+  const action = info.action?.includes(".") ? info.action : `${info.service ?? "?"}.${info.action ?? "?"}`;
+  return `Approval needed: ${action}${label ? ` for "${label}"` : ""}`;
 }
 
 /** Routes an account gate to its lender and other gates to the run's audience. */

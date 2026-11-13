@@ -79,6 +79,8 @@ import { ensureWorkflowSession, parseWorkflowSessionId } from "../workflows/engi
 import { DbActiveStreamStore, type ActiveStreamStore } from "./active-streams.js";
 import { digestGate } from "./gate-digest.js";
 import { savedGatePrompts, deleteSavedGatePrompts } from "./gate-prompts.js";
+import { workflowGatePending } from "../events/attention-delivery.js";
+import { WORKFLOW_GATE_ACTIONS, savedWorkflowGatePrompts, workflowGateClickAnswer, workflowGateKey, type WorkflowApprovalPort, type WorkflowGateTarget } from "./workflow-gates.js";
 import { consumeLinkCode, identityForExternal, identityForUser, linkIdentity } from "./identity-links.js";
 import { ChildReplyDispatcher, type ChildReplyOutcome } from "./child-replies.js";
 import { ChannelStreamBridge } from "./stream-bridge.js";
@@ -98,6 +100,9 @@ export interface ChannelHostDeps {
   workflowStore?: WorkflowStore;
   /** Action catalog used when restoring a workflow session for a callback. */
   actionPluginByService?: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>;
+  /** The run page's checks for a workflow step's approval card. Without it,
+   * a step's attention DM is the plain summary with the web link. */
+  workflowApprovals?: WorkflowApprovalPort;
   /** Public base URL for webhook mode; undefined → long-poll. */
   publicUrl?: string;
   /** Resolves the single org id (single-org assumption, same as auth middleware). */
@@ -414,6 +419,9 @@ export class ChannelHost {
    * one attention DM per recipient. Resolution edits every one of them. */
   private gatePrompts = new Map<string, GatePromptRef[]>();
   private gateActions = new Map<string, DecisionAction[]>();
+  /** Workflow steps behind recorded prompt keys (`workflowGateKey`). A key in
+   * `gateRefs` that is here answers through `deps.workflowApprovals`. */
+  private workflowGates = new Map<string, WorkflowGateTarget>();
   /** Serializes same-gate callbacks so only the first concurrent decision wins. */
   private gateCallbackChains = new Map<string, Promise<unknown>>();
   /** Serializes one person's destination lookups per Slack conversation, so a
@@ -551,6 +559,77 @@ export class ChannelHost {
     return this.gateRefs.get(`${ref.conversationKey}#${ref.messageId}`) ?? null;
   }
 
+  /** A workflow step's card. Its session id names the run, never a `wf:`
+   * session, so the decision-gate paths cannot mistake it for theirs. */
+  private recordWorkflowGatePrompt(key: string, gate: WorkflowGateTarget, ref: GatePromptRef): void {
+    this.workflowGates.set(key, gate);
+    this.gateActions.set(key, WORKFLOW_GATE_ACTIONS);
+    this.recordGatePrompt(key, ref, `workflow-run:${gate.runId}`);
+  }
+
+  /** Saves a step card's callback address, so a restarted host keeps its buttons. */
+  private async saveWorkflowGatePrompt(key: string, channelType: string, ref: GatePromptRef): Promise<void> {
+    try {
+      await this.deps.engineStore.saveDecisionGateRef("", "", key, {
+        channelType, ref: { channelId: ref.conversationKey, messageId: ref.messageId },
+      });
+    } catch (err) {
+      // The card is live on this host. A failed save costs only the restore.
+      console.error(`[channels] could not save the callback reference for workflow step ${key}; the card works until this host restarts`, err);
+    }
+  }
+
+  /** May this recipient answer the workflow step, so its DM gets buttons?
+   * A failed check costs the buttons, never the message. */
+  private async mayResolveWorkflowGateOverDm(userId: string, gate: WorkflowGateTarget, signal?: AbortSignal): Promise<boolean> {
+    if (!this.deps.workflowApprovals) return false;
+    try {
+      const orgId = this.orgId ?? await this.deps.resolveOrgId();
+      signal?.throwIfAborted();
+      return await this.deps.workflowApprovals.mayResolve({ userId, orgId }, gate, signal);
+    } catch (err) {
+      signal?.throwIfAborted();
+      reportError({ area: "channels", reason: "workflow_gate_dm_auth" }, "[channels] workflow step DM authorization failed", err);
+      return false;
+    }
+  }
+
+  /**
+   * A click on a workflow step's card. `resolveWorkflowApproval` makes every
+   * access decision, as for the run page's buttons. A finished step settles
+   * all of its cards, so no copy keeps live buttons.
+   */
+  private async handleWorkflowGateCallback(
+    transport: ChannelTransport | undefined,
+    key: string,
+    gate: WorkflowGateTarget,
+    callbackId: string,
+    actionId: string,
+    orgId: string,
+    userId: string,
+  ): Promise<void> {
+    const port = this.deps.workflowApprovals;
+    if (!port || (actionId !== "approve" && actionId !== "deny")) {
+      await transport?.answerCallback?.(callbackId, "Answer this step on the run page in Valet.");
+      return;
+    }
+    const approved = actionId === "approve";
+    let outcome: Awaited<ReturnType<WorkflowApprovalPort["resolve"]>>;
+    try {
+      outcome = await port.resolve({ userId, orgId }, gate, approved);
+    } catch (err) {
+      reportError({ area: "channels", reason: "workflow_gate_resolve" }, `[channels] workflow step approval failed for ${gate.runId}:${gate.nodeId}`, err);
+      await transport?.answerCallback?.(callbackId, "Valet could not process this approval. Open the run in Valet to answer it.");
+      return;
+    }
+    const answer = workflowGateClickAnswer(outcome, approved, outcome === "ok" ? await this.userName(userId) : undefined);
+    if (answer.settle !== undefined) {
+      this.workflowGates.delete(key);
+      await this.settleGatePrompts(key, answer.settle, { resolvedAtMs: this.now() });
+    }
+    await transport?.answerCallback?.(callbackId, answer.reply);
+  }
+
   /**
    * The gate whose card this Slack conversation hangs under. A reply under a
    * card carries the card's own timestamp as its thread root, so the
@@ -588,7 +667,7 @@ export class ChannelHost {
   ): Promise<boolean> {
     const text = (event.text ?? "").trim();
     // Workflow runs never ask questions; a file reply goes in as a message.
-    if (!text || event.media?.length || card.sessionId.startsWith("wf:")) return false;
+    if (!text || event.media?.length || card.sessionId.startsWith("wf:") || this.workflowGates.has(card.gateId)) return false;
     const [row] = await this.deps.db.select().from(agentSessions).where(eq(agentSessions.id, card.sessionId)).limit(1);
     if (!row || row.orgId !== orgId || !(await canResolveSessionGate(this.deps.db, row, userPrincipal(userId)))) return false;
     const stored = await this.deps.engineStore.getDecisionGate(card.sessionId, card.gateId);
@@ -629,6 +708,17 @@ export class ChannelHost {
       if (!gate) continue;
       this.recordGatePrompt(prompt.gateId, prompt.ref, prompt.sessionId);
       this.gateActions.set(prompt.gateId, gate.actions);
+    }
+    if (this.deps.workflowApprovals) {
+      for (const prompt of await savedWorkflowGatePrompts(this.deps.db)) {
+        // A step answered on the run page while this host was down needs no
+        // address. Its card keeps stale buttons, and a click reads "expired".
+        if (await workflowGatePending(this.deps.db, prompt.gate)) {
+          this.recordWorkflowGatePrompt(prompt.key, prompt.gate, prompt.ref);
+        } else {
+          await deleteSavedGatePrompts(this.deps.db, prompt.key);
+        }
+      }
     }
     for (const plugin of this.deps.plugins) {
       for (const factory of plugin.transports ?? []) {
@@ -2158,6 +2248,11 @@ export class ChannelHost {
       await this.dropLog(orgId, "unsupported_kind", event.conversationKey, "unknown_gate_ref");
       return;
     }
+    const workflowGate = this.workflowGates.get(mapped.gateId);
+    if (workflowGate) {
+      await this.handleWorkflowGateCallback(transport, mapped.gateId, workflowGate, gateCallback.callbackId, gateCallback.actionId, orgId, userId);
+      return;
+    }
 
     // Explicit resolve authorization — the same named check the web
     // decision routes make (`canResolveSessionGate`): the session's direct
@@ -2383,6 +2478,11 @@ export class ChannelHost {
               console.error(`[channels] could not save the recovered callback reference for gate ${event.gate.id}; retry storage before restarting`, err);
             }
           }
+          if (event.workflowGate && ref.gateCard === true && await this.mayResolveWorkflowGateOverDm(userId, event.workflowGate, attempt.signal)) {
+            const key = workflowGateKey(event.workflowGate);
+            this.recordWorkflowGatePrompt(key, event.workflowGate, ref);
+            await this.saveWorkflowGatePrompt(key, channelType, ref);
+          }
           refs.push({ ...ref, channelType });
         }
         return refs;
@@ -2434,6 +2534,25 @@ export class ChannelHost {
                 event.sessionId,
                 attempt?.signal,
               );
+              refs.push({ ...ref, channelType });
+              continue;
+            }
+            // A workflow step waits on the run, not on an engine gate. Its
+            // card answers through the run page's checks.
+            if (event.kind === "approval" && event.workflowGate
+              && await this.mayResolveWorkflowGateOverDm(userId, event.workflowGate, attempt?.signal)) {
+              const key = workflowGateKey(event.workflowGate);
+              const body = this.attentionBody(event);
+              const ref = await transport.sendGatePrompt(conversationKey, {
+                gateId: key,
+                attentionDeliveryId,
+                title: event.title,
+                ...(body !== undefined ? { body } : {}),
+                actions: WORKFLOW_GATE_ACTIONS,
+                signal: attempt?.signal,
+              });
+              this.recordWorkflowGatePrompt(key, event.workflowGate, ref);
+              await this.saveWorkflowGatePrompt(key, channelType, ref);
               refs.push({ ...ref, channelType });
               continue;
             }

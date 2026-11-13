@@ -44,6 +44,7 @@ import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { routeAttention as enqueueAttention, type AttentionEvent } from "../orchestrator/attention.js";
 import { savedGatePrompts } from "./gate-prompts.js";
+import { workflowGateKey, type WorkflowApprovalPort } from "./workflow-gates.js";
 import { wireAttentionRouter } from "../orchestrator/attention-wiring.js";
 import { linkIdentity, setNotifyAttention } from "./identity-links.js";
 import { ChannelHost, type ChannelHostDeps } from "./host.js";
@@ -3044,6 +3045,88 @@ describe("ChannelHost.attentionDeliverer", () => {
     const [sent] = await testDb.appDb.select().from(pendingChannelDeliveries);
     expect(sent).toMatchObject({ status: "sent", messageRefs: [{ channelType: "fake", conversationKey: "fake:dm:77", messageId: "1" }] });
     expect(fakeTransport.sent[0]?.message.attentionDeliveryId).toBe(job.deliveryToken);
+  });
+
+  describe("workflow step approvals", () => {
+    const step = { runId: "wfrun_1", nodeId: "post", iteration: 0, gateId: "occ-1" };
+    const stepEvent = () => event({ kind: "approval", title: "Approval needed: slack_user.post_message", body: "Workflow run wfrun_1 is paused on post.", workflowGate: step, dedupeKey: "wfrun_1:occ-1" });
+    function port(overrides: Partial<WorkflowApprovalPort> = {}): WorkflowApprovalPort & { resolve: ReturnType<typeof vi.fn> } {
+      const resolve = vi.fn<WorkflowApprovalPort["resolve"]>(async () => "ok");
+      return { mayResolve: async () => true, ...overrides, resolve: overrides.resolve ? vi.fn(overrides.resolve) : resolve };
+    }
+    async function savedStepRows(): Promise<number> {
+      return (await testDb.pgdb.query("SELECT * FROM engine_decision_gate_refs WHERE gate_id LIKE 'wfgate:%'")).rows.length;
+    }
+
+    it("sends Approve once and Deny to a person who may answer the step", async () => {
+      host = await buildHost({ workflowApprovals: port() });
+      await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+      await host.attentionDeliverer().deliver(USER_ID, stepEvent());
+      expect(fakeTransport.sent).toHaveLength(0);
+      expect(fakeTransport.gatePrompts).toHaveLength(1);
+      const prompt = fakeTransport.gatePrompts[0]?.prompt;
+      expect(prompt?.gateId).toBe(workflowGateKey(step));
+      expect(prompt?.actions.map(a => a.label)).toEqual(["Approve once", "Deny"]);
+      expect(prompt?.body).toContain("is paused on post");
+      expect(await savedStepRows()).toBe(1);
+    });
+
+    it("sends the plain summary to a person the run page would refuse", async () => {
+      host = await buildHost({ workflowApprovals: port({ mayResolve: async () => false }) });
+      await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+      await host.attentionDeliverer().deliver(USER_ID, stepEvent());
+      expect(fakeTransport.gatePrompts).toHaveLength(0);
+      expect(fakeTransport.sent[0]?.message.markdown).toContain("Approval needed");
+    });
+
+    it("answers a click through the run page's approval and settles the card", async () => {
+      const approvals = port();
+      host = await buildHost({ workflowApprovals: approvals });
+      await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+      await host.attentionDeliverer().deliver(USER_ID, stepEvent());
+      const sent = fakeTransport.gatePrompts[0];
+      const ref = { conversationKey: sent?.conversationKey ?? "", messageId: sent?.messageId ?? "" };
+      await host.handleUpdate("fake", inbound({ kind: "gate_callback", gateCallback: { actionId: "deny", callbackId: "cb-deny", ref } }));
+      expect(approvals.resolve).toHaveBeenCalledWith({ userId: USER_ID, orgId: ORG_ID }, step, false);
+      expect(fakeTransport.gateEdits.map(e => e.resolution.label)).toEqual([expect.stringMatching(/^❌ Denied/)]);
+      expect(fakeTransport.answered).toContainEqual({ callbackId: "cb-deny", text: undefined });
+      expect(host.gateForRef(ref)).toBeNull();
+      expect(await savedStepRows()).toBe(0);
+    });
+
+    it("keeps the card when the clicker may not answer, and says who can", async () => {
+      host = await buildHost({ workflowApprovals: port({ resolve: async () => "not_approver" }) });
+      await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+      await host.attentionDeliverer().deliver(USER_ID, stepEvent());
+      const sent = fakeTransport.gatePrompts[0];
+      const ref = { conversationKey: sent?.conversationKey ?? "", messageId: sent?.messageId ?? "" };
+      await host.handleUpdate("fake", inbound({ kind: "gate_callback", gateCallback: { actionId: "approve", callbackId: "cb-other", ref } }));
+      expect(fakeTransport.gateEdits).toHaveLength(0);
+      expect(fakeTransport.answered.find(a => a.callbackId === "cb-other")?.text).toContain("Only that member can answer it");
+      expect(host.gateForRef(ref)).not.toBeNull();
+    });
+
+    it("drops a saved card address on restart once the step stopped waiting", async () => {
+      host = await buildHost({ workflowApprovals: port() });
+      await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+      await host.attentionDeliverer().deliver(USER_ID, stepEvent());
+      expect(await savedStepRows()).toBe(1);
+      host.stopOutbound();
+      // No run row backs the step, so a restarted host treats it as finished.
+      const restarted = new ChannelHost({
+        db: testDb.appDb, engineHost: new EngineHost({
+          scratchCaps: {}, wakeupLimits: { leaseMaxHours: 72, timerMaxHours: 720, perSession: 20, watchMaxEventsPerHour: 120 },
+          engineStore: new PgSessionStore(testDb.pgdb), sandboxProvider: new VirtualSandboxProvider(), eventStream,
+          engineCredentials: new PgCredentialStore(testDb.pgdb, deriveSecretKey("test-key")), db: testDb.appDb, apiBaseUrl: "http://127.0.0.1:1", plugins: [],
+        }),
+        engineStore: new PgSessionStore(testDb.pgdb), eventStream,
+        engineCredentials: new PgCredentialStore(testDb.pgdb, deriveSecretKey("test-key")), plugins: [],
+        resolveOrgId: async () => ORG_ID, workflowApprovals: port(),
+      });
+      await restarted.start();
+      expect(await savedStepRows()).toBe(0);
+      restarted.stopOutbound();
+    });
   });
 
   it("sends one DM to a linked user with notifyAttention enabled", async () => {
