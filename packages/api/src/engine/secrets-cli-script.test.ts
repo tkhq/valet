@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RESERVED_CREDENTIAL_LABELS } from "@valet/shared";
 import { commandWrapperScript, secretsCliScript } from "./secrets-cli-script.js";
+import { REDACTOR_JS } from "./secrets-redactor.js";
 
 // The constant is generated from a shell source with two placeholders. A
 // regeneration from an already-substituted copy once baked a probe host into
@@ -213,7 +214,8 @@ function commandWordsOf(script: string): Set<string> {
 describe("the reserved credential labels", () => {
   it("cover every utility the generated scripts call", () => {
     const scripts = [
-      secretsCliScript("http://x:1"),
+      // The output filter is a JavaScript program in a quoted string, not shell.
+      secretsCliScript("http://x:1").replace(REDACTOR_JS, ""),
       commandWrapperScript({
         command: "partner-api",
         env: "CLIENT_KEY",

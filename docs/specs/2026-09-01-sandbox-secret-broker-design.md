@@ -276,6 +276,15 @@ than a fallback. `persona.test.ts` pins each of those properties.
   set, so an agent that writes `echo $TOKEN` would print it. The prompt says
   not to. The claim is that the value does not pass through the reply, not
   that the agent is unable to read it.
+- Output redaction (2026-11-11) catches the accidental print. When stdout is
+  not a terminal, `valet-secrets run` starts the command under a Node filter
+  (`engine/secrets-redactor.ts`). The filter replaces each resolved value in
+  stdout and stderr with `[secret:NAME]`, also when a value is split across
+  writes. It matches the exact bytes and the whole value as base64,
+  base64url, hex, or percent-encoding; any other encoding passes through. It
+  skips values under 8 bytes, which also occur in ordinary output. A person at
+  a terminal sees raw output. If `node` is missing, the command runs
+  unfiltered and the script says so on stderr.
 - `base64` must exist in the sandbox image. The script names the fix when it
   does not.
 
@@ -286,3 +295,40 @@ Duplicate vault/item titles use IDs so candidates remain separately addressable.
 The generated command wrapper refuses multiple matches and preserves the scope
 of a unique match. Explicit stored references and repo-pinned references remain
 supported. These changes do not alter the arbitrary-command plaintext limit above.
+
+## Secrets in a secret store (2026-11-10, scopes 2026-11-12)
+
+The broker also resolves `secret://` references in three scopes. They live in a pluggable secret store, and `VALET_SECRET_STORE` picks the provider. Unset turns the store off.
+
+| Scope | Reference | Read in | Write |
+|-------|-----------|---------|-------|
+| company | `secret://company/NAME` | any session in the organization | org admins |
+| team | `secret://team/TEAM_ID/NAME` | the team's sessions, and a member's own personal sessions | team members |
+| personal | `secret://personal/NAME` | a session the token holder owns personally | the owner |
+
+Valet and the provider split the work:
+
+- **Valet** (`services/secret-store/service.ts`) owns the reference grammar, name and size limits, the access rules above, and error text. It creates one personal space per user and provider (table `secret_store_spaces`). Company and team secrets live in the provider's deployment space under the names `company/ORG_ID/NAME` and `team/TEAM_ID/NAME`; the org id keeps the orgs of one deployment apart.
+- **The provider** (`SecretStoreProvider` in `services/secret-store/provider.ts`) stores and encrypts values, and applies the checks it can. A provider registers in `services/secret-store/config.ts`.
+
+Rules that apply to every provider:
+
+- The broker checks every `secret://` reference against the session before any read, and fails the batch on the first refusal. The read context comes from the token and the session row, never the request body.
+- Valet sends labels on every save: `scope`, `valet_company_org_id`, `valet_created_by_user_id`, and `valet_owner_user_id` or `valet_owner_team_id`. It sends a read context on every read: org, user, session, session owner type and id, and the team for a team read.
+- No route returns a value. A provider error reaches the user as a fixed message. Only a `SecretStoreError` from the provider passes through with its own text.
+- One failed read fails the request with 502. A name with no secret is reported in `unresolved`.
+- Saves are sealed in the browser. `POST /api/secrets/import/begin` returns the provider's envelope, the web sealer for its `kind` encrypts the value (`web/src/lib/secret-seal/`), and `import/finish` receives only the sealed value. No route accepts a plaintext value.
+- A replace imports the new value as `<name>@r<time>`, then deletes the old versions, because providers keep names unique and cannot edit a value in place. A failed import keeps the old value. Reads and lists use the newest version.
+- Changing the provider gives every user a new, empty personal space. Valet does not move secrets between providers.
+
+### Getting a credential without the value entering a thread
+
+- **`request_secret`** (`engine/secret-tools.ts`): the agent names the credential, its purpose, and where it will send it. The thread shows a card with the name, the destination, where it is saved, and a masked field. With `replace`, the card replaces a saved value that stopped working. The card seals and saves the value, then answers the gate with only the reference. The resolve route accepts nothing else on such a gate.
+- **Composer**: `detectSecrets` (`@valet/shared`) finds provider key formats and `NAME_KEY=value` assignments in a draft. With a store the user can write to, the composer offers to save the key and swap in the reference, and holds the send until the user decides. Without a store, it warns that the key will stay in the conversation and never holds the send.
+- **Backstop** (`services/secret-store/inbound-scrub.ts`): a key in a provider format that reaches the api in a user message (web send route, Slack direct message) is saved and replaced before the message is stored or reaches the model. A note in the message names the reference and asks the user to rotate a key shared elsewhere.
+
+Limits: a command that receives a value through `valet-secrets run` can print or send it on purpose; output redaction catches exact-byte prints only. Injecting a value at an egress proxy, so commands never hold it, is the next step.
+
+### Turnkey provider
+
+`services/secret-store/turnkey.ts`. Two ordinary, non-root Turnkey users act for Valet: the provisioner (`valet-root`) creates sub-organizations and imports or deletes secrets, and the broker (`valet-broker`) exports. Their policies in the deployment organization come from root-authorized bootstrap (`docs/environment-variables.md`). Each personal space is a sub-organization: the provisioner creates it with both users as roots at threshold 1, adds one policy for each, then sets a 2-of-2 root quorum, so neither key alone can bypass a policy there. Labels become static properties, and the read context becomes the export's request context. The export policies compare the two, so an export with the wrong context fails in Turnkey. These checks catch Valet mistakes; they are not a boundary against a stolen broker key, which writes its own context.

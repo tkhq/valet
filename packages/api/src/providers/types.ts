@@ -29,6 +29,7 @@ import type { WorkflowScheduler } from "../workflows/scheduler.js";
 import type { ContentSyncService } from "../services/content-sync/service.js";
 import type { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
 import type { OnePasswordService } from "../services/onepassword.js";
+import type { SecretStoreService } from "../services/secret-store/service.js";
 import type { AutoTitleHost } from "../sessions/auto-title-host.js";
 import type { McpServerDecl } from "../config/instance-config.js";
 
@@ -58,6 +59,10 @@ export interface Providers {
    * `onePassword` opt, and used directly by the (Task 3) `/api/onepassword`
    * routes for connect status / vault-and-item browsing. */
   onePassword: OnePasswordService;
+  /** Personal secrets in the configured secret store provider
+   * (`VALET_SECRET_STORE`). `enabled: false` when none is set; every method
+   * then refuses by name. */
+  secretStore: SecretStoreService;
   /** Sandbox-image prebuild backend (sandbox images v2 plan). `null` when
    * unresolvable for the configured `VALET_SANDBOX_BACKEND`/
    * `VALET_IMAGE_BUILDER` (e.g. `local`, or `kubernetes` pre-T5) — callers

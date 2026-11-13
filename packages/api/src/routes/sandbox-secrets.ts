@@ -22,14 +22,18 @@ import { isOnePasswordReference, OnePasswordAuthError, type OnePasswordScope } f
 import { classifySecurityBrokerCaller, loadEngagementCredentialRefs } from "../services/security-broker-allowlist.js";
 import { registerSecurityCredentialValue } from "../services/security-credential-tripwire.js";
 import { getTeamInOrg } from "../services/teams.js";
+import { SecretStoreError } from "../services/secret-store/provider.js";
+import { isSecretReference, parseSecretReference, readRefusal, type SecretReadContext } from "../services/secret-store/service.js";
 import { workflowSessionOwner } from "../workflows/session-owner.js";
 import type { AppQueryable } from "../lib/drizzle.js";
 import type { ResolveSandboxSecretsResponse } from "../wire/types.js";
 
 export const sandboxSecretsRouter = new Hono<AppEnv>();
 
-// References this broker resolves: only 1Password today, on the one `op://`
-// grammar `services/onepassword.ts` exports (`isOnePasswordReference`).
+// References this broker resolves: 1Password on the one `op://` grammar
+// `services/onepassword.ts` exports (`isOnePasswordReference`), and personal
+// secrets in the configured secret store as `secret://personal/<name>`
+// (`services/secret-store/`).
 
 /** One `run` injecting hundreds of secrets is a mistake, and each reference
  * costs a round trip. */
@@ -106,11 +110,11 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
   // Every bad reference, not the first: the CLI rejects the whole batch on
   // this error, and naming one of several sends the reader to debug a
   // reference that was fine.
-  const unsupported = references.filter((r) => !isOnePasswordReference(r));
+  const unsupported = references.filter((r) => !isOnePasswordReference(r) && !parseSecretReference(r));
   if (unsupported.length > 0) {
     return c.json(
       {
-        error: `not a supported secret reference: ${unsupported.join(", ")}. Use op://vault/item/field.`,
+        error: `not a supported secret reference: ${unsupported.join(", ")}. Use op://vault/item/field, or secret://personal/NAME, secret://team/TEAM_ID/NAME, or secret://company/NAME.`,
       },
       400,
     );
@@ -144,6 +148,34 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
   if (!narrowed.ok) return c.json({ error: narrowed.error }, 403);
   const scopes = narrowed.scopes;
   const ctx = { orgId: sandbox.orgId, userId: sandbox.userId, teamId };
+
+  // Each secret:// reference is checked against the session before any read,
+  // and the batch fails on the first refusal, so the command never starts
+  // with only some of its secrets. The read context comes from the token and
+  // the session row, never from the request body. A personal scope follows
+  // the personal 1Password rule: the token holder must own the session.
+  const { secretStore } = c.var.providers;
+  const readCtx: SecretReadContext = {
+    orgId: sandbox.orgId,
+    userId: sandbox.userId,
+    sessionId: sandbox.sessionId,
+    sessionOwnerType: teamId ? "team" : isOwnUserSession ? "user" : "org",
+    sessionOwnerId: teamId ?? (isOwnUserSession ? sandbox.userId : sandbox.orgId),
+  };
+  if (references.some(isSecretReference)) {
+    if (!secretStore.enabled) {
+      return c.json(
+        { error: "The secret store is not set up on this Valet. Ask an operator to set VALET_SECRET_STORE, or use an op:// reference." },
+        503,
+      );
+    }
+    for (const reference of references) {
+      const parsed = parseSecretReference(reference);
+      if (parsed && !(await secretStore.mayRead(readCtx, parsed.scope))) {
+        return c.json({ error: readRefusal(parsed.scope) }, 403);
+      }
+    }
+  }
 
   // Per-engagement allowlist (Part 12 §Broker allowlist enforcement, INV-34).
   // A security persona's child sandbox is claimed by a `security_cells` row;
@@ -188,8 +220,20 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
   // refused token sent the reader to rotate a token that was fine.
   let sdkRefused = false;
   let teamRefused = false;
+  const storeErrors: SecretStoreError[] = [];
   const values = await Promise.all(
     references.map(async (reference): Promise<string | null> => {
+      const parsed = parseSecretReference(reference);
+      if (parsed) {
+        try {
+          const value = await secretStore.read(readCtx, parsed.scope, parsed.name);
+          return value === null ? null : Buffer.from(value, "utf8").toString("base64");
+        } catch (err) {
+          if (!(err instanceof SecretStoreError)) throw err;
+          storeErrors.push(err);
+          return null;
+        }
+      }
       const outcome = await resolveAcrossScopes(onePassword, scopes, ctx, reference);
       if ("value" in outcome) {
         if (engagementId !== null) {
@@ -208,6 +252,11 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
     }),
   );
 
+  // One failed secret store read fails the run: a command must not start
+  // with only some of the secrets it named.
+  if (storeErrors[0]) {
+    return c.json({ error: storeErrors[0].message }, 502);
+  }
   if (teamRefused) {
     return c.json({ error: "Team 1Password could not resolve the reference. Check the team token and its vault permissions." }, 502);
   }

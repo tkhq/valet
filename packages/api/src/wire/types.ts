@@ -1879,6 +1879,9 @@ export interface DecisionGate {
    * this call's `tool_id=` and `args=` lines. A string arg longer than
    * 4000 characters is cut and ends with "…". */
   tool?: { id: string; args?: Record<string, unknown> };
+  /** Present on a `request_secret` card: where the value is saved and under
+   * which name. The card saves the value, then answers with the reference. */
+  secretRequest?: { scope: "personal" | "team"; teamId?: string; name: string; purpose: string; sendsTo?: string; replace?: boolean };
 }
 
 export interface DecisionResolution {
@@ -4237,6 +4240,55 @@ export interface ResolveSandboxSecretsResponse {
   /** References nothing could resolve, by name and without a reason: the
    * reason would describe someone else's vault. */
   unresolved: string[];
+}
+
+/** Where a secret lives. `teamId` is set only for the team scope. */
+export type SecretScopeKind = "personal" | "team" | "company";
+
+/** One secret, as `GET /api/secrets` lists it. Names only: no route returns
+ * a value. */
+export interface SecretSummary {
+  name: string;
+  /** What `valet-secrets run --env NAME=<reference>` takes. */
+  reference: string;
+  createdAt: number;
+}
+
+export interface SecretsListResponse {
+  /** False when this deployment sets no secret store provider. */
+  enabled: boolean;
+  /** The provider's name for users, for example "Turnkey". Null when off. */
+  provider: string | null;
+  /** True when the caller may save and delete in this scope. */
+  canWrite: boolean;
+  secrets: SecretSummary[];
+}
+
+/** `POST /api/secrets/import/begin`. */
+export interface BeginSecretSaveRequest {
+  scope: SecretScopeKind;
+  teamId?: string;
+  name: string;
+  /** Replace the value of a secret with this name. Without it, a name in
+   * use is refused. */
+  replace?: boolean;
+}
+
+/** What the browser seals the value with. `kind` selects the sealer; the
+ * other fields are the provider's and opaque to generic code. */
+export interface SecretSealEnvelope {
+  kind: string;
+  [field: string]: unknown;
+}
+
+export interface BeginSecretSaveResponse {
+  envelope: SecretSealEnvelope;
+}
+
+/** `POST /api/secrets/import/finish`. The value arrives sealed; the api
+ * never sees the plaintext on this path. */
+export interface FinishSecretSaveRequest extends BeginSecretSaveRequest {
+  sealed: { kind: string; [field: string]: unknown };
 }
 
 // ── REST: me + models (split-settings design) ─────────────────────────────

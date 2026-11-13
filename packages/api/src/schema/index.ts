@@ -1652,6 +1652,23 @@ export const credentialShares = pgTable(
   ],
 );
 
+/** The provider-side space that holds one owner's secrets
+ * (`services/secret-store/`), for example a Turnkey sub-organization. Written
+ * once, on the owner's first save. Holds no secret. */
+export const secretStoreSpaces = pgTable(
+  "secret_store_spaces",
+  {
+    orgId: text("org_id").notNull(),
+    ownerType: text("owner_type").$type<"user">().notNull(),
+    ownerId: text("owner_id").notNull(),
+    /** `SecretStoreProvider.id`, for example `turnkey`. */
+    provider: text("provider").notNull(),
+    spaceId: text("space_id").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.orgId, t.ownerType, t.ownerId, t.provider] })],
+);
+
 // `mcp_oauth_clients` — one dynamically-registered OAuth client per MCP
 // service, shared across all users (integration-OAuth design,
 // docs/specs/2026-07-20-integration-oauth-design.md). Never deleted on

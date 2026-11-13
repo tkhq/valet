@@ -104,7 +104,7 @@ export const RESERVED_CREDENTIAL_LABELS: ReadonlySet<string> = new Set([
   "semgrep",
 
   "sh", "bash", "dash", "zsh", "env", "command", "printf", "echo", "cat", "sed", "tr",
-  "cut", "paste", "tail", "wc", "base64", "curl",
+  "cut", "paste", "tail", "wc", "base64", "curl", "node",
 ]);
 
 /** A header scheme such as `Bearer`. The scheme lands inside the `sh -c`

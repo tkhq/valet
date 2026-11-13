@@ -636,6 +636,15 @@ WHERE r.status <> 'merged' ORDER BY l.org_id, l.subject_type, l.subject_id, l.di
 )` },
   { describe: "credential share generation", probe: { kind: "column", table: "credential_shares", column: "generation" }, sql: 'ALTER TABLE "credential_shares" ADD COLUMN IF NOT EXISTS "generation" text NOT NULL DEFAULT gen_random_uuid()::text' },
   { describe: "credential share lasting consent", probe: { kind: "column", table: "credential_shares", column: "borrow_consent_at" }, sql: 'ALTER TABLE "credential_shares" ADD COLUMN IF NOT EXISTS "borrow_consent_at" bigint' },
+  { describe: "secret_store_spaces table", probe: { kind: "table", table: "secret_store_spaces" }, sql: `CREATE TABLE IF NOT EXISTS "secret_store_spaces" (
+  "org_id" text NOT NULL,
+  "owner_type" text NOT NULL,
+  "owner_id" text NOT NULL,
+  "provider" text NOT NULL,
+  "space_id" text NOT NULL,
+  "created_at" bigint NOT NULL,
+  PRIMARY KEY ("org_id", "owner_type", "owner_id", "provider")
+);` },
   // A share used to be a team credential row with `metadata.delegatedFrom`,
   // one per team and service. Move each into its own share row. This runs
   // until the index below exists, so it lands once, before that index.

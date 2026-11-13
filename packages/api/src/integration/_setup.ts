@@ -68,6 +68,7 @@ import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { productionEventWaiterDeriver } from "../events/derive.js";
 import { createOnePasswordService } from "../services/onepassword.js";
 import type { OnePasswordService } from "../services/onepassword.js";
+import { disabledSecretStore, type SecretStoreService } from "../services/secret-store/service.js";
 import { assemblePlugins } from "../plugins/assemble.js";
 import { ServiceProbes } from "../plugins/service-probe.js";
 import { orgMembers, orgs, users, workflowDefinitions } from "../schema/index.js";
@@ -99,6 +100,8 @@ export interface BootTestApiOpts {
    * `api.providers.onePassword` after boot never reaches a session's
    * credential provider, which closed over the boot-time instance. */
   onePassword?: OnePasswordService;
+  /** The secret store for the suite. Defaults to the disabled service. */
+  secretStore?: SecretStoreService;
   /** Override the default `VirtualSandboxProvider` — e.g. a create-counting
    * wrapper that proves a code path never provisions a sandbox. */
   sandboxProvider?: SandboxProvider;
@@ -626,6 +629,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     engineCredentials,
     storedCredentials: engineCredentials,
     onePassword,
+    secretStore: opts.secretStore ?? disabledSecretStore(),
     engineHost,
     autoTitleHost,
     childWatcher,

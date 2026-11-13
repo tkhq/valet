@@ -171,6 +171,7 @@ import { publicUrlFromEnv } from "../channels/host.js";
 import { buildFileAttachTool, generatedFileStore } from "../services/generated-files.js";
 import { buildDiagramRenderTool } from "../services/diagram-render.js";
 import { artifactPublishTool, buildMemoryTools, buildReadOnlyMemoryTools } from "../orchestrator/memory-tools.js";
+import { REQUEST_SECRET_TOOL } from "./secret-tools.js";
 import { buildSecurityPersonaTools, buildSecurityRunnerTools } from "./security-tools.js";
 import { securityCompactionHook } from "./security-compaction.js";
 import {
@@ -412,6 +413,8 @@ export interface EngineHostOpts {
   homeTools?: () => ToolDef[];
   /** Tools for messaging the threads a branch links to this one (`home/thread-link-tools.ts`). */
   threadLinkTools?: () => ToolDef[];
+  /** `request_secret` (`engine/secret-tools.ts`), set when a secret store is configured. Every session gets it. */
+  secretTools?: () => ToolDef[];
   /**
    * Assembled plugin set (plugin-system-v2 Task 4's `assemblePlugins`
    * output). Every session builder goes through `sessionExtras`, which
@@ -1731,7 +1734,7 @@ export class EngineHost {
     };
     const serviceAvailability = await resolveServiceAvailability();
     const catalogOptions = {
-      nativeToolNames: [...builtinTools.map((tool) => tool.name), "skill", "skill_script", "focus_tools", ...(this.opts.blobs && this.opts.db ? ["file_attach", "render_diagram"] : []), ...appendedNativeToolNames],
+      nativeToolNames: [...builtinTools.map((tool) => tool.name), "skill", "skill_script", "focus_tools", ...(this.opts.blobs && this.opts.db ? ["file_attach", "render_diagram"] : []), ...(this.opts.secretTools ? [REQUEST_SECRET_TOOL] : []), ...appendedNativeToolNames],
       serviceAvailability,
       resolveServiceAvailability,
     };
@@ -1745,6 +1748,7 @@ export class EngineHost {
       catalogOptions,
     );
     extras.tools.push(buildToolFocusTool());
+    if (this.opts.secretTools) extras.tools.push(...this.opts.secretTools());
     if (this.opts.blobs && this.opts.db) {
       extras.tools.push(buildFileAttachTool(this.opts.db, this.opts.blobs, publicUrlFromEnv(process.env)));
       extras.tools.push(buildDiagramRenderTool(publicUrlFromEnv(process.env)));
