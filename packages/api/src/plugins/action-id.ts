@@ -4,7 +4,7 @@
  * `action-invoker.ts`'s db/policy graph.
  */
 import type { ActionPlugin, PluginAction } from "@valet/engine";
-import { qualifiedActionId as qualifiedId, type ActionIdResolver, type ResolvedActionId } from "@valet/shared";
+import { buildActionIdResolver, qualifiedActionId as qualifiedId, type ActionIdResolver } from "@valet/shared";
 
 /** The canonical policy-facing action id: the fully-qualified fqid
  * (`service.action`), mirroring the plugin-catalog's list_tools convention.
@@ -76,58 +76,25 @@ export function buildToolIndex(
   return index;
 }
 
-/** How `list_tools` and callers spell a service: case and `-`/`_` do not matter. */
-function serviceKey(service: string): string {
-  return service.toLowerCase().replaceAll("-", "_");
-}
-
 type ActionPluginMap = ReadonlyMap<string, { plugin: { name: string }; actionPlugin: ActionPlugin }>;
 
 const resolvers = new WeakMap<ActionPluginMap, ActionIdResolver>();
 
 /**
- * The registry-backed `ActionIdResolver` for one plugin map. It accepts every
- * spelling the platform takes for a static action: the canonical id
- * (`sheets.write_spreadsheet`), the service-prefixed id
- * (`google_workspace.sheets.write_spreadsheet`), and the service written as
- * `list_tools` reports it (`slack_user.x` for `slack-user`). A runtime
- * (`resolveActions`) service resolves any `service.tool` spelling, because its
- * tools are not known before discovery. Nothing here splits a string on a dot
- * to guess a service: each candidate service comes from the registry.
+ * The registry-backed `ActionIdResolver` for one plugin map: the shared
+ * `buildActionIdResolver` over the map's static actions. `buildToolIndex`
+ * runs first, so a map whose ids could name two services fails here, not in
+ * a later lookup.
  */
 export function actionIdResolver(actionPluginByService: ActionPluginMap): ActionIdResolver {
   const cached = resolvers.get(actionPluginByService);
   if (cached) return cached;
-  const index = buildToolIndex(actionPluginByService);
-  const services = [...actionPluginByService.keys()].sort((a, b) => b.length - a.length);
-  const byKey = new Map(services.map((service) => [serviceKey(service), service]));
-  const foreign = new Map<string, string[]>();
-  for (const [canonical, { service }] of index) {
-    if (canonical.startsWith(`${service}.`)) continue;
-    foreign.set(service, [...(foreign.get(service) ?? []), canonical]);
-  }
-  const resolve = (spelling: string): ResolvedActionId | undefined => {
-    const exact = index.get(spelling);
-    if (exact) return { service: exact.service, canonical: spelling };
-    const key = serviceKey(spelling);
-    for (const service of services) {
-      if (!key.startsWith(`${serviceKey(service)}.`)) continue;
-      const rest = spelling.slice(service.length + 1);
-      for (const candidate of [rest, `${service}.${rest}`, `${serviceKey(service)}.${rest}`]) {
-        const hit = index.get(candidate);
-        if (hit?.service === service) return { service, canonical: candidate };
-      }
-      if (actionPluginByService.get(service)?.actionPlugin.resolveActions) {
-        return { service, canonical: qualifiedId(service, rest) };
-      }
-    }
-    return undefined;
-  };
-  const resolver: ActionIdResolver = {
-    resolve,
-    service: (name) => byKey.get(serviceKey(name)),
-    foreignPrefixedIds: (service) => foreign.get(service) ?? [],
-  };
+  buildToolIndex(actionPluginByService);
+  const resolver = buildActionIdResolver([...actionPluginByService].map(([service, { actionPlugin }]) => ({
+    service,
+    declaredIds: actionPlugin.actions.map((action) => action.id),
+    dynamic: actionPlugin.resolveActions !== undefined,
+  })));
   resolvers.set(actionPluginByService, resolver);
   return resolver;
 }

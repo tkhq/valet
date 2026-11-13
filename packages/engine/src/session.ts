@@ -1362,6 +1362,7 @@ export class Session {
     return {
       get toolScope() { return thread.effectiveToolScope(); },
       get toolScopeCeiling() { return thread.toolScopeCeiling(); },
+      canonicalToolScope: (scope) => thread.canonicalToolScope(scope),
       setToolFocus: (scope) => thread.setToolFocus(scope),
       userId: this.options.userId,
       orgId: this.options.orgId,

@@ -84,3 +84,66 @@ export function canonicalizeToolScope(scope: ToolScope | undefined, resolver: Ac
   }
   return { ...scope, actions: [...actions] };
 }
+
+/** One registered service, as an `ActionIdResolver` sees it. */
+export interface ActionIdService {
+  service: string;
+  /** The ids the plugin declares for its static actions. */
+  declaredIds: readonly string[];
+  /** True when the service discovers more tools at run time (`resolveActions`). */
+  dynamic: boolean;
+}
+
+/** How `list_tools` and callers spell a service: case and `-`/`_` do not matter. */
+function serviceKey(service: string): string {
+  return service.toLowerCase().replaceAll("-", "_");
+}
+
+/**
+ * The one `ActionIdResolver` implementation. The api builds it from its
+ * plugin map and the engine from its catalog, so both accept the same
+ * spellings of a static action:
+ *
+ * - the canonical id (`sheets.write_spreadsheet`);
+ * - the service-prefixed id (`google_workspace.sheets.write_spreadsheet`);
+ * - the service as `list_tools` reports it (`slack_user.x` for `slack-user`);
+ * - the service with the action's last segment, when exactly one of the
+ *   service's actions ends with it (`google_calendar.list_events` for
+ *   `calendar.list_events`).
+ *
+ * A runtime service resolves any `service.tool` spelling, because its tools
+ * are not known before discovery. Each candidate service comes from the
+ * registry, never from splitting the spelling on a dot.
+ */
+export function buildActionIdResolver(services: readonly ActionIdService[]): ActionIdResolver {
+  const index = new Map<string, string>();
+  const byService = new Map<string, string[]>();
+  for (const { service, declaredIds } of services) {
+    const ids = declaredIds.map((id) => qualifiedActionId(service, id));
+    byService.set(service, ids);
+    for (const id of ids) if (!index.has(id)) index.set(id, service);
+  }
+  const ordered = [...services].sort((a, b) => b.service.length - a.service.length);
+  const byKey = new Map(services.map(({ service }) => [serviceKey(service), service]));
+  const resolve = (spelling: string): ResolvedActionId | undefined => {
+    const exact = index.get(spelling);
+    if (exact) return { service: exact, canonical: spelling };
+    const key = serviceKey(spelling);
+    for (const { service, dynamic } of ordered) {
+      if (!key.startsWith(`${serviceKey(service)}.`)) continue;
+      const rest = spelling.slice(service.length + 1);
+      for (const candidate of [rest, `${service}.${rest}`, `${serviceKey(service)}.${rest}`]) {
+        if (index.get(candidate) === service) return { service, canonical: candidate };
+      }
+      const named = (byService.get(service) ?? []).filter((id) => id.endsWith(`.${rest}`));
+      if (named.length === 1) return { service, canonical: named[0]! };
+      if (dynamic) return { service, canonical: qualifiedActionId(service, rest) };
+    }
+    return undefined;
+  };
+  return {
+    resolve,
+    service: (name) => byKey.get(serviceKey(name)),
+    foreignPrefixedIds: (service) => (byService.get(service) ?? []).filter((id) => !id.startsWith(`${service}.`)),
+  };
+}

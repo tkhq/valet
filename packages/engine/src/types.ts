@@ -882,6 +882,9 @@ export interface ToolContext {
   /** Effective session, submission, and thread restrictions. This may change after a focus call. */
   readonly toolScope?: ToolScope;
   readonly toolScopeCeiling?: ToolScope;
+  /** A scope in canonical action ids (`@valet/shared` action-id rule 3).
+   * Canonicalize a requested scope before it meets `toolScopeCeiling`. */
+  canonicalToolScope?: (scope: ToolScope | undefined) => ToolScope | undefined;
   setToolFocus?: (scope: ToolScope | undefined) => Promise<void>;
   /** Replace this thread's plan in thread metadata (`update_plan`). Absent on a context built by hand. */
   setThreadPlan?: (items: ThreadPlanItem[], title?: string) => Promise<ThreadPlan>;

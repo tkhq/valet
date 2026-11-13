@@ -1,4 +1,4 @@
-import { CONTINUATION_SOURCE_ITEM_KEY, childCitationNote, intersectToolScopes, markForeignCitations, readToolScope, TOOL_SCOPE_KEY, UNATTENDED_WORKFLOW_KEY, WORKFLOW_STEP_KEY, type ToolScope } from "@valet/shared";
+import { CONTINUATION_SOURCE_ITEM_KEY, canonicalizeToolScope, childCitationNote, intersectToolScopes, markForeignCitations, readToolScope, TOOL_SCOPE_KEY, UNATTENDED_WORKFLOW_KEY, WORKFLOW_STEP_KEY, type ActionIdResolver, type ToolScope } from "@valet/shared";
 import { withChildDelivery, discardChildDelivery } from "./child-delivery.js";
 import { submissionWorkflowStep, type WorkflowStepRef } from "../workflows/step-grants.js";
 /**
@@ -109,6 +109,10 @@ export function childParkAction(state: AttachmentState, retainable: boolean): Ch
 
 export interface ChildrenDeps {
   db: AppDb;
+  /** The registry's action id resolver. Scope layers are canonicalized with
+   * it before they intersect, so two spellings of one action do not cancel
+   * out (`@valet/shared` action-id rule 3). */
+  actionIds?: ActionIdResolver;
   engineHost: EngineHost;
   engineStore: SessionStore;
   /**
@@ -566,6 +570,11 @@ async function unattendedChildMetadata(
  * before returning" contract; the actual settlement wait/report happens
  * off this call stack (decision 10: `task` is fire-and-forget).
  */
+/** A stored scope layer in canonical action ids. */
+function storedScope(deps: Pick<ChildrenDeps, "actionIds">, value: unknown): ToolScope | undefined {
+  return canonicalizeToolScope(readToolScope(value), deps.actionIds);
+}
+
 export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): ChildSpawner {
   return async (
     req: SpawnChildRequest,
@@ -588,7 +597,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
     }
     const orgId = parentData.orgId;
     // The parent's thread focus stays with the parent; `req.toolScope` already carries its ceiling.
-    const toolScope = intersectToolScopes(readToolScope(parentData.metadata?.[TOOL_SCOPE_KEY]), req.toolScope);
+    const toolScope = intersectToolScopes(storedScope(deps, parentData.metadata?.[TOOL_SCOPE_KEY]), canonicalizeToolScope(req.toolScope, deps.actionIds));
 
     // Host policy for `req.repo` (`task` tool): normalize before anything is
     // created so a bad value costs nothing. The message is what the tool
@@ -911,8 +920,8 @@ export class ChildWatcher {
       this.deps.engineStore.getThread(childSessionId, gate.threadId),
     ]);
     const toolScope = submission && thread
-      ? intersectToolScopes(readToolScope(childData.metadata?.[TOOL_SCOPE_KEY]), readToolScope(submission.metadata?.[TOOL_SCOPE_KEY]), readToolScope(thread.metadata?.[TOOL_SCOPE_KEY]),
-        readToolScope((await this.deps.engineStore.getQueueItem(childSessionId, watch.queueItemId))?.metadata?.[TOOL_SCOPE_KEY]))
+      ? intersectToolScopes(storedScope(this.deps, childData.metadata?.[TOOL_SCOPE_KEY]), storedScope(this.deps, submission.metadata?.[TOOL_SCOPE_KEY]), storedScope(this.deps, thread.metadata?.[TOOL_SCOPE_KEY]),
+        storedScope(this.deps, (await this.deps.engineStore.getQueueItem(childSessionId, watch.queueItemId))?.metadata?.[TOOL_SCOPE_KEY]))
       : { tools: [], actions: [] };
     const origin = await childGateOrigin(this.deps.db, this.deps.engineStore, childSessionId, gate.queueItemId);
     const privateGate = watch.origin !== undefined && origin === undefined;
@@ -1194,8 +1203,8 @@ export class ChildWatcher {
       backgroundWork: digest.refs?.background_work ?? "[]",
       ...(continuationCheckpoint !== undefined ? { continuationCheckpointId: continuationCheckpoint.id } : {}),
       ...(origin !== undefined ? { origin } : {}),
-      toolScope: intersectToolScopes(readToolScope(childData.metadata?.[TOOL_SCOPE_KEY]), readToolScope((await this.deps.engineStore.getQueueItem(watch.childSessionId, itemId))?.metadata?.[TOOL_SCOPE_KEY]),
-        readToolScope((await this.deps.engineStore.getQueueItem(watch.childSessionId, watch.queueItemId))?.metadata?.[TOOL_SCOPE_KEY])),
+      toolScope: intersectToolScopes(storedScope(this.deps, childData.metadata?.[TOOL_SCOPE_KEY]), storedScope(this.deps, (await this.deps.engineStore.getQueueItem(watch.childSessionId, itemId))?.metadata?.[TOOL_SCOPE_KEY]),
+        storedScope(this.deps, (await this.deps.engineStore.getQueueItem(watch.childSessionId, watch.queueItemId))?.metadata?.[TOOL_SCOPE_KEY])),
     };
     if (row.batchKey) {
       // Members of one batch decide hold or release one at a time, so two
@@ -2530,7 +2539,7 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
 
     const parentData = await deps.engineStore.getSession(ctx.parentSessionId);
     if (!parentData || parentData.orgId !== watchRow.orgId) return null;
-    const toolScope = intersectToolScopes(ctx.toolScope, readToolScope(parentData.metadata?.[TOOL_SCOPE_KEY]));
+    const toolScope = intersectToolScopes(canonicalizeToolScope(ctx.toolScope, deps.actionIds), storedScope(deps, parentData.metadata?.[TOOL_SCOPE_KEY]));
     const promptOptions = childSendPromptOptions({ ...ctx, toolScope,
       ...(ctx.unattendedWorkflow ? { workflowStep: await submissionWorkflowStep(deps.engineStore, ctx.parentSessionId, ctx.parentQueueItemId) } : {}) }, req.queue === true);
     // Subscription changes take delivery before session use takes cleanup. Never acquire delivery inside the callback.
