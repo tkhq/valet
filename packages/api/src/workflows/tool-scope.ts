@@ -66,9 +66,11 @@ export function entryService(entry: string, resolver?: ActionIdResolver): string
  * `service.*` entries stay as written; readers expand them. Throws a
  * `ValidationError` for an exact entry that no registered service claims:
  * such an entry allows nothing, so the step would fail at run time instead.
- * Returns the input unchanged when no resolver is given.
+ * Returns the input unchanged when no resolver is given. With `strict: false`,
+ * an unknown entry stays as written instead: use it to compare a stored
+ * definition, which a save already accepted.
  */
-export function canonicalizeDefinitionScopes(definition: unknown, resolver: ActionIdResolver | undefined): unknown {
+export function canonicalizeDefinitionScopes(definition: unknown, resolver: ActionIdResolver | undefined, opts: { strict?: boolean } = {}): unknown {
   if (!resolver || !definition || typeof definition !== "object" || !("nodes" in definition) || !Array.isArray(definition.nodes)) return definition;
   const fix = (node: unknown): unknown => {
     if (!node || typeof node !== "object") return node;
@@ -82,6 +84,7 @@ export function canonicalizeDefinitionScopes(definition: unknown, resolver: Acti
       if (isServiceWildcard(entry)) return entry;
       const resolved = resolver.resolve(entry);
       if (!resolved) {
+        if (opts.strict === false) return entry;
         const where = typeof n.id === "string" ? ` in step "${n.id}"` : "";
         throw new ValidationError(`Unknown action "${entry}"${where}. Use a tool id that list_tools shows, such as "slack.send_message".`);
       }

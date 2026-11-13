@@ -795,12 +795,16 @@ async function updateLockedWorkflowDefinition(
   await refuseRepoOwned(deps.db, row);
 
   const now = Date.now();
+  const resolver = deps.actionPluginByService ? actionIdResolver(deps.actionPluginByService) : undefined;
   if (input.definition !== undefined) {
     rejectAssistantRouting(input.definition);
     // Store canonical action ids, and refuse an id that no plugin owns.
-    input = { ...input, definition: canonicalizeDefinitionScopes(input.definition, deps.actionPluginByService ? actionIdResolver(deps.actionPluginByService) : undefined) };
+    input = { ...input, definition: canonicalizeDefinitionScopes(input.definition, resolver) };
   }
-  const stepsChange = input.definition !== undefined && !sameWorkflowSteps(input.definition, row.definition);
+  // Compare canonical forms: a re-save that only respells an action id
+  // (`google_workspace.sheets.x` to `sheets.x`) is not a step change.
+  const stepsChange = input.definition !== undefined
+    && !sameWorkflowSteps(input.definition, canonicalizeDefinitionScopes(row.definition, resolver, { strict: false }));
   // A grant covers the steps a person reviewed. Any step change ends it, so
   // a person allows the new steps again: in the Pre-approve dialog or the
   // assistant's approval card (`workflows.allow_permissions`). A save itself

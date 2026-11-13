@@ -6,6 +6,7 @@ import { actionIdResolver, buildToolIndex, canonicalActionIdFor } from "./action
 import { assemblePlugins } from "./assemble.js";
 import { bundledPlugins } from "./registry.gen.js";
 import { canonicalizeDefinitionScopes, entryService, workflowStepToolScope } from "../workflows/tool-scope.js";
+import { sameWorkflowSteps } from "../workflows/definition-version.js";
 
 function makeAction(id: string): PluginAction {
   return { id, name: id, description: id, riskLevel: "low", parameters: Type.Object({}), execute: async () => ({ success: true }) };
@@ -101,6 +102,15 @@ describe("canonicalizeDefinitionScopes", () => {
   it("refuses an action id no plugin owns, naming the step", () => {
     expect(() => canonicalizeDefinitionScopes({ nodes: [{ id: "save", type: "session", toolScope: { actions: ["google_workspace.sheets.wrte_spreadsheet"] } }] }, resolver))
       .toThrow(/Unknown action "google_workspace\.sheets\.wrte_spreadsheet" in step "save"/);
+  });
+
+  it("compares a stored definition leniently, so a re-save that only respells an id is not a step change", () => {
+    const stored = { nodes: [{ id: "save", type: "session", toolScope: { actions: ["google_workspace.sheets.write_spreadsheet", "retired.thing"] } }] };
+    expect(() => canonicalizeDefinitionScopes(stored, resolver)).toThrow(/Unknown action "retired\.thing"/);
+    const lenient = canonicalizeDefinitionScopes(stored, resolver, { strict: false });
+    expect(lenient).toEqual({ nodes: [{ id: "save", type: "session", toolScope: { actions: ["sheets.write_spreadsheet", "retired.thing"] } }] });
+    const resaved = canonicalizeDefinitionScopes({ nodes: [{ id: "save", type: "session", toolScope: { actions: ["google_workspace.sheets.write_spreadsheet"] } }] }, resolver);
+    expect(sameWorkflowSteps(resaved, canonicalizeDefinitionScopes({ nodes: [{ id: "save", type: "session", toolScope: { actions: ["google_workspace.sheets.write_spreadsheet"] } }] }, resolver, { strict: false }))).toBe(true);
   });
 });
 
