@@ -96,6 +96,27 @@ const SECTION_TITLE: Record<SectionName, string> = {
   memory: "Team principles and notes (background, not review rules)",
 };
 
+/**
+ * The rule sections of a rendered pack: repository conventions, domain notes
+ * and learned lessons. The verifier gets these, not the code sections it can
+ * read itself.
+ */
+export function packRules(text: string): string {
+  const wanted = new Set([SECTION_TITLE.conventions, SECTION_TITLE.notes, SECTION_TITLE.learned]);
+  // Only the pack's own section headings start a section; a `### ` line inside a rule file does not.
+  const headings = new Set([...Object.values(SECTION_TITLE), LEFT_OUT_TITLE]);
+  const kept: string[] = [];
+  let keep = false;
+  for (const line of text.split("\n")) {
+    const title = line.startsWith("### ") ? line.slice(4).trim() : undefined;
+    if (title !== undefined && headings.has(title)) keep = wanted.has(title);
+    if (keep) kept.push(line);
+  }
+  return kept.join("\n").trim();
+}
+
+const LEFT_OUT_TITLE = "Left out of this pack";
+
 const ORDER: SectionName[] = ["conventions", "notes", "learned", "definitions", "callers", "tests", "memory"];
 
 /** A symbol with more references than this is not expanded into callers: its references say nothing about one change. */
@@ -284,7 +305,7 @@ export function buildContextPack(input: PackInput): ContextPack {
     }
   }
   if (dropped.length > 0) {
-    parts.push("", "### Left out of this pack", ...dropped.slice(0, 80).map((d) => `- ${d.section}: ${d.ref} (${d.reason})`));
+    parts.push("", `### ${LEFT_OUT_TITLE}`, ...dropped.slice(0, 80).map((d) => `- ${d.section}: ${d.ref} (${d.reason})`));
     if (dropped.length > 80) parts.push(`- ... and ${dropped.length - 80} more`);
   }
   const text = parts.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd();

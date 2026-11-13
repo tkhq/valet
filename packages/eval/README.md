@@ -243,6 +243,28 @@ pnpm --filter @valet/eval exec tsx src/review-matrix-cli.ts \
   more reviewers; Valet runs count as one), `unconfirmed`, or `noise` (a
   person marked the reference finding wrong).
 
+### Review outcomes
+
+`src/review-outcomes.ts` measures what authors did with review comments on
+merged pull requests. It needs no labels, so it covers every live review.
+
+```bash
+pnpm --filter @valet/eval review-outcomes --repo owner/name --since 2026-11-10 \
+  --bot <reviewer login> --bot <other reviewer login> --out /tmp/outcomes.jsonl
+```
+
+- A comment is `addressed` when its flagged line and the two lines on each
+  side are gone from the file at the merged head. It is `rejected` when the
+  code stayed and a person disagreed: a thumbs-down, a thread a person
+  resolved, or a withdrawal by the reviewer. Other comments are `ignored`.
+- The summary prints the address rate per reviewer and severity. Compare
+  reviewers, or reviewer versions, on the same repositories and dates.
+- A changed line does not prove the comment was right, and an ignored
+  comment can be correct. Treat the rate as a signal, not a precision score.
+- Each row carries the PR title, description, base and the comment's
+  commit, so a verifier replay can use the rows as cases. Keep rows from
+  private repositories out of the repo.
+
 ## Compare models
 
 ```bash

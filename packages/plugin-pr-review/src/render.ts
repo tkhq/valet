@@ -10,6 +10,8 @@ import type { Finding } from "./types.js";
 export interface PostedFinding extends Finding {
   /** `f<n>`, in the order the PR's findings were first reported. */
   id: string;
+  /** The verifier could not confirm it: the summary lists it, with no inline comment. */
+  unconfirmed?: boolean;
 }
 
 const SEVERITIES = ["critical", "high", "medium", "low"] as const;
@@ -81,6 +83,8 @@ export interface SummaryInput {
   inline: PostedFinding[];
   /** Open findings on lines GitHub cannot comment on: their text lives here. */
   outsideDiff: PostedFinding[];
+  /** Open findings the verifier could not confirm: their text lives here, with no inline comment. Absent: none. */
+  unconfirmed?: PostedFinding[];
   /** Findings a recheck resolved at `sha`. `withdrawn`: no commit changed their code. */
   fixed: { finding: Pick<PostedFinding, "id" | "title" | "path">; sha: string; withdrawn?: boolean }[];
   /** Memory paths of the team rules the reviewer was given for this review. */
@@ -92,7 +96,8 @@ export interface SummaryInput {
 /** The body of the PR's one summary review, edited in place on each review. */
 export function renderSummary(s: SummaryInput): string {
   const scope = s.incrementFrom ? `the commits since \`${s.incrementFrom.slice(0, 7)}\`` : "the whole pull request";
-  const open = [...s.inline, ...s.outsideDiff].sort((a, b) => SEVERITIES.indexOf(a.severity) - SEVERITIES.indexOf(b.severity));
+  const unconfirmed = s.unconfirmed ?? [];
+  const open = [...s.inline, ...s.outsideDiff, ...unconfirmed].sort((a, b) => SEVERITIES.indexOf(a.severity) - SEVERITIES.indexOf(b.severity));
   const lines = [
     `<!-- valet-pr-review:summary ${s.head} -->`,
     "## Valet review",
@@ -103,7 +108,7 @@ export function renderSummary(s: SummaryInput): string {
   ];
   if (open.length > 0) {
     lines.push("", `### Open findings (${open.length})`, "");
-    for (const f of open) lines.push(`- **${label(f.severity)}** \`${f.path}:${f.line}\`${f.side === "LEFT" ? " (deleted line)" : ""} ${oneLine(f.title)}`);
+    for (const f of open) lines.push(`- **${label(f.severity)}** \`${f.path}:${f.line}\`${f.side === "LEFT" ? " (deleted line)" : ""} ${oneLine(f.title)}${f.unconfirmed ? " (not confirmed)" : ""}`);
   } else {
     lines.push("", "No open findings.");
   }
@@ -120,6 +125,11 @@ export function renderSummary(s: SummaryInput): string {
   if (s.outsideDiff.length > 0) {
     lines.push("", `<details><summary>Findings outside the diff (${s.outsideDiff.length})</summary>`, "");
     for (const f of s.outsideDiff) lines.push(`\`${f.path}:${f.line}\``, "", renderFinding(f), "");
+    lines.push("</details>");
+  }
+  if (unconfirmed.length > 0) {
+    lines.push("", `<details><summary>Findings the verifier could not confirm (${unconfirmed.length})</summary>`, "", "A second check could neither confirm nor rule out these claims from the code. They get no inline comment.", "");
+    for (const f of unconfirmed) lines.push(`\`${f.path}:${f.line}\``, "", renderFinding(f), "");
     lines.push("</details>");
   }
   if (s.hidden > 0) lines.push("", `${s.hidden} finding(s) are not shown: below the line's minimum severity, in excluded paths, or on a line that does not exist at this head.`);

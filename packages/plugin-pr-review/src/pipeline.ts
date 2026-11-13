@@ -4,14 +4,15 @@ import type { ToolDef } from "@valet/engine";
 import { consolidateFindings, type Consolidation } from "./consolidate.js";
 import { applyDuplicateGroups, clusterExcerpt, createDedupeSpec, duplicateCandidates } from "./dedupe.js";
 import { gatherContext, type PackMemory } from "./context/gather.js";
-import type { ContextPack } from "./context/pack.js";
+import { packRules, type ContextPack } from "./context/pack.js";
 import { rankPatch } from "./context/rank.js";
 import { gitFileAt, localRunner } from "./context/repo.js";
 import { git } from "./git.js";
+import { commentableLines } from "./linemap.js";
 import { createReviewerSpec, type ReviewerSpecOptions } from "./review.js";
 import type { ReviewFocus } from "./prompt.js";
 import type { Finding, Review } from "./types.js";
-import { createVerifierSpec, decideFinding, type FinalVerdict } from "./verify.js";
+import { createVerifierSpec, decideFinding, type FinalVerdict, type FindingTier } from "./verify.js";
 
 /** One agent session to run: the host supplies the engine, model and sandbox. */
 export interface AgentSpec {
@@ -41,6 +42,8 @@ export interface FindingVerdict {
   verdict: FinalVerdict;
   /** Whether the finding stays in the posted review. */
   kept: boolean;
+  /** Where the finding goes: inline, the summary, or dropped. */
+  tier: FindingTier;
   reason: string;
 }
 
@@ -196,6 +199,7 @@ export async function runReviewPipeline(input: PipelineOptions, run: AgentRunner
   const verdicts: (FindingVerdict | undefined)[] = new Array(draft.findings.length);
   let next = 0;
   const limit = Math.max(1, opts.verifyConcurrency ?? 4);
+  const rules = context ? packRules(context.text) : "";
   await Promise.all(
     Array.from({ length: Math.min(limit, draft.findings.length) }, async () => {
       while (next < draft.findings.length) {
@@ -205,16 +209,19 @@ export async function runReviewPipeline(input: PipelineOptions, run: AgentRunner
           ...opts,
           finding: draft.findings[index],
           label: `verify:${index}`,
+          ...(rules ? { context: rules } : {}),
           ...(opts.verifyModel !== undefined ? { model: opts.verifyModel } : {}),
         });
         const result = await run(spec);
         const finding = draft.findings[index];
-        const fileText = await readFile(join(opts.workspace, finding.path), "utf8").catch(() => undefined);
-        const decision = decideFinding(finding, spec.verdict(), fileText);
+        const fileText = finding.side === "LEFT" ? await gitFileAt(opts.workspace, opts.base, finding.path) : await readFile(join(opts.workspace, finding.path), "utf8").catch(() => undefined);
+        const fileDiff = await git(opts.workspace, ["diff", "--unified=3", opts.base, opts.head, "--", finding.path]).catch(() => "");
+        const decision = decideFinding(finding, spec.verdict(), fileText, commentableLines(fileDiff, finding.side ?? "RIGHT", false));
         verdicts[index] = {
           index,
           verdict: decision.verdict,
           kept: decision.keep,
+          tier: decision.tier,
           reason: decision.verdict === "unverified" ? (result.error ?? `verifier ended (${result.outcome}) without a verdict`) : decision.reason,
         };
       }

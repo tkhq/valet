@@ -59,9 +59,10 @@ export async function mapLine(cwd: string, from: string, to: string, path: strin
 /**
  * The lines a GitHub review comment can anchor to inside the patch's hunks.
  * RIGHT: added and context lines, numbered in the new file. LEFT: deleted
- * and context lines, numbered in the old file.
+ * and context lines, numbered in the old file. With `context` false, only
+ * the lines the patch adds (RIGHT) or deletes (LEFT).
  */
-export function commentableLines(patch: string, side: "RIGHT" | "LEFT" = "RIGHT"): Set<number> {
+export function commentableLines(patch: string, side: "RIGHT" | "LEFT" = "RIGHT", context = true): Set<number> {
   const lines = new Set<number>();
   let left = 0;
   let right = 0;
@@ -83,7 +84,7 @@ export function commentableLines(patch: string, side: "RIGHT" | "LEFT" = "RIGHT"
       if (side === "LEFT") lines.add(left);
       left++;
     } else if (line.startsWith(" ")) {
-      lines.add(side === "RIGHT" ? right : left);
+      if (context) lines.add(side === "RIGHT" ? right : left);
       left++;
       right++;
     }

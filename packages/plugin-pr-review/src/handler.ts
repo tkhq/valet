@@ -32,7 +32,8 @@ import {
 } from "./render.js";
 import { ReviewSchema, type Finding, type Review } from "./types.js";
 import { anchorProblems, lineCount } from "./review.js";
-import { buildVerifierPrompt, decideFinding, refutationCitesRules, refutationGrounded, VerdictSchema, type Verdict } from "./verify.js";
+import { buildVerifierPrompt, claimDiff, decideFinding, refutationCitesRules, refutationGrounded, VerdictSchema, type Verdict } from "./verify.js";
+import { packRules } from "./context/pack.js";
 import type { ReviewRound } from "./state.js";
 import { buildLearnerPrompt, collectFeedback, existingLessons, runLearner, writeLessons, type LearnOutcome } from "./learn.js";
 
@@ -119,6 +120,8 @@ export interface FindingPointer {
   commentId?: number;
   /** The GraphQL id of the comment's review thread, once known. */
   threadId?: string;
+  /** The verifier could not confirm it, so it is listed in the summary with no inline comment. */
+  unconfirmed?: true;
   /**
    * `resolved`: a recheck refuted it, and its thread is resolved. `fixedIn`
    * says a later commit changed its code; `withdrawnAt` says the code did
@@ -187,7 +190,6 @@ const CHILD_CONCURRENCY = 4;
 /** Findings verified per run; the rest are posted as unverified. */
 const MAX_VERIFIED = 12;
 const DIFF_BUDGET = 150_000;
-const FILE_DIFF_CHARS = 30_000;
 
 export interface ReviewHandlerOptions {
   /** For tests: the fetch GitHub calls go through. */
@@ -292,6 +294,15 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   const thread = await ctx.threads.ensure(slug, { title: `Review ${slug}` });
   const dispatch = (label: string): string => `${event.id}:${head.slice(0, 12)}:${label}`;
   const prDiff = (await gh.compareDiff(mergeBase, head)) ?? undefined;
+  // The verifier sees the PR as the reviewer did: title, description, diff and rules. The pack's rules arrive with the review.
+  let packText: string | undefined;
+  // Rechecks wait for the pack stage so they get its rules. A review that fails before the stage also releases them.
+  let packSeen: () => void = () => undefined;
+  const packReady = new Promise<void>((resolve) => { packSeen = resolve; });
+  const claimInput = (f: Finding) => {
+    const context = verifierRules(settings.instructions, packText);
+    return { title: pr.title, body: pr.body ?? "", base: mergeBase, head, finding: f, diff: claimDiff(prDiff, f.path), ...(context ? { context } : {}) };
+  };
 
   // 1. Recheck open findings whose files changed. Only a grounded refutation
   // resolves one. It is a fix only when the code behind it changed.
@@ -299,10 +310,11 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   const stillOpen = open.live.filter((f) => !toRecheck.includes(f));
   const fixed: { finding: OpenFinding; reason: string; withdrawn: boolean }[] = [];
   const recheck = forEachLimit(toRecheck, CHILD_CONCURRENCY, async (f) => {
+    await packReady;
     const verdict = await runVerifier(ctx, thread, {
       dispatchId: dispatch(`recheck:${f.id}`),
       model: settings.model,
-      prompt: buildVerifierPrompt({ title: pr.title, base: mergeBase, head, finding: f, fileDiff: fileDiff(prDiff, f.path), finish: VERDICT_FINISH, ...(prior?.lastReviewedHead ? { recheckFrom: prior.lastReviewedHead } : {}) }),
+      prompt: buildVerifierPrompt({ ...claimInput(f), finish: VERDICT_FINISH, ...(prior?.lastReviewedHead ? { recheckFrom: prior.lastReviewedHead } : {}) }),
       title: `Recheck ${f.id} at ${head.slice(0, 7)}`,
       repo: repoName,
       head,
@@ -323,6 +335,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   const rules = new Set<string>();
   const review = (async () => runReviewers(ctx, thread, {
     onRules: (paths) => paths.forEach((p) => rules.add(p)),
+    onPack: (text) => { packText ??= text; packSeen(); },
     slug, repoName, pr, base: mergeBase, head, settings,
     diff: from !== undefined ? await incrementDiff(gh, from, head, reviewed, settings.riskPaths) : prDiffFor(prDiff, reviewed, mergeBase, head, settings.riskPaths),
     ...(from !== undefined ? { incrementFrom: from } : {}),
@@ -335,6 +348,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
     },
   }))();
 
+  void review.then(packSeen, packSeen);
   const [draft] = await Promise.all([review, recheck]);
   // Consolidate: drop repeats inside the draft before any other step.
   const consolidated = consolidateFindings(draft.findings);
@@ -344,20 +358,25 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   const candidates = await anchoredFindings(gh, files, inPaths, head, mergeBase);
   if (candidates.length < inPaths.length) log(slug, `dropped ${inPaths.length - candidates.length} finding(s) anchored to a line that does not exist at ${head.slice(0, 7)}`);
 
-  // 4. With `verify` on, check each new finding in a fresh child; refuted ones are dropped.
+  // 4. With `verify` on, check each new finding in a fresh child. Refuted
+  // ones are dropped; unconfirmed ones below high go to the summary only.
   const kept: Finding[] = [];
+  const unconfirmed = new Set<Finding>();
+  const patches = new Map(files.map((f) => [f.filename, f.patch ?? ""]));
   await forEachLimit(candidates.map((f, i) => ({ f, i })), CHILD_CONCURRENCY, async ({ f, i }) => {
     if (!settings.verify || i >= MAX_VERIFIED) return void kept.push(f);
     const verdict = await runVerifier(ctx, thread, {
       dispatchId: dispatch(`verify:${i}`),
       model: settings.model,
-      prompt: buildVerifierPrompt({ title: pr.title, base: mergeBase, head, finding: f, fileDiff: fileDiff(prDiff, f.path), finish: VERDICT_FINISH }),
+      prompt: buildVerifierPrompt({ ...claimInput(f), finish: VERDICT_FINISH }),
       title: `Verify finding ${i + 1} at ${head.slice(0, 7)}`,
       repo: repoName,
       head,
     });
-    const decision = decideFinding(f, verdict, await readableText(gh, f.path, head));
+    const side = f.side ?? "RIGHT";
+    const decision = decideFinding(f, verdict, await readableText(gh, f.path, side === "LEFT" ? mergeBase : head), commentableLines(patches.get(f.path) ?? "", side, false));
     if (decision.keep) kept.push(f);
+    if (decision.tier === "summary") unconfirmed.add(f);
   });
 
   // 5. New findings: drop repeats of open ones and those below the minimum severity, then assign ids.
@@ -380,7 +399,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
       reopened.push({ ...f, id: back.id, line: f.line, ...(back.commentId !== undefined ? { commentId: back.commentId } : {}), ...(back.threadId !== undefined ? { threadId: back.threadId } : {}) });
       continue;
     }
-    posted.push({ ...f, id: `f${nextId++}` });
+    posted.push({ ...f, id: `f${nextId++}`, ...(unconfirmed.has(f) ? { unconfirmed: true as const } : {}) });
   }
 
   await noteBestEffort(ctx, thread, renderConsolidation(head, draft.findings.map((f): StageOutcome => {
@@ -391,7 +410,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
       : !candidates.includes(f) ? "dropped: line does not exist at HEAD"
       : !kept.includes(f) ? "dropped: the verifier refuted it"
       : SEVERITY_ORDER.indexOf(f.severity) < minRank ? `hidden: below ${settings.minSeverity}`
-      : out ? `posted as ${out.id}`
+      : out ? `posted as ${out.id}${out.unconfirmed ? " in the summary only: the verifier could not confirm it" : ""}`
       : reopened.some((r) => r.path === f.path && r.title === f.title) ? "reopened a fixed finding"
       : "dropped: repeats an open or dismissed finding";
     return { finding: f, result };
@@ -399,7 +418,8 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
 
   // 6. Map new findings to diff lines. GitHub refuses a comment on a line outside the diff.
   const anchorable = new Map(files.map((f) => [f.filename, { RIGHT: commentableLines(f.patch ?? "", "RIGHT"), LEFT: commentableLines(f.patch ?? "", "LEFT") }]));
-  const placed = posted.map((f) => placeNearDiff(f, anchorable.get(f.path)?.[f.side ?? "RIGHT"]));
+  const summaryOnly = posted.filter((f) => f.unconfirmed === true);
+  const placed = posted.filter((f) => f.unconfirmed !== true).map((f) => placeNearDiff(f, anchorable.get(f.path)?.[f.side ?? "RIGHT"]));
   let inline = placed.filter((f) => anchorable.get(f.path)?.[f.side ?? "RIGHT"].has(f.line) ?? false);
   let outside = placed.filter((f) => !inline.includes(f));
 
@@ -412,7 +432,8 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
       summary: draft.summary,
       confidence: draft.confidence,
       inline: [...stillOpen.filter((f) => f.commentId !== undefined), ...reopened, ...inline],
-      outsideDiff: [...stillOpen.filter((f) => f.commentId === undefined), ...outside],
+      outsideDiff: [...stillOpen.filter((f) => f.commentId === undefined && f.unconfirmed !== true), ...outside],
+      unconfirmed: [...stillOpen.filter((f) => f.commentId === undefined && f.unconfirmed === true), ...summaryOnly],
       fixed: fixed.map(({ finding, withdrawn }) => ({ finding, sha: head, withdrawn })),
       rules: [...rules].sort(),
       hidden,
@@ -474,7 +495,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
     const commentId = commentIds.get(f.id);
     byId.set(f.id, pointer(f, "open", commentId !== undefined ? { commentId } : {}));
   }
-  for (const f of outside) byId.set(f.id, pointer(f, "open", {}));
+  for (const f of [...outside, ...summaryOnly]) byId.set(f.id, pointer(f, "open", {}));
   const round: ReviewRound = {
     head,
     mode: from !== undefined ? "incremental" : "full",
@@ -588,7 +609,7 @@ async function recoverFindings(
     if (p.status === "dismissed" || gone || resolvedByAnotherActor(thread) || (p.status === "open" && thread?.isResolved)) {
       dismissed.push({ id: p.id, path: p.path, line: p.line, ...(text ? { title: text.title } : {}) });
     } else if (p.status === "open") {
-      live.push({ ...text, ...where });
+      live.push({ ...text, ...where, ...(p.unconfirmed === true ? { unconfirmed: true } : {}) });
     } else if (p.commentId !== undefined) {
       fixed.push({ ...text, ...where });
     }
@@ -690,10 +711,11 @@ export async function flaggedCodeChanged(
   return false;
 }
 
-function pointer(f: Pick<PostedFinding, "id" | "path" | "line" | "side">, status: FindingPointer["status"], ids: { commentId?: number; threadId?: string }): FindingPointer {
+function pointer(f: Pick<PostedFinding, "id" | "path" | "line" | "side" | "unconfirmed">, status: FindingPointer["status"], ids: { commentId?: number; threadId?: string }): FindingPointer {
   return {
     id: f.id, path: f.path, line: f.line, status,
     ...(f.side === "LEFT" ? { side: "LEFT" as const } : {}),
+    ...(f.unconfirmed === true && ids.commentId === undefined ? { unconfirmed: true as const } : {}),
     ...(ids.commentId !== undefined ? { commentId: ids.commentId } : {}),
     ...(ids.threadId !== undefined ? { threadId: ids.threadId } : {}),
   };
@@ -775,6 +797,8 @@ async function runReviewerChild(
     focus?: ReviewFocus;
     /** Told the memory paths of the team rules the context pack carried. */
     onRules?: (paths: string[]) => void;
+    /** Called once the pack stage ends, with the pack's text or undefined when there is no pack, so the verifiers can get its rules. */
+    onPack?: (text: string | undefined) => void;
   },
 ): Promise<Review> {
   const [owner = "", repo = ""] = input.repoName.split("/");
@@ -799,6 +823,7 @@ async function runReviewerChild(
   const context = input.context;
   const budgetTokens = input.settings.contextBudget ?? 0;
   const gathers = context !== undefined && budgetTokens > 0;
+  if (!gathers) input.onPack?.(undefined);
   const child = await ctx.threads.spawnChild(
     thread,
     {
@@ -822,6 +847,7 @@ async function runReviewerChild(
                 dispatchId: `${input.dispatchId}:context`,
               });
               if (pack) input.onRules?.(pack.manifest.items.filter((i) => i.section === "notes" || i.section === "learned").map((i) => i.ref));
+              input.onPack?.(pack?.text);
               return pack ? promptWith(pack.text, "") : fallback();
             },
           }
@@ -1002,10 +1028,9 @@ export function onlyFiles(patch: string, names: Set<string>): string {
     .join("");
 }
 
-function fileDiff(patch: string | undefined, path: string): string {
-  if (patch === undefined) return "";
-  const one = onlyFiles(patch, new Set([path]));
-  return one.length > FILE_DIFF_CHARS ? `${one.slice(0, FILE_DIFF_CHARS)}\n# (diff cut; run git diff for the rest)\n` : one;
+/** The rules a verifier gets: the line's instructions and the pack's conventions and domain notes. */
+export function verifierRules(instructions: string, pack: string | undefined): string {
+  return [instructions.trim() ? `#### Instructions from the repository owner\n${instructions.trim()}` : "", pack ? packRules(pack) : ""].filter(Boolean).join("\n\n");
 }
 
 /** Memory entries about this repository, for the reviewer's prompt. */
