@@ -1137,7 +1137,7 @@ export class EventDispatcher {
         threads: host.threads({ plugin, orgId: sub.orgId, owner, actorUserId, deliveryId, signal, cancelChildren }),
         config,
         store: owner.type === "team" ? store.team(owner.id) : store.user(owner.id),
-        memory: buildPluginMemory(this.deps.db, owner, actorUserId, sub.orgId),
+        memory: buildPluginMemory(this.deps.db, owner, actorUserId, sub.orgId, plugin),
         appToken: async (service, scope) => {
           if (!services.has(service)) {
             throw new Error(`Plugin ${plugin.name} did not declare service ${service}. Declare a credential for it in the plugin manifest.`);

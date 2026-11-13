@@ -1,12 +1,13 @@
 /**
- * `PluginMemory` for a plugin handler: read-only access to the owner's
- * memory through the memory service. A plugin reads what a task needs and
- * puts it into a child's prompt; it never writes memory.
+ * `PluginMemory` for a plugin handler: the owner's memory through the memory
+ * service. A plugin reads what a task needs and puts it into a child's
+ * prompt. It writes only under the directories its manifest declares in
+ * `memoryWrites`, through the same service checks as an agent write.
  */
 import type { PluginMemory, Principal } from "@valet/engine";
 import { NotFoundError } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
-import { listFiles, readFile, searchFiles, type MemoryScope } from "../services/memory.js";
+import { listFiles, readFile, searchFiles, writeFile, type MemoryScope } from "../services/memory.js";
 
 /** Search results a plugin gets at most, whatever it asks for. */
 const MAX_SEARCH_RESULTS = 20;
@@ -15,7 +16,26 @@ const MAX_LIST_RESULTS = 200;
 /** The virtual prefix of a file in a team's or org's memory. */
 const OWNER_PREFIX = /^(team|org):[^/]+\//;
 
-export function buildPluginMemory(db: AppDb, owner: Principal, actorUserId: string, orgId: string): PluginMemory {
+/** The error a plugin gets for a write outside its declared directories. */
+export class PluginMemoryWriteError extends Error {
+  constructor(plugin: string, path: string, writable: readonly string[]) {
+    super(
+      writable.length === 0
+        ? `Plugin ${plugin} cannot write memory. Declare the directory in the plugin manifest's memoryWrites.`
+        : `Plugin ${plugin} cannot write ${path}. It may write only under ${writable.join(", ")}.`,
+    );
+    this.name = "PluginMemoryWriteError";
+  }
+}
+
+export function buildPluginMemory(
+  db: AppDb,
+  owner: Principal,
+  actorUserId: string,
+  orgId: string,
+  plugin: { name: string; memoryWrites?: readonly string[] } = { name: "unknown" },
+): PluginMemory {
+  const writable = (plugin.memoryWrites ?? []).filter((d) => d.endsWith("/") && !d.startsWith("lib/"));
   // No namespace: the owner's shared memory, which a team's members all read.
   // `orgId` keeps a person's line from reading their other orgs' memory.
   const scope: MemoryScope = { owner, actorUserId, orgId };
@@ -38,6 +58,13 @@ export function buildPluginMemory(db: AppDb, owner: Principal, actorUserId: stri
         .filter((f) => f.path.startsWith(prefix) || f.path.replace(OWNER_PREFIX, "").startsWith(prefix))
         .slice(0, limit)
         .map((f) => ({ path: f.path, title: f.title, description: f.description }));
+    },
+    async write(path, file) {
+      // A declared directory, never `lib/`, and no traversal out of it: the memory service normalizes the rest.
+      if (path.includes("..") || path.startsWith("lib/") || !writable.some((d) => path.startsWith(d))) {
+        throw new PluginMemoryWriteError(plugin.name, path, writable);
+      }
+      await writeFile(db, scope, { path, content: file.content, description: file.description, origin: `plugin:${plugin.name}` });
     },
     async read(path) {
       try {

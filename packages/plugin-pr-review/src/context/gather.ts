@@ -5,6 +5,7 @@
  */
 import { matchesGlob } from "./glob.js";
 import { noteMatch, parseNote, type DomainNote } from "./notes.js";
+import { LEARNED_DIR, parseLearnedNote } from "../learn.js";
 import { buildContextPack, isTestPath, MAX_CALLER_REFS, type ContextPack, type ConventionFile, type MemoryItem, type PackDrop } from "./pack.js";
 import { instructionPath, noiseKind, PLAYBOOK, ROOT_CONVENTIONS, NESTED_CONVENTIONS } from "./paths.js";
 import type { DroppedFile } from "./rank.js";
@@ -65,6 +66,8 @@ const RULE_NOTES = /^((team|org):[^/]+\/)?lib\/code-review\/notes\/[^/]+\.md$/;
 /** Rule notes listed at most. An org keeps a few, so every one is read and matched. */
 const MAX_RULE_NOTES = 100;
 const MAX_MEMORY_READS = 12;
+/** Principles listed in the pack at most, the memory index's own cap. */
+const MAX_PRINCIPLES = 40;
 
 export async function gatherContext(input: GatherInput): Promise<ContextPack> {
   const sourcePatch = parseDiff(input.patch).length > 0 ? onlySource(input.patch) : input.patch;
@@ -151,6 +154,7 @@ export async function gatherContext(input: GatherInput): Promise<ContextPack> {
   const addedText = parseDiff(sourcePatch).flatMap((f) => f.added).join("\n");
   const change = { paths: touchedSource, addedText, title: input.title };
   const notes: { note: DomainNote; why: string }[] = [];
+  const learned: { note: DomainNote; why: string; kind: "check" | "skip" }[] = [];
   const memory: MemoryItem[] = [];
 
   if (input.memory) {
@@ -164,9 +168,21 @@ export async function gatherContext(input: GatherInput): Promise<ContextPack> {
         return [];
       }
     };
-    // Principles: listed by title, read on demand.
-    const principles = (await search("principle", 40)).filter((h) => /(^|\/)principles\//.test(h.path));
-    for (const p of principles) memory.push({ path: p.path, title: p.title, text: p.description, kind: "principle" });
+    // Principles: listed by title, read on demand. The owner's own principles
+    // are listed, so a principle learned from an earlier review always shows;
+    // a search adds team and synced principles.
+    const listing = async (prefix: string): Promise<Awaited<ReturnType<PackMemory["list"]>>> => {
+      try {
+        return await mem.list(prefix);
+      } catch (err) {
+        extraDrops.push({ section: "memory", ref: `list ${prefix}`, reason: `failed: ${err instanceof Error ? err.message : String(err)}` });
+        return [];
+      }
+    };
+    const principles = new Map<string, { title: string; description: string }>();
+    for (const p of await listing("principles/")) principles.set(p.path, p);
+    for (const h of await search("principle", 40)) if (/(^|\/)principles\//.test(h.path) && !principles.has(h.path)) principles.set(h.path, h);
+    for (const [path, p] of [...principles.entries()].slice(0, MAX_PRINCIPLES)) memory.push({ path, title: p.title, text: p.description, kind: "principle" });
     const read = async (path: string): Promise<{ path: string; content: string } | null> => {
       try {
         return await mem.read(path);
@@ -207,6 +223,18 @@ export async function gatherContext(input: GatherInput): Promise<ContextPack> {
     }
     if (unmatchedRules > 0) extraDrops.push({ section: "notes", ref: `${unmatchedRules} rule note(s)`, reason: "their paths, terms and title pattern do not match this change" });
 
+    // Lessons learned from past feedback on this repository: matched like rules, labeled as learned.
+    if (input.repo) {
+      for (const f of await listing(`${LEARNED_DIR}${input.repo}/`)) {
+        const file = await read(f.path);
+        const parsed = file ? parseLearnedNote(f.path, file.content) : undefined;
+        if (!parsed || parsed.retired) continue;
+        const note: DomainNote = { name: baseName(f.path), title: parsed.title, paths: parsed.paths, terms: parsed.terms, body: parsed.body, origin: "memory", path: f.path };
+        const why = parsed.paths.length > 0 || parsed.terms.length > 0 ? noteMatch(note, change, matchesGlob) : "applies to every change in this repository";
+        if (why) learned.push({ note, why, kind: parsed.kind });
+      }
+    }
+
     // Background notes and playbooks found by what the change names:
     // repository, paths, symbols, distinctive terms in added lines, and
     // title words. A note's own paths, terms and title pattern then decide
@@ -238,7 +266,7 @@ export async function gatherContext(input: GatherInput): Promise<ContextPack> {
     }
   }
 
-  const pack = buildContextPack({ scan, lines: fetched.lines, symbols, conventions, changedConventions, notes, memory, diffDropped: input.diffDropped, budgetChars: input.budgetChars });
+  const pack = buildContextPack({ scan, lines: fetched.lines, symbols, conventions, changedConventions, notes, learned, memory, diffDropped: input.diffDropped, budgetChars: input.budgetChars });
   if (extraDrops.length === 0) return pack;
   // Log these drops in the manifest and in the pack's last section.
   const lines = extraDrops.map((d) => `- ${d.section}: ${d.ref} (${d.reason})`).join("\n");

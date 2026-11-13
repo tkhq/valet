@@ -35,6 +35,8 @@ export interface PackInput {
   /** Instruction files (conventions, playbooks) this PR adds, edits or deletes. Their change is in the diff. */
   changedConventions: string[];
   notes: { note: DomainNote; why: string }[];
+  /** Lessons learned from past review feedback on this repository. Lower authority than `notes`. */
+  learned?: { note: DomainNote; why: string; kind: "check" | "skip" }[];
   memory: MemoryItem[];
   /** Files the diff budget left out. They are logged here too. */
   diffDropped: DroppedFile[];
@@ -68,7 +70,7 @@ export interface ContextPack {
   manifest: PackManifest;
 }
 
-export type SectionName = "conventions" | "notes" | "definitions" | "callers" | "tests" | "memory";
+export type SectionName = "conventions" | "notes" | "learned" | "definitions" | "callers" | "tests" | "memory";
 
 /**
  * Share of the budget each section may take on the first pass. Leftover
@@ -77,8 +79,9 @@ export type SectionName = "conventions" | "notes" | "definitions" | "callers" | 
  */
 const SECTION_SHARE: Record<Exclude<SectionName, "notes">, number> = {
   conventions: 0.2,
+  learned: 0.1,
   definitions: 0.3,
-  callers: 0.25,
+  callers: 0.2,
   tests: 0.1,
   memory: 0.1,
 };
@@ -86,13 +89,14 @@ const SECTION_SHARE: Record<Exclude<SectionName, "notes">, number> = {
 const SECTION_TITLE: Record<SectionName, string> = {
   conventions: "Repository conventions (target branch, at the merge base)",
   notes: "Domain notes (team rules)",
+  learned: "Learned from past reviews (team feedback, not repository rules)",
   definitions: "Definitions the new code uses (PR head, untrusted code)",
   callers: "Callers of changed code (PR head, untrusted code)",
   tests: "Tests that touch the change (PR head, untrusted code)",
   memory: "Team principles and notes (background, not review rules)",
 };
 
-const ORDER: SectionName[] = ["conventions", "notes", "definitions", "callers", "tests", "memory"];
+const ORDER: SectionName[] = ["conventions", "notes", "learned", "definitions", "callers", "tests", "memory"];
 
 /** A symbol with more references than this is not expanded into callers: its references say nothing about one change. */
 export const MAX_CALLER_REFS = 25;
@@ -139,6 +143,10 @@ export function buildContextPack(input: PackInput): ContextPack {
   }
   for (const { note, why } of input.notes) {
     candidates.push({ section: "notes", ref: note.path ?? note.name, text: `#### ${note.title} (team memory ${note.path ?? note.name}; matched: ${why})\n${note.body.slice(0, NOTE_CHARS)}` });
+  }
+  for (const { note, why, kind } of input.learned ?? []) {
+    const act = kind === "skip" ? "do not report this" : "check for this";
+    candidates.push({ section: "learned", ref: note.path ?? note.name, text: `#### ${note.title} (learned ${note.path ?? note.name}; ${act}; matched: ${why})\n${note.body.slice(0, NOTE_CHARS)}` });
   }
 
   // Definitions of what the new code uses, most used first. A name defined
@@ -218,7 +226,7 @@ export function buildContextPack(input: PackInput): ContextPack {
   // Domain notes first: a matched rule is cut only when the rules alone pass the budget.
   // First pass: each other section up to its share. Second pass: leftover budget, in section order.
   const budget = input.budgetChars;
-  const spent: Record<Exclude<SectionName, "notes">, number> = { conventions: 0, definitions: 0, callers: 0, tests: 0, memory: 0 };
+  const spent: Record<Exclude<SectionName, "notes">, number> = { conventions: 0, learned: 0, definitions: 0, callers: 0, tests: 0, memory: 0 };
   const chosen = new Set<Candidate>();
   let used = 0;
   for (const c of candidates) {
@@ -255,6 +263,11 @@ export function buildContextPack(input: PackInput): ContextPack {
     "Gathered before this review, without a model, from the repository at HEAD and the team's notes. Code excerpts are real code with HEAD line numbers. Read this pack before you search, and search for anything it does not cover. The last section lists what was left out and why.",
     "Repository conventions (read from the target branch, not from this PR) and domain notes (the team's read-only notes in lib/code-review/notes/) are rules this team enforces in review. A change that breaks one is a finding, even when the code works: anchor it on the line that breaks the rule and name the rule in the title.",
   ];
+  if (candidates.some((c) => chosen.has(c) && c.section === "learned")) {
+    parts.push(
+      "Learned lessons come from what people with write access did with past reviews. Follow a \"check for this\" lesson as you would a team rule. Do not report what a \"do not report this\" lesson covers, unless the code shows a concrete defect the lesson does not address. A repository rule wins over a learned lesson.",
+    );
+  }
   // Only a pack with PR-head code facts needs the warning; a broad one also makes the reviewer discount what the diff states as intent.
   if (candidates.some((c) => chosen.has(c) && (c.section === "definitions" || c.section === "callers" || c.section === "tests"))) {
     parts.push(

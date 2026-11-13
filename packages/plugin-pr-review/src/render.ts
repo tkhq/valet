@@ -124,7 +124,7 @@ export function renderSummary(s: SummaryInput): string {
   }
   if (s.hidden > 0) lines.push("", `${s.hidden} finding(s) are not shown: below the line's minimum severity, in excluded paths, or on a line that does not exist at this head.`);
   if (s.rules && s.rules.length > 0) {
-    lines.push("", `<details><summary>Team rules applied (${s.rules.length})</summary>`, "");
+    lines.push("", `<details><summary>Team rules and lessons applied (${s.rules.length})</summary>`, "");
     for (const path of s.rules) lines.push(`- \`${path}\``);
     lines.push("", "</details>");
   }
@@ -162,7 +162,7 @@ export function renderShadowReview(r: { slug: string; commit: string; summary: s
     if (f.suggestion) lines.push("", "```suggestion", f.suggestion.replace(/\n+$/, ""), "```");
   }
   if (r.hidden > 0) lines.push("", `${r.hidden} finding(s) are not shown: below the line's minimum severity, in excluded paths, or on a line that does not exist at this commit.`);
-  if (r.rules && r.rules.length > 0) lines.push("", `Team rules applied (${r.rules.length}): ${r.rules.map((p) => `\`${p}\``).join(", ")}`);
+  if (r.rules && r.rules.length > 0) lines.push("", `Team rules and lessons applied (${r.rules.length}): ${r.rules.map((p) => `\`${p}\``).join(", ")}`);
   return lines.join("\n");
 }
 
