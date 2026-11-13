@@ -1846,6 +1846,24 @@ async function ownedRun(
   return run;
 }
 
+/**
+ * Whether `owner` may answer this approval, read-only. It runs the access
+ * part of `resolveWorkflowApproval`, so a channel card offers buttons only to
+ * a person whose click that function would accept.
+ */
+export async function mayResolveWorkflowApproval(
+  deps: WorkflowServiceDeps,
+  owner: WorkflowOwner,
+  gate: { runId: string; nodeId: string; iteration: number; gateId?: string },
+): Promise<boolean> {
+  const run = await ownedRun(deps, owner, gate.runId, "act", { nodeId: gate.nodeId, iteration: gate.iteration, gateId: gate.gateId });
+  if (!run) return false;
+  const checkpoint = (await deps.workflowStore.getCheckpoints(gate.runId))
+    .find(cp => cp.nodeId === gate.nodeId && cp.iteration === gate.iteration && cp.status === "intent");
+  const approver = approverFromEffects(checkpoint?.effects);
+  return !approver || (owner.principal?.type !== "team" && approver.userId === owner.userId);
+}
+
 export type ResolveApprovalOutcome =
   | "ok" | "not_found" | "not_parked" | "already_resolved" | "timed_out"
   | "stale_gate"
@@ -2118,8 +2136,9 @@ export async function resolveWorkflowApproval(
     note?: string;
     scope?: "once" | "run" | "always" | "workflow" | "team_account";
     iteration?: number;
-    /** "thread": a person answered the agent's card in a conversation. */
-    via: "web" | "agent" | "thread";
+    /** "thread": a person answered the agent's card in a conversation.
+     * "channel": a person clicked the step's own card in Slack or Telegram. */
+    via: "web" | "agent" | "thread" | "channel";
   },
 ): Promise<ResolveApprovalOutcome> {
   const iter = input.iteration ?? 0;
