@@ -1,5 +1,4 @@
 import { readFile, writeFile } from "node:fs/promises";
-import type { ScopedPluginStore } from "@valet/engine";
 import type { Finding } from "./types.js";
 
 /** A finding tracked across the commits of one pull request. */
@@ -43,26 +42,11 @@ export interface PullRequestReviewState {
   nextId: number;
 }
 
-/** Where review state lives. The plugin uses its PluginStore; the CLI uses a file. */
+/** Where review state lives: a file for the CLI, memory for tests. */
 export interface ReviewStateStore {
   get(key: string): Promise<{ state: PullRequestReviewState; revision?: number } | undefined>;
   /** Pass the revision read by `get` so a concurrent review of the same PR cannot overwrite this one. */
   put(state: PullRequestReviewState, revision?: number): Promise<void>;
-}
-
-const COLLECTION = "pr-review-state";
-
-/** State in the plugin's PluginStore, one document per PR. Writes are revision-checked. */
-export function pluginStoreReviewState(store: ScopedPluginStore): ReviewStateStore {
-  return {
-    async get(key) {
-      const doc = await store.get<PullRequestReviewState>(COLLECTION, key);
-      return doc ? { state: doc.doc, revision: doc.revision } : undefined;
-    },
-    async put(state, revision) {
-      await store.put(COLLECTION, state.key, state, revision !== undefined ? { ifRevision: revision } : undefined);
-    },
-  };
 }
 
 /** In-memory store, for tests and one-process runs. */

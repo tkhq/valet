@@ -35,11 +35,11 @@ export const DELEGATED_SNAPSHOT_BUDGET_CHARS = 16_000;
 
 /** Most lines the memory index lists before it points at mem_search.
  * Claude Code loads the first 200 lines of its MEMORY.md index. */
-export const MEMORY_INDEX_MAX_LINES = 200;
+const MEMORY_INDEX_MAX_LINES = 200;
 
 /** Most characters the memory index holds. Claude Code cuts its MEMORY.md
  * index at 25,000 characters. */
-export const MEMORY_INDEX_MAX_CHARS = 25_000;
+const MEMORY_INDEX_MAX_CHARS = 25_000;
 
 /** Most characters of one index line. Claude Code asks for index entries
  * "under ~200 chars". A longer description is cut; a path never is. */

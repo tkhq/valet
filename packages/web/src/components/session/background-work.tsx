@@ -465,10 +465,10 @@ export function BackgroundWorkStatusLine({
         </PopoverTrigger>
         <PopoverContent align="start" className="w-80">
           <p className="mb-2 text-xs font-medium text-ink">Background work</p>
-          {own.length > 0 && <ManageList items={own} now={now} canCancel={canCancel} onCancel={ask} label="This thread" />}
+          <ManageList items={own} now={now} canCancel={canCancel} onCancel={ask} label="This thread" />
           {other.length > 0 && (
             <>
-              <p className={cn("mb-2 text-xs text-muted", own.length > 0 && "mt-3")}>In other threads</p>
+              <p className="mb-2 mt-3 text-xs text-muted">In other threads</p>
               <ManageList items={other} now={now} canCancel={canCancel} onCancel={ask} label="In other threads" />
             </>
           )}
