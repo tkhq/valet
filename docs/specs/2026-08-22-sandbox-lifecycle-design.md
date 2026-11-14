@@ -57,7 +57,9 @@ hour.
    (`SandboxProvider.deriveId`), so no handle needs recording at provision
    time. Backends with provider-assigned ids (docker/local) have nothing to
    destroy once the cache entry is gone; the reclaim logs and stamps rather
-   than re-sweeping forever.
+   than re-sweeping forever. A derived name can match nothing, so the
+   reaper counts `hibernation_retention` only when the sandbox was present
+   before the destroy.
 4. **Race rules mirror `ChildWatcher.sweepRetention`.** Unsettled
    submissions always win, re-checked immediately before the destroy.
 5. **Provider-side reconcile sweep — orphan rule only.**
@@ -191,7 +193,10 @@ defects. Both are fixed; decision 6 (no age-based kill) stands.
    sandbox user in a one-off container, because the api user cannot, and
    the engine rebuilds a revived child in the empty directory. It then sets
    the session `hibernated` with `sandbox_reclaimed_at`, the state the
-   hibernation reaper leaves. A wake makes it `active` again. A failed release is reported (`child_workspace_release`) and
+   hibernation reaper leaves. A parked child is already `hibernated`, and
+   `retireChild` stamps it too. Before 2026-11-13 it stamped only `active`
+   rows, so the reaper destroyed a parked child's derived handle again after
+   retention and counted that destroy a second time. A wake makes it `active` again. A failed release is reported (`child_workspace_release`) and
    counted. `valet_children_reclaimed_active`,
    `valet_child_workspaces{state}`, `valet_child_workspace_bytes` and
    `valet_child_reclaim_failures_total` feed two alerts. Nothing retries a

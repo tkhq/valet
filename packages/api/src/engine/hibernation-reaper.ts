@@ -47,6 +47,7 @@ export interface HibernationReaperDeps {
   engineHost: {
     liveSession(sessionId: string): ReaperLiveSession | null;
     destroySandbox(sandboxId: string): Promise<void>;
+    sandboxStatus(sandboxId: string): Promise<{ state: string }>;
     deriveSandboxId(sessionKey: string): string | null;
     evictCache(sessionId: string): void;
   };
@@ -114,8 +115,11 @@ export class HibernationReaper {
           // matching nothing is a tolerated 404.
           const handle = row.hibernatedSandboxId ?? this.deps.engineHost.deriveSandboxId(row.workspace);
           if (handle) {
+            // A derived name can match nothing. Count only a sandbox that was
+            // there, so created minus destroyed stays a true gap.
+            const present = (await this.deps.engineHost.sandboxStatus(handle)).state !== "released";
             await this.deps.engineHost.destroySandbox(handle);
-            recordSandboxDestroyed("hibernation_retention");
+            if (present) recordSandboxDestroyed("hibernation_retention");
             console.log(`HibernationReaper: reclaimed sandbox ${handle} for session ${row.id}`);
           } else {
             console.warn(

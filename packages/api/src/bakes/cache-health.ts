@@ -27,6 +27,8 @@ export async function readCacheState(db: AppDb, orgId: string) {
       eq(agentSessions.orgId, orgId),
       inArray(agentSessions.status, ["active", "hibernated"]),
       isNull(agentSessions.sandboxReclaimedAt),
+      // `retireChild` stamps the session now. Children retired before that
+      // stamp existed (2026-11-09) carry it only on their watch row.
       notExists(db.select({ id: childWatches.childSessionId }).from(childWatches)
         .where(and(eq(childWatches.childSessionId, agentSessions.id), isNotNull(childWatches.sandboxReclaimedAt)))),
     ));
