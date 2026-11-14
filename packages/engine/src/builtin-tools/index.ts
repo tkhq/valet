@@ -1216,7 +1216,7 @@ export const taskTool = defineTool({
     }
 
     const req: SpawnChildRequest = {
-      toolScope: intersectToolScopes(ctx.toolScopeCeiling, args.toolScope),
+      toolScope: intersectToolScopes(ctx.toolScopeCeiling, ctx.canonicalToolScope?.(args.toolScope) ?? args.toolScope),
       prompt: args.prompt,
       title: args.title,
       repo: args.repo,

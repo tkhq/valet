@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { fauxAssistantMessage, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
 import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
-import { builtinTools, Engine, InMemoryEventStream, InMemorySessionStore, pluginCatalogTools, UNATTENDED_WORKFLOW_DECISION, VirtualSandboxProvider, type DecisionResolution, type PolicyResolver, type ToolDef } from "../src/index.js";
+import { buildPluginCatalog, builtinTools, Engine, InMemoryEventStream, InMemorySessionStore, pluginCatalogTools, UNATTENDED_WORKFLOW_DECISION, VirtualSandboxProvider, type ActionPlugin, type DecisionResolution, type PolicyResolver, type ToolDef } from "../src/index.js";
 import { CONTINUATION_TOOL_SCOPE_KEY, UNATTENDED_WORKFLOW_KEY } from "@valet/shared";
 
 describe.each(["user", "team"] as const)("%s task scopes", (ownerType) => {
@@ -268,5 +268,44 @@ describe("unattended workflow tasks", () => {
   it("leaves a person's own prompt in an assistant thread attended", async () => {
     const { seen } = await decide("attended-orchestrator", "orchestrator", { ask: false });
     expect(seen.unattended).toBeUndefined();
+  });
+});
+
+describe("action scopes in any spelling", () => {
+  let writes = 0;
+  // google_workspace declares ids under product prefixes, so its canonical
+  // ids do not start with the service.
+  const sheets: ActionPlugin = { service: "google_workspace", defaultApprovalMode: "allow", actions: [{
+    id: "sheets.write_spreadsheet", name: "Write spreadsheet", description: "Write cells", riskLevel: "low",
+    parameters: Type.Object({}), execute: async () => { writes++; return { success: true, data: { written: true } }; },
+  }] };
+
+  async function focusedCall(provider: string, focus: string[], toolId: string) {
+    const faux = registerFauxProvider({ provider });
+    try {
+      const engine = new Engine({ providers: { store: new InMemorySessionStore(), stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() } });
+      const session = await engine.createSession({ userId: "alice", orgId: "org", owner: { type: "user", id: "alice" }, workspace: "/", sandbox: {},
+        model: faux.getModel(), builtinTools: [], pluginCatalog: buildPluginCatalog([sheets]), tools: pluginCatalogTools({ plugins: [sheets] }),
+        initialToolFocus: () => ({ actions: focus }) });
+      const thread = await session.createThread("focused");
+      faux.setResponses([
+        fauxAssistantMessage([fauxToolCall("call_tool", { tool_id: toolId, params: {}, summary: "write the cells" })], { stopReason: "toolUse" }),
+        fauxAssistantMessage("done"),
+      ]);
+      const receipt = await session.prompt("update the sheet", { threadId: thread.id });
+      await thread.awaitResult(receipt.queueItemId);
+      return thread.effectiveToolScope();
+    } finally { faux.unregister(); }
+  }
+
+  it.each([
+    ["a service wildcard", ["google_workspace.*"], "sheets.write_spreadsheet"],
+    ["the service-prefixed id", ["google_workspace.sheets.write_spreadsheet"], "sheets.write_spreadsheet"],
+    ["the canonical id", ["sheets.write_spreadsheet"], "google_workspace.sheets.write_spreadsheet"],
+  ])("allows the action when the focus names it with %s", async (_label, focus, toolId) => {
+    writes = 0;
+    const scope = await focusedCall(`scope-spelling-${focus[0]}`, focus, toolId);
+    expect(scope?.actions).toContain("sheets.write_spreadsheet");
+    expect(writes).toBe(1);
   });
 });
