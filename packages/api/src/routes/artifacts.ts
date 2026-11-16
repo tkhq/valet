@@ -43,6 +43,7 @@ import { isValidInternalToken } from "../lib/internal-auth.js";
 import { handleServiceError, resolveScope } from "./memory.js";
 import { promptAuthorFromUser, submitSessionPrompt } from "./messages.js";
 import { requestViewer, threadVisibility, visibleThreadIds, type ThreadViewer } from "../services/thread-access.js";
+import { scrubSessionInput } from "../services/secret-store/inbound-scrub.js";
 import { viewerOf } from "./_thread-access.js";
 import type { Providers } from "../providers/types.js";
 import {
@@ -428,13 +429,19 @@ export function buildArtifactsPublicRouter(auth: ValetAuth | null): Hono<AppEnv>
     }
 
     try {
+      // A comment sent to the agent reaches the model like a message, so a
+      // key in it is saved and replaced before the comment is stored.
+      const send = body.sendToSession === true ? await canSendToSourceSession(providers, artifact, user) : ({ ok: false } as const);
+      const commentBody = send.ok
+        ? await scrubSessionInput(providers.secretStore, { ...send.row, userId: user.id }, body.body, "web")
+        : body.body;
       const row = await addArtifactComment(providers.db, {
         artifactId: artifact.id,
         version: artifact.version,
         vdid: typeof body.vdid === "string" ? body.vdid : undefined,
         anchorLabel: typeof body.anchorLabel === "string" ? body.anchorLabel : undefined,
         parentId: typeof body.parentId === "string" ? body.parentId : undefined,
-        body: body.body,
+        body: commentBody,
         authorUserId: user.id,
       });
 
@@ -442,20 +449,17 @@ export function buildArtifactsPublicRouter(auth: ValetAuth | null): Hono<AppEnv>
       // response reports what actually happened, so the UI cannot claim a
       // send that silently failed.
       let sent = false;
-      if (body.sendToSession === true) {
-        const send = await canSendToSourceSession(providers, artifact, user);
-        if (send.ok) {
-          const anchor = row.anchorLabel ? `element "${row.anchorLabel}"` : row.vdid ? `element ${row.vdid}` : "page";
-          const text = `[artifact comment] on "${artifact.title}" (${anchor}): ${row.body}`;
-          const resp = await submitSessionPrompt(providers, send.row, text, {
-            author: promptAuthorFromUser(user, userPrincipal(user.id), loaded.authVia),
-            threadId: artifact.sourceThreadId ?? undefined,
-          });
-          if (resp) {
-            await markArtifactCommentSent(providers.db, row.id, artifact.sourceSessionId);
-            row.sentToSession = artifact.sourceSessionId;
-            sent = true;
-          }
+      if (send.ok) {
+        const anchor = row.anchorLabel ? `element "${row.anchorLabel}"` : row.vdid ? `element ${row.vdid}` : "page";
+        const text = `[artifact comment] on "${artifact.title}" (${anchor}): ${row.body}`;
+        const resp = await submitSessionPrompt(providers, send.row, text, {
+          author: promptAuthorFromUser(user, userPrincipal(user.id), loaded.authVia),
+          threadId: artifact.sourceThreadId ?? undefined,
+        });
+        if (resp) {
+          await markArtifactCommentSent(providers.db, row.id, artifact.sourceSessionId);
+          row.sentToSession = artifact.sourceSessionId;
+          sent = true;
         }
       }
 

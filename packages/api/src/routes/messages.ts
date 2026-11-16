@@ -1,6 +1,6 @@
 import { HOME_THREAD_KEY, HOME_THREAD_TITLE } from "../home/context.js";
 import { secretRequestAnswerRefusal, secretRequestOf } from "../engine/secret-tools.js";
-import { scrubInboundSecrets } from "../services/secret-store/inbound-scrub.js";
+import { scrubSessionInput } from "../services/secret-store/inbound-scrub.js";
 import { readAppPageHint, type AppPageHint } from "@valet/shared";
 /**
  * Messages + threads routes — the agent loop entry points.
@@ -1681,15 +1681,8 @@ export async function sendPrompt(c: Context<AppEnv>, sessionId: string, threadId
 
   // A key in the message text is saved as a secret and replaced with its
   // reference before the message is stored or reaches the model.
-  if (!promoteItemId && typeof body.text === "string" && c.var.providers.secretStore.enabled) {
-    const scrubbed = await scrubInboundSecrets({
-      store: c.var.providers.secretStore,
-      actor: { orgId: row.orgId, userId: c.var.user.id },
-      scope: row.ownerType === "team" && row.ownerId ? { kind: "team", teamId: row.ownerId } : { kind: "personal" },
-      text: body.text,
-      channel: "web",
-    });
-    body.text = scrubbed.text;
+  if (!promoteItemId && typeof body.text === "string") {
+    body.text = await scrubSessionInput(c.var.providers.secretStore, { ...row, userId: c.var.user.id }, body.text, "web");
   }
 
   try {
@@ -2443,9 +2436,16 @@ export async function resolveDecision(c: Context<AppEnv>, sessionId: string, thr
     }
   }
 
+  // A typed answer goes to the model like a message, so a key in it is
+  // saved and replaced the same way. A secret request's answer is only ever
+  // its reference (checked above).
+  const value = gate.type === "question" && typeof body.value === "string" && !sessionId.startsWith("wf:")
+    ? await scrubSessionInput(c.var.providers.secretStore, { ...session, userId: c.var.user.id }, body.value, "web")
+    : body.value;
+
   await engineSession.resolveDecision(gateId, {
     actionId: body.actionId,
-    value: body.value,
+    value,
     ...(body.attachments?.length ? { attachments: body.attachments } : {}),
     resolvedBy: c.var.user.id,
     resolvedAt: Date.now(),

@@ -1,3 +1,4 @@
+import { scrubSessionInput } from "../services/secret-store/inbound-scrub.js";
 import { cancelChildDelivery } from "../orchestrator/child-delivery.js";
 import { isLegacyAssistantRuntime } from "../services/legacy-runtime.js";
 import { visibleWorkOrigin } from "../services/work-origin.js";
@@ -887,13 +888,18 @@ sessionsRouter.post("/", async (c) => {
     }
   }
 
+  // The first prompt reaches the model like a message, so a key in it is
+  // saved and replaced the same way.
+  const initialPrompt = body.initialPrompt && created
+    ? await scrubSessionInput(c.var.providers.secretStore, { ...created, userId: c.var.user.id }, body.initialPrompt, "web")
+    : body.initialPrompt;
   const firstPrompt =
     kind === "security"
       ? securityKickoffPrompt(repos[0].fullName, {
-          ...(body.initialPrompt ? { focusNotes: body.initialPrompt } : {}),
+          ...(initialPrompt ? { focusNotes: initialPrompt } : {}),
           alreadyStarted: securityAlreadyStarted,
         })
-      : body.initialPrompt;
+      : initialPrompt;
   let queuedPrompt = false;
   if (firstPrompt && created) {
     try {
