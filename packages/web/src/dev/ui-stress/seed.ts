@@ -45,6 +45,7 @@ import { childWorkKey } from "~/api/child-work";
 import { qkEvents } from "~/api/events";
 import { qkHome } from "~/api/home";
 import { qkIntegrations } from "~/api/integrations";
+import { qkCommitSigning } from "~/api/commit-signing";
 import { onePasswordKeys } from "~/api/onepassword";
 import { qkPolicies } from "~/api/policies";
 import { qk } from "~/api/queries";
@@ -121,6 +122,7 @@ function seedUsage(client: QueryClient): void {
 }
 
 function seedIntegrations(client: QueryClient): void {
+  client.setQueryData(qkCommitSigning.all(), { configured: false, enrolled: false, keys: [] });
   client.setQueryData<ListPluginsResponse>(qkIntegrations.plugins(), stressPlugins);
   client.setQueryData<ListPluginsResponse>(qkIntegrations.plugins(INTEGRATIONS_TEAM_ID), stressPlugins);
   client.setQueryData<ListCredentialsResponse>(qkIntegrations.credentials("user"), stressUserCredentials);

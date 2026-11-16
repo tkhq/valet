@@ -8,6 +8,11 @@ import { api, ApiError } from "~/api/client";
 import { qkIntegrations } from "~/api/integrations";
 
 let teamId: string | undefined;
+vi.mock("~/api/commit-signing", () => ({
+  useCommitSigning: () => ({ data: { configured: false, enrolled: false, keys: [] }, isLoading: false, error: null }),
+  useEnrollCommitSigning: () => ({ mutateAsync: vi.fn(), isPending: false }),
+}));
+
 vi.mock("~/lib/workspace-scope", async (importOriginal) => {
   const original = await importOriginal<typeof import("~/lib/workspace-scope")>();
   return { ...original, useWorkspaceScope: () => ({ teamId }) };

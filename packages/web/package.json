@@ -28,6 +28,7 @@
     "@tanstack/react-router": "^1.151.0",
     "@toon-format/toon": "^2.1.0",
     "@turnkey/crypto": "2.13.4",
+    "@turnkey/sdk-browser": "^8.4.0",
     "@valet/api": "workspace:*",
     "@valet/shared": "workspace:*",
     "@valet/workflow": "workspace:*",
