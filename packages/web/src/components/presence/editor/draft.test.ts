@@ -28,6 +28,7 @@ import {
   setThreadLink,
   suggestedName,
   exampleSteps,
+  USER_ONLINE,
 } from "./draft";
 
 const SERVICES: CatalogService[] = [
@@ -303,6 +304,63 @@ describe("saveBlocker", () => {
     expect(saveBlocker({ ...draft, name: "x" }, CREATE, { connected: false })).toBe("Connect the service first.");
     const routineDraft = { ...newDraft({ preselected: { schedule: true }, timezone: "UTC" }), name: "R" };
     expect(saveBlocker(routineDraft, CREATE, { connected: true })).toBe("Give the routine instructions.");
+  });
+
+  it("lets a proposal with a thread_ts pattern turn on: it follows no one thread", () => {
+    const sub = line("proposal-1", {
+      enabled: false,
+      eventKeys: ["slack.message"],
+      filters: [{ field: "channel", op: "eq", value: "C1" }, { field: "thread_ts", op: "regex", value: ".+" }],
+      target: { kind: "assistant", assistant: "user", systemPrompt: "Answer in the thread." },
+    });
+    const draft = draftFromLine(sub);
+    expect(draft.threadFollow).toBe(false);
+    expect(saveBlocker(draft, { kind: "review", line: sub }, { connected: true })).toBeNull();
+    const edited = { ...draft, instructions: "Answer in the thread. Keep it short." };
+    expect(saveBlocker(edited, { kind: "edit", line: sub }, { connected: true })).toBeNull();
+  });
+});
+
+describe("the four editor fixes", () => {
+  const GITHUB_PRS: CatalogService[] = [{
+    service: "github",
+    entries: [
+      { key: "github.pull_request.opened", description: "Opened", filters: [{ field: "repo" }, { field: "base_branch" }] },
+      { key: "github.pull_request.closed", description: "Closed", filters: [{ field: "repo" }, { field: "base_branch" }] },
+      { key: "github.issues.opened", description: "Issue opened", filters: [{ field: "repo" }] },
+    ],
+  }];
+
+  it("reads a wildcard key's fields: the template check passes and a new event keeps its conditions", () => {
+    const sub = line("l-prs", {
+      eventKeys: ["github.pull_request.*"],
+      filters: [{ field: "base_branch", op: "eq", value: "main" }],
+      target: { kind: "assistant", assistant: "user", userPromptTemplate: "{{payload.repo}}" },
+    });
+    const draft = draftFromLine(sub);
+    expect(saveBlocker(draft, { kind: "review", line: sub }, { connected: true, services: GITHUB_PRS })).toBeNull();
+    const more = toggleEvent(draft, "github.issues.opened", GITHUB_PRS);
+    expect(more.conditions.map((row) => [row.field, row.value])).toEqual([["base_branch", "main"]]);
+  });
+
+  it("drops a hidden once-every-N-hours when the comes-online event goes", () => {
+    const online = { ...newDraft({ timezone: "UTC" }), service: "slack" as const, events: new Set([USER_ONLINE]), oncePerHours: "abc", name: "x", doKind: "work" as const };
+    const message = toggleEvent(toggleEvent(online, USER_ONLINE, SERVICES), "slack.message", SERVICES);
+    expect(message.oncePerHours).toBe("");
+    expect(saveBlocker({ ...message, conditions: [{ id: "c", field: "channel", op: "eq", value: "C1" }] }, CREATE, { connected: true })).toBeNull();
+    expect(setService({ ...online, oncePerHours: "6" }, "github").oncePerHours).toBe("");
+    expect(toggleEvent({ ...online, oncePerHours: "6" }, "slack.message", SERVICES).oncePerHours).toBe("6");
+  });
+
+  it("reads a labelled creator filter as the creator scope, as the server does", () => {
+    const sub = line("l-mention", {
+      eventKeys: ["slack.app_mention"],
+      filters: [{ field: "channel", op: "eq", value: "C1" }, { field: "user", op: "eq", value: "U-me", label: "Me" }],
+      target: { kind: "assistant", assistant: "user", follow: true },
+    });
+    const draft = draftFromLine(sub);
+    expect(draft.creatorScopeId).not.toBeNull();
+    expect(saveBlocker({ ...draft, instructions: "Be brief." }, { kind: "edit", line: sub }, { connected: true })).toBeNull();
   });
 });
 

@@ -77,6 +77,10 @@ export function displayThreadPolicy(
   return { mode: "own" };
 }
 
+/** The note above Where for a line on Slack conversations: the reply goes
+ * to the matched message's Slack thread whatever the Valet thread is. */
+export const SLACK_REPLY_NOTE = "Valet replies in the Slack thread of the message that matched. Choose the Valet thread that keeps the work.";
+
 /** The note under Where when one thread would hold several Slack conversations. */
 export const SHARED_SLACK_THREAD_NOTE = "Messages from several Slack conversations will share this thread.";
 

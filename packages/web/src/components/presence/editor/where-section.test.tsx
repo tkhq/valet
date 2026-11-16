@@ -4,6 +4,7 @@ import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import type { CatalogService } from "~/components/events/subscription-match";
 import { partsText } from "../sentences";
+import { SLACK_REPLY_NOTE } from "../thread-policy-copy";
 import { newDraft, setService, toggleEvent, type Draft } from "./draft";
 
 vi.mock("../thread-picker", () => ({
@@ -43,6 +44,16 @@ describe("WhereSection", () => {
     expect(screen.getByText("Every event starts fresh.")).toBeTruthy();
     expect(screen.getByText("One running thread for this line.")).toBeTruthy();
     expect(screen.getByText("Pick an existing thread. If it is archived, this line stops until you pick another.")).toBeTruthy();
+  });
+
+  it("says where a Slack reply goes, only for a line on Slack conversations", () => {
+    const slack = { ...newDraft({ timezone: "UTC" }), service: "slack" as const, events: new Set(["slack.message"]) };
+    const { unmount } = render(<Harness initial={slack} />);
+    expect(screen.getByRole("radiogroup", { name: "Where" }).getAttribute("aria-describedby")).toBeTruthy();
+    expect(screen.getByText(SLACK_REPLY_NOTE)).toBeTruthy();
+    unmount();
+    render(<Harness initial={checks()} />);
+    expect(screen.queryByText(SLACK_REPLY_NOTE)).toBeNull();
   });
 
   it("holds the thread picker inline and names the pick", () => {

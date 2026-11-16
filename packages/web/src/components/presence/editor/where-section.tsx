@@ -13,6 +13,7 @@ import {
   carriesSlackConversation,
   ownOptionLabel,
   SHARED_SLACK_THREAD_NOTE,
+  SLACK_REPLY_NOTE,
   subjectOptionLabel,
 } from "../thread-policy-copy";
 import { draftSubjectKind, effectiveWhere, type Draft } from "./draft";
@@ -82,9 +83,13 @@ export function WhereSection({
   }
 
   const keys = [...draft.events];
+  // The reply always goes back to the event's own Slack thread
+  // (`originFromEntries`); these cards pick only the Valet thread.
+  const slackReply = !routine && carriesSlackConversation(keys);
   return (
     <>
-      <div role="radiogroup" aria-label="Where" className="grid gap-2">
+      {slackReply && <p id={`${id}-slack-reply`} className="text-[13px] text-muted">{SLACK_REPLY_NOTE}</p>}
+      <div role="radiogroup" aria-label="Where" aria-describedby={slackReply ? `${id}-slack-reply` : undefined} className="grid gap-2">
         {cards.map((card) => {
           const on = mode === card.mode;
           const lineId = `${id}-line-${card.mode}`;
