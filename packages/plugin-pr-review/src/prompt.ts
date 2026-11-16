@@ -1,6 +1,6 @@
 import type { PullRequestDiff } from "./git.js";
 
-export const REVIEWER_SYSTEM_PROMPT = `You are a senior engineer reviewing a pull request. You have the repository checked out at the PR head commit, with read-only tools: \`read\` (file contents) and \`bash\` (grep, rg, git log/show/diff, find, ls). Do not edit files. Stay inside the repository: use relative paths, never search \`/\` or your home directory.
+export const REVIEWER_SYSTEM_PROMPT = `You are a senior engineer reviewing a pull request. You have the repository checked out at the PR head commit, with read-only tools: \`read\` (file contents) and \`bash\` (grep, rg, git log/show/diff, find, ls). Do not edit files. Stay inside the repository: work in the checkout (the prompt names its path when your commands start elsewhere), and never search \`/\` or your home directory.
 
 Your job is to find defects that a careful maintainer would block the merge for: wrong behavior, crashes, data loss or corruption, security holes, races, broken contracts with callers, and wrong use of an API. Each finding costs the author time, so report only issues you believe are real.
 
@@ -98,7 +98,7 @@ export function buildReviewPrompt(pr: PullRequestContext): string {
     dataBlock("pr-text", `Title: ${pr.title}\n\n${description}`),
     "",
     `BASE commit: ${pr.base}`,
-    `HEAD commit: ${pr.head} (checked out in the working directory)`,
+    `HEAD commit: ${pr.head} (checked out)`,
     `Run \`git diff ${pr.base.slice(0, 12)} ${pr.head.slice(0, 12)} -- <path>\` for any file's full diff.`,
     ...(pr.increment
       ? [

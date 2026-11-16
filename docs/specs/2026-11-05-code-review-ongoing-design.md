@@ -94,10 +94,18 @@ the plugin keeps them apart.
 - **No checkout, no review.** The reviewer and verifier prompts say the
   repository is checked out at the PR head, and a defect in a helper the diff
   never names is found only by reading it. Each reviewer and verifier child's
-  `prepare` step first runs `git rev-parse HEAD`. If the command fails, or
-  the commit is not the head, the child does not start and the delivery
-  fails with the git error. Before this check, a child whose clone failed
-  reviewed the diff alone and still posted a confident review.
+  `prepare` step first runs `git rev-parse --show-toplevel HEAD`. If the
+  command fails, or the commit is not the head, the child does not start and
+  the delivery fails with the git error. Before this check, a child whose
+  clone failed reviewed the diff alone and still posted a confident review.
+- **The prompt names the checkout path.** The host clones into a directory
+  under the sandbox's working directory, so a child's commands do not start
+  in the checkout. The first prompt opens with the checkout's absolute path
+  and tells the child to `cd` there in each `bash` command. Before this, the
+  prompt said "checked out in the working directory". In three days of
+  reviews, 70% of verifiers and 42% of reviewers that used tools ran a
+  command on a path that did not exist, and about a quarter of their file
+  reads failed.
 - **Selection is not trust.** Changed paths, the PR title and added lines
   choose which trusted notes and playbooks go into the pack. They never supply
   rule text.

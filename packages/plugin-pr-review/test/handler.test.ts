@@ -299,7 +299,7 @@ class FakeThreads implements PluginThreads {
       run: (command, o) => command === CHECKOUT_COMMAND
         ? Promise.resolve(this.noCheckout
           ? { exitCode: 128, stdout: "", stderr: "fatal: not a git repository (or any of the parent directories): .git\n", truncated: false, timedOut: false }
-          : { exitCode: 0, stdout: `${req.ref ?? ""}\n`, stderr: "", truncated: false, timedOut: false })
+          : { exitCode: 0, stdout: `/workspace/${req.repo ?? "repo"}\n${req.ref ?? ""}\n`, stderr: "", truncated: false, timedOut: false })
         : local.run(command, o),
     };
     const prompt = req.prepare ? await req.prepare(runner, req.prompt) : req.prompt;
@@ -434,6 +434,8 @@ describe("review-pull-request handler", () => {
     const reviewer = threads.spawned.find((s) => s.req.role === "pr-reviewer");
     expect(reviewer?.req).toMatchObject({ repo: "acme/site", ref: H1, model: "anthropic/claude-sonnet-5-5", gitAccess: "read" });
     expect(reviewer?.req.prompt).toContain("```json");
+    // The child's commands do not start in the checkout, so the prompt opens with its path.
+    expect(reviewer?.req.prompt.startsWith("# Checkout\nThe repository is checked out at `/workspace/acme/site`.")).toBe(true);
     // The spec asks for the event id in every dispatch id.
     expect(threads.spawned.every((s) => s.dispatchId.startsWith(`ev1:${H1.slice(0, 12)}:`))).toBe(true);
 
@@ -474,6 +476,7 @@ describe("review-pull-request handler", () => {
     expect(verifier?.req.prompt).toMatch(/<pr-description>\nAdds a\.\n<\/pr-description>/);
     expect(verifier?.req.prompt).toContain("+++ b/a.ts");
     expect(verifier?.req.prompt).toContain("Prefer typed errors.");
+    expect(verifier?.req.prompt.startsWith("# Checkout\nThe repository is checked out at `/workspace/acme/site`.")).toBe(true);
 
     // A later review rechecks it and keeps it in the summary.
     const again = new FakeThreads(answers);
