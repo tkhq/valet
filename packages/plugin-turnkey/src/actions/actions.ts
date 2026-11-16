@@ -57,6 +57,7 @@ function action<TParams extends TSchema>(parameters: TParams) {
     name: string;
     description: string;
     riskLevel: PluginAction["riskLevel"];
+    label?: PluginAction<TParams>["label"];
     execute: (args: Static<TParams>, ctx: PluginActionContext) => Promise<PluginActionResult>;
   }): PluginAction<TParams> => ({ ...rest, parameters });
 }
@@ -222,6 +223,7 @@ export function buildTurnkeyActionPlugin(overrides: Partial<SigningDeps> = {}): 
     name: "Revoke commit signing key",
     description: "Remove a signing key from the user's GitHub account before its window ends, and turn signing off.",
     riskLevel: "low",
+    label: (args) => `Revoked commit signing key ${args.fingerprint}`,
     execute: async (args, ctx) => {
       const store = ctx.pluginStore;
       if (!store) return fail(NO_STORE_MESSAGE);
