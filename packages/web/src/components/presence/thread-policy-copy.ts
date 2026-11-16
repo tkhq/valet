@@ -45,6 +45,13 @@ export function subjectOptionLabel(subjectKind: SubjectKind | null): string {
   return `One thread per ${subjectKind ?? "place"}`;
 }
 
+/** The option copy for the new mode. A line on Slack conversations keys
+ * it by the Slack thread, so a root message and its replies share one
+ * Valet thread; any other event gets its own. */
+export function newOptionLabel(keys: readonly string[]): string {
+  return carriesSlackConversation(keys) ? "A new thread per Slack conversation" : "A new thread each time";
+}
+
 /** The rule's own thread. A line of presence has no category noun, so it reads `Its own thread`. */
 export function ownOptionLabel(ruleKind: RuleKind): string {
   return ruleKind === "presence" ? "Its own thread" : "This routine's thread";

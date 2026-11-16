@@ -77,6 +77,8 @@ interface SeedOpts {
   subjects?: string[];
   /** The destination stamp ingest wrote (spec Part C step 6). */
   destination?: unknown;
+  /** A subscription an earlier seed made: the delivery joins it, and no new one is inserted. */
+  subscriptionId?: string;
 }
 
 describe("EventDispatcher", () => {
@@ -107,7 +109,7 @@ describe("EventDispatcher", () => {
     const db = tdb.appDb;
     const now = Date.now();
     const eventId = randomUUID();
-    const subscriptionId = randomUUID();
+    const subscriptionId = opts.subscriptionId ?? randomUUID();
     const deliveryId = randomUUID();
     await db.insert(events).values({
       id: eventId,
@@ -123,7 +125,7 @@ describe("EventDispatcher", () => {
       receivedAt: now,
       subjects: opts.subjects ?? null,
     });
-    await db.insert(eventSubscriptions).values({
+    if (opts.subscriptionId === undefined) await db.insert(eventSubscriptions).values({
       id: subscriptionId,
       orgId: ORG,
       ownerType: opts.ownerType ?? "user",
@@ -1102,7 +1104,7 @@ describe("EventDispatcher", () => {
       const { deliver, deliveryId } = await dispatchMention();
       expect(deliver).toHaveBeenCalledOnce();
       expect(deliver.mock.calls[0]![0].destination).toEqual({
-        kind: "key", key: expect.stringMatching(new RegExp(`:${deliveryId}$`)), title: "Mention", reason: "policy_new",
+        kind: "key", key: expect.stringMatching(/:slack:C1:1\.2$/), title: "Mention", reason: "policy_new",
       });
       expect(await findFollowedThread(tdb.appDb, followKey)).toMatchObject({ sessionId: LANDED.sessionId, threadId: LANDED.threadId });
       expect(recordDestination.mock.calls).toEqual([["policy_new"]]);
@@ -1588,7 +1590,8 @@ describe("EventDispatcher", () => {
     });
 
     it("defaults an absent policy per delivery: new with a channel origin, never a shared thread for channel content", async () => {
-      // A mention rule that does not follow still opens a thread per Slack conversation.
+      // A mention rule that does not follow still opens a thread per Slack
+      // conversation, keyed by the origin's thread key.
       const mention = await seedDelivery({
         target: { kind: "assistant" }, service: "slack", eventKey: "slack.app_mention", eventKeys: ["slack.app_mention"],
         payload: { type: "app_mention", channel: "C1", user: "U9", text: "hi", ts: "1.2" },
@@ -1605,8 +1608,35 @@ describe("EventDispatcher", () => {
         resolveChannelOrigin: (_service, eventKey) => eventKey === "slack.app_mention" ? { channelType: "slack", threadKey: "slack:C1:1.2", messageTs: "1.2" } : null,
       }).pollOnce();
       const byDispatch = new Map(deliver.mock.calls.map(([args]) => [args.dispatchId, args.destination]));
-      expect(byDispatch.get(`event:${mention.deliveryId}`)).toMatchObject({ kind: "key", key: `sub:${mention.subscriptionId}:${mention.deliveryId}`, reason: "policy_new" });
+      expect(byDispatch.get(`event:${mention.deliveryId}`)).toMatchObject({ kind: "key", key: `sub:${mention.subscriptionId}:slack:C1:1.2`, reason: "policy_new" });
       expect(byDispatch.get(`event:${reaction.deliveryId}`)).toMatchObject({ kind: "key", key: `sub:${reaction.subscriptionId}:${reaction.deliveryId}`, reason: "policy_new" });
+    });
+
+    it("lands a Slack thread's root and its replies in one thread, and another root in its own (new per conversation)", async () => {
+      const message = (ts: string, threadTs?: string) => ({
+        type: "message", channel: "C1", user: "U9", text: `text ${ts}`, ts, ...(threadTs !== undefined ? { thread_ts: threadTs } : {}),
+      });
+      const seed = (payload: Record<string, unknown>, subscriptionId?: string) => seedDelivery({
+        target: { kind: "assistant" }, service: "slack", eventKey: "slack.message", eventKeys: ["slack.message"],
+        refs: { channel: "C1" }, summary: `message ${String(payload.ts)}`, payload, ...(subscriptionId !== undefined ? { subscriptionId } : {}),
+      });
+      const root = await seed(message("1.2"));
+      const replies = [await seed(message("1.3", "1.2"), root.subscriptionId), await seed(message("1.4", "1.2"), root.subscriptionId)];
+      const other = await seed(message("2.0"), root.subscriptionId);
+      const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
+      await new EventDispatcher({
+        db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToAssistant: deliver,
+        // As the Slack transport does: a reply's thread key names its root.
+        resolveChannelOrigin: (_service, _key, payload) => {
+          const p = payload as { channel: string; ts: string; thread_ts?: string };
+          return { channelType: "slack", threadKey: `slack:${p.channel}:${p.thread_ts ?? p.ts}`, messageTs: p.ts };
+        },
+      }).pollOnce();
+      const keyOf = (deliveryId: string) => deliver.mock.calls.find(([args]) => args.dispatchId === eventDeliveryDispatchId(deliveryId))?.[0].destination;
+      const shared = { kind: "key", key: `sub:${root.subscriptionId}:slack:C1:1.2`, reason: "policy_new" };
+      expect(keyOf(root.deliveryId)).toMatchObject({ ...shared, title: "message 1.2" });
+      for (const reply of replies) expect(keyOf(reply.deliveryId)).toMatchObject(shared);
+      expect(keyOf(other.deliveryId)).toMatchObject({ kind: "key", key: `sub:${root.subscriptionId}:slack:C1:2.0` });
     });
 
     it("records the destination stage and the counter once when a retry recovers an admitted dispatch (M6)", async () => {

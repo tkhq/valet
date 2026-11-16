@@ -11,6 +11,7 @@ import { ThreadPicker } from "../thread-picker";
 import { text, type SentencePart } from "../sentences";
 import {
   carriesSlackConversation,
+  newOptionLabel,
   ownOptionLabel,
   SHARED_SLACK_THREAD_NOTE,
   SLACK_REPLY_NOTE,
@@ -20,13 +21,13 @@ import { draftSubjectKind, effectiveWhere, type Draft } from "./draft";
 
 type Mode = AssistantThreadPolicy["mode"];
 
-/** The Where summary: `in a new thread each time`, `in the Platform CI thread`. */
+/** The Where summary: `in a new thread per Slack conversation`, `in the Platform CI thread`. */
 export function whereSummaryParts(draft: Draft): SentencePart[] {
   const where = effectiveWhere(draft);
   if (where === null) return [text("in a thread you pick")];
   switch (where.mode) {
     case "new":
-      return [text("in a new thread each time")];
+      return [text(`in a${newOptionLabel([...draft.events]).slice(1)}`)];
     case "subject":
       return [text(`in ${subjectOptionLabel(draftSubjectKind(draft)).toLowerCase()}`)];
     case "own":
@@ -61,12 +62,20 @@ export function WhereSection({
   const unit = routine ? "routine" : "line";
   const pinned = current?.mode === "existing" ? current : null;
   const pinTitle = pinned !== null ? draft.whereTitle?.trim() : undefined;
+  const keys = [...draft.events];
+  // The reply always goes back to the event's own Slack thread
+  // (`originFromEntries`); these cards pick only the Valet thread.
+  const slackReply = !routine && carriesSlackConversation(keys);
 
   const cards: { mode: Mode; title: string; line: string }[] = [
     ...(!routine && subjectKind !== null
       ? [{ mode: "subject" as const, title: subjectOptionLabel(subjectKind), line: `Each ${subjectKind} gets its own thread; every event for it lands there.` }]
       : []),
-    { mode: "new", title: "A new thread each time", line: routine ? "Every run starts fresh." : "Every event starts fresh." },
+    {
+      mode: "new",
+      title: routine ? "A new thread each time" : newOptionLabel(keys),
+      line: routine ? "Every run starts fresh." : slackReply ? "A Slack message and its replies share one thread." : "Every event starts fresh.",
+    },
     { mode: "own", title: ownOptionLabel(routine ? "routine" : "presence"), line: `One running thread for this ${unit}.` },
     ...(workspace !== undefined || mode === "existing"
       ? [{
@@ -82,10 +91,6 @@ export function WhereSection({
     else onChange({ ...draft, where: { mode: next }, whereChosen: true, whereTitle: undefined });
   }
 
-  const keys = [...draft.events];
-  // The reply always goes back to the event's own Slack thread
-  // (`originFromEntries`); these cards pick only the Valet thread.
-  const slackReply = !routine && carriesSlackConversation(keys);
   return (
     <>
       {slackReply && <p id={`${id}-slack-reply`} className="text-[13px] text-muted">{SLACK_REPLY_NOTE}</p>}

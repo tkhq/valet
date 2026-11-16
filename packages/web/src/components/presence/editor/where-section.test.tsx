@@ -51,9 +51,14 @@ describe("WhereSection", () => {
     const { unmount } = render(<Harness initial={slack} />);
     expect(screen.getByRole("radiogroup", { name: "Where" }).getAttribute("aria-describedby")).toBeTruthy();
     expect(screen.getByText(SLACK_REPLY_NOTE)).toBeTruthy();
+    // A Slack thread's root and replies share one new thread.
+    expect(screen.getByRole("radio", { name: "A new thread per Slack conversation" })).toBeTruthy();
+    expect(screen.getByText("A Slack message and its replies share one thread.")).toBeTruthy();
+    expect(partsText(whereSummaryParts({ ...slack, whereChosen: true, where: { mode: "new" } }))).toBe("in a new thread per Slack conversation");
     unmount();
     render(<Harness initial={checks()} />);
     expect(screen.queryByText(SLACK_REPLY_NOTE)).toBeNull();
+    expect(screen.getByRole("radio", { name: "A new thread each time" })).toBeTruthy();
   });
 
   it("holds the thread picker inline and names the pick", () => {

@@ -82,3 +82,27 @@ describe("resolveDestination's throw paths", () => {
     expect(() => resolveDestination(input)).toThrow("A new-mode destination for a schedule needs fireAt.");
   });
 });
+
+describe("new-mode keys across deliveries", () => {
+  const rule: DestinationInput["rule"] = { id: "rule-msg", kind: "subscription", name: "Deploy questions", policy: { mode: "new" } };
+  const at = (event: NonNullable<DestinationInput["event"]>) => resolveDestination({ rule, event, binding: null, claim: null });
+  const base = { summary: "s", naturalSubject: null, conversational: false };
+
+  it("gives a retry of one delivery the same key (INV-D4)", () => {
+    const event = { ...base, deliveryId: "del-1", conversationKey: "slack:C1:1712345678.000100" };
+    expect(at(event)).toEqual(at({ ...event }));
+  });
+
+  it("keeps one key per delivery for an event with no channel conversation", () => {
+    const first = at({ ...base, deliveryId: "del-1" });
+    const second = at({ ...base, deliveryId: "del-2" });
+    expect(first).toMatchObject({ kind: "key", key: "sub:rule-msg:del-1" });
+    expect(second).toMatchObject({ kind: "key", key: "sub:rule-msg:del-2" });
+  });
+
+  it("gives two Slack threads in one channel two keys", () => {
+    const one = at({ ...base, deliveryId: "del-1", conversationKey: "slack:C1:1712345678.000100" });
+    const two = at({ ...base, deliveryId: "del-2", conversationKey: "slack:C1:1712349999.000200" });
+    expect(one).not.toEqual(two);
+  });
+});
