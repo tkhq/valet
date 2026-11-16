@@ -173,6 +173,11 @@ export function buildCommitSigningRouter(deps: CommitSigningRouteDeps = {}): Hon
   return router;
 }
 
+/** `ssh-keygen` reads `valid-after`/`valid-before` as `YYYYMMDDHHMMSSZ`, not ISO 8601. */
+function sshTime(ms: number): string {
+  return new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z").replace(/[-:T]/g, "");
+}
+
 /**
  * The `allowed_signers` file for the caller's organization: one line per key
  * ever issued, with its window, so `git verify-commit` accepts a commit made
@@ -182,9 +187,7 @@ export function renderAllowedSigners(rows: SigningKeyIndexDoc[]): string {
   return rows
     .map((row) => {
       const principal = row.userEmail ?? `user:${row.userId}@valet`;
-      const after = new Date(row.notBefore).toISOString().replace(/\.\d{3}Z$/, "Z");
-      const before = new Date(row.notAfter).toISOString().replace(/\.\d{3}Z$/, "Z");
-      return `${principal} valid-after="${after}" valid-before="${before}" ${row.publicKey}`;
+      return `${principal} valid-after="${sshTime(row.notBefore)}",valid-before="${sshTime(row.notAfter)}" ${row.publicKey}`;
     })
     .join("\n")
     .concat(rows.length > 0 ? "\n" : "");

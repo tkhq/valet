@@ -1,3 +1,7 @@
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { SigningKeyIndexDoc } from "@valet/plugin-turnkey/store";
 import { parseEnrollBody, renderAllowedSigners } from "./commit-signing.js";
@@ -43,9 +47,33 @@ describe("renderAllowedSigners", () => {
 
   it("renders one line per key with its window, and the email as principal", () => {
     expect(renderAllowedSigners([row])).toBe(
-      'dev@example.com valid-after="2026-09-12T10:00:00Z" valid-before="2026-09-12T12:00:00Z" ' +
+      'dev@example.com valid-after="20260912100000Z",valid-before="20260912120000Z" ' +
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICeWZmvBV3XihCqtdcBzSZYc2j9qj95bLMxbrf+NVOdG\n",
     );
+  });
+
+  it("writes a file ssh-keygen accepts inside the window and refuses after it", () => {
+    const dir = mkdtempSync(join(tmpdir(), "allowed-signers-"));
+    try {
+      const key = join(dir, "key");
+      execFileSync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", key]);
+      const payload = join(dir, "payload");
+      writeFileSync(payload, "commit");
+      execFileSync("ssh-keygen", ["-Y", "sign", "-q", "-n", "git", "-f", key, payload]);
+      const publicKey = readFileSync(`${key}.pub`, "utf8").split(" ").slice(0, 2).join(" ");
+      const allowed = join(dir, "allowed_signers");
+      writeFileSync(allowed, renderAllowedSigners([{ ...row, publicKey }]));
+      const verify = (at: string) =>
+        execFileSync(
+          "ssh-keygen",
+          ["-Y", "verify", "-n", "git", "-f", allowed, "-I", "dev@example.com", "-s", `${payload}.sig`, "-Overify-time=" + at],
+          { input: "commit", stdio: ["pipe", "pipe", "pipe"] },
+        );
+      expect(() => verify("20260912110000Z")).not.toThrow();
+      expect(() => verify("20260912130000Z")).toThrow();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("falls back to a user principal and renders nothing for no keys", () => {

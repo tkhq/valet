@@ -148,8 +148,10 @@ Decision gates persist in the engine store. `action_invocations` rows come from 
 `GET /api/org/allowed-signers` renders one line per key ever issued in the caller's organization:
 
 ```
-<user email> valid-after="<notBefore>" valid-before="<notAfter>" ssh-ed25519 <key>
+<user email> valid-after="<notBefore>",valid-before="<notAfter>" ssh-ed25519 <key>
 ```
+
+The options are comma-separated and the times use the `YYYYMMDDHHMMSSZ` form, because `ssh-keygen` rejects ISO 8601 and space-separated options. `git` finds the signer by key, so the principal does not have to match the committer email.
 
 A reviewer sets `git config gpg.ssh.allowedSignersFile` to a download of it, and `git verify-commit` exits 0 for commits in the window.
 
