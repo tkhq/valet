@@ -31,6 +31,18 @@ export function spacePageFor(pathname: string): SpacePage["to"] | undefined {
   return SPACE_PAGES.find((page) => page.to !== "/chat" && (pathname === page.to || pathname.startsWith(`${page.to}/`)))?.to;
 }
 
+/**
+ * Pure: the page a space's name opens from `pathname`. The space page, or
+ * its sub-list when you are on one: run pages keep you on Runs, and
+ * Activity and its event pages keep you on Activity. A detail page names
+ * a row of the old space, so the switch opens its list instead.
+ */
+export function spaceSwitchTarget(pathname: string): SpacePage["to"] | "/workflows/runs" | "/presence/activity" | undefined {
+  if (pathname === "/workflows/runs" || pathname.startsWith("/workflows/runs/")) return "/workflows/runs";
+  if (pathname === "/presence/activity" || pathname.startsWith("/presence/events/")) return "/presence/activity";
+  return spacePageFor(pathname);
+}
+
 /** Muted tints for team marks. Static strings, so Tailwind emits each one. */
 const SPACE_TINTS = [
   "bg-[oklch(70%_0.10_30/0.22)] text-[oklch(45%_0.12_30)] dark:text-[oklch(82%_0.09_30)]",
@@ -91,7 +103,8 @@ function teamLabelsOf(options: readonly WorkspaceOption[]): string[] {
 export function SpacesNav() {
   const options = useWorkspaceOptions();
   const scope = useWorkspaceScope();
-  const page = spacePageFor(useRouterState({ select: (state) => state.location.pathname }));
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const page = spacePageFor(pathname);
   // Manual open states belong to the space they were set in. Every change of
   // space clears them, Browser Back included, so only the new active space
   // is open. The reset runs during render, before the stale state can show.
@@ -105,9 +118,10 @@ export function SpacesNav() {
   const setOpen = (key: string, open: boolean) => setManualOpen((current) => ({ ...current, [key]: open }));
   const teamLabels = teamLabelsOf(options);
   // A space's name opens the page you are on in that space, so switching
-  // keeps your place (Eng / Skills to Sales / Skills). From
-  // Home, a thread, or a page no space owns, it opens the space's Threads.
-  const nameTarget = page ?? "/chat";
+  // keeps your place (Eng / Skills to Sales / Skills, Eng / Runs to Sales /
+  // Runs). From Home, a thread, or a page no space owns, it opens the
+  // space's Threads.
+  const nameTarget = spaceSwitchTarget(pathname) ?? "/chat";
   return <section aria-label="Spaces" data-tour="spaces">
     <p className={SIDEBAR_LABEL}>Spaces</p>
     <ul className="space-y-0.5">
@@ -118,7 +132,7 @@ export function SpacesNav() {
 }
 
 function SpaceRow({ option, teamLabels, nameTarget, open, activePage, onOpenChange }: {
-  option: WorkspaceOption; teamLabels: readonly string[]; nameTarget: SpacePage["to"];
+  option: WorkspaceOption; teamLabels: readonly string[]; nameTarget: NonNullable<ReturnType<typeof spaceSwitchTarget>>;
   open: boolean; activePage: string | undefined; onOpenChange: (open: boolean) => void;
 }) {
   const pageRow = (page: SpacePage) => {

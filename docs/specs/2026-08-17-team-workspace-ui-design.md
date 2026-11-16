@@ -327,8 +327,9 @@ id), and the server checks team membership as before.
   button, and tasks start from a message to Home.
 - **Same-page switching.** On a space page, a space's name opens the same
   page in that space: Engineering / Integrations goes to Sales /
-  Integrations. A detail page goes to its list page. From Home or a thread,
-  the name opens the space's Threads.
+  Integrations. A detail page goes to its list page: a run goes to Runs,
+  and an event goes to Activity. Runs and Activity stay on Runs and
+  Activity. From Home or a thread, the name opens the space's Threads.
 - **Threads.** The open space's Projects and threads show below Spaces only
   on Home and Threads. A phone's drawer always shows them.
 - **A space that cannot open.** If the space's assistant session fails to

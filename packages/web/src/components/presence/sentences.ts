@@ -358,14 +358,15 @@ function isMentionKey(key: string): boolean {
 
 /**
  * True for the creator scope filter the server adds to a personal, org, or
- * workflow mention line (api events/mention-scope.ts): an unlabeled `user`
- * filter with one value, as `eq` or a one-value `in`. The editor uses the
- * same test to keep the filter out of its conditions.
+ * workflow mention line (api events/mention-scope.ts): a `user` filter with
+ * one value, as `eq` or a one-value `in`. A label does not change it: the
+ * Slack user picker saves the creator with a label, and the server's
+ * `isCreatorUserFilter` ignores labels. The editor uses the same test to
+ * keep the filter out of its conditions.
  */
 export function isCreatorScopeFilter(filter: EventSubscriptionFilterWire): boolean {
   if (filter.field !== "user") return false;
-  const oneValue = filter.op === "eq" || (filter.op === "in" && Array.isArray(filter.value) && filter.value.length === 1);
-  return oneValue && !hasText(filter.label) && !(filter.labels?.some(hasText) ?? false);
+  return filter.op === "eq" || (filter.op === "in" && Array.isArray(filter.value) && filter.value.length === 1);
 }
 
 function hasCreatorScope(filters: readonly EventSubscriptionFilterWire[]): boolean {

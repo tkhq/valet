@@ -372,6 +372,7 @@ export function setService(draft: Draft, next: EditorService): Draft {
     conditions: [],
     creatorScopeId: null,
     anyChannel: false,
+    oncePerHours: "",
     threadFollow: false,
     threadLink: "",
     doKind,
@@ -423,7 +424,10 @@ export function toggleEvent(
   const creatorScopeId = conditions.some((row) => row.id === draft.creatorScopeId) ? draft.creatorScopeId : null;
   const lostMention = !mention && selectsSlackMention([...draft.events]);
   const doKind = options.create === true && lostMention && draft.doKind === "reply" ? "work" : draft.doKind;
-  return { ...draft, events, conditions, creatorScopeId, doKind, anyChannel: mention ? draft.anyChannel : false };
+  // The field shows only while the comes-online event is picked. Once it
+  // goes, a value left here would block Save or store unseen.
+  const oncePerHours = events.has(USER_ONLINE) ? draft.oncePerHours : "";
+  return { ...draft, events, conditions, creatorScopeId, doKind, anyChannel: mention ? draft.anyChannel : false, oncePerHours };
 }
 
 const SLACK_MESSAGE = "slack.message";
@@ -445,6 +449,7 @@ export function setThreadFollow(draft: Draft, on: boolean): Draft {
     conditions: placeRow,
     creatorScopeId: null,
     anyChannel: false,
+    oncePerHours: "",
     // A thread follow works on each reply; it never starts a conversation to follow.
     doKind: draft.doKind === "workflow" || draft.doKind === "plugin" ? draft.doKind : on ? "work" : draft.doKind,
     where: null,
@@ -547,6 +552,7 @@ export function setHandler(draft: Draft, handler: { plugin: string; id: string; 
     handlerConfig: {},
     service,
     events: events.length > 0 ? new Set(events) : draft.events,
+    oncePerHours: events.length === 0 || events.includes(USER_ONLINE) ? draft.oncePerHours : "",
     conditions: service === draft.service ? draft.conditions : [],
     threadFollow: false,
     threadLink: "",
