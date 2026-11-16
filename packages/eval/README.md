@@ -310,6 +310,29 @@ pnpm --filter @valet/eval pack-snapshot --cases private:<suite> --out <snapshot 
   default mount, `lib`, reads rule notes at `lib/code-review/notes/`.
 - Keep snapshots of private repositories out of the repo.
 
+### Review misses
+
+`src/review-misses.ts` finds defects other reviewers caught and our
+reviewer missed, and writes each one as a recall case.
+
+```bash
+pnpm --filter @valet/eval review-misses --repo owner/name --since 2026-11-10 \
+  --ours <reviewer login> --other <other reviewer login> --out-dir <suite dir>
+```
+
+- A miss is another reviewer's `addressed` comment on a commit our reviewer
+  also reviewed, with no comment of ours on the same file within
+  `--window` lines (default 8). A comment on a commit our reviewer never
+  saw is not a miss.
+- Each pull request commit with misses becomes one case at that commit,
+  with the comments as golden comments. The command never overwrites a
+  case file, so hand edits stay.
+- `addressed` is a weak label. Read each case, fix its golden text,
+  category and severity, and delete cases that are not defects before the
+  suite gates a change.
+- Cases quote review comments. The command refuses an output directory
+  inside the repo. Run the suite as a private suite (see "Private suites").
+
 ## Compare models
 
 ```bash

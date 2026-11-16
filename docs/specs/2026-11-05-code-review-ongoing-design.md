@@ -255,6 +255,15 @@ also carries the PR and the comment's commit, so it can become a replay
 case. Address-rate rows start to cover a reviewer version only after its
 pull requests merge.
 
+The address rate measures precision only. For recall, the `review-misses`
+command uses other reviewers as a label source. When another reviewer's
+comment is addressed on a commit our reviewer also reviewed, and our
+reviewer flagged nothing near it, the command writes a `pull_request` case
+at that commit with the comment as a golden comment. The cases build a
+recall suite from live reviews without hand labels. A person reads each
+case before it gates a reviewer change, because a changed line is not
+proof of a defect.
+
 ### Finding records
 
 The handler also measures its own reviews, with no eval run.
