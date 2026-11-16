@@ -1,4 +1,3 @@
-import { scrubSessionInput } from "../services/secret-store/inbound-scrub.js";
 /**
  * Artifact routes (2026-08-22 artifacts design; 2026-09-02 artifact-pages
  * design).
@@ -44,6 +43,7 @@ import { isValidInternalToken } from "../lib/internal-auth.js";
 import { handleServiceError, resolveScope } from "./memory.js";
 import { promptAuthorFromUser, submitSessionPrompt } from "./messages.js";
 import { requestViewer, threadVisibility, visibleThreadIds, type ThreadViewer } from "../services/thread-access.js";
+import { scrubSessionInput } from "../services/secret-store/inbound-scrub.js";
 import { viewerOf } from "./_thread-access.js";
 import type { Providers } from "../providers/types.js";
 import {
