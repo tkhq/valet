@@ -101,6 +101,12 @@ the plugin keeps them apart.
 - **Selection is not trust.** Changed paths, the PR title and added lines
   choose which trusted notes and playbooks go into the pack. They never supply
   rule text.
+- **A playbook matches on its topic.** Words that any PR title or file name
+  can hold ("new", "create", "update" and similar) never match. A match on a
+  playbook directory's name brings the whole directory. A match on one file
+  name brings that file and the directory's README only. On 2026-11-16 a PR
+  titled "new ..." pulled in ten unrelated database runbooks, about 40,000
+  characters, through one file named `create_a_new_user.md`.
 
 ## Focused reviewer passes
 

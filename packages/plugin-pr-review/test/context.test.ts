@@ -551,6 +551,25 @@ describe("the pack's trust boundary", () => {
     });
   });
 
+  it("matches a playbook on a topic word, not a word any title has, and brings only the matched file unless the directory matched", async () => {
+    const files = {
+      ...BASE_FILES,
+      "playbooks/postgres/README.md": "# Postgres playbook\n",
+      "playbooks/postgres/create_a_new_user.md": "# Create a new user\n",
+      "playbooks/postgres/rotate_a_user_password.md": "# Rotate a user password\n",
+      "playbooks/postgres/pgbouncer.md": "# PgBouncer\n",
+    };
+    const r = repo(files, { "src/cart.ts": BASE_FILES["src/cart.ts"].replace("0);", "1);") });
+    const pack = (title: string) => gatherContext({ runner: localRunner(r.dir), readTrusted: (p) => gitFileAt(r.dir, r.base, p), patch: r.patch, diffDropped: [], title, budgetChars: 20_000 });
+    const playbooks = async (title: string) => (await pack(title)).manifest.items.filter((i) => i.ref.startsWith("playbooks/postgres/")).map((i) => i.ref);
+    // "new" is in the title and a file name, and says nothing about the topic.
+    expect(await playbooks("new cart attributes")).toEqual([]);
+    // A file-name match brings that file and the README only.
+    expect(await playbooks("Rotate the cart password")).toEqual(["playbooks/postgres/README.md", "playbooks/postgres/rotate_a_user_password.md"]);
+    // A directory-name match brings the whole directory.
+    expect(await playbooks("Move cart totals to postgres")).toHaveLength(4);
+  });
+
   it("uses the base version of a playbook the PR edits, and keeps the edit in the diff budget", async () => {
     const r = repo(BASE_FILES, { "playbooks/payments/README.md": "# Payments playbook\nAmounts need no rounding.\n", "src/cart.ts": BASE_FILES["src/cart.ts"].replace("0);", "1);") });
     const pack = await gatherContext({
