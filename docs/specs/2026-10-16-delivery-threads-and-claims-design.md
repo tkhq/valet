@@ -247,8 +247,8 @@ Destination =
 3. A `key` destination MUST resolve to a thread only at delivery time, with
    `ensureFreshThread`, which gains a `title` for a thread it creates. A
    `skip` and a dead-letter MUST create no thread.
-4. An archived thread found by key (`own`, `subject`) MUST reopen on
-   delivery. A `target` destination from `existing` whose thread is
+4. An archived thread found by key (`own`, `subject`, and `new` for a
+   channel conversation) MUST reopen on delivery. A `target` destination from `existing` whose thread is
    archived, deleted, or outside the owner's live runtime MUST dead-letter
    with `Pick another thread in Presence.` and MUST NOT fall
    back to another mode.
