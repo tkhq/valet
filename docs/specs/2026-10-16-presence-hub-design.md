@@ -735,7 +735,12 @@ Pass criterion: all steps, in one run, from a clean start.
    picked). A routine reads `Every run starts fresh.` and `This routine's
    thread`. The default follows the thread policy spec. For a personal
    line that a team line may also cover, a sub-option `When <team> also
-   listens` offers `Pause this line` or `Keep both`.
+   listens` offers `Pause this line` or `Keep both`. For a line on Slack
+   conversations (mentions or messages), a note above the cards reads
+   `Valet replies in the Slack thread of the message that matched. Choose
+   the Valet thread that keeps the work.` The api always routes the reply
+   to the matched message's Slack thread; the cards pick only the Valet
+   thread.
 6. **Appears as**: display name and avatar URL with a live avatar chip;
    collapsed by default. **Name**: a text field with a suggested name from
    the sentence (`CI failures`) that the reader can keep or change.
@@ -1063,8 +1068,11 @@ Revision 2 deviations that still hold:
 - **A thread follow has its own sentence (Part C step 2).** `A reply in
   one Slack thread` stores a `slack.message` line with `channel` and
   `thread_ts` filters. A line whose keys are all Slack messages and that
-  has a `thread_ts` filter reads `When someone replies in the Slack thread
-  in <channel>, <do>.` The channel is its label, or its id when the line
+  has a `thread_ts` equals filter reads `When someone replies in the Slack
+  thread in <channel>, <do>.` Another `thread_ts` condition, such as
+  `matches .+` for replies in any thread, names no one thread: the line
+  reads and edits as a plain message line, and the editor asks for no
+  link. The channel is its label, or its id when the line
   has no label. The editor's side pane reads the draft through the same
   renderer, so it equals the stored sentence.
 - **Old Workflows tabs redirect from the live page (Part A step 4).**

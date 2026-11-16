@@ -304,6 +304,20 @@ describe("saveBlocker", () => {
     const routineDraft = { ...newDraft({ preselected: { schedule: true }, timezone: "UTC" }), name: "R" };
     expect(saveBlocker(routineDraft, CREATE, { connected: true })).toBe("Give the routine instructions.");
   });
+
+  it("lets a proposal with a thread_ts pattern turn on: it follows no one thread", () => {
+    const sub = line("proposal-1", {
+      enabled: false,
+      eventKeys: ["slack.message"],
+      filters: [{ field: "channel", op: "eq", value: "C1" }, { field: "thread_ts", op: "regex", value: ".+" }],
+      target: { kind: "assistant", assistant: "user", systemPrompt: "Answer in the thread." },
+    });
+    const draft = draftFromLine(sub);
+    expect(draft.threadFollow).toBe(false);
+    expect(saveBlocker(draft, { kind: "review", line: sub }, { connected: true })).toBeNull();
+    const edited = { ...draft, instructions: "Answer in the thread. Keep it short." };
+    expect(saveBlocker(edited, { kind: "edit", line: sub }, { connected: true })).toBeNull();
+  });
 });
 
 describe("saveBlocker mirrors the api's mention and template refusals (E5, E6)", () => {

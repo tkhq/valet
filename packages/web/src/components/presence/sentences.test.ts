@@ -185,6 +185,15 @@ describe("presenceSentence <do>", () => {
     expect(presenceSentence(plain, catalog, workflows, threads)).toBe(
       "When someone posts a message in #incidents, work in its own thread.",
     );
+    // A thread_ts condition that is not an equals names no one thread.
+    const anyReply = sub({
+      eventKeys: ["slack.message"],
+      filters: [incidents, { field: "thread_ts", op: "regex", value: ".+" }],
+      target: { kind: "assistant", thread: { mode: "own" } },
+    });
+    expect(presenceSentence(anyReply, catalog, workflows, threads)).toBe(
+      "When someone posts a message in #incidents, work in its own thread.",
+    );
   });
 
   it("assistant, existing: work in the <title> thread", () => {
