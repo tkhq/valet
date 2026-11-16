@@ -1,3 +1,4 @@
+import { eventKeyMatches } from "@valet/shared";
 import type { FilterField } from "./filter-editor";
 
 export interface CatalogService {
@@ -7,16 +8,18 @@ export interface CatalogService {
 
 /** Filter fields the selected events declare, unioned and deduped by field —
  * a filter is valid when any selected event declares it (the same rule the
- * server's validateSubscription applies). */
+ * server's validateSubscription applies). A selected key ending in `.*`
+ * selects every entry under it, as the server's `eventKeyMatches` reads it. */
 export function unionFilterFields(
   services: CatalogService[],
   selected: ReadonlySet<string>,
 ): FilterField[] {
   const out: FilterField[] = [];
   const seen = new Set<string>();
+  const patterns = [...selected];
   for (const s of services) {
     for (const entry of s.entries) {
-      if (!selected.has(entry.key)) continue;
+      if (!eventKeyMatches(entry.key, patterns)) continue;
       for (const f of entry.filters ?? []) {
         if (seen.has(f.field)) continue;
         seen.add(f.field);

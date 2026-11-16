@@ -8,7 +8,7 @@ import userEvent from "@testing-library/user-event";
 import type { TeamSummary } from "@valet/api/wire";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceScopeProvider } from "~/lib/workspace-scope";
-import { SpacesNav, spaceInitial, spacePageFor, spaceTint } from "./spaces-nav";
+import { SpacesNav, spaceInitial, spacePageFor, spaceSwitchTarget, spaceTint } from "./spaces-nav";
 
 let teams: TeamSummary[] = [];
 let plugins: Array<{ name: string; enabledForCaller: boolean }> = [];
@@ -225,6 +225,17 @@ describe("SpacesNav", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Show Platform pages" }));
     const items = (await screen.findAllByRole("menuitem")).map((item) => item.textContent);
     expect(items).toEqual(["Threads", "Workflows", "Presence", "Artifacts", "Skills", "Memory", "Settings"]);
+  });
+
+  it("keeps a sub-list when the space switches, and opens a detail page's list", () => {
+    expect(spaceSwitchTarget("/workflows/runs")).toBe("/workflows/runs");
+    expect(spaceSwitchTarget("/workflows/runs/r1")).toBe("/workflows/runs");
+    expect(spaceSwitchTarget("/presence/activity")).toBe("/presence/activity");
+    expect(spaceSwitchTarget("/presence/events/e1")).toBe("/presence/activity");
+    expect(spaceSwitchTarget("/presence/rules/l1")).toBe("/presence");
+    expect(spaceSwitchTarget("/workflows/w1")).toBe("/workflows");
+    expect(spaceSwitchTarget("/skills/review")).toBe("/skills");
+    expect(spaceSwitchTarget("/changelog")).toBeUndefined();
   });
 
   it("maps paths to the space page they belong to", () => {

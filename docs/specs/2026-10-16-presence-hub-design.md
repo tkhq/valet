@@ -692,8 +692,11 @@ Pass criterion: all steps, in one run, from a clean start.
    app's posts from starting a turn. An event with no value for the field
    still matches an exclusion. `is one of` and `is not` take a
    comma-separated list. Only `is` picks its value from a list such as the
-   channels or users; every other comparison takes typed text. The hidden creator scope
-   (Part C step 2) shows as a pill `your own mentions` (or `mentions by
+   channels or users; every other comparison takes typed text. A wildcard
+   event key such as `github.pull_request.*` offers the fields of every event
+   it covers, as the api's `eventKeyMatches` reads it. `Only once every N
+   hours` clears when its comes-online event leaves the line. The hidden creator scope
+   (Part C step 2), labelled or not, shows as a pill `your own mentions` (or `mentions by
    <creator>` on another person's line) that cannot be removed. A mention
    with no channel condition offers `Any channel`; Save refuses both
    together. For Slack, a **Listen for** choice comes first: `A mention or
