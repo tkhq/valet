@@ -33,7 +33,9 @@ import {
   renderFinding,
   ReviewSettingsSchema,
   localRunner,
+  CHECKOUT_COMMAND,
   type Finding,
+  type RepoRunner,
   type PullPointers,
   type Review,
   type ReviewRound,
@@ -286,11 +288,21 @@ class FakeThreads implements PluginThreads {
   async awaitReply(): Promise<never> {
     throw new Error("the review handler does not post to its thread");
   }
-  /** The checkout a child's prepare step runs in. Unset: a directory that is not a git repository. */
+  /** The files a child's prepare step reads. Unset: an empty directory. */
   checkout?: string;
+  /** Make the child's clone fail, as a sandbox without repository access would. */
+  noCheckout = false;
   async spawnChild(_thread: PluginThreadRef, req: PluginChildRequest, opts: { dispatchId: string }): Promise<PluginChild> {
-    // As the host does: run the prepare step in the child's checkout and send the prompt it returns.
-    const prompt = req.prepare ? await req.prepare(localRunner(this.checkout ?? mkdtempSync(join(tmpdir(), "pr-review-no-repo-"))), req.prompt) : req.prompt;
+    // As the host does: run the prepare step in the child's checkout, at `req.ref`, and send the prompt it returns.
+    const local = localRunner(this.checkout ?? mkdtempSync(join(tmpdir(), "pr-review-no-repo-")));
+    const runner: RepoRunner = {
+      run: (command, o) => command === CHECKOUT_COMMAND
+        ? Promise.resolve(this.noCheckout
+          ? { exitCode: 128, stdout: "", stderr: "fatal: not a git repository (or any of the parent directories): .git\n", truncated: false, timedOut: false }
+          : { exitCode: 0, stdout: `${req.ref ?? ""}\n`, stderr: "", truncated: false, timedOut: false })
+        : local.run(command, o),
+    };
+    const prompt = req.prepare ? await req.prepare(runner, req.prompt) : req.prompt;
     const sent = { ...req, prompt };
     this.spawned.push({ req: sent, dispatchId: opts.dispatchId });
     this.requests.set(opts.dispatchId, sent);
@@ -380,6 +392,17 @@ describe("review-pull-request handler", () => {
     expect(gh.reviews.size).toBe(1);
     // The finding on the unreadable file skips the line check instead of being dropped.
     expect([...gh.reviews.values()][0].body).toContain("Open findings (1)");
+  });
+
+  it("fails the review, and posts nothing, when the reviewer's sandbox has no checkout", async () => {
+    for (const settings of [{ contextBudget: 0 }, {}]) {
+      const gh = new FakeGitHub();
+      const threads = new FakeThreads(scripted(reviewOf([finding({})]), {}));
+      threads.noCheckout = true;
+      await expect(createReviewHandler({ fetch: gh.fetch }).handle(event("ev1", "github.pull_request.opened"), context(threads, new FakeStore(), settings)))
+        .rejects.toThrow("The review sandbox has no git checkout of the repository (fatal: not a git repository");
+      expect(gh.reviews.size).toBe(0);
+    }
   });
 
   it("posts one review with inline and summary findings on the first push", async () => {

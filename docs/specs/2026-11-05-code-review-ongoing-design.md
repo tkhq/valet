@@ -91,6 +91,13 @@ the plugin keeps them apart.
 - **Failures are visible.** A failed memory list, search or read, or a failed
   merge-base read, appears in the pack's drop log or in the "not built"
   notice. It never reads as "nothing found".
+- **No checkout, no review.** The reviewer and verifier prompts say the
+  repository is checked out at the PR head, and a defect in a helper the diff
+  never names is found only by reading it. Each reviewer and verifier child's
+  `prepare` step first runs `git rev-parse HEAD`. If the command fails, or
+  the commit is not the head, the child does not start and the delivery
+  fails with the git error. Before this check, a child whose clone failed
+  reviewed the diff alone and still posted a confident review.
 - **Selection is not trust.** Changed paths, the PR title and added lines
   choose which trusted notes and playbooks go into the pack. They never supply
   rule text.
