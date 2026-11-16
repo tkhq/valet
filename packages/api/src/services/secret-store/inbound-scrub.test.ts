@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import { scrubInboundSecrets } from "./inbound-scrub.js";
+import { maskKnownSecrets, scrubInboundSecrets, scrubSessionInput } from "./inbound-scrub.js";
 import { SecretStoreError } from "./provider.js";
 import { secretReference, type SecretStoreService } from "./service.js";
 
@@ -61,5 +61,27 @@ describe("scrubInboundSecrets", () => {
     const text = "deploy 3f9a2c1d8e7b6a5f4c3d2e1f0a9b8c7d6e5f4a3b with ACME_TOKEN=q8w7e6r5t4y3u2i1";
     expect(await scrubInboundSecrets({ ...base, store: fake.store, text })).toEqual({ text, saved: [], removed: 0 });
     expect(fake.saved).toEqual([]);
+  });
+
+  it("saves to the team's secrets for a team session and to the person's own otherwise", async () => {
+    const scopes: string[] = [];
+    const fake = fakeStore();
+    const store: SecretStoreService = { ...fake.store, saveValue: async (a, scope, name, value) => { scopes.push(scope.kind === "team" ? `team:${scope.teamId}` : scope.kind); return fake.store.saveValue(a, scope, name, value); } };
+    expect(await scrubSessionInput(store, { orgId: "o", userId: "u", ownerType: "team", ownerId: "t1" }, OPENAI, "web")).toContain("secret://team/t1/OPENAI_API_KEY");
+    await scrubSessionInput(store, { orgId: "o", userId: "u", ownerType: "user", ownerId: "u" }, `x ${OPENAI}`, "web");
+    expect(scopes).toEqual(["team:t1", "personal"]);
+  });
+
+  it("leaves session input unchanged without a secret store", async () => {
+    const text = `key ${OPENAI}`;
+    expect(await scrubSessionInput(undefined, { orgId: "o", userId: "u", ownerType: "user", ownerId: "u" }, text, "web")).toBe(text);
+    expect(await scrubSessionInput({ ...fakeStore().store, enabled: false }, { orgId: "o", userId: "u", ownerType: "user", ownerId: "u" }, text, "web")).toBe(text);
+  });
+
+  it("masks a known key without saving it, and only with a store", () => {
+    const fake = fakeStore();
+    expect(maskKnownSecrets(fake.store, `use ${OPENAI} now, ACME_TOKEN=q8w7e6r5t4y3u2i1`)).toBe("use [removed openai key] now, ACME_TOKEN=q8w7e6r5t4y3u2i1");
+    expect(fake.saved).toEqual([]);
+    expect(maskKnownSecrets(undefined, OPENAI)).toBe(OPENAI);
   });
 });

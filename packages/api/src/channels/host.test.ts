@@ -26,6 +26,7 @@ import { ChannelHost } from "./host.js";
 import { bindConversation } from "./conversation-bindings.js";
 import { deliverToAssistantThread } from "../events/assistant-delivery.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
+import { secretReference, type SecretStoreService } from "../services/secret-store/service.js";
 
 const ORG_ID = "local-org";
 const USER_ID = "local-user";
@@ -359,6 +360,48 @@ describe("ChannelHost.handleUpdate", () => {
       expect(note?.type === "message" ? note.content : "").toContain("Before: deploy to prod\nAfter: deploy to staging");
     });
     expect((await entries()).filter((e) => e.type === "message" && e.role === "assistant")).toHaveLength(replies);
+  });
+
+  it("keeps a key out of an edit note after the backstop removed it from the message", async () => {
+    const key = "sk-proj-" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8s9T0";
+    const saved: { name: string; value: string }[] = [];
+    const refuse = async (): Promise<never> => {
+      throw new Error("not used");
+    };
+    const secretStore: SecretStoreService = {
+      enabled: true,
+      providerLabel: "Memory",
+      list: async (_a, scope) => saved.map((s) => ({ name: s.name, createdAt: 0, reference: secretReference(scope, s.name) })),
+      saveValue: async (_a, scope, name, value) => {
+        saved.push({ name, value });
+        return { name, createdAt: 0, reference: secretReference(scope, name) };
+      },
+      beginSave: refuse, finishSave: refuse, remove: refuse, exists: refuse, mayRead: refuse, read: refuse,
+    };
+    await host.stop();
+    host = new ChannelHost({
+      db: testDb.appDb, engineHost, engineStore, eventStream, engineCredentials, secretStore,
+      plugins: [{ name: "fake", version: "0", transports: [{ channelType: "fake", create: () => fakeTransport }] }],
+      resolveOrgId: async () => ORG_ID,
+    });
+    await host.start();
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+
+    await host.handleUpdate("fake", inbound({ text: `use ${key} for the script`, dispatchId: "key-msg" }));
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const thread = session.thread("fake:99");
+    const entries = () => engineStore.getEntries(session.id, thread.id);
+    await vi.waitFor(async () => expect((await entries()).some((e) => e.type === "message" && e.role === "assistant")).toBe(true));
+    expect(saved).toEqual([{ name: "OPENAI_API_KEY", value: key }]);
+
+    await host.handleUpdate("fake", inbound({ kind: "edit", text: `use ${key} for the deploy script`, previousText: `use ${key} for the script`, dispatchId: "key-edit" }));
+    await vi.waitFor(async () => {
+      const note = (await entries()).find((e) => e.type === "message" && e.signal?.signalType === "slack.message_changed");
+      expect(note?.type === "message" ? note.content : "").toContain("Before: use [removed openai key] for the script\nAfter: use [removed openai key] for the deploy script");
+    });
+    expect(JSON.stringify(await entries())).not.toContain(key);
+    // The edit repeats the saved key: nothing is saved a second time.
+    expect(saved).toHaveLength(1);
   });
 
   it("concurrent channel and event deliveries share one durable thread", async () => {

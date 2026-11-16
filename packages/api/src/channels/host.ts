@@ -1,5 +1,5 @@
 import { mergeAppearance, readAppearance } from "@valet/shared";
-import { scrubInboundSecrets } from "../services/secret-store/inbound-scrub.js";
+import { maskKnownSecrets, scrubSessionInput } from "../services/secret-store/inbound-scrub.js";
 import type { SecretStoreService } from "../services/secret-store/service.js";
 import { HOME_THREAD_KEY } from "../home/context.js";
 import { slackEditSignal } from "./slack-edit.js";
@@ -683,7 +683,7 @@ export class ChannelHost {
     try {
       const session = await this.gateSession(card.sessionId, row, userId, orgId);
       await session.resolveDecision(card.gateId, {
-        value: text,
+        value: await scrubSessionInput(this.deps.secretStore, { ...row, userId }, text, "channel"),
         resolvedBy: userId,
         resolvedAt: this.now(),
         source: { channelType, channelId: event.conversationKey, messageId: event.dispatchId },
@@ -1908,8 +1908,11 @@ export class ChannelHost {
       await this.dropLog(orgId, "edit_without_thread", event.conversationKey, `thread ${threadKey} does not exist`);
       return;
     }
+    // Both sides of an edit repeat a message the backstop already handled,
+    // so a key in either is masked, not saved again.
+    const mask = (value: string | undefined) => maskKnownSecrets(this.deps.secretStore, value ?? "");
     await thread.recordSignal(
-      slackEditSignal({ previousText: event.previousText ?? "", text: event.text ?? "", attributes: { channel: channelType }, origin: { channelType, threadKey } }),
+      slackEditSignal({ previousText: mask(event.previousText), text: mask(event.text), attributes: { channel: channelType }, origin: { channelType, threadKey } }),
       { dispatchId: event.dispatchId, author: { id: userId } },
     );
   }
@@ -1958,10 +1961,13 @@ export class ChannelHost {
       if (followUp) return;
       throw new Error("A new direct message must resolve to a chat.");
     }
+    // A key in the text is saved and replaced before it answers a question
+    // or reaches the model as a message.
+    const inbound = await scrubSessionInput(this.deps.secretStore, { orgId, userId, ownerType: "user", ownerId: userId }, event.text ?? "", "channel");
     // A text reply in this conversation answers the open question its thread
     // waits on, instead of queueing behind the turn that asked it.
     if (!event.media?.length && await answerOpenQuestion(this.deps.db, {
-      session, thread, userId, text: event.text ?? "", channelType,
+      session, thread, userId, text: inbound, channelType,
       channelId: event.conversationKey, dispatchId: event.dispatchId, now: this.now(),
     })) return;
 
@@ -1972,16 +1978,7 @@ export class ChannelHost {
     }) : undefined;
     let admitted = false;
     try {
-      let text = event.text ?? "";
-      if (this.deps.secretStore?.enabled) {
-        text = (await scrubInboundSecrets({
-          store: this.deps.secretStore,
-          actor: { orgId, userId },
-          scope: { kind: "personal" },
-          text,
-          channel: "channel",
-        })).text;
-      }
+      let text = inbound;
       const attachments: PromptAttachment[] = [];
       for (const media of event.media ?? []) {
         const fetched = transport?.fetchMedia ? await transport.fetchMedia(media) : null;

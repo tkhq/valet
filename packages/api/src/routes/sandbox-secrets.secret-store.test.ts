@@ -482,3 +482,27 @@ describe("/api/secrets", () => {
     expect(res.status).toBe(403);
   });
 });
+
+describe("keys in answers to an agent's question", () => {
+  it("saves a key typed as an answer and gives the agent the reference", async () => {
+    await bootWithStore();
+    const key = "sk-proj-" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8s9T0";
+    const created = await fetch(`${api!.baseUrl}/api/threads`, { method: "POST" });
+    const thread = (await created.json()) as { id: string; sessionId: string };
+    const gate = {
+      id: "ask-for-key", sessionId: thread.sessionId, threadId: thread.id,
+      queueItemId: "queued-question", resumeKey: "answer", ordinal: 0,
+      type: "question" as const, title: "What is your OpenAI key?", actions: [],
+      status: "pending" as const, createdAt: Date.now(), updatedAt: Date.now(),
+    };
+    await api!.providers.engineStore.saveDecisionGate(thread.sessionId, thread.id, gate);
+    const res = await fetch(`${api!.baseUrl}/api/threads/${thread.id}/decisions/${gate.id}/resolve`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ value: `here: ${key}` }),
+    });
+    expect(res.status).toBe(200);
+    const stored = await api!.providers.engineStore.getDecisionGate(thread.sessionId, gate.id);
+    expect(stored?.resolution?.value).toContain("here: secret://personal/OPENAI_API_KEY");
+    expect(JSON.stringify(stored)).not.toContain(key);
+    expect((await api!.providers.secretStore.list(as("local-user"), personal)).map((r) => r.name)).toEqual(["OPENAI_API_KEY"]);
+  });
+});

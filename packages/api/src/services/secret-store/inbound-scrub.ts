@@ -1,7 +1,7 @@
 /**
  * The backstop for a key that reaches the api inside a user message: a
- * client without the composer prompt, a channel such as Slack, or a key the
- * user kept as text. Each key in a known provider format is saved as a
+ * client without the composer prompt, a channel such as Slack, an answer to
+ * an agent's question, or a key the user kept as text. Each key in a known provider format is saved as a
  * secret and replaced with its reference before the message is stored or
  * reaches the model. A note at the end of the message tells the user and
  * the agent what happened.
@@ -77,4 +77,43 @@ export async function scrubInboundSecrets(deps: {
       : "If you shared the key anywhere else, rotate it.",
   );
   return { text: `${replaceSecrets(text, replacements)}\n\n(${notes.join(" ")})`, saved, removed };
+}
+
+/** The session a piece of user input goes to: who owns it, and who typed. */
+export interface InboundSession {
+  orgId: string;
+  userId: string;
+  ownerType: string;
+  ownerId: string | null;
+}
+
+/**
+ * The backstop for any text a person sends into a session: a message, an
+ * answer to a question, a first prompt, an artifact comment. A team
+ * session saves to the team's secrets, any other session to the person's
+ * own. Returns `text` unchanged when the deployment has no secret store.
+ */
+export async function scrubSessionInput(
+  store: SecretStoreService | undefined,
+  session: InboundSession,
+  text: string,
+  channel: "web" | "channel",
+): Promise<string> {
+  if (!store?.enabled) return text;
+  const scope: SecretScope = session.ownerType === "team" && session.ownerId ? { kind: "team", teamId: session.ownerId } : { kind: "personal" };
+  return (await scrubInboundSecrets({ store, actor: { orgId: session.orgId, userId: session.userId }, scope, text, channel })).text;
+}
+
+/**
+ * `text` with each key in a known format replaced by a placeholder, and
+ * nothing saved. For text that repeats an earlier message, such as both
+ * sides of an edit: the backstop already saved the original key, and saving
+ * it again would make a duplicate. Unchanged without a secret store, like
+ * the backstop.
+ */
+export function maskKnownSecrets(store: SecretStoreService | undefined, text: string): string {
+  if (!store?.enabled) return text;
+  const candidates = detectSecrets(text).filter((c) => c.confidence === "known");
+  if (candidates.length === 0) return text;
+  return replaceSecrets(text, candidates.map((candidate) => ({ candidate, with: `[removed ${candidate.label.toLowerCase()}]` })));
 }
