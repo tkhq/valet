@@ -164,6 +164,9 @@ importers:
       '@valet/plugin-telegram':
         specifier: workspace:*
         version: link:../plugin-telegram
+      '@valet/plugin-turnkey':
+        specifier: workspace:*
+        version: link:../plugin-turnkey
       '@valet/plugin-typefully':
         specifier: workspace:*
         version: link:../plugin-typefully
@@ -1049,6 +1052,31 @@ importers:
         specifier: ^4.0.18
         version: 4.0.18(@opentelemetry/api@1.9.1)(@types/node@25.0.9)(jiti@1.21.7)(jsdom@25.0.1)(tsx@4.21.0)(yaml@2.9.0)
 
+  packages/plugin-turnkey:
+    dependencies:
+      '@turnkey/sdk-server':
+        specifier: ^8.4.0
+        version: 8.9.0(typescript@5.9.3)(zod@4.4.3)
+      '@valet/engine':
+        specifier: workspace:*
+        version: link:../engine
+      '@valet/shared':
+        specifier: workspace:*
+        version: link:../shared
+      typebox:
+        specifier: 1.3.7
+        version: 1.3.7
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      typescript:
+        specifier: ^5.3.3
+        version: 5.9.3
+      vitest:
+        specifier: ^4.0.18
+        version: 4.0.18(@opentelemetry/api@1.9.1)(@types/node@22.20.1)(jiti@1.21.7)(jsdom@25.0.1)(tsx@4.21.0)(yaml@2.9.0)
+
   packages/plugin-typefully:
     dependencies:
       '@valet/engine':
@@ -1340,6 +1368,9 @@ importers:
       '@turnkey/crypto':
         specifier: 2.13.4
         version: 2.13.4
+      '@turnkey/sdk-browser':
+        specifier: ^8.4.0
+        version: 8.8.0(typescript@5.9.3)(zod@4.4.3)
       '@valet/api':
         specifier: workspace:*
         version: link:../api
@@ -2880,6 +2911,26 @@ packages:
       hono: '>=3.9.0'
       zod: ^3.19.1
 
+  '@hpke/chacha20poly1305@1.8.1':
+    resolution: {integrity: sha512-EqIpqvybIQrdMMbVcrF9cr6q8PZWbKQ60428iZyESjGO8j9jJCsILNHaCyWWBwnJYAKT8nZko5sNIkIXmlHsuw==}
+    engines: {node: '>=16.0.0'}
+
+  '@hpke/common@1.13.0':
+    resolution: {integrity: sha512-PqaJR89RWJQmt/WOGuBLrcrtXtEMbWu91XIbxDjKDTDgKvqvhlxOzQ9BAf9a0Q+yqqbTtQ0pK6KUyVi2WMehbA==}
+    engines: {node: '>=16.0.0'}
+
+  '@hpke/core@1.10.1':
+    resolution: {integrity: sha512-VZOk0rHC4vPsbW/fIRz7Q2IviSl0+9dRhP9yi/PmkKVKjj4vZDs1ufkN47twBFLZmiw37YFtTqBrxKAI7dlOrg==}
+    engines: {node: '>=16.0.0'}
+
+  '@hpke/dhkem-x25519@1.8.1':
+    resolution: {integrity: sha512-bAshBoHmVKJY8MQdl09E8dRsfPUfWwniqCOCAOAN6IlUZzpZFI/QG6hAXqIQpu/XNDPSl0tXYBocq4423whXpg==}
+    engines: {node: '>=16.0.0'}
+
+  '@hpke/dhkem-x448@1.8.1':
+    resolution: {integrity: sha512-gsrEQHJUKmN1TfenktFAnZozFs1fUYnHGa4xbggJHIf2sn5gTPDNZfmmJWvat6Kom4aBRWzldyAogtEg6jsXwA==}
+    engines: {node: '>=16.0.0'}
+
   '@hyzyla/pdfium@2.1.12':
     resolution: {integrity: sha512-2ezbrJk9V4foB3+U+eQ7234spsHmrufPU+9EV2cVZCnhTLLfelPz7wWshO0HjUNtcECNBaAfEzrdaQZOigkW+A==}
 
@@ -4316,6 +4367,18 @@ packages:
 
   '@turnkey/http@6.8.0':
     resolution: {integrity: sha512-2m0frZ/Eo3xNdguQ5/DZVL0tMvqYgurQTV9pH0PmF1jFsaXnPwUoMSwwa9nEI4fT5Wekly+Q5nIEjKQrISw9hA==}
+    engines: {node: '>=18.0.0'}
+
+  '@turnkey/iframe-stamper@2.11.1':
+    resolution: {integrity: sha512-S9BoAIyVBH1BurTKsX/YzjVrEhW6Zn0A/9WPfhhC9YA/9RDELP4wNL3jUcijJWgT9OO6BRbRDUs81FrC0ruLww==}
+    engines: {node: '>=18.0.0'}
+
+  '@turnkey/indexed-db-stamper@1.3.13':
+    resolution: {integrity: sha512-kYGg+MOaS1uHFrk4f7+WokdSUFc7YJGTAUSOhoLL4QhinRrPG4y9RAhRXAqfKZCsOOjtMq1M673MrXQGLtu5Vw==}
+    engines: {node: '>=18.0.0'}
+
+  '@turnkey/sdk-browser@8.8.0':
+    resolution: {integrity: sha512-spnZDxqwzoS+TeiW3U33CNnTM/vyZ6iqCyN8yCsIfwiL9nk80NkI1cD12plC9RofGyFO8I4Dtv9sM0eLcnBQ/g==}
     engines: {node: '>=18.0.0'}
 
   '@turnkey/sdk-server@8.9.0':
@@ -5909,6 +5972,10 @@ packages:
   hpagent@1.2.0:
     resolution: {integrity: sha512-A91dYTeIB6NoXG+PxTQpCCDDnfHsW9kc06Lvpu1TEe9gnd6ZFeiBoRO9JvzEv6xK7EX97/dUE8g/vBMTqTS3CA==}
     engines: {node: '>=14'}
+
+  hpke-js@1.8.1:
+    resolution: {integrity: sha512-xwG8uJnfs58gDPiBRpgv7A5kG6uN4uydW5VPa2/lYgbRp+sR1Jbfud3y7B3T+SY56s/6QOBhyFNnG4Qn3PxhJg==}
+    engines: {node: '>=16.0.0'}
 
   html-encoding-sniffer@4.0.0:
     resolution: {integrity: sha512-Y22oTqIU4uuPgEemfz7NDJz6OeKf12Lsu+QC+s3BVpda64lTiMYCyGwg5ki4vFxkMwQdeZDl2adZoqUgdFuTgQ==}
@@ -8960,6 +9027,24 @@ snapshots:
       hono: 4.11.4
       zod: 3.25.76
 
+  '@hpke/chacha20poly1305@1.8.1':
+    dependencies:
+      '@hpke/common': 1.13.0
+
+  '@hpke/common@1.13.0': {}
+
+  '@hpke/core@1.10.1':
+    dependencies:
+      '@hpke/common': 1.13.0
+
+  '@hpke/dhkem-x25519@1.8.1':
+    dependencies:
+      '@hpke/common': 1.13.0
+
+  '@hpke/dhkem-x448@1.8.1':
+    dependencies:
+      '@hpke/common': 1.13.0
+
   '@hyzyla/pdfium@2.1.12': {}
 
   '@iconify/types@2.0.0': {}
@@ -10457,6 +10542,35 @@ snapshots:
       cross-fetch: 3.2.0
     transitivePeerDependencies:
       - encoding
+
+  '@turnkey/iframe-stamper@2.11.1': {}
+
+  '@turnkey/indexed-db-stamper@1.3.13':
+    dependencies:
+      '@turnkey/encoding': 0.6.0
+      '@turnkey/sdk-types': 1.12.0
+
+  '@turnkey/sdk-browser@8.8.0(typescript@5.9.3)(zod@4.4.3)':
+    dependencies:
+      '@turnkey/api-key-stamper': 0.6.19
+      '@turnkey/crypto': 2.13.4
+      '@turnkey/encoding': 0.6.0
+      '@turnkey/http': 6.8.0
+      '@turnkey/iframe-stamper': 2.11.1
+      '@turnkey/indexed-db-stamper': 1.3.13
+      '@turnkey/sdk-types': 1.12.0
+      '@turnkey/wallet-stamper': 1.1.31(typescript@5.9.3)(zod@4.4.3)
+      '@turnkey/webauthn-stamper': 0.6.0
+      buffer: 6.0.3
+      cross-fetch: 3.2.0
+      hpke-js: 1.8.1
+    transitivePeerDependencies:
+      - bufferutil
+      - encoding
+      - mppx
+      - typescript
+      - utf-8-validate
+      - zod
 
   '@turnkey/sdk-server@8.9.0(typescript@5.9.3)(zod@4.4.3)':
     dependencies:
@@ -12194,6 +12308,14 @@ snapshots:
   hono@4.11.4: {}
 
   hpagent@1.2.0: {}
+
+  hpke-js@1.8.1:
+    dependencies:
+      '@hpke/chacha20poly1305': 1.8.1
+      '@hpke/common': 1.13.0
+      '@hpke/core': 1.10.1
+      '@hpke/dhkem-x25519': 1.8.1
+      '@hpke/dhkem-x448': 1.8.1
 
   html-encoding-sniffer@4.0.0:
     dependencies:

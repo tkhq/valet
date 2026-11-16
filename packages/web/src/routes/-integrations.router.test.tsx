@@ -23,6 +23,11 @@ import type {
   ToolPermissionWire,
 } from "@valet/api/wire";
 
+vi.mock("~/api/commit-signing", () => ({
+  useCommitSigning: () => ({ data: { configured: false, enrolled: false, keys: [] }, isLoading: false, error: null }),
+  useEnrollCommitSigning: () => ({ mutateAsync: vi.fn(), isPending: false }),
+}));
+
 vi.mock("~/api/workflows", () => ({ useTriggerCatalog: () => ({ data: { catalog: [] } }) }));
 vi.mock("~/components/integrations/integration-limit-notice", () => ({ IntegrationLimitNotice: () => null }));
 vi.mock("~/lib/use-list-owner", () => ({ useListOwner: () => undefined }));
